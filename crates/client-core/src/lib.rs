@@ -197,9 +197,10 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                 .context("spawn ssh — openssh installé ?")?;
             let mut stderr = child.stderr.take();
             let guard = Arc::new(SshGuard(tokio::sync::Mutex::new(child)));
-            // Attendre que le tunnel soit prêt
+            // Attendre que le tunnel soit prêt (~26 s > ConnectTimeout=10
+            // pour laisser ssh mourir avec sa vraie erreur dans stderr)
             let addr = format!("127.0.0.1:{local}");
-            for _ in 0..50 {
+            for _ in 0..130 {
                 match TcpStream::connect(&addr).await {
                     Ok(s) => {
                         let (r, w) = s.into_split();
