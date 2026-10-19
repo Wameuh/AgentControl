@@ -90,6 +90,10 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                     "ExitOnForwardFailure=yes",
                     "-o",
                     "ServerAliveInterval=30",
+                    // Ignore les LocalForward/RemoteForward de ~/.ssh/config
+                    // pour cette connexion (sinon bind déjà pris → échec total)
+                    "-o",
+                    "ClearAllForwardings=yes",
                 ])
                 .args(args)
                 .arg(host)
