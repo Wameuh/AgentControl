@@ -962,6 +962,16 @@ $("f-create").addEventListener("click", async (e) => {
   await refreshSessions();
 });
 
+interface SavedConn { kind: string; host?: string; remote_port?: number; args?: string[]; path?: string; addr?: string }
+let savedConns: SavedConn[] = [];
+
+function fillConnForm(c: SavedConn) {
+  ($("c-kind") as HTMLSelectElement).value = c.kind;
+  ($("c-host") as HTMLInputElement).value = c.host ?? c.addr ?? c.path ?? "";
+  ($("c-port") as HTMLInputElement).value = String(c.remote_port ?? 7331);
+  ($("c-args") as HTMLInputElement).value = (c.args ?? []).join(" ");
+}
+
 $("btn-connect").onclick = async () => {
   // Alias Host de ~/.ssh/config en suggestions
   const dl = $("ssh-hosts");
@@ -971,7 +981,27 @@ $("btn-connect").onclick = async () => {
     o.value = h;
     dl.appendChild(o);
   }
+  // Connexions récentes sauvegardées
+  savedConns = await invoke<SavedConn[]>("saved_connections").catch(() => []);
+  const sv = $("c-saved") as HTMLSelectElement;
+  sv.innerHTML = '<option value="">— choisir —</option>';
+  savedConns.forEach((c, i) => {
+    const o = document.createElement("option");
+    o.value = String(i);
+    o.textContent = `${c.kind} ${c.host ?? c.addr ?? c.path ?? ""}`;
+    sv.appendChild(o);
+  });
+  // Pré-remplir avec la dernière utilisée → un clic sur Connecter suffit
+  if (savedConns.length) {
+    sv.value = "0";
+    fillConnForm(savedConns[0]);
+  }
   ($("dlg-conn") as HTMLDialogElement).showModal();
+};
+
+($("c-saved") as HTMLSelectElement).onchange = (e) => {
+  const i = Number((e.target as HTMLSelectElement).value);
+  if (savedConns[i]) fillConnForm(savedConns[i]);
 };
 $("c-logs").addEventListener("click", async () => {
   const v = $("log-view");
@@ -1000,6 +1030,7 @@ $("c-go").addEventListener("click", async (e) => {
     await invoke("connect", { cfg });
     ($("conn-status") as HTMLElement).textContent = "connecté";
     ($("conn-status") as HTMLElement).className = "badge ok";
+    invoke("save_connection", { cfg }).catch(console.error);
     await refreshSessions();
     ($("dlg-conn") as HTMLDialogElement).close();
   } catch (err) {

@@ -55,6 +55,29 @@ pub fn log(msg: impl std::fmt::Display) {
     }
 }
 
+/// Fichier des connexions récentes : ~/.agentcontrol/connections.json
+/// (marche aussi sous Windows via USERPROFILE).
+pub fn config_path() -> PathBuf {
+    log_path().join("connections.json")
+}
+
+pub fn load_connections() -> Vec<serde_json::Value> {
+    std::fs::read_to_string(config_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Ajoute une connexion en tête (dédupliquée), max 10.
+pub fn save_connection(cfg: &serde_json::Value) {
+    let mut list = load_connections();
+    let key = cfg.to_string();
+    list.retain(|c| c.to_string() != key);
+    list.insert(0, cfg.clone());
+    list.truncate(10);
+    let _ = std::fs::write(config_path(), serde_json::to_string_pretty(&list).unwrap());
+}
+
 /// Les N dernières lignes du log (pour l'UI).
 pub fn log_tail(n: usize) -> String {
     let p = log_path().join("client.log");
