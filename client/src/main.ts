@@ -7,6 +7,9 @@ import { listen } from "@tauri-apps/api/event";
 (window as { MeshBackground?: { setMood: (m: string, o: object) => void } })
   .MeshBackground?.setMood("sand", { intensity: 0.55 });
 
+// Bloque le menu contextuel natif du webview (son "Reload" tuait la connexion)
+window.addEventListener("contextmenu", (e) => e.preventDefault());
+
 // ---------------------------------------------------------------------------
 // Types miroir du protocole
 // ---------------------------------------------------------------------------
@@ -974,6 +977,13 @@ $("f-create").addEventListener("click", async (e) => {
 interface SavedConn { kind: string; host?: string; remote_port?: number; args?: string[]; path?: string; addr?: string }
 let savedConns: SavedConn[] = [];
 
+// Auto-reconnexion au démarrage avec la dernière connexion utilisée
+invoke<SavedConn[]>("saved_connections")
+  .then(async (conns) => {
+    if (conns.length) await doConnect({ ...conns[0] }).catch((e) => showErr(String(e)));
+  })
+  .catch(() => {});
+
 function fillConnForm(c: SavedConn) {
   ($("c-kind") as HTMLSelectElement).value = c.kind;
   ($("c-host") as HTMLInputElement).value = c.host ?? c.addr ?? c.path ?? "";
@@ -1036,11 +1046,8 @@ $("c-go").addEventListener("click", async (e) => {
         ? { kind: "tcp", addr: ($("c-host") as HTMLInputElement).value }
         : { kind: "local" };
   try {
-    await invoke("connect", { cfg });
-    ($("conn-status") as HTMLElement).textContent = "connecté";
-    ($("conn-status") as HTMLElement).className = "badge ok";
+    await doConnect(cfg);
     invoke("save_connection", { cfg }).catch(console.error);
-    await refreshSessions();
     ($("dlg-conn") as HTMLDialogElement).close();
   } catch (err) {
     showErr(String(err));
