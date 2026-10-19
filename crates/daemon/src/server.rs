@@ -185,6 +185,7 @@ impl Daemon {
                     available_modes: vec![],
                     available_commands: vec![],
                     available_models: vec![],
+                    config_options: vec![],
                     state: "starting".into(),
                 };
                 let dir = Session::create_dir(&self.root, &meta)?;
@@ -247,6 +248,7 @@ impl Daemon {
                     available_modes: vec![],
                     available_commands: vec![],
                     available_models: vec![],
+                    config_options: vec![],
                     state: "starting".into(),
                 };
                 let dir = Session::create_dir(&self.root, &meta)?;
@@ -343,6 +345,15 @@ impl Daemon {
                 let s = self.get_session(&session).await?;
                 s.set_model(&model).await?;
                 Ok(json!({"model": model}))
+            }
+            ReqKind::SetConfigOption {
+                session,
+                config_id,
+                value,
+            } => {
+                let s = self.get_session(&session).await?;
+                s.set_config_option(&config_id, &value).await?;
+                Ok(json!({"config": config_id, "value": value}))
             }
             ReqKind::Respond {
                 session,

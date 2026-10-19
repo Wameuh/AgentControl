@@ -212,6 +212,18 @@ pub fn map_update(update: &Value) -> Mapped {
                 .unwrap_or_default();
             Mapped::Event(EventKind::CommandsAvailable { commands })
         }
+        "config_option_update" => {
+            let options = update
+                .get("configOptions")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|o| serde_json::from_value::<proto::ConfigOption>(o.clone()).ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            Mapped::Event(EventKind::ConfigOptions { options })
+        }
         "current_mode_update" => {
             let mode = update
                 .get("currentModeId")

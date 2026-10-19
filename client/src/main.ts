@@ -23,7 +23,14 @@ interface SessionMeta {
   available_modes: string[];
   available_commands: CmdInfo[];
   available_models: string[];
+  config_options?: ConfigOption[];
   state: string;
+}
+
+interface ConfigOpt { value: string; name: string; description?: string }
+interface ConfigOption {
+  id: string; name: string; category?: string;
+  currentValue?: string; options: ConfigOpt[];
 }
 
 interface AcEvent {
@@ -159,34 +166,47 @@ function updateHeader() {
   $("btn-resume").hidden = !(current.state === "interrupted" || current.state === "dead");
   $("btn-cancel").hidden = !(current.state === "working" || current.state === "waiting_input");
 
+  // Options de config dynamiques (ex. Devin : config_option_update → mode + model)
+  const copts = current.config_options ?? [];
+  const modeOpt = copts.find((o) => o.id === "mode" || o.category === "mode");
+  const modelOpt = copts.find((o) => o.id === "model" || o.category === "model");
+
   const ms = $("mode-select") as HTMLSelectElement;
-  if (current.available_modes.length) {
+  if (modeOpt || current.available_modes.length) {
     ms.hidden = false;
     ms.innerHTML = "";
-    for (const m of current.available_modes) {
+    const items = modeOpt
+      ? modeOpt.options.map((o) => ({ v: o.value, label: o.name || o.value }))
+      : current.available_modes.map((m) => ({ v: m, label: m }));
+    for (const it of items) {
       const o = document.createElement("option");
-      o.value = m;
-      o.textContent = m;
+      o.value = it.v;
+      o.textContent = it.label;
       ms.appendChild(o);
     }
-    if (current.mode) ms.value = current.mode;
+    ms.dataset.cfgid = modeOpt ? modeOpt.id : "";
+    ms.value = modeOpt?.currentValue || current.mode || "";
   } else {
     ms.hidden = true;
   }
 
   const md = $("model-select") as HTMLSelectElement;
   const mf = $("model-free") as HTMLInputElement;
-  if (current.available_models.length) {
+  if (modelOpt || current.available_models.length) {
     md.hidden = false;
     mf.hidden = true;
     md.innerHTML = "";
-    for (const m of current.available_models) {
+    const items = modelOpt
+      ? modelOpt.options.map((o) => ({ v: o.value, label: o.name || o.value }))
+      : current.available_models.map((m) => ({ v: m, label: m }));
+    for (const it of items) {
       const o = document.createElement("option");
-      o.value = m;
-      o.textContent = "🧠 " + m;
+      o.value = it.v;
+      o.textContent = "🧠 " + it.label;
       md.appendChild(o);
     }
-    if (current.model) md.value = current.model;
+    md.dataset.cfgid = modelOpt ? modelOpt.id : "";
+    md.value = modelOpt?.currentValue || current.model || "";
   } else {
     // Pas de liste annoncée → champ libre (set_model ou /model fallback)
     md.hidden = true;
@@ -321,6 +341,19 @@ function renderEvent(ev: AcEvent): HTMLElement {
         current.mode = ev.mode as string;
         updateHeader();
       }
+      return d;
+    }
+    case "config_options": {
+      if (current) {
+        current.config_options = ev.options as ConfigOption[];
+        const mo = current.config_options.find((o) => o.id === "model" || o.category === "model");
+        if (mo) current.model = mo.currentValue;
+        const md = current.config_options.find((o) => o.id === "mode" || o.category === "mode");
+        if (md) current.mode = md.currentValue;
+        updateHeader();
+      }
+      const d = mkEv("sysline", ev.seq);
+      d.hidden = true;
       return d;
     }
     case "commands_available": {
@@ -683,19 +716,23 @@ $("btn-resume").onclick = () =>
     .then(() => openSession(current!.id))
     .catch((e) => showErr(String(e)));
 
-($("mode-select") as HTMLSelectElement).onchange = (e) =>
-  current &&
-  call("set_mode", {
-    session: current.id,
-    mode: (e.target as HTMLSelectElement).value,
-  }).catch((e) => showErr(String(e)));
+($("mode-select") as HTMLSelectElement).onchange = (e) => {
+  if (!current) return;
+  const sel = e.target as HTMLSelectElement;
+  const req = sel.dataset.cfgid
+    ? call("set_config_option", { session: current.id, config_id: sel.dataset.cfgid, value: sel.value })
+    : call("set_mode", { session: current.id, mode: sel.value });
+  req.catch((er) => showErr(String(er)));
+};
 
-($("model-select") as HTMLSelectElement).onchange = (e) =>
-  current &&
-  call("set_model", {
-    session: current.id,
-    model: (e.target as HTMLSelectElement).value,
-  }).catch((er) => showErr(String(er)));
+($("model-select") as HTMLSelectElement).onchange = (e) => {
+  if (!current) return;
+  const sel = e.target as HTMLSelectElement;
+  const req = sel.dataset.cfgid
+    ? call("set_config_option", { session: current.id, config_id: sel.dataset.cfgid, value: sel.value })
+    : call("set_model", { session: current.id, model: sel.value });
+  req.catch((er) => showErr(String(er)));
+};
 
 ($("model-free") as HTMLInputElement).addEventListener("keydown", async (e) => {
   if (e.key !== "Enter" || !current) return;

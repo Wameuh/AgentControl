@@ -446,6 +446,21 @@ impl Session {
                         }
                         self.save_meta();
                     }
+                    EventKind::ConfigOptions { options } => {
+                        {
+                            let mut m = self.meta.lock().unwrap();
+                            m.config_options = options.clone();
+                            // sync mode/model courants pour compat UI
+                            for o in options {
+                                match o.id.as_str() {
+                                    "mode" => m.mode = Some(o.current_value.clone()),
+                                    "model" => m.model = Some(o.current_value.clone()),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        self.save_meta();
+                    }
                     _ => {}
                 }
                 self.emit(kind);
@@ -620,6 +635,21 @@ impl Session {
                 self.send_prompt(&format!("/model {model}")).await
             }
         }
+    }
+
+    /// ACP session/set_config_option — le mécanisme de config de Devin
+    /// (mode, model, …).
+    pub async fn set_config_option(&self, config_id: &str, value: &str) -> Result<()> {
+        let sid = self
+            .meta_snapshot()
+            .native_session_id
+            .context("no native session id")?;
+        self.acp_request(
+            "session/set_config_option",
+            json!({"sessionId": sid, "configId": config_id, "value": value}),
+        )
+        .await?;
+        Ok(())
     }
 
     /// Répond à une permission ou question pending.

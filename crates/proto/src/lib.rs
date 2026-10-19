@@ -91,6 +91,10 @@ pub enum EventKind {
     CommandsAvailable {
         commands: Vec<CmdInfo>,
     },
+    /// Options de configuration dynamiques (mode, model, …) — update ACP.
+    ConfigOptions {
+        options: Vec<ConfigOption>,
+    },
     /// État du run : idle | working | waiting_input | dead
     StatusChanged {
         state: String,
@@ -149,6 +153,29 @@ impl CmdInfo {
     }
 }
 
+/// Option de config agent (ACP config_option_update — ex. mode, model chez Devin).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConfigOpt {
+    pub value: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConfigOption {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default, rename = "currentValue")]
+    pub current_value: String,
+    #[serde(default)]
+    pub options: Vec<ConfigOpt>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermOption {
     pub option_id: String,
@@ -185,6 +212,9 @@ pub struct SessionMeta {
     /// Modèles annoncés par l'agent (session/new|load → models.availableModels)
     #[serde(default)]
     pub available_models: Vec<String>,
+    /// Options de config dynamiques (config_option_update — mode/model chez Devin)
+    #[serde(default)]
+    pub config_options: Vec<ConfigOption>,
     /// running | waiting_input | idle | dead | interrupted
     #[serde(default = "default_state")]
     pub state: String,
@@ -267,6 +297,12 @@ pub enum ReqKind {
     SetModel {
         session: String,
         model: String,
+    },
+    /// session/set_config_option (configId + value)
+    SetConfigOption {
+        session: String,
+        config_id: String,
+        value: String,
     },
     /// Tue l'agent et supprime la session + ses fichiers (journal/blobs).
     DeleteSession { session: String },
