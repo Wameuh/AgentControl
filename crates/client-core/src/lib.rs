@@ -150,6 +150,15 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
             let mut child = Command::new("ssh")
                 .args([
                     "-N",
+                    // Efface les forwards de ~/.ssh/config (sinon bind déjà
+                    // pris → échec total). "none" n'efface QUE la config lue
+                    // avant : notre -L placé après est conservé.
+                    "-o",
+                    "LocalForward=none",
+                    "-o",
+                    "RemoteForward=none",
+                    "-o",
+                    "DynamicForward=none",
                     "-L",
                     &spec,
                     "-o",
@@ -163,10 +172,6 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                     "-o",
                     // accepte les nouvelles host keys (1re connexion, pas de tty)
                     "StrictHostKeyChecking=accept-new",
-                    // Ignore les LocalForward/RemoteForward de ~/.ssh/config
-                    // pour cette connexion (sinon bind déjà pris → échec total)
-                    "-o",
-                    "ClearAllForwardings=yes",
                 ])
                 .args(args)
                 .arg(host)
