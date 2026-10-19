@@ -66,7 +66,9 @@
         <datalist id="ssh-hosts"></datalist>
         <label>Port démon distant <input id="c-port" type="number" value="7331" /></label>
         <label>Args SSH <input id="c-args" placeholder="-i ~/.ssh/key -p 22" /></label>
+        <pre id="log-view" hidden></pre>
         <menu>
+          <button id="c-logs" type="button">Logs</button>
           <button value="cancel">Annuler</button>
           <button id="c-go" value="default">Connecter</button>
         </menu>

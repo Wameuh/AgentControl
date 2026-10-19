@@ -657,8 +657,17 @@ $("btn-connect").onclick = async () => {
   }
   ($("dlg-conn") as HTMLDialogElement).showModal();
 };
+$("c-logs").addEventListener("click", async () => {
+  const v = $("log-view");
+  v.hidden = !v.hidden;
+  if (!v.hidden) v.textContent = await invoke<string>("log_tail", { n: 200 });
+});
+
 $("c-go").addEventListener("click", async (e) => {
   e.preventDefault();
+  const btn = e.currentTarget as HTMLButtonElement;
+  btn.disabled = true;
+  btn.classList.add("spin");
   const kind = ($("c-kind") as HTMLSelectElement).value;
   const cfg =
     kind === "ssh"
@@ -679,5 +688,8 @@ $("c-go").addEventListener("click", async (e) => {
     ($("dlg-conn") as HTMLDialogElement).close();
   } catch (err) {
     showErr(String(err));
+  } finally {
+    btn.disabled = false;
+    btn.classList.remove("spin");
   }
 });

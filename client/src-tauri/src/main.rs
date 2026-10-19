@@ -115,6 +115,12 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
     })
 }
 
+/// Les N dernières lignes du log client.
+#[tauri::command]
+fn log_tail(n: Option<usize>) -> String {
+    client_core::log_tail(n.unwrap_or(200))
+}
+
 /// Liste les alias Host de ~/.ssh/config (Ignore * ? ! negations).
 #[tauri::command]
 fn ssh_hosts() -> Vec<String> {
@@ -176,7 +182,7 @@ fn main() {
             client: Mutex::new(None),
         })
         .manage(Mutex::new(Vec::<Arc<Client>>::new()))
-        .invoke_handler(tauri::generate_handler![connect, call, subscribe, ssh_hosts])
+        .invoke_handler(tauri::generate_handler![connect, call, subscribe, ssh_hosts, log_tail])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

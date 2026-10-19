@@ -73,8 +73,17 @@ button:disabled { opacity: .5; cursor: default; }
   border-bottom: 1px solid var(--err); color: var(--fg); font-size: 13px;
   user-select: text;
 }
+#err-bar[hidden] { display: none; }
 #err-text { flex: 1; word-break: break-word; user-select: text; }
 #err-close { padding: 2px 8px; font-size: 12px; }
+
+.spin::after {
+  content: ""; display: inline-block; width: 11px; height: 11px; margin-left: 6px;
+  border: 2px solid var(--dim); border-top-color: var(--accent); border-radius: 50%;
+  animation: rot .7s linear infinite; vertical-align: -2px;
+}
+@keyframes rot { to { transform: rotate(360deg); } }
+#log-view { max-height: 320px; overflow-y: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; font: 11px/1.5 ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; user-select: text; }
 #chat-header {
   display: flex; align-items: center; gap: 10px;
   padding: 10px 16px; background: var(--bg2); border-bottom: 1px solid var(--border);

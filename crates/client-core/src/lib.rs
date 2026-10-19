@@ -19,6 +19,51 @@ type BoxedStream = Box<dyn AsyncRead + Unpin + Send>;
 type BoxedWriter = Box<dyn AsyncWrite + Unpin + Send>;
 
 // ---------------------------------------------------------------------------
+// Mini-log : ~/.agentcontrol/logs/client.log (+ stderr en dev)
+// ---------------------------------------------------------------------------
+
+static LOGFILE: std::sync::OnceLock<std::sync::Mutex<std::fs::File>> = std::sync::OnceLock::new();
+
+pub fn log_path() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".agentcontrol").join("logs")
+}
+
+fn logfile() -> &'static std::sync::Mutex<std::fs::File> {
+    LOGFILE.get_or_init(|| {
+        let dir = log_path();
+        let _ = std::fs::create_dir_all(&dir);
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("client.log"))
+            .expect("client.log");
+        std::sync::Mutex::new(f)
+    })
+}
+
+/// Ajoute une ligne de log (horodatée) dans client.log + stderr.
+pub fn log(msg: impl std::fmt::Display) {
+    use std::io::Write;
+    let line = format!("[{}] {}", proto::now_iso(), msg);
+    eprintln!("{line}");
+    if let Ok(mut f) = logfile().lock() {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// Les N dernières lignes du log (pour l'UI).
+pub fn log_tail(n: usize) -> String {
+    let p = log_path().join("client.log");
+    std::fs::read_to_string(p)
+        .map(|s| s.lines().rev().take(n).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"))
+        .unwrap_or_else(|_| "(pas de log)".into())
+}
+
+// ---------------------------------------------------------------------------
 // Transports
 // ---------------------------------------------------------------------------
 
@@ -69,6 +114,7 @@ fn free_port() -> Result<u16> {
 }
 
 async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<Arc<SshGuard>>)> {
+    log(format!("connect transport={:?}", std::mem::discriminant(t)));
     match t {
         Transport::Unix(path) => {
             #[cfg(unix)]
@@ -97,6 +143,10 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
         } => {
             let local = free_port()?;
             let spec = format!("{local}:127.0.0.1:{remote_port}");
+            log(format!(
+                "ssh -N -L {spec} {host} args={args:?} SSH_AUTH_SOCK={:?}",
+                std::env::var("SSH_AUTH_SOCK").unwrap_or_else(|_| "<absent>".into())
+            ));
             let mut child = Command::new("ssh")
                 .args([
                     "-N",
@@ -143,6 +193,7 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                             .and_then(|mut c| c.try_wait().ok().flatten());
                         if let Some(st) = dead {
                             let e = drain_err(&mut stderr).await;
+                            log(format!("ssh mort ({st}): {e}"));
                             bail!("ssh a quitté ({st}){}", if e.is_empty() { String::new() } else { format!(" : {e}") });
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await
@@ -153,6 +204,7 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                 let _ = c.start_kill();
             }
             let e = drain_err(&mut stderr).await;
+            log(format!("tunnel ssh {host} timeout (stderr: {e})"));
             bail!("tunnel ssh {host} timeout{}", if e.is_empty() { String::new() } else { format!(" : {e}") })
         }
     }
