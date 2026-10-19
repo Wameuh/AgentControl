@@ -16,6 +16,7 @@
 }
 
 :root {
+  color-scheme: dark;
   --bg: #121614;
   --ink: #ece6d8;
   --muted: #b9beb3;
@@ -186,12 +187,11 @@ button:disabled { opacity: .5; cursor: default; }
 }
 #input:focus { border-color: var(--sand); outline: none; }
 #cmd-select, #mode-select, #model-select, #effort-select, #model-free {
-  background: rgba(236, 230, 216, .06); color: var(--ink);
+  background: var(--panel-solid); color: var(--ink);
   border: 1px solid var(--line); border-radius: 8px; padding: 5px 7px;
   font: inherit; font-size: 12.5px; max-width: 190px;
 }
 #model-free { width: 130px; }
-select option { background: var(--panel-solid); color: var(--ink); }
 
 /* Badges */
 .badge {
@@ -216,7 +216,7 @@ dialog h3 { margin: 0 0 8px; font-weight: 500; }
 dialog form { display: flex; flex-direction: column; gap: 10px; }
 dialog label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; color: var(--muted); }
 dialog input, dialog select, dialog textarea {
-  background: rgba(236, 230, 216, .05); color: var(--ink);
+  background: rgba(236, 230, 216, .07); color: var(--ink);
   border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; font: inherit;
 }
 dialog input:focus, dialog select:focus, dialog textarea:focus { border-color: var(--sand); outline: none; }
