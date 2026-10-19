@@ -657,14 +657,24 @@ $("f-create").addEventListener("click", async (e) => {
   e.preventDefault();
   const cwd = ($("f-cwd") as HTMLInputElement).value.trim();
   if (!cwd) return;
-  await call("new_session", {
-    agent: ($("f-agent") as HTMLSelectElement).value,
-    cwd,
-    title: ($("f-title") as HTMLInputElement).value || cwd.split("/").pop(),
-    mode: ($("f-mode") as HTMLInputElement).value || undefined,
-    model: ($("f-model") as HTMLInputElement).value || undefined,
-    prompt: ($("f-prompt") as HTMLTextAreaElement).value || undefined,
-  });
+  const attach = ($("f-attach") as HTMLInputElement).value.trim();
+  if (attach) {
+    await call("attach_session", {
+      agent: ($("f-agent") as HTMLSelectElement).value,
+      cwd,
+      native_id: attach,
+      title: ($("f-title") as HTMLInputElement).value || cwd.split("/").pop(),
+    });
+  } else {
+    await call("new_session", {
+      agent: ($("f-agent") as HTMLSelectElement).value,
+      cwd,
+      title: ($("f-title") as HTMLInputElement).value || cwd.split("/").pop(),
+      mode: ($("f-mode") as HTMLInputElement).value || undefined,
+      model: ($("f-model") as HTMLInputElement).value || undefined,
+      prompt: ($("f-prompt") as HTMLTextAreaElement).value || undefined,
+    });
+  }
   ($("dlg-new") as HTMLDialogElement).close();
   await refreshSessions();
 });

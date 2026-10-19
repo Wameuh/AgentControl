@@ -228,6 +228,12 @@ async fn main() -> Result<()> {
             c.tail(&args[1], after).await?;
         }
         "resume" => println!("{}", c.call(proto::ReqKind::ResumeSession { session: args[1].clone() }).await?),
+        "attach" => println!("{}", c.call(proto::ReqKind::AttachSession {
+            agent: args[1].clone(),
+            cwd: args[2].clone(),
+            native_id: args[3].clone(),
+            title: args.get(4).cloned(),
+        }).await?),
         "cancel" => println!("{}", c.call(proto::ReqKind::Cancel { session: args[1].clone() }).await?),
         "kill" => println!("{}", c.call(proto::ReqKind::KillSession { session: args[1].clone() }).await?),
         "mode" => println!("{}", c.call(proto::ReqKind::SetMode { session: args[1].clone(), mode: args[2].clone() }).await?),

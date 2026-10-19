@@ -223,6 +223,15 @@ pub enum ReqKind {
     },
     /// Reprend une session existante (respawn agent + session/load).
     ResumeSession { session: String },
+    /// Attache une session native de l'agent (créée hors AgentControl) :
+    /// respawn + session/load sur l'ID natif fourni.
+    AttachSession {
+        agent: String,
+        cwd: String,
+        native_id: String,
+        #[serde(default)]
+        title: Option<String>,
+    },
     ListSessions,
     ListAgents,
     Send {

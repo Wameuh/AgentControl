@@ -184,6 +184,7 @@ impl Daemon {
                     model: model.clone(),
                     available_modes: vec![],
                     available_commands: vec![],
+                    available_models: vec![],
                     state: "starting".into(),
                 };
                 let dir = Session::create_dir(&self.root, &meta)?;
@@ -221,6 +222,46 @@ impl Daemon {
                         let _ = s.send_prompt(&p).await;
                     });
                 }
+                Ok(json!({"session": sid}))
+            }
+            ReqKind::AttachSession {
+                agent,
+                cwd,
+                native_id,
+                title,
+            } => {
+                let profile = self
+                    .agents
+                    .get(&agent)
+                    .with_context(|| format!("agent inconnu: {agent}"))?
+                    .clone();
+                let meta = SessionMeta {
+                    id: proto::new_id("s"),
+                    agent: agent.clone(),
+                    title: title.unwrap_or_else(|| format!("attach:{native_id}")),
+                    cwd,
+                    created_at: proto::now_iso(),
+                    native_session_id: Some(native_id),
+                    mode: None,
+                    model: None,
+                    available_modes: vec![],
+                    available_commands: vec![],
+                    available_models: vec![],
+                    state: "starting".into(),
+                };
+                let dir = Session::create_dir(&self.root, &meta)?;
+                let session = Session::open(dir)?;
+                let sid = meta.id.clone();
+                self.sessions.write().await.insert(sid.clone(), session.clone());
+                let cmd: Vec<String> = profile
+                    .command
+                    .iter()
+                    .filter(|a| !a.is_empty())
+                    .cloned()
+                    .collect();
+                session
+                    .spawn_agent(&cmd, &profile.env, meta.native_session_id)
+                    .await?;
                 Ok(json!({"session": sid}))
             }
             ReqKind::ResumeSession { session } => {

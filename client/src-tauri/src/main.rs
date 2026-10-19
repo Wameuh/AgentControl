@@ -90,6 +90,12 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             prompt: so("prompt"),
         },
         "resume_session" => ReqKind::ResumeSession { session: s("session") },
+        "attach_session" => ReqKind::AttachSession {
+            agent: s("agent"),
+            cwd: s("cwd"),
+            native_id: s("native_id"),
+            title: so("title"),
+        },
         "send" => ReqKind::Send { session: s("session"), text: s("text") },
         "events" => ReqKind::Events {
             session: s("session"),
