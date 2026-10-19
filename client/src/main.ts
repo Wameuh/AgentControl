@@ -53,6 +53,7 @@ const toolBlocks = new Map<string, HTMLElement>();
 const answered = new Set<string>();
 let loadingOld = false;
 let hasMoreHistory = true;
+let alive = false;
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const eventsEl = $("events");
@@ -127,6 +128,7 @@ async function openSession(id: string) {
     "session_info",
     { session: id },
   );
+  alive = info.alive;
   current = info.meta;
   minRendered = Number.MAX_SAFE_INTEGER;
   renderedCount = 0;
@@ -163,7 +165,8 @@ function updateHeader() {
   const st = $("chat-state");
   st.textContent = current.state;
   st.className = `badge st-${current.state}`;
-  $("btn-resume").hidden = !(current.state === "interrupted" || current.state === "dead");
+  // Reprendre = process mort, quel que soit l'état persisté dans meta.json
+  $("btn-resume").hidden = alive;
   $("btn-cancel").hidden = !(current.state === "working" || current.state === "waiting_input");
 
   // Options de config dynamiques (ex. Devin : config_option_update → mode + model)
@@ -371,6 +374,7 @@ function renderEvent(ev: AcEvent): HTMLElement {
       d.textContent = `état → ${ev.state}`;
       if (current) {
         current.state = ev.state as string;
+        alive = ev.state !== "dead";
         updateHeader();
         refreshSessions();
       }
@@ -617,8 +621,7 @@ async function runBuiltin(name: string, arg: string): Promise<boolean> {
       await call("set_model", { session: current.id, model: arg });
       return true;
     case "resume":
-      await call("resume_session", { session: current.id });
-      await openSession(current.id);
+      await openNativePicker();
       return true;
     case "cancel":
       await call("cancel", { session: current.id });
@@ -688,6 +691,50 @@ $("input").addEventListener("blur", () => {
   // délai pour laisser le click sur un item passer
   setTimeout(() => ($("cmd-ac").hidden = true), 150);
 });
+
+/** Dialogue : sessions natives de l'agent (ACP session/list) → reprise. */
+async function openNativePicker() {
+  if (!current) return;
+  const box = $("native-list");
+  box.innerHTML = "…";
+  ($("dlg-resume") as HTMLDialogElement).showModal();
+  try {
+    const r = await call<{ sessions?: { sessionId: string; title?: string; updatedAt?: string; cwd?: string }[] }>(
+      "list_native_sessions",
+      { session: current.id },
+    );
+    const list = r.sessions ?? [];
+    box.innerHTML = list.length
+      ? ""
+      : "Aucune session native (ou session/list non supporté par l'agent).";
+    for (const s of list) {
+      const row = document.createElement("div");
+      row.className = "ac-item";
+      row.innerHTML = `<span class="n">${esc(s.sessionId.slice(0, 12))}</span>` +
+        `<span class="d">${esc(s.title || s.cwd || "")}</span>` +
+        `<span class="h">${esc((s.updatedAt || "").slice(0, 16).replace("T", " "))}</span>`;
+      row.onclick = async () => {
+        ($("dlg-resume") as HTMLDialogElement).close();
+        await call("resume_session", { session: current!.id, native_id: s.sessionId })
+          .catch((e) => showErr(String(e)));
+        await openSession(current!.id);
+      };
+      box.appendChild(row);
+    }
+  } catch (e) {
+    // Agent mort → impossible de lister ; proposer la reprise de la session courante
+    box.innerHTML = `<div class="errline">${esc(String(e))}</div>`;
+    const row = document.createElement("div");
+    row.className = "ac-item";
+    row.innerHTML = `<span class="n">↻</span><span class="d">Reprendre la session courante (respawn + session/load)</span>`;
+    row.onclick = async () => {
+      ($("dlg-resume") as HTMLDialogElement).close();
+      await call("resume_session", { session: current!.id }).catch((er) => showErr(String(er)));
+      await openSession(current!.id);
+    };
+    box.appendChild(row);
+  }
+}
 
 async function sendInput() {
   const t = ($("input") as HTMLTextAreaElement).value.trim();

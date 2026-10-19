@@ -227,7 +227,10 @@ async fn main() -> Result<()> {
             let after = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
             c.tail(&args[1], after).await?;
         }
-        "resume" => println!("{}", c.call(proto::ReqKind::ResumeSession { session: args[1].clone() }).await?),
+        "resume" => println!("{}", c.call(proto::ReqKind::ResumeSession {
+            session: args[1].clone(),
+            native_id: args.get(2).cloned(),
+        }).await?),
         "attach" => println!("{}", c.call(proto::ReqKind::AttachSession {
             agent: args[1].clone(),
             cwd: args[2].clone(),

@@ -266,10 +266,18 @@ impl Daemon {
                     .await?;
                 Ok(json!({"session": sid}))
             }
-            ReqKind::ResumeSession { session } => {
+            ReqKind::ListNativeSessions { session } => {
                 let s = self.get_session(&session).await?;
-                if s.is_alive() {
+                s.list_native_sessions().await
+            }
+            ReqKind::ResumeSession { session, native_id } => {
+                let s = self.get_session(&session).await?;
+                if s.is_alive() && native_id.is_none() {
                     return Ok(json!({"session": session, "already": true}));
+                }
+                // Rebind éventuel vers une autre session native avant respawn
+                if let Some(nid) = native_id {
+                    s.set_native_id(&nid);
                 }
                 let meta = s.meta_snapshot();
                 let profile = self

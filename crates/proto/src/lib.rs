@@ -252,7 +252,15 @@ pub enum ReqKind {
         prompt: Option<String>,
     },
     /// Reprend une session existante (respawn agent + session/load).
-    ResumeSession { session: String },
+    /// native_id : reprendre une AUTRE session native de l'agent.
+    ResumeSession {
+        session: String,
+        #[serde(default)]
+        native_id: Option<String>,
+    },
+    /// Liste les sessions natives de l'agent (ACP session/list) via une
+    /// session vivante de cet agent.
+    ListNativeSessions { session: String },
     /// Attache une session native de l'agent (créée hors AgentControl) :
     /// respawn + session/load sur l'ID natif fourni.
     AttachSession {

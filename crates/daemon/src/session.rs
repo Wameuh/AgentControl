@@ -637,6 +637,17 @@ impl Session {
         }
     }
 
+    /// Rebind l'ID natif (pour reprendre une autre session de l'agent).
+    pub fn set_native_id(&self, id: &str) {
+        self.meta.lock().unwrap().native_session_id = Some(id.into());
+        self.save_meta();
+    }
+
+    /// ACP session/list — sessions natives de l'agent (reprendre ailleurs).
+    pub async fn list_native_sessions(&self) -> Result<Value> {
+        self.acp_request("session/list", json!({})).await
+    }
+
     /// ACP session/set_config_option — le mécanisme de config de Devin
     /// (mode, model, …).
     pub async fn set_config_option(&self, config_id: &str, value: &str) -> Result<()> {
