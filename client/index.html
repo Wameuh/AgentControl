@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AgentControl</title>
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <div id="conn-bar">
+          <span id="conn-status" class="badge warn">déconnecté</span>
+          <button id="btn-connect">Connecter</button>
+        </div>
+        <div id="session-list"></div>
+        <button id="btn-new-session">+ Nouvelle session</button>
+      </aside>
+      <main id="chat">
+        <header id="chat-header">
+          <span id="chat-title">—</span>
+          <span id="chat-state" class="badge"></span>
+          <select id="mode-select" hidden></select>
+          <button id="btn-resume" hidden>Reprendre</button>
+          <button id="btn-cancel" hidden>Stop</button>
+        </header>
+        <div id="events">
+          <div id="scroll-sentinel"></div>
+        </div>
+        <footer id="composer">
+          <select id="cmd-select" hidden><option value="">⌘ commandes…</option></select>
+          <textarea id="input" placeholder="Message… (Entrée = envoyer, Maj+Entrée = saut de ligne)" rows="2"></textarea>
+          <button id="btn-send">Envoyer</button>
+        </footer>
+      </main>
+    </div>
+
+    <dialog id="dlg-new">
+      <form method="dialog" id="form-new">
+        <h3>Nouvelle session</h3>
+        <label>Agent <select id="f-agent"></select></label>
+        <label>Dossier de travail <input id="f-cwd" placeholder="/home/agent/projet" required /></label>
+        <label>Titre <input id="f-title" placeholder="ma session" /></label>
+        <label>Mode <input id="f-mode" placeholder="normal (optionnel)" /></label>
+        <label>Modèle <input id="f-model" placeholder="défaut" /></label>
+        <label>Message initial <textarea id="f-prompt" rows="3"></textarea></label>
+        <menu>
+          <button value="cancel">Annuler</button>
+          <button id="f-create" value="default">Créer</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-conn">
+      <form method="dialog">
+        <h3>Connexion au démon</h3>
+        <label>Type
+          <select id="c-kind">
+            <option value="local">Socket local (démon sur cette machine)</option>
+            <option value="ssh">SSH (serveur distant)</option>
+            <option value="tcp">TCP direct</option>
+          </select>
+        </label>
+        <label>Hôte / adresse <input id="c-host" placeholder="user@serveur.local ou 127.0.0.1:7331" /></label>
+        <label>Port démon distant <input id="c-port" type="number" value="7331" /></label>
+        <label>Args SSH <input id="c-args" placeholder="-i ~/.ssh/key -p 22" /></label>
+        <menu>
+          <button value="cancel">Annuler</button>
+          <button id="c-go" value="default">Connecter</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

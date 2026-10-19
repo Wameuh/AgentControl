@@ -1,0 +1,15 @@
+[package]
+name = "acctl"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "acctl"
+path = "src/main.rs"
+
+[dependencies]
+proto = { path = "../proto" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }

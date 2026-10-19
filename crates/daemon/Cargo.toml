@@ -1,0 +1,17 @@
+[package]
+name = "agentcontrol-daemon"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "agentcontrol-daemon"
+path = "src/main.rs"
+
+[dependencies]
+proto = { path = "../proto" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+toml = "0.8"
