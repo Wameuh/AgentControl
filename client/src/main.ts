@@ -6,6 +6,11 @@ import { listen } from "@tauri-apps/api/event";
 // Types miroir du protocole
 // ---------------------------------------------------------------------------
 
+type CmdInfo = string | { name: string; description?: string; hint?: string };
+const cmdName = (c: CmdInfo) => (typeof c === "string" ? c.replace(/^\//, "") : c.name);
+const cmdDesc = (c: CmdInfo) => (typeof c === "string" ? "" : (c.description ?? ""));
+const cmdHint = (c: CmdInfo) => (typeof c === "string" ? "" : (c.hint ?? ""));
+
 interface SessionMeta {
   id: string;
   agent: string;
@@ -16,7 +21,7 @@ interface SessionMeta {
   mode?: string;
   model?: string;
   available_modes: string[];
-  available_commands: string[];
+  available_commands: CmdInfo[];
   state: string;
 }
 
@@ -144,8 +149,11 @@ function updateHeader() {
     cs.innerHTML = '<option value="">⌘ commandes…</option>';
     for (const c of current.available_commands) {
       const o = document.createElement("option");
-      o.value = c;
-      o.textContent = c;
+      o.value = "/" + cmdName(c);
+      const d = cmdDesc(c);
+      const h = cmdHint(c);
+      o.textContent = "/" + cmdName(c) + (h ? ` ${h}` : "");
+      o.title = d + (h ? ` — ex: /${cmdName(c)} ${h}` : "");
       cs.appendChild(o);
     }
   } else {
@@ -266,9 +274,10 @@ function renderEvent(ev: AcEvent): HTMLElement {
     }
     case "commands_available": {
       const d = mkEv("sysline", ev.seq);
-      d.textContent = `${(ev.commands as string[]).length} commandes disponibles`;
+      const cmds = ev.commands as CmdInfo[];
+      d.textContent = `${cmds.length} commandes disponibles`;
       if (current) {
-        current.available_commands = ev.commands as string[];
+        current.available_commands = cmds;
         updateHeader();
       }
       return d;
@@ -485,10 +494,87 @@ await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
 
 $("btn-send").onclick = sendInput;
 $("input").addEventListener("keydown", (e) => {
+  const ac = $("cmd-ac");
+  if (!ac.hidden) {
+    const sel = ac.querySelector<HTMLElement>(".ac-item.sel");
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      moveAcSel(e.key === "ArrowDown" ? 1 : -1);
+      return;
+    }
+    if ((e.key === "Tab" || e.key === "Enter") && sel) {
+      e.preventDefault();
+      applyAc(sel.dataset.name!);
+      return;
+    }
+    if (e.key === "Escape") {
+      ac.hidden = true;
+      return;
+    }
+  }
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     sendInput();
   }
+});
+
+// ---- Autocomplete des slash-commands ----
+let acSel = 0;
+
+function moveAcSel(dir: number) {
+  const items = [...$("cmd-ac").querySelectorAll<HTMLElement>(".ac-item")];
+  if (!items.length) return;
+  acSel = (acSel + dir + items.length) % items.length;
+  items.forEach((el, i) => el.classList.toggle("sel", i === acSel));
+  items[acSel].scrollIntoView({ block: "nearest" });
+}
+
+function applyAc(name: string) {
+  const inp = $("input") as HTMLTextAreaElement;
+  inp.value = "/" + name + " ";
+  $("cmd-ac").hidden = true;
+  inp.focus();
+}
+
+function refreshAc() {
+  const inp = $("input") as HTMLTextAreaElement;
+  const ac = $("cmd-ac");
+  const v = inp.value;
+  const m = /^\/([\w-]*)$/.exec(v);
+  if (!m || !current) {
+    ac.hidden = true;
+    return;
+  }
+  const q = m[1].toLowerCase();
+  const matches = current.available_commands
+    .filter((c) => cmdName(c).toLowerCase().startsWith(q))
+    .slice(0, 12);
+  if (!matches.length) {
+    ac.hidden = true;
+    return;
+  }
+  ac.innerHTML = "";
+  acSel = 0;
+  matches.forEach((c, i) => {
+    const n = cmdName(c);
+    const el = document.createElement("div");
+    el.className = "ac-item" + (i === 0 ? " sel" : "");
+    el.dataset.name = n;
+    const h = cmdHint(c);
+    el.innerHTML = `<span class="n">/${esc(n)}</span>` +
+      (h ? `<span class="h">${esc(h)}</span>` : "") +
+      `<span class="d">${esc(cmdDesc(c))}</span>`;
+    el.title = cmdDesc(c);
+    el.onclick = () => applyAc(n);
+    ac.appendChild(el);
+  });
+  ac.hidden = false;
+}
+
+$("input").addEventListener("input", refreshAc);
+$("input").addEventListener("blur", () => {
+  // délai pour laisser le click sur un item passer
+  setTimeout(() => ($("cmd-ac").hidden = true), 150);
 });
 
 async function sendInput() {

@@ -140,7 +140,14 @@ fn print_event(ev: &Value) {
             println!("[{seq}] résolu: {}", ev["outcome"].as_str().or_else(|| ev["answer"].as_str()).unwrap_or(""));
         }
         "mode_changed" => println!("[{seq}] mode → {}", ev["mode"].as_str().unwrap_or("")),
-        "commands_available" => println!("[{seq}] commandes: {:?}", ev["commands"]),
+        "commands_available" => {
+            let names: Vec<String> = ev["commands"].as_array().map(|a| {
+                a.iter().map(|c| {
+                    format!("/{}", c.get("name").and_then(Value::as_str).or_else(|| c.as_str()).unwrap_or(""))
+                }).collect()
+            }).unwrap_or_default();
+            println!("[{seq}] commandes: {}", names.join(" "));
+        }
         "status_changed" => println!("\x1b[90m[{seq}] état → {}\x1b[0m", ev["state"].as_str().unwrap_or("")),
         "error" => println!("\x1b[31m[{seq}] ERREUR {}\x1b[0m", ev["message"].as_str().unwrap_or("")),
         "system" => println!("\x1b[90m[{seq}] ⦿ {}\x1b[0m", ev["text"].as_str().unwrap_or("")),

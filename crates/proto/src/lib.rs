@@ -89,7 +89,7 @@ pub enum EventKind {
         mode: String,
     },
     CommandsAvailable {
-        commands: Vec<String>,
+        commands: Vec<CmdInfo>,
     },
     /// État du run : idle | working | waiting_input | dead
     StatusChanged {
@@ -111,6 +111,42 @@ pub enum ToolStatus {
     Running,
     Done,
     Failed,
+}
+
+/// Commande slash annoncée par l'agent (ACP availableCommands).
+/// Désérialise depuis "/name" (ancien format) ou {name, description, input:{hint}}.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CmdInfo {
+    Name(String),
+    Full {
+        name: String,
+        #[serde(default)]
+        description: String,
+        #[serde(default)]
+        hint: String,
+    },
+}
+
+impl CmdInfo {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Name(s) => s.trim_start_matches('/'),
+            Self::Full { name, .. } => name.trim_start_matches('/'),
+        }
+    }
+    pub fn description(&self) -> &str {
+        match self {
+            Self::Name(_) => "",
+            Self::Full { description, .. } => description,
+        }
+    }
+    pub fn hint(&self) -> &str {
+        match self {
+            Self::Name(_) => "",
+            Self::Full { hint, .. } => hint,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,7 +181,7 @@ pub struct SessionMeta {
     pub available_modes: Vec<String>,
     /// Commandes slash annoncées par l'agent (available_commands_update)
     #[serde(default)]
-    pub available_commands: Vec<String>,
+    pub available_commands: Vec<CmdInfo>,
     /// running | waiting_input | idle | dead | interrupted
     #[serde(default = "default_state")]
     pub state: String,

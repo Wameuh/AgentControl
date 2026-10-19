@@ -187,7 +187,21 @@ pub fn map_update(update: &Value) -> Mapped {
                 .map(|a| {
                     a.iter()
                         .filter_map(|c| {
-                            c.get("name").and_then(Value::as_str).map(|n| format!("/{n}"))
+                            let name = c.get("name").and_then(Value::as_str)?;
+                            Some(proto::CmdInfo::Full {
+                                name: name.to_string(),
+                                description: c
+                                    .get("description")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string(),
+                                hint: c
+                                    .get("input")
+                                    .and_then(|i| i.get("hint"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string(),
+                            })
                         })
                         .collect()
                 })
