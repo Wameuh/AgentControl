@@ -199,11 +199,19 @@ async fn subscribe(
             let _ = app.emit("session-event", v);
         }
     });
-    let keep = app
-        .state::<Mutex<std::collections::HashMap<String, (Arc<Client>, tokio::task::AbortHandle)>>>();
-    keep.lock()
+    let keep = app.state::<Mutex<
+        std::collections::HashMap<
+            String,
+            (Arc<Client>, tauri::async_runtime::JoinHandle<()>),
+        >,
+    >>();
+    let old = keep
+        .lock()
         .await
-        .insert(session, (sub_client, task.abort_handle()));
+        .insert(session, (sub_client, task));
+    if let Some((_, h)) = old {
+        h.abort();
+    }
     Ok(())
 }
 
@@ -215,7 +223,10 @@ fn main() {
             client: Mutex::new(None),
         })
         .manage(Mutex::new(
-            std::collections::HashMap::<String, (Arc<Client>, tokio::task::AbortHandle)>::new(),
+            std::collections::HashMap::<
+                String,
+                (Arc<Client>, tauri::async_runtime::JoinHandle<()>),
+            >::new(),
         ))
         .invoke_handler(tauri::generate_handler![connect, call, subscribe, ssh_hosts, log_tail, saved_connections, save_connection])
         .run(tauri::generate_context!())
