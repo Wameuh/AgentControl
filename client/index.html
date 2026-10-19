@@ -22,7 +22,9 @@
           <span id="chat-state" class="badge"></span>
           <select id="mode-select" hidden></select>
           <select id="model-select" hidden></select>
+          <select id="effort-select" hidden title="Niveau d'effort"></select>
           <input id="model-free" hidden placeholder="modèle…" title="Nom du modèle (Entrée pour appliquer)" />
+          <button id="btn-refresh" title="Recharger la session">⟳</button>
           <button id="btn-resume" hidden>Reprendre</button>
           <button id="btn-cancel" hidden>Stop</button>
         </header>
@@ -75,6 +77,20 @@
           <button id="c-logs" type="button">Logs</button>
           <button value="cancel">Annuler</button>
           <button id="c-go" value="default">Connecter</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-fusion">
+      <form method="dialog">
+        <h3>Fusion — deux modèles en parallèle</h3>
+        <label>Modèle principal <select id="fu-a"></select></label>
+        <label>Effort principal <select id="fu-ea"></select></label>
+        <label>Sidekick <select id="fu-b"></select></label>
+        <label>Effort sidekick <select id="fu-eb"></select></label>
+        <menu>
+          <button value="cancel">Annuler</button>
+          <button id="fu-ok" value="default">Appliquer</button>
         </menu>
       </form>
     </dialog>

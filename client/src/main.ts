@@ -33,6 +33,13 @@ interface ConfigOption {
   currentValue?: string; options: ConfigOpt[];
 }
 
+// Devin : les modèles portent l'effort en suffixe (-medium/-high/...)
+const EFF_RE = /-(low|minimal|medium|high|max|lightning)$/;
+const splitModel = (v: string): [string, string] => {
+  const m = EFF_RE.exec(v);
+  return m ? [v.slice(0, -m[0].length), m[1]] : [v, ""];
+};
+
 interface AcEvent {
   seq: number;
   ts: string;
@@ -194,25 +201,43 @@ function updateHeader() {
   }
 
   const md = $("model-select") as HTMLSelectElement;
+  const es = $("effort-select") as HTMLSelectElement;
   const mf = $("model-free") as HTMLInputElement;
-  if (modelOpt || current.available_models.length) {
+  const rawOpts = modelOpt
+    ? modelOpt.options.map((o) => ({ v: o.value, label: o.name || o.value }))
+    : current.available_models.map((m) => ({ v: m, label: m }));
+  if (rawOpts.length) {
     md.hidden = false;
     mf.hidden = true;
+    // Modèles de base dédupliqués (effort géré à part) + entrée Fusion
+    const bases = new Map<string, string>();
+    for (const o of rawOpts) {
+      if (o.v.startsWith("fusion-")) continue;
+      const [b] = splitModel(o.v);
+      if (!bases.has(b)) bases.set(b, o.label);
+    }
     md.innerHTML = "";
-    const items = modelOpt
-      ? modelOpt.options.map((o) => ({ v: o.value, label: o.name || o.value }))
-      : current.available_models.map((m) => ({ v: m, label: m }));
-    for (const it of items) {
+    for (const [b, label] of bases) {
       const o = document.createElement("option");
-      o.value = it.v;
-      o.textContent = "🧠 " + it.label;
+      o.value = b;
+      o.textContent = "🧠 " + label;
       md.appendChild(o);
     }
+    const fo = document.createElement("option");
+    fo.value = "__fusion";
+    fo.textContent = "✨ Fusion (2 modèles)…";
+    md.appendChild(fo);
     md.dataset.cfgid = modelOpt ? modelOpt.id : "";
-    md.value = modelOpt?.currentValue || current.model || "";
+    md.dataset.opts = JSON.stringify(rawOpts);
+    const curVal = modelOpt?.currentValue || current.model || "";
+    const [curBase, curEff] = splitModel(curVal);
+    md.value = curVal.startsWith("fusion-") ? "__fusion" : curBase;
+    // Select d'effort : suffixes réellement présents pour la base choisie
+    fillEfforts(md.value, curEff);
+    es.hidden = false;
   } else {
-    // Pas de liste annoncée → champ libre (set_model ou /model fallback)
     md.hidden = true;
+    es.hidden = true;
     mf.hidden = false;
     mf.value = current.model ?? "";
   }
@@ -772,14 +797,98 @@ $("btn-resume").onclick = () =>
   req.catch((er) => showErr(String(er)));
 };
 
-($("model-select") as HTMLSelectElement).onchange = (e) => {
+/** Remplit le select d'effort pour une base de modèle donnée. */
+function effortsFor(base: string): string[] {
+  const opts: { v: string }[] = JSON.parse(($("model-select") as HTMLSelectElement).dataset.opts || "[]");
+  const effs = new Set<string>();
+  for (const o of opts) {
+    if (o.v === base || o.v.startsWith(base + "-")) {
+      const e = splitModel(o.v)[1];
+      if (e) effs.add(e);
+    }
+  }
+  return [...effs];
+}
+
+function fillEfforts(base: string, cur: string) {
+  const es = $("effort-select") as HTMLSelectElement;
+  const effs = effortsFor(base);
+  es.innerHTML = "";
+  for (const e of effs.length ? effs : ["medium", "high"]) {
+    const o = document.createElement("option");
+    o.value = e;
+    o.textContent = e;
+    es.appendChild(o);
+  }
+  if (effs.includes(cur)) es.value = cur;
+}
+
+function applyModelValue(v: string) {
   if (!current) return;
-  const sel = e.target as HTMLSelectElement;
-  const req = sel.dataset.cfgid
-    ? call("set_config_option", { session: current.id, config_id: sel.dataset.cfgid, value: sel.value })
-    : call("set_model", { session: current.id, model: sel.value });
+  const md = $("model-select") as HTMLSelectElement;
+  const req = md.dataset.cfgid
+    ? call("set_config_option", { session: current.id, config_id: md.dataset.cfgid, value: v })
+    : call("set_model", { session: current.id, model: v });
   req.catch((er) => showErr(String(er)));
+}
+
+/** Dialogue Fusion : 2 modèles + efforts → value fusion-A-effA-sidekick-B-effB */
+function openFusion() {
+  const md = $("model-select") as HTMLSelectElement;
+  const bases = [...md.querySelectorAll("option")]
+    .map((o) => o.value)
+    .filter((v) => v !== "__fusion" && v !== "");
+  for (const id of ["fu-a", "fu-b"]) {
+    const s = $(id) as HTMLSelectElement;
+    s.innerHTML = "";
+    for (const b of bases) {
+      const o = document.createElement("option");
+      o.value = b;
+      o.textContent = b;
+      s.appendChild(o);
+    }
+  }
+  for (const id of ["fu-ea", "fu-eb"]) {
+    const s = $(id) as HTMLSelectElement;
+    s.innerHTML = "";
+    for (const e of ["medium", "high"]) {
+      const o = document.createElement("option");
+      o.value = e;
+      o.textContent = e;
+      s.appendChild(o);
+    }
+  }
+  ($("dlg-fusion") as HTMLDialogElement).showModal();
+}
+
+$("fu-ok").addEventListener("click", (e) => {
+  e.preventDefault();
+  const a = ($("fu-a") as HTMLSelectElement).value;
+  const ea = ($("fu-ea") as HTMLSelectElement).value;
+  const b = ($("fu-b") as HTMLSelectElement).value;
+  const eb = ($("fu-eb") as HTMLSelectElement).value;
+  ($("dlg-fusion") as HTMLDialogElement).close();
+  applyModelValue(`fusion-${a}-${ea}-sidekick-${b}-${eb}`);
+});
+
+($("model-select") as HTMLSelectElement).onchange = (e) => {
+  const sel = e.target as HTMLSelectElement;
+  if (sel.value === "__fusion") {
+    openFusion();
+    return;
+  }
+  fillEfforts(sel.value, "");
+  const eff = ($("effort-select") as HTMLSelectElement).value;
+  applyModelValue(sel.value + (eff ? "-" + eff : ""));
 };
+
+($("effort-select") as HTMLSelectElement).onchange = (e) => {
+  const base = ($("model-select") as HTMLSelectElement).value;
+  const eff = (e.target as HTMLSelectElement).value;
+  if (base && base !== "__fusion") applyModelValue(base + (eff ? "-" + eff : ""));
+};
+
+$("btn-refresh").onclick = () => current && openSession(current.id);
 
 ($("model-free") as HTMLInputElement).addEventListener("keydown", async (e) => {
   if (e.key !== "Enter" || !current) return;
