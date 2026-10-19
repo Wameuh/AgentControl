@@ -270,6 +270,24 @@ impl Session {
                     .collect();
             }
         }
+        // Modèles disponibles éventuels
+        if let Some(models) = resp.get("models") {
+            let mut m = self.meta.lock().unwrap();
+            if let Some(cur) = models.get("currentModelId").and_then(Value::as_str) {
+                m.model = Some(cur.to_string());
+            }
+            if let Some(av) = models.get("availableModels").and_then(Value::as_array) {
+                m.available_models = av
+                    .iter()
+                    .filter_map(|x| {
+                        x.get("modelId")
+                            .or_else(|| x.get("id"))
+                            .and_then(Value::as_str)
+                            .map(String::from)
+                    })
+                    .collect();
+            }
+        }
         self.save_meta();
         self.emit(EventKind::System {
             text: if resume_native_id.is_some() {
@@ -576,6 +594,32 @@ impl Session {
         self.acp_request("session/set_mode", acp::session_set_mode_params(&sid, mode))
             .await?;
         Ok(())
+    }
+
+    /// Change de modèle : ACP session/set_model, sinon fallback sur la
+    /// slash command "/model <m>" envoyée comme prompt.
+    pub async fn set_model(self: &Arc<Self>, model: &str) -> Result<()> {
+        let sid = self
+            .meta_snapshot()
+            .native_session_id
+            .context("no native session id")?;
+        match self
+            .acp_request("session/set_model", acp::session_set_model_params(&sid, model))
+            .await
+        {
+            Ok(_) => {
+                self.meta.lock().unwrap().model = Some(model.into());
+                self.save_meta();
+                self.emit(EventKind::System {
+                    text: format!("model → {model}"),
+                });
+                Ok(())
+            }
+            Err(_) => {
+                // Fallback : beaucoup d'agents exposent /model en slash command
+                self.send_prompt(&format!("/model {model}")).await
+            }
+        }
     }
 
     /// Répond à une permission ou question pending.

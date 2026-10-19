@@ -182,6 +182,9 @@ pub struct SessionMeta {
     /// Commandes slash annoncées par l'agent (available_commands_update)
     #[serde(default)]
     pub available_commands: Vec<CmdInfo>,
+    /// Modèles annoncés par l'agent (session/new|load → models.availableModels)
+    #[serde(default)]
+    pub available_models: Vec<String>,
     /// running | waiting_input | idle | dead | interrupted
     #[serde(default = "default_state")]
     pub state: String,
@@ -251,6 +254,10 @@ pub enum ReqKind {
     SetMode {
         session: String,
         mode: String,
+    },
+    SetModel {
+        session: String,
+        model: String,
     },
     /// Réponse à une permission ou une question (request_id de l'event).
     Respond {

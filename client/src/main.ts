@@ -22,6 +22,7 @@ interface SessionMeta {
   model?: string;
   available_modes: string[];
   available_commands: CmdInfo[];
+  available_models: string[];
   state: string;
 }
 
@@ -149,6 +150,21 @@ function updateHeader() {
     if (current.mode) ms.value = current.mode;
   } else {
     ms.hidden = true;
+  }
+
+  const md = $("model-select") as HTMLSelectElement;
+  if (current.available_models.length) {
+    md.hidden = false;
+    md.innerHTML = "";
+    for (const m of current.available_models) {
+      const o = document.createElement("option");
+      o.value = m;
+      o.textContent = "🧠 " + m;
+      md.appendChild(o);
+    }
+    if (current.model) md.value = current.model;
+  } else {
+    md.hidden = true;
   }
 
   const cs = $("cmd-select") as HTMLSelectElement;
@@ -607,6 +623,13 @@ $("btn-resume").onclick = () =>
     session: current.id,
     mode: (e.target as HTMLSelectElement).value,
   }).catch((e) => showErr(String(e)));
+
+($("model-select") as HTMLSelectElement).onchange = (e) =>
+  current &&
+  call("set_model", {
+    session: current.id,
+    model: (e.target as HTMLSelectElement).value,
+  }).catch((er) => showErr(String(er)));
 
 ($("cmd-select") as HTMLSelectElement).onchange = (e) => {
   const v = (e.target as HTMLSelectElement).value;

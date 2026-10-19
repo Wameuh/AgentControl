@@ -298,6 +298,11 @@ impl Daemon {
                 s.set_mode(&mode).await?;
                 Ok(json!({"mode": mode}))
             }
+            ReqKind::SetModel { session, model } => {
+                let s = self.get_session(&session).await?;
+                s.set_model(&model).await?;
+                Ok(json!({"model": model}))
+            }
             ReqKind::Respond {
                 session,
                 request_id,

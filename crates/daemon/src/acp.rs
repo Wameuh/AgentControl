@@ -66,6 +66,10 @@ pub fn session_set_mode_params(session_id: &str, mode: &str) -> Value {
     json!({"sessionId": session_id, "modeId": mode})
 }
 
+pub fn session_set_model_params(session_id: &str, model: &str) -> Value {
+    json!({"sessionId": session_id, "modelId": model})
+}
+
 // ---------------------------------------------------------------------------
 // Mapping session/update -> EventKind
 // ---------------------------------------------------------------------------
