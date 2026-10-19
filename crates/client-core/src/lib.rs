@@ -38,10 +38,28 @@ pub enum Transport {
 }
 
 /// Garde un process ssh vivant tant que le client existe.
-pub struct SshGuard(Child);
+pub struct SshGuard(tokio::sync::Mutex<Child>);
 impl Drop for SshGuard {
     fn drop(&mut self) {
-        let _ = self.0.start_kill();
+        if let Ok(mut c) = self.0.try_lock() {
+            let _ = c.start_kill();
+        }
+    }
+}
+
+/// Lit le stderr de ssh (borné à 500 ms pour ne pas bloquer).
+async fn drain_err(s: &mut Option<tokio::process::ChildStderr>) -> String {
+    if let Some(mut e) = s.take() {
+        let mut buf = String::new();
+        use tokio::io::AsyncReadExt;
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            e.read_to_string(&mut buf),
+        )
+        .await;
+        buf.trim().to_string()
+    } else {
+        String::new()
     }
 }
 
@@ -79,7 +97,7 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
         } => {
             let local = free_port()?;
             let spec = format!("{local}:127.0.0.1:{remote_port}");
-            let child = Command::new("ssh")
+            let mut child = Command::new("ssh")
                 .args([
                     "-N",
                     "-L",
@@ -90,6 +108,9 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                     "ExitOnForwardFailure=yes",
                     "-o",
                     "ServerAliveInterval=30",
+                    "-o",
+                    // accepte les nouvelles host keys (1re connexion, pas de tty)
+                    "StrictHostKeyChecking=accept-new",
                     // Ignore les LocalForward/RemoteForward de ~/.ssh/config
                     // pour cette connexion (sinon bind déjà pris → échec total)
                     "-o",
@@ -97,10 +118,12 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                 ])
                 .args(args)
                 .arg(host)
+                .stderr(std::process::Stdio::piped())
                 .kill_on_drop(true)
                 .spawn()
                 .context("spawn ssh — openssh installé ?")?;
-            let guard = Arc::new(SshGuard(child));
+            let mut stderr = child.stderr.take();
+            let guard = Arc::new(SshGuard(tokio::sync::Mutex::new(child)));
             // Attendre que le tunnel soit prêt
             let addr = format!("127.0.0.1:{local}");
             for _ in 0..50 {
@@ -109,10 +132,26 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                         let (r, w) = s.into_split();
                         return Ok((Box::new(r), Box::new(w), Some(guard)));
                     }
-                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(200)).await,
+                    Err(_) => {
+                        // ssh déjà mort → erreur réelle, pas timeout muet
+                        let dead = guard
+                            .0
+                            .try_lock()
+                            .ok()
+                            .and_then(|mut c| c.try_wait().ok().flatten());
+                        if let Some(st) = dead {
+                            let e = drain_err(&mut stderr).await;
+                            bail!("ssh a quitté ({st}){}", if e.is_empty() { String::new() } else { format!(" : {e}") });
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await
+                    }
                 }
             }
-            bail!("tunnel ssh {host} timeout")
+            if let Ok(mut c) = guard.0.try_lock() {
+                let _ = c.start_kill();
+            }
+            let e = drain_err(&mut stderr).await;
+            bail!("tunnel ssh {host} timeout{}", if e.is_empty() { String::new() } else { format!(" : {e}") })
         }
     }
 }
