@@ -60,7 +60,8 @@
             <option value="tcp">TCP direct</option>
           </select>
         </label>
-        <label>Hôte / adresse <input id="c-host" placeholder="user@serveur.local ou 127.0.0.1:7331" /></label>
+        <label>Hôte <input id="c-host" list="ssh-hosts" placeholder="user@serveur.local ou 127.0.0.1:7331" /></label>
+        <datalist id="ssh-hosts"></datalist>
         <label>Port démon distant <input id="c-port" type="number" value="7331" /></label>
         <label>Args SSH <input id="c-args" placeholder="-i ~/.ssh/key -p 22" /></label>
         <menu>

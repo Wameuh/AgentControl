@@ -115,6 +115,29 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
     })
 }
 
+/// Liste les alias Host de ~/.ssh/config (Ignore * ? ! negations).
+#[tauri::command]
+fn ssh_hosts() -> Vec<String> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    if let Ok(cfg) = std::fs::read_to_string(home.join(".ssh/config")) {
+        for line in cfg.lines() {
+            let line = line.trim();
+            if line.len() > 5 && line[..5].eq_ignore_ascii_case("host ") {
+                for h in line[5..].split_whitespace() {
+                    if !h.contains('*') && !h.contains('?') && !h.starts_with('!') {
+                        out.push(h.to_string());
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Subscribe dédié : ouvre une 2e connexion et re-émet les push
 /// comme events Tauri `session-event` ({session, event}).
 #[tauri::command]
@@ -153,7 +176,7 @@ fn main() {
             client: Mutex::new(None),
         })
         .manage(Mutex::new(Vec::<Arc<Client>>::new()))
-        .invoke_handler(tauri::generate_handler![connect, call, subscribe])
+        .invoke_handler(tauri::generate_handler![connect, call, subscribe, ssh_hosts])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

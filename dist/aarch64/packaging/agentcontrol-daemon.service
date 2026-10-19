@@ -1,0 +1,13 @@
+[Unit]
+Description=AgentControl daemon (sessions d'agents ACP détachées)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/agentcontrol-daemon
+Restart=always
+RestartSec=3
+Environment=AGENTCONTROL_HOME=%h/.agentcontrol
+
+[Install]
+WantedBy=default.target

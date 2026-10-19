@@ -1,0 +1,45 @@
+# Configuration agentcontrol-daemon — ~/.agentcontrol/config.toml
+
+# Listener TCP loopback (tunnelé par le client via ssh -L). Ne pas binder 0.0.0.0
+# sans TLS/auth — tout le monde sur la machine pourrait piloter les agents.
+bind_tcp = "127.0.0.1:7331"
+
+# ---------------------------------------------------------------------------
+# Rétention / stockage — un janitor applique ces limites périodiquement.
+# ---------------------------------------------------------------------------
+[retention]
+# events.jsonl compacté au-delà de ce seuil (la queue est conservée)
+journal_max_mb = 64
+journal_keep_mb = 32
+# Quota de blobs par session : les plus anciens sont supprimés (LRU)
+blob_max_mb = 512
+# Purge les sessions inactives (agent mort) sans event depuis N jours. 0 = off
+purge_days = 0
+# Période du janitor (secondes, min 30)
+interval_secs = 600
+
+# ---------------------------------------------------------------------------
+# Agents ACP. Les placeholders {model} et {mode} sont substitués à la création
+# de session (omis si vides).
+# ---------------------------------------------------------------------------
+
+[agents.devin]
+name = "Devin CLI"
+command = ["devin", "acp"]
+
+# DEVIN_PERMISSION_MODE est lue par le CLI au démarrage.
+[agents.devin.env]
+DEVIN_PERMISSION_MODE = "{mode}"
+
+# Exemples d'autres agents ACP (adapter la commande) :
+# [agents.claude]
+# name = "Claude Code"
+# command = ["claude-code-acp"]
+#
+# [agents.gemini]
+# name = "Gemini CLI"
+# command = ["gemini", "--experimental-acp"]
+
+[agents.mock]
+name = "Mock ACP agent (test)"
+command = ["acp-mock-agent"]

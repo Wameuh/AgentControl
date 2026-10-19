@@ -552,7 +552,17 @@ $("f-create").addEventListener("click", async (e) => {
   await refreshSessions();
 });
 
-$("btn-connect").onclick = () => ($("dlg-conn") as HTMLDialogElement).showModal();
+$("btn-connect").onclick = async () => {
+  // Alias Host de ~/.ssh/config en suggestions
+  const dl = $("ssh-hosts");
+  dl.innerHTML = "";
+  for (const h of await invoke<string[]>("ssh_hosts").catch(() => [] as string[])) {
+    const o = document.createElement("option");
+    o.value = h;
+    dl.appendChild(o);
+  }
+  ($("dlg-conn") as HTMLDialogElement).showModal();
+};
 $("c-go").addEventListener("click", async (e) => {
   e.preventDefault();
   const kind = ($("c-kind") as HTMLSelectElement).value;
