@@ -50,6 +50,14 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 const eventsEl = $("events");
 const sentinel = $("scroll-sentinel");
 
+/** Erreur visible et copiable (remplace alert). */
+function showErr(msg: string) {
+  const bar = $("err-bar");
+  $("err-text").textContent = msg;
+  bar.hidden = false;
+}
+$("err-close").addEventListener("click", () => ($("err-bar").hidden = true));
+
 async function call<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
   return invoke<T>("call", { method, params });
 }
@@ -409,7 +417,7 @@ function renderPermission(ev: AcEvent): HTMLElement {
         session: current!.id,
         request_id: ev.request_id,
         option_id: o.option_id,
-      }).catch((e) => alert(String(e)));
+      }).catch((e) => showErr(String(e)));
       d.classList.add("done");
     };
     box.appendChild(b);
@@ -443,7 +451,7 @@ function renderQuestion(ev: AcEvent): HTMLElement {
       session: current!.id,
       request_id: ev.request_id,
       answer: parsed,
-    }).catch((e) => alert(String(e)));
+    }).catch((e) => showErr(String(e)));
     d.classList.add("done");
   };
   d.querySelector<HTMLButtonElement>(".btn-allow")!.onclick = () => answer(input.value || "{}");
@@ -581,24 +589,24 @@ async function sendInput() {
   const t = ($("input") as HTMLTextAreaElement).value.trim();
   if (!t || !current) return;
   ($("input") as HTMLTextAreaElement).value = "";
-  await call("send", { session: current.id, text: t }).catch((e) => alert(String(e)));
+  await call("send", { session: current.id, text: t }).catch((e) => showErr(String(e)));
 }
 
 $("btn-cancel").onclick = () =>
-  current && call("cancel", { session: current.id }).catch((e) => alert(String(e)));
+  current && call("cancel", { session: current.id }).catch((e) => showErr(String(e)));
 
 $("btn-resume").onclick = () =>
   current &&
   call("resume_session", { session: current.id })
     .then(() => openSession(current!.id))
-    .catch((e) => alert(String(e)));
+    .catch((e) => showErr(String(e)));
 
 ($("mode-select") as HTMLSelectElement).onchange = (e) =>
   current &&
   call("set_mode", {
     session: current.id,
     mode: (e.target as HTMLSelectElement).value,
-  }).catch((e) => alert(String(e)));
+  }).catch((e) => showErr(String(e)));
 
 ($("cmd-select") as HTMLSelectElement).onchange = (e) => {
   const v = (e.target as HTMLSelectElement).value;
@@ -670,6 +678,6 @@ $("c-go").addEventListener("click", async (e) => {
     await refreshSessions();
     ($("dlg-conn") as HTMLDialogElement).close();
   } catch (err) {
-    alert(String(err));
+    showErr(String(err));
   }
 });

@@ -105,6 +105,8 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                     "-o",
                     "BatchMode=yes",
                     "-o",
+                    "ConnectTimeout=10",
+                    "-o",
                     "ExitOnForwardFailure=yes",
                     "-o",
                     "ServerAliveInterval=30",
