@@ -188,17 +188,22 @@ async fn subscribe(
         .clone()
         .context("non connecté")
         .map_err(|e| e.to_string())?;
-    let (mut rx, _sub_client) = Client::subscribe(&t, &session, after_seq)
+    let (mut rx, sub_client) = Client::subscribe(&t, &session, after_seq)
         .await
         .map_err(|e| format!("{e:#}"))?;
-    // _sub_client keep-alive : stocké dans l'app state via managed cell
-    let keep = app.state::<Mutex<Vec<Arc<Client>>>>();
-    keep.lock().await.push(_sub_client);
-    tauri::async_runtime::spawn(async move {
+    // Une seule souscription par session : remplacer l'ancienne (le drop du
+    // client tue son tunnel, l'abort stoppe la boucle d'émission → fin des
+    // events en double)
+    let task = tauri::async_runtime::spawn(async move {
         while let Ok(v) = rx.recv().await {
             let _ = app.emit("session-event", v);
         }
     });
+    let keep = app
+        .state::<Mutex<std::collections::HashMap<String, (Arc<Client>, tokio::task::AbortHandle)>>>();
+    keep.lock()
+        .await
+        .insert(session, (sub_client, task.abort_handle()));
     Ok(())
 }
 
@@ -209,7 +214,9 @@ fn main() {
             transport: Mutex::new(None),
             client: Mutex::new(None),
         })
-        .manage(Mutex::new(Vec::<Arc<Client>>::new()))
+        .manage(Mutex::new(
+            std::collections::HashMap::<String, (Arc<Client>, tokio::task::AbortHandle)>::new(),
+        ))
         .invoke_handler(tauri::generate_handler![connect, call, subscribe, ssh_hosts, log_tail, saved_connections, save_connection])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
