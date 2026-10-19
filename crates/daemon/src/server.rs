@@ -368,6 +368,13 @@ impl Daemon {
                     "offset": offset,
                 }))
             }
+            ReqKind::DeleteSession { session } => {
+                let s = self.get_session(&session).await?;
+                s.kill().await;
+                self.sessions.write().await.remove(&session);
+                let _ = std::fs::remove_dir_all(&s.dir);
+                Ok(json!({"deleted": session}))
+            }
             ReqKind::KillSession { session } => {
                 let s = self.get_session(&session).await?;
                 s.kill().await;

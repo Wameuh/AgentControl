@@ -236,6 +236,7 @@ async fn main() -> Result<()> {
         }).await?),
         "cancel" => println!("{}", c.call(proto::ReqKind::Cancel { session: args[1].clone() }).await?),
         "kill" => println!("{}", c.call(proto::ReqKind::KillSession { session: args[1].clone() }).await?),
+        "rm" => println!("{}", c.call(proto::ReqKind::DeleteSession { session: args[1].clone() }).await?),
         "mode" => println!("{}", c.call(proto::ReqKind::SetMode { session: args[1].clone(), mode: args[2].clone() }).await?),
         "model" => println!("{}", c.call(proto::ReqKind::SetModel { session: args[1].clone(), model: args[2].clone() }).await?),
         "respond" => {

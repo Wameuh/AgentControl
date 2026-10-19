@@ -89,8 +89,18 @@ async function refreshSessions() {
   for (const s of list) {
     const div = document.createElement("div");
     div.className = "sess" + (current?.id === s.id ? " active" : "");
-    div.innerHTML = `<span class="dot st-${s.state}"></span><span class="t">${esc(s.title)}</span><span class="a">${esc(s.agent)}</span>`;
+    div.innerHTML = `<span class="dot st-${s.state}"></span><span class="t">${esc(s.title)}</span><span class="a">${esc(s.agent)}</span><button class="sess-del" title="Supprimer">✕</button>`;
     div.onclick = () => openSession(s.id);
+    div.querySelector(".sess-del")!.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!confirm(`Supprimer la session "${s.title}" ?`)) return;
+      await call("delete_session", { session: s.id }).catch((er) => showErr(String(er)));
+      if (current?.id === s.id) {
+        current = null;
+        eventsEl.innerHTML = "";
+      }
+      refreshSessions();
+    });
     el.appendChild(div);
   }
 }
@@ -125,7 +135,13 @@ async function openSession(id: string) {
 
   // Subscribe live à partir du dernier event connu
   const afterSeq = page.events.length ? page.events[page.events.length - 1].seq : 0;
-  await invoke("subscribe", { session: id, afterSeq }).catch(console.error);
+  await invoke("subscribe", { session: id, afterSeq }).catch((e) => {
+    // Le flux live est mort (ex. restart démon) → statut déconnecté visible
+    const el = $("conn-status");
+    el.textContent = "déconnecté — reconnecter";
+    el.className = "badge st-dead";
+    showErr(`subscribe: ${e}`);
+  });
   refreshSessions();
 }
 

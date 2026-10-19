@@ -155,3 +155,6 @@ dialog form { display: flex; flex-direction: column; gap: 10px; }
 dialog label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
 dialog input, dialog select, dialog textarea { background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; }
 dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 0; padding: 0; }
+.sess .sess-del { margin-left: auto; padding: 0 5px; font-size: 10px; opacity: .4; }
+.sess .sess-del:hover { opacity: 1; border-color: var(--err); }
+.badge.st-dead { color: var(--err); cursor: pointer; }

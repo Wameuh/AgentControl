@@ -97,6 +97,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             title: so("title"),
         },
         "send" => ReqKind::Send { session: s("session"), text: s("text") },
+        "delete_session" => ReqKind::DeleteSession { session: s("session") },
         "events" => ReqKind::Events {
             session: s("session"),
             before_seq: p.get("before_seq").and_then(Value::as_u64),

@@ -268,6 +268,8 @@ pub enum ReqKind {
         session: String,
         model: String,
     },
+    /// Tue l'agent et supprime la session + ses fichiers (journal/blobs).
+    DeleteSession { session: String },
     /// Réponse à une permission ou une question (request_id de l'event).
     Respond {
         session: String,
