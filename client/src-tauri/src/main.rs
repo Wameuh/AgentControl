@@ -10,12 +10,19 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 
 struct AppState {
     transport: Mutex<Option<Transport>>,
     client: Mutex<Option<Arc<Client>>>,
+    /// session → (client subscribe, tâche d'émission) — 1 souscription/session.
+    subs: Mutex<
+        std::collections::HashMap<
+            String,
+            (Arc<Client>, tauri::async_runtime::JoinHandle<()>),
+        >,
+    >,
 }
 
 async fn get_client(state: &State<'_, AppState>) -> Result<Arc<Client>, String> {
@@ -199,13 +206,8 @@ async fn subscribe(
             let _ = app.emit("session-event", v);
         }
     });
-    let keep = app.state::<Mutex<
-        std::collections::HashMap<
-            String,
-            (Arc<Client>, tauri::async_runtime::JoinHandle<()>),
-        >,
-    >>();
-    let old = keep
+    let old = state
+        .subs
         .lock()
         .await
         .insert(session, (sub_client, task));
@@ -221,13 +223,8 @@ fn main() {
         .manage(AppState {
             transport: Mutex::new(None),
             client: Mutex::new(None),
+            subs: Mutex::new(std::collections::HashMap::new()),
         })
-        .manage(Mutex::new(
-            std::collections::HashMap::<
-                String,
-                (Arc<Client>, tauri::async_runtime::JoinHandle<()>),
-            >::new(),
-        ))
         .invoke_handler(tauri::generate_handler![connect, call, subscribe, ssh_hosts, log_tail, saved_connections, save_connection])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
