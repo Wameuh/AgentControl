@@ -160,8 +160,36 @@ impl Session {
     // Spawn / ACP
     // -----------------------------------------------------------------------
 
-    /// Spawn l'agent, initialize ACP, session/new ou session/load.
+    /// Spawn avec retry : un premier essai qui échoue (agent qui meurt
+    /// pendant initialize, verrou transitoire…) retente automatiquement.
     pub async fn spawn_agent(
+        self: &Arc<Self>,
+        command: &[String],
+        envs: &HashMap<String, String>,
+        resume_native_id: Option<String>,
+    ) -> Result<()> {
+        let mut last = anyhow::anyhow!("spawn not attempted");
+        for attempt in 0..2 {
+            match self
+                .spawn_agent_once(command, envs, resume_native_id.clone())
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    last = e;
+                    if attempt == 0 {
+                        self.emit(EventKind::System {
+                            text: format!("agent exited au init — retry ({last:#})"),
+                        });
+                        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                    }
+                }
+            }
+        }
+        Err(last)
+    }
+
+    async fn spawn_agent_once(
         self: &Arc<Self>,
         command: &[String],
         envs: &HashMap<String, String>,
