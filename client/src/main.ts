@@ -91,9 +91,15 @@ async function refreshSessions() {
     div.className = "sess" + (current?.id === s.id ? " active" : "");
     div.innerHTML = `<span class="dot st-${s.state}"></span><span class="t">${esc(s.title)}</span><span class="a">${esc(s.agent)}</span><button class="sess-del" title="Supprimer">✕</button>`;
     div.onclick = () => openSession(s.id);
-    div.querySelector(".sess-del")!.addEventListener("click", async (e) => {
+    const del = div.querySelector<HTMLElement>(".sess-del")!;
+    del.addEventListener("click", async (e) => {
       e.stopPropagation();
-      if (!confirm(`Supprimer la session "${s.title}" ?`)) return;
+      if (!del.dataset.armed) {
+        del.dataset.armed = "1";
+        del.textContent = "suppr ?";
+        setTimeout(() => { del.dataset.armed = ""; del.textContent = "✕"; }, 2500);
+        return;
+      }
       await call("delete_session", { session: s.id }).catch((er) => showErr(String(er)));
       if (current?.id === s.id) {
         current = null;
@@ -169,8 +175,10 @@ function updateHeader() {
   }
 
   const md = $("model-select") as HTMLSelectElement;
+  const mf = $("model-free") as HTMLInputElement;
   if (current.available_models.length) {
     md.hidden = false;
+    mf.hidden = true;
     md.innerHTML = "";
     for (const m of current.available_models) {
       const o = document.createElement("option");
@@ -180,7 +188,10 @@ function updateHeader() {
     }
     if (current.model) md.value = current.model;
   } else {
+    // Pas de liste annoncée → champ libre (set_model ou /model fallback)
     md.hidden = true;
+    mf.hidden = false;
+    mf.value = current.model ?? "";
   }
 
   const cs = $("cmd-select") as HTMLSelectElement;
@@ -558,6 +569,31 @@ $("input").addEventListener("keydown", (e) => {
   }
 });
 
+// ---- Commandes built-in (toujours dispo, exécutées côté client) ----
+const BUILTINS: { name: string; description: string; hint: string }[] = [
+  { name: "model", description: "Changer le modèle de la session", hint: "<modèle>" },
+  { name: "resume", description: "Reprendre la session (respawn agent + session/load)", hint: "" },
+  { name: "cancel", description: "Annuler la requête en cours", hint: "" },
+];
+
+async function runBuiltin(name: string, arg: string): Promise<boolean> {
+  if (!current) return false;
+  switch (name) {
+    case "model":
+      if (!arg) return false;
+      await call("set_model", { session: current.id, model: arg });
+      return true;
+    case "resume":
+      await call("resume_session", { session: current.id });
+      await openSession(current.id);
+      return true;
+    case "cancel":
+      await call("cancel", { session: current.id });
+      return true;
+  }
+  return false;
+}
+
 // ---- Autocomplete des slash-commands ----
 let acSel = 0;
 
@@ -586,7 +622,10 @@ function refreshAc() {
     return;
   }
   const q = m[1].toLowerCase();
-  const matches = current.available_commands
+  const matches = [
+    ...current.available_commands,
+    ...BUILTINS,
+  ]
     .filter((c) => cmdName(c).toLowerCase().startsWith(q))
     .slice(0, 12);
   if (!matches.length) {
@@ -620,6 +659,17 @@ $("input").addEventListener("blur", () => {
 async function sendInput() {
   const t = ($("input") as HTMLTextAreaElement).value.trim();
   if (!t || !current) return;
+  // Built-ins client (interceptent avant envoi à l'agent)
+  const bm = /^\/(\w+)(?:\s+(.*))?$/.exec(t);
+  if (bm && BUILTINS.some((b) => b.name === bm[1])) {
+    ($("input") as HTMLTextAreaElement).value = "";
+    try {
+      await runBuiltin(bm[1], (bm[2] ?? "").trim());
+    } catch (e) {
+      showErr(String(e));
+    }
+    return;
+  }
   ($("input") as HTMLTextAreaElement).value = "";
   await call("send", { session: current.id, text: t }).catch((e) => showErr(String(e)));
 }
@@ -646,6 +696,12 @@ $("btn-resume").onclick = () =>
     session: current.id,
     model: (e.target as HTMLSelectElement).value,
   }).catch((er) => showErr(String(er)));
+
+($("model-free") as HTMLInputElement).addEventListener("keydown", async (e) => {
+  if (e.key !== "Enter" || !current) return;
+  const v = (e.target as HTMLInputElement).value.trim();
+  if (v) await call("set_model", { session: current.id, model: v }).catch((er) => showErr(String(er)));
+});
 
 ($("cmd-select") as HTMLSelectElement).onchange = (e) => {
   const v = (e.target as HTMLSelectElement).value;
