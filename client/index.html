@@ -45,7 +45,8 @@
         <label>Dossier de travail <input id="f-cwd" placeholder="/home/agent/projet" required /></label>
         <label>Titre <input id="f-title" placeholder="ma session" /></label>
         <label>Mode <input id="f-mode" placeholder="normal (optionnel)" /></label>
-        <label>Modèle <input id="f-model" placeholder="défaut" /></label>
+        <label>Modèle <input id="f-model" list="model-list" placeholder="défaut" /></label>
+        <datalist id="model-list"></datalist>
         <label>Reprendre ID natif <input id="f-attach" placeholder="(optionnel) ID session agent existante" /></label>
         <label>Message initial <textarea id="f-prompt" rows="3"></textarea></label>
         <menu>

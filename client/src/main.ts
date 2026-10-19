@@ -759,6 +759,24 @@ $("btn-new-session").onclick = async () => {
     o.textContent = a.name;
     sel.appendChild(o);
   }
+  // Suggestions de modèles : union des config_options connues des sessions
+  const sess = await call<SessionMeta[]>("list_sessions").catch(() => [] as SessionMeta[]);
+  const seen = new Set<string>();
+  const dl = $("model-list");
+  dl.innerHTML = "";
+  for (const s of sess) {
+    for (const co of s.config_options ?? []) {
+      if (co.id !== "model" && co.category !== "model") continue;
+      for (const o of co.options) {
+        if (seen.has(o.value)) continue;
+        seen.add(o.value);
+        const el = document.createElement("option");
+        el.value = o.value;
+        el.label = o.name || o.value;
+        dl.appendChild(el);
+      }
+    }
+  }
   ($("dlg-new") as HTMLDialogElement).showModal();
 };
 
