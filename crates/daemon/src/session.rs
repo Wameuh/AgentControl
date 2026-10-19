@@ -671,6 +671,20 @@ impl Session {
         self.save_meta();
     }
 
+    /// Renomme : meta local + tentative session/rename chez l'agent (optionnel).
+    pub async fn rename(&self, title: &str) {
+        self.meta.lock().unwrap().title = title.into();
+        self.save_meta();
+        if let Some(sid) = self.meta_snapshot().native_session_id {
+            let _ = self
+                .acp_request(
+                    "session/rename",
+                    json!({"sessionId": sid, "title": title}),
+                )
+                .await;
+        }
+    }
+
     /// ACP session/list — sessions natives de l'agent (reprendre ailleurs).
     pub async fn list_native_sessions(&self) -> Result<Value> {
         self.acp_request("session/list", json!({})).await

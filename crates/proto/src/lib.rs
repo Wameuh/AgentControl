@@ -314,6 +314,11 @@ pub enum ReqKind {
     },
     /// Tue l'agent et supprime la session + ses fichiers (journal/blobs).
     DeleteSession { session: String },
+    /// Renomme la session (meta local + session/rename chez l'agent si dispo).
+    RenameSession {
+        session: String,
+        title: String,
+    },
     /// Réponse à une permission ou une question (request_id de l'event).
     Respond {
         session: String,

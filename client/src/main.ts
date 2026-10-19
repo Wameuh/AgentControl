@@ -184,6 +184,7 @@ function updateHeader() {
   const st = $("chat-state");
   st.textContent = current.state;
   st.className = `badge st-${current.state}`;
+  $("chat-gem").hidden = current.state !== "working";
   // Reprendre = process mort, quel que soit l'état persisté dans meta.json
   $("btn-resume").hidden = alive;
   $("btn-cancel").hidden = !(current.state === "working" || current.state === "waiting_input");
@@ -901,6 +902,34 @@ $("fu-ok").addEventListener("click", (e) => {
 };
 
 $("btn-refresh").onclick = () => current && openSession(current.id);
+
+// Double-clic sur le titre → renommage inline
+$("chat-title").addEventListener("dblclick", () => {
+  if (!current) return;
+  const t = $("chat-title");
+  const inp = document.createElement("input");
+  inp.id = "title-edit";
+  inp.value = current.title;
+  t.replaceWith(inp);
+  inp.focus();
+  inp.select();
+  const done = async (save: boolean) => {
+    const v = inp.value.trim();
+    inp.replaceWith(t);
+    if (save && v && v !== current!.title) {
+      current!.title = v;
+      t.textContent = v;
+      await call("rename_session", { session: current!.id, title: v })
+        .catch((e) => showErr(String(e)));
+      refreshSessions();
+    }
+  };
+  inp.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") done(true);
+    if (e.key === "Escape") done(false);
+  });
+  inp.addEventListener("blur", () => done(true));
+});
 
 ($("model-free") as HTMLInputElement).addEventListener("keydown", async (e) => {
   if (e.key !== "Enter" || !current) return;

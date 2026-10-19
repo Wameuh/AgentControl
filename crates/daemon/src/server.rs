@@ -387,6 +387,11 @@ impl Daemon {
                     "offset": offset,
                 }))
             }
+            ReqKind::RenameSession { session, title } => {
+                let s = self.get_session(&session).await?;
+                s.rename(&title).await;
+                Ok(json!({"title": title}))
+            }
             ReqKind::DeleteSession { session } => {
                 let s = self.get_session(&session).await?;
                 s.kill().await;
