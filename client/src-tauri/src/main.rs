@@ -211,63 +211,78 @@ async fn subscribe(
     Ok(())
 }
 
-/// Dernière version publiée : release GitHub via `gh` (marche sur repo
-/// privé avec l'auth locale), fallback = package.json sur main.
-#[tauri::command]
-async fn check_update() -> Result<String, String> {
-    if let Ok(out) = tokio::process::Command::new("gh")
-        .args(["release", "list", "--repo", "Wameuh/AgentControl", "--limit", "1",
-               "--json", "tagName", "--jq", ".[0].tagName"])
-        .output()
-        .await
-    {
-        let tag = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !tag.is_empty() {
-            return Ok(tag.trim_start_matches('v').to_string());
-        }
-    }
-    let out = tokio::process::Command::new("gh")
-        .args(["api", "repos/Wameuh/AgentControl/contents/client/package.json",
-               "--jq", ".content | @base64d"])
-        .output()
-        .await
-        .map_err(|e| format!("gh: {e}"))?;
-    let body = String::from_utf8_lossy(&out.stdout);
-    let v: Value = serde_json::from_str(&body).map_err(|e| format!("{e}"))?;
-    Ok(v["version"].as_str().unwrap_or("0.0.0").to_string())
+fn gh_get(url: &str) -> Result<serde_json::Value, String> {
+    ureq::get(url)
+        .set("User-Agent", "agentcontrol-updater")
+        .call()
+        .map_err(|e| e.to_string())?
+        .into_json::<serde_json::Value>()
+        .map_err(|e| e.to_string())
 }
 
-/// Update en un clic : télécharge le .deb de la release et l'installe
-/// (pkexec demande le mot de passe), puis relance l'app.
+/// Dernière version publiée via l'API REST GitHub (aucun outil local requis) :
+/// releases/latest, fallback = package.json sur main.
 #[tauri::command]
-async fn update_client(tag: String) -> Result<(), String> {
-    let dir = std::env::temp_dir().join("agentcontrol-update");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let mut ok = false;
-    for t in [format!("v{tag}"), tag.clone()] {
-        let out = tokio::process::Command::new("gh")
-            .args(["release", "download", &t, "--repo", "Wameuh/AgentControl",
-                   "-p", "*.deb", "-D"])
-            .arg(&dir)
-            .output()
-            .await;
-        if let Ok(o) = out {
-            if o.status.success() {
-                ok = true;
-                break;
+async fn check_update() -> Result<String, String> {
+    tokio::task::spawn_blocking(|| {
+        if let Ok(v) =
+            gh_get("https://api.github.com/repos/Wameuh/AgentControl/releases/latest")
+        {
+            if let Some(t) = v["tag_name"].as_str() {
+                return Ok(t.trim_start_matches('v').to_string());
             }
         }
-    }
-    if !ok {
-        anyhow::bail!("aucun .deb téléchargeable dans la release {tag}");
-    }
-    let deb = std::fs::read_dir(&dir)
-        .map_err(|e| e.to_string())?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .find(|p| p.extension().map(|e| e == "deb").unwrap_or(false))
-        .context("pas de .deb dans la release")
-        .map_err(|e| e.to_string())?;
+        let v = gh_get(
+            "https://raw.githubusercontent.com/Wameuh/AgentControl/main/client/package.json",
+        )?;
+        Ok(v["version"].as_str().unwrap_or("0.0.0").to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Update en un clic : télécharge le .deb de la release via l'API REST et
+/// l'installe (pkexec demande le mot de passe), puis relance l'app.
+#[tauri::command]
+async fn update_client(tag: String) -> Result<(), String> {
+    let deb = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
+        let rel = gh_get(
+            "https://api.github.com/repos/Wameuh/AgentControl/releases/latest",
+        )
+        .or_else(|_| {
+            gh_get(&format!(
+                "https://api.github.com/repos/Wameuh/AgentControl/releases/tags/v{tag}"
+            ))
+        })?;
+        let url = rel["assets"]
+            .as_array()
+            .and_then(|a| {
+                a.iter().find_map(|x| {
+                    let n = x["name"].as_str().unwrap_or("");
+                    if n.ends_with(".deb") {
+                        x["browser_download_url"].as_str().map(String::from)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .context("pas de .deb dans la release")
+            .map_err(|e| e.to_string())?;
+        let dir = std::env::temp_dir().join("agentcontrol-update");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let deb = dir.join("agentcontrol.deb");
+        let resp = ureq::get(&url)
+            .set("User-Agent", "agentcontrol-updater")
+            .call()
+            .map_err(|e| e.to_string())?;
+        let mut r = resp.into_reader();
+        let mut f = std::fs::File::create(&deb).map_err(|e| e.to_string())?;
+        std::io::copy(&mut r, &mut f).map_err(|e| e.to_string())?;
+        Ok(deb)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     let st = tokio::process::Command::new("pkexec")
         .arg("dpkg")
         .arg("-i")
@@ -276,9 +291,8 @@ async fn update_client(tag: String) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     if !st.success() {
-        anyhow::bail!("dpkg -i a échoué");
+        return Err("dpkg -i a échoué".to_string());
     }
-    // Relance le binaire fraîchement installé puis quitte celui-ci.
     if let Ok(exe) = std::env::current_exe() {
         let _ = std::process::Command::new(exe).spawn();
     }

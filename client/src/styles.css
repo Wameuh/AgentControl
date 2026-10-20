@@ -416,3 +416,7 @@ details.th[open] > summary::before { content: "▾ "; }
   padding: 3px 10px; border-radius: 7px; font-size: 11.5px; font-weight: 500;
   cursor: pointer; flex: none; animation: pulse 2s infinite;
 }
+
+/* Fix : backdrop-filter glitchait le compositing WebKit après unfocus
+   (titlebar noire sans icônes ni texte) — fond opaque à la place. */
+#titlebar { background: var(--panel-solid); backdrop-filter: none; }
