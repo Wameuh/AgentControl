@@ -23,11 +23,13 @@ function applyTheme(name: "dark" | "light") {
 applyTheme(localStorage.getItem("ac-theme") === "light" ? "light" : "dark");
 applyStatic();
 
-// Gemme cristal (logo) : titlebar + header + about
-for (const id of ["titlebar-gem", "chat-gem", "about-gem"]) {
+// Gemme cristal : verte (neutral) = identité app ; dorée (human) = travail
+for (const id of ["titlebar-gem", "about-gem"]) {
   const el = document.getElementById(id);
-  if (el) el.innerHTML = gemSVG("agent");
+  if (el) el.innerHTML = gemSVG("neutral");
 }
+const cg = document.getElementById("chat-gem");
+if (cg) cg.innerHTML = gemSVG("human");
 
 // Fenêtre custom (decorations: false) : drag natif via data-tauri-drag-region
 const appWin = getCurrentWindow();
@@ -219,11 +221,12 @@ async function doConnect(cfg: Record<string, unknown>) {
 // Liste des sessions
 // ---------------------------------------------------------------------------
 
-/** Gemme colorée par rôle CV : améthyste agent, sable humain, neutre, ardoise. */
+/** Gemme d'état : dorée working, rouge question/failed, verte idle, grise dead. */
 const DOT_ROLE: Record<string, string> = {
-  working: "agent", running: "agent", waiting_input: "human",
-  idle: "neutral", starting: "neutral",
-  interrupted: "slate", dead: "slate", failed: "inference",
+  working: "human", running: "human", starting: "human",
+  waiting_input: "inference", failed: "inference",
+  idle: "neutral",
+  interrupted: "slate", dead: "slate",
 };
 function dotIcon(state: string): string {
   return gemSVG(DOT_ROLE[state] ?? "slate");

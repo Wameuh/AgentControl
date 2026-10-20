@@ -17,9 +17,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CLIENT = os.path.dirname(HERE)
 M32 = 0xFFFFFFFF
 
-PALETTE = ["#74608f", "#a087bb", "#b69acc", "#4b395f",
-           "#8e72a8", "#816795", "#ceb1e3", "#624a7d"]
-BASE = "#49355d"
+# Palette "neutral" (sauge verte) — identité de l'app
+PALETTE = ["#4a573e", "#727555", "#8f8665", "#38472f",
+           "#5c6949", "#626747", "#a19673", "#455139"]
+BASE = "#303b29"
 
 
 def imul(a, b):
