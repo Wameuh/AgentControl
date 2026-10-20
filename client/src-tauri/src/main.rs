@@ -211,6 +211,80 @@ async fn subscribe(
     Ok(())
 }
 
+/// Dernière version publiée : release GitHub via `gh` (marche sur repo
+/// privé avec l'auth locale), fallback = package.json sur main.
+#[tauri::command]
+async fn check_update() -> Result<String, String> {
+    if let Ok(out) = tokio::process::Command::new("gh")
+        .args(["release", "list", "--repo", "Wameuh/AgentControl", "--limit", "1",
+               "--json", "tagName", "--jq", ".[0].tagName"])
+        .output()
+        .await
+    {
+        let tag = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !tag.is_empty() {
+            return Ok(tag.trim_start_matches('v').to_string());
+        }
+    }
+    let out = tokio::process::Command::new("gh")
+        .args(["api", "repos/Wameuh/AgentControl/contents/client/package.json",
+               "--jq", ".content | @base64d"])
+        .output()
+        .await
+        .map_err(|e| format!("gh: {e}"))?;
+    let body = String::from_utf8_lossy(&out.stdout);
+    let v: Value = serde_json::from_str(&body).map_err(|e| format!("{e}"))?;
+    Ok(v["version"].as_str().unwrap_or("0.0.0").to_string())
+}
+
+/// Update en un clic : télécharge le .deb de la release et l'installe
+/// (pkexec demande le mot de passe), puis relance l'app.
+#[tauri::command]
+async fn update_client(tag: String) -> Result<(), String> {
+    let dir = std::env::temp_dir().join("agentcontrol-update");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut ok = false;
+    for t in [format!("v{tag}"), tag.clone()] {
+        let out = tokio::process::Command::new("gh")
+            .args(["release", "download", &t, "--repo", "Wameuh/AgentControl",
+                   "-p", "*.deb", "-D"])
+            .arg(&dir)
+            .output()
+            .await;
+        if let Ok(o) = out {
+            if o.status.success() {
+                ok = true;
+                break;
+            }
+        }
+    }
+    if !ok {
+        anyhow::bail!("aucun .deb téléchargeable dans la release {tag}");
+    }
+    let deb = std::fs::read_dir(&dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .find(|p| p.extension().map(|e| e == "deb").unwrap_or(false))
+        .context("pas de .deb dans la release")
+        .map_err(|e| e.to_string())?;
+    let st = tokio::process::Command::new("pkexec")
+        .arg("dpkg")
+        .arg("-i")
+        .arg(&deb)
+        .status()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !st.success() {
+        anyhow::bail!("dpkg -i a échoué");
+    }
+    // Relance le binaire fraîchement installé puis quitte celui-ci.
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::process::Command::new(exe).spawn();
+    }
+    std::process::exit(0);
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -232,7 +306,7 @@ fn main() {
             client: Mutex::new(None),
             subs: Mutex::new(std::collections::HashMap::new()),
         })
-        .invoke_handler(tauri::generate_handler![connect, call, subscribe, ssh_hosts, log_tail, saved_connections, save_connection])
+        .invoke_handler(tauri::generate_handler![connect, call, subscribe, ssh_hosts, log_tail, saved_connections, save_connection, check_update, update_client])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

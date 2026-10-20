@@ -80,6 +80,43 @@ $("about-gh").addEventListener("click", (e) => {
   invoke("plugin:shell|open", { path: "https://github.com/Wameuh/AgentControl" }).catch(() => {});
 });
 
+// Check update au boot : version distante (gh release ou package.json sur
+// main) > locale → chip "⬆ vX" dans la titlebar → clic = update (deb+dpkg)
+// ou ouverture de la page releases si aucun asset.
+function cmpVer(a: string, b: string): number {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d) return d;
+  }
+  return 0;
+}
+(async () => {
+  try {
+    const remote = await invoke<string>("check_update");
+    const local = await getVersion().catch(() => "0.0.0");
+    if (cmpVer(remote, local) <= 0) return;
+    const b = document.createElement("button");
+    b.className = "tb-update";
+    b.textContent = `⬆ v${remote}`;
+    b.title = `Update v${remote} available — click to install`;
+    b.onclick = () => {
+      b.textContent = "…";
+      invoke("update_client", { tag: remote }).catch(() => {
+        // Pas d'asset .deb → ouvrir la page releases à la place
+        invoke("plugin:shell|open", {
+          path: "https://github.com/Wameuh/AgentControl/releases",
+        }).catch(() => {});
+        b.textContent = `⬆ v${remote}`;
+      });
+    };
+    $("titlebar").insertBefore(b, document.querySelector(".tb-btns"));
+  } catch {
+    /* pas de gh/réseau → tant pis */
+  }
+})();
+
 // Bloque le menu contextuel natif du webview (son "Reload" tuait la connexion)
 window.addEventListener("contextmenu", (e) => e.preventDefault());
 

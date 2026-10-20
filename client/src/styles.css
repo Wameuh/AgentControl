@@ -409,3 +409,10 @@ details.th[open] > summary::before { content: "▾ "; }
    écrasait chaque bloc verticalement quand le contenu débordait (barres
    compressées illisibles). flex-shrink:0 = hauteur naturelle + scroll. */
 #events > .ev { flex-shrink: 0; }
+
+/* Chip update dispo dans la titlebar */
+.tb-update {
+  border: 1px solid var(--sand); color: var(--sand); background: transparent;
+  padding: 3px 10px; border-radius: 7px; font-size: 11.5px; font-weight: 500;
+  cursor: pointer; flex: none; animation: pulse 2s infinite;
+}
