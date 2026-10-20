@@ -283,6 +283,27 @@ async function openSession(id: string) {
   $("chat-title").textContent = `${current.title} — ${current.agent}`;
   updateHeader();
 
+  // Auto-resume : agent mort (ex. restart démon) → reprise silencieuse
+  // plutôt qu'un "interrupted" qui demande un clic.
+  if (!alive && current.native_session_id) {
+    const sys = document.createElement("div");
+    sys.className = "sysline";
+    sys.textContent = "⏳ reprise de l'agent…";
+    eventsEl.appendChild(sys);
+    try {
+      await call("resume_session", { session: id });
+      const info2 = await call<{ meta: SessionMeta; alive: boolean }>("session_info", {
+        session: id,
+      });
+      alive = info2.alive;
+      current = info2.meta;
+      sys.textContent = "✔ agent repris";
+      updateHeader();
+    } catch (e) {
+      sys.textContent = `⚠ reprise: ${e}`;
+    }
+  }
+
   // Charge la dernière page d'événements — un échec (journal absent/corrompu)
   // ne doit PAS tuer le subscribe ni la vue live derrière.
   let page = { events: [] as AcEvent[], last_seq: 0 };

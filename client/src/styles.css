@@ -387,3 +387,9 @@ details.th[open] > summary::before { content: "▾ "; }
 .tool-head { display: flex; align-items: center; gap: 8px; min-width: 0; overflow: hidden; }
 .tool-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-head .badge { flex: none; }
+
+/* Tool head : zone de clic plus grande + chevron à gauche (toujours visible) */
+.tool-head { padding: 7px 10px; cursor: pointer; user-select: none; }
+.tool-head::after { content: none; }
+.tool-head::before { content: "▸"; color: var(--dim); font-size: 11px; flex: none; }
+.tool.open .tool-head::before { content: "▾"; color: var(--sand); }
