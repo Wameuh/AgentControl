@@ -356,7 +356,7 @@ async fn ensure_daemon(host: String, args: Vec<String>, tag: String) -> Result<S
     if !out.status.success() {
         let e = String::from_utf8_lossy(&out.stderr);
         client_core::log(format!("ensure_daemon {host}: {e}"));
-        anyhow::bail!("{e}");
+        return Err(e.to_string());
     }
     client_core::log(format!("ensure_daemon {host}: {stdout}"));
     Ok(stdout)
