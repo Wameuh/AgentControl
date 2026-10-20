@@ -19,10 +19,74 @@ type BoxedStream = Box<dyn AsyncRead + Unpin + Send>;
 type BoxedWriter = Box<dyn AsyncWrite + Unpin + Send>;
 
 // ---------------------------------------------------------------------------
-// Mini-log : ~/.agentcontrol/logs/client.log (+ stderr en dev)
+// Mini-log rotatif : ~/.agentcontrol/logs/client.log (+ stderr en dev)
+// Rotation à 1 MiB → client.log.1 … client.log.3 (borné à ~4 MiB au total).
 // ---------------------------------------------------------------------------
 
-static LOGFILE: std::sync::OnceLock<std::sync::Mutex<std::fs::File>> = std::sync::OnceLock::new();
+const LOG_MAX_BYTES: u64 = 1 << 20; // 1 MiB
+const LOG_KEEP: usize = 3;
+
+struct LogWriter {
+    dir: PathBuf,
+    /// Option pour fermer le handle pendant la rotation (rename d'un
+    /// fichier ouvert échoue sous Windows).
+    file: Option<std::fs::File>,
+}
+
+impl LogWriter {
+    fn open(dir: PathBuf) -> Self {
+        let _ = std::fs::create_dir_all(&dir);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("client.log"))
+            .ok();
+        Self { dir, file }
+    }
+
+    fn write_line(&mut self, line: &str) {
+        use std::io::Write;
+        if self
+            .file
+            .as_ref()
+            .and_then(|f| f.metadata().ok())
+            .map(|m| m.len() >= LOG_MAX_BYTES)
+            .unwrap_or(false)
+        {
+            self.rotate();
+        }
+        if let Some(f) = self.file.as_mut() {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+
+    fn rotate(&mut self) {
+        self.file = None; // ferme le handle avant les renommages
+        rotate_logs(&self.dir, LOG_KEEP);
+        self.file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.dir.join("client.log"))
+            .ok();
+    }
+}
+
+/// client.log → .1, .1 → .2, … au-delà de `keep` : supprimé.
+fn rotate_logs(dir: &PathBuf, keep: usize) {
+    let _ = std::fs::remove_file(dir.join(format!("client.log.{keep}")));
+    for i in (1..keep).rev() {
+        let src = dir.join(format!("client.log.{i}"));
+        if src.exists() {
+            let _ = std::fs::rename(&src, dir.join(format!("client.log.{}", i + 1)));
+        }
+    }
+    let cur = dir.join("client.log");
+    if cur.exists() {
+        let _ = std::fs::rename(&cur, dir.join("client.log.1"));
+    }
+}
+
+static LOGFILE: std::sync::OnceLock<std::sync::Mutex<LogWriter>> = std::sync::OnceLock::new();
 
 pub fn log_path() -> PathBuf {
     let home = std::env::var_os("HOME")
@@ -32,26 +96,16 @@ pub fn log_path() -> PathBuf {
     home.join(".agentcontrol").join("logs")
 }
 
-fn logfile() -> &'static std::sync::Mutex<std::fs::File> {
-    LOGFILE.get_or_init(|| {
-        let dir = log_path();
-        let _ = std::fs::create_dir_all(&dir);
-        let f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join("client.log"))
-            .expect("client.log");
-        std::sync::Mutex::new(f)
-    })
+fn logfile() -> &'static std::sync::Mutex<LogWriter> {
+    LOGFILE.get_or_init(|| std::sync::Mutex::new(LogWriter::open(log_path())))
 }
 
 /// Ajoute une ligne de log (horodatée) dans client.log + stderr.
 pub fn log(msg: impl std::fmt::Display) {
-    use std::io::Write;
     let line = format!("[{}] {}", proto::now_iso(), msg);
     eprintln!("{line}");
-    if let Ok(mut f) = logfile().lock() {
-        let _ = writeln!(f, "{line}");
+    if let Ok(mut w) = logfile().lock() {
+        w.write_line(&line);
     }
 }
 
@@ -78,12 +132,26 @@ pub fn save_connection(cfg: &serde_json::Value) {
     let _ = std::fs::write(config_path(), serde_json::to_string_pretty(&list).unwrap());
 }
 
-/// Les N dernières lignes du log (pour l'UI).
+/// Les N dernières lignes du log (pour l'UI). Si le fichier courant est
+/// trop court (rotation récente), complète depuis client.log.1.
 pub fn log_tail(n: usize) -> String {
-    let p = log_path().join("client.log");
-    std::fs::read_to_string(p)
-        .map(|s| s.lines().rev().take(n).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"))
-        .unwrap_or_else(|_| "(pas de log)".into())
+    let dir = log_path();
+    let tail = |p: &std::path::Path, k: usize| -> Vec<String> {
+        std::fs::read_to_string(p)
+            .map(|s| s.lines().rev().take(k).map(String::from).collect())
+            .unwrap_or_default()
+    };
+    let mut lines = tail(&dir.join("client.log"), n);
+    if lines.len() < n {
+        let mut older = tail(&dir.join("client.log.1"), n - lines.len());
+        older.extend(lines);
+        lines = older;
+    }
+    if lines.is_empty() {
+        return "(pas de log)".into();
+    }
+    lines.reverse();
+    lines.join("\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -322,5 +390,48 @@ impl Client {
         })
         .await?;
         Ok((rx, c))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("ac-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn rotation_shifts_and_bounds() {
+        let d = tmpdir("rot");
+        let log = d.join("client.log");
+        for i in 0..5 {
+            std::fs::write(&log, format!("gen {i}\n")).unwrap();
+            rotate_logs(&d, 3);
+        }
+        // .1/.2/.3 existent, .4 a été supprimé → contenu borné
+        assert_eq!(std::fs::read_to_string(d.join("client.log.1")).unwrap(), "gen 4\n");
+        assert_eq!(std::fs::read_to_string(d.join("client.log.3")).unwrap(), "gen 2\n");
+        assert!(!d.join("client.log.4").exists());
+    }
+
+    #[test]
+    fn writer_rotates_at_max() {
+        let d = tmpdir("wmax");
+        let mut w = LogWriter::open(d.clone());
+        let line = "x".repeat(1024);
+        // ~1.5 MiB → doit déclencher une rotation
+        for _ in 0..1500 {
+            w.write_line(&line);
+        }
+        assert!(d.join("client.log.1").exists());
+        assert!(std::fs::metadata(d.join("client.log")).unwrap().len() < LOG_MAX_BYTES + 2048);
+        // l'écriture continue après rotation
+        w.write_line("apres rotation");
+        let tail = std::fs::read_to_string(d.join("client.log")).unwrap();
+        assert!(tail.contains("apres rotation"));
     }
 }

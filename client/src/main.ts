@@ -48,6 +48,17 @@ const splitModel = (v: string): [string, string] => {
   return m ? [v.slice(0, -m[0].length), m[1]] : [v, ""];
 };
 
+/** Décompose "fusion-<prim>-<eff>-sidekick-<side>-<eff>" → [pb, pe, sb, se]. */
+function fusionParts(v: string): [string, string, string, string] | null {
+  if (!v.startsWith("fusion-")) return null;
+  const rest = v.slice("fusion-".length);
+  const i = rest.indexOf("-sidekick-");
+  if (i < 0) return null;
+  const [pb, pe] = splitModel(rest.slice(0, i));
+  const [sb, se] = splitModel(rest.slice(i + "-sidekick-".length));
+  return [pb, pe, sb, se];
+}
+
 interface AcEvent {
   seq: number;
   ts: string;
@@ -243,14 +254,24 @@ function updateHeader() {
     md.dataset.cfgid = modelOpt ? modelOpt.id : "";
     md.dataset.opts = JSON.stringify(rawOpts);
     const curVal = modelOpt?.currentValue || current.model || "";
+    const curIsFusion = curVal.startsWith("fusion-");
+    if (curIsFusion) {
+      const fp = rawOpts.find((o) => o.v === curVal);
+      if (fp) fo.textContent = `✨ ${fp.label}`;
+    }
     const [curBase, curEff] = splitModel(curVal);
-    md.value = curVal.startsWith("fusion-") ? "__fusion" : curBase;
+    md.value = curIsFusion ? "__fusion" : curBase;
+    // Bouton ⚙ : reconfigurer la fusion quand elle est déjà active
+    // (re-sélectionner la même option dans un <select> ne tire pas change)
+    $("btn-fusion-edit").hidden = !curIsFusion;
     // Select d'effort : suffixes réellement présents pour la base choisie
+    // (masqué en fusion — les efforts se choisissent dans le dialogue)
     fillEfforts(md.value, curEff);
-    es.hidden = false;
+    es.hidden = curIsFusion;
   } else {
     md.hidden = true;
     es.hidden = true;
+    $("btn-fusion-edit").hidden = true;
     mf.hidden = false;
     mf.value = current.model ?? "";
   }
@@ -845,32 +866,93 @@ function applyModelValue(v: string) {
   req.catch((er) => showErr(String(er)));
 }
 
-/** Dialogue Fusion : 2 modèles + efforts → value fusion-A-effA-sidekick-B-effB */
+/** Combinaisons Fusion réellement annoncées par l'agent (liste fermée :
+ *  composer librement fusion-A-eff-sidekick-B-eff renvoie Invalid params). */
+function fusionTable() {
+  const opts: { v: string; label: string }[] = JSON.parse(
+    ($("model-select") as HTMLSelectElement).dataset.opts || "[]",
+  );
+  const valid = new Set<string>();
+  const prims = new Map<string, Set<string>>();               // base primaire → efforts
+  const sides = new Map<string, Map<string, Set<string>>>(); // "pb|pe" → sidekick → efforts
+  for (const o of opts) {
+    const p = fusionParts(o.v);
+    if (!p) continue;
+    valid.add(o.v);
+    const [pb, pe, sb, se] = p;
+    if (!prims.has(pb)) prims.set(pb, new Set());
+    prims.get(pb)!.add(pe);
+    const key = `${pb}|${pe}`;
+    if (!sides.has(key)) sides.set(key, new Map());
+    const m = sides.get(key)!;
+    if (!m.has(sb)) m.set(sb, new Set());
+    m.get(sb)!.add(se);
+  }
+  return { valid, prims, sides };
+}
+
+function fillSel(s: HTMLSelectElement, items: [string, string][]) {
+  s.innerHTML = "";
+  for (const [v, label] of items) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = label;
+    s.appendChild(o);
+  }
+}
+
+let fusionApplied = false;
+
+/** Dialogue Fusion : seules les paires réellement proposées par l'agent
+ *  sont sélectionnables. Pré-rempli avec la fusion courante le cas échéant. */
 function openFusion() {
-  const md = $("model-select") as HTMLSelectElement;
-  const bases = [...md.querySelectorAll("option")]
-    .map((o) => o.value)
-    .filter((v) => v !== "__fusion" && v !== "");
-  for (const id of ["fu-a", "fu-b"]) {
-    const s = $(id) as HTMLSelectElement;
-    s.innerHTML = "";
-    for (const b of bases) {
-      const o = document.createElement("option");
-      o.value = b;
-      o.textContent = b;
-      s.appendChild(o);
-    }
+  const { prims, sides } = fusionTable();
+  if (!prims.size) {
+    showErr("Aucune combinaison Fusion annoncée par l'agent.");
+    return;
   }
-  for (const id of ["fu-ea", "fu-eb"]) {
-    const s = $(id) as HTMLSelectElement;
-    s.innerHTML = "";
-    for (const e of ["medium", "high"]) {
-      const o = document.createElement("option");
-      o.value = e;
-      o.textContent = e;
-      s.appendChild(o);
-    }
+  const a = $("fu-a") as HTMLSelectElement;
+  const ea = $("fu-ea") as HTMLSelectElement;
+  const b = $("fu-b") as HTMLSelectElement;
+  const eb = $("fu-eb") as HTMLSelectElement;
+  const effLabel = (x: string) => x || "défaut";
+
+  const refreshEB = () => {
+    const effs = [...(sides.get(`${a.value}|${ea.value}`)?.get(b.value) ?? new Set<string>())];
+    fillSel(eb, effs.map((e) => [e, effLabel(e)]));
+  };
+  const refreshB = () => {
+    const m = sides.get(`${a.value}|${ea.value}`) ?? new Map<string, Set<string>>();
+    fillSel(b, [...m.keys()].map((k) => [k, k]));
+    refreshEB();
+  };
+  const refreshEA = () => {
+    fillSel(ea, [...(prims.get(a.value) ?? new Set<string>())].map((e) => [e, effLabel(e)]));
+    refreshB();
+  };
+
+  fillSel(a, [...prims.keys()].map((k) => [k, k]));
+  a.onchange = refreshEA;
+  ea.onchange = refreshB;
+  b.onchange = refreshEB;
+
+  // Pré-remplir depuis la valeur fusion courante (reconfiguration)
+  const curVal =
+    current?.config_options?.find((o) => o.id === "model" || o.category === "model")
+      ?.currentValue || current?.model || "";
+  const p = fusionParts(curVal);
+  if (p && prims.has(p[0])) {
+    a.value = p[0];
+    refreshEA();
+    if ([...ea.options].some((o) => o.value === p[1])) ea.value = p[1];
+    refreshB();
+    if ([...b.options].some((o) => o.value === p[2])) b.value = p[2];
+    refreshEB();
+    if ([...eb.options].some((o) => o.value === p[3])) eb.value = p[3];
+  } else {
+    refreshEA();
   }
+  fusionApplied = false;
   ($("dlg-fusion") as HTMLDialogElement).showModal();
 }
 
@@ -880,9 +962,27 @@ $("fu-ok").addEventListener("click", (e) => {
   const ea = ($("fu-ea") as HTMLSelectElement).value;
   const b = ($("fu-b") as HTMLSelectElement).value;
   const eb = ($("fu-eb") as HTMLSelectElement).value;
+  const v = `fusion-${a}${ea ? "-" + ea : ""}-sidekick-${b}${eb ? "-" + eb : ""}`;
+  if (!fusionTable().valid.has(v)) {
+    showErr(`Combinaison Fusion non annoncée par l'agent : ${v}`);
+    return;
+  }
+  fusionApplied = true;
   ($("dlg-fusion") as HTMLDialogElement).close();
-  applyModelValue(`fusion-${a}-${ea}-sidekick-${b}-${eb}`);
+  applyModelValue(v);
 });
+
+// Annulation du dialogue : si le select affichait "✨ Fusion…" alors que le
+// modèle courant n'est pas une fusion, restaurer sa valeur réelle.
+($("dlg-fusion") as HTMLDialogElement).addEventListener("close", () => {
+  const md = $("model-select") as HTMLSelectElement;
+  const curVal = current?.model ?? "";
+  if (!fusionApplied && md.value === "__fusion" && !curVal.startsWith("fusion-")) {
+    md.value = splitModel(curVal)[0];
+  }
+});
+
+$("btn-fusion-edit").onclick = () => openFusion();
 
 ($("model-select") as HTMLSelectElement).onchange = (e) => {
   const sel = e.target as HTMLSelectElement;

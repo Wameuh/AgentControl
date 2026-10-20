@@ -316,6 +316,26 @@ impl Session {
                     .collect();
             }
         }
+        // Options de config directement dans la réponse session/new|load
+        // (Devin les envoie normalement via config_option_update, mais après
+        // un session/load la réponse peut les porter elle-même).
+        if let Some(opts) = resp.get("configOptions").and_then(Value::as_array) {
+            let parsed: Vec<proto::ConfigOption> = opts
+                .iter()
+                .filter_map(|o| serde_json::from_value::<proto::ConfigOption>(o.clone()).ok())
+                .collect();
+            if !parsed.is_empty() {
+                let mut m = self.meta.lock().unwrap();
+                for o in &parsed {
+                    match o.id.as_str() {
+                        "mode" => m.mode = Some(o.current_value.clone()),
+                        "model" => m.model = Some(o.current_value.clone()),
+                        _ => {}
+                    }
+                }
+                m.config_options = parsed;
+            }
+        }
         self.save_meta();
         self.emit(EventKind::System {
             text: if resume_native_id.is_some() {
@@ -691,18 +711,69 @@ impl Session {
     }
 
     /// ACP session/set_config_option — le mécanisme de config de Devin
-    /// (mode, model, …).
+    /// (mode, model, …). Valide la valeur contre les options annoncées
+    /// (ex. les combinaisons Fusion sont une liste fermée) pour produire
+    /// une erreur lisible au lieu d'un « Invalid params » de l'agent.
     pub async fn set_config_option(&self, config_id: &str, value: &str) -> Result<()> {
         let sid = self
             .meta_snapshot()
             .native_session_id
             .context("no native session id")?;
-        self.acp_request(
-            "session/set_config_option",
-            json!({"sessionId": sid, "configId": config_id, "value": value}),
-        )
-        .await?;
-        Ok(())
+        // Valeurs connues pour enrichir un éventuel refus de l'agent.
+        // Pas de rejet local : la liste persistée peut être périmée après
+        // une maj de l'agent (nouveaux modèles), l'agent fait foi.
+        let known: Vec<String> = {
+            let m = self.meta.lock().unwrap();
+            m.config_options
+                .iter()
+                .find(|o| o.id == config_id)
+                .map(|o| o.options.iter().map(|x| x.value.clone()).collect())
+                .unwrap_or_default()
+        };
+        match self
+            .acp_request(
+                "session/set_config_option",
+                json!({"sessionId": sid, "configId": config_id, "value": value}),
+            )
+            .await
+        {
+            Ok(_) => {
+                // Sync la méta tout de suite — l'agent renverra sans doute un
+                // config_option_update, mais l'UI doit rester cohérente même
+                // s'il n'en envoie pas.
+                let opts = {
+                    let mut m = self.meta.lock().unwrap();
+                    if let Some(opt) = m.config_options.iter_mut().find(|o| o.id == config_id) {
+                        opt.current_value = value.into();
+                    }
+                    match config_id {
+                        "mode" => m.mode = Some(value.into()),
+                        "model" => m.model = Some(value.into()),
+                        _ => {}
+                    }
+                    m.config_options.clone()
+                };
+                self.save_meta();
+                self.emit(EventKind::ConfigOptions { options: opts });
+                Ok(())
+            }
+            Err(e) => {
+                let hint = if known.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " (valeurs connues: {}{})",
+                        known.iter().take(8).cloned().collect::<Vec<_>>().join(", "),
+                        if known.len() > 8 { ", …" } else { "" }
+                    )
+                };
+                let msg = format!("set_config_option {config_id}={value}: {e:#}{hint}");
+                self.emit(EventKind::Error {
+                    message: msg.clone(),
+                });
+                Err(e).with_context(|| msg)
+            }
+        }
     }
 
     /// Répond à une permission ou question pending.
