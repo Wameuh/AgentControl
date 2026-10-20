@@ -404,3 +404,8 @@ details.th[open] > summary::before { content: "▾ "; }
 .tool-title { font-weight: 500; font-size: 12.5px; }
 .tool-head .badge { font-size: 10.5px; }
 .tool-head:hover { background: rgba(236,230,216,.05); }
+
+/* FIX fondamental : les .ev sont des enfants flex-column — flex-shrink:1
+   écrasait chaque bloc verticalement quand le contenu débordait (barres
+   compressées illisibles). flex-shrink:0 = hauteur naturelle + scroll. */
+#events > .ev { flex-shrink: 0; }
