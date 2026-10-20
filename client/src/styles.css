@@ -393,3 +393,14 @@ details.th[open] > summary::before { content: "▾ "; }
 .tool-head::after { content: none; }
 .tool-head::before { content: "▸"; color: var(--dim); font-size: 11px; flex: none; }
 .tool.open .tool-head::before { content: "▾"; color: var(--sand); }
+
+/* Tool blocks : présence de boîte, pas des pilules fines */
+.tool { background: rgba(236,230,216,.03); border: 1px solid var(--line); border-radius: 10px; }
+:root.light .tool { background: rgba(43,42,36,.04); }
+.tool-head {
+  padding: 9px 12px; font-size: 12.5px; min-height: 22px; line-height: 1.3;
+}
+.tool-head .ico, .tool-head > span:first-child { font-size: 13px; }
+.tool-title { font-weight: 500; font-size: 12.5px; }
+.tool-head .badge { font-size: 10.5px; }
+.tool-head:hover { background: rgba(236,230,216,.05); }
