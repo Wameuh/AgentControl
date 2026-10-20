@@ -360,11 +360,16 @@ async function refreshSessions() {
 // Ouverture d'une session : session_info + dernière page + subscribe
 // ---------------------------------------------------------------------------
 
+let openSeq = 0;
+
 async function openSession(id: string) {
+  const seq = ++openSeq;
+  const stale = () => seq !== openSeq; // un openSession plus récent a pris le relais
   const info = await call<{ meta: SessionMeta; pending: string[]; alive: boolean; last_seq: number }>(
     "session_info",
     { session: id },
   );
+  if (stale()) return;
   alive = info.alive;
   current = info.meta;
   minRendered = Number.MAX_SAFE_INTEGER;
@@ -386,9 +391,11 @@ async function openSession(id: string) {
     eventsEl.appendChild(sys);
     try {
       await call("resume_session", { session: id });
+      if (stale()) return;
       const info2 = await call<{ meta: SessionMeta; alive: boolean }>("session_info", {
         session: id,
       });
+      if (stale()) return;
       alive = info2.alive;
       current = info2.meta;
       sys.textContent = "✔ agent repris";
@@ -409,11 +416,13 @@ async function openSession(id: string) {
   } catch (e) {
     showErr(`events: ${e}`);
   }
+  if (stale()) return;
   for (const ev of page.events) appendEvent(ev, false);
   scrollBottom();
 
   // Subscribe live à partir du dernier event connu
   const afterSeq = page.events.length ? page.events[page.events.length - 1].seq : 0;
+  if (stale()) return;
   await invoke("subscribe", { session: id, afterSeq }).catch((e) => {
     // Le flux live est mort (ex. restart démon) → statut déconnecté visible
     const el = $("conn-status");
