@@ -383,22 +383,6 @@ function updateHeader() {
     mf.value = current.model ?? "";
   }
 
-  const cs = $("cmd-select") as HTMLSelectElement;
-  if (current.available_commands.length) {
-    cs.hidden = false;
-    cs.innerHTML = `<option value="">${t("cmd_placeholder")}</option>`;
-    for (const c of current.available_commands) {
-      const o = document.createElement("option");
-      o.value = "/" + cmdName(c);
-      const d = cmdDesc(c);
-      const h = cmdHint(c);
-      o.textContent = "/" + cmdName(c) + (h ? ` ${h}` : "");
-      o.title = d + (h ? ` — ex: /${cmdName(c)} ${h}` : "");
-      cs.appendChild(o);
-    }
-  } else {
-    cs.hidden = true;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1151,15 +1135,6 @@ $("chat-title").addEventListener("dblclick", () => {
   const v = (e.target as HTMLInputElement).value.trim();
   if (v) await call("set_model", { session: current.id, model: v }).catch((er) => showErr(String(er)));
 });
-
-($("cmd-select") as HTMLSelectElement).onchange = (e) => {
-  const v = (e.target as HTMLSelectElement).value;
-  if (v) {
-    ($("input") as HTMLTextAreaElement).value = v + " ";
-    ($("input") as HTMLTextAreaElement).focus();
-    (e.target as HTMLSelectElement).value = "";
-  }
-};
 
 $("btn-new-session").onclick = async () => {
   const agents = await call<{ id: string; name: string }[]>("list_agents");
