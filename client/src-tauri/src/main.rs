@@ -210,8 +210,10 @@ async fn subscribe(
         client_core::log(format!("subscribe {session}: {e:#}"));
         format!("{e:#}")
     })?;
-    // Une seule souscription par session : abort de l'ancienne tâche
-    // d'émission (fin des events en double).
+    // UNE SEULE tâche d'émission au total : le broadcast `pushes` livre les
+    // events à TOUS les receivers — avec N tâches vivantes chaque event
+    // partait N fois au frontend (messages dupliqués). Le démon n'a de toute
+    // façon qu'un sub par connexion → on abort toutes les anciennes.
     let sid_log = session.clone();
     let task = tauri::async_runtime::spawn(async move {
         while let Ok(v) = rx.recv().await {
@@ -219,9 +221,11 @@ async fn subscribe(
         }
         client_core::log(format!("subscribe {sid_log}: flux terminé"));
     });
-    if let Some(h) = state.subs.lock().await.insert(session, task) {
+    let mut map = state.subs.lock().await;
+    for (_, h) in map.drain() {
         h.abort();
     }
+    map.insert(session, task);
     Ok(())
 }
 
