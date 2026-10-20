@@ -115,6 +115,14 @@ impl Journal {
         let before = before_seq.filter(|b| *b > 0).unwrap_or(u64::MAX);
         let (start_off, n) = {
             let g = self.inner.lock().unwrap();
+            if g.offsets.is_empty() {
+                // Index mémoire vide (session chargée au boot du démon,
+                // jamais ré-indexée) → scan complet du journal.
+                drop(g);
+                let v = Self::read_from(dir, 0, before, usize::MAX)?;
+                let keep = v.len().saturating_sub(limit);
+                return Ok(v.into_iter().skip(keep).collect());
+            }
             // nb d'events avec seq < before
             let n = g.offsets.partition_point(|(s, _)| *s < before);
             let start = n.saturating_sub(limit);

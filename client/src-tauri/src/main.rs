@@ -214,6 +214,16 @@ async fn subscribe(
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .setup(|app| {
+            // Icône fenêtre = gemme générée (marche aussi avec --no-bundle,
+            // là où les icônes de bundle ne sont pas installées).
+            if let Some(w) = app.get_webview_window("main") {
+                if let Ok(img) = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png")) {
+                    let _ = w.set_icon(img);
+                }
+            }
+            Ok(())
+        })
         .manage(AppState {
             transport: Mutex::new(None),
             client: Mutex::new(None),

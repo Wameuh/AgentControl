@@ -37,6 +37,11 @@ $("tb-close").onclick = () => appWin.close();
 $("titlebar").addEventListener("dblclick", (e) => {
   if (!(e.target as HTMLElement).closest("button")) appWin.toggleMaximize();
 });
+// Drag fenêtre explicite (plus fiable que data-tauri-drag-region seul)
+$("titlebar").addEventListener("mousedown", (e) => {
+  if (e.button === 0 && !(e.target as HTMLElement).closest("button"))
+    void appWin.startDragging();
+});
 document.querySelectorAll<HTMLElement>(".resize-edge").forEach((el) => {
   el.addEventListener("mousedown", (e) => {
     e.preventDefault();
@@ -140,7 +145,8 @@ let current: SessionMeta | null = null;
 let minRendered = Number.MAX_SAFE_INTEGER;
 let renderedCount = 0;
 const MAX_RENDERED = 400;
-const PAGE = 120;
+const PAGE = 50; // paquets au scroll
+const INITIAL_PAGE = 200; // base d'historique à l'ouverture
 const toolBlocks = new Map<string, HTMLElement>();
 const answered = new Set<string>();
 let loadingOld = false;
@@ -283,7 +289,7 @@ async function openSession(id: string) {
   try {
     page = await call<{ events: AcEvent[]; last_seq: number }>("events", {
       session: id,
-      limit: PAGE,
+      limit: INITIAL_PAGE,
     });
   } catch (e) {
     showErr(`events: ${e}`);
