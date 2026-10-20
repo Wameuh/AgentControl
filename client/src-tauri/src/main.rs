@@ -314,6 +314,11 @@ async fn update_client(tag: String) -> Result<(), String> {
 }
 
 fn main() {
+    // Workaround WebKitGTK : webview blanche/noire après unfocus ou au boot
+    // (compositing GPU — bug connu Tauri sur Linux/Wayland/Nvidia).
+    if std::env::var("WEBKIT_DISABLE_COMPOSITING_MODE").is_err() {
+        unsafe { std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1") };
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {

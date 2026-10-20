@@ -92,9 +92,24 @@ function cmpVer(a: string, b: string): number {
   }
   return 0;
 }
+// Version distante : fetch direct (pas d'outil local), fallback commande Rust.
+async function remoteVersion(): Promise<string> {
+  try {
+    const r = await fetch(
+      "https://api.github.com/repos/Wameuh/AgentControl/releases/latest",
+    );
+    if (r.ok) {
+      const j = (await r.json()) as { tag_name?: string };
+      if (j.tag_name) return j.tag_name.replace(/^v/, "");
+    }
+  } catch {
+    /* CSP/réseau → fallback invoke */
+  }
+  return invoke<string>("check_update");
+}
 (async () => {
   try {
-    const remote = await invoke<string>("check_update");
+    const remote = await remoteVersion();
     const local = await getVersion().catch(() => "0.0.0");
     if (cmpVer(remote, local) <= 0) return;
     const b = document.createElement("button");
