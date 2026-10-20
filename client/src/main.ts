@@ -244,6 +244,7 @@ async function call<T = unknown>(method: string, params: Record<string, unknown>
 // ---------------------------------------------------------------------------
 
 async function doConnect(cfg: Record<string, unknown>) {
+  lastCfg = cfg;
   const status = await call("daemon_status").catch(async () => {
     const r = await invoke("connect", { cfg });
     return r;
@@ -1435,6 +1436,36 @@ $("f-create").addEventListener("click", async (e) => {
 
 interface SavedConn { kind: string; host?: string; remote_port?: number; args?: string[]; path?: string; addr?: string }
 let savedConns: SavedConn[] = [];
+let lastCfg: Record<string, unknown> | null = null;
+let reconnecting = false;
+
+// Watchdog : sonde le démon toutes les 10 s. Si la connexion est morte
+// (restart démon → agents tués côté serveur), badge + reconnexion auto +
+// réouverture de la session (auto-resume de l'agent).
+setInterval(async () => {
+  const el = $("conn-status");
+  try {
+    const st = await call<{ sessions?: number }>("daemon_status");
+    el.textContent = t("connected_n", { n: st.sessions ?? 0 });
+    el.className = "badge ok";
+  } catch {
+    el.textContent = t("disconnected_reconnect");
+    el.className = "badge st-dead";
+    if (lastCfg && !reconnecting) {
+      reconnecting = true;
+      doConnect({ ...lastCfg })
+        .then(() => {
+          if (current) openSession(current.id);
+        })
+        .catch(() => {})
+        .finally(() => {
+          reconnecting = false;
+        });
+    }
+    return;
+  }
+  refreshSessions().catch(() => {});
+}, 10_000);
 
 // Auto-reconnexion au démarrage avec la dernière connexion utilisée
 invoke<SavedConn[]>("saved_connections")
