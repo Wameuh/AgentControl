@@ -317,6 +317,51 @@ async fn update_client(tag: String) -> Result<(), String> {
     std::process::exit(0);
 }
 
+/// Vérifie/installe/maj le démon sur le serveur distant via SSH + curl.
+/// Pas de `gh` : télécharge la release GitHub par URL directe (repo public)
+/// — tag exact demandé, fallback "latest". Idempotent.
+#[tauri::command]
+async fn ensure_daemon(host: String, args: Vec<String>, tag: String) -> Result<String, String> {
+    const BASE: &str = "https://github.com/Wameuh/AgentControl/releases";
+    // Script distant POSIX : check version via acctl status, sinon install.
+    let script = format!(
+        "set -e; arch=$(uname -m); \
+         bin=$HOME/.local/bin/agentcontrol-daemon; \
+         ver=$(\\\"$HOME/.local/bin/acctl\\\" status 2>/dev/null | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4); \
+         running=$(systemctl --user is-active agentcontrol-daemon 2>/dev/null || true); \
+         if [ \"$ver\" = \"{t}\" ] && [ \"$running\" = active ]; then echo ok:$ver; exit 0; fi; \
+         cd /tmp && rm -rf acupd acd.tgz && mkdir -p acupd && \
+         (curl -fsSL -o acd.tgz \"{base}/download/v{t}/agentcontrol-server-$arch-linux.tar.gz\" || \
+          curl -fsSL -o acd.tgz \"{base}/latest/download/agentcontrol-server-$arch-linux.tar.gz\") && \
+         tar xzf acd.tgz -C acupd && \
+         install -Dm755 acupd/agentcontrol-daemon $bin && \
+         install -Dm755 acupd/acctl $HOME/.local/bin/acctl || true; \
+         install -Dm644 acupd/packaging/agentcontrol-daemon.service $HOME/.config/systemd/user/agentcontrol-daemon.service; \
+         systemctl --user daemon-reload; systemctl --user enable --now agentcontrol-daemon; \
+         sleep 1; echo installed:$($HOME/.local/bin/acctl status 2>/dev/null | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4)",
+        base = BASE,
+        t = tag
+    );
+    let mut cmd = tokio::process::Command::new("ssh");
+    cmd.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
+        .args(&args)
+        .arg(&host)
+        .arg(&script);
+    client_core::log(format!("ensure_daemon {host} tag={tag}"));
+    let out = tokio::time::timeout(std::time::Duration::from_secs(120), cmd.output())
+        .await
+        .map_err(|_| "ssh ensure_daemon timeout".to_string())?
+        .map_err(|e| format!("ssh: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !out.status.success() {
+        let e = String::from_utf8_lossy(&out.stderr);
+        client_core::log(format!("ensure_daemon {host}: {e}"));
+        anyhow::bail!("{e}");
+    }
+    client_core::log(format!("ensure_daemon {host}: {stdout}"));
+    Ok(stdout)
+}
+
 fn main() {
     // Workaround WebKitGTK : webview blanche/noire après unfocus ou au boot
     // (compositing GPU — bug connu Tauri sur Linux/Wayland/Nvidia).
@@ -343,7 +388,7 @@ fn main() {
             client: Mutex::new(None),
             subs: Mutex::new(std::collections::HashMap::new()),
         })
-        .invoke_handler(tauri::generate_handler![connect, call, subscribe, ssh_hosts, log_tail, saved_connections, save_connection, check_update, update_client])
+        .invoke_handler(tauri::generate_handler![connect, call, subscribe, ssh_hosts, log_tail, saved_connections, save_connection, check_update, update_client, ensure_daemon])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

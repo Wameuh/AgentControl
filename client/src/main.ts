@@ -56,10 +56,14 @@ $("tb-settings").onclick = () => {
   ($("s-theme") as HTMLSelectElement).value =
     document.documentElement.classList.contains("light") ? "light" : "dark";
   ($("s-lang") as HTMLSelectElement).value = getLang();
+  ($("s-autoconn") as HTMLInputElement).checked =
+    localStorage.getItem("ac-autoconnect") !== "0";
   ($("dlg-settings") as HTMLDialogElement).showModal();
 };
 ($("s-theme") as HTMLSelectElement).onchange = (e) =>
   applyTheme((e.target as HTMLSelectElement).value as "dark" | "light");
+($("s-autoconn") as HTMLInputElement).onchange = (e) =>
+  localStorage.setItem("ac-autoconnect", (e.target as HTMLInputElement).checked ? "1" : "0");
 ($("s-lang") as HTMLSelectElement).onchange = (e) => {
   setLang((e.target as HTMLSelectElement).value as Lang);
   refreshSessions();
@@ -260,11 +264,45 @@ async function call<T = unknown>(method: string, params: Record<string, unknown>
 
 async function doConnect(cfg: Record<string, unknown>) {
   lastCfg = cfg;
-  const status = await call("daemon_status").catch(async () => {
-    const r = await invoke("connect", { cfg });
-    return r;
-  });
   const el = $("conn-status");
+  let status: unknown;
+  try {
+    status = await call("daemon_status").catch(async () => {
+      const r = await invoke("connect", { cfg });
+      return r;
+    });
+  } catch (e) {
+    // SSH : la connexion a échoué — le démon n'est peut-être pas installé
+    // ou arrêté côté serveur → bootstrap depuis la release GitHub.
+    if (cfg.kind === "ssh" && cfg.host) {
+      const ver = await getVersion().catch(() => "0.0.0");
+      el.textContent = t("installing_daemon");
+      el.className = "badge warn";
+      await invoke("ensure_daemon", {
+        host: cfg.host,
+        args: cfg.args ?? [],
+        tag: ver,
+      });
+      await invoke("connect", { cfg });
+      status = await call("daemon_status");
+    } else {
+      throw e;
+    }
+  }
+  // Démon en version antérieure → update à la version du client.
+  const dv = (status as { version?: string }).version;
+  const lv = await getVersion().catch(() => "0.0.0");
+  if (cfg.kind === "ssh" && cfg.host && dv && lv && cmpVer(dv, lv) < 0) {
+    el.textContent = t("updating_daemon", { dv, lv });
+    el.className = "badge warn";
+    await invoke("ensure_daemon", {
+      host: cfg.host,
+      args: cfg.args ?? [],
+      tag: lv,
+    }).catch((e) => showErr(String(e)));
+    await invoke("connect", { cfg }).catch(() => {});
+    status = await call("daemon_status").catch(() => status);
+  }
   el.textContent = t("connected_n", { n: (status as { sessions?: number }).sessions ?? 0 });
   el.className = "badge ok";
   await refreshSessions();
@@ -1508,6 +1546,8 @@ setInterval(async () => {
 // Auto-reconnexion au démarrage avec la dernière connexion utilisée
 invoke<SavedConn[]>("saved_connections")
   .then(async (conns) => {
+    savedConns = conns;
+    if (localStorage.getItem("ac-autoconnect") === "0") return;
     if (conns.length) await doConnect({ ...conns[0] }).catch((e) => showErr(String(e)));
   })
   .catch(() => {});

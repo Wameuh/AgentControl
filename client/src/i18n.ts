@@ -42,6 +42,9 @@ const STR = {
     fusion_entry: "✨ Fusion (2 models)…", cmd_placeholder: "⌘ commands…",
     effort_default: "default", subscribe_err: "subscribe: ",
     settings_title: "Settings", about_title: "About AgentControl",
+    autoconnect_label: "Auto-connect on launch",
+    installing_daemon: "installing daemon on server…",
+    updating_daemon: "updating daemon {dv} → {lv}…",
   },
   fr: {
     connect: "Connecter", connected_n: "connecté ({n} sessions)",
@@ -81,6 +84,9 @@ const STR = {
     fusion_entry: "✨ Fusion (2 modèles)…", cmd_placeholder: "⌘ commandes…",
     effort_default: "défaut", subscribe_err: "subscribe : ",
     settings_title: "Paramètres", about_title: "À propos d'AgentControl",
+    autoconnect_label: "Connexion auto au lancement",
+    installing_daemon: "installation du démon sur le serveur…",
+    updating_daemon: "mise à jour du démon {dv} → {lv}…",
   },
 } as const;
 
