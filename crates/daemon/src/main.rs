@@ -42,14 +42,6 @@ fn default_agents() -> HashMap<String, AgentProfile> {
             env: devin_env,
         },
     );
-    m.insert(
-        "mock".into(),
-        AgentProfile {
-            name: "Mock ACP agent (test)".into(),
-            command: vec!["acp-mock-agent".into()],
-            env: HashMap::new(),
-        },
-    );
     m
 }
 

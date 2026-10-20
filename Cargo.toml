@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/proto", "crates/daemon", "crates/mock-agent", "crates/acctl", "crates/client-core"]
+members = ["crates/proto", "crates/daemon", "crates/acctl", "crates/client-core"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

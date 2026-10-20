@@ -39,7 +39,3 @@ DEVIN_PERMISSION_MODE = "{mode}"
 # [agents.gemini]
 # name = "Gemini CLI"
 # command = ["gemini", "--experimental-acp"]
-
-[agents.mock]
-name = "Mock ACP agent (test)"
-command = ["acp-mock-agent"]
