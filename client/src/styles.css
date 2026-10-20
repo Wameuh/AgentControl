@@ -380,3 +380,8 @@ details.th[open] > summary::before { content: "▾ "; }
 /* Chevron d'expand sur les tool calls */
 .tool-head::after { content: "▸"; margin-left: auto; color: var(--dim); font-size: 11px; }
 .tool.open .tool-head::after { content: "▾"; color: var(--sand); }
+
+/* Tool head : tronquer le titre quand la fenêtre est étroite */
+.tool-head { display: flex; align-items: center; gap: 8px; min-width: 0; overflow: hidden; }
+.tool-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-head .badge { flex: none; }
