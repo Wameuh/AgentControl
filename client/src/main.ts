@@ -228,7 +228,7 @@ async function refreshSessions() {
   // Lumières "agents" du fond : une par session active
   const n = list.filter((s) => s.state === "working" || s.state === "waiting_input").length;
   (window as { MeshBackground?: { setMood: (m: string, o: object) => void } })
-    .MeshBackground?.setMood("sand", { agents: Math.min(n, 4), intensity: 0.55 });
+    .MeshBackground?.setMood(bgMood(), { agents: Math.min(n, 4), intensity: 0.55 });
   const el = $("session-list");
   el.innerHTML = "";
   for (const s of list) {
