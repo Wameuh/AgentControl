@@ -368,3 +368,11 @@ dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 0; pad
 .df-add { color: var(--sage); }
 .df-del { color: var(--err); }
 .df-hd { color: var(--dim); font-family: Mono, ui-monospace, monospace; font-size: 12px; }
+
+/* Pensée : résumé lisible, triangle visible pour déplier */
+details.th > summary {
+  color: var(--muted); cursor: pointer; font-style: italic;
+  list-style: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+details.th > summary::before { content: "▸ "; color: var(--dim); }
+details.th[open] > summary::before { content: "▾ "; }

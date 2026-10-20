@@ -521,7 +521,9 @@ function renderEvent(ev: AcEvent, live: boolean): HTMLElement {
     }
     case "agent_thought": {
       const d = mkEv("thought", ev.seq);
-      d.innerHTML = `<details><summary>${t("thought")}</summary><pre>${diffFmt(esc(ev.text as string))}</pre></details>`;
+      const txt = ev.text as string;
+      const head = txt.trim().split("\n")[0].slice(0, 110);
+      d.innerHTML = `<details class="th"><summary>💭 ${esc(head)}</summary><pre>${diffFmt(esc(txt))}</pre></details>`;
       return d;
     }
     case "tool_call":
