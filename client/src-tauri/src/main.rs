@@ -135,6 +135,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             offset: p.get("offset").and_then(Value::as_u64).unwrap_or(0),
             limit: p.get("limit").and_then(Value::as_u64).unwrap_or(262144),
         },
+        "read_file" => ReqKind::ReadFile { session: s("session"), path: s("path") },
         "kill_session" => ReqKind::KillSession { session: s("session") },
         m => return Err(format!("méthode inconnue: {m}")),
     })

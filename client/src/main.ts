@@ -395,6 +395,59 @@ function esc(s: string): string {
   return d.innerHTML;
 }
 
+// Chemins de fichiers cliquables → panneau latéral (read_file côté démon)
+const FILE_RE =
+  /((?:\/[\w.\-~]+){2,}|[\w.\-]+\/[\w./\-]+|[\w.\-]+\.(?:rs|ts|tsx|js|jsx|py|toml|json|md|html?|css|ya?ml|sh|c|cpp|h|hpp|go|java|rb|txt|log|svg|cfg|ini|sql|vue|svelte|lock|service))(?::(\d+))?/g;
+
+function linkify(escaped: string): string {
+  return escaped.replace(FILE_RE, (m, p: string) => {
+    const clean = p.replace(/[.,;:!?'")\]]+$/, "");
+    // lien = chemin sans ponctuation finale ; le reste (:ligne, ponct.) reste dehors
+    return `<span class="flink" data-path="${clean}">${clean}</span>${m.slice(clean.length)}`;
+  });
+}
+
+/** Colorise les lignes de diff (+add / -del / @@ hunks) dans le texte. */
+function diffFmt(escaped: string): string {
+  if (!/^(?:\+{3}|-{3}|@@|[-+]\S)/m.test(escaped)) return escaped;
+  return escaped
+    .split("\n")
+    .map((l) => {
+      const cls =
+        l.startsWith("@@") || l.startsWith("+++") || l.startsWith("---")
+          ? "df-hd"
+          : l.startsWith("+")
+            ? "df-add"
+            : l.startsWith("-")
+              ? "df-del"
+              : "";
+      return cls ? `<span class="${cls}">${l}</span>` : l;
+    })
+    .join("\n");
+}
+
+async function openFilePanel(path: string) {
+  if (!current) return;
+  $("file-panel").hidden = false;
+  $("file-path").textContent = path;
+  $("file-path").title = path;
+  $("file-view").textContent = "…";
+  try {
+    const r = await call<{ content: string; truncated: boolean }>("read_file", {
+      session: current.id,
+      path,
+    });
+    $("file-view").textContent = r.content + (r.truncated ? "\n… (tronqué)" : "");
+  } catch (e) {
+    $("file-view").textContent = String(e);
+  }
+}
+$("file-close").onclick = () => ($("file-panel").hidden = true);
+eventsEl.addEventListener("click", (e) => {
+  const el = (e.target as HTMLElement).closest<HTMLElement>(".flink");
+  if (el?.dataset.path) void openFilePanel(el.dataset.path);
+});
+
 function mkEv(cls: string, seq: number): HTMLElement {
   const d = document.createElement("div");
   d.className = `ev ${cls}`;
@@ -458,17 +511,17 @@ function renderEvent(ev: AcEvent, live: boolean): HTMLElement {
   switch (ev.type) {
     case "user_message": {
       const d = mkEv("msg user", ev.seq);
-      d.textContent = ev.text as string;
+      d.innerHTML = linkify(esc(ev.text as string));
       return d;
     }
     case "agent_text": {
       const d = mkEv("msg agent", ev.seq);
-      d.textContent = ev.text as string;
+      d.innerHTML = diffFmt(linkify(esc(ev.text as string)));
       return d;
     }
     case "agent_thought": {
       const d = mkEv("thought", ev.seq);
-      d.innerHTML = `<details><summary>${t("thought")}</summary><pre>${esc(ev.text as string)}</pre></details>`;
+      d.innerHTML = `<details><summary>${t("thought")}</summary><pre>${diffFmt(esc(ev.text as string))}</pre></details>`;
       return d;
     }
     case "tool_call":

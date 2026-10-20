@@ -103,6 +103,34 @@ body {
 #re-bottom { left: 0; right: 0; bottom: 0; height: 5px; cursor: s-resize; }
 #re-corner { right: 0; bottom: 0; width: 14px; height: 14px; cursor: se-resize; }
 
+/* Garde-fou : display:flex/grid ne doit jamais écraser l'attribut hidden */
+[hidden] { display: none !important; }
+
+/* Liens de fichiers cliquables dans les messages */
+.flink { color: var(--violet); text-decoration: underline dotted; cursor: pointer; }
+.flink:hover { color: var(--sand); }
+
+/* Panneau fichier à droite */
+#file-panel {
+  width: 420px; min-width: 260px; max-width: 55vw; flex: none;
+  display: flex; flex-direction: column;
+  background: var(--glass); backdrop-filter: blur(14px);
+  border-left: 1px solid var(--line);
+}
+#file-head {
+  display: flex; align-items: center; gap: 8px; padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+}
+#file-path {
+  flex: 1; font-family: Mono, ui-monospace, monospace; font-size: 12px;
+  color: var(--sand); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#file-view {
+  flex: 1; overflow: auto; margin: 0; padding: 12px;
+  font: 12px/1.5 Mono, ui-monospace, monospace; white-space: pre;
+  color: var(--ink); user-select: text;
+}
+
 /* About */
 #about-body { display: flex; gap: 14px; align-items: center; margin: 8px 0 4px; }
 #about-gem { width: 44px; height: 40px; display: inline-flex; flex: none; }
@@ -335,3 +363,8 @@ dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 0; pad
   animation: rot .7s linear infinite; vertical-align: -2px;
 }
 @keyframes rot { to { transform: rotate(360deg); } }
+
+/* Diff inline dans les messages (sinon les --- ressemblent à des barres) */
+.df-add { color: var(--sage); }
+.df-del { color: var(--err); }
+.df-hd { color: var(--dim); font-family: Mono, ui-monospace, monospace; font-size: 12px; }

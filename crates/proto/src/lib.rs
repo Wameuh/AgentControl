@@ -283,6 +283,12 @@ pub enum ReqKind {
         #[serde(default)]
         force: bool,
     },
+    /// Lit un fichier (absolu ou relatif au cwd de la session) — panneau
+    /// latéral du client pour les liens de fichiers de l'agent.
+    ReadFile {
+        session: String,
+        path: String,
+    },
     /// Page d'historique : les `limit` événements avant `before_seq`
     /// (before_seq absent ou 0 = depuis la fin).
     Events {
