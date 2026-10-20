@@ -21,8 +21,9 @@
     ember: { base: [21, 19, 18], light: [197, 111, 106], agent: [147, 173, 140] },
     lichen: { base: [16, 21, 18], light: [160, 186, 150], agent: [205, 182, 140] },
     night: { base: [12, 15, 20], light: [116, 138, 172], agent: [147, 173, 140] },
-    // Thème clair : même maillage, fond papier, accents assombris
-    paper: { base: [233, 229, 216], light: [190, 160, 110], agent: [110, 140, 100] },
+    // Thème clair : même maillage, fond papier, accents nettement plus
+    // foncés que la base → lumière "négative" (facettes sombres, sobre)
+    paper: { base: [233, 229, 216], light: [160, 128, 78], agent: [88, 118, 78] },
   };
   const MAX_AGENTS = 4;
   const IDLE_AFTER_MS = 3000;
