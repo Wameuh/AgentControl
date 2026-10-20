@@ -506,15 +506,22 @@ const SYN_KWS: Record<string, string> = {
   py: "def class import from as if elif else for while return pass with try except finally raise yield lambda global nonlocal assert is in not and or None True False self",
   ts: "function const let var if else for while of in return break continue new class extends import export from as async await try catch finally throw switch case default typeof instanceof delete void this null undefined true false public private protected readonly interface type enum implements satisfies",
   sh: "if then else elif fi for while do done case esac function in echo exit return local export source readonly unset shift",
+  c: "auto break case char const continue default do double else enum extern float for goto if int long register return short signed sizeof static struct switch typedef union unsigned void volatile while bool inline restrict",
+  java: "abstract boolean break byte case catch char class const continue default do double else enum extends final finally float for if implements import instanceof int interface long native new package private protected public return short static strictfp super switch synchronized this throw throws transient try void volatile while true false null var record sealed permits",
 };
 const SYN_EXT: Record<string, string> = {
   rs: "rs", py: "py", ts: "ts", tsx: "ts", js: "ts", jsx: "ts", mjs: "ts",
   sh: "sh", bash: "sh", zsh: "sh",
+  c: "c", h: "c", cpp: "c", cxx: "c", cc: "c", hpp: "c", hxx: "c",
+  java: "java", kt: "java", kts: "java",
 };
 function highlight(code: string, ext: string): string {
   const lang = SYN_EXT[ext] ?? "";
   const kws = (SYN_KWS[lang] ?? "").split(" ").filter(Boolean);
-  const comSrc = lang === "rs" || lang === "ts" ? "\\/\\/[^\\n]*" : "#[^\\n]*";
+  const comSrc =
+    lang === "rs" || lang === "ts" || lang === "c" || lang === "java"
+      ? "\\/\\/[^\\n]*"
+      : "#[^\\n]*";
   const strSrc = '"[^"\\n]*"|\'[^\'\\n]*\'|`[^`\\n]*`';
   const kwSrc = kws.length ? `\\b(?:${kws.join("|")})\\b` : "a^"; // a^ = jamais
   const re = new RegExp(`(${comSrc})|(${strSrc})|(${kwSrc})|(\\b\\d+(?:\\.\\d+)?\\b)`, "g");
