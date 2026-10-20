@@ -454,3 +454,7 @@ details.th[open] > summary::before { content: "▾ "; }
 #file-view .syn-str { color: var(--sage); }
 #file-view .syn-com { color: var(--dim); font-style: italic; }
 #file-view .syn-num { color: var(--sand); }
+
+/* Selects d'options config dynamiques (thought_level, speed…) */
+#dyn-opts { display: inline-flex; gap: 4px; align-items: center; }
+#dyn-opts select { max-width: 130px; }

@@ -473,6 +473,29 @@ function updateHeader() {
     mf.value = current.model ?? "";
   }
 
+  // Autres options de config exposées par l'agent (ex. Devin : thought_level,
+  // speed) — rendues dynamiquement, aucun hardcode.
+  const dyn = $("dyn-opts");
+  dyn.innerHTML = "";
+  for (const o of copts) {
+    if (o === modeOpt || o === modelOpt || !(o.options?.length)) continue;
+    const sel = document.createElement("select");
+    sel.title = o.name || o.id;
+    for (const opt of o.options) {
+      const el = document.createElement("option");
+      el.value = opt.value;
+      el.textContent = opt.name || opt.value;
+      sel.appendChild(el);
+    }
+    sel.value = o.currentValue ?? "";
+    sel.onchange = () =>
+      call("set_config_option", {
+        session: current!.id,
+        config_id: o.id,
+        value: sel.value,
+      }).catch((e) => showErr(String(e)));
+    dyn.appendChild(sel);
+  }
 }
 
 // ---------------------------------------------------------------------------
