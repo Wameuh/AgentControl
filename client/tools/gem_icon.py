@@ -143,7 +143,11 @@ def main():
     os.makedirs(pub, exist_ok=True)
 
     big = render_png(boundary, faces, 1024)
-    big.resize((512, 512), Image.LANCZOS).save(os.path.join(icons, "icon.png"))
+    rgba = big.resize((512, 512), Image.LANCZOS)
+    rgba.save(os.path.join(icons, "icon.png"))
+    # RGBA brut pour Image::new_owned (set_icon au runtime, --no-bundle)
+    with open(os.path.join(icons, "icon.rgba"), "wb") as f:
+        f.write(rgba.tobytes())
     big.resize((32, 32), Image.LANCZOS).save(os.path.join(icons, "32x32.png"))
     big.resize((128, 128), Image.LANCZOS).save(os.path.join(icons, "128x128.png"))
     big.save(os.path.join(icons, "icon.ico"),

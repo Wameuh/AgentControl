@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 
 struct AppState {
@@ -218,9 +218,12 @@ fn main() {
             // Icône fenêtre = gemme générée (marche aussi avec --no-bundle,
             // là où les icônes de bundle ne sont pas installées).
             if let Some(w) = app.get_webview_window("main") {
-                if let Ok(img) = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png")) {
-                    let _ = w.set_icon(img);
-                }
+                let img = tauri::image::Image::new_owned(
+                    include_bytes!("../icons/icon.rgba").to_vec(),
+                    512,
+                    512,
+                );
+                let _ = w.set_icon(img);
             }
             Ok(())
         })
