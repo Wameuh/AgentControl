@@ -426,7 +426,7 @@ function appendEvent(ev: AcEvent, live: boolean) {
   }
   const nearBottom =
     eventsEl.scrollHeight - eventsEl.scrollTop - eventsEl.clientHeight < 120;
-  const node = renderEvent(ev);
+  const node = renderEvent(ev, live);
   eventsEl.appendChild(node);
   renderedCount++;
   if (ev.seq < minRendered) minRendered = ev.seq;
@@ -459,7 +459,7 @@ function prependEvents(events: AcEvent[]) {
   }
   const oldHeight = eventsEl.scrollHeight;
   for (const ev of events) {
-    const node = renderEvent(ev);
+    const node = renderEvent(ev, false);
     eventsEl.insertBefore(node, eventsEl.children[1]); // après sentinel
     renderedCount++;
     if (ev.seq < minRendered) minRendered = ev.seq;
@@ -470,7 +470,7 @@ function prependEvents(events: AcEvent[]) {
   eventsEl.scrollTop += eventsEl.scrollHeight - oldHeight;
 }
 
-function renderEvent(ev: AcEvent): HTMLElement {
+function renderEvent(ev: AcEvent, live: boolean): HTMLElement {
   switch (ev.type) {
     case "user_message": {
       const d = mkEv("msg user", ev.seq);
@@ -538,7 +538,10 @@ function renderEvent(ev: AcEvent): HTMLElement {
     case "status_changed": {
       const d = mkEv("sysline", ev.seq);
       d.textContent = t("state_arrow") + (ev.state as string);
-      if (current) {
+      // Seul un event LIVE met à jour l'état — rejouer l'historique du
+      // journal écraserait alive/meta avec un état périmé ("working"
+      // d'une session morte → bouton Reprendre masqué).
+      if (live && current) {
         current.state = ev.state as string;
         alive = ev.state !== "dead";
         updateHeader();

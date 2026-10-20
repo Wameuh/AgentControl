@@ -96,14 +96,9 @@ impl Daemon {
                 }
                 match Session::open(entry.path()) {
                     Ok(s) => {
-                        // Un agent n'est jamais vivant après un restart du démon :
-                        // running/waiting_input → interrupted.
-                        {
-                            let mut m = s.meta.lock().unwrap();
-                            if m.state == "running" || m.state == "working" || m.state == "waiting_input" || m.state == "idle" {
-                                m.state = "interrupted".into();
-                            }
-                        }
+                        // Un agent n'est jamais vivant après un restart du
+                        // démon → interrupted + event journalisé.
+                        s.reconcile_state();
                         let id = s.meta_snapshot().id;
                         d.sessions.write().await.insert(id, s);
                     }

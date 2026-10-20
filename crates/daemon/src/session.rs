@@ -952,4 +952,26 @@ impl Session {
     pub fn is_alive(&self) -> bool {
         self.stdin_tx.lock().unwrap().is_some()
     }
+
+    /// À l'ouverture du démon : un état persisté qui implique un agent
+    /// vivant repasse en interrupted — et on le journalise pour que les
+    /// replays d'historique côté client ne ressuscitent pas "working".
+    pub fn reconcile_state(&self) {
+        let needs = {
+            let mut m = self.meta.lock().unwrap();
+            match m.state.as_str() {
+                "running" | "working" | "waiting_input" | "idle" | "starting" => {
+                    m.state = "interrupted".into();
+                    true
+                }
+                _ => false,
+            }
+        };
+        if needs {
+            self.save_meta();
+            self.emit(EventKind::StatusChanged {
+                state: "interrupted".into(),
+            });
+        }
+    }
 }

@@ -16,13 +16,9 @@ use tokio::sync::Mutex;
 struct AppState {
     transport: Mutex<Option<Transport>>,
     client: Mutex<Option<Arc<Client>>>,
-    /// session → (client subscribe, tâche d'émission) — 1 souscription/session.
-    subs: Mutex<
-        std::collections::HashMap<
-            String,
-            (Arc<Client>, tauri::async_runtime::JoinHandle<()>),
-        >,
-    >,
+    /// session → tâche d'émission — 1 souscription/session, sur la connexion
+    /// principale (plus de tunnel/process ssh dédié par subscribe).
+    subs: Mutex<std::collections::HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
 }
 
 async fn get_client(state: &State<'_, AppState>) -> Result<Arc<Client>, String> {
@@ -184,7 +180,7 @@ fn ssh_hosts() -> Vec<String> {
     out
 }
 
-/// Subscribe dédié : ouvre une 2e connexion et re-émet les push
+/// Subscribe sur la connexion principale et re-émet les push
 /// comme events Tauri `session-event` ({session, event}).
 #[tauri::command]
 async fn subscribe(
@@ -193,36 +189,22 @@ async fn subscribe(
     session: String,
     after_seq: u64,
 ) -> Result<(), String> {
-    let t = state
-        .transport
-        .lock()
-        .await
-        .clone()
-        .context("non connecté")
-        .map_err(|e| e.to_string())?;
+    let c = get_client(&state).await?;
     client_core::log(format!("subscribe session={session} after_seq={after_seq}"));
-    let (mut rx, sub_client) = Client::subscribe(&t, &session, after_seq)
-        .await
-        .map_err(|e| {
-            client_core::log(format!("subscribe {session}: {e:#}"));
-            format!("{e:#}")
-        })?;
-    // Une seule souscription par session : remplacer l'ancienne (le drop du
-    // client tue son tunnel, l'abort stoppe la boucle d'émission → fin des
-    // events en double)
+    let mut rx = c.subscribe(&session, after_seq).await.map_err(|e| {
+        client_core::log(format!("subscribe {session}: {e:#}"));
+        format!("{e:#}")
+    })?;
+    // Une seule souscription par session : abort de l'ancienne tâche
+    // d'émission (fin des events en double).
     let sid_log = session.clone();
     let task = tauri::async_runtime::spawn(async move {
         while let Ok(v) = rx.recv().await {
             let _ = app.emit("session-event", v);
         }
-        client_core::log(format!("subscribe {sid_log}: flux terminé (connexion fermée)"));
+        client_core::log(format!("subscribe {sid_log}: flux terminé"));
     });
-    let old = state
-        .subs
-        .lock()
-        .await
-        .insert(session, (sub_client, task));
-    if let Some((_, h)) = old {
+    if let Some(h) = state.subs.lock().await.insert(session, task) {
         h.abort();
     }
     Ok(())

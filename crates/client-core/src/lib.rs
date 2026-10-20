@@ -392,21 +392,17 @@ impl Client {
         }
     }
 
-    /// Ouvre une **connexion dédiée** au subscribe (1 sub max par connexion
-    /// côté démon). Retourne un receveur de push `{push, session, event}`.
-    pub async fn subscribe(
-        t: &Transport,
-        session: &str,
-        after_seq: u64,
-    ) -> Result<(broadcast::Receiver<Value>, Arc<Client>)> {
-        let c = Self::connect(t).await?;
-        let rx = c.pushes.subscribe();
-        c.call(ReqKind::Subscribe {
+    /// Souscrit sur la connexion principale — le démon n'a qu'un sub par
+    /// connexion, un nouvel appel remplace l'ancien (un seul flux live,
+    /// celui de la session ouverte). Plus de tunnel/process ssh dédié.
+    pub async fn subscribe(&self, session: &str, after_seq: u64) -> Result<broadcast::Receiver<Value>> {
+        let rx = self.pushes.subscribe();
+        self.call(ReqKind::Subscribe {
             session: session.into(),
             after_seq,
         })
         .await?;
-        Ok((rx, c))
+        Ok(rx)
     }
 }
 
