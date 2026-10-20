@@ -1,7 +1,19 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability par défaut de la fenêtre principale",
-  "windows": ["main"],
-  "permissions": ["core:default", "shell:allow-open"]
+  "description": "Capability par d\u00e9faut de la fen\u00eatre principale",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "shell:allow-open",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging",
+    "core:window:allow-is-maximized",
+    "core:app:allow-version"
+  ]
 }

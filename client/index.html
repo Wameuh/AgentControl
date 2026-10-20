@@ -1,112 +1,163 @@
 <!doctype html>
-<html lang="fr">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/gem.svg" />
     <title>AgentControl</title>
   </head>
   <body>
     <canvas id="mesh-bg"></canvas>
     <div id="app">
-      <aside id="sidebar">
-        <div id="conn-bar">
-          <span id="conn-status" class="badge warn">déconnecté</span>
-          <button id="btn-connect">Connecter</button>
+      <div id="titlebar" data-tauri-drag-region>
+        <span id="titlebar-gem"></span>
+        <span id="titlebar-title">AgentControl</span>
+        <div class="tb-btns">
+          <button id="tb-settings" title="Settings" data-i18n-title="settings_title">⚙</button>
+          <button id="tb-about" title="About" data-i18n-title="about_title">ⓘ</button>
+          <button id="tb-min" title="—">—</button>
+          <button id="tb-max" title="▢">▢</button>
+          <button id="tb-close" title="✕">✕</button>
         </div>
-        <div id="session-list"></div>
-        <button id="btn-new-session">+ Nouvelle session</button>
-        <div id="sidebar-resize" title="Glisser pour redimensionner"></div>
-      </aside>
-      <main id="chat">
-        <div id="err-bar" hidden><span id="err-text"></span><button id="err-close">✕</button></div>
-        <header id="chat-header">
-          <span id="chat-gem" hidden></span>
-          <span id="chat-title">—</span>
-          <span id="chat-state" class="badge"></span>
-          <select id="mode-select" hidden></select>
-          <select id="model-select" hidden></select>
-          <select id="effort-select" hidden title="Niveau d'effort"></select>
-          <button id="btn-fusion-edit" hidden title="Configurer la fusion">⚙✨</button>
-          <input id="model-free" hidden placeholder="modèle…" title="Nom du modèle (Entrée pour appliquer)" />
-          <button id="btn-refresh" title="Recharger la session">⟳</button>
-          <button id="btn-resume" hidden>Reprendre</button>
-          <button id="btn-cancel" hidden>Stop</button>
-        </header>
-        <div id="events">
-          <div id="scroll-sentinel"></div>
-        </div>
-        <footer id="composer">
-          <select id="cmd-select" hidden><option value="">⌘ commandes…</option></select>
-          <div id="cmd-ac" hidden></div>
-          <textarea id="input" placeholder="Message… (Entrée = envoyer, Maj+Entrée = saut de ligne, / = commandes)" rows="2"></textarea>
-          <button id="btn-send">Envoyer</button>
-        </footer>
-      </main>
+      </div>
+      <div id="app-body">
+        <aside id="sidebar">
+          <div id="conn-bar">
+            <span id="conn-status" class="badge warn" data-i18n="disconnected">disconnected</span>
+            <button id="btn-connect" data-i18n="connect">Connect</button>
+          </div>
+          <div id="session-list"></div>
+          <button id="btn-new-session" data-i18n="new_session">+ New session</button>
+          <div id="sidebar-resize" title="Drag to resize"></div>
+        </aside>
+        <main id="chat">
+          <div id="err-bar" hidden><span id="err-text"></span><button id="err-close">✕</button></div>
+          <header id="chat-header">
+            <span id="chat-gem" hidden></span>
+            <span id="chat-title" data-i18n-title="title_dblclick">—</span>
+            <span id="chat-state" class="badge"></span>
+            <select id="mode-select" hidden></select>
+            <select id="model-select" hidden></select>
+            <select id="effort-select" hidden data-i18n-title="effort_title" title="Effort"></select>
+            <button id="btn-fusion-edit" hidden title="Configure fusion">⚙✨</button>
+            <input id="model-free" hidden data-i18n-ph="model_free_ph" data-i18n-title="model_free_title" placeholder="model…" />
+            <button id="btn-refresh" data-i18n-title="refresh_title" title="Reload">⟳</button>
+            <button id="btn-resume" hidden data-i18n="resume">Resume</button>
+            <button id="btn-cancel" hidden data-i18n="stop">Stop</button>
+          </header>
+          <div id="events">
+            <div id="scroll-sentinel"></div>
+          </div>
+          <footer id="composer">
+            <select id="cmd-select" hidden><option value="">⌘ commands…</option></select>
+            <div id="cmd-ac" hidden></div>
+            <textarea id="input" data-i18n-ph="input_ph" placeholder="Message… (Enter = send)" rows="2"></textarea>
+            <button id="btn-send" data-i18n="send">Send</button>
+          </footer>
+        </main>
+      </div>
     </div>
+    <div class="resize-edge" id="re-right" data-dir="East"></div>
+    <div class="resize-edge" id="re-bottom" data-dir="South"></div>
+    <div class="resize-edge" id="re-corner" data-dir="SouthEast"></div>
 
     <dialog id="dlg-new">
       <form method="dialog" id="form-new">
-        <h3>Nouvelle session</h3>
-        <label>Agent <select id="f-agent"></select></label>
-        <label>Dossier de travail <input id="f-cwd" placeholder="/home/agent/projet" required /></label>
-        <label>Titre <input id="f-title" placeholder="ma session" /></label>
-        <label>Mode <input id="f-mode" placeholder="normal (optionnel)" /></label>
-        <label>Modèle <input id="f-model" list="model-list" placeholder="défaut" /></label>
+        <h3 data-i18n="new_session_h">New session</h3>
+        <label><span data-i18n="agent">Agent</span> <select id="f-agent"></select></label>
+        <label><span data-i18n="workdir">Working directory</span> <input id="f-cwd" placeholder="/home/agent/projet" required /></label>
+        <label><span data-i18n="title_label">Title</span> <input id="f-title" data-i18n-ph="title_ph" placeholder="my session" /></label>
+        <label><span data-i18n="mode_label">Mode</span> <input id="f-mode" data-i18n-ph="mode_ph" placeholder="normal (optional)" /></label>
+        <label><span data-i18n="model_label">Model</span> <input id="f-model" list="model-list" data-i18n-ph="model_ph" placeholder="default" /></label>
         <datalist id="model-list"></datalist>
-        <label>Reprendre ID natif <input id="f-attach" placeholder="(optionnel) ID session agent existante" /></label>
-        <label>Message initial <textarea id="f-prompt" rows="3"></textarea></label>
+        <label><span data-i18n="attach_label">Resume native ID</span> <input id="f-attach" data-i18n-ph="attach_ph" placeholder="(optional)" /></label>
+        <label><span data-i18n="prompt_label">Initial message</span> <textarea id="f-prompt" rows="3"></textarea></label>
         <menu>
-          <button value="cancel">Annuler</button>
-          <button id="f-create" value="default">Créer</button>
+          <button value="cancel" data-i18n="cancel">Cancel</button>
+          <button id="f-create" value="default" data-i18n="create">Create</button>
         </menu>
       </form>
     </dialog>
 
     <dialog id="dlg-conn">
       <form method="dialog">
-        <h3>Connexion au démon</h3>
-        <label>Connexions récentes
-          <select id="c-saved"><option value="">— choisir —</option></select>
+        <h3 data-i18n="conn_h">Connect to daemon</h3>
+        <label><span data-i18n="recent">Recent connections</span>
+          <select id="c-saved"><option value="">— choose —</option></select>
         </label>
-        <label>Type
+        <label><span data-i18n="type_label">Type</span>
           <select id="c-kind">
-            <option value="local">Socket local (démon sur cette machine)</option>
-            <option value="ssh">SSH (serveur distant)</option>
-            <option value="tcp">TCP direct</option>
+            <option value="local" data-i18n="local_sock">Local socket</option>
+            <option value="ssh" data-i18n="ssh_label">SSH (remote server)</option>
+            <option value="tcp" data-i18n="tcp_label">Direct TCP</option>
           </select>
         </label>
-        <label>Hôte <input id="c-host" list="ssh-hosts" placeholder="user@serveur.local ou 127.0.0.1:7331" /></label>
+        <label><span data-i18n="host_label">Host</span> <input id="c-host" list="ssh-hosts" data-i18n-ph="host_ph" placeholder="user@server" /></label>
         <datalist id="ssh-hosts"></datalist>
-        <label>Port démon distant <input id="c-port" type="number" value="7331" /></label>
-        <label>Args SSH <input id="c-args" placeholder="-i ~/.ssh/key -p 22" /></label>
+        <label><span data-i18n="port_label">Remote daemon port</span> <input id="c-port" type="number" value="7331" /></label>
+        <label><span data-i18n="ssh_args_label">SSH args</span> <input id="c-args" data-i18n-ph="ssh_args_ph" placeholder="-i ~/.ssh/key -p 22" /></label>
         <pre id="log-view" hidden></pre>
         <menu>
-          <button id="c-logs" type="button">Logs</button>
-          <button value="cancel">Annuler</button>
-          <button id="c-go" value="default">Connecter</button>
+          <button id="c-logs" type="button" data-i18n="logs">Logs</button>
+          <button value="cancel" data-i18n="cancel">Cancel</button>
+          <button id="c-go" value="default" data-i18n="connect">Connect</button>
         </menu>
       </form>
     </dialog>
 
     <dialog id="dlg-fusion">
       <form method="dialog">
-        <h3>Fusion — deux modèles en parallèle</h3>
-        <label>Modèle principal <select id="fu-a"></select></label>
-        <label>Effort principal <select id="fu-ea"></select></label>
-        <label>Sidekick <select id="fu-b"></select></label>
-        <label>Effort sidekick <select id="fu-eb"></select></label>
+        <h3 data-i18n="fusion_h">Fusion — two models in parallel</h3>
+        <label><span data-i18n="main_model">Main model</span> <select id="fu-a"></select></label>
+        <label><span data-i18n="main_effort">Main effort</span> <select id="fu-ea"></select></label>
+        <label><span data-i18n="sidekick">Sidekick</span> <select id="fu-b"></select></label>
+        <label><span data-i18n="sidekick_effort">Sidekick effort</span> <select id="fu-eb"></select></label>
         <menu>
-          <button value="cancel">Annuler</button>
-          <button id="fu-ok" value="default">Appliquer</button>
+          <button value="cancel" data-i18n="cancel">Cancel</button>
+          <button id="fu-ok" value="default" data-i18n="apply">Apply</button>
         </menu>
       </form>
     </dialog>
 
     <dialog id="dlg-resume">
       <form method="dialog">
-        <h3>Sessions de l'agent à reprendre</h3>
+        <h3 data-i18n="resume_h">Agent sessions to resume</h3>
         <div id="native-list">…</div>
-        <menu><button value="cancel">Fermer</button></menu>
+        <menu><button value="cancel" data-i18n="close">Close</button></menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-settings">
+      <form method="dialog">
+        <h3 data-i18n="settings_h">Settings</h3>
+        <label><span data-i18n="theme_label">Theme</span>
+          <select id="s-theme">
+            <option value="dark" data-i18n="theme_dark">Dark</option>
+            <option value="light" data-i18n="theme_light">Light</option>
+          </select>
+        </label>
+        <label><span data-i18n="lang_label">Language</span>
+          <select id="s-lang">
+            <option value="en">English</option>
+            <option value="fr">Français</option>
+          </select>
+        </label>
+        <menu><button value="cancel" data-i18n="close">Close</button></menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-about">
+      <form method="dialog">
+        <h3 data-i18n="about_h">About</h3>
+        <div id="about-body">
+          <span id="about-gem"></span>
+          <div>
+            <div><b>AgentControl</b> <span id="about-version">v0.0.1</span></div>
+            <div><a id="about-gh" href="https://github.com/Wameuh/AgentControl">github.com/Wameuh/AgentControl</a></div>
+            <div><span data-i18n="license_label">License</span> : MIT</div>
+          </div>
+        </div>
+        <menu><button value="cancel" data-i18n="close">Close</button></menu>
       </form>
     </dialog>
 

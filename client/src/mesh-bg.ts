@@ -21,6 +21,8 @@
     ember: { base: [21, 19, 18], light: [197, 111, 106], agent: [147, 173, 140] },
     lichen: { base: [16, 21, 18], light: [160, 186, 150], agent: [205, 182, 140] },
     night: { base: [12, 15, 20], light: [116, 138, 172], agent: [147, 173, 140] },
+    // Thème clair : même maillage, fond papier, accents assombris
+    paper: { base: [233, 229, 216], light: [190, 160, 110], agent: [110, 140, 100] },
   };
   const MAX_AGENTS = 4;
   const IDLE_AFTER_MS = 3000;
@@ -146,7 +148,7 @@
   function draw() {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     // Reset edge antialiasing each frame, including the first frame after resize.
-    ctx.fillStyle = "#121614";
+    ctx.fillStyle = `rgb(${mood.base[0] | 0},${mood.base[1] | 0},${mood.base[2] | 0})`;
     ctx.fillRect(0, 0, width, height);
     const diagonal = Math.hypot(fieldWidth, fieldHeight);
     const lights = [{

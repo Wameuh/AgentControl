@@ -2,10 +2,76 @@ import "./styles.css";
 import "./mesh-bg.ts";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getVersion } from "@tauri-apps/api/app";
+import { gemSVG } from "./crystal";
+import { initLang, setLang, getLang, t, applyStatic, type Lang } from "./i18n";
 
-// Fond : intensité réduite pour ne pas distraire du contenu
-(window as { MeshBackground?: { setMood: (m: string, o: object) => void } })
-  .MeshBackground?.setMood("sand", { intensity: 0.55 });
+const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+
+// Thème + langue persistés (localStorage), appliqués au boot
+initLang();
+const mesh = (window as { MeshBackground?: { setMood: (m: string, o: object) => void } })
+  .MeshBackground;
+const bgMood = () => (document.documentElement.classList.contains("light") ? "paper" : "sand");
+
+function applyTheme(name: "dark" | "light") {
+  document.documentElement.classList.toggle("light", name === "light");
+  localStorage.setItem("ac-theme", name);
+  mesh?.setMood(bgMood(), { intensity: 0.55 });
+}
+applyTheme(localStorage.getItem("ac-theme") === "light" ? "light" : "dark");
+applyStatic();
+
+// Gemme cristal (logo) : titlebar + header + about
+for (const id of ["titlebar-gem", "chat-gem", "about-gem"]) {
+  const el = document.getElementById(id);
+  if (el) el.innerHTML = gemSVG("agent");
+}
+
+// Fenêtre custom (decorations: false) : drag natif via data-tauri-drag-region
+const appWin = getCurrentWindow();
+$("tb-min").onclick = () => appWin.minimize();
+$("tb-max").onclick = () => appWin.toggleMaximize();
+$("tb-close").onclick = () => appWin.close();
+$("titlebar").addEventListener("dblclick", (e) => {
+  if (!(e.target as HTMLElement).closest("button")) appWin.toggleMaximize();
+});
+document.querySelectorAll<HTMLElement>(".resize-edge").forEach((el) => {
+  el.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    void appWin.startResizeDragging(el.dataset.dir as never);
+  });
+});
+
+// Settings : thème + langue
+$("tb-settings").onclick = () => {
+  ($("s-theme") as HTMLSelectElement).value =
+    document.documentElement.classList.contains("light") ? "light" : "dark";
+  ($("s-lang") as HTMLSelectElement).value = getLang();
+  ($("dlg-settings") as HTMLDialogElement).showModal();
+};
+($("s-theme") as HTMLSelectElement).onchange = (e) =>
+  applyTheme((e.target as HTMLSelectElement).value as "dark" | "light");
+($("s-lang") as HTMLSelectElement).onchange = (e) => {
+  setLang((e.target as HTMLSelectElement).value as Lang);
+  refreshSessions();
+  updateHeader();
+};
+
+// About : version réelle + lien GitHub via le plugin shell
+$("tb-about").onclick = async () => {
+  try {
+    $("about-version").textContent = "v" + (await getVersion());
+  } catch {
+    /* dev */
+  }
+  ($("dlg-about") as HTMLDialogElement).showModal();
+};
+$("about-gh").addEventListener("click", (e) => {
+  e.preventDefault();
+  invoke("plugin:shell|open", { path: "https://github.com/Wameuh/AgentControl" }).catch(() => {});
+});
 
 // Bloque le menu contextuel natif du webview (son "Reload" tuait la connexion)
 window.addEventListener("contextmenu", (e) => e.preventDefault());
@@ -81,7 +147,6 @@ let loadingOld = false;
 let hasMoreHistory = true;
 let alive = false;
 
-const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const eventsEl = $("events");
 const sentinel = $("scroll-sentinel");
 
@@ -139,7 +204,7 @@ async function doConnect(cfg: Record<string, unknown>) {
     return r;
   });
   const el = $("conn-status");
-  el.textContent = `connecté (${(status as { sessions?: number }).sessions ?? 0} sessions)`;
+  el.textContent = t("connected_n", { n: (status as { sessions?: number }).sessions ?? 0 });
   el.className = "badge ok";
   await refreshSessions();
 }
@@ -148,13 +213,14 @@ async function doConnect(cfg: Record<string, unknown>) {
 // Liste des sessions
 // ---------------------------------------------------------------------------
 
-/** Contenu de l'indicateur d'état : engrenage (working) ou ? (question). */
+/** Gemme colorée par rôle CV : améthyste agent, sable humain, neutre, ardoise. */
+const DOT_ROLE: Record<string, string> = {
+  working: "agent", running: "agent", waiting_input: "human",
+  idle: "neutral", starting: "neutral",
+  interrupted: "slate", dead: "slate", failed: "inference",
+};
 function dotIcon(state: string): string {
-  if (state === "working") {
-    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
-  }
-  if (state === "waiting_input") return "?";
-  return "";
+  return gemSVG(DOT_ROLE[state] ?? "slate");
 }
 
 async function refreshSessions() {
@@ -175,7 +241,7 @@ async function refreshSessions() {
       e.stopPropagation();
       if (!del.dataset.armed) {
         del.dataset.armed = "1";
-        del.textContent = "suppr ?";
+        del.textContent = t("delete_armed");
         setTimeout(() => { del.dataset.armed = ""; del.textContent = "✕"; }, 2500);
         return;
       }
@@ -224,7 +290,7 @@ async function openSession(id: string) {
   await invoke("subscribe", { session: id, afterSeq }).catch((e) => {
     // Le flux live est mort (ex. restart démon) → statut déconnecté visible
     const el = $("conn-status");
-    el.textContent = "déconnecté — reconnecter";
+    el.textContent = t("disconnected_reconnect");
     el.className = "badge st-dead";
     showErr(`subscribe: ${e}`);
   });
@@ -290,7 +356,7 @@ function updateHeader() {
     }
     const fo = document.createElement("option");
     fo.value = "__fusion";
-    fo.textContent = "✨ Fusion (2 modèles)…";
+    fo.textContent = t("fusion_entry");
     md.appendChild(fo);
     md.dataset.cfgid = modelOpt ? modelOpt.id : "";
     md.dataset.opts = JSON.stringify(rawOpts);
@@ -320,7 +386,7 @@ function updateHeader() {
   const cs = $("cmd-select") as HTMLSelectElement;
   if (current.available_commands.length) {
     cs.hidden = false;
-    cs.innerHTML = '<option value="">⌘ commandes…</option>';
+    cs.innerHTML = `<option value="">${t("cmd_placeholder")}</option>`;
     for (const c of current.available_commands) {
       const o = document.createElement("option");
       o.value = "/" + cmdName(c);
@@ -418,7 +484,7 @@ function renderEvent(ev: AcEvent): HTMLElement {
     }
     case "agent_thought": {
       const d = mkEv("thought", ev.seq);
-      d.innerHTML = `<details><summary>pensée</summary><pre>${esc(ev.text as string)}</pre></details>`;
+      d.innerHTML = `<details><summary>${t("thought")}</summary><pre>${esc(ev.text as string)}</pre></details>`;
       return d;
     }
     case "tool_call":
@@ -432,14 +498,14 @@ function renderEvent(ev: AcEvent): HTMLElement {
       const d = mkEv("resolved", ev.seq);
       const rid = ev.request_id as string;
       answered.add(rid);
-      d.textContent = `✔ résolu — ${(ev.outcome ?? ev.answer) as string}`;
+      d.textContent = t("resolved") + ((ev.outcome ?? ev.answer) as string);
       const card = eventsEl.querySelector(`[data-req="${rid}"]`);
       if (card) card.classList.add("done");
       return d;
     }
     case "mode_changed": {
       const d = mkEv("sysline", ev.seq);
-      d.textContent = `mode → ${ev.mode}`;
+      d.textContent = t("mode_arrow") + (ev.mode as string);
       if (current) {
         current.mode = ev.mode as string;
         updateHeader();
@@ -462,7 +528,7 @@ function renderEvent(ev: AcEvent): HTMLElement {
     case "commands_available": {
       const d = mkEv("sysline", ev.seq);
       const cmds = ev.commands as CmdInfo[];
-      d.textContent = `${cmds.length} commandes disponibles`;
+      d.textContent = t("cmds_avail", { n: cmds.length });
       if (current) {
         current.available_commands = cmds;
         updateHeader();
@@ -471,7 +537,7 @@ function renderEvent(ev: AcEvent): HTMLElement {
     }
     case "status_changed": {
       const d = mkEv("sysline", ev.seq);
-      d.textContent = `état → ${ev.state}`;
+      d.textContent = t("state_arrow") + (ev.state as string);
       if (current) {
         current.state = ev.state as string;
         alive = ev.state !== "dead";
@@ -527,7 +593,7 @@ function renderToolCall(ev: AcEvent): HTMLElement {
   if (btn && ev.blob) {
     btn.addEventListener("click", async () => {
       btn.disabled = true;
-      btn.textContent = "chargement…";
+      btn.textContent = t("loading");
       const r = await call<{ data: string; total: number }>("get_blob", {
         session: current!.id,
         blob: ev.blob,
@@ -561,7 +627,7 @@ function updateToolBlock(ev: AcEvent) {
   if (ev.blob && !d.querySelector(".btn-more")) {
     const b = document.createElement("button");
     b.className = "btn-more";
-    b.textContent = "charger la sortie complète…";
+    b.textContent = t("load_full");
     b.addEventListener("click", async () => {
       b.disabled = true;
       const r = await call<{ data: string; total: number }>("get_blob", {
@@ -612,9 +678,9 @@ function renderQuestion(ev: AcEvent): HTMLElement {
   d.innerHTML = `
     <div class="perm-title">❓ ${esc(ev.message as string)}</div>
     <div class="q-row">
-      <input class="q-input" placeholder='réponse (JSON ou texte)' />
-      <button class="btn-allow">Répondre</button>
-      <button class="btn-reject">Ignorer</button>
+      <input class="q-input" placeholder='${t("answer_ph")}' />
+      <button class="btn-allow">${t("answer_btn")}</button>
+      <button class="btn-reject">${t("ignore_btn")}</button>
     </div>`;
   const input = d.querySelector<HTMLInputElement>(".q-input")!;
   const answer = async (val: string | null) => {
@@ -707,10 +773,10 @@ $("input").addEventListener("keydown", (e) => {
 });
 
 // ---- Commandes built-in (toujours dispo, exécutées côté client) ----
-const BUILTINS: { name: string; description: string; hint: string }[] = [
-  { name: "model", description: "Changer le modèle de la session", hint: "<modèle>" },
-  { name: "resume", description: "Reprendre la session (respawn agent + session/load)", hint: "" },
-  { name: "cancel", description: "Annuler la requête en cours", hint: "" },
+const BUILTINS = (): { name: string; description: string; hint: string }[] => [
+  { name: "model", description: t("builtin_model"), hint: "<model>" },
+  { name: "resume", description: t("builtin_resume"), hint: "" },
+  { name: "cancel", description: t("builtin_cancel"), hint: "" },
 ];
 
 async function runBuiltin(name: string, arg: string): Promise<boolean> {
@@ -760,7 +826,7 @@ function refreshAc() {
   const q = m[1].toLowerCase();
   const matches = [
     ...current.available_commands,
-    ...BUILTINS,
+    ...BUILTINS(),
   ]
     .filter((c) => cmdName(c).toLowerCase().startsWith(q))
     .slice(0, 12);
@@ -806,7 +872,7 @@ async function openNativePicker() {
     const list = r.sessions ?? [];
     box.innerHTML = list.length
       ? ""
-      : "Aucune session native (ou session/list non supporté par l'agent).";
+      : t("no_native");
     for (const s of list) {
       const row = document.createElement("div");
       row.className = "ac-item";
@@ -826,7 +892,7 @@ async function openNativePicker() {
     box.innerHTML = `<div class="errline">${esc(String(e))}</div>`;
     const row = document.createElement("div");
     row.className = "ac-item";
-    row.innerHTML = `<span class="n">↻</span><span class="d">Reprendre la session courante (respawn + session/load)</span>`;
+    row.innerHTML = `<span class="n">↻</span><span class="d">${t("resume_current")}</span>`;
     row.onclick = async () => {
       ($("dlg-resume") as HTMLDialogElement).close();
       await call("resume_session", { session: current!.id }).catch((er) => showErr(String(er)));
@@ -841,7 +907,7 @@ async function sendInput() {
   if (!t || !current) return;
   // Built-ins client (interceptent avant envoi à l'agent)
   const bm = /^\/(\w+)(?:\s+(.*))?$/.exec(t);
-  if (bm && BUILTINS.some((b) => b.name === bm[1])) {
+  if (bm && BUILTINS().some((b) => b.name === bm[1])) {
     ($("input") as HTMLTextAreaElement).value = "";
     try {
       await runBuiltin(bm[1], (bm[2] ?? "").trim());
@@ -949,7 +1015,7 @@ let fusionApplied = false;
 function openFusion() {
   const { prims, sides } = fusionTable();
   if (!prims.size) {
-    showErr("Aucune combinaison Fusion annoncée par l'agent.");
+    showErr(t("fusion_none"));
     return;
   }
   const a = $("fu-a") as HTMLSelectElement;
@@ -1005,7 +1071,7 @@ $("fu-ok").addEventListener("click", (e) => {
   const eb = ($("fu-eb") as HTMLSelectElement).value;
   const v = `fusion-${a}${ea ? "-" + ea : ""}-sidekick-${b}${eb ? "-" + eb : ""}`;
   if (!fusionTable().valid.has(v)) {
-    showErr(`Combinaison Fusion non annoncée par l'agent : ${v}`);
+    showErr(t("fusion_bad") + v);
     return;
   }
   fusionApplied = true;
@@ -1173,7 +1239,7 @@ $("btn-connect").onclick = async () => {
   // Connexions récentes sauvegardées
   savedConns = await invoke<SavedConn[]>("saved_connections").catch(() => []);
   const sv = $("c-saved") as HTMLSelectElement;
-  sv.innerHTML = '<option value="">— choisir —</option>';
+  sv.innerHTML = `<option value="">${t("choose")}</option>`;
   savedConns.forEach((c, i) => {
     const o = document.createElement("option");
     o.value = String(i);

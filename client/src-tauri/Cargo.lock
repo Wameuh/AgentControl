@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agentcontrol"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "client-core",
@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "client-core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "proto",
@@ -2450,7 +2450,7 @@ dependencies = [
 
 [[package]]
 name = "proto"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "chrono",
  "serde",
