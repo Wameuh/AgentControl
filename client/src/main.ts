@@ -630,6 +630,7 @@ function renderToolCall(ev: AcEvent): HTMLElement {
   if (ev.excerpt) pre.textContent = ev.excerpt as string;
   d.querySelector(".tool-head")!.addEventListener("click", () => {
     body.hidden = !body.hidden;
+    d.classList.toggle("open", !body.hidden);
   });
   const btn = d.querySelector<HTMLButtonElement>(".btn-more");
   if (btn && ev.blob) {

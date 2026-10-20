@@ -376,3 +376,7 @@ details.th > summary {
 }
 details.th > summary::before { content: "▸ "; color: var(--dim); }
 details.th[open] > summary::before { content: "▾ "; }
+
+/* Chevron d'expand sur les tool calls */
+.tool-head::after { content: "▸"; margin-left: auto; color: var(--dim); font-size: 11px; }
+.tool.open .tool-head::after { content: "▾"; color: var(--sand); }
