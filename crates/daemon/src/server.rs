@@ -221,7 +221,7 @@ impl Daemon {
                 if let Some(p) = prompt {
                     let s = Arc::clone(&session);
                     tokio::spawn(async move {
-                        let _ = s.send_prompt(&p).await;
+                        let _ = s.send_prompt(&p, false).await;
                     });
                 }
                 Ok(json!({"session": sid}))
@@ -311,14 +311,14 @@ impl Daemon {
                 s.spawn_agent(&cmd, &envs, meta.native_session_id).await?;
                 Ok(json!({"session": session}))
             }
-            ReqKind::Send { session, text } => {
+            ReqKind::Send { session, text, force } => {
                 let s = self.get_session(&session).await?;
                 if !s.is_alive() {
                     anyhow::bail!("agent not running — resume_session d'abord");
                 }
                 // Le tour peut durer longtemps : on spawne, le client suit via events.
                 tokio::spawn(async move {
-                    let _ = s.send_prompt(&text).await;
+                    let _ = s.send_prompt(&text, force).await;
                 });
                 Ok(json!({"queued": true}))
             }
@@ -334,6 +334,7 @@ impl Daemon {
             }
             ReqKind::Cancel { session } => {
                 let s = self.get_session(&session).await?;
+                s.clear_queue();
                 s.cancel().await?;
                 Ok(json!({"cancelled": true}))
             }

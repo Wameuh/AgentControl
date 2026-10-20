@@ -279,6 +279,9 @@ pub enum ReqKind {
     Send {
         session: String,
         text: String,
+        /// Interrompt le tour en cours puis envoie en priorité (tête de file).
+        #[serde(default)]
+        force: bool,
     },
     /// Page d'historique : les `limit` événements avant `before_seq`
     /// (before_seq absent ou 0 = depuis la fin).

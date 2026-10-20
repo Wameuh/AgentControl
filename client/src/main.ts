@@ -746,7 +746,7 @@ await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
 // Actions UI
 // ---------------------------------------------------------------------------
 
-$("btn-send").onclick = sendInput;
+$("btn-send").onclick = () => sendInput();
 $("input").addEventListener("keydown", (e) => {
   const ac = $("cmd-ac");
   if (!ac.hidden) {
@@ -765,6 +765,11 @@ $("input").addEventListener("keydown", (e) => {
       ac.hidden = true;
       return;
     }
+  }
+  if (e.key === "Enter" && e.ctrlKey) {
+    e.preventDefault();
+    sendInput(true); // Ctrl+Entrée = envoi forcé (annule le tour en cours)
+    return;
   }
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
@@ -902,7 +907,7 @@ async function openNativePicker() {
   }
 }
 
-async function sendInput() {
+async function sendInput(force = false) {
   const t = ($("input") as HTMLTextAreaElement).value.trim();
   if (!t || !current) return;
   // Built-ins client (interceptent avant envoi à l'agent)
@@ -917,7 +922,7 @@ async function sendInput() {
     return;
   }
   ($("input") as HTMLTextAreaElement).value = "";
-  await call("send", { session: current.id, text: t }).catch((e) => showErr(String(e)));
+  await call("send", { session: current.id, text: t, force }).catch((e) => showErr(String(e)));
 }
 
 $("btn-cancel").onclick = () =>

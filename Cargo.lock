@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "acctl"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "proto",
@@ -15,7 +15,7 @@ dependencies = [
 
 [[package]]
 name = "acp-mock-agent"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -23,7 +23,7 @@ dependencies = [
 
 [[package]]
 name = "agentcontrol-daemon"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "client-core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "proto",
@@ -313,7 +313,7 @@ dependencies = [
 
 [[package]]
 name = "proto"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "chrono",
  "serde",

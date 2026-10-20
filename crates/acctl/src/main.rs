@@ -210,6 +210,7 @@ async fn main() -> Result<()> {
             c.call(proto::ReqKind::Send {
                 session: args[1].clone(),
                 text: args[2..].join(" "),
+                force: false,
             }).await?;
         }
         "events" => {

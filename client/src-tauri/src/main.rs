@@ -107,7 +107,11 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             native_id: s("native_id"),
             title: so("title"),
         },
-        "send" => ReqKind::Send { session: s("session"), text: s("text") },
+        "send" => ReqKind::Send {
+            session: s("session"),
+            text: s("text"),
+            force: p.get("force").and_then(Value::as_bool).unwrap_or(false),
+        },
         "delete_session" => ReqKind::DeleteSession { session: s("session") },
         "rename_session" => ReqKind::RenameSession { session: s("session"), title: s("title") },
         "events" => ReqKind::Events {
