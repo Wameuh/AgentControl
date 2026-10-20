@@ -277,11 +277,17 @@ async function openSession(id: string) {
   $("chat-title").textContent = `${current.title} — ${current.agent}`;
   updateHeader();
 
-  // Charge la dernière page d'événements
-  const page = await call<{ events: AcEvent[]; last_seq: number }>("events", {
-    session: id,
-    limit: PAGE,
-  });
+  // Charge la dernière page d'événements — un échec (journal absent/corrompu)
+  // ne doit PAS tuer le subscribe ni la vue live derrière.
+  let page = { events: [] as AcEvent[], last_seq: 0 };
+  try {
+    page = await call<{ events: AcEvent[]; last_seq: number }>("events", {
+      session: id,
+      limit: PAGE,
+    });
+  } catch (e) {
+    showErr(`events: ${e}`);
+  }
   for (const ev of page.events) appendEvent(ev, false);
   scrollBottom();
 
