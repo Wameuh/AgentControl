@@ -136,6 +136,20 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             limit: p.get("limit").and_then(Value::as_u64).unwrap_or(262144),
         },
         "read_file" => ReqKind::ReadFile { session: s("session"), path: s("path") },
+        "queue_list" => ReqKind::QueueList { session: s("session") },
+        "queue_edit" => ReqKind::QueueEdit {
+            session: s("session"),
+            index: p.get("index").and_then(Value::as_u64).unwrap_or(0),
+            text: s("text"),
+        },
+        "queue_drop" => ReqKind::QueueDrop {
+            session: s("session"),
+            index: p.get("index").and_then(Value::as_u64).unwrap_or(0),
+        },
+        "queue_promote" => ReqKind::QueuePromote {
+            session: s("session"),
+            index: p.get("index").and_then(Value::as_u64).unwrap_or(0),
+        },
         "kill_session" => ReqKind::KillSession { session: s("session") },
         m => return Err(format!("méthode inconnue: {m}")),
     })

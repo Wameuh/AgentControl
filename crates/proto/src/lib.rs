@@ -289,6 +289,12 @@ pub enum ReqKind {
         session: String,
         path: String,
     },
+    /// Gestion de la file de prompts (index = position dans la file).
+    QueueList { session: String },
+    QueueEdit { session: String, index: u64, text: String },
+    QueueDrop { session: String, index: u64 },
+    /// Tête de file + annulation du tour courant = envoi forcé.
+    QueuePromote { session: String, index: u64 },
     /// Page d'historique : les `limit` événements avant `before_seq`
     /// (before_seq absent ou 0 = depuis la fin).
     Events {

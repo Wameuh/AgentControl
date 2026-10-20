@@ -346,6 +346,28 @@ impl Daemon {
                     "truncated": truncated,
                 }))
             }
+            ReqKind::QueueList { session } => {
+                let s = self.get_session(&session).await?;
+                Ok(json!({"queue": s.queue_snapshot()}))
+            }
+            ReqKind::QueueEdit { session, index, text } => {
+                let s = self.get_session(&session).await?;
+                Ok(json!({"ok": s.queue_edit(index as usize, &text)}))
+            }
+            ReqKind::QueueDrop { session, index } => {
+                let s = self.get_session(&session).await?;
+                Ok(json!({"ok": s.queue_remove(index as usize)}))
+            }
+            // Promote : tête de file + annule le tour courant = envoi forcé,
+            // mais le reste de la file est préservé (≠ Cancel qui vide tout).
+            ReqKind::QueuePromote { session, index } => {
+                let s = self.get_session(&session).await?;
+                let ok = s.queue_promote(index as usize);
+                if ok {
+                    let _ = s.cancel().await;
+                }
+                Ok(json!({"ok": ok}))
+            }
             ReqKind::Cancel { session } => {
                 let s = self.get_session(&session).await?;
                 s.clear_queue();
@@ -358,6 +380,7 @@ impl Daemon {
                     "meta": s.meta_snapshot(),
                     "pending": s.pending_requests(),
                     "alive": s.is_alive(),
+                    "queue": s.queue_snapshot(),
                     "last_seq": s.journal.last_seq(),
                 }))
             }

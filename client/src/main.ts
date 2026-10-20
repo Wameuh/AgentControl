@@ -372,6 +372,7 @@ async function openSession(id: string) {
 
 function updateHeader() {
   if (!current) return;
+  refreshQueue();
   const st = $("chat-state");
   st.textContent = current.state;
   st.className = `badge st-${current.state}`;
@@ -499,6 +500,34 @@ function diffFmt(escaped: string): string {
     .join("\n");
 }
 
+/** Coloration syntaxique légère par extension (kw/str/com/num). */
+const SYN_KWS: Record<string, string> = {
+  rs: "fn let mut pub mod use impl struct enum trait match loop where dyn ref box unsafe const static type as in for while if else return break continue move self Self super crate true false",
+  py: "def class import from as if elif else for while return pass with try except finally raise yield lambda global nonlocal assert is in not and or None True False self",
+  ts: "function const let var if else for while of in return break continue new class extends import export from as async await try catch finally throw switch case default typeof instanceof delete void this null undefined true false public private protected readonly interface type enum implements satisfies",
+  sh: "if then else elif fi for while do done case esac function in echo exit return local export source readonly unset shift",
+};
+const SYN_EXT: Record<string, string> = {
+  rs: "rs", py: "py", ts: "ts", tsx: "ts", js: "ts", jsx: "ts", mjs: "ts",
+  sh: "sh", bash: "sh", zsh: "sh",
+};
+function highlight(code: string, ext: string): string {
+  const lang = SYN_EXT[ext] ?? "";
+  const kws = (SYN_KWS[lang] ?? "").split(" ").filter(Boolean);
+  const comSrc = lang === "rs" || lang === "ts" ? "\\/\\/[^\\n]*" : "#[^\\n]*";
+  const strSrc = '"[^"\\n]*"|\'[^\'\\n]*\'|`[^`\\n]*`';
+  const kwSrc = kws.length ? `\\b(?:${kws.join("|")})\\b` : "a^"; // a^ = jamais
+  const re = new RegExp(`(${comSrc})|(${strSrc})|(${kwSrc})|(\\b\\d+(?:\\.\\d+)?\\b)`, "g");
+  return esc(code).replace(
+    re,
+    (m, c, s, k, n) =>
+      c ? `<span class="syn-com">${m}</span>`
+      : s ? `<span class="syn-str">${m}</span>`
+      : k ? `<span class="syn-kw">${m}</span>`
+      : `<span class="syn-num">${m}</span>`,
+  );
+}
+
 async function openFilePanel(path: string) {
   if (!current) return;
   $("file-panel").hidden = false;
@@ -510,12 +539,38 @@ async function openFilePanel(path: string) {
       session: current.id,
       path,
     });
-    $("file-view").textContent = r.content + (r.truncated ? "\n… (tronqué)" : "");
+    const ext = /\.([a-zA-Z0-9]+)$/.exec(path)?.[1]?.toLowerCase() ?? "";
+    $("file-view").innerHTML =
+      highlight(r.content, ext) + (r.truncated ? "\n… (tronqué)" : "");
   } catch (e) {
     $("file-view").textContent = String(e);
   }
 }
 $("file-close").onclick = () => ($("file-panel").hidden = true);
+// Redimensionnement du panneau par son bord gauche
+{
+  const panel = $("file-panel");
+  const hd = $("file-resize");
+  hd.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    const move = (ev: MouseEvent) => {
+      const w = Math.min(
+        Math.max(window.innerWidth - ev.clientX, 240),
+        window.innerWidth - 120,
+      );
+      panel.style.width = `${w}px`;
+      localStorage.setItem("ac-filepanel-w", String(w));
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  });
+  const saved = Number(localStorage.getItem("ac-filepanel-w"));
+  if (saved > 240) panel.style.width = `${saved}px`;
+}
 eventsEl.addEventListener("click", (e) => {
   const el = (e.target as HTMLElement).closest<HTMLElement>(".flink");
   if (el?.dataset.path) void openFilePanel(el.dataset.path);
@@ -1023,6 +1078,54 @@ async function openNativePicker() {
   }
 }
 
+// ---- File d'attente des prompts (queue_list/edit/drop/promote) ----
+async function refreshQueue() {
+  const bar = $("queue-bar");
+  if (!current) {
+    bar.hidden = true;
+    return;
+  }
+  try {
+    const r = await call<{ queue: string[] }>("queue_list", {
+      session: current.id,
+    });
+    bar.innerHTML = "";
+    bar.hidden = r.queue.length === 0;
+    r.queue.forEach((txt, i) => {
+      const d = document.createElement("div");
+      d.className = "q-item";
+      const sp = document.createElement("span");
+      sp.className = "q-txt";
+      sp.textContent = txt;
+      sp.title = txt;
+      d.appendChild(sp);
+      // ✎ = reprendre dans le champ + retirer de la file
+      const e = qBtn("✎", "Edit");
+      e.onclick = () => {
+        ($("input") as HTMLTextAreaElement).value = txt;
+        call("queue_drop", { session: current!.id, index: i }).then(refreshQueue);
+      };
+      // ⏫ = tête de file + cancel → envoi forcé (reste de file préservée)
+      const p = qBtn("⏫", "Send now");
+      p.onclick = () =>
+        call("queue_promote", { session: current!.id, index: i }).then(refreshQueue);
+      const x = qBtn("✕", "Remove");
+      x.onclick = () =>
+        call("queue_drop", { session: current!.id, index: i }).then(refreshQueue);
+      d.append(e, p, x);
+      bar.appendChild(d);
+    });
+  } catch {
+    bar.hidden = true;
+  }
+}
+function qBtn(txt: string, title: string): HTMLButtonElement {
+  const b = document.createElement("button");
+  b.textContent = txt;
+  b.title = title;
+  return b;
+}
+
 async function sendInput(force = false) {
   const t = ($("input") as HTMLTextAreaElement).value.trim();
   if (!t || !current) return;
@@ -1039,6 +1142,7 @@ async function sendInput(force = false) {
   }
   ($("input") as HTMLTextAreaElement).value = "";
   await call("send", { session: current.id, text: t, force }).catch((e) => showErr(String(e)));
+  refreshQueue();
 }
 
 $("btn-cancel").onclick = () =>

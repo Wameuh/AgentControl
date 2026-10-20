@@ -48,6 +48,7 @@
           <div id="events">
             <div id="scroll-sentinel"></div>
           </div>
+          <div id="queue-bar" hidden></div>
           <footer id="composer">
             <div id="cmd-ac" hidden></div>
             <textarea id="input" data-i18n-ph="input_ph" placeholder="Message… (Enter = send)" rows="2"></textarea>
@@ -55,8 +56,9 @@
           </footer>
         </main>
         <aside id="file-panel" hidden>
+          <div id="file-resize" title="Drag to resize"></div>
           <header id="file-head"><span id="file-path"></span><button id="file-close">✕</button></header>
-          <pre id="file-view"></pre>
+          <pre id="file-view" class="syn"></pre>
         </aside>
       </div>
     </div>

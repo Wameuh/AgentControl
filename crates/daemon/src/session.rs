@@ -721,6 +721,38 @@ impl Session {
         }
     }
 
+    /// Contenu de la file dans l'ordre d'envoi.
+    pub fn queue_snapshot(&self) -> Vec<String> {
+        self.prompt_queue.lock().unwrap().iter().cloned().collect()
+    }
+
+    pub fn queue_edit(&self, idx: usize, text: &str) -> bool {
+        let mut q = self.prompt_queue.lock().unwrap();
+        if let Some(slot) = q.get_mut(idx) {
+            *slot = text.to_string();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn queue_remove(&self, idx: usize) -> bool {
+        self.prompt_queue.lock().unwrap().remove(idx).is_some()
+    }
+
+    /// Passe en tête de file — combiné au cancel serveur = envoi forcé
+    /// (contrairement à clear_queue, le reste de la file est préservé).
+    pub fn queue_promote(&self, idx: usize) -> bool {
+        let mut q = self.prompt_queue.lock().unwrap();
+        match q.remove(idx) {
+            Some(t) => {
+                q.push_front(t);
+                true
+            }
+            None => false,
+        }
+    }
+
     pub async fn cancel(&self) -> Result<()> {
         let sid = self
             .meta_snapshot()
