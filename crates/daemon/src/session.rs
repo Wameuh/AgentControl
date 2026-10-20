@@ -344,6 +344,32 @@ impl Session {
                 "agent started".into()
             },
         });
+        // Config demandée pendant que l'agent était mort : rejouer maintenant
+        // (modèle/mode choisis hors-ligne appliqués au resume).
+        let pending: Vec<(String, String)> = {
+            self.meta.lock().unwrap().pending_config.drain().collect()
+        };
+        if !pending.is_empty() {
+            self.save_meta(); // persiste la map vidée même si les appels échouent
+        }
+        for (k, v) in pending {
+            let r = match k.as_str() {
+                "model" => match self.set_config_option("model", &v).await {
+                    Ok(()) => Ok(()),
+                    Err(_) => self.set_model(&v).await.map(|_| ()),
+                },
+                "mode" => match self.set_config_option("mode", &v).await {
+                    Ok(()) => Ok(()),
+                    Err(_) => self.set_mode(&v).await,
+                },
+                _ => self.set_config_option(&k, &v).await,
+            };
+            if let Err(e) = r {
+                self.emit(EventKind::Error {
+                    message: format!("config différée {k}={v}: {e:#}"),
+                });
+            }
+        }
         self.set_state("idle");
         Ok(())
     }
@@ -650,6 +676,18 @@ impl Session {
     }
 
     pub async fn set_mode(&self, mode: &str) -> Result<()> {
+        if !self.is_alive() {
+            // Agent mort : mémoriser, rejoué au resume comme "mode".
+            let mut m = self.meta.lock().unwrap();
+            m.pending_config.insert("mode".into(), mode.into());
+            m.mode = Some(mode.into());
+            drop(m);
+            self.save_meta();
+            self.emit(EventKind::System {
+                text: format!("mode={mode} mémorisé — appliqué à la reprise"),
+            });
+            return Ok(());
+        }
         let sid = self
             .meta_snapshot()
             .native_session_id
@@ -661,7 +699,19 @@ impl Session {
 
     /// Change de modèle : ACP session/set_model, sinon fallback sur la
     /// slash command "/model <m>" envoyée comme prompt.
+    /// Agent mort → mémorisé dans pending_config["model"], rejoué au resume.
     pub async fn set_model(self: &Arc<Self>, model: &str) -> Result<()> {
+        if !self.is_alive() {
+            let mut m = self.meta.lock().unwrap();
+            m.pending_config.insert("model".into(), model.into());
+            m.model = Some(model.into());
+            drop(m);
+            self.save_meta();
+            self.emit(EventKind::System {
+                text: format!("model={model} mémorisé — appliqué à la reprise"),
+            });
+            return Ok(());
+        }
         let sid = self
             .meta_snapshot()
             .native_session_id
@@ -711,10 +761,30 @@ impl Session {
     }
 
     /// ACP session/set_config_option — le mécanisme de config de Devin
-    /// (mode, model, …). Valide la valeur contre les options annoncées
-    /// (ex. les combinaisons Fusion sont une liste fermée) pour produire
-    /// une erreur lisible au lieu d'un « Invalid params » de l'agent.
+    /// (mode, model, …). Agent mort → la valeur est mémorisée dans
+    /// `pending_config` et rejouée au prochain spawn (resume).
     pub async fn set_config_option(&self, config_id: &str, value: &str) -> Result<()> {
+        if !self.is_alive() {
+            let opts = {
+                let mut m = self.meta.lock().unwrap();
+                m.pending_config.insert(config_id.into(), value.into());
+                if let Some(opt) = m.config_options.iter_mut().find(|o| o.id == config_id) {
+                    opt.current_value = value.into();
+                }
+                match config_id {
+                    "mode" => m.mode = Some(value.into()),
+                    "model" => m.model = Some(value.into()),
+                    _ => {}
+                }
+                m.config_options.clone()
+            };
+            self.save_meta();
+            self.emit(EventKind::System {
+                text: format!("{config_id}={value} mémorisé — appliqué à la reprise"),
+            });
+            self.emit(EventKind::ConfigOptions { options: opts });
+            return Ok(());
+        }
         let sid = self
             .meta_snapshot()
             .native_session_id

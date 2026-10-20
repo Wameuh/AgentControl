@@ -85,6 +85,38 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 const eventsEl = $("events");
 const sentinel = $("scroll-sentinel");
 
+// Redimensionnement de la sidebar : drag sur la poignée bord droit.
+// Largeur persistée dans localStorage.
+{
+  const bar = $("sidebar");
+  const grip = $("sidebar-resize");
+  const clamp = (x: number) => Math.min(520, Math.max(180, x));
+  const saved = Number(localStorage.getItem("sidebar-w"));
+  if (saved) {
+    bar.style.width = clamp(saved) + "px";
+    bar.style.minWidth = clamp(saved) + "px";
+  }
+  grip.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    grip.classList.add("drag");
+    document.body.style.userSelect = "none";
+    const move = (ev: MouseEvent) => {
+      const w = clamp(ev.clientX);
+      bar.style.width = w + "px";
+      bar.style.minWidth = w + "px";
+    };
+    const up = (ev: MouseEvent) => {
+      document.removeEventListener("mousemove", move);
+      document.removeEventListener("mouseup", up);
+      grip.classList.remove("drag");
+      document.body.style.userSelect = "";
+      localStorage.setItem("sidebar-w", String(clamp(ev.clientX)));
+    };
+    document.addEventListener("mousemove", move);
+    document.addEventListener("mouseup", up);
+  });
+}
+
 /** Erreur visible et copiable (remplace alert). */
 function showErr(msg: string) {
   const bar = $("err-bar");
@@ -116,6 +148,15 @@ async function doConnect(cfg: Record<string, unknown>) {
 // Liste des sessions
 // ---------------------------------------------------------------------------
 
+/** Contenu de l'indicateur d'état : engrenage (working) ou ? (question). */
+function dotIcon(state: string): string {
+  if (state === "working") {
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+  }
+  if (state === "waiting_input") return "?";
+  return "";
+}
+
 async function refreshSessions() {
   const list = await call<SessionMeta[]>("list_sessions");
   // Lumières "agents" du fond : une par session active
@@ -127,7 +168,7 @@ async function refreshSessions() {
   for (const s of list) {
     const div = document.createElement("div");
     div.className = "sess" + (current?.id === s.id ? " active" : "");
-    div.innerHTML = `<span class="dot st-${s.state}"></span><span class="t">${esc(s.title)}</span><span class="a">${esc(s.agent)}</span><button class="sess-del" title="Supprimer">✕</button>`;
+    div.innerHTML = `<span class="dot st-${s.state}" title="${esc(s.state)}">${dotIcon(s.state)}</span><span class="t">${esc(s.title)}</span><span class="a">${esc(s.agent)}</span><button class="sess-del" title="Supprimer">✕</button>`;
     div.onclick = () => openSession(s.id);
     const del = div.querySelector<HTMLElement>(".sess-del")!;
     del.addEventListener("click", async (e) => {

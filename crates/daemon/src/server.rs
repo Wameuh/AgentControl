@@ -186,6 +186,7 @@ impl Daemon {
                     available_commands: vec![],
                     available_models: vec![],
                     config_options: vec![],
+                    pending_config: Default::default(),
                     state: "starting".into(),
                 };
                 let dir = Session::create_dir(&self.root, &meta)?;
@@ -249,6 +250,7 @@ impl Daemon {
                     available_commands: vec![],
                     available_models: vec![],
                     config_options: vec![],
+                    pending_config: Default::default(),
                     state: "starting".into(),
                 };
                 let dir = Session::create_dir(&self.root, &meta)?;

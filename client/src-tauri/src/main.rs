@@ -196,16 +196,22 @@ async fn subscribe(
         .clone()
         .context("non connecté")
         .map_err(|e| e.to_string())?;
+    client_core::log(format!("subscribe session={session} after_seq={after_seq}"));
     let (mut rx, sub_client) = Client::subscribe(&t, &session, after_seq)
         .await
-        .map_err(|e| format!("{e:#}"))?;
+        .map_err(|e| {
+            client_core::log(format!("subscribe {session}: {e:#}"));
+            format!("{e:#}")
+        })?;
     // Une seule souscription par session : remplacer l'ancienne (le drop du
     // client tue son tunnel, l'abort stoppe la boucle d'émission → fin des
     // events en double)
+    let sid_log = session.clone();
     let task = tauri::async_runtime::spawn(async move {
         while let Ok(v) = rx.recv().await {
             let _ = app.emit("session-event", v);
         }
+        client_core::log(format!("subscribe {sid_log}: flux terminé (connexion fermée)"));
     });
     let old = state
         .subs

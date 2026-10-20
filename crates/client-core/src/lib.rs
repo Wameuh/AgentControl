@@ -357,6 +357,11 @@ impl Client {
 
     /// Appel RPC. Réponse ou erreur du démon.
     pub async fn call(&self, req: ReqKind) -> Result<Value> {
+        // Nom de la requête pour le log (le tag serde "req").
+        let name = serde_json::to_value(&req)
+            .ok()
+            .and_then(|v| v.get("req").and_then(Value::as_str).map(String::from))
+            .unwrap_or_else(|| "?".into());
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
@@ -364,14 +369,26 @@ impl Client {
         s.push('\n');
         {
             let mut w = self.w.lock().await;
-            w.write_all(s.as_bytes()).await?;
+            if let Err(e) = w.write_all(s.as_bytes()).await {
+                log(format!("daemon {name}: écriture ko {e}"));
+                return Err(e.into());
+            }
             w.flush().await?;
         }
         match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
             Ok(Ok(Ok(v))) => Ok(v),
-            Ok(Ok(Err(e))) => bail!(e),
-            Ok(Err(_)) => bail!("connexion fermée"),
-            Err(_) => bail!("timeout démon"),
+            Ok(Ok(Err(e))) => {
+                log(format!("daemon {name}: {e}"));
+                bail!(e)
+            }
+            Ok(Err(_)) => {
+                log(format!("daemon {name}: connexion fermée"));
+                bail!("connexion fermée")
+            }
+            Err(_) => {
+                log(format!("daemon {name}: timeout"));
+                bail!("timeout démon")
+            }
         }
     }
 

@@ -215,6 +215,10 @@ pub struct SessionMeta {
     /// Options de config dynamiques (config_option_update — mode/model chez Devin)
     #[serde(default)]
     pub config_options: Vec<ConfigOption>,
+    /// Config demandée pendant que l'agent était mort — rejouée au prochain
+    /// spawn (session/load). Clés = id d'option ("model", "mode", …).
+    #[serde(default)]
+    pub pending_config: std::collections::HashMap<String, String>,
     /// running | waiting_input | idle | dead | interrupted
     #[serde(default = "default_state")]
     pub state: String,

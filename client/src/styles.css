@@ -60,6 +60,19 @@ body {
   width: 250px; min-width: 250px; display: flex; flex-direction: column;
   background: var(--glass); backdrop-filter: blur(14px);
   border-right: 1px solid var(--line); padding: 10px; gap: 8px;
+  position: relative;
+}
+/* Poignée de redimensionnement sur le bord droit */
+#sidebar-resize {
+  position: absolute; top: 0; bottom: 0; right: -4px; width: 8px;
+  cursor: col-resize; z-index: 20;
+}
+#sidebar-resize::after {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px;
+  background: transparent; transition: background .15s;
+}
+#sidebar-resize:hover::after, #sidebar-resize.drag::after {
+  background: rgba(205, 182, 140, .55);
 }
 #conn-bar { display: flex; align-items: center; gap: 8px; }
 #conn-bar .badge { cursor: pointer; }
@@ -73,13 +86,36 @@ body {
 #session-list .sess.active { background: rgba(205, 182, 140, .1); border-color: rgba(205, 182, 140, .3); }
 #session-list .sess .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 #session-list .sess .a { color: var(--dim); font-size: 11px; font-family: Mono, ui-monospace, monospace; }
+/* Indicateur d'état par session : rond sauge idle, engrenage qui tourne
+   en working, ? violet en attente de réponse, anneaux or/rouge/dim sinon. */
 #session-list .sess .dot {
-  width: 8px; height: 8px; border-radius: 50%; flex: none;
-  background: var(--dim); box-shadow: 0 0 6px currentColor;
+  width: 13px; height: 13px; border-radius: 50%; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--dim); color: var(--dim);
+  font-size: 9px; font-weight: 700; line-height: 1;
 }
-.sess .dot.st-working, .sess .dot.st-waiting_input { background: var(--sage); color: var(--sage); animation: pulse 1.6s infinite; }
-.sess .dot.st-idle, .sess .dot.st-running { background: var(--sand); color: var(--sand); }
-.sess .dot.st-interrupted, .sess .dot.st-dead, .sess .dot.st-failed { background: var(--dim); color: transparent; }
+.sess .dot.st-idle, .sess .dot.st-running {
+  background: var(--sage); color: var(--sage);
+  box-shadow: 0 0 7px rgba(184, 207, 174, .55);
+}
+.sess .dot.st-working { background: transparent; color: var(--sage); }
+.sess .dot.st-working svg {
+  width: 14px; height: 14px; display: block;
+  animation: gearspin 1.6s linear infinite;
+  filter: drop-shadow(0 0 3px rgba(184, 207, 174, .6));
+}
+.sess .dot.st-waiting_input {
+  background: var(--violet); color: #221733;
+  animation: pulse 1.1s infinite;
+  box-shadow: 0 0 7px rgba(196, 169, 220, .6);
+}
+.sess .dot.st-starting {
+  background: var(--sand); color: var(--sand); animation: pulse 1.2s infinite;
+}
+.sess .dot.st-interrupted { background: transparent; border: 1.5px solid var(--gold); }
+.sess .dot.st-failed { background: transparent; border: 1.5px solid var(--err); }
+.sess .dot.st-dead { background: transparent; border: 1.5px solid var(--dim); }
+@keyframes gearspin { to { transform: rotate(360deg); } }
 @keyframes pulse { 50% { opacity: .35; } }
 .sess .sess-del { margin-left: auto; padding: 0 6px; font-size: 10px; opacity: .3; }
 .sess .sess-del:hover { opacity: 1; border-color: var(--err); color: var(--err); }
