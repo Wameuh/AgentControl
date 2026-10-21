@@ -280,7 +280,6 @@ async fn subscribe(
     after_seq: u64,
     conn: Option<String>,
 ) -> Result<(), String> {
-    fn params_get_conn() -> Option<String> { None }
     let conn = conn.clone();
     let c = get_conn(&state, conn.as_deref()).await?;
     client_core::log(format!("subscribe session={session} after_seq={after_seq} conn={conn:?}"));
@@ -447,6 +446,10 @@ fn main() {
     // (compositing GPU — bug connu Tauri sur Linux/Wayland/Nvidia).
     if std::env::var("WEBKIT_DISABLE_COMPOSITING_MODE").is_err() {
         unsafe { std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1") };
+    }
+    // Rendu figé / input sourd après unfocus (DMA-BUF renderer, Nvidia/Wayland)
+    if std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").is_err() {
+        unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
