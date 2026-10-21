@@ -15,7 +15,6 @@ use tokio::sync::Mutex;
 
 struct ConnCtx {
     client: Arc<Client>,
-    transport: Transport,
 }
 
 struct AppState {
@@ -87,7 +86,7 @@ async fn connect(state: State<'_, AppState>, cfg: ConnectCfg) -> Result<Value, S
     };
     let c = Client::connect(&t).await.map_err(|e| format!("{e:#}"))?;
     let status = c.call(ReqKind::DaemonStatus).await.map_err(|e| format!("{e:#}"))?;
-    state.conns.lock().await.insert(key.clone(), ConnCtx { client: c, transport: t });
+    state.conns.lock().await.insert(key.clone(), ConnCtx { client: c });
     *state.default_conn.lock().await = Some(key);
     Ok(status)
 }
