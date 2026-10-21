@@ -404,18 +404,20 @@ async fn ensure_daemon(host: String, args: Vec<String>, tag: String) -> Result<S
     // Script distant POSIX : check version via acctl status, sinon install.
     let script = format!(
         "set -e; arch=$(uname -m); \
+         case $arch in x86_64|aarch64) ;; *) echo \"arch non supportée: $arch\" >&2; exit 1;; esac; \
          bin=$HOME/.local/bin/agentcontrol-daemon; \
-         ver=$(\\\"$HOME/.local/bin/acctl\\\" status 2>/dev/null | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4); \
+         ver=$(\"$HOME/.local/bin/acctl\" status 2>/dev/null | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4); \
          running=$(systemctl --user is-active agentcontrol-daemon 2>/dev/null || true); \
          if [ \"$ver\" = \"{t}\" ] && [ \"$running\" = active ]; then echo ok:$ver; exit 0; fi; \
-         cd /tmp && rm -rf acupd acd.tgz && mkdir -p acupd && \
-         (curl -fsSL -o acd.tgz \"{base}/download/v{t}/agentcontrol-server-$arch-linux.tar.gz\" || \
-          curl -fsSL -o acd.tgz \"{base}/latest/download/agentcontrol-server-$arch-linux.tar.gz\") && \
-         tar xzf acd.tgz -C acupd && \
-         install -Dm755 acupd/agentcontrol-daemon $bin && \
-         install -Dm755 acupd/acctl $HOME/.local/bin/acctl || true; \
+         cd /tmp; rm -rf acupd acd.tgz; mkdir -p acupd; \
+         curl -fsSL -o acd.tgz \"{base}/download/v{t}/agentcontrol-server-$arch-linux.tar.gz\" || \
+         curl -fsSL -o acd.tgz \"{base}/latest/download/agentcontrol-server-$arch-linux.tar.gz\"; \
+         tar xzf acd.tgz -C acupd; \
+         install -Dm755 acupd/agentcontrol-daemon $bin; \
+         install -Dm755 acupd/acctl $HOME/.local/bin/acctl; \
          install -Dm644 acupd/packaging/agentcontrol-daemon.service $HOME/.config/systemd/user/agentcontrol-daemon.service; \
-         systemctl --user daemon-reload; systemctl --user enable --now agentcontrol-daemon; \
+         systemctl --user daemon-reload; \
+         systemctl --user enable --now agentcontrol-daemon; \
          sleep 1; echo installed:$($HOME/.local/bin/acctl status 2>/dev/null | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4)",
         base = BASE,
         t = tag

@@ -315,7 +315,24 @@ pub struct Client {
 
 impl Client {
     pub async fn connect(t: &Transport) -> Result<Arc<Self>> {
-        let (r, w, guard) = open_stream(t).await?;
+        // Retry sur TOCTOU de free_port() : le port est relâché avant le
+        // bind ssh -L → un autre tunnel/process peut le prendre entre-temps.
+        let mut attempt = 0u8;
+        let (r, w, guard) = loop {
+            attempt += 1;
+            match open_stream(t).await {
+                Ok(x) => break x,
+                Err(e) => {
+                    let m = format!("{e:#}");
+                    let busy = m.contains("Address already in use") || m.contains("cannot listen to port");
+                    if !busy || attempt >= 4 {
+                        return Err(e);
+                    }
+                    log(format!("port local occupé — retry tunnel {attempt}/3"));
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            }
+        };
         let client = Arc::new(Self {
             w: Mutex::new(w),
             pending: Mutex::new(HashMap::new()),
