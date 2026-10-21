@@ -23,7 +23,7 @@
     night: { base: [12, 15, 20], light: [116, 138, 172], agent: [147, 173, 140] },
     // Thème clair : même maillage, fond papier, accents nettement plus
     // foncés que la base → lumière "négative" (facettes sombres, sobre)
-    paper: { base: [233, 229, 216], light: [160, 128, 78], agent: [88, 118, 78] },
+    paper: { base: [233, 229, 216], light: [160, 128, 78], agent: [88, 118, 78], dark: true },
   };
   const MAX_AGENTS = 4;
   const IDLE_AFTER_MS = 3000;
@@ -42,7 +42,7 @@
   let frameId = 0;
   let lastTime = 0;
 
-  const mood = { base: [...MOODS.sand.base], light: [...MOODS.sand.light], agent: [...MOODS.sand.agent], intensity: 1 };
+  const mood = { base: [...MOODS.sand.base], light: [...MOODS.sand.light], agent: [...MOODS.sand.agent], intensity: 1, dark: false };
   let target = { ...MOODS.sand, intensity: 1 };
   let agentCount = 0;
 
@@ -138,7 +138,8 @@
       const distance = Math.hypot(dx, dy, dz);
       const lambert = Math.max(0, (nx * dx + ny * dy + nz * dz) / distance);
       const falloff = 1 / (1 + (distance * distance) / (light.radius * light.radius));
-      const k = lambert * lambert * falloff * light.power;
+      const sgn = mood.dark ? -1.35 : 1;
+      const k = sgn * lambert * lambert * falloff * light.power;
       r += light.color[0] * k;
       g += light.color[1] * k;
       b += light.color[2] * k;
@@ -243,6 +244,7 @@
   function setMood(name, options = {}) {
     const preset = MOODS[name] || MOODS.sand;
     target = { ...preset, intensity: options.intensity ?? 1 };
+    mood.dark = !!preset.dark;
     agentCount = Math.max(0, Math.min(MAX_AGENTS, options.agents | 0));
     if (!running) {
       snapToTarget();
