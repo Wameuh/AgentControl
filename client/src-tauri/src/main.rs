@@ -23,6 +23,8 @@ struct AppState {
     default_conn: Mutex<Option<String>>,
     /// "conn:session" → tâche d'émission subscribe
     subs: Mutex<std::collections::HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
+    /// sysinfo persisté → delta CPU entre deux appels
+    sys: Mutex<sysinfo::System>,
 }
 
 async fn get_conn(state: &State<'_, AppState>, key: Option<&str>) -> Result<Arc<Client>, String> {
@@ -92,6 +94,19 @@ async fn connect(state: State<'_, AppState>, cfg: ConnectCfg) -> Result<Value, S
 }
 
 /// Déconnecte proprement une connexion (tue le tunnel/process ssh).
+/// Stats process client : RSS Mo + CPU % (delta depuis l'appel précédent).
+#[tauri::command]
+async fn sys_stats(state: State<'_, AppState>) -> Result<Value, String> {
+    let pid = sysinfo::get_current_pid().map_err(|e| e.to_string())?;
+    let mut sys = state.sys.lock().await;
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+    let p = sys.process(pid).ok_or("process introuvable")?;
+    Ok(json!({
+        "rss_mb": (p.memory() as f64 / 1_048_576.0).round(),
+        "cpu": (p.cpu_usage() * 10.0).round() / 10.0,
+    }))
+}
+
 #[tauri::command]
 async fn disconnect(state: State<'_, AppState>, conn: String) -> Result<(), String> {
     state.conns.lock().await.remove(&conn);
@@ -470,8 +485,9 @@ fn main() {
             conns: Mutex::new(std::collections::HashMap::new()),
             default_conn: Mutex::new(None),
             subs: Mutex::new(std::collections::HashMap::new()),
+            sys: Mutex::new(sysinfo::System::new()),
         })
-        .invoke_handler(tauri::generate_handler![connect, call, subscribe, ssh_hosts, log_tail, saved_connections, save_connection, check_update, update_client, ensure_daemon, disconnect])
+        .invoke_handler(tauri::generate_handler![connect, call, subscribe, ssh_hosts, log_tail, saved_connections, save_connection, check_update, update_client, ensure_daemon, disconnect, sys_stats])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

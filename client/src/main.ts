@@ -1652,6 +1652,16 @@ setInterval(async () => {
   refreshSessions().catch(() => {});
 }, 10_000);
 
+// Barre d'état : mémoire + CPU du client, toutes les 3 s
+async function updateStatusbar() {
+  try {
+    const s = await invoke<{ rss_mb: number; cpu: number }>("sys_stats");
+    $("sb-stats").textContent = `mem ${Math.round(s.rss_mb)} MB · cpu ${s.cpu}%`;
+  } catch { /* silencieux */ }
+}
+setInterval(updateStatusbar, 3000);
+updateStatusbar();
+
 // Auto-reconnexion au démarrage avec la dernière connexion utilisée
 invoke<SavedConn[]>("saved_connections")
   .then(async (conns) => {

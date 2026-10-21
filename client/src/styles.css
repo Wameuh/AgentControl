@@ -477,3 +477,9 @@ details.th[open] > summary::before { content: "▾ "; }
 .sess.in-grp { margin-left:14px }
 #g-name { width:100%; box-sizing:border-box; background:rgba(236,230,216,.05); color:var(--ink);
   border:1px solid var(--line); border-radius:8px; padding:8px 10px; font:inherit; margin:8px 0 }
+
+/* Barre d'état basse */
+#statusbar { display:flex; align-items:center; gap:14px; padding:3px 14px;
+  font-size:11px; color:var(--dim); border-top:1px solid var(--line);
+  background:var(--panel-solid); user-select:none; flex:none }
+.sb-flex { flex:1 }
