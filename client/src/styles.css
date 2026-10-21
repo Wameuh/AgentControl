@@ -464,3 +464,8 @@ details.th[open] > summary::before { content: "▾ "; }
   padding:6px 8px 3px; cursor:pointer; user-select:none; display:flex; gap:5px; align-items:center }
 .grp-head:hover { color:var(--fg) }
 .grp-arrow { width:10px; opacity:.7 }
+
+/* Dialogue install/update démon */
+.daemon-dlg { display:flex; gap:12px; align-items:center; padding:6px 0; }
+.spin-ico { display:inline-block; animation: spin 1s linear infinite; font-size:22px; color:var(--sand); }
+@keyframes spin { to { transform: rotate(360deg); } }

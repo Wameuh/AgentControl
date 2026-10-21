@@ -265,49 +265,59 @@ async function call<T = unknown>(method: string, params: Record<string, unknown>
 // Connexion
 // ---------------------------------------------------------------------------
 
+const minorOf = (v: string) => v.split(".").slice(0, 2).join(".");
+const connKeyOf = (cfg: Record<string, unknown>) =>
+  cfg.kind === "ssh" ? `ssh:${cfg.host}` : cfg.kind === "tcp" ? `tcp:${cfg.addr}` : "local";
+
+/** Dialogue modal pendant install/update du démon distant. */
+function daemonDlg(msg: string, open: boolean) {
+  const d = $("dlg-daemon") as HTMLDialogElement;
+  if (open) {
+    ($("dlg-daemon-msg")).textContent = msg;
+    if (!d.open) d.showModal();
+  } else if (d.open) d.close();
+}
+
 async function doConnect(cfg: Record<string, unknown>) {
   lastCfg = cfg;
   const el = $("conn-status");
   let status: unknown;
   try {
-    status = await call("daemon_status").catch(async () => {
-      const r = await invoke("connect", { cfg });
-      return r;
-    });
+    // Toujours établir la connexion — daemon_status fusionné renvoie Ok
+    // même sans connexions, il ne peut pas servir de pré-vérification.
+    status = await invoke("connect", { cfg });
   } catch (e) {
-    // SSH : la connexion a échoué — le démon n'est peut-être pas installé
-    // ou arrêté côté serveur → bootstrap depuis la release GitHub.
-    if (cfg.kind === "ssh" && cfg.host) {
-      const ver = await getVersion().catch(() => "0.0.0");
-      el.textContent = t("installing_daemon");
-      el.className = "badge warn";
-      await invoke("ensure_daemon", {
-        host: cfg.host,
-        args: cfg.args ?? [],
-        tag: ver,
-      });
-      await invoke("connect", { cfg });
-      status = await call("daemon_status");
-    } else {
-      throw e;
+    // SSH : échec → démon absent ou arrêté → bootstrap depuis la release.
+    if (cfg.kind !== "ssh" || !cfg.host) throw e;
+    const ver = await getVersion().catch(() => "0.0.0");
+    el.textContent = t("installing_daemon");
+    el.className = "badge warn";
+    daemonDlg(t("installing_daemon") + " — " + String(cfg.host), true);
+    try {
+      await invoke("ensure_daemon", { host: cfg.host, args: cfg.args ?? [], tag: ver });
+    } finally {
+      daemonDlg("", false);
     }
+    status = await invoke("connect", { cfg });
   }
-  // Démon en version antérieure → update à la version du client.
+  // Update démon : seulement sur incompatibilité de version mineure (x.y),
+  // pas à chaque patch.
   const dv = (status as { version?: string }).version;
   const lv = await getVersion().catch(() => "0.0.0");
-  if (cfg.kind === "ssh" && cfg.host && dv && lv && cmpVer(dv, lv) < 0) {
+  if (cfg.kind === "ssh" && cfg.host && dv && lv && minorOf(dv) !== minorOf(lv)) {
     el.textContent = t("updating_daemon", { dv, lv });
     el.className = "badge warn";
-    await invoke("ensure_daemon", {
-      host: cfg.host,
-      args: cfg.args ?? [],
-      tag: lv,
-    }).catch((e) => showErr(String(e)));
-    await invoke("connect", { cfg }).catch(() => {});
-    status = await call("daemon_status").catch(() => status);
+    daemonDlg(t("updating_daemon", { dv, lv }) + " — " + String(cfg.host), true);
+    try {
+      await invoke("ensure_daemon", { host: cfg.host, args: cfg.args ?? [], tag: lv })
+        .catch((e) => showErr(String(e)));
+      status = await invoke("connect", { cfg }).catch(() => status);
+    } finally {
+      daemonDlg("", false);
+    }
   }
   const srv = (status as { servers?: number }).servers;
-    el.textContent = srv && srv > 1 ? `${srv} servers` : t("connected_n", { n: (status as { sessions?: number }).sessions ?? 0 });
+  el.textContent = srv && srv > 1 ? `${srv} servers` : t("connected_n", { n: (status as { sessions?: number }).sessions ?? 0 });
   el.className = "badge ok";
   await refreshSessions();
 }
@@ -1551,23 +1561,31 @@ let reconnecting = false;
 setInterval(async () => {
   const el = $("conn-status");
   try {
-    const st = await call<{ sessions?: number }>("daemon_status");
-    el.textContent = t("connected_n", { n: st.sessions ?? 0 });
+    const st = await call<{ servers?: number; sessions?: number } & Record<string, unknown>>("daemon_status");
+    // Conns mortes : entrées {error} dans le résultat fusionné
+    const dead = Object.entries(st)
+      .filter(([k, v]) => !["servers", "sessions"].includes(k) && (v as { error?: string }).error)
+      .map(([k]) => k);
+    if (!st.servers || dead.length) throw dead;
+    el.textContent = st.servers > 1 ? `${st.servers} servers` : t("connected_n", { n: st.sessions ?? 0 });
     el.className = "badge ok";
-  } catch {
+  } catch (dead) {
     el.textContent = t("disconnected_reconnect");
     el.className = "badge st-dead";
-    if (lastCfg && !reconnecting) {
-      reconnecting = true;
-      doConnect({ ...lastCfg })
-        .then(() => {
-          if (current) openSession(current.id);
-        })
-        .catch(() => {})
-        .finally(() => {
-          reconnecting = false;
-        });
-    }
+    if (reconnecting) return;
+    reconnecting = true;
+    // Reconnecter chaque connexion morte (ou toutes si liste vide)
+    const keys = Array.isArray(dead) ? (dead as string[]) : [];
+    const cfgs = savedConns.filter((c) =>
+      !keys.length || keys.includes(connKeyOf(c as unknown as Record<string, unknown>)));
+    const list = cfgs.length ? cfgs : (lastCfg ? [lastCfg] : []);
+    Promise.all(list.map((c) => doConnect({ ...(c as Record<string, unknown>) }).catch(() => {})))
+      .then(() => {
+        if (current) openSession(current.id);
+      })
+      .finally(() => {
+        reconnecting = false;
+      });
     return;
   }
   refreshSessions().catch(() => {});
