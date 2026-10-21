@@ -531,7 +531,7 @@ function updateHeader() {
     // Select d'effort : suffixes réellement présents pour la base choisie
     // (masqué en fusion — les efforts se choisissent dans le dialogue)
     fillEfforts(md.value, curEff);
-    es.hidden = curIsFusion;
+    es.hidden = curIsFusion || es.options.length <= 1;
   } else {
     md.hidden = true;
     es.hidden = true;
@@ -1293,7 +1293,8 @@ function fillEfforts(base: string, cur: string) {
   const es = $("effort-select") as HTMLSelectElement;
   const effs = effortsFor(base);
   es.innerHTML = "";
-  for (const e of effs.length ? effs : ["medium", "high"]) {
+  if (effs.length <= 1) return;
+  for (const e of effs) {
     const o = document.createElement("option");
     o.value = e;
     o.textContent = e;
