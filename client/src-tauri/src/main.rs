@@ -25,6 +25,8 @@ struct AppState {
     subs: Mutex<std::collections::HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
     /// sysinfo persisté → delta CPU entre deux appels
     sys: Mutex<sysinfo::System>,
+    /// Échantillons (instant, rx, tx) — débit lissé sur ~5 s
+    net: Mutex<std::collections::VecDeque<(std::time::Instant, u64, u64)>>,
 }
 
 async fn get_conn(state: &State<'_, AppState>, key: Option<&str>) -> Result<Arc<Client>, String> {
@@ -101,9 +103,23 @@ async fn sys_stats(state: State<'_, AppState>) -> Result<Value, String> {
     let mut sys = state.sys.lock().await;
     sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
     let p = sys.process(pid).ok_or("process introuvable")?;
+    // Débit : fenêtre glissante des 5 dernières secondes sur les compteurs
+    // cumulés de client-core (toutes connexions confondues).
+    let now = std::time::Instant::now();
+    let rx = client_core::RX_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+    let tx = client_core::TX_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+    let mut q = state.net.lock().await;
+    q.push_back((now, rx, tx));
+    while q.front().map(|(t, _, _)| now.duration_since(*t).as_secs_f64() > 5.5).unwrap_or(false) {
+        q.pop_front();
+    }
+    let (t0, rx0, tx0) = *q.front().unwrap();
+    let dt = now.duration_since(t0).as_secs_f64().max(0.001);
     Ok(json!({
         "rss_mb": (p.memory() as f64 / 1_048_576.0).round(),
         "cpu": (p.cpu_usage() * 10.0).round() / 10.0,
+        "rx_bps": ((rx - rx0) as f64 / dt).round(),
+        "tx_bps": ((tx - tx0) as f64 / dt).round(),
     }))
 }
 
@@ -486,6 +502,7 @@ fn main() {
             default_conn: Mutex::new(None),
             subs: Mutex::new(std::collections::HashMap::new()),
             sys: Mutex::new(sysinfo::System::new()),
+            net: Mutex::new(std::collections::VecDeque::new()),
         })
         .invoke_handler(tauri::generate_handler![connect, call, subscribe, ssh_hosts, log_tail, saved_connections, save_connection, check_update, update_client, ensure_daemon, disconnect, sys_stats])
         .run(tauri::generate_context!())

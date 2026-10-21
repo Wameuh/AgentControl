@@ -1655,8 +1655,9 @@ setInterval(async () => {
 // Barre d'état : mémoire + CPU du client, toutes les 3 s
 async function updateStatusbar() {
   try {
-    const s = await invoke<{ rss_mb: number; cpu: number }>("sys_stats");
-    $("sb-stats").textContent = `mem ${Math.round(s.rss_mb)} MB · cpu ${s.cpu}%`;
+    const s = await invoke<{ rss_mb: number; cpu: number; rx_bps: number; tx_bps: number }>("sys_stats");
+    const fmt = (b: number) => b >= 1_048_576 ? `${(b / 1_048_576).toFixed(1)} MB/s` : b >= 1024 ? `${(b / 1024).toFixed(0)} kB/s` : `${Math.round(b)} B/s`;
+    $("sb-stats").textContent = `mem ${Math.round(s.rss_mb)} MB · cpu ${s.cpu}% · ↓${fmt(s.rx_bps)} ↑${fmt(s.tx_bps)}`;
   } catch { /* silencieux */ }
 }
 setInterval(updateStatusbar, 3000);

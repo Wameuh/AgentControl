@@ -11,6 +11,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+
+/// Octets cumulés reçus/envoyés via tous les transports (tunnels SSH, TCP…)
+pub static RX_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static TX_TOTAL: AtomicU64 = AtomicU64::new(0);
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, oneshot, Mutex};
@@ -346,6 +350,7 @@ impl Client {
             tokio::spawn(async move {
                 let mut lines = BufReader::new(r).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
+                    RX_TOTAL.fetch_add(line.len() as u64 + 1, Ordering::Relaxed);
                     if line.trim().is_empty() {
                         continue;
                     }
@@ -386,6 +391,7 @@ impl Client {
         s.push('\n');
         {
             let mut w = self.w.lock().await;
+            TX_TOTAL.fetch_add(s.len() as u64, Ordering::Relaxed);
             if let Err(e) = w.write_all(s.as_bytes()).await {
                 log(format!("daemon {name}: écriture ko {e}"));
                 return Err(e.into());
