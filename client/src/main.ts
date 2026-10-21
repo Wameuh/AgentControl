@@ -150,6 +150,7 @@ const cmdHint = (c: CmdInfo) => (typeof c === "string" ? "" : (c.hint ?? ""));
 
 interface SessionMeta {
   conn?: string;
+  group?: string;
   id: string;
   agent: string;
   title: string;
@@ -266,6 +267,37 @@ async function call<T = unknown>(method: string, params: Record<string, unknown>
 // ---------------------------------------------------------------------------
 
 const minorOf = (v: string) => v.split(".").slice(0, 2).join(".");
+
+// Dialogue d'assignation de groupe (clic droit sur une session)
+let grpTarget: SessionMeta | null = null;
+function openGroupDlg(s: SessionMeta) {
+  grpTarget = s;
+  ($("g-name") as HTMLInputElement).value = s.group ?? "";
+  const dl = $("g-list");
+  dl.innerHTML = "";
+  call<SessionMeta[]>("list_sessions").then((ls) => {
+    for (const g of new Set(ls.filter((x) => x.group).map((x) => x.group!))) {
+      const o = document.createElement("option");
+      o.value = g;
+      dl.appendChild(o);
+    }
+  });
+  ($("dlg-group") as HTMLDialogElement).showModal();
+}
+($("dlg-group") as HTMLDialogElement).addEventListener("close", async (e) => {
+  const rv = (e.target as HTMLDialogElement).returnValue;
+  if (!grpTarget || rv === "cancel") return;
+  const name = rv === "none" ? "" : ($("g-name") as HTMLInputElement).value.trim();
+  await call("set_session_group", {
+    session: grpTarget.id,
+    conn: grpTarget.conn,
+    group: name || undefined,
+  }).catch((er) => showErr(String(er)));
+  refreshSessions();
+});
+($("g-ok") as HTMLButtonElement).onclick = () => {
+  ($("dlg-group") as HTMLDialogElement).close("ok");
+};
 const connKeyOf = (cfg: Record<string, unknown>) =>
   cfg.kind === "ssh" ? `ssh:${cfg.host}` : cfg.kind === "tcp" ? `tcp:${cfg.addr}` : "local";
 
@@ -345,27 +377,56 @@ async function refreshSessions() {
     .MeshBackground?.setMood(bgMood(), { agents: Math.min(n, 4), intensity: 0.55 });
   const el = $("session-list");
   el.innerHTML = "";
+  // Tri : serveur → groupe nommé (non groupés à la fin) → titre
+  list.sort((a, b) =>
+    (a.conn ?? "").localeCompare(b.conn ?? "") ||
+    (a.group ?? "\uffff").localeCompare(b.group ?? "\uffff") ||
+    a.title.localeCompare(b.title));
   let lastConn: string | null = null;
+  let lastGrp: string | null = null;
+  let connClosed = false;
   for (const s of list) {
     const conn = s.conn ?? "default";
     if (conn !== lastConn) {
       lastConn = conn;
+      lastGrp = null;
       const key = `ac-grp-${conn}`;
-      const closed = localStorage.getItem(key) === "1";
+      connClosed = localStorage.getItem(key) === "1";
       const g = document.createElement("div");
-      g.className = "grp-head" + (closed ? " closed" : "");
-      g.innerHTML = `<span class="grp-arrow">${closed ? "\u25b8" : "\u25be"}</span> ${esc(conn)}`;
+      g.className = "grp-head" + (connClosed ? " closed" : "");
+      g.innerHTML = `<span class="grp-arrow">${connClosed ? "\u25b8" : "\u25be"}</span> ${esc(conn)}`;
       g.onclick = () => {
-        localStorage.setItem(key, closed ? "0" : "1");
+        localStorage.setItem(key, connClosed ? "0" : "1");
         refreshSessions();
       };
       el.appendChild(g);
     }
+    const grp = s.group ?? "";
+    let grpClosed = connClosed;
+    if (grp !== lastGrp) {
+      lastGrp = grp;
+      if (grp) {
+        const key = `ac-grp-${conn}::${grp}`;
+        grpClosed = connClosed || localStorage.getItem(key) === "1";
+        const g = document.createElement("div");
+        g.className = "grp-sub" + (grpClosed ? " closed" : "");
+        g.innerHTML = `<span class="grp-arrow">${grpClosed ? "\u25b8" : "\u25be"}</span> ${esc(grp)}`;
+        g.onclick = () => {
+          localStorage.setItem(key, localStorage.getItem(key) === "1" ? "0" : "1");
+          refreshSessions();
+        };
+        el.appendChild(g);
+      }
+    }
     const div = document.createElement("div");
-    div.className = "sess" + (current?.id === s.id ? " active" : "");
-    if (localStorage.getItem(`ac-grp-${conn}`) === "1") div.style.display = "none";
+    div.className = "sess" + (grp ? " in-grp" : "") + (current?.id === s.id ? " active" : "");
+    if (grpClosed) div.style.display = "none";
     div.innerHTML = `<span class="dot st-${s.state}" title="${esc(s.state)}">${dotIcon(s.state)}</span><span class="t">${esc(s.title)}</span><span class="a">${esc(s.agent)}</span><button class="sess-del" title="Supprimer">✕</button>`;
     div.onclick = () => openSession(s.id);
+    div.oncontextmenu = (e) => {
+      e.preventDefault();
+      openGroupDlg(s);
+    };
     const del = div.querySelector<HTMLElement>(".sess-del")!;
     del.addEventListener("click", async (e) => {
       e.stopPropagation();

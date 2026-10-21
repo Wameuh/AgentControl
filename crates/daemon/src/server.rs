@@ -183,6 +183,7 @@ impl Daemon {
                     config_options: vec![],
                     pending_config: Default::default(),
                     state: "starting".into(),
+                    group: None,
                 };
                 let dir = Session::create_dir(&self.root, &meta)?;
                 let session = Session::open(dir)?;
@@ -247,6 +248,7 @@ impl Daemon {
                     config_options: vec![],
                     pending_config: Default::default(),
                     state: "starting".into(),
+                    group: None,
                 };
                 let dir = Session::create_dir(&self.root, &meta)?;
                 let session = Session::open(dir)?;
@@ -431,6 +433,11 @@ impl Daemon {
                 let s = self.get_session(&session).await?;
                 s.rename(&title).await;
                 Ok(json!({"title": title}))
+            }
+            ReqKind::SetSessionGroup { session, group } => {
+                let s = self.get_session(&session).await?;
+                s.set_group(group.clone()).await;
+                Ok(json!({"group": group}))
             }
             ReqKind::DeleteSession { session } => {
                 let s = self.get_session(&session).await?;

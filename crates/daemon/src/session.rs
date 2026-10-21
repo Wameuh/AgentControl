@@ -832,6 +832,11 @@ impl Session {
     }
 
     /// Renomme : meta local + tentative session/rename chez l'agent (optionnel).
+    pub async fn set_group(&self, group: Option<String>) {
+        self.meta.lock().unwrap().group = group.filter(|g| !g.trim().is_empty());
+        self.save_meta();
+    }
+
     pub async fn rename(&self, title: &str) {
         self.meta.lock().unwrap().title = title.into();
         self.save_meta();

@@ -133,6 +133,19 @@
       </form>
     </dialog>
 
+    <dialog id="dlg-group">
+      <form method="dialog">
+        <h3 data-i18n="group_h">Session group</h3>
+        <input id="g-name" data-i18n-ph="group_name_ph" placeholder="Group name…" list="g-list" autocomplete="off" />
+        <datalist id="g-list"></datalist>
+        <menu>
+          <button value="none" id="g-none" data-i18n="group_none">No group</button>
+          <button value="cancel" data-i18n="cancel">Cancel</button>
+          <button value="ok" id="g-ok" data-i18n="ok">OK</button>
+        </menu>
+      </form>
+    </dialog>
+
     <dialog id="dlg-daemon">
       <form method="dialog">
         <h3 id="dlg-daemon-title">Daemon update</h3>

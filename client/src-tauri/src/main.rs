@@ -184,6 +184,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         },
         "delete_session" => ReqKind::DeleteSession { session: s("session") },
         "rename_session" => ReqKind::RenameSession { session: s("session"), title: s("title") },
+        "set_session_group" => ReqKind::SetSessionGroup { session: s("session"), group: so("group") },
         "events" => ReqKind::Events {
             session: s("session"),
             before_seq: p.get("before_seq").and_then(Value::as_u64),

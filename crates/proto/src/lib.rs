@@ -222,6 +222,9 @@ pub struct SessionMeta {
     /// running | waiting_input | idle | dead | interrupted
     #[serde(default = "default_state")]
     pub state: String,
+    /// Groupe nommé (sidebar) — None = non groupé.
+    #[serde(default)]
+    pub group: Option<String>,
 }
 
 fn default_state() -> String {
@@ -337,6 +340,11 @@ pub enum ReqKind {
     RenameSession {
         session: String,
         title: String,
+    },
+    /// Assigne la session à un groupe nommé (None = retirer du groupe).
+    SetSessionGroup {
+        session: String,
+        group: Option<String>,
     },
     /// Réponse à une permission ou une question (request_id de l'event).
     Respond {

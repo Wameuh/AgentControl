@@ -469,3 +469,11 @@ details.th[open] > summary::before { content: "▾ "; }
 .daemon-dlg { display:flex; gap:12px; align-items:center; padding:6px 0; }
 .spin-ico { display:inline-block; animation: spin 1s linear infinite; font-size:22px; color:var(--sand); }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Sous-groupes nommés dans un groupe-serveur */
+.grp-sub { font-size:11px; color:var(--sand); padding:3px 8px 2px 18px;
+  cursor:pointer; user-select:none; display:flex; gap:5px; align-items:center }
+.grp-sub:hover { color:var(--ink) }
+.sess.in-grp { margin-left:14px }
+#g-name { width:100%; box-sizing:border-box; background:rgba(236,230,216,.05); color:var(--ink);
+  border:1px solid var(--line); border-radius:8px; padding:8px 10px; font:inherit; margin:8px 0 }
