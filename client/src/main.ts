@@ -1311,10 +1311,10 @@ function qBtn(txt: string, title: string): HTMLButtonElement {
 }
 
 async function sendInput(force = false) {
-  const t = ($("input") as HTMLTextAreaElement).value.trim();
-  if (!t || !current) return;
+  const txt = ($("input") as HTMLTextAreaElement).value.trim();
+  if (!txt || !current) return;
   // Built-ins client (interceptent avant envoi à l'agent)
-  const bm = /^\/(\w+)(?:\s+(.*))?$/.exec(t);
+  const bm = /^\/(\w+)(?:\s+(.*))?$/.exec(txt);
   if (bm && BUILTINS().some((b) => b.name === bm[1])) {
     ($("input") as HTMLTextAreaElement).value = "";
     try {
@@ -1325,7 +1325,16 @@ async function sendInput(force = false) {
     return;
   }
   ($("input") as HTMLTextAreaElement).value = "";
-  await call("send", { session: current.id, text: t, force }).catch((e) => showErr(String(e)));
+  await call("send", { session: current.id, text: txt, force }).catch((e) => showErr(String(e)));
+  // Commande slash non-builtin : l'agent l'applique au prochain tour (ex.
+  // /compact → "context compacted" n'arrive qu'au message suivant) → hint.
+  if (bm) {
+    const d = document.createElement("div");
+    d.className = "ev sysline";
+    d.textContent = `⦿ ${t("cmd_sent_hint", { cmd: bm[1] })}`;
+    eventsEl.appendChild(d);
+    scrollBottom();
+  }
   refreshQueue();
 }
 
