@@ -149,6 +149,7 @@ const cmdDesc = (c: CmdInfo) => (typeof c === "string" ? "" : (c.description ?? 
 const cmdHint = (c: CmdInfo) => (typeof c === "string" ? "" : (c.hint ?? ""));
 
 interface SessionMeta {
+  conn?: string;
   id: string;
   agent: string;
   title: string;
@@ -255,7 +256,9 @@ function showErr(msg: string) {
 $("err-close").addEventListener("click", () => ($("err-bar").hidden = true));
 
 async function call<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-  return invoke<T>("call", { method, params });
+  const p = { ...params };
+  if (p.session && !p.conn && current?.conn) p.conn = current.conn;
+  return invoke<T>("call", { method, params: p });
 }
 
 // ---------------------------------------------------------------------------
@@ -303,7 +306,8 @@ async function doConnect(cfg: Record<string, unknown>) {
     await invoke("connect", { cfg }).catch(() => {});
     status = await call("daemon_status").catch(() => status);
   }
-  el.textContent = t("connected_n", { n: (status as { sessions?: number }).sessions ?? 0 });
+  const srv = (status as { servers?: number }).servers;
+    el.textContent = srv && srv > 1 ? `${srv} servers` : t("connected_n", { n: (status as { sessions?: number }).sessions ?? 0 });
   el.className = "badge ok";
   await refreshSessions();
 }
@@ -331,9 +335,25 @@ async function refreshSessions() {
     .MeshBackground?.setMood(bgMood(), { agents: Math.min(n, 4), intensity: 0.55 });
   const el = $("session-list");
   el.innerHTML = "";
+  let lastConn: string | null = null;
   for (const s of list) {
+    const conn = s.conn ?? "default";
+    if (conn !== lastConn) {
+      lastConn = conn;
+      const key = `ac-grp-${conn}`;
+      const closed = localStorage.getItem(key) === "1";
+      const g = document.createElement("div");
+      g.className = "grp-head" + (closed ? " closed" : "");
+      g.innerHTML = `<span class="grp-arrow">${closed ? "\u25b8" : "\u25be"}</span> ${esc(conn)}`;
+      g.onclick = () => {
+        localStorage.setItem(key, closed ? "0" : "1");
+        refreshSessions();
+      };
+      el.appendChild(g);
+    }
     const div = document.createElement("div");
     div.className = "sess" + (current?.id === s.id ? " active" : "");
+    if (localStorage.getItem(`ac-grp-${conn}`) === "1") div.style.display = "none";
     div.innerHTML = `<span class="dot st-${s.state}" title="${esc(s.state)}">${dotIcon(s.state)}</span><span class="t">${esc(s.title)}</span><span class="a">${esc(s.agent)}</span><button class="sess-del" title="Supprimer">✕</button>`;
     div.onclick = () => openSession(s.id);
     const del = div.querySelector<HTMLElement>(".sess-del")!;
@@ -1557,7 +1577,7 @@ invoke<SavedConn[]>("saved_connections")
   .then(async (conns) => {
     savedConns = conns;
     if (localStorage.getItem("ac-autoconnect") === "0") return;
-    if (conns.length) await doConnect({ ...conns[0] }).catch((e) => showErr(String(e)));
+    for (const c of conns) await doConnect({ ...c }).catch((e) => showErr(String(e)));
   })
   .catch(() => {});
 

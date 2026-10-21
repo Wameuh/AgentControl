@@ -13,22 +13,44 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 
+struct ConnCtx {
+    client: Arc<Client>,
+    transport: Transport,
+}
+
 struct AppState {
-    transport: Mutex<Option<Transport>>,
-    client: Mutex<Option<Arc<Client>>>,
-    /// session → tâche d'émission — 1 souscription/session, sur la connexion
-    /// principale (plus de tunnel/process ssh dédié par subscribe).
+    /// conn key (host/path) → contexte de connexion
+    conns: Mutex<std::collections::HashMap<String, ConnCtx>>,
+    default_conn: Mutex<Option<String>>,
+    /// "conn:session" → tâche d'émission subscribe
     subs: Mutex<std::collections::HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
 }
 
-async fn get_client(state: &State<'_, AppState>) -> Result<Arc<Client>, String> {
-    state
-        .client
-        .lock()
-        .await
-        .clone()
-        .context("non connecté — configurez la connexion")
+async fn get_conn(state: &State<'_, AppState>, key: Option<&str>) -> Result<Arc<Client>, String> {
+    let map = state.conns.lock().await;
+    let k = match key {
+        Some(k) if !k.is_empty() => k.to_string(),
+        _ => state
+            .default_conn
+            .lock()
+            .await
+            .clone()
+            .or_else(|| map.keys().next().cloned())
+            .context("non connecté — configurez la connexion")
+            .map_err(|e| e.to_string())?,
+    };
+    map.get(&k)
+        .map(|c| c.client.clone())
+        .context(format!("connexion inconnue: {k}"))
         .map_err(|e| e.to_string())
+}
+
+fn conn_key(cfg: &ConnectCfg) -> String {
+    match cfg {
+        ConnectCfg::Local {} => "local".into(),
+        ConnectCfg::Tcp { addr } => format!("tcp:{addr}"),
+        ConnectCfg::Ssh { host, .. } => format!("ssh:{host}"),
+    }
 }
 
 #[derive(Deserialize)]
@@ -46,6 +68,7 @@ enum ConnectCfg {
 /// Configure la connexion au démon.
 #[tauri::command]
 async fn connect(state: State<'_, AppState>, cfg: ConnectCfg) -> Result<Value, String> {
+    let key = conn_key(&cfg);
     let t = match cfg {
         ConnectCfg::Local {} => {
             let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
@@ -64,14 +87,66 @@ async fn connect(state: State<'_, AppState>, cfg: ConnectCfg) -> Result<Value, S
     };
     let c = Client::connect(&t).await.map_err(|e| format!("{e:#}"))?;
     let status = c.call(ReqKind::DaemonStatus).await.map_err(|e| format!("{e:#}"))?;
-    *state.transport.lock().await = Some(t);
-    *state.client.lock().await = Some(c);
+    state.conns.lock().await.insert(key.clone(), ConnCtx { client: c, transport: t });
+    *state.default_conn.lock().await = Some(key);
     Ok(status)
+}
+
+/// Déconnecte proprement une connexion (tue le tunnel/process ssh).
+#[tauri::command]
+async fn disconnect(state: State<'_, AppState>, conn: String) -> Result<(), String> {
+    state.conns.lock().await.remove(&conn);
+    if state.default_conn.lock().await.as_deref() == Some(&conn) {
+        *state.default_conn.lock().await = None;
+    }
+    Ok(())
 }
 
 #[tauri::command]
 async fn call(state: State<'_, AppState>, method: String, params: Value) -> Result<Value, String> {
-    let c = get_client(&state).await?;
+    // Connexion cible : params.conn explicite, sinon connexion par défaut.
+    let conn = params.get("conn").and_then(Value::as_str).map(String::from);
+    // list_sessions / daemon_status : fusion multi-serveurs.
+    if method == "list_sessions" {
+        let map = state.conns.lock().await;
+        let mut all = Vec::new();
+        for (k, ctx) in map.iter() {
+            match ctx.client.call(ReqKind::ListSessions).await {
+                Ok(mut v) => {
+                    if let Some(arr) = v.as_array_mut() {
+                        for m in arr.iter_mut() {
+                            m["conn"] = json!(k);
+                        }
+                        all.append(arr);
+                    }
+                }
+                Err(e) => client_core::log(format!("list_sessions {k}: {e:#}")),
+            }
+        }
+        return Ok(json!(all));
+    }
+    if method == "daemon_status" {
+        if let Some(k) = conn {
+            let c = get_conn(&state, Some(&k)).await?;
+            return c.call(ReqKind::DaemonStatus).await.map_err(|e| format!("{e:#}"));
+        }
+        let map = state.conns.lock().await;
+        let mut out = json!({});
+        let mut n_ok = 0u64;
+        for (k, ctx) in map.iter() {
+            match ctx.client.call(ReqKind::DaemonStatus).await {
+                Ok(v) => {
+                    n_ok += 1;
+                    out[k] = v;
+                }
+                Err(e) => out[k] = json!({"error": format!("{e:#}")}),
+            }
+        }
+        out["servers"] = json!(map.len());
+        out["sessions"] = json!(n_ok);
+        return Ok(out);
+    }
+    let c = get_conn(&state, conn.as_deref()).await?;
     let req = req_from(&method, params)?;
     c.call(req).await.map_err(|e| format!("{e:#}"))
 }
@@ -203,9 +278,12 @@ async fn subscribe(
     state: State<'_, AppState>,
     session: String,
     after_seq: u64,
+    conn: Option<String>,
 ) -> Result<(), String> {
-    let c = get_client(&state).await?;
-    client_core::log(format!("subscribe session={session} after_seq={after_seq}"));
+    fn params_get_conn() -> Option<String> { None }
+    let conn = conn.clone();
+    let c = get_conn(&state, conn.as_deref()).await?;
+    client_core::log(format!("subscribe session={session} after_seq={after_seq} conn={conn:?}"));
     let mut rx = c.subscribe(&session, after_seq).await.map_err(|e| {
         client_core::log(format!("subscribe {session}: {e:#}"));
         format!("{e:#}")
@@ -225,7 +303,7 @@ async fn subscribe(
     for (_, h) in map.drain() {
         h.abort();
     }
-    map.insert(session, task);
+    map.insert(format!("{}:{}", conn.unwrap_or_default(), session), task);
     Ok(())
 }
 
@@ -384,11 +462,11 @@ fn main() {
             Ok(())
         })
         .manage(AppState {
-            transport: Mutex::new(None),
-            client: Mutex::new(None),
+            conns: Mutex::new(std::collections::HashMap::new()),
+            default_conn: Mutex::new(None),
             subs: Mutex::new(std::collections::HashMap::new()),
         })
-        .invoke_handler(tauri::generate_handler![connect, call, subscribe, ssh_hosts, log_tail, saved_connections, save_connection, check_update, update_client, ensure_daemon])
+        .invoke_handler(tauri::generate_handler![connect, call, subscribe, ssh_hosts, log_tail, saved_connections, save_connection, check_update, update_client, ensure_daemon, disconnect])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -458,3 +458,9 @@ details.th[open] > summary::before { content: "▾ "; }
 /* Selects d'options config dynamiques (thought_level, speed…) */
 #dyn-opts { display: inline-flex; gap: 4px; align-items: center; }
 #dyn-opts select { max-width: 130px; }
+
+/* Groupes de sessions (par serveur) */
+.grp-head { font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:var(--dim);
+  padding:6px 8px 3px; cursor:pointer; user-select:none; display:flex; gap:5px; align-items:center }
+.grp-head:hover { color:var(--fg) }
+.grp-arrow { width:10px; opacity:.7 }

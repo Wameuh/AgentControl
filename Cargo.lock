@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "acctl"
-version = "0.0.21"
+version = "0.0.29"
 dependencies = [
  "anyhow",
  "proto",
@@ -15,7 +15,7 @@ dependencies = [
 
 [[package]]
 name = "agentcontrol-daemon"
-version = "0.0.21"
+version = "0.0.30"
 dependencies = [
  "anyhow",
  "chrono",
@@ -94,7 +94,7 @@ dependencies = [
 
 [[package]]
 name = "client-core"
-version = "0.0.21"
+version = "0.0.29"
 dependencies = [
  "anyhow",
  "proto",
@@ -305,7 +305,7 @@ dependencies = [
 
 [[package]]
 name = "proto"
-version = "0.0.21"
+version = "0.0.30"
 dependencies = [
  "chrono",
  "serde",
