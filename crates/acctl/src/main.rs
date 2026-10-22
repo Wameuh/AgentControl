@@ -206,11 +206,23 @@ async fn main() -> Result<()> {
             println!("{}", v["session"].as_str().unwrap_or(""));
         }
         "send" => {
-            if args.len() < 3 { bail!("send <session> <text...>"); }
+            // acctl send <session> [--steer|--force] <text...>
+            if args.len() < 3 { bail!("send <session> [--steer|--force] <text...>"); }
+            let mut steer = false;
+            let mut force = false;
+            let mut parts = Vec::new();
+            for a in &args[2..] {
+                match a.as_str() {
+                    "--steer" => steer = true,
+                    "--force" => force = true,
+                    _ => parts.push(a.clone()),
+                }
+            }
             c.call(proto::ReqKind::Send {
                 session: args[1].clone(),
-                text: args[2..].join(" "),
-                force: false,
+                text: parts.join(" "),
+                force,
+                steer,
             }).await?;
         }
         "events" => {
