@@ -522,9 +522,12 @@ async function openSession(id: string) {
     showErr(`subscribe: ${e}`);
   });
   refreshSessions();
+  // L'arbre suit le workspace de la session nouvellement ouverte
+  if (treeOpen) void loadTreeRoot();
 }
 
 function updateHeader() {
+  $("btn-files").hidden = !current;
   if (!current) return;
   refreshQueue();
   const st = $("chat-state");
@@ -718,11 +721,16 @@ async function openFilePanel(path: string) {
   $("file-path").textContent = path;
   $("file-path").title = path;
   $("file-view").textContent = "…";
+  // Marque le noeud de l'arborescence correspondant
+  for (const n of $("file-tree").querySelectorAll<HTMLElement>(".fnode")) {
+    n.classList.toggle("sel", n.dataset.rel === path);
+  }
   try {
-    const r = await call<{ content: string; truncated: boolean }>("read_file", {
+    const r = await call<{ content: string; truncated: boolean; path: string }>("read_file", {
       session: current.id,
       path,
     });
+    $("file-path").title = r.path;
     const ext = /\.([a-zA-Z0-9]+)$/.exec(path)?.[1]?.toLowerCase() ?? "";
     $("file-view").innerHTML =
       highlight(r.content, ext) + (r.truncated ? "\n… (tronqué)" : "");
@@ -759,6 +767,199 @@ eventsEl.addEventListener("click", (e) => {
   const el = (e.target as HTMLElement).closest<HTMLElement>(".flink");
   if (el?.dataset.path) void openFilePanel(el.dataset.path);
 });
+
+// ---------------------------------------------------------------------------
+// Explorateur de fichiers du workspace (list_dir/read_file/delete_path)
+// ---------------------------------------------------------------------------
+
+interface DirEntry { name: string; dir: boolean; size: number }
+
+const fileCtx = $("fctx");
+let treeOpen = false;
+
+const fmtSize = (n: number) =>
+  n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB`
+  : n >= 1024 ? `${(n / 1024).toFixed(0)} kB`
+  : `${n} B`;
+
+async function copyText(s: string) {
+  try {
+    await navigator.clipboard.writeText(s);
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = s;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+  }
+}
+
+/** Nœud de l'arbre : dossier (pliable) ou fichier (ouvre le viewer). */
+function treeNode(rel: string, name: string, en: DirEntry, depth: number, abs: string): HTMLElement {
+  const d = document.createElement("div");
+  d.className = "fnode" + (en.dir ? " is-dir" : "") + (name.startsWith(".") ? " fdot" : "");
+  d.style.paddingLeft = `${6 + depth * 14}px`;
+  d.dataset.rel = rel;
+  d.dataset.abs = abs;
+  d.innerHTML =
+    `<span class="farrow">${en.dir ? "\u25b8" : ""}</span>` +
+    `<span class="fico">${en.dir ? "\u{1f4c1}" : "\u{1f4c4}"}</span>` +
+    `<span class="fname">${esc(name)}</span>` +
+    (en.dir ? "" : `<span class="fsize">${fmtSize(en.size)}</span>`);
+  d.title = abs;
+  if (en.dir) {
+    d.onclick = () => toggleDir(d);
+  } else {
+    d.onclick = () => openFilePanel(rel);
+  }
+  d.oncontextmenu = (e) => {
+    e.preventDefault();
+    openFileCtx(e.clientX, e.clientY, d);
+  };
+  return d;
+}
+
+/** Ouvre/replie un dossier — chargement paresseux à chaque expansion
+ *  (le contenu change pendant que l'agent travaille, pas de cache). */
+async function toggleDir(el: HTMLElement) {
+  const arrow = el.querySelector<HTMLElement>(".farrow")!;
+  const next = el.nextElementSibling;
+  if (next?.classList.contains("fchildren")) {
+    next.remove();
+    arrow.textContent = "\u25b8";
+    return;
+  }
+  const rel = el.dataset.rel ?? "";
+  arrow.textContent = "…";
+  const box = document.createElement("div");
+  box.className = "fchildren";
+  try {
+    const r = await call<{ dir: string; entries: DirEntry[] }>("list_dir", {
+      session: current!.id,
+      path: rel,
+    });
+    if (!r.entries.length) {
+      box.innerHTML = `<div class="fempty">${t("tree_empty")}</div>`;
+    }
+    const depth = rel ? rel.split("/").length : 0;
+    for (const en of r.entries) {
+      const childRel = rel ? `${rel}/${en.name}` : en.name;
+      box.appendChild(treeNode(childRel, en.name, en, depth, `${r.dir}/${en.name}`));
+    }
+  } catch (e) {
+    box.innerHTML = `<div class="ferr">${esc(String(e))}</div>`;
+  }
+  if (el.isConnected) {
+    el.after(box);
+    arrow.textContent = "\u25be";
+  }
+}
+
+/** Racine = cwd canonique de la session (renvoyé par list_dir ""). */
+async function loadTreeRoot() {
+  const tree = $("file-tree");
+  tree.innerHTML = "";
+  if (!current) return;
+  try {
+    const r = await call<{ dir: string; entries: DirEntry[] }>("list_dir", {
+      session: current.id,
+      path: "",
+    });
+    const hd = document.createElement("div");
+    hd.className = "froot";
+    hd.innerHTML = `<span class="fico">\u{1f4c1}</span><span class="fname">${esc(r.dir)}</span>`;
+    hd.title = r.dir;
+    tree.appendChild(hd);
+    for (const en of r.entries) {
+      tree.appendChild(treeNode(en.name, en.name, en, 0, `${r.dir}/${en.name}`));
+    }
+    if (!r.entries.length) {
+      tree.insertAdjacentHTML("beforeend", `<div class="fempty">${t("tree_empty")}</div>`);
+    }
+  } catch (e) {
+    tree.innerHTML = `<div class="ferr">${esc(String(e))}</div>`;
+  }
+}
+
+function setTreeVisible(v: boolean) {
+  treeOpen = v;
+  $("file-tree").hidden = !v;
+  $("btn-tree-refresh").hidden = !v;
+  if (v && !$("file-panel").hidden) void loadTreeRoot();
+}
+
+// 📁 dans le header : ouvre le panneau complet (arbre + viewer)
+$("btn-files").onclick = () => {
+  const p = $("file-panel");
+  const opening = p.hidden;
+  p.hidden = !opening;
+  if (opening) {
+    // L'arbre + le viewer ont besoin de largeur
+    const w = Math.max(Number(p.style.width.replace("px", "")) || 0, 620);
+    p.style.width = `${Math.min(w, window.innerWidth - 120)}px`;
+    setTreeVisible(true);
+  }
+};
+// 🗂 dans le panneau : bascule juste la colonne arborescence
+$("btn-tree").onclick = () => setTreeVisible($("file-tree").hidden);
+$("btn-tree-refresh").onclick = () => void loadTreeRoot();
+
+/** Menu contextuel clic droit : copier contenu / chemin absolu / supprimer. */
+function openFileCtx(x: number, y: number, el: HTMLElement) {
+  const rel = el.dataset.rel ?? "";
+  const abs = el.dataset.abs ?? rel;
+  const isDir = el.classList.contains("is-dir");
+  fileCtx.innerHTML = `<div class="fctx-path">${esc(abs)}</div>`;
+  const add = (label: string, cls: string, fn: (b: HTMLButtonElement) => void) => {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.className = cls;
+    b.onclick = () => fn(b);
+    fileCtx.appendChild(b);
+    return b;
+  };
+  if (!isDir) {
+    add(t("ctx_copy"), "", () => {
+      fileCtx.hidden = true;
+      void call<{ content: string }>("read_file", { session: current!.id, path: rel })
+        .then((r) => copyText(r.content))
+        .catch((e) => showErr(String(e)));
+    });
+  }
+  add(t("ctx_copy_path"), "", () => {
+    fileCtx.hidden = true;
+    void copyText(abs);
+  });
+  add(t("ctx_delete"), "danger", (b) => {
+    // Double-clic armé : "Supprimer" → "confirmer ?" → suppression
+    if (!b.dataset.armed) {
+      b.dataset.armed = "1";
+      b.textContent = t("ctx_confirm");
+      return;
+    }
+    fileCtx.hidden = true;
+    void call("delete_path", { session: current!.id, path: rel })
+      .then(() => {
+        const nx = el.nextElementSibling;
+        if (nx?.classList.contains("fchildren")) nx.remove();
+        el.remove();
+      })
+      .catch((e) => showErr(String(e)));
+  });
+  fileCtx.hidden = false;
+  const r = fileCtx.getBoundingClientRect();
+  fileCtx.style.left = `${Math.min(x, window.innerWidth - r.width - 8)}px`;
+  fileCtx.style.top = `${Math.min(y, window.innerHeight - r.height - 8)}px`;
+}
+// Le menu se ferme au clic ailleurs / Échap / scroll de l'arbre — mais un
+// clic DANS le menu ne doit pas le fermer avant l'action (delete armé).
+fileCtx.addEventListener("click", (e) => e.stopPropagation());
+window.addEventListener("click", () => (fileCtx.hidden = true));
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") fileCtx.hidden = true;
+});
+$("file-tree").addEventListener("scroll", () => (fileCtx.hidden = true));
 
 function mkEv(cls: string, seq: number): HTMLElement {
   const d = document.createElement("div");

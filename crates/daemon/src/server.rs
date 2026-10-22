@@ -348,6 +348,54 @@ impl Daemon {
                     "truncated": truncated,
                 }))
             }
+            ReqKind::ListDir { session, path } => {
+                let s = self.get_session(&session).await?;
+                let dir = resolve_in_cwd(&s, &path)?;
+                if !dir.is_dir() {
+                    anyhow::bail!("pas un dossier: {path}");
+                }
+                let mut ents: Vec<(bool, String, u64)> = Vec::new();
+                let mut truncated = false;
+                for e in std::fs::read_dir(&dir)? {
+                    if ents.len() >= 5000 {
+                        truncated = true;
+                        break;
+                    }
+                    let e = e?;
+                    let ft = e.file_type()?;
+                    ents.push((
+                        ft.is_dir(),
+                        e.file_name().to_string_lossy().into_owned(),
+                        e.metadata().map(|m| m.len()).unwrap_or(0),
+                    ));
+                }
+                ents.sort_by(|a, b| {
+                    b.0.cmp(&a.0)
+                        .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+                });
+                let entries: Vec<Value> = ents
+                    .iter()
+                    .map(|(d, n, sz)| json!({"name": n, "dir": d, "size": sz}))
+                    .collect();
+                Ok(json!({
+                    "dir": dir.display().to_string(),
+                    "entries": entries,
+                    "truncated": truncated,
+                }))
+            }
+            ReqKind::DeletePath { session, path } => {
+                let s = self.get_session(&session).await?;
+                let p = resolve_in_cwd(&s, &path)?;
+                if p == resolve_in_cwd(&s, "")? {
+                    anyhow::bail!("racine du workspace");
+                }
+                if p.is_dir() {
+                    std::fs::remove_dir_all(&p)?;
+                } else {
+                    std::fs::remove_file(&p)?;
+                }
+                Ok(json!({"deleted": p.display().to_string()}))
+            }
             ReqKind::QueueList { session } => {
                 let s = self.get_session(&session).await?;
                 Ok(json!({"queue": s.queue_snapshot()}))
@@ -565,6 +613,20 @@ impl Daemon {
     {
         Self::send_line(w, &Push { push: "event", session: session.into(), event: ev.clone() }).await
     }
+}
+
+/// Résout `path` (relatif au cwd de la session) en chemin canonique et
+/// garantit qu'il reste dans le workspace — anti `..`, chemins absolus et
+/// liens symboliques sortants.
+fn resolve_in_cwd(s: &Session, path: &str) -> Result<PathBuf> {
+    let cwd = std::fs::canonicalize(&s.meta_snapshot().cwd)
+        .with_context(|| format!("cwd: {}", s.meta_snapshot().cwd))?;
+    let p = std::fs::canonicalize(cwd.join(path))
+        .with_context(|| format!("{}", cwd.join(path).display()))?;
+    if !p.starts_with(&cwd) {
+        anyhow::bail!("hors du workspace: {path}");
+    }
+    Ok(p)
 }
 
 /// Wrapper pour accepter des connexions Unix.

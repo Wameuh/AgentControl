@@ -48,6 +48,10 @@ const STR = {
     cmd_sent_hint: "/{cmd} sent — the agent applies it on the next turn",
     installing_daemon: "installing daemon on server…",
     updating_daemon: "updating daemon {dv} → {lv}…",
+    files_title: "Workspace files", tree_title: "Toggle file tree",
+    tree_refresh: "Refresh tree", tree_empty: "(empty)",
+    ctx_copy: "Copy content", ctx_copy_path: "Copy absolute path",
+    ctx_delete: "Delete", ctx_confirm: "confirm delete?",
   },
   fr: {
     connect: "Connecter", connected_n: "connecté ({n} sessions)",
@@ -93,6 +97,10 @@ const STR = {
     cmd_sent_hint: "/{cmd} envoyée — l'agent l'applique au prochain tour",
     installing_daemon: "installation du démon sur le serveur…",
     updating_daemon: "mise à jour du démon {dv} → {lv}…",
+    files_title: "Fichiers du workspace", tree_title: "Afficher/masquer l'arborescence",
+    tree_refresh: "Rafraîchir l'arborescence", tree_empty: "(vide)",
+    ctx_copy: "Copier le contenu", ctx_copy_path: "Copier le chemin absolu",
+    ctx_delete: "Supprimer", ctx_confirm: "confirmer la suppression ?",
   },
 } as const;
 

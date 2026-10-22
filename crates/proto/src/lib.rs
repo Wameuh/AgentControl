@@ -292,6 +292,19 @@ pub enum ReqKind {
         session: String,
         path: String,
     },
+    /// Liste un dossier du workspace (arborescence côté client). `path`
+    /// relatif au cwd de la session ("" = racine) — borné au workspace.
+    ListDir {
+        session: String,
+        #[serde(default)]
+        path: String,
+    },
+    /// Supprime un fichier ou dossier du workspace — borné au cwd de la
+    /// session, la racine du workspace elle-même est refusée.
+    DeletePath {
+        session: String,
+        path: String,
+    },
     /// Gestion de la file de prompts (index = position dans la file).
     QueueList { session: String },
     QueueEdit { session: String, index: u64, text: String },
