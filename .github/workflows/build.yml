@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -138,8 +139,11 @@ jobs:
         working-directory: client
         run: |
           VER=$(grep -oE '"version": "[^"]+"' src-tauri/tauri.conf.json | head -1 | cut -d'"' -f4)
+          # hors tag : suffixe SHA pour distinguer les builds de test (PR/main)
+          SUFFIX=""
+          if [ "${GITHUB_REF_NAME#v}" = "$GITHUB_REF_NAME" ]; then SUFFIX="-${GITHUB_SHA:0:7}"; fi
           find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" \
-            -exec sh -c 'mv "$1" "$(dirname "$1")/AgentControl_'"$VER"'_aarch64-debug.apk"' _ {} \;
+            -exec sh -c 'mv "$1" "$(dirname "$1")/AgentControl_'"$VER$SUFFIX"'_aarch64-debug.apk"' _ {} \;
           find src-tauri/gen/android/app/build/outputs/apk -name "*.apk"
       - uses: actions/upload-artifact@v4
         with:
