@@ -91,11 +91,50 @@ jobs:
             client/src-tauri/target/release/agentcontrol.exe
 
   # -----------------------------------------------------------------
+  # Client Android : APK aarch64 (debug-signé, installable directement).
+  # gen/android n'est pas commité → `tauri android init` dans le job.
+  # -----------------------------------------------------------------
+  client-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client/src-tauri
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - name: NDK
+        run: |
+          sdkmanager "ndk;29.0.14233865" "cmake;3.22.1"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/29.0.14233865" >> "$GITHUB_ENV"
+      - run: npm ci
+        working-directory: client
+      - name: tauri android init + build APK
+        working-directory: client
+        run: |
+          npx tauri android init --ci
+          npx tauri android build --apk --debug --target aarch64-linux-android
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agentcontrol-client-android
+          path: client/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+
+  # -----------------------------------------------------------------
   # Release GitHub sur tag v* (permet l'auto-update + install démon distant)
   # -----------------------------------------------------------------
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [daemon-linux, client]
+    needs: [daemon-linux, client, client-android]
     runs-on: ubuntu-latest
     permissions:
       contents: write

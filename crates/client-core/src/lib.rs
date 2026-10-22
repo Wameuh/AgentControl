@@ -92,12 +92,28 @@ fn rotate_logs(dir: &PathBuf, keep: usize) {
 
 static LOGFILE: std::sync::OnceLock<std::sync::Mutex<LogWriter>> = std::sync::OnceLock::new();
 
-pub fn log_path() -> PathBuf {
+/// Racine des fichiers client (~/.agentcontrol) — sur Android HOME est
+/// absent → `init_paths` fixe le app_data_dir au démarrage.
+static BASE_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// À appeler au démarrage (Android) avec le répertoire data de l'app.
+pub fn init_paths(dir: PathBuf) {
+    let _ = BASE_DIR.set(dir);
+}
+
+fn base_dir() -> PathBuf {
+    if let Some(d) = BASE_DIR.get() {
+        return d.clone();
+    }
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".agentcontrol").join("logs")
+    home.join(".agentcontrol")
+}
+
+pub fn log_path() -> PathBuf {
+    base_dir().join("logs")
 }
 
 fn logfile() -> &'static std::sync::Mutex<LogWriter> {
@@ -116,7 +132,7 @@ pub fn log(msg: impl std::fmt::Display) {
 /// Fichier des connexions récentes : ~/.agentcontrol/connections.json
 /// (marche aussi sous Windows via USERPROFILE).
 pub fn config_path() -> PathBuf {
-    log_path().join("connections.json")
+    base_dir().join("connections.json")
 }
 
 pub fn load_connections() -> Vec<serde_json::Value> {
@@ -175,14 +191,40 @@ pub enum Transport {
         /// Args ssh supplémentaires : "-i", "~/.ssh/key", "-p", "2222"…
         args: Vec<String>,
     },
+    /// SSH natif (russh) — pas de binaire ssh : canal direct-tcpip vers
+    /// 127.0.0.1:<remote_port> directement dans la session SSH. Clé générée
+    /// par l'app (ou `key`), mot de passe en fallback.
+    SshNative {
+        host: String,
+        port: u16,
+        user: String,
+        remote_port: u16,
+        password: Option<String>,
+        /// Chemin d'une clé privée OpenSSH ; None = clé générée de l'app.
+        key_path: Option<PathBuf>,
+    },
 }
 
-/// Garde un process ssh vivant tant que le client existe.
-pub struct SshGuard(tokio::sync::Mutex<Child>);
+/// Garde un process ssh (CLI) ou une session russh vivante tant que le
+/// client existe.
+pub enum SshGuard {
+    Process(tokio::sync::Mutex<Child>),
+    Native(ssh_native::NativeGuard),
+}
+impl SshGuard {
+    fn process(c: Child) -> Self {
+        Self::Process(tokio::sync::Mutex::new(c))
+    }
+    fn native(g: ssh_native::NativeGuard) -> Self {
+        Self::Native(g)
+    }
+}
 impl Drop for SshGuard {
     fn drop(&mut self) {
-        if let Ok(mut c) = self.0.try_lock() {
-            let _ = c.start_kill();
+        if let Self::Process(c) = self {
+            if let Ok(mut c) = c.try_lock() {
+                let _ = c.start_kill();
+            }
         }
     }
 }
@@ -268,7 +310,7 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                 .spawn()
                 .context("spawn ssh — openssh installé ?")?;
             let mut stderr = child.stderr.take();
-            let guard = Arc::new(SshGuard(tokio::sync::Mutex::new(child)));
+            let guard = Arc::new(SshGuard::process(child));
             // Attendre que le tunnel soit prêt (~26 s > ConnectTimeout=10
             // pour laisser ssh mourir avec sa vraie erreur dans stderr)
             let addr = format!("127.0.0.1:{local}");
@@ -280,11 +322,13 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                     }
                     Err(_) => {
                         // ssh déjà mort → erreur réelle, pas timeout muet
-                        let dead = guard
-                            .0
-                            .try_lock()
-                            .ok()
-                            .and_then(|mut c| c.try_wait().ok().flatten());
+                        let dead = match &*guard {
+                            SshGuard::Process(c) => c
+                                .try_lock()
+                                .ok()
+                                .and_then(|mut c| c.try_wait().ok().flatten()),
+                            SshGuard::Native(_) => None,
+                        };
                         if let Some(st) = dead {
                             let e = drain_err(&mut stderr).await;
                             log(format!("ssh mort ({st}): {e}"));
@@ -294,12 +338,38 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                     }
                 }
             }
-            if let Ok(mut c) = guard.0.try_lock() {
-                let _ = c.start_kill();
+            if let SshGuard::Process(c) = &*guard {
+                if let Ok(mut c) = c.try_lock() {
+                    let _ = c.start_kill();
+                }
             }
             let e = drain_err(&mut stderr).await;
             log(format!("tunnel ssh {host} timeout (stderr: {e})"));
             bail!("tunnel ssh {host} timeout{}", if e.is_empty() { String::new() } else { format!(" : {e}") })
+        }
+        Transport::SshNative {
+            host,
+            port,
+            user,
+            remote_port,
+            password,
+            key_path,
+        } => {
+            let (h, ch) = ssh_native::open_direct_tcpip(
+                host,
+                *port,
+                user,
+                *remote_port,
+                password.as_deref(),
+                key_path.as_deref(),
+            )
+            .await?;
+            let (r, w) = tokio::io::split(ch);
+            Ok((
+                Box::new(r),
+                Box::new(w),
+                Some(Arc::new(SshGuard::native(h))),
+            ))
         }
     }
 }
@@ -426,6 +496,205 @@ impl Client {
         })
         .await?;
         Ok(rx)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SSH natif (russh) — Android + tout hôte sans binaire ssh
+// ---------------------------------------------------------------------------
+
+pub mod ssh_native {
+    use super::{base_dir, log};
+    use anyhow::{bail, Context, Result};
+    use russh::client;
+    use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::io::{AsyncRead, AsyncWrite};
+
+    /// Clé ed25519 générée par l'app : <base>/agentcontrol_ed25519{,.pub}
+    pub fn key_path() -> PathBuf {
+        base_dir().join("agentcontrol_ed25519")
+    }
+
+    /// Génère la paire si absente (chmod 600). Retourne le chemin.
+    pub fn ensure_keypair() -> Result<PathBuf> {
+        let p = key_path();
+        if p.exists() {
+            return Ok(p);
+        }
+        let _ = std::fs::create_dir_all(base_dir());
+        // rand 0.10 n'expose plus OsRng ; rand_core 0.10 non plus →
+        // petit RNG adossé à getrandom (CryptoRng vient par blanket impl).
+        struct OsRng;
+        impl rand_core::TryRng for OsRng {
+            type Error = std::convert::Infallible;
+            fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+                let mut b = [0u8; 4];
+                self.try_fill_bytes(&mut b)?;
+                Ok(u32::from_le_bytes(b))
+            }
+            fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+                let mut b = [0u8; 8];
+                self.try_fill_bytes(&mut b)?;
+                Ok(u64::from_le_bytes(b))
+            }
+            fn try_fill_bytes(&mut self, d: &mut [u8]) -> Result<(), Self::Error> {
+                getrandom::fill(d).expect("os rng");
+                Ok(())
+            }
+        }
+        impl rand_core::TryCryptoRng for OsRng {}
+        let key = ssh_key::PrivateKey::random(&mut OsRng, ssh_key::Algorithm::Ed25519)
+            .context("keygen ed25519")?;
+        let pem = key.to_openssh(ssh_key::LineEnding::LF).context("openssh pem")?;
+        std::fs::write(&p, pem.as_bytes())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+        }
+        let pub_line = format!("{} agentcontrol", key.public_key().to_openssh().unwrap_or_default());
+        std::fs::write(p.with_extension("pub"), &pub_line)?;
+        log(format!("clé ssh app générée : {}", pub_line));
+        Ok(p)
+    }
+
+    /// Ligne authorized_keys à ajouter côté serveur ("ssh-ed25519 AAAA… agentcontrol").
+    pub fn pubkey_line() -> Result<String> {
+        let p = ensure_keypair()?;
+        let key = russh::keys::load_secret_key(&p, None).context("clé privée")?;
+        Ok(format!(
+            "{} agentcontrol",
+            key.public_key().to_openssh().unwrap_or_default()
+        ))
+    }
+
+    struct Handler;
+
+    impl client::Handler for Handler {
+        type Error = russh::Error;
+        async fn check_server_key(
+            &mut self,
+            key: &PublicKeyOrCertificate,
+        ) -> Result<bool, Self::Error> {
+            // accept-new equivalent : on logge la clé vue (TOFU implicite v1).
+            match key {
+                PublicKeyOrCertificate::PublicKey { key, .. } => log(format!(
+                    "ssh host key: {}",
+                    key.fingerprint(russh::keys::HashAlg::Sha256)
+                )),
+                PublicKeyOrCertificate::Certificate(_) => {
+                    log("ssh host key: certificate")
+                }
+            }
+            Ok(true)
+        }
+    }
+
+    /// Garde la session SSH vivante ; la fermeture suit le drop du Handle.
+    /// Le champ n'est jamais lu — c'est sa durée de vie qui compte.
+    pub struct NativeGuard(#[allow(dead_code)] client::Handle<Handler>);
+
+    /// Connecte + authentifie (clé, sinon mot de passe) et renvoie le handle.
+    async fn connect_auth(
+        host: &str,
+        port: u16,
+        user: &str,
+        password: Option<&str>,
+        key: Option<&Path>,
+    ) -> Result<client::Handle<Handler>> {
+        let mut cfg = client::Config::default();
+        cfg.inactivity_timeout = None;
+        cfg.keepalive_interval = Some(Duration::from_secs(30));
+        cfg.keepalive_max = 3;
+        let addrs = (host, port);
+        let mut h = tokio::time::timeout(
+            Duration::from_secs(15),
+            client::connect(Arc::new(cfg), addrs, Handler),
+        )
+        .await
+        .context("ssh connect timeout")?
+        .context("ssh connect")?;
+        // Clé d'abord (app-générée ou explicitée), puis mot de passe.
+        let kp = key.map(PathBuf::from).unwrap_or_else(key_path);
+        if kp.exists() {
+            let key = russh::keys::load_secret_key(&kp, None)
+                .with_context(|| format!("clé {}", kp.display()))?;
+            let auth = h
+                .authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), None))
+                .await;
+            match auth {
+                Ok(r) if r.success() => return Ok(h),
+                Ok(_) => log("clé refusée (auth partielle) — essai mot de passe"),
+                Err(e) => log(format!("auth clé: {e} — essai mot de passe")),
+            }
+        }
+        if let Some(pw) = password.filter(|p| !p.is_empty()) {
+            let r = h
+                .authenticate_password(user, pw)
+                .await
+                .context("auth password")?;
+            if r.success() {
+                return Ok(h);
+            }
+            bail!("mot de passe refusé");
+        }
+        bail!("auth impossible — ajoutez la clé publique de l'app dans authorized_keys du serveur");
+    }
+
+    /// Ouvre un canal direct-tcpip vers 127.0.0.1:remote_port dans la
+    /// session SSH — équivalent `ssh -L` sans port local ni process.
+    pub async fn open_direct_tcpip(
+        host: &str,
+        port: u16,
+        user: &str,
+        remote_port: u16,
+        password: Option<&str>,
+        key_path: Option<&Path>,
+    ) -> Result<(NativeGuard, impl AsyncRead + AsyncWrite + Unpin + Send)> {
+        let h = connect_auth(host, port, user, password, key_path).await?;
+        let ch = tokio::time::timeout(
+            Duration::from_secs(10),
+            h.channel_open_direct_tcpip("127.0.0.1", remote_port as u32, "127.0.0.1", 0),
+        )
+        .await
+        .context("direct-tcpip timeout")?
+        .context("direct-tcpip — le démon écoute-t-il sur le port distant ?")?;
+        Ok((NativeGuard(h), ch.into_stream()))
+    }
+
+    /// `ssh host <script>` sans binaire : canal exec → stdout collecté.
+    pub async fn ssh_exec(
+        host: &str,
+        port: u16,
+        user: &str,
+        password: Option<&str>,
+        key_path: Option<&Path>,
+        script: &str,
+    ) -> Result<(i32, String)> {
+        use russh::ChannelMsg;
+        let h = connect_auth(host, port, user, password, key_path).await?;
+        let mut ch = h.channel_open_session().await.context("channel session")?;
+        ch.exec(true, script.as_bytes().to_vec())
+            .await
+            .context("exec")?;
+        let mut out = Vec::new();
+        let mut code = -1i32;
+        tokio::time::timeout(Duration::from_secs(120), async {
+            while let Some(msg) = ch.wait().await {
+                match msg {
+                    ChannelMsg::Data { data } => out.extend_from_slice(&data),
+                    ChannelMsg::ExtendedData { data, .. } => out.extend_from_slice(&data),
+                    ChannelMsg::ExitStatus { exit_status } => code = exit_status as i32,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .context("exec timeout")?;
+        Ok((code, String::from_utf8_lossy(&out).to_string()))
     }
 }
 

@@ -538,3 +538,53 @@ details.th[open] > summary::before { content: "▾ "; }
   font-size:11px; color:var(--dim); border-top:1px solid var(--line);
   background:var(--panel-solid); user-select:none; flex:none }
 .sb-flex { flex:1 }
+
+/* ── Android / tactile ─────────────────────────────────────────────────── */
+#scrim {
+  position: fixed; inset: 0; z-index: 39;
+  background: rgba(0, 0, 0, .45); backdrop-filter: blur(1px);
+}
+body.android #titlebar {
+  height: 46px; padding: env(safe-area-inset-top) 6px 0 6px;
+}
+body.android #tb-min, body.android #tb-max, body.android #tb-close,
+body.android .resize-edge, body.android #sidebar-resize {
+  display: none !important;
+}
+#tb-menu {
+  border: 0; background: transparent; color: var(--muted);
+  font-size: 18px; padding: 4px 10px; flex: none;
+}
+body.android #sidebar {
+  position: fixed; z-index: 40; top: 0; bottom: 0; left: 0;
+  width: min(82vw, 320px); min-width: 0;
+  padding-top: max(10px, env(safe-area-inset-top));
+  transform: translateX(-105%); transition: transform .2s ease;
+  background: var(--panel-solid);
+}
+body.android #sidebar.open { transform: translateX(0); }
+body.android dialog { max-width: 94vw; }
+body.android dialog input, body.android dialog select,
+body.android dialog textarea, body.android dialog button { font-size: 16px; }
+body.android #file-panel {
+  position: fixed; inset: 0; z-index: 45; width: auto; max-width: none;
+  border-left: 0; background: var(--panel-solid);
+}
+body.android #file-resize { display: none; }
+body.android #composer {
+  padding-bottom: max(8px, env(safe-area-inset-bottom));
+}
+body.android #composer button, body.android #chat-header button,
+body.android #chat-header select { min-height: 38px; }
+body.android #statusbar {
+  padding-bottom: max(3px, env(safe-area-inset-bottom));
+}
+body.android #btn-bottom { bottom: 74px; }
+/* Champs SSH natifs dans le dialogue de connexion */
+#c-pubkey {
+  margin: 0; padding: 8px; font-size: 11px; white-space: pre-wrap;
+  word-break: break-all; user-select: all; max-height: 90px; overflow: auto;
+  background: rgba(236, 230, 216, .05); border-radius: 6px; color: var(--sand);
+}
+#c-pubkey-box { display: flex; flex-direction: column; gap: 6px;
+  font-size: 13px; color: var(--muted); }

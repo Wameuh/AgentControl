@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <link rel="icon" type="image/svg+xml" href="/gem.svg" />
     <title>AgentControl</title>
   </head>
@@ -10,6 +10,7 @@
     <canvas id="mesh-bg"></canvas>
     <div id="app">
       <div id="titlebar" data-tauri-drag-region>
+        <button id="tb-menu" hidden data-i18n-title="menu_title" title="Menu">☰</button>
         <span id="titlebar-gem"></span>
         <span id="titlebar-title">AgentControl</span>
         <div class="tb-btns">
@@ -115,10 +116,21 @@
             <option value="tcp" data-i18n="tcp_label">Direct TCP</option>
           </select>
         </label>
+        <label id="c-native-wrap"><span data-i18n="ssh_native_label">Native SSH (russh)</span>
+          <input type="checkbox" id="c-native" />
+        </label>
         <label><span data-i18n="host_label">Host</span> <input id="c-host" list="ssh-hosts" data-i18n-ph="host_ph" placeholder="user@server" /></label>
         <datalist id="ssh-hosts"></datalist>
+        <label class="nat-row"><span data-i18n="ssh_port_label">SSH port</span> <input id="c-sport" type="number" value="22" /></label>
+        <label class="nat-row"><span data-i18n="user_label">User</span> <input id="c-user" data-i18n-ph="user_ph" placeholder="(user@host if blank)" /></label>
+        <label class="nat-row"><span data-i18n="password_label">Password</span> <input id="c-pass" type="password" data-i18n-ph="password_ph" placeholder="(key preferred)" /></label>
         <label><span data-i18n="port_label">Remote daemon port</span> <input id="c-port" type="number" value="7331" /></label>
-        <label><span data-i18n="ssh_args_label">SSH args</span> <input id="c-args" data-i18n-ph="ssh_args_ph" placeholder="-i ~/.ssh/key -p 22" /></label>
+        <label id="c-args-wrap"><span data-i18n="ssh_args_label">SSH args</span> <input id="c-args" data-i18n-ph="ssh_args_ph" placeholder="-i ~/.ssh/key -p 22" /></label>
+        <div id="c-pubkey-box" class="nat-row" hidden>
+          <span data-i18n="pubkey_label">App public key (server authorized_keys)</span>
+          <pre id="c-pubkey"></pre>
+          <button id="c-pubkey-copy" type="button" data-i18n="copy">Copy</button>
+        </div>
         <pre id="log-view" hidden></pre>
         <menu>
           <button id="c-logs" type="button" data-i18n="logs">Logs</button>

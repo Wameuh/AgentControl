@@ -27,12 +27,28 @@ client Tauri Ubuntu+Windows, et publie une release sur les tags `v*`.
 - **Suppression d'un crate/binaire** : penser au workflow CI
   (`-p <crate>` dans build.yml) et à `CRATES` dans `tools/bump_version.py`.
 
+## Android
+
+- `gen/android` NON commité — généré par `npx tauri android init --ci` dans le
+  job `client-android` (le manifest généré inclut déjà `INTERNET`).
+- SSH : pas de binaire ssh → transport `Transport::SshNative` (russh) forcé
+  sur Android, disponible en opt-in sur desktop (`native: true` dans la cfg).
+  `direct-tcpip` remplace `ssh -L` ; `ssh_native::ssh_exec` remplace `ssh host`.
+- Clé ed25519 générée par l'app : `<base>/agentcontrol_ed25519` — sur Android
+  `client_core::init_paths(app_data_dir)` car HOME est absent.
+- `ureq`, `tauri-plugin-shell` : desktop-only (target cfg dans src-tauri/
+  Cargo.toml) ; `check_update`/`update_client` renvoient Err sur Android.
+- APK CI : aarch64 debug-signé (artifact + release). `--target` pour ajouter
+  d'autres ABI.
+
 ## Pièges rencontrés
 
 - `anyhow::bail!` dans une fonction `Result<_, String>` → E0308.
 - `ureq` : feature `native-tls` (pas rustls/ring → pas de compilateur C
   requis pour le check Windows) ; `libssl-dev`/`pkg-config` nécessaires
-  sur Ubuntu (CI).
+  sur Ubuntu (CI). NB : russh **exige** ring (C) — le check Windows passe
+  via les shims zig `/tmp/zig-shim/x86_64-w64-mingw32-gcc{,++}`
+  (`zig cc -target x86_64-windows-gnu`, filtrent `--target=` de cc-rs).
 - `flex-shrink:0` requis sur les items d'un flex-column scrollable.
 - Tauri 2 : `set_var` est `unsafe` ; `get_webview_window` exige
   `use tauri::Manager` ; `Image::new_owned` prend du RGBA brut.

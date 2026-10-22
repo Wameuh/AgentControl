@@ -31,11 +31,76 @@ for (const id of ["titlebar-gem", "about-gem"]) {
 const cg = document.getElementById("chat-gem");
 if (cg) cg.innerHTML = gemSVG("human");
 
+// Plateforme (android | windows | linux) — gates UI mobile.
+// Détection synchrone par UA (avant le resolve de platform()).
+let IS_ANDROID = /Android/i.test(navigator.userAgent);
+invoke<string>("platform").then((p) => {
+  IS_ANDROID = p === "android";
+  document.body.classList.toggle("android", IS_ANDROID);
+  if (IS_ANDROID) {
+    // Pas de fenêtre à minimizer/drag sous Android.
+    $("tb-menu").hidden = false;
+  }
+}).catch(() => {});
+document.body.classList.toggle("android", IS_ANDROID);
+
+/// Ouvre une URL externe : plugin shell (desktop), window.open (android).
+function shellOpen(url: string) {
+  if (IS_ANDROID) {
+    window.open(url, "_blank");
+    return;
+  }
+  invoke("plugin:shell|open", { path: url }).catch(() => {});
+}
+
+/// Clic droit (desktop) ou appui long ~500 ms (tactile) → menu contextuel.
+function bindCtx(el: HTMLElement, cb: (x: number, y: number) => void) {
+  el.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    cb(e.clientX, e.clientY);
+  });
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let px = 0;
+  let py = 0;
+  el.addEventListener("touchstart", (e) => {
+    const t0 = e.touches[0];
+    px = t0.clientX;
+    py = t0.clientY;
+    timer = setTimeout(() => {
+      timer = null;
+      cb(px, py);
+    }, 500);
+  }, { passive: true });
+  const cancel = () => {
+    if (timer) { clearTimeout(timer); timer = null; }
+  };
+  el.addEventListener("touchend", cancel);
+  el.addEventListener("touchmove", (e) => {
+    const t0 = e.touches[0];
+    if (Math.hypot(t0.clientX - px, t0.clientY - py) > 10) cancel();
+  }, { passive: true });
+}
+
 // Fenêtre custom (decorations: false) : drag natif via data-tauri-drag-region
 const appWin = getCurrentWindow();
 $("tb-min").onclick = () => appWin.minimize();
 $("tb-max").onclick = () => appWin.toggleMaximize();
 $("tb-close").onclick = () => appWin.close();
+// Drawer mobile : ☰ ouvre la sidebar, tap dehors/selection ferme.
+const scrim = document.createElement("div");
+scrim.id = "scrim";
+scrim.hidden = true;
+scrim.onclick = () => {
+  $("sidebar").classList.remove("open");
+  scrim.hidden = true;
+};
+document.body.appendChild(scrim);
+$("tb-menu").onclick = () => {
+  const sb = $("sidebar");
+  sb.classList.toggle("open");
+  scrim.hidden = !sb.classList.contains("open");
+};
 $("titlebar").addEventListener("dblclick", (e) => {
   if (!(e.target as HTMLElement).closest("button")) appWin.toggleMaximize();
 });
@@ -81,7 +146,7 @@ $("tb-about").onclick = async () => {
 };
 $("about-gh").addEventListener("click", (e) => {
   e.preventDefault();
-  invoke("plugin:shell|open", { path: "https://github.com/Wameuh/AgentControl" }).catch(() => {});
+  shellOpen("https://github.com/Wameuh/AgentControl");
 });
 
 // Check update au boot : version distante (gh release ou package.json sur
@@ -124,9 +189,7 @@ async function remoteVersion(): Promise<string> {
       b.textContent = "…";
       invoke("update_client", { tag: remote }).catch(() => {
         // Pas d'asset .deb → ouvrir la page releases à la place
-        invoke("plugin:shell|open", {
-          path: "https://github.com/Wameuh/AgentControl/releases",
-        }).catch(() => {});
+        shellOpen("https://github.com/Wameuh/AgentControl/releases");
         b.textContent = `⬆ v${remote}`;
       });
     };
@@ -300,8 +363,29 @@ function openGroupDlg(s: SessionMeta) {
 ($("g-ok") as HTMLButtonElement).onclick = () => {
   ($("dlg-group") as HTMLDialogElement).close("ok");
 };
-const connKeyOf = (cfg: Record<string, unknown>) =>
-  cfg.kind === "ssh" ? `ssh:${cfg.host}` : cfg.kind === "tcp" ? `tcp:${cfg.addr}` : "local";
+// Doit refléter conn_key() côté Rust : ssh → "ssh{,-native}:host:sshport".
+const connKeyOf = (cfg: Record<string, unknown>) => {
+  if (cfg.kind === "ssh") {
+    const nat = cfg.native === true || IS_ANDROID;
+    const p = Number(cfg.port) || 22;
+    return `${nat ? "ssh-native" : "ssh"}:${cfg.host}:${p}`;
+  }
+  return cfg.kind === "tcp" ? `tcp:${cfg.addr}` : "local";
+};
+
+/// Params ensure_daemon — forward les champs ssh de la cfg (natif ou CLI).
+function daemonParams(cfg: Record<string, unknown>, tag: string) {
+  return {
+    host: cfg.host,
+    args: cfg.args ?? [],
+    tag,
+    port: cfg.port ?? null,
+    user: cfg.user ?? null,
+    password: cfg.password ?? null,
+    key: cfg.key ?? null,
+    native: cfg.native ?? null,
+  };
+}
 
 /** Dialogue modal pendant install/update du démon distant. */
 function daemonDlg(msg: string, open: boolean) {
@@ -328,7 +412,7 @@ async function doConnect(cfg: Record<string, unknown>) {
     el.className = "badge warn";
     daemonDlg(t("installing_daemon") + " — " + String(cfg.host), true);
     try {
-      await invoke("ensure_daemon", { host: cfg.host, args: cfg.args ?? [], tag: ver });
+      await invoke("ensure_daemon", daemonParams(cfg, ver));
     } finally {
       daemonDlg("", false);
     }
@@ -343,7 +427,7 @@ async function doConnect(cfg: Record<string, unknown>) {
     el.className = "badge warn";
     daemonDlg(t("updating_daemon", { dv, lv }) + " — " + String(cfg.host), true);
     try {
-      await invoke("ensure_daemon", { host: cfg.host, args: cfg.args ?? [], tag: lv })
+      await invoke("ensure_daemon", daemonParams(cfg, lv))
         .catch((e) => showErr(String(e)));
       status = await invoke("connect", { cfg }).catch(() => status);
     } finally {
@@ -451,11 +535,13 @@ async function refreshSessions() {
     div.className = "sess" + (grp ? " in-grp" : "") + (current?.id === s.id ? " active" : "");
     if (grpClosed) div.style.display = "none";
     div.innerHTML = `<span class="dot st-${s.state}" title="${esc(s.state)}">${dotIcon(s.state)}</span><span class="t">${esc(s.title)}</span><span class="a">${esc(s.agent)}</span><button class="sess-del" title="Supprimer">✕</button>`;
-    div.onclick = () => openSession(s.id);
-    div.oncontextmenu = (e) => {
-      e.preventDefault();
-      openGroupDlg(s);
+    div.onclick = () => {
+      openSession(s.id);
+      // Mobile : fermer le drawer après sélection.
+      $("sidebar").classList.remove("open");
+      scrim.hidden = true;
     };
+    bindCtx(div, () => openGroupDlg(s));
     const del = div.querySelector<HTMLElement>(".sess-del")!;
     del.addEventListener("click", async (e) => {
       e.stopPropagation();
@@ -848,10 +934,7 @@ function treeNode(rel: string, name: string, en: DirEntry, depth: number, abs: s
   } else {
     d.onclick = () => openFilePanel(rel);
   }
-  d.oncontextmenu = (e) => {
-    e.preventDefault();
-    openFileCtx(e.clientX, e.clientY, d);
-  };
+  bindCtx(d, (x, y) => openFileCtx(x, y, d));
   return d;
 }
 
@@ -1959,7 +2042,19 @@ $("f-create").addEventListener("click", async (e) => {
   await refreshSessions();
 });
 
-interface SavedConn { kind: string; host?: string; remote_port?: number; args?: string[]; path?: string; addr?: string }
+interface SavedConn {
+  kind: string;
+  host?: string;
+  addr?: string;
+  path?: string;
+  remote_port?: number;
+  args?: string[];
+  port?: number;
+  user?: string;
+  password?: string;
+  key?: string;
+  native?: boolean;
+}
 let savedConns: SavedConn[] = [];
 let lastCfg: Record<string, unknown> | null = null;
 let reconnecting = false;
@@ -2025,9 +2120,62 @@ function fillConnForm(c: SavedConn) {
   ($("c-host") as HTMLInputElement).value = c.host ?? c.addr ?? c.path ?? "";
   ($("c-port") as HTMLInputElement).value = String(c.remote_port ?? 7331);
   ($("c-args") as HTMLInputElement).value = (c.args ?? []).join(" ");
+  ($("c-sport") as HTMLInputElement).value = String(c.port ?? 22);
+  ($("c-user") as HTMLInputElement).value = c.user ?? "";
+  ($("c-pass") as HTMLInputElement).value = c.password ?? "";
+  ($("c-native") as HTMLInputElement).checked = c.native === true || IS_ANDROID;
+  syncSshFields();
 }
 
+/// Champs SSH natifs visibles si kind=ssh && (native || android) ;
+/// args CLI sinon (desktop). Local → presque rien.
+function syncSshFields() {
+  const kind = ($("c-kind") as HTMLSelectElement).value;
+  const ssh = kind === "ssh";
+  const nat = ($("c-native") as HTMLInputElement).checked || IS_ANDROID;
+  document.querySelectorAll<HTMLElement>(".nat-row").forEach((r) => {
+    r.style.display = ssh && nat ? "" : "none";
+  });
+  ($("c-args-wrap") as HTMLElement).style.display = ssh && !nat ? "" : "none";
+  ($("c-native-wrap") as HTMLElement).style.display = ssh && !IS_ANDROID ? "" : "none";
+  ($("c-host") as HTMLInputElement).style.display = kind === "local" ? "none" : "";
+  ($("c-port") as HTMLInputElement).style.display = ssh ? "" : "none";
+  if (ssh && nat) void showPubkey();
+}
+
+async function showPubkey() {
+  const box = $("c-pubkey-box");
+  if (!box.hidden) return;
+  box.hidden = false;
+  const pre = $("c-pubkey");
+  pre.textContent = await invoke<string>("ssh_pubkey").catch((e) => `⚠ ${e}`);
+}
+$("c-pubkey-copy").onclick = async () => {
+  const txt = $("c-pubkey").textContent ?? "";
+  try {
+    await navigator.clipboard.writeText(txt);
+    $("c-pubkey-copy").textContent = "✓";
+  } catch {
+    // Clipboard refusé → sélectionner le texte pour copie manuelle.
+    const r = document.createRange();
+    r.selectNodeContents($("c-pubkey"));
+    getSelection()?.removeAllRanges();
+    getSelection()?.addRange(r);
+  }
+  setTimeout(() => { $("c-pubkey-copy").textContent = t("copy"); }, 1500);
+};
+($("c-kind") as HTMLSelectElement).onchange = syncSshFields;
+($("c-native") as HTMLInputElement).onchange = syncSshFields;
+
 $("btn-connect").onclick = async () => {
+  // Android : pas de socket local ni de binaire ssh → SSH natif par défaut.
+  if (IS_ANDROID) {
+    const ks = $("c-kind") as HTMLSelectElement;
+    ks.querySelector('option[value="local"]')?.remove();
+    ks.value = "ssh";
+    ($("c-native") as HTMLInputElement).checked = true;
+  }
+  syncSshFields();
   // Alias Host de ~/.ssh/config en suggestions
   const dl = $("ssh-hosts");
   dl.innerHTML = "";
@@ -2070,13 +2218,17 @@ $("c-go").addEventListener("click", async (e) => {
   btn.disabled = true;
   btn.classList.add("spin");
   const kind = ($("c-kind") as HTMLSelectElement).value;
-  const cfg =
+  const cfg: Record<string, unknown> =
     kind === "ssh"
       ? {
           kind: "ssh",
           host: ($("c-host") as HTMLInputElement).value,
           remote_port: Number(($("c-port") as HTMLInputElement).value) || 7331,
           args: ($("c-args") as HTMLInputElement).value.split(" ").filter(Boolean),
+          port: Number(($("c-sport") as HTMLInputElement).value) || 22,
+          user: ($("c-user") as HTMLInputElement).value || undefined,
+          password: ($("c-pass") as HTMLInputElement).value || undefined,
+          native: ($("c-native") as HTMLInputElement).checked || IS_ANDROID || undefined,
         }
       : kind === "tcp"
         ? { kind: "tcp", addr: ($("c-host") as HTMLInputElement).value }

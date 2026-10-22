@@ -1,23 +1,31 @@
 [package]
 name = "agentcontrol"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2021"
 build = "build.rs"
 
 # Crate indépendante du workspace racine (sous-dossier)
 [workspace]
 
+# Tauri mobile : le code vit dans la lib (entry point cfg(mobile)),
+# le bin desktop ne fait qu'appeler run().
+[lib]
+name = "agentcontrol_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-tauri-plugin-shell = "2"
 client-core = { path = "../../crates/client-core" }
 proto = { path = "../../crates/proto" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-ureq = { version = "2.12", default-features = false, features = ["json", "native-tls"] }
 anyhow = "1"
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+tauri-plugin-shell = "2"
+ureq = { version = "2.12", default-features = false, features = ["json", "native-tls"] }
