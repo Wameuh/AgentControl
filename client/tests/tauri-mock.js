@@ -1,0 +1,97 @@
+// Mock window.__TAURI_INTERNALS__ pour tester la WebView hors Tauri.
+// Répond aux invoke() du frontend avec des données réalistes.
+(function () {
+  const SESSIONS = [
+    { id: "s1", conn: "local", agent: "devin", title: "Refactor API client",
+      cwd: "/home/agent/api", created_at: "2026-10-20T10:00:00Z",
+      available_modes: ["normal", "auto"], available_models: ["devin-latest", "opus"],
+      available_commands: [{ name: "compact", description: "Compacter le contexte" }],
+      config_options: [
+        { id: "mode", name: "Mode", category: "mode", type: "select",
+          currentValue: "normal", options: [{ value: "normal", name: "Normal" }, { value: "auto", name: "Auto" }] },
+        { id: "model", name: "Model", category: "model", type: "select",
+          currentValue: "devin-latest", options: [{ value: "devin-latest", name: "devin-latest" }, { value: "opus", name: "opus" }] },
+      ],
+      state: "working" },
+    { id: "s2", conn: "local", agent: "mock", title: "Fix login crash",
+      cwd: "/home/agent/app", created_at: "2026-10-19T09:00:00Z", group: "Serveur pi",
+      available_modes: [], available_models: [], available_commands: [], state: "idle" },
+    { id: "s3", conn: "local", agent: "devin", title: "Write unit tests",
+      cwd: "/home/agent/tests", created_at: "2026-10-18T08:00:00Z", group: "Serveur pi",
+      available_modes: [], available_models: [], available_commands: [], state: "dead" },
+  ];
+  const EVENTS = [
+    { seq: 1, ts: "10:01", type: "user_message", text: "Refactorise le client API pour utiliser fetch avec retry exponentiel." },
+    { seq: 2, ts: "10:01", type: "agent_thought", text: "I need to look at the existing client structure first, then introduce a retry wrapper around fetch calls." },
+    { seq: 3, ts: "10:02", type: "tool_call", call_id: "c1", title: "Read src/api/client.ts", status: "done", excerpt: "export async function apiCall(url) { const r = await fetch(url); return r.json(); }" },
+    { seq: 4, ts: "10:03", type: "tool_call", call_id: "c2", title: "Edit src/api/client.ts", status: "done", excerpt: "+async function withRetry(fn, n = 3) { … }" },
+    { seq: 5, ts: "10:04", type: "agent_text", text: "J'ai refactoré le client API : `withRetry` encapsule les appels fetch avec backoff exponentiel (3 tentatives, 500ms de base)." },
+    { seq: 6, ts: "10:05", type: "tool_call", call_id: "c3", title: "Run npm test", status: "running", excerpt: "" },
+    { seq: 7, ts: "10:05", type: "permission_request", request_id: "r1",
+      title: "Autoriser l'exécution de npm test ?",
+      options: [
+        { option_id: "always", name: "Toujours autoriser", kind: "allow_always" },
+        { option_id: "once", name: "Autoriser une fois", kind: "allow_once" },
+        { option_id: "no", name: "Refuser", kind: "reject_once" },
+      ] },
+    { seq: 8, ts: "10:06", type: "system", text: "steer → envoyé au tour en cours" },
+  ];
+  const DIR = {
+    dir: "/home/agent/api",
+    entries: [
+      { name: "src", dir: true, size: 0 },
+      { name: "tests", dir: true, size: 0 },
+      { name: ".git", dir: true, size: 0 },
+      { name: "Cargo.toml", dir: false, size: 1240 },
+      { name: "package.json", dir: false, size: 980 },
+      { name: "README.md", dir: false, size: 4321 },
+      { name: ".env", dir: false, size: 120 },
+    ],
+  };
+  const FILE = { content: "export async function apiCall(url, opts) {\n  return withRetry(() => fetch(url, opts), 3);\n}\n\nasync function withRetry(fn, n) {\n  try { return await fn(); }\n  catch (e) { if (n > 0) { await sleep(500); return withRetry(fn, n - 1); } throw e; }\n}", truncated: false, path: "/home/agent/api/src/client.ts" };
+
+  function rpc(method) {
+    switch (method) {
+      case "list_sessions": return SESSIONS;
+      case "list_agents": return [{ id: "devin", name: "Devin" }, { id: "mock", name: "Mock agent" }];
+      case "session_info": return { meta: SESSIONS[0], pending: ["r1"], alive: true, last_seq: EVENTS.length };
+      case "events": return { events: EVENTS, last_seq: EVENTS.length };
+      case "queue_list": return { queue: ["Compile aussi la doc quand tu as fini"] };
+      case "list_dir": return DIR;
+      case "read_file": return FILE;
+      case "daemon_status": return { version: "0.2.9", sessions: SESSIONS.length };
+      case "list_native_sessions": return { sessions: [] };
+      case "get_blob": return { data: "blob", total: 4 };
+      default: return null;
+    }
+  }
+
+  let cbId = 0;
+  const callbacks = new Map();
+  window.__TAURI_INTERNALS__ = {
+    metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
+    transformCallback(cb) { const id = ++cbId; callbacks.set(id, cb); return id; },
+    runCallback(id, data) { callbacks.get(id)?.(data); },
+    convertFileSrc(p) { return p; },
+    invoke(cmd, args) {
+      const p = Promise.resolve();
+      if (cmd === "platform") return p.then(() => "android");
+      if (cmd === "plugin:app|version") return p.then(() => "0.2.9");
+      if (cmd === "plugin:event|listen") return p.then(() => ++cbId);
+      if (cmd === "plugin:event|unlisten") return p.then(() => null);
+      if (cmd.startsWith("plugin:")) return p.then(() => null);
+      switch (cmd) {
+        case "connect": return p.then(() => ({ version: "0.2.9", sessions: SESSIONS.length, servers: 1 }));
+        case "call": return p.then(() => rpc(args.method));
+        case "subscribe": return p.then(() => null);
+        case "saved_connections": return p.then(() => []);
+        case "ssh_hosts": return p.then(() => []);
+        case "ssh_pubkey": return p.then(() => "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDemoAgentControlKeyExample agentcontrol");
+        case "check_update": return p.then(() => { throw new Error("offline"); });
+        case "ensure_daemon": case "save_connection": case "update_client":
+          return p.then(() => null);
+        default: return p.then(() => null);
+      }
+    },
+  };
+})();

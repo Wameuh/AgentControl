@@ -70,12 +70,17 @@ function bindCtx(el: HTMLElement, cb: (x: number, y: number) => void) {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let px = 0;
   let py = 0;
+  // Le touchend qui termine un long-press synthétise un click : l'avaler pour
+  // ne pas déclencher l'action normale de l'élément ni refermer le menu.
+  const swallowClick = (e: Event) => { e.preventDefault(); e.stopPropagation(); };
   el.addEventListener("touchstart", (e) => {
     const t0 = e.touches[0];
     px = t0.clientX;
     py = t0.clientY;
     timer = setTimeout(() => {
       timer = null;
+      el.addEventListener("click", swallowClick, { capture: true, once: true });
+      setTimeout(() => el.removeEventListener("click", swallowClick, { capture: true }), 450);
       cb(px, py);
     }, 500);
   }, { passive: true });
@@ -167,12 +172,14 @@ scrim.onclick = () => {
   if (scrimOwner === "drawer") { navClose("drawer"); $("sidebar").classList.remove("open"); scrimOff("drawer"); }
   else if (scrimOwner === "sheet") { navClose("sheet"); omenu.hidden = true; scrimOff("sheet"); }
 };
-document.body.appendChild(scrim);
+// NB : dans #app-body (pas body) — #app a z-index:1 (contexte d'empilement),
+// un enfant de body passerait au-dessus de toute l'app quel que soit son z.
+$("app-body").appendChild(scrim);
 // Menu ⋮ en bottom-sheet (Android uniquement)
 const omenu = document.createElement("div");
 omenu.id = "omenu";
 omenu.hidden = true;
-document.body.appendChild(omenu);
+$("app-body").appendChild(omenu);
 function openSheetMenu(items: { label: string; danger?: boolean; fn: () => void }[]) {
   omenu.innerHTML = "";
   for (const it of items) {
@@ -1167,9 +1174,12 @@ $("btn-files").onclick = () => {
   if (opening) {
     p.hidden = false;
     navPush("files");
-    // L'arbre + le viewer ont besoin de largeur
-    const w = Math.max(Number(p.style.width.replace("px", "")) || 0, 620);
-    p.style.width = `${Math.min(w, window.innerWidth - 120)}px`;
+    // L'arbre + le viewer ont besoin de largeur (desktop seulement :
+    // sur Android le panneau est fixe plein écran, pas de width inline).
+    if (!IS_ANDROID) {
+      const w = Math.max(Number(p.style.width.replace("px", "")) || 0, 620);
+      p.style.width = `${Math.min(w, window.innerWidth - 120)}px`;
+    }
     setTreeVisible(true);
   } else {
     closeFilePanel();
