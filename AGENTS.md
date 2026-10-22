@@ -1,5 +1,10 @@
 # AgentControl — règles de travail
 
+## Releases
+
+**Pas de tag `v*` ni de release sans demande explicite de l'utilisateur.**
+Pousser les commits et bumper la version, oui — tagguer/publier, non.
+
 ## Après chaque push : vérifier le CI
 
 Obligatoire, ne pas oublier :
