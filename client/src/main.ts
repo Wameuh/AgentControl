@@ -41,6 +41,7 @@ function applyAndroidChrome() {
   $("chat-more").hidden = false;
   $("titlebar").removeAttribute("data-tauri-drag-region");
   ($("input") as HTMLTextAreaElement).enterKeyHint = "send";
+  ($("input") as HTMLTextAreaElement).placeholder = t("input_ph_mobile");
   $("file-close").textContent = "‹"; // page fichiers → flèche retour
 }
 invoke<string>("platform").then((p) => {

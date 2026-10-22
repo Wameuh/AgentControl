@@ -637,6 +637,9 @@ body.android dialog input, body.android dialog select,
 body.android dialog textarea {
   font-size: 16px; min-height: 46px; padding: 10px 12px;
 }
+body.android dialog input[type="checkbox"] {
+  min-height: 0; width: 24px; height: 24px; accent-color: #7ecba1;
+}
 body.android dialog textarea { min-height: 90px; }
 body.android dialog button {
   min-height: 46px; font-size: 15.5px; padding: 10px 16px;
