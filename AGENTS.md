@@ -1,5 +1,15 @@
 # AgentControl — règles de travail
 
+## Branche `main` protégée → workflow PR
+
+`main` est protégée : **push direct impossible**, PR obligatoire.
+Checks CI requis avant merge : `daemon-linux` (x86_64 + aarch64),
+`client` (Ubuntu + Windows), `client-android`.
+
+Workflow : créer une branche → push → `gh pr create` → attendre les
+5 checks verts → merge (squash ou merge commit, pas de contrainte).
+Le CI build tous les artefacts sur les PR (APK suffixé `-<sha>`).
+
 ## Releases
 
 **Pas de tag `v*` ni de release sans demande explicite de l'utilisateur.**
