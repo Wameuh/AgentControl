@@ -15,6 +15,8 @@
   if (!canvas || !canvas.getContext) return;
   const ctx = canvas.getContext("2d", { alpha: false });
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  // Android : fond statique — pas de boucle rAF permanente (batterie).
+  const NO_ANIM = reducedMotion.matches || /Android/i.test(navigator.userAgent);
 
   const MOODS = {
     sand: { base: [18, 22, 20], light: [205, 182, 140], agent: [147, 173, 140] },
@@ -230,7 +232,7 @@
   }
 
   function start() {
-    if (running || reducedMotion.matches || document.hidden) return;
+    if (running || NO_ANIM || document.hidden) return;
     running = true;
     lastTime = performance.now();
     frameId = window.requestAnimationFrame(frame);
@@ -276,7 +278,7 @@
     else start();
   });
   const onMotionPreference = () => {
-    if (reducedMotion.matches) {
+    if (NO_ANIM) {
       stop();
       snapToTarget();
       draw();

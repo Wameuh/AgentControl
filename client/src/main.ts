@@ -34,15 +34,22 @@ if (cg) cg.innerHTML = gemSVG("human");
 // Plateforme (android | windows | linux) — gates UI mobile.
 // Détection synchrone par UA (avant le resolve de platform()).
 let IS_ANDROID = /Android/i.test(navigator.userAgent);
+function applyAndroidChrome() {
+  // Pas de fenêtre à minimizer/drag sous Android : ☰ + ⋮ seulement.
+  $("tb-menu").hidden = false;
+  $("tb-more").hidden = false;
+  $("chat-more").hidden = false;
+  $("titlebar").removeAttribute("data-tauri-drag-region");
+  ($("input") as HTMLTextAreaElement).enterKeyHint = "send";
+  $("file-close").textContent = "‹"; // page fichiers → flèche retour
+}
 invoke<string>("platform").then((p) => {
   IS_ANDROID = p === "android";
   document.body.classList.toggle("android", IS_ANDROID);
-  if (IS_ANDROID) {
-    // Pas de fenêtre à minimizer/drag sous Android.
-    $("tb-menu").hidden = false;
-  }
+  if (IS_ANDROID) applyAndroidChrome();
 }).catch(() => {});
 document.body.classList.toggle("android", IS_ANDROID);
+if (IS_ANDROID) applyAndroidChrome();
 
 /// Ouvre une URL externe : plugin shell (desktop), window.open (android).
 function shellOpen(url: string) {
@@ -87,26 +94,141 @@ const appWin = getCurrentWindow();
 $("tb-min").onclick = () => appWin.minimize();
 $("tb-max").onclick = () => appWin.toggleMaximize();
 $("tb-close").onclick = () => appWin.close();
+
+// ---------------------------------------------------------------------------
+// Navigation Android : pile d'overlays adossée à l'historique → le bouton
+// "retour" ferme le panneau/menu/dialog ouvert au lieu de quitter l'app.
+// ---------------------------------------------------------------------------
+const navStack: string[] = [];
+let suppressPops = 0; // back() déclenchés par navClose → autant de popstate à ignorer
+function navPush(id: string) {
+  if (!IS_ANDROID) return;
+  navStack.push(id);
+  try { history.pushState({ ac: id }, ""); } catch { /* noop */ }
+}
+function navClose(id: string) {
+  if (!IS_ANDROID) return;
+  const i = navStack.lastIndexOf(id);
+  if (i < 0) return;
+  navStack.splice(i, 1);
+  if ((history.state as { ac?: string } | null)?.ac === id) {
+    suppressPops++;
+    history.back();
+  }
+}
+function rawCloseOverlay(id: string) {
+  if (id === "drawer") {
+    $("sidebar").classList.remove("open");
+    scrimOff("drawer");
+  } else if (id === "sheet" || id === "fctx") {
+    omenu.hidden = true;
+    fileCtx.hidden = true;
+    scrimOff("sheet");
+  } else if (id === "fileview") {
+    $("file-viewer").classList.remove("open");
+  } else if (id === "files") {
+    $("file-panel").hidden = true;
+  } else if (id.startsWith("dlg:")) {
+    (document.getElementById(id.slice(4)) as HTMLDialogElement | null)?.close();
+  }
+}
+window.addEventListener("popstate", () => {
+  if (!IS_ANDROID) return;
+  if (suppressPops > 0) { suppressPops--; return; }
+  const top = navStack.pop();
+  if (top) rawCloseOverlay(top);
+});
+// Dialogs trackés automatiquement dans la pile (Cancel = back propre).
+if (IS_ANDROID) {
+  const origShowModal = HTMLDialogElement.prototype.showModal;
+  HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) {
+    origShowModal.call(this);
+    navPush(`dlg:${this.id}`);
+  };
+  document.addEventListener("close", (e) => {
+    const d = e.target as HTMLDialogElement;
+    if (d?.id) navClose(`dlg:${d.id}`);
+  }, true);
+}
+
 // Drawer mobile : ☰ ouvre la sidebar, tap dehors/selection ferme.
 const scrim = document.createElement("div");
 scrim.id = "scrim";
 scrim.hidden = true;
+let scrimOwner: "drawer" | "sheet" | null = null;
+function scrimOn(owner: "drawer" | "sheet") {
+  scrimOwner = owner;
+  scrim.hidden = false;
+}
+function scrimOff(owner: "drawer" | "sheet") {
+  if (scrimOwner === owner) { scrimOwner = null; scrim.hidden = true; }
+}
 scrim.onclick = () => {
-  $("sidebar").classList.remove("open");
-  scrim.hidden = true;
+  if (scrimOwner === "drawer") { navClose("drawer"); $("sidebar").classList.remove("open"); scrimOff("drawer"); }
+  else if (scrimOwner === "sheet") { navClose("sheet"); omenu.hidden = true; scrimOff("sheet"); }
 };
 document.body.appendChild(scrim);
-$("tb-menu").onclick = () => {
-  const sb = $("sidebar");
-  sb.classList.toggle("open");
-  scrim.hidden = !sb.classList.contains("open");
-};
+// Menu ⋮ en bottom-sheet (Android uniquement)
+const omenu = document.createElement("div");
+omenu.id = "omenu";
+omenu.hidden = true;
+document.body.appendChild(omenu);
+function openSheetMenu(items: { label: string; danger?: boolean; fn: () => void }[]) {
+  omenu.innerHTML = "";
+  for (const it of items) {
+    const b = document.createElement("button");
+    b.className = "om-item" + (it.danger ? " danger" : "");
+    b.textContent = it.label;
+    b.onclick = () => { closeSheet(); it.fn(); };
+    omenu.appendChild(b);
+  }
+  omenu.hidden = false;
+  scrimOn("sheet");
+  navPush("sheet");
+}
+function closeSheet() {
+  navClose("sheet");
+  omenu.hidden = true;
+  scrimOff("sheet");
+}
+function openDrawer() {
+  $("sidebar").classList.add("open");
+  scrimOn("drawer");
+  navPush("drawer");
+}
+function closeDrawer() {
+  navClose("drawer");
+  $("sidebar").classList.remove("open");
+  scrimOff("drawer");
+}
+$("tb-menu").onclick = () =>
+  $("sidebar").classList.contains("open") ? closeDrawer() : openDrawer();
+// Swipe depuis le bord gauche → ouvre le drawer ; swipe gauche dessus → ferme.
+{
+  let sx = 0, sy = 0, swiping = false;
+  document.addEventListener("touchstart", (e) => {
+    const t0 = e.touches[0];
+    const inDrawer = (e.target as HTMLElement).closest("#sidebar") != null;
+    if (!IS_ANDROID || document.querySelector("dialog[open]")) { swiping = false; return; }
+    swiping = (inDrawer && $("sidebar").classList.contains("open")) ||
+      (!inDrawer && t0.clientX <= 26 && !(e.target as HTMLElement).closest("#file-panel, #omenu, #fctx"));
+    sx = t0.clientX; sy = t0.clientY;
+  }, { passive: true });
+  document.addEventListener("touchmove", (e) => {
+    if (!swiping) return;
+    const t0 = e.touches[0];
+    const dx = t0.clientX - sx, dy = t0.clientY - sy;
+    if (Math.abs(dy) > Math.abs(dx)) { swiping = false; return; }
+    if (dx > 56) { openDrawer(); swiping = false; }
+    else if (dx < -56 && $("sidebar").classList.contains("open")) { closeDrawer(); swiping = false; }
+  }, { passive: true });
+}
 $("titlebar").addEventListener("dblclick", (e) => {
-  if (!(e.target as HTMLElement).closest("button")) appWin.toggleMaximize();
+  if (!IS_ANDROID && !(e.target as HTMLElement).closest("button")) appWin.toggleMaximize();
 });
 // Drag fenêtre explicite (plus fiable que data-tauri-drag-region seul)
 $("titlebar").addEventListener("mousedown", (e) => {
-  if (e.button === 0 && !(e.target as HTMLElement).closest("button"))
+  if (!IS_ANDROID && e.button === 0 && !(e.target as HTMLElement).closest("button"))
     void appWin.startDragging();
 });
 document.querySelectorAll<HTMLElement>(".resize-edge").forEach((el) => {
@@ -143,6 +265,20 @@ $("tb-about").onclick = async () => {
     /* dev */
   }
   ($("dlg-about") as HTMLDialogElement).showModal();
+};
+// Menus ⋮ (Android) : l'app-level ouvre Settings/About, celui du chat les
+// actions de session (cachées du header sur mobile).
+$("tb-more").onclick = () =>
+  openSheetMenu([
+    { label: `⚙  ${t("settings_title")}`, fn: () => $("tb-settings").click() },
+    { label: `ⓘ  ${t("about_title")}`, fn: () => $("tb-about").click() },
+  ]);
+$("chat-more").onclick = () => {
+  const items: { label: string; danger?: boolean; fn: () => void }[] = [];
+  if (current) items.push({ label: `📁  ${t("files_title")}`, fn: () => $("btn-files").click() });
+  if (current && !alive) items.push({ label: `↻  ${t("resume")}`, fn: () => $("btn-resume").click() });
+  items.push({ label: `⟳  ${t("refresh_title")}`, fn: () => $("btn-refresh").click() });
+  openSheetMenu(items);
 };
 $("about-gh").addEventListener("click", (e) => {
   e.preventDefault();
@@ -538,8 +674,7 @@ async function refreshSessions() {
     div.onclick = () => {
       openSession(s.id);
       // Mobile : fermer le drawer après sélection.
-      $("sidebar").classList.remove("open");
-      scrim.hidden = true;
+      closeDrawer();
     };
     bindCtx(div, () => openGroupDlg(s));
     const del = div.querySelector<HTMLElement>(".sess-del")!;
@@ -838,7 +973,13 @@ function highlight(code: string, ext: string): string {
 
 async function openFilePanel(path: string) {
   if (!current) return;
-  $("file-panel").hidden = false;
+  if ($("file-panel").hidden) { $("file-panel").hidden = false; navPush("files"); }
+  // Android : le viewer glisse par-dessus la liste (navigation plein écran).
+  if (IS_ANDROID) {
+    $("file-viewer").classList.add("open");
+    $("fv-name").textContent = path.split("/").pop() ?? path;
+    navPush("fileview");
+  }
   $("file-path").textContent = path;
   $("file-path").title = path;
   $("file-view").textContent = "…";
@@ -859,7 +1000,19 @@ async function openFilePanel(path: string) {
     $("file-view").textContent = String(e);
   }
 }
-$("file-close").onclick = () => ($("file-panel").hidden = true);
+function closeFilePanel() {
+  // Le viewer glissé par-dessus doit être dépilé aussi (pile back propre).
+  navClose("fileview");
+  $("file-viewer").classList.remove("open");
+  navClose("files");
+  $("file-panel").hidden = true;
+}
+$("file-close").onclick = closeFilePanel;
+// Retour viewer → liste (Android)
+$("fv-back").onclick = () => {
+  navClose("fileview");
+  $("file-viewer").classList.remove("open");
+};
 // Redimensionnement du panneau par son bord gauche
 {
   const panel = $("file-panel");
@@ -1011,19 +1164,27 @@ function setTreeVisible(v: boolean) {
 $("btn-files").onclick = () => {
   const p = $("file-panel");
   const opening = p.hidden;
-  p.hidden = !opening;
   if (opening) {
+    p.hidden = false;
+    navPush("files");
     // L'arbre + le viewer ont besoin de largeur
     const w = Math.max(Number(p.style.width.replace("px", "")) || 0, 620);
     p.style.width = `${Math.min(w, window.innerWidth - 120)}px`;
     setTreeVisible(true);
+  } else {
+    closeFilePanel();
   }
 };
 // 🗂 dans le panneau : bascule juste la colonne arborescence
 $("btn-tree").onclick = () => setTreeVisible($("file-tree").hidden);
 $("btn-tree-refresh").onclick = () => void loadTreeRoot();
 
-/** Menu contextuel clic droit : copier contenu / chemin absolu / supprimer. */
+function hideFileCtx() {
+  navClose("fctx");
+  fileCtx.hidden = true;
+}
+/** Menu contextuel clic droit : copier contenu / chemin absolu / supprimer.
+ *  Android : rendu en action-sheet ancré en bas (pas de positionnement x/y). */
 function openFileCtx(x: number, y: number, el: HTMLElement) {
   const rel = el.dataset.rel ?? "";
   const abs = el.dataset.abs ?? rel;
@@ -1039,14 +1200,14 @@ function openFileCtx(x: number, y: number, el: HTMLElement) {
   };
   if (!isDir) {
     add(t("ctx_copy"), "", () => {
-      fileCtx.hidden = true;
+      hideFileCtx();
       void call<{ content: string }>("read_file", { session: current!.id, path: rel })
         .then((r) => copyText(r.content))
         .catch((e) => showErr(String(e)));
     });
   }
   add(t("ctx_copy_path"), "", () => {
-    fileCtx.hidden = true;
+    hideFileCtx();
     void copyText(abs);
   });
   add(t("ctx_delete"), "danger", (b) => {
@@ -1056,7 +1217,7 @@ function openFileCtx(x: number, y: number, el: HTMLElement) {
       b.textContent = t("ctx_confirm");
       return;
     }
-    fileCtx.hidden = true;
+    hideFileCtx();
     void call("delete_path", { session: current!.id, path: rel })
       .then(() => {
         const nx = el.nextElementSibling;
@@ -1066,18 +1227,21 @@ function openFileCtx(x: number, y: number, el: HTMLElement) {
       .catch((e) => showErr(String(e)));
   });
   fileCtx.hidden = false;
-  const r = fileCtx.getBoundingClientRect();
-  fileCtx.style.left = `${Math.min(x, window.innerWidth - r.width - 8)}px`;
-  fileCtx.style.top = `${Math.min(y, window.innerHeight - r.height - 8)}px`;
+  navPush("fctx");
+  if (!IS_ANDROID) {
+    const r = fileCtx.getBoundingClientRect();
+    fileCtx.style.left = `${Math.min(x, window.innerWidth - r.width - 8)}px`;
+    fileCtx.style.top = `${Math.min(y, window.innerHeight - r.height - 8)}px`;
+  }
 }
 // Le menu se ferme au clic ailleurs / Échap / scroll de l'arbre — mais un
 // clic DANS le menu ne doit pas le fermer avant l'action (delete armé).
 fileCtx.addEventListener("click", (e) => e.stopPropagation());
-window.addEventListener("click", () => (fileCtx.hidden = true));
+window.addEventListener("click", hideFileCtx);
 window.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") fileCtx.hidden = true;
+  if (e.key === "Escape") hideFileCtx();
 });
-$("file-tree").addEventListener("scroll", () => (fileCtx.hidden = true));
+$("file-tree").addEventListener("scroll", hideFileCtx);
 
 function mkEv(cls: string, seq: number): HTMLElement {
   const d = document.createElement("div");
