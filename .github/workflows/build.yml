@@ -131,7 +131,7 @@ jobs:
         working-directory: client
         run: |
           npx tauri android init --ci
-          npx tauri android build --apk --debug --target aarch64-linux-android
+          npx tauri android build --apk --debug --target aarch64
       - uses: actions/upload-artifact@v4
         with:
           name: agentcontrol-client-android
