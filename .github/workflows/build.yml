@@ -115,7 +115,8 @@ jobs:
           cache-dependency-path: client/package-lock.json
       - name: NDK
         run: |
-          sdkmanager "ndk;29.0.14233865" "cmake;3.22.1"
+          SDKMANAGER=$(ls "$ANDROID_HOME"/cmdline-tools/latest/bin/sdkmanager 2>/dev/null || find "$ANDROID_HOME" -name sdkmanager -type f | head -1)
+          "$SDKMANAGER" "ndk;29.0.14233865" "cmake;3.22.1"
           echo "NDK_HOME=$ANDROID_HOME/ndk/29.0.14233865" >> "$GITHUB_ENV"
       - run: npm ci
         working-directory: client
