@@ -134,6 +134,13 @@ jobs:
           # Icônes commitées (tauri icon) → projet généré
           cp -r src-tauri/icons/android/* src-tauri/gen/android/app/src/main/res/
           npx tauri android build --apk --debug --target aarch64
+      - name: Renommer l'APK avec la version
+        working-directory: client
+        run: |
+          VER=$(grep -oE '"version": "[^"]+"' src-tauri/tauri.conf.json | head -1 | cut -d'"' -f4)
+          find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" \
+            -exec sh -c 'mv "$1" "$(dirname "$1")/AgentControl_'"$VER"'_aarch64-debug.apk"' _ {} \;
+          find src-tauri/gen/android/app/build/outputs/apk -name "*.apk"
       - uses: actions/upload-artifact@v4
         with:
           name: agentcontrol-client-android
