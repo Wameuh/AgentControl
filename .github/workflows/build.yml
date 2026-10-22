@@ -131,6 +131,8 @@ jobs:
         working-directory: client
         run: |
           npx tauri android init --ci
+          # Icônes commitées (tauri icon) → projet généré
+          cp -r src-tauri/icons/android/* src-tauri/gen/android/app/src/main/res/
           npx tauri android build --apk --debug --target aarch64
       - uses: actions/upload-artifact@v4
         with:
