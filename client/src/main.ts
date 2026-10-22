@@ -471,6 +471,8 @@ async function openSession(id: string) {
   hasMoreHistory = true;
   toolBlocks.clear();
   answered.clear();
+  unseenBelow = 0;
+  $("btn-bottom").hidden = true;
   for (const c of eventsEl.querySelectorAll(".ev")) c.remove();
 
   $("chat-title").textContent = `${current.title} — ${current.agent}`;
@@ -987,6 +989,10 @@ function appendEvent(ev: AcEvent, live: boolean) {
     toolBlocks.set(ev.call_id as string, node);
   }
   if (live && nearBottom) scrollBottom();
+  if (live && !nearBottom) {
+    unseenBelow++;
+    updateBottomBtn();
+  }
   trimRendered();
 }
 
@@ -1021,6 +1027,7 @@ function prependEvents(events: AcEvent[]) {
   }
   // garder la position visuelle
   eventsEl.scrollTop += eventsEl.scrollHeight - oldHeight;
+  updateBottomBtn();
 }
 
 function renderEvent(ev: AcEvent, live: boolean): HTMLElement {
@@ -1287,7 +1294,26 @@ observer.observe(sentinel);
 
 function scrollBottom() {
   eventsEl.scrollTop = eventsEl.scrollHeight;
+  updateBottomBtn();
 }
+
+// Bouton flottant "↓" quand on n'est pas en bas ; compteur d'events non vus.
+let unseenBelow = 0;
+function updateBottomBtn() {
+  const dist = eventsEl.scrollHeight - eventsEl.scrollTop - eventsEl.clientHeight;
+  const b = $("btn-bottom");
+  if (dist < 120) {
+    b.hidden = true;
+    unseenBelow = 0;
+    return;
+  }
+  b.hidden = false;
+  b.textContent = unseenBelow ? `↓ ${unseenBelow}` : "↓";
+}
+eventsEl.addEventListener("scroll", updateBottomBtn);
+$("btn-bottom").onclick = () => {
+  eventsEl.scrollTo({ top: eventsEl.scrollHeight, behavior: "smooth" });
+};
 
 // ---------------------------------------------------------------------------
 // Push events du démon

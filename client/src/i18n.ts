@@ -55,6 +55,7 @@ const STR = {
     compact_hold: "compact in progress — {n} message(s) held (sending now would cancel it)",
     compact_released: "compact done — sending held message(s)",
     compact_timeout: "no compact confirmation after 2 min — sending held message(s)",
+    bottom_title: "Back to latest message",
   },
   fr: {
     connect: "Connecter", connected_n: "connecté ({n} sessions)",
@@ -107,6 +108,7 @@ const STR = {
     compact_hold: "compact en cours — {n} message(s) retenu(s) (envoyer maintenant l'annulerait)",
     compact_released: "compact terminé — envoi des messages retenus",
     compact_timeout: "pas de confirmation du compact après 2 min — envoi des messages retenus",
+    bottom_title: "Revenir au dernier message",
   },
 } as const;
 
