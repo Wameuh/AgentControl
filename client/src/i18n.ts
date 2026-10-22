@@ -52,6 +52,9 @@ const STR = {
     tree_refresh: "Refresh tree", tree_empty: "(empty)",
     ctx_copy: "Copy content", ctx_copy_path: "Copy absolute path",
     ctx_delete: "Delete", ctx_confirm: "confirm delete?",
+    compact_hold: "compact in progress — {n} message(s) held (sending now would cancel it)",
+    compact_released: "compact done — sending held message(s)",
+    compact_timeout: "no compact confirmation after 2 min — sending held message(s)",
   },
   fr: {
     connect: "Connecter", connected_n: "connecté ({n} sessions)",
@@ -101,6 +104,9 @@ const STR = {
     tree_refresh: "Rafraîchir l'arborescence", tree_empty: "(vide)",
     ctx_copy: "Copier le contenu", ctx_copy_path: "Copier le chemin absolu",
     ctx_delete: "Supprimer", ctx_confirm: "confirmer la suppression ?",
+    compact_hold: "compact en cours — {n} message(s) retenu(s) (envoyer maintenant l'annulerait)",
+    compact_released: "compact terminé — envoi des messages retenus",
+    compact_timeout: "pas de confirmation du compact après 2 min — envoi des messages retenus",
   },
 } as const;
 

@@ -258,7 +258,9 @@ $("err-close").addEventListener("click", () => ($("err-bar").hidden = true));
 
 async function call<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
   const p = { ...params };
-  if (p.session && !p.conn && current?.conn) p.conn = current.conn;
+  // conn absent (undefined) → injecter celui de la session affichée ; un
+  // appelant peut passer conn:"" explicitement (envois en arrière-plan).
+  if (p.session && p.conn === undefined && current?.conn) p.conn = current.conn;
   return invoke<T>("call", { method, params: p });
 }
 
@@ -437,6 +439,7 @@ async function refreshSessions() {
         return;
       }
       await call("delete_session", { session: s.id }).catch((er) => showErr(String(er)));
+      compactHold.delete(s.id);
       if (current?.id === s.id) {
         current = null;
         eventsEl.innerHTML = "";
@@ -1292,6 +1295,16 @@ function scrollBottom() {
 
 await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
   const { session, event } = msg.payload;
+  // Fin de compact (succès "context compacted", annulation, échec) →
+  // relâcher les messages retenus pour cette session.
+  if (compactHold.has(session)) {
+    const txt = String((event.text ?? event.message) ?? "");
+    const done =
+      /compacted/i.test(txt) ||
+      (/compact/i.test(txt) &&
+        /cancel|complet|abort|finish|done|interrupt|error|fail/i.test(txt));
+    if (done) flushCompact(session);
+  }
   if (current && session === current.id) {
     appendEvent(event, true);
   }
@@ -1511,6 +1524,42 @@ function qBtn(txt: string, title: string): HTMLButtonElement {
   return b;
 }
 
+// ---- /compact : la compaction tourne en arrière-plan côté agent après un
+// idle immédiat — un prompt envoyé avant la fin l'annule ("compact
+// cancelled"). Les messages tapés pendant ce temps sont retenus puis
+// renvoyés au signal de fin (ou timeout de sécurité).
+const compactHold = new Map<string, {
+  conn: string;
+  msgs: string[];
+  timer: ReturnType<typeof setTimeout>;
+}>();
+
+function addSysline(text: string) {
+  const d = document.createElement("div");
+  d.className = "ev sysline";
+  d.textContent = `⦿ ${text}`;
+  eventsEl.appendChild(d);
+  scrollBottom();
+}
+
+/** Relâche les messages retenus d'une session (fin de compact ou timeout). */
+function flushCompact(sid: string, timedOut = false) {
+  const h = compactHold.get(sid);
+  if (!h) return;
+  compactHold.delete(sid);
+  clearTimeout(h.timer);
+  if (!h.msgs.length) return;
+  if (current?.id === sid) {
+    addSysline(t(timedOut ? "compact_timeout" : "compact_released"));
+  }
+  void (async () => {
+    for (const m of h.msgs) {
+      await call("send", { session: sid, text: m, conn: h.conn }).catch((e) => showErr(String(e)));
+    }
+    refreshQueue();
+  })();
+}
+
 async function sendInput(force = false) {
   const txt = ($("input") as HTMLTextAreaElement).value.trim();
   if (!txt || !current) return;
@@ -1525,16 +1574,30 @@ async function sendInput(force = false) {
     }
     return;
   }
+  // Compaction en cours : retenir le message — l'envoyer annulerait le
+  // compact (Ctrl+Entrée / ⏫ force = bypass volontaire, annule le compact).
+  const held = compactHold.get(current.id);
+  if (held && !force) {
+    ($("input") as HTMLTextAreaElement).value = "";
+    held.msgs.push(txt);
+    addSysline(t("compact_hold", { n: held.msgs.length }));
+    return;
+  }
   ($("input") as HTMLTextAreaElement).value = "";
   await call("send", { session: current.id, text: txt, force }).catch((e) => showErr(String(e)));
   // Commande slash non-builtin : l'agent l'applique au prochain tour (ex.
   // /compact → "context compacted" n'arrive qu'au message suivant) → hint.
   if (bm) {
-    const d = document.createElement("div");
-    d.className = "ev sysline";
-    d.textContent = `⦿ ${t("cmd_sent_hint", { cmd: bm[1] })}`;
-    eventsEl.appendChild(d);
-    scrollBottom();
+    addSysline(t("cmd_sent_hint", { cmd: bm[1] }));
+    // /compact : armer la rétention des messages jusqu'au signal de fin.
+    if (bm[1] === "compact") {
+      const sid = current.id;
+      compactHold.set(sid, {
+        conn: current.conn ?? "",
+        msgs: [],
+        timer: setTimeout(() => flushCompact(sid, true), 120_000),
+      });
+    }
   }
   refreshQueue();
 }
