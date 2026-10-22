@@ -116,8 +116,15 @@ jobs:
       - name: NDK
         run: |
           SDKMANAGER=$(ls "$ANDROID_HOME"/cmdline-tools/latest/bin/sdkmanager 2>/dev/null || find "$ANDROID_HOME" -name sdkmanager -type f | head -1)
-          "$SDKMANAGER" "ndk;29.0.14233865" "cmake;3.22.1"
-          echo "NDK_HOME=$ANDROID_HOME/ndk/29.0.14233865" >> "$GITHUB_ENV"
+          # NDK préinstallé sur le runner, sinon dernier `ndk;*` dispo
+          NDK_DIR=$(ls -d "$ANDROID_HOME"/ndk/*/ 2>/dev/null | sort -V | tail -1)
+          if [ -z "$NDK_DIR" ]; then
+            VER=$("$SDKMANAGER" --list | grep -oE 'ndk;[0-9.]+' | sort -Vu | tail -1)
+            "$SDKMANAGER" "$VER" "cmake;3.22.1"
+            NDK_DIR="$ANDROID_HOME/ndk/${VER#ndk;}/"
+          fi
+          echo "NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "NDK: $NDK_DIR"
       - run: npm ci
         working-directory: client
       - name: tauri android init + build APK
