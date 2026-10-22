@@ -47,6 +47,9 @@ pub struct Session {
     loading_replay: std::sync::atomic::AtomicBool,
     /// Un tour session/prompt en cours (le runner draine la file).
     busy: std::sync::atomic::AtomicBool,
+    /// Requêtes session/prompt en vol (runner + steer concurrents) —
+    /// l'état ne repasse idle que quand toutes sont terminées.
+    active_prompts: AtomicU64,
     /// Messages en attente d'un tour libre (FIFO).
     prompt_queue: Mutex<std::collections::VecDeque<String>>,
     child: Mutex<Option<Child>>,
@@ -73,6 +76,7 @@ impl Session {
             tool_calls: Mutex::new(HashMap::new()),
             loading_replay: std::sync::atomic::AtomicBool::new(false),
             busy: std::sync::atomic::AtomicBool::new(false),
+            active_prompts: AtomicU64::new(0),
             prompt_queue: Mutex::new(std::collections::VecDeque::new()),
             child: Mutex::new(None),
         }))
@@ -635,29 +639,63 @@ impl Session {
 
     /// Enfile un prompt et devient le runner si aucun tour ne tourne.
     /// `force` : annule le tour en cours et passe le message en tête.
+    /// `steer` : session/prompt concurrent pendant le tour — si l'agent
+    /// supporte le steering il injecte le message au prochain point
+    /// d'arrêt (après le tool call courant) ; refus → fallback en file.
     /// Le message est journalisé à l'enfilement (chat = ordre d'envoi).
-    pub async fn send_prompt(&self, text: &str, force: bool) -> Result<()> {
-        {
-            let mut q = self.prompt_queue.lock().unwrap();
-            if force {
-                q.push_front(text.to_string());
-            } else {
-                q.push_back(text.to_string());
+    pub async fn send_prompt(&self, text: &str, force: bool, steer: bool) -> Result<()> {
+        if steer && !force && self.busy.load(Ordering::SeqCst) {
+            self.emit(EventKind::UserMessage {
+                text: text.into(),
+            });
+            self.emit(EventKind::System {
+                text: "steer → envoyé au tour en cours".into(),
+            });
+            if let Err(e) = self.prompt_rpc(text).await {
+                self.emit(EventKind::System {
+                    text: format!("steer refusé ({e}) — message en file"),
+                });
+                if !self.enqueue_prompt(text, false) {
+                    self.drain_queue().await;
+                }
             }
+            return Ok(());
         }
         self.emit(EventKind::UserMessage {
             text: text.into(),
         });
         if force {
             let _ = self.cancel().await;
-        } else if self.busy.load(Ordering::SeqCst) {
+        }
+        let already = self.enqueue_prompt(text, force);
+        if already && !force {
             self.emit(EventKind::System {
                 text: "message en file — envoyé à la fin du tour".into(),
             });
         }
-        if self.busy.swap(true, Ordering::SeqCst) {
+        if already {
             return Ok(()); // un runner existe déjà
         }
+        self.drain_queue().await;
+        Ok(())
+    }
+
+    /// push + busy.swap sous le lock de la file : sérialisé avec le
+    /// pop/store du runner → aucun message coincé entre les deux.
+    /// Retourne vrai si un runner existe déjà.
+    fn enqueue_prompt(&self, text: &str, front: bool) -> bool {
+        let mut q = self.prompt_queue.lock().unwrap();
+        if front {
+            q.push_front(text.to_string());
+        } else {
+            q.push_back(text.to_string());
+        }
+        self.busy.swap(true, Ordering::SeqCst)
+    }
+
+    /// Le runner draine la file FIFO jusqu'à vide, puis libère `busy`
+    /// (sous le lock de la file → un push concurrent reprendra le relais).
+    async fn drain_queue(&self) {
         loop {
             let next = {
                 let mut q = self.prompt_queue.lock().unwrap();
@@ -665,7 +703,7 @@ impl Session {
                     Some(t) => t,
                     None => {
                         self.busy.store(false, Ordering::SeqCst);
-                        return Ok(());
+                        return;
                     }
                 }
             };
@@ -673,27 +711,29 @@ impl Session {
         }
     }
 
-    /// Un tour session/prompt : working → réponse → idle.
-    async fn run_turn(&self, text: &str) {
+    /// session/prompt + état working/idle partagé entre le runner et les
+    /// prompts steer concurrents (idle seulement quand plus rien ne vole).
+    async fn prompt_rpc(&self, text: &str) -> Result<Value> {
+        let sid = self
+            .meta_snapshot()
+            .native_session_id
+            .context("no native session id")?;
+        self.active_prompts.fetch_add(1, Ordering::SeqCst);
         self.set_state("working");
-        let sid = match self.meta_snapshot().native_session_id {
-            Some(s) => s,
-            None => {
-                self.busy.store(false, Ordering::SeqCst);
-                self.set_state("idle");
-                self.emit(EventKind::Error {
-                    message: "no native session id".into(),
-                });
-                return;
-            }
-        };
         let resp = self
             .acp_request("session/prompt", acp::session_prompt_params(&sid, text))
             .await;
         self.flush_text();
-        match resp {
+        if self.active_prompts.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.set_state("idle");
+        }
+        resp
+    }
+
+    /// Un tour session/prompt : working → réponse → idle.
+    async fn run_turn(&self, text: &str) {
+        match self.prompt_rpc(text).await {
             Ok(v) => {
-                self.set_state("idle");
                 if let Some(sr) = v.get("stopReason").and_then(Value::as_str) {
                     if sr != "end_turn" {
                         self.emit(EventKind::System {
@@ -703,7 +743,6 @@ impl Session {
                 }
             }
             Err(e) => {
-                self.set_state("idle");
                 self.emit(EventKind::Error {
                     message: format!("prompt failed: {e}"),
                 });
@@ -820,7 +859,8 @@ impl Session {
             }
             Err(_) => {
                 // Fallback : beaucoup d'agents exposent /model en slash command
-                self.send_prompt(&format!("/model {model}"), false).await
+                self.send_prompt(&format!("/model {model}"), false, false)
+                    .await
             }
         }
     }

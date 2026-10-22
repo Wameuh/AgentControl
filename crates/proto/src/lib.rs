@@ -285,6 +285,11 @@ pub enum ReqKind {
         /// Interrompt le tour en cours puis envoie en priorité (tête de file).
         #[serde(default)]
         force: bool,
+        /// Steering : envoie session/prompt pendant le tour — l'agent peut
+        /// injecter le message après le tool call en cours (capacité agent ;
+        /// refus → fallback en file).
+        #[serde(default)]
+        steer: bool,
     },
     /// Lit un fichier (absolu ou relatif au cwd de la session) — panneau
     /// latéral du client pour les liens de fichiers de l'agent.

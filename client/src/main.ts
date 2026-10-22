@@ -541,7 +541,10 @@ function updateHeader() {
   $("chat-gem").hidden = current.state !== "working";
   // Reprendre = process mort, quel que soit l'état persisté dans meta.json
   $("btn-resume").hidden = alive;
-  $("btn-cancel").hidden = !(current.state === "working" || current.state === "waiting_input");
+  const busySt = current.state === "working" || current.state === "waiting_input";
+  $("btn-cancel").hidden = !busySt;
+  // Steer : n'a de sens que pendant un tour (sinon = envoi normal).
+  $("btn-steer").hidden = !busySt;
 
   // Options de config dynamiques (ex. Devin : config_option_update → mode + model)
   const copts = current.config_options ?? [];
@@ -1341,7 +1344,8 @@ await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
 // Actions UI
 // ---------------------------------------------------------------------------
 
-$("btn-send").onclick = () => sendInput();
+$("btn-send").onclick = () => sendInput("normal");
+$("btn-steer").onclick = () => sendInput("steer");
 $("input").addEventListener("keydown", (e) => {
   const ac = $("cmd-ac");
   if (!ac.hidden) {
@@ -1363,12 +1367,17 @@ $("input").addEventListener("keydown", (e) => {
   }
   if (e.key === "Enter" && e.ctrlKey) {
     e.preventDefault();
-    sendInput(true); // Ctrl+Entrée = envoi forcé (annule le tour en cours)
+    sendInput("force"); // Ctrl+Entrée = envoi forcé (annule le tour en cours)
+    return;
+  }
+  if (e.key === "Enter" && e.altKey) {
+    e.preventDefault();
+    sendInput("steer"); // Alt+Entrée = injecter après le tool call courant
     return;
   }
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
-    sendInput();
+    sendInput("normal");
   }
 });
 
@@ -1586,7 +1595,9 @@ function flushCompact(sid: string, timedOut = false) {
   })();
 }
 
-async function sendInput(force = false) {
+type SendMode = "normal" | "steer" | "force";
+
+async function sendInput(mode: SendMode = "normal") {
   const txt = ($("input") as HTMLTextAreaElement).value.trim();
   if (!txt || !current) return;
   // Built-ins client (interceptent avant envoi à l'agent)
@@ -1601,16 +1612,21 @@ async function sendInput(force = false) {
     return;
   }
   // Compaction en cours : retenir le message — l'envoyer annulerait le
-  // compact (Ctrl+Entrée / ⏫ force = bypass volontaire, annule le compact).
+  // compact (force/steer = bypass volontaire, annule le compact).
   const held = compactHold.get(current.id);
-  if (held && !force) {
+  if (held && mode === "normal") {
     ($("input") as HTMLTextAreaElement).value = "";
     held.msgs.push(txt);
     addSysline(t("compact_hold", { n: held.msgs.length }));
     return;
   }
   ($("input") as HTMLTextAreaElement).value = "";
-  await call("send", { session: current.id, text: txt, force }).catch((e) => showErr(String(e)));
+  await call("send", {
+    session: current.id,
+    text: txt,
+    force: mode === "force",
+    steer: mode === "steer",
+  }).catch((e) => showErr(String(e)));
   // Commande slash non-builtin : l'agent l'applique au prochain tour (ex.
   // /compact → "context compacted" n'arrive qu'au message suivant) → hint.
   if (bm) {
