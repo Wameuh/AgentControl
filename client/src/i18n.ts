@@ -57,6 +57,7 @@ const STR = {
     compact_released: "compact done — sending held message(s)",
     compact_timeout: "no compact confirmation after 2 min — sending held message(s)",
     bottom_title: "Back to latest message",
+    session_gone: "⚠ session deleted on the server",
   },
   fr: {
     connect: "Connecter", connected_n: "connecté ({n} sessions)",
@@ -111,6 +112,7 @@ const STR = {
     compact_released: "compact terminé — envoi des messages retenus",
     compact_timeout: "pas de confirmation du compact après 2 min — envoi des messages retenus",
     bottom_title: "Revenir au dernier message",
+    session_gone: "⚠ session supprimée sur le serveur",
   },
 } as const;
 

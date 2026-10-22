@@ -371,8 +371,35 @@ function dotIcon(state: string): string {
   return gemSVG(DOT_ROLE[state] ?? "slate");
 }
 
+/** La session courante a été supprimée (autre client / janitor) :
+ *  vue figée avec marqueur, `current` libéré — les events affichés
+ *  restent lisibles mais plus rien ne partira. */
+function markSessionGone() {
+  if (!current) return;
+  addSysline(t("session_gone"));
+  compactHold.delete(current.id);
+  current = null;
+  unseenBelow = 0;
+  $("btn-bottom").hidden = true;
+  $("chat-gem").hidden = true;
+  for (const b of ["btn-resume", "btn-cancel", "btn-steer"]) $(b).hidden = true;
+  const st = $("chat-state");
+  st.textContent = "gone";
+  st.className = "badge st-dead";
+  updateHeader();
+}
+
 async function refreshSessions() {
   const list = await call<SessionMeta[]>("list_sessions");
+  // Session courante disparue alors que sa connexion répond encore
+  // (sessions du même serveur présentes) → supprimée côté serveur.
+  if (
+    current &&
+    !list.some((s) => s.id === current!.id) &&
+    list.some((s) => (s.conn ?? "") === (current!.conn ?? ""))
+  ) {
+    markSessionGone();
+  }
   // Lumières "agents" du fond : une par session active
   const n = list.filter((s) => s.state === "working" || s.state === "waiting_input").length;
   (window as { MeshBackground?: { setMood: (m: string, o: object) => void } })
@@ -1333,6 +1360,12 @@ await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
       (/compact/i.test(txt) &&
         /cancel|complet|abort|finish|done|interrupt|error|fail/i.test(txt));
     if (done) flushCompact(session);
+  }
+  // Suppression côté serveur : l'event terminal arrive avant la coupure.
+  if (event.type === "session_deleted") {
+    if (current && session === current.id) markSessionGone();
+    refreshSessions();
+    return;
   }
   if (current && session === current.id) {
     appendEvent(event, true);

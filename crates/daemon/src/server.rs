@@ -495,6 +495,9 @@ impl Daemon {
             ReqKind::DeleteSession { session } => {
                 let s = self.get_session(&session).await?;
                 s.kill().await;
+                // Event terminal : les clients abonnés apprennent la
+                // suppression avant que le flux ne se ferme.
+                s.emit_ephemeral(proto::EventKind::SessionDeleted {});
                 self.sessions.write().await.remove(&session);
                 let _ = std::fs::remove_dir_all(&s.dir);
                 Ok(json!({"deleted": session}))
@@ -709,6 +712,7 @@ pub async fn janitor(daemon: Arc<Daemon>) {
                 let old = now.duration_since(mtime).unwrap_or_default() > purge_age;
                 if old {
                     let id = meta.id.clone();
+                    s.emit_ephemeral(proto::EventKind::SessionDeleted {});
                     daemon.sessions.write().await.remove(&id);
                     if let Err(e) = std::fs::remove_dir_all(&s.dir) {
                         eprintln!("purge session {id}: {e}");

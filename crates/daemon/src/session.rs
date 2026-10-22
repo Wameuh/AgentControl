@@ -152,6 +152,17 @@ impl Session {
         }
     }
 
+    /// Push sans journalisation — pour l'event terminal `session_deleted`
+    /// (le dossier de la session va disparaître).
+    pub fn emit_ephemeral(&self, kind: EventKind) {
+        let ev = Event {
+            seq: self.journal.last_seq() + 1,
+            ts: proto::now_iso(),
+            kind,
+        };
+        let _ = self.events_tx.send(ev);
+    }
+
     fn set_state(&self, state: &str) {
         {
             let mut m = self.meta.lock().unwrap();

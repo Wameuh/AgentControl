@@ -106,6 +106,10 @@ pub enum EventKind {
     System {
         text: String,
     },
+    /// La session a été supprimée (autre client ou janitor) — event
+    /// terminal, jamais journalisé : poussé sur le flux juste avant
+    /// fermeture pour prévenir les clients abonnés.
+    SessionDeleted {},
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
