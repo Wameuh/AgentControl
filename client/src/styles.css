@@ -211,7 +211,7 @@ body {
   background: rgba(205, 182, 140, .55);
 }
 #conn-bar { display: flex; align-items: center; gap: 8px; }
-#conn-bar .badge { cursor: pointer; }
+#conn-bar #btn-connect { flex: 1; }
 #session-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; }
 #session-list .sess {
   display: flex; align-items: center; gap: 8px; padding: 8px 10px;
@@ -652,7 +652,7 @@ body.android #sidebar {
   transform: translateX(-105%); transition: transform .2s ease;
 }
 body.android #sidebar.open { transform: translateX(0); }
-body.android #conn-bar .badge, body.android #conn-bar button {
+body.android #conn-bar button {
   min-height: 44px; font-size: 15px; padding: 8px 14px;
 }
 body.android #session-list .sess {
