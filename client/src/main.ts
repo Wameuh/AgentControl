@@ -1049,10 +1049,13 @@ function updateHeader() {
       o.textContent = "🧠 " + label;
       md.appendChild(o);
     }
+    // Entrée Fusion : uniquement si l'agent annonce des modèles fusion-*
+    // (Devin — cursor/codex n'en ont pas, inutile d'afficher une option KO).
+    const hasFusion = rawOpts.some((o) => o.v.startsWith("fusion-"));
     const fo = document.createElement("option");
     fo.value = "__fusion";
     fo.textContent = t("fusion_entry");
-    md.appendChild(fo);
+    if (hasFusion) md.appendChild(fo);
     md.dataset.cfgid = modelOpt ? modelOpt.id : "";
     md.dataset.opts = JSON.stringify(rawOpts);
     const curVal = modelOpt?.currentValue || current.model || "";
@@ -2368,7 +2371,8 @@ function fillEfforts(base: string, cur: string) {
     const o = document.createElement("option");
     o.value = e;
     // "[context=…,effort=…]" → contenu lisible sans les crochets
-    o.textContent = e.startsWith("[") ? e.slice(1, -1) : e;
+    // ("[]" de cursor = variante par défaut → garder "[]" plutôt que vide)
+    o.textContent = e.startsWith("[") ? e.slice(1, -1) || e : e;
     es.appendChild(o);
   }
   if (effs.includes(cur)) es.value = cur;
