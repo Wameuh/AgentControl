@@ -2,8 +2,12 @@ name: version
 
 # Bump de version automatique piloté par les labels de la PR :
 #   daemon / client → patch   (déclare les composants touchés)
+#   sync              → minor (client+daemon à déployer ensemble —
+#                     auto-update des démons au prochain connect)
 #   patch / minor / major     → niveau explicite (prioritaire)
 #   aucun label composante    → pas de bump (docs, CI, tests)
+#   release           → pas de bump ici ; au merge, release-on-merge.yml
+#                       tague vX.Y.Z et déclenche le build de release.
 # Idempotent : si la branche a déjà une version différente de base, skip.
 
 on:
@@ -34,7 +38,7 @@ jobs:
           echo "labels: $LABELS"
           case " $LABELS " in
             *" major "*) LEVEL=major ;;
-            *" minor "*) LEVEL=minor ;;
+            *" minor "*|*" sync "*) LEVEL=minor ;;
             *" patch "*) LEVEL=patch ;;
             *" daemon "*|*" client "*) LEVEL=patch ;;
             *) echo "pas de label daemon/client → pas de bump"; exit 0 ;;

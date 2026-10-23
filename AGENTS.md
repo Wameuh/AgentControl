@@ -15,6 +15,12 @@ Le CI build tous les artefacts sur les PR (APK suffixé `-<sha>`).
 **Pas de tag `v*` ni de release sans demande explicite de l'utilisateur.**
 Pousser les commits et bumper la version, oui — tagguer/publier, non.
 
+Exception : le label **`release`** sur une PR = demande de release →
+au merge, `release-on-merge.yml` tague `v<version>` (lu depuis
+`client/package.json`) et dispatche `build.yml` sur le tag (le push de
+tag via GITHUB_TOKEN ne déclenche pas les workflows d'où le dispatch).
+Idempotent : tag existant → skip (version non bumpée = rien à releaser).
+
 ## Après chaque push : vérifier le CI
 
 Obligatoire, ne pas oublier :
@@ -35,7 +41,9 @@ Le CI build les artefacts sur les PR (APK suffixé `-<sha>`).
 
 Le workflow `version.yml` bump la version selon les labels de la PR :
 - `daemon` et/ou `client` : composants touchés → bump **patch**
+- `sync` : daemon+client à déployer ensemble → bump **minor**
 - `patch` / `minor` / `major` : niveau explicite (prioritaire)
+- `release` : pas de bump — au merge, tag + release (voir plus haut)
 - aucun label composante → pas de bump (docs, CI…)
 - `minor` = incompatibilité client↔démon (déclenche l'auto-update)
 
