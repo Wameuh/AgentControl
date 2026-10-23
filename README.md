@@ -84,6 +84,10 @@ substitués à la création de session, omis si vides). `list_agents` rapporte
   + env `CODEX_PATH` = chemin absolu du binaire codex (évite le codex npm
   embarqué — requis sur arm64). Node doit être sur le PATH du démon
   (`~/.nvm/versions/node/*/bin` est auto-détecté, `$NVM_BIN` prioritaire).
+- **Claude** : adaptateur `npm i -g @agentclientprotocol/claude-agent-acp`
+  (embarque le Claude Agent SDK — le CLI `claude` n'est pas requis).
+  Auth : `ANTHROPIC_API_KEY` ou `CLAUDE_CODE_OAUTH_TOKEN`
+  (`claude setup-token`, fonctionne en headless) dans `[agents.claude.env]`.
 
 Modes/modèles demandés à la création : substitués dans command/env si le
 profil utilise les placeholders, sinon appliqués via `session/set_config_option`

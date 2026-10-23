@@ -63,11 +63,21 @@ command = ["codex-acp"]
 [agents.codex.env]
 CODEX_PATH = "/home/wameuh/.local/bin/codex" # adapter : chemin absolu du codex standalone
 
+# Claude — pas d'ACP natif non plus : via l'adaptateur officiel
+# `npm i -g @agentclientprotocol/claude-agent-acp` (embarque le Claude
+# Agent SDK → le CLI `claude` n'est PAS requis). Auth requise — l'une
+# des deux variables ci-dessous, ou OAuth existant dans ~/.claude :
+#   - ANTHROPIC_API_KEY (facturation API)
+#   - CLAUDE_CODE_OAUTH_TOKEN : `npm i -g @anthropic-ai/claude-code`
+#     puis `claude setup-token` (marche en headless : URL → code).
+[agents.claude]
+name = "Claude"
+command = ["claude-agent-acp"]
+
+# [agents.claude.env]
+# CLAUDE_CODE_OAUTH_TOKEN = "…"
+
 # Exemples d'autres agents ACP (adapter la commande) :
-# [agents.claude]
-# name = "Claude Code"
-# command = ["claude-code-acp"]
-#
 # [agents.gemini]
 # name = "Gemini CLI"
 # command = ["gemini", "--experimental-acp"]

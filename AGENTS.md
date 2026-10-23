@@ -100,6 +100,9 @@ Manuel hors-PR : `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]
   vers le binaire codex standalone : sinon l'adaptateur prend son
   `@openai/codex` npm embarqué (optional dep manquante sur arm64), et via
   npx `codex` dans PATH est le wrapper npm, pas le vrai CLI.
+- Claude : `@agentclientprotocol/claude-agent-acp` embarque le Claude
+  Agent SDK → CLI `claude` inutile. Auth : ANTHROPIC_API_KEY ou
+  CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`, headless OK).
 - PATH systemd minimal : `ensure_agent_path` (main.rs) injecte dir du
   binaire + ~/.local/bin + nvm (`$NVM_BIN`, sinon dernier
   `~/.nvm/versions/node/*/bin`) — requis pour les agents npm-globaux
