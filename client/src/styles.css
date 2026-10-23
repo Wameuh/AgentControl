@@ -38,6 +38,7 @@
   --border: var(--line);
   --msg-user-bg: var(--sand);
   --msg-user-fg: #1a1d16;
+  --msg-user-link: #5b3f7d;
   --radius: 14px;
 }
 
@@ -71,6 +72,7 @@ body {
   --panel-solid: #efece2;
   --msg-user-bg: var(--sand);
   --msg-user-fg: #f5f1e4;
+  --msg-user-link: #dccdf0;
 }
 :root.light ::-webkit-scrollbar-thumb { background: rgba(43, 42, 36, .2); }
 :root.light .msg.agent { background: rgba(107, 77, 140, .08); border-color: rgba(107, 77, 140, .3); }
@@ -308,6 +310,12 @@ button:disabled { opacity: .5; cursor: default; }
 .msg.user {
   background: var(--msg-user-bg); color: var(--msg-user-fg); align-self: flex-end;
   border-radius: 14px 14px 4px 14px; font-weight: 500;
+}
+/* liens/chemins dans une bulle user : le fond est --sand, --violet/--sage y
+   sont invisibles → couleur dédiée par thème */
+.msg.user .flink, .msg.user a { color: var(--msg-user-link); }
+.msg.user .flink:hover, .msg.user a:hover {
+  color: var(--msg-user-link); text-decoration-style: solid;
 }
 .msg.agent {
   background: rgba(196, 169, 220, .1);

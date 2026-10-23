@@ -1022,11 +1022,22 @@ const FILE_RE =
   /((?:\/[\w.\-~]+){2,}|[\w.\-]+\/[\w./\-]+|[\w.\-]+\.(?:rs|ts|tsx|js|jsx|py|toml|json|md|html?|css|ya?ml|sh|c|cpp|h|hpp|go|java|rb|txt|log|svg|cfg|ini|sql|vue|svelte|lock|service))(?::(\d+))?/g;
 
 function linkify(escaped: string): string {
-  return escaped.replace(FILE_RE, (m, p: string) => {
+  // URLs d'abord → vrais liens (placeholder \x00U pour ne pas être re-matchées
+  // par FILE_RE ni corrompues par le markup)
+  const urls: string[] = [];
+  let work = escaped.replace(/https?:\/\/[^\s<]+/g, (m) => {
+    const clean = m.replace(/(?:&(?:quot|#39|lt|gt);|[.,;:!?)\]])+$/, "");
+    urls.push(
+      `<a class="ulink" href="${clean}" target="_blank" rel="noopener noreferrer">${clean}</a>`,
+    );
+    return `\x00U${urls.length - 1}\x00${m.slice(clean.length)}`;
+  });
+  work = work.replace(FILE_RE, (m, p: string) => {
     const clean = p.replace(/[.,;:!?'")\]]+$/, "");
     // lien = chemin sans ponctuation finale ; le reste (:ligne, ponct.) reste dehors
     return `<span class="flink" data-path="${clean}">${clean}</span>${m.slice(clean.length)}`;
   });
+  return work.replace(/\x00U(\d+)\x00/g, (_m, i: string) => urls[+i]);
 }
 
 /** Colorise les lignes de diff (+add / -del / @@ hunks) dans le texte. */
