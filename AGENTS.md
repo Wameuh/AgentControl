@@ -7,7 +7,10 @@ Checks CI requis avant merge : `daemon-linux` (x86_64 + aarch64),
 `client` (Ubuntu + Windows), `client-android`.
 
 Workflow : créer une branche → push → `gh pr create` → attendre les
-5 checks verts → merge (squash ou merge commit, pas de contrainte).
+5 checks verts → **l'utilisateur merge** (jamais l'agent : ni
+`gh pr merge`, ni `git merge`, ni API — un hook `.devin/` le bloque,
+et c'est interdit même sans le hook). PR déjà mergée par l'utilisateur ?
+`git checkout main && git pull` pour resynchroniser.
 Le CI build tous les artefacts sur les PR (APK suffixé `-<sha>`).
 
 ## Releases
