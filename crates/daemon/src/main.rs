@@ -56,6 +56,58 @@ fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// systemd --user démarre le démon avec un PATH minimal (/usr/bin…) qui exclut
+/// ~/.local/bin — là où sont installés le démon lui-même et les agents (devin,
+/// cursor-agent, codex…) → `spawn devin` échouait en ENOENT. On réinjecte le
+/// dossier du binaire, ~/.local/bin et le node nvm actif en tête de PATH si
+/// absents (hérité par les agents et leurs sous-processus).
+fn ensure_agent_path() {
+    let extra = [
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(PathBuf::from)),
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/bin")),
+        // Agents npm-globaux (codex-acp…) : shebang `#!/usr/bin/env node`, or
+        // nvm n'est pas sur le PATH systemd. Dernier ~/.nvm/versions/node/*/bin
+        // en repli, $NVM_BIN (version active) en priorité.
+        nvm_node_bin(),
+        std::env::var_os("NVM_BIN").map(PathBuf::from),
+    ];
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    for dir in extra.into_iter().flatten() {
+        if !dirs.contains(&dir) {
+            dirs.insert(0, dir);
+        }
+    }
+    if let Ok(joined) = std::env::join_paths(&dirs) {
+        std::env::set_var("PATH", joined);
+    }
+}
+
+/// `~/.nvm/versions/node/<version max>/bin` — repli quand $NVM_BIN est absent.
+fn nvm_node_bin() -> Option<PathBuf> {
+    let versions = home_dir().join(".nvm/versions/node");
+    let mut best: Option<(Vec<u64>, PathBuf)> = None;
+    for e in std::fs::read_dir(versions).ok()?.flatten() {
+        let bin = e.path().join("bin");
+        if !bin.is_dir() {
+            continue;
+        }
+        let ver: Vec<u64> = e
+            .file_name()
+            .to_string_lossy()
+            .trim_start_matches('v')
+            .split('.')
+            .map(|s| s.parse().unwrap_or(0))
+            .collect();
+        if best.as_ref().is_none_or(|(b, _)| ver > *b) {
+            best = Some((ver, bin));
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Subcommand caché : serveur MCP stdio (injecté dans les sessions agent
@@ -63,6 +115,7 @@ async fn main() -> Result<()> {
     if std::env::args().nth(1).as_deref() == Some("mcp-serve") {
         return mcp::serve_stdio().await;
     }
+    ensure_agent_path();
     let root = std::env::var("AGENTCONTROL_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| home_dir().join(".agentcontrol"));

@@ -1,16 +1,22 @@
 # AgentControl — règles de travail
 
-## Branche `main` protégée → workflow PR
+## Workflow : `next_release` → `main`
 
-`main` est protégée : **push direct impossible**, PR obligatoire.
-Checks CI requis avant merge : `daemon-linux` (x86_64 + aarch64),
-`client` (Ubuntu + Windows), `client-android`.
+Deux branches protégées (**push direct impossible**, PR obligatoire,
+5 checks CI requis : `daemon-linux` ×2, `client` ×2, `client-android`) :
 
-Workflow : créer une branche → push → `gh pr create` → attendre les
-5 checks verts → **l'utilisateur merge** (jamais l'agent : ni
-`gh pr merge`, ni `git merge`, ni API — un hook `.devin/` le bloque,
-et c'est interdit même sans le hook). PR déjà mergée par l'utilisateur ?
-`git checkout main && git pull` pour resynchroniser.
+- **`next_release`** = branche d'intégration. **Toutes les PR de
+  feature/fix visent `next_release`** (`gh pr create --base next_release`)
+  et s'y accumulent.
+- **`main`** = branche de release. Uniquement alimentée par le merge de
+  `next_release` quand l'utilisateur décide de releaser.
+
+Workflow : créer une branche depuis `next_release` → push →
+`gh pr create --base next_release` → attendre les 5 checks verts →
+**l'utilisateur merge** (jamais l'agent : ni `gh pr merge`, ni
+`git merge`, ni API — un hook `.devin/` le bloque, et c'est interdit
+même sans le hook). PR déjà mergée par l'utilisateur ?
+`git checkout next_release && git pull` pour resynchroniser.
 Le CI build tous les artefacts sur les PR (APK suffixé `-<sha>`).
 
 ## Releases
@@ -18,11 +24,12 @@ Le CI build tous les artefacts sur les PR (APK suffixé `-<sha>`).
 **Pas de tag `v*` ni de release sans demande explicite de l'utilisateur.**
 Pousser les commits et bumper la version, oui — tagguer/publier, non.
 
-Exception : le label **`release`** sur une PR = demande de release →
-au merge, `release-on-merge.yml` tague `v<version>` (lu depuis
-`client/package.json`) et dispatche `build.yml` sur le tag (le push de
-tag via GITHUB_TOKEN ne déclenche pas les workflows d'où le dispatch).
-Idempotent : tag existant → skip (version non bumpée = rien à releaser).
+Release = PR `next_release` → `main` avec le label **`release`** →
+au merge (par l'utilisateur), `release-on-merge.yml` tague `v<version>`
+(lu depuis `client/package.json`) et dispatche `build.yml` sur le tag
+(le push de tag via GITHUB_TOKEN ne déclenche pas les workflows d'où le
+dispatch). Idempotent : tag existant → skip. Sans label `release`, un
+merge dans `main` ne tague rien.
 
 ## Après chaque push : vérifier le CI
 
@@ -38,9 +45,9 @@ client Tauri Ubuntu+Windows, et publie une release sur les tags `v*`.
 
 ## Version automatique (labels de PR)
 
-`main` est protégée : **push direct impossible, PR obligatoire** —
-5 checks requis (`daemon-linux` ×2, `client` ×2, `client-android`).
-Le CI build les artefacts sur les PR (APK suffixé `-<sha>`).
+PR → **`next_release`** (pas `main` directement). 5 checks requis
+(`daemon-linux` ×2, `client` ×2, `client-android`). Le CI build les
+artefacts sur les PR (APK suffixé `-<sha>`).
 
 Le workflow `version.yml` bump la version selon les labels de la PR :
 - `daemon` et/ou `client` : composants touchés → bump **patch**
@@ -92,3 +99,18 @@ Manuel hors-PR : `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]
 - `flex-shrink:0` requis sur les items d'un flex-column scrollable.
 - Tauri 2 : `set_var` est `unsafe` ; `get_webview_window` exige
   `use tauri::Manager` ; `Image::new_owned` prend du RGBA brut.
+- `cursor-agent acp` : sous-commande **cachée** (absente de --help),
+  aucun argument — pas de placeholder {mode}/{model} possible, le mode/
+  modèle demandé à la création est appliqué via set_config_option post-spawn.
+- Codex : pas d'ACP natif → adaptateur `@agentclientprotocol/codex-acp`
+  (Node ; zed-industries/codex-acp archivé). `CODEX_PATH` **absolu** exigé
+  vers le binaire codex standalone : sinon l'adaptateur prend son
+  `@openai/codex` npm embarqué (optional dep manquante sur arm64), et via
+  npx `codex` dans PATH est le wrapper npm, pas le vrai CLI.
+- Claude : `@agentclientprotocol/claude-agent-acp` embarque le Claude
+  Agent SDK → CLI `claude` inutile. Auth : ANTHROPIC_API_KEY ou
+  CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`, headless OK).
+- PATH systemd minimal : `ensure_agent_path` (main.rs) injecte dir du
+  binaire + ~/.local/bin + nvm (`$NVM_BIN`, sinon dernier
+  `~/.nvm/versions/node/*/bin`) — requis pour les agents npm-globaux
+  (shebang `#!/usr/bin/env node`).
