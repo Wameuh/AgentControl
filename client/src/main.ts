@@ -647,6 +647,28 @@ function daemonDlg(msg: string, open: boolean) {
   } else if (d.open) d.close();
 }
 
+/** Démon plus vieux que le client (minor ≠) : l'update redémarre le démon
+ *  et tue les agents en cours → popup de confirmation. Le message compte
+ *  les sessions vivantes de cette connexion (0 si la requête échoue). */
+async function confirmDaemonUpdate(
+  dv: string, lv: string, host: string, conn: string,
+): Promise<boolean> {
+  const dlg = $("dlg-dupdate") as HTMLDialogElement;
+  if (dlg.open) return false;
+  const n = await call<SessionMeta[]>("list_sessions", { conn })
+    .then((ls) => ls.filter((s) => DOT_ROLE[s.state] === "human").length)
+    .catch(() => 0);
+  $("dupdate-msg").textContent = t("dupdate_msg", { dv, lv, host, n: String(n) });
+  return new Promise((resolve) => {
+    ($("dupdate-go") as HTMLButtonElement).onclick = () => {
+      resolve(true);
+      dlg.close();
+    };
+    dlg.addEventListener("close", () => resolve(false), { once: true });
+    dlg.showModal();
+  });
+}
+
 async function doConnect(cfg: Record<string, unknown>) {
   lastCfg = cfg;
   let status: unknown;
@@ -680,18 +702,21 @@ async function doConnect(cfg: Record<string, unknown>) {
       // Démon plus récent → client outdated : popup, démon non modifié.
       showOutdated(lv, dv);
     } else if (cfg.kind === "ssh" && cfg.host) {
-      daemonDlg(t("updating_daemon", { dv, lv }) + " — " + String(cfg.host), true);
-      try {
-        const res = await invoke<string>("ensure_daemon", daemonParams(cfg, lv))
-          .catch((e) => {
-            showErr(String(e));
-            return "";
-          });
-        // Un autre client a pu upgrader le démon entre-temps → même garde-fou.
-        if (res.startsWith("newer:")) showOutdated(lv, res.slice(6));
-        else status = await invoke("connect", { cfg }).catch(() => status);
-      } finally {
-        daemonDlg("", false);
+      // Redémarrer le démon tue les agents en cours → validation utilisateur.
+      if (await confirmDaemonUpdate(dv, lv, String(cfg.host), connKeyOf(cfg))) {
+        daemonDlg(t("updating_daemon", { dv, lv }) + " — " + String(cfg.host), true);
+        try {
+          const res = await invoke<string>("ensure_daemon", daemonParams(cfg, lv))
+            .catch((e) => {
+              showErr(String(e));
+              return "";
+            });
+          // Un autre client a pu upgrader le démon entre-temps → même garde-fou.
+          if (res.startsWith("newer:")) showOutdated(lv, res.slice(6));
+          else status = await invoke("connect", { cfg }).catch(() => status);
+        } finally {
+          daemonDlg("", false);
+        }
       }
     }
   }
