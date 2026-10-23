@@ -39,7 +39,8 @@ portable (Tauri)                serveur Ubuntu
 ┌─────────────────┐   SSH -L    ┌──────────────────────────────┐
 │ client-core ────┼────────────►│ agentcontrol-daemon          │
 │ UI chat/events  │  NDJSON     │  ├─ devin acp   (enfant)      │
-└─────────────────┘  unix/tcp   │  ├─ claude …   (enfant)      │
+└─────────────────┘  unix/tcp   │  ├─ cursor-agent acp (enfant) │
+                                │  ├─ codex-acp …  (enfant)     │
                                 │  └─ ~/.agentcontrol/sessions │
                                 └──────────────────────────────┘
 ```
@@ -69,6 +70,24 @@ AGENTCONTROL_HOME=~/.agentcontrol ./agentcontrol-daemon
 
 Écoute : `~/.agentcontrol/daemon.sock` + `127.0.0.1:7331` (loopback → tunnel SSH).
 Agents configurés dans `~/.agentcontrol/config.toml` (voir `packaging/config.example.toml`).
+
+### Agents supportés
+
+Tout agent parlant ACP sur stdio fonctionne ; chaque entrée `[agents.<id>]`
+de la config définit sa commande et ses env (placeholders `{model}`/`{mode}`
+substitués à la création de session, omis si vides). `list_agents` rapporte
+`available` (binaire résolvable) — le picker UI grise les agents absents.
+
+- **Devin** : `devin acp` (défaut). Mode via `DEVIN_PERMISSION_MODE={mode}`.
+- **Cursor** : `cursor-agent acp` (ACP natif). `cursor-agent login` requis.
+- **Codex** : pas d'ACP natif → adaptateur `npm i -g @agentclientprotocol/codex-acp`
+  + env `CODEX_PATH` = chemin absolu du binaire codex (évite le codex npm
+  embarqué — requis sur arm64). Node doit être sur le PATH du démon
+  (`~/.nvm/versions/node/*/bin` est auto-détecté, `$NVM_BIN` prioritaire).
+
+Modes/modèles demandés à la création : substitués dans command/env si le
+profil utilise les placeholders, sinon appliqués via `session/set_config_option`
+quand la valeur figure dans les options annoncées par l'agent.
 
 ## Client Tauri
 

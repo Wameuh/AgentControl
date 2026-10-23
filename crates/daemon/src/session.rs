@@ -939,6 +939,63 @@ impl Session {
         }
     }
 
+    /// Applique le mode/modèle demandés à la création via ACP. Nécessaire
+    /// pour les agents sans placeholder {mode}/{model} dans leur commande/env
+    /// (cursor-agent acp, codex-acp n'acceptent aucun argument) — chez Devin
+    /// le mode arrive via DEVIN_PERMISSION_MODE et vaut déjà la demande.
+    /// La valeur n'est envoyée que si elle figure dans les options annoncées
+    /// par l'agent : une valeur du domaine env (ex. "normal") qui n'est pas
+    /// un id ACP est ignorée plutôt que d'échouer. À appeler uniquement au
+    /// premier spawn (session/new) — au resume, pending_config fait foi.
+    pub async fn apply_spawn_config(
+        self: &Arc<Self>,
+        mode: Option<&str>,
+        model: Option<&str>,
+    ) {
+        for (id, want) in [("mode", mode), ("model", model)] {
+            let Some(want) = want else { continue };
+            if want.is_empty() {
+                continue;
+            }
+            let (cur, known): (Option<String>, Vec<String>) = {
+                let m = self.meta.lock().unwrap();
+                let known = m
+                    .config_options
+                    .iter()
+                    .find(|o| o.id == id)
+                    .map(|o| o.options.iter().map(|x| x.value.clone()).collect())
+                    .unwrap_or_else(|| match id {
+                        "mode" => m.available_modes.clone(),
+                        "model" => m.available_models.clone(),
+                        _ => vec![],
+                    });
+                let cur = match id {
+                    "mode" => m.mode.clone(),
+                    _ => m.model.clone(),
+                };
+                (cur, known)
+            };
+            if !known.iter().any(|v| v == want) || cur.as_deref() == Some(want) {
+                continue;
+            }
+            let r = match self.set_config_option(id, want).await {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    let r2 = match id {
+                        "mode" => self.set_mode(want).await,
+                        _ => self.set_model(want).await.map(|_| ()),
+                    };
+                    r2.map_err(|e2| anyhow::anyhow!("{e:#} ; fallback: {e2:#}"))
+                }
+            };
+            if let Err(e) = r {
+                self.emit(EventKind::System {
+                    text: format!("{id}={want} (demandé à la création) non appliqué: {e:#}"),
+                });
+            }
+        }
+    }
+
     /// Rebind l'ID natif (pour reprendre une autre session de l'agent).
     pub fn set_native_id(&self, id: &str) {
         self.meta.lock().unwrap().native_session_id = Some(id.into());
