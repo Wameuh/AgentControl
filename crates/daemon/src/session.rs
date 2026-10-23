@@ -107,7 +107,7 @@ impl Session {
     // Journalisation
     // -----------------------------------------------------------------------
 
-    fn emit(&self, kind: EventKind) {
+    pub fn emit(&self, kind: EventKind) {
         // Flush un éventuel texte accumulé avant tout event non-chunk.
         self.flush_text();
         match self.journal.append(kind) {
@@ -183,16 +183,20 @@ impl Session {
 
     /// Spawn avec retry : un premier essai qui échoue (agent qui meurt
     /// pendant initialize, verrou transitoire…) retente automatiquement.
+    /// `skip_replay` : le journal local contient déjà l'historique de cette
+    /// session native → les updates rejouées par session/load sont ignorées.
+    /// Passer false après un rebind (journal reset) pour les journaliser.
     pub async fn spawn_agent(
         self: &Arc<Self>,
         command: &[String],
         envs: &HashMap<String, String>,
         resume_native_id: Option<String>,
+        skip_replay: bool,
     ) -> Result<()> {
         let mut last = anyhow::anyhow!("spawn not attempted");
         for attempt in 0..2 {
             match self
-                .spawn_agent_once(command, envs, resume_native_id.clone())
+                .spawn_agent_once(command, envs, resume_native_id.clone(), skip_replay)
                 .await
             {
                 Ok(()) => return Ok(()),
@@ -215,6 +219,7 @@ impl Session {
         command: &[String],
         envs: &HashMap<String, String>,
         resume_native_id: Option<String>,
+        skip_replay: bool,
     ) -> Result<()> {
         let meta = self.meta_snapshot();
         let (cmd, args) = command.split_first().context("commande agent vide")?;
@@ -290,7 +295,7 @@ impl Session {
             .unwrap_or(false);
 
         let resp = if let (Some(native), true) = (resume_native_id.clone(), supports_load) {
-            self.loading_replay.store(true, Ordering::SeqCst);
+            self.loading_replay.store(skip_replay, Ordering::SeqCst);
             let r = self
                 .acp_request("session/load", acp::session_load_params(&native, &meta.cwd))
                 .await;
