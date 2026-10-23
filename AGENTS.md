@@ -1,9 +1,25 @@
 # AgentControl — règles de travail
 
+## Branche `main` protégée → workflow PR
+
+`main` est protégée : **push direct impossible**, PR obligatoire.
+Checks CI requis avant merge : `daemon-linux` (x86_64 + aarch64),
+`client` (Ubuntu + Windows), `client-android`.
+
+Workflow : créer une branche → push → `gh pr create` → attendre les
+5 checks verts → merge (squash ou merge commit, pas de contrainte).
+Le CI build tous les artefacts sur les PR (APK suffixé `-<sha>`).
+
 ## Releases
 
 **Pas de tag `v*` ni de release sans demande explicite de l'utilisateur.**
 Pousser les commits et bumper la version, oui — tagguer/publier, non.
+
+Exception : le label **`release`** sur une PR = demande de release →
+au merge, `release-on-merge.yml` tague `v<version>` (lu depuis
+`client/package.json`) et dispatche `build.yml` sur le tag (le push de
+tag via GITHUB_TOKEN ne déclenche pas les workflows d'où le dispatch).
+Idempotent : tag existant → skip (version non bumpée = rien à releaser).
 
 ## Après chaque push : vérifier le CI
 
@@ -17,10 +33,26 @@ gh run view <id> --log-failed   # si failure
 Le workflow `.github/workflows/build.yml` build : daemon x86_64+aarch64,
 client Tauri Ubuntu+Windows, et publie une release sur les tags `v*`.
 
-## Avant chaque push
+## Version automatique (labels de PR)
 
-- **Bump de version** : `python3 client/tools/bump_version.py` (incrémente
-  le patch partout : tauri.conf, package.json, Cargo.toml).
+`main` est protégée : **push direct impossible, PR obligatoire** —
+5 checks requis (`daemon-linux` ×2, `client` ×2, `client-android`).
+Le CI build les artefacts sur les PR (APK suffixé `-<sha>`).
+
+Le workflow `version.yml` bump la version selon les labels de la PR :
+- `daemon` et/ou `client` : composants touchés → bump **patch**
+- `sync` : daemon+client à déployer ensemble → bump **minor**
+- `patch` / `minor` / `major` : niveau explicite (prioritaire)
+- `release` : pas de bump — au merge, tag + release (voir plus haut)
+- aucun label composante → pas de bump (docs, CI…)
+- `minor` = incompatibilité client↔démon (déclenche l'auto-update)
+
+Le commit `chore: bump version` est poussé sur la branche automatiquement ;
+ne pas bumper à la main en parallèle (le job skip si déjà bumpé vs base).
+Manuel hors-PR : `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]`.
+
+## Avant chaque push (branche de PR)
+
 - **Frontend** : `cd client && npm run build` (tsc + vite).
 - **Rust client (src-tauri)** : pas de webkit sur le Pi → typecheck via
   la cible Windows :

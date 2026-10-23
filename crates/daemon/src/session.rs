@@ -183,11 +183,15 @@ impl Session {
 
     /// Spawn avec retry : un premier essai qui échoue (agent qui meurt
     /// pendant initialize, verrou transitoire…) retente automatiquement.
+    /// `skip_replay` : le journal local contient déjà l'historique de cette
+    /// session native → les updates rejouées par session/load sont ignorées.
+    /// Passer false après un rebind (journal reset) pour les journaliser.
     pub async fn spawn_agent(
         self: &Arc<Self>,
         command: &[String],
         envs: &HashMap<String, String>,
         resume_native_id: Option<String>,
+        skip_replay: bool,
         mcp_servers: Value,
     ) -> Result<()> {
         let mut last = anyhow::anyhow!("spawn not attempted");
@@ -197,6 +201,7 @@ impl Session {
                     command,
                     envs,
                     resume_native_id.clone(),
+                    skip_replay,
                     mcp_servers.clone(),
                 )
                 .await
@@ -221,6 +226,7 @@ impl Session {
         command: &[String],
         envs: &HashMap<String, String>,
         resume_native_id: Option<String>,
+        skip_replay: bool,
         mcp_servers: Value,
     ) -> Result<()> {
         let meta = self.meta_snapshot();
@@ -297,7 +303,7 @@ impl Session {
             .unwrap_or(false);
 
         let resp = if let (Some(native), true) = (resume_native_id.clone(), supports_load) {
-            self.loading_replay.store(true, Ordering::SeqCst);
+            self.loading_replay.store(skip_replay, Ordering::SeqCst);
             let r = self
                 .acp_request(
                     "session/load",

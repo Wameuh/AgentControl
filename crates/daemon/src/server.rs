@@ -259,8 +259,14 @@ impl Daemon {
         s.emit(EventKind::System {
             text: "agent relancé (message agent→agent)".into(),
         });
-        s.spawn_agent(&cmd, &envs, meta.native_session_id, self.mcp_servers(session))
-            .await?;
+        s.spawn_agent(
+            &cmd,
+            &envs,
+            meta.native_session_id,
+            true,
+            self.mcp_servers(session),
+        )
+        .await?;
         s.send_peer_prompt(&wrapped, steer).await
     }
 
@@ -339,7 +345,7 @@ impl Daemon {
                 let (cmd, envs) =
                     self.agent_parts(&profile, model.as_deref(), mode.as_deref(), &sid);
                 session
-                    .spawn_agent(&cmd, &envs, None, self.mcp_servers(&sid))
+                    .spawn_agent(&cmd, &envs, None, true, self.mcp_servers(&sid))
                     .await?;
                 if let Some(p) = prompt {
                     let s = Arc::clone(&session);
@@ -383,7 +389,7 @@ impl Daemon {
                 self.sessions.write().await.insert(sid.clone(), session.clone());
                 let (cmd, envs) = self.agent_parts(&profile, None, None, &sid);
                 session
-                    .spawn_agent(&cmd, &envs, meta.native_session_id, self.mcp_servers(&sid))
+                    .spawn_agent(&cmd, &envs, meta.native_session_id, true, self.mcp_servers(&sid))
                     .await?;
                 Ok(json!({"session": sid}))
             }
@@ -396,7 +402,21 @@ impl Daemon {
                 if s.is_alive() && native_id.is_none() {
                     return Ok(json!({"session": session, "already": true}));
                 }
-                // Rebind éventuel vers une autre session native avant respawn
+                // Rebind vers une AUTRE session native : le journal local
+                // reflète l'ancienne conversation → reset, puis le replay de
+                // session/load le re-remplit (skip_replay=false).
+                let rebind = match &native_id {
+                    Some(nid) => {
+                        s.meta_snapshot().native_session_id.as_deref() != Some(nid.as_str())
+                    }
+                    None => false,
+                };
+                if rebind {
+                    s.journal.reset(&s.dir)?;
+                    s.emit(EventKind::System {
+                        text: "session native rebindée — historique rechargé".into(),
+                    });
+                }
                 if let Some(nid) = native_id {
                     s.set_native_id(&nid);
                 }
@@ -416,6 +436,7 @@ impl Daemon {
                     &cmd,
                     &envs,
                     meta.native_session_id,
+                    !rebind,
                     self.mcp_servers(&session),
                 )
                 .await?;
