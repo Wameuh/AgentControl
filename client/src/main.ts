@@ -2256,6 +2256,21 @@ async function sendInput(mode: SendMode = "normal") {
     }
     return;
   }
+  // Slash-commande ni builtin ni exposée par l'agent (available_commands) :
+  // l'envoyer en texte brut coûte un tour pour rien (ex. /fork chez Devin =
+  // TUI-only, jamais routé). Avertir localement. Liste vide = agent sans
+  // annonce → on ne peut pas trancher, on laisse passer.
+  if (
+    bm &&
+    current.available_commands.length > 0 &&
+    !current.available_commands.some(
+      (c) => cmdName(c).toLowerCase() === bm[1].toLowerCase(),
+    )
+  ) {
+    ($("input") as HTMLTextAreaElement).value = "";
+    addSysline(t("cmd_unknown", { cmd: bm[1] }));
+    return;
+  }
   // Compaction en cours : retenir le message — l'envoyer annulerait le
   // compact (force/steer = bypass volontaire, annule le compact).
   const held = compactHold.get(current.id);
