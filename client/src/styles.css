@@ -371,6 +371,11 @@ button:disabled { opacity: .5; cursor: default; }
 .md .mdt th { background: rgba(236, 230, 216, .08); }
 .md hr { border: none; border-top: 1px solid var(--line); margin: 10px 0; }
 .md a { color: var(--sage); }
+/* Images inline (option Settings) — cliquables via l'<a> englobant */
+img.md-img {
+  display: block; max-width: 100%; max-height: 340px;
+  margin: 6px 0; border-radius: 8px; border: 1px solid var(--line);
+}
 .th-body { margin: 6px 0; font-family: Instrument, sans-serif; }
 .sysline { color: var(--dim); font-size: 12px; padding: 1px 8px; }
 .errline { color: var(--err); font-size: 13px; }
