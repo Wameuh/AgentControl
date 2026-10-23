@@ -173,7 +173,7 @@ fn print_event(ev: &Value) {
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("usage: acctl status|agents|list|new|send|events|tail|resume|cancel|kill|mode|respond|blob");
+        eprintln!("usage: acctl status|agents|list|new|send|events|tail|resume|attach|fork|cancel|kill|mode|respond|blob");
         std::process::exit(2);
     }
     let mut c = connect().await?;
@@ -281,6 +281,9 @@ async fn main() -> Result<()> {
             cwd: args[2].clone(),
             native_id: args[3].clone(),
             title: args.get(4).cloned(),
+        }).await?),
+        "fork" => println!("{}", c.call(proto::ReqKind::ForkSession {
+            session: args[1].clone(),
         }).await?),
         "cancel" => println!("{}", c.call(proto::ReqKind::Cancel { session: args[1].clone() }).await?),
         "kill" => println!("{}", c.call(proto::ReqKind::KillSession { session: args[1].clone() }).await?),

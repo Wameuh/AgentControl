@@ -2020,6 +2020,7 @@ const BUILTINS = (): { name: string; description: string; hint: string }[] => [
   { name: "model", description: t("builtin_model"), hint: "<model>" },
   { name: "resume", description: t("builtin_resume"), hint: "" },
   { name: "cancel", description: t("builtin_cancel"), hint: "" },
+  { name: "fork", description: t("builtin_fork"), hint: "" },
 ];
 
 async function runBuiltin(name: string, arg: string): Promise<boolean> {
@@ -2035,6 +2036,17 @@ async function runBuiltin(name: string, arg: string): Promise<boolean> {
     case "cancel":
       await call("cancel", { session: current.id });
       return true;
+    case "fork": {
+      // Le daemon libère la session native, /fork via le TUI de l'agent,
+      // puis attache la session forkée (même groupe, titre + "_fork").
+      addSysline(t("fork_started"));
+      const r = await call<{ session: string }>("fork_session", {
+        session: current.id,
+      });
+      await refreshSessions();
+      if (r.session) await openSession(r.session);
+      return true;
+    }
   }
   return false;
 }

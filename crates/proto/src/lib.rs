@@ -307,6 +307,11 @@ pub enum ReqKind {
     /// Liste les sessions natives de l'agent (ACP session/list) via une
     /// session vivante de cet agent.
     ListNativeSessions { session: String },
+    /// Fork la session native (pas de méthode ACP — on pilote le TUI de
+    /// l'agent dans un PTY : `devin -r` + /fork), puis attache la session
+    /// forkée dans une nouvelle session AgentControl (même groupe, titre
+    /// suffixé "_fork"). La source est libérée puis ré-ouverte.
+    ForkSession { session: String },
     /// Attache une session native de l'agent (créée hors AgentControl) :
     /// respawn + session/load sur l'ID natif fourni.
     AttachSession {
