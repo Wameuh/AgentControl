@@ -552,6 +552,15 @@ details.th[open] > summary::before { content: "▾ "; }
 .grp-head { font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:var(--dim);
   padding:6px 8px 3px; cursor:pointer; user-select:none; display:flex; gap:5px; align-items:center }
 .grp-head:hover { color:var(--fg) }
+.grp-head .grp-add {
+  margin-left: auto; border: 0; background: none; color: var(--dim);
+  font-size: 14px; cursor: pointer; padding: 0 4px; border-radius: 4px; line-height: 1;
+}
+.grp-head .grp-add:hover { color: var(--sand); background: rgba(236,230,216,.08); }
+.drop-hint {
+  outline: 2px dashed var(--accent); outline-offset: -2px; border-radius: 6px;
+  background: rgba(224, 201, 150, .08);
+}
 .grp-arrow { width:10px; opacity:.7 }
 
 /* Dialogue install/update démon */

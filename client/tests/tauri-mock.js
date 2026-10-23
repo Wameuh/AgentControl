@@ -52,7 +52,7 @@
   };
   const FILE = { content: "export async function apiCall(url, opts) {\n  return withRetry(() => fetch(url, opts), 3);\n}\n\nasync function withRetry(fn, n) {\n  try { return await fn(); }\n  catch (e) { if (n > 0) { await sleep(500); return withRetry(fn, n - 1); } throw e; }\n}", truncated: false, path: "/home/agent/api/src/client.ts" };
 
-  function rpc(method) {
+  function rpc(method, args) {
     switch (method) {
       case "list_sessions": return SESSIONS;
       case "list_agents": return [{ id: "devin", name: "Devin" }, { id: "mock", name: "Mock agent" }];
@@ -61,6 +61,11 @@
       case "queue_list": return { queue: ["Compile aussi la doc quand tu as fini"] };
       case "list_dir": return DIR;
       case "read_file": return FILE;
+      case "set_session_group": {
+        const s = SESSIONS.find((x) => x.id === args.session);
+        if (s) s.group = args.group;
+        return { group: args.group };
+      }
       case "daemon_status": return { version: "0.2.9", sessions: SESSIONS.length };
       case "list_native_sessions": return { sessions: [] };
       case "get_blob": return { data: "blob", total: 4 };
@@ -77,14 +82,14 @@
     convertFileSrc(p) { return p; },
     invoke(cmd, args) {
       const p = Promise.resolve();
-      if (cmd === "platform") return p.then(() => "android");
+      if (cmd === "platform") return p.then(() => (location.hash === "#desktop" ? "linux" : "android"));
       if (cmd === "plugin:app|version") return p.then(() => "0.2.9");
       if (cmd === "plugin:event|listen") return p.then(() => ++cbId);
       if (cmd === "plugin:event|unlisten") return p.then(() => null);
       if (cmd.startsWith("plugin:")) return p.then(() => null);
       switch (cmd) {
         case "connect": return p.then(() => ({ version: "0.2.9", sessions: SESSIONS.length, servers: 1 }));
-        case "call": return p.then(() => rpc(args.method));
+        case "call": return p.then(() => rpc(args.method, args.params ?? args));
         case "subscribe": return p.then(() => null);
         case "saved_connections": return p.then(() => []);
         case "ssh_hosts": return p.then(() => []);
