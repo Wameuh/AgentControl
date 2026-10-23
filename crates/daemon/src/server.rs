@@ -319,7 +319,14 @@ impl Daemon {
                 let list: Vec<Value> = self
                     .agents
                     .iter()
-                    .map(|(k, a)| json!({"id": k, "name": a.name, "command": a.command}))
+                    .map(|(k, a)| {
+                        json!({
+                            "id": k,
+                            "name": a.name,
+                            "command": a.command,
+                            "available": a.command.first().map(|c| command_available(c)).unwrap_or(false),
+                        })
+                    })
                     .collect();
                 Ok(json!(list))
             }
@@ -372,6 +379,12 @@ impl Daemon {
                 session
                     .spawn_agent(&cmd, &envs, None, true, self.mcp_servers(&sid))
                     .await?;
+                // Mode/modèle demandés à la création : appliqués via ACP pour
+                // les agents sans placeholder {mode}/{model} (cursor, codex) —
+                // le premier prompt doit déjà voir la config demandée.
+                session
+                    .apply_spawn_config(mode.as_deref(), model.as_deref())
+                    .await;
                 if let Some(p) = prompt {
                     let s = Arc::clone(&session);
                     tokio::spawn(async move {
@@ -982,6 +995,32 @@ fn resolve_in_cwd(s: &Session, path: &str) -> Result<PathBuf> {
         anyhow::bail!("hors du workspace: {path}");
     }
     Ok(p)
+}
+
+/// `argv[0]` d'un profil agent résolvable : binaire sur le PATH du démon
+/// (tel qu'assuré par ensure_agent_path) ou chemin absolu existant.
+fn command_available(cmd: &str) -> bool {
+    let p = PathBuf::from(cmd);
+    if p.is_absolute() {
+        return is_executable(&p);
+    }
+    std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).any(|d| is_executable(&d.join(cmd))))
+        .unwrap_or(false)
+}
+
+fn is_executable(p: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        p.metadata()
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        p.is_file()
+    }
 }
 
 /// Wrapper pour accepter des connexions Unix.

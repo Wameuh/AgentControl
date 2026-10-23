@@ -425,12 +425,19 @@ interface ConfigOption {
   currentValue?: string; options: ConfigOpt[];
 }
 
-// Devin : les modèles portent l'effort en suffixe (-medium/-high/...)
+// Devin : les modèles portent l'effort en suffixe (-medium/-high/...) ;
+// Cursor/Codex : variantes `base[param=v,…]` (ex. gpt-6.1-sol[medium]).
 const EFF_RE = /-(low|minimal|medium|high|max|lightning)$/;
+const BRACKET_RE = /(\[[^\]]*\])$/;
 const splitModel = (v: string): [string, string] => {
+  const b = BRACKET_RE.exec(v);
+  if (b) return [v.slice(0, -b[0].length), b[1]];
   const m = EFF_RE.exec(v);
   return m ? [v.slice(0, -m[0].length), m[1]] : [v, ""];
 };
+// base + variante : "-" pour les efforts suffixe, concat pour les [params]
+const joinModel = (base: string, eff: string) =>
+  !eff ? base : eff.startsWith("[") ? base + eff : `${base}-${eff}`;
 
 /** Décompose "fusion-<prim>-<eff>-sidekick-<side>-<eff>" → [pb, pe, sb, se]. */
 function fusionParts(v: string): [string, string, string, string] | null {
@@ -1042,10 +1049,13 @@ function updateHeader() {
       o.textContent = "🧠 " + label;
       md.appendChild(o);
     }
+    // Entrée Fusion : uniquement si l'agent annonce des modèles fusion-*
+    // (Devin — cursor/codex n'en ont pas, inutile d'afficher une option KO).
+    const hasFusion = rawOpts.some((o) => o.v.startsWith("fusion-"));
     const fo = document.createElement("option");
     fo.value = "__fusion";
     fo.textContent = t("fusion_entry");
-    md.appendChild(fo);
+    if (hasFusion) md.appendChild(fo);
     md.dataset.cfgid = modelOpt ? modelOpt.id : "";
     md.dataset.opts = JSON.stringify(rawOpts);
     const curVal = modelOpt?.currentValue || current.model || "";
@@ -2344,7 +2354,7 @@ function effortsFor(base: string): string[] {
   const opts: { v: string }[] = JSON.parse(($("model-select") as HTMLSelectElement).dataset.opts || "[]");
   const effs = new Set<string>();
   for (const o of opts) {
-    if (o.v === base || o.v.startsWith(base + "-")) {
+    if (o.v === base || o.v.startsWith(base + "-") || o.v.startsWith(base + "[")) {
       const e = splitModel(o.v)[1];
       if (e) effs.add(e);
     }
@@ -2360,7 +2370,9 @@ function fillEfforts(base: string, cur: string) {
   for (const e of effs) {
     const o = document.createElement("option");
     o.value = e;
-    o.textContent = e;
+    // "[context=…,effort=…]" → contenu lisible sans les crochets
+    // ("[]" de cursor = variante par défaut → garder "[]" plutôt que vide)
+    o.textContent = e.startsWith("[") ? e.slice(1, -1) || e : e;
     es.appendChild(o);
   }
   if (effs.includes(cur)) es.value = cur;
@@ -2503,13 +2515,13 @@ $("btn-fusion-edit").onclick = () => openFusion();
   }
   fillEfforts(sel.value, "");
   const eff = ($("effort-select") as HTMLSelectElement).value;
-  applyModelValue(sel.value + (eff ? "-" + eff : ""));
+  applyModelValue(joinModel(sel.value, eff));
 };
 
 ($("effort-select") as HTMLSelectElement).onchange = (e) => {
   const base = ($("model-select") as HTMLSelectElement).value;
   const eff = (e.target as HTMLSelectElement).value;
-  if (base && base !== "__fusion") applyModelValue(base + (eff ? "-" + eff : ""));
+  if (base && base !== "__fusion") applyModelValue(joinModel(base, eff));
 };
 
 $("btn-refresh").onclick = () => current && openSession(current.id);
@@ -2556,13 +2568,14 @@ let pendingGroup: { conn?: string; name: string } | null = null;
 /** Dialogue "nouvelle session". `conn` route list_agents/new_session vers le
  *  bon serveur ; `ref` préremplit agent + workspace (1er membre du groupe). */
 async function openNewSessionDlg(conn?: string, ref?: SessionMeta) {
-  const agents = await call<{ id: string; name: string }[]>("list_agents", conn ? { conn } : {});
+  const agents = await call<{ id: string; name: string; available?: boolean }[]>("list_agents", conn ? { conn } : {});
   const sel = $("f-agent") as HTMLSelectElement;
   sel.innerHTML = "";
   for (const a of agents) {
     const o = document.createElement("option");
     o.value = a.id;
-    o.textContent = a.name;
+    o.textContent = a.name + (a.available === false ? ` (${t("agent_missing")})` : "");
+    o.disabled = a.available === false;
     sel.appendChild(o);
   }
   if (ref) {

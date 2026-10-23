@@ -75,6 +75,7 @@ const STR = {
     bottom_title: "Back to latest message",
     session_gone: "⚠ session deleted on the server",
     peer_from: "from", peer_to: "to",
+    agent_missing: "not installed",
   },
   fr: {
     connect: "Connecter", new_conn: "Nouvelle connexion",
@@ -147,6 +148,7 @@ const STR = {
     bottom_title: "Revenir au dernier message",
     session_gone: "⚠ session supprimée sur le serveur",
     peer_from: "de", peer_to: "vers",
+    agent_missing: "non installé",
   },
 } as const;
 

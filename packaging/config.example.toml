@@ -42,11 +42,42 @@ command = ["devin", "acp"]
 [agents.devin.env]
 DEVIN_PERMISSION_MODE = "{mode}"
 
+# Cursor CLI — ACP natif (sous-commande cachée, aucun argument).
+# Login préalable : `cursor-agent login`. Le mode/modèle demandés à la
+# création sont appliqués via ACP après session/new (pas de placeholder).
+[agents.cursor]
+name = "Cursor CLI"
+command = ["cursor-agent", "acp"]
+
+# Codex CLI — pas d'ACP natif : via l'adaptateur officiel
+# `npm i -g @agentclientprotocol/codex-acp` (repo zed-industries archivé,
+# développement déplacé vers agentclientprotocol). Nécessite node sur le
+# PATH du démon (ensure_agent_path couvre ~/.nvm automatiquement).
+# CODEX_PATH doit pointer le binaire codex installé : sans lui,
+# l'adaptateur lance son @openai/codex npm embarqué (et sous npx,
+# "codex" dans PATH serait le wrapper npm, pas le vrai CLI).
+[agents.codex]
+name = "Codex CLI"
+command = ["codex-acp"]
+
+[agents.codex.env]
+CODEX_PATH = "/home/wameuh/.local/bin/codex" # adapter : chemin absolu du codex standalone
+
+# Claude — pas d'ACP natif non plus : via l'adaptateur officiel
+# `npm i -g @agentclientprotocol/claude-agent-acp` (embarque le Claude
+# Agent SDK → le CLI `claude` n'est PAS requis). Auth requise — l'une
+# des deux variables ci-dessous, ou OAuth existant dans ~/.claude :
+#   - ANTHROPIC_API_KEY (facturation API)
+#   - CLAUDE_CODE_OAUTH_TOKEN : `npm i -g @anthropic-ai/claude-code`
+#     puis `claude setup-token` (marche en headless : URL → code).
+[agents.claude]
+name = "Claude"
+command = ["claude-agent-acp"]
+
+# [agents.claude.env]
+# CLAUDE_CODE_OAUTH_TOKEN = "…"
+
 # Exemples d'autres agents ACP (adapter la commande) :
-# [agents.claude]
-# name = "Claude Code"
-# command = ["claude-code-acp"]
-#
 # [agents.gemini]
 # name = "Gemini CLI"
 # command = ["gemini", "--experimental-acp"]

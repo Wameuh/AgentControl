@@ -92,3 +92,18 @@ Manuel hors-PR : `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]
 - `flex-shrink:0` requis sur les items d'un flex-column scrollable.
 - Tauri 2 : `set_var` est `unsafe` ; `get_webview_window` exige
   `use tauri::Manager` ; `Image::new_owned` prend du RGBA brut.
+- `cursor-agent acp` : sous-commande **cachée** (absente de --help),
+  aucun argument — pas de placeholder {mode}/{model} possible, le mode/
+  modèle demandé à la création est appliqué via set_config_option post-spawn.
+- Codex : pas d'ACP natif → adaptateur `@agentclientprotocol/codex-acp`
+  (Node ; zed-industries/codex-acp archivé). `CODEX_PATH` **absolu** exigé
+  vers le binaire codex standalone : sinon l'adaptateur prend son
+  `@openai/codex` npm embarqué (optional dep manquante sur arm64), et via
+  npx `codex` dans PATH est le wrapper npm, pas le vrai CLI.
+- Claude : `@agentclientprotocol/claude-agent-acp` embarque le Claude
+  Agent SDK → CLI `claude` inutile. Auth : ANTHROPIC_API_KEY ou
+  CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`, headless OK).
+- PATH systemd minimal : `ensure_agent_path` (main.rs) injecte dir du
+  binaire + ~/.local/bin + nvm (`$NVM_BIN`, sinon dernier
+  `~/.nvm/versions/node/*/bin`) — requis pour les agents npm-globaux
+  (shebang `#!/usr/bin/env node`).
