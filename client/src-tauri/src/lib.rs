@@ -548,6 +548,9 @@ async fn ensure_daemon(
          ver=$(\"$HOME/.local/bin/acctl\" status 2>/dev/null | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4); \
          running=$(systemctl --user is-active agentcontrol-daemon 2>/dev/null || true); \
          if [ \"$ver\" = \"{t}\" ] && [ \"$running\" = active ]; then echo ok:$ver; exit 0; fi; \
+         if [ -n \"$ver\" ] && [ \"$ver\" != \"{t}\" ] && \
+            [ \"$(printf '%s\\n%s\\n' \"{t}\" \"$ver\" | sort -V | tail -n1)\" = \"$ver\" ]; then \
+            echo newer:$ver; exit 0; fi; \
          cd /tmp; rm -rf acupd acd.tgz; mkdir -p acupd; \
          curl -fsSL -o acd.tgz \"{base}/download/v{t}/agentcontrol-server-$arch-linux.tar.gz\" || \
          curl -fsSL -o acd.tgz \"{base}/latest/download/agentcontrol-server-$arch-linux.tar.gz\"; \
@@ -614,10 +617,8 @@ pub fn run() {
             unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
         }
     }
-    let builder = tauri::Builder::default();
-    #[cfg(not(target_os = "android"))]
-    let builder = builder.plugin(tauri_plugin_shell::init());
-    builder
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // Android : pas de HOME — les chemins client-core (clé SSH,
             // connexions, logs) racinent dans le app_data_dir.
