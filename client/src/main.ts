@@ -52,13 +52,9 @@ invoke<string>("platform").then((p) => {
 document.body.classList.toggle("android", IS_ANDROID);
 if (IS_ANDROID) applyAndroidChrome();
 
-/// Ouvre une URL externe : plugin shell (desktop), window.open (android).
+/// Ouvre une URL externe (plugin opener — navigateur système sur Android).
 function shellOpen(url: string) {
-  if (IS_ANDROID) {
-    window.open(url, "_blank");
-    return;
-  }
-  invoke("plugin:shell|open", { path: url }).catch(() => {});
+  invoke("plugin:opener|open_url", { url }).catch(() => {});
 }
 
 /// Clic droit (desktop) ou appui long ~500 ms (tactile) → menu contextuel.
@@ -331,9 +327,7 @@ async function remoteVersion(): Promise<string> {
     b.title = `Update v${remote} available — click to install`;
     b.onclick = () => {
       b.textContent = "…";
-      invoke("update_client", { tag: remote }).catch(() => {
-        // Pas d'asset .deb → ouvrir la page releases à la place
-        shellOpen("https://github.com/Wameuh/AgentControl/releases");
+      performClientUpdate(remote).finally(() => {
         b.textContent = `⬆ v${remote}`;
       });
     };
@@ -342,6 +336,56 @@ async function remoteVersion(): Promise<string> {
     /* pas de gh/réseau → tant pis */
   }
 })();
+
+/// URL de l'APK de la release `tag` (asset `.apk`), fallback = page releases.
+async function apkReleaseUrl(tag: string): Promise<string> {
+  try {
+    const r = await fetch(
+      `https://api.github.com/repos/Wameuh/AgentControl/releases/tags/v${tag}`,
+    );
+    if (r.ok) {
+      const j = (await r.json()) as {
+        assets?: { name?: string; browser_download_url?: string }[];
+      };
+      const a = j.assets?.find((x) => x.name?.endsWith(".apk"));
+      if (a?.browser_download_url) return a.browser_download_url;
+    }
+  } catch {
+    /* réseau */
+  }
+  return "https://github.com/Wameuh/AgentControl/releases/latest";
+}
+
+/// Update du client vers `tag` : desktop = .deb auto (`update_client`,
+/// fallback page releases) ; Android = APK ouvert dans le navigateur —
+/// le gestionnaire de paquets fait la maj in-place (signature identique).
+async function performClientUpdate(tag: string) {
+  if (IS_ANDROID) {
+    shellOpen(await apkReleaseUrl(tag));
+    return;
+  }
+  await invoke("update_client", { tag }).catch(() => {
+    shellOpen("https://github.com/Wameuh/AgentControl/releases");
+  });
+}
+
+/// Client plus vieux que le démon (minor) : le démon n'est PAS touché —
+/// popup proposant l'update du client (desktop : auto, Android : APK).
+async function showOutdated(lv: string, dv: string) {
+  const dlg = $("dlg-outdated") as HTMLDialogElement;
+  if (dlg.open) return;
+  const remote = await remoteVersion().catch(() => "");
+  const target = remote && cmpVer(remote, dv) >= 0 ? remote : dv;
+  $("outdated-msg").textContent = t("outdated_msg", { lv, dv, target });
+  const btn = $("outdated-update") as HTMLButtonElement;
+  btn.onclick = async () => {
+    btn.disabled = true;
+    await performClientUpdate(target);
+    btn.disabled = false;
+    dlg.close();
+  };
+  dlg.showModal();
+}
 
 // Bloque le menu contextuel natif du webview (son "Reload" tuait la connexion)
 window.addEventListener("contextmenu", (e) => e.preventDefault());
@@ -597,6 +641,7 @@ function daemonDlg(msg: string, open: boolean) {
 async function doConnect(cfg: Record<string, unknown>) {
   lastCfg = cfg;
   let status: unknown;
+  let newerDaemon = "";
   try {
     // Toujours établir la connexion — daemon_status fusionné renvoie Ok
     // même sans connexions, il ne peut pas servir de pré-vérification.
@@ -607,24 +652,38 @@ async function doConnect(cfg: Record<string, unknown>) {
     const ver = await getVersion().catch(() => "0.0.0");
     daemonDlg(t("installing_daemon") + " — " + String(cfg.host), true);
     try {
-      await invoke("ensure_daemon", daemonParams(cfg, ver));
+      const res = await invoke<string>("ensure_daemon", daemonParams(cfg, ver));
+      // Démon plus récent : le script distant refuse le downgrade.
+      if (res.startsWith("newer:")) newerDaemon = res.slice(6);
     } finally {
       daemonDlg("", false);
     }
-    status = await invoke("connect", { cfg });
+    status = await invoke("connect", { cfg }).catch((e2) => {
+      if (newerDaemon) showOutdated(ver, newerDaemon);
+      throw e2;
+    });
   }
-  // Update démon : seulement sur incompatibilité de version mineure (x.y),
-  // pas à chaque patch.
-  const dv = (status as { version?: string }).version;
+  // Incompatibilité de version mineure (x.y) — jamais à chaque patch.
+  const dv = (status as { version?: string }).version || newerDaemon;
   const lv = await getVersion().catch(() => "0.0.0");
-  if (cfg.kind === "ssh" && cfg.host && dv && lv && minorOf(dv) !== minorOf(lv)) {
-    daemonDlg(t("updating_daemon", { dv, lv }) + " — " + String(cfg.host), true);
-    try {
-      await invoke("ensure_daemon", daemonParams(cfg, lv))
-        .catch((e) => showErr(String(e)));
-      status = await invoke("connect", { cfg }).catch(() => status);
-    } finally {
-      daemonDlg("", false);
+  if (dv && lv && minorOf(dv) !== minorOf(lv)) {
+    if (cmpVer(minorOf(dv), minorOf(lv)) > 0) {
+      // Démon plus récent → client outdated : popup, démon non modifié.
+      showOutdated(lv, dv);
+    } else if (cfg.kind === "ssh" && cfg.host) {
+      daemonDlg(t("updating_daemon", { dv, lv }) + " — " + String(cfg.host), true);
+      try {
+        const res = await invoke<string>("ensure_daemon", daemonParams(cfg, lv))
+          .catch((e) => {
+            showErr(String(e));
+            return "";
+          });
+        // Un autre client a pu upgrader le démon entre-temps → même garde-fou.
+        if (res.startsWith("newer:")) showOutdated(lv, res.slice(6));
+        else status = await invoke("connect", { cfg }).catch(() => status);
+      } finally {
+        daemonDlg("", false);
+      }
     }
   }
   await refreshSessions();
