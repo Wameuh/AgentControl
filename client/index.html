@@ -25,11 +25,10 @@
       <div id="app-body">
         <aside id="sidebar">
           <div id="conn-bar">
-            <span id="conn-status" class="badge warn" data-i18n="disconnected">disconnected</span>
-            <button id="btn-connect" data-i18n="connect">Connect</button>
+            <button id="btn-connect" data-i18n="new_conn">New connection</button>
           </div>
           <div id="session-list"></div>
-          <button id="btn-new-session" data-i18n="new_session">+ New session</button>
+          <button id="btn-new-session" data-i18n="new_session">New agent</button>
           <div id="sidebar-resize" title="Drag to resize"></div>
         </aside>
         <main id="chat">
@@ -107,7 +106,7 @@
         <label><span data-i18n="attach_label">Resume native ID</span> <input id="f-attach" data-i18n-ph="attach_ph" placeholder="(optional)" /></label>
         <label><span data-i18n="prompt_label">Initial message</span> <textarea id="f-prompt" rows="3"></textarea></label>
         <menu>
-          <button value="cancel" data-i18n="cancel">Cancel</button>
+          <button type="button" id="f-cancel" data-i18n="cancel">Cancel</button>
           <button id="f-create" value="default" data-i18n="create">Create</button>
         </menu>
       </form>
@@ -144,7 +143,7 @@
         <pre id="log-view" hidden></pre>
         <menu>
           <button id="c-logs" type="button" data-i18n="logs">Logs</button>
-          <button value="cancel" data-i18n="cancel">Cancel</button>
+          <button type="button" id="c-cancel" data-i18n="cancel">Cancel</button>
           <button id="c-go" value="default" data-i18n="connect">Connect</button>
         </menu>
       </form>
@@ -158,7 +157,7 @@
         <label><span data-i18n="sidekick">Sidekick</span> <select id="fu-b"></select></label>
         <label><span data-i18n="sidekick_effort">Sidekick effort</span> <select id="fu-eb"></select></label>
         <menu>
-          <button value="cancel" data-i18n="cancel">Cancel</button>
+          <button type="button" id="fu-cancel" data-i18n="cancel">Cancel</button>
           <button id="fu-ok" value="default" data-i18n="apply">Apply</button>
         </menu>
       </form>
@@ -178,9 +177,9 @@
         <input id="g-name" data-i18n-ph="group_name_ph" placeholder="Group name…" list="g-list" autocomplete="off" />
         <datalist id="g-list"></datalist>
         <menu>
-          <button value="none" id="g-none" data-i18n="group_none">No group</button>
-          <button value="cancel" data-i18n="cancel">Cancel</button>
-          <button value="ok" id="g-ok" data-i18n="ok">OK</button>
+          <button type="button" id="g-none" data-i18n="group_none">No group</button>
+          <button type="button" id="g-cancel" data-i18n="cancel">Cancel</button>
+          <button id="g-ok" value="ok" data-i18n="ok">OK</button>
         </menu>
       </form>
     </dialog>

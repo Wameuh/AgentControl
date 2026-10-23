@@ -558,6 +558,9 @@ async function applyGroupAssign(s: SessionMeta, group?: string) {
 ($("g-ok") as HTMLButtonElement).onclick = () => {
   ($("dlg-group") as HTMLDialogElement).close("ok");
 };
+// type=button → fermeture explicite ; Enter active g-ok (seul submit restant).
+$("g-none").onclick = () => ($("dlg-group") as HTMLDialogElement).close("none");
+$("g-cancel").onclick = () => ($("dlg-group") as HTMLDialogElement).close("cancel");
 // Doit refléter conn_key() côté Rust : ssh → "ssh{,-native}:host:sshport".
 const connKeyOf = (cfg: Record<string, unknown>) => {
   if (cfg.kind === "ssh") {
@@ -593,7 +596,6 @@ function daemonDlg(msg: string, open: boolean) {
 
 async function doConnect(cfg: Record<string, unknown>) {
   lastCfg = cfg;
-  const el = $("conn-status");
   let status: unknown;
   try {
     // Toujours établir la connexion — daemon_status fusionné renvoie Ok
@@ -603,8 +605,6 @@ async function doConnect(cfg: Record<string, unknown>) {
     // SSH : échec → démon absent ou arrêté → bootstrap depuis la release.
     if (cfg.kind !== "ssh" || !cfg.host) throw e;
     const ver = await getVersion().catch(() => "0.0.0");
-    el.textContent = t("installing_daemon");
-    el.className = "badge warn";
     daemonDlg(t("installing_daemon") + " — " + String(cfg.host), true);
     try {
       await invoke("ensure_daemon", daemonParams(cfg, ver));
@@ -618,8 +618,6 @@ async function doConnect(cfg: Record<string, unknown>) {
   const dv = (status as { version?: string }).version;
   const lv = await getVersion().catch(() => "0.0.0");
   if (cfg.kind === "ssh" && cfg.host && dv && lv && minorOf(dv) !== minorOf(lv)) {
-    el.textContent = t("updating_daemon", { dv, lv });
-    el.className = "badge warn";
     daemonDlg(t("updating_daemon", { dv, lv }) + " — " + String(cfg.host), true);
     try {
       await invoke("ensure_daemon", daemonParams(cfg, lv))
@@ -629,9 +627,6 @@ async function doConnect(cfg: Record<string, unknown>) {
       daemonDlg("", false);
     }
   }
-  const srv = (status as { servers?: number }).servers;
-  el.textContent = srv && srv > 1 ? `${srv} servers` : t("connected_n", { n: (status as { sessions?: number }).sessions ?? 0 });
-  el.className = "badge ok";
   await refreshSessions();
 }
 
@@ -889,10 +884,7 @@ async function openSession(id: string) {
   const afterSeq = page.events.length ? page.events[page.events.length - 1].seq : 0;
   if (stale()) return;
   await invoke("subscribe", { session: id, afterSeq }).catch((e) => {
-    // Le flux live est mort (ex. restart démon) → statut déconnecté visible
-    const el = $("conn-status");
-    el.textContent = t("disconnected_reconnect");
-    el.className = "badge st-dead";
+    // Le flux live est mort (ex. restart démon) → erreur visible
     showErr(`subscribe: ${e}`);
   });
   refreshSessions();
@@ -2302,6 +2294,8 @@ function openFusion() {
   ($("dlg-fusion") as HTMLDialogElement).showModal();
 }
 
+$("fu-cancel").onclick = () => ($("dlg-fusion") as HTMLDialogElement).close("cancel");
+
 $("fu-ok").addEventListener("click", (e) => {
   e.preventDefault();
   const a = ($("fu-a") as HTMLSelectElement).value;
@@ -2430,6 +2424,9 @@ $("btn-new-session").onclick = () => {
   void openNewSessionDlg();
 };
 
+// type=button → Enter dans le form valide via f-create (seul submit restant).
+$("f-cancel").onclick = () => ($("dlg-new") as HTMLDialogElement).close("cancel");
+
 $("f-create").addEventListener("click", async (e) => {
   e.preventDefault();
   const cwd = ($("f-cwd") as HTMLInputElement).value.trim();
@@ -2491,10 +2488,9 @@ let lastCfg: Record<string, unknown> | null = null;
 let reconnecting = false;
 
 // Watchdog : sonde le démon toutes les 10 s. Si la connexion est morte
-// (restart démon → agents tués côté serveur), badge + reconnexion auto +
+// (restart démon → agents tués côté serveur), reconnexion auto +
 // réouverture de la session (auto-resume de l'agent).
 setInterval(async () => {
-  const el = $("conn-status");
   try {
     const st = await call<{ servers?: number; sessions?: number } & Record<string, unknown>>("daemon_status");
     // Conns mortes : entrées {error} dans le résultat fusionné
@@ -2502,11 +2498,7 @@ setInterval(async () => {
       .filter(([k, v]) => !["servers", "sessions"].includes(k) && (v as { error?: string }).error)
       .map(([k]) => k);
     if (!st.servers || dead.length) throw dead;
-    el.textContent = st.servers > 1 ? `${st.servers} servers` : t("connected_n", { n: st.sessions ?? 0 });
-    el.className = "badge ok";
   } catch (dead) {
-    el.textContent = t("disconnected_reconnect");
-    el.className = "badge st-dead";
     if (reconnecting) return;
     reconnecting = true;
     // Reconnecter chaque connexion morte (ou toutes si liste vide)
@@ -2642,6 +2634,8 @@ $("c-logs").addEventListener("click", async () => {
   v.hidden = !v.hidden;
   if (!v.hidden) v.textContent = await invoke<string>("log_tail", { n: 200 });
 });
+
+$("c-cancel").onclick = () => ($("dlg-conn") as HTMLDialogElement).close("cancel");
 
 $("c-go").addEventListener("click", async (e) => {
   e.preventDefault();

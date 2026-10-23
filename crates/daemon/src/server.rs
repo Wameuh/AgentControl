@@ -585,8 +585,16 @@ impl Daemon {
                         }
                         continue;
                     }
-                    let resp = self.dispatch(req).await;
-                    Self::send_line(&write, &resp).await?;
+                    // Requêtes concurrentes par connexion : chaque dispatch dans
+                    // sa tâche — un handler lent (resume_session → spawn +
+                    // session/load + replay) ne bloque plus les autres appels.
+                    // Les réponses sont démux côté client par id.
+                    let d = Arc::clone(self);
+                    let w = Arc::clone(&write);
+                    tokio::spawn(async move {
+                        let resp = d.dispatch(req).await;
+                        let _ = Self::send_line(&w, &resp).await;
+                    });
                 }
                 ev = async {
                     match sub.as_mut() {
