@@ -132,6 +132,25 @@ impl Journal {
         Self::read_from(dir, start_off, before, n)
     }
 
+    /// Vide le journal et les blobs — utilisé quand la session se rebinde
+    /// vers une AUTRE session native : l'historique local n'est plus valide
+    /// et sera re-rempli par le replay de `session/load`.
+    pub fn reset(&self, dir: &Path) -> Result<()> {
+        let mut g = self.inner.lock().unwrap();
+        let path = dir.join("events.jsonl");
+        File::create(&path)?; // truncate
+        g.file = OpenOptions::new().append(true).open(&path)?;
+        g.offsets.clear();
+        g.end = 0;
+        g.last_seq = 0;
+        let bdir = dir.join("blobs");
+        if bdir.exists() {
+            let _ = std::fs::remove_dir_all(&bdir);
+        }
+        std::fs::create_dir_all(&bdir)?;
+        Ok(())
+    }
+
     /// Tous les événements avec seq > after_seq (rattrapage subscribe).
     pub fn read_after(&self, dir: &Path, after_seq: u64) -> Result<Vec<Event>> {
         let start_off = {

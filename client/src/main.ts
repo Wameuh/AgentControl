@@ -477,31 +477,82 @@ async function call<T = unknown>(method: string, params: Record<string, unknown>
 
 const minorOf = (v: string) => v.split(".").slice(0, 2).join(".");
 
-// Dialogue d'assignation de groupe (clic droit sur une session)
+// Groupes nommés par connexion : persistés côté client (les sessions portent
+// leur groupe dans meta.json ; le store conserve aussi les groupes VIDES).
+const GKEY = (c: string) => `ac-groups:${c}`;
+function storedGroups(conn: string): string[] {
+  try { return JSON.parse(localStorage.getItem(GKEY(conn)) ?? "[]") as string[]; }
+  catch { return []; }
+}
+function saveGroups(conn: string, grps: string[]) {
+  localStorage.setItem(GKEY(conn), JSON.stringify([...new Set(grps)].sort()));
+}
+function addStoredGroup(conn: string, name: string) {
+  if (name) saveGroups(conn, [...storedGroups(conn), name]);
+}
+function removeStoredGroup(conn: string, name: string) {
+  saveGroups(conn, storedGroups(conn).filter((g) => g !== name));
+}
+
+// Dialogue groupe : mode "session" (assigner), "rename" (renommer/dissoudre),
+// "new" (créer un groupe vide dans une connexion).
 let grpTarget: SessionMeta | null = null;
-function openGroupDlg(s: SessionMeta) {
+let grpMode: "session" | "rename" | "new" = "session";
+let grpCtx = { conn: "", name: "" };
+
+function openGroupDlg(mode: "session" | "rename" | "new", s: SessionMeta | null, conn = "", name = "") {
+  grpMode = mode;
   grpTarget = s;
-  ($("g-name") as HTMLInputElement).value = s.group ?? "";
+  grpCtx = { conn, name };
+  const dlg = $("dlg-group") as HTMLDialogElement;
+  dlg.querySelector("h3")!.textContent =
+    t(mode === "rename" ? "rename_group" : mode === "new" ? "new_group" : "group_h");
+  ($("g-name") as HTMLInputElement).value = mode === "session" ? (s?.group ?? "") : name;
+  ($("g-none") as HTMLButtonElement).hidden = mode === "new";
+  ($("g-none") as HTMLButtonElement).textContent =
+    t(mode === "rename" ? "dissolve_group" : "group_none");
   const dl = $("g-list");
   dl.innerHTML = "";
   call<SessionMeta[]>("list_sessions").then((ls) => {
+    const conns = mode === "session" ? [s?.conn ?? ""] : [conn];
+    const all = new Set(conns.flatMap((c) => storedGroups(c)));
+    for (const g of all) { const o = document.createElement("option"); o.value = g; dl.appendChild(o); }
     for (const g of new Set(ls.filter((x) => x.group).map((x) => x.group!))) {
       const o = document.createElement("option");
       o.value = g;
       dl.appendChild(o);
     }
   });
-  ($("dlg-group") as HTMLDialogElement).showModal();
+  dlg.showModal();
 }
+
+async function applyGroupAssign(s: SessionMeta, group?: string) {
+  await call("set_session_group", { session: s.id, conn: s.conn, group }).catch((er) =>
+    showErr(String(er)),
+  );
+  if (group) addStoredGroup(s.conn ?? "default", group);
+}
+
 ($("dlg-group") as HTMLDialogElement).addEventListener("close", async (e) => {
   const rv = (e.target as HTMLDialogElement).returnValue;
-  if (!grpTarget || rv === "cancel") return;
-  const name = rv === "none" ? "" : ($("g-name") as HTMLInputElement).value.trim();
-  await call("set_session_group", {
-    session: grpTarget.id,
-    conn: grpTarget.conn,
-    group: name || undefined,
-  }).catch((er) => showErr(String(er)));
+  if (rv === "cancel") return;
+  const name = ($("g-name") as HTMLInputElement).value.trim();
+  if (grpMode === "session" && grpTarget) {
+    await applyGroupAssign(grpTarget, rv === "none" ? undefined : name || undefined);
+  } else if (grpMode === "rename" && grpCtx.name) {
+    const members = lastSessions.filter(
+      (s) => (s.conn ?? "default") === grpCtx.conn && s.group === grpCtx.name,
+    );
+    if (rv === "none" || !name) {
+      for (const s of members) await applyGroupAssign(s, undefined);
+      removeStoredGroup(grpCtx.conn, grpCtx.name);
+    } else if (name !== grpCtx.name) {
+      for (const s of members) await applyGroupAssign(s, name);
+      removeStoredGroup(grpCtx.conn, grpCtx.name);
+    }
+  } else if (grpMode === "new" && name) {
+    addStoredGroup(grpCtx.conn, name);
+  }
   refreshSessions();
 });
 ($("g-ok") as HTMLButtonElement).onclick = () => {
@@ -619,6 +670,7 @@ function markSessionGone() {
 
 async function refreshSessions() {
   const list = await call<SessionMeta[]>("list_sessions");
+  lastSessions = list;
   // Session courante disparue alors que sa connexion répond encore
   // (sessions du même serveur présentes) → supprimée côté serveur.
   if (
@@ -634,76 +686,128 @@ async function refreshSessions() {
     .MeshBackground?.setMood(bgMood(), { agents: Math.min(n, 4), intensity: 0.55 });
   const el = $("session-list");
   el.innerHTML = "";
-  // Tri : serveur → groupe nommé (non groupés à la fin) → titre
-  list.sort((a, b) =>
-    (a.conn ?? "").localeCompare(b.conn ?? "") ||
-    (a.group ?? "\uffff").localeCompare(b.group ?? "\uffff") ||
-    a.title.localeCompare(b.title));
-  let lastConn: string | null = null;
-  let lastGrp: string | null = null;
-  let connClosed = false;
+  // Rendu : connexion → groupes nommés (le store client garde les groupes
+  // VIDES visibles) → sessions non groupées.
+  const byConn = new Map<string, SessionMeta[]>();
   for (const s of list) {
-    const conn = s.conn ?? "default";
-    if (conn !== lastConn) {
-      lastConn = conn;
-      lastGrp = null;
-      const key = `ac-grp-${conn}`;
-      connClosed = localStorage.getItem(key) === "1";
+    const c = s.conn ?? "default";
+    if (!byConn.has(c)) byConn.set(c, []);
+    byConn.get(c)!.push(s);
+  }
+  for (const conn of [...byConn.keys()].sort()) {
+    const sessions = byConn.get(conn)!.sort((a, b) => a.title.localeCompare(b.title));
+    const key = `ac-grp-${conn}`;
+    const connClosed = localStorage.getItem(key) === "1";
+    const ch = document.createElement("div");
+    ch.className = "grp-head" + (connClosed ? " closed" : "");
+    ch.innerHTML = `<span class="grp-arrow">${connClosed ? "▸" : "▾"}</span> ${esc(conn)}` +
+      `<button class="grp-add" title="${esc(t("new_group"))}">＋</button>`;
+    ch.onclick = () => {
+      localStorage.setItem(key, connClosed ? "0" : "1");
+      refreshSessions();
+    };
+    ch.querySelector(".grp-add")!.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openGroupDlg("new", null, conn);
+    });
+    // Déposer sur le header connexion = dégrouper la session
+    bindDropTarget(ch, conn, undefined);
+    el.appendChild(ch);
+
+    const grpNames = [
+      ...new Set([
+        ...storedGroups(conn),
+        ...sessions.map((s) => s.group).filter((g): g is string => !!g),
+      ]),
+    ].sort();
+    for (const grp of grpNames) {
+      const gkey = `ac-grp-${conn}::${grp}`;
+      const grpClosed = connClosed || localStorage.getItem(gkey) === "1";
       const g = document.createElement("div");
-      g.className = "grp-head" + (connClosed ? " closed" : "");
-      g.innerHTML = `<span class="grp-arrow">${connClosed ? "\u25b8" : "\u25be"}</span> ${esc(conn)}`;
+      g.className = "grp-sub" + (grpClosed ? " closed" : "");
+      g.innerHTML = `<span class="grp-arrow">${grpClosed ? "▸" : "▾"}</span> ${esc(grp)}`;
       g.onclick = () => {
-        localStorage.setItem(key, connClosed ? "0" : "1");
+        localStorage.setItem(gkey, localStorage.getItem(gkey) === "1" ? "0" : "1");
         refreshSessions();
       };
+      bindCtx(g, () => openGroupDlg("rename", null, conn, grp));
+      bindDropTarget(g, conn, grp);
       el.appendChild(g);
-    }
-    const grp = s.group ?? "";
-    let grpClosed = connClosed;
-    if (grp !== lastGrp) {
-      lastGrp = grp;
-      if (grp) {
-        const key = `ac-grp-${conn}::${grp}`;
-        grpClosed = connClosed || localStorage.getItem(key) === "1";
-        const g = document.createElement("div");
-        g.className = "grp-sub" + (grpClosed ? " closed" : "");
-        g.innerHTML = `<span class="grp-arrow">${grpClosed ? "\u25b8" : "\u25be"}</span> ${esc(grp)}`;
-        g.onclick = () => {
-          localStorage.setItem(key, localStorage.getItem(key) === "1" ? "0" : "1");
-          refreshSessions();
-        };
-        el.appendChild(g);
+      for (const s of sessions.filter((x) => x.group === grp)) {
+        el.appendChild(sessRow(s, conn, grp, grpClosed));
       }
     }
-    const div = document.createElement("div");
-    div.className = "sess" + (grp ? " in-grp" : "") + (current?.id === s.id ? " active" : "");
-    if (grpClosed) div.style.display = "none";
-    div.innerHTML = `<span class="dot st-${s.state}" title="${esc(s.state)}">${dotIcon(s.state)}</span><span class="t">${esc(s.title)}</span><span class="a">${esc(s.agent)}</span><button class="sess-del" title="Supprimer">✕</button>`;
-    div.onclick = () => {
-      openSession(s.id);
-      // Mobile : fermer le drawer après sélection.
-      closeDrawer();
-    };
-    bindCtx(div, () => openGroupDlg(s));
-    const del = div.querySelector<HTMLElement>(".sess-del")!;
-    del.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      if (!del.dataset.armed) {
-        del.dataset.armed = "1";
-        del.textContent = t("delete_armed");
-        setTimeout(() => { del.dataset.armed = ""; del.textContent = "✕"; }, 2500);
-        return;
-      }
-      await call("delete_session", { session: s.id }).catch((er) => showErr(String(er)));
-      compactHold.delete(s.id);
-      if (current?.id === s.id) {
-        current = null;
-        eventsEl.innerHTML = "";
-      }
-      refreshSessions();
-    });
-    el.appendChild(div);
+    for (const s of sessions.filter((x) => !x.group)) {
+      el.appendChild(sessRow(s, conn, "", connClosed));
+    }
   }
+}
+
+const DTYPE = "application/x-ac-session";
+
+/** Cible de drop pour une session : conn = câble, group undefined = dégrouper. */
+function bindDropTarget(el: HTMLElement, conn: string, group: string | undefined) {
+  el.addEventListener("dragover", (e) => {
+    if (e.dataTransfer?.types.includes(DTYPE)) {
+      e.preventDefault();
+      el.classList.add("drop-hint");
+    }
+  });
+  el.addEventListener("dragleave", () => el.classList.remove("drop-hint"));
+  el.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    el.classList.remove("drop-hint");
+    try {
+      const d = JSON.parse(e.dataTransfer!.getData(DTYPE)) as { id: string; conn: string };
+      if (d.conn !== conn) return; // pas de déplacement inter-serveur
+      const s = lastSessions.find((x) => x.id === d.id);
+      if (!s || (s.group ?? "") === (group ?? "")) return;
+      await applyGroupAssign(s, group);
+      refreshSessions();
+    } catch {
+      /* donnée étrangère : ignorer */
+    }
+  });
+}
+
+let lastSessions: SessionMeta[] = [];
+
+function sessRow(s: SessionMeta, conn: string, grp: string, closed: boolean): HTMLElement {
+  const div = document.createElement("div");
+  div.className = "sess" + (grp ? " in-grp" : "") + (current?.id === s.id ? " active" : "");
+  if (closed) div.style.display = "none";
+  div.innerHTML = `<span class="dot st-${s.state}" title="${esc(s.state)}">${dotIcon(s.state)}</span><span class="t">${esc(s.title)}</span><span class="a">${esc(s.agent)}</span><button class="sess-del" title="Supprimer">✕</button>`;
+  div.onclick = () => {
+    openSession(s.id);
+    // Mobile : fermer le drawer après sélection.
+    closeDrawer();
+  };
+  bindCtx(div, () => openGroupDlg("session", s));
+  if (!IS_ANDROID) {
+    div.draggable = true;
+    div.addEventListener("dragstart", (e) => {
+      e.dataTransfer!.setData(DTYPE, JSON.stringify({ id: s.id, conn }));
+      e.dataTransfer!.effectAllowed = "move";
+    });
+  }
+  const del = div.querySelector<HTMLElement>(".sess-del")!;
+  del.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (!del.dataset.armed) {
+      del.dataset.armed = "1";
+      del.textContent = t("delete_armed");
+      setTimeout(() => { del.dataset.armed = ""; del.textContent = "✕"; }, 2500);
+      return;
+    }
+    await call("delete_session", { session: s.id }).catch((er) => showErr(String(er)));
+    compactHold.delete(s.id);
+    if (current?.id === s.id) {
+      current = null;
+      eventsEl.innerHTML = "";
+    }
+    refreshSessions();
+  });
+  return div;
 }
 
 // ---------------------------------------------------------------------------
@@ -918,11 +1022,22 @@ const FILE_RE =
   /((?:\/[\w.\-~]+){2,}|[\w.\-]+\/[\w./\-]+|[\w.\-]+\.(?:rs|ts|tsx|js|jsx|py|toml|json|md|html?|css|ya?ml|sh|c|cpp|h|hpp|go|java|rb|txt|log|svg|cfg|ini|sql|vue|svelte|lock|service))(?::(\d+))?/g;
 
 function linkify(escaped: string): string {
-  return escaped.replace(FILE_RE, (m, p: string) => {
+  // URLs d'abord → vrais liens (placeholder \x00U pour ne pas être re-matchées
+  // par FILE_RE ni corrompues par le markup)
+  const urls: string[] = [];
+  let work = escaped.replace(/https?:\/\/[^\s<]+/g, (m) => {
+    const clean = m.replace(/(?:&(?:quot|#39|lt|gt);|[.,;:!?)\]])+$/, "");
+    urls.push(
+      `<a class="ulink" href="${clean}" target="_blank" rel="noopener noreferrer">${clean}</a>`,
+    );
+    return `\x00U${urls.length - 1}\x00${m.slice(clean.length)}`;
+  });
+  work = work.replace(FILE_RE, (m, p: string) => {
     const clean = p.replace(/[.,;:!?'")\]]+$/, "");
     // lien = chemin sans ponctuation finale ; le reste (:ligne, ponct.) reste dehors
     return `<span class="flink" data-path="${clean}">${clean}</span>${m.slice(clean.length)}`;
   });
+  return work.replace(/\x00U(\d+)\x00/g, (_m, i: string) => urls[+i]);
 }
 
 /** Colorise les lignes de diff (+add / -del / @@ hunks) dans le texte. */
@@ -977,6 +1092,105 @@ function highlight(code: string, ext: string): string {
       : k ? `<span class="syn-kw">${m}</span>`
       : `<span class="syn-num">${m}</span>`,
   );
+}
+
+/** Rendu markdown minimal et sûr : échappement HTML d'abord, blocs de code
+ *  et liens extraits en placeholders (ni linkify ni inline-md ne les corrompt). */
+function mdRender(src: string): string {
+  const blocks: string[] = [];
+  const stash = (html: string) => `\x00B${blocks.push(html) - 1}\x00`;
+
+  // 1) blocs ```lang (fermé ou non — fin de texte tolérée) + code inline `x`
+  let work = src
+    .replace(/```(\w*)[ \t]*\n?([\s\S]*?)(?:```|$)/g, (_m, lang: string, code: string) =>
+      stash(`<pre class="md-code">${highlight(code.replace(/\n$/, ""), lang.toLowerCase())}</pre>`))
+    .replace(/`([^`\n]+)`/g, (_m, c: string) => stash(`<code class="md-ic">${esc(c)}</code>`));
+
+  // 2) échappement du reste
+  work = esc(work);
+
+  // 3) liens markdown [t](https://…) → placeholder (avant linkify)
+  work = work.replace(
+    /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+    (_m, tx: string, url: string) =>
+      stash(`<a href="${url}" target="_blank" rel="noopener noreferrer">${tx}</a>`),
+  );
+
+  // 4) inline : gras / italique / barré
+  work = work
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\b__([^_]+)__\b/g, "<strong>$1</strong>")
+    .replace(/(^|[^\w*])\*([^*\n]+)\*(?![*\w])/g, "$1<em>$2</em>")
+    .replace(/(?<![\w_])_([^_\n]+)_(?![\w_])/g, "<em>$1</em>")
+    .replace(/~~([^~]+)~~/g, "<del>$1</del>");
+
+  // 5) chemins de fichiers cliquables (hors blocs extraits)
+  work = linkify(work);
+
+  // 6) structure de blocs : headers, hr, citations, tables, listes, paragraphes
+  const lines = work.split("\n");
+  const isBlockStart = (l: string) =>
+    /^\x00B\d+\x00\s*$/.test(l.trim()) ||
+    /^#{1,6}\s/.test(l) ||
+    /^\s*(?:\*{3,}|-{3,}|_{3,})$/.test(l) ||
+    /^&gt;/.test(l) ||
+    /^\s*(?:[-*+]|\d+[.)])\s+/.test(l);
+  const cellSplit = (l: string) =>
+    l.replace(/^\s*\||\|\s*$/g, "").split("|").map((c) => c.trim());
+  const out: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const l = lines[i];
+    if (!l.trim()) { i++; continue; }
+    if (/^\x00B\d+\x00\s*$/.test(l.trim())) { out.push(l.trim()); i++; continue; }
+    const h = /^(#{1,6})\s+(.*)/.exec(l);
+    if (h) { out.push(`<div class="mdh mdh${h[1].length}">${h[2]}</div>`); i++; continue; }
+    if (/^\s*(?:\*{3,}|-{3,}|_{3,})$/.test(l)) { out.push("<hr>"); i++; continue; }
+    if (/^&gt;/.test(l)) {
+      const q: string[] = [];
+      while (i < lines.length && /^&gt;/.test(lines[i])) {
+        q.push(lines[i].replace(/^&gt;\s?/, ""));
+        i++;
+      }
+      out.push(`<blockquote>${q.join("<br>")}</blockquote>`);
+      continue;
+    }
+    // table : ligne |a|b| suivie d'une ligne |---|
+    if (l.includes("|") && i + 1 < lines.length && /^\s*\|?[\s:|-]+\|?[\s:|-]*$/.test(lines[i + 1]) && lines[i + 1].includes("-") && lines[i + 1].includes("|")) {
+      const hdr = cellSplit(l);
+      i += 2;
+      const rows: string[][] = [];
+      while (i < lines.length && lines[i].includes("|") && lines[i].trim()) {
+        rows.push(cellSplit(lines[i]));
+        i++;
+      }
+      out.push(
+        `<table class="mdt"><thead><tr>${hdr.map((c) => `<th>${c}</th>`).join("")}</tr></thead>` +
+          `<tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("")}</tbody></table>`,
+      );
+      continue;
+    }
+    const lm = /^(\s*)([-*+]|\d+[.)])\s+(.*)/.exec(l);
+    if (lm) {
+      const ordered = /^\d/.test(lm[2]);
+      const items: string[] = [];
+      while (i < lines.length) {
+        const m2 = /^(\s*)([-*+]|\d+[.)])\s+(.*)/.exec(lines[i]);
+        if (!m2) break;
+        items.push(`<li${m2[1].length >= 2 ? ' class="md-sub"' : ""}>${m2[3]}</li>`);
+        i++;
+      }
+      out.push(`<${ordered ? "ol" : "ul"} class="mdl">${items.join("")}</${ordered ? "ol" : "ul"}>`);
+      continue;
+    }
+    const para: string[] = [];
+    while (i < lines.length && lines[i].trim() && !isBlockStart(lines[i])) {
+      para.push(diffFmt(lines[i]));
+      i++;
+    }
+    out.push(`<p>${para.join("<br>")}</p>`);
+  }
+  return out.join("").replace(/\x00B(\d+)\x00/g, (_m, n: string) => blocks[+n]);
 }
 
 async function openFilePanel(path: string) {
@@ -1327,14 +1541,14 @@ function renderEvent(ev: AcEvent, live: boolean): HTMLElement {
     }
     case "agent_text": {
       const d = mkEv("msg agent", ev.seq);
-      d.innerHTML = diffFmt(linkify(esc(ev.text as string)));
+      d.innerHTML = `<div class="md">${mdRender(ev.text as string)}</div>`;
       return d;
     }
     case "agent_thought": {
       const d = mkEv("thought", ev.seq);
       const txt = ev.text as string;
       const head = txt.trim().split("\n")[0].slice(0, 110);
-      d.innerHTML = `<details class="th"><summary>💭 ${esc(head)}</summary><pre>${diffFmt(esc(txt))}</pre></details>`;
+      d.innerHTML = `<details class="th"><summary>💭 ${esc(head)}</summary><div class="md th-body">${mdRender(txt)}</div></details>`;
       return d;
     }
     case "tool_call":

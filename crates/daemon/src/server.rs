@@ -1,7 +1,7 @@
 //! Serveur : accepte les connexions, dispatche les requêtes, gère le push.
 
 use anyhow::{Context, Result};
-use proto::{Push, ReqKind, Request, Response, SessionMeta};
+use proto::{EventKind, Push, ReqKind, Request, Response, SessionMeta};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -213,7 +213,7 @@ impl Daemon {
                     .filter(|(_, v)| !v.is_empty())
                     .collect();
 
-                session.spawn_agent(&cmd, &envs, None).await?;
+                session.spawn_agent(&cmd, &envs, None, true).await?;
                 if let Some(p) = prompt {
                     let s = Arc::clone(&session);
                     tokio::spawn(async move {
@@ -261,7 +261,7 @@ impl Daemon {
                     .cloned()
                     .collect();
                 session
-                    .spawn_agent(&cmd, &profile.env, meta.native_session_id)
+                    .spawn_agent(&cmd, &profile.env, meta.native_session_id, true)
                     .await?;
                 Ok(json!({"session": sid}))
             }
@@ -274,7 +274,21 @@ impl Daemon {
                 if s.is_alive() && native_id.is_none() {
                     return Ok(json!({"session": session, "already": true}));
                 }
-                // Rebind éventuel vers une autre session native avant respawn
+                // Rebind vers une AUTRE session native : le journal local
+                // reflète l'ancienne conversation → reset, puis le replay de
+                // session/load le re-remplit (skip_replay=false).
+                let rebind = match &native_id {
+                    Some(nid) => {
+                        s.meta_snapshot().native_session_id.as_deref() != Some(nid.as_str())
+                    }
+                    None => false,
+                };
+                if rebind {
+                    s.journal.reset(&s.dir)?;
+                    s.emit(EventKind::System {
+                        text: "session native rebindée — historique rechargé".into(),
+                    });
+                }
                 if let Some(nid) = native_id {
                     s.set_native_id(&nid);
                 }
@@ -305,7 +319,8 @@ impl Daemon {
                     })
                     .filter(|(_, v)| !v.is_empty())
                     .collect();
-                s.spawn_agent(&cmd, &envs, meta.native_session_id).await?;
+                s.spawn_agent(&cmd, &envs, meta.native_session_id, !rebind)
+                    .await?;
                 Ok(json!({"session": session}))
             }
             ReqKind::Send {

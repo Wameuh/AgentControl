@@ -27,10 +27,24 @@ gh run view <id> --log-failed   # si failure
 Le workflow `.github/workflows/build.yml` build : daemon x86_64+aarch64,
 client Tauri Ubuntu+Windows, et publie une release sur les tags `v*`.
 
-## Avant chaque push
+## Version automatique (labels de PR)
 
-- **Bump de version** : `python3 client/tools/bump_version.py` (incrémente
-  le patch partout : tauri.conf, package.json, Cargo.toml).
+`main` est protégée : **push direct impossible, PR obligatoire** —
+5 checks requis (`daemon-linux` ×2, `client` ×2, `client-android`).
+Le CI build les artefacts sur les PR (APK suffixé `-<sha>`).
+
+Le workflow `version.yml` bump la version selon les labels de la PR :
+- `daemon` et/ou `client` : composants touchés → bump **patch**
+- `patch` / `minor` / `major` : niveau explicite (prioritaire)
+- aucun label composante → pas de bump (docs, CI…)
+- `minor` = incompatibilité client↔démon (déclenche l'auto-update)
+
+Le commit `chore: bump version` est poussé sur la branche automatiquement ;
+ne pas bumper à la main en parallèle (le job skip si déjà bumpé vs base).
+Manuel hors-PR : `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]`.
+
+## Avant chaque push (branche de PR)
+
 - **Frontend** : `cd client && npm run build` (tsc + vite).
 - **Rust client (src-tauri)** : pas de webkit sur le Pi → typecheck via
   la cible Windows :
