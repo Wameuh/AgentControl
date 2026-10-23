@@ -725,11 +725,20 @@ async function refreshSessions() {
       const grpClosed = connClosed || localStorage.getItem(gkey) === "1";
       const g = document.createElement("div");
       g.className = "grp-sub" + (grpClosed ? " closed" : "");
-      g.innerHTML = `<span class="grp-arrow">${grpClosed ? "▸" : "▾"}</span> ${esc(grp)}`;
+      g.innerHTML = `<span class="grp-arrow">${grpClosed ? "▸" : "▾"}</span> ${esc(grp)}` +
+        `<button class="grp-add" title="${esc(t("new_sess_grp"))}">＋</button>`;
       g.onclick = () => {
         localStorage.setItem(gkey, localStorage.getItem(gkey) === "1" ? "0" : "1");
         refreshSessions();
       };
+      // + : nouvel agent dans le groupe — agent + workspace du 1er membre
+      // préremplis (sessions triées par titre → "le premier" = premier affiché).
+      g.querySelector(".grp-add")!.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const apiConn = conn === "default" ? undefined : conn;
+        pendingGroup = { conn: apiConn, name: grp };
+        void openNewSessionDlg(apiConn, sessions.find((x) => x.group === grp));
+      });
       bindCtx(g, () => openGroupDlg("rename", null, conn, grp));
       bindDropTarget(g, conn, grp);
       el.appendChild(g);
@@ -2374,8 +2383,15 @@ $("chat-title").addEventListener("dblclick", () => {
   if (v) await call("set_model", { session: current.id, model: v }).catch((er) => showErr(String(er)));
 });
 
-$("btn-new-session").onclick = async () => {
-  const agents = await call<{ id: string; name: string }[]>("list_agents");
+// Groupe cible d'une création lancée par le "+" d'un groupe — la session
+// créée y est assignée automatiquement. conn = clé de routage (undefined =
+// connexion par défaut).
+let pendingGroup: { conn?: string; name: string } | null = null;
+
+/** Dialogue "nouvelle session". `conn` route list_agents/new_session vers le
+ *  bon serveur ; `ref` préremplit agent + workspace (1er membre du groupe). */
+async function openNewSessionDlg(conn?: string, ref?: SessionMeta) {
+  const agents = await call<{ id: string; name: string }[]>("list_agents", conn ? { conn } : {});
   const sel = $("f-agent") as HTMLSelectElement;
   sel.innerHTML = "";
   for (const a of agents) {
@@ -2383,6 +2399,10 @@ $("btn-new-session").onclick = async () => {
     o.value = a.id;
     o.textContent = a.name;
     sel.appendChild(o);
+  }
+  if (ref) {
+    if ([...sel.options].some((o) => o.value === ref.agent)) sel.value = ref.agent;
+    ($("f-cwd") as HTMLInputElement).value = ref.cwd;
   }
   // Suggestions de modèles : union des config_options connues des sessions
   const sess = await call<SessionMeta[]>("list_sessions").catch(() => [] as SessionMeta[]);
@@ -2403,6 +2423,11 @@ $("btn-new-session").onclick = async () => {
     }
   }
   ($("dlg-new") as HTMLDialogElement).showModal();
+}
+
+$("btn-new-session").onclick = () => {
+  pendingGroup = null;
+  void openNewSessionDlg();
 };
 
 $("f-create").addEventListener("click", async (e) => {
@@ -2410,22 +2435,39 @@ $("f-create").addEventListener("click", async (e) => {
   const cwd = ($("f-cwd") as HTMLInputElement).value.trim();
   if (!cwd) return;
   const attach = ($("f-attach") as HTMLInputElement).value.trim();
-  if (attach) {
-    await call("attach_session", {
-      agent: ($("f-agent") as HTMLSelectElement).value,
-      cwd,
-      native_id: attach,
-      title: ($("f-title") as HTMLInputElement).value || cwd.split("/").pop(),
-    });
-  } else {
-    await call("new_session", {
-      agent: ($("f-agent") as HTMLSelectElement).value,
-      cwd,
-      title: ($("f-title") as HTMLInputElement).value || cwd.split("/").pop(),
-      mode: ($("f-mode") as HTMLInputElement).value || undefined,
-      model: ($("f-model") as HTMLInputElement).value || undefined,
-      prompt: ($("f-prompt") as HTMLTextAreaElement).value || undefined,
-    });
+  const grp = pendingGroup;
+  const res = await (attach
+    ? call<{ session: string }>("attach_session", {
+        agent: ($("f-agent") as HTMLSelectElement).value,
+        cwd,
+        conn: grp?.conn,
+        native_id: attach,
+        title: ($("f-title") as HTMLInputElement).value || cwd.split("/").pop(),
+      })
+    : call<{ session: string }>("new_session", {
+        agent: ($("f-agent") as HTMLSelectElement).value,
+        cwd,
+        conn: grp?.conn,
+        title: ($("f-title") as HTMLInputElement).value || cwd.split("/").pop(),
+        mode: ($("f-mode") as HTMLInputElement).value || undefined,
+        model: ($("f-model") as HTMLInputElement).value || undefined,
+        prompt: ($("f-prompt") as HTMLTextAreaElement).value || undefined,
+      })
+  ).catch((er) => {
+    showErr(String(er));
+    return null;
+  });
+  if (!res) return;
+  if (grp) {
+    // conn "" = connexion par défaut côté routage — la même que celle qui
+    // vient de créer la session (évite l'injection de current.conn).
+    await call("set_session_group", {
+      session: res.session,
+      conn: grp.conn ?? "",
+      group: grp.name,
+    }).catch((er) => showErr(String(er)));
+    addStoredGroup(grp.conn ?? "default", grp.name);
+    pendingGroup = null;
   }
   ($("dlg-new") as HTMLDialogElement).close();
   await refreshSessions();
