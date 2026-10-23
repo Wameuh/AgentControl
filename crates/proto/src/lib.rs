@@ -106,6 +106,15 @@ pub enum EventKind {
     System {
         text: String,
     },
+    /// Message agent→agent. Journalisé dans les DEUX journaux : l'UI déduit
+    /// la direction (from_session == session courante → sortant).
+    PeerMessage {
+        from_session: String,
+        from_title: String,
+        to_session: String,
+        to_title: String,
+        text: String,
+    },
     /// La session a été supprimée (autre client ou janitor) — event
     /// terminal, jamais journalisé : poussé sur le flux juste avant
     /// fermeture pour prévenir les clients abonnés.
@@ -294,6 +303,17 @@ pub enum ReqKind {
         /// refus → fallback en file).
         #[serde(default)]
         steer: bool,
+    },
+    /// Message agent→agent (pont MCP `agentcontrol_send_message`, acctl msg).
+    /// `delivery` : "queue" (défaut, fin de tâche) | "steer" (session/prompt
+    /// concurrent pendant le tour — après le tool call courant si l'agent
+    /// le supporte, sinon enfile). Cible morte → auto-resume + livraison.
+    PeerSend {
+        from: String,
+        session: String,
+        text: String,
+        #[serde(default)]
+        delivery: String,
     },
     /// Lit un fichier (absolu ou relatif au cwd de la session) — panneau
     /// latéral du client pour les liens de fichiers de l'agent.

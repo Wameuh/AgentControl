@@ -65,6 +65,7 @@ const STR = {
     compact_timeout: "no compact confirmation after 2 min — sending held message(s)",
     bottom_title: "Back to latest message",
     session_gone: "⚠ session deleted on the server",
+    peer_from: "from", peer_to: "to",
   },
   fr: {
     connect: "Connecter", new_conn: "Nouvelle connexion",
@@ -127,6 +128,7 @@ const STR = {
     compact_timeout: "pas de confirmation du compact après 2 min — envoi des messages retenus",
     bottom_title: "Revenir au dernier message",
     session_gone: "⚠ session supprimée sur le serveur",
+    peer_from: "de", peer_to: "vers",
   },
 } as const;
 

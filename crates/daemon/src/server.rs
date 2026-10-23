@@ -67,11 +67,46 @@ impl Default for RetentionCfg {
     }
 }
 
+/// Communication agent↔agent (section [a2a] de config.toml).
+/// Quand activé, chaque session reçoit un serveur MCP "agentcontrol" dans
+/// session/new|load — l'agent peut lister/envoyer/lire les sessions paires.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct A2aCfg {
+    /// Injecte le serveur MCP + l'env AGENTCONTROL_* au spawn (défaut true)
+    #[serde(default = "dtrue")]
+    pub enabled: bool,
+    /// Max messages par minute et par paire d'expéditeur→cible (0 = illimité).
+    /// Borne les boucles de réponse agent↔agent.
+    #[serde(default = "d20")]
+    pub rate_per_min: u32,
+}
+
+fn dtrue() -> bool {
+    true
+}
+fn d20() -> u32 {
+    20
+}
+
+impl Default for A2aCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            rate_per_min: 20,
+        }
+    }
+}
+
 pub struct Daemon {
     pub root: PathBuf,
     pub sessions: RwLock<HashMap<String, Arc<Session>>>,
     pub agents: HashMap<String, AgentProfile>,
     pub retention: RetentionCfg,
+    pub a2a: A2aCfg,
+    /// Horodatage des envois agent→agent par paire (from,to) — rate-limit.
+    peer_rate: std::sync::Mutex<
+        HashMap<(String, String), std::collections::VecDeque<std::time::Instant>>,
+    >,
 }
 
 impl Daemon {
@@ -80,12 +115,15 @@ impl Daemon {
         root: PathBuf,
         agents: HashMap<String, AgentProfile>,
         retention: RetentionCfg,
+        a2a: A2aCfg,
     ) -> Result<Arc<Self>> {
         let d = Arc::new(Self {
             root: root.clone(),
             sessions: RwLock::new(HashMap::new()),
             agents,
             retention,
+            a2a,
+            peer_rate: std::sync::Mutex::new(HashMap::new()),
         });
         let sdir = root.join("sessions");
         if sdir.exists() {
@@ -116,6 +154,120 @@ impl Daemon {
             .get(id)
             .cloned()
             .with_context(|| format!("session inconnue: {id}"))
+    }
+
+    // -----------------------------------------------------------------------
+    // Agent↔agent : helpers
+    // -----------------------------------------------------------------------
+
+    /// Commande + env d'un profil avec substitution {model}/{mode}, plus
+    /// l'env AGENTCONTROL_SOCK/AGENTCONTROL_SESSION quand l'a2a est activé
+    /// (permet le fallback `acctl` aux agents sans support MCP).
+    fn agent_parts(
+        &self,
+        profile: &AgentProfile,
+        model: Option<&str>,
+        mode: Option<&str>,
+        session_id: &str,
+    ) -> (Vec<String>, HashMap<String, String>) {
+        let (m, md) = (model.unwrap_or(""), mode.unwrap_or(""));
+        let cmd: Vec<String> = profile
+            .command
+            .iter()
+            .map(|a| a.replace("{model}", m).replace("{mode}", md))
+            .filter(|a| !a.is_empty())
+            .collect();
+        let mut envs: HashMap<String, String> = profile
+            .env
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    v.replace("{model}", m).replace("{mode}", md),
+                )
+            })
+            .filter(|(_, v)| !v.is_empty())
+            .collect();
+        if self.a2a.enabled {
+            envs.insert(
+                "AGENTCONTROL_SOCK".into(),
+                self.root.join("daemon.sock").display().to_string(),
+            );
+            envs.insert("AGENTCONTROL_SESSION".into(), session_id.into());
+        }
+        (cmd, envs)
+    }
+
+    /// Entrée mcpServers injectée dans session/new|load : le serveur MCP
+    /// "agentcontrol", subcommand du binaire démon courant (l'agent le
+    /// spawn lui-même ; l'env identifie la session appelante).
+    fn mcp_servers(&self, session_id: &str) -> Value {
+        if !self.a2a.enabled {
+            return json!([]);
+        }
+        let exe = std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "agentcontrol-daemon".into());
+        json!([{
+            "name": "agentcontrol",
+            "command": exe,
+            "args": ["mcp-serve"],
+            "env": {
+                "AGENTCONTROL_SOCK": self.root.join("daemon.sock").display().to_string(),
+                "AGENTCONTROL_SESSION": session_id,
+            }
+        }])
+    }
+
+    /// Rate-limit par paire (from→to) : borne les boucles ping-pong.
+    fn peer_rate_check(&self, from: &str, to: &str) -> Result<()> {
+        if self.a2a.rate_per_min == 0 {
+            return Ok(());
+        }
+        let now = std::time::Instant::now();
+        let mut m = self.peer_rate.lock().unwrap();
+        let q = m.entry((from.into(), to.into())).or_default();
+        while q
+            .front()
+            .map(|t| now.duration_since(*t).as_secs() >= 60)
+            .unwrap_or(false)
+        {
+            q.pop_front();
+        }
+        if q.len() >= self.a2a.rate_per_min as usize {
+            anyhow::bail!(
+                "rate-limit a2a : {} messages/min dépassé ({from} → {to})",
+                self.a2a.rate_per_min
+            );
+        }
+        q.push_back(now);
+        Ok(())
+    }
+
+    /// Cible morte : respawn de l'agent (même mécanique que ResumeSession)
+    /// puis livraison du message.
+    async fn resume_and_deliver(&self, session: &str, wrapped: String, steer: bool) -> Result<()> {
+        let s = self.get_session(session).await?;
+        let meta = s.meta_snapshot();
+        let profile = self
+            .agents
+            .get(&meta.agent)
+            .with_context(|| format!("agent inconnu: {}", meta.agent))?
+            .clone();
+        let (cmd, envs) =
+            self.agent_parts(&profile, meta.model.as_deref(), meta.mode.as_deref(), session);
+        s.emit(EventKind::System {
+            text: "agent relancé (message agent→agent)".into(),
+        });
+        s.spawn_agent(
+            &cmd,
+            &envs,
+            meta.native_session_id,
+            true,
+            self.mcp_servers(session),
+        )
+        .await?;
+        s.send_peer_prompt(&wrapped, steer).await
     }
 
     // -----------------------------------------------------------------------
@@ -190,30 +342,11 @@ impl Daemon {
                 let sid = meta.id.clone();
                 self.sessions.write().await.insert(sid.clone(), session.clone());
 
-                // Substitution des templates {model},{mode} dans command/env
-                let cmd: Vec<String> = profile
-                    .command
-                    .iter()
-                    .map(|a| {
-                        a.replace("{model}", model.as_deref().unwrap_or(""))
-                            .replace("{mode}", mode.as_deref().unwrap_or(""))
-                    })
-                    .filter(|a| !a.is_empty())
-                    .collect();
-                let envs: HashMap<String, String> = profile
-                    .env
-                    .iter()
-                    .map(|(k, v)| {
-                        (
-                            k.clone(),
-                            v.replace("{model}", model.as_deref().unwrap_or(""))
-                                .replace("{mode}", mode.as_deref().unwrap_or("")),
-                        )
-                    })
-                    .filter(|(_, v)| !v.is_empty())
-                    .collect();
-
-                session.spawn_agent(&cmd, &envs, None, true).await?;
+                let (cmd, envs) =
+                    self.agent_parts(&profile, model.as_deref(), mode.as_deref(), &sid);
+                session
+                    .spawn_agent(&cmd, &envs, None, true, self.mcp_servers(&sid))
+                    .await?;
                 if let Some(p) = prompt {
                     let s = Arc::clone(&session);
                     tokio::spawn(async move {
@@ -254,14 +387,9 @@ impl Daemon {
                 let session = Session::open(dir)?;
                 let sid = meta.id.clone();
                 self.sessions.write().await.insert(sid.clone(), session.clone());
-                let cmd: Vec<String> = profile
-                    .command
-                    .iter()
-                    .filter(|a| !a.is_empty())
-                    .cloned()
-                    .collect();
+                let (cmd, envs) = self.agent_parts(&profile, None, None, &sid);
                 session
-                    .spawn_agent(&cmd, &profile.env, meta.native_session_id, true)
+                    .spawn_agent(&cmd, &envs, meta.native_session_id, true, self.mcp_servers(&sid))
                     .await?;
                 Ok(json!({"session": sid}))
             }
@@ -298,29 +426,20 @@ impl Daemon {
                     .get(&meta.agent)
                     .with_context(|| format!("agent inconnu: {}", meta.agent))?
                     .clone();
-                let cmd: Vec<String> = profile
-                    .command
-                    .iter()
-                    .map(|a| {
-                        a.replace("{model}", meta.model.as_deref().unwrap_or(""))
-                            .replace("{mode}", meta.mode.as_deref().unwrap_or(""))
-                    })
-                    .filter(|a| !a.is_empty())
-                    .collect();
-                let envs: HashMap<String, String> = profile
-                    .env
-                    .iter()
-                    .map(|(k, v)| {
-                        (
-                            k.clone(),
-                            v.replace("{model}", meta.model.as_deref().unwrap_or(""))
-                                .replace("{mode}", meta.mode.as_deref().unwrap_or("")),
-                        )
-                    })
-                    .filter(|(_, v)| !v.is_empty())
-                    .collect();
-                s.spawn_agent(&cmd, &envs, meta.native_session_id, !rebind)
-                    .await?;
+                let (cmd, envs) = self.agent_parts(
+                    &profile,
+                    meta.model.as_deref(),
+                    meta.mode.as_deref(),
+                    &session,
+                );
+                s.spawn_agent(
+                    &cmd,
+                    &envs,
+                    meta.native_session_id,
+                    !rebind,
+                    self.mcp_servers(&session),
+                )
+                .await?;
                 Ok(json!({"session": session}))
             }
             ReqKind::Send {
@@ -338,6 +457,68 @@ impl Daemon {
                     let _ = s.send_prompt(&text, force, steer).await;
                 });
                 Ok(json!({"queued": true}))
+            }
+            ReqKind::PeerSend {
+                from,
+                session,
+                text,
+                delivery,
+            } => {
+                if !self.a2a.enabled {
+                    anyhow::bail!("a2a désactivé (config [a2a] enabled)");
+                }
+                let target = self.get_session(&session).await?;
+                let sender = self.get_session(&from).await?;
+                let fm = sender.meta_snapshot();
+                let tm = target.meta_snapshot();
+                self.peer_rate_check(&from, &session)?;
+
+                // Journalisé dans les DEUX journaux : l'émetteur voit son
+                // envoi, la cible voit le message entrant.
+                let kind = EventKind::PeerMessage {
+                    from_session: from.clone(),
+                    from_title: fm.title.clone(),
+                    to_session: session.clone(),
+                    to_title: tm.title.clone(),
+                    text: text.clone(),
+                };
+                target.emit(kind.clone());
+                sender.emit(kind);
+
+                // Le prompt livré à l'agent cible porte la provenance +
+                // l'instruction de réponse (l'event journalisé reste brut).
+                let wrapped = format!(
+                    "[AgentControl] message de la session « {} » ({}, agent={})\n\
+                    ---\n{}\n---\n\
+                    Réponds via l'outil MCP `agentcontrol_send_message` \
+                    (session=\"{}\") — ou ignore ce message s'il n'appelle \
+                    pas de réponse.",
+                    fm.title, from, fm.agent, text, from
+                );
+                let steer = delivery == "steer";
+                if target.is_alive() {
+                    let t = Arc::clone(&target);
+                    tokio::spawn(async move {
+                        if let Err(e) = t.send_peer_prompt(&wrapped, steer).await {
+                            t.emit(EventKind::Error {
+                                message: format!("peer send: {e:#}"),
+                            });
+                        }
+                    });
+                    Ok(json!({"queued": true}))
+                } else {
+                    // Cible morte → auto-resume puis livraison.
+                    let d = Arc::clone(self);
+                    let t = Arc::clone(&target);
+                    tokio::spawn(async move {
+                        if let Err(e) = d.resume_and_deliver(&session, wrapped, steer).await {
+                            t.emit(EventKind::Error {
+                                message: format!("peer send: resume échoué — {e:#}"),
+                            });
+                        }
+                    });
+                    Ok(json!({"queued": true, "resumed": true}))
+                }
             }
             ReqKind::Events {
                 session,
