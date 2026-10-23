@@ -979,6 +979,105 @@ function highlight(code: string, ext: string): string {
   );
 }
 
+/** Rendu markdown minimal et sûr : échappement HTML d'abord, blocs de code
+ *  et liens extraits en placeholders (ni linkify ni inline-md ne les corrompt). */
+function mdRender(src: string): string {
+  const blocks: string[] = [];
+  const stash = (html: string) => `\x00B${blocks.push(html) - 1}\x00`;
+
+  // 1) blocs ```lang (fermé ou non — fin de texte tolérée) + code inline `x`
+  let work = src
+    .replace(/```(\w*)[ \t]*\n?([\s\S]*?)(?:```|$)/g, (_m, lang: string, code: string) =>
+      stash(`<pre class="md-code">${highlight(code.replace(/\n$/, ""), lang.toLowerCase())}</pre>`))
+    .replace(/`([^`\n]+)`/g, (_m, c: string) => stash(`<code class="md-ic">${esc(c)}</code>`));
+
+  // 2) échappement du reste
+  work = esc(work);
+
+  // 3) liens markdown [t](https://…) → placeholder (avant linkify)
+  work = work.replace(
+    /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+    (_m, tx: string, url: string) =>
+      stash(`<a href="${url}" target="_blank" rel="noopener noreferrer">${tx}</a>`),
+  );
+
+  // 4) inline : gras / italique / barré
+  work = work
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\b__([^_]+)__\b/g, "<strong>$1</strong>")
+    .replace(/(^|[^\w*])\*([^*\n]+)\*(?![*\w])/g, "$1<em>$2</em>")
+    .replace(/(?<![\w_])_([^_\n]+)_(?![\w_])/g, "<em>$1</em>")
+    .replace(/~~([^~]+)~~/g, "<del>$1</del>");
+
+  // 5) chemins de fichiers cliquables (hors blocs extraits)
+  work = linkify(work);
+
+  // 6) structure de blocs : headers, hr, citations, tables, listes, paragraphes
+  const lines = work.split("\n");
+  const isBlockStart = (l: string) =>
+    /^\x00B\d+\x00\s*$/.test(l.trim()) ||
+    /^#{1,6}\s/.test(l) ||
+    /^\s*(?:\*{3,}|-{3,}|_{3,})$/.test(l) ||
+    /^&gt;/.test(l) ||
+    /^\s*(?:[-*+]|\d+[.)])\s+/.test(l);
+  const cellSplit = (l: string) =>
+    l.replace(/^\s*\||\|\s*$/g, "").split("|").map((c) => c.trim());
+  const out: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const l = lines[i];
+    if (!l.trim()) { i++; continue; }
+    if (/^\x00B\d+\x00\s*$/.test(l.trim())) { out.push(l.trim()); i++; continue; }
+    const h = /^(#{1,6})\s+(.*)/.exec(l);
+    if (h) { out.push(`<div class="mdh mdh${h[1].length}">${h[2]}</div>`); i++; continue; }
+    if (/^\s*(?:\*{3,}|-{3,}|_{3,})$/.test(l)) { out.push("<hr>"); i++; continue; }
+    if (/^&gt;/.test(l)) {
+      const q: string[] = [];
+      while (i < lines.length && /^&gt;/.test(lines[i])) {
+        q.push(lines[i].replace(/^&gt;\s?/, ""));
+        i++;
+      }
+      out.push(`<blockquote>${q.join("<br>")}</blockquote>`);
+      continue;
+    }
+    // table : ligne |a|b| suivie d'une ligne |---|
+    if (l.includes("|") && i + 1 < lines.length && /^\s*\|?[\s:|-]+\|?[\s:|-]*$/.test(lines[i + 1]) && lines[i + 1].includes("-") && lines[i + 1].includes("|")) {
+      const hdr = cellSplit(l);
+      i += 2;
+      const rows: string[][] = [];
+      while (i < lines.length && lines[i].includes("|") && lines[i].trim()) {
+        rows.push(cellSplit(lines[i]));
+        i++;
+      }
+      out.push(
+        `<table class="mdt"><thead><tr>${hdr.map((c) => `<th>${c}</th>`).join("")}</tr></thead>` +
+          `<tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("")}</tbody></table>`,
+      );
+      continue;
+    }
+    const lm = /^(\s*)([-*+]|\d+[.)])\s+(.*)/.exec(l);
+    if (lm) {
+      const ordered = /^\d/.test(lm[2]);
+      const items: string[] = [];
+      while (i < lines.length) {
+        const m2 = /^(\s*)([-*+]|\d+[.)])\s+(.*)/.exec(lines[i]);
+        if (!m2) break;
+        items.push(`<li${m2[1].length >= 2 ? ' class="md-sub"' : ""}>${m2[3]}</li>`);
+        i++;
+      }
+      out.push(`<${ordered ? "ol" : "ul"} class="mdl">${items.join("")}</${ordered ? "ol" : "ul"}>`);
+      continue;
+    }
+    const para: string[] = [];
+    while (i < lines.length && lines[i].trim() && !isBlockStart(lines[i])) {
+      para.push(diffFmt(lines[i]));
+      i++;
+    }
+    out.push(`<p>${para.join("<br>")}</p>`);
+  }
+  return out.join("").replace(/\x00B(\d+)\x00/g, (_m, n: string) => blocks[+n]);
+}
+
 async function openFilePanel(path: string) {
   if (!current) return;
   if ($("file-panel").hidden) { $("file-panel").hidden = false; navPush("files"); }
@@ -1327,14 +1426,14 @@ function renderEvent(ev: AcEvent, live: boolean): HTMLElement {
     }
     case "agent_text": {
       const d = mkEv("msg agent", ev.seq);
-      d.innerHTML = diffFmt(linkify(esc(ev.text as string)));
+      d.innerHTML = `<div class="md">${mdRender(ev.text as string)}</div>`;
       return d;
     }
     case "agent_thought": {
       const d = mkEv("thought", ev.seq);
       const txt = ev.text as string;
       const head = txt.trim().split("\n")[0].slice(0, 110);
-      d.innerHTML = `<details class="th"><summary>💭 ${esc(head)}</summary><pre>${diffFmt(esc(txt))}</pre></details>`;
+      d.innerHTML = `<details class="th"><summary>💭 ${esc(head)}</summary><div class="md th-body">${mdRender(txt)}</div></details>`;
       return d;
     }
     case "tool_call":
