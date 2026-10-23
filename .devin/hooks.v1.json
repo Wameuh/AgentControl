@@ -1,0 +1,14 @@
+{
+  "PreToolUse": [
+    {
+      "matcher": "^(exec|write_to_process)$",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 \"${DEVIN_PROJECT_DIR:-.}/.devin/hooks/block-merge.py\"",
+          "timeout": 5
+        }
+      ]
+    }
+  ]
+}
