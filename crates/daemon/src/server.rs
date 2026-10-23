@@ -336,6 +336,8 @@ impl Daemon {
                     pending_config: Default::default(),
                     state: "starting".into(),
                     group: None,
+                    context_used: None,
+                    context_size: None,
                 };
                 let dir = Session::create_dir(&self.root, &meta)?;
                 let session = Session::open(dir)?;
@@ -382,6 +384,8 @@ impl Daemon {
                     pending_config: Default::default(),
                     state: "starting".into(),
                     group: None,
+                    context_used: None,
+                    context_size: None,
                 };
                 let dir = Session::create_dir(&self.root, &meta)?;
                 let session = Session::open(dir)?;

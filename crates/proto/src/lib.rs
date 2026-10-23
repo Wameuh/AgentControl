@@ -65,6 +65,16 @@ pub enum EventKind {
     PermissionRequest {
         request_id: String,
         title: String,
+        /// Type d'action demandée (toolCall.kind : execute, edit, …)
+        #[serde(default)]
+        kind: String,
+        /// toolCallId ACP — relie la demande au tool call affiché
+        #[serde(skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        /// Détail de la demande (commande, chemins, input brut…) : le
+        /// "pourquoi" de la permission.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
         #[serde(default)]
         options: Vec<PermOption>,
     },
@@ -94,6 +104,16 @@ pub enum EventKind {
     /// Options de configuration dynamiques (mode, model, …) — update ACP.
     ConfigOptions {
         options: Vec<ConfigOption>,
+    },
+    /// Jauge de contexte rapportée par l'agent (usage_update ACP) :
+    /// `used`/`size` en tokens, coût cumulé éventuel.
+    UsageUpdate {
+        used: u64,
+        size: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cost: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        currency: Option<String>,
     },
     /// État du run : idle | working | waiting_input | dead
     StatusChanged {
@@ -238,6 +258,12 @@ pub struct SessionMeta {
     /// Groupe nommé (sidebar) — None = non groupé.
     #[serde(default)]
     pub group: Option<String>,
+    /// Dernière occupation contexte rapportée par l'agent (usage_update).
+    #[serde(default)]
+    pub context_used: Option<u64>,
+    /// Fenêtre de contexte annoncée par l'agent (tokens).
+    #[serde(default)]
+    pub context_size: Option<u64>,
 }
 
 fn default_state() -> String {

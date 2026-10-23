@@ -503,6 +503,9 @@ impl Session {
                 self.emit(EventKind::PermissionRequest {
                     request_id,
                     title: req.title,
+                    kind: req.kind,
+                    call_id: req.call_id,
+                    detail: req.detail,
                     options: req.options,
                 });
             }
@@ -573,6 +576,16 @@ impl Session {
                                 }
                             }
                         }
+                        self.save_meta();
+                    }
+                    EventKind::UsageUpdate { used, size, .. } => {
+                        let mut m = self.meta.lock().unwrap();
+                        if m.context_used == Some(*used) && m.context_size == Some(*size) {
+                            return; // déduplique (replay, heartbeat à l'identique)
+                        }
+                        m.context_used = Some(*used);
+                        m.context_size = Some(*size);
+                        drop(m);
                         self.save_meta();
                     }
                     _ => {}

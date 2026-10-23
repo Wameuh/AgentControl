@@ -136,6 +136,11 @@ fn print_event(ev: &Value) {
         }
         "permission_request" => {
             println!("\x1b[31m[{seq}] PERMISSION {}\x1b[0m", ev["title"].as_str().unwrap_or(""));
+            if let Some(d) = ev["detail"].as_str() {
+                for l in d.lines().take(10) {
+                    println!("    \x1b[90m{l}\x1b[0m");
+                }
+            }
             for o in ev["options"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
                 println!("    - {} ({})", o["option_id"].as_str().unwrap_or(""), o["name"].as_str().unwrap_or(""));
             }
