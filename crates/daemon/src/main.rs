@@ -1,5 +1,6 @@
 mod acp;
 mod journal;
+mod mcp;
 mod server;
 mod session;
 
@@ -16,6 +17,9 @@ struct Config {
     agents: HashMap<String, AgentConf>,
     #[serde(default)]
     retention: server::RetentionCfg,
+    /// Communication agent↔agent (serveur MCP injecté dans les sessions).
+    #[serde(default)]
+    a2a: server::A2aCfg,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -53,9 +57,16 @@ fn home_dir() -> PathBuf {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Subcommand caché : serveur MCP stdio (injecté dans les sessions agent
+    // via mcpServers — voir server::Daemon::mcp_servers).
+    if std::env::args().nth(1).as_deref() == Some("mcp-serve") {
+        return mcp::serve_stdio().await;
+    }
     let root = std::env::var("AGENTCONTROL_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| home_dir().join(".agentcontrol"));
+    // Chemin absolu : injecté dans l'env des agents (AGENTCONTROL_SOCK).
+    let root = std::fs::canonicalize(&root).unwrap_or(root);
     std::fs::create_dir_all(root.join("sessions"))?;
 
     // Config optionnelle
@@ -67,6 +78,7 @@ async fn main() -> Result<()> {
             bind_tcp: default_tcp(),
             agents: HashMap::new(),
             retention: server::RetentionCfg::default(),
+            a2a: server::A2aCfg::default(),
         }
     };
 
@@ -82,7 +94,8 @@ async fn main() -> Result<()> {
         );
     }
 
-    let daemon = Daemon::open(root.clone(), agents, cfg.retention.clone()).await?;
+    let daemon =
+        Daemon::open(root.clone(), agents, cfg.retention.clone(), cfg.a2a.clone()).await?;
     eprintln!(
         "agentcontrol-daemon: {} session(s) chargée(s), root={}",
         daemon.sessions.read().await.len(),

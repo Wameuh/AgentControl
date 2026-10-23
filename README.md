@@ -81,3 +81,20 @@ acctl kill s-xxx / cancel s-xxx
 - sorties > 32 KB externalisées en blob + relecture
 - `set_mode` à chaud, `session/load` (reprise), restart démon → `interrupted` → resume
 - subscribe live + rattrapage par seq
+
+## Agent↔agent
+
+Chaque session reçoit (via `mcpServers` ACP) un serveur MCP `agentcontrol`
+exposant 3 outils : `agentcontrol_list_sessions` (découverte des pairs),
+`agentcontrol_send_message` (`delivery: "queue"` = fin de tâche, `"steer"` =
+injection après le tool call courant si l'agent le supporte) et
+`agentcontrol_read_events` (transcript d'un pair).
+
+Le message est journalisé `peer_message` dans les deux sessions (rendu
+dédié côté client, cliquable vers la session pair) et livré à la cible
+comme prompt préfixé de la provenance. Une session morte est relancée
+automatiquement. Anti-boucle : `rate_per_min` (20/min/paire, section
+`[a2a]` de config.toml — `enabled = false` pour tout couper).
+
+Fallback sans MCP : `AGENTCONTROL_SOCK`/`AGENTCONTROL_SESSION` sont dans
+l'env de l'agent → `acctl msg <from> <to> [--steer] <texte>`.

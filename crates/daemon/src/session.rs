@@ -107,7 +107,7 @@ impl Session {
     // Journalisation
     // -----------------------------------------------------------------------
 
-    fn emit(&self, kind: EventKind) {
+    pub fn emit(&self, kind: EventKind) {
         // Flush un éventuel texte accumulé avant tout event non-chunk.
         self.flush_text();
         match self.journal.append(kind) {
@@ -188,11 +188,17 @@ impl Session {
         command: &[String],
         envs: &HashMap<String, String>,
         resume_native_id: Option<String>,
+        mcp_servers: Value,
     ) -> Result<()> {
         let mut last = anyhow::anyhow!("spawn not attempted");
         for attempt in 0..2 {
             match self
-                .spawn_agent_once(command, envs, resume_native_id.clone())
+                .spawn_agent_once(
+                    command,
+                    envs,
+                    resume_native_id.clone(),
+                    mcp_servers.clone(),
+                )
                 .await
             {
                 Ok(()) => return Ok(()),
@@ -215,6 +221,7 @@ impl Session {
         command: &[String],
         envs: &HashMap<String, String>,
         resume_native_id: Option<String>,
+        mcp_servers: Value,
     ) -> Result<()> {
         let meta = self.meta_snapshot();
         let (cmd, args) = command.split_first().context("commande agent vide")?;
@@ -292,13 +299,19 @@ impl Session {
         let resp = if let (Some(native), true) = (resume_native_id.clone(), supports_load) {
             self.loading_replay.store(true, Ordering::SeqCst);
             let r = self
-                .acp_request("session/load", acp::session_load_params(&native, &meta.cwd))
+                .acp_request(
+                    "session/load",
+                    acp::session_load_params(&native, &meta.cwd, mcp_servers.clone()),
+                )
                 .await;
             self.loading_replay.store(false, Ordering::SeqCst);
             r
         } else {
-            self.acp_request("session/new", acp::session_new_params(&meta.cwd))
-                .await
+            self.acp_request(
+                "session/new",
+                acp::session_new_params(&meta.cwd, mcp_servers),
+            )
+            .await
         };
         let resp = resp.context("session/new|load")?;
 
@@ -685,6 +698,37 @@ impl Session {
             });
         }
         if already {
+            return Ok(()); // un runner existe déjà
+        }
+        self.drain_queue().await;
+        Ok(())
+    }
+
+    /// Livre un message agent→agent (texte déjà préfixé de provenance par
+    /// l'appelant). Même mécanique que send_prompt : `steer` tente un
+    /// session/prompt concurrent pendant le tour (fallback en file si
+    /// l'agent refuse), sinon enfile FIFO. L'event `PeerMessage` a déjà été
+    /// journalisé par l'appelant — ici on ne fait QUE livrer le prompt.
+    pub async fn send_peer_prompt(&self, wrapped: &str, steer: bool) -> Result<()> {
+        if steer && self.busy.load(Ordering::SeqCst) {
+            self.emit(EventKind::System {
+                text: "steer → envoyé au tour en cours".into(),
+            });
+            if let Err(e) = self.prompt_rpc(wrapped).await {
+                self.emit(EventKind::System {
+                    text: format!("steer refusé ({e}) — message en file"),
+                });
+                if !self.enqueue_prompt(wrapped, false) {
+                    self.drain_queue().await;
+                }
+            }
+            return Ok(());
+        }
+        let already = self.enqueue_prompt(wrapped, false);
+        if already {
+            self.emit(EventKind::System {
+                text: "message en file — envoyé à la fin du tour".into(),
+            });
             return Ok(()); // un runner existe déjà
         }
         self.drain_queue().await;

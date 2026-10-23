@@ -4,6 +4,7 @@
 //!   acctl status | agents | list
 //!   acctl new <agent> <cwd> [prompt...] [--title T] [--mode M] [--model X]
 //!   acctl send <session> <text...>
+//!   acctl msg <from> <to> [--steer] <text...>   (message agent→agent)
 //!   acctl events <session> [before_seq] [limit]
 //!   acctl tail <session> [after_seq]
 //!   acctl resume|cancel|kill <session>
@@ -110,6 +111,14 @@ fn print_event(ev: &Value) {
     let ty = ev["type"].as_str().unwrap_or("?");
     match ty {
         "user_message" => println!("\x1b[36m[{seq}] vous> {}\x1b[0m", ev["text"].as_str().unwrap_or("")),
+        "peer_message" => println!(
+            "\x1b[35m[{seq}] {}→{} («{}»→«{}»)> {}\x1b[0m",
+            ev["from_session"].as_str().unwrap_or("?"),
+            ev["to_session"].as_str().unwrap_or("?"),
+            ev["from_title"].as_str().unwrap_or("?"),
+            ev["to_title"].as_str().unwrap_or("?"),
+            ev["text"].as_str().unwrap_or("")
+        ),
         "agent_text" => println!("[{seq}] {}", ev["text"].as_str().unwrap_or("")),
         "agent_thought" => println!("\x1b[90m[{seq}] (pensée) {}\x1b[0m", ev["text"].as_str().unwrap_or("")),
         "tool_call" | "tool_call_update" => {
@@ -224,6 +233,24 @@ async fn main() -> Result<()> {
                 force,
                 steer,
             }).await?;
+        }
+        "msg" => {
+            // acctl msg <from> <to> [--steer] <text...>
+            if args.len() < 4 { bail!("msg <from> <to> [--steer] <text...>"); }
+            let mut steer = false;
+            let mut parts = Vec::new();
+            for a in &args[3..] {
+                match a.as_str() {
+                    "--steer" => steer = true,
+                    _ => parts.push(a.clone()),
+                }
+            }
+            println!("{}", c.call(proto::ReqKind::PeerSend {
+                from: args[1].clone(),
+                session: args[2].clone(),
+                text: parts.join(" "),
+                delivery: if steer { "steer".into() } else { "queue".into() },
+            }).await?);
         }
         "events" => {
             let before = args.get(2).and_then(|s| s.parse().ok()).filter(|n: &u64| *n > 0);

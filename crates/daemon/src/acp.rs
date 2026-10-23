@@ -43,12 +43,12 @@ pub fn initialize_params() -> Value {
     })
 }
 
-pub fn session_new_params(cwd: &str) -> Value {
-    json!({"cwd": cwd, "mcpServers": []})
+pub fn session_new_params(cwd: &str, mcp_servers: Value) -> Value {
+    json!({"cwd": cwd, "mcpServers": mcp_servers})
 }
 
-pub fn session_load_params(session_id: &str, cwd: &str) -> Value {
-    json!({"sessionId": session_id, "cwd": cwd, "mcpServers": []})
+pub fn session_load_params(session_id: &str, cwd: &str, mcp_servers: Value) -> Value {
+    json!({"sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers})
 }
 
 pub fn session_prompt_params(session_id: &str, text: &str) -> Value {

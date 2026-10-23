@@ -1330,6 +1330,21 @@ function renderEvent(ev: AcEvent, live: boolean): HTMLElement {
       d.innerHTML = diffFmt(linkify(esc(ev.text as string)));
       return d;
     }
+    case "peer_message": {
+      // Message agent→agent : journalisé dans les deux sessions — la
+      // direction se déduit de from_session vs la session ouverte.
+      const outgoing = current?.id === ev.from_session;
+      const peerId = (outgoing ? ev.to_session : ev.from_session) as string;
+      const d = mkEv(`msg peer ${outgoing ? "out" : "in"}`, ev.seq);
+      const label = outgoing
+        ? `→ ${t("peer_to")} «${ev.to_title}»`
+        : `💬 ${t("peer_from")} «${ev.from_title}»`;
+      d.innerHTML =
+        `<div class="peer-head" title="${esc(peerId)}">${esc(label)}</div>` +
+        `<div class="peer-body">${linkify(esc(ev.text as string))}</div>`;
+      d.querySelector(".peer-head")?.addEventListener("click", () => openSession(peerId));
+      return d;
+    }
     case "agent_thought": {
       const d = mkEv("thought", ev.seq);
       const txt = ev.text as string;
