@@ -44,11 +44,13 @@ pub fn initialize_params() -> Value {
 }
 
 pub fn session_new_params(cwd: &str, mcp_servers: Value) -> Value {
-    json!({"cwd": cwd, "mcpServers": mcp_servers})
+    // capabilities.compaction : annonce le contrat compaction_update
+    // (l'agent n'émet ces updates que si le client le déclare).
+    json!({"cwd": cwd, "mcpServers": mcp_servers, "capabilities": {"compaction": {}}})
 }
 
 pub fn session_load_params(session_id: &str, cwd: &str, mcp_servers: Value) -> Value {
-    json!({"sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers})
+    json!({"sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers, "capabilities": {"compaction": {}}})
 }
 
 pub fn session_prompt_params(session_id: &str, text: &str) -> Value {
@@ -232,7 +234,68 @@ pub fn map_update(update: &Value) -> Mapped {
                 .to_string();
             Mapped::Event(EventKind::ModeChanged { mode })
         }
-        "usage_update" | "session_info_update" => Mapped::Ignore,
+        "usage_update" => {
+            // Jauge contexte : {used, size} tokens (+ cost{amount,currency})
+            let used = update.get("used").and_then(Value::as_u64).unwrap_or(0);
+            let size = update.get("size").and_then(Value::as_u64).unwrap_or(0);
+            if used == 0 && size == 0 {
+                return Mapped::Ignore;
+            }
+            let cost = update
+                .get("cost")
+                .and_then(|c| c.get("amount"))
+                .and_then(Value::as_f64);
+            let currency = update
+                .get("cost")
+                .and_then(|c| c.get("currency"))
+                .and_then(Value::as_str)
+                .map(String::from);
+            Mapped::Event(EventKind::UsageUpdate {
+                used,
+                size,
+                cost,
+                currency,
+            })
+        }
+        "compaction_update" => {
+            // Cycle de vie d'une compaction (capacité "compaction" annoncée
+            // au session/new|load). Seuls les états terminaux font un event :
+            // les états intermédiaires (pending/in_progress) sont patchés en
+            // place côté agent et polluraient le journal.
+            let status = update.get("status").and_then(Value::as_str).unwrap_or("");
+            match status {
+                "completed" | "done" => Mapped::Event(EventKind::System {
+                    text: "context compacted".into(),
+                }),
+                "failed" | "cancelled" | "canceled" | "error" => {
+                    let err = update.get("error").and_then(Value::as_str).unwrap_or("");
+                    Mapped::Event(EventKind::System {
+                        text: if err.is_empty() {
+                            format!("compact {status}")
+                        } else {
+                            format!("compact {status}: {err}")
+                        },
+                    })
+                }
+                _ => Mapped::Ignore,
+            }
+        }
+        "notice" => {
+            // Notice "live" de l'agent (progression, info transitoire).
+            let text = update
+                .get("message")
+                .or_else(|| update.get("text"))
+                .or_else(|| update.get("title"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if text.is_empty() {
+                Mapped::Ignore
+            } else {
+                Mapped::Event(EventKind::System { text })
+            }
+        }
+        "session_info_update" => Mapped::Ignore,
         _ => Mapped::Ignore,
     }
 }
@@ -305,16 +368,121 @@ fn map_status(s: Option<&str>) -> ToolStatus {
 pub struct PermissionReq {
     pub title: String,
     pub options: Vec<PermOption>,
+    pub kind: String,
+    pub call_id: Option<String>,
+    pub detail: Option<String>,
+}
+
+/// Tronque une chaîne pour l'affichage dans le détail d'une permission.
+fn clip(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let c: String = s.chars().take(max).collect();
+        format!("{c}…")
+    }
+}
+
+/// Rend un rawInput ACP lisible : champ notable seul → la valeur brute ;
+/// plusieurs champs → "clé: valeur" par ligne ; sinon JSON compacté.
+fn fmt_detail(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) if !s.is_empty() => Some(clip(s, 1500)),
+        Value::Object(m) => {
+            const KEYS: [&str; 18] = [
+                "command", "cmd", "file_path", "path", "file", "url", "uri",
+                "query", "pattern", "regex", "description", "prompt",
+                "question", "reason", "message", "content", "text", "code",
+            ];
+            let mut lines: Vec<(&str, String)> = Vec::new();
+            for k in KEYS {
+                if let Some(s) = m.get(k).and_then(Value::as_str) {
+                    if !s.is_empty() {
+                        lines.push((k, clip(s, 400)));
+                    }
+                }
+            }
+            match lines.len() {
+                0 => {
+                    let js = serde_json::to_string(v).unwrap_or_default();
+                    if js == "{}" {
+                        None
+                    } else {
+                        Some(clip(&js, 800))
+                    }
+                }
+                1 => Some(lines[0].1.clone()),
+                _ => Some(
+                    lines
+                        .iter()
+                        .map(|(k, v)| format!("{k}: {v}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+            }
+        }
+        Value::Array(_) => {
+            let js = serde_json::to_string(v).unwrap_or_default();
+            if js == "[]" {
+                None
+            } else {
+                Some(clip(&js, 800))
+            }
+        }
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
 }
 
 pub fn parse_permission(params: &Value) -> PermissionReq {
-    let title = params
-        .get("toolCall")
+    let tc = params.get("toolCall");
+    let title = tc
         .and_then(|t| t.get("title"))
         .and_then(Value::as_str)
         .or_else(|| params.get("title").and_then(Value::as_str))
         .unwrap_or("permission request")
         .to_string();
+    let kind = tc
+        .and_then(|t| t.get("kind"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let call_id = tc
+        .and_then(|t| t.get("toolCallId"))
+        .and_then(Value::as_str)
+        .map(String::from);
+    // Le "pourquoi" : rawInput (commande, paths, args) + locations + contenu.
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(d) = tc
+        .and_then(|t| t.get("rawInput"))
+        .or_else(|| params.get("rawInput"))
+        .and_then(fmt_detail)
+    {
+        parts.push(d);
+    }
+    if let Some(locs) = tc.and_then(|t| t.get("locations")).and_then(Value::as_array) {
+        let paths: Vec<&str> = locs
+            .iter()
+            .filter_map(|l| l.get("path").and_then(Value::as_str))
+            .collect();
+        if !paths.is_empty() {
+            parts.push(paths.join("\n"));
+        }
+    }
+    if let Some(content) = tc.and_then(|t| t.get("content")) {
+        let (text, diff) = extract_content(Some(content));
+        let mut s = text;
+        if let Some(d) = diff {
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s.push_str(&d);
+        }
+        if !s.is_empty() {
+            parts.push(clip(&s, 1500));
+        }
+    }
+    let detail = parts.join("\n");
     let options = params
         .get("options")
         .and_then(Value::as_array)
@@ -333,7 +501,13 @@ pub fn parse_permission(params: &Value) -> PermissionReq {
                 .collect()
         })
         .unwrap_or_default();
-    PermissionReq { title, options }
+    PermissionReq {
+        title,
+        options,
+        kind,
+        call_id,
+        detail: if detail.is_empty() { None } else { Some(detail) },
+    }
 }
 
 /// Résultat de permission sélectionnée -> réponse ACP.

@@ -13,6 +13,7 @@ use tokio::sync::RwLock;
 
 use crate::journal;
 use crate::session::Session;
+use crate::tui;
 
 #[derive(Debug, Clone)]
 pub struct AgentProfile {
@@ -20,6 +21,28 @@ pub struct AgentProfile {
     pub command: Vec<String>,
     /// Templates d'env : {mode}, {model} substitués ; var omise si vide.
     pub env: HashMap<String, String>,
+}
+
+/// Substitution {model}/{mode} du profil avec les valeurs courantes de la
+/// session (mêmes règles que new_session/resume : entrée vide → omise).
+fn spawn_args(profile: &AgentProfile, meta: &SessionMeta) -> (Vec<String>, HashMap<String, String>) {
+    let (m, mo) = (
+        meta.model.as_deref().unwrap_or(""),
+        meta.mode.as_deref().unwrap_or(""),
+    );
+    let cmd = profile
+        .command
+        .iter()
+        .map(|a| a.replace("{model}", m).replace("{mode}", mo))
+        .filter(|a| !a.is_empty())
+        .collect();
+    let env = profile
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), v.replace("{model}", m).replace("{mode}", mo)))
+        .filter(|(_, v)| !v.is_empty())
+        .collect();
+    (cmd, env)
 }
 
 /// Politique de rétention (section [retention] de config.toml, tailles en MB).
@@ -336,6 +359,8 @@ impl Daemon {
                     pending_config: Default::default(),
                     state: "starting".into(),
                     group: None,
+                    context_used: None,
+                    context_size: None,
                 };
                 let dir = Session::create_dir(&self.root, &meta)?;
                 let session = Session::open(dir)?;
@@ -382,6 +407,8 @@ impl Daemon {
                     pending_config: Default::default(),
                     state: "starting".into(),
                     group: None,
+                    context_used: None,
+                    context_size: None,
                 };
                 let dir = Session::create_dir(&self.root, &meta)?;
                 let session = Session::open(dir)?;
@@ -396,6 +423,122 @@ impl Daemon {
             ReqKind::ListNativeSessions { session } => {
                 let s = self.get_session(&session).await?;
                 s.list_native_sessions().await
+            }
+            ReqKind::ForkSession { session } => {
+                let s = self.get_session(&session).await?;
+                let meta = s.meta_snapshot();
+                let native = meta
+                    .native_session_id
+                    .clone()
+                    .context("fork : la session n'a pas d'id natif")?;
+                let profile = self
+                    .agents
+                    .get(&meta.agent)
+                    .with_context(|| format!("agent inconnu: {}", meta.agent))?
+                    .clone();
+                let bin = profile
+                    .command
+                    .first()
+                    .cloned()
+                    .context("commande agent vide")?;
+                // /fork n'existe que dans le TUI Devin (pas de méthode ACP).
+                if !bin.to_lowercase().contains("devin") {
+                    anyhow::bail!("fork non supporté pour l'agent '{}'", meta.agent);
+                }
+                // Le TUI refuse d'ouvrir une session native verrouillée :
+                // l'agent acp la tient → kill, puis respawn après le fork.
+                let was_alive = s.is_alive();
+                if was_alive {
+                    s.emit(EventKind::System {
+                        text: "fork : libération de la session native…".into(),
+                    });
+                    s.kill().await;
+                    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                }
+                let new_native = match tui::fork_via_tui(&bin, &meta.cwd, &native).await {
+                    Ok(id) => id,
+                    Err(e) => {
+                        // Restaure la source si on l'avait tuée.
+                        if was_alive {
+                            let (cmd, envs) = spawn_args(&profile, &meta);
+                            let _ = s
+                                .spawn_agent(
+                                    &cmd,
+                                    &envs,
+                                    meta.native_session_id.clone(),
+                                    true,
+                                    self.mcp_servers(&session),
+                                )
+                                .await;
+                        }
+                        return Err(e.context("fork via le TUI de l'agent"));
+                    }
+                };
+                s.emit(EventKind::System {
+                    text: format!("session native forkée → {new_native}"),
+                });
+                // Ré-ouvre la source si elle vivait. Le lock natif peut
+                // traîner le temps que le TUI meure → retry sur le cas
+                // "already open in another process".
+                if was_alive {
+                    let (cmd, envs) = spawn_args(&profile, &meta);
+                    for attempt in 0..8 {
+                        match s
+                            .spawn_agent(
+                                &cmd,
+                                &envs,
+                                meta.native_session_id.clone(),
+                                true,
+                                self.mcp_servers(&session),
+                            )
+                            .await
+                        {
+                            Ok(()) => break,
+                            Err(e) => {
+                                if attempt == 7 || !format!("{e:#}").contains("already open") {
+                                    s.emit(EventKind::System {
+                                        text: format!(
+                                            "source non restaurée ({e:#}) — resume dispo"
+                                        ),
+                                    });
+                                    break;
+                                }
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            }
+                        }
+                    }
+                }
+                // Session AgentControl pour le fork : clone du meta source
+                // (même groupe, agent, cwd, mode/model), id/titre/natif
+                // remplacés, historique rejoué (skip_replay=false).
+                let mut meta2 = meta.clone();
+                meta2.id = proto::new_id("s");
+                meta2.title = format!("{}_fork", meta.title);
+                meta2.native_session_id = Some(new_native);
+                meta2.created_at = proto::now_iso();
+                meta2.state = "starting".into();
+                meta2.pending_config.clear();
+                meta2.context_used = None;
+                meta2.context_size = None;
+                let dir = Session::create_dir(&self.root, &meta2)?;
+                let session2 = Session::open(dir)?;
+                let sid2 = meta2.id.clone();
+                self.sessions
+                    .write()
+                    .await
+                    .insert(sid2.clone(), session2.clone());
+                let (cmd2, envs2) = spawn_args(&profile, &meta2);
+                session2
+                    .spawn_agent(
+                        &cmd2,
+                        &envs2,
+                        meta2.native_session_id.clone(),
+                        false,
+                        self.mcp_servers(&sid2),
+                    )
+                    .await
+                    .context("attach de la session forkée")?;
+                Ok(json!({ "session": sid2 }))
             }
             ReqKind::ResumeSession { session, native_id } => {
                 let s = self.get_session(&session).await?;

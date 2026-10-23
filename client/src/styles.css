@@ -398,6 +398,13 @@ button:disabled { opacity: .5; cursor: default; }
   display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
 }
 .perm-title { flex-basis: 100%; font-weight: 500; }
+.perm-kind { font-size: 11px; color: var(--gold); border: 1px solid var(--gold); border-radius: 6px; padding: 0 5px; margin-left: 6px; }
+.perm-detail {
+  flex-basis: 100%; margin: 0; padding: 7px 9px;
+  font: 12px/1.5 Mono, ui-monospace, monospace; white-space: pre-wrap; word-break: break-all;
+  color: var(--muted); background: rgba(236, 230, 216, .04);
+  border: 1px solid var(--line); border-radius: 8px; max-height: 200px; overflow-y: auto;
+}
 .btn-allow { border-color: var(--ok); color: var(--ok); }
 .btn-reject { border-color: var(--err); color: var(--err); }
 .perm.done { opacity: .5; pointer-events: none; }
@@ -442,6 +449,8 @@ button:disabled { opacity: .5; cursor: default; }
 .badge.st-working, .badge.st-waiting_input { color: var(--sand); border-color: rgba(205, 182, 140, .45); }
 .badge.warn, .badge.st-interrupted { color: var(--gold); border-color: rgba(224, 201, 150, .4); }
 .badge.st-failed, .badge.st-dead { color: var(--err); border-color: rgba(232, 148, 134, .45); cursor: pointer; }
+#chat-ctx { cursor: default; flex: none; }
+#chat-ctx.ctx-hot { color: var(--err); border-color: rgba(232, 148, 134, .45); }
 
 /* Dialogs */
 dialog {

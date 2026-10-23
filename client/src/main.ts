@@ -415,6 +415,8 @@ interface SessionMeta {
   available_models: string[];
   config_options?: ConfigOption[];
   state: string;
+  context_used?: number;
+  context_size?: number;
 }
 
 interface ConfigOpt { value: string; name: string; description?: string }
@@ -951,10 +953,37 @@ async function openSession(id: string) {
   if (treeOpen) void loadTreeRoot();
 }
 
+const fmtTok = (n: number) =>
+  n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n);
+
+/** Jauge de contexte dans le header : "53k/200k" + tooltip détaillé. */
+function updateCtx() {
+  const el = $("chat-ctx");
+  const used = current?.context_used;
+  const size = current?.context_size;
+  if (used == null || !size) {
+    el.hidden = true;
+    return;
+  }
+  const pct = Math.round((used / size) * 100);
+  el.hidden = false;
+  el.textContent = `${fmtTok(used)}/${fmtTok(size)}`;
+  el.title = t("ctx_title", {
+    used: used.toLocaleString(),
+    size: size.toLocaleString(),
+    pct,
+  });
+  el.classList.toggle("ctx-hot", pct >= 80);
+}
+
 function updateHeader() {
   $("btn-files").hidden = !current;
-  if (!current) return;
+  if (!current) {
+    $("chat-ctx").hidden = true;
+    return;
+  }
   refreshQueue();
+  updateCtx();
   const st = $("chat-state");
   st.textContent = current.state;
   st.className = `badge st-${current.state}`;
@@ -1664,6 +1693,18 @@ function renderEvent(ev: AcEvent, live: boolean): HTMLElement {
       d.hidden = true;
       return d;
     }
+    case "usage_update": {
+      // Jauge contexte — pas rendue comme message ; met à jour le badge
+      // du header (replay : la dernière valeur de la page gagne).
+      if (current) {
+        current.context_used = ev.used as number;
+        current.context_size = ev.size as number;
+        updateCtx();
+      }
+      const d = mkEv("sysline", ev.seq);
+      d.hidden = true;
+      return d;
+    }
     case "commands_available": {
       const d = mkEv("sysline", ev.seq);
       const cmds = ev.commands as CmdInfo[];
@@ -1794,7 +1835,14 @@ function renderPermission(ev: AcEvent): HTMLElement {
   const d = mkEv("perm", ev.seq);
   d.dataset.req = ev.request_id as string;
   const opts = (ev.options as { option_id: string; name: string; kind: string }[]) ?? [];
-  d.innerHTML = `<div class="perm-title">🔐 ${esc(ev.title as string)}</div><div class="perm-opts"></div>`;
+  const kind = ev.kind as string | undefined;
+  const detail = ev.detail as string | undefined;
+  d.innerHTML =
+    `<div class="perm-title">🔐 ${esc(ev.title as string)}` +
+    (kind ? ` <span class="perm-kind">${esc(kind)}</span>` : "") +
+    `</div>` +
+    (detail ? `<pre class="perm-detail">${esc(detail)}</pre>` : "") +
+    `<div class="perm-opts"></div>`;
   const box = d.querySelector<HTMLElement>(".perm-opts")!;
   for (const o of opts) {
     const b = document.createElement("button");
@@ -1899,13 +1947,19 @@ $("btn-bottom").onclick = () => {
 await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
   const { session, event } = msg.payload;
   // Fin de compact (succès "context compacted", annulation, échec) →
-  // relâcher les messages retenus pour cette session.
+  // relâcher les messages retenus pour cette session. Un usage_update en
+  // dessous de la valeur au lancement du /compact vaut aussi signal.
   if (compactHold.has(session)) {
+    const h = compactHold.get(session)!;
     const txt = String((event.text ?? event.message) ?? "");
     const done =
       /compacted/i.test(txt) ||
       (/compact/i.test(txt) &&
-        /cancel|complet|abort|finish|done|interrupt|error|fail/i.test(txt));
+        /cancel|complet|abort|finish|done|interrupt|error|fail/i.test(txt)) ||
+      (event.type === "usage_update" &&
+        h.used != null &&
+        typeof event.used === "number" &&
+        (event.used as number) < h.used);
     if (done) flushCompact(session);
   }
   // Suppression côté serveur : l'event terminal arrive avant la coupure.
@@ -1966,6 +2020,7 @@ const BUILTINS = (): { name: string; description: string; hint: string }[] => [
   { name: "model", description: t("builtin_model"), hint: "<model>" },
   { name: "resume", description: t("builtin_resume"), hint: "" },
   { name: "cancel", description: t("builtin_cancel"), hint: "" },
+  { name: "fork", description: t("builtin_fork"), hint: "" },
 ];
 
 async function runBuiltin(name: string, arg: string): Promise<boolean> {
@@ -1981,6 +2036,17 @@ async function runBuiltin(name: string, arg: string): Promise<boolean> {
     case "cancel":
       await call("cancel", { session: current.id });
       return true;
+    case "fork": {
+      // Le daemon libère la session native, /fork via le TUI de l'agent,
+      // puis attache la session forkée (même groupe, titre + "_fork").
+      addSysline(t("fork_started"));
+      const r = await call<{ session: string }>("fork_session", {
+        session: current.id,
+      });
+      await refreshSessions();
+      if (r.session) await openSession(r.session);
+      return true;
+    }
   }
   return false;
 }
@@ -2146,6 +2212,7 @@ function qBtn(txt: string, title: string): HTMLButtonElement {
 const compactHold = new Map<string, {
   conn: string;
   msgs: string[];
+  used?: number; // context_used au lancement — signal "contexte réduit"
   timer: ReturnType<typeof setTimeout>;
 }>();
 
@@ -2163,10 +2230,20 @@ function flushCompact(sid: string, timedOut = false) {
   if (!h) return;
   compactHold.delete(sid);
   clearTimeout(h.timer);
-  if (!h.msgs.length) return;
+  // Retour visible même sans message retenu — c'est la confirmation que
+  // le compact est bien terminé (ou qu'il a expiré).
   if (current?.id === sid) {
-    addSysline(t(timedOut ? "compact_timeout" : "compact_released"));
+    addSysline(
+      t(
+        timedOut
+          ? "compact_timeout"
+          : h.msgs.length
+            ? "compact_released"
+            : "compact_done",
+      ),
+    );
   }
+  if (!h.msgs.length) return;
   void (async () => {
     for (const m of h.msgs) {
       await call("send", { session: sid, text: m, conn: h.conn }).catch((e) => showErr(String(e)));
@@ -2191,6 +2268,21 @@ async function sendInput(mode: SendMode = "normal") {
     }
     return;
   }
+  // Slash-commande ni builtin ni exposée par l'agent (available_commands) :
+  // l'envoyer en texte brut coûte un tour pour rien (ex. /fork chez Devin =
+  // TUI-only, jamais routé). Avertir localement. Liste vide = agent sans
+  // annonce → on ne peut pas trancher, on laisse passer.
+  if (
+    bm &&
+    current.available_commands.length > 0 &&
+    !current.available_commands.some(
+      (c) => cmdName(c).toLowerCase() === bm[1].toLowerCase(),
+    )
+  ) {
+    ($("input") as HTMLTextAreaElement).value = "";
+    addSysline(t("cmd_unknown", { cmd: bm[1] }));
+    return;
+  }
   // Compaction en cours : retenir le message — l'envoyer annulerait le
   // compact (force/steer = bypass volontaire, annule le compact).
   const held = compactHold.get(current.id);
@@ -2210,15 +2302,20 @@ async function sendInput(mode: SendMode = "normal") {
   // Commande slash non-builtin : l'agent l'applique au prochain tour (ex.
   // /compact → "context compacted" n'arrive qu'au message suivant) → hint.
   if (bm) {
-    addSysline(t("cmd_sent_hint", { cmd: bm[1] }));
-    // /compact : armer la rétention des messages jusqu'au signal de fin.
     if (bm[1] === "compact") {
+      // /compact : armer la rétention des messages jusqu'au signal de fin.
       const sid = current.id;
+      const prev = compactHold.get(sid);
+      if (prev) clearTimeout(prev.timer);
       compactHold.set(sid, {
         conn: current.conn ?? "",
-        msgs: [],
+        msgs: prev?.msgs ?? [],
+        used: current.context_used,
         timer: setTimeout(() => flushCompact(sid, true), 120_000),
       });
+      addSysline(t("compact_started"));
+    } else {
+      addSysline(t("cmd_sent_hint", { cmd: bm[1] }));
     }
   }
   refreshQueue();

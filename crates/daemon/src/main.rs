@@ -3,6 +3,7 @@ mod journal;
 mod mcp;
 mod server;
 mod session;
+mod tui;
 
 use anyhow::{Context, Result};
 use server::{AgentProfile, Daemon};
