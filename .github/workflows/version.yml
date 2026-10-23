@@ -34,7 +34,7 @@ jobs:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -e
-          LABELS=$(echo "$PR_LABELS" | grep -o '"name":"[^"]*"' | cut -d'"' -f4 | tr '\n' ' ')
+          LABELS=$(echo "$PR_LABELS" | jq -r '.[].name' | tr '\n' ' ')
           echo "labels: $LABELS"
           case " $LABELS " in
             *" major "*) LEVEL=major ;;
