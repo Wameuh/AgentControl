@@ -160,20 +160,20 @@ body {
 .fempty, .ferr { padding: 3px 10px; color: var(--dim); font-size: 11px; white-space: normal; }
 .ferr { color: var(--err); }
 
-/* Menu contextuel des fichiers (copier / supprimer / chemin absolu) */
-#fctx {
+/* Menus contextuels (fichiers : copier/supprimer — sessions : rename/fork/exit) */
+#fctx, #sctx {
   position: fixed; z-index: 80; min-width: 170px;
   background: var(--panel-solid); border: 1px solid var(--line-strong);
   border-radius: 8px; padding: 4px; display: flex; flex-direction: column;
   box-shadow: 0 8px 26px rgba(0, 0, 0, .45);
 }
-#fctx button {
+#fctx button, #sctx button {
   background: none; border: none; color: var(--ink); text-align: left;
   padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 12px;
 }
-#fctx button:hover { background: rgba(236, 230, 216, .08); }
-#fctx button.danger { color: var(--red); }
-#fctx .fctx-path {
+#fctx button:hover, #sctx button:hover { background: rgba(236, 230, 216, .08); }
+#fctx button.danger, #sctx button.danger { color: var(--red); }
+#fctx .fctx-path, #sctx .fctx-path {
   padding: 4px 10px 6px; color: var(--dim); font-size: 10.5px;
   font-family: Mono, ui-monospace, monospace; border-bottom: 1px solid var(--line);
   margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -775,16 +775,16 @@ body.android #fv-name {
   font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 body.android #file-view { flex: 1; overflow: auto; font-size: 13px; margin: 0; padding: 12px; }
-/* Menu contextuel fichiers → action sheet ancré bas. */
-body.android #fctx {
+/* Menus contextuels (fichiers, sessions) → action sheet ancré bas. */
+body.android #fctx, body.android #sctx {
   position: fixed; left: 0 !important; right: 0; bottom: 0; top: auto !important;
   z-index: 70; border-radius: 18px 18px 0 0; width: auto;
   padding: 8px 10px calc(12px + env(safe-area-inset-bottom));
   border: 1px solid var(--line); border-bottom: 0;
   animation: sheet-up .2s ease-out;
 }
-body.android #fctx button { padding: 14px 16px; font-size: 16px; text-align: left; width: 100%; }
-body.android #fctx .fctx-path { padding: 10px 16px 6px; }
+body.android #fctx button, body.android #sctx button { padding: 14px 16px; font-size: 16px; text-align: left; width: 100%; }
+body.android #fctx .fctx-path, body.android #sctx .fctx-path { padding: 10px 16px 6px; }
 /* Header chat : 1re ligne = titre/état/actions, 2e = options scrollables. */
 body.android #chat-header {
   flex-wrap: wrap; row-gap: 6px; min-height: 48px; padding: 6px 8px;
