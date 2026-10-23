@@ -133,9 +133,10 @@ function rawCloseOverlay(id: string) {
   if (id === "drawer") {
     $("sidebar").classList.remove("open");
     scrimOff("drawer");
-  } else if (id === "sheet" || id === "fctx") {
+  } else if (id === "sheet" || id === "fctx" || id === "sctx") {
     omenu.hidden = true;
     fileCtx.hidden = true;
+    sessCtx.hidden = true;
     scrimOff("sheet");
   } else if (id === "fileview") {
     $("file-viewer").classList.remove("open");
@@ -226,7 +227,7 @@ $("tb-menu").onclick = () =>
     const inDrawer = (e.target as HTMLElement).closest("#sidebar") != null;
     if (!IS_ANDROID || document.querySelector("dialog[open]")) { swiping = false; return; }
     swiping = (inDrawer && $("sidebar").classList.contains("open")) ||
-      (!inDrawer && t0.clientX <= 26 && !(e.target as HTMLElement).closest("#file-panel, #omenu, #fctx"));
+      (!inDrawer && t0.clientX <= 26 && !(e.target as HTMLElement).closest("#file-panel, #omenu, #fctx, #sctx"));
     sx = t0.clientX; sy = t0.clientY;
   }, { passive: true });
   document.addEventListener("touchmove", (e) => {
@@ -913,6 +914,98 @@ function bindDropTarget(el: HTMLElement, conn: string, group: string | undefined
 
 let lastSessions: SessionMeta[] = [];
 
+// Menu contextuel session (clic droit / appui long) : rename / fork / exit.
+// Même pattern que #fctx — fixe au point cliqué sur desktop, action-sheet
+// ancrée en bas sur Android.
+const sessCtx = $("sctx");
+
+function hideSessCtx() {
+  navClose("sctx");
+  sessCtx.hidden = true;
+}
+
+function openSessionCtx(x: number, y: number, s: SessionMeta, row: HTMLElement) {
+  sessCtx.innerHTML = `<div class="fctx-path">${esc(s.title)}</div>`;
+  const add = (label: string, cls: string, fn: () => void) => {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.className = cls;
+    b.onclick = fn;
+    sessCtx.appendChild(b);
+  };
+  add(t("ctx_rename"), "", () => {
+    hideSessCtx();
+    renameSessRow(s, row);
+  });
+  add(t("ctx_fork"), "", () => {
+    hideSessCtx();
+    if (current?.id === s.id) addSysline(t("fork_started"));
+    void call<{ session: string }>("fork_session", { session: s.id })
+      .then(async (r) => {
+        await refreshSessions();
+        if (r.session) await openSession(r.session);
+      })
+      .catch((e) => showErr(String(e)));
+  });
+  // Exit = tue le process agent (kill_session) — la session reste, reprenable.
+  add(t("ctx_exit"), "danger", () => {
+    hideSessCtx();
+    void call("kill_session", { session: s.id })
+      .then(() => refreshSessions())
+      .catch((e) => showErr(String(e)));
+  });
+  sessCtx.hidden = false;
+  navPush("sctx");
+  if (!IS_ANDROID) {
+    const r = sessCtx.getBoundingClientRect();
+    sessCtx.style.left = `${Math.min(x, window.innerWidth - r.width - 8)}px`;
+    sessCtx.style.top = `${Math.min(y, window.innerHeight - r.height - 8)}px`;
+  }
+}
+
+/** Renommage inline du titre dans la ligne session (même pattern que le
+ *  double-clic sur chat-title). */
+function renameSessRow(s: SessionMeta, row: HTMLElement) {
+  const span = row.querySelector<HTMLElement>(".t");
+  if (!span) return;
+  const inp = document.createElement("input");
+  inp.id = "title-edit";
+  inp.value = s.title;
+  span.replaceWith(inp);
+  inp.focus();
+  inp.select();
+  const done = async (save: boolean) => {
+    const v = inp.value.trim();
+    inp.replaceWith(span);
+    if (save && v && v !== s.title) {
+      s.title = v;
+      span.textContent = v;
+      if (current?.id === s.id) {
+        current.title = v;
+        $("chat-title").textContent = v;
+      }
+      await call("rename_session", { session: s.id, title: v })
+        .catch((e) => showErr(String(e)));
+      refreshSessions();
+    }
+  };
+  inp.addEventListener("click", (e) => e.stopPropagation());
+  inp.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") done(true);
+    if (e.key === "Escape") done(false);
+  });
+  inp.addEventListener("blur", () => done(true));
+}
+
+// Fermeture : clic ailleurs / Échap / scroll de la liste. Un clic DANS le
+// menu ne doit pas le fermer avant l'action du bouton.
+sessCtx.addEventListener("click", (e) => e.stopPropagation());
+window.addEventListener("click", hideSessCtx);
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") hideSessCtx();
+});
+$("session-list").addEventListener("scroll", hideSessCtx);
+
 function sessRow(s: SessionMeta, conn: string, grp: string, closed: boolean): HTMLElement {
   const div = document.createElement("div");
   div.className = "sess" + (grp ? " in-grp" : "") + (s.offline ? " offline" : "") +
@@ -924,7 +1017,7 @@ function sessRow(s: SessionMeta, conn: string, grp: string, closed: boolean): HT
     // Mobile : fermer le drawer après sélection.
     closeDrawer();
   };
-  bindCtx(div, () => openGroupDlg("session", s));
+  bindCtx(div, (x, y) => openSessionCtx(x, y, s, div));
   if (!IS_ANDROID) {
     div.draggable = true;
     div.addEventListener("dragstart", (e) => {
