@@ -6,6 +6,32 @@ complet, reprise des sessions, réponses aux permissions/questions en attente.
 
 Voir `ANALYSE.md` pour la conception.
 
+## Captures d'écran
+
+### Bureau (Ubuntu / Windows)
+
+Chat — rendu markdown des réponses agent, groupes de sessions (glisser-déposer),
+file d'attente de prompts :
+
+![Chat desktop](docs/screenshots/desktop-chat.png)
+
+Explorateur de fichiers distant :
+
+![Explorateur de fichiers](docs/screenshots/desktop-files.png)
+
+### Android
+
+Interface native mobile : drawer de sessions, bulles de chat markdown,
+explorateur plein écran, menus en bottom sheets.
+
+| Chat | Sessions & groupes | Explorateur |
+|:-:|:-:|:-:|
+| ![Chat Android](docs/screenshots/android-chat.png) | ![Drawer Android](docs/screenshots/android-drawer.png) | ![Fichiers Android](docs/screenshots/android-files.png) |
+
+Les captures sont générées par le harnais de test : `cd client && npm run build
+&& node tests/readme-shots.mjs` (Chromium headless + mock Tauri, viewports
+desktop & Android).
+
 ## Architecture
 
 ```
