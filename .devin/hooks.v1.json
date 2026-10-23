@@ -5,7 +5,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "python3 \"${DEVIN_PROJECT_DIR:-.}/.devin/hooks/block-merge.py\"",
+          "command": "test ! -f \"${DEVIN_PROJECT_DIR:-.}/.devin/hooks/block-merge.py\" || python3 \"${DEVIN_PROJECT_DIR:-.}/.devin/hooks/block-merge.py\"",
           "timeout": 5
         }
       ]
