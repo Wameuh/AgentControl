@@ -250,6 +250,14 @@ fn free_port() -> Result<u16> {
     Ok(l.local_addr()?.port())
 }
 
+/// Windows : un enfant console (ssh…) hérite une fenêtre cmd.exe visible
+/// quand le parent est une app GUI — CREATE_NO_WINDOW le garde silencieux.
+/// No-op ailleurs (Unix : pas de console allouée pour un sous-process).
+pub fn hide_console(cmd: &mut Command) {
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+}
+
 async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<Arc<SshGuard>>)> {
     log(format!("connect transport={:?}", std::mem::discriminant(t)));
     match t {
@@ -284,8 +292,8 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                 "ssh -N -L {spec} {host} args={args:?} SSH_AUTH_SOCK={:?}",
                 std::env::var("SSH_AUTH_SOCK").unwrap_or_else(|_| "<absent>".into())
             ));
-            let mut child = Command::new("ssh")
-                .args([
+            let mut cmd = Command::new("ssh");
+            cmd.args([
                     "-N",
                     "-L",
                     &spec,
@@ -306,9 +314,9 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                 .args(args)
                 .arg(host)
                 .stderr(std::process::Stdio::piped())
-                .kill_on_drop(true)
-                .spawn()
-                .context("spawn ssh — openssh installé ?")?;
+                .kill_on_drop(true);
+            hide_console(&mut cmd);
+            let mut child = cmd.spawn().context("spawn ssh — openssh installé ?")?;
             let mut stderr = child.stderr.take();
             let guard = Arc::new(SshGuard::process(child));
             // Attendre que le tunnel soit prêt (~26 s > ConnectTimeout=10
