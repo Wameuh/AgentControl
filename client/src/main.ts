@@ -999,6 +999,7 @@ async function openSession(id: string) {
       if (stale()) return;
       alive = info2.alive;
       current = info2.meta;
+      if (!current.conn && connHint) current.conn = connHint;
       sys.textContent = "✔ agent repris";
       updateHeader();
     } catch (e) {
