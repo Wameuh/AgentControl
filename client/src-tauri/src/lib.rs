@@ -617,6 +617,8 @@ fn set_app_icon(window: tauri::WebviewWindow, state: &str) -> Result<(), String>
             "grey" => include_bytes!("../icons/icon-grey.rgba"),
             _ => include_bytes!("../icons/icon.rgba"),
         };
+        // Contrat avec tools/gem_icon.py : RGBA brut 512×512.
+        debug_assert_eq!(bytes.len(), 512 * 512 * 4);
         window
             .set_icon(tauri::image::Image::new_owned(bytes.to_vec(), 512, 512))
             .map_err(|e| e.to_string())?;

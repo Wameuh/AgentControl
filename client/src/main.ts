@@ -2703,6 +2703,9 @@ setInterval(async () => {
       .map(([k]) => k);
     if (!st.servers || dead.length) throw dead;
   } catch (dead) {
+    // Démon injoignable → aucun agent joignable, icône grise (le catch de
+    // refreshSessions ne peut pas couvrir ce chemin : on return avant).
+    setAppIcon("grey");
     if (reconnecting) return;
     reconnecting = true;
     // Reconnecter chaque connexion morte (ou toutes si liste vide)

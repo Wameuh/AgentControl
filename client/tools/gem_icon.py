@@ -106,33 +106,33 @@ def transform(boundary, size, pad_ratio=0.10):
     return t, (x0, y0, w, h)
 
 
-def render_png(boundary, faces, size):
+def render_png(boundary, faces, size, palette=PALETTE, base=BASE):
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     layer = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(layer)
     t, _ = transform(boundary, size)
-    d.polygon([t(p) for p in boundary], fill=BASE)
+    d.polygon([t(p) for p in boundary], fill=base)
     for pts, tone in faces:
-        d.polygon([t(p) for p in pts], fill=PALETTE[tone])
+        d.polygon([t(p) for p in pts], fill=palette[tone])
     mask = Image.new("L", (size, size), 0)
     ImageDraw.Draw(mask).polygon([t(p) for p in boundary], fill=255)
     img.paste(layer, (0, 0), mask)
     return img
 
 
-def render_svg(boundary, faces, size=256):
+def render_svg(boundary, faces, size=256, palette=PALETTE, base=BASE):
     t, (x0, y0, w, h) = transform(boundary, size)
     x0 -= size * .10 / .8
     y0 -= size * .10 / .8
     loc = lambda pts: " ".join(f"{p[0]:.1f},{p[1]:.1f}" for p in pts)
     polys = "".join(
-        f'<polygon points="{loc([t(p) for p in pts])}" fill="{PALETTE[tone]}"/>'
+        f'<polygon points="{loc([t(p) for p in pts])}" fill="{palette[tone]}"/>'
         for pts, tone in faces)
     vb = f"0 0 {size} {size}"
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{vb}">'
         f'<defs><clipPath id="c"><polygon points="{loc([t(p) for p in boundary])}"/></clipPath></defs>'
-        f'<g clip-path="url(#c)"><polygon points="{loc([t(p) for p in boundary])}" fill="{BASE}"/>'
+        f'<g clip-path="url(#c)"><polygon points="{loc([t(p) for p in boundary])}" fill="{base}"/>'
         f"{polys}</g></svg>")
 
 
@@ -182,7 +182,8 @@ def write_android(icons, big):
 
 
 def write_ios(icons, big):
-    """iOS : icônes opaques obligatoires (pas d'alpha)."""
+    """iOS : icônes opaques obligatoires — RGB, pas de canal alpha
+    (l'App Store rejette tout canal alpha, même opaque)."""
     pts = [(20, (1, 2, 3)), (29, (1, 2, 3)), (40, (1, 2, 3)),
            (60, (2, 3)), (76, (1, 2)), (83.5, (2,))]
     d = os.path.join(icons, "ios")
@@ -190,13 +191,15 @@ def write_ios(icons, big):
     for pt, scales in pts:
         for sc in scales:
             n = int(round(pt * sc))
-            tile = Image.new("RGBA", (n, n), BG)
+            tile = Image.new("RGB", (n, n), BG)
             fit_paste(tile, big, 0.80)
             p = f"AppIcon-{pt:g}x{pt:g}@{sc}x.png"
             tile.save(os.path.join(d, p))
-            if os.path.exists(os.path.join(d, p.replace("@", "-1@"))):
-                tile.save(os.path.join(d, p.replace("@", "-1@")))
-    tile = Image.new("RGBA", (1024, 1024), BG)
+            # Slots iPad dupliqués par tauri icon : AppIcon-20x20@2x-1.png
+            alt = os.path.join(d, p.replace(".png", "-1.png"))
+            if os.path.exists(alt):
+                tile.save(alt)
+    tile = Image.new("RGB", (1024, 1024), BG)
     fit_paste(tile, big, 0.80)
     tile.save(os.path.join(d, "AppIcon-512@2x.png"))
 
@@ -234,14 +237,10 @@ def main():
     with open(os.path.join(pub, "gem.svg"), "w") as f:
         f.write(render_svg(boundary, faces))
 
-    global PALETTE, BASE
-    pal0, base0 = PALETTE, BASE
     for name, (pal, base) in VARIANTS.items():
-        PALETTE, BASE = pal, base
-        v = render_png(boundary, faces, 512)
+        v = render_png(boundary, faces, 512, pal, base)
         with open(os.path.join(icons, f"icon-{name}.rgba"), "wb") as f:
             f.write(v.tobytes())
-    PALETTE, BASE = pal0, base0
 
     write_android(icons, big)
     write_ios(icons, big)
