@@ -69,7 +69,7 @@ jobs:
           RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
         run: |
           set -e
-          git fetch origin next_release
+          git fetch origin next_release main
           # main déjà ancêtre de nr (rien mergé depuis le dernier
           # reconcile) → rien à faire — sortie avant le check PAT :
           # secret absent ≠ échec quand aucun push n'est nécessaire.
@@ -83,13 +83,14 @@ jobs:
           if git diff --quiet origin/main origin/next_release; then
             # Arbres identiques → reset sans perte de contenu : tous
             # les commits nr sont déjà publiés (squash release), seul
-            # leur historique est abandonné. HEAD = le commit main
-            # poussé (checkout github.sha). Le lease ancre la
-            # réécriture sur le nr qu'on vient d'évaluer : si nr a
-            # bougé entre le fetch et le push → refus → job rouge.
+            # leur historique est abandonné. On pousse `origin/main` —
+            # la référence qu'on vient d'évaluer, pas HEAD (github.sha,
+            # figé au trigger, peut être périmé sur re-run ou si main a
+            # bougé). Le lease ancre la réécriture sur le nr évalué :
+            # si nr a bougé entre le fetch et le push → refus → rouge.
             echo "arbres identiques → reset next_release sur main"
             git push --force-with-lease=refs/heads/next_release \
-              origin HEAD:refs/heads/next_release
+              origin origin/main:refs/heads/next_release
           else
             # nr a du contenu hors de main → merge réconcilié,
             # jamais de reset destructif.
