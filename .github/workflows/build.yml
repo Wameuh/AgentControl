@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 # Draft ↔ ready et pushes rapides : annule les runs obsolètes d'une
-# même PR (sur tags/main le group est par ref → pas d'annulation).
+# même PR (group par ref sur main/tags → pas d'annulation croisée).
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true

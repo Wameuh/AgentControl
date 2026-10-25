@@ -49,15 +49,16 @@ jobs:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -e
-          LABELS=$(echo "$PR_LABELS" | jq -r '.[].name' | tr '\n' ' ')
-          echo "labels: $LABELS"
-          case " $LABELS " in
-            *" major "*) LEVEL=major ;;
-            *" minor "*|*" sync "*) LEVEL=minor ;;
-            *" patch "*) LEVEL=patch ;;
-            *" daemon "*|*" client "*) LEVEL=patch ;;
-            *) echo "pas de label daemon/client → pas de bump"; exit 0 ;;
-          esac
+          LABELS=$(echo "$PR_LABELS" | jq -r '.[].name')
+          echo "labels: $(echo "$LABELS" | tr '\n' ' ')"
+          # Matching exact par ligne (un label "not major" ne doit pas
+          # matcher " major " en substring).
+          if   echo "$LABELS" | grep -qxF major; then LEVEL=major
+          elif echo "$LABELS" | grep -qxF minor || echo "$LABELS" | grep -qxF sync; then LEVEL=minor
+          elif echo "$LABELS" | grep -qxF patch; then LEVEL=patch
+          elif echo "$LABELS" | grep -qxF daemon || echo "$LABELS" | grep -qxF client; then LEVEL=patch
+          else echo "pas de label daemon/client → pas de bump"; exit 0
+          fi
           BASEV=$(git show "origin/$BASE_REF:client/package.json" | grep -oE '"version": "[^"]+"' | head -1 | cut -d'"' -f4)
           HEADV=$(grep -oE '"version": "[^"]+"' client/package.json | head -1 | cut -d'"' -f4)
           echo "base=$BASEV head=$HEADV level=$LEVEL"
