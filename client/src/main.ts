@@ -1775,7 +1775,9 @@ function renderEvent(ev: AcEvent, live: boolean): HTMLElement {
   switch (ev.type) {
     case "user_message": {
       const d = mkEv("msg user", ev.seq);
-      d.innerHTML = linkify(esc(ev.text as string));
+      d.innerHTML =
+        (ev.steer ? `<span class="steer-badge">${t("steer_badge")}</span> ` : "") +
+        linkify(esc(ev.text as string));
       return d;
     }
     case "agent_text": {

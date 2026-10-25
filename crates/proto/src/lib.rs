@@ -21,6 +21,9 @@ pub struct Event {
 pub enum EventKind {
     UserMessage {
         text: String,
+        /// Envoyé en injection mid-turn (steer) — badge côté client.
+        #[serde(default)]
+        steer: bool,
     },
     AgentText {
         text: String,

@@ -317,6 +317,13 @@ button:disabled { opacity: .5; cursor: default; }
 .msg.user .flink:hover, .msg.user a:hover {
   color: var(--msg-user-link); text-decoration-style: solid;
 }
+/* pastille "steer" sur un user_message injecté mid-turn */
+.steer-badge {
+  display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .4px;
+  text-transform: uppercase; padding: 1px 6px; margin-right: 2px;
+  border-radius: 999px; border: 1px solid var(--msg-user-link);
+  color: var(--msg-user-link); vertical-align: 1px; opacity: .85;
+}
 .msg.agent {
   background: rgba(196, 169, 220, .1);
   border: 1px solid rgba(196, 169, 220, .22);
