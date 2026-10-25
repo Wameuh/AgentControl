@@ -2,13 +2,18 @@ name: version
 
 # Bump de version au moment de la release (PR next_release -> main
 # labellisee `release`) :
-#   NEXT = dernier tag v* + niveau
-#   niveau = mot-clef le plus fort trouve dans les messages des commits
-#            depuis le dernier tag : `major` > `minor` | `sync` ;
-#            aucun mot-clef -> patch.
+#   NEXT = dernier tag v* semver + niveau
+#   niveau = mot-clef le plus fort trouve dans les sujets/bodies des
+#            commits du cycle : `(major)` > `(minor)` | `(sync)` ;
+#            aucun -> patch.
+#   Plage : depuis le dernier commit `chore: bump version` sur
+#   next_release (borne auto-entretenue — un tag de release ne peut PAS
+#   servir de borne : les releases sur main sont des squashs, le tag
+#   n'est jamais ancetre des commits nr -> v<tag>..HEAD rescannerait
+#   indefiniment l'historique deja publie). Fallback : dernier tag.
 #   Les mots-clefs survivent au squash : le message de squash reprend
-#   les messages des commits dans le body -> les ecrire en clair dans
-#   le commit (ex. `feat: multi-agents (minor)`).
+#   les sujets des commits dans le body -> ecrire le mot-clef
+#   parenthese dans le sujet (ex. `feat: multi-agents (minor)`).
 #   Le bump est commit + push sur next_release par le workflow (requiert
 #   github-actions[bot] en bypass actor de la protection de
 #   next_release, sinon GH006 protected branch).
@@ -58,17 +63,29 @@ jobs:
         run: |
           set -e
           git fetch --tags -q origin
-          LAST=$(git tag -l 'v*' --sort=-version:refname | head -1)
-          echo "dernier tag: ${LAST:-aucun}"
+          # Borne du scan = dernier commit `chore: bump version` (pose
+          # par ce job en fin de cycle precedent ; c'est un vrai commit
+          # de l'historique nr, il survit au squash de la release sur
+          # main). Fallback : dernier tag semver.
+          BOUND=$(git rev-list -1 --grep='^chore: bump version' HEAD || true)
+          [ -z "$BOUND" ] && BOUND=$(git tag -l 'v*' --sort=-version:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
           RANGE="HEAD"
-          [ -n "$LAST" ] && RANGE="$LAST..HEAD"
-          # Mots entiers, casse minuscule (convention : écrire le
-          # mot-clef en minuscules dans le message de commit).
+          [ -n "$BOUND" ] && RANGE="$BOUND..HEAD"
+          echo "borne: ${BOUND:-racine}"
+          # Convention : mot-clef parenthese `(minor)`/`(major)`/`(sync)`
+          # — jamais un mot nu (`a major bug`, `sync retry` en prose ne
+          # doivent pas compter).
           MSGS=$(git log --format=%B "$RANGE")
-          if   echo "$MSGS" | grep -qwE 'major';       then LEVEL=major
-          elif echo "$MSGS" | grep -qwE 'minor|sync';  then LEVEL=minor
+          if   echo "$MSGS" | grep -qE '\(major\)';        then LEVEL=major
+          elif echo "$MSGS" | grep -qE '\((minor|sync)\)'; then LEVEL=minor
           else LEVEL=patch
           fi
+          # Numero de release = dernier tag semver + niveau (jamais
+          # package.json, qui derive entre releases).
+          LAST=$(git tag -l 'v*' --sort=-version:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          echo "dernier tag: ${LAST:-aucun}"
           if [ -n "$LAST" ]; then
             IFS=. read -r MA MI PA <<< "${LAST#v}"
           else
@@ -94,5 +111,7 @@ jobs:
           git checkout HEAD -- client/tools/bump_version.py
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "chore: bump version ($LEVEL → $NEXT)"
+          # Pas de mot-clef dans le message (il rentrerait dans la
+          # plage du cycle suivant) — le niveau reste lisible ci-dessus.
+          git commit -am "chore: bump version to $NEXT"
           git push origin "HEAD:$HEAD_REF"

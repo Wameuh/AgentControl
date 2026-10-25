@@ -123,17 +123,21 @@ PR → **`next_release`** (pas `main` directement). 5 checks requis
 artefacts sur les PR (APK suffixé `-<sha>`).
 
 **Pas de bump par PR** — la version ne bouge qu'à la release. Le niveau
-est décidé par des **mots-clés dans les messages de commit** (mot
-entier, minuscules) balayés depuis le dernier tag `v*` :
+est décidé par des **mots-clés parenthésés dans les sujets de commit**
+balayés sur le cycle (depuis le dernier `chore: bump version` de
+`next_release`, borne auto-entretenue — un tag `main` n'est jamais
+ancêtre des commits nr sous squash) :
 
-- `major` → **major** ; `minor` ou `sync` → **minor** ; rien → **patch**
-- `sync`/`minor` = incompatibilité client↔démon (déclenche
+- `(major)` → **major** ; `(minor)` ou `(sync)` → **minor** ;
+  rien → **patch**
+- `(sync)`/`(minor)` = incompatibilité client↔démon (déclenche
   l'auto-update) — le plus fort rencontré gagne.
-- Écrire le mot-clé dans le commit qui le motive, ex.
-  `feat: multi-agents (minor)`. **Au squash, l'élément doit être
-  repris** — GitHub inclut par défaut la liste des commits dans le
-  body du squash : ne pas l'éditer hors du message.
-- La release numérote depuis le **dernier tag**, pas depuis
+- Écrire le mot-clé **parenthésé** dans le sujet du commit qui le
+  motive : `feat: multi-agents (minor)` — un mot nu (`a major bug`)
+  ne doit pas compter. **Au squash, l'élément doit être repris** —
+  GitHub inclut par défaut les sujets dans le body du squash : ne pas
+  l'éditer hors du message.
+- La release numérote depuis le **dernier tag semver**, pas depuis
   `package.json` — la version fichier peut dériver entre releases,
   elle est recalée au bump de release.
 
