@@ -108,7 +108,7 @@ fn split_user_host<'a>(host: &'a str, user: Option<&'a str>) -> Result<(String, 
 
 /// Configure la connexion au démon.
 #[tauri::command]
-async fn connect(state: State<'_, AppState>, cfg: ConnectCfg) -> Result<Value, String> {
+async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: ConnectCfg) -> Result<Value, String> {
     let key = conn_key(&cfg);
     let t = match cfg {
         ConnectCfg::Local {} => {
@@ -148,8 +148,41 @@ async fn connect(state: State<'_, AppState>, cfg: ConnectCfg) -> Result<Value, S
     };
     let c = Client::connect(&t).await.map_err(|e| format!("{e:#}"))?;
     let status = c.call(ReqKind::DaemonStatus).await.map_err(|e| format!("{e:#}"))?;
-    state.conns.lock().await.insert(key.clone(), ConnCtx { client: c });
-    *state.default_conn.lock().await = Some(key);
+    {
+        let mut map = state.conns.lock().await;
+        map.insert(key.clone(), ConnCtx { client: c.clone() });
+        // Le défaut ne se repositionne que s'il est vide ou pointe une conn
+        // supprimée — une reconnexion en arrière-plan (backoff) ne doit pas
+        // détourner les appels qui routent sans conn explicite.
+        let mut d = state.default_conn.lock().await;
+        if d.as_ref().is_none_or(|k| !map.contains_key(k)) {
+            *d = Some(key.clone());
+        }
+    }
+    // Mort de la boucle de lecture (EOF transport) → event `conn-dead`
+    // pour l'UI. Le Weak évite de retenir le client si la connexion est
+    // remplacée/fermée entre-temps.
+    {
+        let weak = Arc::downgrade(&c);
+        let mut dead = c.dead.clone();
+        let k = key.clone();
+        tauri::async_runtime::spawn(async move {
+            // wait_for sonde la VALEUR — `changed()` raterait une mort
+            // survenue avant le clone (le clone marque l'état comme vu).
+            if dead.wait_for(|d| *d).await.is_err() {
+                return; // client droppé avant de mourir (remplacé/déconnecté)
+            }
+            let Some(c2) = weak.upgrade() else { return };
+            let still = {
+                let st = app.state::<AppState>();
+                let m = st.conns.lock().await;
+                m.get(&k).is_some_and(|x| Arc::ptr_eq(&x.client, &c2))
+            };
+            if still {
+                let _ = app.emit("conn-dead", k);
+            }
+        });
+    }
     Ok(status)
 }
 
@@ -212,12 +245,41 @@ async fn disconnect(state: State<'_, AppState>, conn: String) -> Result<(), Stri
 async fn call(state: State<'_, AppState>, method: String, params: Value) -> Result<Value, String> {
     // Connexion cible : params.conn explicite, sinon connexion par défaut.
     let conn = params.get("conn").and_then(Value::as_str).map(String::from);
-    // list_sessions / daemon_status : fusion multi-serveurs.
-    if method == "list_sessions" {
-        let map = state.conns.lock().await;
+    // list_sessions / daemon_status : fusion multi-serveurs — en parallèle
+    // avec timeout par conn (une conn morte en blackhole ne doit pas
+    // bloquer la réponse des autres).
+    if method == "list_sessions" || method == "daemon_status" {
+        let merged = method == "daemon_status";
+        if merged {
+            if let Some(k) = conn {
+                let c = get_conn(&state, Some(&k)).await?;
+                return c.call(ReqKind::DaemonStatus).await.map_err(|e| format!("{e:#}"));
+            }
+        }
+        let pairs: Vec<(String, Arc<Client>)> = {
+            let map = state.conns.lock().await;
+            map.iter().map(|(k, c)| (k.clone(), c.client.clone())).collect()
+        };
+        let n_conns = pairs.len();
+        let req = if merged { ReqKind::DaemonStatus } else { ReqKind::ListSessions };
+        let mut set = tokio::task::JoinSet::new();
+        for (k, c) in pairs {
+            let req = req.clone();
+            set.spawn(async move {
+                let r = tokio::time::timeout(std::time::Duration::from_secs(8), c.call(req)).await;
+                (k, r.map_err(|_| anyhow::anyhow!("timeout")).and_then(|x| x))
+            });
+        }
         let mut all = Vec::new();
-        for (k, ctx) in map.iter() {
-            match ctx.client.call(ReqKind::ListSessions).await {
+        let mut out = json!({});
+        let mut n_ok = 0u64;
+        while let Some(res) = set.join_next().await {
+            let Ok((k, r)) = res else { continue };
+            match r {
+                Ok(v) if merged => {
+                    n_ok += 1;
+                    out[k] = v;
+                }
                 Ok(mut v) => {
                     if let Some(arr) = v.as_array_mut() {
                         for m in arr.iter_mut() {
@@ -226,29 +288,19 @@ async fn call(state: State<'_, AppState>, method: String, params: Value) -> Resu
                         all.append(arr);
                     }
                 }
-                Err(e) => client_core::log(format!("list_sessions {k}: {e:#}")),
-            }
-        }
-        return Ok(json!(all));
-    }
-    if method == "daemon_status" {
-        if let Some(k) = conn {
-            let c = get_conn(&state, Some(&k)).await?;
-            return c.call(ReqKind::DaemonStatus).await.map_err(|e| format!("{e:#}"));
-        }
-        let map = state.conns.lock().await;
-        let mut out = json!({});
-        let mut n_ok = 0u64;
-        for (k, ctx) in map.iter() {
-            match ctx.client.call(ReqKind::DaemonStatus).await {
-                Ok(v) => {
-                    n_ok += 1;
-                    out[k] = v;
+                Err(e) if merged => out[k] = json!({"error": format!("{e:#}")}),
+                // Le frontend filtre ce marqueur → conn marquée down et
+                // sessions servies depuis le cache au lieu de disparaître.
+                Err(e) => {
+                    client_core::log(format!("list_sessions {k}: {e:#}"));
+                    all.push(json!({"conn": k, "conn_error": true}));
                 }
-                Err(e) => out[k] = json!({"error": format!("{e:#}")}),
             }
         }
-        out["servers"] = json!(map.len());
+        if !merged {
+            return Ok(json!(all));
+        }
+        out["servers"] = json!(n_conns);
         out["sessions"] = json!(n_ok);
         return Ok(out);
     }

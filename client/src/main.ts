@@ -410,6 +410,8 @@ const cmdHint = (c: CmdInfo) => (typeof c === "string" ? "" : (c.hint ?? ""));
 
 interface SessionMeta {
   conn?: string;
+  /** Connexion down → session affichée depuis le cache (grisée). */
+  offline?: boolean;
   group?: string;
   id: string;
   agent: string;
@@ -530,6 +532,9 @@ async function call<T = unknown>(method: string, params: Record<string, unknown>
   // conn absent (undefined) → injecter celui de la session affichée ; un
   // appelant peut passer conn:"" explicitement (envois en arrière-plan).
   if (p.session && p.conn === undefined && current?.conn) p.conn = current.conn;
+  // Conn marquée down → échec rapide au lieu d'attendre le timeout RPC.
+  const ck = (p.conn as string) || "";
+  if (ck && (connLive.get(ck) ?? "ok") !== "ok") throw new Error(t("conn_offline"));
   return invoke<T>("call", { method, params: p });
 }
 
@@ -657,7 +662,6 @@ function daemonDlg(msg: string, open: boolean) {
 }
 
 async function doConnect(cfg: Record<string, unknown>) {
-  lastCfg = cfg;
   let status: unknown;
   let newerDaemon = "";
   try {
@@ -704,6 +708,10 @@ async function doConnect(cfg: Record<string, unknown>) {
       }
     }
   }
+  // Connexion établie → la surveillance/backoff la suit.
+  const ck = connKeyOf(cfg);
+  connCfg.set(ck, cfg);
+  markAlive(ck);
   await refreshSessions();
 }
 
@@ -750,12 +758,30 @@ function setAppIcon(state: string) {
 }
 
 async function refreshSessions() {
-  const list = await call<SessionMeta[]>("list_sessions").catch((e) => {
+  const raw = await call<SessionMeta[]>("list_sessions").catch((e) => {
     setAppIcon("grey"); // démon injoignable → aucun agent joignable
     throw e;
   });
+  // Marqueur Rust `conn_error` : la sonde list_sessions d'une conn a
+  // échoué (timeout 8 s) → la marquer down (une seule fois : déjà down,
+  // markDead re-rendererait refreshSessions en boucle).
+  const list = raw.filter((s) => {
+    if (!(s as { conn_error?: boolean }).conn_error) return true;
+    const k = s.conn ?? "";
+    if ((connLive.get(k) ?? "ok") === "ok") markDead(k);
+    return false;
+  });
+  // Conn down : ses sessions n'arrivent plus — réafficher le dernier cache
+  // connu (grisé) au lieu de faire disparaître le serveur.
+  for (const [k, st] of connLive) {
+    if (st !== "ok" && !list.some((s) => (s.conn ?? "default") === k)) {
+      for (const s of lastSessions.filter((x) => (x.conn ?? "default") === k)) {
+        list.push({ ...s, offline: true });
+      }
+    }
+  }
   lastSessions = list;
-  const live = list.filter((s) => s.state !== "dead" && s.state !== "interrupted");
+  const live = list.filter((s) => !s.offline && s.state !== "dead" && s.state !== "interrupted");
   setAppIcon(
     live.some((s) => s.state === "waiting_input")
       ? "red"
@@ -772,8 +798,9 @@ async function refreshSessions() {
   ) {
     markSessionGone();
   }
-  // Lumières "agents" du fond : une par session active
-  const n = list.filter((s) => s.state === "working" || s.state === "waiting_input").length;
+  // Lumières "agents" du fond : une par session active (les sessions
+  // cachées d'une conn down ne comptent pas).
+  const n = list.filter((s) => !s.offline && (s.state === "working" || s.state === "waiting_input")).length;
   (window as { MeshBackground?: { setMood: (m: string, o: object) => void } })
     .MeshBackground?.setMood(bgMood(), { agents: Math.min(n, 4), intensity: 0.55 });
   const el = $("session-list");
@@ -786,13 +813,19 @@ async function refreshSessions() {
     if (!byConn.has(c)) byConn.set(c, []);
     byConn.get(c)!.push(s);
   }
-  for (const conn of [...byConn.keys()].sort()) {
-    const sessions = byConn.get(conn)!.sort((a, b) => a.title.localeCompare(b.title));
+  // Conns suivies même sans session (ex. serveur down) → header + badge.
+  for (const conn of [...new Set([...connCfg.keys(), ...byConn.keys()])].sort()) {
+    const sessions = (byConn.get(conn) ?? []).sort((a, b) => a.title.localeCompare(b.title));
     const key = `ac-grp-${conn}`;
     const connClosed = localStorage.getItem(key) === "1";
+    const st = connLive.get(conn) ?? "ok";
     const ch = document.createElement("div");
     ch.className = "grp-head" + (connClosed ? " closed" : "");
-    ch.innerHTML = `<span class="grp-arrow">${connClosed ? "▸" : "▾"}</span> ${esc(conn)}` +
+    const badge = connCfg.has(conn)
+      ? `<span class="conn-st ${st === "ok" ? "ok" : st === "reconnecting" ? "warn" : "bad"}"` +
+        ` title="${esc(connTip(st))}">${st === "reconnecting" ? "⟳" : "●"}</span> `
+      : "";
+    ch.innerHTML = `<span class="grp-arrow">${connClosed ? "▸" : "▾"}</span> ${badge}${esc(conn)}` +
       `<button class="grp-add" title="${esc(t("new_group"))}">＋</button>`;
     ch.onclick = () => {
       localStorage.setItem(key, connClosed ? "0" : "1");
@@ -801,6 +834,11 @@ async function refreshSessions() {
     ch.querySelector(".grp-add")!.addEventListener("click", (e) => {
       e.stopPropagation();
       openGroupDlg("new", null, conn);
+    });
+    // Badge ≠ ok → clic = reconnecter maintenant (retry simple).
+    ch.querySelector(".conn-st")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if ((connLive.get(conn) ?? "ok") !== "ok") manualRetry(conn);
     });
     // Déposer sur le header connexion = dégrouper la session
     bindDropTarget(ch, conn, undefined);
@@ -875,7 +913,8 @@ let lastSessions: SessionMeta[] = [];
 
 function sessRow(s: SessionMeta, conn: string, grp: string, closed: boolean): HTMLElement {
   const div = document.createElement("div");
-  div.className = "sess" + (grp ? " in-grp" : "") + (current?.id === s.id ? " active" : "");
+  div.className = "sess" + (grp ? " in-grp" : "") + (s.offline ? " offline" : "") +
+    (current?.id === s.id ? " active" : "");
   if (closed) div.style.display = "none";
   div.innerHTML = `<span class="dot st-${s.state}" title="${esc(s.state)}">${dotIcon(s.state)}</span><span class="t">${esc(s.title)}</span><span class="a">${esc(s.agent)}</span><button class="sess-del" title="Supprimer">✕</button>`;
   div.onclick = () => {
@@ -920,13 +959,18 @@ let openSeq = 0;
 async function openSession(id: string) {
   const seq = ++openSeq;
   const stale = () => seq !== openSeq; // un openSession plus récent a pris le relais
+  // La meta démon ne porte pas sa conn (notion client) — la reprendre de
+  // la liste (stampée par le merge) pour router session_info sur le bon
+  // serveur ; "" → connexion par défaut.
+  const connHint = lastSessions.find((s) => s.id === id)?.conn ?? "";
   const info = await call<{ meta: SessionMeta; pending: string[]; alive: boolean; last_seq: number }>(
     "session_info",
-    { session: id },
+    { session: id, conn: connHint },
   );
   if (stale()) return;
   alive = info.alive;
   current = info.meta;
+  if (!current.conn && connHint) current.conn = connHint;
   minRendered = Number.MAX_SAFE_INTEGER;
   renderedCount = 0;
   hasMoreHistory = true;
@@ -955,6 +999,7 @@ async function openSession(id: string) {
       if (stale()) return;
       alive = info2.alive;
       current = info2.meta;
+      if (!current.conn && connHint) current.conn = connHint;
       sys.textContent = "✔ agent repris";
       updateHeader();
     } catch (e) {
@@ -980,7 +1025,7 @@ async function openSession(id: string) {
   // Subscribe live à partir du dernier event connu
   const afterSeq = page.events.length ? page.events[page.events.length - 1].seq : 0;
   if (stale()) return;
-  await invoke("subscribe", { session: id, afterSeq }).catch((e) => {
+  await invoke("subscribe", { session: id, afterSeq, conn: current?.conn ?? connHint }).catch((e) => {
     // Le flux live est mort (ex. restart démon) → erreur visible
     showErr(`subscribe: ${e}`);
   });
@@ -2697,39 +2742,129 @@ interface SavedConn {
   native?: boolean;
 }
 let savedConns: SavedConn[] = [];
-let lastCfg: Record<string, unknown> | null = null;
-let reconnecting = false;
 
-// Watchdog : sonde le démon toutes les 10 s. Si la connexion est morte
-// (restart démon → agents tués côté serveur), reconnexion auto +
-// réouverture de la session (auto-resume de l'agent).
+// ---------------------------------------------------------------------------
+// Surveillance connexions : ok | reconnecting | down
+// ---------------------------------------------------------------------------
+// Mort détectée via `conn-dead` (Rust : EOF du reader, instantané) ou une
+// entrée {error} de la sonde fusionnée → down → retry en backoff
+// exponentiel (2 s → 60 s max). Le retry est un `connect` simple : le démon
+// est relancé par systemd (Restart=always) — jamais de réinstall en boucle.
+type ConnLive = "ok" | "reconnecting" | "down";
+const connLive = new Map<string, ConnLive>();
+const connCfg = new Map<string, Record<string, unknown>>();
+const connTimer = new Map<string, ReturnType<typeof setTimeout>>();
+const connDelay = new Map<string, number>();
+const RETRY_MIN = 2_000, RETRY_MAX = 60_000;
+
+/** Tooltip du badge selon l'état. */
+function connTip(st: ConnLive): string {
+  if (st === "ok") return t("conn_ok");
+  return `${t(st === "reconnecting" ? "reconnecting" : "conn_offline")} — ${t("retry_now")}`;
+}
+
+function markAlive(key: string) {
+  const t0 = connTimer.get(key);
+  if (t0) {
+    clearTimeout(t0);
+    connTimer.delete(key);
+  }
+  connDelay.delete(key);
+  const was = connLive.get(key);
+  connLive.set(key, "ok");
+  if (was !== "ok") renderConnState();
+}
+
+function markDead(key: string) {
+  // connCfg n'est posé qu'à la fin d'un doConnect réussi — une conn dont
+  // le tout premier connect a échoué en route n'est pas suivie (fenêtre
+  // minime, pas de config retenue à rejouer de toute façon).
+  if (!connCfg.has(key)) return;
+  if (connLive.get(key) !== "reconnecting") connLive.set(key, "down");
+  renderConnState();
+  scheduleRetry(key);
+}
+
+function scheduleRetry(key: string) {
+  if (connTimer.has(key) || connLive.get(key) === "reconnecting") return;
+  const d = connDelay.get(key) ?? RETRY_MIN;
+  connDelay.set(key, Math.min(d * 2, RETRY_MAX));
+  connTimer.set(key, setTimeout(() => {
+    connTimer.delete(key);
+    void retryConn(key);
+  }, d));
+}
+
+/** Reconnexion simple (connect, pas d'ensure_daemon) — auto + bouton. */
+async function retryConn(key: string) {
+  const cfg = connCfg.get(key);
+  // Pas de retry parallèle : un connect déjà en vol suffit — un second
+  // tunnel SSH orphelin resterait vivant après remplacement.
+  if (!cfg || connLive.get(key) === "reconnecting") return;
+  connLive.set(key, "reconnecting");
+  renderConnState();
+  try {
+    await invoke("connect", { cfg });
+    markAlive(key);
+    // Réouvrir la session affichée si elle vivait sur cette connexion.
+    if (current && (current.conn ?? "default") === key) openSession(current.id);
+    await refreshSessions();
+  } catch {
+    if (connLive.get(key) === "reconnecting") connLive.set(key, "down");
+    scheduleRetry(key);
+    renderConnState();
+  }
+}
+
+/** Bouton "reconnecter" : annule l'attente backoff, retry immédiat. */
+function manualRetry(key: string) {
+  const t0 = connTimer.get(key);
+  if (t0) {
+    clearTimeout(t0);
+    connTimer.delete(key);
+  }
+  void retryConn(key);
+}
+
+/** État agrégé → chip header ; re-render des badges de la sidebar. */
+function renderConnState() {
+  const bad = [...connLive.values()].some((s) => s !== "ok");
+  const chip = $("conn-chip") as HTMLButtonElement;
+  chip.hidden = !bad;
+  if (bad) {
+    const rc = [...connLive.values()].some((s) => s === "reconnecting");
+    chip.textContent = rc ? `⟳ ${t("reconnecting")}` : `⚠ ${t("conn_offline")}`;
+    chip.className = "badge " + (rc ? "warn" : "st-dead");
+    chip.title = t("retry_now");
+  }
+  refreshSessions().catch(() => {});
+}
+$("conn-chip").addEventListener("click", () => {
+  for (const [k, s] of connLive) if (s !== "ok") manualRetry(k);
+});
+// Mort instantanée du transport (EOF reader côté Rust).
+listen<string>("conn-dead", (e) => markDead(e.payload));
+
+// Watchdog : sonde fusionnée toutes les 10 s (timeout 8 s/conn côté Rust) —
+// filet de sécurité pour les blackholes réseau (pas d'EOF → pas de
+// conn-dead). Entrées {error} → markDead → backoff de reconnexion.
 setInterval(async () => {
   try {
-    const st = await call<{ servers?: number; sessions?: number } & Record<string, unknown>>("daemon_status");
-    // Conns mortes : entrées {error} dans le résultat fusionné
-    const dead = Object.entries(st)
-      .filter(([k, v]) => !["servers", "sessions"].includes(k) && (v as { error?: string }).error)
-      .map(([k]) => k);
-    if (!st.servers || dead.length) throw dead;
-  } catch (dead) {
-    // Démon injoignable → aucun agent joignable, icône grise (le catch de
-    // refreshSessions ne peut pas couvrir ce chemin : on return avant).
+    const st = await call<Record<string, unknown>>("daemon_status");
+    let anyOk = false;
+    for (const [k, v] of Object.entries(st)) {
+      if (k === "servers" || k === "sessions") continue;
+      if ((v as { error?: string }).error) markDead(k);
+      else {
+        anyOk = true;
+        if ((connLive.get(k) ?? "ok") !== "ok") markAlive(k);
+      }
+    }
+    // Aucune conn saine → démon(s) injoignable(s), icône grise.
+    if (!anyOk) setAppIcon("grey");
+  } catch {
+    // L'appel fusionné lui-même a échoué — le backoff gère les retry.
     setAppIcon("grey");
-    if (reconnecting) return;
-    reconnecting = true;
-    // Reconnecter chaque connexion morte (ou toutes si liste vide)
-    const keys = Array.isArray(dead) ? (dead as string[]) : [];
-    const cfgs = savedConns.filter((c) =>
-      !keys.length || keys.includes(connKeyOf(c as unknown as Record<string, unknown>)));
-    const list = cfgs.length ? cfgs : (lastCfg ? [lastCfg] : []);
-    Promise.all(list.map((c) => doConnect({ ...(c as Record<string, unknown>) }).catch(() => {})))
-      .then(() => {
-        if (current) openSession(current.id);
-      })
-      .finally(() => {
-        reconnecting = false;
-      });
-    return;
   }
   refreshSessions().catch(() => {});
 }, 10_000);
