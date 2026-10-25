@@ -27,13 +27,24 @@ retours de review/CI) → la repasser en draft **avant** d'y toucher :
 `gh pr ready --undo`, puis `gh pr ready` quand c'est fini.
 **Le CI ne tourne pas sur les drafts** (tous les jobs sont skippés) :
 le passage en ready (event `ready_for_review`) déclenche les 5
-checks — attendre le vert avant de considérer la PR prête à merger.
-⚠️ `gh pr checks <N> --watch` peut lire les check runs **périmés**
-(skipped de la phase draft ou du cycle précédent) tant que les runs
-`ready_for_review` ne sont pas enregistrés → vérifier d'abord
-`gh run list --workflow build.yml --branch <br> --limit 1 --json event,createdAt`
-(event `ready_for_review`, ou `createdAt` postérieur au ready),
-*puis* `--watch`.
+checks. **Laisser ~30 s entre le dernier push et `gh pr ready`** —
+sinon le dispatch `synchronize` draft (tout skip) peut se
+matérialiser après le run ready et l'annuler (même groupe de
+concurrency) → head sans CI (arrivé en live, merge bloqué).
+⚠️ `gh pr checks <N> --watch` sort vert sur des runs skippés ou
+cancelled → gater sur les **check runs du head**, pas sur les
+métadonnées de runs (`workflow_run.event` ne rapporte jamais
+`ready_for_review`, et `createdAt` est une course) :
+
+```bash
+SHA=$(gh pr view <N> --json headRefOid -q .headRefOid)
+until [ "$(gh api repos/{o}/{r}/commits/$SHA/check-runs --jq \
+  '[.check_runs[] | select(.conclusion != "skipped" and .conclusion != "cancelled")] | length')" -gt 0 ]; do sleep 15; done
+gh pr checks <N> --watch
+```
+
+Head réduit à des skips/cancelled → réparer : `gh pr ready --undo &&
+sleep 30 && gh pr ready`.
 
 **Review auto** : une fois la PR ready, **noter `TS=$(date -u +%FT%TZ)`**,
 commenter `/mr review` (`gh pr comment <N> --body "/mr review"`),
