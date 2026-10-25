@@ -19,7 +19,8 @@ relancer, toujours en draft) → review soldée → `gh pr ready`
 **Merge** : vers `main`, toujours l'utilisateur. Vers `next_release`,
 **l'agent peut merger** via `gh pr merge <N>` quand la dernière review
 auto porte un verdict **`Verdict: APPROVED` en titre** postérieur au
-push du head courant (fraîcheur vérifiée via les PushEvents du repo) —
+push du head courant (fraîcheur vérifiée via les PushEvents du repo,
+fallback feed `activity` — les events peuvent lagger des heures) —
 sinon le hook `.devin/` bloque (`git merge`, API, GraphQL, `--admin`,
 `main` : toujours interdits). Tripwire : un commentaire `Verdict:
 APPROVED` auto-posté passerait — la règle reste de ne merger que sur
