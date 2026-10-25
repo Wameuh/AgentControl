@@ -603,6 +603,27 @@ async fn ensure_daemon(
     Ok(stdout)
 }
 
+/// Icône fenêtre dynamique selon l'état agrégé des agents :
+/// "base" (sauge), "gold" (agent actif), "red" (question en attente),
+/// "grey" (aucun agent). No-op sur Android (icône launcher fixe).
+#[tauri::command]
+#[allow(unused_variables)]
+fn set_app_icon(window: tauri::WebviewWindow, state: &str) -> Result<(), String> {
+    #[cfg(not(target_os = "android"))]
+    {
+        let bytes: &[u8] = match state {
+            "gold" => include_bytes!("../icons/icon-gold.rgba"),
+            "red" => include_bytes!("../icons/icon-red.rgba"),
+            "grey" => include_bytes!("../icons/icon-grey.rgba"),
+            _ => include_bytes!("../icons/icon.rgba"),
+        };
+        window
+            .set_icon(tauri::image::Image::new_owned(bytes.to_vec(), 512, 512))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Workaround WebKitGTK : webview blanche/noire après unfocus ou au boot
@@ -646,7 +667,7 @@ pub fn run() {
             sys: Mutex::new(sysinfo::System::new()),
             net: Mutex::new(std::collections::VecDeque::new()),
         })
-        .invoke_handler(tauri::generate_handler![connect, call, subscribe, ssh_hosts, ssh_pubkey, platform, log_tail, saved_connections, save_connection, check_update, update_client, ensure_daemon, disconnect, sys_stats])
+        .invoke_handler(tauri::generate_handler![connect, call, subscribe, ssh_hosts, ssh_pubkey, platform, log_tail, saved_connections, save_connection, check_update, update_client, ensure_daemon, disconnect, sys_stats, set_app_icon])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
