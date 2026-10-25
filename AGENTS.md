@@ -103,7 +103,8 @@ ouverte si absente — pour releaser il suffit de lui poser le label
 **`RELEASE_PAT`** (fallback `GITHUB_TOKEN`) : le réglage repo
 « Allow GitHub Actions to create and approve pull requests » interdit
 `createPullRequest` au `GITHUB_TOKEN` ; sans `Pull requests: RW` sur le
-PAT le job échoue rouge (arrivé : run 40210287826).
+PAT le job échoue rouge (arrivé : run 40210287826, tentatives avant
+l'ajout du scope).
 
 Release = PR `next_release` → `main` avec le label **`release`** →
 le job `release-bump` de `version.yml` calcule `dernier tag + niveau`,
@@ -124,11 +125,12 @@ commit sur `next_release` (parents nr + main, vrai merge — hotfix
 prochaine release = tip `main` → plus de conflit.
 ⚠️ `release-bump` et `reconcile-next-release` poussent sur
 `next_release` via le secret **`RELEASE_PAT`**, qu'`auto-release-pr`
-utilise aussi pour créer la release PR (PAT fine-grained du
-repo, **Contents RW + Workflows RW + Pull requests RW** — Workflows
-exigé par reconcile :
-le merge importe des squashs `main` touchant `.github/workflows`, et
-un PAT sans ce scope est refusé indépendamment du bypass ruleset) :
+utilise aussi pour créer la release PR. PAT fine-grained du repo,
+scopes requis : **Contents RW** (les deux pushes), **Workflows RW**
+(reconcile : le merge importe des squashs `main` touchant
+`.github/workflows`, un PAT sans ce scope est refusé indépendamment du
+bypass ruleset), **Pull requests RW** (auto-release-pr :
+`createPullRequest`) :
 `github-actions[bot]` ne peut pas être bypass actor d'un ruleset
 (app first-party → 422), et un push `GITHUB_TOKEN` ne déclencherait
 pas les checks sur le head poussé (anti-récursion). Le ruleset
