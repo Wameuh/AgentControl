@@ -333,7 +333,10 @@ async fn main() -> Result<()> {
             }).await?;
             let dest = args.get(3).cloned()
                 .unwrap_or_else(|| info["name"].as_str().unwrap_or("download").to_string());
-            let mut out = std::fs::File::create(&dest)?;
+            if std::path::Path::new(&dest).is_dir() {
+                bail!("destinataire est un dossier: {dest}");
+            }
+            let mut out: Option<std::fs::File> = None;
             let mut archive: Option<String> = None;
             let mut offset = 0u64;
             use base64::Engine;
@@ -349,7 +352,12 @@ async fn main() -> Result<()> {
                 let total = v["total"].as_u64().unwrap_or(0);
                 let data = base64::engine::general_purpose::STANDARD
                     .decode(v["data"].as_str().unwrap_or(""))?;
-                out.write_all(&data)?;
+                // Fichier créé au premier chunk reçu — pas de fichier vide
+                // résiduel si le démon échoue d'emblée.
+                if out.is_none() {
+                    out = Some(std::fs::File::create(&dest)?);
+                }
+                out.as_mut().unwrap().write_all(&data)?;
                 offset += data.len() as u64;
                 eprint!("\r{offset}/{total} o");
                 if offset >= total { break; }

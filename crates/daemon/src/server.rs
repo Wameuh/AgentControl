@@ -1038,12 +1038,23 @@ async fn download_path(
     if !meta.is_dir() {
         anyhow::bail!("type non téléchargeable: {}", p.display());
     }
+    if limit == 0 {
+        // Sonde métadonnées : ne pas zipper ici — la première tranche
+        // (offset 0, limit>0) construira l'archive une seule fois.
+        return Ok(json!({"name": format!("{name}.zip"), "dir": true, "size": null}));
+    }
     let zip_name = if offset == 0 {
         let zip_name = new_zip_name(&p);
         let (src, dst) = (p.clone(), s.dir.join("blobs").join(&zip_name));
-        tokio::task::spawn_blocking(move || zip_dir(&src, &dst))
-            .await
-            .context("zip task")??;
+        tokio::task::spawn_blocking(move || {
+            let r = zip_dir(&src, &dst);
+            if r.is_err() {
+                let _ = std::fs::remove_file(dst.with_extension("part"));
+            }
+            r
+        })
+        .await
+        .context("zip task")??;
         zip_name
     } else {
         let a = archive.context("archive manquante — repartir à offset 0")?;
@@ -1059,6 +1070,10 @@ async fn download_path(
     if !zip_path.is_file() {
         anyhow::bail!("archive expirée (purge) — relancez le téléchargement");
     }
+    // Rafraîchit la mtime : le LRU trie par ancienneté et ne doit pas
+    // purger une archive encore en cours de transfert.
+    let _ = std::fs::File::open(&zip_path)
+        .and_then(|f| f.set_modified(std::time::SystemTime::now()));
     let (data, total) = read_slice(&zip_path, offset, limit.min(DL_CHUNK))?;
     Ok(json!({
         "name": format!("{name}.zip"), "dir": true, "total": total,
@@ -1169,8 +1184,15 @@ fn zip_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
                 }
             } else if meta.is_file() {
                 if let Ok(mut f) = std::fs::File::open(&real) {
-                    zw.start_file(rel, opts)?;
-                    let _ = std::io::copy(&mut f, &mut zw);
+                    match zw.start_file(&rel, opts) {
+                        Ok(()) => {
+                            if let Err(e) = std::io::copy(&mut f, &mut zw) {
+                                eprintln!("zip: {rel}: {e}");
+                                let _ = zw.abort_file();
+                            }
+                        }
+                        Err(e) => eprintln!("zip: {rel}: {e}"),
+                    }
                 }
             }
         }
