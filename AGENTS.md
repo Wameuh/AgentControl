@@ -18,9 +18,12 @@ relancer, toujours en draft) → review soldée → `gh pr ready`
 (≥30 s après le dernier push) → attendre les 5 checks verts → merge.
 **Merge** : vers `main`, toujours l'utilisateur. Vers `next_release`,
 **l'agent peut merger** via `gh pr merge <N>` quand la dernière review
-auto est `APPROVED`/`mergeable` **sur le head courant** (post-commit,
-~2 min de skew) — sinon le hook `.devin/` bloque (`git merge`, API,
-GraphQL, `main` : toujours interdits). PR déjà mergée ?
+auto porte un verdict **`Verdict: APPROVED` en titre** postérieur au
+push du head courant (fraîcheur vérifiée via les PushEvents du repo) —
+sinon le hook `.devin/` bloque (`git merge`, API, GraphQL, `--admin`,
+`main` : toujours interdits). Tripwire : un commentaire `Verdict:
+APPROVED` auto-posté passerait — la règle reste de ne merger que sur
+review réelle. PR déjà mergée ?
 `git checkout next_release && git pull` pour resynchroniser.
 Le CI build tous les artefacts sur les PR (APK suffixé `-<sha>`).
 
