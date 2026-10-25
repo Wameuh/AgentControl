@@ -61,7 +61,12 @@ jobs:
             echo "version déjà bumpée sur la branche → skip"
             exit 0
           fi
+          # Durcissement : exécuter le script de la BASE, pas celui de
+          # la PR (le job tourne sous contents: write). ROOT du script
+          # dépend de __file__ → extraire dans le tree puis restaurer.
+          git show "origin/$BASE_REF:client/tools/bump_version.py" > client/tools/bump_version.py
           python3 client/tools/bump_version.py "$LEVEL"
+          git checkout HEAD -- client/tools/bump_version.py
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -am "chore: bump version ($LEVEL)"

@@ -35,12 +35,14 @@ checks — attendre le vert avant de considérer la PR prête à merger.
 (event `ready_for_review`, ou `createdAt` postérieur au ready),
 *puis* `--watch`.
 
-**Review auto** : une fois la PR ready, commenter `/mr review`
-(`gh pr comment <N> --body "/mr review"`), puis **poller les
-commentaires** jusqu'à la review — l'automation poste d'abord un
-ack (`Launching a review…`, sous le compte user) → filtrer sur
-l'auteur **bot** + le marqueur `## Review` :
-`gh api repos/{o}/{r}/issues/<N>/comments --jq '.[] | select(.user.login | startswith("devin-ai-integration")) | select(.body | startswith("## Review"))'`.
+**Review auto** : une fois la PR ready, **noter `TS=$(date -u +%FT%TZ)`**,
+commenter `/mr review` (`gh pr comment <N> --body "/mr review"`),
+puis **poller les commentaires** jusqu'à la review — l'automation
+poste d'abord un ack (`Launching a review…`) et la review peut
+sortir sous **le compte user OU le bot** → ne pas filtrer l'auteur :
+matcher le marqueur `Review` **postérieur à `$TS`** (`--paginate`
+requis — les commentaires récents sont sur la dernière page) :
+`gh api --paginate 'repos/{o}/{r}/issues/<N>/comments?per_page=100' --jq '.[] | select(.body | test("^[*#]+ ?Review")) | select(.created_at > "'"$TS"'")'`.
 Dès qu'elle est postée, l'addresser, pas d'attente fixe
 (abandon ~10 min si rien).
 Des changements à faire → repasser en draft (voir **Drafts**),
