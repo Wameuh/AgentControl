@@ -67,6 +67,15 @@ le filtre de noms doit suivre les jobs required de `build.yml`. Sans
 la branche d'échec, un head tout-skippé ressortirait vert après ~5
 min — le cas exact que le gate détecte.
 
+**Rebase avant review** : si `origin/next_release` a avancé depuis la
+branche — `git merge-base --is-ancestor origin/next_release HEAD` faux,
+ou `gh pr view <N> --json mergeable` → `CONFLICTING` — rebase/merge
+**avant** de lancer la review. Le verdict est ancré au SHA du head :
+tout push ultérieur l'invalide → la review est perdue et un round de
+plus est obligatoire (arrivé : #35 approved sur une base stale →
+rebase → re-review). Une base à jour évite aussi de faire reviewer un
+diff que le merge réécrira.
+
 **Review auto** : quand le travail semble fini **(PR encore draft)**,
 **noter `TS=$(date -u +%FT%TZ)`**, commenter `/mr review`
 (`gh pr comment <N> --body "/mr review"`),
