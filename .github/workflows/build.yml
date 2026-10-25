@@ -10,6 +10,12 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
+# Draft ↔ ready et pushes rapides : annule les runs obsolètes d'une
+# même PR (sur tags/main le group est par ref → pas d'annulation).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # -----------------------------------------------------------------
   # Démon + outils : Linux x86_64 (le serveur cible)

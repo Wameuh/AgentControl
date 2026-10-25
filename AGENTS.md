@@ -27,13 +27,20 @@ retours de review/CI) → la repasser en draft **avant** d'y toucher :
 `gh pr ready --undo`, puis `gh pr ready` quand c'est fini.
 **Le CI ne tourne pas sur les drafts** (tous les jobs sont skippés) :
 le passage en ready (event `ready_for_review`) déclenche les 5
-checks — attendre le vert avant de considérer la PR prête à merger.
+checks — attendre le vert (`gh pr checks <N> --watch`) avant de
+considérer la PR prête à merger.
 
 **Review auto** : une fois la PR ready, commenter `/mr review`
-(`gh pr comment <N> --body "/mr review"`), attendre ~10 min
-(`sleep 600`), lire le nouveau commentaire — c'est la review — et
-l'addresser. Des changements à faire → repasser en draft (voir
-**Drafts**), corriger, `gh pr ready`, relancer `/mr review`.
+(`gh pr comment <N> --body "/mr review"`), puis **poller les
+commentaires** (`gh api repos/{owner}/{repo}/issues/<N>/comments`)
+jusqu'à la review — typiquement quelques minutes ; dès qu'elle est
+postée, l'addresser, pas d'attente fixe (abandon ~10 min si rien).
+Des changements à faire → repasser en draft (voir **Drafts**),
+corriger, `gh pr ready`, relancer `/mr review`.
+La commande se poste **seule** dans son commentaire : le trigger
+matche `contains` sur le body → toute citation de `/mr review` dans
+un autre commentaire relance une session (pour la citer :
+`/mr&#32;review`).
 
 ## Releases
 
