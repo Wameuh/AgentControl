@@ -373,6 +373,13 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         "read_file" => ReqKind::ReadFile { session: s("session"), path: s("path") },
         "list_dir" => ReqKind::ListDir { session: s("session"), path: s("path") },
         "delete_path" => ReqKind::DeletePath { session: s("session"), path: s("path") },
+        "download_path" => ReqKind::DownloadPath {
+            session: s("session"),
+            path: s("path"),
+            offset: p.get("offset").and_then(Value::as_u64).unwrap_or(0),
+            limit: p.get("limit").and_then(Value::as_u64).unwrap_or(0),
+            archive: so("archive"),
+        },
         "queue_list" => ReqKind::QueueList { session: s("session") },
         "queue_edit" => ReqKind::QueueEdit {
             session: s("session"),
@@ -396,6 +403,32 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
 #[tauri::command]
 fn log_tail(n: Option<usize>) -> String {
     client_core::log_tail(n.unwrap_or(200))
+}
+
+/// Écrit une tranche de téléchargement (base64) dans `path` — flux du
+/// fichier workspace démon → fichier local choisi par l'utilisateur.
+/// Retourne le nombre d'octets écrits.
+#[tauri::command]
+fn write_download(path: String, data: String, append: bool) -> Result<u64, String> {
+    use base64::Engine;
+    use std::io::Write;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|e| e.to_string())?;
+    let p = PathBuf::from(&path);
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut o = std::fs::OpenOptions::new();
+    o.create(true).write(true);
+    if append {
+        o.append(true);
+    } else {
+        o.truncate(true);
+    }
+    let mut f = o.open(&p).map_err(|e| e.to_string())?;
+    f.write_all(&bytes).map_err(|e| e.to_string())?;
+    Ok(bytes.len() as u64)
 }
 
 /// Connexions récentes (~/.agentcontrol/connections.json).
@@ -694,6 +727,7 @@ pub fn run() {
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // Android : pas de HOME — les chemins client-core (clé SSH,
             // connexions, logs) racinent dans le app_data_dir.
@@ -721,7 +755,7 @@ pub fn run() {
             sys: Mutex::new(sysinfo::System::new()),
             net: Mutex::new(std::collections::VecDeque::new()),
         })
-        .invoke_handler(tauri::generate_handler![connect, call, subscribe, ssh_hosts, ssh_pubkey, platform, log_tail, saved_connections, save_connection, check_update, update_client, ensure_daemon, disconnect, sys_stats, set_app_icon])
+        .invoke_handler(tauri::generate_handler![connect, call, subscribe, ssh_hosts, ssh_pubkey, platform, log_tail, saved_connections, save_connection, check_update, update_client, ensure_daemon, disconnect, sys_stats, set_app_icon, write_download])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

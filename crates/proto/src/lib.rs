@@ -365,6 +365,22 @@ pub enum ReqKind {
         session: String,
         path: String,
     },
+    /// Télécharge un fichier ou dossier du workspace, en tranches base64.
+    /// `limit` = 0 → métadonnées seules {name, dir, size} ; sinon renvoie
+    /// {name, dir, total, offset, data(b64)}. Un dossier est zippé côté
+    /// démon à offset 0 → la réponse porte `archive` (blobs/dl-*.zip), à
+    /// renvoyer tel quel sur les tranches suivantes.
+    DownloadPath {
+        session: String,
+        path: String,
+        #[serde(default)]
+        offset: u64,
+        #[serde(default)]
+        limit: u64,
+        /// Nom d'archive zip renvoyé à offset 0 (tranches suivantes).
+        #[serde(default)]
+        archive: Option<String>,
+    },
     /// Gestion de la file de prompts (index = position dans la file).
     QueueList { session: String },
     QueueEdit { session: String, index: u64, text: String },

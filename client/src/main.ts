@@ -4,6 +4,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
+import { save } from "@tauri-apps/plugin-dialog";
+import { appDataDir, downloadDir } from "@tauri-apps/api/path";
 import { gemSVG } from "./crystal";
 import { initLang, setLang, getLang, t, applyStatic, type Lang } from "./i18n";
 
@@ -1608,6 +1610,10 @@ function openFileCtx(x: number, y: number, el: HTMLElement) {
     hideFileCtx();
     void copyText(abs);
   });
+  add(t("ctx_download"), "", () => {
+    hideFileCtx();
+    void downloadEntry(rel);
+  });
   add(t("ctx_delete"), "danger", (b) => {
     // Double-clic armé : "Supprimer" → "confirmer ?" → suppression
     if (!b.dataset.armed) {
@@ -1630,6 +1636,66 @@ function openFileCtx(x: number, y: number, el: HTMLElement) {
     const r = fileCtx.getBoundingClientRect();
     fileCtx.style.left = `${Math.min(x, window.innerWidth - r.width - 8)}px`;
     fileCtx.style.top = `${Math.min(y, window.innerHeight - r.height - 8)}px`;
+  }
+}
+
+/** Télécharge un fichier/dossier du workspace vers le disque local :
+ *  infos (nom suggéré — .zip pour un dossier) → dialogue « Enregistrer
+ *  sous » (Android : Download/AgentControl/ → repli app data) → tranches
+ *  base64 démon → write_download. Session/conn figées : un changement de
+ *  session en cours de route n'envoie pas les tranches sur le mauvais
+ *  serveur (la sysline disparaît au switch, le téléchargement finit). */
+async function downloadEntry(rel: string) {
+  if (!current) return;
+  const sid = current.id;
+  const conn = current.conn;
+  const info = await call<{ name: string; dir: boolean; size: number | null }>(
+    "download_path",
+    { session: sid, conn, path: rel, offset: 0, limit: 0 },
+  ).catch((e) => {
+    showErr(String(e));
+    return null;
+  });
+  if (!info) return;
+  let dest: string | null = IS_ANDROID
+    ? `${await downloadDir()}/AgentControl/${info.name}`
+    : await save({ defaultPath: info.name, title: t("ctx_download") });
+  if (!dest) return; // dialogue annulé
+  const sys = document.createElement("div");
+  sys.className = "ev sysline";
+  sys.textContent = `⏳ ${t("dl_progress", { name: info.name, pct: 0 })}`;
+  eventsEl.appendChild(sys);
+  scrollBottom();
+  let offset = 0;
+  let archive: string | undefined;
+  try {
+    for (;;) {
+      const c = await call<{ total: number; data: string; archive?: string }>(
+        "download_path",
+        { session: sid, conn, path: rel, offset, limit: 1 << 20, archive },
+      );
+      archive ??= c.archive;
+      const n = await invoke<number>("write_download", {
+        path: dest,
+        data: c.data,
+        append: offset > 0,
+      }).catch(async (e): Promise<number> => {
+        // Android : Download public peut refuser (pas de SAF) → app data.
+        if (!IS_ANDROID || offset > 0) throw e;
+        dest = `${await appDataDir()}/downloads/${info.name}`;
+        return invoke<number>("write_download", { path: dest, data: c.data, append: false });
+      });
+      offset += n;
+      sys.textContent = `⏳ ${t("dl_progress", {
+        name: info.name,
+        pct: Math.round((offset * 100) / Math.max(c.total, 1)),
+      })}`;
+      if (offset >= c.total) break;
+    }
+    sys.textContent = `✔ ${t("dl_done", { name: info.name, dest })}`;
+  } catch (e) {
+    sys.textContent = `⚠ ${t("dl_failed", { name: info.name, err: String(e) })}`;
+    showErr(String(e));
   }
 }
 // Le menu se ferme au clic ailleurs / Échap / scroll de l'arbre — mais un

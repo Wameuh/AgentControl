@@ -15,3 +15,6 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 toml = "0.8"
+base64 = "0.22"
+# deflate pur-Rust (miniz_oxide) — pas de compilateur C requis
+zip = { version = "2", default-features = false, features = ["deflate"] }
