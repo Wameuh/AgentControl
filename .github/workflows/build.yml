@@ -4,7 +4,10 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # `ready_for_review` : le pipeline se lance au passage draft → ready.
+  # Sur une draft, chaque job est skippé (`draft != true`).
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 jobs:
@@ -12,6 +15,7 @@ jobs:
   # Démon + outils : Linux x86_64 (le serveur cible)
   # -----------------------------------------------------------------
   daemon-linux:
+    if: github.event.pull_request.draft != true
     strategy:
       matrix:
         include:
@@ -40,6 +44,7 @@ jobs:
   # Client desktop Tauri : Ubuntu + Windows
   # -----------------------------------------------------------------
   client:
+    if: github.event.pull_request.draft != true
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
@@ -96,6 +101,7 @@ jobs:
   # gen/android n'est pas commité → `tauri android init` dans le job.
   # -----------------------------------------------------------------
   client-android:
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

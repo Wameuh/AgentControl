@@ -12,12 +12,20 @@ Deux branches protégées (**push direct impossible**, PR obligatoire,
   `next_release` quand l'utilisateur décide de releaser.
 
 Workflow : créer une branche depuis `next_release` → push →
-`gh pr create --base next_release` → attendre les 5 checks verts →
+`gh pr create --base next_release --draft` → finir le travail →
+`gh pr ready` → attendre les 5 checks verts →
 **l'utilisateur merge** (jamais l'agent : ni `gh pr merge`, ni
 `git merge`, ni API — un hook `.devin/` le bloque, et c'est interdit
 même sans le hook). PR déjà mergée par l'utilisateur ?
 `git checkout next_release && git pull` pour resynchroniser.
 Le CI build tous les artefacts sur les PR (APK suffixé `-<sha>`).
+
+**Drafts** : une PR reste en **draft tant qu'on travaille dessus**.
+Des ajouts sont prévus sur une PR non-draft → la repasser en draft
+**avant** de pousser : `gh pr ready --undo`. **Le CI ne tourne pas
+sur les drafts** (tous les jobs sont skippés) : le passage en ready
+(`gh pr ready`, event `ready_for_review`) déclenche les 5 checks —
+attendre le vert avant de considérer la PR prête à merger.
 
 ## Releases
 

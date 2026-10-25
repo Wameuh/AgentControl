@@ -9,10 +9,11 @@ name: version
 #   release           → pas de bump ici ; au merge, release-on-merge.yml
 #                       tague vX.Y.Z et déclenche le build de release.
 # Idempotent : si la branche a déjà une version différente de base, skip.
+# Draft : pas de bump — le job repart au passage en ready_for_review.
 
 on:
   pull_request:
-    types: [opened, synchronize, labeled]
+    types: [opened, synchronize, labeled, ready_for_review]
 
 permissions:
   contents: write
@@ -20,6 +21,7 @@ permissions:
 
 jobs:
   bump:
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
