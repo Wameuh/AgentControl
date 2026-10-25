@@ -6,11 +6,14 @@ name: version
 #   niveau = mot-clef le plus fort trouve dans les sujets/bodies des
 #            commits du cycle : `(major)` > `(minor)` | `(sync)` ;
 #            aucun -> patch.
-#   Plage : depuis le dernier commit `chore: bump version` sur
-#   next_release (borne auto-entretenue — un tag de release ne peut PAS
-#   servir de borne : les releases sur main sont des squashs, le tag
-#   n'est jamais ancetre des commits nr -> v<tag>..HEAD rescannerait
-#   indefiniment l'historique deja publie). Fallback : dernier tag.
+#   Plage : depuis le dernier bump DEJA RELEASE = dernier commit
+#   `chore: bump version` dont la version a son tag vX.Y.Z — le bump
+#   du cycle courant (tag pas encore cree) est saute, la plage couvre
+#   le cycle entier meme sur re-run (synchronize post-bump). Un tag de
+#   release ne peut PAS servir de borne : les releases sur main sont
+#   des squashs, le tag n'est jamais ancetre des commits nr ->
+#   v<tag>..HEAD rescannerait indefiniment l'historique deja publie.
+#   Fallback bootstrap : dernier tag semver.
 #   Les mots-clefs survivent au squash : le message de squash reprend
 #   les sujets des commits dans le body -> ecrire le mot-clef
 #   parenthese dans le sujet (ex. `feat: multi-agents (minor)`).
@@ -63,11 +66,18 @@ jobs:
         run: |
           set -e
           git fetch --tags -q origin
-          # Borne du scan = dernier commit `chore: bump version` (pose
-          # par ce job en fin de cycle precedent ; c'est un vrai commit
-          # de l'historique nr, il survit au squash de la release sur
-          # main). Fallback : dernier tag semver.
-          BOUND=$(git rev-list -1 --grep='^chore: bump version' HEAD || true)
+          # Borne du scan = dernier bump DEJA RELEASE : iterer les
+          # commits `chore: bump version`, extraire X.Y.Z du sujet,
+          # retenir le premier dont le tag vX.Y.Z existe — le bump que
+          # ce job vient de pousser (tag pas encore cree) est saute →
+          # la plage couvre le cycle complet meme sur re-run.
+          BOUND=""
+          for c in $(git rev-list --grep='^chore: bump version' HEAD); do
+            v=$(git log -1 --format=%s "$c" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+            if [ -n "$v" ] && git rev-parse -q --verify "refs/tags/v$v" >/dev/null 2>&1; then
+              BOUND=$c; break
+            fi
+          done
           [ -z "$BOUND" ] && BOUND=$(git tag -l 'v*' --sort=-version:refname \
             | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
           RANGE="HEAD"
@@ -77,8 +87,8 @@ jobs:
           # — jamais un mot nu (`a major bug`, `sync retry` en prose ne
           # doivent pas compter).
           MSGS=$(git log --format=%B "$RANGE")
-          if   echo "$MSGS" | grep -qE '\(major\)';        then LEVEL=major
-          elif echo "$MSGS" | grep -qE '\((minor|sync)\)'; then LEVEL=minor
+          if   echo "$MSGS" | grep -qiE '\(major\)';        then LEVEL=major
+          elif echo "$MSGS" | grep -qiE '\((minor|sync)\)'; then LEVEL=minor
           else LEVEL=patch
           fi
           # Numero de release = dernier tag semver + niveau (jamais
