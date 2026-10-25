@@ -39,16 +39,20 @@ métadonnées de runs (`workflow_run.event` ne rapporte jamais
 ```bash
 SHA=$(gh pr view <N> --json headRefOid -q .headRefOid)
 for i in $(seq 1 20); do
-  N=$(gh api "repos/{owner}/{repo}/commits/$SHA/check-runs?per_page=100" --jq \
+  COUNT=$(gh api "repos/{owner}/{repo}/commits/$SHA/check-runs?per_page=100" --jq \
     '[.check_runs[] | select(.name | test("^(daemon-linux|client)( |-|$)"))
       | select(.conclusion != "skipped" and .conclusion != "cancelled")] | length' || echo 0)
-  [ "$N" -gt 0 ] && break; sleep 15
+  [ "$COUNT" -gt 0 ] && break; sleep 15
 done
+[ "${COUNT:-0}" -gt 0 ] || { echo "aucun check run réel — head à réparer :
+  gh pr ready --undo && sleep 30 && gh pr ready"; exit 1; }
 gh pr checks <N> --watch
 ```
 
-Head réduit à des skips/cancelled → réparer : `gh pr ready --undo &&
-sleep 30 && gh pr ready`.
+À lancer depuis la racine du clone (`{owner}/{repo}` = repo du cwd) ;
+le filtre de noms doit suivre les jobs required de `build.yml`. Sans
+le `[ "${COUNT:-0}" -gt 0 ] ||`, un head tout-skippé ressortirait
+vert après ~5 min — le cas exact que le gate détecte.
 
 **Review auto** : une fois la PR ready, **noter `TS=$(date -u +%FT%TZ)`**,
 commenter `/mr review` (`gh pr comment <N> --body "/mr review"`),
@@ -61,7 +65,9 @@ requis — les commentaires récents sont sur la dernière page) :
 Dès qu'elle est postée, l'addresser, pas d'attente fixe
 (abandon ~10 min si rien).
 Des changements à faire → repasser en draft (voir **Drafts**),
-corriger, `gh pr ready`, relancer `/mr review`.
+corriger, `gh pr ready`, relancer `/mr review`. NB : une review
+lancée juste après un push peut lire un diff périmé → ancrer la
+lecture sur `headRefOid`.
 La commande se poste **seule** dans son commentaire : le trigger
 matche `contains` sur le body → toute citation de `/mr review` dans
 un autre commentaire relance une session (pour la citer :
