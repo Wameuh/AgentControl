@@ -97,6 +97,13 @@ $("tb-min").onclick = () => appWin.minimize();
 $("tb-max").onclick = () => appWin.toggleMaximize();
 $("tb-close").onclick = () => appWin.close();
 
+// dragDropEnabled:false → WebView2 garde AllowExternalDrop=true : un
+// fichier OS droppé sur la fenêtre ferait naviguer la webview vers
+// file:///… — on avale les drops extérieurs au niveau window (les
+// cibles internes ont déjà traité les leurs en amont).
+window.addEventListener("dragover", (e) => e.preventDefault());
+window.addEventListener("drop", (e) => e.preventDefault());
+
 // ---------------------------------------------------------------------------
 // Navigation Android : pile d'overlays adossée à l'historique → le bouton
 // "retour" ferme le panneau/menu/dialog ouvert au lieu de quitter l'app.
