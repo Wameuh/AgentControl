@@ -159,7 +159,8 @@ def pushed_at(nwo, head, ref):
               ' | .[0].created_at // ""'], timeout=8)
     if ts or not ref:
         return ts
-    return run(["gh", "api", f"repos/{nwo}/activity?ref={ref}",
+    return run(["gh", "api", f"repos/{nwo}/activity",
+                "-f", f"ref={ref}", "-f", "per_page=100",
                 "--jq",
                 rf'[.[] | select(.after == "{head}")]'
                 ' | .[0].timestamp // ""'], timeout=8)
@@ -178,7 +179,8 @@ def approved_next_release_merge(n, nwo):
     created_s, verdict = latest_verdict(n, nwo)
     if not created_s or verdict not in ("approved", "mergeable"):
         return False
-    pushed = pushed_at(nwo, head, "refs/heads/" + (pr.get("headRefName") or ""))
+    name = pr.get("headRefName") or ""
+    pushed = pushed_at(nwo, head, f"refs/heads/{name}" if name else "")
     if not pushed:
         return False
     try:
