@@ -159,7 +159,7 @@ def pushed_at(nwo, head, ref):
               ' | .[0].created_at // ""'], timeout=8)
     if ts or not ref:
         return ts
-    return run(["gh", "api", f"repos/{nwo}/activity",
+    return run(["gh", "api", "--method", "GET", f"repos/{nwo}/activity",
                 "-f", f"ref={ref}", "-f", "per_page=100",
                 "--jq",
                 rf'[.[] | select(.after == "{head}")]'
