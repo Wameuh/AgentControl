@@ -99,10 +99,12 @@ $("tb-close").onclick = () => appWin.close();
 
 // dragDropEnabled:false → WebView2 garde AllowExternalDrop=true : un
 // fichier OS droppé sur la fenêtre ferait naviguer la webview vers
-// file:///… — on avale les drops extérieurs au niveau window (les
-// cibles internes ont déjà traité les leurs en amont).
-window.addEventListener("dragover", (e) => e.preventDefault());
-window.addEventListener("drop", (e) => e.preventDefault());
+// file:///… — on avale les drops de fichiers au niveau window (les
+// cibles internes ont déjà traité les leurs en amont ; restreint à
+// "Files" pour garder curseur + drop de texte natif intacts).
+const isFileDrag = (e: DragEvent) => e.dataTransfer?.types.includes("Files") ?? false;
+window.addEventListener("dragover", (e) => { if (isFileDrag(e)) e.preventDefault(); });
+window.addEventListener("drop", (e) => { if (isFileDrag(e)) e.preventDefault(); });
 
 // ---------------------------------------------------------------------------
 // Navigation Android : pile d'overlays adossée à l'historique → le bouton
