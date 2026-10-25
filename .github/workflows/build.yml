@@ -4,14 +4,30 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # `ready_for_review` : le pipeline se lance au passage draft → ready.
+  # Sur une PR draft, chaque job est skippé (`draft != true`).
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
+
+# Moindre privilège : les jobs de build n'ont besoin que de lire le
+# dépôt ; le job `release` porte son propre `contents: write`.
+permissions:
+  contents: read
+
+# Draft ↔ ready et pushes rapides : annule les runs obsolètes d'une
+# même PR (group par ref sur main/tags → pas d'annulation croisée).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # -----------------------------------------------------------------
   # Démon + outils : Linux x86_64 (le serveur cible)
   # -----------------------------------------------------------------
   daemon-linux:
+    if: github.event.pull_request.draft != true
+    timeout-minutes: 30
     strategy:
       matrix:
         include:
@@ -40,6 +56,8 @@ jobs:
   # Client desktop Tauri : Ubuntu + Windows
   # -----------------------------------------------------------------
   client:
+    if: github.event.pull_request.draft != true
+    timeout-minutes: 45
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
@@ -96,6 +114,8 @@ jobs:
   # gen/android n'est pas commité → `tauri android init` dans le job.
   # -----------------------------------------------------------------
   client-android:
+    if: github.event.pull_request.draft != true
+    timeout-minutes: 45
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -156,6 +176,7 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [daemon-linux, client, client-android]
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     permissions:
       contents: write
