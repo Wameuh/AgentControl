@@ -148,12 +148,17 @@ async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: ConnectCfg) ->
     };
     let c = Client::connect(&t).await.map_err(|e| format!("{e:#}"))?;
     let status = c.call(ReqKind::DaemonStatus).await.map_err(|e| format!("{e:#}"))?;
-    state
-        .conns
-        .lock()
-        .await
-        .insert(key.clone(), ConnCtx { client: c.clone() });
-    *state.default_conn.lock().await = Some(key.clone());
+    {
+        let mut map = state.conns.lock().await;
+        map.insert(key.clone(), ConnCtx { client: c.clone() });
+        // Le défaut ne se repositionne que s'il est vide ou pointe une conn
+        // supprimée — une reconnexion en arrière-plan (backoff) ne doit pas
+        // détourner les appels qui routent sans conn explicite.
+        let mut d = state.default_conn.lock().await;
+        if d.as_ref().is_none_or(|k| !map.contains_key(k)) {
+            *d = Some(key.clone());
+        }
+    }
     // Mort de la boucle de lecture (EOF transport) → event `conn-dead`
     // pour l'UI. Le Weak évite de retenir le client si la connexion est
     // remplacée/fermée entre-temps.
@@ -162,7 +167,9 @@ async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: ConnectCfg) ->
         let mut dead = c.dead.clone();
         let k = key.clone();
         tauri::async_runtime::spawn(async move {
-            if dead.changed().await.is_err() {
+            // wait_for sonde la VALEUR — `changed()` raterait une mort
+            // survenue avant le clone (le clone marque l'état comme vu).
+            if dead.wait_for(|d| *d).await.is_err() {
                 return; // client droppé avant de mourir (remplacé/déconnecté)
             }
             let Some(c2) = weak.upgrade() else { return };
@@ -253,6 +260,7 @@ async fn call(state: State<'_, AppState>, method: String, params: Value) -> Resu
             let map = state.conns.lock().await;
             map.iter().map(|(k, c)| (k.clone(), c.client.clone())).collect()
         };
+        let n_conns = pairs.len();
         let req = if merged { ReqKind::DaemonStatus } else { ReqKind::ListSessions };
         let mut set = tokio::task::JoinSet::new();
         for (k, c) in pairs {
@@ -281,14 +289,18 @@ async fn call(state: State<'_, AppState>, method: String, params: Value) -> Resu
                     }
                 }
                 Err(e) if merged => out[k] = json!({"error": format!("{e:#}")}),
-                Err(e) => client_core::log(format!("list_sessions {k}: {e:#}")),
+                // Le frontend filtre ce marqueur → conn marquée down et
+                // sessions servies depuis le cache au lieu de disparaître.
+                Err(e) => {
+                    client_core::log(format!("list_sessions {k}: {e:#}"));
+                    all.push(json!({"conn": k, "conn_error": true}));
+                }
             }
         }
         if !merged {
             return Ok(json!(all));
         }
-        let map = state.conns.lock().await;
-        out["servers"] = json!(map.len());
+        out["servers"] = json!(n_conns);
         out["sessions"] = json!(n_ok);
         return Ok(out);
     }

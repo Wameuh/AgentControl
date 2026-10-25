@@ -662,7 +662,6 @@ function daemonDlg(msg: string, open: boolean) {
 }
 
 async function doConnect(cfg: Record<string, unknown>) {
-  lastCfg = cfg;
   let status: unknown;
   let newerDaemon = "";
   try {
@@ -759,9 +758,18 @@ function setAppIcon(state: string) {
 }
 
 async function refreshSessions() {
-  const list = await call<SessionMeta[]>("list_sessions").catch((e) => {
+  const raw = await call<SessionMeta[]>("list_sessions").catch((e) => {
     setAppIcon("grey"); // démon injoignable → aucun agent joignable
     throw e;
+  });
+  // Marqueur Rust `conn_error` : la sonde list_sessions d'une conn a
+  // échoué (timeout 8 s) → la marquer down (une seule fois : déjà down,
+  // markDead re-rendererait refreshSessions en boucle).
+  const list = raw.filter((s) => {
+    if (!(s as { conn_error?: boolean }).conn_error) return true;
+    const k = s.conn ?? "";
+    if ((connLive.get(k) ?? "ok") === "ok") markDead(k);
+    return false;
   });
   // Conn down : ses sessions n'arrivent plus — réafficher le dernier cache
   // connu (grisé) au lieu de faire disparaître le serveur.
@@ -951,13 +959,18 @@ let openSeq = 0;
 async function openSession(id: string) {
   const seq = ++openSeq;
   const stale = () => seq !== openSeq; // un openSession plus récent a pris le relais
+  // La meta démon ne porte pas sa conn (notion client) — la reprendre de
+  // la liste (stampée par le merge) pour router session_info sur le bon
+  // serveur ; "" → connexion par défaut.
+  const connHint = lastSessions.find((s) => s.id === id)?.conn ?? "";
   const info = await call<{ meta: SessionMeta; pending: string[]; alive: boolean; last_seq: number }>(
     "session_info",
-    { session: id },
+    { session: id, conn: connHint },
   );
   if (stale()) return;
   alive = info.alive;
   current = info.meta;
+  if (!current.conn && connHint) current.conn = connHint;
   minRendered = Number.MAX_SAFE_INTEGER;
   renderedCount = 0;
   hasMoreHistory = true;
@@ -1011,7 +1024,7 @@ async function openSession(id: string) {
   // Subscribe live à partir du dernier event connu
   const afterSeq = page.events.length ? page.events[page.events.length - 1].seq : 0;
   if (stale()) return;
-  await invoke("subscribe", { session: id, afterSeq }).catch((e) => {
+  await invoke("subscribe", { session: id, afterSeq, conn: current?.conn ?? connHint }).catch((e) => {
     // Le flux live est mort (ex. restart démon) → erreur visible
     showErr(`subscribe: ${e}`);
   });
@@ -2728,7 +2741,6 @@ interface SavedConn {
   native?: boolean;
 }
 let savedConns: SavedConn[] = [];
-let lastCfg: Record<string, unknown> | null = null;
 
 // ---------------------------------------------------------------------------
 // Surveillance connexions : ok | reconnecting | down
@@ -2763,7 +2775,10 @@ function markAlive(key: string) {
 }
 
 function markDead(key: string) {
-  if (!connCfg.has(key)) return; // conn inconnue (jamais établie ici)
+  // connCfg n'est posé qu'à la fin d'un doConnect réussi — une conn dont
+  // le tout premier connect a échoué en route n'est pas suivie (fenêtre
+  // minime, pas de config retenue à rejouer de toute façon).
+  if (!connCfg.has(key)) return;
   if (connLive.get(key) !== "reconnecting") connLive.set(key, "down");
   renderConnState();
   scheduleRetry(key);
@@ -2782,7 +2797,9 @@ function scheduleRetry(key: string) {
 /** Reconnexion simple (connect, pas d'ensure_daemon) — auto + bouton. */
 async function retryConn(key: string) {
   const cfg = connCfg.get(key);
-  if (!cfg) return;
+  // Pas de retry parallèle : un connect déjà en vol suffit — un second
+  // tunnel SSH orphelin resterait vivant après remplacement.
+  if (!cfg || connLive.get(key) === "reconnecting") return;
   connLive.set(key, "reconnecting");
   renderConnState();
   try {
