@@ -731,9 +731,29 @@ function markSessionGone() {
   updateHeader();
 }
 
+/** Icône fenêtre : rouge si une question attend, dorée si un agent tourne,
+ *  grise sans agent vivant, gemme sauge sinon (no-op sur Android). */
+let lastIconState = "";
+function setAppIcon(state: string) {
+  if (state === lastIconState) return;
+  lastIconState = state;
+  invoke("set_app_icon", { state }).catch(() => {});
+}
+
 async function refreshSessions() {
-  const list = await call<SessionMeta[]>("list_sessions");
+  const list = await call<SessionMeta[]>("list_sessions").catch((e) => {
+    setAppIcon("grey"); // démon injoignable → aucun agent joignable
+    throw e;
+  });
   lastSessions = list;
+  const live = list.filter((s) => s.state !== "dead" && s.state !== "interrupted");
+  setAppIcon(
+    live.some((s) => s.state === "waiting_input")
+      ? "red"
+      : live.some((s) => s.state === "working" || s.state === "running" || s.state === "starting")
+        ? "gold"
+        : live.length > 0 ? "base" : "grey",
+  );
   // Session courante disparue alors que sa connexion répond encore
   // (sessions du même serveur présentes) → supprimée côté serveur.
   if (
@@ -2683,6 +2703,9 @@ setInterval(async () => {
       .map(([k]) => k);
     if (!st.servers || dead.length) throw dead;
   } catch (dead) {
+    // Démon injoignable → aucun agent joignable, icône grise (le catch de
+    // refreshSessions ne peut pas couvrir ce chemin : on return avant).
+    setAppIcon("grey");
     if (reconnecting) return;
     reconnecting = true;
     // Reconnecter chaque connexion morte (ou toutes si liste vide)
