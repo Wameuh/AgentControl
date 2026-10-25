@@ -47,6 +47,7 @@ jobs:
       - name: Ouvrir la release PR si absente
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -e
           OPEN=$(gh pr list --base main --head next_release --state open \
@@ -57,5 +58,6 @@ jobs:
           fi
           gh pr create --base main --head next_release --draft \
             --title "Next release" \
-            --body-file "$RUNNER_TEMP/release-pr-body.md"
+            --body-file "$RUNNER_TEMP/release-pr-body.md" \
+            || echo "création échouée — PR créée entre-temps ?"
           echo "release PR créée (draft)"
