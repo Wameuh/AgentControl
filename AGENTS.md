@@ -100,9 +100,18 @@ l'utilisateur), `release-on-merge.yml` tague `v<version>` (lu depuis
 de tag via GITHUB_TOKEN ne déclenche pas les workflows d'où le
 dispatch). Idempotent : tag existant → skip. Sans label `release`, un
 merge dans `main` ne tague rien.
-⚠️ `release-bump` pousse sur `next_release` (protégée) : il faut
-`github-actions[bot]` en **bypass actor** de la règle « require a pull
-request » de `next_release` (Settings → Branches), sinon GH006.
+
+**Reconcile** : tout merge nr→main est un squash → le commit `main`
+n'est jamais ancêtre des commits nr, et la release suivante
+reconflicterait sur toute zone retouchée (arrivé : #23, #29). Le job
+`reconcile-next-release` (push sur `main`) refait le lien : merge
+commit sur `next_release` (parents nr + main, vrai merge — hotfix
+`main` propagé, conflit = job rouge fail-closed) → la merge-base de la
+prochaine release = tip `main` → plus de conflit.
+⚠️ `release-bump` et `reconcile-next-release` poussent sur
+`next_release` (protégée) : il faut `github-actions[bot]` en
+**bypass actor** de la règle « require a pull request » de
+`next_release` (Settings → Branches), sinon GH006.
 
 ## Après chaque push : vérifier le CI
 

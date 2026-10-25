@@ -1,0 +1,56 @@
+name: reconcile-next-release
+
+# Réconciliation post-release : chaque merge nr -> main est un squash
+# (commit sans lien d'ancêtre avec les commits nr) → sans reconcile,
+# la merge-base nr/main reste figée avant le cycle et la prochaine PR
+# de release reconflicte dès que les deux côtés ont touché les mêmes
+# lignes (arrivé sur #23, #29).
+#
+# Ici : après chaque push sur main, merge commit sur next_release
+# (parents = nr tip + main tip). main devient ancêtre de nr → la
+# merge-base de la prochaine release = le tip main → diff = commits du
+# cycle seul → plus jamais de conflit.
+#
+# Vrai merge récursif (pas `-s ours`) : un hotfix poussé directement
+# sur main doit être propagé dans nr ; si ça conflict le job échoue
+# (fail-closed — résolution manuelle requise, jamais de perte silencieuse).
+#
+# Requiert github-actions[bot] en bypass actor de la protection de
+# next_release (« require a pull request »), sinon le push → GH006.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: reconcile-next-release
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge main into next_release
+        run: |
+          set -e
+          git fetch origin next_release
+          # main déjà ancêtre de nr (rien mergé depuis le dernier
+          # reconcile) → rien à faire.
+          if git merge-base --is-ancestor origin/main origin/next_release; then
+            echo "next_release contient déjà main → skip"
+            exit 0
+          fi
+          git checkout -B next_release origin/next_release
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git merge --no-ff origin/main \
+            -m "merge: reconcile main into next_release after release"
+          git push origin next_release
