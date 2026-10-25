@@ -127,10 +127,10 @@ un PAT sans ce scope est refusé indépendamment du bypass ruleset) :
 (app first-party → 422), et un push `GITHUB_TOKEN` ne déclencherait
 pas les checks sur le head poussé (anti-récursion). Le ruleset
 `next_release` a le rôle **`Repository admin`** en bypass actor
-(Settings → Rules → Rulesets). Sans `RELEASE_PAT`, les deux jobs
-échouent fail-fast (« secret RELEASE_PAT manquant ») ; les fine-grained
-PAT expirent → renouveler le secret à l'échéance (sinon échec opaque
-au checkout).
+(Settings → Rules → Rulesets). Sans `RELEASE_PAT`, un push réellement
+nécessaire échoue fail-fast (« secret RELEASE_PAT manquant ») — rien à
+pousser → skip clean, pas d'échec ; les fine-grained PAT expirent →
+renouveler le secret à l'échéance (sinon échec opaque au checkout).
 
 ## Après chaque push : vérifier le CI
 

@@ -47,22 +47,20 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.RELEASE_PAT || github.token }}
 
-      # Guard dédié : le PAT n'est pas injecté dans le step métier.
-      - name: Guard RELEASE_PAT
+      - name: Merge main into next_release
         env:
           RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
-        run: '[ -n "$RELEASE_PAT" ] || { echo "::error::secret RELEASE_PAT manquant"; exit 1; }'
-
-      - name: Merge main into next_release
         run: |
           set -e
           git fetch origin next_release
           # main déjà ancêtre de nr (rien mergé depuis le dernier
-          # reconcile) → rien à faire.
+          # reconcile) → rien à faire — sortie avant le check PAT :
+          # secret absent ≠ échec quand aucun push n'est nécessaire.
           if git merge-base --is-ancestor origin/main origin/next_release; then
             echo "next_release contient déjà main → skip"
             exit 0
           fi
+          [ -n "$RELEASE_PAT" ] || { echo "::error::secret RELEASE_PAT manquant"; exit 1; }
           git checkout -B next_release origin/next_release
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

@@ -70,14 +70,8 @@ jobs:
           # push déclenchent les checks (GITHUB_TOKEN ne le ferait pas).
           token: ${{ secrets.RELEASE_PAT || github.token }}
 
-      # Guard dédié : le PAT n'est pas injecté dans le step métier
-      # (ni dans bump_version.py ni ses sous-processus).
-      - name: Guard RELEASE_PAT
-        env:
-          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
-        run: '[ -n "$RELEASE_PAT" ] || { echo "::error::secret RELEASE_PAT manquant"; exit 1; }'
-
       - name: Bump depuis le dernier tag + mots-clés des commits
+        id: bump
         env:
           BASE_REF: ${{ github.base_ref }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
@@ -144,4 +138,19 @@ jobs:
           # Pas de mot-clef dans le message (il rentrerait dans la
           # plage du cycle suivant) — le niveau reste lisible ci-dessus.
           git commit -am "chore: bump version to $NEXT"
-          git push origin "HEAD:$HEAD_REF"
+          echo "bumped=true" >> "$GITHUB_OUTPUT"
+
+      # Guard dédié, seulement si un push est nécessaire (déjà bumpé →
+      # sortie clean sans exiger le secret). Le PAT n'est jamais dans
+      # l'env du step métier (ni dans bump_version.py).
+      - name: Guard RELEASE_PAT
+        if: steps.bump.outputs.bumped == 'true'
+        env:
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
+        run: '[ -n "$RELEASE_PAT" ] || { echo "::error::secret RELEASE_PAT manquant"; exit 1; }'
+
+      - name: Push du bump sur next_release
+        if: steps.bump.outputs.bumped == 'true'
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: git push origin "HEAD:$HEAD_REF"
