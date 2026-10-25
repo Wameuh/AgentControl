@@ -146,20 +146,28 @@ def latest_verdict(n, nwo):
     return created_s, (m.group(1).lower() if m else "")
 
 
-def pushed_at(nwo, head):
+def pushed_at(nwo, head, ref):
     """Server-side timestamp of the push that set `head` as a branch
-    tip (repo PushEvents) — committer.date is author-controlled."""
-    return run(["gh", "api", "--paginate",
-                f"repos/{nwo}/events?per_page=100",
+    tip (repo PushEvents) — committer.date is author-controlled.
+    The events feed can lag hours → fall back to the per-ref
+    activity feed, which reports pushes near-instantly."""
+    ts = run(["gh", "api", "--paginate",
+              f"repos/{nwo}/events?per_page=100",
+              "--jq",
+              rf'[.[] | select(.type == "PushEvent"'
+              rf' and .payload.head == "{head}")]'
+              ' | .[0].created_at // ""'], timeout=8)
+    if ts or not ref:
+        return ts
+    return run(["gh", "api", f"repos/{nwo}/activity?ref={ref}",
                 "--jq",
-                rf'[.[] | select(.type == "PushEvent"'
-                rf' and .payload.head == "{head}")]'
-                ' | .[0].created_at // ""'], timeout=8)
+                rf'[.[] | select(.after == "{head}")]'
+                ' | .[0].timestamp // ""'], timeout=8)
 
 
 def approved_next_release_merge(n, nwo):
     pr = run(["gh", "pr", "view", n, "-R", nwo,
-              "--json", "baseRefName,headRefOid"])
+              "--json", "baseRefName,headRefOid,headRefName"])
     try:
         pr = json.loads(pr)
     except Exception:
@@ -170,7 +178,7 @@ def approved_next_release_merge(n, nwo):
     created_s, verdict = latest_verdict(n, nwo)
     if not created_s or verdict not in ("approved", "mergeable"):
         return False
-    pushed = pushed_at(nwo, head)
+    pushed = pushed_at(nwo, head, "refs/heads/" + (pr.get("headRefName") or ""))
     if not pushed:
         return False
     try:
