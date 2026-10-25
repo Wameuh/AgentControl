@@ -13,21 +13,26 @@ Deux branches protégées (**push direct impossible**, PR obligatoire,
 
 Workflow : créer une branche depuis `next_release` → push →
 `gh pr create --base next_release --draft` → finir le travail →
-`gh pr ready` + commenter `/mr review` → traiter la review +
-attendre les 5 checks verts →
+`/mr review` **sur la draft** → traiter la review (fix → push →
+relancer, toujours en draft) → review soldée → `gh pr ready`
+(≥30 s après le dernier push) → attendre les 5 checks verts →
 **l'utilisateur merge** (jamais l'agent : ni `gh pr merge`, ni
 `git merge`, ni API — un hook `.devin/` le bloque, et c'est interdit
 même sans le hook). PR déjà mergée par l'utilisateur ?
 `git checkout next_release && git pull` pour resynchroniser.
 Le CI build tous les artefacts sur les PR (APK suffixé `-<sha>`).
 
-**Drafts** : une PR reste en **draft tant qu'on travaille dessus**.
-**Tout changement à faire sur une PR non-draft** (ajouts, fixes,
-retours de review/CI) → la repasser en draft **avant** d'y toucher :
-`gh pr ready --undo`, puis `gh pr ready` quand c'est fini.
-**Le CI ne tourne pas sur les drafts** (tous les jobs sont skippés) :
-le passage en ready (event `ready_for_review`) déclenche les 5
-checks. **Laisser ~30 s entre le dernier push et `gh pr ready`** —
+**Drafts** : une PR reste en **draft tout le cycle travail + review**
+— les pipelines ne se lancent qu'**après** la review (`gh pr ready` =
+feu vert final : event `ready_for_review` → les 5 checks). **La
+review se demande sur la draft** : `/mr review` lance la session même
+sans ready (le trigger ne gate pas `isDraft`) → itérer (corriger →
+push → relancer `/mr review`) autant de rounds que nécessaire en
+restant draft → **un seul run CI complet par PR**, pas un par round.
+Tout changement sur une PR non-draft → repasser en draft **avant**
+d'y toucher : `gh pr ready --undo`, puis `gh pr ready` quand c'est
+fini. **Le CI ne tourne pas sur les drafts** (tous les jobs sont
+skippés). **Laisser ~30 s entre le dernier push et `gh pr ready`** —
 sinon le dispatch `synchronize` draft (tout skip) peut se
 matérialiser après le run ready et l'annuler (même groupe de
 concurrency) → head sans CI (arrivé en live, merge bloqué).
@@ -57,8 +62,9 @@ le filtre de noms doit suivre les jobs required de `build.yml`. Sans
 la branche d'échec, un head tout-skippé ressortirait vert après ~5
 min — le cas exact que le gate détecte.
 
-**Review auto** : une fois la PR ready, **noter `TS=$(date -u +%FT%TZ)`**,
-commenter `/mr review` (`gh pr comment <N> --body "/mr review"`),
+**Review auto** : quand le travail semble fini **(PR encore draft)**,
+**noter `TS=$(date -u +%FT%TZ)`**, commenter `/mr review`
+(`gh pr comment <N> --body "/mr review"`),
 puis **poller les commentaires** jusqu'à la review — l'automation
 poste d'abord un ack (`Launching a review…`) et la review peut
 sortir sous **le compte user OU le bot** → ne pas filtrer l'auteur :
@@ -67,8 +73,9 @@ requis — les commentaires récents sont sur la dernière page) :
 `gh api --paginate 'repos/{owner}/{repo}/issues/<N>/comments?per_page=100' --jq '.[] | select(.body | test("^[*#]+ ?Review")) | select(.created_at > "'"$TS"'") | .body'`.
 Dès qu'elle est postée, l'addresser, pas d'attente fixe
 (abandon ~10 min si rien).
-Des changements à faire → repasser en draft (voir **Drafts**),
-corriger, `gh pr ready`, relancer `/mr review`. NB : une review
+Des changements à faire → corriger et pousser **en restant draft**,
+puis relancer `/mr review` ; `gh pr ready` seulement quand la review
+est soldée (voir **Drafts**). NB : une review
 lancée juste après un push peut lire un diff périmé → ancrer la
 lecture sur `headRefOid` — mais `headRefOid`/`isDraft` peuvent
 eux-mêmes lagger ~1 min post-push → recouper avec le tip de branche
