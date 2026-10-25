@@ -44,15 +44,18 @@ for i in $(seq 1 20); do
       | select(.conclusion != "skipped" and .conclusion != "cancelled")] | length' || echo 0)
   [ "$COUNT" -gt 0 ] && break; sleep 15
 done
-[ "${COUNT:-0}" -gt 0 ] || { echo "aucun check run réel — head à réparer :
-  gh pr ready --undo && sleep 30 && gh pr ready"; exit 1; }
-gh pr checks <N> --watch
+if [ "${COUNT:-0}" -eq 0 ]; then
+  echo "aucun check run réel — head à réparer (gh pr ready --undo &&
+        sleep 30 && gh pr ready), ou relancer depuis la racine du clone"
+else
+  gh pr checks <N> --watch
+fi
 ```
 
 À lancer depuis la racine du clone (`{owner}/{repo}` = repo du cwd) ;
 le filtre de noms doit suivre les jobs required de `build.yml`. Sans
-le `[ "${COUNT:-0}" -gt 0 ] ||`, un head tout-skippé ressortirait
-vert après ~5 min — le cas exact que le gate détecte.
+la branche d'échec, un head tout-skippé ressortirait vert après ~5
+min — le cas exact que le gate détecte.
 
 **Review auto** : une fois la PR ready, **noter `TS=$(date -u +%FT%TZ)`**,
 commenter `/mr review` (`gh pr comment <N> --body "/mr review"`),
