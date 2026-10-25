@@ -68,9 +68,10 @@ min — le cas exact que le gate détecte.
 puis **poller les commentaires** jusqu'à la review — l'automation
 poste d'abord un ack (`Launching a review…`) et la review peut
 sortir sous **le compte user OU le bot** → ne pas filtrer l'auteur :
-matcher le marqueur `Review` **postérieur à `$TS`** (`--paginate`
-requis — les commentaires récents sont sur la dernière page) :
-`gh api --paginate 'repos/{owner}/{repo}/issues/<N>/comments?per_page=100' --jq '.[] | select(.body | test("^[*#]+ ?Review")) | select(.created_at > "'"$TS"'") | .body'`.
+matcher le marqueur **postérieur à `$TS`** (`--paginate`
+requis — les commentaires récents sont sur la dernière page ;
+`Review|Verdict` car le format varie : `## Review` / `## Verdict: …`) :
+`gh api --paginate 'repos/{owner}/{repo}/issues/<N>/comments?per_page=100' --jq '.[] | select(.body | test("^[*#]+ ?(Review|Verdict)")) | select(.created_at > "'"$TS"'") | .body'`.
 Dès qu'elle est postée, l'addresser, pas d'attente fixe
 (abandon ~10 min si rien).
 Des changements à faire → corriger et pousser **en restant draft**,

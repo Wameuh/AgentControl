@@ -25,7 +25,7 @@ permissions:
 # cancel-in-progress=true : le run le plus récent gagne (l'event freeze
 # head.sha ; un run en attente checkout un vieux head et échouerait).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
