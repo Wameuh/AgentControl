@@ -9,11 +9,14 @@ name: version
 #   Plage : depuis le dernier bump DEJA RELEASE = dernier commit
 #   `chore: bump version` dont la version a son tag vX.Y.Z — le bump
 #   du cycle courant (tag pas encore cree) est saute, la plage couvre
-#   le cycle entier meme sur re-run (synchronize post-bump). Un tag de
-#   release ne peut PAS servir de borne : les releases sur main sont
-#   des squashs, le tag n'est jamais ancetre des commits nr ->
-#   v<tag>..HEAD rescannerait indefiniment l'historique deja publie.
-#   Fallback bootstrap : dernier tag semver.
+#   le cycle entier meme sur re-run (synchronize post-bump).
+#   Borne nominale post-reset : reconcile remet nr = tip main → nr
+#   n'a plus de commit `chore: bump version` → le grep ne trouve rien
+#   → fallback = dernier tag semver, ancetre de nr → v<tag>..HEAD =
+#   commits du cycle. Avant le reset (historique nr autonome) le tag
+#   ne pouvait PAS servir de borne : jamais ancetre des commits nr
+#   sous squash -> rescan infini de l'historique publie ; d'ou le
+#   double chemin : commit bump tague d'abord, dernier tag ensuite.
 #   Les mots-clefs survivent au squash : le message de squash reprend
 #   les sujets des commits dans le body -> ecrire le mot-clef
 #   parenthese dans le sujet (ex. `feat: multi-agents (minor)`).
