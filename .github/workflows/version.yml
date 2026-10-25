@@ -17,9 +17,12 @@ name: version
 #   Les mots-clefs survivent au squash : le message de squash reprend
 #   les sujets des commits dans le body -> ecrire le mot-clef
 #   parenthese dans le sujet (ex. `feat: multi-agents (minor)`).
-#   Le bump est commit + push sur next_release par le workflow (requiert
-#   github-actions[bot] en bypass actor de la protection de
-#   next_release, sinon GH006 protected branch).
+#   Le bump est commit + push sur next_release par le workflow via le
+#   secret RELEASE_PAT (PAT fine-grained du repo, Contents RW) : les
+#   rulesets ne peuvent pas bypasser github-actions[bot] (422 : app
+#   first-party non installable) ET un push GITHUB_TOKEN ne declencherait
+#   pas les checks sur le head bumpe (anti-recursion) — le PAT resout
+#   les deux (le role `Repository admin` est en bypass actor du ruleset).
 #   Idempotent : package.json deja a NEXT -> skip.
 # Draft : pas de bump — le job repart au passage en ready_for_review.
 
@@ -58,13 +61,18 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
+          # Push via PAT : bypass ruleset (role admin) + les events
+          # push déclenchent les checks (GITHUB_TOKEN ne le ferait pas).
+          token: ${{ secrets.RELEASE_PAT || github.token }}
 
       - name: Bump depuis le dernier tag + mots-clés des commits
         env:
           BASE_REF: ${{ github.base_ref }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
         run: |
           set -e
+          [ -n "$RELEASE_PAT" ] || { echo "::error::secret RELEASE_PAT manquant"; exit 1; }
           git fetch --tags -q origin
           # Borne du scan = dernier bump DEJA RELEASE : iterer les
           # commits `chore: bump version`, extraire X.Y.Z du sujet,

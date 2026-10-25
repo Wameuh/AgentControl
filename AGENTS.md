@@ -114,9 +114,13 @@ commit sur `next_release` (parents nr + main, vrai merge — hotfix
 `main` propagé, conflit = job rouge fail-closed) → la merge-base de la
 prochaine release = tip `main` → plus de conflit.
 ⚠️ `release-bump` et `reconcile-next-release` poussent sur
-`next_release` (protégée) : il faut `github-actions[bot]` en
-**bypass actor** de la règle « require a pull request » de
-`next_release` (Settings → Branches), sinon GH006.
+`next_release` via le secret **`RELEASE_PAT`** (PAT fine-grained du
+repo, Contents RW) : `github-actions[bot]` ne peut pas être bypass
+actor d'un ruleset (app first-party → 422), et un push `GITHUB_TOKEN`
+ne déclencherait pas les checks sur le head poussé (anti-récursion).
+Le ruleset `next_release` a le rôle **`Repository admin`** en bypass
+actor (Settings → Rules → Rulesets). Sans `RELEASE_PAT`, les deux
+jobs échouent fail-fast (« secret RELEASE_PAT manquant »).
 
 ## Après chaque push : vérifier le CI
 

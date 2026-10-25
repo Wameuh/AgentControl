@@ -15,8 +15,11 @@ name: reconcile-next-release
 # sur main doit être propagé dans nr ; si ça conflict le job échoue
 # (fail-closed — résolution manuelle requise, jamais de perte silencieuse).
 #
-# Requiert github-actions[bot] en bypass actor de la protection de
-# next_release (« require a pull request »), sinon le push → GH006.
+# Push via secret RELEASE_PAT (PAT fine-grained, Contents RW) : le
+# ruleset ne peut pas bypasser github-actions[bot] (app first-party,
+# 422) et un push GITHUB_TOKEN ne déclencherait pas les checks sur le
+# head réconcilié — le PAT couvre les deux (bypass actor : role
+# `Repository admin`).
 
 on:
   push:
@@ -37,10 +40,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT || github.token }}
 
       - name: Merge main into next_release
+        env:
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
         run: |
           set -e
+          [ -n "$RELEASE_PAT" ] || { echo "::error::secret RELEASE_PAT manquant"; exit 1; }
           git fetch origin next_release
           # main déjà ancêtre de nr (rien mergé depuis le dernier
           # reconcile) → rien à faire.
