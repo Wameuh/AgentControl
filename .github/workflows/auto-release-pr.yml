@@ -13,6 +13,12 @@ name: auto-release-pr
 # Les pushes via GITHUB_TOKEN (release-bump, reconcile) ne déclenchent
 # pas les workflows — pas de boucle ; et à ce stade du cycle la PR
 # existe de toute façon déjà.
+#
+# gh pr create via RELEASE_PAT (fallback GITHUB_TOKEN) : le réglage
+# repo « Allow GitHub Actions to create and approve pull requests »
+# interdit createPullRequest au GITHUB_TOKEN (arrivé : run 40209286139)
+# — le PAT passe par le rôle admin en bypass actor du ruleset. La PR
+# créée porte l'auteur du PAT.
 
 on:
   push:
@@ -46,7 +52,7 @@ jobs:
 
       - name: Ouvrir la release PR si absente
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -e
@@ -56,8 +62,15 @@ jobs:
             echo "release PR déjà ouverte → skip"
             exit 0
           fi
-          gh pr create --base main --head next_release --draft \
+          if ! gh pr create --base main --head next_release --draft \
             --title "Next release" \
-            --body-file "$RUNNER_TEMP/release-pr-body.md" \
-            || echo "création échouée — PR créée entre-temps ?"
+            --body-file "$RUNNER_TEMP/release-pr-body.md"; then
+            # Race tolérée : une PR apparue entre list et create est OK ;
+            # sinon l'échec est réel → rouge.
+            OPEN=$(gh pr list --base main --head next_release --state open \
+              --json number --jq 'length')
+            [ "$OPEN" -gt 0 ] && { echo "PR créée entre-temps"; exit 0; }
+            echo "::error::gh pr create a échoué sans PR concurrente"
+            exit 1
+          fi
           echo "release PR créée (draft)"
