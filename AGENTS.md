@@ -38,8 +38,12 @@ métadonnées de runs (`workflow_run.event` ne rapporte jamais
 
 ```bash
 SHA=$(gh pr view <N> --json headRefOid -q .headRefOid)
-until [ "$(gh api repos/{o}/{r}/commits/$SHA/check-runs --jq \
-  '[.check_runs[] | select(.conclusion != "skipped" and .conclusion != "cancelled")] | length')" -gt 0 ]; do sleep 15; done
+for i in $(seq 1 20); do
+  N=$(gh api "repos/{owner}/{repo}/commits/$SHA/check-runs?per_page=100" --jq \
+    '[.check_runs[] | select(.name | test("^(daemon-linux|client)( |-|$)"))
+      | select(.conclusion != "skipped" and .conclusion != "cancelled")] | length' || echo 0)
+  [ "$N" -gt 0 ] && break; sleep 15
+done
 gh pr checks <N> --watch
 ```
 
@@ -53,7 +57,7 @@ poste d'abord un ack (`Launching a review…`) et la review peut
 sortir sous **le compte user OU le bot** → ne pas filtrer l'auteur :
 matcher le marqueur `Review` **postérieur à `$TS`** (`--paginate`
 requis — les commentaires récents sont sur la dernière page) :
-`gh api --paginate 'repos/{o}/{r}/issues/<N>/comments?per_page=100' --jq '.[] | select(.body | test("^[*#]+ ?Review")) | select(.created_at > "'"$TS"'")'`.
+`gh api --paginate 'repos/{owner}/{repo}/issues/<N>/comments?per_page=100' --jq '.[] | select(.body | test("^[*#]+ ?Review")) | select(.created_at > "'"$TS"'") | .body'`.
 Dès qu'elle est postée, l'addresser, pas d'attente fixe
 (abandon ~10 min si rien).
 Des changements à faire → repasser en draft (voir **Drafts**),
