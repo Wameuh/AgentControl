@@ -12,12 +12,79 @@ Deux branches protégées (**push direct impossible**, PR obligatoire,
   `next_release` quand l'utilisateur décide de releaser.
 
 Workflow : créer une branche depuis `next_release` → push →
-`gh pr create --base next_release` → attendre les 5 checks verts →
+`gh pr create --base next_release --draft` → finir le travail →
+`/mr review` **sur la draft** → traiter la review (fix → push →
+relancer, toujours en draft) → review soldée → `gh pr ready`
+(≥30 s après le dernier push) → attendre les 5 checks verts →
 **l'utilisateur merge** (jamais l'agent : ni `gh pr merge`, ni
 `git merge`, ni API — un hook `.devin/` le bloque, et c'est interdit
 même sans le hook). PR déjà mergée par l'utilisateur ?
 `git checkout next_release && git pull` pour resynchroniser.
 Le CI build tous les artefacts sur les PR (APK suffixé `-<sha>`).
+
+**Drafts** : une PR reste en **draft tout le cycle travail + review**
+— les pipelines ne se lancent qu'**après** la review (`gh pr ready` =
+feu vert final : event `ready_for_review` → les 5 checks). **La
+review se demande sur la draft** : `/mr review` lance la session même
+sans ready (le trigger ne gate pas `isDraft`) → itérer (corriger →
+push → relancer `/mr review`) autant de rounds que nécessaire en
+restant draft → **un seul run CI complet par PR**, pas un par round.
+Tout changement sur une PR non-draft → repasser en draft **avant**
+d'y toucher : `gh pr ready --undo`, puis `gh pr ready` quand c'est
+fini. **Le CI ne tourne pas sur les drafts** (tous les jobs sont
+skippés). **Laisser ~30 s entre le dernier push et `gh pr ready`** —
+sinon le dispatch `synchronize` draft (tout skip) peut se
+matérialiser après le run ready et l'annuler (même groupe de
+concurrency) → head sans CI (arrivé en live, merge bloqué).
+⚠️ `gh pr checks <N> --watch` sort vert sur des runs skippés ou
+cancelled → gater sur les **check runs du head**, pas sur les
+métadonnées de runs (`workflow_run.event` ne rapporte jamais
+`ready_for_review`, et `createdAt` est une course) :
+
+```bash
+SHA=$(gh pr view <N> --json headRefOid -q .headRefOid)
+for i in $(seq 1 20); do
+  COUNT=$(gh api --paginate "repos/{owner}/{repo}/commits/$SHA/check-runs?per_page=100" --jq \
+    '.check_runs[] | select(.name | test("^(daemon-linux|client)( |-|$)"))
+      | select(.conclusion != "skipped" and .conclusion != "cancelled") | .name' | wc -l)
+  [ "$COUNT" -gt 0 ] && break; sleep 15
+done
+if [ "${COUNT:-0}" -eq 0 ]; then
+  echo "aucun check run réel — head à réparer (gh pr ready --undo &&
+        sleep 30 && gh pr ready), ou relancer depuis la racine du clone"
+else
+  gh pr checks <N> --watch
+fi
+```
+
+À lancer depuis la racine du clone (`{owner}/{repo}` = repo du cwd) ;
+le filtre de noms doit suivre les jobs required de `build.yml`. Sans
+la branche d'échec, un head tout-skippé ressortirait vert après ~5
+min — le cas exact que le gate détecte.
+
+**Review auto** : quand le travail semble fini **(PR encore draft)**,
+**noter `TS=$(date -u +%FT%TZ)`**, commenter `/mr review`
+(`gh pr comment <N> --body "/mr review"`),
+puis **poller les commentaires** jusqu'à la review — l'automation
+poste d'abord un ack (`Launching a review…`) et la review peut
+sortir sous **le compte user OU le bot** → ne pas filtrer l'auteur :
+matcher le marqueur **postérieur à `$TS`** (`--paginate`
+requis — les commentaires récents sont sur la dernière page ;
+`Review|Verdict` car le format varie : `## Review` / `## Verdict: …`) :
+`gh api --paginate 'repos/{owner}/{repo}/issues/<N>/comments?per_page=100' --jq '.[] | select(.body | test("^[*#]+ ?(Review|Verdict)")) | select(.created_at > "'"$TS"'") | .body'`.
+Dès qu'elle est postée, l'addresser, pas d'attente fixe
+(abandon ~10 min si rien).
+Des changements à faire → corriger et pousser **en restant draft**,
+puis relancer `/mr review` ; `gh pr ready` seulement quand la review
+est soldée (voir **Drafts**). NB : une review
+lancée juste après un push peut lire un diff périmé → ancrer la
+lecture sur `headRefOid` — mais `headRefOid`/`isDraft` peuvent
+eux-mêmes lagger ~1 min post-push → recouper avec le tip de branche
+(`gh api repos/{owner}/{repo}/branches/<br>`) ou attendre ~60 s.
+La commande se poste **seule** dans son commentaire : le trigger
+matche `contains` sur le body → toute citation de `/mr review` dans
+un autre commentaire relance une session (pour la citer :
+`/mr&#32;review`).
 
 ## Releases
 
@@ -72,7 +139,10 @@ Manuel hors-PR : `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]
   redéployer : `systemctl --user stop agentcontrol-daemon && cp target/release/agentcontrol-daemon ~/.local/bin/ && systemctl --user start agentcontrol-daemon`.
   ⚠️ Le restart tue les agents en cours (sessions → interrupted).
 - **Suppression d'un crate/binaire** : penser au workflow CI
-  (`-p <crate>` dans build.yml) et à `CRATES` dans `tools/bump_version.py`.
+  (`-p <crate>` dans build.yml) et à `CRATES` dans `tools/bump_version.py`
+  (le bump de la PR exécute le script de la **base** → éditer `CRATES`
+  n'aide que les bumps post-merge ; crate retiré = job rouge
+  fail-closed, non bloquant).
 
 ## Android
 

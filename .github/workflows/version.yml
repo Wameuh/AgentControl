@@ -9,17 +9,32 @@ name: version
 #   release           → pas de bump ici ; au merge, release-on-merge.yml
 #                       tague vX.Y.Z et déclenche le build de release.
 # Idempotent : si la branche a déjà une version différente de base, skip.
+# Draft : pas de bump — le job repart au passage en ready_for_review.
 
 on:
   pull_request:
-    types: [opened, synchronize, labeled]
+    types: [opened, synchronize, reopened, labeled, ready_for_review]
 
+# Plancher moindre privilège pour tout futur job ; `bump` porte son
+# propre `contents: write` au niveau job.
 permissions:
-  contents: write
-  pull-requests: read
+  contents: read
+
+# Deux events proches (labeled + ready_for_review, labeled ×2…) → deux
+# jobs bump concurrents : le second push est non-fast-forward → échec.
+# cancel-in-progress=true : le run le plus récent gagne (l'event freeze
+# head.sha ; un run en attente checkout un vieux head et échouerait).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   bump:
+    # fork : GITHUB_TOKEN read-only → le push échouerait → skip.
+    if: github.event.pull_request.draft != true && github.event.pull_request.head.repo.fork == false
+    permissions:
+      contents: write
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,15 +49,16 @@ jobs:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -e
-          LABELS=$(echo "$PR_LABELS" | jq -r '.[].name' | tr '\n' ' ')
-          echo "labels: $LABELS"
-          case " $LABELS " in
-            *" major "*) LEVEL=major ;;
-            *" minor "*|*" sync "*) LEVEL=minor ;;
-            *" patch "*) LEVEL=patch ;;
-            *" daemon "*|*" client "*) LEVEL=patch ;;
-            *) echo "pas de label daemon/client → pas de bump"; exit 0 ;;
-          esac
+          LABELS=$(echo "$PR_LABELS" | jq -r '.[].name')
+          echo "labels: $(echo "$LABELS" | tr '\n' ' ')"
+          # Matching exact par ligne (un label "not major" ne doit pas
+          # matcher " major " en substring).
+          if   echo "$LABELS" | grep -qxF major; then LEVEL=major
+          elif echo "$LABELS" | grep -qxF minor || echo "$LABELS" | grep -qxF sync; then LEVEL=minor
+          elif echo "$LABELS" | grep -qxF patch; then LEVEL=patch
+          elif echo "$LABELS" | grep -qxF daemon || echo "$LABELS" | grep -qxF client; then LEVEL=patch
+          else echo "pas de label daemon/client → pas de bump"; exit 0
+          fi
           BASEV=$(git show "origin/$BASE_REF:client/package.json" | grep -oE '"version": "[^"]+"' | head -1 | cut -d'"' -f4)
           HEADV=$(grep -oE '"version": "[^"]+"' client/package.json | head -1 | cut -d'"' -f4)
           echo "base=$BASEV head=$HEADV level=$LEVEL"
@@ -50,7 +66,12 @@ jobs:
             echo "version déjà bumpée sur la branche → skip"
             exit 0
           fi
+          # Durcissement : exécuter le script de la BASE, pas celui de
+          # la PR (le job tourne sous contents: write). ROOT du script
+          # dépend de __file__ → extraire dans le tree puis restaurer.
+          git show "origin/$BASE_REF:client/tools/bump_version.py" > client/tools/bump_version.py
           python3 client/tools/bump_version.py "$LEVEL"
+          git checkout HEAD -- client/tools/bump_version.py
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -am "chore: bump version ($LEVEL)"
