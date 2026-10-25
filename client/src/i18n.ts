@@ -4,6 +4,8 @@
 const STR = {
   en: {
     connect: "Connect", new_conn: "New connection",
+    conn_ok: "connected", reconnecting: "reconnecting…",
+    conn_offline: "connection lost", retry_now: "reconnect now",
     new_session: "New agent", send: "Send", cancel: "Cancel", stop: "Stop",
     resume: "Resume", refresh_title: "Reload session",
     input_ph: "Message… (Enter = send, Alt+Enter = inject mid-turn, Ctrl+Enter = force, / = cmds)",
@@ -79,6 +81,8 @@ const STR = {
   },
   fr: {
     connect: "Connecter", new_conn: "Nouvelle connexion",
+    conn_ok: "connecté", reconnecting: "reconnexion…",
+    conn_offline: "connexion perdue", retry_now: "reconnecter",
     new_session: "Nouvel agent", send: "Envoyer", cancel: "Annuler", stop: "Stop",
     resume: "Reprendre", refresh_title: "Recharger la session",
     input_ph: "Message… (Entrée = envoyer, Alt+Entrée = injecter, Ctrl+Entrée = forcer, / = cmds)",

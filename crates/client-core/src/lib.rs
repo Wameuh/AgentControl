@@ -17,7 +17,7 @@ pub static RX_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static TX_TOTAL: AtomicU64 = AtomicU64::new(0);
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
-use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::sync::{broadcast, oneshot, watch, Mutex};
 
 type BoxedStream = Box<dyn AsyncRead + Unpin + Send>;
 type BoxedWriter = Box<dyn AsyncWrite + Unpin + Send>;
@@ -384,6 +384,11 @@ pub struct Client {
     next_id: AtomicU64,
     /// Tous les push (subscribe) du démon
     pub pushes: broadcast::Sender<Value>,
+    /// Signalé quand la boucle de lecture meurt (EOF/erreur transport) :
+    /// la connexion est perdue — le frontend peut le savoir sans attendre
+    /// l'échec d'un appel.
+    pub dead: watch::Receiver<()>,
+    dead_tx: watch::Sender<()>,
     _guard: Option<Arc<SshGuard>>,
 }
 
@@ -407,11 +412,14 @@ impl Client {
                 }
             }
         };
+        let (dead_tx, dead) = watch::channel(());
         let client = Arc::new(Self {
             w: Mutex::new(w),
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             pushes: broadcast::channel(512).0,
+            dead,
+            dead_tx,
             _guard: guard,
         });
         // Reader task : dispatch responses / pushes
@@ -442,6 +450,8 @@ impl Client {
                         }
                     }
                 }
+                // Fin de boucle = transport mort (EOF ou erreur de lecture).
+                let _ = c.dead_tx.send(());
             });
         }
         Ok(client)
