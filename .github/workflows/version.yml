@@ -73,7 +73,7 @@ jobs:
           # la plage couvre le cycle complet meme sur re-run.
           BOUND=""
           for c in $(git rev-list --grep='^chore: bump version' HEAD); do
-            v=$(git log -1 --format=%s "$c" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+            v=$(git log -1 --format=%s "$c" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | tail -1)
             if [ -n "$v" ] && git rev-parse -q --verify "refs/tags/v$v" >/dev/null 2>&1; then
               BOUND=$c; break
             fi

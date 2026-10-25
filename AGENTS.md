@@ -124,9 +124,10 @@ artefacts sur les PR (APK suffixé `-<sha>`).
 
 **Pas de bump par PR** — la version ne bouge qu'à la release. Le niveau
 est décidé par des **mots-clés parenthésés dans les sujets de commit**
-balayés sur le cycle (depuis le dernier `chore: bump version` de
-`next_release`, borne auto-entretenue — un tag `main` n'est jamais
-ancêtre des commits nr sous squash) :
+balayés sur le cycle (depuis le dernier `chore: bump version` **dont
+le tag `vX.Y.Z` existe** sur `next_release` — borne auto-entretenue :
+le bump du cycle courant, non encore tagué, n'est pas une borne ; un
+tag `main` n'est jamais ancêtre des commits nr sous squash) :
 
 - `(major)` → **major** ; `(minor)` ou `(sync)` → **minor** ;
   rien → **patch**
