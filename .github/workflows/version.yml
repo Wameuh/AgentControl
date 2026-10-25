@@ -19,6 +19,14 @@ permissions:
   contents: write
   pull-requests: read
 
+# Deux events proches (labeled + ready_for_review, labeled ×2…) → deux
+# jobs bump concurrents : le second push est non-fast-forward → échec.
+# cancel-in-progress=true : le run le plus récent gagne (l'event freeze
+# head.sha ; un run en attente checkout un vieux head et échouerait).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   bump:
     if: github.event.pull_request.draft != true

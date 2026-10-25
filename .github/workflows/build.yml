@@ -5,7 +5,7 @@ on:
     branches: [main]
     tags: ["v*"]
   # `ready_for_review` : le pipeline se lance au passage draft → ready.
-  # Sur une draft, chaque job est skippé (`draft != true`).
+  # Sur une PR draft, chaque job est skippé (`draft != true`).
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
