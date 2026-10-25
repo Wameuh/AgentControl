@@ -32,8 +32,9 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, ready_for_review]
 
-# Plancher moindre privilège pour tout futur job ; `release-bump` porte
-# son propre `contents: write` au niveau job.
+# Plancher moindre privilège : GITHUB_TOKEN en read partout — les
+# pushes partent via le PAT du checkout (RELEASE_PAT), jamais via
+# GITHUB_TOKEN.
 permissions:
   contents: read
 
@@ -131,8 +132,10 @@ jobs:
             exit 0
           fi
           # Durcissement : exécuter le script de la BASE, pas celui de
-          # la PR (le job tourne sous contents: write). ROOT du script
-          # dépend de __file__ → extraire dans le tree puis restaurer.
+          # la PR — le PAT du checkout est persisté dans la config git
+          # (persist-credentials) → tout code de PR dans ce step
+          # pourrait pusher avec. ROOT du script dépend de __file__ →
+          # extraire dans le tree puis restaurer.
           git show "origin/$BASE_REF:client/tools/bump_version.py" > client/tools/bump_version.py
           python3 client/tools/bump_version.py "$NEXT"
           git checkout HEAD -- client/tools/bump_version.py
