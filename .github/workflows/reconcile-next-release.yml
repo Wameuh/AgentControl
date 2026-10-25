@@ -15,18 +15,23 @@ name: reconcile-next-release
 # sur main doit être propagé dans nr ; si ça conflict le job échoue
 # (fail-closed — résolution manuelle requise, jamais de perte silencieuse).
 #
-# Push via secret RELEASE_PAT (PAT fine-grained, Contents RW) : le
-# ruleset ne peut pas bypasser github-actions[bot] (app first-party,
-# 422) et un push GITHUB_TOKEN ne déclencherait pas les checks sur le
-# head réconcilié — le PAT couvre les deux (bypass actor : role
-# `Repository admin`).
+# Push via secret RELEASE_PAT (PAT fine-grained, Contents RW +
+# Workflows RW — OBLIGATOIRE : le merge réconcilié importe dans
+# l'historique nr les squashs de main qui touchent .github/workflows,
+# et GitHub refuse un push PAT qui crée/modifie des workflows sans le
+# scope Workflows) : le ruleset ne peut pas bypasser
+# github-actions[bot] (app first-party, 422) et un push GITHUB_TOKEN
+# ne déclencherait pas les checks sur le head réconcilié — le PAT
+# couvre les deux (bypass actor : role `Repository admin`).
 
 on:
   push:
     branches: [main]
 
+# contents: write inutile : le push part en PAT (checkout token) ;
+# le fallback github.token n'atteint jamais le push (guard avant).
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: reconcile-next-release
@@ -42,12 +47,15 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.RELEASE_PAT || github.token }}
 
-      - name: Merge main into next_release
+      # Guard dédié : le PAT n'est pas injecté dans le step métier.
+      - name: Guard RELEASE_PAT
         env:
           RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
+        run: '[ -n "$RELEASE_PAT" ] || { echo "::error::secret RELEASE_PAT manquant"; exit 1; }'
+
+      - name: Merge main into next_release
         run: |
           set -e
-          [ -n "$RELEASE_PAT" ] || { echo "::error::secret RELEASE_PAT manquant"; exit 1; }
           git fetch origin next_release
           # main déjà ancêtre de nr (rien mergé depuis le dernier
           # reconcile) → rien à faire.

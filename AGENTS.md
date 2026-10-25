@@ -115,12 +115,17 @@ commit sur `next_release` (parents nr + main, vrai merge — hotfix
 prochaine release = tip `main` → plus de conflit.
 ⚠️ `release-bump` et `reconcile-next-release` poussent sur
 `next_release` via le secret **`RELEASE_PAT`** (PAT fine-grained du
-repo, Contents RW) : `github-actions[bot]` ne peut pas être bypass
-actor d'un ruleset (app first-party → 422), et un push `GITHUB_TOKEN`
-ne déclencherait pas les checks sur le head poussé (anti-récursion).
-Le ruleset `next_release` a le rôle **`Repository admin`** en bypass
-actor (Settings → Rules → Rulesets). Sans `RELEASE_PAT`, les deux
-jobs échouent fail-fast (« secret RELEASE_PAT manquant »).
+repo, **Contents RW + Workflows RW** — Workflows exigé par reconcile :
+le merge importe des squashs `main` touchant `.github/workflows`, et
+un PAT sans ce scope est refusé indépendamment du bypass ruleset) :
+`github-actions[bot]` ne peut pas être bypass actor d'un ruleset
+(app first-party → 422), et un push `GITHUB_TOKEN` ne déclencherait
+pas les checks sur le head poussé (anti-récursion). Le ruleset
+`next_release` a le rôle **`Repository admin`** en bypass actor
+(Settings → Rules → Rulesets). Sans `RELEASE_PAT`, les deux jobs
+échouent fail-fast (« secret RELEASE_PAT manquant ») ; les fine-grained
+PAT expirent → renouveler le secret à l'échéance (sinon échec opaque
+au checkout).
 
 ## Après chaque push : vérifier le CI
 

@@ -18,11 +18,13 @@ name: version
 #   les sujets des commits dans le body -> ecrire le mot-clef
 #   parenthese dans le sujet (ex. `feat: multi-agents (minor)`).
 #   Le bump est commit + push sur next_release par le workflow via le
-#   secret RELEASE_PAT (PAT fine-grained du repo, Contents RW) : les
-#   rulesets ne peuvent pas bypasser github-actions[bot] (422 : app
-#   first-party non installable) ET un push GITHUB_TOKEN ne declencherait
-#   pas les checks sur le head bumpe (anti-recursion) — le PAT resout
-#   les deux (le role `Repository admin` est en bypass actor du ruleset).
+#   secret RELEASE_PAT (PAT fine-grained du repo, Contents RW +
+#   Workflows RW — Workflows exige par reconcile, qui importe des
+#   historiques touchant .github/workflows) : les rulesets ne peuvent
+#   pas bypasser github-actions[bot] (422 : app first-party non
+#   installable) ET un push GITHUB_TOKEN ne declencherait pas les
+#   checks sur le head bumpe (anti-recursion) — le PAT resout les deux
+#   (le role `Repository admin` est en bypass actor du ruleset).
 #   Idempotent : package.json deja a NEXT -> skip.
 # Draft : pas de bump — le job repart au passage en ready_for_review.
 
@@ -52,8 +54,10 @@ jobs:
       && contains(github.event.pull_request.labels.*.name, 'release')
       && github.event.pull_request.draft != true
       && github.event.pull_request.head.repo.fork == false
+    # contents: write inutile : le push part en PAT (checkout token) ;
+    # le fallback github.token n'atteint jamais le push (guard avant).
     permissions:
-      contents: write
+      contents: read
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
@@ -65,14 +69,19 @@ jobs:
           # push déclenchent les checks (GITHUB_TOKEN ne le ferait pas).
           token: ${{ secrets.RELEASE_PAT || github.token }}
 
+      # Guard dédié : le PAT n'est pas injecté dans le step métier
+      # (ni dans bump_version.py ni ses sous-processus).
+      - name: Guard RELEASE_PAT
+        env:
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
+        run: '[ -n "$RELEASE_PAT" ] || { echo "::error::secret RELEASE_PAT manquant"; exit 1; }'
+
       - name: Bump depuis le dernier tag + mots-clés des commits
         env:
           BASE_REF: ${{ github.base_ref }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
         run: |
           set -e
-          [ -n "$RELEASE_PAT" ] || { echo "::error::secret RELEASE_PAT manquant"; exit 1; }
           git fetch --tags -q origin
           # Borne du scan = dernier bump DEJA RELEASE : iterer les
           # commits `chore: bump version`, extraire X.Y.Z du sujet,
