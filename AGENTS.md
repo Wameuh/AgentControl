@@ -27,14 +27,22 @@ retours de review/CI) → la repasser en draft **avant** d'y toucher :
 `gh pr ready --undo`, puis `gh pr ready` quand c'est fini.
 **Le CI ne tourne pas sur les drafts** (tous les jobs sont skippés) :
 le passage en ready (event `ready_for_review`) déclenche les 5
-checks — attendre le vert (`gh pr checks <N> --watch`) avant de
-considérer la PR prête à merger.
+checks — attendre le vert avant de considérer la PR prête à merger.
+⚠️ `gh pr checks <N> --watch` peut lire les check runs **périmés**
+(skipped de la phase draft ou du cycle précédent) tant que les runs
+`ready_for_review` ne sont pas enregistrés → vérifier d'abord
+`gh run list --workflow build.yml --branch <br> --limit 1 --json event,createdAt`
+(event `ready_for_review`, ou `createdAt` postérieur au ready),
+*puis* `--watch`.
 
 **Review auto** : une fois la PR ready, commenter `/mr review`
 (`gh pr comment <N> --body "/mr review"`), puis **poller les
-commentaires** (`gh api repos/{owner}/{repo}/issues/<N>/comments`)
-jusqu'à la review — typiquement quelques minutes ; dès qu'elle est
-postée, l'addresser, pas d'attente fixe (abandon ~10 min si rien).
+commentaires** jusqu'à la review — l'automation poste d'abord un
+ack (`Launching a review…`, sous le compte user) → filtrer sur
+l'auteur **bot** + le marqueur `## Review` :
+`gh api repos/{o}/{r}/issues/<N>/comments --jq '.[] | select(.user.login | startswith("devin-ai-integration")) | select(.body | startswith("## Review"))'`.
+Dès qu'elle est postée, l'addresser, pas d'attente fixe
+(abandon ~10 min si rien).
 Des changements à faire → repasser en draft (voir **Drafts**),
 corriger, `gh pr ready`, relancer `/mr review`.
 La commande se poste **seule** dans son commentaire : le trigger
