@@ -17,7 +17,7 @@ pub static RX_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static TX_TOTAL: AtomicU64 = AtomicU64::new(0);
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
-use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::sync::{broadcast, oneshot, watch, Mutex};
 
 type BoxedStream = Box<dyn AsyncRead + Unpin + Send>;
 type BoxedWriter = Box<dyn AsyncWrite + Unpin + Send>;
@@ -378,12 +378,33 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
 // Client
 // ---------------------------------------------------------------------------
 
+/// Retire l'entrée `pending` d'un `call` à la fin ou à l'annulation du
+/// future (timeout externe qui le droppe) — sinon elle fuirait jusqu'au
+/// drop du client. `try_lock` : best-effort, jamais de blocage en Drop.
+struct PendingGuard<'a> {
+    map: &'a Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
+    id: u64,
+}
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut m) = self.map.try_lock() {
+            m.remove(&self.id);
+        }
+    }
+}
+
 pub struct Client {
     w: Mutex<BoxedWriter>,
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
     next_id: AtomicU64,
     /// Tous les push (subscribe) du démon
     pub pushes: broadcast::Sender<Value>,
+    /// Signalé quand la boucle de lecture meurt (EOF/erreur transport) :
+    /// la connexion est perdue — le frontend peut le savoir sans attendre
+    /// l'échec d'un appel. Valeur `true` à la mort (un receiver cloné après
+    /// coup doit voir l'état via `wait_for`, pas seulement la transition).
+    pub dead: watch::Receiver<bool>,
+    dead_tx: watch::Sender<bool>,
     _guard: Option<Arc<SshGuard>>,
 }
 
@@ -407,11 +428,14 @@ impl Client {
                 }
             }
         };
+        let (dead_tx, dead) = watch::channel(false);
         let client = Arc::new(Self {
             w: Mutex::new(w),
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             pushes: broadcast::channel(512).0,
+            dead,
+            dead_tx,
             _guard: guard,
         });
         // Reader task : dispatch responses / pushes
@@ -442,6 +466,8 @@ impl Client {
                         }
                     }
                 }
+                // Fin de boucle = transport mort (EOF ou erreur de lecture).
+                let _ = c.dead_tx.send(true);
             });
         }
         Ok(client)
@@ -457,6 +483,10 @@ impl Client {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
+        // La future peut être droppée en vol (timeout externe, JoinSet) ou
+        // timeout interne → sans guard l'entrée pending fuirait jusqu'au
+        // drop du client.
+        let _pending_guard = PendingGuard { map: &self.pending, id };
         let mut s = serde_json::to_string(&Request { id, req })?;
         s.push('\n');
         {

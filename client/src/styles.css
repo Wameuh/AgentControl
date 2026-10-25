@@ -432,7 +432,7 @@ button:disabled { opacity: .5; cursor: default; }
   border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; font: inherit;
 }
 #input:focus { border-color: var(--sand); outline: none; }
-#cmd-select, #mode-select, #model-select, #effort-select, #model-free {
+#cmd-select, #mode-select, #model-select, #effort-select, #model-free, #dyn-opts select {
   background: var(--panel-solid); color: var(--ink);
   border: 1px solid var(--line); border-radius: 8px; padding: 5px 7px;
   font: inherit; font-size: 12.5px; max-width: 190px;
@@ -593,6 +593,14 @@ details.th[open] > summary::before { content: "▾ "; }
   background: rgba(224, 201, 150, .08);
 }
 .grp-arrow { width:10px; opacity:.7 }
+
+/* État de connexion dans le header de groupe */
+.conn-st { flex:none; font-size:10px; line-height:1 }
+.conn-st.ok { color:var(--sage) }
+.conn-st.warn { color:var(--gold); cursor:pointer; display:inline-block; animation:spin 1.1s linear infinite }
+.conn-st.bad { color:var(--err); cursor:pointer }
+#conn-chip { flex:none; cursor:pointer }
+#session-list .sess.offline { opacity:.45 }
 
 /* Dialogue install/update démon */
 .daemon-dlg { display:flex; gap:12px; align-items:center; padding:6px 0; }

@@ -67,6 +67,18 @@ le filtre de noms doit suivre les jobs required de `build.yml`. Sans
 la branche d'échec, un head tout-skippé ressortirait vert après ~5
 min — le cas exact que le gate détecte.
 
+**Rebase avant review** : si `origin/next_release` a avancé depuis la
+branche — `git merge-base --is-ancestor origin/next_release HEAD` faux
+**après `git fetch`**, ou `gh pr view <N> --json mergeable` →
+`CONFLICTING` (`UNKNOWN` = calcul async GitHub → retry, pas « ok ») —
+rebase/merge **avant** de lancer la review. Le verdict est ancré au SHA
+du head : tout push ultérieur l'invalide → la review est perdue et un
+round de plus est obligatoire (arrivé : #35 approved sur une base
+stale → rebase → re-review). Une base à jour évite aussi de faire
+reviewer un diff que le merge réécrira. Si `next_release` avance entre
+l'APPROVED et le merge, le verdict reste valide mais GitHub peut
+refuser le merge sur conflit → rebase + re-review.
+
 **Review auto** : quand le travail semble fini **(PR encore draft)**,
 **noter `TS=$(date -u +%FT%TZ)`**, commenter `/mr review`
 (`gh pr comment <N> --body "/mr review"`),
@@ -99,7 +111,12 @@ Pousser les commits et bumper la version, oui — tagguer/publier, non.
 La **release PR est auto-créée** par `auto-release-pr.yml` : à chaque
 push sur `next_release`, une PR draft `next_release` → `main` est
 ouverte si absente — pour releaser il suffit de lui poser le label
-`release` et de la passer ready.
+`release` et de la passer ready. La création passe par
+**`RELEASE_PAT`** (fallback `GITHUB_TOKEN`) : le réglage repo
+« Allow GitHub Actions to create and approve pull requests » interdit
+`createPullRequest` au `GITHUB_TOKEN` ; sans `Pull requests: RW` sur le
+PAT le job échoue rouge (arrivé : run 40210287826, tentatives avant
+l'ajout du scope).
 
 Release = PR `next_release` → `main` avec le label **`release`** →
 le job `release-bump` de `version.yml` calcule `dernier tag + niveau`,
@@ -119,18 +136,21 @@ commit sur `next_release` (parents nr + main, vrai merge — hotfix
 `main` propagé, conflit = job rouge fail-closed) → la merge-base de la
 prochaine release = tip `main` → plus de conflit.
 ⚠️ `release-bump` et `reconcile-next-release` poussent sur
-`next_release` via le secret **`RELEASE_PAT`** (PAT fine-grained du
-repo, **Contents RW + Workflows RW** — Workflows exigé par reconcile :
-le merge importe des squashs `main` touchant `.github/workflows`, et
-un PAT sans ce scope est refusé indépendamment du bypass ruleset) :
+`next_release` via le secret **`RELEASE_PAT`**, qu'`auto-release-pr`
+utilise aussi pour créer la release PR. PAT fine-grained du repo,
+scopes requis : **Contents RW** (les deux pushes), **Workflows RW**
+(reconcile : le merge importe des squashs `main` touchant
+`.github/workflows`, un PAT sans ce scope est refusé indépendamment du
+bypass ruleset), **Pull requests RW** (auto-release-pr :
+`createPullRequest`) :
 `github-actions[bot]` ne peut pas être bypass actor d'un ruleset
 (app first-party → 422), et un push `GITHUB_TOKEN` ne déclencherait
 pas les checks sur le head poussé (anti-récursion). Le ruleset
 `next_release` a le rôle **`Repository admin`** en bypass actor
-(Settings → Rules → Rulesets). Sans `RELEASE_PAT`, les deux jobs
-échouent fail-fast (« secret RELEASE_PAT manquant ») ; les fine-grained
-PAT expirent → renouveler le secret à l'échéance (sinon échec opaque
-au checkout).
+(Settings → Rules → Rulesets). Sans `RELEASE_PAT`, un push réellement
+nécessaire échoue fail-fast (« secret RELEASE_PAT manquant ») — rien à
+pousser → skip clean, pas d'échec ; les fine-grained PAT expirent →
+renouveler le secret à l'échéance (sinon échec opaque au checkout).
 
 ## Après chaque push : vérifier le CI
 
