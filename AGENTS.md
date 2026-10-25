@@ -68,13 +68,16 @@ la branche d'échec, un head tout-skippé ressortirait vert après ~5
 min — le cas exact que le gate détecte.
 
 **Rebase avant review** : si `origin/next_release` a avancé depuis la
-branche — `git merge-base --is-ancestor origin/next_release HEAD` faux,
-ou `gh pr view <N> --json mergeable` → `CONFLICTING` — rebase/merge
-**avant** de lancer la review. Le verdict est ancré au SHA du head :
-tout push ultérieur l'invalide → la review est perdue et un round de
-plus est obligatoire (arrivé : #35 approved sur une base stale →
-rebase → re-review). Une base à jour évite aussi de faire reviewer un
-diff que le merge réécrira.
+branche — `git merge-base --is-ancestor origin/next_release HEAD` faux
+**après `git fetch`**, ou `gh pr view <N> --json mergeable` →
+`CONFLICTING` (`UNKNOWN` = calcul async GitHub → retry, pas « ok ») —
+rebase/merge **avant** de lancer la review. Le verdict est ancré au SHA
+du head : tout push ultérieur l'invalide → la review est perdue et un
+round de plus est obligatoire (arrivé : #35 approved sur une base
+stale → rebase → re-review). Une base à jour évite aussi de faire
+reviewer un diff que le merge réécrira. Si `next_release` avance entre
+l'APPROVED et le merge, le verdict reste valide mais GitHub peut
+refuser le merge sur conflit → rebase + re-review.
 
 **Review auto** : quand le travail semble fini **(PR encore draft)**,
 **noter `TS=$(date -u +%FT%TZ)`**, commenter `/mr review`
