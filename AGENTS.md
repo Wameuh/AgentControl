@@ -15,10 +15,15 @@ Workflow : créer une branche depuis `next_release` → push →
 `gh pr create --base next_release --draft` → finir le travail →
 `/mr review` **sur la draft** → traiter la review (fix → push →
 relancer, toujours en draft) → review soldée → `gh pr ready`
-(≥30 s après le dernier push) → attendre les 5 checks verts →
-**l'utilisateur merge** (jamais l'agent : ni `gh pr merge`, ni
-`git merge`, ni API — un hook `.devin/` le bloque, et c'est interdit
-même sans le hook). PR déjà mergée par l'utilisateur ?
+(≥30 s après le dernier push) → attendre les 5 checks verts → merge.
+**Merge** : vers `main`, toujours l'utilisateur. Vers `next_release`,
+**l'agent peut merger** via `gh pr merge <N>` quand la dernière review
+auto porte un verdict **`Verdict: APPROVED` en titre** postérieur au
+push du head courant (fraîcheur vérifiée via les PushEvents du repo) —
+sinon le hook `.devin/` bloque (`git merge`, API, GraphQL, `--admin`,
+`main` : toujours interdits). Tripwire : un commentaire `Verdict:
+APPROVED` auto-posté passerait — la règle reste de ne merger que sur
+review réelle. PR déjà mergée ?
 `git checkout next_release && git pull` pour resynchroniser.
 Le CI build tous les artefacts sur les PR (APK suffixé `-<sha>`).
 
