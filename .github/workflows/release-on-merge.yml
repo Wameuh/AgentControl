@@ -7,8 +7,9 @@ name: release-on-merge
 #   Idempotent : si le tag v<version> existe déjà → skip (version non
 #   bumpée = rien à releaser).
 #
-#   label `sync` → voir version.yml : bump minor (client+daemon doivent
-#   être déployés ensemble ; déclenche l'auto-update des démons).
+#   Le bump lui-même est fait en amont par le job `release-bump` de
+#   version.yml sur la PR de release (niveau = mots-clés `(major)` /
+#   `(minor)` / `(sync)` dans les commits du cycle → cf. version.yml).
 
 on:
   push:
