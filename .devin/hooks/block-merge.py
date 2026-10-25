@@ -83,6 +83,14 @@ def pr_target(seg, nwo):
         t = toks[j]
         if t == "--admin":
             return "", False
+        # redirections shell : ">f"/"2>&1" en un token, "> f" en deux
+        # — sans ça la cible de redirect passerait pour un positionnel.
+        if re.fullmatch(r"\d*(>>?|<)", t):
+            j += 2
+            continue
+        if re.match(r"\d*(>>?|<|>&|<&)", t) or t == "&":
+            j += 1
+            continue
         if t in BOOL_FLAGS:
             j += 1
             continue
