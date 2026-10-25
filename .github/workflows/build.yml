@@ -10,6 +10,11 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
+# Moindre privilège : les jobs de build n'ont besoin que de lire le
+# dépôt ; le job `release` porte son propre `contents: write`.
+permissions:
+  contents: read
+
 # Draft ↔ ready et pushes rapides : annule les runs obsolètes d'une
 # même PR (sur tags/main le group est par ref → pas d'annulation).
 concurrency:
@@ -22,6 +27,7 @@ jobs:
   # -----------------------------------------------------------------
   daemon-linux:
     if: github.event.pull_request.draft != true
+    timeout-minutes: 30
     strategy:
       matrix:
         include:
@@ -51,6 +57,7 @@ jobs:
   # -----------------------------------------------------------------
   client:
     if: github.event.pull_request.draft != true
+    timeout-minutes: 45
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
@@ -108,6 +115,7 @@ jobs:
   # -----------------------------------------------------------------
   client-android:
     if: github.event.pull_request.draft != true
+    timeout-minutes: 45
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

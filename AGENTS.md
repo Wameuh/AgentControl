@@ -39,9 +39,9 @@ métadonnées de runs (`workflow_run.event` ne rapporte jamais
 ```bash
 SHA=$(gh pr view <N> --json headRefOid -q .headRefOid)
 for i in $(seq 1 20); do
-  COUNT=$(gh api "repos/{owner}/{repo}/commits/$SHA/check-runs?per_page=100" --jq \
-    '[.check_runs[] | select(.name | test("^(daemon-linux|client)( |-|$)"))
-      | select(.conclusion != "skipped" and .conclusion != "cancelled")] | length' || echo 0)
+  COUNT=$(gh api --paginate "repos/{owner}/{repo}/commits/$SHA/check-runs?per_page=100" --jq \
+    '.check_runs[] | select(.name | test("^(daemon-linux|client)( |-|$)"))
+      | select(.conclusion != "skipped" and .conclusion != "cancelled") | .name' | wc -l)
   [ "$COUNT" -gt 0 ] && break; sleep 15
 done
 if [ "${COUNT:-0}" -eq 0 ]; then
