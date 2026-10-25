@@ -70,7 +70,9 @@ Dès qu'elle est postée, l'addresser, pas d'attente fixe
 Des changements à faire → repasser en draft (voir **Drafts**),
 corriger, `gh pr ready`, relancer `/mr review`. NB : une review
 lancée juste après un push peut lire un diff périmé → ancrer la
-lecture sur `headRefOid`.
+lecture sur `headRefOid` — mais `headRefOid`/`isDraft` peuvent
+eux-mêmes lagger ~1 min post-push → recouper avec le tip de branche
+(`gh api repos/{owner}/{repo}/branches/<br>`) ou attendre ~60 s.
 La commande se poste **seule** dans son commentaire : le trigger
 matche `contains` sur le body → toute citation de `/mr review` dans
 un autre commentaire relance une session (pour la citer :

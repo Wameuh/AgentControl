@@ -15,9 +15,6 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, ready_for_review]
 
-permissions:
-  contents: write
-
 # Deux events proches (labeled + ready_for_review, labeled ×2…) → deux
 # jobs bump concurrents : le second push est non-fast-forward → échec.
 # cancel-in-progress=true : le run le plus récent gagne (l'event freeze
@@ -30,6 +27,9 @@ jobs:
   bump:
     # fork : GITHUB_TOKEN read-only → le push échouerait → skip.
     if: github.event.pull_request.draft != true && github.event.pull_request.head.repo.fork == false
+    permissions:
+      contents: write
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
