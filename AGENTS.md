@@ -91,6 +91,11 @@ un autre commentaire relance une session (pour la citer :
 **Pas de tag `v*` ni de release sans demande explicite de l'utilisateur.**
 Pousser les commits et bumper la version, oui — tagguer/publier, non.
 
+La **release PR est auto-créée** par `auto-release-pr.yml` : à chaque
+push sur `next_release`, une PR draft `next_release` → `main` est
+ouverte si absente — pour releaser il suffit de lui poser le label
+`release` et de la passer ready.
+
 Release = PR `next_release` → `main` avec le label **`release`** →
 le job `release-bump` de `version.yml` calcule `dernier tag + niveau`,
 commit `chore: bump version` poussé sur `next_release` (la PR se met
