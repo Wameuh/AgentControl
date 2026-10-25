@@ -13,7 +13,8 @@ Deux branches protégées (**push direct impossible**, PR obligatoire,
 
 Workflow : créer une branche depuis `next_release` → push →
 `gh pr create --base next_release --draft` → finir le travail →
-`gh pr ready` → attendre les 5 checks verts →
+`gh pr ready` + commenter `/mr review` → traiter la review +
+attendre les 5 checks verts →
 **l'utilisateur merge** (jamais l'agent : ni `gh pr merge`, ni
 `git merge`, ni API — un hook `.devin/` le bloque, et c'est interdit
 même sans le hook). PR déjà mergée par l'utilisateur ?
@@ -27,6 +28,12 @@ retours de review/CI) → la repasser en draft **avant** d'y toucher :
 **Le CI ne tourne pas sur les drafts** (tous les jobs sont skippés) :
 le passage en ready (event `ready_for_review`) déclenche les 5
 checks — attendre le vert avant de considérer la PR prête à merger.
+
+**Review auto** : une fois la PR ready, commenter `/mr review`
+(`gh pr comment <N> --body "/mr review"`), attendre ~10 min
+(`sleep 600`), lire le nouveau commentaire — c'est la review — et
+l'addresser. Des changements à faire → repasser en draft (voir
+**Drafts**), corriger, `gh pr ready`, relancer `/mr review`.
 
 ## Releases
 
