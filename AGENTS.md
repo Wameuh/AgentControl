@@ -131,7 +131,10 @@ Manuel hors-PR : `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]
   redéployer : `systemctl --user stop agentcontrol-daemon && cp target/release/agentcontrol-daemon ~/.local/bin/ && systemctl --user start agentcontrol-daemon`.
   ⚠️ Le restart tue les agents en cours (sessions → interrupted).
 - **Suppression d'un crate/binaire** : penser au workflow CI
-  (`-p <crate>` dans build.yml) et à `CRATES` dans `tools/bump_version.py`.
+  (`-p <crate>` dans build.yml) et à `CRATES` dans `tools/bump_version.py`
+  (le bump de la PR exécute le script de la **base** → éditer `CRATES`
+  n'aide que les bumps post-merge ; crate retiré = job rouge
+  fail-closed, non bloquant).
 
 ## Android
 

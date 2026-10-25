@@ -15,6 +15,11 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, ready_for_review]
 
+# Plancher moindre privilège pour tout futur job ; `bump` porte son
+# propre `contents: write` au niveau job.
+permissions:
+  contents: read
+
 # Deux events proches (labeled + ready_for_review, labeled ×2…) → deux
 # jobs bump concurrents : le second push est non-fast-forward → échec.
 # cancel-in-progress=true : le run le plus récent gagne (l'event freeze
