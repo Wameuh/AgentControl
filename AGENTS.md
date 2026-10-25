@@ -21,11 +21,12 @@ même sans le hook). PR déjà mergée par l'utilisateur ?
 Le CI build tous les artefacts sur les PR (APK suffixé `-<sha>`).
 
 **Drafts** : une PR reste en **draft tant qu'on travaille dessus**.
-Des ajouts sont prévus sur une PR non-draft → la repasser en draft
-**avant** de pousser : `gh pr ready --undo`. **Le CI ne tourne pas
-sur les drafts** (tous les jobs sont skippés) : le passage en ready
-(`gh pr ready`, event `ready_for_review`) déclenche les 5 checks —
-attendre le vert avant de considérer la PR prête à merger.
+**Tout changement à faire sur une PR non-draft** (ajouts, fixes,
+retours de review/CI) → la repasser en draft **avant** d'y toucher :
+`gh pr ready --undo`, puis `gh pr ready` quand c'est fini.
+**Le CI ne tourne pas sur les drafts** (tous les jobs sont skippés) :
+le passage en ready (event `ready_for_review`) déclenche les 5
+checks — attendre le vert avant de considérer la PR prête à merger.
 
 ## Releases
 
