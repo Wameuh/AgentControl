@@ -15,10 +15,15 @@ Workflow : créer une branche depuis `next_release` → push →
 `gh pr create --base next_release --draft` → finir le travail →
 `/mr review` **sur la draft** → traiter la review (fix → push →
 relancer, toujours en draft) → review soldée → `gh pr ready`
-(≥30 s après le dernier push) → attendre les 5 checks verts →
-**l'utilisateur merge** (jamais l'agent : ni `gh pr merge`, ni
-`git merge`, ni API — un hook `.devin/` le bloque, et c'est interdit
-même sans le hook). PR déjà mergée par l'utilisateur ?
+(≥30 s après le dernier push) → attendre les 5 checks verts → merge.
+**Merge** : vers `main`, toujours l'utilisateur. Vers `next_release`,
+**l'agent peut merger** via `gh pr merge <N>` quand la dernière review
+auto porte un verdict **`Verdict: APPROVED` en titre** postérieur au
+push du head courant (fraîcheur vérifiée via les PushEvents du repo) —
+sinon le hook `.devin/` bloque (`git merge`, API, GraphQL, `--admin`,
+`main` : toujours interdits). Tripwire : un commentaire `Verdict:
+APPROVED` auto-posté passerait — la règle reste de ne merger que sur
+review réelle. PR déjà mergée ?
 `git checkout next_release && git pull` pour resynchroniser.
 Le CI build tous les artefacts sur les PR (APK suffixé `-<sha>`).
 
@@ -91,12 +96,41 @@ un autre commentaire relance une session (pour la citer :
 **Pas de tag `v*` ni de release sans demande explicite de l'utilisateur.**
 Pousser les commits et bumper la version, oui — tagguer/publier, non.
 
+La **release PR est auto-créée** par `auto-release-pr.yml` : à chaque
+push sur `next_release`, une PR draft `next_release` → `main` est
+ouverte si absente — pour releaser il suffit de lui poser le label
+`release` et de la passer ready.
+
 Release = PR `next_release` → `main` avec le label **`release`** →
-au merge (par l'utilisateur), `release-on-merge.yml` tague `v<version>`
-(lu depuis `client/package.json`) et dispatche `build.yml` sur le tag
-(le push de tag via GITHUB_TOKEN ne déclenche pas les workflows d'où le
+le job `release-bump` de `version.yml` calcule `dernier tag + niveau`,
+commit `chore: bump version` poussé sur `next_release` (la PR se met
+à jour, les 5 checks tournent sur le head bumpé) → au merge (par
+l'utilisateur), `release-on-merge.yml` tague `v<version>` (lu depuis
+`client/package.json`) et dispatche `build.yml` sur le tag (le push
+de tag via GITHUB_TOKEN ne déclenche pas les workflows d'où le
 dispatch). Idempotent : tag existant → skip. Sans label `release`, un
 merge dans `main` ne tague rien.
+
+**Reconcile** : tout merge nr→main est un squash → le commit `main`
+n'est jamais ancêtre des commits nr, et la release suivante
+reconflicterait sur toute zone retouchée (arrivé : #23, #29). Le job
+`reconcile-next-release` (push sur `main`) refait le lien : merge
+commit sur `next_release` (parents nr + main, vrai merge — hotfix
+`main` propagé, conflit = job rouge fail-closed) → la merge-base de la
+prochaine release = tip `main` → plus de conflit.
+⚠️ `release-bump` et `reconcile-next-release` poussent sur
+`next_release` via le secret **`RELEASE_PAT`** (PAT fine-grained du
+repo, **Contents RW + Workflows RW** — Workflows exigé par reconcile :
+le merge importe des squashs `main` touchant `.github/workflows`, et
+un PAT sans ce scope est refusé indépendamment du bypass ruleset) :
+`github-actions[bot]` ne peut pas être bypass actor d'un ruleset
+(app first-party → 422), et un push `GITHUB_TOKEN` ne déclencherait
+pas les checks sur le head poussé (anti-récursion). Le ruleset
+`next_release` a le rôle **`Repository admin`** en bypass actor
+(Settings → Rules → Rulesets). Sans `RELEASE_PAT`, les deux jobs
+échouent fail-fast (« secret RELEASE_PAT manquant ») ; les fine-grained
+PAT expirent → renouveler le secret à l'échéance (sinon échec opaque
+au checkout).
 
 ## Après chaque push : vérifier le CI
 
@@ -110,22 +144,32 @@ gh run view <id> --log-failed   # si failure
 Le workflow `.github/workflows/build.yml` build : daemon x86_64+aarch64,
 client Tauri Ubuntu+Windows, et publie une release sur les tags `v*`.
 
-## Version automatique (labels de PR)
+## Version automatique (mots-clés de commit)
 
 PR → **`next_release`** (pas `main` directement). 5 checks requis
 (`daemon-linux` ×2, `client` ×2, `client-android`). Le CI build les
 artefacts sur les PR (APK suffixé `-<sha>`).
 
-Le workflow `version.yml` bump la version selon les labels de la PR :
-- `daemon` et/ou `client` : composants touchés → bump **patch**
-- `sync` : daemon+client à déployer ensemble → bump **minor**
-- `patch` / `minor` / `major` : niveau explicite (prioritaire)
-- `release` : pas de bump — au merge, tag + release (voir plus haut)
-- aucun label composante → pas de bump (docs, CI…)
-- `minor` = incompatibilité client↔démon (déclenche l'auto-update)
+**Pas de bump par PR** — la version ne bouge qu'à la release. Le niveau
+est décidé par des **mots-clés parenthésés dans les sujets de commit**
+balayés sur le cycle (depuis le dernier `chore: bump version` **dont
+le tag `vX.Y.Z` existe** sur `next_release` — borne auto-entretenue :
+le bump du cycle courant, non encore tagué, n'est pas une borne ; un
+tag `main` n'est jamais ancêtre des commits nr sous squash) :
 
-Le commit `chore: bump version` est poussé sur la branche automatiquement ;
-ne pas bumper à la main en parallèle (le job skip si déjà bumpé vs base).
+- `(major)` → **major** ; `(minor)` ou `(sync)` → **minor** ;
+  rien → **patch**
+- `(sync)`/`(minor)` = incompatibilité client↔démon (déclenche
+  l'auto-update) — le plus fort rencontré gagne.
+- Écrire le mot-clé **parenthésé** dans le sujet du commit qui le
+  motive : `feat: multi-agents (minor)` — un mot nu (`a major bug`)
+  ne doit pas compter. **Au squash, l'élément doit être repris** —
+  GitHub inclut par défaut les sujets dans le body du squash : ne pas
+  l'éditer hors du message.
+- La release numérote depuis le **dernier tag semver**, pas depuis
+  `package.json` — la version fichier peut dériver entre releases,
+  elle est recalée au bump de release.
+
 Manuel hors-PR : `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]`.
 
 ## Avant chaque push (branche de PR)

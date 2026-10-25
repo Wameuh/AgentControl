@@ -1,0 +1,63 @@
+name: auto-release-pr
+
+# Après chaque push sur next_release (merge d'une PR feature/fix) :
+# s'assurer qu'une PR de release next_release -> main existe.
+#
+# La PR est créée en **draft, sans label** — elle accumule les merges
+# silencieusement (draft → synchronize = runs tout-skip, zéro CI).
+# Pour releaser : label `release` + `gh pr ready` → release-bump pousse
+# `chore: bump version to <NEXT>` sur next_release (dernier tag +
+# mots-clés des commits), les 5 checks tournent sur le head bumpé,
+# merge par l'utilisateur → tag + build dispatch.
+#
+# Les pushes via GITHUB_TOKEN (release-bump, reconcile) ne déclenchent
+# pas les workflows — pas de boucle ; et à ce stade du cycle la PR
+# existe de toute façon déjà.
+
+on:
+  push:
+    branches: [next_release]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: auto-release-pr
+  cancel-in-progress: false
+
+jobs:
+  ensure-release-pr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Corps de la PR
+        run: |
+          cat > "$RUNNER_TEMP/release-pr-body.md" <<'EOF'
+          Release PR auto-créée — accumule les merges de `next_release`.
+
+          Pour releaser : ajouter le label **`release`** + passer la PR
+          ready → `release-bump` pousse le bump de version
+          (`dernier tag + niveau`, mots-clés `(minor)`/`(major)`/`(sync)`
+          des commits du cycle) → les 5 checks tournent sur le head
+          bumpé → merge → `release-on-merge` tague `v<NEXT>` et
+          dispatche le build de release.
+          EOF
+
+      - name: Ouvrir la release PR si absente
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -e
+          OPEN=$(gh pr list --base main --head next_release --state open \
+            --json number --jq 'length')
+          if [ "$OPEN" -gt 0 ]; then
+            echo "release PR déjà ouverte → skip"
+            exit 0
+          fi
+          gh pr create --base main --head next_release --draft \
+            --title "Next release" \
+            --body-file "$RUNNER_TEMP/release-pr-body.md" \
+            || echo "création échouée — PR créée entre-temps ?"
+          echo "release PR créée (draft)"
