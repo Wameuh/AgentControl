@@ -74,7 +74,6 @@ jobs:
         id: bump
         env:
           BASE_REF: ${{ github.base_ref }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -e
           git fetch --tags -q origin
