@@ -401,6 +401,22 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         "kill_session" => ReqKind::KillSession { session: s("session") },
         "clear_session" => ReqKind::ClearSession { session: s("session") },
         "fork_session" => ReqKind::ForkSession { session: s("session") },
+        "peer_send" => ReqKind::PeerSend {
+            from: s("from"),
+            session: s("session"),
+            text: s("text"),
+            delivery: s("delivery"),
+        },
+        "peer_spawn" => ReqKind::PeerSpawn {
+            from: s("from"),
+            agent: so("agent"),
+            cwd: so("cwd"),
+            title: so("title"),
+            model: so("model"),
+            mode: so("mode"),
+            prompt: so("prompt"),
+            group: so("group"),
+        },
         m => return Err(format!("méthode inconnue: {m}")),
     })
 }

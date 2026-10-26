@@ -102,6 +102,18 @@ pub struct A2aCfg {
     /// Borne les boucles de réponse agent↔agent.
     #[serde(default = "d20")]
     pub rate_per_min: u32,
+    /// Max sessions créées par minute et par session créatrice
+    /// (peer_spawn) — borne une boucle de spawn qui coûterait un agent +
+    /// des tokens par itération. 0 = illimité (comme rate_per_min).
+    #[serde(default = "d10")]
+    pub spawn_per_min: u32,
+    /// Max sessions agent→agent existantes au total (spawned_by non
+    /// nul, vivantes ou mortes) — borne le fan-out récursif : chaque
+    /// fille étant une créatrice, le seul rate-limit par créatrice
+    /// laisserait l'arbre croître de façon exponentielle.
+    /// 0 = spawn agent→agent interdit.
+    #[serde(default = "d20")]
+    pub spawn_max_sessions: u32,
 }
 
 fn dtrue() -> bool {
@@ -110,12 +122,17 @@ fn dtrue() -> bool {
 fn d20() -> u32 {
     20
 }
+fn d10() -> u32 {
+    10
+}
 
 impl Default for A2aCfg {
     fn default() -> Self {
         Self {
             enabled: true,
             rate_per_min: 20,
+            spawn_per_min: 10,
+            spawn_max_sessions: 20,
         }
     }
 }
@@ -129,6 +146,10 @@ pub struct Daemon {
     /// Horodatage des envois agent→agent par paire (from,to) — rate-limit.
     peer_rate: std::sync::Mutex<
         HashMap<(String, String), std::collections::VecDeque<std::time::Instant>>,
+    >,
+    /// Horodatage des spawns agent→agent par session créatrice.
+    spawn_rate: std::sync::Mutex<
+        HashMap<String, std::collections::VecDeque<std::time::Instant>>,
     >,
 }
 
@@ -147,6 +168,7 @@ impl Daemon {
             retention,
             a2a,
             peer_rate: std::sync::Mutex::new(HashMap::new()),
+            spawn_rate: std::sync::Mutex::new(HashMap::new()),
         });
         let sdir = root.join("sessions");
         if sdir.exists() {
@@ -272,6 +294,33 @@ impl Daemon {
         Ok(())
     }
 
+    /// Rate-limit par session créatrice (peer_spawn) — borne une boucle de
+    /// création de sessions (un process agent + des tokens par spawn).
+    /// 0 = illimité ; le cap global spawn_max_sessions borne le fan-out.
+    fn spawn_rate_check(&self, from: &str) -> Result<()> {
+        if self.a2a.spawn_per_min == 0 {
+            return Ok(());
+        }
+        let now = std::time::Instant::now();
+        let mut m = self.spawn_rate.lock().unwrap();
+        let q = m.entry(from.into()).or_default();
+        while q
+            .front()
+            .map(|t| now.duration_since(*t).as_secs() >= 60)
+            .unwrap_or(false)
+        {
+            q.pop_front();
+        }
+        if q.len() >= self.a2a.spawn_per_min as usize {
+            anyhow::bail!(
+                "rate-limit spawn : {} sessions/min dépassé (créatrice {from})",
+                self.a2a.spawn_per_min
+            );
+        }
+        q.push_back(now);
+        Ok(())
+    }
+
     /// Cible morte : respawn de l'agent (même mécanique que ResumeSession)
     /// puis livraison du message.
     async fn resume_and_deliver(&self, session: &str, wrapped: String, steer: bool) -> Result<()> {
@@ -371,6 +420,7 @@ impl Daemon {
                     pending_config: Default::default(),
                     state: "starting".into(),
                     group: None,
+                    spawned_by: None,
                     context_used: None,
                     context_size: None,
                 };
@@ -425,6 +475,7 @@ impl Daemon {
                     pending_config: Default::default(),
                     state: "starting".into(),
                     group: None,
+                    spawned_by: None,
                     context_used: None,
                     context_size: None,
                 };
@@ -714,6 +765,162 @@ impl Daemon {
                     });
                     Ok(json!({"queued": true, "resumed": true}))
                 }
+            }
+            ReqKind::PeerSpawn {
+                from,
+                agent,
+                cwd,
+                title,
+                model,
+                mode,
+                prompt,
+                group,
+            } => {
+                if !self.a2a.enabled {
+                    anyhow::bail!("a2a désactivé (config [a2a] enabled)");
+                }
+                let creator = self.get_session(&from).await?;
+                let cm = creator.meta_snapshot();
+                self.spawn_rate_check(&from)?;
+                // Cap global de sessions agent→agent : chaque fille est
+                // une créatrice avec son propre budget rate — sans borne
+                // absolue un arbre de délégation croît de façon
+                // exponentielle. 0 = spawn interdit.
+                if self.a2a.spawn_max_sessions == 0 {
+                    anyhow::bail!(
+                        "spawn agent→agent désactivé (config [a2a] spawn_max_sessions)"
+                    );
+                }
+                let spawned = {
+                    let sessions = self.sessions.read().await;
+                    sessions
+                        .values()
+                        .filter(|s| s.meta_snapshot().spawned_by.is_some())
+                        .count()
+                };
+                if spawned >= self.a2a.spawn_max_sessions as usize {
+                    anyhow::bail!(
+                        "cap de sessions agent→agent atteint \
+                        ({spawned} ≥ spawn_max_sessions={})",
+                        self.a2a.spawn_max_sessions
+                    );
+                }
+
+                let agent_id = agent.unwrap_or_else(|| cm.agent.clone());
+                let profile = self
+                    .agents
+                    .get(&agent_id)
+                    .with_context(|| format!("agent inconnu: {agent_id}"))?
+                    .clone();
+                // Modèle/mode hérités seulement si même agent : leur
+                // vocabulaire est propre à chaque CLI ("bypass" devin ne
+                // veut rien dire pour claude).
+                let same_agent = agent_id == cm.agent;
+                let cwd = cwd.unwrap_or_else(|| cm.cwd.clone());
+                if !std::path::Path::new(&cwd).is_dir() {
+                    anyhow::bail!("cwd introuvable: {cwd}");
+                }
+                let prompt = prompt.filter(|p| !p.trim().is_empty());
+                let title = title
+                    .filter(|t| !t.trim().is_empty())
+                    .or_else(|| {
+                        prompt.as_deref().and_then(|p| {
+                            let t: String =
+                                p.lines().next().unwrap_or("").chars().take(48).collect();
+                            if t.is_empty() {
+                                None
+                            } else {
+                                Some(t)
+                            }
+                        })
+                    })
+                    .unwrap_or_else(|| format!("spawn:{from}"));
+                let meta = SessionMeta {
+                    id: proto::new_id("s"),
+                    agent: agent_id.clone(),
+                    title: title.clone(),
+                    cwd,
+                    created_at: proto::now_iso(),
+                    native_session_id: None,
+                    mode: mode.or(if same_agent { cm.mode.clone() } else { None }),
+                    model: model.or(if same_agent { cm.model.clone() } else { None }),
+                    available_modes: vec![],
+                    available_commands: vec![],
+                    available_models: vec![],
+                    config_options: vec![],
+                    pending_config: Default::default(),
+                    state: "starting".into(),
+                    group: group.or_else(|| cm.group.clone()),
+                    spawned_by: Some(from.clone()),
+                    context_used: None,
+                    context_size: None,
+                };
+                let dir = Session::create_dir(&self.root, &meta)?;
+                let session2 = Session::open(dir)?;
+                let sid2 = meta.id.clone();
+                self.sessions
+                    .write()
+                    .await
+                    .insert(sid2.clone(), session2.clone());
+
+                // La création elle-même est tracée dans les deux journaux
+                // (le parent voit d'où vient la session, l'enfant qui l'a
+                // créée) — distinct de la délégation de tâche ci-dessous.
+                creator.emit(EventKind::System {
+                    text: format!("session créée : {sid2} «{title}» (agent={agent_id})"),
+                });
+                session2.emit(EventKind::System {
+                    text: format!("session créée par «{}» ({from})", cm.title),
+                });
+
+                let (cmd, envs) = self.agent_parts(
+                    &profile,
+                    meta.model.as_deref(),
+                    meta.mode.as_deref(),
+                    &sid2,
+                );
+                session2
+                    .spawn_agent(&cmd, &envs, None, true, self.mcp_servers(&sid2))
+                    .await?;
+                session2
+                    .apply_spawn_config(meta.mode.as_deref(), meta.model.as_deref())
+                    .await;
+
+                if let Some(task) = prompt {
+                    // Délégation de tâche = message pair→pair : PeerMessage
+                    // journalisé dans les deux journaux (lien cliquable
+                    // côté client), prompt livré wrappé de la provenance
+                    // (PromptSrc::Peer → pas de user_message au drain).
+                    let kind = EventKind::PeerMessage {
+                        from_session: from.clone(),
+                        from_title: cm.title.clone(),
+                        to_session: sid2.clone(),
+                        to_title: title.clone(),
+                        text: task.clone(),
+                    };
+                    session2.emit(kind.clone());
+                    creator.emit(kind);
+                    let wrapped = format!(
+                        "[AgentControl] tu es la session {sid2}, créée par \
+                        « {} » ({from}, agent={}) — la tâche ci-dessous \
+                        t'est déléguée.\n\
+                        ---\n{task}\n---\n\
+                        Quand c'est terminé, rends compte via l'outil MCP \
+                        `agentcontrol_send_message` (session=\"{from}\") — \
+                        ou ignore cette instruction si la tâche n'appelle \
+                        pas de compte-rendu.",
+                        cm.title, cm.agent
+                    );
+                    let s2 = Arc::clone(&session2);
+                    tokio::spawn(async move {
+                        if let Err(e) = s2.send_peer_prompt(&wrapped, false).await {
+                            s2.emit(EventKind::Error {
+                                message: format!("tâche déléguée: {e:#}"),
+                            });
+                        }
+                    });
+                }
+                Ok(json!({"session": sid2, "agent": agent_id, "title": title}))
             }
             ReqKind::Events {
                 session,

@@ -261,6 +261,10 @@ pub struct SessionMeta {
     /// Groupe nommé (sidebar) — None = non groupé.
     #[serde(default)]
     pub group: Option<String>,
+    /// Session créatrice (spawn agent→agent via peer_spawn) — None = session
+    /// créée par un client.
+    #[serde(default)]
+    pub spawned_by: Option<String>,
     /// Dernière occupation contexte rapportée par l'agent (usage_update).
     #[serde(default)]
     pub context_used: Option<u64>,
@@ -348,6 +352,30 @@ pub enum ReqKind {
         text: String,
         #[serde(default)]
         delivery: String,
+    },
+    /// Création de session par un agent (pont MCP
+    /// `agentcontrol_create_session`, acctl spawn). `from` = session
+    /// créatrice : les champs omis héritent de sa config (agent, cwd,
+    /// groupe ; modèle/mode seulement si même agent — le vocabulaire est
+    /// propre à chaque CLI). Le `prompt` éventuel est livré wrappé de
+    /// provenance comme premier message et journalisé PeerMessage dans
+    /// les deux journaux.
+    PeerSpawn {
+        from: String,
+        #[serde(default)]
+        agent: Option<String>,
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        mode: Option<String>,
+        #[serde(default)]
+        prompt: Option<String>,
+        #[serde(default)]
+        group: Option<String>,
     },
     /// Lit un fichier (absolu ou relatif au cwd de la session) — panneau
     /// latéral du client pour les liens de fichiers de l'agent.
