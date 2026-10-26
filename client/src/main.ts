@@ -261,12 +261,15 @@ $("tb-settings").onclick = () => {
   ($("s-lang") as HTMLSelectElement).value = getLang();
   ($("s-autoconn") as HTMLInputElement).checked =
     localStorage.getItem("ac-autoconnect") !== "0";
+  ($("s-images") as HTMLInputElement).checked = inlineImages();
   ($("dlg-settings") as HTMLDialogElement).showModal();
 };
 ($("s-theme") as HTMLSelectElement).onchange = (e) =>
   applyTheme((e.target as HTMLSelectElement).value as "dark" | "light");
 ($("s-autoconn") as HTMLInputElement).onchange = (e) =>
   localStorage.setItem("ac-autoconnect", (e.target as HTMLInputElement).checked ? "1" : "0");
+($("s-images") as HTMLInputElement).onchange = (e) =>
+  localStorage.setItem("ac-inline-images", (e.target as HTMLInputElement).checked ? "1" : "0");
 ($("s-lang") as HTMLSelectElement).onchange = (e) => {
   setLang((e.target as HTMLSelectElement).value as Lang);
   refreshSessions();
@@ -489,6 +492,22 @@ let alive = false;
 
 const eventsEl = $("events");
 const sentinel = $("scroll-sentinel");
+
+// Option « images en ligne » (Settings, défaut activé) : les URLs http(s)
+// finissant par une extension image sont rendues en <img> cliquable.
+const IMG_URL_RE = /\.(?:png|jpe?g|gif|webp|avif|bmp|svg|ico)(?:[?#][^\s<]*)?$/i;
+const inlineImages = () => localStorage.getItem("ac-inline-images") !== "0";
+// Image cassée (404, hôte inaccessible…) → on la remplace par son texte/URL,
+// l'<a> englobant reste cliquable. capture=true : error ne bubble pas.
+eventsEl.addEventListener(
+  "error",
+  (e) => {
+    const img = e.target;
+    if (img instanceof HTMLImageElement && img.classList.contains("md-img"))
+      img.replaceWith(img.alt || img.src);
+  },
+  true,
+);
 
 // Redimensionnement de la sidebar : drag sur la poignée bord droit.
 // Largeur persistée dans localStorage.
@@ -1353,6 +1372,9 @@ function esc(s: string): string {
   return d.innerHTML;
 }
 
+// Pour les valeurs insérées dans un attribut "…" : esc() n'échappe pas '"'.
+const q = (s: string) => s.replace(/"/g, "&quot;");
+
 // Chemins de fichiers cliquables → panneau latéral (read_file côté démon)
 const FILE_RE =
   /((?:\/[\w.\-~]+){2,}|[\w.\-]+(?:\/[\w.\-]+){2,}|[\w.\-/]+\.(?:rs|ts|tsx|js|jsx|py|toml|json|md|html?|css|ya?ml|sh|c|cpp|h|hpp|go|java|rb|txt|log|svg|cfg|ini|sql|vue|svelte|lock|service))(?::(\d+))?/g;
@@ -1361,17 +1383,21 @@ function linkify(escaped: string): string {
   // URLs d'abord → vrais liens (placeholder \x00U pour ne pas être re-matchées
   // par FILE_RE ni corrompues par le markup)
   const urls: string[] = [];
-  let work = escaped.replace(/https?:\/\/[^\s<]+/g, (m) => {
+  let work = escaped.replace(/https?:\/\/[^\s< ]+/g, (m) => {
     const clean = m.replace(/(?:&(?:quot|#39|lt|gt);|[.,;:!?)\]])+$/, "");
+    const inner =
+      inlineImages() && IMG_URL_RE.test(clean)
+        ? `<img class="md-img" src="${q(clean)}" alt="${q(clean)}" loading="lazy">`
+        : clean;
     urls.push(
-      `<a class="ulink" href="${clean}" target="_blank" rel="noopener noreferrer">${clean}</a>`,
+      `<a class="ulink" href="${q(clean)}" target="_blank" rel="noopener noreferrer">${inner}</a>`,
     );
     return `\x00U${urls.length - 1}\x00${m.slice(clean.length)}`;
   });
   work = work.replace(FILE_RE, (m, p: string) => {
     const clean = p.replace(/[.,;:!?'")\]]+$/, "");
     // lien = chemin sans ponctuation finale ; le reste (:ligne, ponct.) reste dehors
-    return `<span class="flink" data-path="${clean}">${clean}</span>${m.slice(clean.length)}`;
+    return `<span class="flink" data-path="${q(clean)}">${clean}</span>${m.slice(clean.length)}`;
   });
   return work.replace(/\x00U(\d+)\x00/g, (_m, i: string) => urls[+i]);
 }
@@ -1445,14 +1471,28 @@ function mdRender(src: string): string {
   // 2) échappement du reste
   work = esc(work);
 
-  // 3) liens markdown [t](https://…) → placeholder (avant linkify)
+  // 3) images ![alt](https://…) avant les liens (le ![…] matcherait […](…))
+  work = work.replace(
+    /!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g,
+    (_m, alt: string, url: string) =>
+      inlineImages()
+        ? stash(
+            `<a href="${q(url)}" target="_blank" rel="noopener noreferrer">` +
+              `<img class="md-img" src="${q(url)}" alt="${q(alt)}" loading="lazy"></a>`,
+          )
+        : stash(
+            `<a href="${q(url)}" target="_blank" rel="noopener noreferrer">${alt || url}</a>`,
+          ),
+  );
+
+  // 4) liens markdown [t](https://…) → placeholder (avant linkify)
   work = work.replace(
     /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
     (_m, tx: string, url: string) =>
-      stash(`<a href="${url}" target="_blank" rel="noopener noreferrer">${tx}</a>`),
+      stash(`<a href="${q(url)}" target="_blank" rel="noopener noreferrer">${tx}</a>`),
   );
 
-  // 4) inline : gras / italique / barré
+  // 5) inline : gras / italique / barré
   work = work
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/\b__([^_]+)__\b/g, "<strong>$1</strong>")
@@ -1460,10 +1500,10 @@ function mdRender(src: string): string {
     .replace(/(?<![\w_])_([^_\n]+)_(?![\w_])/g, "<em>$1</em>")
     .replace(/~~([^~]+)~~/g, "<del>$1</del>");
 
-  // 5) chemins de fichiers cliquables (hors blocs extraits)
+  // 6) chemins de fichiers cliquables (hors blocs extraits)
   work = linkify(work);
 
-  // 6) structure de blocs : headers, hr, citations, tables, listes, paragraphes
+  // 7) structure de blocs : headers, hr, citations, tables, listes, paragraphes
   const lines = work.split("\n");
   const isBlockStart = (l: string) =>
     /^\x00B\d+\x00\s*$/.test(l.trim()) ||
@@ -1526,7 +1566,16 @@ function mdRender(src: string): string {
     }
     out.push(`<p>${para.join("<br>")}</p>`);
   }
-  return out.join("").replace(/\x00B(\d+)\x00/g, (_m, n: string) => blocks[+n]);
+  // Placeholders imbriqués ([![](img)](url)) : la valeur insérée peut contenir
+  // un \x00B — résoudre jusqu'à point fixe (index invalide : laissé tel quel).
+  let html = out.join("");
+  for (;;) {
+    const next = html.replace(/\x00B(\d+)\x00/g, (m, n: string) =>
+      +n < blocks.length ? blocks[+n] : m,
+    );
+    if (next === html) return html;
+    html = next;
+  }
 }
 
 async function openFilePanel(path: string) {
