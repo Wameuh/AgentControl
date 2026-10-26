@@ -2846,10 +2846,10 @@ $("chat-title").addEventListener("dblclick", () => {
 // connexion par défaut).
 let pendingGroup: { conn?: string; name: string } | null = null;
 
-/** Dialogue "nouvelle session". `conn` route list_agents/new_session vers le
- *  bon serveur ; `ref` préremplit agent + workspace (1er membre du groupe). */
-async function openNewSessionDlg(conn?: string, ref?: SessionMeta) {
-  const agents = await call<{ id: string; name: string; available?: boolean }[]>("list_agents", conn ? { conn } : {});
+/** Agents disponibles sur une connexion (`conn` vide = défaut côté Rust). */
+async function fillAgents(conn: string, keep?: string) {
+  const agents = await call<{ id: string; name: string; available?: boolean }[]>(
+    "list_agents", conn ? { conn } : {});
   const sel = $("f-agent") as HTMLSelectElement;
   sel.innerHTML = "";
   for (const a of agents) {
@@ -2859,10 +2859,36 @@ async function openNewSessionDlg(conn?: string, ref?: SessionMeta) {
     o.disabled = a.available === false;
     sel.appendChild(o);
   }
-  if (ref) {
-    if ([...sel.options].some((o) => o.value === ref.agent)) sel.value = ref.agent;
-    ($("f-cwd") as HTMLInputElement).value = ref.cwd;
+  if (keep && [...sel.options].some((o) => o.value === keep)) sel.value = keep;
+}
+
+// Changement de serveur cible → recharger la liste des agents de ce serveur.
+$("f-conn").addEventListener("change", () => {
+  void fillAgents(($("f-conn") as HTMLSelectElement).value);
+});
+
+/** Dialogue "nouvelle session". `conn` route list_agents/new_session vers le
+ *  bon serveur (groupe "+" → imposé, select désactivé) ; `ref` préremplit
+ *  agent + workspace (1er membre du groupe). */
+async function openNewSessionDlg(conn?: string, ref?: SessionMeta) {
+  // Serveur cible : connexions actives ; présélection = conn du contexte,
+  // sinon celle de la session affichée, sinon la première. Masqué si < 2.
+  const cs = $("f-conn") as HTMLSelectElement;
+  const conns = [...connCfg.keys()];
+  cs.innerHTML = "";
+  for (const k of conns) {
+    const o = document.createElement("option");
+    o.value = k;
+    o.textContent = k;
+    cs.appendChild(o);
   }
+  const want = conn ?? current?.conn ?? conns[0] ?? "";
+  cs.value = conns.includes(want) ? want : "";
+  cs.disabled = conn !== undefined;
+  ($("f-conn-wrap") as HTMLElement).hidden = conns.length < 2;
+  const effConn = cs.disabled ? (conn ?? "") : cs.value;
+  await fillAgents(effConn, ref?.agent);
+  if (ref) ($("f-cwd") as HTMLInputElement).value = ref.cwd;
   // Suggestions de modèles : union des config_options connues des sessions
   const sess = await call<SessionMeta[]>("list_sessions").catch(() => [] as SessionMeta[]);
   const seen = new Set<string>();
@@ -2898,18 +2924,20 @@ $("f-create").addEventListener("click", async (e) => {
   if (!cwd) return;
   const attach = ($("f-attach") as HTMLInputElement).value.trim();
   const grp = pendingGroup;
+  // Serveur cible : le select (désactivé = conn imposée par le groupe).
+  const selConn = ($("f-conn") as HTMLSelectElement).value || undefined;
   const res = await (attach
     ? call<{ session: string }>("attach_session", {
         agent: ($("f-agent") as HTMLSelectElement).value,
         cwd,
-        conn: grp?.conn,
+        conn: grp?.conn ?? selConn,
         native_id: attach,
         title: ($("f-title") as HTMLInputElement).value || cwd.split("/").pop(),
       })
     : call<{ session: string }>("new_session", {
         agent: ($("f-agent") as HTMLSelectElement).value,
         cwd,
-        conn: grp?.conn,
+        conn: grp?.conn ?? selConn,
         title: ($("f-title") as HTMLInputElement).value || cwd.split("/").pop(),
         mode: ($("f-mode") as HTMLInputElement).value || undefined,
         model: ($("f-model") as HTMLInputElement).value || undefined,
@@ -2923,12 +2951,13 @@ $("f-create").addEventListener("click", async (e) => {
   if (grp) {
     // conn "" = connexion par défaut côté routage — la même que celle qui
     // vient de créer la session (évite l'injection de current.conn).
+    const gconn = grp.conn ?? selConn ?? "";
     await call("set_session_group", {
       session: res.session,
-      conn: grp.conn ?? "",
+      conn: gconn,
       group: grp.name,
     }).catch((er) => showErr(String(er)));
-    addStoredGroup(grp.conn ?? "default", grp.name);
+    addStoredGroup(gconn || "default", grp.name);
     pendingGroup = null;
   }
   ($("dlg-new") as HTMLDialogElement).close();
@@ -3148,6 +3177,33 @@ $("c-pubkey-copy").onclick = async () => {
 ($("c-kind") as HTMLSelectElement).onchange = syncSshFields;
 ($("c-native") as HTMLInputElement).onchange = syncSshFields;
 
+/** Repeuple le select des connexions récentes depuis `savedConns`. */
+function fillSavedSelect(): HTMLSelectElement {
+  const sv = $("c-saved") as HTMLSelectElement;
+  sv.innerHTML = `<option value="">${t("choose")}</option>`;
+  savedConns.forEach((c, i) => {
+    const o = document.createElement("option");
+    o.value = String(i);
+    o.textContent = `${c.kind} ${c.host ?? c.addr ?? c.path ?? ""}`;
+    sv.appendChild(o);
+  });
+  return sv;
+}
+
+// ✕ : retire la connexion sauvegardée sélectionnée (fichier + liste).
+$("c-saved-del").addEventListener("click", async () => {
+  const sv = $("c-saved") as HTMLSelectElement;
+  if (sv.value === "") return;
+  const c = savedConns[Number(sv.value)];
+  if (!c) return;
+  const ok = await invoke("remove_connection", { cfg: c })
+    .then(() => true)
+    .catch((e) => { showErr(String(e)); return false; });
+  if (!ok) return;
+  savedConns = savedConns.filter((x) => x !== c);
+  fillSavedSelect();
+});
+
 $("btn-connect").onclick = async () => {
   // Android : pas de socket local ni de binaire ssh → SSH natif par défaut.
   if (IS_ANDROID) {
@@ -3167,14 +3223,7 @@ $("btn-connect").onclick = async () => {
   }
   // Connexions récentes sauvegardées
   savedConns = await invoke<SavedConn[]>("saved_connections").catch(() => []);
-  const sv = $("c-saved") as HTMLSelectElement;
-  sv.innerHTML = `<option value="">${t("choose")}</option>`;
-  savedConns.forEach((c, i) => {
-    const o = document.createElement("option");
-    o.value = String(i);
-    o.textContent = `${c.kind} ${c.host ?? c.addr ?? c.path ?? ""}`;
-    sv.appendChild(o);
-  });
+  const sv = fillSavedSelect();
   // Pré-remplir avec la dernière utilisée → un clic sur Connecter suffit
   if (savedConns.length) {
     sv.value = "0";
