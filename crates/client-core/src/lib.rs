@@ -256,6 +256,8 @@ fn free_port() -> Result<u16> {
 pub fn hide_console(cmd: &mut Command) {
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    #[cfg(not(windows))]
+    let _ = cmd;
 }
 
 async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<Arc<SshGuard>>)> {
@@ -294,27 +296,27 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
             ));
             let mut cmd = Command::new("ssh");
             cmd.args([
-                    "-N",
-                    "-L",
-                    &spec,
-                    "-o",
-                    "BatchMode=yes",
-                    "-o",
-                    "ConnectTimeout=10",
-                    "-o",
-                    "ServerAliveInterval=30",
-                    "-o",
-                    // accepte les nouvelles host keys (1re connexion, pas de tty)
-                    "StrictHostKeyChecking=accept-new",
-                    // NOTE : pas de ClearAllForwardings / LocalForward=none
-                    // (tueraient notre -L ou parsent mal). PAS d'
-                    // ExitOnForwardFailure : des forwards de la config qui
-                    // échouent ne doivent pas tuer notre tunnel (warning seul).
-                ])
-                .args(args)
-                .arg(host)
-                .stderr(std::process::Stdio::piped())
-                .kill_on_drop(true);
+                "-N",
+                "-L",
+                &spec,
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "ServerAliveInterval=30",
+                "-o",
+                // accepte les nouvelles host keys (1re connexion, pas de tty)
+                "StrictHostKeyChecking=accept-new",
+                // NOTE : pas de ClearAllForwardings / LocalForward=none
+                // (tueraient notre -L ou parsent mal). PAS d'
+                // ExitOnForwardFailure : des forwards de la config qui
+                // échouent ne doivent pas tuer notre tunnel (warning seul).
+            ])
+            .args(args)
+            .arg(host)
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
             hide_console(&mut cmd);
             let mut child = cmd.spawn().context("spawn ssh — openssh installé ?")?;
             let mut stderr = child.stderr.take();
