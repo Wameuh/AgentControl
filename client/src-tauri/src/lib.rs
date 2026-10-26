@@ -245,10 +245,10 @@ async fn disconnect(state: State<'_, AppState>, conn: String) -> Result<(), Stri
 async fn call(state: State<'_, AppState>, method: String, params: Value) -> Result<Value, String> {
     // Connexion cible : params.conn explicite, sinon connexion par défaut.
     let conn = params.get("conn").and_then(Value::as_str).map(String::from);
-    // list_sessions / daemon_status : fusion multi-serveurs — en parallèle
-    // avec timeout par conn (une conn morte en blackhole ne doit pas
-    // bloquer la réponse des autres).
-    if method == "list_sessions" || method == "daemon_status" {
+    // list_sessions / daemon_status / pr_list : fusion multi-serveurs — en
+    // parallèle avec timeout par conn (une conn morte en blackhole ne doit
+    // pas bloquer la réponse des autres).
+    if method == "list_sessions" || method == "daemon_status" || method == "pr_list" {
         let merged = method == "daemon_status";
         if merged {
             if let Some(k) = conn {
@@ -261,7 +261,13 @@ async fn call(state: State<'_, AppState>, method: String, params: Value) -> Resu
             map.iter().map(|(k, c)| (k.clone(), c.client.clone())).collect()
         };
         let n_conns = pairs.len();
-        let req = if merged { ReqKind::DaemonStatus } else { ReqKind::ListSessions };
+        let req = if method == "pr_list" {
+            ReqKind::PrList { session: None }
+        } else if merged {
+            ReqKind::DaemonStatus
+        } else {
+            ReqKind::ListSessions
+        };
         let mut set = tokio::task::JoinSet::new();
         for (k, c) in pairs {
             let req = req.clone();
@@ -292,7 +298,7 @@ async fn call(state: State<'_, AppState>, method: String, params: Value) -> Resu
                 // Le frontend filtre ce marqueur → conn marquée down et
                 // sessions servies depuis le cache au lieu de disparaître.
                 Err(e) => {
-                    client_core::log(format!("list_sessions {k}: {e:#}"));
+                    client_core::log(format!("{method} {k}: {e:#}"));
                     all.push(json!({"conn": k, "conn_error": true}));
                 }
             }
@@ -397,6 +403,20 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         "queue_promote" => ReqKind::QueuePromote {
             session: s("session"),
             index: p.get("index").and_then(Value::as_u64).unwrap_or(0),
+        },
+        "pr_list" => ReqKind::PrList { session: so("session") },
+        "pr_track" => ReqKind::PrTrack {
+            session: so("session"),
+            repo: s("repo"),
+            pr: p.get("pr").and_then(Value::as_u64).unwrap_or(0),
+            branch: so("branch"),
+            title: so("title"),
+            status: so("status"),
+            note: so("note"),
+        },
+        "pr_untrack" => ReqKind::PrUntrack {
+            repo: s("repo"),
+            pr: p.get("pr").and_then(Value::as_u64).unwrap_or(0),
         },
         "kill_session" => ReqKind::KillSession { session: s("session") },
         "clear_session" => ReqKind::ClearSession { session: s("session") },

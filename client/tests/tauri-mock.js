@@ -78,6 +78,11 @@
         return { group: args.group };
       }
       case "daemon_status": return { version: "0.2.9", sessions: SESSIONS.length };
+      case "pr_list": return [
+        { conn: "local", repo: "Wameuh/AgentControl", pr: 42,
+          session: SESSIONS[0].id, branch: "feat/x", title: "feat: exemple",
+          status: "open", via: "detected" },
+      ];
       case "clear_session": return { session: args.session };
       case "list_native_sessions": return { sessions: [] };
       case "get_blob": return { data: "blob", total: 4 };
