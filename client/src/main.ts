@@ -671,11 +671,16 @@ async function confirmDaemonUpdate(
 ): Promise<boolean> {
   const dlg = $("dlg-dupdate") as HTMLDialogElement;
   if (dlg.open) return false;
-  const n = await call<SessionMeta[]>("list_sessions", { conn })
-    .then((ls) => ls.filter((s) =>
-      ["working", "running", "starting", "waiting_input"].includes(s.state)).length)
-    .catch(() => 0);
-  $("dupdate-msg").textContent = t("dupdate_msg", { dv, lv, host, n: String(n) });
+  // list_sessions agrège toutes les conns (params.conn ignoré côté Rust)
+  // → filtre client sur s.conn. "Vivant" = ni dead ni interrupted (idle
+  // inclus : le restart tue son process aussi). Échec → compteur inconnu.
+  const sessions = await call<SessionMeta[]>("list_sessions", { conn })
+    .catch(() => null);
+  const n = sessions?.filter((s) =>
+    s.conn === conn && s.state !== "dead" && s.state !== "interrupted").length;
+  $("dupdate-msg").textContent = n == null
+    ? t("dupdate_msg_unk", { dv, lv, host })
+    : t("dupdate_msg", { dv, lv, host, n });
   return new Promise((resolve) => {
     ($("dupdate-go") as HTMLButtonElement).onclick = () => {
       resolve(true);
