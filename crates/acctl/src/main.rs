@@ -111,7 +111,15 @@ fn print_event(ev: &Value) {
     let seq = ev["seq"].as_u64().unwrap_or(0);
     let ty = ev["type"].as_str().unwrap_or("?");
     match ty {
-        "user_message" => println!("\x1b[36m[{seq}] vous> {}\x1b[0m", ev["text"].as_str().unwrap_or("")),
+        "user_message" => println!(
+            "\x1b[36m[{seq}] vous{}> {}\x1b[0m",
+            if ev["steer"].as_bool().unwrap_or(false) {
+                " (steer)"
+            } else {
+                ""
+            },
+            ev["text"].as_str().unwrap_or("")
+        ),
         "peer_message" => println!(
             "\x1b[35m[{seq}] {}→{} («{}»→«{}»)> {}\x1b[0m",
             ev["from_session"].as_str().unwrap_or("?"),
