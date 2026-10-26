@@ -4,6 +4,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
+import { save } from "@tauri-apps/plugin-dialog";
+import { appDataDir, downloadDir } from "@tauri-apps/api/path";
 import { gemSVG } from "./crystal";
 import { initLang, setLang, getLang, t, applyStatic, type Lang } from "./i18n";
 
@@ -131,9 +133,10 @@ function rawCloseOverlay(id: string) {
   if (id === "drawer") {
     $("sidebar").classList.remove("open");
     scrimOff("drawer");
-  } else if (id === "sheet" || id === "fctx") {
+  } else if (id === "sheet" || id === "fctx" || id === "sctx") {
     omenu.hidden = true;
     fileCtx.hidden = true;
+    sessCtx.hidden = true;
     scrimOff("sheet");
   } else if (id === "fileview") {
     $("file-viewer").classList.remove("open");
@@ -224,7 +227,7 @@ $("tb-menu").onclick = () =>
     const inDrawer = (e.target as HTMLElement).closest("#sidebar") != null;
     if (!IS_ANDROID || document.querySelector("dialog[open]")) { swiping = false; return; }
     swiping = (inDrawer && $("sidebar").classList.contains("open")) ||
-      (!inDrawer && t0.clientX <= 26 && !(e.target as HTMLElement).closest("#file-panel, #omenu, #fctx"));
+      (!inDrawer && t0.clientX <= 26 && !(e.target as HTMLElement).closest("#file-panel, #omenu, #fctx, #sctx"));
     sx = t0.clientX; sy = t0.clientY;
   }, { passive: true });
   document.addEventListener("touchmove", (e) => {
@@ -258,12 +261,15 @@ $("tb-settings").onclick = () => {
   ($("s-lang") as HTMLSelectElement).value = getLang();
   ($("s-autoconn") as HTMLInputElement).checked =
     localStorage.getItem("ac-autoconnect") !== "0";
+  ($("s-images") as HTMLInputElement).checked = inlineImages();
   ($("dlg-settings") as HTMLDialogElement).showModal();
 };
 ($("s-theme") as HTMLSelectElement).onchange = (e) =>
   applyTheme((e.target as HTMLSelectElement).value as "dark" | "light");
 ($("s-autoconn") as HTMLInputElement).onchange = (e) =>
   localStorage.setItem("ac-autoconnect", (e.target as HTMLInputElement).checked ? "1" : "0");
+($("s-images") as HTMLInputElement).onchange = (e) =>
+  localStorage.setItem("ac-inline-images", (e.target as HTMLInputElement).checked ? "1" : "0");
 ($("s-lang") as HTMLSelectElement).onchange = (e) => {
   setLang((e.target as HTMLSelectElement).value as Lang);
   refreshSessions();
@@ -374,7 +380,7 @@ async function performClientUpdate(tag: string) {
     return;
   }
   await invoke("update_client", { tag }).catch(() => {
-    shellOpen("https://github.com/Wameuh/AgentControl/releases");
+    shellOpen(`https://github.com/Wameuh/AgentControl/releases/tag/v${tag}`);
   });
 }
 
@@ -486,6 +492,22 @@ let alive = false;
 
 const eventsEl = $("events");
 const sentinel = $("scroll-sentinel");
+
+// Option « images en ligne » (Settings, défaut activé) : les URLs http(s)
+// finissant par une extension image sont rendues en <img> cliquable.
+const IMG_URL_RE = /\.(?:png|jpe?g|gif|webp|avif|bmp|svg|ico)(?:[?#][^\s<]*)?$/i;
+const inlineImages = () => localStorage.getItem("ac-inline-images") !== "0";
+// Image cassée (404, hôte inaccessible…) → on la remplace par son texte/URL,
+// l'<a> englobant reste cliquable. capture=true : error ne bubble pas.
+eventsEl.addEventListener(
+  "error",
+  (e) => {
+    const img = e.target;
+    if (img instanceof HTMLImageElement && img.classList.contains("md-img"))
+      img.replaceWith(img.alt || img.src);
+  },
+  true,
+);
 
 // Redimensionnement de la sidebar : drag sur la poignée bord droit.
 // Largeur persistée dans localStorage.
@@ -661,6 +683,34 @@ function daemonDlg(msg: string, open: boolean) {
   } else if (d.open) d.close();
 }
 
+/** Démon plus vieux que le client (minor ≠) : l'update redémarre le démon
+ *  et tue les agents en cours → popup de confirmation. Le message compte
+ *  les sessions vivantes de cette connexion (0 si la requête échoue). */
+async function confirmDaemonUpdate(
+  dv: string, lv: string, host: string, conn: string,
+): Promise<boolean> {
+  const dlg = $("dlg-dupdate") as HTMLDialogElement;
+  if (dlg.open) return false;
+  // list_sessions agrège toutes les conns (params.conn ignoré côté Rust)
+  // → filtre client sur s.conn. "Vivant" = ni dead ni interrupted (idle
+  // inclus : le restart tue son process aussi). Échec → compteur inconnu.
+  const sessions = await call<SessionMeta[]>("list_sessions", { conn })
+    .catch(() => null);
+  const n = sessions?.filter((s) =>
+    s.conn === conn && s.state !== "dead" && s.state !== "interrupted").length;
+  $("dupdate-msg").textContent = n == null
+    ? t("dupdate_msg_unk", { dv, lv, host })
+    : t("dupdate_msg", { dv, lv, host, n });
+  return new Promise((resolve) => {
+    ($("dupdate-go") as HTMLButtonElement).onclick = () => {
+      resolve(true);
+      dlg.close();
+    };
+    dlg.addEventListener("close", () => resolve(false), { once: true });
+    dlg.showModal();
+  });
+}
+
 async function doConnect(cfg: Record<string, unknown>) {
   let status: unknown;
   let newerDaemon = "";
@@ -693,18 +743,21 @@ async function doConnect(cfg: Record<string, unknown>) {
       // Démon plus récent → client outdated : popup, démon non modifié.
       showOutdated(lv, dv);
     } else if (cfg.kind === "ssh" && cfg.host) {
-      daemonDlg(t("updating_daemon", { dv, lv }) + " — " + String(cfg.host), true);
-      try {
-        const res = await invoke<string>("ensure_daemon", daemonParams(cfg, lv))
-          .catch((e) => {
-            showErr(String(e));
-            return "";
-          });
-        // Un autre client a pu upgrader le démon entre-temps → même garde-fou.
-        if (res.startsWith("newer:")) showOutdated(lv, res.slice(6));
-        else status = await invoke("connect", { cfg }).catch(() => status);
-      } finally {
-        daemonDlg("", false);
+      // Redémarrer le démon tue les agents en cours → validation utilisateur.
+      if (await confirmDaemonUpdate(dv, lv, String(cfg.host), connKeyOf(cfg))) {
+        daemonDlg(t("updating_daemon", { dv, lv }) + " — " + String(cfg.host), true);
+        try {
+          const res = await invoke<string>("ensure_daemon", daemonParams(cfg, lv))
+            .catch((e) => {
+              showErr(String(e));
+              return "";
+            });
+          // Un autre client a pu upgrader le démon entre-temps → même garde-fou.
+          if (res.startsWith("newer:")) showOutdated(lv, res.slice(6));
+          else status = await invoke("connect", { cfg }).catch(() => status);
+        } finally {
+          daemonDlg("", false);
+        }
       }
     }
   }
@@ -722,7 +775,7 @@ async function doConnect(cfg: Record<string, unknown>) {
 /** Gemme d'état : dorée working, rouge question/failed, verte idle, grise dead. */
 const DOT_ROLE: Record<string, string> = {
   working: "human", running: "human", starting: "human",
-  waiting_input: "inference", failed: "inference",
+  waiting_input: "inference", failed: "inference", compacting: "inference",
   idle: "neutral",
   interrupted: "slate", dead: "slate",
 };
@@ -736,7 +789,6 @@ function dotIcon(state: string): string {
 function markSessionGone() {
   if (!current) return;
   addSysline(t("session_gone"));
-  compactHold.delete(current.id);
   current = null;
   unseenBelow = 0;
   $("btn-bottom").hidden = true;
@@ -785,7 +837,13 @@ async function refreshSessions() {
   setAppIcon(
     live.some((s) => s.state === "waiting_input")
       ? "red"
-      : live.some((s) => s.state === "working" || s.state === "running" || s.state === "starting")
+      : live.some(
+            (s) =>
+              s.state === "working" ||
+              s.state === "running" ||
+              s.state === "starting" ||
+              s.state === "compacting",
+          )
         ? "gold"
         : live.length > 0 ? "base" : "grey",
   );
@@ -800,7 +858,11 @@ async function refreshSessions() {
   }
   // Lumières "agents" du fond : une par session active (les sessions
   // cachées d'une conn down ne comptent pas).
-  const n = list.filter((s) => !s.offline && (s.state === "working" || s.state === "waiting_input")).length;
+  const n = list.filter(
+    (s) =>
+      !s.offline &&
+      (s.state === "working" || s.state === "waiting_input" || s.state === "compacting"),
+  ).length;
   (window as { MeshBackground?: { setMood: (m: string, o: object) => void } })
     .MeshBackground?.setMood(bgMood(), { agents: Math.min(n, 4), intensity: 0.55 });
   const el = $("session-list");
@@ -911,6 +973,121 @@ function bindDropTarget(el: HTMLElement, conn: string, group: string | undefined
 
 let lastSessions: SessionMeta[] = [];
 
+// Menu contextuel session (clic droit / appui long) : rename / fork / exit.
+// Même pattern que #fctx — fixe au point cliqué sur desktop, action-sheet
+// ancrée en bas sur Android.
+const sessCtx = $("sctx");
+
+function hideSessCtx() {
+  navClose("sctx");
+  sessCtx.hidden = true;
+}
+
+function openSessionCtx(x: number, y: number, s: SessionMeta, row: HTMLElement) {
+  sessCtx.innerHTML = `<div class="fctx-path">${esc(s.title)}</div>`;
+  const add = (label: string, cls: string, fn: (b: HTMLButtonElement) => void) => {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.className = cls;
+    b.onclick = () => fn(b);
+    sessCtx.appendChild(b);
+    return b;
+  };
+  add(t("ctx_rename"), "", () => {
+    hideSessCtx();
+    renameSessRow(s, row);
+  });
+  // conn: s.conn — la session peut vivre sur une autre connexion que
+  // celle affichée ; sans ça call() routerait vers le mauvais démon.
+  const forkBtn = add(t("ctx_fork"), "", () => {
+    hideSessCtx();
+    if (current?.id === s.id) addSysline(t("fork_started"));
+    void call<{ session: string }>("fork_session", { session: s.id, conn: s.conn })
+      .then(async (r) => {
+        await refreshSessions();
+        if (r.session) await openSession(r.session);
+      })
+      .catch((e) => showErr(String(e)));
+  });
+  // Fork = respawn depuis la session native — impossible sans id natif.
+  forkBtn.disabled = !s.native_session_id;
+  add(t("ctx_group"), "", () => {
+    hideSessCtx();
+    openGroupDlg("session", s);
+  });
+  // Exit = tue le process agent (kill_session) — la session reste, reprenable.
+  // Action destructive → double-clic armé comme delete_path / sess-del.
+  add(t("ctx_exit"), "danger", (b) => {
+    if (!b.dataset.armed) {
+      b.dataset.armed = "1";
+      b.textContent = t("ctx_confirm");
+      return;
+    }
+    hideSessCtx();
+    void call("kill_session", { session: s.id, conn: s.conn })
+      .then(() => refreshSessions())
+      .catch((e) => showErr(String(e)));
+  });
+  sessCtx.hidden = false;
+  navPush("sctx");
+  if (!IS_ANDROID) {
+    const r = sessCtx.getBoundingClientRect();
+    sessCtx.style.left = `${Math.min(x, window.innerWidth - r.width - 8)}px`;
+    sessCtx.style.top = `${Math.min(y, window.innerHeight - r.height - 8)}px`;
+  }
+}
+
+/** Renommage inline du titre dans la ligne session (même pattern que le
+ *  double-clic sur chat-title). */
+function renameSessRow(s: SessionMeta, row: HTMLElement) {
+  const span = row.querySelector<HTMLElement>(".t");
+  if (!span) return;
+  const inp = document.createElement("input");
+  inp.id = "title-edit";
+  inp.value = s.title;
+  span.replaceWith(inp);
+  row.draggable = false; // sinon un drag depuis l'input part en drag de ligne
+  inp.focus();
+  inp.select();
+  // blur ré-entrant : retirer l'input focusé (Escape, ou refreshSessions
+  // qui rebuild la liste) redéclenche blur → sans garde, une annulation
+  // persisterait le texte tapé. !isConnected = ligne déjà reconstruite.
+  let finished = false;
+  const done = async (save: boolean) => {
+    if (finished || !inp.isConnected) { finished = true; return; }
+    finished = true;
+    if (!IS_ANDROID) row.draggable = true;
+    const v = inp.value.trim();
+    inp.replaceWith(span);
+    if (save && v && v !== s.title) {
+      s.title = v;
+      span.textContent = v;
+      if (current?.id === s.id) {
+        current.title = v;
+        $("chat-title").textContent = v;
+      }
+      await call("rename_session", { session: s.id, title: v, conn: s.conn })
+        .catch((e) => showErr(String(e)));
+      refreshSessions();
+    }
+  };
+  inp.addEventListener("click", (e) => e.stopPropagation());
+  inp.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") done(true);
+    if (e.key === "Escape") done(false);
+  });
+  inp.addEventListener("blur", () => done(true));
+}
+
+// Fermeture : clic ailleurs / Échap / scroll de la liste. Un clic DANS le
+// menu ne doit pas le fermer avant l'action du bouton.
+sessCtx.addEventListener("click", (e) => e.stopPropagation());
+window.addEventListener("click", hideSessCtx);
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") hideSessCtx();
+});
+$("session-list").addEventListener("scroll", hideSessCtx);
+
 function sessRow(s: SessionMeta, conn: string, grp: string, closed: boolean): HTMLElement {
   const div = document.createElement("div");
   div.className = "sess" + (grp ? " in-grp" : "") + (s.offline ? " offline" : "") +
@@ -922,7 +1099,7 @@ function sessRow(s: SessionMeta, conn: string, grp: string, closed: boolean): HT
     // Mobile : fermer le drawer après sélection.
     closeDrawer();
   };
-  bindCtx(div, () => openGroupDlg("session", s));
+  bindCtx(div, (x, y) => openSessionCtx(x, y, s, div));
   if (!IS_ANDROID) {
     div.draggable = true;
     div.addEventListener("dragstart", (e) => {
@@ -939,8 +1116,7 @@ function sessRow(s: SessionMeta, conn: string, grp: string, closed: boolean): HT
       setTimeout(() => { del.dataset.armed = ""; del.textContent = "✕"; }, 2500);
       return;
     }
-    await call("delete_session", { session: s.id }).catch((er) => showErr(String(er)));
-    compactHold.delete(s.id);
+    await call("delete_session", { session: s.id, conn: s.conn }).catch((er) => showErr(String(er)));
     if (current?.id === s.id) {
       current = null;
       eventsEl.innerHTML = "";
@@ -1068,13 +1244,19 @@ function updateHeader() {
   const st = $("chat-state");
   st.textContent = current.state;
   st.className = `badge st-${current.state}`;
-  $("chat-gem").hidden = current.state !== "working";
+  // Le gem tourne aussi pendant "compacting" (le démon retient les
+  // envois en file jusqu'au signal de fin du compact).
+  $("chat-gem").hidden = current.state !== "working" && current.state !== "compacting";
   // Reprendre = process mort, quel que soit l'état persisté dans meta.json
   $("btn-resume").hidden = alive;
-  const busySt = current.state === "working" || current.state === "waiting_input";
+  const busySt =
+    current.state === "working" ||
+    current.state === "waiting_input" ||
+    current.state === "compacting";
   $("btn-cancel").hidden = !busySt;
-  // Steer : n'a de sens que pendant un tour (sinon = envoi normal).
-  $("btn-steer").hidden = !busySt;
+  // Steer : n'a de sens que pendant un vrai tour (sinon = envoi normal ;
+  // pendant compact un envoi est simplement retenu en file).
+  $("btn-steer").hidden = current.state !== "working";
 
   // Options de config dynamiques (ex. Devin : config_option_update → mode + model)
   const copts = current.config_options ?? [];
@@ -1190,25 +1372,32 @@ function esc(s: string): string {
   return d.innerHTML;
 }
 
+// Pour les valeurs insérées dans un attribut "…" : esc() n'échappe pas '"'.
+const q = (s: string) => s.replace(/"/g, "&quot;");
+
 // Chemins de fichiers cliquables → panneau latéral (read_file côté démon)
 const FILE_RE =
-  /((?:\/[\w.\-~]+){2,}|[\w.\-]+\/[\w./\-]+|[\w.\-]+\.(?:rs|ts|tsx|js|jsx|py|toml|json|md|html?|css|ya?ml|sh|c|cpp|h|hpp|go|java|rb|txt|log|svg|cfg|ini|sql|vue|svelte|lock|service))(?::(\d+))?/g;
+  /((?:\/[\w.\-~]+){2,}|[\w.\-]+(?:\/[\w.\-]+){2,}|[\w.\-/]+\.(?:rs|ts|tsx|js|jsx|py|toml|json|md|html?|css|ya?ml|sh|c|cpp|h|hpp|go|java|rb|txt|log|svg|cfg|ini|sql|vue|svelte|lock|service))(?::(\d+))?/g;
 
 function linkify(escaped: string): string {
   // URLs d'abord → vrais liens (placeholder \x00U pour ne pas être re-matchées
   // par FILE_RE ni corrompues par le markup)
   const urls: string[] = [];
-  let work = escaped.replace(/https?:\/\/[^\s<]+/g, (m) => {
+  let work = escaped.replace(/https?:\/\/[^\s< ]+/g, (m) => {
     const clean = m.replace(/(?:&(?:quot|#39|lt|gt);|[.,;:!?)\]])+$/, "");
+    const inner =
+      inlineImages() && IMG_URL_RE.test(clean)
+        ? `<img class="md-img" src="${q(clean)}" alt="${q(clean)}" loading="lazy">`
+        : clean;
     urls.push(
-      `<a class="ulink" href="${clean}" target="_blank" rel="noopener noreferrer">${clean}</a>`,
+      `<a class="ulink" href="${q(clean)}" target="_blank" rel="noopener noreferrer">${inner}</a>`,
     );
     return `\x00U${urls.length - 1}\x00${m.slice(clean.length)}`;
   });
   work = work.replace(FILE_RE, (m, p: string) => {
     const clean = p.replace(/[.,;:!?'")\]]+$/, "");
     // lien = chemin sans ponctuation finale ; le reste (:ligne, ponct.) reste dehors
-    return `<span class="flink" data-path="${clean}">${clean}</span>${m.slice(clean.length)}`;
+    return `<span class="flink" data-path="${q(clean)}">${clean}</span>${m.slice(clean.length)}`;
   });
   return work.replace(/\x00U(\d+)\x00/g, (_m, i: string) => urls[+i]);
 }
@@ -1282,14 +1471,28 @@ function mdRender(src: string): string {
   // 2) échappement du reste
   work = esc(work);
 
-  // 3) liens markdown [t](https://…) → placeholder (avant linkify)
+  // 3) images ![alt](https://…) avant les liens (le ![…] matcherait […](…))
+  work = work.replace(
+    /!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g,
+    (_m, alt: string, url: string) =>
+      inlineImages()
+        ? stash(
+            `<a href="${q(url)}" target="_blank" rel="noopener noreferrer">` +
+              `<img class="md-img" src="${q(url)}" alt="${q(alt)}" loading="lazy"></a>`,
+          )
+        : stash(
+            `<a href="${q(url)}" target="_blank" rel="noopener noreferrer">${alt || url}</a>`,
+          ),
+  );
+
+  // 4) liens markdown [t](https://…) → placeholder (avant linkify)
   work = work.replace(
     /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
     (_m, tx: string, url: string) =>
-      stash(`<a href="${url}" target="_blank" rel="noopener noreferrer">${tx}</a>`),
+      stash(`<a href="${q(url)}" target="_blank" rel="noopener noreferrer">${tx}</a>`),
   );
 
-  // 4) inline : gras / italique / barré
+  // 5) inline : gras / italique / barré
   work = work
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/\b__([^_]+)__\b/g, "<strong>$1</strong>")
@@ -1297,10 +1500,10 @@ function mdRender(src: string): string {
     .replace(/(?<![\w_])_([^_\n]+)_(?![\w_])/g, "<em>$1</em>")
     .replace(/~~([^~]+)~~/g, "<del>$1</del>");
 
-  // 5) chemins de fichiers cliquables (hors blocs extraits)
+  // 6) chemins de fichiers cliquables (hors blocs extraits)
   work = linkify(work);
 
-  // 6) structure de blocs : headers, hr, citations, tables, listes, paragraphes
+  // 7) structure de blocs : headers, hr, citations, tables, listes, paragraphes
   const lines = work.split("\n");
   const isBlockStart = (l: string) =>
     /^\x00B\d+\x00\s*$/.test(l.trim()) ||
@@ -1363,7 +1566,16 @@ function mdRender(src: string): string {
     }
     out.push(`<p>${para.join("<br>")}</p>`);
   }
-  return out.join("").replace(/\x00B(\d+)\x00/g, (_m, n: string) => blocks[+n]);
+  // Placeholders imbriqués ([![](img)](url)) : la valeur insérée peut contenir
+  // un \x00B — résoudre jusqu'à point fixe (index invalide : laissé tel quel).
+  let html = out.join("");
+  for (;;) {
+    const next = html.replace(/\x00B(\d+)\x00/g, (m, n: string) =>
+      +n < blocks.length ? blocks[+n] : m,
+    );
+    if (next === html) return html;
+    html = next;
+  }
 }
 
 async function openFilePanel(path: string) {
@@ -1608,6 +1820,10 @@ function openFileCtx(x: number, y: number, el: HTMLElement) {
     hideFileCtx();
     void copyText(abs);
   });
+  add(t("ctx_download"), "", () => {
+    hideFileCtx();
+    void downloadEntry(rel);
+  });
   add(t("ctx_delete"), "danger", (b) => {
     // Double-clic armé : "Supprimer" → "confirmer ?" → suppression
     if (!b.dataset.armed) {
@@ -1630,6 +1846,66 @@ function openFileCtx(x: number, y: number, el: HTMLElement) {
     const r = fileCtx.getBoundingClientRect();
     fileCtx.style.left = `${Math.min(x, window.innerWidth - r.width - 8)}px`;
     fileCtx.style.top = `${Math.min(y, window.innerHeight - r.height - 8)}px`;
+  }
+}
+
+/** Télécharge un fichier/dossier du workspace vers le disque local :
+ *  infos (nom suggéré — .zip pour un dossier) → dialogue « Enregistrer
+ *  sous » (Android : Download/AgentControl/ → repli app data) → tranches
+ *  base64 démon → write_download. Session/conn figées : un changement de
+ *  session en cours de route n'envoie pas les tranches sur le mauvais
+ *  serveur (la sysline disparaît au switch, le téléchargement finit). */
+async function downloadEntry(rel: string) {
+  if (!current) return;
+  const sid = current.id;
+  const conn = current.conn;
+  const info = await call<{ name: string; dir: boolean; size: number | null }>(
+    "download_path",
+    { session: sid, conn, path: rel, offset: 0, limit: 0 },
+  ).catch((e) => {
+    showErr(String(e));
+    return null;
+  });
+  if (!info) return;
+  let dest: string | null = IS_ANDROID
+    ? `${await downloadDir()}/AgentControl/${info.name}`
+    : await save({ defaultPath: info.name, title: t("ctx_download") });
+  if (!dest) return; // dialogue annulé
+  const sys = document.createElement("div");
+  sys.className = "ev sysline";
+  sys.textContent = `⏳ ${t("dl_progress", { name: info.name, pct: 0 })}`;
+  eventsEl.appendChild(sys);
+  scrollBottom();
+  let offset = 0;
+  let archive: string | undefined;
+  try {
+    for (;;) {
+      const c = await call<{ total: number; data: string; archive?: string }>(
+        "download_path",
+        { session: sid, conn, path: rel, offset, limit: 1 << 20, archive },
+      );
+      archive ??= c.archive;
+      const n = await invoke<number>("write_download", {
+        path: dest,
+        data: c.data,
+        append: offset > 0,
+      }).catch(async (e): Promise<number> => {
+        // Android : Download public peut refuser (pas de SAF) → app data.
+        if (!IS_ANDROID || offset > 0) throw e;
+        dest = `${await appDataDir()}/downloads/${info.name}`;
+        return invoke<number>("write_download", { path: dest, data: c.data, append: false });
+      });
+      offset += n;
+      sys.textContent = `⏳ ${t("dl_progress", {
+        name: info.name,
+        pct: Math.round((offset * 100) / Math.max(c.total, 1)),
+      })}`;
+      if (offset >= c.total) break;
+    }
+    sys.textContent = `✔ ${t("dl_done", { name: info.name, dest })}`;
+  } catch (e) {
+    sys.textContent = `⚠ ${t("dl_failed", { name: info.name, err: String(e) })}`;
+    showErr(String(e));
   }
 }
 // Le menu se ferme au clic ailleurs / Échap / scroll de l'arbre — mais un
@@ -1709,7 +1985,9 @@ function renderEvent(ev: AcEvent, live: boolean): HTMLElement {
   switch (ev.type) {
     case "user_message": {
       const d = mkEv("msg user", ev.seq);
-      d.innerHTML = linkify(esc(ev.text as string));
+      d.innerHTML =
+        (ev.steer ? `<span class="steer-badge">${t("steer_badge")}</span> ` : "") +
+        linkify(esc(ev.text as string));
       return d;
     }
     case "agent_text": {
@@ -2030,22 +2308,6 @@ $("btn-bottom").onclick = () => {
 
 await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
   const { session, event } = msg.payload;
-  // Fin de compact (succès "context compacted", annulation, échec) →
-  // relâcher les messages retenus pour cette session. Un usage_update en
-  // dessous de la valeur au lancement du /compact vaut aussi signal.
-  if (compactHold.has(session)) {
-    const h = compactHold.get(session)!;
-    const txt = String((event.text ?? event.message) ?? "");
-    const done =
-      /compacted/i.test(txt) ||
-      (/compact/i.test(txt) &&
-        /cancel|complet|abort|finish|done|interrupt|error|fail/i.test(txt)) ||
-      (event.type === "usage_update" &&
-        h.used != null &&
-        typeof event.used === "number" &&
-        (event.used as number) < h.used);
-    if (done) flushCompact(session);
-  }
   // Suppression côté serveur : l'event terminal arrive avant la coupure.
   if (event.type === "session_deleted") {
     if (current && session === current.id) markSessionGone();
@@ -2290,15 +2552,10 @@ function qBtn(txt: string, title: string): HTMLButtonElement {
 }
 
 // ---- /compact : la compaction tourne en arrière-plan côté agent après un
-// idle immédiat — un prompt envoyé avant la fin l'annule ("compact
-// cancelled"). Les messages tapés pendant ce temps sont retenus puis
-// renvoyés au signal de fin (ou timeout de sécurité).
-const compactHold = new Map<string, {
-  conn: string;
-  msgs: string[];
-  used?: number; // context_used au lancement — signal "contexte réduit"
-  timer: ReturnType<typeof setTimeout>;
-}>();
+// idle immédiat — le démon passe la session en "compacting" et retient
+// les prompts en file (visibles dans la barre de file) jusqu'au signal
+// de fin (contexte réduit, message de fin, cancel, timeout). Un prompt
+// livré pendant le compact l'annulerait.
 
 function addSysline(text: string) {
   const d = document.createElement("div");
@@ -2306,34 +2563,6 @@ function addSysline(text: string) {
   d.textContent = `⦿ ${text}`;
   eventsEl.appendChild(d);
   scrollBottom();
-}
-
-/** Relâche les messages retenus d'une session (fin de compact ou timeout). */
-function flushCompact(sid: string, timedOut = false) {
-  const h = compactHold.get(sid);
-  if (!h) return;
-  compactHold.delete(sid);
-  clearTimeout(h.timer);
-  // Retour visible même sans message retenu — c'est la confirmation que
-  // le compact est bien terminé (ou qu'il a expiré).
-  if (current?.id === sid) {
-    addSysline(
-      t(
-        timedOut
-          ? "compact_timeout"
-          : h.msgs.length
-            ? "compact_released"
-            : "compact_done",
-      ),
-    );
-  }
-  if (!h.msgs.length) return;
-  void (async () => {
-    for (const m of h.msgs) {
-      await call("send", { session: sid, text: m, conn: h.conn }).catch((e) => showErr(String(e)));
-    }
-    refreshQueue();
-  })();
 }
 
 type SendMode = "normal" | "steer" | "force";
@@ -2367,15 +2596,6 @@ async function sendInput(mode: SendMode = "normal") {
     addSysline(t("cmd_unknown", { cmd: bm[1] }));
     return;
   }
-  // Compaction en cours : retenir le message — l'envoyer annulerait le
-  // compact (force/steer = bypass volontaire, annule le compact).
-  const held = compactHold.get(current.id);
-  if (held && mode === "normal") {
-    ($("input") as HTMLTextAreaElement).value = "";
-    held.msgs.push(txt);
-    addSysline(t("compact_hold", { n: held.msgs.length }));
-    return;
-  }
   ($("input") as HTMLTextAreaElement).value = "";
   await call("send", {
     session: current.id,
@@ -2385,22 +2605,9 @@ async function sendInput(mode: SendMode = "normal") {
   }).catch((e) => showErr(String(e)));
   // Commande slash non-builtin : l'agent l'applique au prochain tour (ex.
   // /compact → "context compacted" n'arrive qu'au message suivant) → hint.
+  // (/compact : le démon arme la retenue "compacting" à la livraison.)
   if (bm) {
-    if (bm[1] === "compact") {
-      // /compact : armer la rétention des messages jusqu'au signal de fin.
-      const sid = current.id;
-      const prev = compactHold.get(sid);
-      if (prev) clearTimeout(prev.timer);
-      compactHold.set(sid, {
-        conn: current.conn ?? "",
-        msgs: prev?.msgs ?? [],
-        used: current.context_used,
-        timer: setTimeout(() => flushCompact(sid, true), 120_000),
-      });
-      addSysline(t("compact_started"));
-    } else {
-      addSysline(t("cmd_sent_hint", { cmd: bm[1] }));
-    }
+    addSysline(t("cmd_sent_hint", { cmd: bm[1] }));
   }
   refreshQueue();
 }

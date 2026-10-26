@@ -10,9 +10,11 @@ name: auto-release-pr
 # mots-clés des commits), les 5 checks tournent sur le head bumpé,
 # merge par l'utilisateur → tag + build dispatch.
 #
-# Les pushes via GITHUB_TOKEN (release-bump, reconcile) ne déclenchent
-# pas les workflows — pas de boucle ; et à ce stade du cycle la PR
-# existe de toute façon déjà.
+# Le reset post-release de `reconcile-next-release` pointe nr sur le
+# même SHA que main : ce push (PAT) déclenche ce job, qui doit sortir
+# clean — `gh pr create` sur une branche sans avance échouerait
+# (« No commits between ») en vrai rouge sinon. Rien à releaser =
+# pas de release PR ; elle naîtra au premier merge du cycle.
 #
 # gh pr create via RELEASE_PAT (fallback GITHUB_TOKEN) : le réglage
 # repo « Allow GitHub Actions to create and approve pull requests »
@@ -56,6 +58,13 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -e
+          # nr alignée sur main (reset post-release) → rien à releaser.
+          AHEAD=$(gh api "repos/$GH_REPO/compare/main...next_release" \
+            --jq .ahead_by)
+          if [ "$AHEAD" = "0" ]; then
+            echo "next_release sans avance sur main → skip"
+            exit 0
+          fi
           OPEN=$(gh pr list --base main --head next_release --state open \
             --json number --jq 'length')
           if [ "$OPEN" -gt 0 ]; then

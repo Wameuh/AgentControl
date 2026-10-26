@@ -19,7 +19,8 @@ relancer, toujours en draft) → review soldée → `gh pr ready`
 **Merge** : vers `main`, toujours l'utilisateur. Vers `next_release`,
 **l'agent peut merger** via `gh pr merge <N>` quand la dernière review
 auto porte un verdict **`Verdict: APPROVED` en titre** postérieur au
-push du head courant (fraîcheur vérifiée via les PushEvents du repo) —
+push du head courant (fraîcheur vérifiée via les PushEvents du repo,
+fallback feed `activity` — les events peuvent lagger des heures) —
 sinon le hook `.devin/` bloque (`git merge`, API, GraphQL, `--admin`,
 `main` : toujours interdits). Tripwire : un commentaire `Verdict:
 APPROVED` auto-posté passerait — la règle reste de ne merger que sur
@@ -129,12 +130,27 @@ dispatch). Idempotent : tag existant → skip. Sans label `release`, un
 merge dans `main` ne tague rien.
 
 **Reconcile** : tout merge nr→main est un squash → le commit `main`
-n'est jamais ancêtre des commits nr, et la release suivante
-reconflicterait sur toute zone retouchée (arrivé : #23, #29). Le job
-`reconcile-next-release` (push sur `main`) refait le lien : merge
-commit sur `next_release` (parents nr + main, vrai merge — hotfix
-`main` propagé, conflit = job rouge fail-closed) → la merge-base de la
-prochaine release = tip `main` → plus de conflit.
+n'est jamais ancêtre des commits nr : sans reconcile la release
+suivante reconflicterait sur toute zone retouchée (arrivé : #23, #29),
+et la release PR listerait TOUT l'historique nr (#39 : 25 commits
+remontant à #11, injectés par GitHub dans le message de squash —
+réglage `COMMIT_MESSAGES`). Le job `reconcile-next-release` (push sur
+`main`) refait le lien, en deux modes : **arbres identiques** (cas
+nominal post-release — nr n'a plus de contenu hors `main`) →
+**reset** `next_release` = tip `main` en `--force-with-lease` : les
+commits du cycle écoulé quittent nr → la prochaine release PR ne
+liste que le cycle courant, merge-base = tip `main` ; **arbres
+différents** (feature mergée dans la fenêtre du reconcile,
+résolutions de conflit côté `main`, hotfix direct en cours de cycle)
+→ **merge** classique (vrai merge récursif, hotfix propagé, conflit =
+job rouge fail-closed, jamais de reset destructif).
+⚠️ Après un reset, nr est réécrite : clones locaux →
+`git fetch && git reset --hard origin/next_release` (pas `pull`) ;
+PR ouverte basée sur l'ancien nr → `git fetch && git rebase --onto
+origin/next_release <ancien-tip>` — sinon sa liste de commits
+affiche l'ancien historique nr (le diff reste correct, mais les
+vieux sujets `(minor)`/`(sync)` ré-entreraient dans le body du
+squash → sur-bump possible au cycle suivant).
 ⚠️ `release-bump` et `reconcile-next-release` poussent sur
 `next_release` via le secret **`RELEASE_PAT`**, qu'`auto-release-pr`
 utilise aussi pour créer la release PR. PAT fine-grained du repo,
@@ -172,10 +188,11 @@ artefacts sur les PR (APK suffixé `-<sha>`).
 
 **Pas de bump par PR** — la version ne bouge qu'à la release. Le niveau
 est décidé par des **mots-clés parenthésés dans les sujets de commit**
-balayés sur le cycle (depuis le dernier `chore: bump version` **dont
-le tag `vX.Y.Z` existe** sur `next_release` — borne auto-entretenue :
-le bump du cycle courant, non encore tagué, n'est pas une borne ; un
-tag `main` n'est jamais ancêtre des commits nr sous squash) :
+balayés sur le cycle. Borne du scan = dernier `chore: bump version`
+**dont le tag `vX.Y.Z` existe** sur `next_release`, sinon (post-reset :
+nr n'a plus de commit bump, l'historique = celui de `main`) **dernier
+tag semver**, qui est alors ancêtre de nr — borne auto-entretenue dans
+les deux cas :
 
 - `(major)` → **major** ; `(minor)` ou `(sync)` → **minor** ;
   rien → **patch**

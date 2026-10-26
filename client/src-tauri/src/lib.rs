@@ -373,6 +373,13 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         "read_file" => ReqKind::ReadFile { session: s("session"), path: s("path") },
         "list_dir" => ReqKind::ListDir { session: s("session"), path: s("path") },
         "delete_path" => ReqKind::DeletePath { session: s("session"), path: s("path") },
+        "download_path" => ReqKind::DownloadPath {
+            session: s("session"),
+            path: s("path"),
+            offset: p.get("offset").and_then(Value::as_u64).unwrap_or(0),
+            limit: p.get("limit").and_then(Value::as_u64).unwrap_or(0),
+            archive: so("archive"),
+        },
         "queue_list" => ReqKind::QueueList { session: s("session") },
         "queue_edit" => ReqKind::QueueEdit {
             session: s("session"),
@@ -396,6 +403,32 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
 #[tauri::command]
 fn log_tail(n: Option<usize>) -> String {
     client_core::log_tail(n.unwrap_or(200))
+}
+
+/// Écrit une tranche de téléchargement (base64) dans `path` — flux du
+/// fichier workspace démon → fichier local choisi par l'utilisateur.
+/// Retourne le nombre d'octets écrits.
+#[tauri::command]
+fn write_download(path: String, data: String, append: bool) -> Result<u64, String> {
+    use base64::Engine;
+    use std::io::Write;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|e| e.to_string())?;
+    let p = PathBuf::from(&path);
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut o = std::fs::OpenOptions::new();
+    o.create(true).write(true);
+    if append {
+        o.append(true);
+    } else {
+        o.truncate(true);
+    }
+    let mut f = o.open(&p).map_err(|e| e.to_string())?;
+    f.write_all(&bytes).map_err(|e| e.to_string())?;
+    Ok(bytes.len() as u64)
 }
 
 /// Connexions récentes (~/.agentcontrol/connections.json).
@@ -518,7 +551,7 @@ async fn update_client(_tag: String) -> Result<(), String> {
 
 /// Update en un clic : télécharge le .deb de la release via l'API REST et
 /// l'installe (pkexec demande le mot de passe), puis relance l'app.
-#[cfg(not(target_os = "android"))]
+#[cfg(all(not(target_os = "android"), not(target_os = "windows")))]
 #[tauri::command]
 async fn update_client(tag: String) -> Result<(), String> {
     let deb = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
@@ -572,6 +605,94 @@ async fn update_client(tag: String) -> Result<(), String> {
     if let Ok(exe) = std::env::current_exe() {
         let _ = std::process::Command::new(exe).spawn();
     }
+    std::process::exit(0);
+}
+
+/// Update en un clic (Windows) — version INSTALLÉE uniquement : télécharge
+/// le setup NSIS de la release, puis un .bat caché l'installe en silencieux
+/// (/S) et relance l'app — l'exe courant doit être mort pour le remplacer.
+/// Build portable (exe hors des dossiers d'install) → Err → page releases.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn update_client(tag: String) -> Result<(), String> {
+    let cur = std::env::current_exe().map_err(|e| e.to_string())?;
+    // Installé = exe sous le $INSTDIR NSIS = %LOCALAPPDATA%\<productName>\
+    // (installMode currentUser par défaut — RestorePreviousInstallLocation
+    // met alors à jour EN PLACE → relancer cur est correct). Un exe sous
+    // Program Files (MSI per-machine, ou portable déplacé là) → le setup
+    // per-user s'installerait AILLEURS et relancer cur rouvrirait
+    // l'ancien : trompe-l'œil → refus → repli page releases, comme le
+    // portable. "\" final = borne de composant (\AgentControlX\ ne match
+    // pas). Comparaison en minuscules : la casse de current_exe peut
+    // différer de %LOCALAPPDATA%.
+    let local = std::env::var("LOCALAPPDATA")
+        .map(|p| format!("{p}\\AgentControl\\"))
+        .unwrap_or_default()
+        .to_lowercase();
+    let cur_l = cur.to_string_lossy().to_lowercase();
+    if local.is_empty() || !cur_l.starts_with(&local) {
+        return Err("build portable — update manuelle via la page releases".into());
+    }
+    let dir = std::env::temp_dir().join("agentcontrol-update");
+    let setup = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
+        let rel = gh_get(
+            "https://api.github.com/repos/Wameuh/AgentControl/releases/latest",
+        )
+        .or_else(|_| {
+            gh_get(&format!(
+                "https://api.github.com/repos/Wameuh/AgentControl/releases/tags/v{tag}"
+            ))
+        })?;
+        let url = rel["assets"]
+            .as_array()
+            .and_then(|a| {
+                a.iter().find_map(|x| {
+                    let n = x["name"].as_str().unwrap_or("");
+                    // NSIS : AgentControl_<ver>_x64-setup.exe
+                    if n.ends_with("-setup.exe") {
+                        x["browser_download_url"].as_str().map(String::from)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .context("pas de setup .exe dans la release")
+            .map_err(|e| e.to_string())?;
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let setup = dir.join("agentcontrol-setup.exe");
+        let resp = ureq::get(&url)
+            .set("User-Agent", "agentcontrol-updater")
+            .call()
+            .map_err(|e| e.to_string())?;
+        let mut r = resp.into_reader();
+        let mut f = std::fs::File::create(&setup).map_err(|e| e.to_string())?;
+        std::io::copy(&mut r, &mut f).map_err(|e| e.to_string())?;
+        Ok(setup)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    // cmd /C : ping ≈ sleep 1 s sans console (timeout.exe exige un handle
+    // d'entrée console → inerte sous CREATE_NO_WINDOW) — laisse au process
+    // courant le temps de se fermer et de relâcher ses locks ; /wait attend
+    // la fin du setup (exit code propagé → pas de relance si l'install a
+    // échoué). hide_console → aucune fenêtre cmd parasite. del final : pas
+    // de résidu setup/.bat dans TEMP (sauf chemin d'échec = débogage).
+    let bat = setup.with_file_name("agentcontrol-update.bat");
+    std::fs::write(
+        &bat,
+        format!(
+            "@echo off\r\nping -n 2 127.0.0.1 >nul\r\nstart \"\" /wait \"{}\" /S\r\nif errorlevel 1 exit /b 1\r\ndel \"{}\"\r\nstart \"\" \"{}\"\r\ndel \"%~f0\"\r\n",
+            setup.display(),
+            setup.display(),
+            cur.display()
+        ),
+    )
+    .map_err(|e| e.to_string())?;
+    let mut cmd = tokio::process::Command::new("cmd");
+    cmd.arg("/C").arg(&bat);
+    client_core::hide_console(&mut cmd);
+    cmd.spawn().map_err(|e| e.to_string())?;
     std::process::exit(0);
 }
 
@@ -641,6 +762,7 @@ async fn ensure_daemon(
         .args(&args.unwrap_or_default())
         .arg(&host)
         .arg(&script);
+    client_core::hide_console(&mut cmd);
     let out = tokio::time::timeout(std::time::Duration::from_secs(120), cmd.output())
         .await
         .map_err(|_| "ssh ensure_daemon timeout".to_string())?
@@ -694,6 +816,7 @@ pub fn run() {
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // Android : pas de HOME — les chemins client-core (clé SSH,
             // connexions, logs) racinent dans le app_data_dir.
@@ -721,7 +844,7 @@ pub fn run() {
             sys: Mutex::new(sysinfo::System::new()),
             net: Mutex::new(std::collections::VecDeque::new()),
         })
-        .invoke_handler(tauri::generate_handler![connect, call, subscribe, ssh_hosts, ssh_pubkey, platform, log_tail, saved_connections, save_connection, check_update, update_client, ensure_daemon, disconnect, sys_stats, set_app_icon])
+        .invoke_handler(tauri::generate_handler![connect, call, subscribe, ssh_hosts, ssh_pubkey, platform, log_tail, saved_connections, save_connection, check_update, update_client, ensure_daemon, disconnect, sys_stats, set_app_icon, write_download])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

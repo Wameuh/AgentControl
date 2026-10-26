@@ -99,6 +99,17 @@ jobs:
             client/src-tauri/target/release/bundle/appimage/*.AppImage
             client/src-tauri/target/release/agentcontrol
 
+      # Exe brut = version PORTABLE (sans install) — renommé pour
+      # distinguer portable vs installer (nsis -setup.exe / msi).
+      - name: Portable exe (Windows)
+        if: runner.os == 'Windows'
+        working-directory: client
+        shell: pwsh
+        run: |
+          $ver = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          New-Item -ItemType Directory -Force dist-win | Out-Null
+          Copy-Item src-tauri/target/release/agentcontrol.exe "dist-win/AgentControl_${ver}_x64-portable.exe"
+
       - name: Artifacts (Windows)
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
@@ -107,7 +118,7 @@ jobs:
           path: |
             client/src-tauri/target/release/bundle/msi/*.msi
             client/src-tauri/target/release/bundle/nsis/*.exe
-            client/src-tauri/target/release/agentcontrol.exe
+            client/dist-win/*.exe
 
   # -----------------------------------------------------------------
   # Client Android : APK aarch64 (debug-signé, installable directement).

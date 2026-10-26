@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -18,11 +18,51 @@ use crate::journal::{self, Journal};
 const MAX_INLINE: usize = 32 * 1024;
 /// Taille de l'extrait conservé dans l'event quand le contenu part en blob.
 const EXCERPT: usize = 4 * 1024;
+/// Garde-fou de la retenue compact si l'agent ne signale jamais la fin
+/// (ni usage_update réduit, ni message "compacted", ni cancel).
+const COMPACT_TIMEOUT_SECS: u64 = 180;
 
 /// Requête émise par l'agent, en attente de réponse d'un client.
 enum PendingAgent {
     Permission { acp_id: Value },
     Question { acp_id: Value },
+}
+
+/// Retenue active pendant un compact agent-side. `used_at_start` sert
+/// de référence au signal "contexte réduit", `timer` est le garde-fou.
+struct CompactHold {
+    used_at_start: Option<u64>,
+    timer: tokio::task::JoinHandle<()>,
+}
+
+/// `/compact` (avec ou sans arguments) déclenche une compaction côté
+/// agent — le prompt rend la main immédiatement mais la compaction
+/// continue en arrière-plan.
+fn is_compact_cmd(text: &str) -> bool {
+    text.trim_start()
+        .strip_prefix("/compact")
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+}
+
+/// Heuristique de fin de compact sur un message agent : un mot en
+/// "compact…" + un terme de clôture, en bornes de mot (évite de matcher
+/// "uncompacted" ou un "done" noyé dans une sous-chaîne).
+fn compact_done_text(text: &str) -> bool {
+    let l = text.to_lowercase();
+    let mut compact = false;
+    let mut done = false;
+    for w in l.split(|c: char| !c.is_alphanumeric()) {
+        compact |= w.starts_with("compact");
+        done |= matches!(
+            w,
+            "compacted" | "compacté" | "compactée" | "cancel" | "cancelled" | "canceled"
+                | "annulé" | "annulée" | "abort" | "aborted" | "finish" | "finished" | "done"
+                | "interrupt" | "interrupted" | "error" | "errors" | "fail" | "failed"
+                | "failure" | "échoué" | "cancellation" | "complete" | "completed"
+                | "terminé" | "terminée"
+        );
+    }
+    compact && done
 }
 
 pub struct Session {
@@ -50,9 +90,25 @@ pub struct Session {
     /// Requêtes session/prompt en vol (runner + steer concurrents) —
     /// l'état ne repasse idle que quand toutes sont terminées.
     active_prompts: AtomicU64,
-    /// Messages en attente d'un tour libre (FIFO).
-    prompt_queue: Mutex<std::collections::VecDeque<String>>,
+    /// Messages en attente d'un tour libre (FIFO) — (texte, provenance) :
+    /// un prompt peer drainé ne doit PAS devenir un user_message dans le
+    /// journal (son PeerMessage est déjà journalisé côté appelant).
+    prompt_queue: Mutex<std::collections::VecDeque<(String, PromptSrc)>>,
+    /// Compact agent-side en cours : les prompts sont retenus en file
+    /// jusqu'au signal de fin (contexte réduit, message, cancel,
+    /// timeout) — un prompt livré pendant le compact l'annulerait.
+    compacting: Mutex<Option<CompactHold>>,
+    /// Self-ref pour lancer des tâches internes (drain, timer compact).
+    me: Weak<Session>,
     child: Mutex<Option<Child>>,
+}
+
+/// Provenance d'un prompt en file — détermine si le drain journalise un
+/// `user_message` (user) ou passe en silence (peer, déjà journalisé).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptSrc {
+    User,
+    Peer,
 }
 
 impl Session {
@@ -63,7 +119,7 @@ impl Session {
         )?;
         let journal = Journal::open(&dir)?;
         let (events_tx, _) = broadcast::channel(1024);
-        Ok(Arc::new(Self {
+        Ok(Arc::new_cyclic(|me| Self {
             dir,
             meta: Mutex::new(meta),
             journal,
@@ -78,6 +134,8 @@ impl Session {
             busy: std::sync::atomic::AtomicBool::new(false),
             active_prompts: AtomicU64::new(0),
             prompt_queue: Mutex::new(std::collections::VecDeque::new()),
+            compacting: Mutex::new(None),
+            me: me.clone(),
             child: Mutex::new(None),
         }))
     }
@@ -120,15 +178,31 @@ impl Session {
 
     /// Accumule un chunk de texte ; flushé au prochain event non-chunk ou fin de tour.
     fn push_chunk(&self, kind: &str, text: &str) {
-        let mut cur = self.cur_text.lock().unwrap();
-        match &mut *cur {
-            Some((k, buf)) if k == kind => buf.push_str(text),
-            _ => {
-                // kind différent : flush l'ancien d'abord
-                drop(cur);
-                self.flush_text();
-                *self.cur_text.lock().unwrap() = Some((kind.to_string(), text.to_string()));
+        {
+            let mut cur = self.cur_text.lock().unwrap();
+            match &mut *cur {
+                Some((k, buf)) if k == kind => buf.push_str(text),
+                _ => {
+                    // kind différent : flush l'ancien d'abord
+                    drop(cur);
+                    self.flush_text();
+                    *self.cur_text.lock().unwrap() = Some((kind.to_string(), text.to_string()));
+                }
             }
+        }
+        // Fin de compact signalée par le texte agent : détectée dès que
+        // le buffer la contient — le flush peut ne jamais venir si c'est
+        // le dernier message du compact.
+        let compact_done = kind == "agent"
+            && self.compacting.lock().unwrap().is_some()
+            && self
+                .cur_text
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|(_, buf)| compact_done_text(buf));
+        if compact_done {
+            self.end_compact("signal agent");
         }
     }
 
@@ -138,9 +212,13 @@ impl Session {
             if buf.is_empty() {
                 return;
             }
+            let compact_done = kind == "agent" && compact_done_text(&buf);
             let ev_kind = match kind.as_str() {
                 "thought" => EventKind::AgentThought { text: buf },
-                "user" => EventKind::UserMessage { text: buf },
+                "user" => EventKind::UserMessage {
+                    text: buf,
+                    steer: false,
+                },
                 _ => EventKind::AgentText { text: buf },
             };
             match self.journal.append(ev_kind) {
@@ -148,6 +226,11 @@ impl Session {
                     let _ = self.events_tx.send(ev);
                 }
                 Err(e) => eprintln!("journal append failed: {e}"),
+            }
+            // L'agent annonce la fin de sa compaction par un message —
+            // relâche les prompts retenus.
+            if compact_done {
+                self.end_compact("signal agent");
             }
         }
     }
@@ -194,6 +277,10 @@ impl Session {
         skip_replay: bool,
         mcp_servers: Value,
     ) -> Result<()> {
+        // Nouveau process = nouveau cycle de livraison : retenue compact
+        // et flag busy d'un éventuel tour mort avec l'ancien process.
+        self.take_compact_hold();
+        self.busy.store(false, Ordering::SeqCst);
         let mut last = anyhow::anyhow!("spawn not attempted");
         for attempt in 0..2 {
             match self
@@ -206,7 +293,15 @@ impl Session {
                 )
                 .await
             {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    // Des prompts restés en file (session morte puis
+                    // reprise) sont livrés au nouvel agent.
+                    if !self.prompt_queue.lock().unwrap().is_empty() {
+                        let s = Arc::clone(self);
+                        tokio::spawn(async move { s.drain_queue().await });
+                    }
+                    return Ok(());
+                }
                 Err(e) => {
                     last = e;
                     if attempt == 0 {
@@ -547,6 +642,7 @@ impl Session {
                 }
             }
             acp::Mapped::Event(kind) => {
+                let mut compact_done = false;
                 match &kind {
                     EventKind::ModeChanged { mode } => {
                         let mut m = self.meta.lock().unwrap();
@@ -587,10 +683,25 @@ impl Session {
                         m.context_size = Some(*size);
                         drop(m);
                         self.save_meta();
+                        // Fin de compact : l'occupation contexte est
+                        // passée sous la valeur relevée au lancement.
+                        if self
+                            .compacting
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .and_then(|h| h.used_at_start)
+                            .is_some_and(|u0| *used < u0)
+                        {
+                            compact_done = true;
+                        }
                     }
                     _ => {}
                 }
                 self.emit(kind);
+                if compact_done {
+                    self.end_compact("contexte réduit");
+                }
             }
             acp::Mapped::ToolUpdate {
                 call_id,
@@ -680,46 +791,82 @@ impl Session {
     // API publique (dispatchée par le serveur)
     // -----------------------------------------------------------------------
 
-    /// Enfile un prompt et devient le runner si aucun tour ne tourne.
-    /// `force` : annule le tour en cours et passe le message en tête.
-    /// `steer` : session/prompt concurrent pendant le tour — si l'agent
-    /// supporte le steering il injecte le message au prochain point
-    /// d'arrêt (après le tool call courant) ; refus → fallback en file.
-    /// Le message est journalisé à l'enfilement (chat = ordre d'envoi).
+    /// Enfile un prompt ; la livraison est pilotée par le runner (drain).
+    /// `force` : sort d'une éventuelle retenue compact, annule le tour en
+    /// cours et passe le message en tête. `steer` : session/prompt
+    /// concurrent pendant le tour — l'agent l'injecte au prochain point
+    /// d'arrêt s'il le supporte ; refus → fallback en file.
+    /// Le `user_message` n'est journalisé qu'à l'envoi effectif (au drain
+    /// ou au steer réussi) — un message en file peut être édité/retiré,
+    /// le chat doit montrer la version réellement reçue par l'agent.
+    /// Retourne dès l'enfilement : la file est à jour pour le client.
     pub async fn send_prompt(&self, text: &str, force: bool, steer: bool) -> Result<()> {
-        if steer && !force && self.busy.load(Ordering::SeqCst) {
-            self.emit(EventKind::UserMessage {
-                text: text.into(),
-            });
-            self.emit(EventKind::System {
-                text: "steer → envoyé au tour en cours".into(),
-            });
-            if let Err(e) = self.prompt_rpc(text).await {
+        // Retenue compact : aucun tour ne tourne (busy n'est tenu que par
+        // la retenue) — tout envoi non forcé attend la fin du compact
+        // dans la file ; le drain est relancé par end_compact.
+        if !force {
+            let c = self.compacting.lock().unwrap();
+            if c.is_some() {
+                self.enqueue_prompt(text, false, PromptSrc::User);
+                drop(c);
                 self.emit(EventKind::System {
-                    text: format!("steer refusé ({e}) — message en file"),
+                    text: "compact en cours — message en file".into(),
                 });
-                if !self.enqueue_prompt(text, false) {
-                    self.drain_queue().await;
+                return Ok(());
+            }
+        }
+        if steer && !force && self.busy.load(Ordering::SeqCst) {
+            // Steer réussi → user_message{steer:true} ; refus → fallback
+            // en file (rendu comme message normal à la livraison).
+            let me = self.me.clone();
+            let text = text.to_string();
+            tokio::spawn(async move {
+                let Some(s) = me.upgrade() else { return };
+                if is_compact_cmd(&text) {
+                    s.arm_compact();
                 }
+                match s.prompt_rpc(&text).await {
+                    Ok(_) => s.emit(EventKind::UserMessage {
+                        text: text.clone(),
+                        steer: true,
+                    }),
+                    Err(e) => {
+                        s.emit(EventKind::System {
+                            text: format!("steer refusé ({e}) — message en file"),
+                        });
+                        if !s.enqueue_prompt(&text, false, PromptSrc::User) {
+                            s.drain_queue().await;
+                        }
+                    }
+                }
+            });
+            return Ok(());
+        }
+        if force {
+            // bypass volontaire : sort de la retenue compact le cas
+            // échéant, annule le tour courant, livre en priorité.
+            let held = self.take_compact_hold();
+            if held {
+                self.emit(EventKind::System {
+                    text: "compact interrompu — envoi forcé".into(),
+                });
+            }
+            let _ = self.cancel().await;
+            let already = self.enqueue_prompt(text, true, PromptSrc::User);
+            if held || !already {
+                // retenue levée (aucun runner ne tournait) ou file vide.
+                self.spawn_drain();
             }
             return Ok(());
         }
-        self.emit(EventKind::UserMessage {
-            text: text.into(),
-        });
-        if force {
-            let _ = self.cancel().await;
-        }
-        let already = self.enqueue_prompt(text, force);
-        if already && !force {
+        let already = self.enqueue_prompt(text, false, PromptSrc::User);
+        if already {
             self.emit(EventKind::System {
                 text: "message en file — envoyé à la fin du tour".into(),
             });
-        }
-        if already {
             return Ok(()); // un runner existe déjà
         }
-        self.drain_queue().await;
+        self.spawn_drain();
         Ok(())
     }
 
@@ -729,7 +876,19 @@ impl Session {
     /// l'agent refuse), sinon enfile FIFO. L'event `PeerMessage` a déjà été
     /// journalisé par l'appelant — ici on ne fait QUE livrer le prompt.
     pub async fn send_peer_prompt(&self, wrapped: &str, steer: bool) -> Result<()> {
+        {
+            let c = self.compacting.lock().unwrap();
+            if c.is_some() {
+                self.enqueue_prompt(wrapped, false, PromptSrc::Peer);
+                drop(c);
+                self.emit(EventKind::System {
+                    text: "compact en cours — message en file".into(),
+                });
+                return Ok(());
+            }
+        }
         if steer && self.busy.load(Ordering::SeqCst) {
+            // (retenue compact exclue ci-dessus : busy vrai ⇒ vrai tour)
             self.emit(EventKind::System {
                 text: "steer → envoyé au tour en cours".into(),
             });
@@ -737,41 +896,57 @@ impl Session {
                 self.emit(EventKind::System {
                     text: format!("steer refusé ({e}) — message en file"),
                 });
-                if !self.enqueue_prompt(wrapped, false) {
+                if !self.enqueue_prompt(wrapped, false, PromptSrc::Peer) {
                     self.drain_queue().await;
                 }
             }
             return Ok(());
         }
-        let already = self.enqueue_prompt(wrapped, false);
+        let already = self.enqueue_prompt(wrapped, false, PromptSrc::Peer);
         if already {
             self.emit(EventKind::System {
                 text: "message en file — envoyé à la fin du tour".into(),
             });
             return Ok(()); // un runner existe déjà
         }
-        self.drain_queue().await;
+        self.spawn_drain();
         Ok(())
     }
 
     /// push + busy.swap sous le lock de la file : sérialisé avec le
     /// pop/store du runner → aucun message coincé entre les deux.
     /// Retourne vrai si un runner existe déjà.
-    fn enqueue_prompt(&self, text: &str, front: bool) -> bool {
+    fn enqueue_prompt(&self, text: &str, front: bool, src: PromptSrc) -> bool {
         let mut q = self.prompt_queue.lock().unwrap();
         if front {
-            q.push_front(text.to_string());
+            q.push_front((text.to_string(), src));
         } else {
-            q.push_back(text.to_string());
+            q.push_back((text.to_string(), src));
         }
         self.busy.swap(true, Ordering::SeqCst)
     }
 
+    /// Lance le drain en tâche de fond (le runner libère `busy` à file
+    /// vide ou s'arrête tant qu'une retenue compact est active).
+    fn spawn_drain(&self) {
+        if let Some(s) = self.me.upgrade() {
+            tokio::spawn(async move { s.drain_queue().await });
+        }
+    }
+
     /// Le runner draine la file FIFO jusqu'à vide, puis libère `busy`
     /// (sous le lock de la file → un push concurrent reprendra le relais).
+    /// Pendant une retenue compact il s'arrête sans libérer `busy` :
+    /// `end_compact` relancera le drain pour livrer les retenus.
+    /// Le `user_message` est journalisé ici, à l'envoi réel (texte final
+    /// après édits) ; les prompts peers passent en silence (PeerMessage
+    /// déjà journalisé).
     async fn drain_queue(&self) {
         loop {
-            let next = {
+            if self.compacting.lock().unwrap().is_some() {
+                return;
+            }
+            let (next, src) = {
                 let mut q = self.prompt_queue.lock().unwrap();
                 match q.pop_front() {
                     Some(t) => t,
@@ -781,7 +956,28 @@ impl Session {
                     }
                 }
             };
-            self.run_turn(&next).await;
+            if src == PromptSrc::User {
+                self.emit(EventKind::UserMessage {
+                    text: next.clone(),
+                    steer: false,
+                });
+            }
+            let armed = is_compact_cmd(&next);
+            if armed {
+                self.arm_compact();
+            }
+            if !self.run_turn(&next).await && armed && self.take_compact_hold() {
+                // /compact refusé ou inconnu côté agent : aucune
+                // compaction ne tourne — désarmer plutôt que retenir
+                // les envois jusqu'au timeout. Pas de spawn_drain :
+                // cette boucle poursuit la livraison elle-même.
+                self.emit(EventKind::System {
+                    text: "compact terminé — échec de la commande".into(),
+                });
+                if self.is_alive() {
+                    self.set_state("idle");
+                }
+            }
         }
     }
 
@@ -799,13 +995,21 @@ impl Session {
             .await;
         self.flush_text();
         if self.active_prompts.fetch_sub(1, Ordering::SeqCst) == 1 {
-            self.set_state("idle");
+            if self.compacting.lock().unwrap().is_some() {
+                // Le /compact a rendu la main mais la compaction tourne
+                // encore côté agent — l'état reste visible jusqu'au
+                // signal de fin (la retenue garde les envois en file).
+                self.set_state("compacting");
+            } else {
+                self.set_state("idle");
+            }
         }
         resp
     }
 
     /// Un tour session/prompt : working → réponse → idle.
-    async fn run_turn(&self, text: &str) {
+    /// Retourne faux si le `session/prompt` RPC a échoué.
+    async fn run_turn(&self, text: &str) -> bool {
         match self.prompt_rpc(text).await {
             Ok(v) => {
                 if let Some(sr) = v.get("stopReason").and_then(Value::as_str) {
@@ -815,11 +1019,13 @@ impl Session {
                         });
                     }
                 }
+                true
             }
             Err(e) => {
                 self.emit(EventKind::Error {
                     message: format!("prompt failed: {e}"),
                 });
+                false
             }
         }
     }
@@ -834,15 +1040,20 @@ impl Session {
         }
     }
 
-    /// Contenu de la file dans l'ordre d'envoi.
+    /// Contenu de la file dans l'ordre d'envoi (textes seuls).
     pub fn queue_snapshot(&self) -> Vec<String> {
-        self.prompt_queue.lock().unwrap().iter().cloned().collect()
+        self.prompt_queue
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(t, _)| t.clone())
+            .collect()
     }
 
     pub fn queue_edit(&self, idx: usize, text: &str) -> bool {
         let mut q = self.prompt_queue.lock().unwrap();
         if let Some(slot) = q.get_mut(idx) {
-            *slot = text.to_string();
+            slot.0 = text.to_string();
             true
         } else {
             false
@@ -866,16 +1077,69 @@ impl Session {
         }
     }
 
+    /// Arme la retenue compact : le prochain retour à idle devient
+    /// "compacting" et les prompts sont retenus en file jusqu'au signal
+    /// de fin (contexte réduit, message agent, cancel) ou au timeout.
+    fn arm_compact(&self) {
+        let mut c = self.compacting.lock().unwrap();
+        if let Some(old) = c.take() {
+            old.timer.abort();
+        }
+        let used_at_start = self.meta.lock().unwrap().context_used;
+        let me = self.me.clone();
+        let timer = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(COMPACT_TIMEOUT_SECS)).await;
+            if let Some(s) = me.upgrade() {
+                s.end_compact("timeout");
+            }
+        });
+        *c = Some(CompactHold {
+            used_at_start,
+            timer,
+        });
+    }
+
+    /// Stoppe la retenue compact (annule le garde-fou) sans rien livrer.
+    /// Retourne vrai si une retenue était active.
+    fn take_compact_hold(&self) -> bool {
+        if let Some(h) = self.compacting.lock().unwrap().take() {
+            h.timer.abort();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Fin normale du compact : journalise, repasse idle (si l'agent
+    /// vit encore) et relance le drain pour livrer les retenus.
+    fn end_compact(&self, reason: &str) {
+        if !self.take_compact_hold() {
+            return;
+        }
+        self.emit(EventKind::System {
+            text: format!("compact terminé — {reason}"),
+        });
+        if self.is_alive() {
+            self.set_state("idle");
+            self.spawn_drain();
+        }
+    }
+
     pub async fn cancel(&self) -> Result<()> {
-        let sid = self
-            .meta_snapshot()
-            .native_session_id
-            .context("no native session id")?;
-        self.write_line(&acp::notification(
-            "session/cancel",
-            acp::session_cancel_params(&sid),
-        ))?;
-        Ok(())
+        let res = match self.meta_snapshot().native_session_id {
+            Some(sid) => self.write_line(&acp::notification(
+                "session/cancel",
+                acp::session_cancel_params(&sid),
+            )),
+            None => Err(anyhow::anyhow!("no native session id")),
+        };
+        // Un cancel utilisateur met aussi fin à la retenue compact —
+        // après la notification (ordre réseau) mais même si elle a
+        // échoué (agent mort : la retenue ne survivrait qu'au timeout).
+        // Le drain relancé livre les messages encore en file (le Stop
+        // serveur les a vidés, le promote les garde).
+        self.end_compact("annulé");
+        res
     }
 
     pub async fn set_mode(&self, mode: &str) -> Result<()> {
@@ -1168,7 +1432,7 @@ impl Session {
         let needs = {
             let mut m = self.meta.lock().unwrap();
             match m.state.as_str() {
-                "running" | "working" | "waiting_input" | "idle" | "starting" => {
+                "running" | "working" | "waiting_input" | "idle" | "starting" | "compacting" => {
                     m.state = "interrupted".into();
                     true
                 }
