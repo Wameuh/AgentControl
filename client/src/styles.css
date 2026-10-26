@@ -488,6 +488,8 @@ dialog input, dialog select, dialog textarea {
 }
 dialog input:focus, dialog select:focus, dialog textarea:focus { border-color: var(--sand); outline: none; }
 dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 0; padding: 0; }
+#c-saved-row { display: flex; gap: 6px; }
+#c-saved-row select { flex: 1; min-width: 0; }
 
 #native-list { display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow-y: auto; }
 #log-view {
