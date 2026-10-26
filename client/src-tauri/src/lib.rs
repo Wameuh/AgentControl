@@ -396,6 +396,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         },
         "kill_session" => ReqKind::KillSession { session: s("session") },
         "clear_session" => ReqKind::ClearSession { session: s("session") },
+        "fork_session" => ReqKind::ForkSession { session: s("session") },
         m => return Err(format!("méthode inconnue: {m}")),
     })
 }
