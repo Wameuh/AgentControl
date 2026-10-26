@@ -172,6 +172,8 @@ body {
   padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 12px;
 }
 #fctx button:hover, #sctx button:hover { background: rgba(236, 230, 216, .08); }
+#fctx button:disabled, #sctx button:disabled { opacity: .4; cursor: default; }
+#fctx button:disabled:hover, #sctx button:disabled:hover { background: none; }
 #fctx button.danger, #sctx button.danger { color: var(--red); }
 #fctx .fctx-path, #sctx .fctx-path {
   padding: 4px 10px 6px; color: var(--dim); font-size: 10.5px;

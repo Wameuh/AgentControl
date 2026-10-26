@@ -926,31 +926,46 @@ function hideSessCtx() {
 
 function openSessionCtx(x: number, y: number, s: SessionMeta, row: HTMLElement) {
   sessCtx.innerHTML = `<div class="fctx-path">${esc(s.title)}</div>`;
-  const add = (label: string, cls: string, fn: () => void) => {
+  const add = (label: string, cls: string, fn: (b: HTMLButtonElement) => void) => {
     const b = document.createElement("button");
     b.textContent = label;
     b.className = cls;
-    b.onclick = fn;
+    b.onclick = () => fn(b);
     sessCtx.appendChild(b);
+    return b;
   };
   add(t("ctx_rename"), "", () => {
     hideSessCtx();
     renameSessRow(s, row);
   });
-  add(t("ctx_fork"), "", () => {
+  // conn: s.conn — la session peut vivre sur une autre connexion que
+  // celle affichée ; sans ça call() routerait vers le mauvais démon.
+  const forkBtn = add(t("ctx_fork"), "", () => {
     hideSessCtx();
     if (current?.id === s.id) addSysline(t("fork_started"));
-    void call<{ session: string }>("fork_session", { session: s.id })
+    void call<{ session: string }>("fork_session", { session: s.id, conn: s.conn })
       .then(async (r) => {
         await refreshSessions();
         if (r.session) await openSession(r.session);
       })
       .catch((e) => showErr(String(e)));
   });
-  // Exit = tue le process agent (kill_session) — la session reste, reprenable.
-  add(t("ctx_exit"), "danger", () => {
+  // Fork = respawn depuis la session native — impossible sans id natif.
+  forkBtn.disabled = !s.native_session_id;
+  add(t("ctx_group"), "", () => {
     hideSessCtx();
-    void call("kill_session", { session: s.id })
+    openGroupDlg("session", s);
+  });
+  // Exit = tue le process agent (kill_session) — la session reste, reprenable.
+  // Action destructive → double-clic armé comme delete_path / sess-del.
+  add(t("ctx_exit"), "danger", (b) => {
+    if (!b.dataset.armed) {
+      b.dataset.armed = "1";
+      b.textContent = t("ctx_confirm");
+      return;
+    }
+    hideSessCtx();
+    void call("kill_session", { session: s.id, conn: s.conn })
       .then(() => refreshSessions())
       .catch((e) => showErr(String(e)));
   });
@@ -972,9 +987,17 @@ function renameSessRow(s: SessionMeta, row: HTMLElement) {
   inp.id = "title-edit";
   inp.value = s.title;
   span.replaceWith(inp);
+  row.draggable = false; // sinon un drag depuis l'input part en drag de ligne
   inp.focus();
   inp.select();
+  // blur ré-entrant : retirer l'input focusé (Escape, ou refreshSessions
+  // qui rebuild la liste) redéclenche blur → sans garde, une annulation
+  // persisterait le texte tapé. !isConnected = ligne déjà reconstruite.
+  let finished = false;
   const done = async (save: boolean) => {
+    if (finished || !inp.isConnected) { finished = true; return; }
+    finished = true;
+    if (!IS_ANDROID) row.draggable = true;
     const v = inp.value.trim();
     inp.replaceWith(span);
     if (save && v && v !== s.title) {
@@ -984,7 +1007,7 @@ function renameSessRow(s: SessionMeta, row: HTMLElement) {
         current.title = v;
         $("chat-title").textContent = v;
       }
-      await call("rename_session", { session: s.id, title: v })
+      await call("rename_session", { session: s.id, title: v, conn: s.conn })
         .catch((e) => showErr(String(e)));
       refreshSessions();
     }
@@ -1034,7 +1057,7 @@ function sessRow(s: SessionMeta, conn: string, grp: string, closed: boolean): HT
       setTimeout(() => { del.dataset.armed = ""; del.textContent = "✕"; }, 2500);
       return;
     }
-    await call("delete_session", { session: s.id }).catch((er) => showErr(String(er)));
+    await call("delete_session", { session: s.id, conn: s.conn }).catch((er) => showErr(String(er)));
     compactHold.delete(s.id);
     if (current?.id === s.id) {
       current = null;
