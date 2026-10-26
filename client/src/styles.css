@@ -457,6 +457,11 @@ img.md-img {
 }
 #model-free { width: 130px; }
 
+/* Popup natif d'un <select> : sous Windows/WebView2 il reste blanc malgré
+   color-scheme:dark et les options héritent l'encre claire → texte invisible.
+   Fond + encre explicites sur les options (respectés par le popup Chromium). */
+select option { background: var(--panel-solid); color: var(--ink); }
+
 /* Badges */
 .badge {
   font-size: 11px; padding: 3px 10px; border-radius: 999px;
