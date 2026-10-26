@@ -3401,9 +3401,12 @@ async function deleteConn(conn: string) {
   for (const k of Object.keys(localStorage)) {
     if (k.startsWith(`ac-grp-${conn}::`)) localStorage.removeItem(k);
   }
+  // Conversations cachées de sessions de cette conn → purge (elles sont
+  // supprimées côté démon quand il était joignable).
+  for (const [k, c] of convCache) if (c.conn === conn) convCache.delete(k);
   if (current && (current.conn ?? "default") === conn) {
     current = null;
-    eventsEl.innerHTML = "";
+    clearConv();
   }
   refreshSessions();
 }
