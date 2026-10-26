@@ -1153,6 +1153,7 @@ async function openSession(id: string) {
   renderedCount = 0;
   hasMoreHistory = true;
   toolBlocks.clear();
+  pendingToolUpdates.clear();
   answered.clear();
   unseenBelow = 0;
   $("btn-bottom").hidden = true;
@@ -1385,7 +1386,7 @@ function linkify(escaped: string): string {
   // URLs d'abord → vrais liens (placeholder \x00U pour ne pas être re-matchées
   // par FILE_RE ni corrompues par le markup)
   const urls: string[] = [];
-  let work = escaped.replace(/https?:\/\/[^\s< ]+/g, (m) => {
+  let work = escaped.replace(/https?:\/\/[^\s<\x00]+/g, (m) => {
     const clean = m.replace(/(?:&(?:quot|#39|lt|gt);|[.,;:!?)\]])+$/, "");
     const inner =
       inlineImages() && IMG_URL_RE.test(clean)
@@ -1940,6 +1941,7 @@ function appendEvent(ev: AcEvent, live: boolean) {
   if (ev.seq < minRendered) minRendered = ev.seq;
   if (ev.type === "tool_call") {
     toolBlocks.set(ev.call_id as string, node);
+    flushToolUpdates(ev.call_id as string);
   }
   if (live && nearBottom) scrollBottom();
   if (live && !nearBottom) {
@@ -1956,7 +1958,10 @@ function trimRendered() {
     if (!first) break;
     // retirer aussi son bloc de la map si tool_call
     for (const [k, v] of toolBlocks) if (v === first) toolBlocks.delete(k);
+    // Suppression en haut → tout remonterait : compenser pour figer la vue.
+    const sh = eventsEl.scrollHeight;
     first.remove();
+    eventsEl.scrollTop -= sh - eventsEl.scrollHeight;
     renderedCount--;
     minRendered = Number(
       eventsEl.querySelector<HTMLElement>(".ev")?.dataset.seq ?? Number.MAX_SAFE_INTEGER,
@@ -1970,17 +1975,34 @@ function prependEvents(events: AcEvent[]) {
     return;
   }
   const oldHeight = eventsEl.scrollHeight;
-  for (const ev of events) {
-    const node = renderEvent(ev, false);
-    eventsEl.insertBefore(node, eventsEl.children[1]); // après sentinel
-    renderedCount++;
-    if (ev.seq < minRendered) minRendered = ev.seq;
-    if (ev.type === "tool_call") toolBlocks.set(ev.call_id as string, node);
-    if (ev.type === "tool_call_update") updateToolBlock(ev);
+  // Ancre fixe = premier event déjà rendu : insérer avant elle à chaque
+  // tour préserve l'ordre croissant de la page (children[1] bougerait).
+  const anchor = eventsEl.children[1] ?? null;
+  const pageCalls: string[] = [];
+  inPrepend = true;
+  try {
+    for (const ev of events) {
+      if (ev.seq < minRendered) minRendered = ev.seq;
+      if (ev.type === "tool_call_update") {
+        updateToolBlock(ev); // pas de nœud : met à jour le bloc (ou stash)
+        continue;
+      }
+      const node = renderEvent(ev, false);
+      eventsEl.insertBefore(node, anchor);
+      renderedCount++;
+      if (ev.type === "tool_call") {
+        toolBlocks.set(ev.call_id as string, node);
+        pageCalls.push(ev.call_id as string);
+      }
+    }
+    // Les updates stashées sont plus récentes que la page → après la boucle.
+    for (const id of pageCalls) flushToolUpdates(id);
+    // garder la position visuelle
+    eventsEl.scrollTop += eventsEl.scrollHeight - oldHeight;
+    updateBottomBtn();
+  } finally {
+    inPrepend = false;
   }
-  // garder la position visuelle
-  eventsEl.scrollTop += eventsEl.scrollHeight - oldHeight;
-  updateBottomBtn();
 }
 
 function renderEvent(ev: AcEvent, live: boolean): HTMLElement {
@@ -2155,40 +2177,93 @@ function renderToolCall(ev: AcEvent): HTMLElement {
   return d;
 }
 
+// Updates reçues avant leur bloc tool_call (bloc dans une page
+// d'historique pas encore chargée) — flushées quand le bloc est rendu.
+const pendingToolUpdates = new Map<string, AcEvent[]>();
+
+function stashToolUpdate(ev: AcEvent) {
+  const id = ev.call_id as string;
+  const l = pendingToolUpdates.get(id) ?? [];
+  // ré-insertion en fin → l'éviction au cap est LRU, pas FIFO strict
+  pendingToolUpdates.delete(id);
+  pendingToolUpdates.set(id, l);
+  if (pendingToolUpdates.size > 300)
+    pendingToolUpdates.delete(pendingToolUpdates.keys().next().value!);
+  if (l.length < 400) l.push(ev);
+}
+
+/// Les updates du stash sont toujours plus récentes que la page en cours
+/// (live ou pages déjà rendues) → à appeler APRÈS le rendu de la page.
+function flushToolUpdates(callId: string) {
+  const list = pendingToolUpdates.get(callId);
+  if (!list?.length) return;
+  pendingToolUpdates.delete(callId);
+  list.sort((a, b) => a.seq - b.seq);
+  for (const ev of list) updateToolBlock(ev);
+}
+
+/// Exécute `fn` en compensant le scroll si `d` est entièrement au-dessus
+/// du viewport : sa croissance pousserait sinon le contenu visible.
+/// Pendant un prepend, la compensation de fin de page couvre déjà tout.
+let inPrepend = false;
+function anchorIfAbove(d: HTMLElement, fn: () => void) {
+  if (inPrepend) {
+    fn();
+    return;
+  }
+  const r = d.getBoundingClientRect();
+  if (r.bottom >= eventsEl.getBoundingClientRect().top) {
+    fn();
+    return;
+  }
+  const h = r.height;
+  fn();
+  eventsEl.scrollTop += d.getBoundingClientRect().height - h;
+}
+
 function updateToolBlock(ev: AcEvent) {
   const d = toolBlocks.get(ev.call_id as string);
-  if (!d) return;
-  const badge = d.querySelector<HTMLElement>(".tool-head .badge");
-  if (badge && ev.status) {
-    badge.textContent = ev.status as string;
-    badge.className = `badge st-${ev.status}`;
+  if (!d) {
+    stashToolUpdate(ev);
+    return;
   }
-  const body = d.querySelector<HTMLElement>(".tool-body")!;
-  const pre = d.querySelector<HTMLElement>(".tool-out")!;
-  if (ev.excerpt) {
-    pre.textContent += ev.excerpt as string;
-    if (body.hidden) {
-      // signaler du nouveau contenu sans ouvrir
-      d.querySelector(".tool-head")!.classList.add("has-new");
+  // Idempotent par nœud : un bloc re-rendu (trim → refetch) repart à 0.
+  const last = Number(d.dataset.updSeq ?? 0);
+  if (ev.seq <= last) return;
+  d.dataset.updSeq = String(ev.seq);
+  anchorIfAbove(d, () => {
+    const badge = d.querySelector<HTMLElement>(".tool-head .badge");
+    if (badge && ev.status) {
+      badge.textContent = ev.status as string;
+      badge.className = `badge st-${ev.status}`;
     }
-  }
-  if (ev.blob && !d.querySelector(".btn-more")) {
-    const b = document.createElement("button");
-    b.className = "btn-more";
-    b.textContent = t("load_full");
-    b.addEventListener("click", async () => {
-      b.disabled = true;
-      const r = await call<{ data: string; total: number }>("get_blob", {
-        session: current!.id,
-        blob: ev.blob,
-        offset: 0,
-        limit: 1 << 20,
+    const body = d.querySelector<HTMLElement>(".tool-body")!;
+    const pre = d.querySelector<HTMLElement>(".tool-out")!;
+    if (ev.excerpt) {
+      pre.textContent += ev.excerpt as string;
+      if (body.hidden) {
+        // signaler du nouveau contenu sans ouvrir
+        d.querySelector(".tool-head")!.classList.add("has-new");
+      }
+    }
+    if (ev.blob && !d.querySelector(".btn-more")) {
+      const b = document.createElement("button");
+      b.className = "btn-more";
+      b.textContent = t("load_full");
+      b.addEventListener("click", async () => {
+        b.disabled = true;
+        const r = await call<{ data: string; total: number }>("get_blob", {
+          session: current!.id,
+          blob: ev.blob,
+          offset: 0,
+          limit: 1 << 20,
+        });
+        pre.textContent = r.data + (r.total > r.data.length ? `\n… (${r.total} o total)` : "");
+        b.remove();
       });
-      pre.textContent = r.data + (r.total > r.data.length ? `\n… (${r.total} o total)` : "");
-      b.remove();
-    });
-    body.appendChild(b);
-  }
+      body.appendChild(b);
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -2268,12 +2343,15 @@ function renderQuestion(ev: AcEvent): HTMLElement {
 const observer = new IntersectionObserver(async (entries) => {
   if (!entries[0].isIntersecting || loadingOld || !current || !hasMoreHistory) return;
   loadingOld = true;
+  const sessId = current.id;
   try {
     const page = await call<{ events: AcEvent[] }>("events", {
-      session: current.id,
+      session: sessId,
       before_seq: minRendered,
       limit: PAGE,
     });
+    // Session changée pendant l'await → ne pas insérer l'ancienne page.
+    if (!current || current.id !== sessId) return;
     prependEvents(page.events);
   } finally {
     loadingOld = false;
