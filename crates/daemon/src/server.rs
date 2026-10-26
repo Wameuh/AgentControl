@@ -231,14 +231,19 @@ impl Daemon {
         let exe = std::env::current_exe()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "agentcontrol-daemon".into());
+        // Spec ACP : `env` est une liste d'objets {name, value}, pas une map
+        // {K: V} — la map casse la désérialisation untagged de certains agents
+        // (ex. devin CLI : "did not match any variant of untagged enum
+        // McpServer" → session/new en Invalid params → agent exited).
         json!([{
             "name": "agentcontrol",
             "command": exe,
             "args": ["mcp-serve"],
-            "env": {
-                "AGENTCONTROL_SOCK": self.root.join("daemon.sock").display().to_string(),
-                "AGENTCONTROL_SESSION": session_id,
-            }
+            "env": [
+                {"name": "AGENTCONTROL_SOCK",
+                 "value": self.root.join("daemon.sock").display().to_string()},
+                {"name": "AGENTCONTROL_SESSION", "value": session_id},
+            ]
         }])
     }
 
