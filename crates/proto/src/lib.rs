@@ -278,6 +278,37 @@ fn default_state() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Registre PR ↔ session (prs.json à la racine du démon)
+// ---------------------------------------------------------------------------
+
+/// Quelle session a créé quelle pull request. Alimenté automatiquement
+/// (scan des sorties outils) et manuellement (PrTrack / `acctl pr add`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrEntry {
+    /// "owner/name" du repo.
+    pub repo: String,
+    pub pr: u64,
+    /// Id de session ("s-xxxx") ou label libre ("auto-release-bot").
+    pub session: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    /// open | draft | merged | closed
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub note: Option<String>,
+    /// "manual" (pr_track) — prioritaire — ou "detected" (scan auto).
+    #[serde(default)]
+    pub via: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+// ---------------------------------------------------------------------------
 // Protocole client -> daemon : { "id": n, "req": "...", ... }
 // ---------------------------------------------------------------------------
 
@@ -493,6 +524,31 @@ pub enum ReqKind {
     KillSession {
         session: String,
     },
+    /// Registre PR ↔ session : liste, filtrable par session.
+    PrList {
+        #[serde(default)]
+        session: Option<String>,
+    },
+    /// Upsert manuel d'une entrée (champs Some écrasent, None conservent —
+    /// `session` requis pour une entrée nouvelle). Prime sur `via: detected`.
+    PrTrack {
+        #[serde(default)]
+        session: Option<String>,
+        repo: String,
+        pr: u64,
+        #[serde(default)]
+        branch: Option<String>,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        note: Option<String>,
+    },
+    PrUntrack {
+        repo: String,
+        pr: u64,
+    },
     DaemonStatus,
 }
 
@@ -533,6 +589,9 @@ impl ReqKind {
             Self::Respond { .. } => "respond",
             Self::GetBlob { .. } => "get_blob",
             Self::KillSession { .. } => "kill_session",
+            Self::PrList { .. } => "pr_list",
+            Self::PrTrack { .. } => "pr_track",
+            Self::PrUntrack { .. } => "pr_untrack",
             Self::DaemonStatus => "daemon_status",
         }
     }

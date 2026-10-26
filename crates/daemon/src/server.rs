@@ -13,6 +13,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::journal;
+use crate::prs::PrRegistry;
 use crate::session::Session;
 use crate::tui;
 
@@ -152,6 +153,8 @@ pub struct Daemon {
     spawn_rate: std::sync::Mutex<
         HashMap<String, std::collections::VecDeque<std::time::Instant>>,
     >,
+    /// Registre PR ↔ session (prs.json) — voir prs.rs.
+    pub prs: Arc<PrRegistry>,
 }
 
 impl Daemon {
@@ -170,6 +173,7 @@ impl Daemon {
             a2a,
             peer_rate: std::sync::Mutex::new(HashMap::new()),
             spawn_rate: std::sync::Mutex::new(HashMap::new()),
+            prs: Arc::new(PrRegistry::open(&root)),
         });
         let sdir = root.join("sessions");
         if sdir.exists() {
@@ -184,6 +188,7 @@ impl Daemon {
                         // démon → interrupted + event journalisé.
                         s.reconcile_state();
                         let id = s.meta_snapshot().id;
+                        d.watch_prs(&s);
                         info!("session chargée: {id}");
                         d.sessions.write().await.insert(id, s);
                     }
@@ -201,6 +206,40 @@ impl Daemon {
             .get(id)
             .cloned()
             .with_context(|| format!("session inconnue: {id}"))
+    }
+
+    // -----------------------------------------------------------------------
+    // Registre PR : détection auto dans les sorties de tool calls
+    // -----------------------------------------------------------------------
+
+    /// Branche la détection PR sur une session : scan rétroactif du journal
+    /// (backfill borne — les PRs créées avant le démarrage sont détectées),
+    /// puis un watcher sur le broadcast des events. Le watcher meurt tout
+    /// seul quand la session est droppée (sender fermé / Weak épuisé).
+    fn watch_prs(&self, s: &Arc<Session>) {
+        let sid = s.meta_snapshot().id;
+        if let Ok(evs) = s.journal.read_page(&s.dir, None, 2000) {
+            let mut titles = HashMap::new();
+            for ev in &evs {
+                scan_pr_event(&self.prs, s, &sid, ev, &mut titles);
+            }
+        }
+        let prs = Arc::clone(&self.prs);
+        let weak = Arc::downgrade(s);
+        let mut rx = s.events_tx.subscribe();
+        tokio::spawn(async move {
+            let mut titles: HashMap<String, String> = HashMap::new();
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        let Some(s) = weak.upgrade() else { break };
+                        scan_pr_event(&prs, &s, &sid, &ev, &mut titles);
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -434,6 +473,7 @@ impl Daemon {
                 let dir = Session::create_dir(&self.root, &meta)?;
                 let session = Session::open(dir)?;
                 let sid = meta.id.clone();
+                self.watch_prs(&session);
                 self.sessions.write().await.insert(sid.clone(), session.clone());
 
                 let (cmd, envs) =
@@ -490,6 +530,7 @@ impl Daemon {
                 let dir = Session::create_dir(&self.root, &meta)?;
                 let session = Session::open(dir)?;
                 let sid = meta.id.clone();
+                self.watch_prs(&session);
                 self.sessions.write().await.insert(sid.clone(), session.clone());
                 let (cmd, envs) = self.agent_parts(&profile, None, None, &sid);
                 let natif = meta.native_session_id.clone();
@@ -605,6 +646,7 @@ impl Daemon {
                 let dir = Session::create_dir(&self.root, &meta2)?;
                 let session2 = Session::open(dir)?;
                 let sid2 = meta2.id.clone();
+                self.watch_prs(&session2);
                 self.sessions
                     .write()
                     .await
@@ -874,6 +916,7 @@ impl Daemon {
                 let dir = Session::create_dir(&self.root, &meta)?;
                 let session2 = Session::open(dir)?;
                 let sid2 = meta.id.clone();
+                self.watch_prs(&session2);
                 self.sessions
                     .write()
                     .await
@@ -1147,6 +1190,30 @@ impl Daemon {
                 s.kill().await;
                 info!("agent tué: {session}");
                 Ok(json!({"killed": session}))
+            }
+            ReqKind::PrList { session } => {
+                let mut v = self.prs.list();
+                if let Some(sid) = session {
+                    v.retain(|e| e.session == sid);
+                }
+                Ok(serde_json::to_value(v)?)
+            }
+            ReqKind::PrTrack {
+                session,
+                repo,
+                pr,
+                branch,
+                title,
+                status,
+                note,
+            } => {
+                let e = self
+                    .prs
+                    .track(session, &repo, pr, branch, title, status, note)?;
+                Ok(serde_json::to_value(e)?)
+            }
+            ReqKind::PrUntrack { repo, pr } => {
+                Ok(json!({ "removed": self.prs.remove(&repo, pr)? }))
             }
             // Subscribe est géré par la couche connexion (streaming)
             ReqKind::Subscribe { session, after_seq } => {
@@ -1479,6 +1546,54 @@ fn zip_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
     zw.finish()?;
     std::fs::rename(&tmp, dst)?;
     Ok(())
+}
+
+/// Le titre d'un tool call (la commande pour un exec) évoque une création
+/// de PR — signal fort pour la réattribution d'une entrée détectée.
+/// Uniquement "pr create" : un `gh pr view|checks|merge` d'une autre
+/// session ne doit PAS pouvoir réattribuer l'entrée.
+fn pr_cmd_title(title: &str) -> bool {
+    title.to_lowercase().contains("pr create")
+}
+
+/// Scanne un event journalisé à la recherche d'URLs `…/pull/N` dans les
+/// sorties outils et enregistre les PRs trouvées au nom de la session.
+/// `titles` mémorise call_id → commande (un ToolCallUpdate n'a que l'id).
+fn scan_pr_event(
+    prs: &PrRegistry,
+    s: &Session,
+    sid: &str,
+    ev: &proto::Event,
+    titles: &mut HashMap<String, String>,
+) {
+    let (excerpt, strong) = match &ev.kind {
+        EventKind::ToolCall {
+            call_id,
+            title,
+            excerpt,
+            ..
+        } => {
+            titles.insert(call_id.clone(), title.clone());
+            (excerpt.as_deref(), pr_cmd_title(title))
+        }
+        EventKind::ToolCallUpdate {
+            call_id, excerpt, ..
+        } => (
+            excerpt.as_deref(),
+            titles.get(call_id).is_some_and(|t| pr_cmd_title(t)),
+        ),
+        _ => return,
+    };
+    let Some(text) = excerpt else { return };
+    for (repo, pr) in crate::prs::extract_pr_refs(text) {
+        match prs.detected(sid, &repo, pr, strong) {
+            Ok(true) => s.emit(EventKind::System {
+                text: format!("PR détectée et enregistrée : {repo}#{pr}"),
+            }),
+            Ok(false) => {}
+            Err(e) => warn!("[{sid}] prs.detected: {e:#}"),
+        }
+    }
 }
 
 /// `argv[0]` d'un profil agent résolvable : binaire sur le PATH du démon

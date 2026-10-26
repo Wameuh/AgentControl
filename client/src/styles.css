@@ -231,6 +231,11 @@ body {
 #session-list .sess.active { background: rgba(205, 182, 140, .1); border-color: rgba(205, 182, 140, .3); }
 #session-list .sess .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 #session-list .sess .a { color: var(--dim); font-size: 11px; font-family: Mono, ui-monospace, monospace; }
+#session-list .sess .sess-pr {
+  flex: none; font-size: 10px; font-family: Mono, ui-monospace, monospace;
+  padding: 0 5px; border: 1px solid var(--accent); border-radius: 8px;
+  color: var(--accent); opacity: .8;
+}
 /* Indicateur d'état : la même gemme cristal que le logo, colorée par rôle —
    sable (working), améthyste (compacting), grenat (waiting_input/failed),
    neutre (idle), ardoise (interrupted/dead). */

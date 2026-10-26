@@ -439,6 +439,19 @@ interface SessionMeta {
   context_size?: number;
 }
 
+/** Registre PR ↔ session du démon (prs.json) — badge sidebar. */
+interface PrEntry {
+  conn?: string;
+  repo: string;
+  pr: number;
+  session: string;
+  branch?: string;
+  title?: string;
+  status?: string;
+  note?: string;
+  via?: string;
+}
+
 interface ConfigOpt { value: string; name: string; description?: string }
 interface ConfigOption {
   id: string; name: string; category?: string;
@@ -821,11 +834,27 @@ function setAppIcon(state: string) {
   invoke("set_app_icon", { state }).catch(() => {});
 }
 
+/** PRs ouvertes par session ("conn\0sid") — rempli par refreshSessions ;
+ *  vide si le démon ne connaît pas pr_list (vieux démon → pas de badge). */
+const prBySess = new Map<string, PrEntry[]>();
+
 async function refreshSessions() {
-  const raw = await call<SessionMeta[]>("list_sessions").catch((e) => {
-    setAppIcon("grey"); // démon injoignable → aucun agent joignable
-    throw e;
-  });
+  // pr_list en parallèle : un démon mort/vieux ne doit pas retarder la
+  // sidebar (erreur → pas de badge, c'est tout).
+  const [raw, prs] = await Promise.all([
+    call<SessionMeta[]>("list_sessions").catch((e) => {
+      setAppIcon("grey"); // démon injoignable → aucun agent joignable
+      throw e;
+    }),
+    call<PrEntry[]>("pr_list").catch(() => [] as PrEntry[]),
+  ]);
+  prBySess.clear();
+  for (const p of prs) {
+    if (!p.session || p.status === "merged" || p.status === "closed") continue;
+    const k = `${p.conn ?? "default"}${p.session}`;
+    if (!prBySess.has(k)) prBySess.set(k, []);
+    prBySess.get(k)!.push(p);
+  }
   // Marqueur Rust `conn_error` : la sonde list_sessions d'une conn a
   // échoué (timeout 8 s) → la marquer down (une seule fois : déjà down,
   // markDead re-rendererait refreshSessions en boucle).
@@ -1108,7 +1137,11 @@ function sessRow(s: SessionMeta, conn: string, grp: string, closed: boolean): HT
   div.className = "sess" + (grp ? " in-grp" : "") + (s.offline ? " offline" : "") +
     (current?.id === s.id ? " active" : "");
   if (closed) div.style.display = "none";
-  div.innerHTML = `<span class="dot st-${s.state}" title="${esc(s.state)}">${dotIcon(s.state)}</span><span class="t">${esc(s.title)}</span><span class="a">${esc(s.agent)}</span><button class="sess-del" title="Supprimer">✕</button>`;
+  const prs = prBySess.get(`${conn}${s.id}`) ?? [];
+  const prHtml = prs.length
+    ? `<span class="sess-pr" title="${esc(prs.map((p) => `${p.repo}#${p.pr}${p.title ? ` — ${p.title}` : ""}${p.status ? ` (${p.status})` : ""}`).join("\n"))}">${prs.map((p) => `#${p.pr}`).join(" ")}</span>`
+    : "";
+  div.innerHTML = `<span class="dot st-${s.state}" title="${esc(s.state)}">${dotIcon(s.state)}</span><span class="t">${esc(s.title)}</span>${prHtml}<span class="a">${esc(s.agent)}</span><button class="sess-del" title="Supprimer">✕</button>`;
   div.onclick = () => {
     openSession(s.id);
     // Mobile : fermer le drawer après sélection.

@@ -2,6 +2,7 @@ mod acp;
 mod journal;
 mod logging;
 mod mcp;
+mod prs;
 mod server;
 mod session;
 mod tui;
