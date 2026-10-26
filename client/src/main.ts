@@ -1355,7 +1355,7 @@ function esc(s: string): string {
 
 // Chemins de fichiers cliquables → panneau latéral (read_file côté démon)
 const FILE_RE =
-  /((?:\/[\w.\-~]+){2,}|[\w.\-]+\/[\w./\-]+|[\w.\-]+\.(?:rs|ts|tsx|js|jsx|py|toml|json|md|html?|css|ya?ml|sh|c|cpp|h|hpp|go|java|rb|txt|log|svg|cfg|ini|sql|vue|svelte|lock|service))(?::(\d+))?/g;
+  /((?:\/[\w.\-~]+){2,}|[\w.\-]+(?:\/[\w.\-]+){2,}|[\w.\-/]+\.(?:rs|ts|tsx|js|jsx|py|toml|json|md|html?|css|ya?ml|sh|c|cpp|h|hpp|go|java|rb|txt|log|svg|cfg|ini|sql|vue|svelte|lock|service))(?::(\d+))?/g;
 
 function linkify(escaped: string): string {
   // URLs d'abord → vrais liens (placeholder \x00U pour ne pas être re-matchées
