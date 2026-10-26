@@ -407,6 +407,16 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             text: s("text"),
             delivery: s("delivery"),
         },
+        "peer_spawn" => ReqKind::PeerSpawn {
+            from: s("from"),
+            agent: so("agent"),
+            cwd: so("cwd"),
+            title: so("title"),
+            model: so("model"),
+            mode: so("mode"),
+            prompt: so("prompt"),
+            group: so("group"),
+        },
         m => return Err(format!("méthode inconnue: {m}")),
     })
 }

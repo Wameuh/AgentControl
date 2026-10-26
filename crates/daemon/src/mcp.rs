@@ -98,6 +98,48 @@ fn tools_list() -> Value {
             },
         },
         {
+            "name": "agentcontrol_create_session",
+            "description": "Crée une nouvelle session d'agent AgentControl : \
+                un agent démarre dans une session séparée et reçoit `task` \
+                comme premier prompt (délégation). La session apparaît dans \
+                agentcontrol_list_sessions ; elle connaît ta provenance et \
+                peut te répondre via agentcontrol_send_message. Sans \
+                agent/cwd, elle hérite des tiens.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "tâche livrée à la nouvelle session \
+                            comme premier prompt",
+                    },
+                    "agent": {
+                        "type": "string",
+                        "description": "type d'agent (devin, claude, codex…) \
+                            — défaut : le tien",
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "dossier de travail — défaut : le tien",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "titre de la session — défaut : début \
+                            de la tâche",
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "modèle — défaut : le tien si même agent",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "description": "mode — défaut : le tien si même agent",
+                    },
+                },
+                "required": ["task"],
+            },
+        },
+        {
             "name": "agentcontrol_read_events",
             "description": "Lit la fin du transcript d'une autre session \
                 (messages user/agent/peer/système) pour prendre du contexte \
@@ -160,6 +202,30 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
             })
             .await?;
             Ok(format!("message envoyé à {session} : {v}"))
+        }
+        "agentcontrol_create_session" => {
+            let from = self_session()
+                .ok_or("AGENTCONTROL_SESSION absent — session émettrice inconnue")?;
+            let task = args["task"].as_str().ok_or("argument 'task' manquant")?;
+            let opt = |k: &str| args[k].as_str().map(String::from);
+            let v = daemon_call(proto::ReqKind::PeerSpawn {
+                from,
+                agent: opt("agent"),
+                cwd: opt("cwd"),
+                title: opt("title"),
+                model: opt("model"),
+                mode: opt("mode"),
+                prompt: Some(task.into()),
+                group: opt("group"),
+            })
+            .await?;
+            Ok(format!(
+                "session créée : {} «{}» — la tâche lui est livrée comme \
+                premier prompt ; elle peut te répondre via \
+                agentcontrol_send_message",
+                v["session"].as_str().unwrap_or("?"),
+                v["title"].as_str().unwrap_or("")
+            ))
         }
         "agentcontrol_read_events" => {
             let session = args["session"]
@@ -256,7 +322,8 @@ pub async fn serve_stdio() -> Result<()> {
                     },
                     "instructions": "Outils de communication entre agents \
                         AgentControl : liste les sessions, envoie des \
-                        messages, lis leurs transcripts.",
+                        messages, lis leurs transcripts, crée des sessions \
+                        (délégation de tâche).",
                 }
             }),
             ("ping", Some(id)) => json!({"jsonrpc": "2.0", "id": id, "result": {}}),

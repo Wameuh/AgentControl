@@ -20,14 +20,18 @@ interval_secs = 600
 
 # ---------------------------------------------------------------------------
 # Communication agent↔agent — chaque session reçoit un serveur MCP
-# "agentcontrol" (tools: list_sessions / send_message / read_events) et
-# l'env AGENTCONTROL_SOCK + AGENTCONTROL_SESSION (fallback via `acctl msg`).
+# "agentcontrol" (tools: list_sessions / send_message / create_session /
+# read_events) et l'env AGENTCONTROL_SOCK + AGENTCONTROL_SESSION (fallback
+# via `acctl msg` / `acctl spawn`).
 # Un message vers une session morte la relance automatiquement.
 # ---------------------------------------------------------------------------
 [a2a]
 enabled = true
 # Max messages par minute et par paire émetteur→cible (anti-boucle, 0 = illimité)
 rate_per_min = 20
+# Max sessions créées par minute et par session créatrice
+# (agentcontrol_create_session — 0 = spawn agent→agent interdit)
+spawn_per_min = 10
 
 # ---------------------------------------------------------------------------
 # Agents ACP. Les placeholders {model} et {mode} sont substitués à la création

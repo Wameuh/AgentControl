@@ -5,6 +5,8 @@
 //!   acctl new <agent> <cwd> [prompt...] [--title T] [--mode M] [--model X]
 //!   acctl send <session> <text...>
 //!   acctl msg <from> <to> [--steer] <text...>   (message agent→agent)
+//!   acctl spawn <from> [task...] [--agent A] [--cwd C] [--title T]
+//!               [--mode M] [--model X] [--group G]   (session agent→agent)
 //!   acctl events <session> [before_seq] [limit]
 //!   acctl tail <session> [after_seq]
 //!   acctl resume|cancel|kill|clear <session>
@@ -182,7 +184,7 @@ fn print_event(ev: &Value) {
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("usage: acctl status|agents|list|new|send|events|tail|resume|attach|fork|cancel|kill|clear|mode|respond|blob|download");
+        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|resume|attach|fork|cancel|kill|clear|mode|respond|blob|download");
         std::process::exit(2);
     }
     let mut c = connect().await?;
@@ -264,6 +266,32 @@ async fn main() -> Result<()> {
                 session: args[2].clone(),
                 text: parts.join(" "),
                 delivery: if steer { "steer".into() } else { "queue".into() },
+            }).await?);
+        }
+        "spawn" => {
+            // acctl spawn <from> [task...] [--agent A] [--cwd C] [--title T]
+            //             [--mode M] [--model X] [--group G]
+            if args.len() < 2 { bail!("spawn <from> [task...] [--agent A] [--cwd C] [--title T] [--mode M] [--model X] [--group G]"); }
+            let mut prompt_parts = Vec::new();
+            let (mut agent, mut cwd, mut title, mut mode, mut model, mut group) =
+                (None, None, None, None, None, None);
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--agent" => { agent = args.get(i + 1).cloned(); i += 2; }
+                    "--cwd" => { cwd = args.get(i + 1).cloned(); i += 2; }
+                    "--title" => { title = args.get(i + 1).cloned(); i += 2; }
+                    "--mode" => { mode = args.get(i + 1).cloned(); i += 2; }
+                    "--model" => { model = args.get(i + 1).cloned(); i += 2; }
+                    "--group" => { group = args.get(i + 1).cloned(); i += 2; }
+                    p => { prompt_parts.push(p.to_string()); i += 1; }
+                }
+            }
+            println!("{}", c.call(proto::ReqKind::PeerSpawn {
+                from: args[1].clone(),
+                agent, cwd, title, model, mode,
+                prompt: if prompt_parts.is_empty() { None } else { Some(prompt_parts.join(" ")) },
+                group,
             }).await?);
         }
         "events" => {
