@@ -83,6 +83,7 @@ const STR = {
     session_gone: "⚠ session deleted on the server",
     peer_from: "from", peer_to: "to",
     agent_missing: "not installed",
+    um_expand: "Show more", um_collapse: "Show less",
   },
   fr: {
     connect: "Connecter", new_conn: "Nouvelle connexion",
@@ -163,6 +164,7 @@ const STR = {
     session_gone: "⚠ session supprimée sur le serveur",
     peer_from: "de", peer_to: "vers",
     agent_missing: "non installé",
+    um_expand: "Afficher tout", um_collapse: "Réduire",
   },
 } as const;
 
