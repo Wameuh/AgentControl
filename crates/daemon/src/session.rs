@@ -843,11 +843,15 @@ impl Session {
             // en file (rendu comme message normal à la livraison).
             let me = self.me.clone();
             let text = text.to_string();
+            // Génération capturée AVANT le spawn : une tâche schedulée après
+            // un clear est périmée d'emblée — elle n'arme ni compact ni
+            // prompt pour le contexte disparu.
+            let gen = self.spawn_gen.load(Ordering::SeqCst);
             tokio::spawn(async move {
                 let Some(s) = me.upgrade() else { return };
-                // Si un clear remplace l'agent pendant le steer, ni la
-                // notice ni le ré-enfilement (contexte disparu).
-                let gen = s.spawn_gen.load(Ordering::SeqCst);
+                if s.spawn_gen.load(Ordering::SeqCst) != gen {
+                    return;
+                }
                 if is_compact_cmd(&text) {
                     s.arm_compact();
                 }
@@ -1038,7 +1042,9 @@ impl Session {
         // toucher le nouveau cycle.
         let gen = self.spawn_gen.load(Ordering::SeqCst);
         self.active_prompts.fetch_add(1, Ordering::SeqCst);
-        self.set_state("working");
+        if self.spawn_gen.load(Ordering::SeqCst) == gen {
+            self.set_state("working");
+        }
         let resp = self
             .acp_request("session/prompt", acp::session_prompt_params(&sid, text))
             .await;
@@ -1069,7 +1075,7 @@ impl Session {
         match self.prompt_rpc(text).await {
             Ok(v) => {
                 if let Some(sr) = v.get("stopReason").and_then(Value::as_str) {
-                    if sr != "end_turn" {
+                    if sr != "end_turn" && self.spawn_gen.load(Ordering::SeqCst) == gen {
                         self.emit(EventKind::System {
                             text: format!("turn ended: {sr}"),
                         });
@@ -1493,10 +1499,6 @@ impl Session {
                 let _ = tx.send(Err("agent replaced".into()));
             }
         }
-        // Prompts en file : ils appartiennent au contexte qui meurt —
-        // drain silencieux (le handler émet sa notice post-reset pour
-        // d'éventuels retardataires).
-        self.prompt_queue.lock().unwrap().clear();
         self.kill().await;
     }
 
