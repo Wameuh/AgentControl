@@ -31,7 +31,10 @@ for (const id of ["titlebar-gem", "about-gem"]) {
   if (el) el.innerHTML = gemSVG("neutral");
 }
 const cg = document.getElementById("chat-gem");
-if (cg) cg.innerHTML = gemSVG("human");
+if (cg) {
+  cg.dataset.role = "human";
+  cg.innerHTML = gemSVG("human");
+}
 
 // Plateforme (android | windows | linux) — gates UI mobile.
 // Détection synchrone par UA (avant le resolve de platform()).
@@ -777,10 +780,12 @@ async function doConnect(cfg: Record<string, unknown>) {
 // Liste des sessions
 // ---------------------------------------------------------------------------
 
-/** Gemme d'état : dorée working, rouge question/failed, verte idle, grise dead. */
+/** Gemme d'état : dorée working, violette compacting, rouge question/failed,
+ *  verte idle, grise dead. */
 const DOT_ROLE: Record<string, string> = {
   working: "human", running: "human", starting: "human",
-  waiting_input: "inference", failed: "inference", compacting: "inference",
+  waiting_input: "inference", failed: "inference",
+  compacting: "agent",
   idle: "neutral",
   interrupted: "slate", dead: "slate",
 };
@@ -807,7 +812,8 @@ function markSessionGone() {
 }
 
 /** Icône fenêtre : rouge si une question attend, dorée si un agent tourne,
- *  grise sans agent vivant, gemme sauge sinon (no-op sur Android). */
+ *  violette si une session compacte, grise sans agent vivant, gemme sauge
+ *  sinon (no-op sur Android). */
 let lastIconState = "";
 function setAppIcon(state: string) {
   if (state === lastIconState) return;
@@ -847,11 +853,12 @@ async function refreshSessions() {
             (s) =>
               s.state === "working" ||
               s.state === "running" ||
-              s.state === "starting" ||
-              s.state === "compacting",
+              s.state === "starting",
           )
         ? "gold"
-        : live.length > 0 ? "base" : "grey",
+        : live.some((s) => s.state === "compacting")
+          ? "violet"
+          : live.length > 0 ? "base" : "grey",
   );
   // Session courante disparue alors que sa connexion répond encore
   // (sessions du même serveur présentes) → supprimée côté serveur.
@@ -1415,8 +1422,15 @@ function updateHeader() {
   st.textContent = current.state;
   st.className = `badge st-${current.state}`;
   // Le gem tourne aussi pendant "compacting" (le démon retient les
-  // envois en file jusqu'au signal de fin du compact).
-  $("chat-gem").hidden = current.state !== "working" && current.state !== "compacting";
+  // envois en file jusqu'au signal de fin du compact) — en améthyste
+  // pour distinguer la compaction d'un vrai tour.
+  const gem = $("chat-gem");
+  gem.hidden = current.state !== "working" && current.state !== "compacting";
+  const gemRole = current.state === "compacting" ? "agent" : "human";
+  if (gem.dataset.role !== gemRole) {
+    gem.dataset.role = gemRole;
+    gem.innerHTML = gemSVG(gemRole);
+  }
   // Reprendre = process mort, quel que soit l'état persisté dans meta.json
   $("btn-resume").hidden = alive;
   const busySt =

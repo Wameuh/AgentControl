@@ -137,11 +137,14 @@ def render_svg(boundary, faces, size=256, palette=PALETTE, base=BASE):
 
 
 # Variantes d'état — mêmes facettes (même seed), autre famille de teintes.
-# Utilisées par set_app_icon : gold = agent actif, red = question en
-# attente, grey = aucun agent connecté.
+# Utilisées par set_app_icon : gold = agent actif, violet = compaction,
+# red = question en attente, grey = aucun agent connecté.
+# "violet" reprend la palette "agent" de src/crystal.ts (améthyste).
 VARIANTS = {
     "gold": (["#8a5510", "#b57619", "#d99a2b", "#6b3f0c",
               "#9c6414", "#c9852a", "#eec25e", "#7d4e10"], "#4e2f08"),
+    "violet": (["#74608f", "#a087bb", "#b69acc", "#4b395f",
+                "#8e72a8", "#816795", "#ceb1e3", "#624a7d"], "#49355d"),
     "red": (["#7a352b", "#9c4a3a", "#b95f49", "#5c281f",
              "#8a4132", "#a85544", "#cf7f63", "#6b3026"], "#45201a"),
     "grey": (["#4d514c", "#6f7368", "#8c8f81", "#3a3e38",

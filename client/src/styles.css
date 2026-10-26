@@ -232,8 +232,8 @@ body {
 #session-list .sess .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 #session-list .sess .a { color: var(--dim); font-size: 11px; font-family: Mono, ui-monospace, monospace; }
 /* Indicateur d'état : la même gemme cristal que le logo, colorée par rôle —
-   améthyste agent (working), sable humain (waiting_input), neutre (idle),
-   ardoise (interrupted/dead), grenat (failed). */
+   sable (working), améthyste (compacting), grenat (waiting_input/failed),
+   neutre (idle), ardoise (interrupted/dead). */
 #session-list .sess .dot {
   width: 15px; height: 15px; flex: none;
   display: inline-flex; align-items: center; justify-content: center;

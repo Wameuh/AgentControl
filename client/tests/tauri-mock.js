@@ -19,6 +19,9 @@
     { id: "s3", conn: "local", agent: "devin", title: "Write unit tests",
       cwd: "/home/agent/tests", created_at: "2026-10-18T08:00:00Z", group: "Serveur pi",
       available_modes: [], available_models: [], available_commands: [], state: "dead" },
+    { id: "s4", conn: "local", agent: "mock", title: "Reduce context usage",
+      cwd: "/home/agent/infra", created_at: "2026-10-21T07:30:00Z",
+      available_modes: [], available_models: [], available_commands: [], state: "compacting" },
   ];
   const EVENTS = [
     { seq: 1, ts: "10:01", type: "user_message", text: "Refactorise le client API pour utiliser fetch avec retry exponentiel." },
