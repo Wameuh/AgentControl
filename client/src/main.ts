@@ -487,8 +487,9 @@ const USER_FOLD_CHARS = 480;
 const USER_FOLD_LINES = 5;
 const PAGE = 50; // paquets au scroll
 const INITIAL_PAGE = 200; // base d'historique à l'ouverture
-const toolBlocks = new Map<string, HTMLElement>();
-const answered = new Set<string>();
+// Réassignés au swap de session (cache par conversation).
+let toolBlocks = new Map<string, HTMLElement>();
+let answered = new Set<string>();
 let loadingOld = false;
 let hasMoreHistory = true;
 let alive = false;
@@ -793,6 +794,7 @@ function dotIcon(state: string): string {
 function markSessionGone() {
   if (!current) return;
   addSysline(t("session_gone"));
+  convCache.delete(current.id);
   current = null;
   unseenBelow = 0;
   $("btn-bottom").hidden = true;
@@ -1095,6 +1097,7 @@ $("session-list").addEventListener("scroll", hideSessCtx);
 
 function sessRow(s: SessionMeta, conn: string, grp: string, closed: boolean): HTMLElement {
   const div = document.createElement("div");
+  div.dataset.sid = s.id;
   div.className = "sess" + (grp ? " in-grp" : "") + (s.offline ? " offline" : "") +
     (current?.id === s.id ? " active" : "");
   if (closed) div.style.display = "none";
@@ -1122,9 +1125,10 @@ function sessRow(s: SessionMeta, conn: string, grp: string, closed: boolean): HT
       return;
     }
     await call("delete_session", { session: s.id, conn: s.conn }).catch((er) => showErr(String(er)));
+    convCache.delete(s.id);
     if (current?.id === s.id) {
       current = null;
-      eventsEl.innerHTML = "";
+      clearConv();
     }
     refreshSessions();
   });
@@ -1137,31 +1141,186 @@ function sessRow(s: SessionMeta, conn: string, grp: string, closed: boolean): HT
 
 let openSeq = 0;
 
-async function openSession(id: string) {
+/** Ligne de session marquée active immédiatement au clic — avant tout
+ *  chargement, sinon l'ancienne session semble encore sélectionnée. */
+function setActiveRow(id: string) {
+  for (const r of document.querySelectorAll<HTMLElement>("#session-list .sess")) {
+    r.classList.toggle("active", r.dataset.sid === id);
+  }
+}
+
+// Cache mémoire des conversations : le DOM détaché + l'état de rendu sont
+// conservés à la sortie d'une session → réaffichage instantané au retour,
+// puis subscribe(after_seq) rejoue le trou (read_after du journal démon).
+// Expiré (TTL) ou évincé (LRU) → rechargement complet derrière la gemme.
+interface ConvCache {
+  conn: string;
+  frag: DocumentFragment;
+  toolBlocks: Map<string, HTMLElement>;
+  pendingToolUpdates: Map<string, AcEvent[]>;
+  answered: Set<string>;
+  minRendered: number;
+  renderedCount: number;
+  hasMoreHistory: boolean;
+  unseenBelow: number;
+  lastSeq: number;
+  scrollTop: number;
+  atBottom: boolean;
+  ts: number;
+}
+const convCache = new Map<string, ConvCache>();
+const CACHE_TTL = 10 * 60_000;
+const CACHE_MAX = 6;
+
+const nearBottom = () =>
+  eventsEl.scrollHeight - eventsEl.scrollTop - eventsEl.clientHeight < 120;
+
+/** Grande gemme centrée dans la zone de discussion pendant le chargement. */
+let convLoadingEl: HTMLElement | null = null;
+function showConvLoading(v: boolean) {
+  if (!convLoadingEl) {
+    convLoadingEl = document.createElement("div");
+    convLoadingEl.id = "conv-loading";
+    convLoadingEl.innerHTML =
+      `<span class="load-gem">${gemSVG("agent")}</span><span>${esc(t("loading"))}</span>`;
+  }
+  if (v) eventsEl.appendChild(convLoadingEl);
+  else convLoadingEl.remove();
+}
+
+/** Vide la zone (sentinelle conservée) et réinitialise l'état de rendu. */
+function clearConv() {
+  for (const n of [...eventsEl.children]) {
+    if (n !== sentinel) n.remove();
+  }
+  toolBlocks = new Map();
+  pendingToolUpdates = new Map();
+  answered = new Set();
+  minRendered = Number.MAX_SAFE_INTEGER;
+  renderedCount = 0;
+  hasMoreHistory = true;
+  loadingOld = false;
+  unseenBelow = 0;
+  $("btn-bottom").hidden = true;
+}
+
+/** Détache la conversation affichée dans le cache (session quittée). */
+function stashConv(id: string, conn: string) {
+  const frag = document.createDocumentFragment();
+  let lastSeq = 0;
+  let n0 = 0;
+  const atBottom = nearBottom();
+  const scroll = eventsEl.scrollTop; // lu avant détachement (clamp après)
+  for (const n of [...eventsEl.children]) {
+    if (n === sentinel || n === convLoadingEl) continue;
+    const s = Number((n as HTMLElement).dataset.seq ?? 0);
+    if (s > lastSeq) lastSeq = s;
+    frag.appendChild(n);
+    n0++;
+  }
+  if (!n0) return; // rien d'affiché → rien à garder
+  convCache.delete(id); // re-set = touche LRU
+  convCache.set(id, {
+    conn,
+    frag,
+    toolBlocks,
+    pendingToolUpdates,
+    answered,
+    minRendered,
+    renderedCount,
+    hasMoreHistory,
+    unseenBelow,
+    lastSeq,
+    scrollTop: scroll,
+    atBottom,
+    ts: Date.now(),
+  });
+  while (convCache.size > CACHE_MAX) {
+    convCache.delete(convCache.keys().next().value!);
+  }
+}
+
+/** Entrée de cache exploitable (connexion identique + pas expirée).
+ *  Consommée au hit : le fragment est transféré au DOM par restoreConv —
+ *  laisser l'entrée dans la map laisserait un fragment vide réutilisable. */
+function cachedConv(id: string, conn: string): ConvCache | undefined {
+  const c = convCache.get(id);
+  if (!c) return;
+  convCache.delete(id);
+  if (c.conn !== conn || Date.now() - c.ts > CACHE_TTL) return;
+  return c;
+}
+
+/** Réinstalle une conversation cachée : contenu + position de scroll. */
+function restoreConv(c: ConvCache) {
+  for (const n of [...eventsEl.children]) {
+    if (n !== sentinel) n.remove();
+  }
+  eventsEl.appendChild(c.frag);
+  toolBlocks = c.toolBlocks;
+  pendingToolUpdates = c.pendingToolUpdates;
+  answered = c.answered;
+  minRendered = c.minRendered;
+  renderedCount = c.renderedCount;
+  hasMoreHistory = c.hasMoreHistory;
+  loadingOld = false;
+  unseenBelow = c.unseenBelow;
+  if (c.atBottom) scrollBottom();
+  else eventsEl.scrollTop = c.scrollTop;
+  updateBottomBtn();
+}
+
+async function openSession(id: string, force = false) {
   const seq = ++openSeq;
   const stale = () => seq !== openSeq; // un openSession plus récent a pris le relais
   // La meta démon ne porte pas sa conn (notion client) — la reprendre de
   // la liste (stampée par le merge) pour router session_info sur le bon
   // serveur ; "" → connexion par défaut.
-  const connHint = lastSessions.find((s) => s.id === id)?.conn ?? "";
-  const info = await call<{ meta: SessionMeta; pending: string[]; alive: boolean; last_seq: number }>(
-    "session_info",
-    { session: id, conn: connHint },
-  );
+  const listMeta = lastSessions.find((s) => s.id === id);
+  const connHint = listMeta?.conn ?? "";
+
+  // Feedback immédiat : la ligne cliquée passe active tout de suite.
+  setActiveRow(id);
+  // La session quittée garde son DOM en mémoire (réaffichage instantané).
+  if (current && current.id !== id) stashConv(current.id, current.conn || "default");
+  if (force) convCache.delete(id);
+
+  // Bascule immédiate sur la meta connue de la liste — titre + header
+  // changent sans attendre session_info (qui la rafraîchit ensuite).
+  // Pas de meta → current = null d'emblée : sans ça les pushes de
+  // l'ancienne session (sub encore vivante) s'injecteraient dans la zone
+  // de la nouvelle pendant le chargement.
+  current = listMeta ? { ...listMeta } : null;
+  alive = !!current && !current.offline &&
+    current.state !== "dead" && current.state !== "interrupted";
+  if (current) $("chat-title").textContent = `${current.title} — ${current.agent}`;
+  updateHeader();
+
+  // Cache frais → conversation réaffichée d'emblée ; sinon zone vidée +
+  // grande gemme le temps du rechargement.
+  const cached = cachedConv(id, connHint || "default");
+  if (cached) {
+    restoreConv(cached);
+  } else {
+    clearConv();
+    showConvLoading(true);
+  }
+
+  const info = await call<{
+    meta: SessionMeta; pending: string[]; alive: boolean; last_seq: number;
+  }>("session_info", { session: id, conn: connHint }).catch((e) => {
+    showErr(`session_info: ${e}`);
+    return null;
+  });
   if (stale()) return;
+  if (!info) {
+    // Échec : on garde le cache affiché s'il existe, sinon on retire la gemme.
+    showConvLoading(false);
+    return;
+  }
   alive = info.alive;
   current = info.meta;
   if (!current.conn && connHint) current.conn = connHint;
-  minRendered = Number.MAX_SAFE_INTEGER;
-  renderedCount = 0;
-  hasMoreHistory = true;
-  toolBlocks.clear();
-  pendingToolUpdates.clear();
-  answered.clear();
-  unseenBelow = 0;
-  $("btn-bottom").hidden = true;
-  for (const c of eventsEl.querySelectorAll(".ev")) c.remove();
-
   $("chat-title").textContent = `${current.title} — ${current.agent}`;
   updateHeader();
 
@@ -1174,11 +1333,11 @@ async function openSession(id: string) {
     eventsEl.appendChild(sys);
     try {
       await call("resume_session", { session: id });
-      if (stale()) return;
+      if (stale()) { sys.remove(); return; }
       const info2 = await call<{ meta: SessionMeta; alive: boolean }>("session_info", {
         session: id,
       });
-      if (stale()) return;
+      if (stale()) { sys.remove(); return; }
       alive = info2.alive;
       current = info2.meta;
       if (!current.conn && connHint) current.conn = connHint;
@@ -1189,23 +1348,28 @@ async function openSession(id: string) {
     }
   }
 
-  // Charge la dernière page d'événements — un échec (journal absent/corrompu)
+  // Avec cache, le trou depuis lastSeq est rejoué par le subscribe ; sans
+  // cache, on recharge la dernière page — un échec (journal absent/corrompu)
   // ne doit PAS tuer le subscribe ni la vue live derrière.
-  let page = { events: [] as AcEvent[], last_seq: 0 };
-  try {
-    page = await call<{ events: AcEvent[]; last_seq: number }>("events", {
-      session: id,
-      limit: INITIAL_PAGE,
-    });
-  } catch (e) {
-    showErr(`events: ${e}`);
+  let afterSeq = cached?.lastSeq ?? 0;
+  if (!cached) {
+    let page = { events: [] as AcEvent[], last_seq: 0 };
+    try {
+      page = await call<{ events: AcEvent[]; last_seq: number }>("events", {
+        session: id,
+        limit: INITIAL_PAGE,
+      });
+    } catch (e) {
+      showErr(`events: ${e}`);
+    }
+    if (stale()) return;
+    showConvLoading(false);
+    for (const ev of page.events) appendEvent(ev, false);
+    afterSeq = page.events.length ? page.events[page.events.length - 1].seq : 0;
+    scrollBottom();
   }
-  if (stale()) return;
-  for (const ev of page.events) appendEvent(ev, false);
-  scrollBottom();
 
   // Subscribe live à partir du dernier event connu
-  const afterSeq = page.events.length ? page.events[page.events.length - 1].seq : 0;
   if (stale()) return;
   await invoke("subscribe", { session: id, afterSeq, conn: current?.conn ?? connHint }).catch((e) => {
     // Le flux live est mort (ex. restart démon) → erreur visible
@@ -2231,7 +2395,8 @@ function renderToolCall(ev: AcEvent): HTMLElement {
 
 // Updates reçues avant leur bloc tool_call (bloc dans une page
 // d'historique pas encore chargée) — flushées quand le bloc est rendu.
-const pendingToolUpdates = new Map<string, AcEvent[]>();
+// Par session comme toolBlocks/answered : swapée par le cache de conv.
+let pendingToolUpdates = new Map<string, AcEvent[]>();
 
 function stashToolUpdate(ev: AcEvent) {
   const id = ev.call_id as string;
@@ -2393,18 +2558,18 @@ function renderQuestion(ev: AcEvent): HTMLElement {
 // ---------------------------------------------------------------------------
 
 const observer = new IntersectionObserver(async (entries) => {
-  if (!entries[0].isIntersecting || loadingOld || !current || !hasMoreHistory) return;
+  if (!entries[0].isIntersecting || loadingOld || !current || !hasMoreHistory ||
+      convLoadingEl?.isConnected) return;
+  const sid = current.id;
   loadingOld = true;
-  const sessId = current.id;
   try {
     const page = await call<{ events: AcEvent[] }>("events", {
-      session: sessId,
+      session: sid,
       before_seq: minRendered,
       limit: PAGE,
     });
     // Session changée pendant l'await → ne pas insérer l'ancienne page.
-    if (!current || current.id !== sessId) return;
-    prependEvents(page.events);
+    if (current?.id === sid) prependEvents(page.events);
   } finally {
     loadingOld = false;
   }
@@ -2442,6 +2607,7 @@ await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
   const { session, event } = msg.payload;
   // Suppression côté serveur : l'event terminal arrive avant la coupure.
   if (event.type === "session_deleted") {
+    convCache.delete(session);
     if (current && session === current.id) markSessionGone();
     refreshSessions();
     return;
@@ -2949,7 +3115,8 @@ $("btn-fusion-edit").onclick = () => openFusion();
   if (base && base !== "__fusion") applyModelValue(joinModel(base, eff));
 };
 
-$("btn-refresh").onclick = () => current && openSession(current.id);
+// ⟳ = vrai rechargement : le cache de conversation est ignoré.
+$("btn-refresh").onclick = () => current && openSession(current.id, true);
 
 // Double-clic sur le titre → renommage inline
 $("chat-title").addEventListener("dblclick", () => {
@@ -3298,9 +3465,12 @@ async function deleteConn(conn: string) {
   for (const k of Object.keys(localStorage)) {
     if (k.startsWith(`ac-grp-${conn}::`)) localStorage.removeItem(k);
   }
+  // Conversations cachées de sessions de cette conn → purge (elles sont
+  // supprimées côté démon quand il était joignable).
+  for (const [k, c] of convCache) if (c.conn === conn) convCache.delete(k);
   if (current && (current.conn ?? "default") === conn) {
     current = null;
-    eventsEl.innerHTML = "";
+    clearConv();
   }
   refreshSessions();
 }
