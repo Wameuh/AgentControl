@@ -377,7 +377,7 @@ async function performClientUpdate(tag: string) {
     return;
   }
   await invoke("update_client", { tag }).catch(() => {
-    shellOpen("https://github.com/Wameuh/AgentControl/releases");
+    shellOpen(`https://github.com/Wameuh/AgentControl/releases/tag/v${tag}`);
   });
 }
 
