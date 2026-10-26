@@ -31,7 +31,10 @@ for (const id of ["titlebar-gem", "about-gem"]) {
   if (el) el.innerHTML = gemSVG("neutral");
 }
 const cg = document.getElementById("chat-gem");
-if (cg) cg.innerHTML = gemSVG("human");
+if (cg) {
+  cg.dataset.role = "human";
+  cg.innerHTML = gemSVG("human");
+}
 
 // Plateforme (android | windows | linux) — gates UI mobile.
 // Détection synchrone par UA (avant le resolve de platform()).
@@ -804,7 +807,8 @@ function markSessionGone() {
 }
 
 /** Icône fenêtre : rouge si une question attend, dorée si un agent tourne,
- *  grise sans agent vivant, gemme sauge sinon (no-op sur Android). */
+ *  violette si une session compacte, grise sans agent vivant, gemme sauge
+ *  sinon (no-op sur Android). */
 let lastIconState = "";
 function setAppIcon(state: string) {
   if (state === lastIconState) return;
