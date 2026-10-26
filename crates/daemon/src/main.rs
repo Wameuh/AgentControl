@@ -1,5 +1,6 @@
 mod acp;
 mod journal;
+mod logging;
 mod mcp;
 mod server;
 mod session;
@@ -109,12 +110,28 @@ fn nvm_node_bin() -> Option<PathBuf> {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     // Subcommand caché : serveur MCP stdio (injecté dans les sessions agent
-    // via mcpServers — voir server::Daemon::mcp_servers).
+    // via mcpServers — voir server::Daemon::mcp_servers). Pas de logging
+    // fichier ici : sa stderr remonte au démon via le reader stderr de
+    // l'agent → lignes "[sid stderr]" dans le log démon.
     if std::env::args().nth(1).as_deref() == Some("mcp-serve") {
-        return mcp::serve_stdio().await;
+        if let Err(e) = mcp::serve_stdio().await {
+            eprintln!("mcp-serve: {e:#}");
+            std::process::exit(1);
+        }
+        return;
     }
+    if let Err(e) = run().await {
+        // Stderr toujours ; le fichier a déjà sa copie via le error! de
+        // run() (émis pendant que le guard du writer est vivant) quand
+        // l'échec arrive après l'init du logging.
+        eprintln!("agentcontrol-daemon: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<()> {
     ensure_agent_path();
     let root = std::env::var("AGENTCONTROL_HOME")
         .map(PathBuf::from)
@@ -122,7 +139,23 @@ async fn main() -> Result<()> {
     // Chemin absolu : injecté dans l'env des agents (AGENTCONTROL_SOCK).
     let root = std::fs::canonicalize(&root).unwrap_or(root);
     std::fs::create_dir_all(root.join("sessions"))?;
+    // Guard vivant jusqu'au retour de run() : flush les derniers logs
+    // fichier — y compris l'erreur fatale, émise AVANT son drop.
+    let _guard = logging::init(&root);
+    tracing::info!(
+        "=== agentcontrol-daemon v{} démarré (pid {}) — logs: {} ===",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id(),
+        root.join("logs").display()
+    );
+    let res = serve(&root).await;
+    if let Err(e) = &res {
+        tracing::error!("arrêt sur erreur fatale: {e:#}");
+    }
+    res
+}
 
+async fn serve(root: &std::path::Path) -> Result<()> {
     // Config optionnelle
     let cfg_path = root.join("config.toml");
     let cfg: Config = if cfg_path.exists() {
@@ -149,11 +182,12 @@ async fn main() -> Result<()> {
     }
 
     let daemon =
-        Daemon::open(root.clone(), agents, cfg.retention.clone(), cfg.a2a.clone()).await?;
-    eprintln!(
-        "agentcontrol-daemon: {} session(s) chargée(s), root={}",
+        Daemon::open(root.to_path_buf(), agents, cfg.retention.clone(), cfg.a2a.clone()).await?;
+    tracing::info!(
+        "{} session(s) chargée(s), root={}, agents: {}",
         daemon.sessions.read().await.len(),
-        root.display()
+        root.display(),
+        daemon.agents.keys().cloned().collect::<Vec<_>>().join(", ")
     );
 
     // Socket Unix
@@ -173,7 +207,7 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("bind {}", cfg.bind_tcp))?;
 
-    eprintln!(
+    tracing::info!(
         "listening: unix:{} + {} | rétention: journal>{}MB→{}MB, blobs<{}MB, purge_days={}",
         sock_path.display(),
         cfg.bind_tcp,
@@ -186,12 +220,38 @@ async fn main() -> Result<()> {
     let d1 = daemon.clone();
     let d2 = daemon.clone();
     tokio::spawn(async move { server::janitor(d2).await });
+    // Les accept loops ne retournent jamais en pratique — si l'un le fait,
+    // le select termine et supervisord relance : tracer la branche coupable.
     tokio::select! {
-        _ = server::accept_unix(d1, unix_listener) => {},
-        _ = server::accept_tcp(daemon, tcp_listener) => {},
-        _ = tokio::signal::ctrl_c() => {
-            eprintln!("shutdown — les sessions restent journalisées sur disque");
+        _ = server::accept_unix(d1, unix_listener) => {
+            tracing::error!("accept_unix a retourné — arrêt inattendu");
+        }
+        _ = server::accept_tcp(daemon, tcp_listener) => {
+            tracing::error!("accept_tcp a retourné — arrêt inattendu");
+        }
+        sig = shutdown_signal() => {
+            tracing::info!(
+                "signal {sig} reçu — arrêt (les sessions restent journalisées sur disque)"
+            );
         }
     }
+    tracing::info!("=== agentcontrol-daemon arrêté (pid {}) ===", std::process::id());
     Ok(())
+}
+
+/// SIGINT ou SIGTERM — le stop supervisord envoie SIGTERM : sans handler le
+/// démon mourait sans laisser de trace dans son propre log.
+async fn shutdown_signal() -> &'static str {
+    use tokio::signal::unix::{signal, SignalKind};
+    match signal(SignalKind::terminate()) {
+        Ok(mut term) => tokio::select! {
+            _ = tokio::signal::ctrl_c() => "SIGINT",
+            _ = term.recv() => "SIGTERM",
+        },
+        Err(e) => {
+            tracing::warn!("handler SIGTERM indisponible: {e}");
+            let _ = tokio::signal::ctrl_c().await;
+            "SIGINT"
+        }
+    }
 }

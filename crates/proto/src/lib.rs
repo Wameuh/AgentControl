@@ -496,6 +496,48 @@ pub enum ReqKind {
     DaemonStatus,
 }
 
+impl ReqKind {
+    /// Nom du variant — pour les logs (`debug!`), sans sérialiser le payload
+    /// (qui peut contenir des prompts/texte volumineux ou sensibles).
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::NewSession { .. } => "new_session",
+            Self::ResumeSession { .. } => "resume_session",
+            Self::ListNativeSessions { .. } => "list_native_sessions",
+            Self::ForkSession { .. } => "fork_session",
+            Self::AttachSession { .. } => "attach_session",
+            Self::ListSessions => "list_sessions",
+            Self::ListAgents => "list_agents",
+            Self::Send { .. } => "send",
+            Self::PeerSend { .. } => "peer_send",
+            Self::PeerSpawn { .. } => "peer_spawn",
+            Self::ReadFile { .. } => "read_file",
+            Self::ListDir { .. } => "list_dir",
+            Self::DeletePath { .. } => "delete_path",
+            Self::DownloadPath { .. } => "download_path",
+            Self::QueueList { .. } => "queue_list",
+            Self::QueueEdit { .. } => "queue_edit",
+            Self::QueueDrop { .. } => "queue_drop",
+            Self::QueuePromote { .. } => "queue_promote",
+            Self::Events { .. } => "events",
+            Self::Subscribe { .. } => "subscribe",
+            Self::Cancel { .. } => "cancel",
+            Self::SessionInfo { .. } => "session_info",
+            Self::SetMode { .. } => "set_mode",
+            Self::SetModel { .. } => "set_model",
+            Self::SetConfigOption { .. } => "set_config_option",
+            Self::DeleteSession { .. } => "delete_session",
+            Self::ClearSession { .. } => "clear_session",
+            Self::RenameSession { .. } => "rename_session",
+            Self::SetSessionGroup { .. } => "set_session_group",
+            Self::Respond { .. } => "respond",
+            Self::GetBlob { .. } => "get_blob",
+            Self::KillSession { .. } => "kill_session",
+            Self::DaemonStatus => "daemon_status",
+        }
+    }
+}
+
 fn default_limit() -> u32 {
     200
 }

@@ -8,6 +8,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use tracing::info;
 
 struct Inner {
     file: File,
@@ -233,7 +234,7 @@ impl Journal {
         g.offsets = new_offsets;
         g.end = pos;
         g.file = OpenOptions::new().append(true).open(&path)?;
-        eprintln!("journal compacté : -{removed} events, {len} -> {pos} octets");
+        info!("journal compacté : -{removed} events, {len} -> {pos} octets");
         Ok(true)
     }
 }
