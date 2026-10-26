@@ -428,6 +428,9 @@ pub enum ReqKind {
     },
     /// Tue l'agent et supprime la session + ses fichiers (journal/blobs).
     DeleteSession { session: String },
+    /// /clear — vide le journal et repart sur une session native neuve
+    /// (session/new), même session AgentControl (id, titre, groupe, cwd).
+    ClearSession { session: String },
     /// Renomme la session (meta local + session/rename chez l'agent si dispo).
     RenameSession {
         session: String,

@@ -100,6 +100,10 @@ pub struct Session {
     compacting: Mutex<Option<CompactHold>>,
     /// Self-ref pour lancer des tâches internes (drain, timer compact).
     me: Weak<Session>,
+    /// Incrémentée à chaque spawn — le reader d'un vieux process compare
+    /// sa génération à la courante : périmée → son on_agent_exit se tait
+    /// (pas de "agent exited"/dead ni de take() sur le child du successeur).
+    spawn_gen: AtomicU64,
     child: Mutex<Option<Child>>,
 }
 
@@ -136,6 +140,7 @@ impl Session {
             prompt_queue: Mutex::new(std::collections::VecDeque::new()),
             compacting: Mutex::new(None),
             me: me.clone(),
+            spawn_gen: AtomicU64::new(0),
             child: Mutex::new(None),
         }))
     }
@@ -324,6 +329,12 @@ impl Session {
         skip_replay: bool,
         mcp_servers: Value,
     ) -> Result<()> {
+        // Nouvelle génération : tout reader d'un process précédent devient
+        // périmé — son on_agent_exit ne touchera plus l'état partagé.
+        let gen = self.spawn_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        // Un load tué en vol laisserait le flag vrai → les updates de la
+        // session suivante seraient ignorées comme du replay.
+        self.loading_replay.store(false, Ordering::SeqCst);
         let meta = self.meta_snapshot();
         let (cmd, args) = command.split_first().context("commande agent vide")?;
         let mut child = Command::new(cmd)
@@ -376,11 +387,11 @@ impl Session {
                 let mut lines = BufReader::new(stdout).lines();
                 loop {
                     match lines.next_line().await {
-                        Ok(Some(line)) => session.handle_agent_line(&line).await,
+                        Ok(Some(line)) => session.handle_agent_line(&line, gen).await,
                         _ => break,
                     }
                 }
-                session.on_agent_exit().await;
+                session.on_agent_exit(gen).await;
             });
         }
 
@@ -509,7 +520,13 @@ impl Session {
         Ok(())
     }
 
-    async fn on_agent_exit(&self) {
+    async fn on_agent_exit(&self, gen: u64) {
+        // Un spawn plus récent a pris le relais (resume/rebind/clear) :
+        // la mort du vieux process est attendue — ne pas marquer dead ni
+        // lâcher le child (il appartient au process de la gen courante).
+        if self.spawn_gen.load(Ordering::SeqCst) != gen {
+            return;
+        }
         *self.stdin_tx.lock().unwrap() = None;
         self.child.lock().unwrap().take();
         self.flush_text();
@@ -556,7 +573,13 @@ impl Session {
     // Dispatch des lignes sortantes de l'agent
     // -----------------------------------------------------------------------
 
-    async fn handle_agent_line(self: &Arc<Self>, line: &str) {
+    async fn handle_agent_line(self: &Arc<Self>, line: &str, gen: u64) {
+        // Ligne d'un process remplacé (clear/rebind) : ses updates et
+        // requêtes n'ont plus de sens — et ses réponses n'ont plus
+        // d'attendant (acp_pending soldé au kill).
+        if self.spawn_gen.load(Ordering::SeqCst) != gen {
+            return;
+        }
         let v: Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => return,
@@ -820,17 +843,31 @@ impl Session {
             // en file (rendu comme message normal à la livraison).
             let me = self.me.clone();
             let text = text.to_string();
+            // Génération capturée AVANT le spawn : une tâche schedulée après
+            // un clear est périmée d'emblée — elle n'arme ni compact ni
+            // prompt pour le contexte disparu.
+            let gen = self.spawn_gen.load(Ordering::SeqCst);
             tokio::spawn(async move {
                 let Some(s) = me.upgrade() else { return };
+                if s.spawn_gen.load(Ordering::SeqCst) != gen {
+                    return;
+                }
                 if is_compact_cmd(&text) {
                     s.arm_compact();
                 }
                 match s.prompt_rpc(&text).await {
-                    Ok(_) => s.emit(EventKind::UserMessage {
-                        text: text.clone(),
-                        steer: true,
-                    }),
+                    Ok(_) => {
+                        if s.spawn_gen.load(Ordering::SeqCst) == gen {
+                            s.emit(EventKind::UserMessage {
+                                text: text.clone(),
+                                steer: true,
+                            });
+                        }
+                    }
                     Err(e) => {
+                        if s.spawn_gen.load(Ordering::SeqCst) != gen {
+                            return;
+                        }
                         s.emit(EventKind::System {
                             text: format!("steer refusé ({e}) — message en file"),
                         });
@@ -892,7 +929,13 @@ impl Session {
             self.emit(EventKind::System {
                 text: "steer → envoyé au tour en cours".into(),
             });
+            let gen = self.spawn_gen.load(Ordering::SeqCst);
             if let Err(e) = self.prompt_rpc(wrapped).await {
+                // Clear pendant le RPC : pas de ré-enfilement d'un message
+                // d'un contexte disparu.
+                if self.spawn_gen.load(Ordering::SeqCst) != gen {
+                    return Ok(());
+                }
                 self.emit(EventKind::System {
                     text: format!("steer refusé ({e}) — message en file"),
                 });
@@ -942,7 +985,13 @@ impl Session {
     /// après édits) ; les prompts peers passent en silence (PeerMessage
     /// déjà journalisé).
     async fn drain_queue(&self) {
+        // Un runner démarré avant un clear ne doit ni livrer ni journaliser
+        // les prompts de l'ancien contexte — la génération le fige.
+        let gen = self.spawn_gen.load(Ordering::SeqCst);
         loop {
+            if self.spawn_gen.load(Ordering::SeqCst) != gen {
+                return;
+            }
             if self.compacting.lock().unwrap().is_some() {
                 return;
             }
@@ -988,21 +1037,31 @@ impl Session {
             .meta_snapshot()
             .native_session_id
             .context("no native session id")?;
+        // Génération au lancement du tour : si un clear a remplacé l'agent
+        // pendant le RPC, ni le flush ni l'état de sortie ne doivent
+        // toucher le nouveau cycle.
+        let gen = self.spawn_gen.load(Ordering::SeqCst);
         self.active_prompts.fetch_add(1, Ordering::SeqCst);
-        self.set_state("working");
+        if self.spawn_gen.load(Ordering::SeqCst) == gen {
+            self.set_state("working");
+        }
         let resp = self
             .acp_request("session/prompt", acp::session_prompt_params(&sid, text))
             .await;
-        self.flush_text();
-        if self.active_prompts.fetch_sub(1, Ordering::SeqCst) == 1 {
-            if self.compacting.lock().unwrap().is_some() {
-                // Le /compact a rendu la main mais la compaction tourne
-                // encore côté agent — l'état reste visible jusqu'au
-                // signal de fin (la retenue garde les envois en file).
-                self.set_state("compacting");
-            } else {
-                self.set_state("idle");
+        if self.spawn_gen.load(Ordering::SeqCst) == gen {
+            self.flush_text();
+            if self.active_prompts.fetch_sub(1, Ordering::SeqCst) == 1 {
+                if self.compacting.lock().unwrap().is_some() {
+                    // Le /compact a rendu la main mais la compaction tourne
+                    // encore côté agent — l'état reste visible jusqu'au
+                    // signal de fin (la retenue garde les envois en file).
+                    self.set_state("compacting");
+                } else {
+                    self.set_state("idle");
+                }
             }
+        } else {
+            self.active_prompts.fetch_sub(1, Ordering::SeqCst);
         }
         resp
     }
@@ -1010,10 +1069,13 @@ impl Session {
     /// Un tour session/prompt : working → réponse → idle.
     /// Retourne faux si le `session/prompt` RPC a échoué.
     async fn run_turn(&self, text: &str) -> bool {
+        // Un tour de l'ancien contexte tué par un clear n'émet pas son
+        // "prompt failed" dans le journal frais.
+        let gen = self.spawn_gen.load(Ordering::SeqCst);
         match self.prompt_rpc(text).await {
             Ok(v) => {
                 if let Some(sr) = v.get("stopReason").and_then(Value::as_str) {
-                    if sr != "end_turn" {
+                    if sr != "end_turn" && self.spawn_gen.load(Ordering::SeqCst) == gen {
                         self.emit(EventKind::System {
                             text: format!("turn ended: {sr}"),
                         });
@@ -1022,9 +1084,11 @@ impl Session {
                 true
             }
             Err(e) => {
-                self.emit(EventKind::Error {
-                    message: format!("prompt failed: {e}"),
-                });
+                if self.spawn_gen.load(Ordering::SeqCst) == gen {
+                    self.emit(EventKind::Error {
+                        message: format!("prompt failed: {e}"),
+                    });
+                }
                 false
             }
         }
@@ -1419,6 +1483,52 @@ impl Session {
         if let Some(mut c) = c {
             let _ = c.kill().await;
         }
+    }
+
+    /// Tue l'agent en vue d'un respawn immédiat (clear) : la génération
+    /// est invalidée AVANT le kill → le on_agent_exit du vieux reader se
+    /// tait (ni "agent process exited" ni dead dans le nouveau cycle).
+    /// Les requêtes ACP en vol sont soldées en erreur, sinon leurs
+    /// appelants resteraient suspendus indéfiniment.
+    pub async fn kill_for_respawn(&self) {
+        self.spawn_gen.fetch_add(1, Ordering::SeqCst);
+        *self.stdin_tx.lock().unwrap() = None;
+        {
+            let mut p = self.acp_pending.lock().unwrap();
+            for (_, tx) in p.drain() {
+                let _ = tx.send(Err("agent replaced".into()));
+            }
+        }
+        self.kill().await;
+    }
+
+    /// /clear : journal + blobs vidés, méta recalée pour une session
+    /// native neuve (native_id None — si le respawn échoue, un resume
+    /// ultérieur ne rechargerait pas l'ancien contexte par surprise).
+    /// L'agent doit déjà être arrêté (kill_for_respawn).
+    pub fn clear_context(&self) -> Result<()> {
+        // Fragments d'un tour interrompu et demandes en attente de
+        // l'ancien contexte : ils n'ont plus de sens après le reset.
+        self.cur_text.lock().unwrap().take();
+        self.tool_calls.lock().unwrap().clear();
+        self.pending_agent.lock().unwrap().clear();
+        self.journal.reset(&self.dir)?;
+        {
+            let mut m = self.meta.lock().unwrap();
+            m.native_session_id = None;
+            m.context_used = None;
+        }
+        self.save_meta();
+        self.emit(EventKind::System {
+            text: "contexte effacé — nouvelle session agent".into(),
+        });
+        Ok(())
+    }
+
+    /// Marque la session morte — chemin d'erreur d'un respawn post-clear
+    /// (set_state est privé, le handler serveur en a besoin ici).
+    pub fn mark_dead(&self) {
+        self.set_state("dead");
     }
 
     pub fn is_alive(&self) -> bool {
