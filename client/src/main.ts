@@ -1977,25 +1977,30 @@ function prependEvents(events: AcEvent[]) {
   // tour préserve l'ordre croissant de la page (children[1] bougerait).
   const anchor = eventsEl.children[1] ?? null;
   const pageCalls: string[] = [];
-  for (const ev of events) {
-    if (ev.seq < minRendered) minRendered = ev.seq;
-    if (ev.type === "tool_call_update") {
-      updateToolBlock(ev); // pas de nœud : met à jour le bloc (ou stash)
-      continue;
+  inPrepend = true;
+  try {
+    for (const ev of events) {
+      if (ev.seq < minRendered) minRendered = ev.seq;
+      if (ev.type === "tool_call_update") {
+        updateToolBlock(ev); // pas de nœud : met à jour le bloc (ou stash)
+        continue;
+      }
+      const node = renderEvent(ev, false);
+      eventsEl.insertBefore(node, anchor);
+      renderedCount++;
+      if (ev.type === "tool_call") {
+        toolBlocks.set(ev.call_id as string, node);
+        pageCalls.push(ev.call_id as string);
+      }
     }
-    const node = renderEvent(ev, false);
-    eventsEl.insertBefore(node, anchor);
-    renderedCount++;
-    if (ev.type === "tool_call") {
-      toolBlocks.set(ev.call_id as string, node);
-      pageCalls.push(ev.call_id as string);
-    }
+    // Les updates stashées sont plus récentes que la page → après la boucle.
+    for (const id of pageCalls) flushToolUpdates(id);
+    // garder la position visuelle
+    eventsEl.scrollTop += eventsEl.scrollHeight - oldHeight;
+    updateBottomBtn();
+  } finally {
+    inPrepend = false;
   }
-  // Les updates stashées sont plus récentes que la page → après la boucle.
-  for (const id of pageCalls) flushToolUpdates(id);
-  // garder la position visuelle
-  eventsEl.scrollTop += eventsEl.scrollHeight - oldHeight;
-  updateBottomBtn();
 }
 
 function renderEvent(ev: AcEvent, live: boolean): HTMLElement {
@@ -2176,13 +2181,12 @@ const pendingToolUpdates = new Map<string, AcEvent[]>();
 
 function stashToolUpdate(ev: AcEvent) {
   const id = ev.call_id as string;
-  let l = pendingToolUpdates.get(id);
-  if (!l) {
-    if (pendingToolUpdates.size >= 300)
-      pendingToolUpdates.delete(pendingToolUpdates.keys().next().value!);
-    l = [];
-    pendingToolUpdates.set(id, l);
-  }
+  const l = pendingToolUpdates.get(id) ?? [];
+  // ré-insertion en fin → l'éviction au cap est LRU, pas FIFO strict
+  pendingToolUpdates.delete(id);
+  pendingToolUpdates.set(id, l);
+  if (pendingToolUpdates.size > 300)
+    pendingToolUpdates.delete(pendingToolUpdates.keys().next().value!);
   if (l.length < 400) l.push(ev);
 }
 
@@ -2198,7 +2202,13 @@ function flushToolUpdates(callId: string) {
 
 /// Exécute `fn` en compensant le scroll si `d` est entièrement au-dessus
 /// du viewport : sa croissance pousserait sinon le contenu visible.
+/// Pendant un prepend, la compensation de fin de page couvre déjà tout.
+let inPrepend = false;
 function anchorIfAbove(d: HTMLElement, fn: () => void) {
+  if (inPrepend) {
+    fn();
+    return;
+  }
   const r = d.getBoundingClientRect();
   if (r.bottom >= eventsEl.getBoundingClientRect().top) {
     fn();
@@ -2331,12 +2341,15 @@ function renderQuestion(ev: AcEvent): HTMLElement {
 const observer = new IntersectionObserver(async (entries) => {
   if (!entries[0].isIntersecting || loadingOld || !current || !hasMoreHistory) return;
   loadingOld = true;
+  const sessId = current.id;
   try {
     const page = await call<{ events: AcEvent[] }>("events", {
-      session: current.id,
+      session: sessId,
       before_seq: minRendered,
       limit: PAGE,
     });
+    // Session changée pendant l'await → ne pas insérer l'ancienne page.
+    if (!current || current.id !== sessId) return;
     prependEvents(page.events);
   } finally {
     loadingOld = false;
