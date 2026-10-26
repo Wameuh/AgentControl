@@ -725,7 +725,7 @@ impl Daemon {
                 let last = s.journal.last_seq();
                 Ok(json!({"events": events, "last_seq": last}))
             }
-            ReqKind::ReadFile { session, path } => {
+            ReqKind::ReadFile { session, path, binary } => {
                 let s = self.get_session(&session).await?;
                 let p = PathBuf::from(&path);
                 let full = if p.is_absolute() {
@@ -733,16 +733,31 @@ impl Daemon {
                 } else {
                     PathBuf::from(&s.meta_snapshot().cwd).join(p)
                 };
-                let data = std::fs::read(&full)
-                    .with_context(|| format!("{}", full.display()))?;
-                const CAP: usize = 512 * 1024;
-                let truncated = data.len() > CAP;
-                let data = &data[..CAP.min(data.len())];
-                Ok(json!({
-                    "path": full.display().to_string(),
-                    "content": String::from_utf8_lossy(data),
-                    "truncated": truncated,
-                }))
+                if binary {
+                    // Aperçu image : ~16 Mio de JSON base64 max ; `data` omis
+                    // si tronqué (le client n'affiche que « trop grosse »).
+                    const CAP: u64 = 12 * 1024 * 1024;
+                    let (data, size) = read_slice(&full, 0, CAP)
+                        .with_context(|| format!("{}", full.display()))?;
+                    let mut resp = json!({
+                        "path": full.display().to_string(),
+                        "size": size,
+                        "truncated": size > CAP,
+                    });
+                    if size <= CAP {
+                        resp["data"] = json!(b64(&data));
+                    }
+                    Ok(resp)
+                } else {
+                    const CAP: u64 = 512 * 1024;
+                    let (data, size) = read_slice(&full, 0, CAP)
+                        .with_context(|| format!("{}", full.display()))?;
+                    Ok(json!({
+                        "path": full.display().to_string(),
+                        "content": String::from_utf8_lossy(&data),
+                        "truncated": size > CAP,
+                    }))
+                }
             }
             ReqKind::ListDir { session, path } => {
                 let s = self.get_session(&session).await?;

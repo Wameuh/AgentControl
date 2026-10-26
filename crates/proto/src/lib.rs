@@ -351,9 +351,13 @@ pub enum ReqKind {
     },
     /// Lit un fichier (absolu ou relatif au cwd de la session) — panneau
     /// latéral du client pour les liens de fichiers de l'agent.
+    /// `binary` → réponse {path, data(base64), size, truncated} au lieu de
+    /// {path, content(utf8 lossy), truncated} — aperçu image du client.
     ReadFile {
         session: String,
         path: String,
+        #[serde(default)]
+        binary: bool,
     },
     /// Liste un dossier du workspace (arborescence côté client). `path`
     /// relatif au cwd de la session ("" = racine) — borné au workspace.

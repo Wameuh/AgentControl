@@ -51,6 +51,7 @@
       { name: "Cargo.toml", dir: false, size: 1240 },
       { name: "package.json", dir: false, size: 980 },
       { name: "README.md", dir: false, size: 4321 },
+      { name: "logo.png", dir: false, size: 68 },
       { name: ".env", dir: false, size: 120 },
     ],
   };
@@ -64,7 +65,10 @@
       case "events": return { events: EVENTS, last_seq: EVENTS.length };
       case "queue_list": return { queue: ["Compile aussi la doc quand tu as fini"] };
       case "list_dir": return DIR;
-      case "read_file": return FILE;
+      case "read_file": return args.binary ? {
+        path: "/home/agent/api/logo.png", size: 68, truncated: false,
+        data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      } : FILE;
       case "set_session_group": {
         const s = SESSIONS.find((x) => x.id === args.session);
         if (s) s.group = args.group;

@@ -370,7 +370,11 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             offset: p.get("offset").and_then(Value::as_u64).unwrap_or(0),
             limit: p.get("limit").and_then(Value::as_u64).unwrap_or(262144),
         },
-        "read_file" => ReqKind::ReadFile { session: s("session"), path: s("path") },
+        "read_file" => ReqKind::ReadFile {
+            session: s("session"),
+            path: s("path"),
+            binary: p.get("binary").and_then(Value::as_bool).unwrap_or(false),
+        },
         "list_dir" => ReqKind::ListDir { session: s("session"), path: s("path") },
         "delete_path" => ReqKind::DeletePath { session: s("session"), path: s("path") },
         "download_path" => ReqKind::DownloadPath {
