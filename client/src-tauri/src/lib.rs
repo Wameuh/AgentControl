@@ -6,11 +6,11 @@
 mod commands;
 mod state;
 
-use serde_json::json;
 use state::AppState;
 use tauri::Manager;
 use tokio::sync::Mutex;
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Workaround WebKitGTK : webview blanche/noire après unfocus ou au boot
     // (compositing GPU — bug connu Tauri sur Linux/Wayland/Nvidia).
@@ -75,10 +75,4 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-// silence unused
-#[allow(dead_code)]
-fn _unused(_: serde_json::Value) {
-    let _ = json!(null);
 }

@@ -25,7 +25,6 @@ pub(crate) fn ssh_pubkey() -> Result<String, String> {
     client_core::ssh_native::pubkey_line().map_err(|e| format!("{e:#}"))
 }
 
-/// Déconnecte proprement une connexion (tue le tunnel/process ssh).
 /// Stats process client : RSS Mo + CPU % (delta depuis l'appel précédent).
 #[tauri::command]
 pub(crate) async fn sys_stats(state: State<'_, AppState>) -> Result<Value, String> {
@@ -53,16 +52,11 @@ pub(crate) async fn sys_stats(state: State<'_, AppState>) -> Result<Value, Strin
     }))
 }
 
-
 /// Les N dernières lignes du log client.
 #[tauri::command]
 pub(crate) fn log_tail(n: Option<usize>) -> String {
     client_core::log_tail(n.unwrap_or(200))
 }
-
-/// Écrit une tranche de téléchargement (base64) dans `path` — flux du
-/// fichier workspace démon → fichier local choisi par l'utilisateur.
-/// Retourne le nombre d'octets écrits.
 
 /// Icône fenêtre dynamique selon l'état agrégé des agents :
 /// "base" (sauge), "gold" (agent actif), "violet" (compaction),

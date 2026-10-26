@@ -93,6 +93,7 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
     Ok(status)
 }
 
+/// Déconnecte proprement une connexion (tue le tunnel/process ssh).
 #[tauri::command]
 pub(crate) async fn disconnect(state: State<'_, AppState>, conn: String) -> Result<(), String> {
     state.conns.lock().await.remove(&conn);
@@ -101,7 +102,6 @@ pub(crate) async fn disconnect(state: State<'_, AppState>, conn: String) -> Resu
     }
     Ok(())
 }
-
 
 /// Subscribe sur la connexion principale et re-émet les push
 /// comme events Tauri `session-event` ({session, event}).
@@ -138,9 +138,6 @@ pub(crate) async fn subscribe(
     map.insert(format!("{}:{}", conn.unwrap_or_default(), session), task);
     Ok(())
 }
-
-#[cfg(not(target_os = "android"))]
-
 
 /// Vérifie/installe/maj le démon sur le serveur distant via SSH + curl.
 /// Pas de `gh` : télécharge la release GitHub par URL directe (repo public)

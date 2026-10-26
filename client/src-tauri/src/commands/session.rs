@@ -85,7 +85,6 @@ pub(crate) async fn call(state: State<'_, AppState>, method: String, params: Val
     c.call(req).await.map_err(|e| format!("{e:#}"))
 }
 
-
 fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
     let s = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     let so = |k: &str| p.get(k).and_then(Value::as_str).map(String::from);

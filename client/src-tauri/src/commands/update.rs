@@ -2,7 +2,10 @@
 //! installation en un clic (.deb/pkexec, NSIS/.bat). Non supporté
 //! sur Android (APK par release).
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+#[cfg(not(target_os = "android"))]
+use anyhow::Context;
+#[cfg(not(target_os = "android"))]
 use std::path::PathBuf;
 
 #[cfg(not(target_os = "android"))]
