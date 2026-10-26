@@ -17,3 +17,6 @@ client/src-tauri/gen/
 client/shots/
 __pycache__/
 *.pyc
+
+# Sortie locale de graphify (analyse code — régénérable)
+graphify-out/

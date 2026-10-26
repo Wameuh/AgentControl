@@ -1,0 +1,74 @@
+/* Menus contextuels (fichiers : copier/supprimer — sessions : rename/fork/exit) */
+#fctx, #sctx {
+  position: fixed; z-index: 80; min-width: 170px;
+  background: var(--panel-solid); border: 1px solid var(--line-strong);
+  border-radius: 8px; padding: 4px; display: flex; flex-direction: column;
+  box-shadow: 0 8px 26px rgba(0, 0, 0, .45);
+}
+#fctx button, #sctx button {
+  background: none; border: none; color: var(--ink); text-align: left;
+  padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 12px;
+}
+#fctx button:hover, #sctx button:hover { background: rgba(236, 230, 216, .08); }
+#fctx button:disabled, #sctx button:disabled { opacity: .4; cursor: default; }
+#fctx button:disabled:hover, #sctx button:disabled:hover { background: none; }
+#fctx button.danger, #sctx button.danger { color: var(--red); }
+#fctx .fctx-path, #sctx .fctx-path {
+  padding: 4px 10px 6px; color: var(--dim); font-size: 10.5px;
+  font-family: Mono, ui-monospace, monospace; border-bottom: 1px solid var(--line);
+  margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* About */
+#about-body { display: flex; gap: 14px; align-items: center; margin: 8px 0 4px; }
+#about-gem { width: 44px; height: 40px; display: inline-flex; flex: none; }
+#about-gem svg { width: 100%; height: 100%; }
+#about-version { color: var(--dim); font-family: Mono, ui-monospace, monospace; font-size: 12px; }
+#about-gh { color: var(--violet); }
+:root.light #about-gh { color: var(--violet); }
+
+/* Dialogs */
+dialog {
+  background: var(--panel-solid); color: var(--ink);
+  border: 1px solid var(--line-strong); border-radius: 16px;
+  padding: 18px; min-width: 400px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, .6);
+}
+dialog::backdrop { background: rgba(9, 12, 11, .7); backdrop-filter: blur(3px); }
+dialog h3 { margin: 0 0 8px; font-weight: 500; }
+dialog form { display: flex; flex-direction: column; gap: 10px; }
+dialog label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; color: var(--muted); }
+dialog input, dialog select, dialog textarea {
+  background: rgba(236, 230, 216, .07); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; font: inherit;
+}
+dialog input:focus, dialog select:focus, dialog textarea:focus { border-color: var(--sand); outline: none; }
+dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 0; padding: 0; }
+#c-saved-row { display: flex; gap: 6px; }
+#c-saved-row select { flex: 1; min-width: 0; }
+
+#native-list { display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow-y: auto; }
+#log-view {
+  max-height: 320px; overflow-y: auto; background: rgba(0, 0, 0, .35);
+  border: 1px solid var(--line); border-radius: 10px; padding: 9px;
+  font: 11px/1.5 Mono, ui-monospace, monospace; white-space: pre-wrap;
+  word-break: break-all; user-select: text; color: var(--muted);
+}
+
+/* Spinner */
+.spin::after {
+  content: ""; display: inline-block; width: 11px; height: 11px; margin-left: 7px;
+  border: 2px solid var(--dim); border-top-color: var(--sand); border-radius: 50%;
+  animation: rot .7s linear infinite; vertical-align: -2px;
+}
+@keyframes rot { to { transform: rotate(360deg); } }
+
+
+/* Dialogue install/update démon */
+.daemon-dlg { display:flex; gap:12px; align-items:center; padding:6px 0; }
+.spin-ico { display:inline-block; animation: spin 1s linear infinite; font-size:22px; color:var(--sand); }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+
+#g-name { width:100%; box-sizing:border-box; background:rgba(236,230,216,.05); color:var(--ink);
+  border:1px solid var(--line); border-radius:8px; padding:8px 10px; font:inherit; margin:8px 0 }
