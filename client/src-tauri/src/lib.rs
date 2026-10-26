@@ -783,8 +783,9 @@ async fn ensure_daemon(
 }
 
 /// Icône fenêtre dynamique selon l'état agrégé des agents :
-/// "base" (sauge), "gold" (agent actif), "red" (question en attente),
-/// "grey" (aucun agent). No-op sur Android (icône launcher fixe).
+/// "base" (sauge), "gold" (agent actif), "violet" (compaction),
+/// "red" (question en attente), "grey" (aucun agent).
+/// No-op sur Android (icône launcher fixe).
 #[tauri::command]
 #[allow(unused_variables)]
 fn set_app_icon(window: tauri::WebviewWindow, state: &str) -> Result<(), String> {
@@ -792,6 +793,7 @@ fn set_app_icon(window: tauri::WebviewWindow, state: &str) -> Result<(), String>
     {
         let bytes: &[u8] = match state {
             "gold" => include_bytes!("../icons/icon-gold.rgba"),
+            "violet" => include_bytes!("../icons/icon-violet.rgba"),
             "red" => include_bytes!("../icons/icon-red.rgba"),
             "grey" => include_bytes!("../icons/icon-grey.rgba"),
             _ => include_bytes!("../icons/icon.rgba"),
