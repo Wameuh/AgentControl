@@ -737,7 +737,7 @@ async fn ensure_daemon(
          install -Dm755 acctl $HOME/.local/bin/acctl; \
          install -Dm644 packaging/agentcontrol-daemon.service $HOME/.config/systemd/user/agentcontrol-daemon.service; \
          systemctl --user daemon-reload; \
-         systemctl --user enable --now agentcontrol-daemon; \
+         systemctl --user enable --now agentcontrol-daemon; rm -rf \"$d\"; \
          sleep 1; echo installed:$($HOME/.local/bin/acctl status 2>/dev/null | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4)",
         base = BASE,
         t = tag

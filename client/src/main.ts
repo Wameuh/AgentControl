@@ -2846,10 +2846,14 @@ $("chat-title").addEventListener("dblclick", () => {
 // connexion par défaut).
 let pendingGroup: { conn?: string; name: string } | null = null;
 
+type AgentOpt = { id: string; name: string; available?: boolean };
+
 /** Agents disponibles sur une connexion (`conn` vide = défaut côté Rust). */
-async function fillAgents(conn: string, keep?: string) {
-  const agents = await call<{ id: string; name: string; available?: boolean }[]>(
-    "list_agents", conn ? { conn } : {});
+async function listAgents(conn: string) {
+  return call<AgentOpt[]>("list_agents", conn ? { conn } : {});
+}
+
+function renderAgents(agents: AgentOpt[], keep?: string) {
   const sel = $("f-agent") as HTMLSelectElement;
   sel.innerHTML = "";
   for (const a of agents) {
@@ -2862,9 +2866,24 @@ async function fillAgents(conn: string, keep?: string) {
   if (keep && [...sel.options].some((o) => o.value === keep)) sel.value = keep;
 }
 
-// Changement de serveur cible → recharger la liste des agents de ce serveur.
-$("f-conn").addEventListener("change", () => {
-  void fillAgents(($("f-conn") as HTMLSelectElement).value);
+async function fillAgents(conn: string, keep?: string) {
+  renderAgents(await listAgents(conn), keep);
+}
+
+// Changement de serveur cible → recharger les agents de ce serveur. Token de
+// séquence : un changement plus récent invalide la réponse encore en vol.
+let agentsReq = 0;
+$("f-conn").addEventListener("change", async () => {
+  const req = ++agentsReq;
+  const conn = ($("f-conn") as HTMLSelectElement).value;
+  try {
+    const agents = await listAgents(conn);
+    if (req === agentsReq) renderAgents(agents);
+  } catch (e) {
+    if (req !== agentsReq) return;
+    ($("f-agent") as HTMLSelectElement).innerHTML = "";
+    showErr(String(e));
+  }
 });
 
 /** Dialogue "nouvelle session". `conn` route list_agents/new_session vers le
@@ -2883,7 +2902,7 @@ async function openNewSessionDlg(conn?: string, ref?: SessionMeta) {
     cs.appendChild(o);
   }
   const want = conn ?? current?.conn ?? conns[0] ?? "";
-  cs.value = conns.includes(want) ? want : "";
+  cs.value = conns.includes(want) ? want : (conns[0] ?? "");
   cs.disabled = conn !== undefined;
   ($("f-conn-wrap") as HTMLElement).hidden = conns.length < 2;
   const effConn = cs.disabled ? (conn ?? "") : cs.value;
