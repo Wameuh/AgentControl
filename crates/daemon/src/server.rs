@@ -608,11 +608,11 @@ impl Daemon {
                 if !s.is_alive() {
                     anyhow::bail!("agent not running — resume_session d'abord");
                 }
-                // Le tour peut durer longtemps : on spawne, le client suit via events.
-                tokio::spawn(async move {
-                    let _ = s.send_prompt(&text, force, steer).await;
-                });
-                Ok(json!({"queued": true}))
+                // send_prompt ne fait qu'enfiler (livraison en tâche de
+                // fond) : l'attendre garantit une file à jour quand le
+                // client la relit après la réponse.
+                s.send_prompt(&text, force, steer).await?;
+                Ok(json!({"queued": true, "queue": s.queue_snapshot()}))
             }
             ReqKind::PeerSend {
                 from,

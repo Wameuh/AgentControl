@@ -756,7 +756,7 @@ async function doConnect(cfg: Record<string, unknown>) {
 /** Gemme d'état : dorée working, rouge question/failed, verte idle, grise dead. */
 const DOT_ROLE: Record<string, string> = {
   working: "human", running: "human", starting: "human",
-  waiting_input: "inference", failed: "inference",
+  waiting_input: "inference", failed: "inference", compacting: "inference",
   idle: "neutral",
   interrupted: "slate", dead: "slate",
 };
@@ -770,7 +770,6 @@ function dotIcon(state: string): string {
 function markSessionGone() {
   if (!current) return;
   addSysline(t("session_gone"));
-  compactHold.delete(current.id);
   current = null;
   unseenBelow = 0;
   $("btn-bottom").hidden = true;
@@ -819,7 +818,13 @@ async function refreshSessions() {
   setAppIcon(
     live.some((s) => s.state === "waiting_input")
       ? "red"
-      : live.some((s) => s.state === "working" || s.state === "running" || s.state === "starting")
+      : live.some(
+            (s) =>
+              s.state === "working" ||
+              s.state === "running" ||
+              s.state === "starting" ||
+              s.state === "compacting",
+          )
         ? "gold"
         : live.length > 0 ? "base" : "grey",
   );
@@ -834,7 +839,11 @@ async function refreshSessions() {
   }
   // Lumières "agents" du fond : une par session active (les sessions
   // cachées d'une conn down ne comptent pas).
-  const n = list.filter((s) => !s.offline && (s.state === "working" || s.state === "waiting_input")).length;
+  const n = list.filter(
+    (s) =>
+      !s.offline &&
+      (s.state === "working" || s.state === "waiting_input" || s.state === "compacting"),
+  ).length;
   (window as { MeshBackground?: { setMood: (m: string, o: object) => void } })
     .MeshBackground?.setMood(bgMood(), { agents: Math.min(n, 4), intensity: 0.55 });
   const el = $("session-list");
@@ -1089,7 +1098,6 @@ function sessRow(s: SessionMeta, conn: string, grp: string, closed: boolean): HT
       return;
     }
     await call("delete_session", { session: s.id, conn: s.conn }).catch((er) => showErr(String(er)));
-    compactHold.delete(s.id);
     if (current?.id === s.id) {
       current = null;
       eventsEl.innerHTML = "";
@@ -1217,13 +1225,19 @@ function updateHeader() {
   const st = $("chat-state");
   st.textContent = current.state;
   st.className = `badge st-${current.state}`;
-  $("chat-gem").hidden = current.state !== "working";
+  // Le gem tourne aussi pendant "compacting" (le démon retient les
+  // envois en file jusqu'au signal de fin du compact).
+  $("chat-gem").hidden = current.state !== "working" && current.state !== "compacting";
   // Reprendre = process mort, quel que soit l'état persisté dans meta.json
   $("btn-resume").hidden = alive;
-  const busySt = current.state === "working" || current.state === "waiting_input";
+  const busySt =
+    current.state === "working" ||
+    current.state === "waiting_input" ||
+    current.state === "compacting";
   $("btn-cancel").hidden = !busySt;
-  // Steer : n'a de sens que pendant un tour (sinon = envoi normal).
-  $("btn-steer").hidden = !busySt;
+  // Steer : n'a de sens que pendant un vrai tour (sinon = envoi normal ;
+  // pendant compact un envoi est simplement retenu en file).
+  $("btn-steer").hidden = current.state !== "working";
 
   // Options de config dynamiques (ex. Devin : config_option_update → mode + model)
   const copts = current.config_options ?? [];
@@ -2245,22 +2259,6 @@ $("btn-bottom").onclick = () => {
 
 await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
   const { session, event } = msg.payload;
-  // Fin de compact (succès "context compacted", annulation, échec) →
-  // relâcher les messages retenus pour cette session. Un usage_update en
-  // dessous de la valeur au lancement du /compact vaut aussi signal.
-  if (compactHold.has(session)) {
-    const h = compactHold.get(session)!;
-    const txt = String((event.text ?? event.message) ?? "");
-    const done =
-      /compacted/i.test(txt) ||
-      (/compact/i.test(txt) &&
-        /cancel|complet|abort|finish|done|interrupt|error|fail/i.test(txt)) ||
-      (event.type === "usage_update" &&
-        h.used != null &&
-        typeof event.used === "number" &&
-        (event.used as number) < h.used);
-    if (done) flushCompact(session);
-  }
   // Suppression côté serveur : l'event terminal arrive avant la coupure.
   if (event.type === "session_deleted") {
     if (current && session === current.id) markSessionGone();
@@ -2505,15 +2503,10 @@ function qBtn(txt: string, title: string): HTMLButtonElement {
 }
 
 // ---- /compact : la compaction tourne en arrière-plan côté agent après un
-// idle immédiat — un prompt envoyé avant la fin l'annule ("compact
-// cancelled"). Les messages tapés pendant ce temps sont retenus puis
-// renvoyés au signal de fin (ou timeout de sécurité).
-const compactHold = new Map<string, {
-  conn: string;
-  msgs: string[];
-  used?: number; // context_used au lancement — signal "contexte réduit"
-  timer: ReturnType<typeof setTimeout>;
-}>();
+// idle immédiat — le démon passe la session en "compacting" et retient
+// les prompts en file (visibles dans la barre de file) jusqu'au signal
+// de fin (contexte réduit, message de fin, cancel, timeout). Un prompt
+// livré pendant le compact l'annulerait.
 
 function addSysline(text: string) {
   const d = document.createElement("div");
@@ -2521,34 +2514,6 @@ function addSysline(text: string) {
   d.textContent = `⦿ ${text}`;
   eventsEl.appendChild(d);
   scrollBottom();
-}
-
-/** Relâche les messages retenus d'une session (fin de compact ou timeout). */
-function flushCompact(sid: string, timedOut = false) {
-  const h = compactHold.get(sid);
-  if (!h) return;
-  compactHold.delete(sid);
-  clearTimeout(h.timer);
-  // Retour visible même sans message retenu — c'est la confirmation que
-  // le compact est bien terminé (ou qu'il a expiré).
-  if (current?.id === sid) {
-    addSysline(
-      t(
-        timedOut
-          ? "compact_timeout"
-          : h.msgs.length
-            ? "compact_released"
-            : "compact_done",
-      ),
-    );
-  }
-  if (!h.msgs.length) return;
-  void (async () => {
-    for (const m of h.msgs) {
-      await call("send", { session: sid, text: m, conn: h.conn }).catch((e) => showErr(String(e)));
-    }
-    refreshQueue();
-  })();
 }
 
 type SendMode = "normal" | "steer" | "force";
@@ -2582,15 +2547,6 @@ async function sendInput(mode: SendMode = "normal") {
     addSysline(t("cmd_unknown", { cmd: bm[1] }));
     return;
   }
-  // Compaction en cours : retenir le message — l'envoyer annulerait le
-  // compact (force/steer = bypass volontaire, annule le compact).
-  const held = compactHold.get(current.id);
-  if (held && mode === "normal") {
-    ($("input") as HTMLTextAreaElement).value = "";
-    held.msgs.push(txt);
-    addSysline(t("compact_hold", { n: held.msgs.length }));
-    return;
-  }
   ($("input") as HTMLTextAreaElement).value = "";
   await call("send", {
     session: current.id,
@@ -2600,22 +2556,9 @@ async function sendInput(mode: SendMode = "normal") {
   }).catch((e) => showErr(String(e)));
   // Commande slash non-builtin : l'agent l'applique au prochain tour (ex.
   // /compact → "context compacted" n'arrive qu'au message suivant) → hint.
+  // (/compact : le démon arme la retenue "compacting" à la livraison.)
   if (bm) {
-    if (bm[1] === "compact") {
-      // /compact : armer la rétention des messages jusqu'au signal de fin.
-      const sid = current.id;
-      const prev = compactHold.get(sid);
-      if (prev) clearTimeout(prev.timer);
-      compactHold.set(sid, {
-        conn: current.conn ?? "",
-        msgs: prev?.msgs ?? [],
-        used: current.context_used,
-        timer: setTimeout(() => flushCompact(sid, true), 120_000),
-      });
-      addSysline(t("compact_started"));
-    } else {
-      addSysline(t("cmd_sent_hint", { cmd: bm[1] }));
-    }
+    addSysline(t("cmd_sent_hint", { cmd: bm[1] }));
   }
   refreshQueue();
 }
