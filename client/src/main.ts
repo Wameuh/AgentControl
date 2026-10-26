@@ -1377,7 +1377,7 @@ const q = (s: string) => s.replace(/"/g, "&quot;");
 
 // Chemins de fichiers cliquables → panneau latéral (read_file côté démon)
 const FILE_RE =
-  /((?:\/[\w.\-~]+){2,}|[\w.\-]+(?:\/[\w.\-]+){2,}|[\w.\-/]+\.(?:rs|ts|tsx|js|jsx|py|toml|json|md|html?|css|ya?ml|sh|c|cpp|h|hpp|go|java|rb|txt|log|svg|cfg|ini|sql|vue|svelte|lock|service))(?::(\d+))?/g;
+  /((?:\/[\w.\-~]+){2,}|[\w.\-]+(?:\/[\w.\-]+){2,}|[\w.\-/]+\.(?:rs|ts|tsx|js|jsx|py|toml|json|md|html?|css|ya?ml|sh|c|cpp|h|hpp|go|java|rb|txt|log|svg|cfg|ini|sql|vue|svelte|lock|service|png|jpe?g|gif|webp|bmp|ico|avif))(?::(\d+))?/g;
 
 function linkify(escaped: string): string {
   // URLs d'abord → vrais liens (placeholder \x00U pour ne pas être re-matchées
@@ -1578,6 +1578,13 @@ function mdRender(src: string): string {
   }
 }
 
+/** Extensions affichées en aperçu image (data URL — pas de script dans <img>). */
+const IMG_MIME: Record<string, string> = {
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
+  webp: "image/webp", bmp: "image/bmp", ico: "image/x-icon", avif: "image/avif",
+  svg: "image/svg+xml",
+};
+
 async function openFilePanel(path: string) {
   if (!current) return;
   if ($("file-panel").hidden) { $("file-panel").hidden = false; navPush("files"); }
@@ -1594,13 +1601,38 @@ async function openFilePanel(path: string) {
   for (const n of $("file-tree").querySelectorAll<HTMLElement>(".fnode")) {
     n.classList.toggle("sel", n.dataset.rel === path);
   }
+  const ext = /\.([a-zA-Z0-9]+)$/.exec(path)?.[1]?.toLowerCase() ?? "";
   try {
+    if (IMG_MIME[ext]) {
+      const r = await call<{
+        data?: string; size?: number; truncated?: boolean;
+        content?: string; path: string;
+      }>("read_file", { session: current.id, path, binary: true });
+      $("file-path").title = r.path;
+      if (r.data != null) {
+        // Propriétés DOM — r.data (démon distant) jamais injecté en markup.
+        const img = document.createElement("img");
+        img.className = "fv-img";
+        img.src = `data:${IMG_MIME[ext]};base64,${r.data}`;
+        img.alt = path;
+        const view = $("file-view");
+        view.innerHTML = "";
+        view.appendChild(img);
+      } else if (r.content != null) {
+        // Vieux démon sans mode binaire → affichage texte historique.
+        $("file-view").innerHTML =
+          highlight(r.content, ext) + (r.truncated ? "\n… (tronqué)" : "");
+      } else {
+        $("file-view").innerHTML =
+          `<div class="fv-msg">${esc(t("img_too_big", { size: fmtSize(r.size ?? 0) }))}</div>`;
+      }
+      return;
+    }
     const r = await call<{ content: string; truncated: boolean; path: string }>("read_file", {
       session: current.id,
       path,
     });
     $("file-path").title = r.path;
-    const ext = /\.([a-zA-Z0-9]+)$/.exec(path)?.[1]?.toLowerCase() ?? "";
     $("file-view").innerHTML =
       highlight(r.content, ext) + (r.truncated ? "\n… (tronqué)" : "");
   } catch (e) {

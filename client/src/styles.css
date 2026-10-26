@@ -133,6 +133,13 @@ body {
   font: 12px/1.5 Mono, ui-monospace, monospace; white-space: pre;
   color: var(--ink); user-select: text;
 }
+/* Aperçu image dans le panneau fichier (damier pour la transparence) */
+#file-view .fv-img {
+  display: block; max-width: 100%; height: auto; margin: auto;
+  background:
+    repeating-conic-gradient(var(--line) 0% 25%, transparent 0% 50%) 0 0 / 16px 16px;
+}
+#file-view .fv-msg { color: var(--dim); white-space: pre-wrap; }
 
 /* Explorateur de fichiers du workspace (colonne gauche du panneau) */
 #file-tree {
