@@ -104,9 +104,16 @@ pub struct A2aCfg {
     pub rate_per_min: u32,
     /// Max sessions créées par minute et par session créatrice
     /// (peer_spawn) — borne une boucle de spawn qui coûterait un agent +
-    /// des tokens par itération. 0 = spawn agent→agent interdit.
+    /// des tokens par itération. 0 = illimité (comme rate_per_min).
     #[serde(default = "d10")]
     pub spawn_per_min: u32,
+    /// Max sessions agent→agent existantes au total (spawned_by non
+    /// nul, vivantes ou mortes) — borne le fan-out récursif : chaque
+    /// fille étant une créatrice, le seul rate-limit par créatrice
+    /// laisserait l'arbre croître de façon exponentielle.
+    /// 0 = spawn agent→agent interdit.
+    #[serde(default = "d20")]
+    pub spawn_max_sessions: u32,
 }
 
 fn dtrue() -> bool {
@@ -125,6 +132,7 @@ impl Default for A2aCfg {
             enabled: true,
             rate_per_min: 20,
             spawn_per_min: 10,
+            spawn_max_sessions: 20,
         }
     }
 }
@@ -288,9 +296,10 @@ impl Daemon {
 
     /// Rate-limit par session créatrice (peer_spawn) — borne une boucle de
     /// création de sessions (un process agent + des tokens par spawn).
+    /// 0 = illimité ; le cap global spawn_max_sessions borne le fan-out.
     fn spawn_rate_check(&self, from: &str) -> Result<()> {
         if self.a2a.spawn_per_min == 0 {
-            anyhow::bail!("spawn agent→agent désactivé (config [a2a] spawn_per_min)");
+            return Ok(());
         }
         let now = std::time::Instant::now();
         let mut m = self.spawn_rate.lock().unwrap();
@@ -773,6 +782,29 @@ impl Daemon {
                 let creator = self.get_session(&from).await?;
                 let cm = creator.meta_snapshot();
                 self.spawn_rate_check(&from)?;
+                // Cap global de sessions agent→agent : chaque fille est
+                // une créatrice avec son propre budget rate — sans borne
+                // absolue un arbre de délégation croît de façon
+                // exponentielle. 0 = spawn interdit.
+                if self.a2a.spawn_max_sessions == 0 {
+                    anyhow::bail!(
+                        "spawn agent→agent désactivé (config [a2a] spawn_max_sessions)"
+                    );
+                }
+                let spawned = {
+                    let sessions = self.sessions.read().await;
+                    sessions
+                        .values()
+                        .filter(|s| s.meta_snapshot().spawned_by.is_some())
+                        .count()
+                };
+                if spawned >= self.a2a.spawn_max_sessions as usize {
+                    anyhow::bail!(
+                        "cap de sessions agent→agent atteint \
+                        ({spawned} ≥ spawn_max_sessions={})",
+                        self.a2a.spawn_max_sessions
+                    );
+                }
 
                 let agent_id = agent.unwrap_or_else(|| cm.agent.clone());
                 let profile = self
@@ -881,7 +913,11 @@ impl Daemon {
                     );
                     let s2 = Arc::clone(&session2);
                     tokio::spawn(async move {
-                        let _ = s2.send_peer_prompt(&wrapped, false).await;
+                        if let Err(e) = s2.send_peer_prompt(&wrapped, false).await {
+                            s2.emit(EventKind::Error {
+                                message: format!("tâche déléguée: {e:#}"),
+                            });
+                        }
                     });
                 }
                 Ok(json!({"session": sid2, "agent": agent_id, "title": title}))

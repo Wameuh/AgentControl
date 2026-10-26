@@ -152,8 +152,10 @@ Création de session par un agent (`agentcontrol_create_session` /
 cwd, groupe ; modèle/mode seulement si même agent). La création et la
 tâche déléguée sont tracées dans les deux journaux (events `system` +
 `peer_message`), et la session fille connaît l'id de sa créatrice pour
-répondre via `agentcontrol_send_message`. Anti-boucle dédié :
-`spawn_per_min` (10/min/créatrice — `0` interdit le spawn).
+répondre via `agentcontrol_send_message`. Anti-boucle dédié : `spawn_per_min`
+(10/min/créatrice, `0` = illimité) et `spawn_max_sessions`
+(20 sessions agent→agent au total, `0` interdit le spawn) — le cap
+global borne le fan-out récursif, chaque fille étant une créatrice.
 
 Fallback sans MCP : `AGENTCONTROL_SOCK`/`AGENTCONTROL_SESSION` sont dans
 l'env de l'agent → `acctl msg <from> <to> [--steer] <texte>` et

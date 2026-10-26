@@ -135,6 +135,10 @@ fn tools_list() -> Value {
                         "type": "string",
                         "description": "mode — défaut : le tien si même agent",
                     },
+                    "group": {
+                        "type": "string",
+                        "description": "groupe sidebar — défaut : le tien",
+                    },
                 },
                 "required": ["task"],
             },
@@ -207,6 +211,9 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
             let from = self_session()
                 .ok_or("AGENTCONTROL_SESSION absent — session émettrice inconnue")?;
             let task = args["task"].as_str().ok_or("argument 'task' manquant")?;
+            if task.trim().is_empty() {
+                return Err("argument 'task' vide".into());
+            }
             let opt = |k: &str| args[k].as_str().map(String::from);
             let v = daemon_call(proto::ReqKind::PeerSpawn {
                 from,

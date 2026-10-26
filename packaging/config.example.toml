@@ -30,8 +30,12 @@ enabled = true
 # Max messages par minute et par paire émetteur→cible (anti-boucle, 0 = illimité)
 rate_per_min = 20
 # Max sessions créées par minute et par session créatrice
-# (agentcontrol_create_session — 0 = spawn agent→agent interdit)
+# (agentcontrol_create_session — 0 = illimité, comme rate_per_min)
 spawn_per_min = 10
+# Max sessions agent→agent existantes au total (vivantes ou mortes) —
+# borne le fan-out récursif (chaque fille est une créatrice).
+# 0 = spawn agent→agent interdit.
+spawn_max_sessions = 20
 
 # ---------------------------------------------------------------------------
 # Agents ACP. Les placeholders {model} et {mode} sont substitués à la création
