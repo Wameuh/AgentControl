@@ -674,6 +674,7 @@ async fn ensure_daemon(
         .args(&args.unwrap_or_default())
         .arg(&host)
         .arg(&script);
+    client_core::hide_console(&mut cmd);
     let out = tokio::time::timeout(std::time::Duration::from_secs(120), cmd.output())
         .await
         .map_err(|_| "ssh ensure_daemon timeout".to_string())?
