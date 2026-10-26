@@ -1,0 +1,212 @@
+/* ── Android / tactile ─────────────────────────────────────────────────── */
+#scrim {
+  position: fixed; inset: 0; z-index: 39;
+  background: rgba(0, 0, 0, .45);
+}
+/* Wrapper des selects du header : invisible sur desktop (display:contents),
+   devient une rangée scrollable sur Android. */
+#chat-opts { display: contents; }
+/* Viewer de fichier : transparent sur desktop, overlay plein écran Android. */
+#file-viewer { display: contents; }
+#fv-bar { display: none; }
+#tb-more, #chat-more { display: none; }
+/* Menu ⋮ en bottom-sheet (peuplé par openSheetMenu, Android uniquement). */
+#omenu { display: none; }
+/* WebView Android : backdrop-filter rend flou/lent → surfaces solides. */
+body.android * {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+body.android {
+  font-size: 15px;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+}
+body.android #titlebar,
+body.android #sidebar,
+body.android #file-panel,
+body.android #chat-header,
+body.android #composer,
+body.android #queue-bar,
+body.android #err-bar {
+  background: var(--panel-solid);
+}
+body.android #titlebar {
+  height: 56px;
+  padding: env(safe-area-inset-top) 8px 0 8px;
+}
+body.android #titlebar-gem { width: 24px; height: 24px; }
+body.android #titlebar-title { font-size: 15px; }
+body.android .tb-btns button {
+  font-size: 17px; padding: 10px 13px; min-width: 44px; min-height: 44px;
+}
+body.android #tb-min, body.android #tb-max, body.android #tb-close,
+body.android .resize-edge, body.android #sidebar-resize {
+  display: none !important;
+}
+#tb-menu {
+  border: 0; background: transparent; color: var(--muted);
+  font-size: 18px; padding: 4px 10px; flex: none;
+}
+body.android #tb-menu { font-size: 24px; min-width: 44px; min-height: 44px; }
+/* Barre d'app mobile : un seul ⋮ au lieu des boutons fenêtre/settings. */
+body.android #tb-settings, body.android #tb-about { display: none; }
+body.android #tb-more { display: inline-block; font-size: 22px; min-width: 44px; min-height: 44px; padding: 10px 13px; }
+body.android #sidebar {
+  position: fixed; z-index: 40; top: 0; bottom: 0; left: 0;
+  width: min(84vw, 340px); min-width: 0;
+  padding-top: max(10px, env(safe-area-inset-top));
+  transform: translateX(-105%); transition: transform .2s ease;
+}
+body.android #sidebar.open { transform: translateX(0); }
+body.android #conn-bar button {
+  min-height: 44px; font-size: 15px; padding: 8px 14px;
+}
+body.android #session-list .sess {
+  padding: 13px 10px; font-size: 15px;
+}
+body.android #session-list .sess .sess-del {
+  min-width: 40px; min-height: 40px; font-size: 15px;
+}
+body.android #btn-new-session { min-height: 46px; font-size: 15px; }
+
+/* Dialogues → bottom sheets : ancrées bas, coins arrondis haut, poignée. */
+body.android dialog {
+  width: 100vw; max-width: 100vw; min-width: 0; max-height: 84dvh;
+  margin: auto 0 0; overflow-y: auto;
+  padding: 8px 18px calc(16px + env(safe-area-inset-bottom));
+  border: 1px solid var(--line); border-bottom: 0;
+  border-radius: 18px 18px 0 0;
+}
+body.android dialog::before {
+  content: ""; display: block; width: 42px; height: 4px; flex: none;
+  border-radius: 2px; background: var(--line); margin: 2px auto 10px;
+}
+body.android dialog[open] { animation: sheet-up .22s ease-out; }
+@keyframes sheet-up {
+  from { transform: translateY(14%); opacity: .5; }
+  to { transform: none; opacity: 1; }
+}
+body.android dialog::backdrop { background: rgba(0, 0, 0, .6); }
+body.android dialog h3 { font-size: 18px; }
+body.android dialog form { gap: 13px; }
+body.android dialog label { font-size: 15px; }
+body.android dialog input, body.android dialog select,
+body.android dialog textarea {
+  font-size: 16px; min-height: 46px; padding: 10px 12px;
+}
+body.android dialog input[type="checkbox"] {
+  min-height: 0; width: 24px; height: 24px; accent-color: #7ecba1;
+}
+body.android dialog textarea { min-height: 90px; }
+body.android dialog button {
+  min-height: 46px; font-size: 15.5px; padding: 10px 16px;
+}
+body.android dialog menu {
+  position: sticky; bottom: calc(-16px - env(safe-area-inset-bottom));
+  margin: 8px -18px calc(-16px - env(safe-area-inset-bottom));
+  padding: 12px 18px calc(12px + env(safe-area-inset-bottom));
+  background: var(--panel-solid);
+  border-top: 1px solid var(--line);
+}
+/* Menu ⋮ → action sheet ancré bas. */
+body.android #omenu:not([hidden]) {
+  display: flex; flex-direction: column;
+  position: fixed; left: 0; right: 0; bottom: 0; top: auto; z-index: 60;
+  background: var(--panel-solid);
+  border-top: 1px solid var(--line); border-radius: 18px 18px 0 0;
+  padding: 8px 10px calc(12px + env(safe-area-inset-bottom));
+  box-shadow: 0 -10px 34px rgba(0, 0, 0, .45);
+  animation: sheet-up .2s ease-out;
+}
+body.android #omenu .om-item {
+  display: flex; align-items: center; width: 100%;
+  padding: 15px 16px; font-size: 16.5px; text-align: left;
+  background: none; border: 0; color: var(--fg); border-radius: 10px;
+}
+body.android #omenu .om-item:active { background: rgba(236, 230, 216, .07); }
+body.android #omenu .om-item.danger { color: var(--red); }
+/* Explorateur = page plein écran ; le viewer glisse par-dessus la liste. */
+body.android #file-panel {
+  position: fixed; inset: 0; z-index: 45; width: auto; max-width: none;
+  border-left: 0;
+}
+body.android #file-resize { display: none; }
+body.android #file-head { min-height: 52px; gap: 6px; }
+body.android #file-head button { min-width: 44px; min-height: 44px; font-size: 17px; }
+body.android #file-tree:not([hidden]) { flex: 1; width: auto; }
+body.android .fnode { padding: 9px 8px 9px 0; font-size: 15px; min-height: 44px; }
+body.android #file-viewer {
+  display: flex; flex-direction: column;
+  position: fixed; inset: 0; z-index: 50;
+  background: var(--panel-solid);
+  transform: translateX(102%); visibility: hidden;
+  transition: transform .2s ease, visibility 0s .2s;
+}
+body.android #file-viewer.open {
+  transform: none; visibility: visible; transition: transform .2s ease;
+}
+body.android #fv-bar {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  min-height: 52px; padding: 0 10px;
+  border-bottom: 1px solid var(--line);
+}
+body.android #fv-back {
+  font-size: 26px; line-height: 1; min-width: 44px; min-height: 44px;
+  padding: 6px 10px; background: none; border: 0; color: var(--fg);
+}
+body.android #fv-name {
+  font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+body.android #file-view { flex: 1; overflow: auto; font-size: 13px; margin: 0; padding: 12px; }
+/* Menus contextuels (fichiers, sessions) → action sheet ancré bas. */
+body.android #fctx, body.android #sctx {
+  position: fixed; left: 0 !important; right: 0; bottom: 0; top: auto !important;
+  z-index: 70; border-radius: 18px 18px 0 0; width: auto;
+  padding: 8px 10px calc(12px + env(safe-area-inset-bottom));
+  border: 1px solid var(--line); border-bottom: 0;
+  animation: sheet-up .2s ease-out;
+}
+body.android #fctx button, body.android #sctx button { padding: 14px 16px; font-size: 16px; text-align: left; width: 100%; }
+body.android #fctx .fctx-path, body.android #sctx .fctx-path { padding: 10px 16px 6px; }
+/* Header chat : 1re ligne = titre/état/actions, 2e = options scrollables. */
+body.android #chat-header {
+  flex-wrap: wrap; row-gap: 6px; min-height: 48px; padding: 6px 8px;
+}
+body.android #chat-header button, body.android #chat-header select {
+  min-height: 42px; font-size: 14px; padding: 6px 12px;
+}
+body.android #chat-header #btn-files,
+body.android #chat-header #btn-refresh,
+body.android #chat-header #btn-resume { display: none !important; }
+body.android #chat-more { display: inline-block; font-size: 20px; min-width: 42px; }
+body.android #chat-opts {
+  display: flex; gap: 8px; flex: none; width: 100%; order: 20;
+  overflow-x: auto; scrollbar-width: none; padding-bottom: 2px;
+}
+body.android #chat-opts::-webkit-scrollbar { display: none; }
+body.android #chat-opts > * { flex: none; }
+body.android #chat-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+body.android #composer {
+  padding: 8px 8px max(10px, env(safe-area-inset-bottom));
+}
+body.android #composer button { min-height: 46px; font-size: 15px; padding: 8px 16px; }
+body.android #input { font-size: 16px; min-height: 46px; }
+body.android #statusbar { display: none; }
+body.android #btn-bottom {
+  bottom: 80px; right: 14px; width: 46px; height: 46px; font-size: 18px;
+}
+body.android #events { padding: 8px 10px; }
+body.android .msg { font-size: 15px; }
+
+/* Champs SSH natifs dans le dialogue de connexion */
+#c-pubkey {
+  margin: 0; padding: 8px; font-size: 11px; white-space: pre-wrap;
+  word-break: break-all; user-select: all; max-height: 90px; overflow: auto;
+  background: rgba(236, 230, 216, .05); border-radius: 6px; color: var(--sand);
+}
+#c-pubkey-box { display: flex; flex-direction: column; gap: 6px;
+  font-size: 13px; color: var(--muted); }
+body.android #c-pubkey { font-size: 13px; max-height: 130px; }
+body.android #c-pubkey-box { font-size: 15px; }

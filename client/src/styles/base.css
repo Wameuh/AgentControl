@@ -1,0 +1,83 @@
+/* AgentControl — thème reprenant l'univers du CV : minéral sombre,
+   facettes low-poly, lumières sable & sauge, violet améthyste pour l'agent. */
+@font-face {
+  font-family: "Instrument";
+  src: url("/fonts/InstrumentSans-Regular.ttf") format("truetype");
+  font-weight: 400;
+}
+@font-face {
+  font-family: "Instrument";
+  src: url("/fonts/InstrumentSans-Medium.ttf") format("truetype");
+  font-weight: 500;
+}
+@font-face {
+  font-family: "Mono";
+  src: url("/fonts/JetBrainsMono-Regular.ttf") format("truetype");
+}
+
+:root {
+  color-scheme: dark;
+  --bg: #121614;
+  --ink: #ece6d8;
+  --muted: #b9beb3;
+  --dim: #8f9689;
+  --sand: #cdb68c;
+  --sage: #b8cfae;
+  --gold: #e0c996;
+  --violet: #c4a9dc;
+  --red: #e89486;
+  --line: rgba(236, 230, 216, .15);
+  --line-strong: rgba(236, 230, 216, .3);
+  --glass: rgba(15, 20, 17, .72);
+  --panel: rgba(13, 19, 15, .82);
+  --panel-solid: #161c18;
+  --accent: var(--sand);
+  --ok: var(--sage);
+  --warn: var(--gold);
+  --err: var(--red);
+  --border: var(--line);
+  --msg-user-bg: var(--sand);
+  --msg-user-fg: #1a1d16;
+  --msg-user-link: #5b3f7d;
+  --radius: 14px;
+}
+
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; margin: 0; }
+body {
+  color: var(--ink);
+  font: 14px/1.55 Instrument, system-ui, sans-serif;
+  overflow: hidden;
+}
+#mesh-bg { position: fixed; inset: 0; z-index: 0; }
+
+/* Thème clair : même univers minéral, fond papier */
+:root.light {
+  color-scheme: light;
+  --bg: #e9e5d8;
+  --ink: #2b2a24;
+  --muted: #5c5a4e;
+  --dim: #7a7768;
+  --sand: #8a6f3e;
+  --sage: #4f6b42;
+  --gold: #93712f;
+  --violet: #6b4d8c;
+  --red: #b04a3e;
+  --line: rgba(43, 42, 36, .16);
+  --line-strong: rgba(43, 42, 36, .32);
+  --glass: rgba(233, 229, 216, .72);
+  --panel: rgba(240, 237, 228, .85);
+  --panel-solid: #efece2;
+  --msg-user-bg: var(--sand);
+  --msg-user-fg: #f5f1e4;
+  --msg-user-link: #dccdf0;
+}
+:root.light ::-webkit-scrollbar-thumb { background: rgba(43, 42, 36, .2); }
+:root.light .msg.agent { background: rgba(107, 77, 140, .08); border-color: rgba(107, 77, 140, .3); }
+:root.light button { background: rgba(43, 42, 36, .05); }
+
+
+::selection { background: var(--sand); color: var(--bg); }
+::-webkit-scrollbar { width: 9px; }
+::-webkit-scrollbar-thumb { background: rgba(236, 230, 216, .16); border-radius: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
