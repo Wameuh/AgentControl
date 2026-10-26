@@ -1383,7 +1383,7 @@ function linkify(escaped: string): string {
   // URLs d'abord → vrais liens (placeholder \x00U pour ne pas être re-matchées
   // par FILE_RE ni corrompues par le markup)
   const urls: string[] = [];
-  let work = escaped.replace(/https?:\/\/[^\s< ]+/g, (m) => {
+  let work = escaped.replace(/https?:\/\/[^\s<\x00]+/g, (m) => {
     const clean = m.replace(/(?:&(?:quot|#39|lt|gt);|[.,;:!?)\]])+$/, "");
     const inner =
       inlineImages() && IMG_URL_RE.test(clean)
