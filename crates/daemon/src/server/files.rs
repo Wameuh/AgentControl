@@ -104,6 +104,9 @@ impl Daemon {
     }
 }
 
+/// Résout `path` (relatif au cwd de la session) en chemin canonique et
+/// garantit qu'il reste dans le workspace — anti `..`, chemins absolus et
+/// liens symboliques sortants.
 fn resolve_in_cwd(s: &Session, path: &str) -> Result<PathBuf> {
     let cwd = std::fs::canonicalize(&s.meta_snapshot().cwd)
         .with_context(|| format!("cwd: {}", s.meta_snapshot().cwd))?;

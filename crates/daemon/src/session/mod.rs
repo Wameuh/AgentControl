@@ -90,6 +90,7 @@ enum PromptSrc {
 }
 
 impl Session {
+    /// Ouvre une session existante sur disque (sans spawn d'agent).
     pub fn open(dir: PathBuf) -> Result<Arc<Self>> {
         let meta: SessionMeta = serde_json::from_str(
             &std::fs::read_to_string(dir.join("meta.json")).context("meta.json illisible")?,

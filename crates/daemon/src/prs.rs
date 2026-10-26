@@ -6,7 +6,7 @@
 //!  - la détection automatique : un watcher par session scanne les
 //!    extraits des tool calls à la recherche d'URLs
 //!    `github.com/<owner>/<repo>/pull/<N>` (sortie typique de
-//!    `gh pr create`) — voir `watch_prs` dans server.rs ;
+//!    `gh pr create`) — voir `watch_prs` dans server/prs.rs ;
 //!  - les upserts manuels (`acctl pr add` → ReqKind::PrTrack), qui
 //!    priment toujours sur `via: "detected"`.
 

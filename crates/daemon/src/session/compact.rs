@@ -19,6 +19,9 @@ pub(super) fn is_compact_cmd(text: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
 }
 
+/// Heuristique de fin de compact sur un message agent : un mot en
+/// "compact…" + un terme de clôture, en bornes de mot (évite de matcher
+/// "uncompacted" ou un "done" noyé dans une sous-chaîne).
 pub(super) fn compact_done_text(text: &str) -> bool {
     let l = text.to_lowercase();
     let mut compact = false;
