@@ -59,7 +59,9 @@ pub fn init(root: &Path) -> Option<tracing_appender::non_blocking::WorkerGuard> 
 fn install_panic_hook() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let bt = std::backtrace::Backtrace::capture();
+        // force_capture : capture() honore RUST_BACKTRACE (absente sous
+        // supervisord) → backtrace vide justement au moment du crash.
+        let bt = std::backtrace::Backtrace::force_capture();
         tracing::error!("panic: {info}\n{bt}");
         prev(info);
     }));

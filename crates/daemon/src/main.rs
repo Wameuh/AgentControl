@@ -123,8 +123,9 @@ async fn main() {
         return;
     }
     if let Err(e) = run().await {
-        // Fichier si logging déjà initialisé, stderr toujours.
-        tracing::error!("arrêt sur erreur fatale: {e:#}");
+        // Stderr toujours ; le fichier a déjà sa copie via le error! de
+        // run() (émis pendant que le guard du writer est vivant) quand
+        // l'échec arrive après l'init du logging.
         eprintln!("agentcontrol-daemon: {e:#}");
         std::process::exit(1);
     }
@@ -138,7 +139,8 @@ async fn run() -> Result<()> {
     // Chemin absolu : injecté dans l'env des agents (AGENTCONTROL_SOCK).
     let root = std::fs::canonicalize(&root).unwrap_or(root);
     std::fs::create_dir_all(root.join("sessions"))?;
-    // Guard vivant jusqu'à la fin de run() : flush les derniers logs fichier.
+    // Guard vivant jusqu'au retour de run() : flush les derniers logs
+    // fichier — y compris l'erreur fatale, émise AVANT son drop.
     let _guard = logging::init(&root);
     tracing::info!(
         "=== agentcontrol-daemon v{} démarré (pid {}) — logs: {} ===",
@@ -146,7 +148,14 @@ async fn run() -> Result<()> {
         std::process::id(),
         root.join("logs").display()
     );
+    let res = serve(&root).await;
+    if let Err(e) = &res {
+        tracing::error!("arrêt sur erreur fatale: {e:#}");
+    }
+    res
+}
 
+async fn serve(root: &std::path::Path) -> Result<()> {
     // Config optionnelle
     let cfg_path = root.join("config.toml");
     let cfg: Config = if cfg_path.exists() {
@@ -173,7 +182,7 @@ async fn run() -> Result<()> {
     }
 
     let daemon =
-        Daemon::open(root.clone(), agents, cfg.retention.clone(), cfg.a2a.clone()).await?;
+        Daemon::open(root.to_path_buf(), agents, cfg.retention.clone(), cfg.a2a.clone()).await?;
     tracing::info!(
         "{} session(s) chargée(s), root={}, agents: {}",
         daemon.sessions.read().await.len(),
