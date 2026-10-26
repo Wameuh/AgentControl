@@ -2385,13 +2385,15 @@ async function runBuiltin(name: string, arg: string): Promise<boolean> {
       await call("cancel", { session: current.id });
       return true;
     case "clear":
-    case "new":
+    case "new": {
       // Sémantique /clear des CLI (Devin : alias /new) : journal vidé +
       // contexte agent reparti à zéro (session/new côté démon). La vue est
       // rechargée — le journal ne contient plus que le nouveau cycle.
-      await call("clear_session", { session: current.id });
-      await openSession(current.id);
+      const id = current.id; // current peut changer pendant l'await
+      await call("clear_session", { session: id });
+      await openSession(id);
       return true;
+    }
     case "fork": {
       // Le daemon libère la session native, /fork via le TUI de l'agent,
       // puis attache la session forkée (même groupe, titre + "_fork").

@@ -626,8 +626,15 @@ impl Daemon {
                     &session,
                 );
                 // resume_native_id=None → session/new : contexte agent vide.
-                s.spawn_agent(&cmd, &envs, None, true, self.mcp_servers(&session))
-                    .await?;
+                if let Err(e) = s
+                    .spawn_agent(&cmd, &envs, None, true, self.mcp_servers(&session))
+                    .await
+                {
+                    // État cohérent avec la réalité : l'agent n'a pas
+                    // redémarré (meta garderait working/waiting_input).
+                    s.mark_dead();
+                    return Err(e.context("respawn après clear"));
+                }
                 Ok(json!({"session": session}))
             }
             ReqKind::Send {

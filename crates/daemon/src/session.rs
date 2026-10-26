@@ -387,7 +387,7 @@ impl Session {
                 let mut lines = BufReader::new(stdout).lines();
                 loop {
                     match lines.next_line().await {
-                        Ok(Some(line)) => session.handle_agent_line(&line).await,
+                        Ok(Some(line)) => session.handle_agent_line(&line, gen).await,
                         _ => break,
                     }
                 }
@@ -573,7 +573,13 @@ impl Session {
     // Dispatch des lignes sortantes de l'agent
     // -----------------------------------------------------------------------
 
-    async fn handle_agent_line(self: &Arc<Self>, line: &str) {
+    async fn handle_agent_line(self: &Arc<Self>, line: &str, gen: u64) {
+        // Ligne d'un process remplacé (clear/rebind) : ses updates et
+        // requêtes n'ont plus de sens — et ses réponses n'ont plus
+        // d'attendant (acp_pending soldé au kill).
+        if self.spawn_gen.load(Ordering::SeqCst) != gen {
+            return;
+        }
         let v: Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => return,
@@ -839,15 +845,25 @@ impl Session {
             let text = text.to_string();
             tokio::spawn(async move {
                 let Some(s) = me.upgrade() else { return };
+                // Si un clear remplace l'agent pendant le steer, ni la
+                // notice ni le ré-enfilement (contexte disparu).
+                let gen = s.spawn_gen.load(Ordering::SeqCst);
                 if is_compact_cmd(&text) {
                     s.arm_compact();
                 }
                 match s.prompt_rpc(&text).await {
-                    Ok(_) => s.emit(EventKind::UserMessage {
-                        text: text.clone(),
-                        steer: true,
-                    }),
+                    Ok(_) => {
+                        if s.spawn_gen.load(Ordering::SeqCst) == gen {
+                            s.emit(EventKind::UserMessage {
+                                text: text.clone(),
+                                steer: true,
+                            });
+                        }
+                    }
                     Err(e) => {
+                        if s.spawn_gen.load(Ordering::SeqCst) != gen {
+                            return;
+                        }
                         s.emit(EventKind::System {
                             text: format!("steer refusé ({e}) — message en file"),
                         });
@@ -909,7 +925,13 @@ impl Session {
             self.emit(EventKind::System {
                 text: "steer → envoyé au tour en cours".into(),
             });
+            let gen = self.spawn_gen.load(Ordering::SeqCst);
             if let Err(e) = self.prompt_rpc(wrapped).await {
+                // Clear pendant le RPC : pas de ré-enfilement d'un message
+                // d'un contexte disparu.
+                if self.spawn_gen.load(Ordering::SeqCst) != gen {
+                    return Ok(());
+                }
                 self.emit(EventKind::System {
                     text: format!("steer refusé ({e}) — message en file"),
                 });
@@ -959,7 +981,13 @@ impl Session {
     /// après édits) ; les prompts peers passent en silence (PeerMessage
     /// déjà journalisé).
     async fn drain_queue(&self) {
+        // Un runner démarré avant un clear ne doit ni livrer ni journaliser
+        // les prompts de l'ancien contexte — la génération le fige.
+        let gen = self.spawn_gen.load(Ordering::SeqCst);
         loop {
+            if self.spawn_gen.load(Ordering::SeqCst) != gen {
+                return;
+            }
             if self.compacting.lock().unwrap().is_some() {
                 return;
             }
@@ -1005,21 +1033,29 @@ impl Session {
             .meta_snapshot()
             .native_session_id
             .context("no native session id")?;
+        // Génération au lancement du tour : si un clear a remplacé l'agent
+        // pendant le RPC, ni le flush ni l'état de sortie ne doivent
+        // toucher le nouveau cycle.
+        let gen = self.spawn_gen.load(Ordering::SeqCst);
         self.active_prompts.fetch_add(1, Ordering::SeqCst);
         self.set_state("working");
         let resp = self
             .acp_request("session/prompt", acp::session_prompt_params(&sid, text))
             .await;
-        self.flush_text();
-        if self.active_prompts.fetch_sub(1, Ordering::SeqCst) == 1 {
-            if self.compacting.lock().unwrap().is_some() {
-                // Le /compact a rendu la main mais la compaction tourne
-                // encore côté agent — l'état reste visible jusqu'au
-                // signal de fin (la retenue garde les envois en file).
-                self.set_state("compacting");
-            } else {
-                self.set_state("idle");
+        if self.spawn_gen.load(Ordering::SeqCst) == gen {
+            self.flush_text();
+            if self.active_prompts.fetch_sub(1, Ordering::SeqCst) == 1 {
+                if self.compacting.lock().unwrap().is_some() {
+                    // Le /compact a rendu la main mais la compaction tourne
+                    // encore côté agent — l'état reste visible jusqu'au
+                    // signal de fin (la retenue garde les envois en file).
+                    self.set_state("compacting");
+                } else {
+                    self.set_state("idle");
+                }
             }
+        } else {
+            self.active_prompts.fetch_sub(1, Ordering::SeqCst);
         }
         resp
     }
@@ -1027,6 +1063,9 @@ impl Session {
     /// Un tour session/prompt : working → réponse → idle.
     /// Retourne faux si le `session/prompt` RPC a échoué.
     async fn run_turn(&self, text: &str) -> bool {
+        // Un tour de l'ancien contexte tué par un clear n'émet pas son
+        // "prompt failed" dans le journal frais.
+        let gen = self.spawn_gen.load(Ordering::SeqCst);
         match self.prompt_rpc(text).await {
             Ok(v) => {
                 if let Some(sr) = v.get("stopReason").and_then(Value::as_str) {
@@ -1039,9 +1078,11 @@ impl Session {
                 true
             }
             Err(e) => {
-                self.emit(EventKind::Error {
-                    message: format!("prompt failed: {e}"),
-                });
+                if self.spawn_gen.load(Ordering::SeqCst) == gen {
+                    self.emit(EventKind::Error {
+                        message: format!("prompt failed: {e}"),
+                    });
+                }
                 false
             }
         }
@@ -1452,6 +1493,10 @@ impl Session {
                 let _ = tx.send(Err("agent replaced".into()));
             }
         }
+        // Prompts en file : ils appartiennent au contexte qui meurt —
+        // drain silencieux (le handler émet sa notice post-reset pour
+        // d'éventuels retardataires).
+        self.prompt_queue.lock().unwrap().clear();
         self.kill().await;
     }
 
@@ -1473,9 +1518,15 @@ impl Session {
         }
         self.save_meta();
         self.emit(EventKind::System {
-            text: "context cleared — new agent session".into(),
+            text: "contexte effacé — nouvelle session agent".into(),
         });
         Ok(())
+    }
+
+    /// Marque la session morte — chemin d'erreur d'un respawn post-clear
+    /// (set_state est privé, le handler serveur en a besoin ici).
+    pub fn mark_dead(&self) {
+        self.set_state("dead");
     }
 
     pub fn is_alive(&self) -> bool {
