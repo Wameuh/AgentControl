@@ -616,19 +616,19 @@ async fn update_client(tag: String) -> Result<(), String> {
 #[tauri::command]
 async fn update_client(tag: String) -> Result<(), String> {
     let cur = std::env::current_exe().map_err(|e| e.to_string())?;
-    // Installé = exe sous %LOCALAPPDATA%\Programs (NSIS per-user) ou
-    // %ProgramFiles% (MSI per-machine). Portable = ailleurs → refus.
+    // Installé = exe sous %LOCALAPPDATA%\Programs UNIQUEMENT (cible du setup
+    // NSIS per-user téléchargé). Un exe sous Program Files (install MSI
+    // per-machine, ou portable déplacé là) → le NSIS s'installerait dans un
+    // AUTRE dossier et le .bat relancerait l'ancien exe : update en
+    // trompe-l'œil → refus → repli page releases, comme le portable.
+    // Comparaison en minuscules : la casse de current_exe peut différer de
+    // %LOCALAPPDATA% (rare, mais starts_with Path est sensible à la casse).
     let local = std::env::var("LOCALAPPDATA")
         .map(|p| format!("{p}\\Programs"))
-        .unwrap_or_default();
-    let installed = [
-        local,
-        std::env::var("ProgramFiles").unwrap_or_default(),
-        std::env::var("ProgramFiles(x86)").unwrap_or_default(),
-    ]
-    .iter()
-    .any(|root| !root.is_empty() && cur.starts_with(root));
-    if !installed {
+        .unwrap_or_default()
+        .to_lowercase();
+    let cur_l = cur.to_string_lossy().to_lowercase();
+    if local.is_empty() || !cur_l.starts_with(&local) {
         return Err("build portable — update manuelle via la page releases".into());
     }
     let dir = std::env::temp_dir().join("agentcontrol-update");
@@ -670,13 +670,16 @@ async fn update_client(tag: String) -> Result<(), String> {
     })
     .await
     .map_err(|e| e.to_string())??;
-    // cmd /C : /wait garantit que l'install (et ses sous-process) est finie
-    // avant le relancement. hide_console → aucune fenêtre cmd parasite.
+    // cmd /C : timeout laisse au process courant le temps de se fermer et de
+    // relâcher ses locks ; /wait attend la fin du setup (exit code propagé
+    // → pas de relance si l'install a échoué). hide_console → aucune
+    // fenêtre cmd parasite. del final : pas de résidu setup/.bat dans TEMP.
     let bat = setup.with_file_name("agentcontrol-update.bat");
     std::fs::write(
         &bat,
         format!(
-            "@echo off\r\nstart \"\" /wait \"{}\" /S\r\nstart \"\" \"{}\"\r\n",
+            "@echo off\r\ntimeout /t 1 /nobreak >nul\r\nstart \"\" /wait \"{}\" /S\r\nif errorlevel 1 exit /b 1\r\ndel \"{}\"\r\nstart \"\" \"{}\"\r\ndel \"%~f0\"\r\n",
+            setup.display(),
             setup.display(),
             cur.display()
         ),
