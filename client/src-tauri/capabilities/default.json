@@ -14,6 +14,7 @@
     "core:window:allow-start-resize-dragging",
     "core:window:allow-is-maximized",
     "core:app:allow-version",
-    "opener:allow-open-url"
+    "opener:allow-open-url",
+    "dialog:allow-save"
   ]
 }

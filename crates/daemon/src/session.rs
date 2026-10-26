@@ -50,9 +50,19 @@ pub struct Session {
     /// Requêtes session/prompt en vol (runner + steer concurrents) —
     /// l'état ne repasse idle que quand toutes sont terminées.
     active_prompts: AtomicU64,
-    /// Messages en attente d'un tour libre (FIFO).
-    prompt_queue: Mutex<std::collections::VecDeque<String>>,
+    /// Messages en attente d'un tour libre (FIFO) — (texte, provenance) :
+    /// un prompt peer drainé ne doit PAS devenir un user_message dans le
+    /// journal (son PeerMessage est déjà journalisé côté appelant).
+    prompt_queue: Mutex<std::collections::VecDeque<(String, PromptSrc)>>,
     child: Mutex<Option<Child>>,
+}
+
+/// Provenance d'un prompt en file — détermine si le drain journalise un
+/// `user_message` (user) ou passe en silence (peer, déjà journalisé).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptSrc {
+    User,
+    Peer,
 }
 
 impl Session {
@@ -140,7 +150,10 @@ impl Session {
             }
             let ev_kind = match kind.as_str() {
                 "thought" => EventKind::AgentThought { text: buf },
-                "user" => EventKind::UserMessage { text: buf },
+                "user" => EventKind::UserMessage {
+                    text: buf,
+                    steer: false,
+                },
                 _ => EventKind::AgentText { text: buf },
             };
             match self.journal.append(ev_kind) {
@@ -685,32 +698,31 @@ impl Session {
     /// `steer` : session/prompt concurrent pendant le tour — si l'agent
     /// supporte le steering il injecte le message au prochain point
     /// d'arrêt (après le tool call courant) ; refus → fallback en file.
-    /// Le message est journalisé à l'enfilement (chat = ordre d'envoi).
+    /// Le `user_message` n'est journalisé qu'à l'envoi effectif (au drain
+    /// ou au steer réussi) — un message en file peut être édité/retiré,
+    /// le chat doit montrer la version réellement reçue par l'agent.
     pub async fn send_prompt(&self, text: &str, force: bool, steer: bool) -> Result<()> {
         if steer && !force && self.busy.load(Ordering::SeqCst) {
-            self.emit(EventKind::UserMessage {
-                text: text.into(),
-            });
-            self.emit(EventKind::System {
-                text: "steer → envoyé au tour en cours".into(),
-            });
-            if let Err(e) = self.prompt_rpc(text).await {
-                self.emit(EventKind::System {
-                    text: format!("steer refusé ({e}) — message en file"),
-                });
-                if !self.enqueue_prompt(text, false) {
-                    self.drain_queue().await;
+            match self.prompt_rpc(text).await {
+                Ok(_) => self.emit(EventKind::UserMessage {
+                    text: text.into(),
+                    steer: true,
+                }),
+                Err(e) => {
+                    self.emit(EventKind::System {
+                        text: format!("steer refusé ({e}) — message en file"),
+                    });
+                    if !self.enqueue_prompt(text, false, PromptSrc::User) {
+                        self.drain_queue().await;
+                    }
                 }
             }
             return Ok(());
         }
-        self.emit(EventKind::UserMessage {
-            text: text.into(),
-        });
         if force {
             let _ = self.cancel().await;
         }
-        let already = self.enqueue_prompt(text, force);
+        let already = self.enqueue_prompt(text, force, PromptSrc::User);
         if already && !force {
             self.emit(EventKind::System {
                 text: "message en file — envoyé à la fin du tour".into(),
@@ -737,13 +749,13 @@ impl Session {
                 self.emit(EventKind::System {
                     text: format!("steer refusé ({e}) — message en file"),
                 });
-                if !self.enqueue_prompt(wrapped, false) {
+                if !self.enqueue_prompt(wrapped, false, PromptSrc::Peer) {
                     self.drain_queue().await;
                 }
             }
             return Ok(());
         }
-        let already = self.enqueue_prompt(wrapped, false);
+        let already = self.enqueue_prompt(wrapped, false, PromptSrc::Peer);
         if already {
             self.emit(EventKind::System {
                 text: "message en file — envoyé à la fin du tour".into(),
@@ -757,21 +769,24 @@ impl Session {
     /// push + busy.swap sous le lock de la file : sérialisé avec le
     /// pop/store du runner → aucun message coincé entre les deux.
     /// Retourne vrai si un runner existe déjà.
-    fn enqueue_prompt(&self, text: &str, front: bool) -> bool {
+    fn enqueue_prompt(&self, text: &str, front: bool, src: PromptSrc) -> bool {
         let mut q = self.prompt_queue.lock().unwrap();
         if front {
-            q.push_front(text.to_string());
+            q.push_front((text.to_string(), src));
         } else {
-            q.push_back(text.to_string());
+            q.push_back((text.to_string(), src));
         }
         self.busy.swap(true, Ordering::SeqCst)
     }
 
     /// Le runner draine la file FIFO jusqu'à vide, puis libère `busy`
     /// (sous le lock de la file → un push concurrent reprendra le relais).
+    /// Le `user_message` est journalisé ici, à l'envoi réel (texte final
+    /// après édits) ; les prompts peers passent en silence (PeerMessage
+    /// déjà journalisé).
     async fn drain_queue(&self) {
         loop {
-            let next = {
+            let (next, src) = {
                 let mut q = self.prompt_queue.lock().unwrap();
                 match q.pop_front() {
                     Some(t) => t,
@@ -781,6 +796,12 @@ impl Session {
                     }
                 }
             };
+            if src == PromptSrc::User {
+                self.emit(EventKind::UserMessage {
+                    text: next.clone(),
+                    steer: false,
+                });
+            }
             self.run_turn(&next).await;
         }
     }
@@ -834,15 +855,20 @@ impl Session {
         }
     }
 
-    /// Contenu de la file dans l'ordre d'envoi.
+    /// Contenu de la file dans l'ordre d'envoi (textes seuls).
     pub fn queue_snapshot(&self) -> Vec<String> {
-        self.prompt_queue.lock().unwrap().iter().cloned().collect()
+        self.prompt_queue
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(t, _)| t.clone())
+            .collect()
     }
 
     pub fn queue_edit(&self, idx: usize, text: &str) -> bool {
         let mut q = self.prompt_queue.lock().unwrap();
         if let Some(slot) = q.get_mut(idx) {
-            *slot = text.to_string();
+            slot.0 = text.to_string();
             true
         } else {
             false

@@ -11,6 +11,7 @@
 //!   acctl mode <session> <mode>
 //!   acctl respond <session> <request_id> [option_id | --answer JSON]
 //!   acctl blob <session> <blob> [offset] [limit]
+//!   acctl download <session> <path> [dest]     (dossier → zip auto)
 //!
 //! Connexion : $AGENTCONTROL_SOCK (défaut ~/.agentcontrol/daemon.sock)
 //!             ou $AGENTCONTROL_TCP host:port
@@ -173,7 +174,7 @@ fn print_event(ev: &Value) {
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("usage: acctl status|agents|list|new|send|events|tail|resume|attach|fork|cancel|kill|mode|respond|blob");
+        eprintln!("usage: acctl status|agents|list|new|send|events|tail|resume|attach|fork|cancel|kill|mode|respond|blob|download");
         std::process::exit(2);
     }
     let mut c = connect().await?;
@@ -321,6 +322,47 @@ async fn main() -> Result<()> {
             }).await?;
             print!("{}", v["data"].as_str().unwrap_or(""));
             eprintln!("(total={} offset={})", v["total"], v["offset"]);
+        }
+        "download" | "dl" => {
+            // acctl download <session> <path> [dest] — dossier → zip côté démon
+            if args.len() < 3 { bail!("download <session> <path> [dest]"); }
+            let (session, path) = (args[1].clone(), args[2].clone());
+            let info = c.call(proto::ReqKind::DownloadPath {
+                session: session.clone(), path: path.clone(),
+                offset: 0, limit: 0, archive: None,
+            }).await?;
+            let dest = args.get(3).cloned()
+                .unwrap_or_else(|| info["name"].as_str().unwrap_or("download").to_string());
+            if std::path::Path::new(&dest).is_dir() {
+                bail!("destinataire est un dossier: {dest}");
+            }
+            let mut out: Option<std::fs::File> = None;
+            let mut archive: Option<String> = None;
+            let mut offset = 0u64;
+            use base64::Engine;
+            use std::io::Write;
+            loop {
+                let v = c.call(proto::ReqKind::DownloadPath {
+                    session: session.clone(), path: path.clone(),
+                    offset, limit: 1 << 20, archive: archive.clone(),
+                }).await?;
+                if archive.is_none() {
+                    archive = v["archive"].as_str().map(String::from);
+                }
+                let total = v["total"].as_u64().unwrap_or(0);
+                let data = base64::engine::general_purpose::STANDARD
+                    .decode(v["data"].as_str().unwrap_or(""))?;
+                // Fichier créé au premier chunk reçu — pas de fichier vide
+                // résiduel si le démon échoue d'emblée.
+                if out.is_none() {
+                    out = Some(std::fs::File::create(&dest)?);
+                }
+                out.as_mut().unwrap().write_all(&data)?;
+                offset += data.len() as u64;
+                eprint!("\r{offset}/{total} o");
+                if offset >= total { break; }
+            }
+            eprintln!("\n→ {dest} ({offset} o)");
         }
         other => bail!("commande inconnue: {other}"),
     }

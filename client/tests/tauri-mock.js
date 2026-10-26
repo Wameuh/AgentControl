@@ -34,7 +34,7 @@
         { option_id: "once", name: "Autoriser une fois", kind: "allow_once" },
         { option_id: "no", name: "Refuser", kind: "reject_once" },
       ] },
-    { seq: 8, ts: "10:06", type: "system", text: "steer → envoyé au tour en cours" },
+    { seq: 8, ts: "10:06", type: "user_message", steer: true, text: "Pendant que tu y es, ajoute aussi un test d'intégration." },
     { seq: 9, ts: "10:07", type: "agent_text", text:
       "## Résumé du refactor\n\nVoici ce qui a été fait :\n\n- `withRetry` avec **backoff exponentiel**\n- Gestion des erreurs *transient*\n- Tests ajoutés dans tests/client.test.ts\n\n```ts\nasync function withRetry(fn, n = 3) {\n  try { return await fn(); }\n  catch (e) {\n    if (n > 0) { await sleep(500); return withRetry(fn, n - 1); }\n    throw e;\n  }\n}\n```\n\n| Fichier | Lignes |\n|---------|--------|\n| client.ts | +42 |\n| tests | +18 |\n\n> Attention : le retry n'est pas idempotent sur les POST.\n\nVoir [la doc](https://example.com/retry) pour les détails. Et aussi un _it_ et ~~barré~~." },
     { seq: 10, ts: "10:08", type: "user_message",
