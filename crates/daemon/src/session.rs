@@ -100,6 +100,10 @@ pub struct Session {
     compacting: Mutex<Option<CompactHold>>,
     /// Self-ref pour lancer des tâches internes (drain, timer compact).
     me: Weak<Session>,
+    /// Incrémentée à chaque spawn — le reader d'un vieux process compare
+    /// sa génération à la courante : périmée → son on_agent_exit se tait
+    /// (pas de "agent exited"/dead ni de take() sur le child du successeur).
+    spawn_gen: AtomicU64,
     child: Mutex<Option<Child>>,
 }
 
@@ -136,6 +140,7 @@ impl Session {
             prompt_queue: Mutex::new(std::collections::VecDeque::new()),
             compacting: Mutex::new(None),
             me: me.clone(),
+            spawn_gen: AtomicU64::new(0),
             child: Mutex::new(None),
         }))
     }
@@ -324,6 +329,12 @@ impl Session {
         skip_replay: bool,
         mcp_servers: Value,
     ) -> Result<()> {
+        // Nouvelle génération : tout reader d'un process précédent devient
+        // périmé — son on_agent_exit ne touchera plus l'état partagé.
+        let gen = self.spawn_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        // Un load tué en vol laisserait le flag vrai → les updates de la
+        // session suivante seraient ignorées comme du replay.
+        self.loading_replay.store(false, Ordering::SeqCst);
         let meta = self.meta_snapshot();
         let (cmd, args) = command.split_first().context("commande agent vide")?;
         let mut child = Command::new(cmd)
@@ -380,7 +391,7 @@ impl Session {
                         _ => break,
                     }
                 }
-                session.on_agent_exit().await;
+                session.on_agent_exit(gen).await;
             });
         }
 
@@ -509,7 +520,13 @@ impl Session {
         Ok(())
     }
 
-    async fn on_agent_exit(&self) {
+    async fn on_agent_exit(&self, gen: u64) {
+        // Un spawn plus récent a pris le relais (resume/rebind/clear) :
+        // la mort du vieux process est attendue — ne pas marquer dead ni
+        // lâcher le child (il appartient au process de la gen courante).
+        if self.spawn_gen.load(Ordering::SeqCst) != gen {
+            return;
+        }
         *self.stdin_tx.lock().unwrap() = None;
         self.child.lock().unwrap().take();
         self.flush_text();
@@ -1419,6 +1436,46 @@ impl Session {
         if let Some(mut c) = c {
             let _ = c.kill().await;
         }
+    }
+
+    /// Tue l'agent en vue d'un respawn immédiat (clear) : la génération
+    /// est invalidée AVANT le kill → le on_agent_exit du vieux reader se
+    /// tait (ni "agent process exited" ni dead dans le nouveau cycle).
+    /// Les requêtes ACP en vol sont soldées en erreur, sinon leurs
+    /// appelants resteraient suspendus indéfiniment.
+    pub async fn kill_for_respawn(&self) {
+        self.spawn_gen.fetch_add(1, Ordering::SeqCst);
+        *self.stdin_tx.lock().unwrap() = None;
+        {
+            let mut p = self.acp_pending.lock().unwrap();
+            for (_, tx) in p.drain() {
+                let _ = tx.send(Err("agent replaced".into()));
+            }
+        }
+        self.kill().await;
+    }
+
+    /// /clear : journal + blobs vidés, méta recalée pour une session
+    /// native neuve (native_id None — si le respawn échoue, un resume
+    /// ultérieur ne rechargerait pas l'ancien contexte par surprise).
+    /// L'agent doit déjà être arrêté (kill_for_respawn).
+    pub fn clear_context(&self) -> Result<()> {
+        // Fragments d'un tour interrompu et demandes en attente de
+        // l'ancien contexte : ils n'ont plus de sens après le reset.
+        self.cur_text.lock().unwrap().take();
+        self.tool_calls.lock().unwrap().clear();
+        self.pending_agent.lock().unwrap().clear();
+        self.journal.reset(&self.dir)?;
+        {
+            let mut m = self.meta.lock().unwrap();
+            m.native_session_id = None;
+            m.context_used = None;
+        }
+        self.save_meta();
+        self.emit(EventKind::System {
+            text: "context cleared — new agent session".into(),
+        });
+        Ok(())
     }
 
     pub fn is_alive(&self) -> bool {
