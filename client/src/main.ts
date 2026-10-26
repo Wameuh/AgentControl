@@ -1237,16 +1237,14 @@ function stashConv(id: string, conn: string) {
   }
 }
 
-/** Entrée de cache exploitable (connexion identique + pas expirée). */
+/** Entrée de cache exploitable (connexion identique + pas expirée).
+ *  Consommée au hit : le fragment est transféré au DOM par restoreConv —
+ *  laisser l'entrée dans la map laisserait un fragment vide réutilisable. */
 function cachedConv(id: string, conn: string): ConvCache | undefined {
   const c = convCache.get(id);
   if (!c) return;
-  if (c.conn !== conn || Date.now() - c.ts > CACHE_TTL) {
-    convCache.delete(id);
-    return;
-  }
   convCache.delete(id);
-  convCache.set(id, c); // touche LRU
+  if (c.conn !== conn || Date.now() - c.ts > CACHE_TTL) return;
   return c;
 }
 
@@ -1281,18 +1279,19 @@ async function openSession(id: string, force = false) {
   // Feedback immédiat : la ligne cliquée passe active tout de suite.
   setActiveRow(id);
   // La session quittée garde son DOM en mémoire (réaffichage instantané).
-  if (current && current.id !== id) stashConv(current.id, current.conn ?? "default");
+  if (current && current.id !== id) stashConv(current.id, current.conn || "default");
   if (force) convCache.delete(id);
 
   // Bascule immédiate sur la meta connue de la liste — titre + header
   // changent sans attendre session_info (qui la rafraîchit ensuite).
-  if (listMeta) {
-    alive = !listMeta.offline &&
-      listMeta.state !== "dead" && listMeta.state !== "interrupted";
-    current = { ...listMeta };
-    $("chat-title").textContent = `${current.title} — ${current.agent}`;
-    updateHeader();
-  }
+  // Pas de meta → current = null d'emblée : sans ça les pushes de
+  // l'ancienne session (sub encore vivante) s'injecteraient dans la zone
+  // de la nouvelle pendant le chargement.
+  current = listMeta ? { ...listMeta } : null;
+  alive = !!current && !current.offline &&
+    current.state !== "dead" && current.state !== "interrupted";
+  if (current) $("chat-title").textContent = `${current.title} — ${current.agent}`;
+  updateHeader();
 
   // Cache frais → conversation réaffichée d'emblée ; sinon zone vidée +
   // grande gemme le temps du rechargement.
@@ -1331,11 +1330,11 @@ async function openSession(id: string, force = false) {
     eventsEl.appendChild(sys);
     try {
       await call("resume_session", { session: id });
-      if (stale()) return;
+      if (stale()) { sys.remove(); return; }
       const info2 = await call<{ meta: SessionMeta; alive: boolean }>("session_info", {
         session: id,
       });
-      if (stale()) return;
+      if (stale()) { sys.remove(); return; }
       alive = info2.alive;
       current = info2.meta;
       if (!current.conn && connHint) current.conn = connHint;
