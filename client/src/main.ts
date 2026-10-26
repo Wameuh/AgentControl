@@ -764,6 +764,7 @@ async function doConnect(cfg: Record<string, unknown>) {
   // Connexion établie → la surveillance/backoff la suit.
   const ck = connKeyOf(cfg);
   connCfg.set(ck, cfg);
+  connGone.delete(ck); // reconnectée via le dialogue → ré-active
   markAlive(ck);
   await refreshSessions();
 }
@@ -904,6 +905,7 @@ async function refreshSessions() {
     });
     // Déposer sur le header connexion = dégrouper la session
     bindDropTarget(ch, conn, undefined);
+    bindCtx(ch, (x, y) => openConnCtx(x, y, conn));
     el.appendChild(ch);
 
     const grpNames = [
@@ -2983,7 +2985,9 @@ $("f-create").addEventListener("click", async (e) => {
   await refreshSessions();
 });
 
-interface SavedConn {
+// Type alias (pas interface) → signature d'index implicite, assignable à
+// Record<string, unknown> pour connKeyOf().
+type SavedConn = {
   kind: string;
   host?: string;
   addr?: string;
@@ -2995,7 +2999,7 @@ interface SavedConn {
   password?: string;
   key?: string;
   native?: boolean;
-}
+};
 let savedConns: SavedConn[] = [];
 
 // ---------------------------------------------------------------------------
@@ -3010,6 +3014,9 @@ const connLive = new Map<string, ConnLive>();
 const connCfg = new Map<string, Record<string, unknown>>();
 const connTimer = new Map<string, ReturnType<typeof setTimeout>>();
 const connDelay = new Map<string, number>();
+// Conns déconnectées volontairement : ni alerte chip ni retry auto — un
+// retry explicite (menu ctx / badge) les ré-active (delete dans retryConn).
+const connGone = new Set<string>();
 const RETRY_MIN = 2_000, RETRY_MAX = 60_000;
 
 /** Tooltip du badge selon l'état. */
@@ -3034,14 +3041,14 @@ function markDead(key: string) {
   // connCfg n'est posé qu'à la fin d'un doConnect réussi — une conn dont
   // le tout premier connect a échoué en route n'est pas suivie (fenêtre
   // minime, pas de config retenue à rejouer de toute façon).
-  if (!connCfg.has(key)) return;
+  if (!connCfg.has(key) || connGone.has(key)) return;
   if (connLive.get(key) !== "reconnecting") connLive.set(key, "down");
   renderConnState();
   scheduleRetry(key);
 }
 
 function scheduleRetry(key: string) {
-  if (connTimer.has(key) || connLive.get(key) === "reconnecting") return;
+  if (connTimer.has(key) || connGone.has(key) || connLive.get(key) === "reconnecting") return;
   const d = connDelay.get(key) ?? RETRY_MIN;
   connDelay.set(key, Math.min(d * 2, RETRY_MAX));
   connTimer.set(key, setTimeout(() => {
@@ -3056,6 +3063,7 @@ async function retryConn(key: string) {
   // Pas de retry parallèle : un connect déjà en vol suffit — un second
   // tunnel SSH orphelin resterait vivant après remplacement.
   if (!cfg || connLive.get(key) === "reconnecting") return;
+  connGone.delete(key); // un retry ré-active une conn déconnectée à la demande
   connLive.set(key, "reconnecting");
   renderConnState();
   try {
@@ -3081,9 +3089,104 @@ function manualRetry(key: string) {
   void retryConn(key);
 }
 
+/** Déconnexion volontaire : ferme le transport (le tunnel/process ssh est
+ *  tué au drop du client côté Rust). La cfg reste dans connCfg → la conn
+ *  reste listée (badge rouge) et reconnectable, mais hors surveillance :
+ *  connGone la met à l'abri du retry auto et du chip d'alerte. */
+async function disconnectConn(conn: string) {
+  connGone.add(conn);
+  const t0 = connTimer.get(conn);
+  if (t0) {
+    clearTimeout(t0);
+    connTimer.delete(conn);
+  }
+  connLive.set(conn, "down");
+  await invoke("disconnect", { conn }).catch((e) => showErr(String(e)));
+  renderConnState();
+}
+
+/** Suppression d'une connexion : tue ses sessions côté démon (si encore
+ *  joignable — sur une conn morte elles restent côté serveur), déconnecte
+ *  puis oublie la cfg, les entrées sauvegardées et les groupes stockés. */
+async function deleteConn(conn: string) {
+  if ((connLive.get(conn) ?? "ok") === "ok" && !connGone.has(conn)) {
+    for (const s of lastSessions.filter((x) => (x.conn ?? "default") === conn)) {
+      await call("delete_session", { session: s.id, conn }).catch((e) => showErr(String(e)));
+    }
+  }
+  await disconnectConn(conn);
+  connGone.delete(conn);
+  connCfg.delete(conn);
+  connLive.delete(conn);
+  connDelay.delete(conn);
+  for (const c of savedConns) {
+    if (connKeyOf(c) === conn) {
+      await invoke("remove_connection", { cfg: c }).catch(() => {});
+    }
+  }
+  savedConns = savedConns.filter((c) => connKeyOf(c) !== conn);
+  // Groupes nommés + états de collapse persistés pour cette conn.
+  localStorage.removeItem(GKEY(conn));
+  localStorage.removeItem(`ac-grp-${conn}`);
+  for (const k of Object.keys(localStorage)) {
+    if (k.startsWith(`ac-grp-${conn}::`)) localStorage.removeItem(k);
+  }
+  if (current && (current.conn ?? "default") === conn) {
+    current = null;
+    eventsEl.innerHTML = "";
+  }
+  refreshSessions();
+}
+
+/** Menu contextuel connexion (clic droit / appui long sur le header de
+ *  groupe) : reconnecter / déconnecter / supprimer — même pattern que
+ *  openSessionCtx. */
+function openConnCtx(x: number, y: number, conn: string) {
+  sessCtx.innerHTML = `<div class="fctx-path">${esc(conn)}</div>`;
+  const add = (label: string, cls: string, fn: (b: HTMLButtonElement) => void) => {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.className = cls;
+    b.onclick = () => fn(b);
+    sessCtx.appendChild(b);
+    return b;
+  };
+  // "reconnecting" = connect en vol → déconnexion/suppression laisseraient
+  // une conn vivante hors surveillance ; actions gelées le temps du retry.
+  const busy = connLive.get(conn) === "reconnecting";
+  const rec = add(t("ctx_reconnect"), "", () => {
+    hideSessCtx();
+    manualRetry(conn);
+  });
+  rec.disabled = !connCfg.has(conn) || busy;
+  const dis = add(t("ctx_disconnect"), "", () => {
+    hideSessCtx();
+    void disconnectConn(conn);
+  });
+  dis.disabled = !connCfg.has(conn) || connGone.has(conn) || busy;
+  const del = add(t("ctx_delete_conn"), "danger", (b) => {
+    if (!b.dataset.armed) {
+      b.dataset.armed = "1";
+      b.textContent = t("ctx_confirm");
+      return;
+    }
+    hideSessCtx();
+    void deleteConn(conn);
+  });
+  del.disabled = !connCfg.has(conn) || busy;
+  sessCtx.hidden = false;
+  navPush("sctx");
+  if (!IS_ANDROID) {
+    const r = sessCtx.getBoundingClientRect();
+    sessCtx.style.left = `${Math.min(x, window.innerWidth - r.width - 8)}px`;
+    sessCtx.style.top = `${Math.min(y, window.innerHeight - r.height - 8)}px`;
+  }
+}
+
 /** État agrégé → chip header ; re-render des badges de la sidebar. */
 function renderConnState() {
-  const bad = [...connLive.values()].some((s) => s !== "ok");
+  // connGone (déconnecté à la demande) n'est pas une alerte.
+  const bad = [...connLive].some(([k, s]) => s !== "ok" && !connGone.has(k));
   const chip = $("conn-chip") as HTMLButtonElement;
   chip.hidden = !bad;
   if (bad) {
@@ -3095,7 +3198,7 @@ function renderConnState() {
   refreshSessions().catch(() => {});
 }
 $("conn-chip").addEventListener("click", () => {
-  for (const [k, s] of connLive) if (s !== "ok") manualRetry(k);
+  for (const [k, s] of connLive) if (s !== "ok" && !connGone.has(k)) manualRetry(k);
 });
 // Mort instantanée du transport (EOF reader côté Rust).
 listen<string>("conn-dead", (e) => markDead(e.payload));
