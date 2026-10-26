@@ -3048,7 +3048,8 @@ function markDead(key: string) {
 }
 
 function scheduleRetry(key: string) {
-  if (connTimer.has(key) || connGone.has(key) || connLive.get(key) === "reconnecting") return;
+  if (connTimer.has(key) || connGone.has(key) || !connCfg.has(key) ||
+      connLive.get(key) === "reconnecting") return;
   const d = connDelay.get(key) ?? RETRY_MIN;
   connDelay.set(key, Math.min(d * 2, RETRY_MAX));
   connTimer.set(key, setTimeout(() => {
@@ -3068,6 +3069,14 @@ async function retryConn(key: string) {
   renderConnState();
   try {
     await invoke("connect", { cfg });
+    // Déconnectée/supprimée pendant le connect en vol → refermer aussitôt :
+    // hors connGone/connCfg elle tournerait sans aucune surveillance.
+    if (connGone.has(key) || !connCfg.has(key)) {
+      await invoke("disconnect", { conn: key }).catch(() => {});
+      if (connGone.has(key)) connLive.set(key, "down"); else connLive.delete(key);
+      renderConnState();
+      return;
+    }
     markAlive(key);
     // Réouvrir la session affichée si elle vivait sur cette connexion.
     if (current && (current.conn ?? "default") === key) openSession(current.id);
@@ -3109,6 +3118,18 @@ async function disconnectConn(conn: string) {
  *  joignable — sur une conn morte elles restent côté serveur), déconnecte
  *  puis oublie la cfg, les entrées sauvegardées et les groupes stockés. */
 async function deleteConn(conn: string) {
+  const st = connLive.get(conn);
+  // Hors ligne mais reconnectable : reconnexion éphémère pour pouvoir
+  // tuer les sessions côté démon — sinon elles survivraient à la
+  // suppression. "reconnecting" = connect déjà en vol, pas de second
+  // en parallèle (tunnel SSH orphelin).
+  if (st !== "ok" && st !== "reconnecting" && connCfg.has(conn)) {
+    const t0 = connTimer.get(conn);
+    if (t0) { clearTimeout(t0); connTimer.delete(conn); }
+    await invoke("connect", { cfg: connCfg.get(conn) })
+      .then(() => { connLive.set(conn, "ok"); connGone.delete(conn); })
+      .catch(() => {});
+  }
   if ((connLive.get(conn) ?? "ok") === "ok" && !connGone.has(conn)) {
     for (const s of lastSessions.filter((x) => (x.conn ?? "default") === conn)) {
       await call("delete_session", { session: s.id, conn }).catch((e) => showErr(String(e)));
@@ -3119,6 +3140,10 @@ async function deleteConn(conn: string) {
   connCfg.delete(conn);
   connLive.delete(conn);
   connDelay.delete(conn);
+  // Re-fetch avant la purge : une conn sauvegardée pendant cette session
+  // n'est pas encore dans savedConns → resterait dans connections.json
+  // et ressusciterait à l'autoconnect du prochain lancement.
+  savedConns = await invoke<SavedConn[]>("saved_connections").catch(() => savedConns);
   for (const c of savedConns) {
     if (connKeyOf(c) === conn) {
       await invoke("remove_connection", { cfg: c }).catch(() => {});
@@ -3167,7 +3192,8 @@ function openConnCtx(x: number, y: number, conn: string) {
   const del = add(t("ctx_delete_conn"), "danger", (b) => {
     if (!b.dataset.armed) {
       b.dataset.armed = "1";
-      b.textContent = t("ctx_confirm");
+      const n = lastSessions.filter((x) => (x.conn ?? "default") === conn).length;
+      b.textContent = t("ctx_del_conn_armed", { n });
       return;
     }
     hideSessCtx();
