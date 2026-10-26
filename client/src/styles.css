@@ -330,6 +330,21 @@ button:disabled { opacity: .5; cursor: default; }
 .msg.user .flink:hover, .msg.user a:hover {
   color: var(--msg-user-link); text-decoration-style: solid;
 }
+/* Bulle user longue repliée : corps tronqué avec fondu + bouton déplier */
+.msg.user.um-collapsed .um-body {
+  max-height: 8.7em; /* ~6 lignes à line-height 1.45 */
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(#000 55%, transparent 96%);
+  mask-image: linear-gradient(#000 55%, transparent 96%);
+}
+.um-toggle {
+  display: inline-block; margin-top: 3px; padding: 0;
+  background: none; border: 0; cursor: pointer; font: inherit;
+  color: var(--msg-user-link); font-size: 12px; font-weight: 700; opacity: .9;
+}
+.um-toggle:hover { text-decoration: underline; }
+.msg.user.um-collapsed .um-toggle::before { content: "▾ "; }
+.msg.user:not(.um-collapsed) .um-toggle::before { content: "▴ "; }
 /* pastille "steer" sur un user_message injecté mid-turn */
 .steer-badge {
   display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .4px;

@@ -482,6 +482,9 @@ let current: SessionMeta | null = null;
 let minRendered = Number.MAX_SAFE_INTEGER;
 let renderedCount = 0;
 const MAX_RENDERED = 400;
+// Seuils au-delà desquels une bulle user est repliée par défaut.
+const USER_FOLD_CHARS = 480;
+const USER_FOLD_LINES = 5;
 const PAGE = 50; // paquets au scroll
 const INITIAL_PAGE = 200; // base d'historique à l'ouverture
 const toolBlocks = new Map<string, HTMLElement>();
@@ -2041,9 +2044,26 @@ function renderEvent(ev: AcEvent, live: boolean): HTMLElement {
   switch (ev.type) {
     case "user_message": {
       const d = mkEv("msg user", ev.seq);
-      d.innerHTML =
+      const txt = ev.text as string;
+      const body = document.createElement("div");
+      body.className = "um-body";
+      body.innerHTML =
         (ev.steer ? `<span class="steer-badge">${t("steer_badge")}</span> ` : "") +
-        linkify(esc(ev.text as string));
+        linkify(esc(txt));
+      d.appendChild(body);
+      // Prompt long → replié par défaut, bouton pour déplier/replier.
+      if (txt.length > USER_FOLD_CHARS || txt.split("\n").length > USER_FOLD_LINES) {
+        d.classList.add("um-collapsed");
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "um-toggle";
+        btn.textContent = t("um_expand");
+        btn.addEventListener("click", () => {
+          const collapsed = d.classList.toggle("um-collapsed");
+          btn.textContent = t(collapsed ? "um_expand" : "um_collapse");
+        });
+        d.appendChild(btn);
+      }
       return d;
     }
     case "agent_text": {
