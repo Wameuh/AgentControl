@@ -442,6 +442,11 @@ fn save_connection(cfg: serde_json::Value) {
     client_core::save_connection(&cfg);
 }
 
+#[tauri::command]
+fn remove_connection(cfg: serde_json::Value) {
+    client_core::remove_connection(&cfg);
+}
+
 /// Liste les alias Host de ~/.ssh/config (Ignore * ? ! negations).
 /// Android : pas de ~/.ssh/config — l'app utilise la liste des connexions.
 #[tauri::command]
@@ -724,15 +729,15 @@ async fn ensure_daemon(
          if [ -n \"$ver\" ] && [ \"$ver\" != \"{t}\" ] && \
             [ \"$(printf '%s\\n%s\\n' \"{t}\" \"$ver\" | sort -V | tail -n1)\" = \"$ver\" ]; then \
             echo newer:$ver; exit 0; fi; \
-         cd /tmp; rm -rf acupd acd.tgz; mkdir -p acupd; \
+         d=$HOME/.cache/agentcontrol-upd; rm -rf \"$d\"; mkdir -p \"$d\"; cd \"$d\" || exit 1; \
          curl -fsSL -o acd.tgz \"{base}/download/v{t}/agentcontrol-server-$arch-linux.tar.gz\" || \
          curl -fsSL -o acd.tgz \"{base}/latest/download/agentcontrol-server-$arch-linux.tar.gz\"; \
-         tar xzf acd.tgz -C acupd; \
-         install -Dm755 acupd/agentcontrol-daemon $bin; \
-         install -Dm755 acupd/acctl $HOME/.local/bin/acctl; \
-         install -Dm644 acupd/packaging/agentcontrol-daemon.service $HOME/.config/systemd/user/agentcontrol-daemon.service; \
+         tar xzf acd.tgz; \
+         install -Dm755 agentcontrol-daemon $bin; \
+         install -Dm755 acctl $HOME/.local/bin/acctl; \
+         install -Dm644 packaging/agentcontrol-daemon.service $HOME/.config/systemd/user/agentcontrol-daemon.service; \
          systemctl --user daemon-reload; \
-         systemctl --user enable --now agentcontrol-daemon; \
+         systemctl --user enable --now agentcontrol-daemon; rm -rf \"$d\"; \
          sleep 1; echo installed:$($HOME/.local/bin/acctl status 2>/dev/null | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4)",
         base = BASE,
         t = tag
@@ -844,7 +849,7 @@ pub fn run() {
             sys: Mutex::new(sysinfo::System::new()),
             net: Mutex::new(std::collections::VecDeque::new()),
         })
-        .invoke_handler(tauri::generate_handler![connect, call, subscribe, ssh_hosts, ssh_pubkey, platform, log_tail, saved_connections, save_connection, check_update, update_client, ensure_daemon, disconnect, sys_stats, set_app_icon, write_download])
+        .invoke_handler(tauri::generate_handler![connect, call, subscribe, ssh_hosts, ssh_pubkey, platform, log_tail, saved_connections, save_connection, remove_connection, check_update, update_client, ensure_daemon, disconnect, sys_stats, set_app_icon, write_download])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

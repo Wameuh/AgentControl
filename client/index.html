@@ -100,6 +100,7 @@
     <dialog id="dlg-new">
       <form method="dialog" id="form-new">
         <h3 data-i18n="new_session_h">New session</h3>
+        <label id="f-conn-wrap" hidden><span data-i18n="server_label">Server</span> <select id="f-conn"></select></label>
         <label><span data-i18n="agent">Agent</span> <select id="f-agent"></select></label>
         <label><span data-i18n="workdir">Working directory</span> <input id="f-cwd" placeholder="/home/agent/projet" required /></label>
         <label><span data-i18n="title_label">Title</span> <input id="f-title" data-i18n-ph="title_ph" placeholder="my session" /></label>
@@ -119,7 +120,10 @@
       <form method="dialog">
         <h3 data-i18n="conn_h">Connect to daemon</h3>
         <label><span data-i18n="recent">Recent connections</span>
-          <select id="c-saved"><option value="">— choose —</option></select>
+          <span id="c-saved-row">
+            <select id="c-saved"><option value="">— choose —</option></select>
+            <button type="button" id="c-saved-del" data-i18n-title="del_saved_conn" title="Remove">✕</button>
+          </span>
         </label>
         <label><span data-i18n="type_label">Type</span>
           <select id="c-kind">

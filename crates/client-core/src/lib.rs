@@ -152,6 +152,14 @@ pub fn save_connection(cfg: &serde_json::Value) {
     let _ = std::fs::write(config_path(), serde_json::to_string_pretty(&list).unwrap());
 }
 
+/// Retire une connexion de la liste (même clé de dédup que save).
+pub fn remove_connection(cfg: &serde_json::Value) {
+    let mut list = load_connections();
+    let key = cfg.to_string();
+    list.retain(|c| c.to_string() != key);
+    let _ = std::fs::write(config_path(), serde_json::to_string_pretty(&list).unwrap());
+}
+
 /// Les N dernières lignes du log (pour l'UI). Si le fichier courant est
 /// trop court (rotation récente), complète depuis client.log.1.
 pub fn log_tail(n: usize) -> String {
