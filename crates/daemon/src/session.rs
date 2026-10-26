@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, Weak};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tracing::{debug, error, info, warn};
 
 use crate::acp;
 use crate::journal::{self, Journal};
@@ -177,7 +178,7 @@ impl Session {
             Ok(ev) => {
                 let _ = self.events_tx.send(ev);
             }
-            Err(e) => eprintln!("[{}] journal append failed: {e}", self.meta_snapshot().id),
+            Err(e) => error!("[{}] journal append failed: {e}", self.meta_snapshot().id),
         }
     }
 
@@ -230,7 +231,7 @@ impl Session {
                 Ok(ev) => {
                     let _ = self.events_tx.send(ev);
                 }
-                Err(e) => eprintln!("journal append failed: {e}"),
+                Err(e) => error!("journal append failed: {e}"),
             }
             // L'agent annonce la fin de sa compaction par un message —
             // relâche les prompts retenus.
@@ -287,6 +288,8 @@ impl Session {
         self.take_compact_hold();
         self.busy.store(false, Ordering::SeqCst);
         let mut last = anyhow::anyhow!("spawn not attempted");
+        let sid = self.meta_snapshot().id;
+        info!("[{sid}] spawn agent: {}", command.join(" "));
         for attempt in 0..2 {
             match self
                 .spawn_agent_once(
@@ -308,6 +311,7 @@ impl Session {
                     return Ok(());
                 }
                 Err(e) => {
+                    warn!("[{sid}] spawn échoué (essai {}): {e:#}", attempt + 1);
                     last = e;
                     if attempt == 0 {
                         self.emit(EventKind::System {
@@ -318,6 +322,7 @@ impl Session {
                 }
             }
         }
+        error!("[{sid}] spawn abandonné après 2 essais: {last:#}");
         Err(last)
     }
 
@@ -375,7 +380,7 @@ impl Session {
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(l)) = lines.next_line().await {
-                    eprintln!("[{sid} stderr] {l}");
+                    info!("[{sid} stderr] {l}");
                 }
             });
         }
@@ -536,6 +541,7 @@ impl Session {
             let _ = tx.send(Err("agent exited".into()));
         }
         self.set_state("dead");
+        info!("[{}] agent process exited", self.meta_snapshot().id);
         self.emit(EventKind::System {
             text: "agent process exited".into(),
         });
@@ -1491,6 +1497,7 @@ impl Session {
     /// Les requêtes ACP en vol sont soldées en erreur, sinon leurs
     /// appelants resteraient suspendus indéfiniment.
     pub async fn kill_for_respawn(&self) {
+        debug!("[{}] kill pour respawn", self.meta_snapshot().id);
         self.spawn_gen.fetch_add(1, Ordering::SeqCst);
         *self.stdin_tx.lock().unwrap() = None;
         {

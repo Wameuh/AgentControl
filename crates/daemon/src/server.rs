@@ -10,6 +10,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::UnixStream;
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
+use tracing::{debug, info, warn};
 
 use crate::journal;
 use crate::session::Session;
@@ -183,9 +184,10 @@ impl Daemon {
                         // démon → interrupted + event journalisé.
                         s.reconcile_state();
                         let id = s.meta_snapshot().id;
+                        info!("session chargée: {id}");
                         d.sessions.write().await.insert(id, s);
                     }
-                    Err(e) => eprintln!("session load failed {:?}: {e}", entry.path()),
+                    Err(e) => warn!("session load failed {:?}: {e:#}", entry.path()),
                 }
             }
         }
@@ -353,9 +355,14 @@ impl Daemon {
 
     pub async fn dispatch(self: &Arc<Self>, req: Request) -> Response {
         let id = req.id;
+        let kind = req.req.kind_name();
+        debug!("req #{id} {kind}");
         match self.handle(req.req).await {
             Ok(v) => Response::ok(id, v),
-            Err(e) => Response::err(id, format!("{e:#}")),
+            Err(e) => {
+                debug!("req #{id} {kind} → {e:#}");
+                Response::err(id, format!("{e:#}"))
+            }
         }
     }
 
@@ -446,6 +453,7 @@ impl Daemon {
                         let _ = s.send_prompt(&p, false, false).await;
                     });
                 }
+                info!("session créée: {sid} (agent={agent})");
                 Ok(json!({"session": sid}))
             }
             ReqKind::AttachSession {
@@ -484,9 +492,14 @@ impl Daemon {
                 let sid = meta.id.clone();
                 self.sessions.write().await.insert(sid.clone(), session.clone());
                 let (cmd, envs) = self.agent_parts(&profile, None, None, &sid);
+                let natif = meta.native_session_id.clone();
                 session
                     .spawn_agent(&cmd, &envs, meta.native_session_id, true, self.mcp_servers(&sid))
                     .await?;
+                info!(
+                    "session attachée: {sid} (agent={agent}, natif={})",
+                    natif.as_deref().unwrap_or_default()
+                );
                 Ok(json!({"session": sid}))
             }
             ReqKind::ListNativeSessions { session } => {
@@ -607,6 +620,7 @@ impl Daemon {
                     )
                     .await
                     .context("attach de la session forkée")?;
+                info!("session forkée: {sid2} (source={session})");
                 Ok(json!({ "session": sid2 }))
             }
             ReqKind::ResumeSession { session, native_id } => {
@@ -652,6 +666,7 @@ impl Daemon {
                     self.mcp_servers(&session),
                 )
                 .await?;
+                info!("session reprise: {session}");
                 Ok(json!({"session": session}))
             }
             ReqKind::ClearSession { session } => {
@@ -686,6 +701,7 @@ impl Daemon {
                     s.mark_dead();
                     return Err(e.context("respawn après clear"));
                 }
+                info!("contexte effacé: {session}");
                 Ok(json!({"session": session}))
             }
             ReqKind::Send {
@@ -1123,11 +1139,13 @@ impl Daemon {
                 s.emit_ephemeral(proto::EventKind::SessionDeleted {});
                 self.sessions.write().await.remove(&session);
                 let _ = std::fs::remove_dir_all(&s.dir);
+                info!("session supprimée: {session}");
                 Ok(json!({"deleted": session}))
             }
             ReqKind::KillSession { session } => {
                 let s = self.get_session(&session).await?;
                 s.kill().await;
+                info!("agent tué: {session}");
                 Ok(json!({"killed": session}))
             }
             // Subscribe est géré par la couche connexion (streaming)
@@ -1405,7 +1423,7 @@ fn zip_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
         let rd = match std::fs::read_dir(&dir) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("zip: skip {}: {e}", dir.display());
+                warn!("zip: skip {}: {e}", dir.display());
                 continue;
             }
         };
@@ -1448,11 +1466,11 @@ fn zip_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
                     match zw.start_file(&rel, opts) {
                         Ok(()) => {
                             if let Err(e) = std::io::copy(&mut f, &mut zw) {
-                                eprintln!("zip: {rel}: {e}");
+                                warn!("zip: {rel}: {e}");
                                 let _ = zw.abort_file();
                             }
                         }
-                        Err(e) => eprintln!("zip: {rel}: {e}"),
+                        Err(e) => warn!("zip: {rel}: {e}"),
                     }
                 }
             }
@@ -1497,11 +1515,13 @@ pub async fn accept_unix(daemon: Arc<Daemon>, listener: tokio::net::UnixListener
                 let d = Arc::clone(&daemon);
                 tokio::spawn(async move {
                     let s: UnixStream = stream;
-                    let _ = d.serve_conn(s).await;
+                    if let Err(e) = d.serve_conn(s).await {
+                        debug!("conn unix close: {e:#}");
+                    }
                 });
             }
             Err(e) => {
-                eprintln!("accept unix: {e}");
+                warn!("accept unix: {e}");
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
@@ -1516,11 +1536,13 @@ pub async fn accept_tcp(daemon: Arc<Daemon>, listener: tokio::net::TcpListener) 
                 let _ = stream.set_nodelay(true);
                 let d = Arc::clone(&daemon);
                 tokio::spawn(async move {
-                    let _ = d.serve_conn(stream).await;
+                    if let Err(e) = d.serve_conn(stream).await {
+                        debug!("conn tcp close: {e:#}");
+                    }
                 });
             }
             Err(e) => {
-                eprintln!("accept tcp: {e}");
+                warn!("accept tcp: {e}");
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
@@ -1542,11 +1564,11 @@ pub async fn janitor(daemon: Arc<Daemon>) {
             daemon.sessions.read().await.values().cloned().collect();
         for s in &sessions {
             if let Err(e) = s.journal.compact_if_needed(&s.dir, journal_max, journal_keep) {
-                eprintln!("compact {}: {e}", s.meta_snapshot().id);
+                warn!("compact {}: {e}", s.meta_snapshot().id);
             }
             match journal::purge_blobs(&s.dir, blob_max) {
-                Ok(n) if n > 0 => eprintln!("blobs purgés {}: {n}", s.meta_snapshot().id),
-                Err(e) => eprintln!("purge blobs {}: {e}", s.meta_snapshot().id),
+                Ok(n) if n > 0 => info!("blobs purgés {}: {n}", s.meta_snapshot().id),
+                Err(e) => warn!("purge blobs {}: {e}", s.meta_snapshot().id),
                 _ => {}
             }
         }
@@ -1567,9 +1589,9 @@ pub async fn janitor(daemon: Arc<Daemon>) {
                     s.emit_ephemeral(proto::EventKind::SessionDeleted {});
                     daemon.sessions.write().await.remove(&id);
                     if let Err(e) = std::fs::remove_dir_all(&s.dir) {
-                        eprintln!("purge session {id}: {e}");
+                        warn!("purge session {id}: {e}");
                     } else {
-                        eprintln!("session purgée (inactivité): {id}");
+                        info!("session purgée (inactivité): {id}");
                     }
                 }
             }
