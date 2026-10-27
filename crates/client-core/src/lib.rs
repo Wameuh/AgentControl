@@ -24,8 +24,8 @@ type BoxedWriter = Box<dyn AsyncWrite + Unpin + Send>;
 
 // ---------------------------------------------------------------------------
 // Mini-log rotatif à niveaux : ~/.agentcontrol/logs/client.log (+ stderr).
-// Format : [horodatage ISO] [NIVEAU] message. Rotation à 1 MiB →
-// client.log.1 … client.log.3 (borné à ~4 MiB au total).
+// Format : [horodatage ISO] [NIVEAU] fichier.rs:ligne message. Rotation à
+// 1 MiB → client.log.1 … client.log.3 (borné à ~4 MiB au total).
 // Seuil via env `AGENTCONTROL_LOG=debug|info|warn|error`
 // (défaut : debug en build dev, info en release).
 // ---------------------------------------------------------------------------
@@ -169,13 +169,27 @@ fn logfile() -> &'static std::sync::Mutex<LogWriter> {
     LOGFILE.get_or_init(|| std::sync::Mutex::new(LogWriter::open(log_path())))
 }
 
-/// Ajoute une ligne de log (horodatée + niveau) dans client.log + stderr,
-/// si `level` atteint le seuil `AGENTCONTROL_LOG`.
+/// Ajoute une ligne de log (horodatée + niveau + file:line de l'appelant)
+/// dans client.log + stderr, si `level` atteint le seuil `AGENTCONTROL_LOG`.
+#[track_caller]
 pub fn log(level: Level, msg: impl std::fmt::Display) {
+    let loc = std::panic::Location::caller();
+    log_at(level, loc.file(), loc.line(), msg);
+}
+
+/// Variante à source explicite — pour les lignes dont la vraie origine
+/// n'est pas ce callsite (frontend via `log_write` : `file` vide → pas de
+/// file:line, le message porte le préfixe `ui:`).
+pub fn log_at(level: Level, file: &str, line_no: u32, msg: impl std::fmt::Display) {
     if level < min_level() {
         return;
     }
-    let line = format!("[{}] [{}] {}", proto::now_iso(), level.as_str(), msg);
+    let src = if file.is_empty() {
+        String::new()
+    } else {
+        format!(" {file}:{line_no}")
+    };
+    let line = format!("[{}] [{}]{} {}", proto::now_iso(), level.as_str(), src, msg);
     eprintln!("{line}");
     if let Ok(mut w) = logfile().lock() {
         w.write_line(&line);

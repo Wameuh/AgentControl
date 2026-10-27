@@ -262,17 +262,24 @@ export class ConnectDialog {
     return ({ debug: 0, info: 1, warn: 2, error: 3 } as Record<string, number>)[l] ?? 1;
   }
 
-  /** Tail de client.log filtré par niveau et coloré (lignes `[iso] [LVL] msg` ;
-   *  les lignes anciennes sans tag de niveau sont traitées en info). */
+  /** Tail de client.log filtré par niveau et coloré (lignes
+   *  `[iso] [LVL] fichier.rs:NN msg` ; les lignes anciennes sans tag de
+   *  niveau sont traitées en info). */
   private async renderLog() {
     const min = this.logRank(($("log-level") as HTMLSelectElement).value);
     const txt = await invoke<string>("log_tail", { n: 400 }).catch(() => "");
     const rows: string[] = [];
     for (const line of txt.split("\n")) {
-      const m = line.match(/^\[[^\]]*\] \[(DEBUG|INFO|WARN|ERROR)\]/);
-      if (this.logRank(m?.[1]?.toLowerCase() ?? "info") < min) continue;
-      const cls = m ? ` ll-${m[1].toLowerCase()}` : "";
-      rows.push(`<span class="ll${cls}">${esc(line)}</span>`);
+      const m = line.match(/^(\[[^\]]*\] \[(DEBUG|INFO|WARN|ERROR)\])(?: (\S+:\d+))?/);
+      if (this.logRank(m?.[2]?.toLowerCase() ?? "info") < min) continue;
+      const cls = m ? ` ll-${m[2].toLowerCase()}` : "";
+      let body = esc(line);
+      if (m) {
+        body = `<span class="ll-meta">${esc(m[1])}</span>`;
+        if (m[3]) body += ` <span class="ll-meta">${esc(m[3])}</span>`;
+        body += esc(line.slice(m[0].length));
+      }
+      rows.push(`<span class="ll${cls}">${body}</span>`);
     }
     const v = $("log-view");
     v.innerHTML = rows.join("\n");

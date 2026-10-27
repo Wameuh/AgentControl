@@ -60,10 +60,11 @@ pub(crate) fn log_tail(n: Option<usize>) -> String {
 
 /// Écrit une ligne dans client.log depuis le frontend (erreurs UI,
 /// diagnostics webview — préfixées `ui:`). Niveau tolérant, info si inconnu.
+/// file vide : la callsite Rust ne dirait rien d'utile sur la source TS.
 #[tauri::command]
 pub(crate) fn log_write(level: &str, msg: &str) {
     let lv = client_core::Level::parse(level).unwrap_or(client_core::Level::Info);
-    client_core::log(lv, format!("ui: {msg}"));
+    client_core::log_at(lv, "", 0, format!("ui: {msg}"));
 }
 
 /// Icône fenêtre dynamique selon l'état agrégé des agents :

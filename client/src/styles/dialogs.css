@@ -59,6 +59,7 @@ dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 0; pad
 #log-view .ll-debug { color: var(--dim); }
 #log-view .ll-warn { color: var(--warn); }
 #log-view .ll-error { color: var(--err); }
+#log-view .ll-meta { color: var(--dim); }
 
 /* Spinner */
 .spin::after {
