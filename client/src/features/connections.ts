@@ -86,9 +86,12 @@ export class ConnectionManager {
     this.markAlive(ck);
   }
 
-  /** Tooltip du badge selon l'état (avec prochain essai / nb de tentatives). */
+  /** Tooltip du badge selon l'état (avec prochain essai / nb de
+   *  tentatives). `conn` "gone" (déconnectée à la demande) → libellé
+   *  dédié : elle ne réessaiera jamais toute seule. */
   tip(st: ConnLive, conn = ""): string {
     if (st === "ok") return t("conn_ok");
+    if (conn && this.gone.has(conn)) return t("conn_off");
     if (st === "reconnecting") {
       const n = this.attempts.get(conn) ?? 0;
       return t("reconnecting") + (n > 1 ? ` (×${n})` : "");
@@ -226,6 +229,11 @@ export class ConnectionManager {
     this.cfg.delete(conn);
     this.live.delete(conn);
     this.delay.delete(conn);
+    this.nextAt.delete(conn);
+    this.attempts.delete(conn);
+    // La conn sort de cfg : renderState (sb-left/chip) la retire sans
+    // attendre une transition d'état ultérieure.
+    this.renderState();
     // Re-fetch + purge des entrées sauvegardées (une conn sauvegardée pendant
     // la session courante resterait sinon dans connections.json et
     // ressusciterait à l'autoconnect).
@@ -287,9 +295,12 @@ export class ConnectionManager {
         esc(bad.length === 1 ? connLabel(bad[0][0])
           : allRe ? t("reconnecting") : t("conns_down", { n: bad.length }));
       chip.className = "badge " + (allRe ? "warn" : "st-dead");
+      // tip() suffixe déjà « — reconnecter » sur les conns down ; le chip
+      // n'ajoute son propre rappel que si tout est « en essai » (cliquer
+      // reste un retry immédiat).
       chip.title =
         bad.map(([k, s]) => `${connLabel(k)}: ${this.tip(s, k)}`).join("\n") +
-        ` — ${t("retry_now")}`;
+        (allRe ? ` — ${t("retry_now")}` : "");
     }
     // Statusbar : résumé des conns suivies (● ok, ⟳ essai, ● hors ligne,
     // ◌ déconnectée à la demande) — slot sb-left sinon inutilisé.

@@ -56,11 +56,10 @@ export class ConnectDialog {
 
   /** Dialogue modal pendant install/update du démon distant — liste
    *  d'étapes mises à jour par les events `daemon-step` du backend. */
-  private daemonShow(title: string, msg: string, steps: string[] = [], note = "") {
+  private daemonShow(title: string, msg: string, steps: string[] = []) {
     const d = $("dlg-daemon") as HTMLDialogElement;
     $("dlg-daemon-title").textContent = title;
     $("dlg-daemon-msg").textContent = msg;
-    $("dlg-daemon-note").textContent = note;
     const ul = $("dlg-daemon-steps");
     ul.innerHTML = "";
     this.stepEls.clear();
@@ -173,6 +172,8 @@ export class ConnectDialog {
     try {
       const res = await invoke<string>("ensure_daemon", daemonParams(cfg, tag));
       this.daemonFinish();
+      // Laisser voir l'état « toutes étapes ✓ » un instant avant de fermer.
+      await new Promise((r) => setTimeout(r, 450));
       return res;
     } finally {
       this.daemonClose();
@@ -530,10 +531,14 @@ export class ConnectDialog {
         this.saved = conns;
         if (localStorage.getItem("ac-autoconnect") === "0") return;
         // Les échecs tombent en toast (dialogue fermé) ; l'écran vide
-        // affiche "connexion à X…" le temps du boot.
-        this.connecting(conns.map((c) => c.host ?? c.addr ?? c.path ?? "local"));
+        // affiche "connexion à X…" — la liste rétrécit au fil des
+        // connexions réussies (une lente ne maintient pas les rapides).
+        const hosts = conns.map((c) => c.host ?? c.addr ?? c.path ?? "local");
+        this.connecting(hosts);
         for (const c of conns) {
           await this.connect({ ...c }).catch((e) => this.report(String(e)));
+          hosts.splice(hosts.indexOf(c.host ?? c.addr ?? c.path ?? "local"), 1);
+          this.connecting(hosts);
         }
         this.connecting([]);
       })

@@ -87,8 +87,6 @@ dialog input[type="checkbox"]:focus-visible {
 .daemon-body { flex:1; min-width:0; }
 .daemon-body p { margin:0 0 10px; }
 #dlg-daemon-msg { font-size:13px; }
-#dlg-daemon-note { font-size:11.5px; color:var(--dim); margin-top:8px; }
-#dlg-daemon-note:empty { display:none; }
 #dlg-daemon-steps { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:5px; }
 #dlg-daemon-steps:empty { display:none; }
 #dlg-daemon-steps li { display:flex; gap:9px; align-items:baseline; font-size:12.5px; color:var(--dim); }

@@ -37,6 +37,16 @@ const TOAST_TTL: Record<NoticeLevel, number> = {
   warn: 8_000,
   error: 0, // persistant
 };
+// Timer auto-dismiss par toast — annulé si le toast est expulsé par le
+// cap ou fermé au ✕ (sinon il tirerait remove() sur un nœud détaché).
+const toastTimers = new WeakMap<Element, ReturnType<typeof setTimeout>>();
+const disarm = (el: Element) => {
+  const t0 = toastTimers.get(el);
+  if (t0) {
+    clearTimeout(t0);
+    toastTimers.delete(el);
+  }
+};
 
 export function notify(level: NoticeLevel, msg: string) {
   const box = $("toasts");
@@ -49,16 +59,15 @@ export function notify(level: NoticeLevel, msg: string) {
   x.className = "toast-x";
   x.textContent = "✕";
   d.append(txt, x);
-  let timer: ReturnType<typeof setTimeout> | undefined;
   const arm = (ms: number) => {
-    if (ms > 0) timer = setTimeout(() => d.remove(), ms);
+    if (ms > 0) toastTimers.set(d, setTimeout(() => d.remove(), ms));
   };
   arm(TOAST_TTL[level]);
   // Survol : le compte à rebours est gelé puis repart de zéro au départ.
-  d.addEventListener("mouseenter", () => timer && clearTimeout(timer));
+  d.addEventListener("mouseenter", () => disarm(d));
   d.addEventListener("mouseleave", () => arm(TOAST_TTL[level]));
   x.onclick = () => {
-    if (timer) clearTimeout(timer);
+    disarm(d);
     d.remove();
   };
   box.appendChild(d);
@@ -67,7 +76,9 @@ export function notify(level: NoticeLevel, msg: string) {
     const victim =
       [...box.children].find((c) => !c.classList.contains("t-error")) ??
       box.firstElementChild;
-    victim?.remove();
+    if (!victim) break;
+    disarm(victim);
+    victim.remove();
   }
   logUi(level === "error" ? "error" : level === "warn" ? "warn" : "info", msg);
 }
