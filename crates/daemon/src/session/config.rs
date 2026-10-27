@@ -68,6 +68,7 @@ impl Session {
                 // Fallback : beaucoup d'agents exposent /model en slash command
                 self.send_prompt(&format!("/model {model}"), false, false)
                     .await
+                    .map(|_| ())
             }
         }
     }

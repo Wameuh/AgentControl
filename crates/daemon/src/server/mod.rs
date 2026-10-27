@@ -138,7 +138,7 @@ impl Daemon {
     /// Une session à reprendre : même mécanique que ResumeSession (journal
     /// local = source de vérité → skip_replay), puis prompt "continue
     /// please" livré comme un envoi utilisateur.
-    async fn resume_after_crash(&self, sid: &str) {
+    async fn resume_after_crash(self: &Arc<Self>, sid: &str) {
         let Ok(s) = self.get_session(sid).await else {
             return; // purgée entre le chargement et la reprise
         };
@@ -148,7 +148,7 @@ impl Daemon {
         // client est silencieux : sauter toute la reprise laisserait
         // l'agent relancé sans consigne. Attendre la fin d'un spawn en vol
         // puis livrer le prompt si la session finit idle.
-        if s.is_alive() && Self::wait_revived_or_done(&s, sid).await {
+        if s.is_alive() && self.wait_revived_or_done(&s, sid).await {
             return;
         }
         let meta = s.meta_snapshot();
@@ -169,8 +169,10 @@ impl Daemon {
         );
         // Dernier re-check : l'essai suivant d'un spawn client peut
         // repartir dans la fenêtre (sleep 800 ms entre ses essais) —
-        // spawn_agent n'a pas de sérialisation entre appelants.
-        if s.is_alive() && Self::wait_revived_or_done(&s, sid).await {
+        // le spawn_lock de spawn_agent empêche le doublon, mais le
+        // prompt de reprise doit quand même être livré si le spawn
+        // client finit idle plutôt que sauter toute la reprise.
+        if s.is_alive() && self.wait_revived_or_done(&s, sid).await {
             return;
         }
         match s
@@ -179,7 +181,7 @@ impl Daemon {
         {
             Ok(()) => {
                 info!("{sid}: agent relancé — envoi « {AUTO_RESUME_PROMPT} »");
-                Self::send_resume_prompt(&s, sid).await;
+                self.send_resume_prompt(&s, sid).await;
             }
             Err(e) => {
                 warn!("{sid}: reprise auto échouée: {e:#}");
@@ -198,7 +200,7 @@ impl Daemon {
     /// rejeuée) quelqu'un la pilote → ne rien envoyer.
     /// Renvoie vrai quand la session est traitée — faux si l'agent est
     /// mort entre-temps : l'appelant reprend la main avec son propre spawn.
-    async fn wait_revived_or_done(s: &Arc<Session>, sid: &str) -> bool {
+    async fn wait_revived_or_done(self: &Arc<Self>, s: &Arc<Session>, sid: &str) -> bool {
         let mut ev_rx = s.events_tx.subscribe();
         let deadline =
             tokio::time::Instant::now() + std::time::Duration::from_secs(120);
@@ -217,7 +219,7 @@ impl Daemon {
         match st.as_str() {
             "idle" => {
                 info!("{sid}: déjà relancée — envoi « {AUTO_RESUME_PROMPT} »");
-                Self::send_resume_prompt(s, sid).await;
+                self.send_resume_prompt(s, sid).await;
             }
             "interrupted" => {
                 // Le cas que la reprise auto devait couvrir : visible
@@ -231,15 +233,21 @@ impl Daemon {
 
     /// Prompt « continue please » de la reprise post-crash : le sysline
     /// qui explique le contexte puis l'envoi utilisateur lui-même.
-    async fn send_resume_prompt(s: &Arc<Session>, sid: &str) {
+    async fn send_resume_prompt(self: &Arc<Self>, s: &Arc<Session>, sid: &str) {
         s.emit(proto::EventKind::System {
             text: "démon relancé après un arrêt brutal — reprise du travail…".into(),
         });
-        if let Err(e) = s.send_prompt(AUTO_RESUME_PROMPT, false, false).await {
-            warn!("{sid}: prompt de reprise non délivré: {e:#}");
-            s.emit(proto::EventKind::Error {
-                message: format!("prompt de reprise: {e:#}"),
-            });
+        match s.send_prompt(AUTO_RESUME_PROMPT, false, false).await {
+            // Rendormie entre le respawn et l'envoi : le prompt
+            // en file déclenche quand même le réveil.
+            Ok(true) => self.spawn_wake(s, sid),
+            Ok(false) => {}
+            Err(e) => {
+                warn!("{sid}: prompt de reprise non délivré: {e:#}");
+                s.emit(proto::EventKind::Error {
+                    message: format!("prompt de reprise: {e:#}"),
+                });
+            }
         }
     }
 

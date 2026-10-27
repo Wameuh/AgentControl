@@ -252,6 +252,16 @@ impl Daemon {
                     None => false,
                 };
                 if rebind {
+                    // Rebind sur un agent vivant OU un spawn en vol
+                    // (spawning sans stdin_tx encore posé : le kill est
+                    // sans effet direct, mais le bump de génération fait
+                    // bayer l'essai en cours) — sinon la garde
+                    // anti-doublon de spawn_agent (is_alive après
+                    // spawn_lock) sauterait le respawn et la session
+                    // resterait sur l'ancienne session native.
+                    if s.is_alive() || s.is_spawning() {
+                        s.kill_for_respawn().await;
+                    }
                     // Comme clear_context : l'event de contrôle part
                     // dans l'ancienne numérotation, avant le reset.
                     s.emit_ephemeral(EventKind::SessionCleared {});
@@ -327,28 +337,7 @@ impl Daemon {
                     {
                         s.enqueue_for_spawn(&text, force);
                     } else if s.enqueue_for_wake(&text, force) {
-                        let d = Arc::clone(self);
-                        let t = Arc::clone(&s);
-                        let sid = session.clone();
-                        tokio::spawn(async move {
-                            let r = d.wake_session(&sid).await;
-                            t.wake_done();
-                            if let Err(e) = r {
-                                if format!("{e:#}").contains("endormie") {
-                                    // Rendormie pendant le réveil — la
-                                    // ligne "session endormie" l'explique.
-                                    t.emit(EventKind::System {
-                                        text: "réveil interrompu — session rendormie".into(),
-                                    });
-                                } else {
-                                    // Retour à "asleep" (fait par respawn)
-                                    // → le prochain envoi retentera.
-                                    t.emit(EventKind::Error {
-                                        message: format!("réveil impossible: {e:#}"),
-                                    });
-                                }
-                            }
-                        });
+                        self.spawn_wake(&s, &session);
                     }
                     return Ok(json!({
                         "queued": true,
@@ -358,8 +347,11 @@ impl Daemon {
                 }
                 // send_prompt ne fait qu'enfiler (livraison en tâche de
                 // fond) : l'attendre garantit une file à jour quand le
-                // client la relit après la réponse.
-                s.send_prompt(&text, force, steer).await?;
+                // client la relit après la réponse. Le booléen couvre la
+                // course "endormie entre le check ci-dessus et ici".
+                if s.send_prompt(&text, force, steer).await? {
+                    self.spawn_wake(&s, &session);
+                }
                 Ok(json!({"queued": true, "queue": s.queue_snapshot()}))
     }
 
@@ -370,9 +362,47 @@ impl Daemon {
                 if s.meta_snapshot().state == "asleep" {
                     return Ok(json!({"session": session, "already": true}));
                 }
+                // Rien à endormir sans process (dead/interrupted) : dead →
+                // asleep rendrait une session tuée volontairement
+                // auto-réveillable au prochain envoi — ça contournerait la
+                // sémantique de kill_session, en particulier via l'outil
+                // MCP utilisable par un pair.
+                if !s.is_alive() && !s.is_spawning() && !s.is_waking() {
+                    anyhow::bail!("agent not running — rien à endormir");
+                }
                 s.sleep().await;
                 info!("session endormie: {session}");
                 Ok(json!({"session": session}))
+    }
+
+    /// Déclenche le réveil d'une session endormie en tâche de fond —
+    /// appelé par le gagnant de wake_begin (les envois concurrents
+    /// s'enfilent, dedoublonnés par `waking`). Pub(super) : les prompts
+    /// pairs et la reprise auto peuvent tomber sur une session qui vient
+    /// de s'endormir et doivent déclencher le même réveil.
+    pub(super) fn spawn_wake(self: &Arc<Self>, s: &Arc<Session>, session: &str) {
+        let d = Arc::clone(self);
+        let t = Arc::clone(s);
+        let sid = session.to_string();
+        tokio::spawn(async move {
+            let r = d.wake_session(&sid).await;
+            t.wake_done();
+            if let Err(e) = r {
+                if format!("{e:#}").contains("endormie") {
+                    // Rendormie pendant le réveil — la ligne
+                    // "session endormie" l'explique.
+                    t.emit(EventKind::System {
+                        text: "réveil interrompu — session rendormie".into(),
+                    });
+                } else {
+                    // Retour à "asleep" (fait par respawn) → le
+                    // prochain envoi retentera.
+                    t.emit(EventKind::Error {
+                        message: format!("réveil impossible: {e:#}"),
+                    });
+                }
+            }
+        });
     }
 
     /// Réveil d'une session endormie (déclenché par un envoi user) :
@@ -394,6 +424,10 @@ impl Daemon {
     pub(super) async fn respawn(&self, s: &Arc<Session>, skip_replay: bool) -> Result<()> {
         let meta = s.meta_snapshot();
         let was_asleep = s.leave_asleep();
+        // Génération avant le spawn : un kill/rebind intervenu (clear,
+        // sleep, rebind) la change — la session ne doit alors PAS être
+        // rendormie sur échec, l'état appartient au nouveau cycle.
+        let gen0 = s.generation();
         let profile = self
             .agents
             .get(&meta.agent)
@@ -414,7 +448,7 @@ impl Daemon {
                 self.mcp_servers(&meta.id),
             )
             .await;
-        if r.is_err() && was_asleep {
+        if r.is_err() && was_asleep && s.generation() == gen0 {
             s.mark_asleep();
         }
         r

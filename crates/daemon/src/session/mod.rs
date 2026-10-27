@@ -89,6 +89,12 @@ pub struct Session {
     /// être appelé libéralement (hook post-spawn, wake_done, end_compact)
     /// sans risque de deux runners livrant la file en parallèle.
     runner_active: std::sync::atomic::AtomicBool,
+    /// Sérialise spawn_agent (tentatives + handshake) : un sleep peut
+    /// interrompre un réveil en vol et un nouvel envoi relancer un
+    /// respawn concurrent — deux spawn_agent_once parallèles se
+    /// marcheraient sur stdin_tx/child (handshakes ACP entremêlés).
+    /// Couvre aussi resume_session pendant un spawn.
+    spawn_lock: tokio::sync::Mutex<()>,
     child: Mutex<Option<Child>>,
 }
 
@@ -135,6 +141,7 @@ impl Session {
             waking: std::sync::atomic::AtomicBool::new(false),
             spawning: std::sync::atomic::AtomicBool::new(false),
             runner_active: std::sync::atomic::AtomicBool::new(false),
+            spawn_lock: tokio::sync::Mutex::new(()),
             child: Mutex::new(None),
         }))
     }

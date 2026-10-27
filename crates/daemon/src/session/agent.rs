@@ -40,6 +40,18 @@ impl Session {
         skip_replay: bool,
         mcp_servers: Value,
     ) -> Result<()> {
+        // Un seul spawn à la fois : un sleep pendant un réveil en vol
+        // libère `waking`, et un nouvel envoi peut alors lancer un
+        // second respawn — sans le lock les deux spawn_agent_once
+        // s'exécuteraient en parallèle (handshakes ACP écrits dans le
+        // stdin l'un de l'autre, stdin_tx/child en last-writer-wins).
+        let _guard = self.spawn_lock.lock().await;
+        // Le spawn attendu derrière le lock a livré un agent vivant :
+        // respawner par-dessus le tuerait pour rien (deuxième réveil,
+        // resume pendant un spawn).
+        if self.is_alive() {
+            return Ok(());
+        }
         // Nouveau process = nouveau cycle de livraison : retenue compact
         // et flag busy d'un éventuel tour mort avec l'ancien process.
         self.take_compact_hold();
@@ -51,6 +63,16 @@ impl Session {
             .spawn_attempts(command, envs, resume_native_id, skip_replay, mcp_servers)
             .await;
         self.spawning.store(false, Ordering::SeqCst);
+        // Drain post-spawn ici, flag retombé : lancé depuis
+        // spawn_attempts (avant le store) la tâche pouvait casser sur
+        // "spawn en vol" et les prompts en file n'étaient jamais livrés
+        // (resume explicite, /clear — pas de second déclencheur).
+        if r.is_ok()
+            && self.accepting_prompts()
+            && !self.prompt_queue.lock().unwrap().is_empty()
+        {
+            self.spawn_drain();
+        }
         r
     }
 
@@ -65,12 +87,23 @@ impl Session {
         let mut last = anyhow::anyhow!("spawn not attempted");
         let sid = self.meta_snapshot().id;
         info!("[{sid}] spawn agent: {}", command.join(" "));
+        // Génération attendue par tentative : spawn_agent_once incrémente
+        // spawn_gen à son entrée. Un kill (sleep/clear/rebind) entre deux
+        // essais la ferait dépasser — retenter produirait un agent sur un
+        // contexte déjà supplanté.
+        let mut expect = self.spawn_gen.load(Ordering::SeqCst);
         for attempt in 0..2 {
             // Une mise en sommeil pendant le spawn (ou pendant le backoff
             // d'un essai raté) arrête la boucle — pas de respawn : la
-            // session appartient désormais à l'état "asleep".
-            if self.meta_snapshot().state == "asleep" {
+            // session appartient désormais à l'état "asleep". Ne vaut que
+            // pour les reprises (session/load) : un /clear sur session
+            // endormie doit repartir sur un contexte neuf.
+            if resume_native_id.is_some() && self.meta_snapshot().state == "asleep" {
                 return Err(anyhow::anyhow!("session endormie pendant le spawn"));
+            }
+            expect += 1;
+            if self.spawn_gen.load(Ordering::SeqCst) >= expect {
+                return Err(anyhow::anyhow!("spawn supplanté par un kill/rebind"));
             }
             match self
                 .spawn_agent_once(
@@ -82,22 +115,18 @@ impl Session {
                 )
                 .await
             {
-                Ok(()) => {
-                    // Des prompts restés en file (session morte puis
-                    // reprise) sont livrés au nouvel agent — seulement si
-                    // le process est encore là (un sleep a pu le tuer
-                    // pendant le handshake : le drain échouerait en
-                    // "agent not running").
-                    if self.is_alive() && !self.prompt_queue.lock().unwrap().is_empty() {
-                        let s = Arc::clone(self);
-                        tokio::spawn(async move { s.drain_queue().await });
-                    }
-                    return Ok(());
-                }
+                Ok(()) => return Ok(()),
                 Err(e) => {
                     warn!("[{sid}] spawn échoué (essai {}): {e:#}", attempt + 1);
                     last = e;
                     if attempt == 0 {
+                        // Endormie pendant l'essai : pas de ligne "retry"
+                        // trompeuse ni d'attente pour un arrêt volontaire.
+                        if self.meta_snapshot().state == "asleep" {
+                            return Err(anyhow::anyhow!(
+                                "session endormie pendant le spawn"
+                            ));
+                        }
                         self.emit(EventKind::System {
                             text: format!("agent exited au init — retry ({last:#})"),
                         });
@@ -185,13 +214,14 @@ impl Session {
         }
 
         *self.child.lock().unwrap() = Some(child);
-        // Un sleep a pu atterrir pendant Command::spawn — avant que le
-        // child soit posé, son kill n'avait rien à prendre : le process
-        // serait resté vivant avec l'état "asleep". Kill + bail ; la
-        // boucle de retry ne retentera pas (check asleep en tête).
-        if self.meta_snapshot().state == "asleep" {
+        // Un kill a pu atterrir pendant Command::spawn (sleep, clear,
+        // rebind) — avant que le child soit posé, il n'y avait rien à
+        // prendre : le process serait resté vivant sur un contexte
+        // supplanté. Kill + bail ; la boucle ne retentera pas (check de
+        // génération en tête).
+        if self.spawn_gen.load(Ordering::SeqCst) != gen {
             self.kill_for_respawn().await;
-            bail!("session endormie pendant le spawn");
+            bail!("spawn supplanté (kill pendant le spawn)");
         }
 
         // ACP handshake
@@ -653,19 +683,24 @@ impl Session {
         self.set_state("asleep");
     }
 
-    /// Mise en sommeil : kill silencieux (génération invalidée — ni
-    /// "agent exited" ni dead), état persisté "asleep". La session native,
-    /// le journal et la file de prompts sont conservés — le prochain envoi
-    /// (user ou peer) la réveillera via session/load. La retenue compact
-    /// est levée : sinon son timer relancerait un drain sur un agent mort
-    /// ("prompt failed" en rafale). `waking` est relâché : un réveil en
-    /// vol voit son spawn s'arrêter au check "asleep" de la boucle.
+    /// Mise en sommeil : état persisté "asleep" posé AVANT le kill —
+    /// accepting_prompts() rend faux dès ici, donc un envoi tombé dans
+    /// la fenêtre s'enfile pour le réveil au lieu d'être livré à un
+    /// agent en train de mourir ou de bailer "agent not running". Kill
+    /// silencieux (génération invalidée — ni "agent exited" ni dead) ;
+    /// la session native, le journal et la file de prompts sont
+    /// conservés — le prochain envoi (user ou peer) la réveillera via
+    /// session/load. La retenue compact est levée : sinon son timer
+    /// relancerait un drain sur un agent mort ("prompt failed" en
+    /// rafale). `waking` est relâché : un réveil en vol s'arrête au
+    /// check "asleep" de la boucle, et un nouvel envoi déclenche un
+    /// nouveau réveil (sérialisé par spawn_lock).
     pub async fn sleep(&self) {
+        self.set_state("asleep");
         self.waking.store(false, Ordering::SeqCst);
         self.take_compact_hold();
         self.kill_for_respawn().await;
         self.flush_text();
-        self.set_state("asleep");
         self.emit(EventKind::System {
             text: "session endormie — l'agent sera relancé au prochain message".into(),
         });
@@ -685,6 +720,12 @@ impl Session {
 
     pub fn is_alive(&self) -> bool {
         self.stdin_tx.lock().unwrap().is_some()
+    }
+
+    /// Génération courante des spawns — comparée avant/après une
+    /// opération pour détecter un kill/rebind intervenu entre-temps.
+    pub fn generation(&self) -> u64 {
+        self.spawn_gen.load(Ordering::SeqCst)
     }
 
     /// Vrai si l'état persisté implique un tour de travail en vol au

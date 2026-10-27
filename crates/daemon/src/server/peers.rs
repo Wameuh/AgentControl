@@ -38,28 +38,32 @@ impl Daemon {
                     fm.title, from, fm.agent, text, from
                 );
                 let steer = delivery == "steer";
-                if target.is_alive() {
+                // Livraison en tâche de fond : si send_peer_prompt
+                // signale que la cible a basculé "asleep" entre le check
+                // ci-dessous et l'enfilement, le réveil est déclenché
+                // ici (dedoublonné par `waking`).
+                let deliver = |wrapped: String, steer: bool| {
+                    let d = Arc::clone(self);
                     let t = Arc::clone(&target);
+                    let sid = session.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = t.send_peer_prompt(&wrapped, steer).await {
-                            t.emit(EventKind::Error {
+                        match t.send_peer_prompt(&wrapped, steer).await {
+                            Ok(true) => d.spawn_wake(&t, &sid),
+                            Ok(false) => {}
+                            Err(e) => t.emit(EventKind::Error {
                                 message: format!("peer send: {e:#}"),
-                            });
+                            }),
                         }
                     });
+                };
+                if target.is_alive() {
+                    deliver(wrapped, steer);
                     Ok(json!({"queued": true}))
                 } else if target.is_waking() || target.is_spawning() {
                     // Réveil déjà lancé par un envoi user, ou spawn déjà
                     // en vol (init, resume, /clear) : enfiler — le drain
                     // post-spawn livrera (pas de second spawn).
-                    let t = Arc::clone(&target);
-                    tokio::spawn(async move {
-                        if let Err(e) = t.send_peer_prompt(&wrapped, steer).await {
-                            t.emit(EventKind::Error {
-                                message: format!("peer send: {e:#}"),
-                            });
-                        }
-                    });
+                    deliver(wrapped, steer);
                     Ok(json!({"queued": true, "resuming": true}))
                 } else {
                     // Cible morte ou endormie → auto-resume puis livraison.
@@ -283,14 +287,16 @@ impl Daemon {
     async fn resume_and_deliver(&self, session: &str, wrapped: String, steer: bool) -> Result<()> {
         let s = self.get_session(session).await?;
         if !s.wake_begin() {
-            return s.send_peer_prompt(&wrapped, steer).await;
+            s.send_peer_prompt(&wrapped, steer).await?;
+            return Ok(());
         }
         let r = async {
             s.emit(EventKind::System {
                 text: "agent relancé (message agent→agent)".into(),
             });
             self.respawn(&s, true).await?;
-            s.send_peer_prompt(&wrapped, steer).await
+            s.send_peer_prompt(&wrapped, steer).await?;
+            Ok(())
         }
         .await;
         s.wake_done();
