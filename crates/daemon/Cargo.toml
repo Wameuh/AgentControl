@@ -1,6 +1,6 @@
 [package]
 name = "agentcontrol-daemon"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 
 [[bin]]
@@ -21,3 +21,7 @@ toml = "0.8"
 base64 = "0.22"
 # deflate pur-Rust (miniz_oxide) — pas de compilateur C requis
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# Self-update : download https (rustls — pas d'openssl/C) + tar.gz
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+flate2 = "1"
+tar = "0.4"

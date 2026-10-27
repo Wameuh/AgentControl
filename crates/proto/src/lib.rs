@@ -550,6 +550,16 @@ pub enum ReqKind {
         pr: u64,
     },
     DaemonStatus,
+    /// Auto-update du démon vers la release `version` demandée par le
+    /// client (ex. "0.5.0" → tag v0.5.0 — jamais « latest » : le démon
+    /// doit coller à la version du client, pas la dépasser). Le démon
+    /// télécharge `agentcontrol-server-<arch>-linux.tar.gz`, remplace
+    /// son binaire (rename atomique) puis sort pour être relancé par
+    /// son superviseur — le marqueur pid conservé déclenche la reprise
+    /// auto des sessions au boot. Réponse : `{updated, path,
+    /// restarting}` — `restarting:false` = binaire remplacé mais aucun
+    /// superviseur détecté (restart manuel requis).
+    UpdateDaemon { version: String },
 }
 
 impl ReqKind {
@@ -593,6 +603,7 @@ impl ReqKind {
             Self::PrTrack { .. } => "pr_track",
             Self::PrUntrack { .. } => "pr_untrack",
             Self::DaemonStatus => "daemon_status",
+            Self::UpdateDaemon { .. } => "update_daemon",
         }
     }
 }

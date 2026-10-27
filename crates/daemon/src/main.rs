@@ -3,6 +3,7 @@ mod journal;
 mod logging;
 mod mcp;
 mod prs;
+mod selfupdate;
 mod server;
 mod session;
 mod tui;

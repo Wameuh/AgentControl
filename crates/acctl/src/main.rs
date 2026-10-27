@@ -236,12 +236,25 @@ fn print_event(ev: &Value) {
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|resume|attach|fork|cancel|kill|clear|mode|respond|blob|download");
+        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|resume|attach|fork|cancel|kill|clear|mode|respond|blob|download|daemon-update");
         std::process::exit(2);
     }
     let mut c = connect().await?;
     match args[0].as_str() {
         "status" => println!("{}", c.call(proto::ReqKind::DaemonStatus).await?),
+        // Auto-update du démon vers la version passée (défaut : celle
+        // d'acctl) — le démon se remplace puis est relancé par son
+        // superviseur ; la connexion peut couper juste après la réponse.
+        "daemon-update" => {
+            let version = args
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+            println!(
+                "{}",
+                c.call(proto::ReqKind::UpdateDaemon { version }).await?
+            );
+        }
         "agents" => println!("{}", c.call(proto::ReqKind::ListAgents).await?),
         "list" => {
             let v = c.call(proto::ReqKind::ListSessions).await?;

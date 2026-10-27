@@ -90,6 +90,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
     let so = |k: &str| p.get(k).and_then(Value::as_str).map(String::from);
     Ok(match method {
         "daemon_status" => ReqKind::DaemonStatus,
+        "update_daemon" => ReqKind::UpdateDaemon { version: s("version") },
         "list_agents" => ReqKind::ListAgents,
         "list_sessions" => ReqKind::ListSessions,
         "session_info" => ReqKind::SessionInfo { session: s("session") },
