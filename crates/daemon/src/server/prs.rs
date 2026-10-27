@@ -106,5 +106,17 @@ fn scan_pr_event(
             Err(e) => warn!("[{sid}] prs.detected: {e:#}"),
         }
     }
+    // Fin de PR vue dans une sortie (« ✓ Merged pull request o/r#N »)
+    // → statut à jour : le badge disparaît côté client/acctl (ils
+    // filtrent merged/closed) ; l'entrée reste pour la traçabilité.
+    for (repo, pr, status) in crate::prs::extract_state_refs(text) {
+        match prs.state_seen(&repo, pr, status) {
+            Ok(true) => s.emit(EventKind::System {
+                text: format!("PR {repo}#{pr} → {status}"),
+            }),
+            Ok(false) => {}
+            Err(e) => warn!("[{sid}] prs.state_seen: {e:#}"),
+        }
+    }
 }
 
