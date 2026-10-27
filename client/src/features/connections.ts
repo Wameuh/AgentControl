@@ -17,6 +17,7 @@ import { isAndroid } from "../core/chrome";
 import type { ConnLive } from "../core/types";
 import { t } from "../i18n";
 import { setAppIcon } from "./status";
+import { icon } from "../ui/icons";
 import { hideMenu, menuBtn, placeMenu } from "../ui/ctxmenu";
 
 // Conns déconnectées volontairement : ni alerte chip ni retry auto — un
@@ -256,7 +257,7 @@ export class ConnectionManager {
     chip.hidden = !bad;
     if (bad) {
       const rc = [...this.live.values()].some((s) => s === "reconnecting");
-      chip.textContent = rc ? `⟳ ${t("reconnecting")}` : `⚠ ${t("conn_offline")}`;
+      chip.innerHTML = `${icon(rc ? "refresh" : "warn")} ${esc(t(rc ? "reconnecting" : "conn_offline"))}`;
       chip.className = "badge " + (rc ? "warn" : "st-dead");
       chip.title = t("retry_now");
     }

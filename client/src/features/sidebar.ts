@@ -11,6 +11,7 @@ import { isAndroid, meshSetMood } from "../core/chrome";
 import type { PrEntry, SessionMeta } from "../core/types";
 import { t } from "../i18n";
 import { dotIcon, setAppIcon } from "./status";
+import { icon } from "../ui/icons";
 import { bindCtx, hideSessCtx, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
 import type { ChatView } from "./chat-view";
@@ -149,10 +150,10 @@ export class Sidebar {
       ch.className = "grp-head" + (connClosed ? " closed" : "");
       const badge = this.conns.hasCfg(conn)
         ? `<span class="conn-st ${st === "ok" ? "ok" : st === "reconnecting" ? "warn" : "bad"}"` +
-          ` title="${esc(this.conns.tip(st))}">${st === "reconnecting" ? "⟳" : "●"}</span> `
+          ` title="${esc(this.conns.tip(st))}">${st === "reconnecting" ? icon("refresh") : icon("dot")}</span> `
         : "";
-      ch.innerHTML = `<span class="grp-arrow">${connClosed ? "▸" : "▾"}</span> ${badge}${esc(conn)}` +
-        `<button class="grp-add" title="${esc(t("new_group"))}">＋</button>`;
+      ch.innerHTML = `<span class="grp-arrow">${icon(connClosed ? "chev-right" : "chev-down")}</span> ${badge}${esc(conn)}` +
+        `<button class="grp-add" title="${esc(t("new_group"))}">${icon("plus")}</button>`;
       ch.onclick = () => {
         localStorage.setItem(key, connClosed ? "0" : "1");
         void this.refresh();
@@ -182,8 +183,8 @@ export class Sidebar {
         const grpClosed = connClosed || localStorage.getItem(gkey) === "1";
         const g = document.createElement("div");
         g.className = "grp-sub" + (grpClosed ? " closed" : "");
-        g.innerHTML = `<span class="grp-arrow">${grpClosed ? "▸" : "▾"}</span> ${esc(grp)}` +
-          `<button class="grp-add" title="${esc(t("new_sess_grp"))}">＋</button>`;
+        g.innerHTML = `<span class="grp-arrow">${icon(grpClosed ? "chev-right" : "chev-down")}</span> ${esc(grp)}` +
+          `<button class="grp-add" title="${esc(t("new_sess_grp"))}">${icon("plus")}</button>`;
         g.onclick = () => {
           localStorage.setItem(gkey, localStorage.getItem(gkey) === "1" ? "0" : "1");
           void this.refresh();
@@ -340,7 +341,7 @@ export class Sidebar {
     const prHtml = prs.length
       ? `<span class="sess-pr" title="${esc(prs.map((p) => `${p.repo}#${p.pr}${p.title ? ` — ${p.title}` : ""}${p.status ? ` (${p.status})` : ""}`).join("\n"))}">${prs.map((p) => `#${p.pr}`).join(" ")}</span>`
       : "";
-    div.innerHTML = `<span class="dot st-${s.state}" title="${esc(s.state)}">${dotIcon(s.state)}</span><span class="t">${esc(s.title)}</span>${prHtml}<span class="a">${esc(s.agent)}</span><button class="sess-del" title="Supprimer">✕</button>`;
+    div.innerHTML = `<span class="dot st-${s.state}" title="${esc(s.state)}">${dotIcon(s.state)}</span><span class="t">${esc(s.title)}</span>${prHtml}<span class="a">${esc(s.agent)}</span><button class="sess-del" title="Supprimer">${icon("close")}</button>`;
     div.onclick = () => {
       void this.openSession(s.id);
       // Mobile : fermer le drawer après sélection.
@@ -360,7 +361,7 @@ export class Sidebar {
       if (!del.dataset.armed) {
         del.dataset.armed = "1";
         del.textContent = t("delete_armed");
-        setTimeout(() => { del.dataset.armed = ""; del.textContent = "✕"; }, 2500);
+        setTimeout(() => { del.dataset.armed = ""; del.innerHTML = icon("close"); }, 2500);
         return;
       }
       // Optimiste : la ligne disparaît sans attendre le démon (kill de

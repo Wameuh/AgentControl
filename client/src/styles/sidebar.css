@@ -90,6 +90,7 @@ button:disabled { opacity: .5; cursor: default; }
   background: rgba(224, 201, 150, .08);
 }
 .grp-arrow { width:10px; opacity:.7 }
+.grp-arrow .ic, .conn-st .ic { width: 10px; height: 10px; display: block; }
 
 
 /* État de connexion dans le header de groupe */
@@ -97,7 +98,11 @@ button:disabled { opacity: .5; cursor: default; }
 .conn-st.ok { color:var(--sage) }
 .conn-st.warn { color:var(--gold); cursor:pointer; display:inline-block; animation:spin 1.1s linear infinite }
 .conn-st.bad { color:var(--err); cursor:pointer }
-#conn-chip { flex:none; cursor:pointer }
+#conn-chip { flex:none; cursor:pointer; display: inline-flex; align-items: center; gap: 4px; }
+#conn-chip .ic { width: 11px; height: 11px; }
+#conn-chip .ic-refresh { animation: spin 1.1s linear infinite; }
+.sess-del .ic, .grp-add .ic { display: block; }
+.grp-add .ic { width: 12px; height: 12px; }
 #session-list .sess.offline { opacity:.45 }
 
 

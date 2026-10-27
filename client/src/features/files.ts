@@ -14,6 +14,7 @@ import { app } from "../core/state";
 import { isAndroid } from "../core/chrome";
 import type { DirEntry } from "../core/types";
 import { t } from "../i18n";
+import { icon, type IconName } from "../ui/icons";
 import { bindCtx, hideMenu, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
 
@@ -22,7 +23,7 @@ export class FileExplorer {
   private treeOpen = false;
   private deps = {
     /** Ligne de progression de téléchargement dans le fil. */
-    sysline: (_text: string): HTMLElement => document.createElement("div"),
+    sysline: (_text: string, _ic?: IconName): HTMLElement => document.createElement("div"),
   };
 
   bind(d: Partial<typeof this.deps>) {
@@ -256,7 +257,7 @@ export class FileExplorer {
       ? `${await downloadDir()}/AgentControl/${info.name}`
       : await save({ defaultPath: info.name, title: t("ctx_download") });
     if (!dest) return; // dialogue annulé
-    const sys = this.deps.sysline(`⏳ ${t("dl_progress", { name: info.name, pct: 0 })}`);
+    const sys = this.deps.sysline(t("dl_progress", { name: info.name, pct: 0 }), "loader");
     let offset = 0;
     let archive: string | undefined;
     try {
@@ -277,15 +278,15 @@ export class FileExplorer {
           return invoke<number>("write_download", { path: dest, data: c.data, append: false });
         });
         offset += n;
-        sys.textContent = `⏳ ${t("dl_progress", {
+        sys.innerHTML = `${icon("loader")} ${esc(t("dl_progress", {
           name: info.name,
           pct: Math.round((offset * 100) / Math.max(c.total, 1)),
-        })}`;
+        }))}`;
         if (offset >= c.total) break;
       }
-      sys.textContent = `✔ ${t("dl_done", { name: info.name, dest })}`;
+      sys.innerHTML = `${icon("check")} ${esc(t("dl_done", { name: info.name, dest }))}`;
     } catch (e) {
-      sys.textContent = `⚠ ${t("dl_failed", { name: info.name, err: String(e) })}`;
+      sys.innerHTML = `${icon("warn")} ${esc(t("dl_failed", { name: info.name, err: String(e) }))}`;
       showErr(String(e));
     }
   }

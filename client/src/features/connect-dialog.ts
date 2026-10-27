@@ -11,6 +11,7 @@ import { cmpVer, connKeyOf, daemonParams, minorOf } from "../core/conn";
 import { isAndroid } from "../core/chrome";
 import type { SavedConn, SessionMeta } from "../core/types";
 import { t } from "../i18n";
+import { icon } from "../ui/icons";
 import { showOutdated } from "./update";
 import type { ConnectionManager } from "./connections";
 
@@ -334,7 +335,7 @@ export class ConnectDialog {
       const txt = $("c-pubkey").textContent ?? "";
       try {
         await navigator.clipboard.writeText(txt);
-        $("c-pubkey-copy").textContent = "✓";
+        $("c-pubkey-copy").innerHTML = icon("check");
       } catch {
         // Clipboard refusé → sélectionner le texte pour copie manuelle.
         const r = document.createRange();

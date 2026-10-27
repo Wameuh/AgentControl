@@ -84,7 +84,8 @@ dialog input[type="checkbox"]:focus-visible {
 
 /* Dialogue install/update démon */
 .daemon-dlg { display:flex; gap:12px; align-items:center; padding:6px 0; }
-.spin-ico { display:inline-block; animation: spin 1s linear infinite; font-size:22px; color:var(--sand); }
+.spin-ico { display:inline-block; animation: spin 1s linear infinite; color:var(--sand); }
+.spin-ico .ic { width: 22px; height: 22px; display: block; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 

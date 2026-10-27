@@ -4,7 +4,8 @@
 // prompts, picker de sessions natives (reprise).
 // ---------------------------------------------------------------------------
 
-import { $, esc, qBtn, showErr } from "../core/dom";
+import { $, esc, showErr } from "../core/dom";
+import { icon, qIco } from "../ui/icons";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
 import { isAndroid } from "../core/chrome";
@@ -113,7 +114,7 @@ export class Composer {
       box.innerHTML = `<div class="errline">${esc(String(e))}</div>`;
       const row = document.createElement("div");
       row.className = "ac-item";
-      row.innerHTML = `<span class="n">↻</span><span class="d">${t("resume_current")}</span>`;
+      row.innerHTML = `<span class="n">${icon("play")}</span><span class="d">${t("resume_current")}</span>`;
       row.onclick = async () => {
         ($("dlg-resume") as HTMLDialogElement).close();
         await call("resume_session", { session: app.current!.id }).catch((er) => showErr(String(er)));
@@ -136,6 +137,7 @@ export class Composer {
       });
       bar.innerHTML = "";
       bar.hidden = r.queue.length === 0;
+      if (r.queue.length) bar.innerHTML = icon("clock");
       r.queue.forEach((txt, i) => {
         const d = document.createElement("div");
         d.className = "q-item";
@@ -144,17 +146,17 @@ export class Composer {
         sp.textContent = txt;
         sp.title = txt;
         d.appendChild(sp);
-        // ✎ = reprendre dans le champ + retirer de la file
-        const e = qBtn("✎", "Edit");
+        // Reprendre dans le champ + retirer de la file
+        const e = qIco("edit", "Edit");
         e.onclick = () => {
           ($("input") as HTMLTextAreaElement).value = txt;
           call("queue_drop", { session: app.current!.id, index: i }).then(() => this.refreshQueue());
         };
-        // ⏫ = tête de file + cancel → envoi forcé (reste de file préservée)
-        const p = qBtn("⏫", "Send now");
+        // Tête de file + cancel → envoi forcé (reste de file préservée)
+        const p = qIco("top", "Send now");
         p.onclick = () =>
           call("queue_promote", { session: app.current!.id, index: i }).then(() => this.refreshQueue());
-        const x = qBtn("✕", "Remove");
+        const x = qIco("close", "Remove");
         x.onclick = () =>
           call("queue_drop", { session: app.current!.id, index: i }).then(() => this.refreshQueue());
         d.append(e, p, x);
@@ -197,7 +199,7 @@ export class Composer {
       )
     ) {
       ($("input") as HTMLTextAreaElement).value = "";
-      this.chat.sysline(t("cmd_unknown", { cmd: bm[1] }));
+      this.chat.sysline(t("cmd_unknown", { cmd: bm[1] }), "warn");
       return;
     }
     ($("input") as HTMLTextAreaElement).value = "";

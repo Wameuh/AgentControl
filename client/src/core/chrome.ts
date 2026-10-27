@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { gemSVG } from "../crystal";
 import { t } from "../i18n";
+import { icon } from "../ui/icons";
 import { $ } from "./dom";
 
 const mesh = (window as { MeshBackground?: { setMood: (m: string, o: object) => void } })
@@ -46,7 +47,10 @@ export function applyAndroidChrome() {
   $("titlebar").removeAttribute("data-tauri-drag-region");
   ($("input") as HTMLTextAreaElement).enterKeyHint = "send";
   ($("input") as HTMLTextAreaElement).placeholder = t("input_ph_mobile");
-  $("file-close").textContent = "‹"; // page fichiers → flèche retour
+  // Page fichiers → flèche retour. dataset.icon + innerHTML : déclaratif et
+  // rendu d'un coup, quel que soit l'ordre avec hydrateIcons() du boot.
+  $("file-close").dataset.icon = "back";
+  $("file-close").innerHTML = icon("back");
 }
 
 export function initPlatform() {
