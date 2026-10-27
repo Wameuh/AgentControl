@@ -49,7 +49,7 @@ async function apkReleaseUrl(tag: string): Promise<string> {
 /// Update du client vers `tag` : desktop = .deb auto (`update_client`,
 /// fallback page releases) ; Android = APK ouvert dans le navigateur —
 /// le gestionnaire de paquets fait la maj in-place (signature identique).
-async function performClientUpdate(tag: string) {
+export async function performClientUpdate(tag: string) {
   if (isAndroid()) {
     shellOpen(await apkReleaseUrl(tag));
     return;
@@ -75,6 +75,15 @@ export async function showOutdated(lv: string, dv: string) {
     dlg.close();
   };
   dlg.showModal();
+}
+
+/** Check manuel (panneau paramètres) : versions comparables par l'appelant. */
+export async function checkUpdate(): Promise<{ local: string; remote: string }> {
+  const [remote, local] = await Promise.all([
+    remoteVersion(),
+    getVersion().catch(() => "0.0.0"),
+  ]);
+  return { local, remote };
 }
 
 // Check update au boot : version distante (gh release ou package.json sur

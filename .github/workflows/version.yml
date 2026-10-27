@@ -1,7 +1,7 @@
 name: version
 
 # Bump de version au moment de la release (PR next_release -> main
-# labellisee `release`) :
+# passee non-draft) :
 #   NEXT = dernier tag v* semver + niveau
 #   niveau = mot-clef le plus fort trouve dans les sujets/bodies des
 #            commits du cycle : `(major)` > `(minor)` | `(sync)` ;
@@ -33,7 +33,7 @@ name: version
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 # Plancher moindre privilège : GITHUB_TOKEN en read partout — les
 # pushes partent via le PAT du checkout (RELEASE_PAT), jamais via
@@ -41,21 +41,21 @@ on:
 permissions:
   contents: read
 
-# Deux events proches (labeled + synchronize après le push du bump…) →
-# deux jobs concurrents : le second push est non-fast-forward → échec.
-# cancel-in-progress=true : le run le plus récent gagne.
+# Deux events proches (ready_for_review + synchronize après le push du
+# bump…) → deux jobs concurrents : le second push est non-fast-forward
+# → échec. cancel-in-progress=true : le run le plus récent gagne.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   release-bump:
-    # Uniquement la PR de release : base=main, head=next_release, label
-    # `release`, non-draft, non-fork (GITHUB_TOKEN read-only sur fork).
+    # Uniquement la PR de release : base=main, head=next_release,
+    # non-draft, non-fork (GITHUB_TOKEN read-only sur fork).
+    # Le passage en ready EST le declencheur de release — pas de label.
     if: >-
       github.event.pull_request.base.ref == 'main'
       && github.event.pull_request.head.ref == 'next_release'
-      && contains(github.event.pull_request.labels.*.name, 'release')
       && github.event.pull_request.draft != true
       && github.event.pull_request.head.repo.fork == false
     # contents: write inutile : le push part en PAT (checkout token) ;

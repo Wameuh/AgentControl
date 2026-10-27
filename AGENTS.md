@@ -28,6 +28,12 @@ review réelle. PR déjà mergée ?
 `git checkout next_release && git pull` pour resynchroniser.
 Le CI build tous les artefacts sur les PR (APK suffixé `-<sha>`).
 
+**Worktrees** : travailler dans un **git worktree séparé par tâche**
+(`git worktree add ../AgentControl-<feat> -b <br> next_release`) — le
+checkout principal reste propre et plusieurs tâches peuvent avancer
+en parallèle sans se marcher dessus. Nettoyer à la fin :
+`git worktree remove ../AgentControl-<feat>`.
+
 **Drafts** : une PR reste en **draft tout le cycle travail + review**
 — les pipelines ne se lancent qu'**après** la review (`gh pr ready` =
 feu vert final : event `ready_for_review` → les 5 checks). **La
@@ -73,9 +79,12 @@ branche — `git merge-base --is-ancestor origin/next_release HEAD` faux
 **après `git fetch`**, ou `gh pr view <N> --json mergeable` →
 `CONFLICTING` (`UNKNOWN` = calcul async GitHub → retry, pas « ok ») —
 rebase/merge **avant** de lancer la review. Le verdict est ancré au SHA
-du head : tout push ultérieur l'invalide → la review est perdue et un
+du head : tout push ultérieur l'invalide → le verdict est perdu et un
 round de plus est obligatoire (arrivé : #35 approved sur une base
-stale → rebase → re-review). Une base à jour évite aussi de faire
+stale → rebase → re-review). Perdu ≠ ignoré : si la review a déjà
+posté des constats, ils restent valables — **traiter les retours en
+même temps que le rebase** (fix + rebase dans le même push), puis
+relancer la review. Une base à jour évite aussi de faire
 reviewer un diff que le merge réécrira. Si `next_release` avance entre
 l'APPROVED et le merge, le verdict reste valide mais GitHub peut
 refuser le merge sur conflit → rebase + re-review.
@@ -111,23 +120,24 @@ Pousser les commits et bumper la version, oui — tagguer/publier, non.
 
 La **release PR est auto-créée** par `auto-release-pr.yml` : à chaque
 push sur `next_release`, une PR draft `next_release` → `main` est
-ouverte si absente — pour releaser il suffit de lui poser le label
-`release` et de la passer ready. La création passe par
+ouverte si absente — pour releaser il suffit de la passer **ready**
+(le passage non-draft est le déclencheur, pas de label requis).
+La création passe par
 **`RELEASE_PAT`** (fallback `GITHUB_TOKEN`) : le réglage repo
 « Allow GitHub Actions to create and approve pull requests » interdit
 `createPullRequest` au `GITHUB_TOKEN` ; sans `Pull requests: RW` sur le
 PAT le job échoue rouge (arrivé : run 40210287826, tentatives avant
 l'ajout du scope).
 
-Release = PR `next_release` → `main` avec le label **`release`** →
+Release = PR `next_release` → `main` passée **ready** →
 le job `release-bump` de `version.yml` calcule `dernier tag + niveau`,
 commit `chore: bump version` poussé sur `next_release` (la PR se met
 à jour, les 5 checks tournent sur le head bumpé) → au merge (par
 l'utilisateur), `release-on-merge.yml` tague `v<version>` (lu depuis
 `client/package.json`) et dispatche `build.yml` sur le tag (le push
 de tag via GITHUB_TOKEN ne déclenche pas les workflows d'où le
-dispatch). Idempotent : tag existant → skip. Sans label `release`, un
-merge dans `main` ne tague rien.
+dispatch). Idempotent : tag existant → skip, package.json déjà à
+NEXT → pas de re-bump. Tant que la PR reste draft, rien ne bump.
 
 **Reconcile** : tout merge nr→main est un squash → le commit `main`
 n'est jamais ancêtre des commits nr : sans reconcile la release
@@ -216,9 +226,13 @@ Manuel hors-PR : `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]
   la cible Windows :
   `cd client/src-tauri && PATH="/tmp/zig-shim:$PATH" cargo check --target x86_64-pc-windows-gnu`
   (stub `windres` dans /tmp/zig-shim nécessaire).
-- **Daemon** : `cargo build --release -p agentcontrol-daemon`, puis
-  redéployer : `systemctl --user stop agentcontrol-daemon && cp target/release/agentcontrol-daemon ~/.local/bin/ && systemctl --user start agentcontrol-daemon`.
-  ⚠️ Le restart tue les agents en cours (sessions → interrupted).
+- **Daemon** : `cargo build --release -p agentcontrol-daemon` (build
+  seulement). **Interdit de toucher au daemon en direct** : pas de
+  restart/stop/redéploiement par un agent (`systemctl`, `supervisorctl`,
+  kill, remplacement du binaire) — `agentcontrol-daemon` orchestre les
+  sessions agents (dont la nôtre) : le redémarrer tue tous les agents
+  en cours (sessions → interrupted). Le redéploiement est une action
+  de l'utilisateur uniquement.
 - **Suppression d'un crate/binaire** : penser au workflow CI
   (`-p <crate>` dans build.yml) et à `CRATES` dans `tools/bump_version.py`
   (le bump de la PR exécute le script de la **base** → éditer `CRATES`
@@ -238,6 +252,19 @@ Manuel hors-PR : `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]
   Cargo.toml) ; `check_update`/`update_client` renvoient Err sur Android.
 - APK CI : aarch64 debug-signé (artifact + release). `--target` pour ajouter
   d'autres ABI.
+
+## Conventions de code
+
+- **Qualité et évolutivité d'abord** : tout développement se fait avec
+  une idée de qualité de code et d'évolution facile — privilégier des
+  abstractions claires, un découplage propre et du code lisible plutôt
+  qu'une solution rapide qui deviendra difficile à modifier.
+- **Fichiers ≤ 1000 lignes** : éviter les fichiers dépassant 1000
+  lignes ; si un fichier approche ou dépasse cette taille, voir pour
+  le découper en modules/composants cohérents.
+- **Tests** : pas de tests unitaires nécessaires — privilégier les
+  tests d'intégration qui valident les flux réels (daemon ↔ client,
+  appels ACP, SSH, …).
 
 ## Pièges rencontrés
 

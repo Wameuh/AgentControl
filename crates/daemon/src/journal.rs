@@ -152,17 +152,36 @@ impl Journal {
         Ok(())
     }
 
-    /// Tous les événements avec seq > after_seq (rattrapage subscribe).
-    pub fn read_after(&self, dir: &Path, after_seq: u64) -> Result<Vec<Event>> {
-        let start_off = {
+    /// Rattrapage borné : les events avec seq > after_seq, mais au plus les
+    /// `cap` derniers — les plus vieux sont comptés dans `skipped` et
+    /// restent atteignables via `read_page` (pagination arrière). Un
+    /// subscribe sur un after_seq très ancien ne rejoue ainsi jamais un
+    /// journal entier, qui peut faire des centaines de Mo.
+    pub fn read_tail(&self, dir: &Path, after_seq: u64, cap: usize) -> Result<(Vec<Event>, u64)> {
+        let (start_off, skipped) = {
             let g = self.inner.lock().unwrap();
-            let i = g.offsets.partition_point(|(s, _)| *s <= after_seq);
-            if i >= g.offsets.len() {
-                return Ok(vec![]);
+            if g.offsets.is_empty() {
+                // Index mémoire vide → scan complet, même repli que read_page.
+                drop(g);
+                let v = Self::read_from(dir, 0, u64::MAX, usize::MAX)?;
+                let v: Vec<Event> = v.into_iter().filter(|e| e.seq > after_seq).collect();
+                let skipped = v.len().saturating_sub(cap) as u64;
+                let keep = v.len().saturating_sub(cap);
+                return Ok((v.into_iter().skip(keep).collect(), skipped));
             }
-            g.offsets[i].1
+            let idx = g.offsets.partition_point(|(s, _)| *s <= after_seq);
+            if idx >= g.offsets.len() {
+                return Ok((vec![], 0));
+            }
+            let remaining = g.offsets.len() - idx;
+            if remaining > cap {
+                let start = g.offsets.len() - cap;
+                (g.offsets[start].1, (start - idx) as u64)
+            } else {
+                (g.offsets[idx].1, 0)
+            }
         };
-        Self::read_from(dir, start_off, u64::MAX, usize::MAX)
+        Ok((Self::read_from(dir, start_off, u64::MAX, cap)?, skipped))
     }
 
     /// Si le fichier dépasse `max_bytes`, réécrit en gardant seulement les
