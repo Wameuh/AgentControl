@@ -28,6 +28,10 @@ use crate::journal;
 use crate::prs::PrRegistry;
 use crate::session::Session;
 
+/// Prompt injecté aux sessions reprises après un arrêt brutal du démon —
+/// livré comme un envoi utilisateur (journalisé, visible dans le chat).
+const AUTO_RESUME_PROMPT: &str = "continue please";
+
 pub struct Daemon {
     pub root: PathBuf,
     pub sessions: RwLock<HashMap<String, Arc<Session>>>,
@@ -49,12 +53,15 @@ pub struct Daemon {
 
 impl Daemon {
     /// Charge les sessions existantes depuis le disque.
+    /// Renvoie aussi les ids des sessions qui travaillaient au moment où
+    /// l'instance précédente s'est arrêtée (état persisté actif) — à
+    /// n'utiliser pour la reprise auto que si l'arrêt était brutal.
     pub async fn open(
         root: PathBuf,
         agents: HashMap<String, AgentProfile>,
         retention: RetentionCfg,
         a2a: A2aCfg,
-    ) -> Result<Arc<Self>> {
+    ) -> Result<(Arc<Self>, Vec<String>)> {
         let d = Arc::new(Self {
             root: root.clone(),
             sessions: RwLock::new(HashMap::new()),
@@ -65,6 +72,7 @@ impl Daemon {
             spawn_rate: std::sync::Mutex::new(HashMap::new()),
             prs: Arc::new(PrRegistry::open(&root)),
         });
+        let mut resumable = Vec::new();
         let sdir = root.join("sessions");
         if sdir.exists() {
             for entry in std::fs::read_dir(&sdir)? {
@@ -74,10 +82,17 @@ impl Daemon {
                 }
                 match Session::open(entry.path()) {
                     Ok(s) => {
+                        // État persisté lu avant reconcile (qui efface la
+                        // distinction actif/idle en passant tout à
+                        // "interrupted").
+                        let active = s.was_active();
                         // Un agent n'est jamais vivant après un restart du
                         // démon → interrupted + event journalisé.
                         s.reconcile_state();
                         let id = s.meta_snapshot().id;
+                        if active {
+                            resumable.push(id.clone());
+                        }
                         d.watch_prs(&s);
                         info!("session chargée: {id}");
                         d.sessions.write().await.insert(id, s);
@@ -86,7 +101,77 @@ impl Daemon {
                 }
             }
         }
-        Ok(d)
+        Ok((d, resumable))
+    }
+
+    /// Reprise post-crash : respawn des sessions qui travaillaient quand
+    /// l'instance précédente s'est arrêtée brutalement, puis envoi d'un
+    /// prompt de reprise pour les remettre au travail. Lancée en tâche de
+    /// fond après le bind des listeners (les agents rappellent via
+    /// AGENTCONTROL_SOCK).
+    pub async fn auto_resume(self: &Arc<Self>, sessions: Vec<String>) {
+        info!(
+            "arrêt précédent brutal — {} session(s) active(s) à reprendre",
+            sessions.len()
+        );
+        for (i, sid) in sessions.into_iter().enumerate() {
+            let d = Arc::clone(self);
+            tokio::spawn(async move {
+                // Léger décalage : évite une rafale de spawns simultanés.
+                if i > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        500 * i as u64,
+                    ))
+                    .await;
+                }
+                d.resume_after_crash(&sid).await;
+            });
+        }
+    }
+
+    /// Une session à reprendre : même mécanique que ResumeSession (journal
+    /// local = source de vérité → skip_replay), puis prompt "continue
+    /// please" livré comme un envoi utilisateur.
+    async fn resume_after_crash(&self, sid: &str) {
+        let Ok(s) = self.get_session(sid).await else {
+            return; // purgée entre le chargement et la reprise
+        };
+        let meta = s.meta_snapshot();
+        let Some(native) = meta.native_session_id.clone() else {
+            // Jamais arrivée jusqu'à session/new → rien à recharger.
+            info!("{sid}: pas de session native — reprise ignorée");
+            return;
+        };
+        let Some(profile) = self.agents.get(&meta.agent).cloned() else {
+            warn!("{sid}: agent « {} » inconnu — reprise ignorée", meta.agent);
+            return;
+        };
+        let (cmd, envs) = self.agent_parts(
+            &profile,
+            meta.model.as_deref(),
+            meta.mode.as_deref(),
+            sid,
+        );
+        s.emit(proto::EventKind::System {
+            text: "démon relancé après un arrêt brutal — reprise du travail…".into(),
+        });
+        match s
+            .spawn_agent(&cmd, &envs, Some(native), true, self.mcp_servers(sid))
+            .await
+        {
+            Ok(()) => {
+                info!("{sid}: agent relancé — envoi « {AUTO_RESUME_PROMPT} »");
+                if let Err(e) = s.send_prompt(AUTO_RESUME_PROMPT, false, false).await {
+                    warn!("{sid}: prompt de reprise non délivré: {e:#}");
+                }
+            }
+            Err(e) => {
+                warn!("{sid}: reprise auto échouée: {e:#}");
+                s.emit(proto::EventKind::Error {
+                    message: format!("reprise auto: {e:#}"),
+                });
+            }
+        }
     }
 
     async fn get_session(&self, id: &str) -> Result<Arc<Session>> {

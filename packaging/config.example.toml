@@ -4,6 +4,12 @@
 # sans TLS/auth — tout le monde sur la machine pourrait piloter les agents.
 bind_tcp = "127.0.0.1:7331"
 
+# Reprise auto après un arrêt brutal (crash, SIGKILL, OOM) : les sessions
+# qui travaillaient sont relancées (session/load) et reçoivent un prompt
+# "continue please". Les sessions idle ne sont jamais relancées. Un arrêt
+# propre (SIGTERM/SIGINT) ne déclenche pas de reprise au boot suivant.
+auto_resume = true
+
 # ---------------------------------------------------------------------------
 # Rétention / stockage — un janitor applique ces limites périodiquement.
 # ---------------------------------------------------------------------------
