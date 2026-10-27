@@ -98,6 +98,7 @@ conns.bind({
   dropConvsForConn: (c) => chat.dropConvsForConn(c),
   purgeSaved: (c) => connectDlg.purgeSaved(c),
   clearGroups: (c) => groups.clearConn(c),
+  notePendingDel: (ids) => sidebar.notePendingDel(ids),
 });
 connectDlg.bind(conns);
 connectDlg.refresh = () => sidebar.refresh();

@@ -9,7 +9,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { $, esc, showErr } from "../core/dom";
+import { $, esc, q, showErr } from "../core/dom";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
 import { connKeyOf } from "../core/conn";
@@ -53,6 +53,9 @@ export class ConnectionManager {
     purgeSaved: async (_conn: string) => {},
     /** Purge les groupes nommés persistés de la conn. */
     clearGroups: (_conn: string) => {},
+    /** Marque des ids session supprimés localement → pas de toast au
+     *  retour de leurs events session_deleted (cascade conn-delete). */
+    notePendingDel: (_ids: string[]) => {},
   };
 
   bind(d: Partial<typeof this.deps>) {
@@ -216,6 +219,12 @@ export class ConnectionManager {
     }
     if ((this.live.get(conn) ?? "ok") === "ok" && !this.gone.has(conn)) {
       // Parallèle : N sessions à supprimer ne doivent pas coûter N RTT.
+      // Ids marqués locaux → leurs events session_deleted ne toastent pas.
+      this.deps.notePendingDel(
+        app.lastSessions
+          .filter((x) => (x.conn ?? "default") === conn)
+          .map((x) => x.id),
+      );
       await Promise.all(
         app.lastSessions
           .filter((x) => (x.conn ?? "default") === conn)
@@ -312,7 +321,9 @@ export class ConnectionManager {
         const cls = st === "ok" ? "ok" : st === "reconnecting" ? "warn" : st === "down" ? "bad" : "off";
         const ico = st === "reconnecting" ? icon("refresh") : icon("dot");
         const clk = st === "down" || st === "off" ? " clk" : "";
-        return `<span class="conn-seg${clk}" data-conn="${esc(k)}" title="${esc(this.tip(st === "off" ? "down" : st, k))}"><span class="conn-st ${cls}">${ico}</span> ${esc(connLabel(k))}</span>`;
+        // Attributs : esc() n'échappe pas '"' → q() (conn label issu
+        // de la cfg sauvegardée, texte libre).
+        return `<span class="conn-seg${clk}" data-conn="${q(esc(k))}" title="${q(esc(this.tip(st === "off" ? "down" : st, k)))}"><span class="conn-st ${cls}">${ico}</span> ${esc(connLabel(k))}</span>`;
       })
       .join('<span class="sb-sep"> · </span>');
     this.deps.refresh().catch(() => {});

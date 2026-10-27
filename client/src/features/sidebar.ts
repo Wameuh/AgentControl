@@ -4,7 +4,7 @@
 // drag & drop inter-groupes, poignée de redimensionnement.
 // ---------------------------------------------------------------------------
 
-import { $, esc, showErr } from "../core/dom";
+import { $, esc, q, showErr } from "../core/dom";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
 import { isAndroid, meshSetMood } from "../core/chrome";
@@ -43,6 +43,13 @@ export class Sidebar {
    *  pas re-notifier (la ligne a déjà disparu, l'utilisateur sait). */
   wasPendingDel(id: string) {
     return this.pendingDel.has(id);
+  }
+
+  /** Marque des suppressions initiées en masse hors sidebar (ex. delete
+   *  d'une connexion → cascade delete_session) : leurs events
+   *  session_deleted ne doivent pas spammer de toasts. */
+  notePendingDel(ids: string[]) {
+    for (const id of ids) this.pendingDel.add(id);
   }
   private ctx = $("sctx");
 
