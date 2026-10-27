@@ -82,7 +82,7 @@ renderer.bind({
   statusChanged: () => void sidebar.refresh(),
   openSession: (id) => void chat.open(id),
 });
-sidebar.bind(conns, groups, newSess, chat);
+sidebar.bind(conns, groups, newSess, chat, settings);
 composer.bind(chat);
 composer.refresh = () => sidebar.refresh();
 conns.bind({

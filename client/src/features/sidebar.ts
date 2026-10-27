@@ -17,6 +17,7 @@ import type { ChatView } from "./chat-view";
 import type { ConnectionManager } from "./connections";
 import type { GroupStore } from "./groups";
 import type { NewSessionDialog } from "./new-session";
+import type { SettingsPanel } from "./settings";
 
 const DTYPE = "application/x-ac-session";
 
@@ -25,6 +26,7 @@ export class Sidebar {
   private groups!: GroupStore;
   private newSess!: NewSessionDialog;
   private chat!: ChatView;
+  private settings!: SettingsPanel;
 
   /** PRs ouvertes par session ("conn\0sid") — rempli par refresh ;
    *  vide si le démon ne connaît pas pr_list (vieux démon → pas de badge). */
@@ -37,11 +39,20 @@ export class Sidebar {
   private pendingDel = new Set<string>();
   private ctx = $("sctx");
 
-  bind(conns: ConnectionManager, groups: GroupStore, newSess: NewSessionDialog, chat: ChatView) {
+  bind(conns: ConnectionManager, groups: GroupStore, newSess: NewSessionDialog, chat: ChatView, settings: SettingsPanel) {
     this.conns = conns;
     this.groups = groups;
     this.newSess = newSess;
     this.chat = chat;
+    this.settings = settings;
+  }
+
+  /** Ouvrir une session depuis la sidebar = quitter le panneau options
+   *  (il recouvre #chat — la session s'afficherait dessous, invisible ;
+   *  close() est un no-op quand il est déjà fermé). */
+  private openSession(id: string): Promise<void> {
+    this.settings.close();
+    return this.chat.open(id);
   }
 
   /** Ligne de session marquée active immédiatement au clic — avant tout
@@ -239,7 +250,7 @@ export class Sidebar {
       void call<{ session: string }>("fork_session", { session: s.id, conn: s.conn })
         .then(async (r) => {
           await this.refresh();
-          if (r.session) await this.chat.open(r.session);
+          if (r.session) await this.openSession(r.session);
         })
         .catch((e) => showErr(String(e)));
     });
@@ -319,7 +330,7 @@ export class Sidebar {
       : "";
     div.innerHTML = `<span class="dot st-${s.state}" title="${esc(s.state)}">${dotIcon(s.state)}</span><span class="t">${esc(s.title)}</span>${prHtml}<span class="a">${esc(s.agent)}</span><button class="sess-del" title="Supprimer">✕</button>`;
     div.onclick = () => {
-      void this.chat.open(s.id);
+      void this.openSession(s.id);
       // Mobile : fermer le drawer après sélection.
       nav.closeDrawer();
     };
