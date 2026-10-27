@@ -29,9 +29,11 @@ export class Sidebar {
   /** PRs ouvertes par session ("conn\0sid") — rempli par refresh ;
    *  vide si le démon ne connaît pas pr_list (vieux démon → pas de badge). */
   private prBySess = new Map<string, PrEntry[]>();
-  /** delete_session en vol : la ligne est masquée dès le clic — un
-   *  refresh concurrent (events, watchdog) ne doit pas la faire
-   *  réapparaître avant la fin de la requête. */
+  /** delete_session en vol OU terminée : l'id reste tombstoné après
+   *  succès (un refresh dont le snapshot list_sessions date d'avant la
+   *  fin de la suppression ne doit pas réinjecter la ligne — un id
+   *  supprimé ne réapparaît jamais) ; retiré seulement en cas d'échec,
+   *  où la session existe encore. */
   private pendingDel = new Set<string>();
   private ctx = $("sctx");
 
@@ -342,25 +344,31 @@ export class Sidebar {
       // l'agent + purge des fichiers peuvent durer). L'event
       // session_deleted confirmera ; en cas d'erreur la ligne revient.
       this.pendingDel.add(s.id);
-      this.chat.dropConv(s.id);
       if (app.current?.id === s.id) {
-        app.current = null;
-        this.chat.clearConv();
+        // Session affichée : markGone fait le ménage complet (conv
+        // cachée, current, gem, boutons, badge "gone", updateHeader).
+        // L'event session_deleted trouvera app.current déjà null → il
+        // ne repassera pas par là.
+        this.chat.markGone();
+      } else {
+        this.chat.dropConv(s.id);
       }
       div.remove();
       void this.refresh();
       void call("delete_session", { session: s.id, conn: s.conn })
         .catch((er) => {
           showErr(String(er));
+          this.pendingDel.delete(s.id);
           // Échec → la session existe encore : la réinjecter dans le
           // cache liste pour qu'elle réapparaisse au refresh (même
-          // offline si la connexion est tombée entre-temps).
-          if (!app.lastSessions.some((x) => x.id === s.id)) app.lastSessions.push(s);
+          // offline si la connexion est tombée entre-temps) — sauf si
+          // sa connexion a été supprimée entre-temps.
+          if (this.conns.hasCfg(s.conn ?? "local") &&
+              !app.lastSessions.some((x) => x.id === s.id)) {
+            app.lastSessions.push(s);
+          }
         })
-        .finally(() => {
-          this.pendingDel.delete(s.id);
-          void this.refresh();
-        });
+        .finally(() => void this.refresh());
     });
     return div;
   }
