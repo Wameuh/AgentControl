@@ -20,9 +20,10 @@ impl Session {
     /// cours et passe le message en tête. `steer` : session/prompt
     /// concurrent pendant le tour — l'agent l'injecte au prochain point
     /// d'arrêt s'il le supporte ; refus → fallback en file.
-    /// Le `user_message` n'est journalisé qu'à l'envoi effectif (au drain
-    /// ou au steer réussi) — un message en file peut être édité/retiré,
-    /// le chat doit montrer la version réellement reçue par l'agent.
+    /// Le `user_message` est journalisé à l'envoi effectif : au drain
+    /// pour la file, dès la remise à l'agent pour un steer — un message
+    /// en file peut être édité/retiré, le chat doit montrer la version
+    /// réellement reçue par l'agent.
     /// Retourne dès l'enfilement : la file est à jour pour le client.
     pub async fn send_prompt(&self, text: &str, force: bool, steer: bool) -> Result<()> {
         // Retenue compact : aucun tour ne tourne (busy n'est tenu que par
@@ -40,8 +41,11 @@ impl Session {
             }
         }
         if steer && !force && self.busy.load(Ordering::SeqCst) {
-            // Steer réussi → user_message{steer:true} ; refus → fallback
-            // en file (rendu comme message normal à la livraison).
+            // Le user_message est journalisé dès la remise à l'agent —
+            // le RPC session/prompt ne rend la main qu'à la fin du tour,
+            // attendre son retour cacherait le message jusqu'à idle.
+            // Refus → fallback en file en UserJournaled : le drain ne
+            // réémet pas le message déjà visible.
             let me = self.me.clone();
             let text = text.to_string();
             // Génération capturée AVANT le spawn : une tâche schedulée après
@@ -56,15 +60,12 @@ impl Session {
                 if is_compact_cmd(&text) {
                     s.arm_compact();
                 }
+                s.emit(EventKind::UserMessage {
+                    text: text.clone(),
+                    steer: true,
+                });
                 match s.prompt_rpc(&text).await {
-                    Ok(_) => {
-                        if s.spawn_gen.load(Ordering::SeqCst) == gen {
-                            s.emit(EventKind::UserMessage {
-                                text: text.clone(),
-                                steer: true,
-                            });
-                        }
-                    }
+                    Ok(_) => {}
                     Err(e) => {
                         if s.spawn_gen.load(Ordering::SeqCst) != gen {
                             return;
@@ -72,7 +73,7 @@ impl Session {
                         s.emit(EventKind::System {
                             text: format!("steer refusé ({e}) — message en file"),
                         });
-                        if !s.enqueue_prompt(&text, false, PromptSrc::User) {
+                        if !s.enqueue_prompt(&text, false, PromptSrc::UserJournaled) {
                             s.drain_queue().await;
                         }
                     }
@@ -183,8 +184,8 @@ impl Session {
     /// Pendant une retenue compact il s'arrête sans libérer `busy` :
     /// `end_compact` relancera le drain pour livrer les retenus.
     /// Le `user_message` est journalisé ici, à l'envoi réel (texte final
-    /// après édits) ; les prompts peers passent en silence (PeerMessage
-    /// déjà journalisé).
+    /// après édits) ; les prompts peers et les user déjà journalisés
+    /// (steer) passent en silence.
     pub(super) async fn drain_queue(&self) {
         // Un runner démarré avant un clear ne doit ni livrer ni journaliser
         // les prompts de l'ancien contexte — la génération le fige.
@@ -319,6 +320,11 @@ impl Session {
         let mut q = self.prompt_queue.lock().unwrap();
         if let Some(slot) = q.get_mut(idx) {
             slot.0 = text.to_string();
+            // Le texte livré différera du user_message déjà journalisé
+            // (steer refusé) : le drain réémettra la version finale.
+            if slot.1 == PromptSrc::UserJournaled {
+                slot.1 = PromptSrc::User;
+            }
             true
         } else {
             false
