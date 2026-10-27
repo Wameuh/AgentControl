@@ -441,8 +441,9 @@ impl Daemon {
         let mut lines = BufReader::new(read).lines();
         let write = Arc::new(tokio::sync::Mutex::new(BufWriter::new(write)));
 
-        // État de subscription : (session_id, broadcast rx, last_sent)
-        let mut sub: Option<(String, broadcast::Receiver<proto::Event>, u64)> = None;
+        // État de subscription : (session_id, broadcast rx, last_sent,
+        // journal_gen) — la gen trahit un reset quand les seqs coïncident.
+        let mut sub: Option<(String, broadcast::Receiver<proto::Event>, u64, u64)> = None;
 
         loop {
             tokio::select! {
@@ -479,6 +480,20 @@ impl Daemon {
                     if let ReqKind::Subscribe { ref session, after_seq } = req.req {
                         match self.get_session(session).await {
                             Ok(s) => {
+                                let gen = s.journal.gen();
+                                // after_seq au-delà de la fin du journal :
+                                // le client vient d'un cycle précédent
+                                // (reset entre son session_info et ce
+                                // subscribe) — sans SessionCleared il
+                                // garderait l'ancien affichage et `last`
+                                // bloquerait tout le nouveau cycle.
+                                let cleared = (after_seq > s.journal.last_seq())
+                                    .then(|| proto::Event {
+                                        seq: s.journal.last_seq(),
+                                        ts: proto::now_iso(),
+                                        kind: proto::EventKind::SessionCleared {},
+                                    });
+                                let after = if cleared.is_some() { 0 } else { after_seq };
                                 // Rattrapage borné : un trou > REPLAY_MAX
                                 // n'est pas rejoué en entier (les events
                                 // sautés restent paginables via Events) —
@@ -487,7 +502,7 @@ impl Daemon {
                                 // concurrentes par timeout.
                                 let (backlog, skipped) = s
                                     .journal
-                                    .read_tail(&s.dir, after_seq, SUBSCRIBE_REPLAY_MAX)
+                                    .read_tail(&s.dir, after, SUBSCRIBE_REPLAY_MAX)
                                     .unwrap_or_default();
                                 let resp = Response::ok(req.id, json!({
                                     "subscribed": session,
@@ -496,13 +511,18 @@ impl Daemon {
                                 }));
                                 Self::send_line(&write, &resp).await?;
                                 let rx = s.events_tx.subscribe();
+                                // Le signal de reset part avant le
+                                // rattrapage du journal.
+                                if let Some(ev) = cleared {
+                                    Self::send_push(&write, session, &ev).await?;
+                                }
                                 // Rattrapage du journal avant de passer en live
-                                let mut last = after_seq;
+                                let mut last = after;
                                 for ev in backlog {
                                     last = ev.seq;
                                     Self::send_push(&write, session, &ev).await?;
                                 }
-                                sub = Some((session.clone(), rx, last));
+                                sub = Some((session.clone(), rx, last, gen));
                             }
                             Err(e) => {
                                 Self::send_line(&write, &Response::err(req.id, format!("{e:#}"))).await?;
@@ -523,22 +543,27 @@ impl Daemon {
                 }
                 ev = async {
                     match sub.as_mut() {
-                        Some((_, rx, _)) => rx.recv().await,
+                        Some((_, rx, _, _)) => rx.recv().await,
                         None => std::future::pending().await,
                     }
                 }, if sub.is_some() => {
                     match ev {
                         Ok(event) => {
-                            let (sid, _, last) = sub.as_mut().unwrap();
+                            let (sid, _, last, gen) = sub.as_mut().unwrap();
                             // Journal reset (clear/rebind) : les seqs
                             // repartent à 1 — l'event de contrôle est
                             // émis dans l'ANCIENNE numérotation → il
                             // passe le filtre, puis `last` est recalé
-                            // pour laisser passer le nouveau cycle.
+                            // pour laisser passer le nouveau cycle. La
+                            // gen journal a fait +1 au reset : la suivre
+                            // pour la détection du chemin Lagged.
                             let cleared =
                                 matches!(event.kind, proto::EventKind::SessionCleared {});
                             if cleared || event.seq > *last {
                                 *last = if cleared { 0 } else { event.seq };
+                                if cleared {
+                                    *gen += 1;
+                                }
                                 Self::send_push(&write, sid, &event).await?;
                             }
                         }
@@ -547,13 +572,25 @@ impl Daemon {
                             // fenêtre laisse un trou de seq — comblable
                             // via Events mais non signalé au client, on le
                             // logge au moins.
-                            let (sid, _, last) = sub.as_mut().unwrap();
+                            let (sid, _, last, gen) = sub.as_mut().unwrap();
                             let s = self.get_session(sid).await?;
-                            // Journal reset pendant le lag : `last`
-                            // dépasse la fin du nouveau journal →
-                            // repartir de 0 (rejeu du cycle courant).
-                            if s.journal.last_seq() < *last {
+                            // Journal reset pendant le lag : la gen (et
+                            // non les seqs — le nouveau journal peut
+                            // déjà dépasser l'ancien `last`) le trahit.
+                            // Le client a raté l'éphémère → le
+                            // resynthétiser avant le backlog du nouveau
+                            // cycle, sinon il empilerait les events
+                            // rejoués sous l'ancien affichage.
+                            let cur_gen = s.journal.gen();
+                            if cur_gen != *gen {
+                                *gen = cur_gen;
                                 *last = 0;
+                                let ev = proto::Event {
+                                    seq: s.journal.last_seq(),
+                                    ts: proto::now_iso(),
+                                    kind: proto::EventKind::SessionCleared {},
+                                };
+                                Self::send_push(&write, sid, &ev).await?;
                             }
                             let (backlog, skipped) = s
                                 .journal

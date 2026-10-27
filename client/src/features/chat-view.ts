@@ -366,9 +366,10 @@ export class ChatView {
    *  session_cleared) : la vue affichait l'ancien cycle. Elle est
    *  vidée ; les events du nouveau cycle (seqs reparties à 1)
    *  arrivent derrière et remplissent la conversation neuve. La méta
-   *  est rechargée : sans ça `native_session_id` resterait celui du
-   *  cycle précédent et les events repoussés seraient estampillés du
-   *  mauvais id (queue jetée à la prochaine ouverture). */
+   *  est rechargée au mieux : tant que le respawn n'a pas abouti,
+   *  `native_session_id` peut rester absent — la queue repoussée
+   *  serait alors estampillée du mauvais id et jetée à la prochaine
+   *  ouverture (repli conservateur, contenu toujours correct). */
   async convCleared() {
     this.clearConv();
     this.scrollBottom();

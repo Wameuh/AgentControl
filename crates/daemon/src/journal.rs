@@ -18,6 +18,12 @@ struct Inner {
     /// Position de fin de fichier (prochain offset d'écriture).
     end: u64,
     last_seq: u64,
+    /// Génération du journal : incrémentée par `reset()`. Les seqs
+    /// seules ne suffisent pas à détecter un vidage (le nouveau
+    /// journal peut déjà dépasser l'ancien `last_seq` vu côté
+    /// subscriber) — la génération le fait sans ambiguïté. Volatile :
+    /// elle n'a de sens que dans la durée de vie du démon.
+    gen: u64,
 }
 
 pub struct Journal {
@@ -58,12 +64,18 @@ impl Journal {
                 offsets,
                 end,
                 last_seq,
+                gen: 0,
             }),
         })
     }
 
     pub fn last_seq(&self) -> u64 {
         self.inner.lock().unwrap().last_seq
+    }
+
+    /// Génération courante — voir `Inner::gen`.
+    pub fn gen(&self) -> u64 {
+        self.inner.lock().unwrap().gen
     }
 
     /// Ajoute un événement. Doit être suivi d'un broadcast.
@@ -144,6 +156,7 @@ impl Journal {
         g.offsets.clear();
         g.end = 0;
         g.last_seq = 0;
+        g.gen += 1;
         let bdir = dir.join("blobs");
         if bdir.exists() {
             let _ = std::fs::remove_dir_all(&bdir);
