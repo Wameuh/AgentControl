@@ -52,6 +52,7 @@
             </div>
             <button id="btn-search" hidden data-icon="search" data-i18n-title="search_title" title="Search"></button>
             <button id="btn-first" hidden data-icon="top" data-i18n-title="first_post" title="First post"></button>
+            <button id="btn-term" hidden data-icon="terminal" data-i18n-title="term_title" title="Terminal"></button>
             <button id="btn-files" hidden data-icon="folder" data-i18n-title="files_title" title="Files"></button>
             <button id="btn-refresh" data-icon="refresh" data-i18n-title="refresh_title" title="Reload"></button>
             <button id="btn-resume" hidden data-i18n="resume">Resume</button>
@@ -80,6 +81,16 @@
           </div>
           <button id="btn-bottom" hidden data-icon="down" data-i18n-title="bottom_title" title="Latest"></button>
           <div id="queue-bar" hidden></div>
+          <div id="term-panel" hidden>
+            <div id="term-resize" title="Drag to resize"></div>
+            <header id="term-head">
+              <span id="term-title" data-i18n="term_title">Terminal</span>
+              <span id="term-cwd"></span>
+              <button id="btn-term-restart" data-icon="refresh" data-i18n-title="term_new" title="New shell"></button>
+              <button id="btn-term-hide" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <div id="term-box"></div>
+          </div>
           <footer id="composer">
             <div id="cmd-ac" hidden></div>
             <textarea id="input" data-i18n-ph="input_ph" placeholder="Message… (Enter = send)" rows="2"></textarea>

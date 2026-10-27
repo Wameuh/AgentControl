@@ -32,7 +32,8 @@ const connLabel = (k: string) =>
 export class ConnectionManager {
   private live = new Map<string, ConnLive>();
   private cfg = new Map<string, Record<string, unknown>>();
-  /** Status démon par conn (capabilities : self_update, first_post…). */
+  /** Status démon par conn (capabilities : self_update, first_post,
+   *  terminal…). */
   private caps = new Map<string, Record<string, unknown>>();
   private timer = new Map<string, ReturnType<typeof setTimeout>>();
   private delay = new Map<string, number>();
@@ -289,6 +290,7 @@ export class ConnectionManager {
     this.delay.delete(conn);
     this.nextAt.delete(conn);
     this.attempts.delete(conn);
+    this.caps.delete(conn);
     // La conn sort de cfg : renderState (sb-left/chip) la retire sans
     // attendre une transition d'état ultérieure.
     this.renderState();

@@ -31,6 +31,9 @@ const SHAPES: Record<string, string> = {
   file:
     '<path d="M14.5 2.5H6a2 2 0 0 0-2 2v15a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-12Z"/>' +
     '<path d="M14.5 2.5v6h6"/>',
+  terminal:
+    '<rect x="3" y="4.5" width="18" height="15" rx="2"/>' +
+    '<path d="m6.5 9 3.5 3-3.5 3"/><path d="M12.5 15.5H17"/>',
   panel: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9.5 4v16"/>',
   down: '<path d="M12 4v12"/><path d="m6 12 6 6 6-6"/><path d="M5 21h14"/>',
   steer: '<path d="m15 10 5 5-5 5"/><path d="M4 4v7a4 4 0 0 0 4 4h12"/>',

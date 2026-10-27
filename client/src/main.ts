@@ -36,6 +36,7 @@ import { SessionSearch } from "./features/search";
 import { Sidebar } from "./features/sidebar";
 import { Composer } from "./features/composer";
 import { FileExplorer } from "./features/files";
+import { TermPanel } from "./features/terminal";
 import { SettingsPanel } from "./features/settings";
 import { initFirstPost } from "./features/first-post";
 import { initLang, t, applyStatic } from "./i18n";
@@ -62,6 +63,7 @@ const chat = new ChatView();
 const sidebar = new Sidebar();
 const composer = new Composer();
 const files = new FileExplorer();
+const term = new TermPanel();
 const connectDlg = new ConnectDialog();
 const newSess = new NewSessionDialog();
 const settings = new SettingsPanel();
@@ -78,10 +80,14 @@ chat.bind(renderer, {
   setActiveRow: (id) => sidebar.setActiveRow(id),
   refresh: () => sidebar.refresh(),
   refreshQueue: () => composer.refreshQueue(),
-  onSessionOpened: () => files.onSessionOpened(),
+  onSessionOpened: () => {
+    files.onSessionOpened();
+    term.onSessionSwitched();
+  },
   onSessionChanged: () => search.onSessionChanged(),
   connCount: () => conns.knownConns().length,
   firstPostCapable: (c) => conns.cap(c)?.first_post === true,
+  termCapable: (c) => conns.cap(c)?.terminal === true,
 });
 search.bind({ jumpToSeq: (seq) => chat.jumpToSeq(seq) });
 renderer.bind({
@@ -119,6 +125,12 @@ settings.langChanged = () => {
   chat.updateHeader();
 };
 settings.sendModeChanged = () => composer.refreshHints();
+settings.themeChanged = () => term.refreshTheme();
+term.bind({ termCapable: (c) => conns.cap(c)?.terminal === true });
+
+// Conn perdue (EOF transport) : les PTY du démon meurent avec → bannière
+// dans les terminaux concernés (reopen possible via ↻ au retour).
+void listen<string>("conn-dead", (e) => term.markConnDead(e.payload));
 
 // --- Events sessions (push du démon via le bridge Tauri) ---------------------
 
@@ -127,6 +139,7 @@ await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
   // Suppression côté serveur : l'event terminal arrive avant la coupure.
   if (event.type === "session_deleted") {
     chat.dropConv(session);
+    term.dropSession(session);
     if (app.current && session === app.current.id) chat.markGone();
     // Toast seulement pour une suppression externe — la nôtre a déjà
     // retiré la ligne optimistement, re-notifier serait du bruit.
@@ -170,6 +183,8 @@ $("chat-more").onclick = () => {
   if (app.current) items.push({ icon: "search", label: t("search_title"), fn: () => search.open() });
   if (app.current && conns.cap(app.current.conn ?? "default")?.first_post === true)
     items.push({ icon: "top", label: t("first_post"), fn: () => $("btn-first").click() });
+  if (app.current && term.supported())
+    items.push({ icon: "terminal", label: t("term_title"), fn: () => $("btn-term").click() });
   if (app.current) items.push({ icon: "folder", label: t("files_title"), fn: () => $("btn-files").click() });
   if (app.current && !app.alive)
     items.push({ icon: "play", label: t("resume"), fn: () => $("btn-resume").click() });
@@ -195,6 +210,7 @@ search.init();
 sidebar.init();
 composer.init();
 files.init();
+term.init();
 settings.init();
 initFirstPost((c) => conns.cap(c)?.first_post === true);
 initModelBar(openFusion);

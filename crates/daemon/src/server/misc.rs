@@ -16,6 +16,9 @@ impl Daemon {
                     "self_update": true,
                     // Idem pour ReqKind::FirstPost (bouton « premier post »).
                     "first_post": true,
+                    // Même gate capacité : ReqKind::TermOpen connu →
+                    // le client affiche le bouton terminal.
+                    "terminal": true,
                 }))
     }
     /// `UpdateDaemon` : télécharge la release demandée et remplace le

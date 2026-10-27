@@ -7,12 +7,12 @@ use client_core::{Client, Level};
 use proto::ReqKind;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::state::{get_conn, AppState};
 
 #[tauri::command]
-pub(crate) async fn call(state: State<'_, AppState>, method: String, params: Value) -> Result<Value, String> {
+pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: String, params: Value) -> Result<Value, String> {
     // Connexion cible : params.conn explicite, sinon connexion par défaut.
     let conn = params.get("conn").and_then(Value::as_str).map(String::from);
     // list_sessions / daemon_status / pr_list : fusion multi-serveurs — en
@@ -81,8 +81,46 @@ pub(crate) async fn call(state: State<'_, AppState>, method: String, params: Val
         return Ok(out);
     }
     let c = get_conn(&state, conn.as_deref()).await?;
+    // term_open : la pompe de flux PTY s'abonne aux pushes AVANT l'appel —
+    // le démon peut émettre les premiers octets du shell immédiatement.
+    let term_rx = (method == "term_open").then(|| c.pushes.subscribe());
     let req = req_from(&method, params)?;
-    c.call(req).await.map_err(|e| format!("{e:#}"))
+    let v = c.call(req).await.map_err(|e| format!("{e:#}"))?;
+    if let (Some(mut rx), Some(tid)) = (
+        term_rx,
+        v.get("term").and_then(Value::as_str).map(String::from),
+    ) {
+        // Relais term_id → events Tauri `term-data` / `term-exit`. Vit
+        // indépendamment du pump subscribe (rechargements de session).
+        tauri::async_runtime::spawn(async move {
+            loop {
+                let v = match rx.recv().await {
+                    Ok(v) => v,
+                    // Trou de broadcast (bursts) : le flux PTY a sauté —
+                    // tracer le gap dans le terminal plutôt que rien.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        use base64::Engine;
+                        json!({"push":"term_data","term":tid,
+                               "data": base64::engine::general_purpose::STANDARD
+                                   .encode("\r\n\x1b[31m[données perdues]\x1b[0m\r\n")})
+                    }
+                    Err(_) => break,
+                };
+                if v.get("term").and_then(Value::as_str) != Some(tid.as_str()) {
+                    continue;
+                }
+                let ev = match v.get("push").and_then(Value::as_str) {
+                    Some("term_data") => "term-data",
+                    Some("term_exit") => "term-exit",
+                    _ => continue,
+                };
+                if app.emit(ev, &v).is_err() || ev == "term-exit" {
+                    break;
+                }
+            }
+        });
+    }
+    Ok(v)
 }
 
 fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
@@ -205,6 +243,18 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             repo: s("repo"),
             pr: p.get("pr").and_then(Value::as_u64).unwrap_or(0),
         },
+        "term_open" => ReqKind::TermOpen {
+            session: s("session"),
+            cols: p.get("cols").and_then(Value::as_u64).unwrap_or(0) as u16,
+            rows: p.get("rows").and_then(Value::as_u64).unwrap_or(0) as u16,
+        },
+        "term_input" => ReqKind::TermInput { term: s("term"), data: s("data") },
+        "term_resize" => ReqKind::TermResize {
+            term: s("term"),
+            cols: p.get("cols").and_then(Value::as_u64).unwrap_or(0) as u16,
+            rows: p.get("rows").and_then(Value::as_u64).unwrap_or(0) as u16,
+        },
+        "term_close" => ReqKind::TermClose { term: s("term") },
         "kill_session" => ReqKind::KillSession { session: s("session") },
         "clear_session" => ReqKind::ClearSession { session: s("session") },
         "sleep_session" => ReqKind::SleepSession { session: s("session") },

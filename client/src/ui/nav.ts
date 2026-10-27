@@ -103,6 +103,9 @@ export class OverlayNav {
     } else if (id === "files") {
       $("file-panel").hidden = true;
       stopVideos($("file-panel"));
+    } else if (id === "term") {
+      // Passe par le handler de ✕ : wantOpen retombe + nav.close.
+      $("btn-term-hide").click();
     } else if (id === "settings") {
       // Passe par le handler de ✕ : hidden + levée de l'inert + nav.close.
       $("settings-close").click();

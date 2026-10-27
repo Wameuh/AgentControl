@@ -24,6 +24,8 @@ export class SettingsPanel {
   langChanged: () => void = () => {};
   /** Mode d'envoi changé → hints du composer à mettre à jour (injecté). */
   sendModeChanged: () => void = () => {};
+  /** Thème changé → les terminaux ouverts re-pick les couleurs (injecté). */
+  themeChanged: () => void = () => {};
 
   private isOpen() {
     return !$("settings-view").hidden;
@@ -118,8 +120,10 @@ export class SettingsPanel {
         this.close();
     });
 
-    ($("s-theme") as HTMLSelectElement).onchange = (e) =>
+    ($("s-theme") as HTMLSelectElement).onchange = (e) => {
       applyTheme((e.target as HTMLSelectElement).value as "dark" | "light");
+      this.themeChanged();
+    };
     ($("s-lang") as HTMLSelectElement).onchange = (e) => {
       setLang((e.target as HTMLSelectElement).value as Lang);
       this.langChanged();

@@ -685,6 +685,31 @@ pub enum ReqKind {
     KillSession {
         session: String,
     },
+    /// Ouvre un shell PTY sur l'hôte du démon, cwd = workspace de la
+    /// session. Réponse : `{term}`. La sortie arrive en pushes
+    /// `{push:"term_data", term, data:base64}` et la fin en
+    /// `{push:"term_exit", term, code:i64|null}`.
+    /// Cycle de vie borné à la connexion : le PTY est tué si elle tombe.
+    /// Ces requêtes sont traitées inline par la couche connexion
+    /// (jamais dispatchées en tâche — ordre des inputs garanti).
+    TermOpen {
+        session: String,
+        cols: u16,
+        rows: u16,
+    },
+    /// Octets vers le PTY (saisie clavier, coller…) — `data` en base64.
+    TermInput {
+        term: String,
+        data: String,
+    },
+    TermResize {
+        term: String,
+        cols: u16,
+        rows: u16,
+    },
+    TermClose {
+        term: String,
+    },
     /// Registre PR ↔ session : liste, filtrable par session.
     PrList {
         #[serde(default)]
@@ -764,6 +789,10 @@ impl ReqKind {
             Self::Respond { .. } => "respond",
             Self::GetBlob { .. } => "get_blob",
             Self::KillSession { .. } => "kill_session",
+            Self::TermOpen { .. } => "term_open",
+            Self::TermInput { .. } => "term_input",
+            Self::TermResize { .. } => "term_resize",
+            Self::TermClose { .. } => "term_close",
             Self::PrList { .. } => "pr_list",
             Self::PrTrack { .. } => "pr_track",
             Self::PrUntrack { .. } => "pr_untrack",

@@ -19,6 +19,9 @@ tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 toml = "0.8"
 base64 = "0.22"
+# PTY interactif pour le terminal client (shell dans le workspace d'une
+# session) — portable-pty : fork/exec + setsid corrects, resize natif.
+portable-pty = "0.9"
 # deflate pur-Rust (miniz_oxide) — pas de compilateur C requis
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # Self-update : download https (rustls — pas d'openssl/C) + tar.gz

@@ -6,6 +6,7 @@ mod prs;
 mod selfupdate;
 mod server;
 mod session;
+mod term;
 mod tui;
 
 use anyhow::{Context, Result};

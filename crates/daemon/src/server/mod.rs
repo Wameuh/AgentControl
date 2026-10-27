@@ -9,6 +9,7 @@ mod misc;
 mod peers;
 mod prs;
 mod sessions;
+mod term;
 
 pub use cfg::{A2aCfg, AgentProfile, RetentionCfg};
 
@@ -511,6 +512,14 @@ impl Daemon {
             ReqKind::Subscribe { session, after_seq } => {
                 self.h_subscribe(session, after_seq).await
             }
+            // Interceptés par la couche connexion (ordre des inputs +
+            // cycle de vie borné à la connexion) — jamais atteint ici.
+            ReqKind::TermOpen { .. }
+            | ReqKind::TermInput { .. }
+            | ReqKind::TermResize { .. }
+            | ReqKind::TermClose { .. } => {
+                anyhow::bail!("requête terminal hors couche connexion")
+            }
         }
     }
 
@@ -527,6 +536,11 @@ impl Daemon {
         // État de subscription : (session_id, broadcast rx, last_sent,
         // journal_gen) — la gen trahit un reset quand les seqs coïncident.
         let mut sub: Option<(String, broadcast::Receiver<proto::Event>, u64, u64)> = None;
+        // Terminaux ouverts par CETTE connexion — bornés à sa durée de vie :
+        // déconnexion → la map est droppée → master fermé → shells SIGHUP.
+        let mut terms = term::Terms::new();
+        let (term_done_tx, mut term_done_rx) =
+            tokio::sync::mpsc::unbounded_channel::<String>();
 
         loop {
             tokio::select! {
@@ -623,6 +637,15 @@ impl Daemon {
                         }
                         continue;
                     }
+                    // Terminal : inline (pas de tâche — l'ordre des inputs
+                    // compte et l'état vit dans la map locale `terms`).
+                    if let Some(resp) = self
+                        .h_term(&mut terms, &term_done_tx, &write, &req)
+                        .await
+                    {
+                        Self::send_line(&write, &resp).await?;
+                        continue;
+                    }
                     // Requêtes concurrentes par connexion : chaque dispatch dans
                     // sa tâche — un handler lent (resume_session → spawn +
                     // session/load + replay) ne bloque plus les autres appels.
@@ -700,6 +723,13 @@ impl Daemon {
                             }
                         }
                         Err(_) => { sub = None; }
+                    }
+                }
+                // Fin d'un flux PTY (shell mort ou reader coupé) : sortir
+                // le term de la map → drop → kill/réap si encore vivant.
+                tid = term_done_rx.recv(), if !terms.is_empty() => {
+                    if let Some(tid) = tid {
+                        terms.remove(&tid);
                     }
                 }
             }

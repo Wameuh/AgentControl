@@ -104,6 +104,8 @@ export class ChatView {
     onSessionChanged: () => {},
     /** Nb de connexions connues — pour l'écran d'accueil (injecté). */
     connCount: (): number => 0,
+    /** ⌨ affiché seulement si le démon de la conn connaît term_open. */
+    termCapable: (_conn: string) => false,
   };
 
   bind(renderer: EventRenderer, d: Partial<typeof this.deps>) {
@@ -582,6 +584,8 @@ export class ChatView {
     $("btn-search").hidden = !app.current;
     $("btn-first").hidden =
       !app.current || !this.deps.firstPostCapable(app.current?.conn ?? "default");
+    $("btn-term").hidden =
+      !app.current || !this.deps.termCapable(app.current?.conn ?? "default");
     if (!app.current) {
       $("chat-ctx").hidden = true;
       $("chat-opts").hidden = true;

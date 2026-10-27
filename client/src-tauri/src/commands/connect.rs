@@ -127,6 +127,11 @@ pub(crate) async fn subscribe(
     let sid_log = session.clone();
     let task = tauri::async_runtime::spawn(async move {
         while let Ok(v) = rx.recv().await {
+            // Seuls les events de session partent en session-event — les
+            // pushes term_* ont leur pompe dédiée (spawnée par term_open).
+            if v.get("push").and_then(Value::as_str) != Some("event") {
+                continue;
+            }
             let _ = app.emit("session-event", v);
         }
         client_core::log(Level::Debug, format!("subscribe {sid_log}: flux terminé"));

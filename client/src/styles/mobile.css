@@ -195,6 +195,7 @@ body.android #chat-header button, body.android #chat-header select {
   min-height: 42px; font-size: 14px; padding: 6px 12px;
 }
 body.android #chat-header #btn-first,
+body.android #chat-header #btn-term,
 body.android #chat-header #btn-files,
 body.android #chat-header #btn-refresh,
 body.android #chat-header #btn-resume,
