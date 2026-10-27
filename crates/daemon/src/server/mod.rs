@@ -407,8 +407,18 @@ impl Daemon {
             ReqKind::Events {
                 session,
                 before_seq,
+                after_seq,
                 limit,
-            } => self.h_events(session, before_seq, limit).await,
+            } => self.h_events(session, before_seq, after_seq, limit).await,
+            ReqKind::SearchEvents {
+                session,
+                query,
+                before_seq,
+                limit,
+            } => {
+                self.h_search_events(session, query, before_seq, limit)
+                    .await
+            }
             ReqKind::ReadFile { session, path, binary } => {
                 self.h_read_file(session, path, binary).await
             }

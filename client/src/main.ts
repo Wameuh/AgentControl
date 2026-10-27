@@ -32,6 +32,7 @@ import { ConnectionManager } from "./features/connections";
 import { ConnectDialog } from "./features/connect-dialog";
 import { EventRenderer } from "./features/event-renderers";
 import { ChatView } from "./features/chat-view";
+import { SessionSearch } from "./features/search";
 import { Sidebar } from "./features/sidebar";
 import { Composer } from "./features/composer";
 import { FileExplorer } from "./features/files";
@@ -63,6 +64,7 @@ const files = new FileExplorer();
 const connectDlg = new ConnectDialog();
 const newSess = new NewSessionDialog();
 const settings = new SettingsPanel();
+const search = new SessionSearch();
 
 // call() a besoin de la conn courante + des états live — injectés pour éviter
 // l'import inverse core → features.
@@ -76,7 +78,9 @@ chat.bind(renderer, {
   refresh: () => sidebar.refresh(),
   refreshQueue: () => composer.refreshQueue(),
   onSessionOpened: () => files.onSessionOpened(),
+  onSessionChanged: () => search.onSessionChanged(),
 });
+search.bind({ jumpToSeq: (seq) => chat.jumpToSeq(seq) });
 renderer.bind({
   metaChanged: () => chat.updateHeader(),
   ctxChanged: () => chat.updateCtx(),
@@ -153,6 +157,7 @@ $("tb-more").onclick = () =>
   ]);
 $("chat-more").onclick = () => {
   const items: SheetItem[] = [];
+  if (app.current) items.push({ icon: "search", label: t("search_title"), fn: () => search.open() });
   if (app.current) items.push({ icon: "folder", label: t("files_title"), fn: () => $("btn-files").click() });
   if (app.current && !app.alive)
     items.push({ icon: "play", label: t("resume"), fn: () => $("btn-resume").click() });
@@ -174,6 +179,7 @@ newSess.init();
 conns.init();
 connectDlg.init();
 chat.init();
+search.init();
 sidebar.init();
 composer.init();
 files.init();

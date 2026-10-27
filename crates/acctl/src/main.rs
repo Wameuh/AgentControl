@@ -239,7 +239,7 @@ fn print_event(ev: &Value) {
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|resume|attach|fork|cancel|kill|clear|sleep|mode|respond|blob|download|daemon-update");
+        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|search|resume|attach|fork|cancel|kill|clear|sleep|mode|respond|blob|download|daemon-update");
         std::process::exit(2);
     }
     let mut c = connect().await?;
@@ -398,7 +398,7 @@ async fn main() -> Result<()> {
             let before = args.get(2).and_then(|s| s.parse().ok()).filter(|n: &u64| *n > 0);
             let limit = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(200);
             let v = c.call(proto::ReqKind::Events {
-                session: args[1].clone(), before_seq: before, limit,
+                session: args[1].clone(), before_seq: before, after_seq: None, limit,
             }).await?;
             for ev in v["events"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
                 print_event(ev);
@@ -408,6 +408,31 @@ async fn main() -> Result<()> {
         "tail" => {
             let after = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
             c.tail(&args[1], after).await?;
+        }
+        "search" => {
+            // acctl search <session> <query...> — scan plein-texte du
+            // journal, plus récent d'abord (curseur non exposé pour
+            // l'instant : un appel couvre ~20k events scannés).
+            if args.len() < 3 {
+                bail!("search <session> <query...>");
+            }
+            let v = c.call(proto::ReqKind::SearchEvents {
+                session: args[1].clone(),
+                query: args[2..].join(" "),
+                before_seq: None,
+                limit: 50,
+            }).await?;
+            for m in v["matches"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
+                println!(
+                    "[{}] {} {}",
+                    m["seq"].as_u64().unwrap_or(0),
+                    m["type"].as_str().unwrap_or(""),
+                    m["excerpt"].as_str().unwrap_or("")
+                );
+            }
+            if !v["done"].as_bool().unwrap_or(true) {
+                eprintln!("(scan partiel — {} events parcourus)", v["scanned"].as_u64().unwrap_or(0));
+            }
         }
         "resume" => println!("{}", c.call(proto::ReqKind::ResumeSession {
             session: args[1].clone(),

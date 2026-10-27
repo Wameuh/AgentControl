@@ -20,6 +20,8 @@ import type { EventRenderer } from "./event-renderers";
 const MAX_RENDERED = 400;
 const PAGE = 50; // paquets au scroll
 const INITIAL_PAGE = 200; // base d'historique à l'ouverture
+const JUMP_BEFORE = 40; // contexte rendu avant un résultat de recherche
+const JUMP_AFTER = 40; // … et après
 // Fenêtre de rattrapage du subscribe — doit matcher SUBSCRIBE_REPLAY_MAX
 // côté démon : un trou plus grand n'est pas rejoué (cache jeté + dernière
 // page rechargée, l'historique restant paginable via events/before_seq).
@@ -45,6 +47,11 @@ interface ConvCache {
   minRendered: number;
   renderedCount: number;
   hasMoreHistory: boolean;
+  /** Vue ancrée en plein journal (saut de recherche) : du contenu plus
+   *  récent existe après le dernier seq rendu. */
+  hasMoreNewer: boolean;
+  /** Events live tamponnés pendant que la vue est ancrée. */
+  pendingLive: AcEvent[];
   unseenBelow: number;
   lastSeq: number;
   scrollTop: number;
@@ -66,9 +73,13 @@ export class ChatView {
   // visitées remplissent leur queue.
   private tailCache = new Map<string, { conn: string; evs: AcEvent[]; nativeId?: string }>();
   private minRendered = Number.MAX_SAFE_INTEGER;
+  private maxRendered = 0;
   private renderedCount = 0;
-  private loadingOld = false;
+  private loadingPage = false;
   private hasMoreHistory = true;
+  private hasMoreNewer = false;
+  private pendingLive: AcEvent[] = [];
+  private jumpSeq = 0; // invalidation des sauts de recherche en vol
   private unseenBelow = 0;
   private convLoadingEl: HTMLElement | null = null;
 
@@ -81,6 +92,10 @@ export class ChatView {
     refreshQueue: () => {},
     /** L'arbre fichiers suit le workspace de la session ouverte. */
     onSessionOpened: () => {},
+    /** Session affichée changée ou disparue (suppression, conn coupée,
+     *  journal vidé) — la recherche ferme, ses résultats sont d'un
+     *  autre journal. */
+    onSessionChanged: () => {},
   };
 
   bind(renderer: EventRenderer, d: Partial<typeof this.deps>) {
@@ -109,10 +124,14 @@ export class ChatView {
     this.renderer.pendingToolUpdates = new Map();
     this.renderer.answered = new Set();
     this.minRendered = Number.MAX_SAFE_INTEGER;
+    this.maxRendered = 0;
     this.renderedCount = 0;
     this.hasMoreHistory = true;
-    this.loadingOld = false;
+    this.hasMoreNewer = false;
+    this.pendingLive = [];
+    this.loadingPage = false;
     this.unseenBelow = 0;
+    this.jumpSeq++; // un saut de recherche en vol ne doit plus réinjecter sa fenêtre
     $("btn-bottom").hidden = true;
   }
 
@@ -142,6 +161,8 @@ export class ChatView {
       minRendered: this.minRendered,
       renderedCount: this.renderedCount,
       hasMoreHistory: this.hasMoreHistory,
+      hasMoreNewer: this.hasMoreNewer,
+      pendingLive: this.pendingLive,
       unseenBelow: this.unseenBelow,
       lastSeq,
       scrollTop: scroll,
@@ -174,9 +195,12 @@ export class ChatView {
     this.renderer.pendingToolUpdates = c.pendingToolUpdates;
     this.renderer.answered = c.answered;
     this.minRendered = c.minRendered;
+    this.maxRendered = c.lastSeq; // dernier seq rendu = borne haute du cache
     this.renderedCount = c.renderedCount;
     this.hasMoreHistory = c.hasMoreHistory;
-    this.loadingOld = false;
+    this.hasMoreNewer = c.hasMoreNewer;
+    this.pendingLive = c.pendingLive;
+    this.loadingPage = false;
     this.unseenBelow = c.unseenBelow;
     if (c.atBottom) this.scrollBottom();
     else this.eventsEl.scrollTop = c.scrollTop;
@@ -200,6 +224,7 @@ export class ChatView {
     if (app.current && (app.current.conn ?? "default") === conn) {
       app.current = null;
       this.clearConv();
+      this.deps.onSessionChanged();
     }
   }
 
@@ -213,6 +238,7 @@ export class ChatView {
   async open(id: string, force = false) {
     const seq = ++this.openSeq;
     const stale = () => seq !== this.openSeq; // un open plus récent a pris le relais
+    const prevId = app.current?.id;
     // La meta démon ne porte pas sa conn (notion client) — la reprendre de
     // la liste (stampée par le merge) pour router session_info sur le bon
     // serveur ; "" → connexion par défaut.
@@ -234,6 +260,9 @@ export class ChatView {
     app.alive = !!app.current && !app.current.offline &&
       app.current.state !== "dead" && app.current.state !== "interrupted" &&
       app.current.state !== "asleep";
+    // Session affichée différente → la recherche se ferme : ses résultats
+    // indexent le journal de l'ancienne session, pas celui de la nouvelle.
+    if (app.current?.id !== prevId) this.deps.onSessionChanged();
     if (app.current) $("chat-title").textContent = `${app.current.title} — ${app.current.agent}`;
     this.updateHeader();
 
@@ -308,13 +337,13 @@ export class ChatView {
     // atteignable par la pagination scroll-up (events/before_seq).
     // NB : cachedConv consomme l'entrée — la décision se prend sur
     // `cached`, pas sur un second appel qui ne peut rien retourner.
-    const reset = staleCache(cached);
-    const gap = cached != null && !reset && info.last_seq - cached.lastSeq > REPLAY_WINDOW;
-    if (gap || reset) {
+    let journalReset = staleCache(cached);
+    const gap = cached != null && !journalReset && info.last_seq - cached.lastSeq > REPLAY_WINDOW;
+    if (gap || journalReset) {
       this.clearConv();
       this.showConvLoading(true);
     }
-    const fresh = gap || reset ? undefined : cached;
+    const fresh = gap || journalReset ? undefined : cached;
     // Avec cache, le trou depuis lastSeq est rejoué par le subscribe ; sans
     // cache, on recharge la dernière page — un échec (journal absent/corrompu)
     // ne doit PAS tuer le subscribe ni la vue live derrière.
@@ -325,6 +354,7 @@ export class ChatView {
       if (tail && staleCache({ nativeId: tail.nativeId, lastSeq: tailLastSeq })) {
         this.tailCache.delete(id);
         tail = undefined;
+        journalReset = true;
       }
       if (tail && tailLastSeq && info.last_seq - tailLastSeq <= REPLAY_WINDOW) {
         // Queue brute encore fraîche → réaffichage instantané ; le
@@ -361,6 +391,9 @@ export class ChatView {
       // Le flux live est mort (ex. restart démon) → erreur visible
       showErr(`subscribe: ${e}`);
     });
+    // Journal réinitialisé (native changé) → les résultats de recherche
+    // indexent l'ancien journal (seqs reparties à 1) → fermer la recherche.
+    if (journalReset) this.deps.onSessionChanged();
     void this.deps.refresh();
     // L'arbre suit le workspace de la session nouvellement ouverte
     this.deps.onSessionOpened();
@@ -377,6 +410,7 @@ export class ChatView {
   async convCleared() {
     this.clearConv();
     this.scrollBottom();
+    this.deps.onSessionChanged(); // les résultats pointent vers l'ancien journal
     if (!app.current) return;
     const sid = app.current.id;
     const info = await call<{ meta: SessionMeta }>("session_info", {
@@ -396,6 +430,7 @@ export class ChatView {
     this.sysline(t("session_gone"), "warn");
     this.dropConv(app.current.id);
     app.current = null;
+    this.deps.onSessionChanged();
     this.unseenBelow = 0;
     $("btn-bottom").hidden = true;
     $("chat-gem").hidden = true;
@@ -440,6 +475,7 @@ export class ChatView {
 
   updateHeader() {
     $("btn-files").hidden = !app.current;
+    $("btn-search").hidden = !app.current;
     if (!app.current) {
       $("chat-ctx").hidden = true;
       $("chat-opts").hidden = true;
@@ -593,19 +629,35 @@ export class ChatView {
   private updateBottomBtn() {
     const dist = this.eventsEl.scrollHeight - this.eventsEl.scrollTop - this.eventsEl.clientHeight;
     const b = $("btn-bottom");
-    if (dist < 120) {
+    if (dist < 120 && !this.hasMoreNewer) {
       b.hidden = true;
       this.unseenBelow = 0;
       return;
     }
     b.hidden = false;
-    b.textContent = this.unseenBelow ? `↓ ${this.unseenBelow}` : "↓";
+    // Vue ancrée : skip-down = retour au présent (recharge la queue du
+    // journal) ; sinon down = simple scroll au dernier message rendu.
+    b.title = t(this.hasMoreNewer ? "bottom_jump_title" : "bottom_title");
+    b.innerHTML =
+      icon(this.hasMoreNewer ? "skip-down" : "down") +
+      (this.unseenBelow ? `<span class="cnt">${this.unseenBelow}</span>` : "");
   }
 
   appendEvent(ev: AcEvent, live: boolean) {
     // La queue enregistre aussi les updates (dedup par seq) — sinon une
     // réouverture via tail rend les tool_call sans leur output streamé.
     if (app.current) this.pushTail(app.current.id, app.current.conn ?? "default", ev);
+    // Vue ancrée (saut de recherche) : l'event live n'est pas contigu avec
+    // le rendu — il est tamponné jusqu'au retour au présent ; le compteur
+    // du bouton ⇥ reflète ce qui attend.
+    if (live && this.hasMoreNewer) {
+      const lastP = this.pendingLive[this.pendingLive.length - 1];
+      if (!lastP || ev.seq > lastP.seq) this.pendingLive.push(ev);
+      this.unseenBelow++;
+      this.updateBottomBtn();
+      return;
+    }
+    if (ev.seq > this.maxRendered) this.maxRendered = ev.seq;
     // tool_call_update modifie le bloc existant
     if (ev.type === "tool_call_update") {
       this.renderer.updateToolBlock(ev);
@@ -703,6 +755,162 @@ export class ChatView {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // Saut de recherche : vue ancrée en plein journal + pagination avant
+  // -------------------------------------------------------------------------
+
+  /** Centre la vue sur un seq (résultat de recherche). Nœud déjà rendu →
+   *  scroll simple ; sinon fenêtre chargée autour du seq — la vue devient
+   *  « ancrée » : pagination avant au scroll bas, events live tamponnés. */
+  async jumpToSeq(seq: number): Promise<boolean> {
+    if (!app.current) return false;
+    const sid = app.current.id;
+    const js = ++this.jumpSeq;
+    const node = () => this.eventsEl.querySelector<HTMLElement>(`.ev[data-seq="${seq}"]`);
+    const hit = node();
+    if (hit) {
+      this.scrollToNode(hit);
+      return true;
+    }
+    // Tamponner les events live pendant le chargement de la fenêtre :
+    // hasMoreNewer déroute appendEvent vers pendingLive — rien ne se
+    // perd ni ne s'insère dans l'ancienne vue avant le clearConv.
+    const wasAnchored = this.hasMoreNewer;
+    this.hasMoreNewer = true;
+    const pending = this.pendingLive;
+    try {
+      const [before, after] = await Promise.all([
+        call<{ events: AcEvent[] }>("events", {
+          session: sid,
+          before_seq: seq + 1, // exclusif → la page se termine sur le match
+          limit: JUMP_BEFORE,
+        }),
+        call<{ events: AcEvent[]; last_seq: number }>("events", {
+          session: sid,
+          after_seq: seq,
+          limit: JUMP_AFTER,
+        }),
+      ]);
+      if (js !== this.jumpSeq || app.current?.id !== sid) {
+        // Un saut plus récent ou un open a repris la main — hasMoreNewer/
+        // pendingLive appartiennent à ce flux, ne pas les écraser.
+        return false;
+      }
+      this.clearConv();
+      for (const ev of [...before.events, ...after.events]) this.appendEvent(ev, false);
+      // Tampon live accumulé pendant l'await : les events déjà couverts
+      // par la fenêtre sautée sont droppés ; un seq > last_seq lu (event
+      // arrivé après la requête) reste en attente et compte comme
+      // contenu plus récent → la vue reste ancrée jusqu'à ⇥.
+      this.pendingLive = pending.filter((e) => e.seq > this.maxRendered);
+      this.unseenBelow = this.pendingLive.length;
+      this.hasMoreNewer =
+        this.maxRendered < after.last_seq || this.pendingLive.length > 0;
+      if (!this.hasMoreNewer) this.flushPendingLive();
+      const target = node() ?? this.closestEv(seq);
+      if (target) this.scrollToNode(target);
+      else this.scrollBottom();
+      return target != null;
+    } catch (e) {
+      // Échec avant tout clearConv : l'ancienne vue est intacte —
+      // restaurer son état ; si elle était live, les events tamponnés
+      // pendant l'await sont déversés plutôt que perdus.
+      this.hasMoreNewer = wasAnchored;
+      if (!this.hasMoreNewer) this.flushPendingLive();
+      this.updateBottomBtn();
+      showErr(`events: ${e}`);
+      return false;
+    }
+  }
+
+  /** Le bloc rendu le plus proche d'un seq — repli quand le match n'a pas
+   *  de nœud propre (tool_call_update fusionné dans son bloc parent). */
+  private closestEv(seq: number): HTMLElement | null {
+    let best: HTMLElement | null = null;
+    let bd = Number.MAX_SAFE_INTEGER;
+    for (const n of this.eventsEl.querySelectorAll<HTMLElement>(".ev")) {
+      const d = Math.abs(Number(n.dataset.seq ?? 0) - seq);
+      if (d < bd) {
+        bd = d;
+        best = n;
+      }
+    }
+    return best;
+  }
+
+  private scrollToNode(node: HTMLElement) {
+    node.scrollIntoView({ block: "center" });
+    node.classList.remove("hit-flash");
+    void node.offsetWidth; // reflow : rejouer l'anim à chaque saut
+    node.classList.add("hit-flash");
+    this.updateBottomBtn();
+  }
+
+  /** Page suivante vers le présent (scroll bas en vue ancrée). */
+  private async loadNewerPage() {
+    if (!app.current || this.loadingPage || !this.hasMoreNewer) return;
+    const sid = app.current.id;
+    const js = this.jumpSeq;
+    this.loadingPage = true;
+    try {
+      const page = await call<{ events: AcEvent[]; last_seq: number }>("events", {
+        session: sid,
+        after_seq: this.maxRendered,
+        limit: PAGE,
+      });
+      if (app.current?.id !== sid || js !== this.jumpSeq) return;
+      for (const ev of page.events) this.appendEvent(ev, false);
+      if (this.maxRendered >= page.last_seq) {
+        this.hasMoreNewer = false;
+        this.flushPendingLive();
+      }
+    } finally {
+      this.loadingPage = false;
+    }
+  }
+
+  /** Bouton ⇥ : recharge la queue du journal — sortie du mode ancré. */
+  private async loadLatest() {
+    if (!app.current) return;
+    const sid = app.current.id;
+    const pending = this.pendingLive;
+    this.clearConv();
+    this.hasMoreNewer = true; // les events live restent tamponnés pendant l'await
+    const js = this.jumpSeq; // post-clearConv : un saut ultérieur invalide ce load
+    this.showConvLoading(true);
+    try {
+      const page = await call<{ events: AcEvent[]; last_seq: number }>("events", {
+        session: sid,
+        limit: INITIAL_PAGE,
+      });
+      if (app.current?.id !== sid || js !== this.jumpSeq) return;
+      for (const ev of page.events) this.appendEvent(ev, false);
+      // Les events live arrivés pendant l'await sont restés tamponnés
+      // dans pendingLive (clearConv l'a recréée) → concat, pas écrasement.
+      this.pendingLive = [...pending, ...this.pendingLive];
+      this.hasMoreNewer = false;
+      this.scrollBottom();
+      this.flushPendingLive();
+    } catch (e) {
+      // Échec : la vue est vide — les events tamponnés avant l'appel
+      // retournent dans le buffer, ⇥ reste actif pour réessayer.
+      this.pendingLive = [...pending, ...this.pendingLive];
+      this.unseenBelow = this.pendingLive.length;
+      this.updateBottomBtn();
+      showErr(`events: ${e}`);
+    } finally {
+      this.showConvLoading(false);
+    }
+  }
+
+  /** Déverse les events tamponnés en vue ancrée — ceux déjà recouverts
+   *  par la fenêtre sont filtrés par seq (live append les rend en bas). */
+  private flushPendingLive() {
+    const rest = this.pendingLive.filter((e) => e.seq > this.maxRendered);
+    this.pendingLive = [];
+    for (const ev of rest) this.appendEvent(ev, true);
+  }
+
   /** Ligne système dans le fil (retourne l'élément pour mises à jour). */
   sysline(text: string, ic: IconName = "sys"): HTMLElement {
     const d = document.createElement("div");
@@ -716,27 +924,35 @@ export class ChatView {
   init() {
     // Scroll : chargement des pages anciennes via sentinel
     const observer = new IntersectionObserver(async (entries) => {
-      if (!entries[0].isIntersecting || this.loadingOld || !app.current || !this.hasMoreHistory ||
+      if (!entries[0].isIntersecting || this.loadingPage || !app.current || !this.hasMoreHistory ||
           this.convLoadingEl?.isConnected) return;
       const sid = app.current.id;
-      this.loadingOld = true;
+      const js = this.jumpSeq;
+      this.loadingPage = true;
       try {
         const page = await call<{ events: AcEvent[] }>("events", {
           session: sid,
           before_seq: this.minRendered,
           limit: PAGE,
         });
-        // Session changée pendant l'await → ne pas insérer l'ancienne page.
-        if (app.current?.id === sid) this.prependEvents(page.events);
+        // Session changée ou saut de recherche pendant l'await → la page
+        // est périmée pour la fenêtre reconstruite, ne pas l'insérer.
+        if (app.current?.id === sid && js === this.jumpSeq) this.prependEvents(page.events);
       } finally {
-        this.loadingOld = false;
+        this.loadingPage = false;
       }
     });
     observer.observe(this.sentinel);
 
-    this.eventsEl.addEventListener("scroll", () => this.updateBottomBtn());
+    this.eventsEl.addEventListener("scroll", () => {
+      this.updateBottomBtn();
+      // Pagination avant (vue ancrée) : le fond de la fenêtre est atteint
+      // et du contenu plus récent existe → charger la page suivante.
+      if (this.hasMoreNewer && this.nearBottom()) void this.loadNewerPage();
+    });
     $("btn-bottom").onclick = () => {
-      this.eventsEl.scrollTo({ top: this.eventsEl.scrollHeight, behavior: "smooth" });
+      if (this.hasMoreNewer) void this.loadLatest();
+      else this.eventsEl.scrollTo({ top: this.eventsEl.scrollHeight, behavior: "smooth" });
     };
     // Image cassée (404, hôte inaccessible…) → on la remplace par son texte/URL,
     // l'<a> englobant reste cliquable. capture=true : error ne bubble pas.

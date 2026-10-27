@@ -47,6 +47,7 @@
               <input id="model-free" hidden data-i18n-ph="model_free_ph" data-i18n-title="model_free_title" placeholder="model…" />
               <span id="dyn-opts"></span>
             </div>
+            <button id="btn-search" hidden data-icon="search" data-i18n-title="search_title" title="Search"></button>
             <button id="btn-files" hidden data-icon="folder" data-i18n-title="files_title" title="Files"></button>
             <button id="btn-refresh" data-icon="refresh" data-i18n-title="refresh_title" title="Reload"></button>
             <button id="btn-resume" hidden data-i18n="resume">Resume</button>
@@ -54,6 +55,16 @@
             <button id="btn-cancel" hidden data-i18n="stop">Stop</button>
             <button id="chat-more" hidden data-icon="more" data-i18n-title="menu_title" title="Menu"></button>
           </header>
+          <div id="search-wrap" hidden>
+            <div id="search-bar">
+              <input id="search-input" data-i18n-ph="search_ph" placeholder="Search history…" />
+              <span id="search-count"></span>
+              <button id="search-prev" data-icon="up" data-i18n-title="search_prev" title="Previous"></button>
+              <button id="search-next" data-icon="down" data-i18n-title="search_next" title="Next"></button>
+              <button id="search-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </div>
+            <div id="search-results" hidden></div>
+          </div>
           <div id="events">
             <div id="scroll-sentinel"></div>
           </div>
