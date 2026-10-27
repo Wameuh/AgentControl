@@ -142,12 +142,43 @@ impl Daemon {
         let Ok(s) = self.get_session(sid).await else {
             return; // purgée entre le chargement et la reprise
         };
-        // Un client reconnecté peut avoir déjà relancé l'agent (resume à
+        // Un client reconnecté peut relancer l'agent en parallèle (resume à
         // l'ouverture de la session côté UI) — même garde que
-        // h_resume_session, pour ne pas doubler le spawn.
+        // h_resume_session pour ne pas doubler le spawn. Mais le resume
+        // client est silencieux : sauter toute la reprise laisserait
+        // l'agent relancé sans consigne. L'état reste "interrupted"
+        // pendant tout le handshake et ne passe à "idle" qu'après
+        // session/load → attendre la fin d'un spawn en vol (borne 2 min,
+        // réveillé par les events de la session) plutôt qu'envoyer le
+        // prompt à un agent pas encore prêt.
         if s.is_alive() {
-            debug!("{sid}: déjà relancée — reprise auto ignorée");
-            return;
+            let mut ev_rx = s.events_tx.subscribe();
+            let deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+            while s.is_alive() && s.meta_snapshot().state == "interrupted" {
+                if tokio::time::timeout_at(deadline, ev_rx.recv())
+                    .await
+                    .is_err()
+                {
+                    break; // deadline atteinte — spawn visiblement bloqué
+                }
+            }
+            if s.is_alive() {
+                // Relancée sans la reprise auto : le prompt reste dû si la
+                // session est restée sans travail ; si elle tourne déjà
+                // (prompt client, permission rejeuée) quelqu'un la pilote.
+                if s.meta_snapshot().state == "idle" {
+                    info!("{sid}: déjà relancée — envoi « {AUTO_RESUME_PROMPT} »");
+                    Self::send_resume_prompt(&s, sid).await;
+                } else {
+                    debug!(
+                        "{sid}: déjà relancée (état {}) — reprise auto ignorée",
+                        s.meta_snapshot().state
+                    );
+                }
+                return;
+            }
+            // Le spawn client est mort entre-temps → on reprend la main.
         }
         let meta = s.meta_snapshot();
         let Some(native) = meta.native_session_id.clone() else {
@@ -165,21 +196,13 @@ impl Daemon {
             meta.mode.as_deref(),
             sid,
         );
-        s.emit(proto::EventKind::System {
-            text: "démon relancé après un arrêt brutal — reprise du travail…".into(),
-        });
         match s
             .spawn_agent(&cmd, &envs, Some(native), true, self.mcp_servers(sid))
             .await
         {
             Ok(()) => {
                 info!("{sid}: agent relancé — envoi « {AUTO_RESUME_PROMPT} »");
-                if let Err(e) = s.send_prompt(AUTO_RESUME_PROMPT, false, false).await {
-                    warn!("{sid}: prompt de reprise non délivré: {e:#}");
-                    s.emit(proto::EventKind::Error {
-                        message: format!("prompt de reprise: {e:#}"),
-                    });
-                }
+                Self::send_resume_prompt(&s, sid).await;
             }
             Err(e) => {
                 warn!("{sid}: reprise auto échouée: {e:#}");
@@ -187,6 +210,20 @@ impl Daemon {
                     message: format!("reprise auto: {e:#}"),
                 });
             }
+        }
+    }
+
+    /// Prompt « continue please » de la reprise post-crash : le sysline
+    /// qui explique le contexte puis l'envoi utilisateur lui-même.
+    async fn send_resume_prompt(s: &Arc<Session>, sid: &str) {
+        s.emit(proto::EventKind::System {
+            text: "démon relancé après un arrêt brutal — reprise du travail…".into(),
+        });
+        if let Err(e) = s.send_prompt(AUTO_RESUME_PROMPT, false, false).await {
+            warn!("{sid}: prompt de reprise non délivré: {e:#}");
+            s.emit(proto::EventKind::Error {
+                message: format!("prompt de reprise: {e:#}"),
+            });
         }
     }
 
