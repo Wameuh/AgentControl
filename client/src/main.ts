@@ -10,7 +10,7 @@ import "./styles.css";
 import "./mesh-bg.ts";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
-import { $ } from "./core/dom";
+import { $, notify } from "./core/dom";
 import { app } from "./core/state";
 import { initRpc } from "./core/rpc";
 import {
@@ -79,6 +79,7 @@ chat.bind(renderer, {
   refreshQueue: () => composer.refreshQueue(),
   onSessionOpened: () => files.onSessionOpened(),
   onSessionChanged: () => search.onSessionChanged(),
+  connCount: () => conns.knownConns().length,
 });
 search.bind({ jumpToSeq: (seq) => chat.jumpToSeq(seq) });
 renderer.bind({
@@ -100,6 +101,7 @@ conns.bind({
 });
 connectDlg.bind(conns);
 connectDlg.refresh = () => sidebar.refresh();
+connectDlg.connecting = (hosts) => chat.setConnecting(hosts);
 newSess.bind(groups);
 newSess.refresh = () => void sidebar.refresh();
 newSess.knownConns = () => conns.knownConns();
@@ -121,6 +123,7 @@ await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
   if (event.type === "session_deleted") {
     chat.dropConv(session);
     if (app.current && session === app.current.id) chat.markGone();
+    notify("info", t("session_deleted_toast"));
     void sidebar.refresh();
     return;
   }

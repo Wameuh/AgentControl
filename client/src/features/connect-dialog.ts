@@ -5,33 +5,102 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
-import { $, esc, showErr } from "../core/dom";
+import { listen } from "@tauri-apps/api/event";
+import { $, dlgErr, esc, notify } from "../core/dom";
 import { call } from "../core/rpc";
 import { cmpVer, connKeyOf, daemonParams, minorOf } from "../core/conn";
 import { isAndroid } from "../core/chrome";
 import type { SavedConn, SessionMeta } from "../core/types";
-import { t } from "../i18n";
+import { t, type Key } from "../i18n";
 import { icon } from "../ui/icons";
 import { showOutdated } from "./update";
 import type { ConnectionManager } from "./connections";
+
+// Étapes du script ensure_daemon — chaque `echo step:<id>` distant est
+// streamé (stderr/stdout selon le transport) en event `daemon-step`.
+const SCRIPT_STEPS = ["check", "download", "install", "service", "verify"];
+// Variante pour l'auto-update via ReqKind::UpdateDaemon (pas de script).
+const SELF_STEPS = ["send", "restart"];
 
 export class ConnectDialog {
   private conns!: ConnectionManager;
   /** Rafraîchit la sidebar après connexion (injecté). */
   refresh: () => Promise<void> = async () => {};
+  /** Auto-connexion en cours : hôtes affichés sur l'écran vide (injecté). */
+  connecting: (_hosts: string[]) => void = () => {};
   private saved: SavedConn[] = [];
+  private stepEls = new Map<string, HTMLElement>();
 
   bind(conns: ConnectionManager) {
     this.conns = conns;
   }
 
-  /** Dialogue modal pendant install/update du démon distant. */
-  private daemonDlg(msg: string, open: boolean) {
+  /** Erreur du flux de connexion : dans le dialogue s'il est ouvert (les
+   *  toasts passent sous son backdrop modal), toast sinon (auto-connect). */
+  private report(msg: string, level: "info" | "success" | "warn" | "error" = "error") {
+    if (($("dlg-conn") as HTMLDialogElement).open) dlgErr("c-err", msg);
+    else notify(level, msg);
+  }
+
+  /** Ligne de statut bas du dialogue de connexion (étape en cours). */
+  private cStatus(msg: string | null) {
+    const el = $("c-status");
+    if (msg == null) {
+      el.hidden = true;
+      el.textContent = "";
+      return;
+    }
+    el.textContent = msg;
+    el.hidden = false;
+  }
+
+  /** Dialogue modal pendant install/update du démon distant — liste
+   *  d'étapes mises à jour par les events `daemon-step` du backend. */
+  private daemonShow(title: string, msg: string, steps: string[] = [], note = "") {
     const d = $("dlg-daemon") as HTMLDialogElement;
-    if (open) {
-      ($("dlg-daemon-msg")).textContent = msg;
-      if (!d.open) d.showModal();
-    } else if (d.open) d.close();
+    $("dlg-daemon-title").textContent = title;
+    $("dlg-daemon-msg").textContent = msg;
+    $("dlg-daemon-note").textContent = note;
+    const ul = $("dlg-daemon-steps");
+    ul.innerHTML = "";
+    this.stepEls.clear();
+    for (const id of steps) {
+      const li = document.createElement("li");
+      li.innerHTML =
+        `<span class="st-ico">○</span><span>${esc(t(`dstep_${id}` as Key))}</span>`;
+      ul.appendChild(li);
+      this.stepEls.set(id, li);
+    }
+    if (!d.open) d.showModal();
+  }
+
+  /** Marqueur `step:<id>` reçu : les étapes passées → done, celle-ci → cur. */
+  private daemonStep(step: string) {
+    if (!this.stepEls.has(step)) return; // script sans marqueurs connus
+    let seen = false;
+    for (const [id, li] of this.stepEls) {
+      const ico = li.querySelector<HTMLElement>(".st-ico")!;
+      if (id === step) {
+        seen = true;
+        li.className = "cur";
+        ico.textContent = "◌";
+      } else if (!seen) {
+        li.className = "done";
+        ico.textContent = "✓";
+      }
+    }
+  }
+
+  private daemonFinish() {
+    for (const li of this.stepEls.values()) {
+      li.className = "done";
+      li.querySelector<HTMLElement>(".st-ico")!.textContent = "✓";
+    }
+  }
+
+  private daemonClose() {
+    const d = $("dlg-daemon") as HTMLDialogElement;
+    if (d.open) d.close();
   }
 
   /** Démon plus vieux que le client (minor ≠) : l'update redémarre le démon
@@ -81,8 +150,8 @@ export class ConnectDialog {
     try {
       const r = await call<{ restarting?: boolean }>(
         "update_daemon", { conn, version: lv });
-      if (r?.restarting) showErr(t("dupdate_self_ok", { lv }));
-      else showErr(t("dupdate_self_manual", { lv }));
+      if (r?.restarting) notify("success", t("dupdate_self_ok", { lv }));
+      else notify("warn", t("dupdate_self_manual", { lv }));
       return true;
     } catch (e) {
       const msg = String(e);
@@ -90,8 +159,23 @@ export class ConnectDialog {
       if (/unknown|inconnue|unrecognized|unsupported|not.?supported/i.test(msg)) return false;
       // Échec définitif (binaire non inscriptible, download) : le
       // script aurait les mêmes droits → afficher plutôt que retenter.
-      showErr(msg);
+      this.report(msg);
       return true;
+    }
+  }
+
+  /** `ensure_daemon` via le script distant, derrière le dialogue à étapes.
+   *  Retourne la réponse ("ok:*"|"newer:*"|"busy:*"|"installed:*"). */
+  private async runDaemonScript(
+    cfg: Record<string, unknown>, tag: string, title: string, msg: string,
+  ): Promise<string> {
+    this.daemonShow(title, msg, SCRIPT_STEPS);
+    try {
+      const res = await invoke<string>("ensure_daemon", daemonParams(cfg, tag));
+      this.daemonFinish();
+      return res;
+    } finally {
+      this.daemonClose();
     }
   }
 
@@ -123,6 +207,9 @@ export class ConnectDialog {
   }
 
   async connect(cfg: Record<string, unknown>) {
+    const host = String(cfg.host ?? cfg.addr ?? cfg.path ?? "local");
+    dlgErr("c-err", null);
+    this.cStatus(t("connecting_to", { host }));
     let status: unknown;
     let newerDaemon = "";
     try {
@@ -138,19 +225,18 @@ export class ConnectDialog {
       // port forwardé) mais momentanément down, installer ici écraserait
       // l'hôte — confirmation explicite avant toute mutation.
       if (!(await this.confirmDaemonInstall(String(cfg.host)))) throw e;
-      this.daemonDlg(t("installing_daemon") + " — " + String(cfg.host), true);
-      try {
-        const res = await invoke<string>("ensure_daemon", daemonParams(cfg, ver));
-        // Démon plus récent : le script distant refuse le downgrade.
-        if (res.startsWith("newer:")) newerDaemon = res.slice(6);
-        else if (res.startsWith("busy:")) {
-          showErr(t("dupdate_busy", { host: String(cfg.host), addr: res.slice(5) }));
-        } else if (res.startsWith("installed:") && res.slice(10) !== ver) {
-          showErr(t("dupdate_stale", { host: String(cfg.host), want: ver, got: res.slice(10) || "?" }));
-        }
-      } finally {
-        this.daemonDlg("", false);
+      const res = await this.runDaemonScript(
+        cfg, ver, t("dinstall_title"),
+        t("installing_daemon") + " — " + host,
+      );
+      // Démon plus récent : le script distant refuse le downgrade.
+      if (res.startsWith("newer:")) newerDaemon = res.slice(6);
+      else if (res.startsWith("busy:")) {
+        this.report(t("dupdate_busy", { host, addr: res.slice(5) }), "warn");
+      } else if (res.startsWith("installed:") && res.slice(10) !== ver) {
+        this.report(t("dupdate_stale", { host, want: ver, got: res.slice(10) || "?" }));
       }
+      this.cStatus(t("connecting_to", { host }));
       status = await invoke("connect", { cfg }).catch((e2) => {
         if (newerDaemon) showOutdated(ver, newerDaemon);
         throw e2;
@@ -159,6 +245,7 @@ export class ConnectDialog {
     // Incompatibilité de version mineure (x.y) — jamais à chaque patch.
     const dv = (status as { version?: string }).version || newerDaemon;
     const lv = await getVersion().catch(() => "0.0.0");
+    this.cStatus(dv ? t("daemon_detected", { v: dv }) : null);
     // Capacité annoncée par daemon_status — absente des démons plus
     // vieux que la feature (undefined → falsy → gate vers le script).
     const canSelfUpdate =
@@ -173,41 +260,54 @@ export class ConnectDialog {
         // remplace puis son superviseur le relance. Le restart tue les
         // agents en cours → validation utilisateur.
         const conn = this.conns.keyOf(cfg);
-        const host = String(cfg.host ?? conn);
         if (await this.confirmDaemonUpdate(dv, lv, host, conn)) {
-          this.daemonDlg(t("updating_daemon", { dv, lv }) + " — " + host, true);
-          try {
-            const selfDone = await this.tryDaemonSelfUpdate(
-              conn, canSelfUpdate, lv);
-            // `false` = démon trop vieux pour la requête → fallback
-            // script distant (ssh seulement — il faut un exec).
-            if (!selfDone && cfg.kind === "ssh" && cfg.host) {
-              const res = await invoke<string>("ensure_daemon", daemonParams(cfg, lv))
-                .catch((e) => {
-                  showErr(String(e));
-                  return "";
-                });
-              // Un autre client a pu upgrader le démon entre-temps → même garde-fou.
-              if (res.startsWith("newer:")) showOutdated(lv, res.slice(6));
-              else if (res.startsWith("busy:")) {
-                showErr(t("dupdate_busy", { host: String(cfg.host), addr: res.slice(5) }));
-              } else {
-                if (res.startsWith("installed:") && res.slice(10) !== lv) {
-                  showErr(t("dupdate_stale", { host: String(cfg.host), want: lv, got: res.slice(10) || "?" }));
-                }
-                status = await invoke("connect", { cfg }).catch(() => status);
-              }
-            } else if (!selfDone) {
-              // Hors-ssh (local/tcp) avec un démon trop vieux pour
-              // l'auto-update : pas d'exec possible → message honnête.
-              showErr(t("dupdate_too_old", { dv, lv }));
+          let selfDone = false;
+          if (canSelfUpdate) {
+            this.daemonShow(
+              t("dupdate_running"), t("updating_daemon", { dv, lv }) + " — " + host,
+              SELF_STEPS,
+            );
+            this.daemonStep("send");
+            selfDone = await this.tryDaemonSelfUpdate(conn, true, lv);
+            if (selfDone) {
+              // Le démon sort sous son superviseur : la reconnexion est
+              // gérée par le backoff — la note l'explique, court délai
+              // pour laisser lire l'étape "restart" puis fermer.
+              this.daemonStep("restart");
+              await new Promise((r) => setTimeout(r, 1200));
             }
-          } finally {
-            this.daemonDlg("", false);
+            this.daemonClose();
+          }
+          // `false` = démon trop vieux pour la requête → fallback
+          // script distant (ssh seulement — il faut un exec).
+          if (!selfDone && cfg.kind === "ssh" && cfg.host) {
+            const res = await this.runDaemonScript(
+              cfg, lv, t("dupdate_running"),
+              t("updating_daemon", { dv, lv }) + " — " + host,
+            ).catch((e) => {
+              this.report(String(e));
+              return "";
+            });
+            // Un autre client a pu upgrader le démon entre-temps → même garde-fou.
+            if (res.startsWith("newer:")) showOutdated(lv, res.slice(6));
+            else if (res.startsWith("busy:")) {
+              this.report(t("dupdate_busy", { host, addr: res.slice(5) }), "warn");
+            } else if (res) {
+              if (res.startsWith("installed:") && res.slice(10) !== lv) {
+                this.report(t("dupdate_stale", { host, want: lv, got: res.slice(10) || "?" }));
+              }
+              this.cStatus(t("connecting_to", { host }));
+              status = await invoke("connect", { cfg }).catch(() => status);
+            }
+          } else if (!selfDone) {
+            // Hors-ssh (local/tcp) avec un démon trop vieux pour
+            // l'auto-update : pas d'exec possible → message honnête.
+            this.report(t("dupdate_too_old", { dv, lv }));
           }
         }
       }
     }
+    this.cStatus(null);
     this.conns.markConnected(cfg);
     await this.refresh();
   }
@@ -331,6 +431,14 @@ export class ConnectDialog {
   }
 
   init() {
+    // Progression du script distant (marqueurs step:* streamés par
+    // ensure_daemon) — met à jour la liste si le dialogue est ouvert.
+    void listen<string>("daemon-step", (e) => this.daemonStep(e.payload));
+    // Un <dialog> modal se ferme sur Échap — pendant install/update le
+    // travail continuerait en arrière-plan sans retour visible → bloqué.
+    ($("dlg-daemon") as HTMLDialogElement).addEventListener("cancel", (e) =>
+      e.preventDefault(),
+    );
     $("c-pubkey-copy").onclick = async () => {
       const txt = $("c-pubkey").textContent ?? "";
       try {
@@ -356,7 +464,7 @@ export class ConnectDialog {
       if (!c) return;
       const ok = await invoke("remove_connection", { cfg: c })
         .then(() => true)
-        .catch((e) => { showErr(String(e)); return false; });
+        .catch((e) => { dlgErr("c-err", String(e)); return false; });
       if (!ok) return;
       this.saved = this.saved.filter((x) => x !== c);
       this.fillSavedSelect();
@@ -404,8 +512,11 @@ export class ConnectDialog {
         invoke("save_connection", { cfg }).catch(console.error);
         ($("dlg-conn") as HTMLDialogElement).close();
       } catch (err) {
-        showErr(String(err));
+        // Le dialogue reste ouvert : l'erreur va dans sa zone interne
+        // (un toast passerait sous le backdrop modal).
+        dlgErr("c-err", String(err));
       } finally {
+        this.cStatus(null);
         btn.disabled = false;
         btn.classList.remove("spin");
       }
@@ -418,7 +529,13 @@ export class ConnectDialog {
       .then(async (conns) => {
         this.saved = conns;
         if (localStorage.getItem("ac-autoconnect") === "0") return;
-        for (const c of conns) await this.connect({ ...c }).catch((e) => showErr(String(e)));
+        // Les échecs tombent en toast (dialogue fermé) ; l'écran vide
+        // affiche "connexion à X…" le temps du boot.
+        this.connecting(conns.map((c) => c.host ?? c.addr ?? c.path ?? "local"));
+        for (const c of conns) {
+          await this.connect({ ...c }).catch((e) => this.report(String(e)));
+        }
+        this.connecting([]);
       })
       .catch(() => {});
   }

@@ -53,3 +53,6 @@
   font-size:11px; color:var(--dim); border-top:1px solid var(--line);
   background:var(--panel-solid); user-select:none; flex:none }
 .sb-flex { flex:1 }
+#sb-left { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+#sb-left .conn-st { font-size:9px }
+.sb-sep { opacity:.4 }

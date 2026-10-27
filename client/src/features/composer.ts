@@ -4,7 +4,7 @@
 // prompts, picker de sessions natives (reprise).
 // ---------------------------------------------------------------------------
 
-import { $, esc, showErr } from "../core/dom";
+import { $, esc, notify, showErr } from "../core/dom";
 import { icon, qIco } from "../ui/icons";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
@@ -103,6 +103,7 @@ export class Composer {
           `<span class="h">${esc((s.updatedAt || "").slice(0, 16).replace("T", " "))}</span>`;
         row.onclick = async () => {
           ($("dlg-resume") as HTMLDialogElement).close();
+          notify("info", t("resume_wait"));
           await call("resume_session", { session: app.current!.id, native_id: s.sessionId })
             .catch((e) => showErr(String(e)));
           await this.chat.open(app.current!.id);
@@ -117,6 +118,7 @@ export class Composer {
       row.innerHTML = `<span class="n">${icon("play")}</span><span class="d">${t("resume_current")}</span>`;
       row.onclick = async () => {
         ($("dlg-resume") as HTMLDialogElement).close();
+        notify("info", t("resume_wait"));
         await call("resume_session", { session: app.current!.id }).catch((er) => showErr(String(er)));
         await this.chat.open(app.current!.id);
       };
@@ -332,11 +334,24 @@ export class Composer {
     $("btn-cancel").onclick = () =>
       app.current && call("cancel", { session: app.current.id }).catch((e) => showErr(String(e)));
 
-    $("btn-resume").onclick = () =>
-      app.current &&
-      call("resume_session", { session: app.current.id })
-        .then(() => this.chat.open(app.current!.id))
-        .catch((e) => showErr(String(e)));
+    // Reprise d'un agent mort : spawn + session/load peuvent durer
+    // plusieurs secondes — le bouton montre l'attente, l'échec part en
+    // toast persistant (dialogue fermé à ce stade).
+    const resumeBtn = $("btn-resume") as HTMLButtonElement;
+    resumeBtn.onclick = async () => {
+      if (!app.current) return;
+      resumeBtn.disabled = true;
+      resumeBtn.classList.add("spin");
+      try {
+        await call("resume_session", { session: app.current.id });
+        await this.chat.open(app.current.id);
+      } catch (e) {
+        showErr(String(e));
+      } finally {
+        resumeBtn.disabled = false;
+        resumeBtn.classList.remove("spin");
+      }
+    };
 
     // 💤 = endort la session (libère le process ; réveil auto au prochain
     // envoi) — cachée du header sur desktop, utilisée par le menu ⋮ mobile.

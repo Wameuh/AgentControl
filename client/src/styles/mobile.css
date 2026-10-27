@@ -39,7 +39,7 @@ body.android #file-panel,
 body.android #chat-header,
 body.android #composer,
 body.android #queue-bar,
-body.android #err-bar {
+body.android .toast {
   background: var(--panel-solid);
 }
 body.android #titlebar {

@@ -70,6 +70,7 @@ export class Sidebar {
     const [raw, prs] = await Promise.all([
       call<SessionMeta[]>("list_sessions").catch((e) => {
         setAppIcon("grey"); // démon injoignable → aucun agent joignable
+        this.chat.updateEmptyState(); // l'accueil ne doit pas attendre la liste
         throw e;
       }),
       call<PrEntry[]>("pr_list").catch(() => [] as PrEntry[]),
@@ -150,7 +151,7 @@ export class Sidebar {
       ch.className = "grp-head" + (connClosed ? " closed" : "");
       const badge = this.conns.hasCfg(conn)
         ? `<span class="conn-st ${st === "ok" ? "ok" : st === "reconnecting" ? "warn" : "bad"}"` +
-          ` title="${esc(this.conns.tip(st))}">${st === "reconnecting" ? icon("refresh") : icon("dot")}</span> `
+          ` title="${q(esc(this.conns.tip(st, conn)))}">${st === "reconnecting" ? icon("refresh") : icon("dot")}</span> `
         : "";
       ch.innerHTML = `<span class="grp-arrow">${icon(connClosed ? "chev-right" : "chev-down")}</span> ${badge}${esc(conn)}` +
         `<button class="grp-add" title="${esc(t("new_group"))}">${icon("plus")}</button>`;
@@ -208,6 +209,8 @@ export class Sidebar {
         el.appendChild(this.sessRow(s, conn, "", connClosed));
       }
     }
+    // La liste arrive → l'accueil recalcule son état (0 session → CTA).
+    this.chat.updateEmptyState();
   }
 
   /** Cible de drop pour une session : conn = câble, group undefined = dégrouper. */

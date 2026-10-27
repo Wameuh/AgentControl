@@ -784,7 +784,11 @@ pub mod ssh_native {
         Ok((NativeGuard(h), ch.into_stream()))
     }
 
-    /// `ssh host <script>` sans binaire : canal exec → stdout collecté.
+    /// `ssh host <script>` sans binaire : canal exec → stdout/stderr
+    /// collectés à part. `on_stderr` reçoit chaque ligne stderr complète
+    /// au fil de l'eau (progression `step:*`, erreurs lisibles…) — le
+    /// retour est `(code, stdout, stderr)` : le résultat métier reste
+    /// sur stdout, les messages de diagnostic sur stderr.
     pub async fn ssh_exec(
         host: &str,
         port: u16,
@@ -792,7 +796,8 @@ pub mod ssh_native {
         password: Option<&str>,
         key_path: Option<&Path>,
         script: &str,
-    ) -> Result<(i32, String)> {
+        mut on_stderr: Option<&mut (dyn FnMut(&str) + Send)>,
+    ) -> Result<(i32, String, String)> {
         use russh::ChannelMsg;
         let h = connect_auth(host, port, user, password, key_path).await?;
         let mut ch = h.channel_open_session().await.context("channel session")?;
@@ -800,12 +805,27 @@ pub mod ssh_native {
             .await
             .context("exec")?;
         let mut out = Vec::new();
+        let mut err = Vec::new();
+        // Lignes stderr complètes → callback (les lignes partielles en
+        // fin de flux sont livrées aussi, via le drain post-boucle).
+        let mut err_rest = Vec::new();
+        let mut feed_err = |data: &[u8]| {
+            err.extend_from_slice(data);
+            if let Some(cb) = on_stderr.as_deref_mut() {
+                err_rest.extend_from_slice(data);
+                while let Some(i) = err_rest.iter().position(|b| *b == b'\n') {
+                    let line = String::from_utf8_lossy(&err_rest[..i]).to_string();
+                    err_rest.drain(..=i);
+                    cb(line.trim_end_matches('\r'));
+                }
+            }
+        };
         let mut code = -1i32;
         tokio::time::timeout(Duration::from_secs(120), async {
             while let Some(msg) = ch.wait().await {
                 match msg {
                     ChannelMsg::Data { data } => out.extend_from_slice(&data),
-                    ChannelMsg::ExtendedData { data, .. } => out.extend_from_slice(&data),
+                    ChannelMsg::ExtendedData { data, .. } => feed_err(&data),
                     ChannelMsg::ExitStatus { exit_status } => code = exit_status as i32,
                     _ => {}
                 }
@@ -813,7 +833,17 @@ pub mod ssh_native {
         })
         .await
         .context("exec timeout")?;
-        Ok((code, String::from_utf8_lossy(&out).to_string()))
+        // Reliquat stderr sans '\n' final → dernière ligne au callback.
+        if !err_rest.is_empty() {
+            if let Some(cb) = on_stderr.as_deref_mut() {
+                cb(&String::from_utf8_lossy(&err_rest).to_string());
+            }
+        }
+        Ok((
+            code,
+            String::from_utf8_lossy(&out).to_string(),
+            String::from_utf8_lossy(&err).to_string(),
+        ))
     }
 }
 

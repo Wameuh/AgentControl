@@ -3,7 +3,7 @@
 // sont sélectionnables. Pré-rempli avec la fusion courante le cas échéant.
 // ---------------------------------------------------------------------------
 
-import { $, showErr } from "../core/dom";
+import { $, dlgErr, showErr } from "../core/dom";
 import { app } from "../core/state";
 import { t } from "../i18n";
 import { applyModelValue, fillSel, fusionParts, fusionTable, splitModel } from "./modelbar";
@@ -72,7 +72,9 @@ export function initFusionDialog() {
     const eb = ($("fu-eb") as HTMLSelectElement).value;
     const v = `fusion-${a}${ea ? "-" + ea : ""}-sidekick-${b}${eb ? "-" + eb : ""}`;
     if (!fusionTable().valid.has(v)) {
-      showErr(t("fusion_bad") + v);
+      // Dialogue ouvert : l'erreur va dans sa zone interne (un toast
+      // passerait sous le backdrop modal).
+      dlgErr("fu-err", t("fusion_bad") + v);
       return;
     }
     fusionApplied = true;

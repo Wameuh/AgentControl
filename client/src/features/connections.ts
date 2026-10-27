@@ -24,11 +24,20 @@ import { hideMenu, menuBtn, placeMenu } from "../ui/ctxmenu";
 // retry explicite (menu ctx / badge) les ré-active (delete dans retryConn).
 const RETRY_MIN = 2_000, RETRY_MAX = 60_000;
 
+/** "ssh:user@hôte:22" → "user@hôte" pour l'affichage compact
+ *  (le port ssh par défaut est masqué, les autres gardés). */
+const connLabel = (k: string) =>
+  k.replace(/^(ssh-native|ssh|tcp):/, "").replace(/:22$/, "");
+
 export class ConnectionManager {
   private live = new Map<string, ConnLive>();
   private cfg = new Map<string, Record<string, unknown>>();
   private timer = new Map<string, ReturnType<typeof setTimeout>>();
   private delay = new Map<string, number>();
+  /** Horodatage du prochain essai auto (tooltip "réessai dans ~Ns"). */
+  private nextAt = new Map<string, number>();
+  /** Essais consécutifs depuis le dernier succès (tooltip). */
+  private attempts = new Map<string, number>();
   private gone = new Set<string>();
 
   private deps = {
@@ -77,10 +86,17 @@ export class ConnectionManager {
     this.markAlive(ck);
   }
 
-  /** Tooltip du badge selon l'état. */
-  tip(st: ConnLive): string {
+  /** Tooltip du badge selon l'état (avec prochain essai / nb de tentatives). */
+  tip(st: ConnLive, conn = ""): string {
     if (st === "ok") return t("conn_ok");
-    return `${t(st === "reconnecting" ? "reconnecting" : "conn_offline")} — ${t("retry_now")}`;
+    if (st === "reconnecting") {
+      const n = this.attempts.get(conn) ?? 0;
+      return t("reconnecting") + (n > 1 ? ` (×${n})` : "");
+    }
+    const at = this.nextAt.get(conn);
+    const s = at ? Math.max(0, Math.round((at - Date.now()) / 1000)) : 0;
+    const wait = s > 0 ? ` — ${t("retry_in", { s })}` : "";
+    return `${t("conn_offline")}${wait} — ${t("retry_now")}`;
   }
 
   markAlive(key: string) {
@@ -90,6 +106,8 @@ export class ConnectionManager {
       this.timer.delete(key);
     }
     this.delay.delete(key);
+    this.nextAt.delete(key);
+    this.attempts.delete(key);
     const was = this.live.get(key);
     this.live.set(key, "ok");
     if (was !== "ok") this.renderState();
@@ -110,8 +128,10 @@ export class ConnectionManager {
         this.live.get(key) === "reconnecting") return;
     const d = this.delay.get(key) ?? RETRY_MIN;
     this.delay.set(key, Math.min(d * 2, RETRY_MAX));
+    this.nextAt.set(key, Date.now() + d);
     this.timer.set(key, setTimeout(() => {
       this.timer.delete(key);
+      this.nextAt.delete(key);
       void this.retryConn(key);
     }, d));
   }
@@ -123,6 +143,7 @@ export class ConnectionManager {
     // tunnel SSH orphelin resterait vivant après remplacement.
     if (!cfg || this.live.get(key) === "reconnecting") return;
     this.gone.delete(key); // un retry ré-active une conn déconnectée à la demande
+    this.attempts.set(key, (this.attempts.get(key) ?? 0) + 1);
     this.live.set(key, "reconnecting");
     this.renderState();
     try {
@@ -153,6 +174,7 @@ export class ConnectionManager {
       clearTimeout(t0);
       this.timer.delete(key);
     }
+    this.nextAt.delete(key);
     void this.retryConn(key);
   }
 
@@ -167,6 +189,7 @@ export class ConnectionManager {
       clearTimeout(t0);
       this.timer.delete(conn);
     }
+    this.nextAt.delete(conn);
     this.live.set(conn, "down");
     await invoke("disconnect", { conn }).catch((e) => showErr(String(e)));
     this.renderState();
@@ -249,18 +272,36 @@ export class ConnectionManager {
     placeMenu(ctx, "sctx", x, y);
   }
 
-  /** État agrégé → chip header ; re-render des badges de la sidebar. */
+  /** État agrégé → chip header + résumé statusbar ; badges sidebar via
+   *  refresh. Une seule conn down → son nom dans le chip ; plusieurs →
+   *  le compte. Le tooltip liste le détail par connexion. */
   renderState() {
     // gone (déconnecté à la demande) n'est pas une alerte.
-    const bad = [...this.live].some(([k, s]) => s !== "ok" && !this.gone.has(k));
+    const bad = [...this.live].filter(([k, s]) => s !== "ok" && !this.gone.has(k));
     const chip = $("conn-chip") as HTMLButtonElement;
-    chip.hidden = !bad;
-    if (bad) {
-      const rc = [...this.live.values()].some((s) => s === "reconnecting");
-      chip.innerHTML = `${icon(rc ? "refresh" : "warn")} ${esc(t(rc ? "reconnecting" : "conn_offline"))}`;
-      chip.className = "badge " + (rc ? "warn" : "st-dead");
-      chip.title = t("retry_now");
+    chip.hidden = !bad.length;
+    if (bad.length) {
+      const allRe = bad.every(([, s]) => s === "reconnecting");
+      chip.innerHTML =
+        `${icon(allRe ? "refresh" : "warn")} ` +
+        esc(bad.length === 1 ? connLabel(bad[0][0])
+          : allRe ? t("reconnecting") : t("conns_down", { n: bad.length }));
+      chip.className = "badge " + (allRe ? "warn" : "st-dead");
+      chip.title =
+        bad.map(([k, s]) => `${connLabel(k)}: ${this.tip(s, k)}`).join("\n") +
+        ` — ${t("retry_now")}`;
     }
+    // Statusbar : résumé des conns suivies (● ok, ⟳ essai, ● hors ligne,
+    // ◌ déconnectée à la demande) — slot sb-left sinon inutilisé.
+    const sb = $("sb-left");
+    sb.innerHTML = [...this.cfg.keys()]
+      .map((k) => {
+        const st = this.gone.has(k) ? "off" : (this.live.get(k) ?? "ok");
+        const cls = st === "ok" ? "ok" : st === "reconnecting" ? "warn" : st === "down" ? "bad" : "off";
+        const ico = st === "reconnecting" ? icon("refresh") : icon("dot");
+        return `<span class="conn-st ${cls}" title="${esc(this.tip(st === "off" ? "down" : st, k))}">${ico}</span> ${esc(connLabel(k))}`;
+      })
+      .join('<span class="sb-sep"> · </span>');
     this.deps.refresh().catch(() => {});
   }
 
