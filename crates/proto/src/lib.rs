@@ -150,6 +150,96 @@ pub enum EventKind {
     SessionDeleted {},
 }
 
+impl EventKind {
+    /// Tag serde "type" — sans resérialiser l'event entier (recherche).
+    pub fn type_tag(&self) -> &'static str {
+        match self {
+            Self::UserMessage { .. } => "user_message",
+            Self::AgentText { .. } => "agent_text",
+            Self::AgentThought { .. } => "agent_thought",
+            Self::ToolCall { .. } => "tool_call",
+            Self::ToolCallUpdate { .. } => "tool_call_update",
+            Self::PermissionRequest { .. } => "permission_request",
+            Self::PermissionResolved { .. } => "permission_resolved",
+            Self::QuestionRequest { .. } => "question_request",
+            Self::QuestionResolved { .. } => "question_resolved",
+            Self::ModeChanged { .. } => "mode_changed",
+            Self::CommandsAvailable { .. } => "commands_available",
+            Self::ConfigOptions { .. } => "config_options",
+            Self::UsageUpdate { .. } => "usage_update",
+            Self::StatusChanged { .. } => "status_changed",
+            Self::Error { .. } => "error",
+            Self::System { .. } => "system",
+            Self::PeerMessage { .. } => "peer_message",
+            Self::SessionCleared {} => "session_cleared",
+            Self::SessionDeleted {} => "session_deleted",
+        }
+    }
+
+    /// Texte indexable de l'event (champs porteurs de contenu lisible),
+    /// utilisé par la recherche plein-texte du journal (SearchEvents).
+    /// Les événements purement techniques (usage, config, suppression)
+    /// renvoient "" et sont ignorés du scan.
+    pub fn searchable_text(&self) -> String {
+        fn joined<'a>(parts: impl IntoIterator<Item = Option<&'a str>>) -> String {
+            parts.into_iter().flatten().collect::<Vec<_>>().join("\n")
+        }
+        match self {
+            Self::UserMessage { text, .. }
+            | Self::AgentText { text }
+            | Self::AgentThought { text }
+            | Self::System { text }
+            | Self::Error { message: text }
+            | Self::QuestionRequest { message: text, .. }
+            | Self::ModeChanged { mode: text }
+            | Self::StatusChanged { state: text }
+            | Self::PermissionResolved { outcome: text, .. } => text.clone(),
+            Self::PeerMessage {
+                from_title,
+                to_title,
+                text,
+                ..
+            } => joined([Some(from_title), Some(to_title), Some(text)].map(|o| o.map(String::as_str))),
+            Self::ToolCall {
+                title,
+                kind,
+                excerpt,
+                diff,
+                locations,
+                ..
+            } => joined(
+                [
+                    Some(kind.as_str()),
+                    Some(title.as_str()),
+                    excerpt.as_deref(),
+                    diff.as_deref(),
+                ]
+                .into_iter()
+                .chain(locations.iter().flatten().map(|l| Some(l.as_str()))),
+            ),
+            Self::ToolCallUpdate { excerpt, diff, .. } => {
+                joined([excerpt.as_deref(), diff.as_deref()])
+            }
+            Self::PermissionRequest {
+                title, kind, detail, ..
+            } => joined([Some(title.as_str()), Some(kind.as_str()), detail.as_deref()]),
+            Self::QuestionResolved { answer, .. } => match answer {
+                serde_json::Value::String(s) => s.clone(),
+                v => v.to_string(),
+            },
+            Self::CommandsAvailable { commands } => commands
+                .iter()
+                .map(|c| format!("{} {}", c.name(), c.description()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Self::ConfigOptions { .. }
+            | Self::UsageUpdate { .. }
+            | Self::SessionCleared {}
+            | Self::SessionDeleted {} => String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolStatus {
@@ -461,12 +551,28 @@ pub enum ReqKind {
     /// Tête de file + annulation du tour courant = envoi forcé.
     QueuePromote { session: String, index: u64 },
     /// Page d'historique : les `limit` événements avant `before_seq`
-    /// (before_seq absent ou 0 = depuis la fin).
+    /// (before_seq absent ou 0 = depuis la fin), ou — si `after_seq` est
+    /// fourni — les `limit` événements après `after_seq` en ordre croissant
+    /// (pagination vers le présent depuis un saut de recherche).
     Events {
         session: String,
         #[serde(default)]
         before_seq: Option<u64>,
+        #[serde(default)]
+        after_seq: Option<u64>,
         #[serde(default = "default_limit")]
+        limit: u32,
+    },
+    /// Recherche plein-texte dans le journal d'une session : scan à rebours
+    /// depuis `before_seq` (absent = fin), renvoie {matches: [{seq, ts,
+    /// type, excerpt}], next_before, done, scanned}. `next_before` est le
+    /// curseur à repasser pour continuer le scan plus en arrière.
+    SearchEvents {
+        session: String,
+        query: String,
+        #[serde(default)]
+        before_seq: Option<u64>,
+        #[serde(default = "default_search_limit")]
         limit: u32,
     },
     /// Passe la connexion en mode push : tous les events > after_seq.
@@ -599,6 +705,7 @@ impl ReqKind {
             Self::QueueDrop { .. } => "queue_drop",
             Self::QueuePromote { .. } => "queue_promote",
             Self::Events { .. } => "events",
+            Self::SearchEvents { .. } => "search_events",
             Self::Subscribe { .. } => "subscribe",
             Self::Cancel { .. } => "cancel",
             Self::SessionInfo { .. } => "session_info",
@@ -624,6 +731,9 @@ impl ReqKind {
 
 fn default_limit() -> u32 {
     200
+}
+fn default_search_limit() -> u32 {
+    30
 }
 fn default_blob_limit() -> u64 {
     65536

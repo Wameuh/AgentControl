@@ -190,8 +190,13 @@ body.android #chat-header button, body.android #chat-header select {
 }
 body.android #chat-header #btn-files,
 body.android #chat-header #btn-refresh,
-body.android #chat-header #btn-resume { display: none !important; }
+body.android #chat-header #btn-resume,
+body.android #chat-header #btn-search { display: none !important; }
 body.android #chat-more { display: inline-block; font-size: 20px; min-width: 42px; }
+body.android #search-bar { padding: 8px 10px; }
+body.android #search-input { font-size: 16px; min-height: 44px; }
+body.android #search-bar button { min-height: 44px; font-size: 15px; padding: 6px 12px; }
+body.android .sr-row { padding: 12px; font-size: 14px; }
 body.android #chat-opts {
   flex: none; width: 100%; padding-bottom: 2px;
 }

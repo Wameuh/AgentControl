@@ -109,6 +109,11 @@ const STR = {
     agent_missing: "not installed",
     um_expand: "Show more", um_collapse: "Show less",
     win_min: "Minimize", win_max: "Maximize",
+    search_title: "Search in history",
+    search_ph: "Search in this session…",
+    search_prev: "Previous match", search_next: "Next match",
+    search_none: "no match", search_more: "more results…",
+    bottom_jump_title: "Back to live tail",
   },
   fr: {
     connect: "Connecter", new_conn: "Nouvelle connexion",
@@ -215,6 +220,11 @@ const STR = {
     agent_missing: "non installé",
     um_expand: "Afficher tout", um_collapse: "Réduire",
     win_min: "Réduire", win_max: "Agrandir",
+    search_title: "Rechercher dans l'historique",
+    search_ph: "Rechercher dans cette session…",
+    search_prev: "Résultat précédent", search_next: "Résultat suivant",
+    search_none: "aucun résultat", search_more: "plus de résultats…",
+    bottom_jump_title: "Revenir au fil en direct",
   },
 } as const;
 

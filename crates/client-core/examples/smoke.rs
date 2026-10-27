@@ -30,6 +30,7 @@ async fn main() -> anyhow::Result<()> {
             .call(ReqKind::Events {
                 session: sid,
                 before_seq: None,
+                after_seq: None,
                 limit: 3,
             })
             .await?;

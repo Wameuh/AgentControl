@@ -278,6 +278,7 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
             let v = daemon_call(proto::ReqKind::Events {
                 session: session.into(),
                 before_seq: None,
+                after_seq: None,
                 limit,
             })
             .await?;

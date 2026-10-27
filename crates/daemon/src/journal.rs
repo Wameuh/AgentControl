@@ -145,6 +145,31 @@ impl Journal {
         Self::read_from(dir, start_off, before, n)
     }
 
+    /// Page ascendante : les `limit` événements avec seq > `after_seq`,
+    /// en ordre croissant — pagination vers le présent depuis une vue
+    /// ancrée en plein journal (saut vers un résultat de recherche).
+    pub fn read_page_after(&self, dir: &Path, after_seq: u64, limit: usize) -> Result<Vec<Event>> {
+        let start_off = {
+            let g = self.inner.lock().unwrap();
+            if g.offsets.is_empty() {
+                // Index mémoire vide → scan complet, même repli que read_page.
+                drop(g);
+                let v = Self::read_from(dir, 0, u64::MAX, usize::MAX)?;
+                return Ok(v
+                    .into_iter()
+                    .filter(|e| e.seq > after_seq)
+                    .take(limit)
+                    .collect());
+            }
+            let idx = g.offsets.partition_point(|(s, _)| *s <= after_seq);
+            if idx >= g.offsets.len() {
+                return Ok(vec![]);
+            }
+            g.offsets[idx].1
+        };
+        Self::read_from(dir, start_off, u64::MAX, limit)
+    }
+
     /// Vide le journal et les blobs — utilisé quand la session se rebinde
     /// vers une AUTRE session native : l'historique local n'est plus valide
     /// et sera re-rempli par le replay de `session/load`.
@@ -336,4 +361,79 @@ pub fn purge_blobs(dir: &Path, max_bytes: u64) -> Result<usize> {
 
 pub fn session_dir(root: &Path, id: &str) -> PathBuf {
     root.join("sessions").join(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "ac-journal-test-{}-{}",
+            std::process::id(),
+            tag
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn fill(dir: &Path, texts: &[&str]) -> Journal {
+        let j = Journal::open(dir).unwrap();
+        for t in texts {
+            j.append(EventKind::AgentText { text: t.to_string() }).unwrap();
+        }
+        j
+    }
+
+    #[test]
+    fn page_after() {
+        let dir = tmpdir("after");
+        let j = fill(&dir, &["a", "b", "c", "d", "e", "f"]);
+        let page = j.read_page_after(&dir, 2, 3).unwrap();
+        let seqs: Vec<u64> = page.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, vec![3, 4, 5]);
+        // après la fin → vide
+        assert!(j.read_page_after(&dir, 6, 3).unwrap().is_empty());
+        // après 0 = tout depuis le début, borné
+        assert_eq!(j.read_page_after(&dir, 0, 2).unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn page_after_index_vide() {
+        // Journal écrit, fermé, réouvert avec index reconstruit — même
+        // comportement que le chemin indexé.
+        let dir = tmpdir("reopen");
+        let j = fill(&dir, &["x", "y", "z"]);
+        drop(j);
+        let j = Journal::open(&dir).unwrap();
+        let page = j.read_page_after(&dir, 1, 10).unwrap();
+        assert_eq!(page.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![2, 3]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn page_after_trous() {
+        // Journal compacté = trou de seqs en tête : la pagination avant
+        // doit sauter le trou et ne jamais rendre un seq <= borne.
+        let dir = tmpdir("holes");
+        let j = fill(&dir, &["a", "b", "c", "d", "e", "f", "g", "h"]);
+        // max_bytes minuscule + keep_bytes ~2 events (~90 o/ligne) → la
+        // tête du journal saute, les seqs 1..n-2 deviennent un trou.
+        assert!(j.compact_if_needed(&dir, 1, 250).unwrap());
+        j.append(EventKind::AgentText { text: "i".into() }).unwrap();
+        j.append(EventKind::AgentText { text: "j".into() }).unwrap();
+        // La borne peut tomber dans le trou : seuls des seqs > borne
+        // doivent ressortir, dans l'ordre.
+        let kept = j.read_page(&dir, None, 100).unwrap();
+        let first_kept = kept[0].seq;
+        assert!(first_kept > 1); // le trou existe bien
+        let page = j.read_page_after(&dir, first_kept - 1, 100).unwrap();
+        assert_eq!(
+            page.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            kept.iter().map(|e| e.seq).collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -488,11 +488,69 @@ impl Daemon {
         r
     }
 
-    pub(super) async fn h_events(self: &Arc<Self>, session: String, before_seq: Option<u64>, limit: u32) -> Result<Value> {
+    pub(super) async fn h_events(self: &Arc<Self>, session: String, before_seq: Option<u64>, after_seq: Option<u64>, limit: u32) -> Result<Value> {
                 let s = self.get_session(&session).await?;
-                let events = s.journal.read_page(&s.dir, before_seq, limit as usize)?;
+                // after_seq présent → page ascendante (saut de recherche) ;
+                // sinon page arrière classique (pagination scroll-up).
+                let events = match after_seq {
+                    Some(a) => s.journal.read_page_after(&s.dir, a, limit as usize)?,
+                    None => s.journal.read_page(&s.dir, before_seq, limit as usize)?,
+                };
                 let last = s.journal.last_seq();
                 Ok(json!({"events": events, "last_seq": last}))
+    }
+
+    /// Plafonds du scan par appel : assez pour couvrir un gros journal en
+    /// quelques aller-retours sans monopoliser la requête des minutes —
+    /// le client relance avec le curseur `next_before` pour continuer.
+    pub(super) async fn h_search_events(self: &Arc<Self>, session: String, query: String, before_seq: Option<u64>, limit: u32) -> Result<Value> {
+                const SEARCH_CHUNK: usize = 500;
+                const SEARCH_SCAN_CAP: u64 = 20_000;
+                let s = self.get_session(&session).await?;
+                let needle = query.trim().to_lowercase();
+                if needle.is_empty() {
+                    return Ok(json!({"matches": [], "next_before": 0, "done": true, "scanned": 0}));
+                }
+                let want = (limit as usize).max(1);
+                let mut matches = Vec::new();
+                let mut cursor = before_seq.filter(|b| *b > 0).unwrap_or(u64::MAX);
+                let mut scanned = 0u64;
+                let mut done = false;
+                while !done && matches.len() < want && scanned < SEARCH_SCAN_CAP {
+                    let page = s.journal.read_page(&s.dir, Some(cursor), SEARCH_CHUNK)?;
+                    if page.is_empty() {
+                        done = true;
+                        break;
+                    }
+                    // cursor suit le dernier seq réellement examiné : arrêt
+                    // en pleine page (limit/cap) → next_before reprend sur
+                    // le reste non scanné de la page au lieu de la sauter.
+                    for ev in page.iter().rev() {
+                        scanned += 1;
+                        cursor = ev.seq;
+                        if let Some(excerpt) = match_excerpt(&ev.kind.searchable_text(), &needle, 60) {
+                            matches.push(json!({
+                                "seq": ev.seq,
+                                "ts": ev.ts,
+                                "type": ev.kind.type_tag(),
+                                "excerpt": excerpt,
+                            }));
+                        }
+                        if matches.len() >= want || scanned >= SEARCH_SCAN_CAP {
+                            break;
+                        }
+                    }
+                    // Page courte entièrement examinée → début du journal.
+                    if cursor == page[0].seq && page.len() < SEARCH_CHUNK {
+                        done = true;
+                    }
+                }
+                Ok(json!({
+                    "matches": matches,
+                    "next_before": if cursor == u64::MAX { 0 } else { cursor },
+                    "done": done,
+                    "scanned": scanned,
+                }))
     }
 
     pub(super) async fn h_queue_list(self: &Arc<Self>, session: String) -> Result<Value> {
@@ -599,4 +657,31 @@ impl Daemon {
                 let s = self.get_session(&session).await?;
                 Ok(json!({"subscribed": session, "after_seq": after_seq, "last_seq": s.journal.last_seq()}))
     }
+}
+
+/// Extrait ~`ctx` caractères de contexte autour de la 1re occurrence de
+/// `needle` (déjà en minuscules) dans `hay`, ou None si absente.
+/// L'index est calculé sur la version minuscule puis reporté en chars sur
+/// l'original — approximatif pour les rares chars dont la minuscule
+/// s'étend (ex. 'İ'), sans conséquence sur un extrait d'aperçu.
+fn match_excerpt(hay: &str, needle: &str, ctx: usize) -> Option<String> {
+    let hay_lc = hay.to_lowercase();
+    let pos = hay_lc.find(needle)?;
+    let cp = hay_lc[..pos].chars().count();
+    let start = cp.saturating_sub(ctx);
+    let end = cp + needle.chars().count() + ctx;
+    let mut s = String::new();
+    if start > 0 {
+        s.push('…');
+    }
+    s.extend(
+        hay.chars()
+            .skip(start)
+            .take(end - start)
+            .map(|c| if c == '\n' { ' ' } else { c }),
+    );
+    if hay.chars().nth(end).is_some() {
+        s.push('…');
+    }
+    Some(s)
 }

@@ -38,6 +38,8 @@ const SHAPES: Record<string, string> = {
   "arrow-right": '<path d="M4.5 12h15"/><path d="m13.5 5.5 6.5 6.5-6.5 6.5"/>',
   plus: '<path d="M12 5.5v13M5.5 12h13"/>',
   top: '<path d="M5 3.5h14"/><path d="m6 14.5 6-6 6 6"/><path d="M12 8.5V21"/>',
+  "skip-down": '<path d="m5 5 7 7 7-7"/><path d="m5 12 7 7 7-7"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/>',
   // États / indicateurs
   loader: '<path d="M21 12a9 9 0 1 1-6.2-8.56"/>',
   dot: '<circle cx="12" cy="12" r="5" fill="currentColor" stroke="none"/>',
