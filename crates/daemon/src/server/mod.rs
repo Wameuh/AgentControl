@@ -146,39 +146,10 @@ impl Daemon {
         // l'ouverture de la session côté UI) — même garde que
         // h_resume_session pour ne pas doubler le spawn. Mais le resume
         // client est silencieux : sauter toute la reprise laisserait
-        // l'agent relancé sans consigne. L'état reste "interrupted"
-        // pendant tout le handshake et ne passe à "idle" qu'après
-        // session/load → attendre la fin d'un spawn en vol (borne 2 min,
-        // réveillé par les events de la session) plutôt qu'envoyer le
-        // prompt à un agent pas encore prêt.
-        if s.is_alive() {
-            let mut ev_rx = s.events_tx.subscribe();
-            let deadline =
-                tokio::time::Instant::now() + std::time::Duration::from_secs(120);
-            while s.is_alive() && s.meta_snapshot().state == "interrupted" {
-                if tokio::time::timeout_at(deadline, ev_rx.recv())
-                    .await
-                    .is_err()
-                {
-                    break; // deadline atteinte — spawn visiblement bloqué
-                }
-            }
-            if s.is_alive() {
-                // Relancée sans la reprise auto : le prompt reste dû si la
-                // session est restée sans travail ; si elle tourne déjà
-                // (prompt client, permission rejeuée) quelqu'un la pilote.
-                if s.meta_snapshot().state == "idle" {
-                    info!("{sid}: déjà relancée — envoi « {AUTO_RESUME_PROMPT} »");
-                    Self::send_resume_prompt(&s, sid).await;
-                } else {
-                    debug!(
-                        "{sid}: déjà relancée (état {}) — reprise auto ignorée",
-                        s.meta_snapshot().state
-                    );
-                }
-                return;
-            }
-            // Le spawn client est mort entre-temps → on reprend la main.
+        // l'agent relancé sans consigne. Attendre la fin d'un spawn en vol
+        // puis livrer le prompt si la session finit idle.
+        if s.is_alive() && Self::wait_revived_or_done(&s, sid).await {
+            return;
         }
         let meta = s.meta_snapshot();
         let Some(native) = meta.native_session_id.clone() else {
@@ -196,6 +167,12 @@ impl Daemon {
             meta.mode.as_deref(),
             sid,
         );
+        // Dernier re-check : l'essai suivant d'un spawn client peut
+        // repartir dans la fenêtre (sleep 800 ms entre ses essais) —
+        // spawn_agent n'a pas de sérialisation entre appelants.
+        if s.is_alive() && Self::wait_revived_or_done(&s, sid).await {
+            return;
+        }
         match s
             .spawn_agent(&cmd, &envs, Some(native), true, self.mcp_servers(sid))
             .await
@@ -211,6 +188,45 @@ impl Daemon {
                 });
             }
         }
+    }
+
+    /// Spawn en vol (is_alive) : attendre sa fin — l'état reste
+    /// "interrupted" pendant tout le handshake et ne passe à "idle"
+    /// qu'après session/load (borne 2 min, réveillé par les events de la
+    /// session) — puis livrer le prompt de reprise si la session finit
+    /// sans travail ; si elle tourne déjà (prompt client, permission
+    /// rejeuée) quelqu'un la pilote → ne rien envoyer.
+    /// Renvoie vrai quand la session est traitée — faux si l'agent est
+    /// mort entre-temps : l'appelant reprend la main avec son propre spawn.
+    async fn wait_revived_or_done(s: &Arc<Session>, sid: &str) -> bool {
+        let mut ev_rx = s.events_tx.subscribe();
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+        while s.is_alive() && s.meta_snapshot().state == "interrupted" {
+            if tokio::time::timeout_at(deadline, ev_rx.recv())
+                .await
+                .is_err()
+            {
+                break; // borne atteinte — spawn très lent ou bloqué
+            }
+        }
+        if !s.is_alive() {
+            return false;
+        }
+        let st = s.meta_snapshot().state;
+        match st.as_str() {
+            "idle" => {
+                info!("{sid}: déjà relancée — envoi « {AUTO_RESUME_PROMPT} »");
+                Self::send_resume_prompt(s, sid).await;
+            }
+            "interrupted" => {
+                // Le cas que la reprise auto devait couvrir : visible
+                // (le spawn peut être simplement lent, pas bloqué).
+                warn!("{sid}: spawn en vol depuis plus de 2 min — prompt de reprise non envoyé");
+            }
+            _ => debug!("{sid}: déjà relancée (état {st}) — reprise auto ignorée"),
+        }
+        true
     }
 
     /// Prompt « continue please » de la reprise post-crash : le sysline
