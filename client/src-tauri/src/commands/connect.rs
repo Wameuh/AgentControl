@@ -251,9 +251,12 @@ pub(crate) async fn ensure_daemon(
         .map_err(|e| format!("{e:#}"))?;
         let out = out.trim().to_string();
         let err_buf = err_acc.into_inner().unwrap_or_default();
+        // Le stderr hors marqueurs est journalisé : en cas d'échec le
+        // log garde la cause (ssh, droits, download) qui sinon ne vit
+        // que dans le toast éphémère.
         client_core::log(
             if code == 0 { Level::Info } else { Level::Warn },
-            format!("ensure_daemon {host}: code={code} {out}"),
+            format!("ensure_daemon {host}: code={code} out={out} err={}", err_buf.trim()),
         );
         if code != 0 {
             return Err(if err_buf.trim().is_empty() { out } else { err_buf.trim().to_string() });
@@ -275,18 +278,34 @@ pub(crate) async fn ensure_daemon(
     // l'erreur. kill_on_drop tue le ssh si le timeout le lâche.
     let stderr_task = {
         let app2 = app.clone();
+        let host2 = host.clone();
         let pipe = child.stderr.take();
         tauri::async_runtime::spawn(async move {
             let mut buf = String::new();
             if let Some(p) = pipe {
                 use tokio::io::AsyncBufReadExt;
                 let mut lines = tokio::io::BufReader::new(p).lines();
-                while let Ok(Some(l)) = lines.next_line().await {
-                    if let Some(s) = l.trim().strip_prefix("step:") {
-                        let _ = app2.emit("daemon-step", s.to_string());
-                    } else {
-                        buf.push_str(&l);
-                        buf.push('\n');
+                loop {
+                    match lines.next_line().await {
+                        Ok(Some(l)) => {
+                            if let Some(s) = l.trim().strip_prefix("step:") {
+                                let _ = app2.emit("daemon-step", s.to_string());
+                            } else {
+                                buf.push_str(&l);
+                                buf.push('\n');
+                            }
+                        }
+                        Ok(None) => break,
+                        // Ligne non-UTF8 : le drain s'arrête mais la
+                        // coupure est tracée (et dans le buffer rendu).
+                        Err(e) => {
+                            client_core::log(
+                                Level::Warn,
+                                format!("ensure_daemon {host2}: drain stderr interrompu: {e}"),
+                            );
+                            buf.push_str(&format!("(stderr illisible: {e})\n"));
+                            break;
+                        }
                     }
                 }
             }

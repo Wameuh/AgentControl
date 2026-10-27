@@ -38,6 +38,12 @@ export class Sidebar {
    *  supprimé ne réapparaît jamais) ; retiré seulement en cas d'échec,
    *  où la session existe encore. */
   private pendingDel = new Set<string>();
+
+  /** Suppression initiée ici — l'event session_deleted qui suit ne doit
+   *  pas re-notifier (la ligne a déjà disparu, l'utilisateur sait). */
+  wasPendingDel(id: string) {
+    return this.pendingDel.has(id);
+  }
   private ctx = $("sctx");
 
   bind(conns: ConnectionManager, groups: GroupStore, newSess: NewSessionDialog, chat: ChatView, settings: SettingsPanel) {

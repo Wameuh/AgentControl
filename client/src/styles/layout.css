@@ -55,4 +55,6 @@
 .sb-flex { flex:1 }
 #sb-left { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
 #sb-left .conn-st { font-size:9px }
+#sb-left .conn-seg.clk { cursor:pointer }
+#sb-left .conn-seg.clk:hover { color:var(--ink) }
 .sb-sep { opacity:.4 }

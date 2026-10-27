@@ -135,17 +135,15 @@ export class ConnectDialog {
    *  démon sort sous son superviseur : la connexion morte qui suit est
    *  attendue, le backoff de conns la rétablit tout seul.
    *
-   *  Gate capacité : `canSelfUpdate` = flag `self_update` du
-   *  daemon_status. Un démon plus vieux ne connaît pas
+   *  Gate capacité : l'appelant ne tente ceci que si `self_update` est
+   *  vrai dans le daemon_status. Un démon plus vieux ne connaît pas
    *  ReqKind::UpdateDaemon — sa réponse d'erreur de parse porte id=0,
    *  que client-core droppe (routage par id) → l'appel attendrait le
-   *  timeout de 60 s pour rien. On saute donc la tentative. Le flag
-   *  est immune à la numérotation de release (contrairement à un
-   *  seuil de version codé en dur). */
+   *  timeout de 60 s pour rien. Le flag est immune à la numérotation
+   *  de release (contrairement à un seuil de version codé en dur). */
   private async tryDaemonSelfUpdate(
-    conn: string, canSelfUpdate: boolean, lv: string,
+    conn: string, lv: string,
   ): Promise<boolean> {
-    if (!canSelfUpdate) return false;
     try {
       const r = await call<{ restarting?: boolean }>(
         "update_daemon", { conn, version: lv });
@@ -269,7 +267,7 @@ export class ConnectDialog {
               SELF_STEPS,
             );
             this.daemonStep("send");
-            selfDone = await this.tryDaemonSelfUpdate(conn, true, lv);
+            selfDone = await this.tryDaemonSelfUpdate(conn, lv);
             if (selfDone) {
               // Le démon sort sous son superviseur : la reconnexion est
               // gérée par le backoff — la note l'explique, court délai

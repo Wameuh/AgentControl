@@ -303,14 +303,16 @@ export class ConnectionManager {
         (allRe ? ` — ${t("retry_now")}` : "");
     }
     // Statusbar : résumé des conns suivies (● ok, ⟳ essai, ● hors ligne,
-    // ◌ déconnectée à la demande) — slot sb-left sinon inutilisé.
+    // ◌ déconnectée à la demande) — slot sb-left sinon inutilisé. Une conn
+    // down/off est cliquable : retry immédiat (le tooltip le promet).
     const sb = $("sb-left");
     sb.innerHTML = [...this.cfg.keys()]
       .map((k) => {
         const st = this.gone.has(k) ? "off" : (this.live.get(k) ?? "ok");
         const cls = st === "ok" ? "ok" : st === "reconnecting" ? "warn" : st === "down" ? "bad" : "off";
         const ico = st === "reconnecting" ? icon("refresh") : icon("dot");
-        return `<span class="conn-st ${cls}" title="${esc(this.tip(st === "off" ? "down" : st, k))}">${ico}</span> ${esc(connLabel(k))}`;
+        const clk = st === "down" || st === "off" ? " clk" : "";
+        return `<span class="conn-seg${clk}" data-conn="${esc(k)}" title="${esc(this.tip(st === "off" ? "down" : st, k))}"><span class="conn-st ${cls}">${ico}</span> ${esc(connLabel(k))}</span>`;
       })
       .join('<span class="sb-sep"> · </span>');
     this.deps.refresh().catch(() => {});
@@ -319,6 +321,13 @@ export class ConnectionManager {
   init() {
     $("conn-chip").addEventListener("click", () => {
       for (const [k, s] of this.live) if (s !== "ok" && !this.gone.has(k)) this.retry(k);
+    });
+    // Clic sur un segment conn de la statusbar → retry si elle est
+    // hors ligne/déconnectée (les segments ok ne sont pas marqués clk).
+    $("sb-left").addEventListener("click", (e) => {
+      const seg = (e.target as HTMLElement).closest<HTMLElement>(".conn-seg.clk");
+      const k = seg?.dataset.conn;
+      if (k && (this.gone.has(k) || this.live.get(k) === "down")) this.retry(k);
     });
     // Mort instantanée du transport (EOF reader côté Rust).
     listen<string>("conn-dead", (e) => this.markDead(e.payload));

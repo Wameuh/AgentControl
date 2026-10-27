@@ -123,7 +123,9 @@ await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
   if (event.type === "session_deleted") {
     chat.dropConv(session);
     if (app.current && session === app.current.id) chat.markGone();
-    notify("info", t("session_deleted_toast"));
+    // Toast seulement pour une suppression externe — la nôtre a déjà
+    // retiré la ligne optimistement, re-notifier serait du bruit.
+    if (!sidebar.wasPendingDel(session)) notify("info", t("session_deleted_toast"));
     void sidebar.refresh();
     return;
   }
