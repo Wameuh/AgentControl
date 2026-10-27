@@ -93,6 +93,9 @@ export class OverlayNav {
       $("file-viewer").classList.remove("open");
     } else if (id === "files") {
       $("file-panel").hidden = true;
+    } else if (id === "settings") {
+      // Passe par le handler de ✕ : hidden + levée de l'inert + nav.close.
+      $("settings-close").click();
     } else if (id.startsWith("dlg:")) {
       (document.getElementById(id.slice(4)) as HTMLDialogElement | null)?.close();
     }

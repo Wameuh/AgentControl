@@ -64,6 +64,46 @@
             <button id="btn-steer" hidden data-i18n-title="steer_title" title="Steer">↪</button>
             <button id="btn-send" data-i18n="send">Send</button>
           </footer>
+          <div id="settings-view" tabindex="-1" hidden>
+            <header id="settings-head">
+              <span id="settings-title" data-i18n="settings_h">Settings</span>
+              <span id="s-version"></span>
+              <button id="settings-close" data-i18n-title="close" title="Close">✕</button>
+            </header>
+            <div id="settings-body">
+              <label class="s-row"><span data-i18n="theme_label">Theme</span>
+                <select id="s-theme">
+                  <option value="dark" data-i18n="theme_dark">Dark</option>
+                  <option value="light" data-i18n="theme_light">Light</option>
+                </select>
+              </label>
+              <label class="s-row"><span data-i18n="lang_label">Language</span>
+                <select id="s-lang">
+                  <option value="en">English</option>
+                  <option value="fr">Français</option>
+                </select>
+              </label>
+              <label class="s-row"><span data-i18n="sendmode_label">Enter / Send</span>
+                <select id="s-sendmode">
+                  <option value="queue" data-i18n="sendmode_queue">Queue while busy</option>
+                  <option value="steer" data-i18n="sendmode_steer">Steer mid-turn</option>
+                </select>
+              </label>
+              <label class="s-row chk">
+                <input type="checkbox" id="s-autoconn" checked />
+                <span data-i18n="autoconnect_label">Auto-connect on launch</span>
+              </label>
+              <label class="s-row chk">
+                <input type="checkbox" id="s-images" checked />
+                <span data-i18n="images_label">Inline images</span>
+              </label>
+              <div class="s-row" id="s-update-row">
+                <button id="s-checkupdate" type="button" data-i18n="check_update">Check for updates</button>
+                <span id="s-update-status"></span>
+                <button id="s-doupdate" type="button" hidden data-i18n="update_now">Update now</button>
+              </div>
+            </div>
+          </div>
         </main>
         <aside id="file-panel" hidden>
           <div id="file-resize" title="Drag to resize"></div>
@@ -220,31 +260,6 @@
           <button value="later" data-i18n="later">Later</button>
           <button id="outdated-update" type="button" data-i18n="update_now">Update now</button>
         </menu>
-      </form>
-    </dialog>
-
-    <dialog id="dlg-settings">
-      <form method="dialog">
-        <h3 data-i18n="settings_h">Settings</h3>
-        <label><span data-i18n="theme_label">Theme</span>
-          <select id="s-theme">
-            <option value="dark" data-i18n="theme_dark">Dark</option>
-            <option value="light" data-i18n="theme_light">Light</option>
-          </select>
-        </label>
-        <label><span data-i18n="autoconnect_label">Auto-connect on launch</span>
-          <input type="checkbox" id="s-autoconn" checked />
-        </label>
-        <label><span data-i18n="images_label">Inline images</span>
-          <input type="checkbox" id="s-images" checked />
-        </label>
-        <label><span data-i18n="lang_label">Language</span>
-          <select id="s-lang">
-            <option value="en">English</option>
-            <option value="fr">Français</option>
-          </select>
-        </label>
-        <menu><button value="cancel" data-i18n="close">Close</button></menu>
       </form>
     </dialog>
 

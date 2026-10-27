@@ -20,7 +20,6 @@ import {
   initWindowChrome,
   shellOpen,
 } from "./core/chrome";
-import { inlineImages } from "./core/format";
 import { nav } from "./ui/nav";
 import { initStatus } from "./features/status";
 import { checkBootUpdate } from "./features/update";
@@ -35,7 +34,8 @@ import { ChatView } from "./features/chat-view";
 import { Sidebar } from "./features/sidebar";
 import { Composer } from "./features/composer";
 import { FileExplorer } from "./features/files";
-import { initLang, setLang, getLang, t, applyStatic, type Lang } from "./i18n";
+import { SettingsPanel } from "./features/settings";
+import { initLang, t, applyStatic } from "./i18n";
 import type { AcEvent } from "./core/types";
 
 // Thème + langue persistés (localStorage), appliqués au boot
@@ -61,6 +61,7 @@ const composer = new Composer();
 const files = new FileExplorer();
 const connectDlg = new ConnectDialog();
 const newSess = new NewSessionDialog();
+const settings = new SettingsPanel();
 
 // call() a besoin de la conn courante + des états live — injectés pour éviter
 // l'import inverse core → features.
@@ -99,6 +100,13 @@ newSess.refresh = () => void sidebar.refresh();
 newSess.knownConns = () => conns.knownConns();
 groups.refresh = () => void sidebar.refresh();
 files.bind({ sysline: (txt) => chat.sysline(txt) });
+settings.langChanged = () => {
+  // applyStatic a réécrit le placeholder avec input_ph — hints à jour.
+  composer.refreshHints();
+  void sidebar.refresh();
+  chat.updateHeader();
+};
+settings.sendModeChanged = () => composer.refreshHints();
 
 // --- Events sessions (push du démon via le bridge Tauri) ---------------------
 
@@ -118,28 +126,6 @@ await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
 });
 
 // --- Settings / About / menus ⋮ ----------------------------------------------
-
-// Settings : thème + langue
-$("tb-settings").onclick = () => {
-  ($("s-theme") as HTMLSelectElement).value =
-    document.documentElement.classList.contains("light") ? "light" : "dark";
-  ($("s-lang") as HTMLSelectElement).value = getLang();
-  ($("s-autoconn") as HTMLInputElement).checked =
-    localStorage.getItem("ac-autoconnect") !== "0";
-  ($("s-images") as HTMLInputElement).checked = inlineImages();
-  ($("dlg-settings") as HTMLDialogElement).showModal();
-};
-($("s-theme") as HTMLSelectElement).onchange = (e) =>
-  applyTheme((e.target as HTMLSelectElement).value as "dark" | "light");
-($("s-autoconn") as HTMLInputElement).onchange = (e) =>
-  localStorage.setItem("ac-autoconnect", (e.target as HTMLInputElement).checked ? "1" : "0");
-($("s-images") as HTMLInputElement).onchange = (e) =>
-  localStorage.setItem("ac-inline-images", (e.target as HTMLInputElement).checked ? "1" : "0");
-($("s-lang") as HTMLSelectElement).onchange = (e) => {
-  setLang((e.target as HTMLSelectElement).value as Lang);
-  void sidebar.refresh();
-  chat.updateHeader();
-};
 
 // About : version réelle + lien GitHub via le plugin shell
 $("tb-about").onclick = async () => {
@@ -180,6 +166,7 @@ chat.init();
 sidebar.init();
 composer.init();
 files.init();
+settings.init();
 initModelBar(openFusion);
 initFusionDialog();
 initStatus();
