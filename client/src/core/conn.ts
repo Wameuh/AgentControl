@@ -29,12 +29,45 @@ export function daemonParams(cfg: Record<string, unknown>, tag: string) {
 
 export const minorOf = (v: string) => v.split(".").slice(0, 2).join(".");
 
+/// "1.2.3-rc.4" → parties numériques + identifiants de pré-release.
+/// Le build metadata `+…` est ignoré (semver).
+function vParts(v: string): { n: number[]; pre?: string[] } {
+  const noBuild = v.split("+")[0];
+  const i = noBuild.indexOf("-");
+  const core = i < 0 ? noBuild : noBuild.slice(0, i);
+  return {
+    n: core.split(".").map((x) => parseInt(x, 10) || 0),
+    pre: i < 0 ? undefined : noBuild.slice(i + 1).split("."),
+  };
+}
+
+/// Compare semver : pré-release < stable de même X.Y.Z, et dans les
+/// identifiants numérique < alphanum (semver §11). "0.6" toléré.
 export function cmpVer(a: string, b: string): number {
-  const pa = a.split(".").map(Number);
-  const pb = b.split(".").map(Number);
+  const pa = vParts(a);
+  const pb = vParts(b);
   for (let i = 0; i < 3; i++) {
-    const d = (pa[i] || 0) - (pb[i] || 0);
+    const d = (pa.n[i] || 0) - (pb.n[i] || 0);
     if (d) return d;
+  }
+  if (!pa.pre && !pb.pre) return 0;
+  if (!pa.pre) return 1;
+  if (!pb.pre) return -1;
+  for (let i = 0; i < Math.max(pa.pre.length, pb.pre.length); i++) {
+    const x = pa.pre[i];
+    const y = pb.pre[i];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    const xn = /^\d+$/.test(x);
+    const yn = /^\d+$/.test(y);
+    if (xn && yn) {
+      const d = Number(x) - Number(y);
+      if (d) return d;
+    } else if (xn !== yn) {
+      return xn ? -1 : 1;
+    } else if (x !== y) {
+      return x < y ? -1 : 1;
+    }
   }
   return 0;
 }

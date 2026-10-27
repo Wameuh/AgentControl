@@ -18,12 +18,94 @@ fn gh_get(url: &str) -> Result<serde_json::Value, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Compare semver minimal : `x.y.z` numérique puis identifiants de
+/// pré-release (stable > pré-release ; numérique < alphanum, semver §11).
+#[cfg(not(target_os = "android"))]
+fn semver_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering::*;
+    fn parse(v: &str) -> (Vec<u64>, Vec<String>) {
+        let v = v.split('+').next().unwrap_or(v);
+        let (core, pre) = v.split_once('-').unwrap_or((v, ""));
+        let n = core.split('.').map(|x| x.parse().unwrap_or(0)).collect();
+        let p = if pre.is_empty() {
+            Vec::new()
+        } else {
+            pre.split('.').map(String::from).collect()
+        };
+        (n, p)
+    }
+    let (an, ap) = parse(a);
+    let (bn, bp) = parse(b);
+    for i in 0..3 {
+        let d = an.get(i).copied().unwrap_or(0).cmp(&bn.get(i).copied().unwrap_or(0));
+        if d != Equal {
+            return d;
+        }
+    }
+    match (ap.is_empty(), bp.is_empty()) {
+        (true, true) => return Equal,
+        (true, false) => return Greater,
+        (false, true) => return Less,
+        (false, false) => {}
+    }
+    for i in 0..ap.len().max(bp.len()) {
+        match (ap.get(i), bp.get(i)) {
+            (None, _) => return Less,
+            (_, None) => return Greater,
+            (Some(x), Some(y)) => {
+                let d = match (x.parse::<u64>(), y.parse::<u64>()) {
+                    (Ok(xn), Ok(yn)) => xn.cmp(&yn),
+                    (Ok(_), Err(_)) => Less,
+                    (Err(_), Ok(_)) => Greater,
+                    (Err(_), Err(_)) => x.cmp(y),
+                };
+                if d != Equal {
+                    return d;
+                }
+            }
+        }
+    }
+    Equal
+}
+
+/// Max semver des releases récentes — la liste inclut les prereleases
+/// (canal rc opt-in), contrairement à releases/latest.
+#[cfg(not(target_os = "android"))]
+fn latest_incl_rc() -> Result<String, String> {
+    let rels = gh_get(
+        "https://api.github.com/repos/Wameuh/AgentControl/releases?per_page=20",
+    )?;
+    let arr = rels.as_array().ok_or("réponse releases inattendue")?;
+    let mut best = String::new();
+    for r in arr {
+        if r["draft"].as_bool().unwrap_or(false) {
+            continue;
+        }
+        if let Some(t) = r["tag_name"].as_str().map(|t| t.trim_start_matches('v')) {
+            if best.is_empty() || semver_cmp(t, &best) == std::cmp::Ordering::Greater {
+                best = t.to_string();
+            }
+        }
+    }
+    if best.is_empty() {
+        Err("aucune release listée".into())
+    } else {
+        Ok(best)
+    }
+}
+
 /// Dernière version publiée via l'API REST GitHub (aucun outil local requis) :
-/// releases/latest, fallback = package.json sur main.
+/// releases/latest, fallback = package.json sur main. `include_rc` = canal
+/// opt-in des pré-releases (tester la release candidate avant merge).
 #[cfg(not(target_os = "android"))]
 #[tauri::command]
-pub(crate) async fn check_update() -> Result<String, String> {
-    tokio::task::spawn_blocking(|| {
+pub(crate) async fn check_update(include_rc: Option<bool>) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        if include_rc.unwrap_or(false) {
+            if let Ok(v) = latest_incl_rc() {
+                return Ok(v);
+            }
+        }
         if let Ok(v) =
             gh_get("https://api.github.com/repos/Wameuh/AgentControl/releases/latest")
         {
@@ -42,7 +124,7 @@ pub(crate) async fn check_update() -> Result<String, String> {
 
 #[cfg(target_os = "android")]
 #[tauri::command]
-pub(crate) async fn check_update() -> Result<String, String> {
+pub(crate) async fn check_update(_include_rc: Option<bool>) -> Result<String, String> {
     Err("non supporté sur Android — APK par release GitHub".into())
 }
 
@@ -58,13 +140,13 @@ pub(crate) async fn update_client(_tag: String) -> Result<(), String> {
 #[tauri::command]
 pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     let deb = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
-        let rel = gh_get(
-            "https://api.github.com/repos/Wameuh/AgentControl/releases/latest",
-        )
+        // Tag exact d'abord (les rc sont des prereleases — latest
+        // renverrait la STABLE à la place), latest en repli.
+        let rel = gh_get(&format!(
+            "https://api.github.com/repos/Wameuh/AgentControl/releases/tags/v{tag}"
+        ))
         .or_else(|_| {
-            gh_get(&format!(
-                "https://api.github.com/repos/Wameuh/AgentControl/releases/tags/v{tag}"
-            ))
+            gh_get("https://api.github.com/repos/Wameuh/AgentControl/releases/latest")
         })?;
         let url = rel["assets"]
             .as_array()
@@ -138,13 +220,12 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     }
     let dir = std::env::temp_dir().join("agentcontrol-update");
     let setup = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
-        let rel = gh_get(
-            "https://api.github.com/repos/Wameuh/AgentControl/releases/latest",
-        )
+        // Tag exact d'abord (idem — les rc sont des prereleases).
+        let rel = gh_get(&format!(
+            "https://api.github.com/repos/Wameuh/AgentControl/releases/tags/v{tag}"
+        ))
         .or_else(|_| {
-            gh_get(&format!(
-                "https://api.github.com/repos/Wameuh/AgentControl/releases/tags/v{tag}"
-            ))
+            gh_get("https://api.github.com/repos/Wameuh/AgentControl/releases/latest")
         })?;
         let url = rel["assets"]
             .as_array()

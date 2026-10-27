@@ -7,8 +7,10 @@ name: auto-release-pr
 # silencieusement (draft → synchronize = runs tout-skip, zéro CI).
 # Pour releaser : `gh pr ready` → release-bump pousse
 # `chore: bump version to <NEXT>` sur next_release (dernier tag +
-# mots-clés des commits), les 5 checks tournent sur le head bumpé,
-# merge par l'utilisateur → tag + build dispatch.
+# mots-clés des commits), les 5 checks tournent sur le head bumpé et
+# un tag `v<NEXT>-rc.<k>` déclenche le build de la prerelease —
+# installable via l'auto-update (canal rc des paramètres) pour tester
+# avant de merger ; merge par l'utilisateur → tag final + cleanup rc.
 #
 # Le reset post-release de `reconcile-next-release` pointe nr sur le
 # même SHA que main : ce push (PAT) déclenche ce job, qui doit sortir
@@ -47,9 +49,12 @@ jobs:
           Pour releaser : passer la PR **ready** → `release-bump` pousse
           le bump de version (`dernier tag + niveau`, mots-clés
           `(minor)`/`(major)`/`(sync)` des commits du cycle) → les 5
-          checks tournent sur le head bumpé → merge →
-          `release-on-merge` tague `v<NEXT>` et dispatche le build de
-          release.
+          checks tournent sur le head bumpé et un tag `v<NEXT>-rc.<k>`
+          déclenche le build de la **prerelease** — installable depuis
+          l'app via l'auto-update en activant le canal rc dans les
+          paramètres, pour tester avant de merger → merge →
+          `release-on-merge` tague `v<NEXT>`, dispatche le build de
+          release final et nettoie les rc du cycle.
           EOF
 
       - name: Ouvrir la release PR si absente

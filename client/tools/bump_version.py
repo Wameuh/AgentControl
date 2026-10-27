@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Bump la version partout : tauri.conf.json, package.json, Cargo.toml.
-Usage : python3 client/tools/bump_version.py [x.y.z]
+Usage : python3 client/tools/bump_version.py [x.y.z[-rc.n]]
 Sans argument : incrémente le patch. Politique : y = incompatibilité
-client↔démon (déclenche l'auto-update du serveur), z = correctifs."""
+client↔démon (déclenche l'auto-update du serveur), z = correctifs.
+Le suffixe explicite -rc.n sert au build des prereleases (injection au
+build, jamais commitée)."""
 import json
 import os
 import re
@@ -18,7 +20,7 @@ FILES.append(os.path.join(ROOT, "client", "src-tauri", "Cargo.toml"))
 
 
 def bump(v, level="patch"):
-    p = v.split(".")
+    p = v.split("-")[0].split(".")
     i = {"major": 0, "minor": 1, "patch": 2}[level]
     p[i] = str(int(p[i]) + 1)
     for j in range(i + 1, 3):
@@ -33,7 +35,7 @@ level = "patch"
 for a in sys.argv[1:]:
     if a in ("major", "minor", "patch"):
         level = a
-    elif re.match(r"^\d+\.\d+\.\d+$", a):
+    elif re.match(r"^\d+\.\d+\.\d+(-rc\.\d+)?$", a):
         explicit = a
     else:
         raise SystemExit(f"argument inconnu: {a} (attendu x.y.z ou major|minor|patch)")
@@ -49,7 +51,7 @@ for f in FILES:
         open(f, "a").write("\n")
     else:
         s = open(f).read()
-        s2, n = re.subn(r'^version = "(\d+\.\d+\.\d+)"',
+        s2, n = re.subn(r'^version = "(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)"',
                         lambda m: f'version = "{explicit or bump(m.group(1), level)}"', s, count=1, flags=re.M)
         if n:
             open(f, "w").write(s2)

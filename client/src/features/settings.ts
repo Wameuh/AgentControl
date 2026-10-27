@@ -11,7 +11,7 @@ import { inlineImages } from "../core/format";
 import { cmpVer } from "../core/conn";
 import { setLang, getLang, t, type Lang } from "../i18n";
 import { nav } from "../ui/nav";
-import { checkUpdate, performClientUpdate } from "./update";
+import { checkUpdate, performClientUpdate, rcChannel } from "./update";
 
 /** Préférence d'envoi : "queue" (file FIFO, défaut) | "steer" (injection
  *  mid-turn quand l'agent tourne ; idle → envoi normal côté démon). */
@@ -47,6 +47,7 @@ export class SettingsPanel {
     ($("s-autoconn") as HTMLInputElement).checked =
       localStorage.getItem("ac-autoconnect") !== "0";
     ($("s-images") as HTMLInputElement).checked = inlineImages();
+    ($("s-rcchan") as HTMLInputElement).checked = rcChannel();
     $("s-update-status").textContent = "";
     ($("s-doupdate") as HTMLButtonElement).hidden = true;
     void getVersion()
@@ -138,6 +139,11 @@ export class SettingsPanel {
     ($("s-images") as HTMLInputElement).onchange = (e) =>
       localStorage.setItem(
         "ac-inline-images",
+        (e.target as HTMLInputElement).checked ? "1" : "0",
+      );
+    ($("s-rcchan") as HTMLInputElement).onchange = (e) =>
+      localStorage.setItem(
+        "ac-rcchannel",
         (e.target as HTMLInputElement).checked ? "1" : "0",
       );
     ($("s-checkupdate") as HTMLButtonElement).onclick = () => this.runUpdateCheck();

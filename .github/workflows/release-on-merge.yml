@@ -56,3 +56,27 @@ jobs:
           git push origin "v$VERSION"
           gh workflow run build.yml --ref "v$VERSION"
           echo "Release v$VERSION déclenchée (build sur le tag)"
+
+      # Les releases/tags vX.Y.Z-rc.* du cycle sont obsolètes une fois la
+      # finale publiée — on les retire (release + tag) pour garder la
+      # page releases propre. Fail-safe : un échec de cleanup ne casse
+      # jamais la release.
+      - name: Cleanup des RC du cycle
+        if: steps.pr.outputs.is_release == 'true'
+        env:
+          # PAT en priorité : la suppression de tags peut être soumise
+          # à un ruleset (github-actions[bot] non bypassable).
+          GH_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(grep -oE '"version": "[^"]+"' client/package.json | head -1 | cut -d'"' -f4)
+          git fetch --tags -q
+          for t in $(git tag -l "v$VERSION-rc.*"); do
+            echo "cleanup $t"
+            # gh release delete couvre release+tag ; tag orphelin
+            # (release absente) → suppression via l'api (GH_TOKEN=PAT
+            # en priorité — un ruleset de tags bloquerait un push
+            # GITHUB_TOKEN), git push en dernier recours.
+            gh release delete "$t" --yes --cleanup-tag 2>/dev/null \
+              || gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$t" 2>/dev/null \
+              || git push origin ":refs/tags/$t" || true
+          done

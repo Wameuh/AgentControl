@@ -38,6 +38,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      # Tags vX.Y.Z-rc.K : la version buildée porte le suffixe rc (non
+      # commité — le tag pointe un commit propre X.Y.Z) → les binaires
+      # s'identifient "X.Y.Z-rc.K" : la finale X.Y.Z restera proposée en
+      # update (semver : rc < stable) et ensure_daemon matche le tag rc.
+      - name: Version RC
+        if: contains(github.ref_name, '-rc.')
+        run: python3 client/tools/bump_version.py "${GITHUB_REF_NAME#v}"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p agentcontrol-daemon -p acctl
@@ -64,6 +71,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
+      # Idem daemon : suffixe rc dans la version buildée. Windows exclu
+      # — MSI/NSIS exigent une version numérique, l'injection casserait
+      # le bundling (artefacts rc Windows gardent X.Y.Z en interne).
+      - name: Version RC
+        if: runner.os == 'Linux' && contains(github.ref_name, '-rc.')
+        run: python3 client/tools/bump_version.py "${GITHUB_REF_NAME#v}"
 
       - name: Deps Tauri (Ubuntu)
         if: runner.os == 'Linux'
@@ -130,6 +144,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Version RC
+        if: contains(github.ref_name, '-rc.')
+        run: python3 client/tools/bump_version.py "${GITHUB_REF_NAME#v}"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -196,4 +213,10 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: "**/*"
+          # Tags vX.Y.Z-rc.K → prerelease GitHub JAMAIS marquée "latest"
+          # (sinon releases/latest — la sonde stable de l'app et le
+          # Dockerfile devcontainer — renverrait la rc aux utilisateurs
+          # du canal stable).
+          prerelease: ${{ contains(github.ref_name, '-rc.') }}
+          make_latest: ${{ !contains(github.ref_name, '-rc.') }}
 

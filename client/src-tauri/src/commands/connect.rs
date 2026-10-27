@@ -175,7 +175,7 @@ pub(crate) async fn ensure_daemon(
          ver=$({{ [ -n \"$ac\" ] && \"$ac\" status 2>/dev/null || true; }} | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4); \
          if [ \"$ver\" = \"{t}\" ]; then echo ok:$ver; exit 0; fi; \
          if [ -n \"$ver\" ] && [ \"$ver\" != \"{t}\" ] && \
-            [ \"$(printf '%s\\n%s\\n' \"{t}\" \"$ver\" | sort -V | tail -n1)\" = \"$ver\" ]; then \
+            [ \"$(printf '%s\\n%s\\n' \"{t}\" \"$ver\" | sed 's/-rc\\./~rc./g' | sort -V | tail -n1)\" = \"$(echo \"$ver\" | sed 's/-rc\\./~rc./g')\" ]; then \
             echo newer:$ver; exit 0; fi; \
          rc=0; curl -s -o /dev/null --max-time 2 http://127.0.0.1:{p} 2>/dev/null || rc=$?; \
          if [ \"$rc\" -ne 7 ]; then echo busy:127.0.0.1:{p}; exit 0; fi; \

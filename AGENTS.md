@@ -139,6 +139,23 @@ de tag via GITHUB_TOKEN ne déclenche pas les workflows d'où le
 dispatch). Idempotent : tag existant → skip, package.json déjà à
 NEXT → pas de re-bump. Tant que la PR reste draft, rien ne bump.
 
+**Release candidate** : quand la release PR passe ready, `release-bump`
+pousse aussi un tag `v<NEXT>-rc.<k>` (k incrémental, un rc par état de
+head — un synchronize post-ready produit rc.k+1) → le push du tag via
+PAT déclenche `build.yml` qui publie une **prerelease GitHub** (jamais
+marquée `latest`). Le build rc **injecte le suffixe `-rc.k` dans les
+fichiers de version** (non commité — le tag pointe le commit propre
+X.Y.Z) → le binaire s'identifie `X.Y.Z-rc.k`, et la finale `X.Y.Z` est
+proposée en update ensuite (semver : rc < stable). Windows exclu de
+l'injection (MSI/NSIS exigent du numérique) — conséquence : un artefact
+rc Windows s'identifie `X.Y.Z` → pas de chemin auto-update vers rc.k+1
+ni vers la finale, réinstall manuelle. Pour installer la rc depuis
+l'app : canal rc opt-in dans les paramètres → la sonde passe de
+`releases/latest` (qui exclut les prereleases) à la liste `/releases`
++ max semver. Au merge, `release-on-merge` nettoie les releases+tags
+`v<NEXT>-rc.*` du cycle — et une release PR fermée sans merge déclenche
+le même cleanup (`rc-cleanup` de version.yml).
+
 **Reconcile** : tout merge nr→main est un squash → le commit `main`
 n'est jamais ancêtre des commits nr : sans reconcile la release
 suivante reconflicterait sur toute zone retouchée (arrivé : #23, #29),
@@ -173,10 +190,12 @@ bypass ruleset), **Pull requests RW** (auto-release-pr :
 (app first-party → 422), et un push `GITHUB_TOKEN` ne déclencherait
 pas les checks sur le head poussé (anti-récursion). Le ruleset
 `next_release` a le rôle **`Repository admin`** en bypass actor
-(Settings → Rules → Rulesets). Sans `RELEASE_PAT`, un push réellement
-nécessaire échoue fail-fast (« secret RELEASE_PAT manquant ») — rien à
-pousser → skip clean, pas d'échec ; les fine-grained PAT expirent →
-renouveler le secret à l'échéance (sinon échec opaque au checkout).
+(Settings → Rules → Rulesets). Sans `RELEASE_PAT` : le guard de
+`release-bump` tire dès que `next` est connu (le tag rc pousse
+toujours, même bump sauté) → fail-fast « secret RELEASE_PAT manquant »
+sur tout run non-draft ; `reconcile` lui reste skip-clean sans push.
+Les fine-grained PAT expirent → renouveler le secret à l'échéance
+(sinon échec opaque au checkout).
 
 ## Après chaque push : vérifier le CI
 
