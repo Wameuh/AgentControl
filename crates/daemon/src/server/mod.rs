@@ -454,10 +454,23 @@ impl Daemon {
                     if line.trim().is_empty() {
                         continue;
                     }
-                    let req: Request = match serde_json::from_str(&line) {
-                        Ok(r) => r,
+                    // L'id est extrait du JSON brut AVANT la désérialisation
+                    // stricte : une ReqKind inconnue (client plus récent) ne
+                    // doit pas répondre avec id=0 — le client route par id et
+                    // dropperait l'erreur → timeout de 60 s pour rien.
+                    let raw: Value = match serde_json::from_str(&line) {
+                        Ok(v) => v,
                         Err(e) => {
                             let resp = Response::err(0, format!("parse: {e}"));
+                            Self::send_line(&write, &resp).await?;
+                            continue;
+                        }
+                    };
+                    let req: Request = match serde_json::from_value(raw.clone()) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let id = raw.get("id").and_then(Value::as_u64).unwrap_or(0);
+                            let resp = Response::err(id, format!("parse: {e}"));
                             Self::send_line(&write, &resp).await?;
                             continue;
                         }

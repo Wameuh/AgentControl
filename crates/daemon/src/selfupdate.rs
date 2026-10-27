@@ -9,17 +9,42 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const REPO: &str = "Wameuh/AgentControl";
+
+/// Un seul update à la fois par process : les chemins temporaires sont
+/// namespacés par pid → deux requêtes concurrentes partageraient le
+/// staging (extractions entrelacées, rename croisés → binaire brické).
+static UPDATING: AtomicBool = AtomicBool::new(false);
+
+/// RAII : libère le verrou quel que soit le chemin de sortie.
+struct UpdateGuard;
+impl Drop for UpdateGuard {
+    fn drop(&mut self) {
+        UPDATING.store(false, Ordering::SeqCst);
+    }
+}
 
 /// Remplace le binaire courant par celui de la release `version`
 /// (accepte "0.5.0" ou "v0.5.0"). Bloquant : appeler via
 /// `spawn_blocking`. En cas de succès supervisé, un exit différé est
 /// armé — l'appelant reçoit la réponse avant la mort du process.
 pub fn self_update(version: &str) -> Result<Value> {
+    if UPDATING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        bail!("update déjà en cours");
+    }
+    let _guard = UpdateGuard;
+
     let ver = version.trim().trim_start_matches('v');
-    if ver.is_empty() || ver.eq_ignore_ascii_case("latest") {
-        bail!("version cible requise (ex. \"0.5.0\")");
+    // La version part en segment d'URL : whitelist semver stricte —
+    // `../` traverserait vers un asset arbitraire (tout client du
+    // socket peut appeler, agents et listener TCP sans auth compris).
+    if !valid_version(ver) {
+        bail!("version cible invalide (semver attendu, ex. \"0.5.0\")");
     }
     let arch = match std::env::consts::ARCH {
         "x86_64" => "x86_64",
@@ -27,6 +52,13 @@ pub fn self_update(version: &str) -> Result<Value> {
         a => bail!("arch non supportée: {a}"),
     };
     let exe = std::env::current_exe().context("current_exe")?;
+    // Après un update non redémarré, /proc/self/exe pointe l'inode
+    // supprimé ("<chemin> (deleted)") : laisser faire renommerait vers
+    // un fichier littéralement " (deleted)" → le nom réel ne serait
+    // jamais recréé, prochain démarrage cassé.
+    if !exe.exists() {
+        bail!("binaire courant déjà remplacé — redémarrer le démon avant un nouvel update");
+    }
     let dir = exe
         .parent()
         .context("binaire sans dossier parent")?
@@ -53,6 +85,10 @@ pub fn self_update(version: &str) -> Result<Value> {
         // Exit différé : la réponse part avant la mort du process. La
         // sortie saute le cleanup du marqueur pid → le boot suivant
         // le lit comme un arrêt brutal → reprise auto des sessions.
+        // ⚠ `restarting:true` suppose que le superviseur relance
+        // vraiment (supervisord autorestart / systemd Restart≠no) —
+        // une unit Restart=no laisserait le démon mort : indétectable
+        // de l'intérieur, à assumer.
         std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_millis(400));
             std::process::exit(0);
@@ -63,6 +99,26 @@ pub fn self_update(version: &str) -> Result<Value> {
         "path": exe.display().to_string(),
         "restarting": restarting,
     }))
+}
+
+/// Semver strict `X.Y.Z` (+ suffixe `-pre`/`+meta` alphanumérique) —
+/// rejette `/`, `\`, `..`, `%` et tout ce qui altérerait l'URL.
+fn valid_version(v: &str) -> bool {
+    let mut it = v.split(['-', '+']);
+    let core: Vec<&str> = it.next().unwrap_or("").split('.').collect();
+    if core.len() != 3
+        || core
+            .iter()
+            .any(|p| p.is_empty() || !p.chars().all(|c| c.is_ascii_digit()))
+    {
+        return false;
+    }
+    it.all(|tag| {
+        !tag.is_empty()
+            && tag
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    })
 }
 
 /// Vrai si un superviseur relancera le process à sa mort :
@@ -86,6 +142,7 @@ fn probe_dir_writable(dir: &Path) -> Result<()> {
 fn http_get(url: &str) -> Result<Vec<u8>> {
     let mut body = Vec::new();
     ureq::get(url)
+        .timeout(std::time::Duration::from_secs(120))
         .call()
         .with_context(|| format!("GET {url}"))?
         .into_reader()
@@ -121,15 +178,20 @@ fn swap_binaries(tgz: &[u8], staging: &Path, dir: &Path, exe: &Path) -> Result<(
             continue;
         }
         let staged = stage_executable(&src, &dir, name)?;
-        std::fs::rename(&staged, &target)
-            .with_context(|| format!("remplacement de {}", target.display()))?;
+        if let Err(e) = std::fs::rename(&staged, &target)
+            .with_context(|| format!("remplacement de {}", target.display()))
+        {
+            let _ = std::fs::remove_file(&staged);
+            return Err(e);
+        }
         tracing::info!("self-update: {} remplacé", target.display());
     }
     Ok(())
 }
 
 /// Copie l'artefact extrait à côté de sa cible (même FS → rename
-/// atomique possible) avec le mode exécutable.
+/// atomique possible) avec le mode exécutable, fsync inclus — un
+/// crash pile entre copy et rename ne doit pas laisser un binaire vide.
 fn stage_executable(src: &Path, dir: &Path, name: &str) -> Result<PathBuf> {
     let staged = dir.join(format!(".{name}.new-{}", std::process::id()));
     std::fs::copy(src, &staged)?;
@@ -138,5 +200,6 @@ fn stage_executable(src: &Path, dir: &Path, name: &str) -> Result<PathBuf> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
     }
+    std::fs::File::open(&staged)?.sync_data()?;
     Ok(staged)
 }

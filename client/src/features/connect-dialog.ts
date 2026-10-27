@@ -14,6 +14,13 @@ import { t } from "../i18n";
 import { showOutdated } from "./update";
 import type { ConnectionManager } from "./connections";
 
+/** Première version du démon connaissant ReqKind::UpdateDaemon —
+ *  la release qui embarque cette feature (marqueur `(minor)` sur la
+ *  PR → v0.5.0 + minor = 0.6.0). En dessous, l'auto-update est
+ *  sauté : le démon répondrait `parse: unknown variant` avec id=0
+ *  que le client droppe → 60 s de timeout muet. */
+const SELF_UPDATE_SINCE = "0.6.0";
+
 export class ConnectDialog {
   private conns!: ConnectionManager;
   /** Rafraîchit la sidebar après connexion (injecté). */
@@ -57,22 +64,32 @@ export class ConnectDialog {
     );
   }
 
-  /** Tente `daemon_update` (auto-update par le démon lui-même).
+  /** Tente `update_daemon` (auto-update par le démon lui-même).
    *  `true` = traité (succès ou échec définitif affiché — pas de
    *  fallback) ; `false` = démon trop vieux pour connaître la requête
    *  → l'appelant bascule sur le script `ensure_daemon`. Sur succès le
    *  démon sort sous son superviseur : la connexion morte qui suit est
-   *  attendue, le backoff de conns la rétablit tout seul. */
-  private async tryDaemonSelfUpdate(conn: string, lv: string): Promise<boolean> {
+   *  attendue, le backoff de conns la rétablit tout seul.
+   *
+   *  Gate version : un démon < SELF_UPDATE_SINCE ne connaît pas
+   *  ReqKind::UpdateDaemon — sa réponse d'erreur de parse porte id=0,
+   *  que client-core droppe (routage par id) → l'appel attendrait le
+   *  timeout de 60 s pour rien. On saute donc la tentative. Un seuil
+   *  surestimé (release sortie en patch plutôt que minor) ne dégrade
+   *  que vers le fallback ssh — jamais l'inverse. */
+  private async tryDaemonSelfUpdate(
+    conn: string, dv: string, lv: string,
+  ): Promise<boolean> {
+    if (cmpVer(dv, SELF_UPDATE_SINCE) < 0) return false;
     try {
       const r = await call<{ restarting?: boolean }>(
-        "daemon_update", { conn, version: lv });
+        "update_daemon", { conn, version: lv });
       if (r?.restarting) showErr(t("dupdate_self_ok", { lv }));
       else showErr(t("dupdate_self_manual", { lv }));
       return true;
     } catch (e) {
       const msg = String(e);
-      // Requête inconnue du démon (trop vieux) → script ssh en secours.
+      // Requête inconnue du démon (build hybride/dev) → script ssh.
       if (/unknown|inconnue|unrecognized|unsupported|not.?supported/i.test(msg)) return false;
       // Échec définitif (binaire non inscriptible, download) : le
       // script aurait les mêmes droits → afficher plutôt que retenter.
@@ -159,7 +176,7 @@ export class ConnectDialog {
         if (await this.confirmDaemonUpdate(dv, lv, host, conn)) {
           this.daemonDlg(t("updating_daemon", { dv, lv }) + " — " + host, true);
           try {
-            const selfDone = await this.tryDaemonSelfUpdate(conn, lv);
+            const selfDone = await this.tryDaemonSelfUpdate(conn, dv, lv);
             // `false` = démon trop vieux pour la requête → fallback
             // script distant (ssh seulement — il faut un exec).
             if (!selfDone && cfg.kind === "ssh" && cfg.host) {
@@ -178,6 +195,10 @@ export class ConnectDialog {
                 }
                 status = await invoke("connect", { cfg }).catch(() => status);
               }
+            } else if (!selfDone) {
+              // Hors-ssh (local/tcp) avec un démon trop vieux pour
+              // l'auto-update : pas d'exec possible → message honnête.
+              showErr(t("dupdate_too_old", { dv, lv }));
             }
           } finally {
             this.daemonDlg("", false);
