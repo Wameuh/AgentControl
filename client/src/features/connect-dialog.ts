@@ -5,7 +5,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
-import { $, showErr } from "../core/dom";
+import { $, esc, showErr } from "../core/dom";
 import { call } from "../core/rpc";
 import { cmpVer, connKeyOf, daemonParams, minorOf } from "../core/conn";
 import { isAndroid } from "../core/chrome";
@@ -257,6 +257,35 @@ export class ConnectDialog {
     pre.textContent = await invoke<string>("ssh_pubkey").catch((e) => `⚠ ${e}`);
   }
 
+  /** Rang d'un niveau de log — le filtre du sélecteur est un niveau MINIMUM. */
+  private logRank(l: string): number {
+    return ({ debug: 0, info: 1, warn: 2, error: 3 } as Record<string, number>)[l] ?? 1;
+  }
+
+  /** Tail de client.log filtré par niveau et coloré (lignes
+   *  `[iso] [LVL] fichier.rs:NN msg` ; les lignes anciennes sans tag de
+   *  niveau sont traitées en info). */
+  private async renderLog() {
+    const min = this.logRank(($("log-level") as HTMLSelectElement).value);
+    const txt = await invoke<string>("log_tail", { n: 400 }).catch(() => "");
+    const rows: string[] = [];
+    for (const line of txt.split("\n")) {
+      const m = line.match(/^(\[[^\]]*\] \[(DEBUG|INFO|WARN|ERROR)\])(?: (\S+:\d+))?/);
+      if (this.logRank(m?.[2]?.toLowerCase() ?? "info") < min) continue;
+      const cls = m ? ` ll-${m[2].toLowerCase()}` : "";
+      let body = esc(line);
+      if (m) {
+        body = `<span class="ll-meta">${esc(m[1])}</span>`;
+        if (m[3]) body += ` <span class="ll-meta">${esc(m[3])}</span>`;
+        body += esc(line.slice(m[0].length));
+      }
+      rows.push(`<span class="ll${cls}">${body}</span>`);
+    }
+    const v = $("log-view");
+    v.innerHTML = rows.join("\n");
+    v.scrollTop = v.scrollHeight;
+  }
+
   /** Repeuple le select des connexions récentes depuis `this.saved`. */
   private fillSavedSelect(): HTMLSelectElement {
     const sv = $("c-saved") as HTMLSelectElement;
@@ -337,10 +366,12 @@ export class ConnectDialog {
       if (this.saved[i]) this.fillForm(this.saved[i]);
     };
     $("c-logs").addEventListener("click", async () => {
-      const v = $("log-view");
-      v.hidden = !v.hidden;
-      if (!v.hidden) v.textContent = await invoke<string>("log_tail", { n: 200 });
+      const show = ($("log-view")).hidden;
+      $("log-view").hidden = !show;
+      $("log-bar").hidden = !show;
+      if (show) await this.renderLog();
     });
+    ($("log-level") as HTMLSelectElement).onchange = () => this.renderLog();
 
     $("c-cancel").onclick = () => ($("dlg-conn") as HTMLDialogElement).close("cancel");
 
