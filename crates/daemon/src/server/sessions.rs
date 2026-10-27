@@ -61,9 +61,15 @@ impl Daemon {
                     .apply_spawn_config(mode.as_deref(), model.as_deref())
                     .await;
                 if let Some(p) = prompt {
+                    // Ok(true) : session endormie entre la création et la
+                    // livraison — le prompt est en file, réveil à lancer.
+                    let d = Arc::clone(self);
                     let s = Arc::clone(&session);
+                    let sid2 = sid.clone();
                     tokio::spawn(async move {
-                        let _ = s.send_prompt(&p, false, false).await;
+                        if let Ok(true) = s.send_prompt(&p, false, false).await {
+                            d.spawn_wake(&s, &sid2);
+                        }
                     });
                 }
                 info!("session créée: {sid} (agent={agent})");
@@ -252,6 +258,16 @@ impl Daemon {
                     None => false,
                 };
                 if rebind {
+                    // Rebind sur un agent vivant OU un spawn en vol
+                    // (spawning sans stdin_tx encore posé : le kill est
+                    // sans effet direct, mais le bump de génération fait
+                    // bayer l'essai en cours) — sinon la garde
+                    // anti-doublon de spawn_agent (is_alive après
+                    // spawn_lock) sauterait le respawn et la session
+                    // resterait sur l'ancienne session native.
+                    if s.is_alive() || s.is_spawning() {
+                        s.kill_for_respawn().await;
+                    }
                     // Comme clear_context : l'event de contrôle part
                     // dans l'ancienne numérotation, avant le reset.
                     s.emit_ephemeral(EventKind::SessionCleared {});
@@ -263,26 +279,9 @@ impl Daemon {
                 if let Some(nid) = native_id {
                     s.set_native_id(&nid);
                 }
-                let meta = s.meta_snapshot();
-                let profile = self
-                    .agents
-                    .get(&meta.agent)
-                    .with_context(|| format!("agent inconnu: {}", meta.agent))?
-                    .clone();
-                let (cmd, envs) = self.agent_parts(
-                    &profile,
-                    meta.model.as_deref(),
-                    meta.mode.as_deref(),
-                    &session,
-                );
-                s.spawn_agent(
-                    &cmd,
-                    &envs,
-                    meta.native_session_id,
-                    !rebind,
-                    self.mcp_servers(&session),
-                )
-                .await?;
+                // respawn gère la transition asleep → starting → idle
+                // (resume explicite = réveil d'une session endormie).
+                self.respawn(&s, !rebind).await?;
                 info!("session reprise: {session}");
                 Ok(json!({"session": session}))
     }
@@ -309,6 +308,10 @@ impl Daemon {
                     meta.mode.as_deref(),
                     &session,
                 );
+                // /clear sur une session endormie : la sortir d'abord —
+                // sinon le garde asleep de spawn_agent stopperait le
+                // respawn (contexte effacé → échec = dead, pas asleep).
+                s.leave_asleep();
                 // resume_native_id=None → session/new : contexte agent vide.
                 if let Err(e) = s
                     .spawn_agent(&cmd, &envs, None, true, self.mcp_servers(&session))
@@ -325,14 +328,164 @@ impl Daemon {
 
     pub(super) async fn h_send(self: &Arc<Self>, session: String, text: String, force: bool, steer: bool) -> Result<Value> {
                 let s = self.get_session(&session).await?;
-                if !s.is_alive() {
-                    anyhow::bail!("agent not running — resume_session d'abord");
+                if !s.accepting_prompts() {
+                    if s.meta_snapshot().state != "asleep" && !s.is_waking()
+                        && !s.is_spawning()
+                    {
+                        anyhow::bail!("agent not running — resume_session d'abord");
+                    }
+                    // Session endormie, réveil en cours, ou spawn en vol
+                    // (init/resume//clear) : le prompt s'enfile sans drain —
+                    // le spawn en cours livrera la file à son succès
+                    // (user_message journalisé à la livraison).
+                    if s.is_spawning() && !s.is_waking()
+                        && s.meta_snapshot().state != "asleep"
+                    {
+                        s.enqueue_for_spawn(&text, force);
+                    } else {
+                        // Endormie ou réveil en vol : enfiler puis
+                        // déclencher le réveil — spawn_wake dédoublonne
+                        // (wake_begin en interne), un appel doublé est
+                        // un no-op.
+                        s.enqueue_for_wake(&text, force);
+                        self.spawn_wake(&s, &session);
+                    }
+                    return Ok(json!({
+                        "queued": true,
+                        "resuming": true,
+                        "queue": s.queue_snapshot(),
+                    }));
                 }
                 // send_prompt ne fait qu'enfiler (livraison en tâche de
                 // fond) : l'attendre garantit une file à jour quand le
-                // client la relit après la réponse.
-                s.send_prompt(&text, force, steer).await?;
+                // client la relit après la réponse. Le booléen couvre la
+                // course "endormie entre le check ci-dessus et ici".
+                if s.send_prompt(&text, force, steer).await? {
+                    self.spawn_wake(&s, &session);
+                }
                 Ok(json!({"queued": true, "queue": s.queue_snapshot()}))
+    }
+
+    /// Endort une session : le process agent est libéré, la session native
+    /// reste reprenable — réveil auto au prochain envoi (ou resume).
+    pub(super) async fn h_sleep_session(self: &Arc<Self>, session: String) -> Result<Value> {
+                let s = self.get_session(&session).await?;
+                if s.meta_snapshot().state == "asleep" {
+                    return Ok(json!({"session": session, "already": true}));
+                }
+                // Rien à endormir sans process (dead/interrupted) : dead →
+                // asleep rendrait une session tuée volontairement
+                // auto-réveillable au prochain envoi — ça contournerait la
+                // sémantique de kill_session, en particulier via l'outil
+                // MCP utilisable par un pair.
+                if !s.is_alive() && !s.is_spawning() && !s.is_waking() {
+                    anyhow::bail!("agent not running — rien à endormir");
+                }
+                s.sleep().await;
+                info!("session endormie: {session}");
+                Ok(json!({"session": session}))
+    }
+
+    /// Déclenche le réveil d'une session endormie en tâche de fond.
+    /// Acquiert `waking` ici même (wake_begin) : les envois concurrents
+    /// s'enfilent, dedoublonnés — et un booléen "réveil à déclencher"
+    /// droppé par un caller ne peut pas latcher le flag sans tâche.
+    /// Un appel dedoublonné arme `wake_pending` : si le réveil en vol
+    /// finit sans livrer (session rendormie en route ou échec), sa
+    /// tâche enchaîne un nouveau réveil — l'envoi enfilé ne reste pas
+    /// orphelin (le "resuming" retourné au caller reste vrai).
+    /// Pub(super) : les prompts pairs et la reprise auto peuvent tomber
+    /// sur une session qui vient de s'endormir et doivent déclencher le
+    /// même réveil.
+    pub(super) fn spawn_wake(self: &Arc<Self>, s: &Arc<Session>, session: &str) {
+        if !s.wake_begin() {
+            // Réveil déjà en vol — l'envoi est en file ; s'il finit
+            // asleep (sleep en vol, échec), wake_pending le relance.
+            s.arm_wake_pending();
+            return;
+        }
+        let d = Arc::clone(self);
+        let t = Arc::clone(s);
+        let sid = session.to_string();
+        tokio::spawn(async move {
+            let r = d.wake_session(&sid).await;
+            t.wake_done();
+            if let Err(e) = &r {
+                if format!("{e:#}").contains("endormie") {
+                    // Rendormie pendant le réveil — la ligne
+                    // "session endormie" l'explique.
+                    t.emit(EventKind::System {
+                        text: "réveil interrompu — session rendormie".into(),
+                    });
+                } else {
+                    // Retour à "asleep" (fait par respawn) → le
+                    // prochain envoi retentera.
+                    t.emit(EventKind::Error {
+                        message: format!("réveil impossible: {e:#}"),
+                    });
+                }
+            }
+            // Missed wakeup : un envoi dedoublonné pendant le réveil a
+            // armé wake_pending ; si la session est retournée endormie
+            // avec une file non vide, enchaîner un réveil (le flag est
+            // libre — chaque chaîne consomme pending une fois, donc un
+            // échec persistant ne boucle pas sans nouvel envoi).
+            if t.take_wake_pending()
+                && t.meta_snapshot().state == "asleep"
+                && t.has_queued()
+            {
+                d.spawn_wake(&t, &sid);
+            }
+        });
+    }
+
+    /// Réveil d'une session endormie (déclenché par un envoi user) :
+    /// respawn + session/load — même mécanique que ResumeSession. Le drain
+    /// post-spawn livre les prompts enfilés pendant le sommeil.
+    async fn wake_session(&self, session: &str) -> Result<()> {
+        let s = self.get_session(session).await?;
+        s.emit(EventKind::System {
+            text: "réveil de la session…".into(),
+        });
+        self.respawn(&s, true).await
+    }
+
+    /// Respawn de l'agent sur sa session native (resume / réveil / message
+    /// agent→agent). Sort "asleep" via leave_asleep — sinon le garde
+    /// anti-respawn de spawn_agent (state==asleep → bail) stopperait le
+    /// réveil ; en cas d'échec la session retourne à "asleep" pour que le
+    /// prochain envoi retente (une session morte, elle, reste morte).
+    pub(super) async fn respawn(&self, s: &Arc<Session>, skip_replay: bool) -> Result<()> {
+        let meta = s.meta_snapshot();
+        let was_asleep = s.leave_asleep();
+        // Génération avant le spawn : un kill/rebind intervenu (clear,
+        // sleep, rebind) la change — la session ne doit alors PAS être
+        // rendormie sur échec, l'état appartient au nouveau cycle.
+        let gen0 = s.generation();
+        let profile = self
+            .agents
+            .get(&meta.agent)
+            .with_context(|| format!("agent inconnu: {}", meta.agent))?
+            .clone();
+        let (cmd, envs) = self.agent_parts(
+            &profile,
+            meta.model.as_deref(),
+            meta.mode.as_deref(),
+            &meta.id,
+        );
+        let r = s
+            .spawn_agent(
+                &cmd,
+                &envs,
+                meta.native_session_id.clone(),
+                skip_replay,
+                self.mcp_servers(&meta.id),
+            )
+            .await;
+        if r.is_err() && was_asleep && s.generation() == gen0 {
+            s.mark_asleep();
+        }
+        r
     }
 
     pub(super) async fn h_events(self: &Arc<Self>, session: String, before_seq: Option<u64>, limit: u32) -> Result<Value> {

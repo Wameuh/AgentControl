@@ -144,6 +144,25 @@ fn tools_list() -> Value {
             },
         },
         {
+            "name": "agentcontrol_sleep_session",
+            "description": "Endort une session : son process agent est libéré \
+                (la session native et l'historique sont conservés). Elle se \
+                réveille automatiquement dès qu'un message lui est envoyé \
+                (user ou agent). Utile pour garer une session devenue \
+                inutile sans la supprimer.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session": {
+                        "type": "string",
+                        "description": "id de session à endormir — voir \
+                            agentcontrol_list_sessions",
+                    },
+                },
+                "required": ["session"],
+            },
+        },
+        {
             "name": "agentcontrol_read_events",
             "description": "Lit la fin du transcript d'une autre session \
                 (messages user/agent/peer/système) pour prendre du contexte \
@@ -232,6 +251,23 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
                 agentcontrol_send_message",
                 v["session"].as_str().unwrap_or("?"),
                 v["title"].as_str().unwrap_or("")
+            ))
+        }
+        "agentcontrol_sleep_session" => {
+            let session = args["session"]
+                .as_str()
+                .ok_or("argument 'session' manquant")?;
+            let v = daemon_call(proto::ReqKind::SleepSession {
+                session: session.into(),
+            })
+            .await?;
+            Ok(format!(
+                "session endormie : {session}{}",
+                if v["already"].as_bool().unwrap_or(false) {
+                    " (déjà endormie)"
+                } else {
+                    " — elle se réveillera au prochain message"
+                }
             ))
         }
         "agentcontrol_read_events" => {
@@ -330,7 +366,7 @@ pub async fn serve_stdio() -> Result<()> {
                     "instructions": "Outils de communication entre agents \
                         AgentControl : liste les sessions, envoie des \
                         messages, lis leurs transcripts, crée des sessions \
-                        (délégation de tâche).",
+                        (délégation de tâche), endort les sessions inutiles.",
                 }
             }),
             ("ping", Some(id)) => json!({"jsonrpc": "2.0", "id": id, "result": {}}),

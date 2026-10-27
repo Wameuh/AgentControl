@@ -38,18 +38,35 @@ impl Daemon {
                     fm.title, from, fm.agent, text, from
                 );
                 let steer = delivery == "steer";
-                if target.is_alive() {
+                // Livraison en tâche de fond : si send_peer_prompt
+                // signale que la cible a basculé "asleep" entre le check
+                // ci-dessous et l'enfilement, le réveil est déclenché
+                // ici (dedoublonné par `waking`).
+                let deliver = |wrapped: String, steer: bool| {
+                    let d = Arc::clone(self);
                     let t = Arc::clone(&target);
+                    let sid = session.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = t.send_peer_prompt(&wrapped, steer).await {
-                            t.emit(EventKind::Error {
+                        match t.send_peer_prompt(&wrapped, steer).await {
+                            Ok(true) => d.spawn_wake(&t, &sid),
+                            Ok(false) => {}
+                            Err(e) => t.emit(EventKind::Error {
                                 message: format!("peer send: {e:#}"),
-                            });
+                            }),
                         }
                     });
+                };
+                if target.is_alive() {
+                    deliver(wrapped, steer);
                     Ok(json!({"queued": true}))
+                } else if target.is_waking() || target.is_spawning() {
+                    // Réveil déjà lancé par un envoi user, ou spawn déjà
+                    // en vol (init, resume, /clear) : enfiler — le drain
+                    // post-spawn livrera (pas de second spawn).
+                    deliver(wrapped, steer);
+                    Ok(json!({"queued": true, "resuming": true}))
                 } else {
-                    // Cible morte → auto-resume puis livraison.
+                    // Cible morte ou endormie → auto-resume puis livraison.
                     let d = Arc::clone(self);
                     let t = Arc::clone(&target);
                     tokio::spawn(async move {
@@ -199,12 +216,19 @@ impl Daemon {
                         pas de compte-rendu.",
                         cm.title, cm.agent
                     );
+                    let d = Arc::clone(self);
                     let s2 = Arc::clone(&session2);
+                    let sid3 = sid2.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = s2.send_peer_prompt(&wrapped, false).await {
-                            s2.emit(EventKind::Error {
+                        // Ok(true) : endormie entre le spawn et la
+                        // livraison — le message est en file, on lance
+                        // le réveil (dedoublonné par `waking`).
+                        match s2.send_peer_prompt(&wrapped, false).await {
+                            Ok(true) => d.spawn_wake(&s2, &sid3),
+                            Ok(false) => {}
+                            Err(e) => s2.emit(EventKind::Error {
                                 message: format!("tâche déléguée: {e:#}"),
-                            });
+                            }),
                         }
                     });
                 }
@@ -262,30 +286,45 @@ impl Daemon {
         Ok(())
     }
 
-    /// Cible morte : respawn de l'agent (même mécanique que ResumeSession)
-    /// puis livraison du message.
-    async fn resume_and_deliver(&self, session: &str, wrapped: String, steer: bool) -> Result<()> {
+    /// Cible morte ou endormie : respawn de l'agent (même mécanique que
+    /// ResumeSession — respawn sort "asleep" le cas échéant) puis
+    /// livraison du message. Si un réveil déclenché par l'utilisateur est
+    /// déjà en vol, on s'enfile simplement (drain post-spawn) plutôt que
+    /// de lancer un second spawn.
+    async fn resume_and_deliver(self: &Arc<Self>, session: &str, wrapped: String, steer: bool) -> Result<()> {
         let s = self.get_session(session).await?;
-        let meta = s.meta_snapshot();
-        let profile = self
-            .agents
-            .get(&meta.agent)
-            .with_context(|| format!("agent inconnu: {}", meta.agent))?
-            .clone();
-        let (cmd, envs) =
-            self.agent_parts(&profile, meta.model.as_deref(), meta.mode.as_deref(), session);
-        s.emit(EventKind::System {
-            text: "agent relancé (message agent→agent)".into(),
-        });
-        s.spawn_agent(
-            &cmd,
-            &envs,
-            meta.native_session_id,
-            true,
-            self.mcp_servers(session),
-        )
-        .await?;
-        s.send_peer_prompt(&wrapped, steer).await
+        if !s.wake_begin() {
+            // Un autre réveil est en vol : enfiler seulement. Ok(true) =
+            // il a relâché `waking` entre-temps et la cible est endormie
+            // → relancer (dedoublonné si un réveil a repris le flag).
+            if s.send_peer_prompt(&wrapped, steer).await? {
+                self.spawn_wake(&s, session);
+            }
+            return Ok(());
+        }
+        let r: Result<bool> = async {
+            s.emit(EventKind::System {
+                text: "agent relancé (message agent→agent)".into(),
+            });
+            self.respawn(&s, true).await?;
+            s.send_peer_prompt(&wrapped, steer).await
+        }
+        .await;
+        s.wake_done();
+        // Ok(true) : rendormie entre le respawn et la livraison — le
+        // message est en file ; relancer un réveil (wake_done vient de
+        // libérer le flag) plutôt que l'y laisser jusqu'au prochain
+        // envoi. Idem pour un envoi dedoublonné pendant ce réveil —
+        // wake_pending armé + session retournée endormie + file non
+        // vide = missed wakeup à combler par une nouvelle chaîne.
+        let needs = matches!(r, Ok(true))
+            || (s.take_wake_pending()
+                && s.meta_snapshot().state == "asleep"
+                && s.has_queued());
+        if needs {
+            self.spawn_wake(&s, session);
+        }
+        r.map(|_| ())
     }
 
 }

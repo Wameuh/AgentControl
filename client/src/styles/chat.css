@@ -244,6 +244,7 @@ select option { background: var(--panel-solid); color: var(--ink); }
 .badge.st-working, .badge.st-waiting_input { color: var(--sand); border-color: rgba(205, 182, 140, .45); }
 .badge.st-compacting { color: var(--violet); border-color: rgba(196, 169, 220, .45); }
 .badge.warn, .badge.st-interrupted { color: var(--gold); border-color: rgba(224, 201, 150, .4); }
+.badge.st-asleep { color: var(--violet); border-color: rgba(196, 169, 220, .45); }
 .badge.st-failed, .badge.st-dead { color: var(--err); border-color: rgba(232, 148, 134, .45); cursor: pointer; }
 #chat-ctx { cursor: default; flex: none; }
 #chat-ctx.ctx-hot { color: var(--err); border-color: rgba(232, 148, 134, .45); }

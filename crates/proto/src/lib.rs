@@ -261,7 +261,8 @@ pub struct SessionMeta {
     /// spawn (session/load). Clés = id d'option ("model", "mode", …).
     #[serde(default)]
     pub pending_config: std::collections::HashMap<String, String>,
-    /// running | waiting_input | idle | dead | interrupted
+    /// running | waiting_input | idle | dead | interrupted | asleep
+    /// (asleep : agent libéré volontairement, réveil auto au prochain envoi)
     #[serde(default = "default_state")]
     pub state: String,
     /// Groupe nommé (sidebar) — None = non groupé.
@@ -500,6 +501,12 @@ pub enum ReqKind {
     /// /clear — vide le journal et repart sur une session native neuve
     /// (session/new), même session AgentControl (id, titre, groupe, cwd).
     ClearSession { session: String },
+    /// Endort la session : le process agent est libéré mais la session
+    /// native (et le journal) sont conservés — état persisté "asleep".
+    /// Le prochain prompt (user ou peer) la réveille via session/load ;
+    /// un resume explicite la réveille aussi. ≠ KillSession (crash-like :
+    /// "dead" + pas de réveil implicite sur envoi user).
+    SleepSession { session: String },
     /// Renomme la session (meta local + session/rename chez l'agent si dispo).
     RenameSession {
         session: String,
@@ -600,6 +607,7 @@ impl ReqKind {
             Self::SetConfigOption { .. } => "set_config_option",
             Self::DeleteSession { .. } => "delete_session",
             Self::ClearSession { .. } => "clear_session",
+            Self::SleepSession { .. } => "sleep_session",
             Self::RenameSession { .. } => "rename_session",
             Self::SetSessionGroup { .. } => "set_session_group",
             Self::Respond { .. } => "respond",

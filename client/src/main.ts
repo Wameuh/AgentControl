@@ -155,6 +155,8 @@ $("chat-more").onclick = () => {
   if (app.current) items.push({ label: `📁  ${t("files_title")}`, fn: () => $("btn-files").click() });
   if (app.current && !app.alive)
     items.push({ label: `↻  ${t("resume")}`, fn: () => $("btn-resume").click() });
+  if (app.current && app.alive)
+    items.push({ label: `💤  ${t("ctx_sleep")}`, fn: () => $("btn-sleep").click() });
   items.push({ label: `⟳  ${t("refresh_title")}`, fn: () => $("btn-refresh").click() });
   nav.sheet(items);
 };

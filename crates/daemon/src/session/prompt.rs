@@ -25,7 +25,11 @@ impl Session {
     /// en file peut être édité/retiré, le chat doit montrer la version
     /// réellement reçue par l'agent.
     /// Retourne dès l'enfilement : la file est à jour pour le client.
-    pub async fn send_prompt(&self, text: &str, force: bool, steer: bool) -> Result<()> {
+    /// Vrai = prompt enfilé sur session endormie — le caller (serveur)
+    /// devrait appeler spawn_wake ; consultatif : `waking` n'est armé
+    /// que par un réveil réellement lancé, ignorer le booléen laisse le
+    /// message en file sans bloquer les réveils suivants.
+    pub async fn send_prompt(&self, text: &str, force: bool, steer: bool) -> Result<bool> {
         // Retenue compact : aucun tour ne tourne (busy n'est tenu que par
         // la retenue) — tout envoi non forcé attend la fin du compact
         // dans la file ; le drain est relancé par end_compact.
@@ -37,8 +41,24 @@ impl Session {
                 self.emit(EventKind::System {
                     text: "compact en cours — message en file".into(),
                 });
-                return Ok(());
+                return Ok(false);
             }
+        }
+        // Agent pas prêt à recevoir (mort, ou spawn/handshake en vol :
+        // le stdin existe avant la fin du session/load) — enfiler : un
+        // session/prompt écrit maintenant répondrait "Session not found".
+        // Le hook post-spawn relance le drain.
+        if !self.accepting_prompts() {
+            // Endormie entre le check du handler et ici : enfiler et le
+            // signaler — le caller (serveur) déclenche spawn_wake. Le
+            // booléen reste consultatif : `waking` n'est armé que par le
+            // réveil effectif, l'ignorer ne latche rien.
+            if self.meta_snapshot().state == "asleep" {
+                self.enqueue_for_wake(text, force);
+                return Ok(true);
+            }
+            self.enqueue_prompt(text, force, PromptSrc::User);
+            return Ok(false);
         }
         if steer && !force && self.busy.load(Ordering::SeqCst) {
             // Le user_message est journalisé dès la remise à l'agent —
@@ -79,7 +99,7 @@ impl Session {
                     }
                 }
             });
-            return Ok(());
+            return Ok(false);
         }
         if force {
             // bypass volontaire : sort de la retenue compact le cas
@@ -96,17 +116,17 @@ impl Session {
                 // retenue levée (aucun runner ne tournait) ou file vide.
                 self.spawn_drain();
             }
-            return Ok(());
+            return Ok(false);
         }
         let already = self.enqueue_prompt(text, false, PromptSrc::User);
         if already {
             self.emit(EventKind::System {
                 text: "message en file — envoyé à la fin du tour".into(),
             });
-            return Ok(()); // un runner existe déjà
+            return Ok(false); // un runner existe déjà
         }
         self.spawn_drain();
-        Ok(())
+        Ok(false)
     }
 
     /// Livre un message agent→agent (texte déjà préfixé de provenance par
@@ -114,7 +134,8 @@ impl Session {
     /// session/prompt concurrent pendant le tour (fallback en file si
     /// l'agent refuse), sinon enfile FIFO. L'event `PeerMessage` a déjà été
     /// journalisé par l'appelant — ici on ne fait QUE livrer le prompt.
-    pub async fn send_peer_prompt(&self, wrapped: &str, steer: bool) -> Result<()> {
+    /// Même convention que send_prompt : vrai = réveil à déclencher.
+    pub async fn send_peer_prompt(&self, wrapped: &str, steer: bool) -> Result<bool> {
         {
             let c = self.compacting.lock().unwrap();
             if c.is_some() {
@@ -123,8 +144,19 @@ impl Session {
                 self.emit(EventKind::System {
                     text: "compact en cours — message en file".into(),
                 });
-                return Ok(());
+                return Ok(false);
             }
+        }
+        // Même garde que send_prompt : mort ou spawn en vol → enfiler,
+        // le drain post-spawn livrera. Endormie entre le check du
+        // handler et ici → enfiler ET signaler le réveil au caller.
+        if !self.accepting_prompts() {
+            if self.meta_snapshot().state == "asleep" {
+                self.enqueue_for_wake_peer(wrapped);
+                return Ok(true);
+            }
+            self.enqueue_prompt(wrapped, false, PromptSrc::Peer);
+            return Ok(false);
         }
         if steer && self.busy.load(Ordering::SeqCst) {
             // (retenue compact exclue ci-dessus : busy vrai ⇒ vrai tour)
@@ -136,7 +168,7 @@ impl Session {
                 // Clear pendant le RPC : pas de ré-enfilement d'un message
                 // d'un contexte disparu.
                 if self.spawn_gen.load(Ordering::SeqCst) != gen {
-                    return Ok(());
+                    return Ok(false);
                 }
                 self.emit(EventKind::System {
                     text: format!("steer refusé ({e}) — message en file"),
@@ -145,23 +177,118 @@ impl Session {
                     self.drain_queue().await;
                 }
             }
-            return Ok(());
+            return Ok(false);
         }
         let already = self.enqueue_prompt(wrapped, false, PromptSrc::Peer);
         if already {
             self.emit(EventKind::System {
                 text: "message en file — envoyé à la fin du tour".into(),
             });
-            return Ok(()); // un runner existe déjà
+            return Ok(false); // un runner existe déjà
         }
         self.spawn_drain();
-        Ok(())
+        Ok(false)
+    }
+
+    /// Enfile un prompt user pour une session endormie SANS lancer le
+    /// drain (l'agent est mort — le spawn du réveil livrera la file à son
+    /// succès). L'appelant doit déclencher le réveil via
+    /// Daemon::spawn_wake — l'acquisition de `waking` se fait là-bas :
+    /// un appel oublié laisse le message en file (livré au prochain
+    /// réveil) au lieu de latcher le flag sans tâche derrière.
+    /// `front` honore la sémantique "force" (tête de file).
+    pub fn enqueue_for_wake(&self, text: &str, front: bool) {
+        self.enqueue_prompt(text, front, PromptSrc::User);
+    }
+
+    /// Variante pair : la provenance Peer empêche le drain de journaliser
+    /// un `user_message` (le PeerMessage est déjà dans le journal).
+    pub fn enqueue_for_wake_peer(&self, text: &str) {
+        self.enqueue_prompt(text, false, PromptSrc::Peer);
+    }
+
+    /// Débute un réveil (dédoublonné entre envoi user et message pair) —
+    /// vrai pour le premier arrivé, qui DOIT appeler wake_done en fin de
+    /// tentative ; faux → le spawn d'un autre est en cours, enfiler suffit.
+    pub fn wake_begin(&self) -> bool {
+        !self.waking.swap(true, Ordering::SeqCst)
+    }
+
+    /// Un réveil (respawn auto) est en cours — les envois s'enfilent au
+    /// lieu de relancer un second spawn.
+    pub fn is_waking(&self) -> bool {
+        self.waking.load(Ordering::SeqCst)
+    }
+
+    /// Fin du réveil (succès ou échec) — le prochain envoi relancera un
+    /// spawn si la session est retournée à "asleep". Un envoi arrivé dans
+    /// la fenêtre où le process était prêt mais `waking` encore vrai s'est
+    /// enfilé alors que le drain post-spawn était déjà passé à file vide :
+    /// relancer le drain si des items attendent (le CAS en fait un no-op
+    /// si un runner tourne encore).
+    pub fn wake_done(&self) {
+        self.waking.store(false, Ordering::SeqCst);
+        if self.accepting_prompts() && !self.prompt_queue.lock().unwrap().is_empty() {
+            self.spawn_drain();
+        }
+    }
+
+    /// Un envoi a été dedoublonné par le réveil en vol (spawn_wake a
+    /// rendu la main sans lancer) — armé pour que la tâche propriétaire
+    /// enchaîne un réveil si celle-ci finit avec la session toujours
+    /// endormie et la file non vide.
+    pub fn arm_wake_pending(&self) {
+        self.wake_pending.store(true, Ordering::SeqCst);
+    }
+
+    /// Consomme le flag `wake_pending` (une fois par chaîne — appelé en
+    /// fin de tâche de réveil, avant le re-check d'état).
+    pub fn take_wake_pending(&self) -> bool {
+        self.wake_pending.swap(false, Ordering::SeqCst)
+    }
+
+    /// File de prompts non vide (un envoi attend une livraison).
+    pub fn has_queued(&self) -> bool {
+        !self.prompt_queue.lock().unwrap().is_empty()
+    }
+
+    /// Spawn en vol (process + handshake session/load).
+    pub fn is_spawning(&self) -> bool {
+        self.spawning.load(Ordering::SeqCst)
+    }
+
+    /// L'agent peut recevoir un session/prompt : process vivant ET
+    /// handshake terminé (is_alive seul ne suffit pas — le stdin est
+    /// posé avant la fin du session/load) ET session pas endormie (le
+    /// state "asleep" précède le kill dans sleep() — sans ce check un
+    /// envoi dans la fenêtre serait livré à un agent en train de mourir).
+    pub fn accepting_prompts(&self) -> bool {
+        self.is_alive()
+            && !self.is_spawning()
+            && self.meta.lock().unwrap().state != "asleep"
+    }
+
+    /// Enfile un prompt pendant un spawn déjà en vol (init, resume,
+    /// /clear, réveil pair) — pas de wake trigger : le drain post-spawn
+    /// livrera. `front` honore la sémantique "force" (tête de file).
+    pub fn enqueue_for_spawn(&self, text: &str, front: bool) {
+        self.enqueue_prompt(text, front, PromptSrc::User);
     }
 
     /// push + busy.swap sous le lock de la file : sérialisé avec le
     /// pop/store du runner → aucun message coincé entre les deux.
     /// Retourne vrai si un runner existe déjà.
+    /// Entonnoir unique de l'enfilement : un prompt empilé pendant un
+    /// réveil en vol (`waking` — y compris l'état "starting" du respawn,
+    /// où l'envoi ne repasse jamais par spawn_wake) arme `wake_pending`
+    /// ici — si ce réveil finit avec la session retournée "asleep", la
+    /// tâche enchaîne un nouveau réveil au lieu de laisser le message
+    /// orphelin. L'arm précède aussi le wake_begin raté de spawn_wake →
+    /// le take du propriétaire voit forcément le flag.
     fn enqueue_prompt(&self, text: &str, front: bool, src: PromptSrc) -> bool {
+        if self.is_waking() {
+            self.arm_wake_pending();
+        }
         let mut q = self.prompt_queue.lock().unwrap();
         if front {
             q.push_front((text.to_string(), src));
@@ -186,16 +313,28 @@ impl Session {
     /// Le `user_message` est journalisé ici, à l'envoi réel (texte final
     /// après édits) ; les prompts peers et les user déjà journalisés
     /// (steer) passent en silence.
+    /// Runner singleton via CAS : les spawn_drain concurrents sont des
+    /// no-ops — jamais deux livraisons parallèles de la file.
     pub(super) async fn drain_queue(&self) {
+        if self.runner_active.swap(true, Ordering::SeqCst) {
+            return;
+        }
         // Un runner démarré avant un clear ne doit ni livrer ni journaliser
         // les prompts de l'ancien contexte — la génération le fige.
         let gen = self.spawn_gen.load(Ordering::SeqCst);
         loop {
             if self.spawn_gen.load(Ordering::SeqCst) != gen {
-                return;
+                break;
+            }
+            // Agent pas prêt (spawn/handshake en vol, mort) : file et busy
+            // conservés — le hook post-spawn ou le prochain réveil
+            // relancera la livraison (évite le "Session not found" d'un
+            // drain prématuré, et la perte des prompts sur "not running").
+            if !self.accepting_prompts() {
+                break;
             }
             if self.compacting.lock().unwrap().is_some() {
-                return;
+                break;
             }
             let (next, src) = {
                 let mut q = self.prompt_queue.lock().unwrap();
@@ -203,7 +342,7 @@ impl Session {
                     Some(t) => t,
                     None => {
                         self.busy.store(false, Ordering::SeqCst);
-                        return;
+                        break;
                     }
                 }
             };
@@ -229,6 +368,19 @@ impl Session {
                     self.set_state("idle");
                 }
             }
+        }
+        self.runner_active.store(false, Ordering::SeqCst);
+        // Fenêtre de sortie : un push arrivé pendant qu'on rendait le flag
+        // (son spawn_drain a pu heurter le CAS et repartir sans livrer) —
+        // relancer si des items livrables attendent. Les sorties sur
+        // retenue (compact, spawn en vol, agent mort) n'entrent pas ici :
+        // busy resté vrai, le relais appartient à end_compact ou au hook
+        // post-spawn.
+        if self.accepting_prompts()
+            && self.compacting.lock().unwrap().is_none()
+            && !self.prompt_queue.lock().unwrap().is_empty()
+        {
+            self.spawn_drain();
         }
     }
 

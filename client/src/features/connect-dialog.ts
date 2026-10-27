@@ -42,12 +42,14 @@ export class ConnectDialog {
     const dlg = $("dlg-dupdate") as HTMLDialogElement;
     if (dlg.open) return false;
     // list_sessions agrège toutes les conns (params.conn ignoré côté Rust)
-    // → filtre client sur s.conn. "Vivant" = ni dead ni interrupted (idle
-    // inclus : le restart tue son process aussi). Échec → compteur inconnu.
+    // → filtre client sur s.conn. "Vivant" = ni dead ni interrupted ni
+    // asleep (idle inclus : le restart tue son process aussi ; une session
+    // endormie n'a déjà plus de process). Échec → compteur inconnu.
     const sessions = await call<SessionMeta[]>("list_sessions", { conn })
       .catch(() => null);
     const n = sessions?.filter((s) =>
-      s.conn === conn && s.state !== "dead" && s.state !== "interrupted").length;
+      s.conn === conn && s.state !== "dead" && s.state !== "interrupted" &&
+      s.state !== "asleep").length;
     return this.daemonAction(
       t("dupdate_h"),
       n == null

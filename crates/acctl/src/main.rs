@@ -9,7 +9,9 @@
 //!               [--mode M] [--model X] [--group G]   (session agent→agent)
 //!   acctl events <session> [before_seq] [limit]
 //!   acctl tail <session> [after_seq]
-//!   acctl resume|cancel|kill|clear <session>
+//!   acctl resume|cancel|kill|clear|sleep <session>
+//!       (sleep = libère le process, la session reste — réveil auto au
+//!        prochain envoi)
 //!   acctl mode <session> <mode>
 //!   acctl respond <session> <request_id> [option_id | --answer JSON]
 //!   acctl blob <session> <blob> [offset] [limit]
@@ -237,7 +239,7 @@ fn print_event(ev: &Value) {
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|resume|attach|fork|cancel|kill|clear|mode|respond|blob|download|daemon-update");
+        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|resume|attach|fork|cancel|kill|clear|sleep|mode|respond|blob|download|daemon-update");
         std::process::exit(2);
     }
     let mut c = connect().await?;
@@ -423,6 +425,7 @@ async fn main() -> Result<()> {
         "cancel" => println!("{}", c.call(proto::ReqKind::Cancel { session: args[1].clone() }).await?),
         "kill" => println!("{}", c.call(proto::ReqKind::KillSession { session: args[1].clone() }).await?),
         "clear" => println!("{}", c.call(proto::ReqKind::ClearSession { session: args[1].clone() }).await?),
+        "sleep" => println!("{}", c.call(proto::ReqKind::SleepSession { session: args[1].clone() }).await?),
         "rm" => println!("{}", c.call(proto::ReqKind::DeleteSession { session: args[1].clone() }).await?),
         "mode" => println!("{}", c.call(proto::ReqKind::SetMode { session: args[1].clone(), mode: args[2].clone() }).await?),
         "model" => println!("{}", c.call(proto::ReqKind::SetModel { session: args[1].clone(), model: args[2].clone() }).await?),

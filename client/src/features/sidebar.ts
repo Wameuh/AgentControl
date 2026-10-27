@@ -102,7 +102,8 @@ export class Sidebar {
       }
     }
     app.lastSessions = list;
-    const live = list.filter((s) => !s.offline && s.state !== "dead" && s.state !== "interrupted");
+    const live = list.filter((s) =>
+      !s.offline && s.state !== "dead" && s.state !== "interrupted" && s.state !== "asleep");
     setAppIcon(
       live.some((s) => s.state === "waiting_input")
         ? "red"
@@ -260,6 +261,17 @@ export class Sidebar {
       hideSessCtx();
       this.groups.openDlg("session", s);
     });
+    // Endormir = libère le process agent (la session native reste
+    // reprenable — réveil auto au prochain envoi). Sans objet si la
+    // session n'a déjà plus de process (dead/interrupted/asleep).
+    const sleepBtn = menuBtn(this.ctx, t("ctx_sleep"), "", () => {
+      hideSessCtx();
+      void call("sleep_session", { session: s.id, conn: s.conn })
+        .then(() => this.refresh())
+        .catch((e) => showErr(String(e)));
+    });
+    sleepBtn.disabled = !!s.offline ||
+      s.state === "asleep" || s.state === "dead" || s.state === "interrupted";
     // Exit = tue le process agent (kill_session) — la session reste, reprenable.
     // Action destructive → double-clic armé comme delete_path / sess-del.
     menuBtn(this.ctx, t("ctx_exit"), "danger", (b) => {

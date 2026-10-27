@@ -112,15 +112,24 @@ Connexion SSH : type « SSH », `user@serveur` — le client ouvre
 export AGENTCONTROL_SOCK=~/.agentcontrol/daemon.sock
 acctl agents                          # agents configurés
 acctl new devin ~/projet --title t    # nouvelle session
-acctl list                            # sessions (état : idle/working/waiting_input/dead)
+acctl list                            # sessions (état : idle/working/waiting_input/asleep/dead)
 acctl send s-xxx "corrige les tests"  # envoyer un message
 acctl tail s-xxx                      # suivre en live
 acctl events s-xxx                    # paginer l'historique
 acctl respond s-xxx pr-xxx allow_once # répondre à une permission
 acctl mode s-xxx bypass               # changer de mode à chaud
 acctl resume s-xxx                    # reprendre (session/load)
+acctl sleep s-xxx                     # endormir (libère le process)
 acctl kill s-xxx / cancel s-xxx
 ```
+
+`acctl sleep` met une session en sommeil : le process agent est tué (CPU/
+mémoire libérés) mais la session native, le journal et la file de prompts
+sont préservés. Une session endormie (état `asleep`) se réveille
+automatiquement au prochain `send` ou message agent→agent — le démon la
+respawne via `session/load` comme un `resume`. Le client propose la même
+action (« Endormir » dans le menu session, `/sleep` builtin) ; ouvrir une
+session endormie n'a pas d'effet, c'est l'envoi qui la réveille.
 
 ## État validé (e2e)
 
@@ -134,12 +143,13 @@ acctl kill s-xxx / cancel s-xxx
 ## Agent↔agent
 
 Chaque session reçoit (via `mcpServers` ACP) un serveur MCP `agentcontrol`
-exposant 4 outils : `agentcontrol_list_sessions` (découverte des pairs),
+exposant 5 outils : `agentcontrol_list_sessions` (découverte des pairs),
 `agentcontrol_send_message` (`delivery: "queue"` = fin de tâche, `"steer"` =
 injection après le tool call courant si l'agent le supporte),
 `agentcontrol_create_session` (délégation : spawn d'une nouvelle session
-avec la `task` comme premier prompt) et `agentcontrol_read_events`
-(transcript d'un pair).
+avec la `task` comme premier prompt), `agentcontrol_read_events`
+(transcript d'un pair) et `agentcontrol_sleep_session` (endort une session
+— libère son process ; elle se réveille seule au prochain message).
 
 Le message est journalisé `peer_message` dans les deux sessions (rendu
 dédié côté client, cliquable vers la session pair) et livré à la cible

@@ -77,6 +77,31 @@ pub struct Session {
     /// sa génération à la courante : périmée → son on_agent_exit se tait
     /// (pas de "agent exited"/dead ni de take() sur le child du successeur).
     spawn_gen: AtomicU64,
+    /// Réveil (respawn auto sur envoi vers une session "asleep") en cours —
+    /// déduplique les envois concurrents : les suivants s'enfilent sans
+    /// relancer un second spawn.
+    waking: std::sync::atomic::AtomicBool,
+    /// Spawn en vol (process + handshake session/load) — le stdin est posé
+    /// avant la fin du handshake : les envois doivent s'enfiler, un drain
+    /// livrerait un "Session not found" sur l'agent pas encore prêt.
+    spawning: std::sync::atomic::AtomicBool,
+    /// Un runner drain_queue actif — singleton via CAS : spawn_drain peut
+    /// être appelé libéralement (hook post-spawn, wake_done, end_compact)
+    /// sans risque de deux runners livrant la file en parallèle.
+    runner_active: std::sync::atomic::AtomicBool,
+    /// Envoi dedoublonné pendant un réveil en vol (missed wakeup) : si
+    /// ce réveil finit avec la session retournée "asleep" (sleep en
+    /// vol, échec), la tâche enchaîne un nouveau réveil pour livrer la
+    /// file — sans ça l'envoi enfilé resterait orphelin jusqu'au
+    /// suivant alors que le caller a reçu "resuming: true". Consommé
+    /// une fois par chaîne : un échec persistant ne boucle pas.
+    wake_pending: std::sync::atomic::AtomicBool,
+    /// Sérialise spawn_agent (tentatives + handshake) : un sleep peut
+    /// interrompre un réveil en vol et un nouvel envoi relancer un
+    /// respawn concurrent — deux spawn_agent_once parallèles se
+    /// marcheraient sur stdin_tx/child (handshakes ACP entremêlés).
+    /// Couvre aussi resume_session pendant un spawn.
+    spawn_lock: tokio::sync::Mutex<()>,
     child: Mutex<Option<Child>>,
 }
 
@@ -120,6 +145,11 @@ impl Session {
             compacting: Mutex::new(None),
             me: me.clone(),
             spawn_gen: AtomicU64::new(0),
+            waking: std::sync::atomic::AtomicBool::new(false),
+            spawning: std::sync::atomic::AtomicBool::new(false),
+            runner_active: std::sync::atomic::AtomicBool::new(false),
+            wake_pending: std::sync::atomic::AtomicBool::new(false),
+            spawn_lock: tokio::sync::Mutex::new(()),
             child: Mutex::new(None),
         }))
     }

@@ -22,6 +22,7 @@ const BUILTINS = (): { name: string; description: string; hint: string }[] => [
   { name: "fork", description: t("builtin_fork"), hint: "" },
   { name: "clear", description: t("builtin_clear"), hint: "" },
   { name: "new", description: t("builtin_new"), hint: "" },
+  { name: "sleep", description: t("builtin_sleep"), hint: "" },
 ];
 
 export class Composer {
@@ -57,6 +58,12 @@ export class Composer {
         await this.chat.open(id);
         return true;
       }
+      case "sleep":
+        // Endort : libère le process, la session native reste reprenable —
+        // le prochain envoi la réveille via session/load côté démon.
+        await call("sleep_session", { session: app.current.id });
+        await this.refresh();
+        return true;
       case "fork": {
         // Le daemon libère la session native, /fork via le TUI de l'agent,
         // puis attache la session forkée (même groupe, titre + "_fork").
@@ -327,6 +334,14 @@ export class Composer {
       app.current &&
       call("resume_session", { session: app.current.id })
         .then(() => this.chat.open(app.current!.id))
+        .catch((e) => showErr(String(e)));
+
+    // 💤 = endort la session (libère le process ; réveil auto au prochain
+    // envoi) — cachée du header sur desktop, utilisée par le menu ⋮ mobile.
+    $("btn-sleep").onclick = () =>
+      app.current &&
+      call("sleep_session", { session: app.current.id })
+        .then(() => this.refresh())
         .catch((e) => showErr(String(e)));
 
     // ⟳ = vrai rechargement : le cache de conversation est ignoré.

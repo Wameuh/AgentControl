@@ -20,3 +20,6 @@ __pycache__/
 
 # Sortie locale de graphify (analyse code — régénérable)
 graphify-out/
+
+# artefact local du workflow /mr review
+.review_ts

@@ -164,7 +164,8 @@ export class EventRenderer {
         // d'une session morte → bouton Reprendre masqué).
         if (live && app.current) {
           app.current.state = ev.state as string;
-          app.alive = ev.state !== "dead";
+          app.alive = ev.state !== "dead" && ev.state !== "asleep" &&
+            ev.state !== "interrupted";
           this.deps.metaChanged();
           this.deps.statusChanged();
         }
