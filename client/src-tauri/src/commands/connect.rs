@@ -175,10 +175,11 @@ pub(crate) async fn ensure_daemon(
          install -Dm755 agentcontrol-daemon $bin; \
          install -Dm755 acctl $HOME/.local/bin/acctl; \
          confs=\"/etc/supervisor/conf.d/*.conf /etc/supervisord.d/*.conf $HOME/.supervisor/conf.d/*.conf\"; \
-         prog=$(awk '/^\\[program:/ {{ p=$0; sub(/.*\\[program:/,\"\",p); sub(/\\].*/,\"\",p) }} /^command[[:space:]]*=/ && /agentcontrol-daemon/ {{ print p; exit }}' $confs 2>/dev/null); \
+         prog=$(awk '/^\\[/ {{ p=\"\"; if ($0 ~ /^\\[program:/) {{ p=$0; sub(/.*\\[program:/,\"\",p); sub(/\\].*/,\"\",p) }} }} /^command[[:space:]]*=/ && /agentcontrol-daemon/ && p != \"\" {{ print p; exit }}' $confs 2>/dev/null); \
          if [ -n \"$prog\" ]; then \
          svc=$(grep -h '^command[[:space:]]*=' $confs 2>/dev/null | grep agentcontrol-daemon | head -n1 | sed 's/^command[[:space:]]*=[[:space:]]*//' | cut -d' ' -f1); \
          svc=$(command -v \"$svc\" 2>/dev/null || echo \"$svc\"); \
+         case $svc in */agentcontrol-daemon) ;; *) svc=\"\";; esac; \
          if [ -n \"$svc\" ] && [ \"$svc\" != \"$bin\" ] && [ -w \"$(dirname \"$svc\")\" ]; then install -Dm755 agentcontrol-daemon \"$svc\"; fi; \
          if [ -n \"$svc\" ] && {{ [ \"$svc\" = \"$bin\" ] || [ -w \"$(dirname \"$svc\")\" ]; }}; then supervisorctl restart \"$prog\" || true; fi; \
          elif command -v systemctl >/dev/null 2>&1 && systemctl cat agentcontrol-daemon.service >/dev/null 2>&1; then \
@@ -187,6 +188,7 @@ pub(crate) async fn ensure_daemon(
          install -Dm644 packaging/agentcontrol-daemon.service $HOME/.config/systemd/user/agentcontrol-daemon.service; \
          systemctl --user daemon-reload; \
          systemctl --user enable agentcontrol-daemon; \
+         pkill -x agentcontrol-da 2>/dev/null || true; sleep 1; \
          systemctl --user restart agentcontrol-daemon; \
          else \
          pkill -x agentcontrol-da 2>/dev/null || true; sleep 2; \
