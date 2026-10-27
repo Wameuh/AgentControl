@@ -46,6 +46,18 @@ dialog input:focus, dialog select:focus, dialog textarea:focus { border-color: v
 dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 0; padding: 0; }
 #c-saved-row { display: flex; gap: 6px; }
 #c-saved-row select { flex: 1; min-width: 0; }
+/* Case à cocher dans un dialogue : les labels sont en colonne par
+   défaut → la case passait sous son texte ; .chk-row réaligne. */
+dialog label.chk-row { flex-direction: row; align-items: center; gap: 10px; cursor: pointer; }
+dialog input[type="checkbox"] {
+  width: 15px; height: 15px; flex: none; margin: 0; padding: 0;
+  border: 0; background: none; accent-color: var(--sand);
+}
+/* dialog input:focus pose outline:none — restaurer un indicateur
+   visible sur la case sinon la navigation clavier est aveugle. */
+dialog input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--sand); outline-offset: 2px;
+}
 
 #native-list { display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow-y: auto; }
 #log-view {

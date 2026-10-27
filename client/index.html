@@ -172,8 +172,9 @@
             <option value="tcp" data-i18n="tcp_label">Direct TCP</option>
           </select>
         </label>
-        <label id="c-native-wrap"><span data-i18n="ssh_native_label">Native SSH (russh)</span>
+        <label id="c-native-wrap" class="chk-row">
           <input type="checkbox" id="c-native" />
+          <span data-i18n="ssh_native_label">Native SSH (russh)</span>
         </label>
         <label><span data-i18n="host_label">Host</span> <input id="c-host" list="ssh-hosts" data-i18n-ph="host_ph" placeholder="user@server" /></label>
         <datalist id="ssh-hosts"></datalist>
