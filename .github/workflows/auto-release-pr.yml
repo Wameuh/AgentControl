@@ -3,9 +3,9 @@ name: auto-release-pr
 # Après chaque push sur next_release (merge d'une PR feature/fix) :
 # s'assurer qu'une PR de release next_release -> main existe.
 #
-# La PR est créée en **draft, sans label** — elle accumule les merges
+# La PR est créée en **draft** — elle accumule les merges
 # silencieusement (draft → synchronize = runs tout-skip, zéro CI).
-# Pour releaser : label `release` + `gh pr ready` → release-bump pousse
+# Pour releaser : `gh pr ready` → release-bump pousse
 # `chore: bump version to <NEXT>` sur next_release (dernier tag +
 # mots-clés des commits), les 5 checks tournent sur le head bumpé,
 # merge par l'utilisateur → tag + build dispatch.
@@ -44,12 +44,12 @@ jobs:
           cat > "$RUNNER_TEMP/release-pr-body.md" <<'EOF'
           Release PR auto-créée — accumule les merges de `next_release`.
 
-          Pour releaser : ajouter le label **`release`** + passer la PR
-          ready → `release-bump` pousse le bump de version
-          (`dernier tag + niveau`, mots-clés `(minor)`/`(major)`/`(sync)`
-          des commits du cycle) → les 5 checks tournent sur le head
-          bumpé → merge → `release-on-merge` tague `v<NEXT>` et
-          dispatche le build de release.
+          Pour releaser : passer la PR **ready** → `release-bump` pousse
+          le bump de version (`dernier tag + niveau`, mots-clés
+          `(minor)`/`(major)`/`(sync)` des commits du cycle) → les 5
+          checks tournent sur le head bumpé → merge →
+          `release-on-merge` tague `v<NEXT>` et dispatche le build de
+          release.
           EOF
 
       - name: Ouvrir la release PR si absente
