@@ -34,6 +34,9 @@ const TAIL_MAX = 12; // sessions distinctes gardées (LRU)
 // Expiré (TTL) ou évincé (LRU) → rechargement complet derrière la gemme.
 interface ConvCache {
   conn: string;
+  /** Session native au moment du stash : un reset de journal (/clear,
+   *  /new, rebind) en crée une nouvelle → l'entrée devient invalide. */
+  nativeId?: string;
   frag: DocumentFragment;
   toolBlocks: Map<string, HTMLElement>;
   pendingToolUpdates: Map<string, AcEvent[]>;
@@ -60,7 +63,7 @@ export class ChatView {
   // instantanément, puis subscribe(after_seq) rejoue le trou borné. Les
   // pushes n'arrivent que pour la session ouverte → seules les sessions
   // visitées remplissent leur queue.
-  private tailCache = new Map<string, { conn: string; evs: AcEvent[] }>();
+  private tailCache = new Map<string, { conn: string; evs: AcEvent[]; nativeId?: string }>();
   private minRendered = Number.MAX_SAFE_INTEGER;
   private renderedCount = 0;
   private loadingOld = false;
@@ -130,6 +133,7 @@ export class ChatView {
     this.convCache.delete(id); // re-set = touche LRU
     this.convCache.set(id, {
       conn,
+      nativeId: app.current?.native_session_id ?? undefined,
       frag,
       toolBlocks: this.renderer.toolBlocks,
       pendingToolUpdates: this.renderer.pendingToolUpdates,
@@ -283,6 +287,15 @@ export class ChatView {
       }
     }
 
+    // Journal réinitialisé depuis la prise du cache (/clear, /new,
+    // rebind) : l'entrée contient un AUTRE cycle. Détection : l'id de
+    // session native a changé (le respawn en recrée une) ou le seq
+    // connu dépasse la fin du journal actuel. Sans ça l'ancien
+    // contenu était restauré et le subscribe(afterSeq obsolète)
+    // restait muet — le symptôme « /clear ne change rien ».
+    const nativeId = info.meta.native_session_id ?? undefined;
+    const staleCache = (e?: { nativeId?: string; lastSeq: number }) =>
+      !!e && (e.nativeId !== nativeId || e.lastSeq > info.last_seq);
     // Trou énorme entre le cache et le journal (session qui a tourné
     // fermée) : rejouer ce trou via subscribe saturerait le lien — le
     // démon borne déjà le rattrapage à REPLAY_WINDOW events, mais sans
@@ -291,19 +304,24 @@ export class ChatView {
     // atteignable par la pagination scroll-up (events/before_seq).
     // NB : cachedConv consomme l'entrée — la décision se prend sur
     // `cached`, pas sur un second appel qui ne peut rien retourner.
-    const gap = cached != null && info.last_seq - cached.lastSeq > REPLAY_WINDOW;
-    if (gap) {
+    const reset = staleCache(cached);
+    const gap = cached != null && !reset && info.last_seq - cached.lastSeq > REPLAY_WINDOW;
+    if (gap || reset) {
       this.clearConv();
       this.showConvLoading(true);
     }
-    const fresh = gap ? undefined : cached;
+    const fresh = gap || reset ? undefined : cached;
     // Avec cache, le trou depuis lastSeq est rejoué par le subscribe ; sans
     // cache, on recharge la dernière page — un échec (journal absent/corrompu)
     // ne doit PAS tuer le subscribe ni la vue live derrière.
     let afterSeq = fresh?.lastSeq ?? 0;
     if (!fresh) {
-      const tail = this.tailCache.get(id);
+      let tail = this.tailCache.get(id);
       const tailLastSeq = tail?.evs.length ? tail.evs[tail.evs.length - 1].seq : 0;
+      if (tail && staleCache({ nativeId: tail.nativeId, lastSeq: tailLastSeq })) {
+        this.tailCache.delete(id);
+        tail = undefined;
+      }
       if (tail && tailLastSeq && info.last_seq - tailLastSeq <= REPLAY_WINDOW) {
         // Queue brute encore fraîche → réaffichage instantané ; le
         // subscribe rejoue le trou (borné) depuis le dernier seq connu.
@@ -342,6 +360,28 @@ export class ChatView {
     void this.deps.refresh();
     // L'arbre suit le workspace de la session nouvellement ouverte
     this.deps.onSessionOpened();
+  }
+
+  /** Journal vidé côté démon (/clear, /new, rebind — poussé via
+   *  session_cleared) : la vue affichait l'ancien cycle. Elle est
+   *  vidée ; les events du nouveau cycle (seqs reparties à 1)
+   *  arrivent derrière et remplissent la conversation neuve. La méta
+   *  est rechargée au mieux : tant que le respawn n'a pas abouti,
+   *  `native_session_id` peut rester absent — la queue repoussée
+   *  serait alors estampillée du mauvais id et jetée à la prochaine
+   *  ouverture (repli conservateur, contenu toujours correct). */
+  async convCleared() {
+    this.clearConv();
+    this.scrollBottom();
+    if (!app.current) return;
+    const sid = app.current.id;
+    const info = await call<{ meta: SessionMeta }>("session_info", {
+      session: sid,
+    }).catch(() => null);
+    if (info && app.current?.id === sid) {
+      app.current = info.meta;
+      this.updateHeader();
+    }
   }
 
   /** La session courante a été supprimée (autre client / janitor) :
@@ -600,12 +640,16 @@ export class ChatView {
   private pushTail(id: string, conn: string, ev: AcEvent) {
     let t = this.tailCache.get(id);
     if (!t) {
-      t = { conn, evs: [] };
+      t = { conn, evs: [], nativeId: app.current?.native_session_id ?? undefined };
       this.tailCache.set(id, t);
       while (this.tailCache.size > TAIL_MAX) {
         this.tailCache.delete(this.tailCache.keys().next().value!);
       }
     }
+    // L'id natif peut être (ré)assigné après la création de l'entrée —
+    // toujours le recaler sur la méta courante pour refléter le cycle
+    // des events poussés.
+    t.nativeId = app.current?.native_session_id ?? undefined;
     const last = t.evs[t.evs.length - 1];
     if (last && last.seq >= ev.seq) return;
     t.evs.push(ev);

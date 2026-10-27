@@ -119,6 +119,13 @@ await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
     void sidebar.refresh();
     return;
   }
+  // Journal vidé côté serveur (/clear, /new, rebind) : caches + vue
+  // d'un autre cycle — tout jeter, le nouveau cycle suit derrière.
+  if (event.type === "session_cleared") {
+    chat.dropConv(session);
+    if (app.current && session === app.current.id) void chat.convCleared();
+    return;
+  }
   if (app.current && session === app.current.id) {
     chat.appendEvent(event, true);
   }

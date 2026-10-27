@@ -138,6 +138,12 @@ pub enum EventKind {
         to_title: String,
         text: String,
     },
+    /// Le journal a été vidé (/clear, /new, rebind vers une autre
+    /// session native) : les seqs repartent à 1. Jamais journalisé —
+    /// émis dans la numérotation de l'ANCIEN journal (dernier+1) juste
+    /// avant le reset pour passer le filtre `seq > last` des abonnés,
+    /// qui doivent jeter leur état affiché et repartir de 0.
+    SessionCleared {},
     /// La session a été supprimée (autre client ou janitor) — event
     /// terminal, jamais journalisé : poussé sur le flux juste avant
     /// fermeture pour prévenir les clients abonnés.
