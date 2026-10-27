@@ -136,6 +136,13 @@ impl Daemon {
         let Ok(s) = self.get_session(sid).await else {
             return; // purgée entre le chargement et la reprise
         };
+        // Un client reconnecté peut avoir déjà relancé l'agent (resume à
+        // l'ouverture de la session côté UI) — même garde que
+        // h_resume_session, pour ne pas doubler le spawn.
+        if s.is_alive() {
+            debug!("{sid}: déjà relancée — reprise auto ignorée");
+            return;
+        }
         let meta = s.meta_snapshot();
         let Some(native) = meta.native_session_id.clone() else {
             // Jamais arrivée jusqu'à session/new → rien à recharger.
@@ -163,6 +170,9 @@ impl Daemon {
                 info!("{sid}: agent relancé — envoi « {AUTO_RESUME_PROMPT} »");
                 if let Err(e) = s.send_prompt(AUTO_RESUME_PROMPT, false, false).await {
                     warn!("{sid}: prompt de reprise non délivré: {e:#}");
+                    s.emit(proto::EventKind::Error {
+                        message: format!("prompt de reprise: {e:#}"),
+                    });
                 }
             }
             Err(e) => {
