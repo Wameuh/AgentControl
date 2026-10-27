@@ -2,7 +2,7 @@
 //! subscribe (push → events Tauri), ensure_daemon (install via ssh).
 
 use anyhow::Result;
-use client_core::{Client, Transport};
+use client_core::{Client, Level, Transport};
 use proto::ReqKind;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -115,9 +115,9 @@ pub(crate) async fn subscribe(
 ) -> Result<(), String> {
     let conn = conn.clone();
     let c = get_conn(&state, conn.as_deref()).await?;
-    client_core::log(format!("subscribe session={session} after_seq={after_seq} conn={conn:?}"));
+    client_core::log(Level::Debug, format!("subscribe session={session} after_seq={after_seq} conn={conn:?}"));
     let mut rx = c.subscribe(&session, after_seq).await.map_err(|e| {
-        client_core::log(format!("subscribe {session}: {e:#}"));
+        client_core::log(Level::Error, format!("subscribe {session}: {e:#}"));
         format!("{e:#}")
     })?;
     // UNE SEULE tâche d'émission au total : le broadcast `pushes` livre les
@@ -129,7 +129,7 @@ pub(crate) async fn subscribe(
         while let Ok(v) = rx.recv().await {
             let _ = app.emit("session-event", v);
         }
-        client_core::log(format!("subscribe {sid_log}: flux terminé"));
+        client_core::log(Level::Debug, format!("subscribe {sid_log}: flux terminé"));
     });
     let mut map = state.subs.lock().await;
     for (_, h) in map.drain() {
@@ -214,7 +214,7 @@ pub(crate) async fn ensure_daemon(
         t = tag,
         p = remote_port.unwrap_or(7331)
     );
-    client_core::log(format!("ensure_daemon {host} tag={tag}"));
+    client_core::log(Level::Info, format!("ensure_daemon {host} tag={tag}"));
     if native.unwrap_or(false) || cfg!(target_os = "android") {
         let (user, h) = split_user_host(&host, user.as_deref())?;
         let (code, out) = client_core::ssh_native::ssh_exec(
@@ -228,7 +228,10 @@ pub(crate) async fn ensure_daemon(
         .await
         .map_err(|e| format!("{e:#}"))?;
         let out = out.trim().to_string();
-        client_core::log(format!("ensure_daemon {host}: code={code} {out}"));
+        client_core::log(
+            if code == 0 { Level::Info } else { Level::Warn },
+            format!("ensure_daemon {host}: code={code} {out}"),
+        );
         if code != 0 {
             return Err(out);
         }
@@ -247,10 +250,10 @@ pub(crate) async fn ensure_daemon(
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if !out.status.success() {
         let e = String::from_utf8_lossy(&out.stderr);
-        client_core::log(format!("ensure_daemon {host}: {e}"));
+        client_core::log(Level::Error, format!("ensure_daemon {host}: {e}"));
         return Err(e.to_string());
     }
-    client_core::log(format!("ensure_daemon {host}: {stdout}"));
+    client_core::log(Level::Info, format!("ensure_daemon {host}: {stdout}"));
     Ok(stdout)
 }
 

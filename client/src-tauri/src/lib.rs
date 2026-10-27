@@ -69,6 +69,7 @@ pub fn run() {
             commands::system::ssh_pubkey,
             commands::system::sys_stats,
             commands::system::log_tail,
+            commands::system::log_write,
             commands::system::set_app_icon,
             commands::update::check_update,
             commands::update::update_client,

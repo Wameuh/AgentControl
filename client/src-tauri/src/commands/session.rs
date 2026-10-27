@@ -3,7 +3,7 @@
 //! pour list_sessions / daemon_status / pr_list.
 
 use anyhow::Result;
-use client_core::Client;
+use client_core::{Client, Level};
 use proto::ReqKind;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -68,7 +68,7 @@ pub(crate) async fn call(state: State<'_, AppState>, method: String, params: Val
                 // Le frontend filtre ce marqueur → conn marquée down et
                 // sessions servies depuis le cache au lieu de disparaître.
                 Err(e) => {
-                    client_core::log(format!("{method} {k}: {e:#}"));
+                    client_core::log(Level::Warn, format!("{method} {k}: {e:#}"));
                     all.push(json!({"conn": k, "conn_error": true}));
                 }
             }

@@ -48,12 +48,17 @@ dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 0; pad
 #c-saved-row select { flex: 1; min-width: 0; }
 
 #native-list { display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow-y: auto; }
+#log-bar { display: flex; justify-content: flex-end; margin-bottom: 4px; }
+#log-bar select { font-size: 11px; padding: 2px 4px; }
 #log-view {
   max-height: 320px; overflow-y: auto; background: rgba(0, 0, 0, .35);
   border: 1px solid var(--line); border-radius: 10px; padding: 9px;
   font: 11px/1.5 Mono, ui-monospace, monospace; white-space: pre-wrap;
   word-break: break-all; user-select: text; color: var(--muted);
 }
+#log-view .ll-debug { color: var(--dim); }
+#log-view .ll-warn { color: var(--warn); }
+#log-view .ll-error { color: var(--err); }
 
 /* Spinner */
 .spin::after {
