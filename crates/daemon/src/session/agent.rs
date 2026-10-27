@@ -692,12 +692,13 @@ impl Session {
     /// conservés — le prochain envoi (user ou peer) la réveillera via
     /// session/load. La retenue compact est levée : sinon son timer
     /// relancerait un drain sur un agent mort ("prompt failed" en
-    /// rafale). `waking` est relâché : un réveil en vol s'arrête au
-    /// check "asleep" de la boucle, et un nouvel envoi déclenche un
-    /// nouveau réveil (sérialisé par spawn_lock).
+    /// rafale). Un réveil en vol s'arrête au check "asleep" de la
+    /// boucle de spawn — `waking` n'est PAS relâché ici : le flag
+    /// appartient à la tâche de réveil, qui le libère via wake_done
+    /// (sinon un nouvel envoi ré-acquerrait le flag pendant que
+    /// l'ancienne tâche le libère aussi — double relâchement croisé).
     pub async fn sleep(&self) {
         self.set_state("asleep");
-        self.waking.store(false, Ordering::SeqCst);
         self.take_compact_hold();
         self.kill_for_respawn().await;
         self.flush_text();

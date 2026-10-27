@@ -25,9 +25,10 @@ impl Session {
     /// en file peut être édité/retiré, le chat doit montrer la version
     /// réellement reçue par l'agent.
     /// Retourne dès l'enfilement : la file est à jour pour le client.
-    /// Vrai = le caller DOIT déclencher le réveil (la session a basculé
-    /// "asleep" entre le check du handler et ici — sans spawn le prompt
-    /// resterait coincé jusqu'au prochain envoi).
+    /// Vrai = prompt enfilé sur session endormie — le caller (serveur)
+    /// devrait appeler spawn_wake ; consultatif : `waking` n'est armé
+    /// que par un réveil réellement lancé, ignorer le booléen laisse le
+    /// message en file sans bloquer les réveils suivants.
     pub async fn send_prompt(&self, text: &str, force: bool, steer: bool) -> Result<bool> {
         // Retenue compact : aucun tour ne tourne (busy n'est tenu que par
         // la retenue) — tout envoi non forcé attend la fin du compact
@@ -48,8 +49,13 @@ impl Session {
         // session/prompt écrit maintenant répondrait "Session not found".
         // Le hook post-spawn relance le drain.
         if !self.accepting_prompts() {
+            // Endormie entre le check du handler et ici : enfiler et le
+            // signaler — le caller (serveur) déclenche spawn_wake. Le
+            // booléen reste consultatif : `waking` n'est armé que par le
+            // réveil effectif, l'ignorer ne latche rien.
             if self.meta_snapshot().state == "asleep" {
-                return Ok(self.enqueue_for_wake(text, force));
+                self.enqueue_for_wake(text, force);
+                return Ok(true);
             }
             self.enqueue_prompt(text, force, PromptSrc::User);
             return Ok(false);
@@ -146,7 +152,8 @@ impl Session {
         // handler et ici → enfiler ET signaler le réveil au caller.
         if !self.accepting_prompts() {
             if self.meta_snapshot().state == "asleep" {
-                return Ok(self.enqueue_for_wake_peer(wrapped));
+                self.enqueue_for_wake_peer(wrapped);
+                return Ok(true);
             }
             self.enqueue_prompt(wrapped, false, PromptSrc::Peer);
             return Ok(false);
@@ -185,19 +192,19 @@ impl Session {
 
     /// Enfile un prompt user pour une session endormie SANS lancer le
     /// drain (l'agent est mort — le spawn du réveil livrera la file à son
-    /// succès). Retourne vrai si l'appelant doit déclencher le réveil :
-    /// dédoublonné par `waking`, les envois suivants ne font qu'enfiler.
+    /// succès). L'appelant doit déclencher le réveil via
+    /// Daemon::spawn_wake — l'acquisition de `waking` se fait là-bas :
+    /// un appel oublié laisse le message en file (livré au prochain
+    /// réveil) au lieu de latcher le flag sans tâche derrière.
     /// `front` honore la sémantique "force" (tête de file).
-    pub fn enqueue_for_wake(&self, text: &str, front: bool) -> bool {
+    pub fn enqueue_for_wake(&self, text: &str, front: bool) {
         self.enqueue_prompt(text, front, PromptSrc::User);
-        self.wake_begin()
     }
 
     /// Variante pair : la provenance Peer empêche le drain de journaliser
     /// un `user_message` (le PeerMessage est déjà dans le journal).
-    pub fn enqueue_for_wake_peer(&self, text: &str) -> bool {
+    pub fn enqueue_for_wake_peer(&self, text: &str) {
         self.enqueue_prompt(text, false, PromptSrc::Peer);
-        self.wake_begin()
     }
 
     /// Débute un réveil (dédoublonné entre envoi user et message pair) —

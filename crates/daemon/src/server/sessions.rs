@@ -61,9 +61,15 @@ impl Daemon {
                     .apply_spawn_config(mode.as_deref(), model.as_deref())
                     .await;
                 if let Some(p) = prompt {
+                    // Ok(true) : session endormie entre la création et la
+                    // livraison — le prompt est en file, réveil à lancer.
+                    let d = Arc::clone(self);
                     let s = Arc::clone(&session);
+                    let sid2 = sid.clone();
                     tokio::spawn(async move {
-                        let _ = s.send_prompt(&p, false, false).await;
+                        if let Ok(true) = s.send_prompt(&p, false, false).await {
+                            d.spawn_wake(&s, &sid2);
+                        }
                     });
                 }
                 info!("session créée: {sid} (agent={agent})");
@@ -336,7 +342,12 @@ impl Daemon {
                         && s.meta_snapshot().state != "asleep"
                     {
                         s.enqueue_for_spawn(&text, force);
-                    } else if s.enqueue_for_wake(&text, force) {
+                    } else {
+                        // Endormie ou réveil en vol : enfiler puis
+                        // déclencher le réveil — spawn_wake dédoublonne
+                        // (wake_begin en interne), un appel doublé est
+                        // un no-op.
+                        s.enqueue_for_wake(&text, force);
                         self.spawn_wake(&s, &session);
                     }
                     return Ok(json!({
@@ -375,12 +386,17 @@ impl Daemon {
                 Ok(json!({"session": session}))
     }
 
-    /// Déclenche le réveil d'une session endormie en tâche de fond —
-    /// appelé par le gagnant de wake_begin (les envois concurrents
-    /// s'enfilent, dedoublonnés par `waking`). Pub(super) : les prompts
-    /// pairs et la reprise auto peuvent tomber sur une session qui vient
-    /// de s'endormir et doivent déclencher le même réveil.
+    /// Déclenche le réveil d'une session endormie en tâche de fond.
+    /// Acquiert `waking` ici même (wake_begin) : les envois concurrents
+    /// s'enfilent, dedoublonnés — et un booléen "réveil à déclencher"
+    /// droppé par un caller ne peut pas latcher le flag sans tâche.
+    /// Pub(super) : les prompts pairs et la reprise auto peuvent tomber
+    /// sur une session qui vient de s'endormir et doivent déclencher le
+    /// même réveil.
     pub(super) fn spawn_wake(self: &Arc<Self>, s: &Arc<Session>, session: &str) {
+        if !s.wake_begin() {
+            return; // un réveil est déjà en vol — l'envoi est en file
+        }
         let d = Arc::clone(self);
         let t = Arc::clone(s);
         let sid = session.to_string();

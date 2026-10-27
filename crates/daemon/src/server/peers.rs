@@ -216,12 +216,19 @@ impl Daemon {
                         pas de compte-rendu.",
                         cm.title, cm.agent
                     );
+                    let d = Arc::clone(self);
                     let s2 = Arc::clone(&session2);
+                    let sid3 = sid2.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = s2.send_peer_prompt(&wrapped, false).await {
-                            s2.emit(EventKind::Error {
+                        // Ok(true) : endormie entre le spawn et la
+                        // livraison — le message est en file, on lance
+                        // le réveil (dedoublonné par `waking`).
+                        match s2.send_peer_prompt(&wrapped, false).await {
+                            Ok(true) => d.spawn_wake(&s2, &sid3),
+                            Ok(false) => {}
+                            Err(e) => s2.emit(EventKind::Error {
                                 message: format!("tâche déléguée: {e:#}"),
-                            });
+                            }),
                         }
                     });
                 }
@@ -284,23 +291,33 @@ impl Daemon {
     /// livraison du message. Si un réveil déclenché par l'utilisateur est
     /// déjà en vol, on s'enfile simplement (drain post-spawn) plutôt que
     /// de lancer un second spawn.
-    async fn resume_and_deliver(&self, session: &str, wrapped: String, steer: bool) -> Result<()> {
+    async fn resume_and_deliver(self: &Arc<Self>, session: &str, wrapped: String, steer: bool) -> Result<()> {
         let s = self.get_session(session).await?;
         if !s.wake_begin() {
-            s.send_peer_prompt(&wrapped, steer).await?;
+            // Un autre réveil est en vol : enfiler seulement. Ok(true) =
+            // il a relâché `waking` entre-temps et la cible est endormie
+            // → relancer (dedoublonné si un réveil a repris le flag).
+            if s.send_peer_prompt(&wrapped, steer).await? {
+                self.spawn_wake(&s, session);
+            }
             return Ok(());
         }
-        let r = async {
+        let r: Result<bool> = async {
             s.emit(EventKind::System {
                 text: "agent relancé (message agent→agent)".into(),
             });
             self.respawn(&s, true).await?;
-            s.send_peer_prompt(&wrapped, steer).await?;
-            Ok(())
+            s.send_peer_prompt(&wrapped, steer).await
         }
         .await;
         s.wake_done();
-        r
+        // Ok(true) : rendormie entre le respawn et la livraison — le
+        // message est en file ; relancer un réveil (wake_done vient de
+        // libérer le flag) plutôt que l'y laisser jusqu'au prochain envoi.
+        if matches!(r, Ok(true)) {
+            self.spawn_wake(&s, session);
+        }
+        r.map(|_| ())
     }
 
 }
