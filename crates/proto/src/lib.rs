@@ -178,8 +178,10 @@ impl EventKind {
 
     /// Texte indexable de l'event (champs porteurs de contenu lisible),
     /// utilisé par la recherche plein-texte du journal (SearchEvents).
-    /// Les événements purement techniques (usage, config, suppression)
-    /// renvoient "" et sont ignorés du scan.
+    /// Les événements purement techniques (usage, config, état, mode,
+    /// permission résolue, suppression) renvoient "" et sont ignorés du
+    /// scan — chercher « working » ou « approved » dans ces métadonnées
+    /// noierait les résultats de bruit.
     pub fn searchable_text(&self) -> String {
         fn joined<'a>(parts: impl IntoIterator<Item = Option<&'a str>>) -> String {
             parts.into_iter().flatten().collect::<Vec<_>>().join("\n")
@@ -190,10 +192,7 @@ impl EventKind {
             | Self::AgentThought { text }
             | Self::System { text }
             | Self::Error { message: text }
-            | Self::QuestionRequest { message: text, .. }
-            | Self::ModeChanged { mode: text }
-            | Self::StatusChanged { state: text }
-            | Self::PermissionResolved { outcome: text, .. } => text.clone(),
+            | Self::QuestionRequest { message: text, .. } => text.clone(),
             Self::PeerMessage {
                 from_title,
                 to_title,
@@ -221,8 +220,16 @@ impl EventKind {
                 joined([excerpt.as_deref(), diff.as_deref()])
             }
             Self::PermissionRequest {
-                title, kind, detail, ..
-            } => joined([Some(title.as_str()), Some(kind.as_str()), detail.as_deref()]),
+                title,
+                kind,
+                detail,
+                options,
+                ..
+            } => joined(
+                [Some(title.as_str()), Some(kind.as_str()), detail.as_deref()]
+                    .into_iter()
+                    .chain(options.iter().map(|o| Some(o.name.as_str()))),
+            ),
             Self::QuestionResolved { answer, .. } => match answer {
                 serde_json::Value::String(s) => s.clone(),
                 v => v.to_string(),
@@ -234,6 +241,9 @@ impl EventKind {
                 .join("\n"),
             Self::ConfigOptions { .. }
             | Self::UsageUpdate { .. }
+            | Self::ModeChanged { .. }
+            | Self::StatusChanged { .. }
+            | Self::PermissionResolved { .. }
             | Self::SessionCleared {}
             | Self::SessionDeleted {} => String::new(),
         }

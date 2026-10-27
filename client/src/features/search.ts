@@ -84,9 +84,10 @@ export class SessionSearch {
       }
     });
     // Ctrl/Cmd+F ouvre la recherche de la session affichée (remplace le
-    // find webview natif, inopérant ici puisque l'historique est paginé).
+    // find webview natif, inopérant ici puisque l'historique est paginé)
+    // — uniquement avec une session ouverte, sinon le find natif reste.
     window.addEventListener("keydown", (e) => {
-      if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) {
+      if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F") && app.current) {
         e.preventDefault();
         this.open();
       }

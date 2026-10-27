@@ -792,20 +792,31 @@ export class ChatView {
         }),
       ]);
       if (js !== this.jumpSeq || app.current?.id !== sid) {
-        this.hasMoreNewer = wasAnchored;
+        // Un saut plus récent ou un open a repris la main — hasMoreNewer/
+        // pendingLive appartiennent à ce flux, ne pas les écraser.
         return false;
       }
       this.clearConv();
       for (const ev of [...before.events, ...after.events]) this.appendEvent(ev, false);
-      this.pendingLive = pending;
-      this.unseenBelow = pending.length;
-      this.hasMoreNewer = this.maxRendered < after.last_seq;
+      // Tampon live accumulé pendant l'await : les events déjà couverts
+      // par la fenêtre sautée sont droppés ; un seq > last_seq lu (event
+      // arrivé après la requête) reste en attente et compte comme
+      // contenu plus récent → la vue reste ancrée jusqu'à ⇥.
+      this.pendingLive = pending.filter((e) => e.seq > this.maxRendered);
+      this.unseenBelow = this.pendingLive.length;
+      this.hasMoreNewer =
+        this.maxRendered < after.last_seq || this.pendingLive.length > 0;
+      if (!this.hasMoreNewer) this.flushPendingLive();
       const target = node() ?? this.closestEv(seq);
       if (target) this.scrollToNode(target);
       else this.scrollBottom();
       return target != null;
     } catch (e) {
+      // Échec avant tout clearConv : l'ancienne vue est intacte —
+      // restaurer son état ; si elle était live, les events tamponnés
+      // pendant l'await sont déversés plutôt que perdus.
       this.hasMoreNewer = wasAnchored;
+      if (!this.hasMoreNewer) this.flushPendingLive();
       this.updateBottomBtn();
       showErr(`events: ${e}`);
       return false;
@@ -839,6 +850,7 @@ export class ChatView {
   private async loadNewerPage() {
     if (!app.current || this.loadingPage || !this.hasMoreNewer) return;
     const sid = app.current.id;
+    const js = this.jumpSeq;
     this.loadingPage = true;
     try {
       const page = await call<{ events: AcEvent[]; last_seq: number }>("events", {
@@ -846,7 +858,7 @@ export class ChatView {
         after_seq: this.maxRendered,
         limit: PAGE,
       });
-      if (app.current?.id !== sid) return;
+      if (app.current?.id !== sid || js !== this.jumpSeq) return;
       for (const ev of page.events) this.appendEvent(ev, false);
       if (this.maxRendered >= page.last_seq) {
         this.hasMoreNewer = false;
@@ -864,13 +876,14 @@ export class ChatView {
     const pending = this.pendingLive;
     this.clearConv();
     this.hasMoreNewer = true; // les events live restent tamponnés pendant l'await
+    const js = this.jumpSeq; // post-clearConv : un saut ultérieur invalide ce load
     this.showConvLoading(true);
     try {
       const page = await call<{ events: AcEvent[]; last_seq: number }>("events", {
         session: sid,
         limit: INITIAL_PAGE,
       });
-      if (app.current?.id !== sid) return;
+      if (app.current?.id !== sid || js !== this.jumpSeq) return;
       for (const ev of page.events) this.appendEvent(ev, false);
       // Les events live arrivés pendant l'await sont restés tamponnés
       // dans pendingLive (clearConv l'a recréée) → concat, pas écrasement.
@@ -879,6 +892,11 @@ export class ChatView {
       this.scrollBottom();
       this.flushPendingLive();
     } catch (e) {
+      // Échec : la vue est vide — les events tamponnés avant l'appel
+      // retournent dans le buffer, ⇥ reste actif pour réessayer.
+      this.pendingLive = [...pending, ...this.pendingLive];
+      this.unseenBelow = this.pendingLive.length;
+      this.updateBottomBtn();
       showErr(`events: ${e}`);
     } finally {
       this.showConvLoading(false);
@@ -909,6 +927,7 @@ export class ChatView {
       if (!entries[0].isIntersecting || this.loadingPage || !app.current || !this.hasMoreHistory ||
           this.convLoadingEl?.isConnected) return;
       const sid = app.current.id;
+      const js = this.jumpSeq;
       this.loadingPage = true;
       try {
         const page = await call<{ events: AcEvent[] }>("events", {
@@ -916,8 +935,9 @@ export class ChatView {
           before_seq: this.minRendered,
           limit: PAGE,
         });
-        // Session changée pendant l'await → ne pas insérer l'ancienne page.
-        if (app.current?.id === sid) this.prependEvents(page.events);
+        // Session changée ou saut de recherche pendant l'await → la page
+        // est périmée pour la fenêtre reconstruite, ne pas l'insérer.
+        if (app.current?.id === sid && js === this.jumpSeq) this.prependEvents(page.events);
       } finally {
         this.loadingPage = false;
       }
