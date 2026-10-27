@@ -142,11 +142,13 @@ impl Daemon {
         let Ok(s) = self.get_session(sid).await else {
             return; // purgée entre le chargement et la reprise
         };
-        // Un client reconnecté peut avoir déjà relancé l'agent (resume à
+        // Un client reconnecté peut relancer l'agent en parallèle (resume à
         // l'ouverture de la session côté UI) — même garde que
-        // h_resume_session, pour ne pas doubler le spawn.
-        if s.is_alive() {
-            debug!("{sid}: déjà relancée — reprise auto ignorée");
+        // h_resume_session pour ne pas doubler le spawn. Mais le resume
+        // client est silencieux : sauter toute la reprise laisserait
+        // l'agent relancé sans consigne. Attendre la fin d'un spawn en vol
+        // puis livrer le prompt si la session finit idle.
+        if s.is_alive() && Self::wait_revived_or_done(&s, sid).await {
             return;
         }
         let meta = s.meta_snapshot();
@@ -165,21 +167,19 @@ impl Daemon {
             meta.mode.as_deref(),
             sid,
         );
-        s.emit(proto::EventKind::System {
-            text: "démon relancé après un arrêt brutal — reprise du travail…".into(),
-        });
+        // Dernier re-check : l'essai suivant d'un spawn client peut
+        // repartir dans la fenêtre (sleep 800 ms entre ses essais) —
+        // spawn_agent n'a pas de sérialisation entre appelants.
+        if s.is_alive() && Self::wait_revived_or_done(&s, sid).await {
+            return;
+        }
         match s
             .spawn_agent(&cmd, &envs, Some(native), true, self.mcp_servers(sid))
             .await
         {
             Ok(()) => {
                 info!("{sid}: agent relancé — envoi « {AUTO_RESUME_PROMPT} »");
-                if let Err(e) = s.send_prompt(AUTO_RESUME_PROMPT, false, false).await {
-                    warn!("{sid}: prompt de reprise non délivré: {e:#}");
-                    s.emit(proto::EventKind::Error {
-                        message: format!("prompt de reprise: {e:#}"),
-                    });
-                }
+                Self::send_resume_prompt(&s, sid).await;
             }
             Err(e) => {
                 warn!("{sid}: reprise auto échouée: {e:#}");
@@ -187,6 +187,59 @@ impl Daemon {
                     message: format!("reprise auto: {e:#}"),
                 });
             }
+        }
+    }
+
+    /// Spawn en vol (is_alive) : attendre sa fin — l'état reste
+    /// "interrupted" pendant tout le handshake et ne passe à "idle"
+    /// qu'après session/load (borne 2 min, réveillé par les events de la
+    /// session) — puis livrer le prompt de reprise si la session finit
+    /// sans travail ; si elle tourne déjà (prompt client, permission
+    /// rejeuée) quelqu'un la pilote → ne rien envoyer.
+    /// Renvoie vrai quand la session est traitée — faux si l'agent est
+    /// mort entre-temps : l'appelant reprend la main avec son propre spawn.
+    async fn wait_revived_or_done(s: &Arc<Session>, sid: &str) -> bool {
+        let mut ev_rx = s.events_tx.subscribe();
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+        while s.is_alive() && s.meta_snapshot().state == "interrupted" {
+            if tokio::time::timeout_at(deadline, ev_rx.recv())
+                .await
+                .is_err()
+            {
+                break; // borne atteinte — spawn très lent ou bloqué
+            }
+        }
+        if !s.is_alive() {
+            return false;
+        }
+        let st = s.meta_snapshot().state;
+        match st.as_str() {
+            "idle" => {
+                info!("{sid}: déjà relancée — envoi « {AUTO_RESUME_PROMPT} »");
+                Self::send_resume_prompt(s, sid).await;
+            }
+            "interrupted" => {
+                // Le cas que la reprise auto devait couvrir : visible
+                // (le spawn peut être simplement lent, pas bloqué).
+                warn!("{sid}: spawn en vol depuis plus de 2 min — prompt de reprise non envoyé");
+            }
+            _ => debug!("{sid}: déjà relancée (état {st}) — reprise auto ignorée"),
+        }
+        true
+    }
+
+    /// Prompt « continue please » de la reprise post-crash : le sysline
+    /// qui explique le contexte puis l'envoi utilisateur lui-même.
+    async fn send_resume_prompt(s: &Arc<Session>, sid: &str) {
+        s.emit(proto::EventKind::System {
+            text: "démon relancé après un arrêt brutal — reprise du travail…".into(),
+        });
+        if let Err(e) = s.send_prompt(AUTO_RESUME_PROMPT, false, false).await {
+            warn!("{sid}: prompt de reprise non délivré: {e:#}");
+            s.emit(proto::EventKind::Error {
+                message: format!("prompt de reprise: {e:#}"),
+            });
         }
     }
 
