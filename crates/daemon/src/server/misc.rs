@@ -9,7 +9,20 @@ impl Daemon {
                     "version": env!("CARGO_PKG_VERSION"),
                     "sessions": sessions.len(),
                     "agents": self.agents.keys().collect::<Vec<_>>(),
+                    // Capacité annoncée au client : ce démon sait répondre à
+                    // ReqKind::UpdateDaemon. Gate fiable côté client — un
+                    // démon plus vieux répondrait `parse: unknown variant`
+                    // avec id=0, droppé par le routage client → 60 s muet.
+                    "self_update": true,
                 }))
+    }
+    /// `UpdateDaemon` : télécharge la release demandée et remplace le
+    /// binaire courant — le démon sort ensuite sous son superviseur
+    /// (cf. selfupdate). Bloquant (https + IO) → `spawn_blocking`.
+    pub(super) async fn h_update_daemon(self: &Arc<Self>, version: String) -> Result<Value> {
+        tokio::task::spawn_blocking(move || crate::selfupdate::self_update(&version))
+            .await
+            .context("self-update task")?
     }
     pub(super) async fn h_list_agents(self: &Arc<Self>) -> Result<Value> {
                 let list: Vec<Value> = self
