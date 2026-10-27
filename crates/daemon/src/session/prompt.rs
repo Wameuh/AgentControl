@@ -278,7 +278,17 @@ impl Session {
     /// push + busy.swap sous le lock de la file : sérialisé avec le
     /// pop/store du runner → aucun message coincé entre les deux.
     /// Retourne vrai si un runner existe déjà.
+    /// Entonnoir unique de l'enfilement : un prompt empilé pendant un
+    /// réveil en vol (`waking` — y compris l'état "starting" du respawn,
+    /// où l'envoi ne repasse jamais par spawn_wake) arme `wake_pending`
+    /// ici — si ce réveil finit avec la session retournée "asleep", la
+    /// tâche enchaîne un nouveau réveil au lieu de laisser le message
+    /// orphelin. L'arm précède aussi le wake_begin raté de spawn_wake →
+    /// le take du propriétaire voit forcément le flag.
     fn enqueue_prompt(&self, text: &str, front: bool, src: PromptSrc) -> bool {
+        if self.is_waking() {
+            self.arm_wake_pending();
+        }
         let mut q = self.prompt_queue.lock().unwrap();
         if front {
             q.push_front((text.to_string(), src));
