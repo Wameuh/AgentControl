@@ -289,6 +289,7 @@ impl Daemon {
     async fn handle(self: &Arc<Self>, req: ReqKind) -> Result<Value> {
         match req {
             ReqKind::DaemonStatus => self.h_daemon_status().await,
+            ReqKind::UpdateDaemon { version } => self.h_update_daemon(version).await,
             ReqKind::ListAgents => self.h_list_agents().await,
             ReqKind::ListSessions => self.h_list_sessions().await,
             ReqKind::NewSession {

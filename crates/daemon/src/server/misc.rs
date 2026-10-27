@@ -11,6 +11,14 @@ impl Daemon {
                     "agents": self.agents.keys().collect::<Vec<_>>(),
                 }))
     }
+    /// `UpdateDaemon` : télécharge la release demandée et remplace le
+    /// binaire courant — le démon sort ensuite sous son superviseur
+    /// (cf. selfupdate). Bloquant (https + IO) → `spawn_blocking`.
+    pub(super) async fn h_update_daemon(self: &Arc<Self>, version: String) -> Result<Value> {
+        tokio::task::spawn_blocking(move || crate::selfupdate::self_update(&version))
+            .await
+            .context("self-update task")?
+    }
     pub(super) async fn h_list_agents(self: &Arc<Self>) -> Result<Value> {
                 let list: Vec<Value> = self
                     .agents

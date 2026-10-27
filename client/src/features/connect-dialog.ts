@@ -57,6 +57,30 @@ export class ConnectDialog {
     );
   }
 
+  /** Tente `daemon_update` (auto-update par le démon lui-même).
+   *  `true` = traité (succès ou échec définitif affiché — pas de
+   *  fallback) ; `false` = démon trop vieux pour connaître la requête
+   *  → l'appelant bascule sur le script `ensure_daemon`. Sur succès le
+   *  démon sort sous son superviseur : la connexion morte qui suit est
+   *  attendue, le backoff de conns la rétablit tout seul. */
+  private async tryDaemonSelfUpdate(conn: string, lv: string): Promise<boolean> {
+    try {
+      const r = await call<{ restarting?: boolean }>(
+        "daemon_update", { conn, version: lv });
+      if (r?.restarting) showErr(t("dupdate_self_ok", { lv }));
+      else showErr(t("dupdate_self_manual", { lv }));
+      return true;
+    } catch (e) {
+      const msg = String(e);
+      // Requête inconnue du démon (trop vieux) → script ssh en secours.
+      if (/unknown|inconnue|unrecognized|unsupported|not.?supported/i.test(msg)) return false;
+      // Échec définitif (binaire non inscriptible, download) : le
+      // script aurait les mêmes droits → afficher plutôt que retenter.
+      showErr(msg);
+      return true;
+    }
+  }
+
   /** Bootstrap install sur un hôte où connect a échoué : l'action copie
    *  des binaires et active une unit systemd distante — validation
    *  explicite, car l'hôte peut être un passage (port forwardé vers un
@@ -125,25 +149,35 @@ export class ConnectDialog {
       if (cmpVer(minorOf(dv), minorOf(lv)) > 0) {
         // Démon plus récent → client outdated : popup, démon non modifié.
         showOutdated(lv, dv);
-      } else if (cfg.kind === "ssh" && cfg.host) {
-        // Redémarrer le démon tue les agents en cours → validation utilisateur.
-        if (await this.confirmDaemonUpdate(dv, lv, String(cfg.host), this.conns.keyOf(cfg))) {
-          this.daemonDlg(t("updating_daemon", { dv, lv }) + " — " + String(cfg.host), true);
+      } else {
+        // Auto-update par le démon (quel que soit le transport : la
+        // requête passe par le socket déjà connecté) — le binaire se
+        // remplace puis son superviseur le relance. Le restart tue les
+        // agents en cours → validation utilisateur.
+        const conn = this.conns.keyOf(cfg);
+        const host = String(cfg.host ?? conn);
+        if (await this.confirmDaemonUpdate(dv, lv, host, conn)) {
+          this.daemonDlg(t("updating_daemon", { dv, lv }) + " — " + host, true);
           try {
-            const res = await invoke<string>("ensure_daemon", daemonParams(cfg, lv))
-              .catch((e) => {
-                showErr(String(e));
-                return "";
-              });
-            // Un autre client a pu upgrader le démon entre-temps → même garde-fou.
-            if (res.startsWith("newer:")) showOutdated(lv, res.slice(6));
-            else if (res.startsWith("busy:")) {
-              showErr(t("dupdate_busy", { host: String(cfg.host), addr: res.slice(5) }));
-            } else {
-              if (res.startsWith("installed:") && res.slice(10) !== lv) {
-                showErr(t("dupdate_stale", { host: String(cfg.host), want: lv, got: res.slice(10) || "?" }));
+            const selfDone = await this.tryDaemonSelfUpdate(conn, lv);
+            // `false` = démon trop vieux pour la requête → fallback
+            // script distant (ssh seulement — il faut un exec).
+            if (!selfDone && cfg.kind === "ssh" && cfg.host) {
+              const res = await invoke<string>("ensure_daemon", daemonParams(cfg, lv))
+                .catch((e) => {
+                  showErr(String(e));
+                  return "";
+                });
+              // Un autre client a pu upgrader le démon entre-temps → même garde-fou.
+              if (res.startsWith("newer:")) showOutdated(lv, res.slice(6));
+              else if (res.startsWith("busy:")) {
+                showErr(t("dupdate_busy", { host: String(cfg.host), addr: res.slice(5) }));
+              } else {
+                if (res.startsWith("installed:") && res.slice(10) !== lv) {
+                  showErr(t("dupdate_stale", { host: String(cfg.host), want: lv, got: res.slice(10) || "?" }));
+                }
+                status = await invoke("connect", { cfg }).catch(() => status);
               }
-              status = await invoke("connect", { cfg }).catch(() => status);
             }
           } finally {
             this.daemonDlg("", false);
