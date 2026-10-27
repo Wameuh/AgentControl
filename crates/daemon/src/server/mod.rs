@@ -480,6 +480,13 @@ impl Daemon {
                     if let ReqKind::Subscribe { ref session, after_seq } = req.req {
                         match self.get_session(session).await {
                             Ok(s) => {
+                                // Receiver créé AVANT toute lecture :
+                                // un reset pendant le setup (read_tail
+                                // = I/O disque) déposerait sinon son
+                                // cleared éphémère sans destinataire →
+                                // `last` resterait dans l'ancien cycle
+                                // et tout le nouveau serait filtré.
+                                let rx = s.events_tx.subscribe();
                                 let gen = s.journal.gen();
                                 // after_seq au-delà de la fin du journal :
                                 // le client vient d'un cycle précédent
@@ -487,6 +494,10 @@ impl Daemon {
                                 // subscribe) — sans SessionCleared il
                                 // garderait l'ancien affichage et `last`
                                 // bloquerait tout le nouveau cycle.
+                                // Cas indétectable à seq seule (limite
+                                // connue) : after_seq ≤ last_seq issu
+                                // d'un ancien cycle — le client couvre
+                                // ça via nativeId/staleCache.
                                 let cleared = (after_seq > s.journal.last_seq())
                                     .then(|| proto::Event {
                                         seq: s.journal.last_seq(),
@@ -510,7 +521,6 @@ impl Daemon {
                                     "skipped": skipped,
                                 }));
                                 Self::send_line(&write, &resp).await?;
-                                let rx = s.events_tx.subscribe();
                                 // Le signal de reset part avant le
                                 // rattrapage du journal.
                                 if let Some(ev) = cleared {
@@ -555,14 +565,16 @@ impl Daemon {
                             // émis dans l'ANCIENNE numérotation → il
                             // passe le filtre, puis `last` est recalé
                             // pour laisser passer le nouveau cycle. La
-                            // gen journal a fait +1 au reset : la suivre
-                            // pour la détection du chemin Lagged.
+                            // gen est relue à la source (pas +=1 : un
+                            // cleared réel encore bufferisé peut être
+                            // délivré après une resync Lagged →
+                            // double-compte sinon).
                             let cleared =
                                 matches!(event.kind, proto::EventKind::SessionCleared {});
                             if cleared || event.seq > *last {
                                 *last = if cleared { 0 } else { event.seq };
                                 if cleared {
-                                    *gen += 1;
+                                    *gen = self.get_session(sid).await?.journal.gen();
                                 }
                                 Self::send_push(&write, sid, &event).await?;
                             }
