@@ -40,7 +40,8 @@ impl PrRegistry {
                         .unwrap_or(&[])
                     {
                         if let Ok(e) = serde_json::from_value::<PrEntry>(e.clone()) {
-                            map.insert((e.repo.clone(), e.pr), e);
+                            let k = key(&e.repo, e.pr);
+                            map.insert(k, e);
                         }
                     }
                 }
@@ -75,7 +76,7 @@ impl PrRegistry {
         anyhow::ensure!(!repo.is_empty() && pr > 0, "repo/pr invalides");
         let mut g = self.map.lock().unwrap();
         let t = proto::now_iso();
-        let e = match g.get_mut(&(repo.to_string(), pr)) {
+        let e = match g.get_mut(&key(repo, pr)) {
             Some(old) => {
                 if let Some(s) = session {
                     old.session = s;
@@ -111,7 +112,7 @@ impl PrRegistry {
                     created_at: t.clone(),
                     updated_at: t,
                 };
-                g.insert((repo.into(), pr), e.clone());
+                g.insert(key(repo, pr), e.clone());
                 e
             }
         };
@@ -128,7 +129,7 @@ impl PrRegistry {
     /// Retourne true quand l'entrée a été créée/réattribuée.
     pub fn detected(&self, session: &str, repo: &str, pr: u64, strong: bool) -> Result<bool> {
         let mut g = self.map.lock().unwrap();
-        match g.get_mut(&(repo.to_string(), pr)) {
+        match g.get_mut(&key(repo, pr)) {
             Some(old)
                 if old.via == "manual" || !strong || old.session == session =>
             {
@@ -141,7 +142,7 @@ impl PrRegistry {
             None => {
                 let t = proto::now_iso();
                 g.insert(
-                    (repo.to_string(), pr),
+                    key(repo, pr),
                     PrEntry {
                         repo: repo.into(),
                         pr,
@@ -162,14 +163,34 @@ impl PrRegistry {
         Ok(true)
     }
 
+    /// Statut de PR vu dans une sortie outil (ligne « Merged pull
+    /// request o/r#N ») : fait objectif, pas une attribution — met à
+    /// jour `status` quelle que soit la session propriétaire ou `via`.
+    /// No-op si l'entrée est absente (rien à retirer) ou déjà à ce
+    /// statut (rescans du journal au boot). Retourne true si changé.
+    /// NB ordre : au backfill du boot, les journaux sont scannés dans
+    /// l'ordre d'attache des sessions — « dernier scanné gagne », pas
+    /// chronologiquement entre sessions (cas étroit : reopen dans le
+    /// journal de A après un close dans celui de B).
+    pub fn state_seen(&self, repo: &str, pr: u64, status: &str) -> Result<bool> {
+        anyhow::ensure!(!repo.is_empty() && pr > 0, "repo/pr invalides");
+        let mut g = self.map.lock().unwrap();
+        let Some(old) = g.get_mut(&key(repo, pr)) else {
+            return Ok(false);
+        };
+        if old.status == status {
+            return Ok(false);
+        }
+        old.status = status.into();
+        old.updated_at = proto::now_iso();
+        drop(g);
+        self.save()?;
+        Ok(true)
+    }
+
     pub fn remove(&self, repo: &str, pr: u64) -> Result<bool> {
         anyhow::ensure!(!repo.is_empty() && pr > 0, "repo/pr invalides");
-        let gone = self
-            .map
-            .lock()
-            .unwrap()
-            .remove(&(repo.to_string(), pr))
-            .is_some();
+        let gone = self.map.lock().unwrap().remove(&key(repo, pr)).is_some();
         if gone {
             self.save()?;
         }
@@ -223,9 +244,133 @@ pub fn extract_pr_refs(text: &str) -> Vec<(String, u64)> {
     out
 }
 
+/// Clé canonique du registre — GitHub est insensible à la casse sur
+/// owner/repo : sans normalisation, `Wameuh/AgentControl` et
+/// `wameuh/agentcontrol` feraient deux entrées pour la même PR.
+/// `PrEntry.repo` garde la casse d'origine pour l'affichage.
+fn key(repo: &str, pr: u64) -> (String, u64) {
+    (repo.to_lowercase(), pr)
+}
+
+/// Tokens `owner/repo#N` — format compact des sorties gh (« cli/cli#123 »).
+fn extract_repo_num_refs(text: &str) -> Vec<(String, u64)> {
+    let mut out = Vec::new();
+    for tok in text.split(|c: char| {
+        !(c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '#'))
+    }) {
+        let Some((repo, num)) = tok.split_once('#') else {
+            continue;
+        };
+        if repo.matches('/').count() != 1 || repo.starts_with('/') || repo.ends_with('/') {
+            continue;
+        }
+        let digits: String = num.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(n) = digits.parse::<u64>() {
+            if n > 0 && !out.iter().any(|(r, p)| r == repo && *p == n) {
+                out.push((repo.to_string(), n));
+            }
+        }
+    }
+    out
+}
+
+/// Extrait les fins de PR d'une sortie outil : formulations d'action de
+/// gh — « Merged pull request o/r#N » (`gh pr merge`), « Closed pull
+/// request … », « Reopened pull request … » — une URL `…/pull/N` sur la
+/// ligne vaut aussi comme référence. Gardes :
+///  - lignes JSON (`{`/`[` en tête) ignorées : `gh pr view --json`
+///    contient `mergedAt`/`closedAt`/`"merged":false` sans être un merge ;
+///  - la forme adjacente « merged pull request » exclut les négations
+///    (« was not merged »), « mergeable » et les clés JSON ;
+///  - « will be merged » / « queued » = auto-merge différé, pas un fait.
+/// Renvoie ("owner/repo", N, statut) — dernier statut vu gagne dans le
+/// texte (scrollback reopened→merged dans la même sortie).
+pub fn extract_state_refs(text: &str) -> Vec<(String, u64, &'static str)> {
+    let mut out: Vec<(String, u64, &'static str)> = Vec::new();
+    for line in text.lines() {
+        let l = line.to_lowercase();
+        if l.trim_start().starts_with('{') || l.trim_start().starts_with('[') {
+            continue; // sortie JSON mono-ligne (gh --json, gh api)
+        }
+        let status = if l.contains("merged pull request") {
+            "merged"
+        } else if l.contains("closed pull request") {
+            "closed"
+        } else if l.contains("reopened pull request") {
+            "open"
+        } else {
+            continue;
+        };
+        if l.contains("will be") || l.contains("queued") {
+            continue;
+        }
+        for (repo, n) in extract_repo_num_refs(line)
+            .into_iter()
+            .chain(extract_pr_refs(line))
+        {
+            match out.iter_mut().find(|(r, p, _)| r == &repo && *p == n) {
+                Some(e) => e.2 = status, // dernier vu gagne
+                None => out.push((repo, n, status)),
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::extract_pr_refs;
+    use super::{extract_pr_refs, extract_state_refs};
+
+    #[test]
+    fn states() {
+        assert_eq!(
+            extract_state_refs("✓ Merged pull request Wameuh/AgentControl#65"),
+            vec![("Wameuh/AgentControl".into(), 65, "merged")]
+        );
+        assert_eq!(
+            extract_state_refs("✓ Closed pull request o/r#7."),
+            vec![("o/r".into(), 7, "closed")]
+        );
+        assert_eq!(
+            extract_state_refs("✓ Reopened pull request o/r#2"),
+            vec![("o/r".into(), 2, "open")]
+        );
+        // Statut via l'URL quand gh l'affiche plutôt que o/r#N.
+        assert_eq!(
+            extract_state_refs("Merged pull request https://github.com/o/r/pull/9"),
+            vec![("o/r".into(), 9, "merged")]
+        );
+        // « merged » sans la forme d'action gh + URL ≠ un merge
+        // (les négations « pull/5 was not merged » utilisent ce schéma).
+        assert!(extract_state_refs("merged https://github.com/o/r/pull/9").is_empty());
+        // Auto-merge différé : la PR reste ouverte.
+        assert!(extract_state_refs(
+            "✓ Pull request o/r#9 will be merged when all requirements are met"
+        )
+        .is_empty());
+        // Titre de merge-commit git ≠ merge effectué (« Merge », pas « Merged »).
+        assert!(extract_state_refs("Merge pull request #65 from x/y").is_empty());
+        // « not mergeable » ne contient pas « merged pull request ».
+        assert!(extract_state_refs("X Pull request o/r#5 is not mergeable").is_empty());
+        // Négations : « merged » n'est pas adjacent à « pull request ».
+        assert!(extract_state_refs("o/r#5 was not merged").is_empty());
+        // JSON mono-ligne (gh pr view --json) : mergedAt/closedAt ne sont
+        // pas un merge — la PR ouverte ne doit pas être marquée merged.
+        assert!(extract_state_refs(
+            r#"{"state":"OPEN","mergedAt":null,"closedAt":null,"url":"https://github.com/o/r/pull/5"}"#
+        )
+        .is_empty());
+        assert!(extract_state_refs(
+            r#"{"merged":false,"closed_at":null,"html_url":"https://github.com/o/r/pull/5"}"#
+        )
+        .is_empty());
+        // Dernier statut vu gagne : reopened puis merged dans la même sortie.
+        assert_eq!(
+            extract_state_refs("✓ Reopened pull request o/r#5\n✓ Merged pull request o/r#5"),
+            vec![("o/r".into(), 5, "merged")]
+        );
+        assert!(extract_state_refs("gh pr view https://github.com/o/r/pull/3").is_empty());
+    }
 
     #[test]
     fn urls() {
