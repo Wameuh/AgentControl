@@ -1,7 +1,7 @@
 name: version
 
 # Bump de version au moment de la release (PR next_release -> main
-# labellisee `release`) :
+# passee non-draft) :
 #   NEXT = dernier tag v* semver + niveau
 #   niveau = mot-clef le plus fort trouve dans les sujets/bodies des
 #            commits du cycle : `(major)` > `(minor)` | `(sync)` ;
@@ -50,12 +50,12 @@ concurrency:
 
 jobs:
   release-bump:
-    # Uniquement la PR de release : base=main, head=next_release, label
-    # `release`, non-draft, non-fork (GITHUB_TOKEN read-only sur fork).
+    # Uniquement la PR de release : base=main, head=next_release,
+    # non-draft, non-fork (GITHUB_TOKEN read-only sur fork).
+    # Le passage en ready EST le declencheur de release — pas de label.
     if: >-
       github.event.pull_request.base.ref == 'main'
       && github.event.pull_request.head.ref == 'next_release'
-      && contains(github.event.pull_request.labels.*.name, 'release')
       && github.event.pull_request.draft != true
       && github.event.pull_request.head.repo.fork == false
     # contents: write inutile : le push part en PAT (checkout token) ;

@@ -120,23 +120,24 @@ Pousser les commits et bumper la version, oui — tagguer/publier, non.
 
 La **release PR est auto-créée** par `auto-release-pr.yml` : à chaque
 push sur `next_release`, une PR draft `next_release` → `main` est
-ouverte si absente — pour releaser il suffit de lui poser le label
-`release` et de la passer ready. La création passe par
+ouverte si absente — pour releaser il suffit de la passer **ready**
+(le passage non-draft est le déclencheur, pas de label requis).
+La création passe par
 **`RELEASE_PAT`** (fallback `GITHUB_TOKEN`) : le réglage repo
 « Allow GitHub Actions to create and approve pull requests » interdit
 `createPullRequest` au `GITHUB_TOKEN` ; sans `Pull requests: RW` sur le
 PAT le job échoue rouge (arrivé : run 40210287826, tentatives avant
 l'ajout du scope).
 
-Release = PR `next_release` → `main` avec le label **`release`** →
+Release = PR `next_release` → `main` passée **ready** →
 le job `release-bump` de `version.yml` calcule `dernier tag + niveau`,
 commit `chore: bump version` poussé sur `next_release` (la PR se met
 à jour, les 5 checks tournent sur le head bumpé) → au merge (par
 l'utilisateur), `release-on-merge.yml` tague `v<version>` (lu depuis
 `client/package.json`) et dispatche `build.yml` sur le tag (le push
 de tag via GITHUB_TOKEN ne déclenche pas les workflows d'où le
-dispatch). Idempotent : tag existant → skip. Sans label `release`, un
-merge dans `main` ne tague rien.
+dispatch). Idempotent : tag existant → skip, package.json déjà à
+NEXT → pas de re-bump. Tant que la PR reste draft, rien ne bump.
 
 **Reconcile** : tout merge nr→main est un squash → le commit `main`
 n'est jamais ancêtre des commits nr : sans reconcile la release
