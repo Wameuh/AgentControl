@@ -89,6 +89,13 @@ pub struct Session {
     /// être appelé libéralement (hook post-spawn, wake_done, end_compact)
     /// sans risque de deux runners livrant la file en parallèle.
     runner_active: std::sync::atomic::AtomicBool,
+    /// Envoi dedoublonné pendant un réveil en vol (missed wakeup) : si
+    /// ce réveil finit avec la session retournée "asleep" (sleep en
+    /// vol, échec), la tâche enchaîne un nouveau réveil pour livrer la
+    /// file — sans ça l'envoi enfilé resterait orphelin jusqu'au
+    /// suivant alors que le caller a reçu "resuming: true". Consommé
+    /// une fois par chaîne : un échec persistant ne boucle pas.
+    wake_pending: std::sync::atomic::AtomicBool,
     /// Sérialise spawn_agent (tentatives + handshake) : un sleep peut
     /// interrompre un réveil en vol et un nouvel envoi relancer un
     /// respawn concurrent — deux spawn_agent_once parallèles se
@@ -141,6 +148,7 @@ impl Session {
             waking: std::sync::atomic::AtomicBool::new(false),
             spawning: std::sync::atomic::AtomicBool::new(false),
             runner_active: std::sync::atomic::AtomicBool::new(false),
+            wake_pending: std::sync::atomic::AtomicBool::new(false),
             spawn_lock: tokio::sync::Mutex::new(()),
             child: Mutex::new(None),
         }))

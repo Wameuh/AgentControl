@@ -233,6 +233,25 @@ impl Session {
         }
     }
 
+    /// Un envoi a été dedoublonné par le réveil en vol (spawn_wake a
+    /// rendu la main sans lancer) — armé pour que la tâche propriétaire
+    /// enchaîne un réveil si celle-ci finit avec la session toujours
+    /// endormie et la file non vide.
+    pub fn arm_wake_pending(&self) {
+        self.wake_pending.store(true, Ordering::SeqCst);
+    }
+
+    /// Consomme le flag `wake_pending` (une fois par chaîne — appelé en
+    /// fin de tâche de réveil, avant le re-check d'état).
+    pub fn take_wake_pending(&self) -> bool {
+        self.wake_pending.swap(false, Ordering::SeqCst)
+    }
+
+    /// File de prompts non vide (un envoi attend une livraison).
+    pub fn has_queued(&self) -> bool {
+        !self.prompt_queue.lock().unwrap().is_empty()
+    }
+
     /// Spawn en vol (process + handshake session/load).
     pub fn is_spawning(&self) -> bool {
         self.spawning.load(Ordering::SeqCst)

@@ -390,12 +390,19 @@ impl Daemon {
     /// Acquiert `waking` ici même (wake_begin) : les envois concurrents
     /// s'enfilent, dedoublonnés — et un booléen "réveil à déclencher"
     /// droppé par un caller ne peut pas latcher le flag sans tâche.
+    /// Un appel dedoublonné arme `wake_pending` : si le réveil en vol
+    /// finit sans livrer (session rendormie en route ou échec), sa
+    /// tâche enchaîne un nouveau réveil — l'envoi enfilé ne reste pas
+    /// orphelin (le "resuming" retourné au caller reste vrai).
     /// Pub(super) : les prompts pairs et la reprise auto peuvent tomber
     /// sur une session qui vient de s'endormir et doivent déclencher le
     /// même réveil.
     pub(super) fn spawn_wake(self: &Arc<Self>, s: &Arc<Session>, session: &str) {
         if !s.wake_begin() {
-            return; // un réveil est déjà en vol — l'envoi est en file
+            // Réveil déjà en vol — l'envoi est en file ; s'il finit
+            // asleep (sleep en vol, échec), wake_pending le relance.
+            s.arm_wake_pending();
+            return;
         }
         let d = Arc::clone(self);
         let t = Arc::clone(s);
@@ -403,7 +410,7 @@ impl Daemon {
         tokio::spawn(async move {
             let r = d.wake_session(&sid).await;
             t.wake_done();
-            if let Err(e) = r {
+            if let Err(e) = &r {
                 if format!("{e:#}").contains("endormie") {
                     // Rendormie pendant le réveil — la ligne
                     // "session endormie" l'explique.
@@ -417,6 +424,17 @@ impl Daemon {
                         message: format!("réveil impossible: {e:#}"),
                     });
                 }
+            }
+            // Missed wakeup : un envoi dedoublonné pendant le réveil a
+            // armé wake_pending ; si la session est retournée endormie
+            // avec une file non vide, enchaîner un réveil (le flag est
+            // libre — chaque chaîne consomme pending une fois, donc un
+            // échec persistant ne boucle pas sans nouvel envoi).
+            if t.take_wake_pending()
+                && t.meta_snapshot().state == "asleep"
+                && t.has_queued()
+            {
+                d.spawn_wake(&t, &sid);
             }
         });
     }

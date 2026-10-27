@@ -313,8 +313,15 @@ impl Daemon {
         s.wake_done();
         // Ok(true) : rendormie entre le respawn et la livraison — le
         // message est en file ; relancer un réveil (wake_done vient de
-        // libérer le flag) plutôt que l'y laisser jusqu'au prochain envoi.
-        if matches!(r, Ok(true)) {
+        // libérer le flag) plutôt que l'y laisser jusqu'au prochain
+        // envoi. Idem pour un envoi dedoublonné pendant ce réveil —
+        // wake_pending armé + session retournée endormie + file non
+        // vide = missed wakeup à combler par une nouvelle chaîne.
+        let needs = matches!(r, Ok(true))
+            || (s.take_wake_pending()
+                && s.meta_snapshot().state == "asleep"
+                && s.has_queued());
+        if needs {
             self.spawn_wake(&s, session);
         }
         r.map(|_| ())
