@@ -190,10 +190,12 @@ bypass ruleset), **Pull requests RW** (auto-release-pr :
 (app first-party → 422), et un push `GITHUB_TOKEN` ne déclencherait
 pas les checks sur le head poussé (anti-récursion). Le ruleset
 `next_release` a le rôle **`Repository admin`** en bypass actor
-(Settings → Rules → Rulesets). Sans `RELEASE_PAT`, un push réellement
-nécessaire échoue fail-fast (« secret RELEASE_PAT manquant ») — rien à
-pousser → skip clean, pas d'échec ; les fine-grained PAT expirent →
-renouveler le secret à l'échéance (sinon échec opaque au checkout).
+(Settings → Rules → Rulesets). Sans `RELEASE_PAT` : le guard de
+`release-bump` tire dès que `next` est connu (le tag rc pousse
+toujours, même bump sauté) → fail-fast « secret RELEASE_PAT manquant »
+sur tout run non-draft ; `reconcile` lui reste skip-clean sans push.
+Les fine-grained PAT expirent → renouveler le secret à l'échéance
+(sinon échec opaque au checkout).
 
 ## Après chaque push : vérifier le CI
 

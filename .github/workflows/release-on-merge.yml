@@ -72,6 +72,11 @@ jobs:
           git fetch --tags -q
           for t in $(git tag -l "v$VERSION-rc.*"); do
             echo "cleanup $t"
+            # gh release delete couvre release+tag ; tag orphelin
+            # (release absente) → suppression via l'api (GH_TOKEN=PAT
+            # en priorité — un ruleset de tags bloquerait un push
+            # GITHUB_TOKEN), git push en dernier recours.
             gh release delete "$t" --yes --cleanup-tag 2>/dev/null \
+              || gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$t" 2>/dev/null \
               || git push origin ":refs/tags/$t" || true
           done

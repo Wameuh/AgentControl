@@ -243,5 +243,6 @@ jobs:
           for t in $(git tag -l "v$VERSION-rc.*"); do
             echo "cleanup $t"
             gh release delete "$t" --yes --cleanup-tag 2>/dev/null \
+              || gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$t" 2>/dev/null \
               || git push origin ":refs/tags/$t" || true
           done
