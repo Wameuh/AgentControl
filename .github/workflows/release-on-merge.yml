@@ -64,7 +64,9 @@ jobs:
       - name: Cleanup des RC du cycle
         if: steps.pr.outputs.is_release == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PAT en priorité : la suppression de tags peut être soumise
+          # à un ruleset (github-actions[bot] non bypassable).
+          GH_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
         run: |
           VERSION=$(grep -oE '"version": "[^"]+"' client/package.json | head -1 | cut -d'"' -f4)
           git fetch --tags -q

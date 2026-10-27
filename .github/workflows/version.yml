@@ -33,7 +33,7 @@ name: version
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, closed]
 
 # Plancher moindre privilège : GITHUB_TOKEN en read partout — les
 # pushes partent via le PAT du checkout (RELEASE_PAT), jamais via
@@ -53,8 +53,11 @@ jobs:
     # Uniquement la PR de release : base=main, head=next_release,
     # non-draft, non-fork (GITHUB_TOKEN read-only sur fork).
     # Le passage en ready EST le declencheur de release — pas de label.
+    # `closed` exclu : ce cas n'appartient qu'au job rc-cleanup (une PR
+    # fermée ne doit ni bumper ni taguer).
     if: >-
-      github.event.pull_request.base.ref == 'main'
+      github.event.action != 'closed'
+      && github.event.pull_request.base.ref == 'main'
       && github.event.pull_request.head.ref == 'next_release'
       && github.event.pull_request.draft != true
       && github.event.pull_request.head.repo.fork == false
@@ -145,11 +148,13 @@ jobs:
           git commit -am "chore: bump version to $NEXT"
           echo "bumped=true" >> "$GITHUB_OUTPUT"
 
-      # Guard dédié, seulement si un push est nécessaire (déjà bumpé →
-      # sortie clean sans exiger le secret). Le PAT n'est jamais dans
-      # l'env du step métier (ni dans bump_version.py).
+      # Guard dédié : un push (bump ou tag rc) est toujours nécessaire
+      # dès que NEXT est connu — sans PAT le checkout est retombé sur
+      # github.token (contents: read) et le push échouerait en bout de
+      # course. Le PAT n'est jamais dans l'env du step métier (ni dans
+      # bump_version.py).
       - name: Guard RELEASE_PAT
-        if: steps.bump.outputs.bumped == 'true'
+        if: steps.bump.outputs.next != ''
         env:
           RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
         run: '[ -n "$RELEASE_PAT" ] || { echo "::error::secret RELEASE_PAT manquant"; exit 1; }'
@@ -203,3 +208,40 @@ jobs:
               || { echo "::error::push du tag $TAG refusé"; exit 1; }
           fi
           echo "RC $TAG poussé → build déclenché par le tag"
+
+  # -------------------------------------------------------------------
+  # Release PR fermée SANS merge : les releases/tags v<NEXT>-rc.* du
+  # cycle deviendraient orphelins — le canal rc continuerait de
+  # proposer une rc périmée. Même cleanup que release-on-merge (le cas
+  # mergé y est déjà traité — `merged == false` évite le double).
+  # -------------------------------------------------------------------
+  rc-cleanup:
+    if: >-
+      github.event.action == 'closed'
+      && github.event.pull_request.base.ref == 'main'
+      && github.event.pull_request.head.ref == 'next_release'
+      && github.event.pull_request.merged == false
+      && github.event.pull_request.head.repo.fork == false
+    # contents: write requis pour gh release delete + suppression de
+    # tags distants ; le PAT couvre le cas d'un ruleset sur les tags
+    # (github-actions[bot] non bypassable, admin en bypass actor).
+    permissions:
+      contents: write
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          token: ${{ secrets.RELEASE_PAT || github.token }}
+      - name: Cleanup des RC du cycle
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(grep -oE '"version": "[^"]+"' client/package.json | head -1 | cut -d'"' -f4)
+          git fetch --tags -q
+          for t in $(git tag -l "v$VERSION-rc.*"); do
+            echo "cleanup $t"
+            gh release delete "$t" --yes --cleanup-tag 2>/dev/null \
+              || git push origin ":refs/tags/$t" || true
+          done

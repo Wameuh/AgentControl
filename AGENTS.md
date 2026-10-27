@@ -147,11 +147,14 @@ marquée `latest`). Le build rc **injecte le suffixe `-rc.k` dans les
 fichiers de version** (non commité — le tag pointe le commit propre
 X.Y.Z) → le binaire s'identifie `X.Y.Z-rc.k`, et la finale `X.Y.Z` est
 proposée en update ensuite (semver : rc < stable). Windows exclu de
-l'injection (MSI/NSIS exigent du numérique — artefacts rc internes
-X.Y.Z). Pour installer la rc depuis l'app : canal rc opt-in dans les
-paramètres → la sonde passe de `releases/latest` (qui exclut les
-prereleases) à la liste `/releases` + max semver. Au merge,
-`release-on-merge` nettoie les releases+tags `v<NEXT>-rc.*` du cycle.
+l'injection (MSI/NSIS exigent du numérique) — conséquence : un artefact
+rc Windows s'identifie `X.Y.Z` → pas de chemin auto-update vers rc.k+1
+ni vers la finale, réinstall manuelle. Pour installer la rc depuis
+l'app : canal rc opt-in dans les paramètres → la sonde passe de
+`releases/latest` (qui exclut les prereleases) à la liste `/releases`
++ max semver. Au merge, `release-on-merge` nettoie les releases+tags
+`v<NEXT>-rc.*` du cycle — et une release PR fermée sans merge déclenche
+le même cleanup (`rc-cleanup` de version.yml).
 
 **Reconcile** : tout merge nr→main est un squash → le commit `main`
 n'est jamais ancêtre des commits nr : sans reconcile la release
