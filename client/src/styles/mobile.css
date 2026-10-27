@@ -3,9 +3,19 @@
   position: fixed; inset: 0; z-index: 39;
   background: rgba(0, 0, 0, .45);
 }
-/* Wrapper des selects du header : invisible sur desktop (display:contents),
-   devient une rangée scrollable sur Android. */
-#chat-opts { display: contents; }
+/* Wrapper des selects du header : item flex unique, retractable
+   (min-width:0) + defilement horizontal ; order:20 le relègue en 2e
+   ligne quand la fenetre est etroite, apres les boutons d'action.
+   Android : meme chose mais ligne dediee pleine largeur (voir plus bas). */
+#chat-opts {
+  display: flex; gap: 8px; align-items: center; order: 20;
+  min-width: 0; overflow-x: auto; scrollbar-width: none;
+}
+#chat-opts::-webkit-scrollbar { display: none; }
+#chat-opts > * { flex: none; }
+/* span #dyn-opts vide = item flex de taille 0 → gap résiduel en fin
+   de #chat-opts quand d'autres contrôles sont visibles. */
+#dyn-opts:empty { display: none; }
 /* Viewer de fichier : transparent sur desktop, overlay plein écran Android. */
 #file-viewer { display: contents; }
 #fv-bar { display: none; }
@@ -97,7 +107,7 @@ body.android dialog textarea {
   font-size: 16px; min-height: 46px; padding: 10px 12px;
 }
 body.android dialog input[type="checkbox"] {
-  min-height: 0; width: 24px; height: 24px; accent-color: #7ecba1;
+  min-height: 0; width: 24px; height: 24px; accent-color: var(--sand);
 }
 body.android dialog textarea { min-height: 90px; }
 body.android dialog button {
@@ -182,11 +192,8 @@ body.android #chat-header #btn-refresh,
 body.android #chat-header #btn-resume { display: none !important; }
 body.android #chat-more { display: inline-block; font-size: 20px; min-width: 42px; }
 body.android #chat-opts {
-  display: flex; gap: 8px; flex: none; width: 100%; order: 20;
-  overflow-x: auto; scrollbar-width: none; padding-bottom: 2px;
+  flex: none; width: 100%; padding-bottom: 2px;
 }
-body.android #chat-opts::-webkit-scrollbar { display: none; }
-body.android #chat-opts > * { flex: none; }
 body.android #chat-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 body.android #composer {
   padding: 8px 8px max(10px, env(safe-area-inset-bottom));

@@ -438,6 +438,7 @@ export class ChatView {
     $("btn-files").hidden = !app.current;
     if (!app.current) {
       $("chat-ctx").hidden = true;
+      $("chat-opts").hidden = true;
       return;
     }
     this.deps.refreshQueue();
@@ -568,6 +569,12 @@ export class ChatView {
         }).catch((e) => showErr(String(e)));
       dyn.appendChild(sel);
     }
+
+    // Aucun contrôle visible → masquer le groupe entier : sinon l'item
+    // fantôme ajoute un gap dans le header et peut déclencher un wrap.
+    $("chat-opts").hidden =
+      ms.hidden && md.hidden && es.hidden && mf.hidden &&
+      $("btn-fusion-edit").hidden && dyn.children.length === 0;
   }
 
   private nearBottom() {
