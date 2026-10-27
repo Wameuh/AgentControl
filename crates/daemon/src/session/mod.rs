@@ -77,6 +77,18 @@ pub struct Session {
     /// sa génération à la courante : périmée → son on_agent_exit se tait
     /// (pas de "agent exited"/dead ni de take() sur le child du successeur).
     spawn_gen: AtomicU64,
+    /// Réveil (respawn auto sur envoi vers une session "asleep") en cours —
+    /// déduplique les envois concurrents : les suivants s'enfilent sans
+    /// relancer un second spawn.
+    waking: std::sync::atomic::AtomicBool,
+    /// Spawn en vol (process + handshake session/load) — le stdin est posé
+    /// avant la fin du handshake : les envois doivent s'enfiler, un drain
+    /// livrerait un "Session not found" sur l'agent pas encore prêt.
+    spawning: std::sync::atomic::AtomicBool,
+    /// Un runner drain_queue actif — singleton via CAS : spawn_drain peut
+    /// être appelé libéralement (hook post-spawn, wake_done, end_compact)
+    /// sans risque de deux runners livrant la file en parallèle.
+    runner_active: std::sync::atomic::AtomicBool,
     child: Mutex<Option<Child>>,
 }
 
@@ -120,6 +132,9 @@ impl Session {
             compacting: Mutex::new(None),
             me: me.clone(),
             spawn_gen: AtomicU64::new(0),
+            waking: std::sync::atomic::AtomicBool::new(false),
+            spawning: std::sync::atomic::AtomicBool::new(false),
+            runner_active: std::sync::atomic::AtomicBool::new(false),
             child: Mutex::new(None),
         }))
     }

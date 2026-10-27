@@ -231,7 +231,8 @@ export class ChatView {
     // de la nouvelle pendant le chargement.
     app.current = listMeta ? { ...listMeta } : null;
     app.alive = !!app.current && !app.current.offline &&
-      app.current.state !== "dead" && app.current.state !== "interrupted";
+      app.current.state !== "dead" && app.current.state !== "interrupted" &&
+      app.current.state !== "asleep";
     if (app.current) $("chat-title").textContent = `${app.current.title} — ${app.current.agent}`;
     this.updateHeader();
 
@@ -264,8 +265,10 @@ export class ChatView {
     this.updateHeader();
 
     // Auto-resume : agent mort (ex. restart démon) → reprise silencieuse
-    // plutôt qu'un "interrupted" qui demande un clic.
-    if (!app.alive && app.current.native_session_id) {
+    // plutôt qu'un "interrupted" qui demande un clic. Sauf "asleep" :
+    // consulter l'historique d'une session endormie ne doit pas réveiller
+    // l'agent — le prochain envoi le fera (h_send → respawn côté démon).
+    if (!app.alive && app.current.native_session_id && app.current.state !== "asleep") {
       const sys = document.createElement("div");
       sys.className = "sysline";
       sys.textContent = "⏳ reprise de l'agent…";

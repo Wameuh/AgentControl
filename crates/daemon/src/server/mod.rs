@@ -370,6 +370,7 @@ impl Daemon {
                 self.h_resume_session(session, native_id).await
             }
             ReqKind::ClearSession { session } => self.h_clear_session(session).await,
+            ReqKind::SleepSession { session } => self.h_sleep_session(session).await,
             ReqKind::Send {
                 session,
                 text,

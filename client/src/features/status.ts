@@ -14,7 +14,7 @@ const DOT_ROLE: Record<string, string> = {
   waiting_input: "inference", failed: "inference",
   compacting: "agent",
   idle: "neutral",
-  interrupted: "slate", dead: "slate",
+  interrupted: "slate", dead: "slate", asleep: "slate",
 };
 export function dotIcon(state: string): string {
   return gemSVG(DOT_ROLE[state] ?? "slate");
