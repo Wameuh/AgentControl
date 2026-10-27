@@ -29,6 +29,10 @@ export class Sidebar {
   /** PRs ouvertes par session ("conn\0sid") — rempli par refresh ;
    *  vide si le démon ne connaît pas pr_list (vieux démon → pas de badge). */
   private prBySess = new Map<string, PrEntry[]>();
+  /** delete_session en vol : la ligne est masquée dès le clic — un
+   *  refresh concurrent (events, watchdog) ne doit pas la faire
+   *  réapparaître avant la fin de la requête. */
+  private pendingDel = new Set<string>();
   private ctx = $("sctx");
 
   bind(conns: ConnectionManager, groups: GroupStore, newSess: NewSessionDialog, chat: ChatView) {
@@ -67,6 +71,7 @@ export class Sidebar {
     // échoué (timeout 8 s) → la marquer down (une seule fois : déjà down,
     // markDead re-rendererait refresh en boucle).
     const list = raw.filter((s) => {
+      if (this.pendingDel.has(s.id)) return false;
       if (!(s as { conn_error?: boolean }).conn_error) return true;
       const k = s.conn ?? "";
       if ((this.conns.state(k) ?? "ok") === "ok") this.conns.markDead(k);
@@ -76,7 +81,9 @@ export class Sidebar {
     // connu (grisé) au lieu de faire disparaître le serveur.
     for (const [k, st] of this.conns.liveEntries()) {
       if (st !== "ok" && !list.some((s) => (s.conn ?? "default") === k)) {
-        for (const s of app.lastSessions.filter((x) => (x.conn ?? "default") === k)) {
+        for (const s of app.lastSessions.filter(
+          (x) => (x.conn ?? "default") === k && !this.pendingDel.has(x.id),
+        )) {
           list.push({ ...s, offline: true });
         }
       }
@@ -323,7 +330,7 @@ export class Sidebar {
       });
     }
     const del = div.querySelector<HTMLElement>(".sess-del")!;
-    del.addEventListener("click", async (e) => {
+    del.addEventListener("click", (e) => {
       e.stopPropagation();
       if (!del.dataset.armed) {
         del.dataset.armed = "1";
@@ -331,13 +338,29 @@ export class Sidebar {
         setTimeout(() => { del.dataset.armed = ""; del.textContent = "✕"; }, 2500);
         return;
       }
-      await call("delete_session", { session: s.id, conn: s.conn }).catch((er) => showErr(String(er)));
+      // Optimiste : la ligne disparaît sans attendre le démon (kill de
+      // l'agent + purge des fichiers peuvent durer). L'event
+      // session_deleted confirmera ; en cas d'erreur la ligne revient.
+      this.pendingDel.add(s.id);
       this.chat.dropConv(s.id);
       if (app.current?.id === s.id) {
         app.current = null;
         this.chat.clearConv();
       }
+      div.remove();
       void this.refresh();
+      void call("delete_session", { session: s.id, conn: s.conn })
+        .catch((er) => {
+          showErr(String(er));
+          // Échec → la session existe encore : la réinjecter dans le
+          // cache liste pour qu'elle réapparaisse au refresh (même
+          // offline si la connexion est tombée entre-temps).
+          if (!app.lastSessions.some((x) => x.id === s.id)) app.lastSessions.push(s);
+        })
+        .finally(() => {
+          this.pendingDel.delete(s.id);
+          void this.refresh();
+        });
     });
     return div;
   }
