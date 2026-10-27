@@ -252,6 +252,9 @@ impl Daemon {
                     None => false,
                 };
                 if rebind {
+                    // Comme clear_context : l'event de contrôle part
+                    // dans l'ancienne numérotation, avant le reset.
+                    s.emit_ephemeral(EventKind::SessionCleared {});
                     s.journal.reset(&s.dir)?;
                     s.emit(EventKind::System {
                         text: "session native rebindée — historique rechargé".into(),

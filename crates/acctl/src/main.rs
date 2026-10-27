@@ -226,6 +226,7 @@ fn print_event(ev: &Value) {
             println!("[{seq}] commandes: {}", names.join(" "));
         }
         "status_changed" => println!("\x1b[90m[{seq}] état → {}\x1b[0m", ev["state"].as_str().unwrap_or("")),
+        "session_cleared" => println!("\x1b[90m[{seq}] ── contexte effacé ──\x1b[0m"),
         "error" => println!("\x1b[31m[{seq}] ERREUR {}\x1b[0m", ev["message"].as_str().unwrap_or("")),
         "system" => println!("\x1b[90m[{seq}] ⦿ {}\x1b[0m", ev["text"].as_str().unwrap_or("")),
         _ => println!("[{seq}] {ty} {ev}"),

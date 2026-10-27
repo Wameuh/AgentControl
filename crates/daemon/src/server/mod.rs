@@ -530,8 +530,15 @@ impl Daemon {
                     match ev {
                         Ok(event) => {
                             let (sid, _, last) = sub.as_mut().unwrap();
-                            if event.seq > *last {
-                                *last = event.seq;
+                            // Journal reset (clear/rebind) : les seqs
+                            // repartent à 1 — l'event de contrôle est
+                            // émis dans l'ANCIENNE numérotation → il
+                            // passe le filtre, puis `last` est recalé
+                            // pour laisser passer le nouveau cycle.
+                            let cleared =
+                                matches!(event.kind, proto::EventKind::SessionCleared {});
+                            if cleared || event.seq > *last {
+                                *last = if cleared { 0 } else { event.seq };
                                 Self::send_push(&write, sid, &event).await?;
                             }
                         }
@@ -542,6 +549,12 @@ impl Daemon {
                             // logge au moins.
                             let (sid, _, last) = sub.as_mut().unwrap();
                             let s = self.get_session(sid).await?;
+                            // Journal reset pendant le lag : `last`
+                            // dépasse la fin du nouveau journal →
+                            // repartir de 0 (rejeu du cycle courant).
+                            if s.journal.last_seq() < *last {
+                                *last = 0;
+                            }
                             let (backlog, skipped) = s
                                 .journal
                                 .read_tail(&s.dir, *last, SUBSCRIBE_REPLAY_MAX)
