@@ -19,8 +19,14 @@ import type { EventRenderer } from "./event-renderers";
 const MAX_RENDERED = 400;
 const PAGE = 50; // paquets au scroll
 const INITIAL_PAGE = 200; // base d'historique à l'ouverture
+// Fenêtre de rattrapage du subscribe — doit matcher SUBSCRIBE_REPLAY_MAX
+// côté démon : un trou plus grand n'est pas rejoué (cache jeté + dernière
+// page rechargée, l'historique restant paginable via events/before_seq).
+const REPLAY_WINDOW = 500;
 const CACHE_TTL = 10 * 60_000;
 const CACHE_MAX = 6;
+const TAIL_KEEP = 50; // derniers events gardés par session
+const TAIL_MAX = 12; // sessions distinctes gardées (LRU)
 
 // Cache mémoire des conversations : le DOM détaché + l'état de rendu sont
 // conservés à la sortie d'une session → réaffichage instantané au retour,
@@ -49,6 +55,12 @@ export class ChatView {
 
   private openSeq = 0;
   private convCache = new Map<string, ConvCache>();
+  // Queue brute des N derniers events par session — filet de secours du
+  // stash DOM : expiré/évincé → la réouverture réaffiche la queue
+  // instantanément, puis subscribe(after_seq) rejoue le trou borné. Les
+  // pushes n'arrivent que pour la session ouverte → seules les sessions
+  // visitées remplissent leur queue.
+  private tailCache = new Map<string, { conn: string; evs: AcEvent[] }>();
   private minRendered = Number.MAX_SAFE_INTEGER;
   private renderedCount = 0;
   private loadingOld = false;
@@ -169,11 +181,13 @@ export class ChatView {
   /** Oublie la conversation cachée d'une session (suppression). */
   dropConv(id: string) {
     this.convCache.delete(id);
+    this.tailCache.delete(id);
   }
 
   /** Purge les conversations cachées des sessions d'une connexion. */
   dropConvsForConn(conn: string) {
     for (const [k, c] of this.convCache) if (c.conn === conn) this.convCache.delete(k);
+    for (const [k, tc] of this.tailCache) if (tc.conn === conn) this.tailCache.delete(k);
   }
 
   /** La session affichée vivait sur `conn` (supprimée) → zone vidée. */
@@ -269,25 +283,52 @@ export class ChatView {
       }
     }
 
+    // Trou énorme entre le cache et le journal (session qui a tourné
+    // fermée) : rejouer ce trou via subscribe saturerait le lien — le
+    // démon borne déjà le rattrapage à REPLAY_WINDOW events, mais sans
+    // ça la vue garderait un gap au milieu. On jette le cache et on
+    // repart sur la dernière page : tout ce qui précède reste atteignable
+    // par la pagination scroll-up (events/before_seq).
+    if (cached && info.last_seq - cached.lastSeq > REPLAY_WINDOW) {
+      this.convCache.delete(id);
+      this.clearConv();
+      this.showConvLoading(true);
+    }
+    const fresh = this.cachedConv(id, connHint || "default");
     // Avec cache, le trou depuis lastSeq est rejoué par le subscribe ; sans
     // cache, on recharge la dernière page — un échec (journal absent/corrompu)
     // ne doit PAS tuer le subscribe ni la vue live derrière.
-    let afterSeq = cached?.lastSeq ?? 0;
-    if (!cached) {
-      let page = { events: [] as AcEvent[], last_seq: 0 };
-      try {
-        page = await call<{ events: AcEvent[]; last_seq: number }>("events", {
-          session: id,
-          limit: INITIAL_PAGE,
-        });
-      } catch (e) {
-        showErr(`events: ${e}`);
+    let afterSeq = fresh?.lastSeq ?? 0;
+    if (!fresh) {
+      const tail = this.tailCache.get(id);
+      const tailLastSeq = tail?.evs.length ? tail.evs[tail.evs.length - 1].seq : 0;
+      if (tail && tailLastSeq && info.last_seq - tailLastSeq <= REPLAY_WINDOW) {
+        // Queue brute encore fraîche → réaffichage instantané ; le
+        // subscribe rejoue le trou (borné) depuis le dernier seq connu.
+        for (const ev of tail.evs) this.appendEvent(ev, false);
+        afterSeq = tailLastSeq;
+        this.showConvLoading(false);
+        this.scrollBottom();
+      } else {
+        let page = { events: [] as AcEvent[], last_seq: 0 };
+        try {
+          page = await call<{ events: AcEvent[]; last_seq: number }>("events", {
+            session: id,
+            limit: INITIAL_PAGE,
+          });
+        } catch (e) {
+          showErr(`events: ${e}`);
+        }
+        if (stale()) return;
+        this.showConvLoading(false);
+        for (const ev of page.events) this.appendEvent(ev, false);
+        // Page vide (échec events ou journal vide) : partir de la fin de la
+        // fenêtre plutôt que 0 — un subscribe(0) resterait rejoué intégral.
+        afterSeq = page.events.length
+          ? page.events[page.events.length - 1].seq
+          : Math.max(0, info.last_seq - REPLAY_WINDOW);
+        this.scrollBottom();
       }
-      if (stale()) return;
-      this.showConvLoading(false);
-      for (const ev of page.events) this.appendEvent(ev, false);
-      afterSeq = page.events.length ? page.events[page.events.length - 1].seq : 0;
-      this.scrollBottom();
     }
 
     // Subscribe live à partir du dernier event connu
@@ -307,7 +348,7 @@ export class ChatView {
   markGone() {
     if (!app.current) return;
     this.sysline(t("session_gone"));
-    this.convCache.delete(app.current.id);
+    this.dropConv(app.current.id);
     app.current = null;
     this.unseenBelow = 0;
     $("btn-bottom").hidden = true;
@@ -519,6 +560,7 @@ export class ChatView {
     this.eventsEl.appendChild(node);
     this.renderedCount++;
     if (ev.seq < this.minRendered) this.minRendered = ev.seq;
+    if (app.current) this.pushTail(app.current.id, app.current.conn ?? "default", ev);
     if (ev.type === "tool_call") {
       this.renderer.toolBlocks.set(ev.call_id as string, node);
       this.renderer.flushToolUpdates(ev.call_id as string);
@@ -547,6 +589,23 @@ export class ChatView {
         this.eventsEl.querySelector<HTMLElement>(".ev")?.dataset.seq ?? Number.MAX_SAFE_INTEGER,
       );
     }
+  }
+
+  /** Alimente la queue brute de la session (les derniers TAIL_KEEP events
+   *  rendus) — dédup par seq, LRU bornée à TAIL_MAX sessions. */
+  private pushTail(id: string, conn: string, ev: AcEvent) {
+    let t = this.tailCache.get(id);
+    if (!t) {
+      t = { conn, evs: [] };
+      this.tailCache.set(id, t);
+      while (this.tailCache.size > TAIL_MAX) {
+        this.tailCache.delete(this.tailCache.keys().next().value!);
+      }
+    }
+    const last = t.evs[t.evs.length - 1];
+    if (last && last.seq >= ev.seq) return;
+    t.evs.push(ev);
+    if (t.evs.length > TAIL_KEEP) t.evs.splice(0, t.evs.length - TAIL_KEEP);
   }
 
   private prependEvents(events: AcEvent[]) {
