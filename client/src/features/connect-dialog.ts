@@ -78,7 +78,7 @@ export class ConnectDialog {
         // Démon plus récent : le script distant refuse le downgrade.
         if (res.startsWith("newer:")) newerDaemon = res.slice(6);
         else if (res.startsWith("installed:") && res.slice(10) !== ver) {
-          showErr(t("dupdate_stale", { host: String(cfg.host), want: ver, got: res.slice(10) }));
+          showErr(t("dupdate_stale", { host: String(cfg.host), want: ver, got: res.slice(10) || "?" }));
         }
       } finally {
         this.daemonDlg("", false);
@@ -109,7 +109,7 @@ export class ConnectDialog {
             if (res.startsWith("newer:")) showOutdated(lv, res.slice(6));
             else {
               if (res.startsWith("installed:") && res.slice(10) !== lv) {
-                showErr(t("dupdate_stale", { host: String(cfg.host), want: lv, got: res.slice(10) }));
+                showErr(t("dupdate_stale", { host: String(cfg.host), want: lv, got: res.slice(10) || "?" }));
               }
               status = await invoke("connect", { cfg }).catch(() => status);
             }

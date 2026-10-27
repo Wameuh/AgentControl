@@ -174,24 +174,29 @@ pub(crate) async fn ensure_daemon(
          tar xzf acd.tgz; \
          install -Dm755 agentcontrol-daemon $bin; \
          install -Dm755 acctl $HOME/.local/bin/acctl; \
-         if command -v systemctl >/dev/null 2>&1 && systemctl --user list-units >/dev/null 2>&1; then \
+         confs=\"/etc/supervisor/conf.d/*.conf /etc/supervisord.d/*.conf $HOME/.supervisor/conf.d/*.conf\"; \
+         prog=$(awk '/^\\[program:/ {{ p=$0; sub(/.*\\[program:/,\"\",p); sub(/\\].*/,\"\",p) }} /^command[[:space:]]*=/ && /agentcontrol-daemon/ {{ print p; exit }}' $confs 2>/dev/null); \
+         if [ -n \"$prog\" ]; then \
+         svc=$(grep -h '^command[[:space:]]*=' $confs 2>/dev/null | grep agentcontrol-daemon | head -n1 | sed 's/^command[[:space:]]*=[[:space:]]*//' | cut -d' ' -f1); \
+         svc=$(command -v \"$svc\" 2>/dev/null || echo \"$svc\"); \
+         if [ -n \"$svc\" ] && [ \"$svc\" != \"$bin\" ] && [ -w \"$(dirname \"$svc\")\" ]; then install -Dm755 agentcontrol-daemon \"$svc\"; fi; \
+         if [ -n \"$svc\" ] && {{ [ \"$svc\" = \"$bin\" ] || [ -w \"$(dirname \"$svc\")\" ]; }}; then supervisorctl restart \"$prog\" || true; fi; \
+         elif command -v systemctl >/dev/null 2>&1 && systemctl cat agentcontrol-daemon.service >/dev/null 2>&1; then \
+         :; \
+         elif command -v systemctl >/dev/null 2>&1 && systemctl --user list-units >/dev/null 2>&1; then \
          install -Dm644 packaging/agentcontrol-daemon.service $HOME/.config/systemd/user/agentcontrol-daemon.service; \
          systemctl --user daemon-reload; \
          systemctl --user enable agentcontrol-daemon; \
          systemctl --user restart agentcontrol-daemon; \
-         elif command -v supervisorctl >/dev/null 2>&1 && supervisorctl status agentcontrol-daemon >/dev/null 2>&1; then \
-         svc=$(grep -h '^command=' /etc/supervisor/conf.d/*.conf /etc/supervisord.d/*.conf \"$HOME\"/.supervisor/conf.d/*.conf 2>/dev/null | grep 'agentcontrol-daemon' | head -n1 | sed 's/^command=//' | awk '{{print $1}}'); \
-         svc=$(command -v \"$svc\" 2>/dev/null || echo \"$svc\"); \
-         if [ \"$svc\" = \"$bin\" ] || [ -w \"$svc\" ]; then \
-         [ \"$svc\" = \"$bin\" ] || install -Dm755 agentcontrol-daemon \"$svc\"; \
-         supervisorctl restart agentcontrol-daemon || true; \
-         fi; \
          else \
-         pkill -x agentcontrol-daemon 2>/dev/null || true; sleep 1; \
-         nohup \"$bin\" >/dev/null 2>&1 </dev/null & \
+         pkill -x agentcontrol-da 2>/dev/null || true; sleep 2; \
+         pgrep -x agentcontrol-da >/dev/null 2>&1 || nohup \"$bin\" >/dev/null 2>&1 </dev/null & \
          fi; \
-         rm -rf \"$d\"; sleep 1; \
-         echo installed:$($HOME/.local/bin/acctl status 2>/dev/null | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4)",
+         rm -rf \"$d\"; \
+         v=\"\"; for i in 1 2 3; do \
+         v=$($HOME/.local/bin/acctl status 2>/dev/null | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4); \
+         [ -n \"$v\" ] && break; sleep 1; done; \
+         echo installed:$v",
         base = BASE,
         t = tag
     );
