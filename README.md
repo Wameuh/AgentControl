@@ -134,10 +134,12 @@ acctl kill s-xxx / cancel s-xxx
 ## Agent↔agent
 
 Chaque session reçoit (via `mcpServers` ACP) un serveur MCP `agentcontrol`
-exposant 3 outils : `agentcontrol_list_sessions` (découverte des pairs),
+exposant 4 outils : `agentcontrol_list_sessions` (découverte des pairs),
 `agentcontrol_send_message` (`delivery: "queue"` = fin de tâche, `"steer"` =
-injection après le tool call courant si l'agent le supporte) et
-`agentcontrol_read_events` (transcript d'un pair).
+injection après le tool call courant si l'agent le supporte),
+`agentcontrol_create_session` (délégation : spawn d'une nouvelle session
+avec la `task` comme premier prompt) et `agentcontrol_read_events`
+(transcript d'un pair).
 
 Le message est journalisé `peer_message` dans les deux sessions (rendu
 dédié côté client, cliquable vers la session pair) et livré à la cible
@@ -145,5 +147,16 @@ comme prompt préfixé de la provenance. Une session morte est relancée
 automatiquement. Anti-boucle : `rate_per_min` (20/min/paire, section
 `[a2a]` de config.toml — `enabled = false` pour tout couper).
 
+Création de session par un agent (`agentcontrol_create_session` /
+`peer_spawn`) : les champs omis héritent de la session créatrice (agent,
+cwd, groupe ; modèle/mode seulement si même agent). La création et la
+tâche déléguée sont tracées dans les deux journaux (events `system` +
+`peer_message`), et la session fille connaît l'id de sa créatrice pour
+répondre via `agentcontrol_send_message`. Anti-boucle dédié : `spawn_per_min`
+(10/min/créatrice, `0` = illimité) et `spawn_max_sessions`
+(20 sessions agent→agent au total, `0` interdit le spawn) — le cap
+global borne le fan-out récursif, chaque fille étant une créatrice.
+
 Fallback sans MCP : `AGENTCONTROL_SOCK`/`AGENTCONTROL_SESSION` sont dans
-l'env de l'agent → `acctl msg <from> <to> [--steer] <texte>`.
+l'env de l'agent → `acctl msg <from> <to> [--steer] <texte>` et
+`acctl spawn <from> [tâche...]`.

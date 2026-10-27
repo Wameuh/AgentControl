@@ -261,6 +261,10 @@ pub struct SessionMeta {
     /// Groupe nommé (sidebar) — None = non groupé.
     #[serde(default)]
     pub group: Option<String>,
+    /// Session créatrice (spawn agent→agent via peer_spawn) — None = session
+    /// créée par un client.
+    #[serde(default)]
+    pub spawned_by: Option<String>,
     /// Dernière occupation contexte rapportée par l'agent (usage_update).
     #[serde(default)]
     pub context_used: Option<u64>,
@@ -271,6 +275,37 @@ pub struct SessionMeta {
 
 fn default_state() -> String {
     "idle".into()
+}
+
+// ---------------------------------------------------------------------------
+// Registre PR ↔ session (prs.json à la racine du démon)
+// ---------------------------------------------------------------------------
+
+/// Quelle session a créé quelle pull request. Alimenté automatiquement
+/// (scan des sorties outils) et manuellement (PrTrack / `acctl pr add`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrEntry {
+    /// "owner/name" du repo.
+    pub repo: String,
+    pub pr: u64,
+    /// Id de session ("s-xxxx") ou label libre ("auto-release-bot").
+    pub session: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    /// open | draft | merged | closed
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub note: Option<String>,
+    /// "manual" (pr_track) — prioritaire — ou "detected" (scan auto).
+    #[serde(default)]
+    pub via: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -349,11 +384,39 @@ pub enum ReqKind {
         #[serde(default)]
         delivery: String,
     },
+    /// Création de session par un agent (pont MCP
+    /// `agentcontrol_create_session`, acctl spawn). `from` = session
+    /// créatrice : les champs omis héritent de sa config (agent, cwd,
+    /// groupe ; modèle/mode seulement si même agent — le vocabulaire est
+    /// propre à chaque CLI). Le `prompt` éventuel est livré wrappé de
+    /// provenance comme premier message et journalisé PeerMessage dans
+    /// les deux journaux.
+    PeerSpawn {
+        from: String,
+        #[serde(default)]
+        agent: Option<String>,
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        mode: Option<String>,
+        #[serde(default)]
+        prompt: Option<String>,
+        #[serde(default)]
+        group: Option<String>,
+    },
     /// Lit un fichier (absolu ou relatif au cwd de la session) — panneau
     /// latéral du client pour les liens de fichiers de l'agent.
+    /// `binary` → réponse {path, data(base64), size, truncated} au lieu de
+    /// {path, content(utf8 lossy), truncated} — aperçu image du client.
     ReadFile {
         session: String,
         path: String,
+        #[serde(default)]
+        binary: bool,
     },
     /// Liste un dossier du workspace (arborescence côté client). `path`
     /// relatif au cwd de la session ("" = racine) — borné au workspace.
@@ -428,6 +491,9 @@ pub enum ReqKind {
     },
     /// Tue l'agent et supprime la session + ses fichiers (journal/blobs).
     DeleteSession { session: String },
+    /// /clear — vide le journal et repart sur une session native neuve
+    /// (session/new), même session AgentControl (id, titre, groupe, cwd).
+    ClearSession { session: String },
     /// Renomme la session (meta local + session/rename chez l'agent si dispo).
     RenameSession {
         session: String,
@@ -458,7 +524,77 @@ pub enum ReqKind {
     KillSession {
         session: String,
     },
+    /// Registre PR ↔ session : liste, filtrable par session.
+    PrList {
+        #[serde(default)]
+        session: Option<String>,
+    },
+    /// Upsert manuel d'une entrée (champs Some écrasent, None conservent —
+    /// `session` requis pour une entrée nouvelle). Prime sur `via: detected`.
+    PrTrack {
+        #[serde(default)]
+        session: Option<String>,
+        repo: String,
+        pr: u64,
+        #[serde(default)]
+        branch: Option<String>,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        note: Option<String>,
+    },
+    PrUntrack {
+        repo: String,
+        pr: u64,
+    },
     DaemonStatus,
+}
+
+impl ReqKind {
+    /// Nom du variant — pour les logs (`debug!`), sans sérialiser le payload
+    /// (qui peut contenir des prompts/texte volumineux ou sensibles).
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::NewSession { .. } => "new_session",
+            Self::ResumeSession { .. } => "resume_session",
+            Self::ListNativeSessions { .. } => "list_native_sessions",
+            Self::ForkSession { .. } => "fork_session",
+            Self::AttachSession { .. } => "attach_session",
+            Self::ListSessions => "list_sessions",
+            Self::ListAgents => "list_agents",
+            Self::Send { .. } => "send",
+            Self::PeerSend { .. } => "peer_send",
+            Self::PeerSpawn { .. } => "peer_spawn",
+            Self::ReadFile { .. } => "read_file",
+            Self::ListDir { .. } => "list_dir",
+            Self::DeletePath { .. } => "delete_path",
+            Self::DownloadPath { .. } => "download_path",
+            Self::QueueList { .. } => "queue_list",
+            Self::QueueEdit { .. } => "queue_edit",
+            Self::QueueDrop { .. } => "queue_drop",
+            Self::QueuePromote { .. } => "queue_promote",
+            Self::Events { .. } => "events",
+            Self::Subscribe { .. } => "subscribe",
+            Self::Cancel { .. } => "cancel",
+            Self::SessionInfo { .. } => "session_info",
+            Self::SetMode { .. } => "set_mode",
+            Self::SetModel { .. } => "set_model",
+            Self::SetConfigOption { .. } => "set_config_option",
+            Self::DeleteSession { .. } => "delete_session",
+            Self::ClearSession { .. } => "clear_session",
+            Self::RenameSession { .. } => "rename_session",
+            Self::SetSessionGroup { .. } => "set_session_group",
+            Self::Respond { .. } => "respond",
+            Self::GetBlob { .. } => "get_blob",
+            Self::KillSession { .. } => "kill_session",
+            Self::PrList { .. } => "pr_list",
+            Self::PrTrack { .. } => "pr_track",
+            Self::PrUntrack { .. } => "pr_untrack",
+            Self::DaemonStatus => "daemon_status",
+        }
+    }
 }
 
 fn default_limit() -> u32 {

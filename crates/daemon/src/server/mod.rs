@@ -1,0 +1,538 @@
+//! Serveur : accepte les connexions, dispatche les requêtes, gère le push.
+//! `handle` n'est qu'une table de dispatch — les handlers sont éclatés par
+//! domaine : sessions.rs (cycle de vie des sessions), files.rs (workspace
+//! + blobs), peers.rs (agent↔agent), prs.rs (registre PR), misc.rs.
+
+mod cfg;
+mod files;
+mod misc;
+mod peers;
+mod prs;
+mod sessions;
+
+pub use cfg::{A2aCfg, AgentProfile, RetentionCfg};
+
+use anyhow::{Context, Result};
+use proto::{Push, ReqKind, Request, Response};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::net::UnixStream;
+use tokio::sync::broadcast;
+use tokio::sync::RwLock;
+use tracing::{debug, info, warn};
+
+use crate::journal;
+use crate::prs::PrRegistry;
+use crate::session::Session;
+
+pub struct Daemon {
+    pub root: PathBuf,
+    pub sessions: RwLock<HashMap<String, Arc<Session>>>,
+    pub agents: HashMap<String, AgentProfile>,
+    pub retention: RetentionCfg,
+    pub a2a: A2aCfg,
+    /// Horodatage des envois agent→agent par paire (from,to) — rate-limit.
+    peer_rate: std::sync::Mutex<
+        HashMap<(String, String), std::collections::VecDeque<std::time::Instant>>,
+    >,
+    /// Horodatage des spawns agent→agent par session créatrice.
+    spawn_rate: std::sync::Mutex<
+        HashMap<String, std::collections::VecDeque<std::time::Instant>>,
+    >,
+    /// Registre PR ↔ session (prs.json) — voir prs.rs.
+    pub prs: Arc<PrRegistry>,
+}
+
+
+impl Daemon {
+    /// Charge les sessions existantes depuis le disque.
+    pub async fn open(
+        root: PathBuf,
+        agents: HashMap<String, AgentProfile>,
+        retention: RetentionCfg,
+        a2a: A2aCfg,
+    ) -> Result<Arc<Self>> {
+        let d = Arc::new(Self {
+            root: root.clone(),
+            sessions: RwLock::new(HashMap::new()),
+            agents,
+            retention,
+            a2a,
+            peer_rate: std::sync::Mutex::new(HashMap::new()),
+            spawn_rate: std::sync::Mutex::new(HashMap::new()),
+            prs: Arc::new(PrRegistry::open(&root)),
+        });
+        let sdir = root.join("sessions");
+        if sdir.exists() {
+            for entry in std::fs::read_dir(&sdir)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_dir() {
+                    continue;
+                }
+                match Session::open(entry.path()) {
+                    Ok(s) => {
+                        // Un agent n'est jamais vivant après un restart du
+                        // démon → interrupted + event journalisé.
+                        s.reconcile_state();
+                        let id = s.meta_snapshot().id;
+                        d.watch_prs(&s);
+                        info!("session chargée: {id}");
+                        d.sessions.write().await.insert(id, s);
+                    }
+                    Err(e) => warn!("session load failed {:?}: {e:#}", entry.path()),
+                }
+            }
+        }
+        Ok(d)
+    }
+
+    async fn get_session(&self, id: &str) -> Result<Arc<Session>> {
+        self.sessions
+            .read()
+            .await
+            .get(id)
+            .cloned()
+            .with_context(|| format!("session inconnue: {id}"))
+    }
+
+
+    // -----------------------------------------------------------------------
+    // Agent↔agent : helpers
+    // -----------------------------------------------------------------------
+
+    /// Commande + env d'un profil avec substitution {model}/{mode}, plus
+    /// l'env AGENTCONTROL_SOCK/AGENTCONTROL_SESSION quand l'a2a est activé
+    /// (permet le fallback `acctl` aux agents sans support MCP).
+    fn agent_parts(
+        &self,
+        profile: &AgentProfile,
+        model: Option<&str>,
+        mode: Option<&str>,
+        session_id: &str,
+    ) -> (Vec<String>, HashMap<String, String>) {
+        let (m, md) = (model.unwrap_or(""), mode.unwrap_or(""));
+        let cmd: Vec<String> = profile
+            .command
+            .iter()
+            .map(|a| a.replace("{model}", m).replace("{mode}", md))
+            .filter(|a| !a.is_empty())
+            .collect();
+        let mut envs: HashMap<String, String> = profile
+            .env
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    v.replace("{model}", m).replace("{mode}", md),
+                )
+            })
+            .filter(|(_, v)| !v.is_empty())
+            .collect();
+        if self.a2a.enabled {
+            envs.insert(
+                "AGENTCONTROL_SOCK".into(),
+                self.root.join("daemon.sock").display().to_string(),
+            );
+            envs.insert("AGENTCONTROL_SESSION".into(), session_id.into());
+        }
+        (cmd, envs)
+    }
+
+    /// Entrée mcpServers injectée dans session/new|load : le serveur MCP
+    /// "agentcontrol", subcommand du binaire démon courant (l'agent le
+    /// spawn lui-même ; l'env identifie la session appelante).
+    fn mcp_servers(&self, session_id: &str) -> Value {
+        if !self.a2a.enabled {
+            return json!([]);
+        }
+        let exe = std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "agentcontrol-daemon".into());
+        // Spec ACP : `env` est une liste d'objets {name, value}, pas une map
+        // {K: V} — la map casse la désérialisation untagged de certains agents
+        // (ex. devin CLI : "did not match any variant of untagged enum
+        // McpServer" → session/new en Invalid params → agent exited).
+        json!([{
+            "name": "agentcontrol",
+            "command": exe,
+            "args": ["mcp-serve"],
+            "env": [
+                {"name": "AGENTCONTROL_SOCK",
+                 "value": self.root.join("daemon.sock").display().to_string()},
+                {"name": "AGENTCONTROL_SESSION", "value": session_id},
+            ]
+        }])
+    }
+
+    // -----------------------------------------------------------------------
+    // Dispatch
+    // -----------------------------------------------------------------------
+
+    pub async fn dispatch(self: &Arc<Self>, req: Request) -> Response {
+        let id = req.id;
+        let kind = req.req.kind_name();
+        debug!("req #{id} {kind}");
+        match self.handle(req.req).await {
+            Ok(v) => Response::ok(id, v),
+            Err(e) => {
+                debug!("req #{id} {kind} → {e:#}");
+                Response::err(id, format!("{e:#}"))
+            }
+        }
+    }
+
+
+    async fn handle(self: &Arc<Self>, req: ReqKind) -> Result<Value> {
+        match req {
+            ReqKind::DaemonStatus => self.h_daemon_status().await,
+            ReqKind::ListAgents => self.h_list_agents().await,
+            ReqKind::ListSessions => self.h_list_sessions().await,
+            ReqKind::NewSession {
+                agent,
+                cwd,
+                title,
+                model,
+                mode,
+                prompt,
+            } => {
+                self.h_new_session(agent, cwd, title, model, mode, prompt)
+                    .await
+            }
+            ReqKind::AttachSession {
+                agent,
+                cwd,
+                native_id,
+                title,
+            } => self.h_attach_session(agent, cwd, native_id, title).await,
+            ReqKind::ListNativeSessions { session } => {
+                self.h_list_native_sessions(session).await
+            }
+            ReqKind::ForkSession { session } => self.h_fork_session(session).await,
+            ReqKind::ResumeSession { session, native_id } => {
+                self.h_resume_session(session, native_id).await
+            }
+            ReqKind::ClearSession { session } => self.h_clear_session(session).await,
+            ReqKind::Send {
+                session,
+                text,
+                force,
+                steer,
+            } => self.h_send(session, text, force, steer).await,
+            ReqKind::PeerSend {
+                from,
+                session,
+                text,
+                delivery,
+            } => self.h_peer_send(from, session, text, delivery).await,
+            ReqKind::PeerSpawn {
+                from,
+                agent,
+                cwd,
+                title,
+                model,
+                mode,
+                prompt,
+                group,
+            } => {
+                self.h_peer_spawn(from, agent, cwd, title, model, mode, prompt, group)
+                    .await
+            }
+            ReqKind::Events {
+                session,
+                before_seq,
+                limit,
+            } => self.h_events(session, before_seq, limit).await,
+            ReqKind::ReadFile { session, path, binary } => {
+                self.h_read_file(session, path, binary).await
+            }
+            ReqKind::ListDir { session, path } => self.h_list_dir(session, path).await,
+            ReqKind::DeletePath { session, path } => {
+                self.h_delete_path(session, path).await
+            }
+            ReqKind::DownloadPath {
+                session,
+                path,
+                offset,
+                limit,
+                archive,
+            } => {
+                self.h_download_path(session, path, offset, limit, archive)
+                    .await
+            }
+            ReqKind::QueueList { session } => self.h_queue_list(session).await,
+            ReqKind::QueueEdit { session, index, text } => {
+                self.h_queue_edit(session, index, text).await
+            }
+            ReqKind::QueueDrop { session, index } => {
+                self.h_queue_drop(session, index).await
+            }
+            ReqKind::QueuePromote { session, index } => {
+                self.h_queue_promote(session, index).await
+            }
+            ReqKind::Cancel { session } => self.h_cancel(session).await,
+            ReqKind::SessionInfo { session } => self.h_session_info(session).await,
+            ReqKind::SetMode { session, mode } => self.h_set_mode(session, mode).await,
+            ReqKind::SetModel { session, model } => {
+                self.h_set_model(session, model).await
+            }
+            ReqKind::SetConfigOption {
+                session,
+                config_id,
+                value,
+            } => {
+                self.h_set_config_option(session, config_id, value)
+                    .await
+            }
+            ReqKind::Respond {
+                session,
+                request_id,
+                option_id,
+                answer,
+            } => {
+                self.h_respond(session, request_id, option_id, answer)
+                    .await
+            }
+            ReqKind::GetBlob {
+                session,
+                blob,
+                offset,
+                limit,
+            } => self.h_get_blob(session, blob, offset, limit).await,
+            ReqKind::RenameSession { session, title } => {
+                self.h_rename_session(session, title).await
+            }
+            ReqKind::SetSessionGroup { session, group } => {
+                self.h_set_session_group(session, group).await
+            }
+            ReqKind::DeleteSession { session } => self.h_delete_session(session).await,
+            ReqKind::KillSession { session } => self.h_kill_session(session).await,
+            ReqKind::PrList { session } => self.h_pr_list(session).await,
+            ReqKind::PrTrack {
+                session,
+                repo,
+                pr,
+                branch,
+                title,
+                status,
+                note,
+            } => {
+                self.h_pr_track(session, repo, pr, branch, title, status, note)
+                    .await
+            }
+            ReqKind::PrUntrack { repo, pr } => self.h_pr_untrack(repo, pr).await,
+            ReqKind::Subscribe { session, after_seq } => {
+                self.h_subscribe(session, after_seq).await
+            }
+        }
+    }
+
+    /// Sert une connexion : lit des Request en NDJSON, écrit Response/Push.
+    /// Retourne quand le client se déconnecte.
+    pub async fn serve_conn<S>(self: &Arc<Self>, stream: S) -> Result<()>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let (read, write) = tokio::io::split(stream);
+        let mut lines = BufReader::new(read).lines();
+        let write = Arc::new(tokio::sync::Mutex::new(BufWriter::new(write)));
+
+        // État de subscription : (session_id, broadcast rx, last_sent)
+        let mut sub: Option<(String, broadcast::Receiver<proto::Event>, u64)> = None;
+
+        loop {
+            tokio::select! {
+                line = lines.next_line() => {
+                    let line = match line {
+                        Ok(Some(l)) => l,
+                        _ => return Ok(()), // déconnexion
+                    };
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let req: Request = match serde_json::from_str(&line) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let resp = Response::err(0, format!("parse: {e}"));
+                            Self::send_line(&write, &resp).await?;
+                            continue;
+                        }
+                    };
+                    // Subscribe : traite différemment — bascule en push
+                    if let ReqKind::Subscribe { ref session, after_seq } = req.req {
+                        match self.get_session(session).await {
+                            Ok(s) => {
+                                let resp = Response::ok(req.id, json!({
+                                    "subscribed": session,
+                                    "last_seq": s.journal.last_seq()
+                                }));
+                                Self::send_line(&write, &resp).await?;
+                                let rx = s.events_tx.subscribe();
+                                // Rattrapage du journal avant de passer en live
+                                let mut last = after_seq;
+                                for ev in s.journal.read_after(&s.dir, after_seq).unwrap_or_default() {
+                                    last = ev.seq;
+                                    Self::send_push(&write, session, &ev).await?;
+                                }
+                                sub = Some((session.clone(), rx, last));
+                            }
+                            Err(e) => {
+                                Self::send_line(&write, &Response::err(req.id, format!("{e:#}"))).await?;
+                            }
+                        }
+                        continue;
+                    }
+                    // Requêtes concurrentes par connexion : chaque dispatch dans
+                    // sa tâche — un handler lent (resume_session → spawn +
+                    // session/load + replay) ne bloque plus les autres appels.
+                    // Les réponses sont démux côté client par id.
+                    let d = Arc::clone(self);
+                    let w = Arc::clone(&write);
+                    tokio::spawn(async move {
+                        let resp = d.dispatch(req).await;
+                        let _ = Self::send_line(&w, &resp).await;
+                    });
+                }
+                ev = async {
+                    match sub.as_mut() {
+                        Some((_, rx, _)) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                }, if sub.is_some() => {
+                    match ev {
+                        Ok(event) => {
+                            let (sid, _, last) = sub.as_mut().unwrap();
+                            if event.seq > *last {
+                                *last = event.seq;
+                                Self::send_push(&write, sid, &event).await?;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            // Rattrapage via le journal
+                            let (sid, _, last) = sub.as_mut().unwrap();
+                            let s = self.get_session(sid).await?;
+                            for event in s.journal.read_after(&s.dir, *last).unwrap_or_default() {
+                                *last = event.seq;
+                                Self::send_push(&write, sid, &event).await?;
+                            }
+                        }
+                        Err(_) => { sub = None; }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn send_line<W>(w: &Arc<tokio::sync::Mutex<BufWriter<W>>>, v: &impl serde::Serialize) -> Result<()>
+    where
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        let mut g = w.lock().await;
+        let mut s = serde_json::to_string(v)?;
+        s.push('\n');
+        g.write_all(s.as_bytes()).await?;
+        g.flush().await?;
+        Ok(())
+    }
+
+    async fn send_push<W>(w: &Arc<tokio::sync::Mutex<BufWriter<W>>>, session: &str, ev: &proto::Event) -> Result<()>
+    where
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        Self::send_line(w, &Push { push: "event", session: session.into(), event: ev.clone() }).await
+    }
+}
+
+/// Wrapper pour accepter des connexions Unix.
+pub async fn accept_unix(daemon: Arc<Daemon>, listener: tokio::net::UnixListener) {
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                let d = Arc::clone(&daemon);
+                tokio::spawn(async move {
+                    let s: UnixStream = stream;
+                    if let Err(e) = d.serve_conn(s).await {
+                        debug!("conn unix close: {e:#}");
+                    }
+                });
+            }
+            Err(e) => {
+                warn!("accept unix: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
+/// Wrapper pour accepter des connexions TCP (loopback, tunnelé via SSH).
+pub async fn accept_tcp(daemon: Arc<Daemon>, listener: tokio::net::TcpListener) {
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                let _ = stream.set_nodelay(true);
+                let d = Arc::clone(&daemon);
+                tokio::spawn(async move {
+                    if let Err(e) = d.serve_conn(stream).await {
+                        debug!("conn tcp close: {e:#}");
+                    }
+                });
+            }
+            Err(e) => {
+                warn!("accept tcp: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
+/// Janitor périodique : compaction des journaux, purge LRU des blobs,
+/// purge optionnelle des sessions inactives.
+pub async fn janitor(daemon: Arc<Daemon>) {
+    let r = daemon.retention.clone();
+    let interval = std::time::Duration::from_secs(r.interval_secs.max(30));
+    let journal_max = r.journal_max_mb * 1024 * 1024;
+    let journal_keep = r.journal_keep_mb * 1024 * 1024;
+    let blob_max = r.blob_max_mb * 1024 * 1024;
+    let purge_age = std::time::Duration::from_secs(r.purge_days * 86400);
+    loop {
+        tokio::time::sleep(interval).await;
+        let sessions: Vec<Arc<Session>> =
+            daemon.sessions.read().await.values().cloned().collect();
+        for s in &sessions {
+            if let Err(e) = s.journal.compact_if_needed(&s.dir, journal_max, journal_keep) {
+                warn!("compact {}: {e}", s.meta_snapshot().id);
+            }
+            match journal::purge_blobs(&s.dir, blob_max) {
+                Ok(n) if n > 0 => info!("blobs purgés {}: {n}", s.meta_snapshot().id),
+                Err(e) => warn!("purge blobs {}: {e}", s.meta_snapshot().id),
+                _ => {}
+            }
+        }
+        // Purge des sessions inactives (opt-in via purge_days)
+        if r.purge_days > 0 {
+            let now = std::time::SystemTime::now();
+            for s in sessions {
+                let meta = s.meta_snapshot();
+                if s.is_alive() {
+                    continue;
+                }
+                let mtime = std::fs::metadata(s.dir.join("events.jsonl"))
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                let old = now.duration_since(mtime).unwrap_or_default() > purge_age;
+                if old {
+                    let id = meta.id.clone();
+                    s.emit_ephemeral(proto::EventKind::SessionDeleted {});
+                    daemon.sessions.write().await.remove(&id);
+                    if let Err(e) = std::fs::remove_dir_all(&s.dir) {
+                        warn!("purge session {id}: {e}");
+                    } else {
+                        info!("session purgée (inactivité): {id}");
+                    }
+                }
+            }
+        }
+    }
+}

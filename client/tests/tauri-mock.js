@@ -19,6 +19,9 @@
     { id: "s3", conn: "local", agent: "devin", title: "Write unit tests",
       cwd: "/home/agent/tests", created_at: "2026-10-18T08:00:00Z", group: "Serveur pi",
       available_modes: [], available_models: [], available_commands: [], state: "dead" },
+    { id: "s4", conn: "local", agent: "mock", title: "Reduce context usage",
+      cwd: "/home/agent/infra", created_at: "2026-10-21T07:30:00Z",
+      available_modes: [], available_models: [], available_commands: [], state: "compacting" },
   ];
   const EVENTS = [
     { seq: 1, ts: "10:01", type: "user_message", text: "Refactorise le client API pour utiliser fetch avec retry exponentiel." },
@@ -51,6 +54,7 @@
       { name: "Cargo.toml", dir: false, size: 1240 },
       { name: "package.json", dir: false, size: 980 },
       { name: "README.md", dir: false, size: 4321 },
+      { name: "logo.png", dir: false, size: 68 },
       { name: ".env", dir: false, size: 120 },
     ],
   };
@@ -64,13 +68,22 @@
       case "events": return { events: EVENTS, last_seq: EVENTS.length };
       case "queue_list": return { queue: ["Compile aussi la doc quand tu as fini"] };
       case "list_dir": return DIR;
-      case "read_file": return FILE;
+      case "read_file": return args.binary ? {
+        path: "/home/agent/api/logo.png", size: 68, truncated: false,
+        data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      } : FILE;
       case "set_session_group": {
         const s = SESSIONS.find((x) => x.id === args.session);
         if (s) s.group = args.group;
         return { group: args.group };
       }
       case "daemon_status": return { version: "0.2.9", sessions: SESSIONS.length };
+      case "pr_list": return [
+        { conn: "local", repo: "Wameuh/AgentControl", pr: 42,
+          session: SESSIONS[0].id, branch: "feat/x", title: "feat: exemple",
+          status: "open", via: "detected" },
+      ];
+      case "clear_session": return { session: args.session };
       case "list_native_sessions": return { sessions: [] };
       case "get_blob": return { data: "blob", total: 4 };
       default: return null;
