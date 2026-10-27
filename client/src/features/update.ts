@@ -11,8 +11,37 @@ import { isAndroid, shellOpen } from "../core/chrome";
 import { cmpVer } from "../core/conn";
 import { t } from "../i18n";
 
+/** Canal de maj opt-in : inclure les pré-releases rc (settings —
+ *  tester la release candidate avant son merge). */
+export const rcChannel = () =>
+  localStorage.getItem("ac-rcchannel") === "1";
+
 // Version distante : fetch direct (pas d'outil local), fallback commande Rust.
+// releases/latest exclut les prereleases → canal rc = liste + max semver.
 async function remoteVersion(): Promise<string> {
+  if (rcChannel()) {
+    try {
+      const r = await fetch(
+        "https://api.github.com/repos/Wameuh/AgentControl/releases?per_page=20",
+      );
+      if (r.ok) {
+        const rels = (await r.json()) as {
+          tag_name?: string;
+          draft?: boolean;
+        }[];
+        // La liste est triée par date, pas par semver → max explicite.
+        // Stable ET rc confondues : la finale > rc la remplace sitôt publiée.
+        let best = "";
+        for (const rel of rels) {
+          const tag = rel.tag_name?.replace(/^v/, "") ?? "";
+          if (tag && !rel.draft && cmpVer(tag, best) > 0) best = tag;
+        }
+        if (best) return best;
+      }
+    } catch {
+      /* réseau → repli canal stable */
+    }
+  }
   try {
     const r = await fetch(
       "https://api.github.com/repos/Wameuh/AgentControl/releases/latest",
@@ -24,7 +53,7 @@ async function remoteVersion(): Promise<string> {
   } catch {
     /* CSP/réseau → fallback invoke */
   }
-  return invoke<string>("check_update");
+  return invoke<string>("check_update", { includeRc: rcChannel() });
 }
 
 /// URL de l'APK de la release `tag` (asset `.apk`), fallback = page releases.

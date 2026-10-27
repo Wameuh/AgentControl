@@ -123,6 +123,9 @@ jobs:
           esac
           CUR=$(grep -oE '"version": "[^"]+"' client/package.json | head -1 | cut -d'"' -f4)
           echo "last=${LAST:-none} cur=$CUR level=$LEVEL next=$NEXT"
+          # `next` alimente aussi le tag RC (step suivant) — posé même
+          # quand le bump est sauté (déjà à NEXT).
+          echo "next=$NEXT" >> "$GITHUB_OUTPUT"
           if [ "$CUR" = "$NEXT" ]; then
             echo "package.json déjà à $NEXT → skip"
             exit 0
@@ -156,3 +159,47 @@ jobs:
         env:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: git push origin "HEAD:$HEAD_REF"
+
+      # Release candidate : chaque état « prêt » de next_release est
+      # tagué v<NEXT>-rc.<k> → le push du tag via PAT déclenche
+      # build.yml (`push: tags v*`) → prérelease publiée, installable
+      # via l'auto-update (canal rc opt-in des paramètres) pour tester
+      # avant le merge. Idempotent par sha : le synchronize du push de
+      # bump et les re-runs ne re-tagguent pas le même head ; un
+      # synchronize post-ready (nouveaux commits mergés sur nr) produit
+      # rc.<k+1> sur le nouveau head. Le tag porte le commit bumpé
+      # (HEAD local = head pushé, ou checkout quand le bump est sauté).
+      - name: Tag RC v<NEXT>-rc.<k>
+        env:
+          NEXT: ${{ steps.bump.outputs.next }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          [ -n "$NEXT" ] || { echo "NEXT absent → skip"; exit 0; }
+          git fetch --tags -q origin
+          SHA=$(git rev-parse HEAD)
+          if git tag -l "v$NEXT-rc.*" --points-at "$SHA" | grep -q .; then
+            echo "$SHA déjà tagué rc → skip"; exit 0
+          fi
+          # Head nr déplacé depuis le trigger (run stale encore vivant)
+          # → le run du nouveau head tagguera ; pas de rc sur un sha
+          # dépassé (l'api peut échouer → on tague quand même).
+          CUR=$(gh api "repos/${{ github.repository }}/git/ref/heads/next_release" \
+            --jq .object.sha 2>/dev/null || echo "")
+          if [ -n "$CUR" ] && [ "$CUR" != "$SHA" ]; then
+            echo "head nr déplacé ($CUR ≠ $SHA) → skip"
+            exit 0
+          fi
+          ESC=${NEXT//./\\.}
+          LAST=$(git tag -l "v$NEXT-rc.*" \
+            | sed -n "s/^v$ESC-rc\.\([0-9][0-9]*\)$/\1/p" | sort -n | tail -1)
+          TAG="v$NEXT-rc.$((${LAST:-0} + 1))"
+          git tag "$TAG"
+          if ! git push origin "$TAG" 2>/dev/null; then
+            # Course avec un run concurrent : déjà créé ailleurs = OK.
+            git fetch --tags -q origin
+            git rev-parse -q --verify "refs/tags/$TAG" >/dev/null \
+              && echo "tag $TAG créé par un run concurrent" \
+              || { echo "::error::push du tag $TAG refusé"; exit 1; }
+          fi
+          echo "RC $TAG poussé → build déclenché par le tag"

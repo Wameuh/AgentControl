@@ -139,6 +139,20 @@ de tag via GITHUB_TOKEN ne déclenche pas les workflows d'où le
 dispatch). Idempotent : tag existant → skip, package.json déjà à
 NEXT → pas de re-bump. Tant que la PR reste draft, rien ne bump.
 
+**Release candidate** : quand la release PR passe ready, `release-bump`
+pousse aussi un tag `v<NEXT>-rc.<k>` (k incrémental, un rc par état de
+head — un synchronize post-ready produit rc.k+1) → le push du tag via
+PAT déclenche `build.yml` qui publie une **prerelease GitHub** (jamais
+marquée `latest`). Le build rc **injecte le suffixe `-rc.k` dans les
+fichiers de version** (non commité — le tag pointe le commit propre
+X.Y.Z) → le binaire s'identifie `X.Y.Z-rc.k`, et la finale `X.Y.Z` est
+proposée en update ensuite (semver : rc < stable). Windows exclu de
+l'injection (MSI/NSIS exigent du numérique — artefacts rc internes
+X.Y.Z). Pour installer la rc depuis l'app : canal rc opt-in dans les
+paramètres → la sonde passe de `releases/latest` (qui exclut les
+prereleases) à la liste `/releases` + max semver. Au merge,
+`release-on-merge` nettoie les releases+tags `v<NEXT>-rc.*` du cycle.
+
 **Reconcile** : tout merge nr→main est un squash → le commit `main`
 n'est jamais ancêtre des commits nr : sans reconcile la release
 suivante reconflicterait sur toute zone retouchée (arrivé : #23, #29),
