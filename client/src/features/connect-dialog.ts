@@ -77,6 +77,9 @@ export class ConnectDialog {
         const res = await invoke<string>("ensure_daemon", daemonParams(cfg, ver));
         // Démon plus récent : le script distant refuse le downgrade.
         if (res.startsWith("newer:")) newerDaemon = res.slice(6);
+        else if (res.startsWith("installed:") && res.slice(10) !== ver) {
+          showErr(t("dupdate_stale", { host: String(cfg.host), want: ver, got: res.slice(10) }));
+        }
       } finally {
         this.daemonDlg("", false);
       }
@@ -104,7 +107,12 @@ export class ConnectDialog {
               });
             // Un autre client a pu upgrader le démon entre-temps → même garde-fou.
             if (res.startsWith("newer:")) showOutdated(lv, res.slice(6));
-            else status = await invoke("connect", { cfg }).catch(() => status);
+            else {
+              if (res.startsWith("installed:") && res.slice(10) !== lv) {
+                showErr(t("dupdate_stale", { host: String(cfg.host), want: lv, got: res.slice(10) }));
+              }
+              status = await invoke("connect", { cfg }).catch(() => status);
+            }
           } finally {
             this.daemonDlg("", false);
           }

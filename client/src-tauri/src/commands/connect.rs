@@ -157,13 +157,14 @@ pub(crate) async fn ensure_daemon(
 ) -> Result<String, String> {
     const BASE: &str = "https://github.com/Wameuh/AgentControl/releases";
     // Script distant POSIX : check version via acctl status, sinon install.
+    // `ver` non vide = le démon répond — à jour quel que soit le
+    // superviseur (systemd, supervisord, lancé à la main).
     let script = format!(
         "set -e; arch=$(uname -m); \
          case $arch in x86_64|aarch64) ;; *) echo \"arch non supportée: $arch\" >&2; exit 1;; esac; \
          bin=$HOME/.local/bin/agentcontrol-daemon; \
          ver=$(\"$HOME/.local/bin/acctl\" status 2>/dev/null | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4); \
-         running=$(systemctl --user is-active agentcontrol-daemon 2>/dev/null || true); \
-         if [ \"$ver\" = \"{t}\" ] && [ \"$running\" = active ]; then echo ok:$ver; exit 0; fi; \
+         if [ \"$ver\" = \"{t}\" ]; then echo ok:$ver; exit 0; fi; \
          if [ -n \"$ver\" ] && [ \"$ver\" != \"{t}\" ] && \
             [ \"$(printf '%s\\n%s\\n' \"{t}\" \"$ver\" | sort -V | tail -n1)\" = \"$ver\" ]; then \
             echo newer:$ver; exit 0; fi; \
@@ -173,10 +174,24 @@ pub(crate) async fn ensure_daemon(
          tar xzf acd.tgz; \
          install -Dm755 agentcontrol-daemon $bin; \
          install -Dm755 acctl $HOME/.local/bin/acctl; \
+         if command -v systemctl >/dev/null 2>&1 && systemctl --user list-units >/dev/null 2>&1; then \
          install -Dm644 packaging/agentcontrol-daemon.service $HOME/.config/systemd/user/agentcontrol-daemon.service; \
          systemctl --user daemon-reload; \
-         systemctl --user enable --now agentcontrol-daemon; rm -rf \"$d\"; \
-         sleep 1; echo installed:$($HOME/.local/bin/acctl status 2>/dev/null | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4)",
+         systemctl --user enable agentcontrol-daemon; \
+         systemctl --user restart agentcontrol-daemon; \
+         elif command -v supervisorctl >/dev/null 2>&1 && supervisorctl status agentcontrol-daemon >/dev/null 2>&1; then \
+         svc=$(grep -h '^command=' /etc/supervisor/conf.d/*.conf /etc/supervisord.d/*.conf \"$HOME\"/.supervisor/conf.d/*.conf 2>/dev/null | grep 'agentcontrol-daemon' | head -n1 | sed 's/^command=//' | awk '{{print $1}}'); \
+         svc=$(command -v \"$svc\" 2>/dev/null || echo \"$svc\"); \
+         if [ \"$svc\" = \"$bin\" ] || [ -w \"$svc\" ]; then \
+         [ \"$svc\" = \"$bin\" ] || install -Dm755 agentcontrol-daemon \"$svc\"; \
+         supervisorctl restart agentcontrol-daemon || true; \
+         fi; \
+         else \
+         pkill -x agentcontrol-daemon 2>/dev/null || true; sleep 1; \
+         nohup \"$bin\" >/dev/null 2>&1 </dev/null & \
+         fi; \
+         rm -rf \"$d\"; sleep 1; \
+         echo installed:$($HOME/.local/bin/acctl status 2>/dev/null | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4)",
         base = BASE,
         t = tag
     );
