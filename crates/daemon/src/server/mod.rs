@@ -522,14 +522,19 @@ impl Daemon {
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {
-                            // Rattrapage borné via le journal (saut de seq
-                            // possible — comblable via Events côté client)
+                            // Rattrapage borné via le journal : un lag >
+                            // fenêtre laisse un trou de seq — comblable
+                            // via Events mais non signalé au client, on le
+                            // logge au moins.
                             let (sid, _, last) = sub.as_mut().unwrap();
                             let s = self.get_session(sid).await?;
-                            let (backlog, _) = s
+                            let (backlog, skipped) = s
                                 .journal
                                 .read_tail(&s.dir, *last, SUBSCRIBE_REPLAY_MAX)
                                 .unwrap_or_default();
+                            if skipped > 0 {
+                                warn!(session = %sid, skipped, "subscribe lagged: events sautés au-delà de la fenêtre");
+                            }
                             for event in backlog {
                                 *last = event.seq;
                                 Self::send_push(&write, sid, &event).await?;

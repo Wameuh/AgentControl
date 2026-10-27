@@ -286,15 +286,17 @@ export class ChatView {
     // Trou énorme entre le cache et le journal (session qui a tourné
     // fermée) : rejouer ce trou via subscribe saturerait le lien — le
     // démon borne déjà le rattrapage à REPLAY_WINDOW events, mais sans
-    // ça la vue garderait un gap au milieu. On jette le cache et on
-    // repart sur la dernière page : tout ce qui précède reste atteignable
-    // par la pagination scroll-up (events/before_seq).
-    if (cached && info.last_seq - cached.lastSeq > REPLAY_WINDOW) {
-      this.convCache.delete(id);
+    // ça la vue garderait un gap au milieu. On jette le rendu restauré
+    // et on repart sur la dernière page : tout ce qui précède reste
+    // atteignable par la pagination scroll-up (events/before_seq).
+    // NB : cachedConv consomme l'entrée — la décision se prend sur
+    // `cached`, pas sur un second appel qui ne peut rien retourner.
+    const gap = cached != null && info.last_seq - cached.lastSeq > REPLAY_WINDOW;
+    if (gap) {
       this.clearConv();
       this.showConvLoading(true);
     }
-    const fresh = this.cachedConv(id, connHint || "default");
+    const fresh = gap ? undefined : cached;
     // Avec cache, le trou depuis lastSeq est rejoué par le subscribe ; sans
     // cache, on recharge la dernière page — un échec (journal absent/corrompu)
     // ne doit PAS tuer le subscribe ni la vue live derrière.
@@ -550,6 +552,9 @@ export class ChatView {
   }
 
   appendEvent(ev: AcEvent, live: boolean) {
+    // La queue enregistre aussi les updates (dedup par seq) — sinon une
+    // réouverture via tail rend les tool_call sans leur output streamé.
+    if (app.current) this.pushTail(app.current.id, app.current.conn ?? "default", ev);
     // tool_call_update modifie le bloc existant
     if (ev.type === "tool_call_update") {
       this.renderer.updateToolBlock(ev);
@@ -560,7 +565,6 @@ export class ChatView {
     this.eventsEl.appendChild(node);
     this.renderedCount++;
     if (ev.seq < this.minRendered) this.minRendered = ev.seq;
-    if (app.current) this.pushTail(app.current.id, app.current.conn ?? "default", ev);
     if (ev.type === "tool_call") {
       this.renderer.toolBlocks.set(ev.call_id as string, node);
       this.renderer.flushToolUpdates(ev.call_id as string);
