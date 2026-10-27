@@ -608,6 +608,18 @@ impl Session {
         self.stdin_tx.lock().unwrap().is_some()
     }
 
+    /// Vrai si l'état persisté implique un tour de travail en vol au
+    /// chargement — à lire AVANT reconcile_state() (qui repasse tout en
+    /// "interrupted"). Sert à la reprise auto après un arrêt brutal du
+    /// démon : "idle" est volontairement exclu (agent vivant mais sans
+    /// travail en cours → pas de prompt "continue please").
+    pub fn was_active(&self) -> bool {
+        matches!(
+            self.meta_snapshot().state.as_str(),
+            "running" | "working" | "waiting_input" | "starting" | "compacting"
+        )
+    }
+
     /// À l'ouverture du démon : un état persisté qui implique un agent
     /// vivant repasse en interrupted — et on le journalise pour que les
     /// replays d'historique côté client ne ressuscitent pas "working".

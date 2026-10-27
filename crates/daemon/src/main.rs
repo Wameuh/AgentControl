@@ -16,6 +16,11 @@ use std::path::PathBuf;
 struct Config {
     #[serde(default = "default_tcp")]
     bind_tcp: String,
+    /// Reprise auto après un arrêt brutal : les sessions qui travaillaient
+    /// au moment du crash sont respawnées et reçoivent un prompt de
+    /// reprise. Les sessions idle ne sont jamais relancées.
+    #[serde(default = "default_true")]
+    auto_resume: bool,
     #[serde(default)]
     agents: HashMap<String, AgentConf>,
     #[serde(default)]
@@ -35,6 +40,10 @@ struct AgentConf {
 
 fn default_tcp() -> String {
     "127.0.0.1:7331".into()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_agents() -> HashMap<String, AgentProfile> {
@@ -157,6 +166,21 @@ async fn run() -> Result<()> {
 }
 
 async fn serve(root: &std::path::Path) -> Result<()> {
+    // Marqueur d'instance : présent au démarrage = l'instance précédente
+    // n'a pas eu d'arrêt propre (SIGKILL/OOM/panic → pid mort) → les
+    // sessions qui travaillaient sont candidates à la reprise auto.
+    // Un pid encore vivant = seconde instance → refus (deux démons sur
+    // les mêmes sessions = split-brain ; le bind unix ci-dessous
+    // volerait le socket sans ce garde-fou).
+    let pid_path = root.join("daemon.pid");
+    let crashed = match read_pid_marker(&pid_path)? {
+        PidMarker::Absent => false,
+        PidMarker::Running(pid) => {
+            anyhow::bail!("une autre instance agentcontrol-daemon tourne déjà (pid {pid})");
+        }
+        PidMarker::Stale => true,
+    };
+
     // Config optionnelle
     let cfg_path = root.join("config.toml");
     let cfg: Config = if cfg_path.exists() {
@@ -164,6 +188,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     } else {
         Config {
             bind_tcp: default_tcp(),
+            auto_resume: true,
             agents: HashMap::new(),
             retention: server::RetentionCfg::default(),
             a2a: server::A2aCfg::default(),
@@ -182,7 +207,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
         );
     }
 
-    let daemon =
+    let (daemon, resumable) =
         Daemon::open(root.to_path_buf(), agents, cfg.retention.clone(), cfg.a2a.clone()).await?;
     tracing::info!(
         "{} session(s) chargée(s), root={}, agents: {}",
@@ -218,26 +243,90 @@ async fn serve(root: &std::path::Path) -> Result<()> {
         cfg.retention.purge_days,
     );
 
+    // Listeners bindés → l'instance est la nôtre : le marqueur nous
+    // représente jusqu'à un arrêt propre (voir la branche signal).
+    std::fs::write(&pid_path, std::process::id().to_string())
+        .context("écriture daemon.pid")?;
+
     let d1 = daemon.clone();
     let d2 = daemon.clone();
     tokio::spawn(async move { server::janitor(d2).await });
+
+    if crashed && !resumable.is_empty() {
+        if cfg.auto_resume {
+            let d3 = daemon.clone();
+            tokio::spawn(async move { d3.auto_resume(resumable).await });
+        } else {
+            tracing::info!(
+                "arrêt précédent brutal — {} session(s) active(s), reprise auto désactivée (auto_resume=false)",
+                resumable.len()
+            );
+        }
+    }
+
     // Les accept loops ne retournent jamais en pratique — si l'un le fait,
     // le select termine et supervisord relance : tracer la branche coupable.
-    tokio::select! {
+    // `clean` distingue l'arrêt demandé (signal) d'une mort inattendue :
+    // le marqueur n'est effacé que sur arrêt propre — tout autre exit
+    // laisse un marqueur périmé → reprise auto au prochain démarrage.
+    let clean = tokio::select! {
         _ = server::accept_unix(d1, unix_listener) => {
             tracing::error!("accept_unix a retourné — arrêt inattendu");
+            false
         }
         _ = server::accept_tcp(daemon, tcp_listener) => {
             tracing::error!("accept_tcp a retourné — arrêt inattendu");
+            false
         }
         sig = shutdown_signal() => {
             tracing::info!(
                 "signal {sig} reçu — arrêt (les sessions restent journalisées sur disque)"
             );
+            true
         }
+    };
+    if clean {
+        let _ = std::fs::remove_file(&pid_path);
     }
     tracing::info!("=== agentcontrol-daemon arrêté (pid {}) ===", std::process::id());
     Ok(())
+}
+
+/// État du marqueur daemon.pid au démarrage.
+enum PidMarker {
+    /// Pas de marqueur → arrêt propre (ou premier démarrage).
+    Absent,
+    /// Marqueur présent mais le pid est mort/inconnu → arrêt brutal.
+    Stale,
+    /// Le pid du marqueur est un agentcontrol-daemon vivant.
+    Running(u32),
+}
+
+fn read_pid_marker(path: &std::path::Path) -> Result<PidMarker> {
+    let txt = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(PidMarker::Absent),
+        Err(e) => return Err(e).context("lecture daemon.pid"),
+    };
+    let Ok(pid) = txt.trim().parse::<u32>() else {
+        // Contenu illisible : écriture interrompue → arrêt brutal aussi.
+        return Ok(PidMarker::Stale);
+    };
+    Ok(if daemon_process_alive(pid) {
+        PidMarker::Running(pid)
+    } else {
+        PidMarker::Stale
+    })
+}
+
+/// Vrai si `pid` est un agentcontrol-daemon vivant — via /proc (Linux).
+/// Sans /proc ou si le pid appartient à un autre programme → faux, le
+/// marqueur est traité comme périmé (sémantique crash).
+fn daemon_process_alive(pid: u32) -> bool {
+    std::fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .is_some_and(|n| n.contains("agentcontrol-daemon"))
 }
 
 /// SIGINT ou SIGTERM — le stop supervisord envoie SIGTERM : sans handler le
