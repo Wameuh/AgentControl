@@ -592,6 +592,15 @@ pub enum ReqKind {
         #[serde(default = "default_search_limit")]
         limit: u32,
     },
+    /// Premier post du cycle courant : le premier `user_message` du
+    /// journal. Le journal est vidé à /clear, /new et au rebind —
+    /// « premier » suit donc automatiquement le dernier reset.
+    /// Réponse : `{post: {seq, ts, text, steer}}` ou `{post: null}`
+    /// (aucun message utilisateur dans le cycle — ex. juste après
+    /// un /clear).
+    FirstPost {
+        session: String,
+    },
     /// Passe la connexion en mode push : tous les events > after_seq.
     Subscribe {
         session: String,
@@ -723,6 +732,7 @@ impl ReqKind {
             Self::QueuePromote { .. } => "queue_promote",
             Self::Events { .. } => "events",
             Self::SearchEvents { .. } => "search_events",
+            Self::FirstPost { .. } => "first_post",
             Self::Subscribe { .. } => "subscribe",
             Self::Cancel { .. } => "cancel",
             Self::SessionInfo { .. } => "session_info",

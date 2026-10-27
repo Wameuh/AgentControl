@@ -134,6 +134,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             before_seq: p.get("before_seq").and_then(Value::as_u64),
             limit: p.get("limit").and_then(Value::as_u64).unwrap_or(30) as u32,
         },
+        "first_post" => ReqKind::FirstPost { session: s("session") },
         "cancel" => ReqKind::Cancel { session: s("session") },
         "set_mode" => ReqKind::SetMode { session: s("session"), mode: s("mode") },
         "set_model" => ReqKind::SetModel { session: s("session"), model: s("model") },

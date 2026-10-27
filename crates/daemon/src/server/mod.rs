@@ -419,6 +419,7 @@ impl Daemon {
                 self.h_search_events(session, query, before_seq, limit)
                     .await
             }
+            ReqKind::FirstPost { session } => self.h_first_post(session).await,
             ReqKind::ReadFile {
                 session,
                 path,

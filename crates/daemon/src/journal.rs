@@ -190,6 +190,37 @@ impl Journal {
         Ok(())
     }
 
+    /// Premier `user_message` du journal (cycle courant) — scan de la
+    /// tête en flux, borné par FIRST_POST_SCAN_MAX lignes : le journal
+    /// peut faire des centaines de Mo, on ne le charge jamais entier.
+    /// None = pas de message utilisateur dans la fenêtre scannée.
+    pub fn first_post(&self, dir: &Path) -> Result<Option<Event>> {
+        /// Le prelude d'un cycle (status/system/commands post-spawn) ne
+        /// fait que quelques events — la borne est très large au-delà.
+        const FIRST_POST_SCAN_MAX: usize = 4096;
+        let path = dir.join("events.jsonl");
+        let f = match File::open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        for (n, line) in BufReader::new(f).lines().enumerate() {
+            if n >= FIRST_POST_SCAN_MAX {
+                break;
+            }
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(ev) = serde_json::from_str::<Event>(&line) {
+                if matches!(ev.kind, EventKind::UserMessage { .. }) {
+                    return Ok(Some(ev));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Rattrapage borné : les events avec seq > after_seq, mais au plus les
     /// `cap` derniers — les plus vieux sont comptés dans `skipped` et
     /// restent atteignables via `read_page` (pagination arrière). Un

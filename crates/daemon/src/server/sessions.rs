@@ -553,6 +553,23 @@ impl Daemon {
                 }))
     }
 
+    /// Premier post du cycle courant : le journal ne contient que le
+    /// cycle en cours (vidé à /clear, /new, rebind) → le premier
+    /// `user_message` est par construction celui d'après le dernier reset.
+    pub(super) async fn h_first_post(self: &Arc<Self>, session: String) -> Result<Value> {
+                let s = self.get_session(&session).await?;
+                let post = s.journal.first_post(&s.dir)?;
+                Ok(match post {
+                    Some(ev) => {
+                        let proto::EventKind::UserMessage { text, steer } = ev.kind else {
+                            unreachable!() // first_post ne renvoie que ce kind
+                        };
+                        json!({"post": {"seq": ev.seq, "ts": ev.ts, "text": text, "steer": steer}})
+                    }
+                    None => json!({"post": null}),
+                })
+    }
+
     pub(super) async fn h_queue_list(self: &Arc<Self>, session: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
                 Ok(json!({"queue": s.queue_snapshot()}))

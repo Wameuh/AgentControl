@@ -32,6 +32,8 @@ const connLabel = (k: string) =>
 export class ConnectionManager {
   private live = new Map<string, ConnLive>();
   private cfg = new Map<string, Record<string, unknown>>();
+  /** Status démon par conn (capabilities : self_update, first_post…). */
+  private caps = new Map<string, Record<string, unknown>>();
   private timer = new Map<string, ReturnType<typeof setTimeout>>();
   private delay = new Map<string, number>();
   /** Horodatage du prochain essai auto (tooltip "réessai dans ~Ns"). */
@@ -58,6 +60,8 @@ export class ConnectionManager {
     notePendingDel: (_ids: string[]) => {},
     /** Démarque un id dont la suppression en cascade a échoué. */
     clearPendingDel: (_id: string) => {},
+    /** Capabilities rafraîchies → gates UI dépendants du démon. */
+    capsChanged: () => {},
   };
 
   bind(d: Partial<typeof this.deps>) {
@@ -82,6 +86,12 @@ export class ConnectionManager {
   liveEntries(): [string, ConnLive][] {
     return [...this.live];
   }
+  /** Status démon brut de la conn (capabilities). conn inconnue → fallback
+   *  sur la seule conn suivie (cas nominal mono-démon). */
+  cap(k: string): Record<string, unknown> | undefined {
+    return this.caps.get(k) ??
+      (this.caps.size === 1 ? [...this.caps.values()][0] : undefined);
+  }
 
   /** Connexion établie → la surveillance/backoff la suit (fin de doConnect). */
   markConnected(cfg: Record<string, unknown>) {
@@ -89,6 +99,18 @@ export class ConnectionManager {
     this.cfg.set(ck, cfg);
     this.gone.delete(ck); // reconnectée via le dialogue → ré-active
     this.markAlive(ck);
+    // Sonde immédiate : capabilities démon (first_post, self_update) avant
+    // le prochain passage du watchdog (10 s).
+    void call<Record<string, unknown>>("daemon_status", { conn: ck })
+      .then((v) => {
+        if (!v.error) {
+          this.caps.set(ck, v);
+          // Les gates UI lisent caps — rafraîchir le header sinon ils
+          // resteraient masqués jusqu'à la prochaine updateHeader.
+          this.deps.capsChanged();
+        }
+      })
+      .catch(() => {});
   }
 
   /** Tooltip du badge selon l'état (avec prochain essai / nb de
@@ -242,6 +264,7 @@ export class ConnectionManager {
     this.gone.delete(conn);
     this.cfg.delete(conn);
     this.live.delete(conn);
+    this.caps.delete(conn);
     this.delay.delete(conn);
     this.nextAt.delete(conn);
     this.attempts.delete(conn);
@@ -360,6 +383,8 @@ export class ConnectionManager {
           if ((v as { error?: string }).error) this.markDead(k);
           else {
             anyOk = true;
+            this.caps.set(k, v as Record<string, unknown>);
+            this.deps.capsChanged();
             if ((this.live.get(k) ?? "ok") !== "ok") this.markAlive(k);
           }
         }

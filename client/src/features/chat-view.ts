@@ -93,6 +93,9 @@ export class ChatView {
     refresh: (): Promise<void> => Promise.resolve(),
     /** Barre de file (prompts en attente) — rafraîchie par updateHeader. */
     refreshQueue: () => {},
+    /** Bouton « premier post » affiché seulement si le démon de la conn
+     *  connaît first_post. */
+    firstPostCapable: (_conn: string) => false,
     /** L'arbre fichiers suit le workspace de la session ouverte. */
     onSessionOpened: () => {},
     /** Session affichée changée ou disparue (suppression, conn coupée,
@@ -577,6 +580,8 @@ export class ChatView {
   updateHeader() {
     $("btn-files").hidden = !app.current;
     $("btn-search").hidden = !app.current;
+    $("btn-first").hidden =
+      !app.current || !this.deps.firstPostCapable(app.current?.conn ?? "default");
     if (!app.current) {
       $("chat-ctx").hidden = true;
       $("chat-opts").hidden = true;

@@ -37,6 +37,7 @@ import { Sidebar } from "./features/sidebar";
 import { Composer } from "./features/composer";
 import { FileExplorer } from "./features/files";
 import { SettingsPanel } from "./features/settings";
+import { initFirstPost } from "./features/first-post";
 import { initLang, t, applyStatic } from "./i18n";
 import type { AcEvent } from "./core/types";
 
@@ -80,6 +81,7 @@ chat.bind(renderer, {
   onSessionOpened: () => files.onSessionOpened(),
   onSessionChanged: () => search.onSessionChanged(),
   connCount: () => conns.knownConns().length,
+  firstPostCapable: (c) => conns.cap(c)?.first_post === true,
 });
 search.bind({ jumpToSeq: (seq) => chat.jumpToSeq(seq) });
 renderer.bind({
@@ -100,6 +102,7 @@ conns.bind({
   clearGroups: (c) => groups.clearConn(c),
   notePendingDel: (ids) => sidebar.notePendingDel(ids),
   clearPendingDel: (id) => sidebar.clearPendingDel(id),
+  capsChanged: () => chat.updateHeader(),
 });
 connectDlg.bind(conns);
 connectDlg.refresh = () => sidebar.refresh();
@@ -165,6 +168,8 @@ $("tb-more").onclick = () =>
 $("chat-more").onclick = () => {
   const items: SheetItem[] = [];
   if (app.current) items.push({ icon: "search", label: t("search_title"), fn: () => search.open() });
+  if (app.current && conns.cap(app.current.conn ?? "default")?.first_post === true)
+    items.push({ icon: "top", label: t("first_post"), fn: () => $("btn-first").click() });
   if (app.current) items.push({ icon: "folder", label: t("files_title"), fn: () => $("btn-files").click() });
   if (app.current && !app.alive)
     items.push({ icon: "play", label: t("resume"), fn: () => $("btn-resume").click() });
@@ -191,6 +196,7 @@ sidebar.init();
 composer.init();
 files.init();
 settings.init();
+initFirstPost((c) => conns.cap(c)?.first_post === true);
 initModelBar(openFusion);
 initFusionDialog();
 initStatus();
