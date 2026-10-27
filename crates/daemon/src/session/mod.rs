@@ -86,6 +86,11 @@ pub struct Session {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PromptSrc {
     User,
+    /// Message user déjà journalisé (steer remis à l'agent puis refusé)
+    /// — le drain le livre sans réémettre un second `user_message`.
+    /// Repasse à `User` si le texte est édité dans la file : le chat
+    /// doit montrer la version réellement reçue par l'agent.
+    UserJournaled,
     Peer,
 }
 
