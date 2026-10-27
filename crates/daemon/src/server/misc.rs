@@ -9,6 +9,11 @@ impl Daemon {
                     "version": env!("CARGO_PKG_VERSION"),
                     "sessions": sessions.len(),
                     "agents": self.agents.keys().collect::<Vec<_>>(),
+                    // Capacité annoncée au client : ce démon sait répondre à
+                    // ReqKind::UpdateDaemon. Gate fiable côté client — un
+                    // démon plus vieux répondrait `parse: unknown variant`
+                    // avec id=0, droppé par le routage client → 60 s muet.
+                    "self_update": true,
                 }))
     }
     /// `UpdateDaemon` : télécharge la release demandée et remplace le
