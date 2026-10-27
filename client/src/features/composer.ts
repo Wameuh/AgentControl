@@ -7,9 +7,11 @@
 import { $, esc, qBtn, showErr } from "../core/dom";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
+import { isAndroid } from "../core/chrome";
 import type { CmdInfo, SendMode } from "../core/types";
 import { t } from "../i18n";
 import { cmdDesc, cmdHint, cmdName } from "./modelbar";
+import { sendPref } from "./settings";
 import type { ChatView } from "./chat-view";
 
 // ---- Commandes built-in (toujours dispo, exécutées côté client) ----
@@ -261,8 +263,21 @@ export class Composer {
     ac.hidden = false;
   }
 
+  /** Mode par défaut d'Entrée/bouton Envoyer (préférence paramètres). */
+  private defaultMode(): SendMode {
+    return sendPref() === "steer" ? "steer" : "normal";
+  }
+
+  /** Hints clavier du champ — dépendent du mode d'envoi choisi. */
+  refreshHints() {
+    if (isAndroid()) return; // placeholder mobile sans raccourcis
+    ($("input") as HTMLTextAreaElement).placeholder =
+      sendPref() === "steer" ? t("input_ph_steer") : t("input_ph");
+  }
+
   init() {
-    $("btn-send").onclick = () => this.sendInput("normal");
+    this.refreshHints();
+    $("btn-send").onclick = () => this.sendInput(this.defaultMode());
     $("btn-steer").onclick = () => this.sendInput("steer");
     $("input").addEventListener("keydown", (e) => {
       const ac = $("cmd-ac");
@@ -290,12 +305,13 @@ export class Composer {
       }
       if (e.key === "Enter" && e.altKey) {
         e.preventDefault();
-        this.sendInput("steer"); // Alt+Entrée = injecter après le tool call courant
+        // Alt+Entrée = l'autre mode (queue ↔ steer selon la préférence).
+        this.sendInput(this.defaultMode() === "steer" ? "normal" : "steer");
         return;
       }
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
-        this.sendInput("normal");
+        this.sendInput(this.defaultMode());
       }
     });
     $("input").addEventListener("input", () => this.refreshAc());
