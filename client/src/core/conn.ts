@@ -19,6 +19,7 @@ export function daemonParams(cfg: Record<string, unknown>, tag: string) {
     args: cfg.args ?? [],
     tag,
     port: cfg.port ?? null,
+    remotePort: cfg.remote_port ?? null,
     user: cfg.user ?? null,
     password: cfg.password ?? null,
     key: cfg.key ?? null,

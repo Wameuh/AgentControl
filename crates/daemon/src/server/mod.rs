@@ -24,6 +24,12 @@ use tokio::sync::broadcast;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+/// Fenêtre de rattrapage d'un `Subscribe` : au plus les N derniers events
+/// du trou sont rejoués (le reste est compté dans `skipped` et reste
+/// paginable via `ReqKind::Events`). Borne la bande passante du replay —
+/// un journal très volumineux saturait sinon le lien pendant des minutes.
+pub(crate) const SUBSCRIBE_REPLAY_MAX: usize = 500;
+
 use crate::journal;
 use crate::prs::PrRegistry;
 use crate::session::Session;
@@ -459,15 +465,26 @@ impl Daemon {
                     if let ReqKind::Subscribe { ref session, after_seq } = req.req {
                         match self.get_session(session).await {
                             Ok(s) => {
+                                // Rattrapage borné : un trou > REPLAY_MAX
+                                // n'est pas rejoué en entier (les events
+                                // sautés restent paginables via Events) —
+                                // sinon un journal volumineux sature le
+                                // lien et fait échouer toutes les requêtes
+                                // concurrentes par timeout.
+                                let (backlog, skipped) = s
+                                    .journal
+                                    .read_tail(&s.dir, after_seq, SUBSCRIBE_REPLAY_MAX)
+                                    .unwrap_or_default();
                                 let resp = Response::ok(req.id, json!({
                                     "subscribed": session,
-                                    "last_seq": s.journal.last_seq()
+                                    "last_seq": s.journal.last_seq(),
+                                    "skipped": skipped,
                                 }));
                                 Self::send_line(&write, &resp).await?;
                                 let rx = s.events_tx.subscribe();
                                 // Rattrapage du journal avant de passer en live
                                 let mut last = after_seq;
-                                for ev in s.journal.read_after(&s.dir, after_seq).unwrap_or_default() {
+                                for ev in backlog {
                                     last = ev.seq;
                                     Self::send_push(&write, session, &ev).await?;
                                 }
@@ -505,10 +522,20 @@ impl Daemon {
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {
-                            // Rattrapage via le journal
+                            // Rattrapage borné via le journal : un lag >
+                            // fenêtre laisse un trou de seq — comblable
+                            // via Events mais non signalé au client, on le
+                            // logge au moins.
                             let (sid, _, last) = sub.as_mut().unwrap();
                             let s = self.get_session(sid).await?;
-                            for event in s.journal.read_after(&s.dir, *last).unwrap_or_default() {
+                            let (backlog, skipped) = s
+                                .journal
+                                .read_tail(&s.dir, *last, SUBSCRIBE_REPLAY_MAX)
+                                .unwrap_or_default();
+                            if skipped > 0 {
+                                warn!(session = %sid, skipped, "subscribe lagged: events sautés au-delà de la fenêtre");
+                            }
+                            for event in backlog {
                                 *last = event.seq;
                                 Self::send_push(&write, sid, &event).await?;
                             }
