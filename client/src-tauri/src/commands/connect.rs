@@ -158,16 +158,23 @@ pub(crate) async fn ensure_daemon(
     const BASE: &str = "https://github.com/Wameuh/AgentControl/releases";
     // Script distant POSIX : check version via acctl status, sinon install.
     // `ver` non vide = le démon répond — à jour quel que soit le
-    // superviseur (systemd, supervisord, lancé à la main).
+    // superviseur (systemd, supervisord, lancé à la main). Gardes avant
+    // toute mutation : acctl via PATH en plus de ~/.local/bin (un démon
+    // installé par image/conteneur rapporte alors sa version), et probe
+    // du port 127.0.0.1:7331 — un démon qui écoute déjà (publié par
+    // Docker, forwardé) n'est jamais écrasé par l'artefact release.
     let script = format!(
         "set -e; arch=$(uname -m); \
          case $arch in x86_64|aarch64) ;; *) echo \"arch non supportée: $arch\" >&2; exit 1;; esac; \
          bin=$HOME/.local/bin/agentcontrol-daemon; \
-         ver=$(\"$HOME/.local/bin/acctl\" status 2>/dev/null | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4); \
+         ac=$(command -v acctl 2>/dev/null || true); [ -z \"$ac\" ] && [ -x \"$HOME/.local/bin/acctl\" ] && ac=\"$HOME/.local/bin/acctl\"; \
+         ver=$({{ [ -n \"$ac\" ] && \"$ac\" status 2>/dev/null || true; }} | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4); \
          if [ \"$ver\" = \"{t}\" ]; then echo ok:$ver; exit 0; fi; \
          if [ -n \"$ver\" ] && [ \"$ver\" != \"{t}\" ] && \
             [ \"$(printf '%s\\n%s\\n' \"{t}\" \"$ver\" | sort -V | tail -n1)\" = \"$ver\" ]; then \
             echo newer:$ver; exit 0; fi; \
+         curl -s -o /dev/null --max-time 2 http://127.0.0.1:7331 2>/dev/null; rc=$?; \
+         if [ \"$rc\" -ne 7 ]; then echo busy:127.0.0.1:7331; exit 0; fi; \
          d=$HOME/.cache/agentcontrol-upd; rm -rf \"$d\"; mkdir -p \"$d\"; cd \"$d\" || exit 1; \
          curl -fsSL -o acd.tgz \"{base}/download/v{t}/agentcontrol-server-$arch-linux.tar.gz\" || \
          curl -fsSL -o acd.tgz \"{base}/latest/download/agentcontrol-server-$arch-linux.tar.gz\"; \

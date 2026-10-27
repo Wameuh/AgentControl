@@ -48,9 +48,32 @@ export class ConnectDialog {
       .catch(() => null);
     const n = sessions?.filter((s) =>
       s.conn === conn && s.state !== "dead" && s.state !== "interrupted").length;
-    $("dupdate-msg").textContent = n == null
-      ? t("dupdate_msg_unk", { dv, lv, host })
-      : t("dupdate_msg", { dv, lv, host, n });
+    return this.daemonAction(
+      t("dupdate_h"),
+      n == null
+        ? t("dupdate_msg_unk", { dv, lv, host })
+        : t("dupdate_msg", { dv, lv, host, n }),
+      t("update_now"),
+    );
+  }
+
+  /** Bootstrap install sur un hôte où connect a échoué : l'action copie
+   *  des binaires et active une unit systemd distante — validation
+   *  explicite, car l'hôte peut être un passage (port forwardé vers un
+   *  démon managé par conteneur/superviseur) où installer serait une
+   *  erreur. */
+  private async confirmDaemonInstall(host: string): Promise<boolean> {
+    return this.daemonAction(t("dinstall_h"), t("dinstall_msg", { host }), t("install_now"));
+  }
+
+  /** Dialogue de confirmation générique pour une action mutante sur le
+   *  démon distant (dlg-dupdate réutilisé avec les strings de l'action). */
+  private daemonAction(h3: string, msg: string, go: string): Promise<boolean> {
+    const dlg = $("dlg-dupdate") as HTMLDialogElement;
+    if (dlg.open) return Promise.resolve(false);
+    dlg.querySelector("h3")!.textContent = h3;
+    $("dupdate-msg").textContent = msg;
+    ($("dupdate-go") as HTMLButtonElement).textContent = go;
     return new Promise((resolve) => {
       ($("dupdate-go") as HTMLButtonElement).onclick = () => {
         resolve(true);
@@ -72,12 +95,19 @@ export class ConnectDialog {
       // SSH : échec → démon absent ou arrêté → bootstrap depuis la release.
       if (cfg.kind !== "ssh" || !cfg.host) throw e;
       const ver = await getVersion().catch(() => "0.0.0");
+      // L'install copie des binaires + une unit systemd sur l'hôte : si la
+      // connexion pointe un démon managé autrement (conteneur, superviseur,
+      // port forwardé) mais momentanément down, installer ici écraserait
+      // l'hôte — confirmation explicite avant toute mutation.
+      if (!(await this.confirmDaemonInstall(String(cfg.host)))) throw e;
       this.daemonDlg(t("installing_daemon") + " — " + String(cfg.host), true);
       try {
         const res = await invoke<string>("ensure_daemon", daemonParams(cfg, ver));
         // Démon plus récent : le script distant refuse le downgrade.
         if (res.startsWith("newer:")) newerDaemon = res.slice(6);
-        else if (res.startsWith("installed:") && res.slice(10) !== ver) {
+        else if (res.startsWith("busy:")) {
+          showErr(t("dupdate_busy", { host: String(cfg.host), addr: res.slice(5) }));
+        } else if (res.startsWith("installed:") && res.slice(10) !== ver) {
           showErr(t("dupdate_stale", { host: String(cfg.host), want: ver, got: res.slice(10) || "?" }));
         }
       } finally {
@@ -107,7 +137,9 @@ export class ConnectDialog {
               });
             // Un autre client a pu upgrader le démon entre-temps → même garde-fou.
             if (res.startsWith("newer:")) showOutdated(lv, res.slice(6));
-            else {
+            else if (res.startsWith("busy:")) {
+              showErr(t("dupdate_busy", { host: String(cfg.host), addr: res.slice(5) }));
+            } else {
               if (res.startsWith("installed:") && res.slice(10) !== lv) {
                 showErr(t("dupdate_stale", { host: String(cfg.host), want: lv, got: res.slice(10) || "?" }));
               }

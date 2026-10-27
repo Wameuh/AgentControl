@@ -72,6 +72,12 @@ const STR = {
     cmd_unknown: "⚠ /{cmd} is not exposed by this agent — not sent (see autocomplete for supported commands)",
     installing_daemon: "installing daemon on server…",
     updating_daemon: "updating daemon {dv} → {lv}…",
+    dinstall_h: "Install daemon",
+    dinstall_msg:
+      "No daemon answers on {host}. Installing copies binaries and enables a systemd user unit on that host — if the daemon is managed another way there (container, supervisor), cancel and fix that instead.",
+    install_now: "Install",
+    dupdate_busy:
+      "A daemon is already listening on {host} ({addr}) — managed by a container/supervisor or a forwarded port. Install left untouched.",
     outdated_h: "Update required",
     outdated_msg: "This client (v{lv}) is older than the daemon (v{dv}). The daemon was left untouched — please update the client to v{target}.",
     update_now: "Update now", later: "Later",
@@ -164,6 +170,12 @@ const STR = {
     cmd_unknown: "⚠ /{cmd} n'est pas exposée par cet agent — non envoyée (voir l'autocomplétion pour les commandes supportées)",
     installing_daemon: "installation du démon sur le serveur…",
     updating_daemon: "mise à jour du démon {dv} → {lv}…",
+    dinstall_h: "Installer le démon",
+    dinstall_msg:
+      "Aucun démon ne répond sur {host}. L'installation copie des binaires et active une unit systemd sur cet hôte — si le démon y est géré autrement (conteneur, superviseur), annuler et corriger ça à la place.",
+    install_now: "Installer",
+    dupdate_busy:
+      "Un démon écoute déjà sur {host} ({addr}) — géré par un conteneur/superviseur ou un port forwardé. Installation non appliquée.",
     outdated_h: "Mise à jour requise",
     outdated_msg: "Ce client (v{lv}) est plus vieux que le démon (v{dv}). Le démon n'a pas été modifié — mettez le client à jour vers v{target}.",
     update_now: "Mettre à jour", later: "Plus tard",
