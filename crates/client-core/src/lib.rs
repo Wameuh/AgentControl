@@ -189,6 +189,10 @@ pub fn log_at(level: Level, file: &str, line_no: u32, msg: impl std::fmt::Displa
     } else {
         format!(" {file}:{line_no}")
     };
+    // Une ligne physique par entrée : \n → ␤. Un message multi-lignes
+    // (sortie ssh, erreur remontée) ne doit ni injecter de fausse entrée
+    // ni perdre ses continuations au filtrage par niveau de l'UI.
+    let msg = msg.to_string().replace(['\r', '\n'], "␤");
     let line = format!("[{}] [{}]{} {}", proto::now_iso(), level.as_str(), src, msg);
     eprintln!("{line}");
     if let Ok(mut w) = logfile().lock() {

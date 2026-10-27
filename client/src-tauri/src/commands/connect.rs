@@ -250,7 +250,11 @@ pub(crate) async fn ensure_daemon(
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if !out.status.success() {
         let e = String::from_utf8_lossy(&out.stderr);
-        client_core::log(Level::Error, format!("ensure_daemon {host}: {e}"));
+        // 255 = échec de ssh lui-même (transport) ; un autre code = le
+        // script distant a répondu en erreur, déjà remontée à
+        // l'utilisateur → Warn comme le chemin natif (code != 0).
+        let lv = if out.status.code() == Some(255) { Level::Error } else { Level::Warn };
+        client_core::log(lv, format!("ensure_daemon {host}: {e}"));
         return Err(e.to_string());
     }
     client_core::log(Level::Info, format!("ensure_daemon {host}: {stdout}"));
