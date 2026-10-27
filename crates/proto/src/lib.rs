@@ -686,7 +686,7 @@ pub enum ReqKind {
         session: String,
     },
     /// Ouvre un shell PTY sur l'hôte du démon, cwd = workspace de la
-    /// session. Réponse : `{term}`. La sortie arrive en pushes
+    /// session. Réponse : `{term, cwd}`. La sortie arrive en pushes
     /// `{push:"term_data", term, data:base64}` et la fin en
     /// `{push:"term_exit", term, code:i64|null}`.
     /// Cycle de vie borné à la connexion : le PTY est tué si elle tombe.

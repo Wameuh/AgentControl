@@ -77,6 +77,16 @@ impl Daemon {
     where
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
+        /// Garde-fou par connexion : chaque PTY = shell + 2 threads + une
+        /// tâche de relais — un client qui floode term_open ne doit pas
+        /// gonfler le démon sans borne.
+        const MAX_TERMS_PER_CONN: usize = 16;
+
+        if terms.len() >= MAX_TERMS_PER_CONN {
+            return Err(anyhow::anyhow!(
+                "trop de terminaux ouverts sur cette connexion (max {MAX_TERMS_PER_CONN})"
+            ));
+        }
         let s = self.get_session(&session).await?;
         let cwd = s.meta_snapshot().cwd;
         // Comme les agents : acctl/pont A2A utilisables dans le shell.
@@ -91,7 +101,13 @@ impl Daemon {
         } else {
             vec![]
         };
-        let (term, mut rx) = Term::spawn(&cwd, cols, rows, &envs)?;
+        // openpty + fork/exec + spawn des threads : bloquant bref, sorti
+        // de la boucle async de serve_conn (spawn_blocking).
+        let cwd2 = cwd.clone();
+        let (term, mut rx) =
+            tokio::task::spawn_blocking(move || Term::spawn(&cwd2, cols, rows, &envs))
+                .await
+                .map_err(|e| anyhow::anyhow!("pty spawn: {e}"))??;
         let tid = term.id.clone();
         info!("[{}] terminal {tid} ouvert ({}x{})", session, cols, rows);
         {

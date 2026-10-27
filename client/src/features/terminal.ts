@@ -27,6 +27,8 @@ interface TermEntry {
   /** Conteneur du xterm — détaché/réattaché dans #term-box au switch. */
   box: HTMLElement;
   exited: boolean;
+  /** Frappes reçues pendant "connecting…" — flushées à l'ouverture. */
+  pending: string[];
 }
 
 function b64enc(u8: Uint8Array): string {
@@ -77,9 +79,15 @@ export class TermPanel {
    *  pour les sessions sans terminal. */
   private wantOpen = false;
   private capable: (conn: string) => boolean = () => false;
+  /** Résout la sentinelle "default" → clé de conn réelle (mono-conn). */
+  private defaultConn: () => string | undefined = () => undefined;
 
-  bind(d: { termCapable: (conn: string) => boolean }) {
+  bind(d: {
+    termCapable: (conn: string) => boolean;
+    defaultConn: () => string | undefined;
+  }) {
     this.capable = d.termCapable;
+    this.defaultConn = d.defaultConn;
   }
 
   private key(sid: string, conn: string) {
@@ -107,7 +115,10 @@ export class TermPanel {
   toggle() {
     const s = app.current;
     if (!s) return;
-    if (!this.wantOpen) {
+    // L'état réel du panneau fait foi : wantOpen survit aux switchs vers
+    // une session sans terminal (panneau masqué) — se fier à lui ici
+    // rendrait le premier clic sans effet visible.
+    if ($("term-panel").hidden) {
       if (!this.supported()) {
         showErr(t("term_unsupported"));
         return;
@@ -158,8 +169,12 @@ export class TermPanel {
   /** Connexion morte : les PTY meurent avec — terminaux marqués morts,
    *  rouvrables via ↻ (le spawn passe par la conn reconnectée). */
   markConnDead(conn: string) {
+    const def = this.defaultConn();
     for (const e of this.terms.values()) {
-      if (e.conn !== conn || e.exited) continue;
+      // "default" = conn par défaut côté démon — résoluble en clé réelle
+      // qu'en mono-connexion (multi-serveurs : edge ignoré).
+      const mine = e.conn === conn || (e.conn === "default" && def === conn);
+      if (!mine || e.exited) continue;
       e.exited = true;
       e.termId = null;
       e.xterm.write(`\r\n\x1b[31m${t("term_conn_lost")}\x1b[0m\r\n`);
@@ -174,7 +189,10 @@ export class TermPanel {
   /** Monte l'entrée de la session courante dans le panneau + fit. */
   private mount(e: TermEntry) {
     const box = $("term-box");
-    if (e.box.parentElement !== box) box.appendChild(e.box);
+    // replaceChildren retire les boxes des autres sessions : sans ça elles
+    // s'empilent dans #term-box et seule la première reste visible — le
+    // terminal affiché ne suivrait plus la session courante.
+    box.replaceChildren(e.box);
     $("term-panel").hidden = false;
     $("term-cwd").textContent = app.current?.cwd ?? "";
     requestAnimationFrame(() => {
@@ -226,6 +244,7 @@ export class TermPanel {
       fit,
       box,
       exited: false,
+      pending: [],
     };
     this.terms.set(key, entry);
     requestAnimationFrame(() => {
@@ -233,6 +252,32 @@ export class TermPanel {
       xterm.focus();
     });
     xterm.writeln(`\x1b[2m${t("term_connecting")}\x1b[0m`);
+
+    // Handlers posés AVANT term_open : les frappes pendant "connecting…"
+    // sont bufferisées (bornées) puis flushées à l'ouverture — sans ça
+    // elles tombaient dans le vide (pas de onData enregistré).
+    const enc = new TextEncoder();
+    xterm.onData((d) => {
+      if (entry.exited) return;
+      if (!entry.termId) {
+        if (entry.pending.length < 256) entry.pending.push(d);
+        return;
+      }
+      void call("term_input", {
+        term: entry.termId,
+        conn: apiConn(entry.conn), // pas de session → injecté via params
+        data: b64enc(enc.encode(d)),
+      }).catch(() => {});
+    });
+    xterm.onResize(({ cols, rows }) => {
+      if (!entry.termId || entry.exited) return;
+      void call("term_resize", {
+        term: entry.termId,
+        conn: apiConn(entry.conn),
+        cols,
+        rows,
+      }).catch(() => {});
+    });
 
     const dims = fit.proposeDimensions();
     try {
@@ -242,28 +287,34 @@ export class TermPanel {
         cols: dims?.cols ?? 120,
         rows: dims?.rows ?? 30,
       });
-      // Session changée pendant l'ouverture → le term reste dans la map,
-      // remonté au prochain passage sur la session.
+      // Entrée supprimée/remplacée pendant l'ouverture (session_deleted,
+      // restart, second ensure) : le shell démon n'a plus de référence
+      // client — term_close sinon il fuiterait jusqu'à la déconnexion.
+      if (this.terms.get(key) !== entry) {
+        void call("term_close", { term: r.term, conn: apiConn(entry.conn) })
+          .catch(() => {});
+        return;
+      }
       entry.termId = r.term;
       $("term-cwd").textContent = r.cwd;
       $("term-cwd").title = r.cwd;
-      xterm.onData((d) => {
-        if (!entry.termId || entry.exited) return;
-        void call("term_input", {
-          term: entry.termId,
-          conn: apiConn(entry.conn), // pas de session → injecté via params
-          data: b64enc(new TextEncoder().encode(d)),
-        }).catch(() => {});
-      });
-      xterm.onResize(({ cols, rows }) => {
-        if (!entry.termId || entry.exited) return;
+      // La taille a pu changer pendant l'ouverture (fit post-montage).
+      const d2 = fit.proposeDimensions();
+      if (d2 && (d2.cols !== dims?.cols || d2.rows !== dims?.rows)) {
         void call("term_resize", {
-          term: entry.termId,
+          term: r.term,
           conn: apiConn(entry.conn),
-          cols,
-          rows,
+          cols: d2.cols,
+          rows: d2.rows,
         }).catch(() => {});
-      });
+      }
+      for (const d of entry.pending.splice(0)) {
+        void call("term_input", {
+          term: r.term,
+          conn: apiConn(entry.conn),
+          data: b64enc(enc.encode(d)),
+        }).catch(() => {});
+      }
       xterm.focus();
     } catch (err) {
       logUi("error", `term_open ${s.id}: ${err}`);

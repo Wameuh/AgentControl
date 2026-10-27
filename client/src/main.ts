@@ -126,7 +126,14 @@ settings.langChanged = () => {
 };
 settings.sendModeChanged = () => composer.refreshHints();
 settings.themeChanged = () => term.refreshTheme();
-term.bind({ termCapable: (c) => conns.cap(c)?.terminal === true });
+term.bind({
+  termCapable: (c) => conns.cap(c)?.terminal === true,
+  // "default" n'est résoluble en clé réelle qu'en mono-connexion.
+  defaultConn: () => {
+    const k = conns.knownConns();
+    return k.length === 1 ? k[0] : undefined;
+  },
+});
 
 // Conn perdue (EOF transport) : les PTY du démon meurent avec → bannière
 // dans les terminaux concernés (reopen possible via ↻ au retour).
