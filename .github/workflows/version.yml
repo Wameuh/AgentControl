@@ -33,7 +33,7 @@ name: version
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 # Plancher moindre privilège : GITHUB_TOKEN en read partout — les
 # pushes partent via le PAT du checkout (RELEASE_PAT), jamais via
@@ -41,9 +41,9 @@ on:
 permissions:
   contents: read
 
-# Deux events proches (labeled + synchronize après le push du bump…) →
-# deux jobs concurrents : le second push est non-fast-forward → échec.
-# cancel-in-progress=true : le run le plus récent gagne.
+# Deux events proches (ready_for_review + synchronize après le push du
+# bump…) → deux jobs concurrents : le second push est non-fast-forward
+# → échec. cancel-in-progress=true : le run le plus récent gagne.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
