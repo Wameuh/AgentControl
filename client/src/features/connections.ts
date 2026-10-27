@@ -188,9 +188,14 @@ export class ConnectionManager {
         .catch(() => {});
     }
     if ((this.live.get(conn) ?? "ok") === "ok" && !this.gone.has(conn)) {
-      for (const s of app.lastSessions.filter((x) => (x.conn ?? "default") === conn)) {
-        await call("delete_session", { session: s.id, conn }).catch((e) => showErr(String(e)));
-      }
+      // Parallèle : N sessions à supprimer ne doivent pas coûter N RTT.
+      await Promise.all(
+        app.lastSessions
+          .filter((x) => (x.conn ?? "default") === conn)
+          .map((s) =>
+            call("delete_session", { session: s.id, conn }).catch((e) => showErr(String(e))),
+          ),
+      );
     }
     await this.disconnect(conn);
     this.gone.delete(conn);
