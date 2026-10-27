@@ -20,7 +20,8 @@ import {
   initWindowChrome,
   shellOpen,
 } from "./core/chrome";
-import { nav } from "./ui/nav";
+import { nav, type SheetItem } from "./ui/nav";
+import { hydrateIcons } from "./ui/icons";
 import { initStatus } from "./features/status";
 import { checkBootUpdate } from "./features/update";
 import { initModelBar } from "./features/modelbar";
@@ -99,7 +100,7 @@ newSess.bind(groups);
 newSess.refresh = () => void sidebar.refresh();
 newSess.knownConns = () => conns.knownConns();
 groups.refresh = () => void sidebar.refresh();
-files.bind({ sysline: (txt) => chat.sysline(txt) });
+files.bind({ sysline: (txt, ic) => chat.sysline(txt, ic) });
 settings.langChanged = () => {
   // applyStatic a réécrit le placeholder avec input_ph — hints à jour.
   composer.refreshHints();
@@ -147,17 +148,17 @@ $("tb-about").onclick = async () => {
 // actions de session (cachées du header sur mobile).
 $("tb-more").onclick = () =>
   nav.sheet([
-    { label: `⚙  ${t("settings_title")}`, fn: () => $("tb-settings").click() },
-    { label: `ⓘ  ${t("about_title")}`, fn: () => $("tb-about").click() },
+    { icon: "settings", label: t("settings_title"), fn: () => $("tb-settings").click() },
+    { icon: "info", label: t("about_title"), fn: () => $("tb-about").click() },
   ]);
 $("chat-more").onclick = () => {
-  const items: { label: string; danger?: boolean; fn: () => void }[] = [];
-  if (app.current) items.push({ label: `📁  ${t("files_title")}`, fn: () => $("btn-files").click() });
+  const items: SheetItem[] = [];
+  if (app.current) items.push({ icon: "folder", label: t("files_title"), fn: () => $("btn-files").click() });
   if (app.current && !app.alive)
-    items.push({ label: `↻  ${t("resume")}`, fn: () => $("btn-resume").click() });
+    items.push({ icon: "play", label: t("resume"), fn: () => $("btn-resume").click() });
   if (app.current && app.alive)
-    items.push({ label: `💤  ${t("ctx_sleep")}`, fn: () => $("btn-sleep").click() });
-  items.push({ label: `⟳  ${t("refresh_title")}`, fn: () => $("btn-refresh").click() });
+    items.push({ icon: "sleep", label: t("ctx_sleep"), fn: () => $("btn-sleep").click() });
+  items.push({ icon: "refresh", label: t("refresh_title"), fn: () => $("btn-refresh").click() });
   nav.sheet(items);
 };
 $("about-gh").addEventListener("click", (e) => {
@@ -167,6 +168,7 @@ $("about-gh").addEventListener("click", (e) => {
 
 // --- Init --------------------------------------------------------------------
 
+hydrateIcons();
 groups.init();
 newSess.init();
 conns.init();

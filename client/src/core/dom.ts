@@ -38,13 +38,6 @@ export function mkEv(cls: string, seq: number): HTMLElement {
   return d;
 }
 
-export function qBtn(txt: string, title: string): HTMLButtonElement {
-  const b = document.createElement("button");
-  b.textContent = txt;
-  b.title = title;
-  return b;
-}
-
 export async function copyText(s: string) {
   try {
     await navigator.clipboard.writeText(s);

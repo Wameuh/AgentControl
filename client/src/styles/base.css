@@ -81,3 +81,16 @@ body {
 ::-webkit-scrollbar { width: 9px; }
 ::-webkit-scrollbar-thumb { background: rgba(236, 230, 216, .16); border-radius: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* Icônes SVG inline (ui/icons.ts) — remplacent les glyphes Unicode dont le
+   rendu dépendait des fonts système (fallback incohérent, bascule emoji).
+   1em suit la taille du contexte ; -0.18em aligne sur la ligne de base. */
+.ic {
+  width: 1em; height: 1em; flex: none;
+  display: inline-block; vertical-align: -0.18em;
+}
+/* Boutons « icône seule » du markup statique : centrés par construction. */
+[data-icon] { display: inline-flex; align-items: center; justify-content: center; }
+[data-icon] .ic { display: block; vertical-align: 0; }
+/* Carets de dépliage : rotation animée à l'ouverture. */
+.ic-caret { transition: transform .15s ease; }

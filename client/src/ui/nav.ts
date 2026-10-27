@@ -4,10 +4,18 @@
 // Scrim (drawer/sheet) et bottom-sheet ⋮ sont créés ici aussi.
 // ---------------------------------------------------------------------------
 
-import { $ } from "../core/dom";
+import { $, esc } from "../core/dom";
 import { isAndroid } from "../core/chrome";
+import { icon, type IconName } from "./icons";
 
 type ScrimOwner = "drawer" | "sheet";
+
+export interface SheetItem {
+  label: string;
+  icon?: IconName;
+  danger?: boolean;
+  fn: () => void;
+}
 
 export class OverlayNav {
   private stack: string[] = [];
@@ -110,12 +118,12 @@ export class OverlayNav {
     if (this.scrimOwner === owner) { this.scrimOwner = null; this.scrim.hidden = true; }
   }
 
-  sheet(items: { label: string; danger?: boolean; fn: () => void }[]) {
+  sheet(items: SheetItem[]) {
     this.omenu.innerHTML = "";
     for (const it of items) {
       const b = document.createElement("button");
       b.className = "om-item" + (it.danger ? " danger" : "");
-      b.textContent = it.label;
+      b.innerHTML = (it.icon ? `${icon(it.icon)} ` : "") + `<span>${esc(it.label)}</span>`;
       b.onclick = () => { this.closeSheet(); it.fn(); };
       this.omenu.appendChild(b);
     }

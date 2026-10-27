@@ -13,6 +13,7 @@ import { app } from "../core/state";
 import type { AcEvent, SessionMeta } from "../core/types";
 import { gemSVG } from "../crystal";
 import { t } from "../i18n";
+import { icon, type IconName } from "../ui/icons";
 import { fillEfforts, splitModel } from "./modelbar";
 import type { EventRenderer } from "./event-renderers";
 
@@ -271,7 +272,7 @@ export class ChatView {
     if (!app.alive && app.current.native_session_id && app.current.state !== "asleep") {
       const sys = document.createElement("div");
       sys.className = "sysline";
-      sys.textContent = "⏳ reprise de l'agent…";
+      sys.innerHTML = `${icon("loader")} ${esc("reprise de l'agent…")}`;
       this.eventsEl.appendChild(sys);
       try {
         await call("resume_session", { session: id });
@@ -283,10 +284,10 @@ export class ChatView {
         app.alive = info2.alive;
         app.current = info2.meta;
         if (!app.current.conn && connHint) app.current.conn = connHint;
-        sys.textContent = "✔ agent repris";
+        sys.innerHTML = `${icon("check")} ${esc("agent repris")}`;
         this.updateHeader();
       } catch (e) {
-        sys.textContent = `⚠ reprise: ${e}`;
+        sys.innerHTML = `${icon("warn")} ${esc(`reprise: ${e}`)}`;
       }
     }
 
@@ -392,7 +393,7 @@ export class ChatView {
    *  restent lisibles mais plus rien ne partira. */
   markGone() {
     if (!app.current) return;
-    this.sysline(t("session_gone"));
+    this.sysline(t("session_gone"), "warn");
     this.dropConv(app.current.id);
     app.current = null;
     this.unseenBelow = 0;
@@ -703,10 +704,10 @@ export class ChatView {
   }
 
   /** Ligne système dans le fil (retourne l'élément pour mises à jour). */
-  sysline(text: string): HTMLElement {
+  sysline(text: string, ic: IconName = "sys"): HTMLElement {
     const d = document.createElement("div");
     d.className = "ev sysline";
-    d.textContent = `⦿ ${text}`;
+    d.innerHTML = `${icon(ic)} ${esc(text)}`;
     this.eventsEl.appendChild(d);
     this.scrollBottom();
     return d;

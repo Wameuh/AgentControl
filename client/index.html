@@ -10,30 +10,30 @@
     <canvas id="mesh-bg"></canvas>
     <div id="app">
       <div id="titlebar" data-tauri-drag-region>
-        <button id="tb-menu" hidden data-i18n-title="menu_title" title="Menu">☰</button>
+        <button id="tb-menu" hidden data-icon="menu" data-i18n-title="menu_title" title="Menu"></button>
         <span id="titlebar-gem"></span>
         <span id="titlebar-title">AgentControl</span>
         <div class="tb-btns">
-          <button id="tb-settings" title="Settings" data-i18n-title="settings_title">⚙</button>
-          <button id="tb-about" title="About" data-i18n-title="about_title">ⓘ</button>
-          <button id="tb-more" hidden data-i18n-title="menu_title" title="Menu">⋮</button>
-          <button id="tb-min" title="—">—</button>
-          <button id="tb-max" title="▢">▢</button>
-          <button id="tb-close" title="✕">✕</button>
+          <button id="tb-settings" data-icon="settings" title="Settings" data-i18n-title="settings_title"></button>
+          <button id="tb-about" data-icon="info" title="About" data-i18n-title="about_title"></button>
+          <button id="tb-more" hidden data-icon="more" data-i18n-title="menu_title" title="Menu"></button>
+          <button id="tb-min" data-icon="min" data-i18n-title="win_min" title="Minimize"></button>
+          <button id="tb-max" data-icon="max" data-i18n-title="win_max" title="Maximize"></button>
+          <button id="tb-close" data-icon="close" data-i18n-title="close" title="Close"></button>
         </div>
       </div>
       <div id="app-body">
         <aside id="sidebar">
           <div id="conn-bar">
             <button id="btn-connect" data-i18n="new_conn">New connection</button>
-            <button id="conn-chip" class="badge warn" hidden>⟳</button>
+            <button id="conn-chip" class="badge warn" hidden data-icon="refresh"></button>
           </div>
           <div id="session-list"></div>
           <button id="btn-new-session" data-i18n="new_session">New agent</button>
           <div id="sidebar-resize" title="Drag to resize"></div>
         </aside>
         <main id="chat">
-          <div id="err-bar" hidden><span id="err-text"></span><button id="err-close">✕</button></div>
+          <div id="err-bar" hidden><span id="err-text"></span><button id="err-close" data-icon="close"></button></div>
           <header id="chat-header">
             <span id="chat-gem" hidden></span>
             <span id="chat-title" data-i18n-title="title_dblclick">—</span>
@@ -43,33 +43,33 @@
               <select id="mode-select" hidden></select>
               <select id="model-select" hidden></select>
               <select id="effort-select" hidden data-i18n-title="effort_title" title="Effort"></select>
-              <button id="btn-fusion-edit" hidden title="Configure fusion">⚙✨</button>
+              <button id="btn-fusion-edit" hidden data-icon="merge" title="Configure fusion"></button>
               <input id="model-free" hidden data-i18n-ph="model_free_ph" data-i18n-title="model_free_title" placeholder="model…" />
               <span id="dyn-opts"></span>
             </div>
-            <button id="btn-files" hidden data-i18n-title="files_title" title="Files">📁</button>
-            <button id="btn-refresh" data-i18n-title="refresh_title" title="Reload">⟳</button>
+            <button id="btn-files" hidden data-icon="folder" data-i18n-title="files_title" title="Files"></button>
+            <button id="btn-refresh" data-icon="refresh" data-i18n-title="refresh_title" title="Reload"></button>
             <button id="btn-resume" hidden data-i18n="resume">Resume</button>
             <button id="btn-sleep" hidden data-i18n="ctx_sleep">Sleep</button>
             <button id="btn-cancel" hidden data-i18n="stop">Stop</button>
-            <button id="chat-more" hidden data-i18n-title="menu_title" title="Menu">⋮</button>
+            <button id="chat-more" hidden data-icon="more" data-i18n-title="menu_title" title="Menu"></button>
           </header>
           <div id="events">
             <div id="scroll-sentinel"></div>
           </div>
-          <button id="btn-bottom" hidden data-i18n-title="bottom_title" title="Latest">↓</button>
+          <button id="btn-bottom" hidden data-icon="down" data-i18n-title="bottom_title" title="Latest"></button>
           <div id="queue-bar" hidden></div>
           <footer id="composer">
             <div id="cmd-ac" hidden></div>
             <textarea id="input" data-i18n-ph="input_ph" placeholder="Message… (Enter = send)" rows="2"></textarea>
-            <button id="btn-steer" hidden data-i18n-title="steer_title" title="Steer">↪</button>
+            <button id="btn-steer" hidden data-icon="steer" data-i18n-title="steer_title" title="Steer"></button>
             <button id="btn-send" data-i18n="send">Send</button>
           </footer>
           <div id="settings-view" tabindex="-1" hidden>
             <header id="settings-head">
               <span id="settings-title" data-i18n="settings_h">Settings</span>
               <span id="s-version"></span>
-              <button id="settings-close" data-i18n-title="close" title="Close">✕</button>
+              <button id="settings-close" data-icon="close" data-i18n-title="close" title="Close"></button>
             </header>
             <div id="settings-body">
               <label class="s-row"><span data-i18n="theme_label">Theme</span>
@@ -114,15 +114,15 @@
           <div id="file-resize" title="Drag to resize"></div>
           <header id="file-head">
             <span id="file-path"></span>
-            <button id="btn-tree" data-i18n-title="tree_title" title="File tree">🗂</button>
-            <button id="btn-tree-refresh" hidden data-i18n-title="tree_refresh" title="Refresh">⟳</button>
-            <button id="file-close">✕</button>
+            <button id="btn-tree" data-icon="panel" data-i18n-title="tree_title" title="File tree"></button>
+            <button id="btn-tree-refresh" hidden data-icon="refresh" data-i18n-title="tree_refresh" title="Refresh"></button>
+            <button id="file-close" data-icon="close"></button>
           </header>
           <div id="file-body">
             <div id="file-tree" hidden></div>
             <div id="file-viewer">
               <div id="fv-bar">
-                <button id="fv-back" data-i18n-title="menu_title" title="Back">‹</button>
+                <button id="fv-back" data-icon="back" data-i18n-title="menu_title" title="Back"></button>
                 <span id="fv-name"></span>
               </div>
               <pre id="file-view" class="syn"></pre>
@@ -167,7 +167,7 @@
         <label><span data-i18n="recent">Recent connections</span>
           <span id="c-saved-row">
             <select id="c-saved"><option value="">— choose —</option></select>
-            <button type="button" id="c-saved-del" data-i18n-title="del_saved_conn" title="Remove">✕</button>
+            <button type="button" id="c-saved-del" data-icon="close" data-i18n-title="del_saved_conn" title="Remove"></button>
           </span>
         </label>
         <label><span data-i18n="type_label">Type</span>
@@ -249,7 +249,7 @@
       <form method="dialog">
         <h3 id="dlg-daemon-title">Daemon update</h3>
         <div class="daemon-dlg">
-          <span class="spin-ico">◌</span>
+          <span class="spin-ico" data-icon="loader"></span>
           <p id="dlg-daemon-msg"></p>
         </div>
       </form>

@@ -11,6 +11,7 @@ import { call } from "../core/rpc";
 import { app } from "../core/state";
 import type { AcEvent, CmdInfo, ConfigOption } from "../core/types";
 import { t } from "../i18n";
+import { icon } from "../ui/icons";
 
 // Seuils au-delà desquels une bulle user est repliée par défaut.
 const USER_FOLD_CHARS = 480;
@@ -59,10 +60,12 @@ export class EventRenderer {
           const btn = document.createElement("button");
           btn.type = "button";
           btn.className = "um-toggle";
-          btn.textContent = t("um_expand");
+          const setLabel = (collapsed: boolean) => {
+            btn.innerHTML = `${icon("chev-down", "ic-caret")} ${esc(t(collapsed ? "um_expand" : "um_collapse"))}`;
+          };
+          setLabel(true);
           btn.addEventListener("click", () => {
-            const collapsed = d.classList.toggle("um-collapsed");
-            btn.textContent = t(collapsed ? "um_expand" : "um_collapse");
+            setLabel(d.classList.toggle("um-collapsed"));
           });
           d.appendChild(btn);
         }
@@ -80,10 +83,10 @@ export class EventRenderer {
         const peerId = (outgoing ? ev.to_session : ev.from_session) as string;
         const d = mkEv(`msg peer ${outgoing ? "out" : "in"}`, ev.seq);
         const label = outgoing
-          ? `→ ${t("peer_to")} «${ev.to_title}»`
-          : `💬 ${t("peer_from")} «${ev.from_title}»`;
+          ? `${t("peer_to")} «${ev.to_title}»`
+          : `${t("peer_from")} «${ev.from_title}»`;
         d.innerHTML =
-          `<div class="peer-head" title="${esc(peerId)}">${esc(label)}</div>` +
+          `<div class="peer-head" title="${esc(peerId)}">${icon(outgoing ? "arrow-right" : "peer")} ${esc(label)}</div>` +
           `<div class="peer-body">${linkify(esc(ev.text as string))}</div>`;
         d.querySelector(".peer-head")?.addEventListener("click", () =>
           this.deps.openSession(peerId));
@@ -93,7 +96,7 @@ export class EventRenderer {
         const d = mkEv("thought", ev.seq);
         const txt = ev.text as string;
         const head = txt.trim().split("\n")[0].slice(0, 110);
-        d.innerHTML = `<details class="th"><summary>💭 ${esc(head)}</summary><div class="md th-body">${mdRender(txt)}</div></details>`;
+        d.innerHTML = `<details class="th"><summary>${icon("chev-right", "ic-caret")} ${icon("thought")} ${esc(head)}</summary><div class="md th-body">${mdRender(txt)}</div></details>`;
         return d;
       }
       case "tool_call":
@@ -107,7 +110,7 @@ export class EventRenderer {
         const d = mkEv("resolved", ev.seq);
         const rid = ev.request_id as string;
         this.answered.add(rid);
-        d.textContent = t("resolved") + ((ev.outcome ?? ev.answer) as string);
+        d.innerHTML = `${icon("check")} ${esc(t("resolved") + ((ev.outcome ?? ev.answer) as string))}`;
         const card = $("events").querySelector(`[data-req="${rid}"]`);
         if (card) card.classList.add("done");
         return d;
@@ -173,12 +176,12 @@ export class EventRenderer {
       }
       case "error": {
         const d = mkEv("errline", ev.seq);
-        d.textContent = `⚠ ${ev.message}`;
+        d.innerHTML = `${icon("warn")} ${esc(ev.message as string)}`;
         return d;
       }
       case "system": {
         const d = mkEv("sysline", ev.seq);
-        d.textContent = `⦿ ${ev.text}`;
+        d.innerHTML = `${icon("sys")} ${esc(ev.text as string)}`;
         return d;
       }
       default: {
@@ -199,7 +202,8 @@ export class EventRenderer {
     d.dataset.callId = ev.call_id as string;
     d.innerHTML = `
       <div class="tool-head">
-        <span class="tool-ico">⚙</span>
+        ${icon("chev-right", "ic-caret")}
+        <span class="tool-ico">${icon("tool")}</span>
         <span class="tool-title">${esc(ev.title as string)}</span>
         <span class="badge st-${status}">${status}</span>
       </div>
@@ -329,7 +333,7 @@ export class EventRenderer {
     const kind = ev.kind as string | undefined;
     const detail = ev.detail as string | undefined;
     d.innerHTML =
-      `<div class="perm-title">🔐 ${esc(ev.title as string)}` +
+      `<div class="perm-title">${icon("lock")} ${esc(ev.title as string)}` +
       (kind ? ` <span class="perm-kind">${esc(kind)}</span>` : "") +
       `</div>` +
       (detail ? `<pre class="perm-detail">${esc(detail)}</pre>` : "") +
@@ -358,7 +362,7 @@ export class EventRenderer {
     const d = mkEv("perm question", ev.seq);
     d.dataset.req = ev.request_id as string;
     d.innerHTML = `
-      <div class="perm-title">❓ ${esc(ev.message as string)}</div>
+      <div class="perm-title">${icon("question")} ${esc(ev.message as string)}</div>
       <div class="q-row">
         <input class="q-input" placeholder='${t("answer_ph")}' />
         <button class="btn-allow">${t("answer_btn")}</button>

@@ -6,7 +6,8 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
-import { $ } from "../core/dom";
+import { $, esc } from "../core/dom";
+import { icon } from "../ui/icons";
 import { isAndroid, shellOpen } from "../core/chrome";
 import { cmpVer } from "../core/conn";
 import { t } from "../i18n";
@@ -126,12 +127,12 @@ export function checkBootUpdate() {
       if (cmpVer(remote, local) <= 0) return;
       const b = document.createElement("button");
       b.className = "tb-update";
-      b.textContent = `⬆ v${remote}`;
+      b.innerHTML = `${icon("up")} v${esc(remote)}`;
       b.title = `Update v${remote} available — click to install`;
       b.onclick = () => {
         b.textContent = "…";
         performClientUpdate(remote).finally(() => {
-          b.textContent = `⬆ v${remote}`;
+          b.innerHTML = `${icon("up")} v${esc(remote)}`;
         });
       };
       $("titlebar").insertBefore(b, document.querySelector(".tb-btns"));
