@@ -327,11 +327,46 @@ export class Composer {
     return sendPref() === "steer" ? "steer" : "normal";
   }
 
+  /** Mode du bouton secondaire = l'inverse de la préférence : file ↔
+   *  steer. C'est LA voie « autre mode » sur mobile (pas d'Alt+Entrée). */
+  private altMode(): SendMode {
+    return this.defaultMode() === "steer" ? "normal" : "steer";
+  }
+
+  /** Icône, tooltip, label et visibilité du bouton d'envoi alternatif —
+   *  suivent la préférence (sans reload) et l'état de la session.
+   *  Rôle steer : pertinent seulement pendant un vrai tour (hors working
+   *  un steer tombe dans le flux normal — même effet que Envoyer).
+   *  Rôle file : envoi normal — pertinent quand le steer ferait autre
+   *  chose, donc agent occupé (working / waiting_input : un normal part
+   *  en file). Pendant compact les deux modes sont retenus en file —
+   *  bouton sans différence → caché. */
+  syncAltBtn() {
+    const b = $("btn-alt") as HTMLButtonElement;
+    const queue = this.altMode() === "normal";
+    const st = app.current?.state;
+    b.hidden = queue
+      ? st !== "working" && st !== "waiting_input"
+      : st !== "working";
+    const ic = queue ? "clock" : "steer";
+    if (b.dataset.icon !== ic) {
+      b.dataset.icon = ic;
+      b.innerHTML = icon(ic);
+    }
+    // data-i18n-title tenu à jour : applyStatic (changement de langue)
+    // retraduit depuis l'attribut, pas depuis b.title.
+    const key = queue ? "queue_title" : "steer_title";
+    b.dataset.i18nTitle = key;
+    b.title = t(key);
+    b.setAttribute("aria-label", b.title);
+  }
+
   /** Hints clavier du champ — dépendent du mode d'envoi choisi. */
   refreshHints() {
     // Un placeholder plus long peut wrapper → refit, et le titre de la
     // pill suit la langue courante.
     this.fitInput();
+    this.syncAltBtn(); // bouton alternatif : suit la préférence/langue
     if (isAndroid()) return; // placeholder mobile sans raccourcis
     ($("input") as HTMLTextAreaElement).placeholder =
       sendPref() === "steer" ? t("input_ph_steer") : t("input_ph");
@@ -340,7 +375,7 @@ export class Composer {
   init() {
     this.refreshHints();
     $("btn-send").onclick = () => this.sendInput(this.defaultMode());
-    $("btn-steer").onclick = () => this.sendInput("steer");
+    $("btn-alt").onclick = () => this.sendInput(this.altMode());
     $("input").addEventListener("keydown", (e) => {
       const ac = $("cmd-ac");
       if (!ac.hidden) {
@@ -368,7 +403,7 @@ export class Composer {
       if (e.key === "Enter" && e.altKey) {
         e.preventDefault();
         // Alt+Entrée = l'autre mode (queue ↔ steer selon la préférence).
-        this.sendInput(this.defaultMode() === "steer" ? "normal" : "steer");
+        this.sendInput(this.altMode());
         return;
       }
       if (e.key === "Enter" && !e.shiftKey) {

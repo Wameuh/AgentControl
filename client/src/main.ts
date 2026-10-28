@@ -80,6 +80,7 @@ chat.bind(renderer, {
   setActiveRow: (id) => sidebar.setActiveRow(id),
   refresh: () => sidebar.refresh(),
   refreshQueue: () => composer.refreshQueue(),
+  syncAltBtn: () => composer.syncAltBtn(),
   onSessionOpened: () => {
     files.onSessionOpened();
     term.onSessionSwitched();

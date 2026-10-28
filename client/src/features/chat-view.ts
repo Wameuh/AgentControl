@@ -94,6 +94,9 @@ export class ChatView {
     refresh: (): Promise<void> => Promise.resolve(),
     /** Barre de file (prompts en attente) — rafraîchie par updateHeader. */
     refreshQueue: () => {},
+    /** Bouton d'envoi alternatif (steer ↔ file selon la préférence) —
+     *  icône + visibilité resynchronisés par updateHeader. */
+    syncAltBtn: () => {},
     /** Bouton « premier post » affiché seulement si le démon de la conn
      *  connaît first_post. */
     firstPostCapable: (_conn: string) => false,
@@ -545,7 +548,7 @@ export class ChatView {
     this.unseenBelow = 0;
     $("btn-bottom").hidden = true;
     $("chat-gem").hidden = true;
-    for (const b of ["btn-resume", "btn-cancel", "btn-steer"]) $(b).hidden = true;
+    for (const b of ["btn-resume", "btn-cancel", "btn-alt"]) $(b).hidden = true;
     const st = $("chat-state");
     st.textContent = "gone";
     st.className = "badge st-dead";
@@ -603,6 +606,7 @@ export class ChatView {
     if (!app.current) {
       $("chat-ctx").hidden = true;
       $("chat-opts").hidden = true;
+      this.deps.syncAltBtn(); // sans session → bouton alternatif caché
       return;
     }
     this.deps.refreshQueue();
@@ -629,9 +633,9 @@ export class ChatView {
       app.current.state === "waiting_input" ||
       app.current.state === "compacting";
     $("btn-cancel").hidden = !busySt;
-    // Steer : n'a de sens que pendant un vrai tour (sinon = envoi normal ;
-    // pendant compact un envoi est simplement retenu en file).
-    $("btn-steer").hidden = app.current.state !== "working";
+    // Bouton alternatif (steer ↔ file selon la préférence d'envoi) :
+    // rôle + visibilité calculés côté composer.
+    this.deps.syncAltBtn();
 
     // Options de config dynamiques (ex. Devin : config_option_update → mode + model)
     const copts = app.current.config_options ?? [];
