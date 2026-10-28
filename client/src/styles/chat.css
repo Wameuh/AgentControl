@@ -322,11 +322,27 @@ img.md-img {
 .ac-item .h { color: var(--dim); font-size: 12px; flex: none; }
 .ac-item .d { color: var(--ink); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+#input-wrap { position: relative; flex: 1; min-width: 0; display: flex; }
 #input {
-  flex: 1; resize: none; background: rgba(236, 230, 216, .05); color: var(--ink);
+  flex: 1; width: 100%; box-sizing: border-box; resize: none; overflow-y: hidden;
+  background: rgba(236, 230, 216, .05); color: var(--ink);
   border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; font: inherit;
 }
 #input:focus { border-color: var(--sand); outline: none; }
+/* Champ long : scrollable + place réservée à la pill « N lignes » */
+#input-wrap.over #input { overflow-y: auto; padding-right: 62px; }
+#btn-expand {
+  /* right:18px dégage la pill de la scrollbar classique Windows (~14-17px) */
+  position: absolute; top: 5px; right: 18px; z-index: 2;
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: 999px; cursor: pointer;
+  background: var(--panel-solid); border: 1px solid var(--line-strong);
+  color: var(--dim); font: inherit; font-size: 10.5px; line-height: 1.4;
+}
+#btn-expand[hidden] { display: none; }
+#btn-expand:hover { color: var(--ink); border-color: var(--sand); }
+#btn-expand .ic { width: 11px; height: 11px; }
+#btn-expand .n { font-variant-numeric: tabular-nums; }
 #cmd-select, #mode-select, #model-select, #effort-select, #model-free, #dyn-opts select {
   background: var(--panel-solid); color: var(--ink);
   border: 1px solid var(--line); border-radius: 8px; padding: 5px 7px;
