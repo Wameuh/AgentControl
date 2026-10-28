@@ -116,7 +116,7 @@ pub(crate) async fn subscribe(
     let conn = conn.clone();
     let c = get_conn(&state, conn.as_deref()).await?;
     client_core::log(Level::Debug, format!("subscribe session={session} after_seq={after_seq} conn={conn:?}"));
-    let mut rx = c.subscribe(&session, after_seq).await.map_err(|e| {
+    let rx = c.subscribe(&session, after_seq).await.map_err(|e| {
         client_core::log(Level::Error, format!("subscribe {session}: {e:#}"));
         format!("{e:#}")
     })?;
@@ -125,8 +125,49 @@ pub(crate) async fn subscribe(
     // partait N fois au frontend (messages dupliqués). Le démon n'a de toute
     // façon qu'un sub par connexion → on abort toutes les anciennes.
     let sid_log = session.clone();
+    let c2 = c.clone();
     let task = tauri::async_runtime::spawn(async move {
-        while let Ok(v) = rx.recv().await {
+        let mut rx = rx;
+        // Dernier seq d'event émis — base du resync après un Lagged.
+        let mut last_seq = after_seq;
+        loop {
+            let v = match rx.recv().await {
+                Ok(v) => v,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    // Les pushes term_data partagent le broadcast : une
+                    // sortie massive peut dépasser la capacité du canal et
+                    // sauter des events. Sans resync la boucle mourrait
+                    // ici en silence (chat figé). Le resubscribe fait
+                    // rejouer le journal par le démon depuis last_seq
+                    // (rattrapage borné + SessionCleared resynthétisé si
+                    // reset pendant le trou — logique serveur de
+                    // h_subscribe).
+                    client_core::log(Level::Warn, format!(
+                        "subscribe {sid_log}: {n} pushes perdus — resync"
+                    ));
+                    match c2.subscribe(&sid_log, last_seq).await {
+                        Ok(r) => rx = r,
+                        Err(e) => {
+                            client_core::log(Level::Error, format!(
+                                "subscribe {sid_log}: resync impossible: {e:#}"
+                            ));
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                Err(_) => break, // Closed : client droppé/déconnecté
+            };
+            // Seuls les events de session partent en session-event — les
+            // pushes term_* ont leur pompe dédiée (spawnée par term_open).
+            if v.get("push").and_then(Value::as_str) != Some("event") {
+                continue;
+            }
+            // seq assigné (pas max) : après SessionCleared les seqs
+            // repartent à 1 — last_seq doit suivre le cycle courant.
+            if let Some(s) = v.pointer("/event/seq").and_then(Value::as_u64) {
+                last_seq = s;
+            }
             let _ = app.emit("session-event", v);
         }
         client_core::log(Level::Debug, format!("subscribe {sid_log}: flux terminé"));
