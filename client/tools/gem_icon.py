@@ -155,13 +155,18 @@ VARIANTS = {
 BG = (18, 22, 20, 255)  # #121614 — ic_launcher_background / tuiles
 
 
+def scaled_gem(img, size):
+    """Gemme recadrée sur son contenu, redimensionnée dans size×size."""
+    gem = img.crop(img.getbbox())
+    k = size / max(gem.size)
+    return gem.resize((max(1, int(gem.width * k)),
+                       max(1, int(gem.height * k))), Image.LANCZOS)
+
+
 def fit_paste(canvas, img, ratio):
     """Gemme recadrée, centrée, max dim = ratio * taille du canvas."""
     s = canvas.size[0]
-    gem = img.crop(img.getbbox())
-    k = s * ratio / max(gem.size)
-    g2 = gem.resize((max(1, int(gem.width * k)), max(1, int(gem.height * k))),
-                    Image.LANCZOS)
+    g2 = scaled_gem(img, s * ratio)
     canvas.paste(g2, ((s - g2.width) // 2, (s - g2.height) // 2), g2)
 
 
@@ -214,14 +219,6 @@ NSIS_PANEL = (22, 28, 24)      # --panel-solid #161c18
 NSIS_SAND = (205, 182, 140)    # --sand / --accent #cdb68c
 
 
-def scaled_gem(big, size):
-    """Gemme recadrée, redimensionnée pour tenir dans size×size."""
-    gem = big.crop(big.getbbox())
-    k = size / max(gem.size)
-    return gem.resize((max(1, int(gem.width * k)),
-                       max(1, int(gem.height * k))), Image.LANCZOS)
-
-
 def write_nsis(icons, big):
     """Bitmaps du wizard NSIS (bundle.windows.nsis). Le wizard classique
     ne permet pas un fond sombre complet — les pages internes gardent le
@@ -232,14 +229,15 @@ def write_nsis(icons, big):
     sb = Image.new("RGB", (w, h), NSIS_PANEL)
     g = scaled_gem(big, int(w * 0.62))
     sb.paste(g, ((w - g.width) // 2, int(h * 0.42 - g.height / 2)), g)
-    ImageDraw.Draw(sb).rectangle((0, h - 4, w, h), fill=NSIS_SAND)
+    # rectangle() a des bornes inclusives : w-1/h-1 = dernier pixel.
+    ImageDraw.Draw(sb).rectangle((0, h - 4, w - 1, h - 1), fill=NSIS_SAND)
     sb.save(os.path.join(icons, "nsis-sidebar.bmp"))
     # Bandeau d'en-tête des pages internes : 150×57.
     w, h = 150, 57
     hd = Image.new("RGB", (w, h), NSIS_PANEL)
     g = scaled_gem(big, h - 16)
     hd.paste(g, ((w - g.width) // 2, (h - 2 - g.height) // 2), g)
-    ImageDraw.Draw(hd).rectangle((0, h - 2, w, h), fill=NSIS_SAND)
+    ImageDraw.Draw(hd).rectangle((0, h - 2, w - 1, h - 1), fill=NSIS_SAND)
     hd.save(os.path.join(icons, "nsis-header.bmp"))
 
 
