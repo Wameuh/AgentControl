@@ -5,6 +5,7 @@
 
 mod commands;
 mod state;
+mod stream;
 
 use state::AppState;
 use tauri::Manager;
@@ -27,6 +28,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // Lecteur vidéo du panneau fichiers : ranges HTTP → tranches
+        // read_file RPC (jamais le fichier entier en mémoire).
+        .register_asynchronous_uri_scheme_protocol("acvideo", stream::handler)
         .setup(|app| {
             // Android : pas de HOME — les chemins client-core (clé SSH,
             // connexions, logs) racinent dans le app_data_dir.

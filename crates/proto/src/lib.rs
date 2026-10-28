@@ -519,11 +519,18 @@ pub enum ReqKind {
     /// latéral du client pour les liens de fichiers de l'agent.
     /// `binary` → réponse {path, data(base64), size, truncated} au lieu de
     /// {path, content(utf8 lossy), truncated} — aperçu image du client.
+    /// `limit` présent → lecture bornée [offset, offset+limit) : réponse
+    /// {path, offset, size, data(base64)} — streaming vidéo du client.
+    /// (`binary` est alors ignoré : la tranche est toujours brute.)
     ReadFile {
         session: String,
         path: String,
         #[serde(default)]
         binary: bool,
+        #[serde(default)]
+        offset: u64,
+        #[serde(default)]
+        limit: Option<u64>,
     },
     /// Liste un dossier du workspace (arborescence côté client). `path`
     /// relatif au cwd de la session ("" = racine) — borné au workspace.

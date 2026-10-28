@@ -62,6 +62,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tokio",
  "ureq",
+ "url",
 ]
 
 [[package]]

@@ -38,6 +38,10 @@ export function initGems() {
 // Détection synchrone par UA (avant le resolve de platform()).
 let android = /Android/i.test(navigator.userAgent);
 export const isAndroid = () => android;
+// Windows + Android : les schémas custom sont servis en
+// http://<scheme>.localhost (pas <scheme>://…) — forme de l'URL acvideo.
+let windows = /Windows/i.test(navigator.userAgent);
+export const isWindows = () => windows;
 
 export function applyAndroidChrome() {
   // Pas de fenêtre à minimizer/drag sous Android : ☰ + ⋮ seulement.
@@ -56,6 +60,7 @@ export function applyAndroidChrome() {
 export function initPlatform() {
   invoke<string>("platform").then((p) => {
     android = p === "android";
+    windows = p === "windows";
     document.body.classList.toggle("android", android);
     if (android) applyAndroidChrome();
   }).catch(() => {});

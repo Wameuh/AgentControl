@@ -12,7 +12,7 @@ export const inlineImages = () => localStorage.getItem("ac-inline-images") !== "
 
 // Chemins de fichiers cliquables → panneau latéral (read_file côté démon)
 const FILE_RE =
-  /((?:\/[\w.\-~]+){2,}|[\w.\-]+(?:\/[\w.\-]+){2,}|[\w.\-/]+\.(?:rs|ts|tsx|js|jsx|py|toml|json|md|html?|css|ya?ml|sh|c|cpp|h|hpp|go|java|rb|txt|log|svg|cfg|ini|sql|vue|svelte|lock|service|png|jpe?g|gif|webp|bmp|ico|avif))(?::(\d+))?/g;
+  /((?:\/[\w.\-~]+){2,}|[\w.\-]+(?:\/[\w.\-]+){2,}|[\w.\-/]+\.(?:rs|ts|tsx|js|jsx|py|toml|json|md|html?|css|ya?ml|sh|c|cpp|h|hpp|go|java|rb|txt|log|svg|cfg|ini|sql|vue|svelte|lock|service|png|jpe?g|gif|webp|bmp|ico|avif|mp4|m4v|mov|webm|mkv|ogv|avi))(?::(\d+))?/g;
 
 export function linkify(escaped: string): string {
   // URLs d'abord → vrais liens (placeholder \x00U pour ne pas être re-matchées
@@ -218,6 +218,14 @@ export const IMG_MIME: Record<string, string> = {
   png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
   webp: "image/webp", bmp: "image/bmp", ico: "image/x-icon", avif: "image/avif",
   svg: "image/svg+xml",
+};
+
+/** Extensions ouvertes dans le lecteur vidéo (schéma acvideo — ranges
+ *  streamées depuis le démon, pas de chargement complet du fichier). */
+export const VID_MIME: Record<string, string> = {
+  mp4: "video/mp4", m4v: "video/mp4", mov: "video/quicktime",
+  webm: "video/webm", ogv: "video/ogg", mkv: "video/x-matroska",
+  avi: "video/x-msvideo",
 };
 
 export const fmtSize = (n: number) =>

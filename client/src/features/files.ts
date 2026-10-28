@@ -8,15 +8,31 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { appDataDir, downloadDir } from "@tauri-apps/api/path";
 import { $, copyText, esc, showErr } from "../core/dom";
-import { fmtSize, highlight, IMG_MIME } from "../core/format";
+import { fmtSize, highlight, IMG_MIME, VID_MIME } from "../core/format";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
-import { isAndroid } from "../core/chrome";
+import { isAndroid, isWindows } from "../core/chrome";
 import type { DirEntry } from "../core/types";
 import { t } from "../i18n";
 import { icon, type IconName } from "../ui/icons";
 import { bindCtx, hideMenu, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
+
+/** URL du schéma custom acvideo — forme imposée par plateforme :
+ *  http://acvideo.localhost sous Windows/Android, acvideo:// ailleurs. */
+function videoUrl(path: string): string {
+  const q = new URLSearchParams({ session: app.current?.id ?? "", path });
+  if (app.current?.conn) q.set("conn", app.current.conn);
+  const base = isAndroid() || isWindows() ? "http://acvideo.localhost/" : "acvideo://localhost/";
+  return `${base}?${q}`;
+}
+
+/** Stoppe le <video> du viewer — le stream démon s'arrête avec lui
+ *  (sinon la lecture/bufferisation continue sur un élément détaché). */
+function stopVideo() {
+  const v = $("file-view").querySelector("video");
+  if (v) { v.pause(); v.removeAttribute("src"); v.load(); }
+}
 
 export class FileExplorer {
   private ctx = $("fctx");
@@ -46,12 +62,32 @@ export class FileExplorer {
     }
     $("file-path").textContent = path;
     $("file-path").title = path;
+    stopVideo();
     $("file-view").textContent = "…";
     // Marque le noeud de l'arborescence correspondant
     for (const n of $("file-tree").querySelectorAll<HTMLElement>(".fnode")) {
       n.classList.toggle("sel", n.dataset.rel === path);
     }
     const ext = /\.([a-zA-Z0-9]+)$/.exec(path)?.[1]?.toLowerCase() ?? "";
+    if (VID_MIME[ext]) {
+      // Lecteur streamé : le schéma acvideo sert des ranges HTTP
+      // (tranches read_file démon) — la webview ne télécharge que ce
+      // qu'elle bufferise (métadonnées + premières secondes, ranges de
+      // seek ensuite), jamais le fichier entier.
+      const view = $("file-view");
+      view.innerHTML = "";
+      const v = document.createElement("video");
+      v.className = "fv-vid";
+      v.controls = true;
+      v.preload = "metadata";
+      v.playsInline = true;
+      v.onerror = () => {
+        view.innerHTML = `<div class="fv-msg">${esc(t("video_error"))}</div>`;
+      };
+      v.src = videoUrl(path);
+      view.appendChild(v);
+      return;
+    }
     try {
       if (IMG_MIME[ext]) {
         const r = await call<{
@@ -91,6 +127,9 @@ export class FileExplorer {
   }
 
   private closeFilePanel() {
+    // Coupe la lecture en cours — sinon le stream acvideo continue en
+    // tâche de fond après fermeture du panneau.
+    stopVideo();
     // Le viewer glissé par-dessus doit être dépilé aussi (pile back propre).
     nav.close("fileview");
     $("file-viewer").classList.remove("open");
@@ -295,6 +334,7 @@ export class FileExplorer {
     $("file-close").onclick = () => this.closeFilePanel();
     // Retour viewer → liste (Android)
     $("fv-back").onclick = () => {
+      stopVideo();
       nav.close("fileview");
       $("file-viewer").classList.remove("open");
     };
