@@ -481,9 +481,10 @@ pub enum ReqKind {
         steer: bool,
     },
     /// Message agent→agent (pont MCP `agentcontrol_send_message`, acctl msg).
-    /// `delivery` : "queue" (défaut, fin de tâche) | "steer" (session/prompt
-    /// concurrent pendant le tour — après le tool call courant si l'agent
-    /// le supporte, sinon enfile). Cible morte → auto-resume + livraison.
+    /// `delivery` : "steer" (défaut, session/prompt concurrent pendant le
+    /// tour — après le tool call courant si l'agent le supporte, sinon
+    /// enfile) | "queue" (fin de tâche). Cible morte → auto-resume +
+    /// livraison.
     PeerSend {
         from: String,
         session: String,
