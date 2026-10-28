@@ -162,6 +162,7 @@ export class Sidebar {
    *  chaque segment passe par esc(), seul le <mark> est injecté). */
   private hl(txt: string): string {
     const f = this.filter;
+    txt = txt ?? ""; // champ absent du fil (vieux démon) → "" plutôt que TypeError/"undefined"
     if (!f) return esc(txt);
     const i = txt.toLowerCase().indexOf(f);
     if (i < 0) return esc(txt);
