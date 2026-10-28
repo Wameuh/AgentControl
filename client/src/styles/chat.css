@@ -17,7 +17,7 @@
 #btn-bottom .ic { width: 14px; height: 14px; }
 #btn-bottom .cnt { margin-left: 5px; font-size: 12px; }
 #chat-header button .ic { width: 15px; height: 15px; }
-#composer #btn-steer .ic { width: 15px; height: 15px; }
+#composer #btn-alt .ic { width: 15px; height: 15px; }
 /* Toasts : notifications empilées en haut à droite (sous les modals
    natifs — les erreurs de dialogues passent par .dlg-err) */
 #toasts {
