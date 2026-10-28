@@ -81,6 +81,7 @@ export class ChatView {
   private hasMoreNewer = false;
   private pendingLive: AcEvent[] = [];
   private jumpSeq = 0; // invalidation des sauts de recherche en vol
+  private loadSeq = 0; // propriété du load en cours : un finally périmé ne doit pas libérer le flag d'un load plus récent
   private unseenBelow = 0;
   private convLoadingEl: HTMLElement | null = null;
   /** Hôtes en cours d'auto-connexion (écran vide "connexion à…"). */
@@ -799,11 +800,21 @@ export class ChatView {
     this.trimRendered();
   }
 
-  /** Supprime les plus anciens events rendus au-delà du cap (buffer). */
+  /** Supprime les plus anciens events rendus au-delà du cap (buffer).
+   *  Un nœud n'est retiré qu'entièrement hors de vue avec un écran de
+   *  marge : sans ça, garé dans l'historique, le prochain event live
+   *  aspirait par le haut les pages tout juste chargées (tapis roulant
+   *  — « le scroll-up ne charge rien »). Les nœuds hidden (rect nul)
+   *  restent retirables : invisibles, jamais sous les yeux.
+   *  Conséquence assumée : garé en tête, le cap devient mou — le DOM
+   *  peut dépasser MAX_RENDERED tant que l'utilisateur y lit. */
   private trimRendered() {
+    const topLimit =
+      this.eventsEl.getBoundingClientRect().top - this.eventsEl.clientHeight;
     while (this.renderedCount > MAX_RENDERED) {
       const first = this.eventsEl.querySelector<HTMLElement>(".ev");
       if (!first) break;
+      if (!first.hidden && first.getBoundingClientRect().bottom > topLimit) break;
       // retirer aussi son bloc de la map si tool_call
       for (const [k, v] of this.renderer.toolBlocks) if (v === first) this.renderer.toolBlocks.delete(k);
       // Suppression en haut → tout remonterait : compenser pour figer la vue.
@@ -844,8 +855,9 @@ export class ChatView {
       return;
     }
     const oldHeight = this.eventsEl.scrollHeight;
-    // Ancre fixe = premier event déjà rendu : insérer avant elle à chaque
-    // tour préserve l'ordre croissant de la page (children[1] bougerait).
+    // Ancre fixe = #empty-state (décor, toujours en position 1 entre la
+    // sentinelle et le 1er .ev) : insérer avant elle à chaque tour
+    // préserve l'ordre croissant de la page (children[1] bougerait).
     const anchor = this.eventsEl.children[1] ?? null;
     const pageCalls: string[] = [];
     this.renderer.inPrepend = true;
@@ -970,6 +982,7 @@ export class ChatView {
     if (!app.current || this.loadingPage || !this.hasMoreNewer) return;
     const sid = app.current.id;
     const js = this.jumpSeq;
+    const ls = ++this.loadSeq;
     this.loadingPage = true;
     try {
       const page = await call<{ events: AcEvent[]; last_seq: number }>("events", {
@@ -984,7 +997,7 @@ export class ChatView {
         this.flushPendingLive();
       }
     } finally {
-      this.loadingPage = false;
+      if (ls === this.loadSeq) this.loadingPage = false;
     }
   }
 
@@ -1040,15 +1053,29 @@ export class ChatView {
     return d;
   }
 
-  init() {
-    // Scroll : chargement des pages anciennes via sentinel
-    const observer = new IntersectionObserver(async (entries) => {
-      if (!entries[0].isIntersecting || this.loadingPage || !app.current || !this.hasMoreHistory ||
-          this.convLoadingEl?.isConnected) return;
-      const sid = app.current.id;
-      const js = this.jumpSeq;
-      this.loadingPage = true;
-      try {
+  /** La sentinelle (tête de #events) est-elle dans le scrollport ? */
+  private sentinelVisible() {
+    const s = this.sentinel.getBoundingClientRect();
+    const r = this.eventsEl.getBoundingClientRect();
+    return s.bottom > r.top && s.top < r.bottom;
+  }
+
+  /** Charge les pages anciennes tant que la sentinelle reste visible.
+   *  Une page peut ne produire AUCUN nœud — les rafales de
+   *  tool_call_update (streaming d'outputs, ~50+ events d'affilée)
+   *  n'ont pas de rendu : sans boucle, la sentinelle resterait dans le
+   *  viewport et l'observer ne se redéclencherait jamais (il ne tire
+   *  que sur changement d'intersection) → scroll-up mort. */
+  private async loadOlderPages() {
+    if (this.loadingPage || !app.current || !this.hasMoreHistory ||
+        this.convLoadingEl?.isConnected || !this.sentinelVisible()) return;
+    const sid = app.current.id;
+    const js = this.jumpSeq;
+    const ls = ++this.loadSeq;
+    this.loadingPage = true;
+    try {
+      while (this.hasMoreHistory && this.sentinelVisible()) {
+        const prevMin = this.minRendered;
         const page = await call<{ events: AcEvent[] }>("events", {
           session: sid,
           before_seq: this.minRendered,
@@ -1056,10 +1083,28 @@ export class ChatView {
         });
         // Session changée ou saut de recherche pendant l'await → la page
         // est périmée pour la fenêtre reconstruite, ne pas l'insérer.
-        if (app.current?.id === sid && js === this.jumpSeq) this.prependEvents(page.events);
-      } finally {
-        this.loadingPage = false;
+        if (app.current?.id !== sid || js !== this.jumpSeq) return;
+        this.prependEvents(page.events);
+        // Page courte = tête du journal atteinte (trous de compaction
+        // inclus : le démon rend ce qui reste, jamais plus) — rien de
+        // plus ancien à chercher.
+        if (page.events.length < PAGE) this.hasMoreHistory = false;
+        // Garde-fou : la progression repose sur le contrat « page
+        // strictement < before_seq » → minRendered décroît à chaque
+        // tour ; sans ça la boucle enverrait des RPC à l'infini.
+        if (this.minRendered >= prevMin) break;
       }
+    } catch (e) {
+      showErr(`events: ${e}`);
+    } finally {
+      if (ls === this.loadSeq) this.loadingPage = false;
+    }
+  }
+
+  init() {
+    // Scroll : chargement des pages anciennes via sentinel
+    const observer = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting) void this.loadOlderPages();
     });
     observer.observe(this.sentinel);
 
