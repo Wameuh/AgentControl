@@ -69,6 +69,7 @@ body.android #sidebar {
   position: fixed; z-index: 40; top: 0; bottom: 0; left: 0;
   width: min(84vw, 340px); min-width: 0;
   padding-top: max(10px, env(safe-area-inset-top));
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
   transform: translateX(-105%); transition: transform .2s ease;
 }
 body.android #sidebar.open { transform: translateX(0); }
