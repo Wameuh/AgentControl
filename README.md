@@ -100,8 +100,8 @@ app key for you to authorize.
   channel serves release candidates.
 
 Prefer a browser to an app? The daemon can also **serve the same UI over
-HTTP** on the server (loopback + SSH tunnel, token-protected) — zero
-install on the client side.
+HTTP** on the server (`bind_http` in `config.toml` — loopback + SSH
+tunnel, token-protected): zero install on the client side.
 
 ## For developers
 
