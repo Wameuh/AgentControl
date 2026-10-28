@@ -56,6 +56,8 @@ export class ConnectionManager {
     /** Marque des ids session supprimés localement → pas de toast au
      *  retour de leurs events session_deleted (cascade conn-delete). */
     notePendingDel: (_ids: string[]) => {},
+    /** Démarque un id dont la suppression en cascade a échoué. */
+    clearPendingDel: (_id: string) => {},
   };
 
   bind(d: Partial<typeof this.deps>) {
@@ -229,7 +231,10 @@ export class ConnectionManager {
         app.lastSessions
           .filter((x) => (x.conn ?? "default") === conn)
           .map((s) =>
-            call("delete_session", { session: s.id, conn }).catch((e) => showErr(String(e))),
+            call("delete_session", { session: s.id, conn }).catch((e) => {
+              this.deps.clearPendingDel(s.id); // échec → la session existe encore
+              showErr(String(e));
+            }),
           ),
       );
     }

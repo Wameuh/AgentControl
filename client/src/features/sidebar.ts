@@ -10,7 +10,7 @@ import { app } from "../core/state";
 import { isAndroid, meshSetMood } from "../core/chrome";
 import type { PrEntry, SessionMeta } from "../core/types";
 import { t } from "../i18n";
-import { dotIcon, setAppIcon } from "./status";
+import { dotCls, dotIcon, setAppIcon } from "./status";
 import { icon } from "../ui/icons";
 import { bindCtx, hideSessCtx, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
@@ -50,6 +50,12 @@ export class Sidebar {
    *  session_deleted ne doivent pas spammer de toasts. */
   notePendingDel(ids: string[]) {
     for (const id of ids) this.pendingDel.add(id);
+  }
+
+  /** Démarque une suppression en échec (cascade) : la session existe
+   *  encore, elle ne doit pas rester filtrée de la liste. */
+  clearPendingDel(id: string) {
+    this.pendingDel.delete(id);
   }
   private ctx = $("sctx");
 
@@ -355,9 +361,9 @@ export class Sidebar {
     if (closed) div.style.display = "none";
     const prs = this.prBySess.get(`${conn}${s.id}`) ?? [];
     const prHtml = prs.length
-      ? `<span class="sess-pr" title="${esc(prs.map((p) => `${p.repo}#${p.pr}${p.title ? ` — ${p.title}` : ""}${p.status ? ` (${p.status})` : ""}`).join("\n"))}">${prs.map((p) => `#${p.pr}`).join(" ")}</span>`
+      ? `<span class="sess-pr" title="${q(esc(prs.map((p) => `${p.repo}#${p.pr}${p.title ? ` — ${p.title}` : ""}${p.status ? ` (${p.status})` : ""}`).join("\n")))}">${prs.map((p) => `#${p.pr}`).join(" ")}</span>`
       : "";
-    div.innerHTML = `<span class="dot st-${s.state}" title="${esc(s.state)}">${dotIcon(s.state)}</span><span class="t">${esc(s.title)}</span>${prHtml}<span class="a">${esc(s.agent)}</span><button class="sess-del" title="Supprimer">${icon("close")}</button>`;
+    div.innerHTML = `<span class="dot st-${dotCls(s.state)}" title="${q(esc(s.state))}">${dotIcon(s.state)}</span><span class="t">${esc(s.title)}</span>${prHtml}<span class="a">${esc(s.agent)}</span><button class="sess-del" title="Supprimer">${icon("close")}</button>`;
     div.onclick = () => {
       void this.openSession(s.id);
       // Mobile : fermer le drawer après sélection.

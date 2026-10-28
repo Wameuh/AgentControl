@@ -99,6 +99,7 @@ conns.bind({
   purgeSaved: (c) => connectDlg.purgeSaved(c),
   clearGroups: (c) => groups.clearConn(c),
   notePendingDel: (ids) => sidebar.notePendingDel(ids),
+  clearPendingDel: (id) => sidebar.clearPendingDel(id),
 });
 connectDlg.bind(conns);
 connectDlg.refresh = () => sidebar.refresh();
