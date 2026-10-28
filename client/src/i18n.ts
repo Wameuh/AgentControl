@@ -1,6 +1,12 @@
 // i18n minimal : dictionnaire en/fr (défaut en), t() avec interpolation {var},
 // data-i18n / data-i18n-ph / data-i18n-title pour les chaînes statiques du HTML.
 
+// Modifieur principal des raccourcis : Cmd sur macOS, Ctrl ailleurs —
+// {mod} est un placeholder implicite, substitué par t() dans toutes les
+// chaînes (ex. "{mod}+Enter = force"). Détection UA synchrone, cohérente
+// avec isAndroid/isWindows de core/chrome.
+const MOD = /Mac OS X|Macintosh/i.test(navigator.userAgent) ? "Cmd" : "Ctrl";
+
 const STR = {
   en: {
     connect: "Connect", new_conn: "New connection",
@@ -14,8 +20,8 @@ const STR = {
     conn_off: "disconnected — click to reconnect",
     new_session: "New agent", send: "Send", cancel: "Cancel", stop: "Stop",
     resume: "Resume", refresh_title: "Reload session",
-    input_ph: "Message… (Enter = send, Alt+Enter = inject mid-turn, Ctrl+Enter = force, / = cmds)",
-    input_ph_steer: "Message… (Enter = steer mid-turn, Alt+Enter = queue, Ctrl+Enter = force, / = cmds)",
+    input_ph: "Message… (Enter = send, Alt+Enter = inject mid-turn, {mod}+Enter = force, / = cmds)",
+    input_ph_steer: "Message… (Enter = steer mid-turn, Alt+Enter = queue, {mod}+Enter = force, / = cmds)",
     input_ph_mobile: "Message to the agent…",
     input_expand: "Expand input", input_collapse: "Collapse input",
     steer_title: "Inject after the current tool call — agent-dependent",
@@ -127,7 +133,7 @@ const STR = {
     dl_failed: "download failed: {name} — {err}", steer_badge: "steer",
     img_too_big: "image too large to preview ({size}) — use Download",
     video_error: "cannot play this video — unsupported codec or daemon too old for streaming",
-    fv_edit_title: "Edit this file", fv_save_title: "Save (Ctrl+S)",
+    fv_edit_title: "Edit this file", fv_save_title: "Save ({mod}+S)",
     fv_loadall: "load all", fv_dirty: "modified", fv_saved: "saved",
     md_view: "Rendered view", md_source: "View source",
     binary_file: "binary file ({size}) — cannot be edited",
@@ -218,8 +224,8 @@ const STR = {
     conn_off: "déconnectée — clic pour reconnecter",
     new_session: "Nouvel agent", send: "Envoyer", cancel: "Annuler", stop: "Stop",
     resume: "Reprendre", refresh_title: "Recharger la session",
-    input_ph: "Message… (Entrée = envoyer, Alt+Entrée = injecter, Ctrl+Entrée = forcer, / = cmds)",
-    input_ph_steer: "Message… (Entrée = steer, Alt+Entrée = file, Ctrl+Entrée = forcer, / = cmds)",
+    input_ph: "Message… (Entrée = envoyer, Alt+Entrée = injecter, {mod}+Entrée = forcer, / = cmds)",
+    input_ph_steer: "Message… (Entrée = steer, Alt+Entrée = file, {mod}+Entrée = forcer, / = cmds)",
     input_ph_mobile: "Message à l'agent…",
     input_expand: "Agrandir la saisie", input_collapse: "Réduire la saisie",
     steer_title: "Injecter après l'outil en cours — selon l'agent",
@@ -329,7 +335,7 @@ const STR = {
     dl_failed: "échec du téléchargement : {name} — {err}", steer_badge: "steer",
     img_too_big: "image trop grosse pour l'aperçu ({size}) — utilisez Télécharger",
     video_error: "lecture impossible — codec non supporté ou démon trop ancien pour le streaming",
-    fv_edit_title: "Éditer ce fichier", fv_save_title: "Enregistrer (Ctrl+S)",
+    fv_edit_title: "Éditer ce fichier", fv_save_title: "Enregistrer ({mod}+S)",
     fv_loadall: "tout charger", fv_dirty: "modifié", fv_saved: "enregistré",
     md_view: "Vue rendue", md_source: "Voir la source",
     binary_file: "fichier binaire ({size}) — non éditable",
@@ -431,6 +437,7 @@ export function setLang(l: Lang) {
 
 export function t(k: Key, vars?: Record<string, string | number>): string {
   let s: string = STR[lang][k] ?? STR.en[k] ?? k;
+  s = s.replaceAll("{mod}", MOD);
   if (vars) for (const [k2, v] of Object.entries(vars)) s = s.replace(`{${k2}}`, String(v));
   return s;
 }

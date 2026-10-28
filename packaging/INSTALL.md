@@ -40,6 +40,8 @@ AGENTCONTROL_HOME=~/.agentcontrol ~/.local/bin/agentcontrol-daemon
 - **Ubuntu** : installer le `.deb`/binaire de l'artifact `agentcontrol-client-linux`
   (ou `cd client && npm i && npx tauri build` depuis le repo).
 - **Windows** : installer `.msi`/`.exe` de l'artifact `agentcontrol-client-windows`.
+- **macOS** : `.dmg` arm64 de l'artifact `agentcontrol-client-macos` — non
+  signé, clic droit → **Ouvrir** au premier lancement (voir README).
 
 ### Connexion
 

@@ -360,9 +360,11 @@ export class Composer {
           return;
         }
       }
-      if (e.key === "Enter" && e.ctrlKey) {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
-        this.sendInput("force"); // Ctrl+Entrée = envoi forcé (annule le tour en cours)
+        // Ctrl+Entrée (Cmd+Entrée sur macOS) = envoi forcé (annule le
+        // tour en cours).
+        this.sendInput("force");
         return;
       }
       if (e.key === "Enter" && e.altKey) {
