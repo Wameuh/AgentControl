@@ -42,7 +42,7 @@ dialog input, dialog select, dialog textarea {
   background: rgba(236, 230, 216, .07); color: var(--ink);
   border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; font: inherit;
 }
-dialog input:focus, dialog select:focus, dialog textarea:focus { border-color: var(--sand); outline: none; }
+dialog input:focus, dialog select:focus, dialog textarea:focus { border-color: var(--accent); outline: none; }
 dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 0; padding: 0; }
 #c-saved-row { display: flex; gap: 6px; }
 #c-saved-row select { flex: 1; min-width: 0; }
@@ -51,12 +51,12 @@ dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 0; pad
 dialog label.chk-row { flex-direction: row; align-items: center; gap: 10px; cursor: pointer; }
 dialog input[type="checkbox"] {
   width: 15px; height: 15px; flex: none; margin: 0; padding: 0;
-  border: 0; background: none; accent-color: var(--sand);
+  border: 0; background: none; accent-color: var(--accent);
 }
 /* dialog input:focus pose outline:none — restaurer un indicateur
    visible sur la case sinon la navigation clavier est aveugle. */
 dialog input[type="checkbox"]:focus-visible {
-  outline: 2px solid var(--sand); outline-offset: 2px;
+  outline: 2px solid var(--accent); outline-offset: 2px;
 }
 
 #native-list { display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow-y: auto; }
@@ -76,7 +76,7 @@ dialog input[type="checkbox"]:focus-visible {
 /* Spinner */
 .spin::after {
   content: ""; display: inline-block; width: 11px; height: 11px; margin-left: 7px;
-  border: 2px solid var(--dim); border-top-color: var(--sand); border-radius: 50%;
+  border: 2px solid var(--dim); border-top-color: var(--accent); border-radius: 50%;
   animation: rot .7s linear infinite; vertical-align: -2px;
 }
 @keyframes rot { to { transform: rotate(360deg); } }
@@ -102,9 +102,9 @@ dialog input[type="checkbox"]:focus-visible {
 #dlg-daemon-steps li .st-ico { width:15px; flex:none; text-align:center; }
 #dlg-daemon-steps li .st-ico .ic { width:13px; height:13px; display:inline-block; vertical-align:-2px; }
 #dlg-daemon-steps li.cur { color:var(--ink); }
-#dlg-daemon-steps li.cur .st-ico { color:var(--sand); animation:spin 1s linear infinite; display:inline-block; }
+#dlg-daemon-steps li.cur .st-ico { color:var(--accent); animation:spin 1s linear infinite; display:inline-block; }
 #dlg-daemon-steps li.done { color:var(--sage); }
-.spin-ico { display:inline-block; animation: spin 1s linear infinite; color:var(--sand); }
+.spin-ico { display:inline-block; animation: spin 1s linear infinite; color:var(--accent); }
 .spin-ico .ic { width: 22px; height: 22px; display: block; }
 @keyframes spin { to { transform: rotate(360deg); } }
 

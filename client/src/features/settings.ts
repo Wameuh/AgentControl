@@ -6,7 +6,7 @@
 
 import { getVersion, isWeb } from "../core/bridge";
 import { $ } from "../core/dom";
-import { applyTheme, isAndroid } from "../core/chrome";
+import { applyTheme, applyAccent, accentPref, applyBgAnim, bgAnimOn, isAndroid, type Accent } from "../core/chrome";
 import { defaultEncoding } from "../core/encoding";
 import { inlineImages } from "../core/format";
 import { cmpVer } from "../core/conn";
@@ -53,6 +53,8 @@ export class SettingsPanel {
     // Contrôles synchronisés sur l'état courant à chaque ouverture.
     ($("s-theme") as HTMLSelectElement).value =
       document.documentElement.classList.contains("light") ? "light" : "dark";
+    ($("s-accent") as HTMLSelectElement).value = accentPref();
+    ($("s-bganim") as HTMLInputElement).checked = bgAnimOn();
     ($("s-lang") as HTMLSelectElement).value = getLang();
     ($("s-sendmode") as HTMLSelectElement).value = sendPref();
     ($("s-autoconn") as HTMLInputElement).checked =
@@ -148,6 +150,12 @@ export class SettingsPanel {
       applyTheme((e.target as HTMLSelectElement).value as "dark" | "light");
       this.themeChanged();
     };
+    ($("s-accent") as HTMLSelectElement).onchange = (e) => {
+      applyAccent((e.target as HTMLSelectElement).value as Accent);
+      this.themeChanged();
+    };
+    ($("s-bganim") as HTMLInputElement).onchange = (e) =>
+      applyBgAnim((e.target as HTMLInputElement).checked);
     ($("s-lang") as HTMLSelectElement).onchange = (e) => {
       setLang((e.target as HTMLSelectElement).value as Lang);
       this.langChanged();

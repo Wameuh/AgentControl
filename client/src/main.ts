@@ -14,6 +14,8 @@ import { app } from "./core/state";
 import { initRpc } from "./core/rpc";
 import {
   applyTheme,
+  applyAccent,
+  accentPref,
   initGems,
   initPlatform,
   initWindowChrome,
@@ -44,6 +46,8 @@ import type { AcEvent } from "./core/types";
 // Thème + langue persistés (localStorage), appliqués au boot
 initLang();
 applyTheme(localStorage.getItem("ac-theme") === "light" ? "light" : "dark");
+// Accent appliqué au boot, avant le premier rendu utile (pas de flash).
+applyAccent(accentPref());
 applyStatic();
 initGems();
 initPlatform();

@@ -33,6 +33,8 @@ body.android {
   -webkit-tap-highlight-color: transparent;
   overscroll-behavior: none;
 }
+/* « Fond animé » : forcé statique sur Android (batterie) — réglage masqué. */
+body.android #s-bganim-row { display: none; }
 body.android #titlebar,
 body.android #sidebar,
 body.android #file-panel,
@@ -126,7 +128,7 @@ body.android dialog textarea {
   font-size: 16px; min-height: 46px; padding: 10px 12px;
 }
 body.android dialog input[type="checkbox"] {
-  min-height: 0; width: 24px; height: 24px; accent-color: var(--sand);
+  min-height: 0; width: 24px; height: 24px; accent-color: var(--accent);
 }
 body.android dialog textarea { min-height: 90px; }
 body.android dialog button {
@@ -256,7 +258,7 @@ body.android .msg { font-size: 15px; }
 #c-pubkey {
   margin: 0; padding: 8px; font-size: 11px; white-space: pre-wrap;
   word-break: break-all; user-select: all; max-height: 90px; overflow: auto;
-  background: rgba(236, 230, 216, .05); border-radius: 6px; color: var(--sand);
+  background: rgba(236, 230, 216, .05); border-radius: 6px; color: var(--accent);
 }
 #c-pubkey-box { display: flex; flex-direction: column; gap: 6px;
   font-size: 13px; color: var(--muted); }

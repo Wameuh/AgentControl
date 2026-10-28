@@ -1,6 +1,6 @@
 /* Liens de fichiers cliquables dans les messages */
 .flink { color: var(--violet); text-decoration: underline dotted; cursor: pointer; }
-.flink:hover { color: var(--sand); }
+.flink:hover { color: var(--accent); }
 
 
 /* Chat */
@@ -11,9 +11,9 @@
   position: absolute; right: 18px; bottom: 100px; z-index: 15;
   border-radius: 999px; padding: 7px 14px; font-size: 14px;
   background: var(--panel-solid); border: 1px solid var(--line-strong);
-  color: var(--sand); cursor: pointer; box-shadow: 0 4px 18px rgba(0, 0, 0, .4);
+  color: var(--accent); cursor: pointer; box-shadow: 0 4px 18px rgba(0, 0, 0, .4);
 }
-#btn-bottom:hover { color: var(--ink); border-color: var(--sand); }
+#btn-bottom:hover { color: var(--ink); border-color: var(--accent); }
 #btn-bottom .ic { width: 14px; height: 14px; }
 #btn-bottom .cnt { margin-left: 5px; font-size: 12px; }
 #chat-header button .ic { width: 15px; height: 15px; }
@@ -43,7 +43,7 @@
 .toast.t-error { border-left-color: var(--err); }
 .toast-msg { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; user-select: text; }
 .toast-x { flex: none; padding: 0 5px; font-size: 11px; opacity: .55; }
-.toast-x:hover { opacity: 1; color: var(--sand); }
+.toast-x:hover { opacity: 1; color: var(--accent); }
 
 /* flex-wrap : quand la fenêtre est étroite, #chat-opts (order:20) part
    en 2e ligne scrollable — les actions (Stop…) restent visibles. */
@@ -53,8 +53,8 @@
   border-bottom: 1px solid var(--line);
 }
 #chat-title { font-weight: 500; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: text; }
-#chat-title:hover { color: var(--sand); }
-.title-edit { flex: 1; background: transparent; color: var(--ink); border: 0; border-bottom: 1px solid var(--sand); font: inherit; font-weight: 500; outline: none; }
+#chat-title:hover { color: var(--accent); }
+.title-edit { flex: 1; background: transparent; color: var(--ink); border: 0; border-bottom: 1px solid var(--accent); font: inherit; font-weight: 500; outline: none; }
 
 /* Gemme animée — l'agent réfléchit (vrai cristal, palette améthyste) */
 #chat-gem {
@@ -122,7 +122,7 @@
   border: 1px solid var(--line); border-radius: 8px;
   color: var(--ink); padding: 5px 10px; font: inherit; font-size: 13px;
 }
-#search-input:focus { border-color: var(--sand); outline: none; }
+#search-input:focus { border-color: var(--accent); outline: none; }
 #search-count { flex: none; color: var(--dim); font-size: 12px; min-width: 52px; text-align: center; }
 #search-bar button { flex: none; font-size: 13px; padding: 3px 9px; }
 #search-bar button .ic { width: 14px; height: 14px; }
@@ -141,7 +141,7 @@
   color: var(--fg, var(--ink)); font-size: 12.5px; text-align: left; cursor: pointer;
 }
 .sr-row:hover { background: rgba(236, 230, 216, .06); }
-.sr-row.cur { background: rgba(205, 182, 140, .14); }
+.sr-row.cur { background: rgba(var(--accent-rgb), .14); }
 .sr-type {
   flex: none; font-size: 10.5px; color: var(--violet);
   border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px;
@@ -154,7 +154,7 @@
 #search-more {
   width: 100%; padding: 8px; background: none; border: 0;
   border-top: 1px solid var(--line); border-radius: 0;
-  color: var(--sand); font-size: 12px; cursor: pointer;
+  color: var(--accent); font-size: 12px; cursor: pointer;
 }
 #search-more:hover { background: rgba(236, 230, 216, .05); }
 /* Flash sur le bloc ciblé par un saut de recherche */
@@ -170,7 +170,7 @@
   background: var(--msg-user-bg); color: var(--msg-user-fg); align-self: flex-end;
   border-radius: 14px 14px 4px 14px; font-weight: 500;
 }
-/* liens/chemins dans une bulle user : le fond est --sand, --violet/--sage y
+/* liens/chemins dans une bulle user : le fond est --accent, --violet/--sage y
    sont invisibles → couleur dédiée par thème */
 .msg.user .flink, .msg.user a { color: var(--msg-user-link); }
 .msg.user .flink:hover, .msg.user a:hover {
@@ -278,9 +278,9 @@ img.md-img {
 }
 .tool-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; user-select: none; }
 .tool-head:hover { background: rgba(236, 230, 216, .05); }
-.tool-head.has-new .tool-ico { animation: pulse 1.2s infinite; color: var(--sand); }
+.tool-head.has-new .tool-ico { animation: pulse 1.2s infinite; color: var(--accent); }
 .tool-ico { flex: none; }
-.tool-title { flex: 1; font-family: Mono, ui-monospace, monospace; font-size: 12.5px; color: var(--sand); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-title { flex: 1; font-family: Mono, ui-monospace, monospace; font-size: 12.5px; color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-body { border-top: 1px solid var(--line); padding: 9px 12px; }
 .tool-out { margin: 0; font: 12px/1.5 Mono, ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; color: var(--muted); max-height: 400px; overflow-y: auto; }
 .tool-diff { margin: 8px 0 0; font: 12px Mono, ui-monospace, monospace; color: var(--violet); white-space: pre-wrap; }
@@ -317,8 +317,8 @@ img.md-img {
   box-shadow: 0 -8px 30px rgba(0, 0, 0, .55); z-index: 10;
 }
 .ac-item { display: flex; gap: 10px; align-items: baseline; padding: 8px 13px; cursor: pointer; }
-.ac-item:hover, .ac-item.sel { background: rgba(205, 182, 140, .08); }
-.ac-item .n { font-family: Mono, ui-monospace, monospace; color: var(--sand); flex: none; }
+.ac-item:hover, .ac-item.sel { background: rgba(var(--accent-rgb), .08); }
+.ac-item .n { font-family: Mono, ui-monospace, monospace; color: var(--accent); flex: none; }
 .ac-item .h { color: var(--dim); font-size: 12px; flex: none; }
 .ac-item .d { color: var(--ink); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -328,7 +328,7 @@ img.md-img {
   background: rgba(236, 230, 216, .05); color: var(--ink);
   border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; font: inherit;
 }
-#input:focus { border-color: var(--sand); outline: none; }
+#input:focus { border-color: var(--accent); outline: none; }
 /* Champ long : scrollable + place réservée à la pill « N lignes » */
 #input-wrap.over #input { overflow-y: auto; padding-right: 62px; }
 #btn-expand {
@@ -340,7 +340,7 @@ img.md-img {
   color: var(--dim); font: inherit; font-size: 10.5px; line-height: 1.4;
 }
 #btn-expand[hidden] { display: none; }
-#btn-expand:hover { color: var(--ink); border-color: var(--sand); }
+#btn-expand:hover { color: var(--ink); border-color: var(--accent); }
 #btn-expand .ic { width: 11px; height: 11px; }
 #btn-expand .n { font-variant-numeric: tabular-nums; }
 #cmd-select, #mode-select, #model-select, #effort-select, #model-free, #dyn-opts select {
@@ -363,6 +363,9 @@ select option { background: var(--panel-solid); color: var(--ink); }
   border: 1px solid var(--line); font-family: Mono, ui-monospace, monospace;
 }
 .badge.ok, .badge.st-idle, .badge.st-running { color: var(--sage); border-color: rgba(184, 207, 174, .4); }
+/* Occupé/en attente : sand littéral, pas --accent — certains accents
+   (violet, doré) aliaseraient compacting/asleep/warn. « sauge » = sand :
+   le défaut garde le rendu actuel, l'état reste unique sous tout accent. */
 .badge.st-working, .badge.st-waiting_input { color: var(--sand); border-color: rgba(205, 182, 140, .45); }
 .badge.st-compacting { color: var(--violet); border-color: rgba(196, 169, 220, .45); }
 .badge.warn, .badge.st-interrupted { color: var(--gold); border-color: rgba(224, 201, 150, .4); }
@@ -388,7 +391,7 @@ details.th .ic-thought { width: 12px; height: 12px; }
 
 /* Caret d'expand sur les tool calls */
 .tool-head .ic-caret { width: 11px; height: 11px; color: var(--dim); }
-.tool.open .tool-head .ic-caret { transform: rotate(90deg); color: var(--sand); }
+.tool.open .tool-head .ic-caret { transform: rotate(90deg); color: var(--accent); }
 
 /* Tool head : tronquer le titre quand la fenêtre est étroite */
 .tool-head { display: flex; align-items: center; gap: 8px; min-width: 0; overflow: hidden; }
@@ -432,7 +435,7 @@ details.th .ic-thought { width: 12px; height: 12px; }
   white-space: nowrap; color: var(--muted);
 }
 .q-item button { padding: 1px 5px; font-size: 10px; flex: none; }
-.q-item button:hover { border-color: var(--sand); color: var(--sand); }
+.q-item button:hover { border-color: var(--accent); color: var(--accent); }
 
 
 /* Selects d'options config dynamiques (thought_level, speed…) */
@@ -467,9 +470,9 @@ details.th .ic-thought { width: 12px; height: 12px; }
   border-radius: 8px; color: var(--ink); padding: 6px 10px; font: inherit;
   min-width: 220px;
 }
-.s-row select:focus { border-color: var(--sand); outline: none; }
+.s-row select:focus { border-color: var(--accent); outline: none; }
 .s-row.chk { cursor: pointer; }
-.s-row.chk input { accent-color: var(--sand); width: 15px; height: 15px; flex: none; }
+.s-row.chk input { accent-color: var(--accent); width: 15px; height: 15px; flex: none; }
 #s-update-row { border-top: 1px solid var(--line); padding-top: 16px; flex-wrap: wrap; }
 #s-update-row > span { flex: none; }
 #s-update-status { color: var(--dim); }

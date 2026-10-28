@@ -12,7 +12,7 @@
 #file-head .ic, #fv-bar .ic { width: 15px; height: 15px; }
 #file-path {
   flex: 1; font-family: Mono, ui-monospace, monospace; font-size: 12px;
-  color: var(--sand); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 #file-body { flex: 1; display: flex; min-height: 0; }
 /* Barre d'outils du viewer : visible sur desktop aussi (statut, encodage,
@@ -33,26 +33,26 @@
   background: none; border: 1px solid var(--line); border-radius: 4px;
   color: var(--dim); font-size: 11px; padding: 1px 7px; cursor: pointer;
 }
-#fv-loadall:hover { color: var(--ink); border-color: var(--sand); }
+#fv-loadall:hover { color: var(--ink); border-color: var(--accent); }
 #fv-md, #fv-edit, #fv-save {
   display: flex; align-items: center; background: none; border: 0;
   color: var(--muted); cursor: pointer; padding: 3px;
 }
 #fv-md:hover, #fv-edit:hover, #fv-save:hover:not(:disabled) { color: var(--ink); }
-#fv-md.on, #fv-edit.on { color: var(--sand); }
+#fv-md.on, #fv-edit.on { color: var(--accent); }
 #fv-save:disabled { opacity: .35; cursor: default; }
 /* Bandeau conflit : le fichier a changé sur disque pendant l'édition */
 #fv-conflict {
   display: flex; align-items: center; gap: 8px; flex: none;
-  padding: 6px 12px; font-size: 12px; color: var(--sand);
-  background: rgba(205, 182, 140, .09); border-bottom: 1px solid var(--line);
+  padding: 6px 12px; font-size: 12px; color: var(--accent);
+  background: rgba(var(--accent-rgb), .09); border-bottom: 1px solid var(--line);
 }
 #fv-conflict-msg { flex: 1; }
 #fv-conflict button {
   background: none; border: 1px solid var(--line); border-radius: 4px;
   color: var(--ink); font-size: 11px; padding: 2px 8px; cursor: pointer;
 }
-#fv-conflict button:hover { border-color: var(--sand); }
+#fv-conflict button:hover { border-color: var(--accent); }
 /* Éditeur : gouttière + overlay coloré sous la textarea transparente.
    Le pre (#file-hl) et la textarea doivent rester pixel-identiques :
    même font, line-height, padding, tab-size, white-space. */
@@ -73,7 +73,7 @@
   resize: none; border: 0; outline: none; overflow: auto;
   background: transparent; color: transparent; caret-color: var(--ink);
 }
-#file-edit::selection { background: rgba(205, 182, 140, .30); }
+#file-edit::selection { background: rgba(var(--accent-rgb), .30); }
 #file-view {
   flex: 1; min-width: 0; min-height: 0; overflow: auto; margin: 0; padding: 12px;
   font: 12px/1.5 Mono, ui-monospace, monospace; white-space: pre;
@@ -120,7 +120,7 @@
   background: rgba(236, 230, 216, .06); border: 1px solid var(--line);
   border-radius: 6px; color: var(--ink); font: inherit; font-size: 12px;
 }
-#ft-q:focus { border-color: var(--sand); outline: none; }
+#ft-q:focus { border-color: var(--accent); outline: none; }
 #ft-q::placeholder { color: var(--dim); }
 #file-tree, #file-hits {
   flex: 1; min-height: 0; overflow: auto;
@@ -145,7 +145,7 @@
   cursor: pointer; white-space: nowrap; color: var(--muted);
 }
 .fnode:hover { background: rgba(236, 230, 216, .06); color: var(--ink); }
-.fnode.sel { background: rgba(205, 182, 140, .12); color: var(--ink); }
+.fnode.sel { background: rgba(var(--accent-rgb), .12); color: var(--ink); }
 .fnode .farrow { width: 11px; flex: none; opacity: .7; font-size: 10px; }
 .fnode .fico { flex: none; font-size: 11px; }
 .fnode .fname { overflow: hidden; text-overflow: ellipsis; }
@@ -153,7 +153,7 @@
 .fnode.fdot .fname { opacity: .65; }
 .froot {
   display: flex; align-items: center; gap: 4px; padding: 4px 8px;
-  color: var(--sand); font-family: Mono, ui-monospace, monospace; font-size: 11px;
+  color: var(--accent); font-family: Mono, ui-monospace, monospace; font-size: 11px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   border-bottom: 1px solid var(--line); margin-bottom: 2px;
 }
@@ -164,7 +164,7 @@
 .fnode.fnew { color: var(--ink); }
 .fnew-name {
   flex: 1; min-width: 0; padding: 1px 5px;
-  background: rgba(236, 230, 216, .06); border: 1px solid var(--sand);
+  background: rgba(236, 230, 216, .06); border: 1px solid var(--accent);
   border-radius: 4px; color: var(--ink); font: inherit; font-size: 12px;
 }
 .fnew-name:focus { outline: none; }
@@ -176,10 +176,10 @@ body.android .fnew-name { font-size: 15px; padding: 4px 6px; }
   position: absolute; left: 0; top: 0; bottom: 0; width: 6px;
   cursor: col-resize; z-index: 5;
 }
-#file-resize:hover { background: rgba(205, 182, 140, .3); }
+#file-resize:hover { background: rgba(var(--accent-rgb), .3); }
 
 /* Coloration syntaxique légère (viewer + blocs de code du rendu md) */
 #file-view .syn-kw, #file-md .syn-kw { color: var(--violet); font-weight: 600; }
 #file-view .syn-str, #file-md .syn-str { color: var(--sage); }
 #file-view .syn-com, #file-md .syn-com { color: var(--dim); font-style: italic; }
-#file-view .syn-num, #file-md .syn-num { color: var(--sand); }
+#file-view .syn-num, #file-md .syn-num { color: var(--accent); }
