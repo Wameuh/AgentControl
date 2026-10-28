@@ -473,4 +473,16 @@ details.th .ic-thought { width: 12px; height: 12px; }
 #s-update-row { border-top: 1px solid var(--line); padding-top: 16px; flex-wrap: wrap; }
 #s-update-row > span { flex: none; }
 #s-update-status { color: var(--dim); }
+/* Alertes sonores : sous-options indentées ; master off = contrôles
+   grisés sauf les boutons « Tester » (toujours cliquables — preview +
+   déblocage autoplay). */
+#s-snd-opts { display: flex; flex-direction: column; gap: 15px; }
+#s-snd-opts.off input, #s-snd-opts.off label, #s-snd-opts.off span { opacity: .45; }
+.s-snd-opt { padding-left: 26px; }
+.s-snd-opt > label { flex: 1; cursor: pointer; }
+.s-snd-opt > input[type="checkbox"] {
+  accent-color: var(--sand); width: 15px; height: 15px; flex: none;
+}
+.s-test { padding: 3px 12px; font-size: 12px; flex: none; }
+#s-snd-vol { accent-color: var(--sand); flex: none; width: 220px; }
 body.android #settings-body { padding-bottom: calc(20px + env(safe-area-inset-bottom)); }
