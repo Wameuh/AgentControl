@@ -19,11 +19,16 @@ export const rcChannel = () =>
 
 // Version distante : fetch direct (pas d'outil local), fallback commande Rust.
 // releases/latest exclut les prereleases → canal rc = liste + max semver.
+// Fetch bornés : un réseau en blackhole ferait popper dlg-outdated (modal,
+// page inerte) des dizaines de secondes après l'action — incompréhensible.
+const FETCH_TIMEOUT = 15_000;
+
 async function remoteVersion(): Promise<string> {
   if (rcChannel()) {
     try {
       const r = await fetch(
         "https://api.github.com/repos/Wameuh/AgentControl/releases?per_page=20",
+        { signal: AbortSignal.timeout(FETCH_TIMEOUT) },
       );
       if (r.ok) {
         const rels = (await r.json()) as {
@@ -46,6 +51,7 @@ async function remoteVersion(): Promise<string> {
   try {
     const r = await fetch(
       "https://api.github.com/repos/Wameuh/AgentControl/releases/latest",
+      { signal: AbortSignal.timeout(FETCH_TIMEOUT) },
     );
     if (r.ok) {
       const j = (await r.json()) as { tag_name?: string };
@@ -62,6 +68,7 @@ async function apkReleaseUrl(tag: string): Promise<string> {
   try {
     const r = await fetch(
       `https://api.github.com/repos/Wameuh/AgentControl/releases/tags/v${tag}`,
+      { signal: AbortSignal.timeout(FETCH_TIMEOUT) },
     );
     if (r.ok) {
       const j = (await r.json()) as {

@@ -160,6 +160,13 @@ export class NewSessionDialog {
       const label0 = btn.textContent;
       btn.textContent = t("creating_agent");
       dlgErr("f-err", null);
+      // L'appel peut durer sur un démon distant (spawn/attach synchrone,
+      // timeout RPC 60 s) — l'utilisateur doit savoir qu'Échap détache
+      // plutôt que croire à un gel.
+      const fst = $("f-status");
+      fst.textContent = t("create_wait");
+      fst.hidden = false;
+      const dlg = $("dlg-new") as HTMLDialogElement;
       const res = await (attach
         ? call<{ session: string }>("attach_session", {
             agent: ($("f-agent") as HTMLSelectElement).value,
@@ -178,9 +185,13 @@ export class NewSessionDialog {
             prompt: ($("f-prompt") as HTMLTextAreaElement).value || undefined,
           })
       ).catch((er) => {
-        dlgErr("f-err", String(er));
+        // Dialogue détaché (Échap) pendant l'appel : une erreur dans
+        // f-err serait invisible — basculer en toast.
+        if (dlg.open) dlgErr("f-err", String(er));
+        else showErr(String(er));
         return null;
       });
+      fst.hidden = true;
       btn.disabled = false;
       btn.classList.remove("spin");
       btn.textContent = label0;
