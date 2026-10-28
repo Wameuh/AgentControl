@@ -39,17 +39,22 @@ export function initFirstPost(capable: (conn: string) => boolean) {
     copyBtn.disabled = true;
     dlg.showModal();
     try {
-      const r = await call<{ post: FirstPost | null }>("first_post", {
-        session: s.id,
-      });
+      const r = await call<{ post: FirstPost | null; truncated?: boolean }>(
+        "first_post",
+        { session: s.id },
+      );
       if (!r.post) {
         meta.textContent = "";
-        body.textContent = t("first_none");
+        // truncated = la compaction a coupé la tête du journal — le vrai
+        // premier post n'existe plus (≠ cycle sans message).
+        body.textContent = t(r.truncated ? "first_truncated" : "first_none");
         return;
       }
       const p = r.post;
       current = p.text;
-      meta.textContent = `#${p.seq} · ${new Date(p.ts).toLocaleString()}`;
+      meta.textContent =
+        `#${p.seq} · ${new Date(p.ts).toLocaleString()}` +
+        (p.steer ? " · ↪ steer" : "");
       body.textContent = p.text;
       copyBtn.disabled = false;
     } catch (e) {

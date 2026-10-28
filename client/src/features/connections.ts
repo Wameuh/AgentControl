@@ -86,29 +86,48 @@ export class ConnectionManager {
   liveEntries(): [string, ConnLive][] {
     return [...this.live];
   }
-  /** Status démon brut de la conn (capabilities). conn inconnue → fallback
-   *  sur la seule conn suivie (cas nominal mono-démon). */
+  /** Status démon brut de la conn (capabilities). Le fallback « seule
+   *  entrée » n'est joué que pour la sentinelle "default" en mono-conn —
+   *  une clé réelle inconnue ne doit jamais hériter des capabilities
+   *  d'un autre démon (bouton affiché à tort). */
   cap(k: string): Record<string, unknown> | undefined {
     return this.caps.get(k) ??
-      (this.caps.size === 1 ? [...this.caps.values()][0] : undefined);
+      (k === "default" && this.caps.size === 1 ? [...this.caps.values()][0] : undefined);
   }
 
-  /** Connexion établie → la surveillance/backoff la suit (fin de doConnect). */
-  markConnected(cfg: Record<string, unknown>) {
+  /** Flags de capability = les champs booléens du daemon_status. La
+   *  comparaison évite de notifier capsChanged à chaque tick du watchdog
+   *  (updateHeader = RPC queue_list + rebuild des selects, toutes les
+   *  10 s sinon — y compris dropdown ouvert). */
+  private capFlags(v: Record<string, unknown>): string {
+    return JSON.stringify(
+      Object.fromEntries(Object.entries(v).filter(([, x]) => typeof x === "boolean")),
+    );
+  }
+  private setCaps(k: string, v: Record<string, unknown>) {
+    if (this.capFlags(this.caps.get(k) ?? {}) === this.capFlags(v)) {
+      this.caps.set(k, v);
+      return;
+    }
+    this.caps.set(k, v);
+    this.deps.capsChanged();
+  }
+
+  /** Connexion établie → la surveillance/backoff la suit (fin de doConnect).
+   *  `status` = daemon_status déjà en main (`connect` le retourne) —
+   *  sinon probe immédiat pour les capabilities. */
+  markConnected(cfg: Record<string, unknown>, status?: Record<string, unknown>) {
     const ck = this.keyOf(cfg);
     this.cfg.set(ck, cfg);
     this.gone.delete(ck); // reconnectée via le dialogue → ré-active
     this.markAlive(ck);
-    // Sonde immédiate : capabilities démon (first_post, self_update) avant
-    // le prochain passage du watchdog (10 s).
+    if (status && !status.error) {
+      this.setCaps(ck, status);
+      return;
+    }
     void call<Record<string, unknown>>("daemon_status", { conn: ck })
       .then((v) => {
-        if (!v.error) {
-          this.caps.set(ck, v);
-          // Les gates UI lisent caps — rafraîchir le header sinon ils
-          // resteraient masqués jusqu'à la prochaine updateHeader.
-          this.deps.capsChanged();
-        }
+        if (!v.error) this.setCaps(ck, v);
       })
       .catch(() => {});
   }
@@ -177,7 +196,7 @@ export class ConnectionManager {
     this.live.set(key, "reconnecting");
     this.renderState();
     try {
-      await invoke("connect", { cfg });
+      const st = await invoke<Record<string, unknown>>("connect", { cfg });
       // Déconnectée/supprimée pendant le connect en vol → refermer aussitôt :
       // hors gone/cfg elle tournerait sans aucune surveillance.
       if (this.gone.has(key) || !this.cfg.has(key)) {
@@ -187,6 +206,8 @@ export class ConnectionManager {
         return;
       }
       this.markAlive(key);
+      // connect retourne déjà daemon_status → capabilities à jour sans RTT.
+      if (st && !st.error) this.setCaps(key, st);
       // Réouvrir la session affichée si elle vivait sur cette connexion.
       this.deps.reopenIfConn(key);
       await this.deps.refresh();
@@ -383,8 +404,7 @@ export class ConnectionManager {
           if ((v as { error?: string }).error) this.markDead(k);
           else {
             anyOk = true;
-            this.caps.set(k, v as Record<string, unknown>);
-            this.deps.capsChanged();
+            this.setCaps(k, v as Record<string, unknown>);
             if ((this.live.get(k) ?? "ok") !== "ok") this.markAlive(k);
           }
         }

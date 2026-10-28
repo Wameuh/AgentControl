@@ -555,18 +555,21 @@ impl Daemon {
 
     /// Premier post du cycle courant : le journal ne contient que le
     /// cycle en cours (vidé à /clear, /new, rebind) → le premier
-    /// `user_message` est par construction celui d'après le dernier reset.
+    /// `user_message` est par construction celui d'après le dernier
+    /// reset. `truncated: true` = la compaction a coupé la tête — le
+    /// vrai premier post n'existe plus.
     pub(super) async fn h_first_post(self: &Arc<Self>, session: String) -> Result<Value> {
+                use crate::journal::FirstPost;
                 let s = self.get_session(&session).await?;
-                let post = s.journal.first_post(&s.dir)?;
-                Ok(match post {
-                    Some(ev) => {
+                Ok(match s.journal.first_post(&s.dir)? {
+                    FirstPost::Found(ev) => {
                         let proto::EventKind::UserMessage { text, steer } = ev.kind else {
-                            unreachable!() // first_post ne renvoie que ce kind
+                            unreachable!() // Found ne porte que ce kind
                         };
                         json!({"post": {"seq": ev.seq, "ts": ev.ts, "text": text, "steer": steer}})
                     }
-                    None => json!({"post": null}),
+                    FirstPost::Truncated => json!({"post": null, "truncated": true}),
+                    FirstPost::Empty => json!({"post": null}),
                 })
     }
 

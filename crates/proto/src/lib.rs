@@ -597,7 +597,9 @@ pub enum ReqKind {
     /// « premier » suit donc automatiquement le dernier reset.
     /// Réponse : `{post: {seq, ts, text, steer}}` ou `{post: null}`
     /// (aucun message utilisateur dans le cycle — ex. juste après
-    /// un /clear).
+    /// un /clear) ; `{post: null, truncated: true}` quand la
+    /// compaction du journal a supprimé la tête — le vrai premier
+    /// post n'existe alors plus.
     FirstPost {
         session: String,
     },
