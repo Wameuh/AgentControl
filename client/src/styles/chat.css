@@ -424,7 +424,15 @@ details.th .ic-thought { width: 12px; height: 12px; }
   padding: 6px 14px; border-top: 1px solid var(--line);
   background: rgba(236, 230, 216, .02);
 }
-#queue-bar > .ic-clock { width: 12px; height: 12px; align-self: center; color: var(--dim); }
+/* Bouton d'ouverture du panneau file : horloge + compteur, état « on »
+   quand le panneau est visible. */
+#queue-open {
+  display: inline-flex; align-items: center; gap: 4px; flex: none;
+  padding: 2px 7px; font-size: 11px; color: var(--dim);
+}
+#queue-open .ic { width: 12px; height: 12px; }
+#queue-open .n { font-variant-numeric: tabular-nums; }
+#queue-open.on { border-color: var(--accent); color: var(--accent); }
 .q-item {
   display: flex; align-items: center; gap: 5px; max-width: 340px;
   background: var(--glass); border: 1px solid var(--line);
@@ -435,7 +443,52 @@ details.th .ic-thought { width: 12px; height: 12px; }
   white-space: nowrap; color: var(--muted);
 }
 .q-item button { padding: 1px 5px; font-size: 10px; flex: none; }
-.q-item button:hover { border-color: var(--accent); color: var(--accent); }
+.q-item button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.q-item button:disabled { opacity: .4; cursor: default; }
+
+/* Panneau d'inspection de la file : messages complets + édition inline.
+   Dans le flux comme #term-panel — flex-shrink:0 + cap de hauteur, la
+   liste scrolle en interne. */
+#queue-panel {
+  flex-shrink: 0; display: flex; flex-direction: column; max-height: 42%;
+  border-top: 1px solid var(--line);
+  background: rgba(236, 230, 216, .02);
+}
+#qp-head {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  padding: 5px 14px; border-bottom: 1px solid var(--line);
+}
+#qp-title { font-size: 12px; font-weight: 500; color: var(--muted); }
+#qp-count { font-size: 10.5px; }
+#qp-close { margin-left: auto; padding: 2px 7px; }
+#qp-close .ic { width: 12px; height: 12px; display: block; }
+#qp-list {
+  flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 6px; padding: 8px 14px;
+}
+.qp-item {
+  display: flex; align-items: flex-start; gap: 8px; flex-shrink: 0;
+  background: var(--glass); border: 1px solid var(--line);
+  border-radius: 8px; padding: 6px 10px; font-size: 12.5px;
+}
+.qp-idx { flex: none; color: var(--dim); font-size: 11px; padding-top: 1px; }
+.qp-txt {
+  flex: 1; min-width: 0; max-height: 170px; overflow-y: auto;
+  white-space: pre-wrap; word-break: break-word; color: var(--muted);
+}
+.qp-edit {
+  flex: 1; min-width: 0; resize: vertical;
+  font: inherit; color: var(--ink); padding: 4px 8px;
+  background: rgba(236, 230, 216, .05);
+  border: 1px solid var(--accent); border-radius: 6px;
+}
+:root.light .qp-edit { background: rgba(43, 42, 36, .04); }
+.qp-edit:focus { outline: none; }
+.qp-acts { display: flex; gap: 4px; flex: none; margin-left: auto; }
+.qp-acts button { padding: 2px 6px; font-size: 10px; }
+.qp-acts button .ic { width: 11px; height: 11px; display: block; }
+.qp-acts button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.qp-acts button:disabled { opacity: .4; cursor: default; }
 
 
 /* Selects d'options config dynamiques (thought_level, speed…) */

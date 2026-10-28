@@ -44,6 +44,7 @@ body.android #file-panel,
 body.android #chat-header,
 body.android #composer,
 body.android #queue-bar,
+body.android #queue-panel,
 body.android .toast {
   background: var(--panel-solid);
 }
@@ -355,6 +356,18 @@ body.android #events { padding: 8px 10px; }
 body.android .msg { font-size: 15px; }
 body.android .msg.peer .peer-head { font-size: 12px; }
 body.android .q-item .q-txt { font-size: 12px; }
+/* Panneau file : cibles tactiles + texte lu ≥12px */
+body.android #queue-panel { max-height: 55%; }
+body.android .qp-item { padding: 9px 12px; }
+body.android .qp-txt, body.android .qp-edit { font-size: 14px; }
+body.android .qp-idx { font-size: 12px; padding-top: 3px; }
+body.android .qp-acts button { min-width: 40px; min-height: 40px; }
+body.android .qp-acts button .ic { width: 16px; height: 16px; }
+body.android #queue-open { min-height: 40px; padding: 4px 12px; font-size: 13px; }
+body.android #queue-open .ic { width: 15px; height: 15px; }
+body.android #qp-close { min-height: 38px; padding: 4px 12px; }
+body.android #qp-close .ic { width: 15px; height: 15px; }
+body.android #qp-title { font-size: 14px; }
 
 /* ── Landscape bas (téléphone couché) ─────────────────────────────────
    Sous ~500px de hauteur utile, la chrome fixe (titlebar + header +
