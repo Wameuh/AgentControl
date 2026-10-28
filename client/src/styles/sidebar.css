@@ -19,7 +19,24 @@
 }
 #conn-bar { display: flex; align-items: center; gap: 8px; }
 #conn-bar #btn-connect { flex: 1; }
+/* Filtre de l'arbre : input pleine largeur + croix d'effacement */
+#sess-filter { position: relative; display: flex; flex: none; }
+#sess-filter input {
+  flex: 1; min-width: 0; padding: 5px 24px 5px 9px; font: inherit; font-size: 12px;
+  color: var(--ink); background: rgba(236, 230, 216, .05);
+  border: 1px solid var(--line); border-radius: 10px;
+}
+#sess-filter input:focus { outline: none; border-color: rgba(205, 182, 140, .5); }
+#sess-filter input::placeholder { color: var(--dim); }
+#sess-filter-clear {
+  position: absolute; right: 3px; top: 50%; transform: translateY(-50%);
+  border: 0; background: none; color: var(--dim); padding: 3px; line-height: 1;
+}
+#sess-filter-clear:hover { color: var(--sand); }
+#sess-filter-clear .ic { width: 11px; height: 11px; display: block; }
 #session-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; }
+#session-list mark { background: rgba(224, 201, 150, .3); color: inherit; border-radius: 3px; padding: 0 1px; }
+#session-list .sess-none { padding: 10px 12px; color: var(--dim); font-size: 12px; font-style: italic; }
 #session-list .sess {
   display: flex; align-items: center; gap: 8px; padding: 8px 10px;
   border-radius: 10px; cursor: pointer; border: 1px solid transparent;
