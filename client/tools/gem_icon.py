@@ -7,6 +7,7 @@
   - src-tauri/icons/32x32.png
   - src-tauri/icons/128x128.png
   - src-tauri/icons/icon.ico  (16..256 multi-tailles)
+  - src-tauri/icons/nsis-sidebar.bmp / nsis-header.bmp (wizard Windows)
 Usage : python3 client/tools/gem_icon.py
 """
 import math
@@ -207,6 +208,41 @@ def write_ios(icons, big):
     tile.save(os.path.join(d, "AppIcon-512@2x.png"))
 
 
+# Palette du thème sombre de l'app (src/styles/base.css :root) — les
+# bitmaps NSIS sont du BMP 24 bits sans alpha.
+NSIS_PANEL = (22, 28, 24)      # --panel-solid #161c18
+NSIS_SAND = (205, 182, 140)    # --sand / --accent #cdb68c
+
+
+def scaled_gem(big, size):
+    """Gemme recadrée, redimensionnée pour tenir dans size×size."""
+    gem = big.crop(big.getbbox())
+    k = size / max(gem.size)
+    return gem.resize((max(1, int(gem.width * k)),
+                       max(1, int(gem.height * k))), Image.LANCZOS)
+
+
+def write_nsis(icons, big):
+    """Bitmaps du wizard NSIS (bundle.windows.nsis). Le wizard classique
+    ne permet pas un fond sombre complet — les pages internes gardent le
+    fond système ; l'habillage passe uniquement par ces bitmaps (un vrai
+    thème dark exigerait un template .nsi custom — hors scope)."""
+    # Panneau latéral des pages Welcome/Finish : 164×314.
+    w, h = 164, 314
+    sb = Image.new("RGB", (w, h), NSIS_PANEL)
+    g = scaled_gem(big, int(w * 0.62))
+    sb.paste(g, ((w - g.width) // 2, int(h * 0.42 - g.height / 2)), g)
+    ImageDraw.Draw(sb).rectangle((0, h - 4, w, h), fill=NSIS_SAND)
+    sb.save(os.path.join(icons, "nsis-sidebar.bmp"))
+    # Bandeau d'en-tête des pages internes : 150×57.
+    w, h = 150, 57
+    hd = Image.new("RGB", (w, h), NSIS_PANEL)
+    g = scaled_gem(big, h - 16)
+    hd.paste(g, ((w - g.width) // 2, (h - 2 - g.height) // 2), g)
+    ImageDraw.Draw(hd).rectangle((0, h - 2, w, h), fill=NSIS_SAND)
+    hd.save(os.path.join(icons, "nsis-header.bmp"))
+
+
 def write_squares(icons, big):
     for s in (30, 44, 71, 89, 107, 142, 150, 284, 310):
         tile = Image.new("RGBA", (s, s), (0, 0, 0, 0))
@@ -248,6 +284,7 @@ def main():
     write_android(icons, big)
     write_ios(icons, big)
     write_squares(icons, big)
+    write_nsis(icons, big)
     print("icons écrites dans", icons, "et", pub)
 
 
