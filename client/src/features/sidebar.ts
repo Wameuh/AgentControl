@@ -22,6 +22,38 @@ import type { SettingsPanel } from "./settings";
 
 const DTYPE = "application/x-ac-session";
 
+/** Ordonne un compartiment de sessions en arbre parent→sous-agents :
+ *  une session spawnée (spawned_by) dont la créatrice est rendue dans le
+ *  même compartiment s'y imbrique juste après elle (depth+1) ; les
+ *  orphelines (parent supprimé, autre groupe, filtré) restent racines.
+ *  Garde-fou cycles (meta corrompu) : tout nœud non atteint ressort
+ *  racine plutôt que disparaître. Retour aplatie dans l'ordre d'affichage. */
+function nestSessions(rows: SessionMeta[]): { s: SessionMeta; depth: number }[] {
+  const ids = new Set(rows.map((r) => r.id));
+  const byParent = new Map<string, SessionMeta[]>();
+  const roots: SessionMeta[] = [];
+  for (const s of rows) {
+    const p = s.spawned_by;
+    if (p && ids.has(p)) {
+      const a = byParent.get(p);
+      if (a) a.push(s); else byParent.set(p, [s]);
+    } else {
+      roots.push(s);
+    }
+  }
+  const out: { s: SessionMeta; depth: number }[] = [];
+  const seen = new Set<string>();
+  const walk = (s: SessionMeta, depth: number) => {
+    if (seen.has(s.id)) return;
+    seen.add(s.id);
+    out.push({ s, depth });
+    for (const c of byParent.get(s.id) ?? []) walk(c, depth + 1);
+  };
+  for (const s of roots) walk(s, 0);
+  for (const s of rows) walk(s, 0);
+  return out;
+}
+
 export class Sidebar {
   private conns!: ConnectionManager;
   private groups!: GroupStore;
@@ -294,12 +326,12 @@ export class Sidebar {
           this.openGroupCtx(x, y, conn, grp, sessions.find((m) => m.group === grp)));
         this.bindDropTarget(g, conn, grp);
         el.appendChild(g);
-        for (const s of rows) {
-          el.appendChild(this.sessRow(s, conn, grp, grpClosed));
+        for (const { s, depth } of nestSessions(rows)) {
+          el.appendChild(this.sessRow(s, conn, grp, grpClosed, depth));
         }
       }
-      for (const s of plain) {
-        el.appendChild(this.sessRow(s, conn, "", connClosed));
+      for (const { s, depth } of nestSessions(plain)) {
+        el.appendChild(this.sessRow(s, conn, "", connClosed, depth));
       }
     }
     if (f && !shown) {
@@ -478,12 +510,21 @@ export class Sidebar {
     inp.addEventListener("blur", () => done(true));
   }
 
-  private sessRow(s: SessionMeta, conn: string, grp: string, closed: boolean): HTMLElement {
+  private sessRow(s: SessionMeta, conn: string, grp: string, closed: boolean, depth = 0): HTMLElement {
     const div = document.createElement("div");
     div.dataset.sid = s.id;
-    div.className = "sess" + (grp ? " in-grp" : "") + (s.offline ? " offline" : "") +
-      (app.current?.id === s.id ? " active" : "");
+    div.className = "sess" + (grp ? " in-grp" : "") + (depth > 0 ? " sub" : "") +
+      (s.offline ? " offline" : "") + (app.current?.id === s.id ? " active" : "");
     if (closed) div.style.display = "none";
+    // Sous-agent : indentation par niveau (cap visuel — les arbres de
+    // délégation restent peu profonds), tooltip = provenance.
+    if (depth > 0) {
+      div.style.marginLeft = `${(grp ? 14 : 0) + Math.min(depth, 4) * 14}px`;
+    }
+    if (s.spawned_by) {
+      const parent = app.lastSessions.find((x) => x.id === s.spawned_by);
+      div.title = t("spawned_by", { parent: parent?.title ?? s.spawned_by });
+    }
     const prs = this.prBySess.get(`${conn}${s.id}`) ?? [];
     const prHtml = prs.length
       ? `<span class="sess-pr" title="${q(esc(prs.map((p) => `${p.repo}#${p.pr}${p.title ? ` — ${p.title}` : ""}${p.status ? ` (${p.status})` : ""}`).join("\n")))}">${prs.map((p) => `#${p.pr}`).join(" ")}</span>`

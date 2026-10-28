@@ -268,40 +268,93 @@ async fn main() -> Result<()> {
                 .ok()
                 .and_then(|v| v.as_array().cloned())
                 .unwrap_or_default();
-            for s in v.as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
-                let sid = s["id"].as_str().unwrap_or("");
-                let badge: Vec<String> = prs
-                    .iter()
-                    .filter(|p| {
-                        p["session"].as_str() == Some(sid)
-                            && !matches!(p["status"].as_str(), Some("merged" | "closed"))
-                    })
-                    .map(|p| {
-                        let st = p["status"].as_str().unwrap_or("");
-                        format!(
-                            "#{}{}",
-                            p["pr"].as_u64().unwrap_or(0),
-                            if st.is_empty() || st == "open" {
-                                String::new()
-                            } else {
-                                format!("({st})")
-                            }
-                        )
-                    })
-                    .collect();
-                println!(
-                    "{}  {:<12} {:<14} {}  {}{}",
-                    sid,
-                    s["state"].as_str().unwrap_or(""),
-                    s["agent"].as_str().unwrap_or(""),
-                    s["created_at"].as_str().unwrap_or("").get(..16).unwrap_or(""),
-                    s["title"].as_str().unwrap_or(""),
-                    if badge.is_empty() {
+            let rows: Vec<&Value> =
+                v.as_array().map(|a| a.iter().collect()).unwrap_or_default();
+            // Sous-agents : spawned_by pointant une ligne de la liste →
+            // la session s'imprime sous sa créatrice, indentée (↳,
+            // estompée). Les orphelines restent racines.
+            // id vide exclu : sinon un spawned_by "" s'imbriquerait sous
+            // une ligne sans identité, et `seen` les dédoublonnerait à tort.
+            let ids: std::collections::HashSet<&str> = rows
+                .iter()
+                .filter_map(|s| s["id"].as_str())
+                .filter(|i| !i.is_empty())
+                .collect();
+            let mut children: std::collections::HashMap<&str, Vec<&Value>> =
+                Default::default();
+            let mut roots: Vec<&Value> = Vec::new();
+            for s in &rows {
+                match s["spawned_by"].as_str().filter(|p| ids.contains(p)) {
+                    Some(p) => children.entry(p).or_default().push(*s),
+                    None => roots.push(*s),
+                }
+            }
+            let mut seen = std::collections::HashSet::new();
+            // `rows` en second passage : un cycle spawned_by (meta
+            // corrompu) réinjecte ses membres en racines plutôt que
+            // de les faire disparaître.
+            for seed in roots.iter().chain(rows.iter()) {
+                let mut stack = vec![(*seed, 0usize)];
+                while let Some((s, depth)) = stack.pop() {
+                    let sid = s["id"].as_str().unwrap_or("");
+                    // Dédoublonnage par identité de ligne : une ligne sans
+                    // id s'imprime quand même, et un cycle repassant par la
+                    // même entrée de `rows` est bloqué.
+                    if !seen.insert(s as *const Value) {
+                        continue;
+                    }
+                    let badge: Vec<String> = prs
+                        .iter()
+                        .filter(|p| {
+                            p["session"].as_str() == Some(sid)
+                                && !matches!(p["status"].as_str(), Some("merged" | "closed"))
+                        })
+                        .map(|p| {
+                            let st = p["status"].as_str().unwrap_or("");
+                            format!(
+                                "#{}{}",
+                                p["pr"].as_u64().unwrap_or(0),
+                                if st.is_empty() || st == "open" {
+                                    String::new()
+                                } else {
+                                    format!("({st})")
+                                }
+                            )
+                        })
+                        .collect();
+                    // Cap d'indentation comme la sidebar (4 niveaux puis
+                    // retrait fixe) — les arbres très profonds restent
+                    // lisibles dans un terminal étroit.
+                    let indent = if depth == 0 {
                         String::new()
                     } else {
-                        format!("  [{}]", badge.join(" "))
+                        format!("{}↳ ", "  ".repeat((depth - 1).min(4)))
+                    };
+                    let line = format!(
+                        "{}{}  {:<12} {:<14} {}  {}{}",
+                        indent,
+                        sid,
+                        s["state"].as_str().unwrap_or(""),
+                        s["agent"].as_str().unwrap_or(""),
+                        s["created_at"].as_str().unwrap_or("").get(..16).unwrap_or(""),
+                        s["title"].as_str().unwrap_or(""),
+                        if badge.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  [{}]", badge.join(" "))
+                        }
+                    );
+                    if depth == 0 {
+                        println!("{line}");
+                    } else {
+                        println!("\x1b[2m{line}\x1b[0m");
                     }
-                );
+                    if let Some(kids) = children.get(sid) {
+                        for c in kids.iter().rev() {
+                            stack.push((*c, depth + 1));
+                        }
+                    }
+                }
             }
         }
         "new" => {

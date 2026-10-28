@@ -142,6 +142,7 @@ const STR = {
     sess_filter_title: "Filter by session, agent, group or server name",
     sess_filter_clear: "Clear the filter",
     sess_filter_none: "No session matches",
+    spawned_by: "spawned by {parent}",
     bottom_jump_title: "Back to live tail",
     // retours utilisateur : toasts, dialogue démon, états vides
     retry: "Retry",
@@ -309,6 +310,7 @@ const STR = {
     sess_filter_title: "Filtrer par nom de session, agent, groupe ou serveur",
     sess_filter_clear: "Effacer le filtre",
     sess_filter_none: "Aucune session ne correspond",
+    spawned_by: "créée par {parent}",
     bottom_jump_title: "Revenir au fil en direct",
     // retours utilisateur : toasts, dialogue démon, états vides
     retry: "Réessayer",
