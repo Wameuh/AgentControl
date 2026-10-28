@@ -115,6 +115,10 @@ const STR = {
     search_ph: "Search in this session…",
     search_prev: "Previous match", search_next: "Next match",
     search_none: "no match", search_more: "more results…",
+    sess_filter_ph: "Filter sessions…",
+    sess_filter_title: "Filter by session, agent, group or server name",
+    sess_filter_clear: "Clear the filter",
+    sess_filter_none: "No session matches",
     bottom_jump_title: "Back to live tail",
     // retours utilisateur : toasts, dialogue démon, états vides
     retry: "Retry",
@@ -255,6 +259,10 @@ const STR = {
     search_ph: "Rechercher dans cette session…",
     search_prev: "Résultat précédent", search_next: "Résultat suivant",
     search_none: "aucun résultat", search_more: "plus de résultats…",
+    sess_filter_ph: "Filtrer les sessions…",
+    sess_filter_title: "Filtrer par nom de session, agent, groupe ou serveur",
+    sess_filter_clear: "Effacer le filtre",
+    sess_filter_none: "Aucune session ne correspond",
     bottom_jump_title: "Revenir au fil en direct",
     // retours utilisateur : toasts, dialogue démon, états vides
     retry: "Réessayer",

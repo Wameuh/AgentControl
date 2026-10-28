@@ -150,21 +150,77 @@ export class Sidebar {
         (s.state === "working" || s.state === "waiting_input" || s.state === "compacting"),
     ).length;
     meshSetMood({ agents: Math.min(n, 4), intensity: 0.55 });
+    this.renderList();
+    // La liste arrive → l'accueil recalcule son état (0 session → CTA).
+    this.chat.updateEmptyState();
+  }
+
+  /** Filtre de l'arbre (normalisé : trim + bas de casse) — vide = tout. */
+  private filter = "";
+
+  /** Surligne la 1re occurrence du filtre dans un libellé (HTML sûr :
+   *  chaque segment passe par esc(), seul le <mark> est injecté). */
+  private hl(txt: string): string {
+    const f = this.filter;
+    txt = txt ?? ""; // champ absent du fil (vieux démon) → "" plutôt que TypeError/"undefined"
+    if (!f) return esc(txt);
+    const i = txt.toLowerCase().indexOf(f);
+    if (i < 0) return esc(txt);
+    return esc(txt.slice(0, i)) + "<mark>" + esc(txt.slice(i, i + f.length)) + "</mark>" +
+      esc(txt.slice(i + f.length));
+  }
+
+  /** Rendu de #session-list depuis app.lastSessions — appelé par refresh()
+   *  et à chaque frappe du filtre (pas de RPC : la donnée est déjà là).
+   *  Filtre actif : seules les branches avec ≥1 session visible survivent,
+   *  tout est déplié, et la 1re occurrence du filtre est surlignée. */
+  private renderList() {
     const el = $("session-list");
     el.innerHTML = "";
+    const f = this.filter;
+    const hit = (txt: string) => (txt ?? "").toLowerCase().includes(f);
     // Rendu : connexion → groupes nommés (le store client garde les groupes
-    // VIDES visibles) → sessions non groupées.
+    // VIDES visibles hors filtre) → sessions non groupées.
     const byConn = new Map<string, SessionMeta[]>();
-    for (const s of list) {
+    for (const s of app.lastSessions) {
+      if (this.pendingDel.has(s.id)) continue;
       const c = s.conn ?? "default";
       if (!byConn.has(c)) byConn.set(c, []);
       byConn.get(c)!.push(s);
     }
-    // Conns suivies même sans session (ex. serveur down) → header + badge.
-    for (const conn of [...new Set([...this.conns.knownConns(), ...byConn.keys()])].sort()) {
+    // Hors filtre : conns suivies même sans session (ex. serveur down) →
+    // header + badge. Filtré : une conn sans session visible disparaît.
+    const connKeys = [
+      ...new Set([...(f ? [] : this.conns.knownConns()), ...byConn.keys()]),
+    ].sort();
+    let shown = 0;
+    for (const conn of connKeys) {
       const sessions = (byConn.get(conn) ?? []).sort((a, b) => a.title.localeCompare(b.title));
+      // Une connexion ou un groupe dont le NOM matche affiche toutes ses
+      // sessions (sinon l'utilisateur ne verrait que les titres chanceux).
+      const connHit = !!f && hit(conn);
+      const grpHit = (g: string) => !!f && hit(g);
+      const pass = (s: SessionMeta, gHit: boolean) =>
+        !f || connHit || gHit || hit(s.title) || hit(s.agent);
+      const grpNames = [
+        ...new Set([
+          ...(f ? [] : this.groups.stored(conn)),
+          ...sessions.map((s) => s.group).filter((g): g is string => !!g),
+        ]),
+      ].sort();
+      // Hors filtre les groupes stockés VIDES restent visibles ; filtré,
+      // un groupe sans session visible disparaît.
+      const grpRows = grpNames
+        .map((grp) => ({ grp, rows: sessions.filter((x) => x.group === grp && pass(x, grpHit(grp))) }))
+        .filter((g) => !f || g.rows.length > 0);
+      const plain = sessions.filter((x) => !x.group && pass(x, false));
+      // Filtré : conn sans aucune session visible → pas de header. Hors
+      // filtre : le header s'affiche même sans session (conns suivies).
+      if (f && !grpRows.length && !plain.length) continue;
+      shown += plain.length + grpRows.reduce((acc, g) => acc + g.rows.length, 0);
+
       const key = `ac-grp-${conn}`;
-      const connClosed = localStorage.getItem(key) === "1";
+      const connClosed = !f && localStorage.getItem(key) === "1";
       const st = this.conns.state(conn) ?? "ok";
       const ch = document.createElement("div");
       ch.className = "grp-head" + (connClosed ? " closed" : "");
@@ -172,9 +228,12 @@ export class Sidebar {
         ? `<span class="conn-st ${st === "ok" ? "ok" : st === "reconnecting" ? "warn" : "bad"}"` +
           ` title="${q(esc(this.conns.tip(st, conn)))}">${st === "reconnecting" ? icon("refresh") : icon("dot")}</span> `
         : "";
-      ch.innerHTML = `<span class="grp-arrow">${icon(connClosed ? "chev-right" : "chev-down")}</span> ${badge}${esc(conn)}` +
+      ch.innerHTML = `<span class="grp-arrow">${icon(connClosed ? "chev-right" : "chev-down")}</span> ${badge}${this.hl(conn)}` +
         `<button class="grp-add" title="${esc(t("new_group"))}">${icon("plus")}</button>`;
       ch.onclick = () => {
+        // Sous filtre l'arbre est forcé déplié : toggler persisterait un
+        // état invisible à l'écran (+ RPC refresh inutile).
+        if (this.filter) return;
         localStorage.setItem(key, connClosed ? "0" : "1");
         void this.refresh();
       };
@@ -192,20 +251,15 @@ export class Sidebar {
       bindCtx(ch, (x, y) => this.conns.openCtx(x, y, conn));
       el.appendChild(ch);
 
-      const grpNames = [
-        ...new Set([
-          ...this.groups.stored(conn),
-          ...sessions.map((s) => s.group).filter((g): g is string => !!g),
-        ]),
-      ].sort();
-      for (const grp of grpNames) {
+      for (const { grp, rows } of grpRows) {
         const gkey = `ac-grp-${conn}::${grp}`;
-        const grpClosed = connClosed || localStorage.getItem(gkey) === "1";
+        const grpClosed = !f && (connClosed || localStorage.getItem(gkey) === "1");
         const g = document.createElement("div");
         g.className = "grp-sub" + (grpClosed ? " closed" : "");
-        g.innerHTML = `<span class="grp-arrow">${icon(grpClosed ? "chev-right" : "chev-down")}</span> ${esc(grp)}` +
+        g.innerHTML = `<span class="grp-arrow">${icon(grpClosed ? "chev-right" : "chev-down")}</span> ${this.hl(grp)}` +
           `<button class="grp-add" title="${esc(t("new_sess_grp"))}">${icon("plus")}</button>`;
         g.onclick = () => {
+          if (this.filter) return; // idem : pas de toggle invisible sous filtre
           localStorage.setItem(gkey, localStorage.getItem(gkey) === "1" ? "0" : "1");
           void this.refresh();
         };
@@ -220,16 +274,20 @@ export class Sidebar {
         bindCtx(g, () => this.groups.openDlg("rename", null, conn, grp));
         this.bindDropTarget(g, conn, grp);
         el.appendChild(g);
-        for (const s of sessions.filter((x) => x.group === grp)) {
+        for (const s of rows) {
           el.appendChild(this.sessRow(s, conn, grp, grpClosed));
         }
       }
-      for (const s of sessions.filter((x) => !x.group)) {
+      for (const s of plain) {
         el.appendChild(this.sessRow(s, conn, "", connClosed));
       }
     }
-    // La liste arrive → l'accueil recalcule son état (0 session → CTA).
-    this.chat.updateEmptyState();
+    if (f && !shown) {
+      const none = document.createElement("div");
+      none.className = "sess-none";
+      none.textContent = t("sess_filter_none");
+      el.appendChild(none);
+    }
   }
 
   /** Cible de drop pour une session : conn = câble, group undefined = dégrouper. */
@@ -363,7 +421,7 @@ export class Sidebar {
     const prHtml = prs.length
       ? `<span class="sess-pr" title="${q(esc(prs.map((p) => `${p.repo}#${p.pr}${p.title ? ` — ${p.title}` : ""}${p.status ? ` (${p.status})` : ""}`).join("\n")))}">${prs.map((p) => `#${p.pr}`).join(" ")}</span>`
       : "";
-    div.innerHTML = `<span class="dot st-${dotCls(s.state)}" title="${q(esc(s.state))}">${dotIcon(s.state)}</span><span class="t">${esc(s.title)}</span>${prHtml}<span class="a">${esc(s.agent)}</span><button class="sess-del" title="Supprimer">${icon("close")}</button>`;
+    div.innerHTML = `<span class="dot st-${dotCls(s.state)}" title="${q(esc(s.state))}">${dotIcon(s.state)}</span><span class="t">${this.hl(s.title)}</span>${prHtml}<span class="a">${this.hl(s.agent)}</span><button class="sess-del" title="Supprimer">${icon("close")}</button>`;
     div.onclick = () => {
       void this.openSession(s.id);
       // Mobile : fermer le drawer après sélection.
@@ -420,6 +478,40 @@ export class Sidebar {
   }
 
   init() {
+    // Filtre de l'arbre : recherche par nom de session / agent / groupe /
+    // connexion. Rendu local instantané — pas de debounce, pas de RPC.
+    const fIn = $("sess-filter-input") as HTMLInputElement;
+    const fClr = $("sess-filter-clear");
+    const applyFilter = () => {
+      this.filter = fIn.value.trim().toLowerCase();
+      fClr.hidden = !this.filter;
+      this.renderList();
+    };
+    fIn.addEventListener("input", applyFilter);
+    fIn.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && fIn.value) {
+        fIn.value = "";
+        applyFilter();
+        e.stopPropagation(); // ne pas fermer un menu ctx en même temps
+      }
+    });
+    fClr.addEventListener("click", () => {
+      fIn.value = "";
+      applyFilter();
+      fIn.focus();
+    });
+    // Ctrl/Cmd+F sans session ouverte → filtre d'arbre (avec session, le
+    // handler de search.ts prend la main pour la recherche d'historique).
+    // Pas sous un <dialog> ouvert : l'input invisible volerait les frappes.
+    window.addEventListener("keydown", (e) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F") &&
+          !app.current && !document.querySelector("dialog[open]")) {
+        e.preventDefault();
+        fIn.focus();
+        fIn.select();
+      }
+    });
+
     // Fermeture du menu ctx : clic ailleurs / Échap / scroll de la liste.
     // Un clic DANS le menu ne doit pas le fermer avant l'action du bouton.
     this.ctx.addEventListener("click", (e) => e.stopPropagation());
