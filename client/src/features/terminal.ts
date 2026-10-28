@@ -361,6 +361,11 @@ export class TermPanel {
       hd.addEventListener("mousedown", (e) => {
         e.preventDefault();
         const move = (ev: MouseEvent) => {
+          // Bouton relâché hors fenêtre → mouseup perdu : auto-relâcher.
+          if (ev.buttons === 0) {
+            up();
+            return;
+          }
           const h = Math.min(
             Math.max(window.innerHeight - ev.clientY, 120),
             Math.round(window.innerHeight * 0.8),

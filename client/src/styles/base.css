@@ -43,6 +43,12 @@
 }
 
 * { box-sizing: border-box; }
+/* <a> et <img> sont draggables nativement : un drag accidentel qui
+   finit mal (drop refusé, source détachée en plein vol) laisse le
+   curseur "grabbing" collé sous WebKitGTK/Wayland — sans recours
+   possible côté web. Aucun drag de lien/image n'est voulu dans l'app
+   (seule la ligne de session, draggable explicite) → désarmés ici. */
+a, img { -webkit-user-drag: none; }
 html, body, #app { height: 100%; margin: 0; }
 body {
   color: var(--ink);
