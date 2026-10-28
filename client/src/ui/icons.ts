@@ -47,6 +47,7 @@ const SHAPES: Record<string, string> = {
   back: '<path d="m14.5 5.5-6.5 6.5 6.5 6.5"/>',
   "chev-right": '<path d="m9.5 5.5 6.5 6.5-6.5 6.5"/>',
   "chev-down": '<path d="m5.5 9.5 6.5 6.5 6.5-6.5"/>',
+  "chev-up": '<path d="m5.5 14.5 6.5-6.5 6.5 6.5"/>',
   "arrow-right": '<path d="M4.5 12h15"/><path d="m13.5 5.5 6.5 6.5-6.5 6.5"/>',
   plus: '<path d="M12 5.5v13M5.5 12h13"/>',
   top: '<path d="M5 3.5h14"/><path d="m6 14.5 6-6 6 6"/><path d="M12 8.5V21"/>',

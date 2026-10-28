@@ -98,7 +98,10 @@
           </div>
           <footer id="composer">
             <div id="cmd-ac" hidden></div>
-            <textarea id="input" data-i18n-ph="input_ph" placeholder="Message… (Enter = send)" rows="2"></textarea>
+            <div id="input-wrap">
+              <textarea id="input" data-i18n-ph="input_ph" placeholder="Message… (Enter = send)" rows="2"></textarea>
+              <button id="btn-expand" type="button" hidden></button>
+            </div>
             <button id="btn-steer" hidden data-icon="steer" data-i18n-title="steer_title" title="Steer"></button>
             <button id="btn-send" data-i18n="send">Send</button>
           </footer>

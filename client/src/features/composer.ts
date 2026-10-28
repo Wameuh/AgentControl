@@ -31,9 +31,58 @@ export class Composer {
   /** Rafraîchit la sidebar (injecté). */
   refresh: () => Promise<void> = async () => {};
   private acSel = 0;
+  /** Champ déplié manuellement (bouton expand) — replie dès que le
+      contenu rentre sous le cap normal. */
+  private inpExpanded = false;
 
   bind(chat: ChatView) {
     this.chat = chat;
+  }
+
+  // ---- Hauteur du champ : auto-grow borné + bouton expand ----
+  // Le champ grandit avec le contenu jusqu'à ~1/3 de la hauteur du fil ;
+  // au-delà il reste borné et scrollable, et le bouton « N ⌃ » permet de
+  // l'étendre à ~2/3 (re-clic = repli). Le bouton disparaît dès que le
+  // texte redevient court (ou le champ est vidé/envoyé).
+
+  private setInput(v: string) {
+    ($("input") as HTMLTextAreaElement).value = v;
+    this.fitInput();
+  }
+
+  fitInput() {
+    const inp = $("input") as HTMLTextAreaElement;
+    const wrap = $("input-wrap");
+    const btn = $("btn-expand");
+    // Mesure : retour à la hauteur naturelle (rows=2) puis scrollHeight
+    // = hauteur nécessaire. +2 pour les bordures (box-sizing border-box).
+    inp.style.height = "auto";
+    const need = inp.scrollHeight + 2;
+    // Référence stable : la colonne #chat (hauteur fixée par le viewport)
+    // — pas #events, qui rétrécit quand le champ grandit (cap mouvant).
+    const chatH = $("chat")?.clientHeight || window.innerHeight;
+    const small = Math.max(100, Math.round(chatH * 0.33));
+    const big = Math.max(small + 80, Math.round(chatH * 0.66));
+    const over = need > small;
+    if (!over) this.inpExpanded = false;
+    const cap = this.inpExpanded ? big : small;
+    inp.style.height = Math.min(need, cap) + "px";
+    wrap.classList.toggle("over", over);
+    btn.hidden = !over;
+    if (over) {
+      const cs = getComputedStyle(inp);
+      const padV = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+      const lh = parseFloat(cs.lineHeight) || 21;
+      const lines = Math.max(
+        inp.value.split("\n").length,
+        Math.round((need - padV) / lh),
+      );
+      btn.innerHTML =
+        icon(this.inpExpanded ? "chev-down" : "chev-up") +
+        `<span class="n">${lines}</span>`;
+      btn.title = t(this.inpExpanded ? "input_collapse" : "input_expand");
+      btn.setAttribute("aria-label", btn.title);
+    }
   }
 
   private async runBuiltin(name: string, arg: string): Promise<boolean> {
@@ -151,7 +200,7 @@ export class Composer {
         // Reprendre dans le champ + retirer de la file
         const e = qIco("edit", "Edit");
         e.onclick = () => {
-          ($("input") as HTMLTextAreaElement).value = txt;
+          this.setInput(txt);
           call("queue_drop", { session: app.current!.id, index: i }).then(() => this.refreshQueue());
         };
         // Tête de file + cancel → envoi forcé (reste de file préservée)
@@ -181,7 +230,7 @@ export class Composer {
     // Built-ins client (interceptent avant envoi à l'agent)
     const bm = /^\/(\w+)(?:\s+(.*))?$/.exec(txt);
     if (bm && BUILTINS().some((b) => b.name === bm[1])) {
-      ($("input") as HTMLTextAreaElement).value = "";
+      this.setInput("");
       try {
         await this.runBuiltin(bm[1], (bm[2] ?? "").trim());
       } catch (e) {
@@ -200,11 +249,11 @@ export class Composer {
         (c) => cmdName(c).toLowerCase() === bm[1].toLowerCase(),
       )
     ) {
-      ($("input") as HTMLTextAreaElement).value = "";
+      this.setInput("");
       this.chat.sysline(t("cmd_unknown", { cmd: bm[1] }), "warn");
       return;
     }
-    ($("input") as HTMLTextAreaElement).value = "";
+    this.setInput("");
     await call("send", {
       session: app.current.id,
       text: txt,
@@ -230,10 +279,9 @@ export class Composer {
   }
 
   private applyAc(name: string) {
-    const inp = $("input") as HTMLTextAreaElement;
-    inp.value = "/" + name + " ";
+    this.setInput("/" + name + " ");
     $("cmd-ac").hidden = true;
-    inp.focus();
+    ($("input") as HTMLTextAreaElement).focus();
   }
 
   private refreshAc() {
@@ -281,6 +329,9 @@ export class Composer {
 
   /** Hints clavier du champ — dépendent du mode d'envoi choisi. */
   refreshHints() {
+    // Un placeholder plus long peut wrapper → refit, et le titre de la
+    // pill suit la langue courante.
+    this.fitInput();
     if (isAndroid()) return; // placeholder mobile sans raccourcis
     ($("input") as HTMLTextAreaElement).placeholder =
       sendPref() === "steer" ? t("input_ph_steer") : t("input_ph");
@@ -325,11 +376,25 @@ export class Composer {
         this.sendInput(this.defaultMode());
       }
     });
-    $("input").addEventListener("input", () => this.refreshAc());
+    $("input").addEventListener("input", () => {
+      this.refreshAc();
+      this.fitInput();
+    });
     $("input").addEventListener("blur", () => {
       // délai pour laisser le click sur un item passer
       setTimeout(() => ($("cmd-ac").hidden = true), 150);
     });
+
+    // Bouton « N lignes » : bascule replié ↔ étendu, puis redonne le focus
+    // au champ pour continuer la frappe.
+    $("btn-expand").onclick = () => {
+      this.inpExpanded = !this.inpExpanded;
+      this.fitInput();
+      ($("input") as HTMLTextAreaElement).focus();
+    };
+    // Les caps dépendent de la hauteur du fil (resize, rotation mobile).
+    window.addEventListener("resize", () => this.fitInput());
+    this.fitInput();
 
     $("btn-cancel").onclick = () =>
       app.current && call("cancel", { session: app.current.id }).catch((e) => showErr(String(e)));

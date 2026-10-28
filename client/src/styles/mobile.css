@@ -241,6 +241,10 @@ body.android #composer {
 }
 body.android #composer button { min-height: 46px; font-size: 15px; padding: 8px 16px; }
 body.android #input { font-size: 16px; min-height: 46px; }
+/* Pill « N lignes » : cible tactile correcte, alignée sur le coin champ */
+body.android #composer button#btn-expand {
+  min-height: 30px; font-size: 12px; padding: 3px 10px; top: 7px;
+}
 body.android #statusbar { display: none; }
 body.android #btn-bottom {
   bottom: 80px; right: 14px; width: 46px; height: 46px; font-size: 18px;
