@@ -30,6 +30,7 @@ const MOCK = `(function () {
     "": { dir: "/home/agent/api", entries: [
       { name: "docs", dir: true, size: 0 },
       { name: "README.md", dir: false, size: 300 },
+      { name: "bad.md", dir: false, size: 20 },
       { name: "client.ts", dir: false, size: 30 },
     ] },
     "docs": { dir: "/home/agent/api/docs", entries: [
@@ -44,6 +45,7 @@ const MOCK = `(function () {
       case "events": return { events: [], last_seq: 0 };
       case "list_dir": return DIRS[args.path] ?? { dir: "/home/agent/api/" + args.path, entries: [] };
       case "read_file": {
+        if (args.path === "bad.md") throw new Error("permission denied");
         const f = FILES[args.path];
         if (f == null) throw new Error("no such file " + args.path);
         if (args.limit != null) {
@@ -177,6 +179,16 @@ check("édition : fv-md masqué", !(await vis("#fv-md")));
 check("édition : rendu masqué", !(await vis("#file-md")));
 await click("#fv-edit"); await sleep(300); // sort d'édition (buffer non modifié → pas de dialog)
 check("sortie édition : rendu restauré", await vis("#file-md"));
+
+// read_file en échec sur un .md : l'erreur doit être visible en vue
+// source (pas de « … » éternel ni de rendu partiel silencieux).
+await p.evaluate(() => [...document.querySelectorAll(".fnode")].find((n) => n.textContent.includes("bad.md"))?.click());
+await sleep(700);
+check("erreur : vue source affichée", await vis("#file-view"));
+check("erreur : file-md masqué", !(await vis("#file-md")));
+check("erreur : fv-md masqué", !(await vis("#fv-md")));
+const errTxt = await p.evaluate(() => document.querySelector("#file-view").textContent);
+check("erreur : message visible", errTxt.includes("permission denied"), errTxt.slice(0, 80));
 
 console.log(`\n${pass} PASS, ${fail} FAIL`);
 await b.close(); server.kill();

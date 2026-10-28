@@ -194,6 +194,7 @@ export class FileExplorer {
       await this.fetchChunk(cur);
       if (opts?.edit && this.cur === cur && this.editable()) this.enterEdit();
     } catch (e) {
+      this.mdView.detach();
       $("file-view").textContent = String(e);
     }
   }
@@ -279,6 +280,10 @@ export class FileExplorer {
     } catch (e) {
       cur.done = true;
       if (this.cur === cur) {
+        // En mode rendu, #file-view est masqué → l'erreur serait invisible
+        // (« … » éternel ou document tronqué en silence) : retomber en vue
+        // source comme pour un binaire.
+        this.mdView.detach();
         $("file-view").textContent = String(e);
         this.updateStatus();
       }

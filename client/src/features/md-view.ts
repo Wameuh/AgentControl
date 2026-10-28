@@ -105,7 +105,6 @@ export class MdView {
     btn.innerHTML = icon(this.on ? "code" : "eye");
     btn.dataset.i18nTitle = this.on ? "md_source" : "md_view";
     btn.title = t(btn.dataset.i18nTitle as Key);
-    btn.setAttribute("aria-label", btn.title);
     $("file-md").hidden = !show;
     $("file-view").hidden = show || this.editing;
     if (show && this.stale) this.render();
