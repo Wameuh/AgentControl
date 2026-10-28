@@ -201,6 +201,11 @@ body.android #fv-name {
 }
 body.android #fv-bar button { min-width: 44px; min-height: 44px; }
 body.android #fv-bar select { min-height: 36px; font-size: 13px; }
+body.android #fv-enc { max-width: 96px; }
+/* Save épinglé au bord droit : visible même si la barre défile. */
+body.android #fv-save {
+  position: sticky; right: 0; background: var(--panel-solid);
+}
 body.android #file-view { flex: 1; overflow: auto; font-size: 13px; margin: 0; padding: 12px; }
 body.android #file-hl, body.android #file-edit { font-size: 13px; padding: 12px; }
 body.android #file-nums { font-size: 13px; }

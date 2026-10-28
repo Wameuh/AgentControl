@@ -21,13 +21,23 @@
 #fv-bar {
   display: flex; align-items: center; gap: 8px; flex: none;
   padding: 5px 12px; border-bottom: 1px solid var(--line); min-height: 30px;
+  /* Dernier recours quand les items ne tiennent pas (panneau étroit,
+     mobile) : la barre défile au lieu de pousser les contrôles dehors. */
+  overflow-x: auto; scrollbar-width: none;
 }
+#fv-bar::-webkit-scrollbar { display: none; }
 #fv-back, #fv-name { display: none; }
-#fv-status { color: var(--dim); font-size: 11px; white-space: nowrap; }
+#fv-status {
+  color: var(--dim); font-size: 11px; white-space: nowrap;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+}
 .fv-spacer { flex: 1; }
 #fv-enc {
   background: transparent; color: var(--muted); border: 1px solid var(--line);
   border-radius: 4px; font-size: 11px; padding: 1px 3px;
+  /* Le select prend la largeur de son option la plus longue
+     (« Windows-1252 / Latin-1 ») : plafonné pour ne pas manger la barre. */
+  max-width: 11em;
 }
 #fv-loadall {
   background: none; border: 1px solid var(--line); border-radius: 4px;
@@ -68,7 +78,14 @@
   font: 12px/1.5 Mono, ui-monospace, monospace;
   white-space: pre; tab-size: 4;
 }
-#file-hl { overflow: hidden; pointer-events: none; color: var(--ink); }
+/* Overlay en miroir du scroll de la textarea (sync JS) : c'est un vrai
+   conteneur scroll-x — ses contenus longs sont scrollés, pas perdus.
+   Scrollbars masquées : seule la textarea en affiche. */
+#file-hl {
+  overflow: auto; scrollbar-width: none;
+  pointer-events: none; color: var(--ink);
+}
+#file-hl::-webkit-scrollbar { display: none; }
 #file-edit {
   resize: none; border: 0; outline: none; overflow: auto;
   background: transparent; color: transparent; caret-color: var(--ink);
