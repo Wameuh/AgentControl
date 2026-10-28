@@ -76,6 +76,13 @@ body.android #conn-bar button {
 body.android #session-list .sess {
   padding: 13px 10px; font-size: 15px;
 }
+/* Sous-agent : plus petit qu'une session racine mais cible tactile
+   conservée (~44px de hauteur de ligne). */
+body.android #session-list .sess.sub {
+  padding: 10px; font-size: 13px;
+}
+body.android #session-list .sess.sub .dot { width: 14px; height: 14px; }
+body.android #session-list .sess.sub::before { margin-top: -6px; height: 14px; }
 body.android #session-list .sess .sess-del {
   min-width: 40px; min-height: 40px; font-size: 15px;
 }

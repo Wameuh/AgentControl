@@ -24,6 +24,8 @@ export interface SessionMeta {
   state: string;
   context_used?: number;
   context_size?: number;
+  /** Session créatrice (spawn agent→agent) — affichage imbriqué sidebar. */
+  spawned_by?: string;
 }
 
 /** Registre PR ↔ session du démon (prs.json) — badge sidebar. */
