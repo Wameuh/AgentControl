@@ -14,6 +14,7 @@ import { dotCls, dotIcon, setAppIcon } from "./status";
 import { icon } from "../ui/icons";
 import { bindCtx, hideSessCtx, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
+import { PrListView, type PrRow } from "./prs";
 import type { ChatView } from "./chat-view";
 import type { ConnectionManager } from "./connections";
 import { grpNorm, grpParent, inSubtree } from "./groups";
@@ -81,6 +82,13 @@ export class Sidebar {
   /** PRs ouvertes par session ("conn\0sid") — rempli par refresh ;
    *  vide si le démon ne connaît pas pr_list (vieux démon → pas de badge). */
   private prBySess = new Map<string, PrEntry[]>();
+
+  // --- Vue sidebar : « agents » (arbre sessions) ↔ « repos » (PRs par dépôt)
+  private prsView = new PrListView();
+  private view: "agents" | "repos" = "agents";
+  /** Réponse brute du dernier pr_list (entrées + marqueurs conn_error). */
+  private prRows: PrRow[] = [];
+  private prFailed = false;
   /** delete_session en vol OU terminée : l'id reste tombstoné après
    *  succès (un refresh dont le snapshot list_sessions date d'avant la
    *  fin de la suppression ne doit pas réinjecter la ligne — un id
@@ -131,6 +139,11 @@ export class Sidebar {
     this.newSess = newSess;
     this.chat = chat;
     this.settings = settings;
+    this.prsView.bind({
+      openSession: (id) => this.openSession(id),
+      connState: (k) => this.conns.state(k),
+      hl: (txt) => this.hl(txt),
+    });
   }
 
   /** Ouvrir une session depuis la sidebar = quitter le panneau options
@@ -152,16 +165,21 @@ export class Sidebar {
   async refresh() {
     // pr_list en parallèle : un démon mort/vieux ne doit pas retarder la
     // sidebar (erreur → pas de badge, c'est tout).
-    const [raw, prs] = await Promise.all([
+    const [raw, prRes] = await Promise.all([
       call<SessionMeta[]>("list_sessions").catch((e) => {
         setAppIcon("grey"); // démon injoignable → aucun agent joignable
         this.chat.updateEmptyState(); // l'accueil ne doit pas attendre la liste
         throw e;
       }),
-      call<PrEntry[]>("pr_list").catch(() => [] as PrEntry[]),
+      call<PrRow[]>("pr_list").then(
+        (rows) => ({ rows, failed: false }),
+        () => ({ rows: [] as PrRow[], failed: true }),
+      ),
     ]);
+    this.prRows = prRes.rows;
+    this.prFailed = prRes.failed;
     this.prBySess.clear();
-    for (const p of prs) {
+    for (const p of this.prRows) {
       if (!p.session || p.status === "merged" || p.status === "closed") continue;
       const k = `${p.conn ?? "default"}${p.session}`;
       if (!this.prBySess.has(k)) this.prBySess.set(k, []);
@@ -189,6 +207,13 @@ export class Sidebar {
       }
     }
     app.lastSessions = list;
+    // Vue « Repos » : croise les entrées du registre avec les sessions
+    // fusionnées (cache offline inclus) + compteur sur l'onglet.
+    this.prsView.setData(this.prRows, list, this.prFailed);
+    const prCount = this.prsView.openCount();
+    const svCount = $("sv-count");
+    svCount.hidden = prCount === 0;
+    svCount.textContent = String(prCount);
     const live = list.filter((s) =>
       !s.offline && s.state !== "dead" && s.state !== "interrupted" && s.state !== "asleep");
     setAppIcon(
@@ -216,9 +241,49 @@ export class Sidebar {
         (s.state === "working" || s.state === "waiting_input" || s.state === "compacting"),
     ).length;
     meshSetMood({ agents: Math.min(n, 4), intensity: 0.55 });
-    this.renderList();
+    this.renderView();
     // La liste arrive → l'accueil recalcule son état (0 session → CTA).
     this.chat.updateEmptyState();
+  }
+
+  /** Rend la liste de la vue active : arbre sessions ou PRs par dépôt.
+   *  Réaligne aussi le placeholder du filtre partagé (applyStatic a pu
+   *  le réécrire au changement de langue pendant la vue repos). */
+  private renderView() {
+    const fIn = $("sess-filter-input") as HTMLInputElement;
+    const repos = this.view === "repos";
+    fIn.placeholder = t(repos ? "pr_filter_ph" : "sess_filter_ph");
+    fIn.title = t(repos ? "pr_filter_title" : "sess_filter_title");
+    if (repos) {
+      this.prsView.setFilter(this.filter);
+      this.prsView.render();
+    } else {
+      this.renderList();
+    }
+  }
+
+  /** Bascule agents ↔ repos (persistée). Passer en repos resynchronise
+   *  le registre — la vue reflète la fraîcheur d'un refresh, pas un
+   *  cache d'il y a plusieurs minutes. */
+  private setView(v: "agents" | "repos") {
+    if (this.view === v) return;
+    this.view = v;
+    localStorage.setItem("ac-sideview", v);
+    this.applyView();
+    if (v === "repos") void this.refresh();
+  }
+
+  /** Visibilité des panneaux + état visuel de l'onglet actif. */
+  private applyView() {
+    const repos = this.view === "repos";
+    $("sv-agents").classList.toggle("on", !repos);
+    $("sv-repos").classList.toggle("on", repos);
+    $("sv-agents").setAttribute("aria-selected", String(!repos));
+    $("sv-repos").setAttribute("aria-selected", String(repos));
+    $("session-list").hidden = repos;
+    $("pr-list").hidden = !repos;
+    $("btn-new-session").hidden = repos;
+    this.renderView();
   }
 
   /** Filtre de l'arbre (normalisé : trim + bas de casse) — vide = tout. */
@@ -635,7 +700,7 @@ export class Sidebar {
       // continué de bouger pendant l'édition). Un Escape/blur sans
       // changement ne vaut pas un round-trip.
       if (changed) void this.refresh();
-      else if (this.editCount === 0 && this.rebuildPending) this.renderList();
+      else if (this.editCount === 0 && this.rebuildPending) this.renderView();
     };
     inp.addEventListener("click", (e) => e.stopPropagation());
     inp.addEventListener("keydown", (e) => {
@@ -723,6 +788,13 @@ export class Sidebar {
   }
 
   init() {
+    // Sélecteur de vue agents ↔ repos : état persisté, restauration
+    // avant le premier refresh (la vue repos se synchronisera dessus).
+    this.view = localStorage.getItem("ac-sideview") === "repos" ? "repos" : "agents";
+    this.applyView();
+    $("sv-agents").onclick = () => this.setView("agents");
+    $("sv-repos").onclick = () => this.setView("repos");
+
     // Filtre de l'arbre : recherche par nom de session / agent / groupe /
     // connexion. Rendu local instantané — pas de debounce, pas de RPC.
     const fIn = $("sess-filter-input") as HTMLInputElement;
@@ -730,7 +802,7 @@ export class Sidebar {
     const applyFilter = () => {
       this.filter = fIn.value.trim().toLowerCase();
       fClr.hidden = !this.filter;
-      this.renderList();
+      this.renderView();
     };
     fIn.addEventListener("input", applyFilter);
     fIn.addEventListener("keydown", (e) => {

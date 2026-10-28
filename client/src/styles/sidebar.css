@@ -159,3 +159,105 @@ button:disabled { opacity: .5; cursor: default; }
 .grp-sub:hover { color:var(--ink) }
 /* .sess.in-grp : hook sémantique uniquement — l'indent est posé inline
    par sessRow (14px × profondeur de groupe + sous-agent). */
+
+
+/* ── Sélecteur de vue : agents ↔ repos ───────────────────────────────── */
+#side-view {
+  display: flex; gap: 3px; padding: 3px; flex: none;
+  background: rgba(236, 230, 216, .05); border: 1px solid var(--line);
+  border-radius: 11px;
+}
+#side-view .sv {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  gap: 6px; padding: 5px 8px; font-size: 12px;
+  border: 1px solid transparent; background: none; color: var(--dim);
+  border-radius: 8px;
+}
+#side-view .sv:hover { color: var(--ink); }
+#side-view .sv.on {
+  background: rgba(205, 182, 140, .12); border-color: rgba(205, 182, 140, .35);
+  color: var(--sand);
+}
+#side-view .sv .sv-ic { display: inline-flex; flex: none; }
+#side-view .sv .ic { width: 13px; height: 13px; display: block; }
+#sv-count {
+  font-size: 10px; font-family: Mono, ui-monospace, monospace; line-height: 1;
+  background: rgba(205, 182, 140, .18); color: var(--sand);
+  border-radius: 8px; padding: 2px 5px;
+}
+
+/* ── Vue repos : PRs regroupées par dépôt ────────────────────────────── */
+#pr-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; }
+#pr-list mark { background: rgba(224, 201, 150, .3); color: inherit; border-radius: 3px; padding: 0 1px; }
+/* Les headers dépôt reprennent .grp-head mais gardent la casse réelle
+   (owner/repo est significatif — pas de text-transform). */
+.pr-repo { text-transform: none; letter-spacing: .2px; }
+.pr-repo .pr-repo-ic { display: inline-flex; flex: none; opacity: .75; }
+.pr-repo .pr-repo-ic .ic { width: 11px; height: 11px; display: block; }
+.pr-repo .pr-n {
+  margin-left: auto; flex: none; font-size: 10px;
+  font-family: Mono, ui-monospace, monospace; color: var(--dim);
+}
+.pr-repo.unatt { color: var(--dim); }
+#pr-list .pr {
+  padding: 7px 10px 6px; border-radius: 10px; cursor: pointer;
+  border: 1px solid transparent; transition: background .15s, border-color .15s;
+}
+#pr-list .pr:hover { background: rgba(236, 230, 216, .06); }
+#pr-list .pr .pr-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
+#pr-list .pr .pr-num {
+  flex: none; font-size: 11px; font-family: Mono, ui-monospace, monospace;
+  color: var(--accent);
+}
+#pr-list .pr .pr-t {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-size: 12.5px; font-weight: 500;
+}
+#pr-list .pr .pr-st {
+  flex: none; font-size: 9px; text-transform: uppercase; letter-spacing: .4px;
+  padding: 1px 6px; border-radius: 8px; border: 1px solid var(--line);
+  color: var(--dim);
+}
+#pr-list .pr .pr-st.st-open { color: var(--sage); border-color: rgba(184, 207, 174, .5); }
+#pr-list .pr .pr-st.st-draft { color: var(--dim); border-style: dashed; }
+#pr-list .pr .pr-st.st-conflict { color: var(--err); border-color: rgba(232, 148, 134, .55); }
+#pr-list .pr .pr-sub {
+  display: flex; align-items: center; gap: 8px; margin-top: 4px;
+  font-size: 11px; color: var(--dim); min-width: 0;
+}
+#pr-list .pr .pr-branch {
+  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-size: 10.5px;
+  font-family: Mono, ui-monospace, monospace;
+}
+#pr-list .pr .pr-repo-lbl {
+  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-size: 10.5px;
+}
+#pr-list .pr .pr-sess {
+  display: inline-flex; align-items: center; gap: 5px; min-width: 0;
+  flex: 0 1 auto; /* shrink autorisé → .stxt ellipsise vraiment */
+  margin-left: auto; border: 0; background: none; padding: 0 2px;
+  color: var(--sand); font-size: 11px; border-radius: 5px;
+}
+#pr-list .pr .pr-sess:hover { color: var(--ink); }
+#pr-list .pr .pr-sess .stxt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#pr-list .pr .pr-sess .dot {
+  width: 12px; height: 12px; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+#pr-list .pr .pr-sess .dot svg.gem { width: 100%; height: 100%; display: block; }
+#pr-list .pr .pr-sess.gone { color: var(--dim); font-size: 10.5px; }
+#pr-list .pr .pr-sess.offline { opacity: .5; }
+#pr-list .pr-note {
+  display: flex; align-items: center; gap: 7px; padding: 6px 10px;
+  font-size: 11px; color: var(--dim);
+}
+#pr-list .pr-note .ic { width: 12px; height: 12px; flex: none; }
+#pr-list .pr-note.warn { color: var(--gold); }
+/* État vide/chargement : .sess-none est scopé #session-list — même
+   présentation ici (padding, dim, italique, centré). */
+#pr-list .sess-none {
+  padding: 18px 12px; text-align: center; font-size: 12px;
+  color: var(--dim); font-style: italic;
+}
