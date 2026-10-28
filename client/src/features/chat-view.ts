@@ -574,10 +574,10 @@ export class ChatView {
     el.classList.toggle("ctx-hot", pct >= 80);
   }
 
-  /** "titre — agent" dans le header. getElementById plutôt que $() : un
-   *  renommage inline en cours remplace #chat-title par #title-edit →
-   *  l'écriture est un no-op (done() réécrira via cette même méthode)
-   *  plutôt qu'un crash qui avorterait open() en plein milieu. */
+  /** "titre — agent" dans le header. La garde `tl` compte : un renommage
+   *  inline en cours remplace #chat-title par un input → l'écriture est
+   *  un no-op (done() réécrira via cette même méthode) plutôt qu'un
+   *  crash qui avorterait open() en plein milieu. */
   setChatTitle() {
     const tl = document.getElementById("chat-title");
     if (tl && app.current) tl.textContent = `${app.current.title} — ${app.current.agent}`;

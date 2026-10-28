@@ -371,8 +371,9 @@ export class Composer {
       if (!app.current) return;
       const sess = app.current;
       const tl = $("chat-title");
+      const parent = tl.parentElement;
       const inp = document.createElement("input");
-      inp.id = "title-edit";
+      inp.className = "title-edit";
       inp.value = sess.title;
       tl.replaceWith(inp);
       inp.focus();
@@ -382,7 +383,11 @@ export class Composer {
         if (finished) return;
         finished = true;
         const v = inp.value.trim();
+        // Restaurer le titre quoiqu'il arrive : si l'input a été détaché
+        // par un chemin externe, replaceWith ne remettrait rien et le
+        // header resterait sans #chat-title (setChatTitle en no-op).
         if (inp.isConnected) inp.replaceWith(tl);
+        else if (parent && !tl.isConnected) parent.appendChild(tl);
         if (save && v && v !== sess.title) {
           sess.title = v;
           if (app.current?.id === sess.id) this.chat.setChatTitle();

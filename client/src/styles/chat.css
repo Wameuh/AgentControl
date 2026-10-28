@@ -54,7 +54,7 @@
 }
 #chat-title { font-weight: 500; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: text; }
 #chat-title:hover { color: var(--sand); }
-#title-edit { flex: 1; background: transparent; color: var(--ink); border: 0; border-bottom: 1px solid var(--sand); font: inherit; font-weight: 500; outline: none; }
+.title-edit { flex: 1; background: transparent; color: var(--ink); border: 0; border-bottom: 1px solid var(--sand); font: inherit; font-weight: 500; outline: none; }
 
 /* Gemme animée — l'agent réfléchit (vrai cristal, palette améthyste) */
 #chat-gem {

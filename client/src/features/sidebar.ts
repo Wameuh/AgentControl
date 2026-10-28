@@ -40,12 +40,11 @@ export class Sidebar {
   private pendingDel = new Set<string>();
 
   /** Renommage inline en cours (compteur : plusieurs lignes peuvent
-   *  théoriquement être en édition). Tant qu'il est >0, refresh() met à
-   *  jour les données mais diffère la reconstruction de la liste —
-   *  innerHTML="" détacherait l'input de titre (blur → annulation, ou
-   *  sauvegarde prématurée), ce qui tuait l'édition dès qu'une session
-   *  qui travaille émettait un status_changed. Le dernier done()
-   *  relance un refresh pour appliquer le rebuild différé. */
+   *  théoriquement être en édition). Tant qu'il est >0, renderList()
+   *  diffère son rebuild — innerHTML="" détacherait l'input de titre
+   *  (blur → annulation ou sauvegarde prématurée), ce qui tuait
+   *  l'édition dès qu'une session qui travaille émettait un
+   *  status_changed. Le dernier done() rejoue le rendu différé. */
   private editCount = 0;
   private rebuildPending = false;
 
@@ -395,7 +394,7 @@ export class Sidebar {
     const span = row.querySelector<HTMLElement>(".t");
     if (!span) return;
     const inp = document.createElement("input");
-    inp.id = "title-edit";
+    inp.className = "title-edit";
     inp.value = s.title;
     span.replaceWith(inp);
     row.draggable = false; // sinon un drag depuis l'input part en drag de ligne
