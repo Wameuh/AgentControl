@@ -407,21 +407,23 @@ async fn main() -> Result<()> {
         "msg" => {
             // acctl msg <from> <to> [--queue|--steer] <text...>
             // steer est le défaut agent→agent — --steer reste accepté
-            // (compat scripts) mais n'a plus d'effet.
+            // (compat scripts) mais n'a plus d'effet. Flags en tête
+            // seulement : « --queue » dans le corps reste du texte.
             if args.len() < 4 { bail!("msg <from> <to> [--queue|--steer] <text...>"); }
             let mut queue = false;
-            let mut parts = Vec::new();
-            for a in &args[3..] {
-                match a.as_str() {
-                    "--steer" => {}
-                    "--queue" => queue = true,
-                    _ => parts.push(a.clone()),
+            let mut i = 3;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--steer" => i += 1,
+                    "--queue" => { queue = true; i += 1; }
+                    _ => break,
                 }
             }
+            if i >= args.len() { bail!("msg <from> <to> [--queue|--steer] <text...>"); }
             println!("{}", c.call(proto::ReqKind::PeerSend {
                 from: args[1].clone(),
                 session: args[2].clone(),
-                text: parts.join(" "),
+                text: args[i..].join(" "),
                 delivery: if queue { "queue".into() } else { "steer".into() },
             }).await?);
         }

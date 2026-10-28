@@ -91,8 +91,9 @@ fn tools_list() -> Value {
                         "enum": ["queue", "steer"],
                         "description": "steer (défaut) : injecté pendant le \
                             tour de la cible, après le tool call en cours, si \
-                            l'agent le supporte (sinon en file). queue : livré \
-                            quand sa tâche courante se termine.",
+                            l'agent le supporte (sinon en file ; pas d'ordre \
+                            garanti entre steers). queue : livré quand sa \
+                            tâche courante se termine (FIFO strict).",
                     },
                 },
                 "required": ["session", "text"],

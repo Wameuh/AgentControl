@@ -43,6 +43,10 @@ impl Daemon {
                 // file n'est retenue que sur "queue" explicite (valeur
                 // inconnue → steer, comme un delivery absent).
                 let steer = delivery != "queue";
+                if !matches!(delivery.as_str(), "" | "queue" | "steer") {
+                    warn!("peer_send {from}→{session}: delivery «{delivery}» inconnu → steer");
+                }
+                let dlv = if steer { "steer" } else { "queue" };
                 // Livraison en tâche de fond : si send_peer_prompt
                 // signale que la cible a basculé "asleep" entre le check
                 // ci-dessous et l'enfilement, le réveil est déclenché
@@ -63,13 +67,13 @@ impl Daemon {
                 };
                 if target.is_alive() {
                     deliver(wrapped, steer);
-                    Ok(json!({"queued": true}))
+                    Ok(json!({"queued": true, "delivery": dlv}))
                 } else if target.is_waking() || target.is_spawning() {
                     // Réveil déjà lancé par un envoi user, ou spawn déjà
                     // en vol (init, resume, /clear) : enfiler — le drain
                     // post-spawn livrera (pas de second spawn).
                     deliver(wrapped, steer);
-                    Ok(json!({"queued": true, "resuming": true}))
+                    Ok(json!({"queued": true, "resuming": true, "delivery": dlv}))
                 } else {
                     // Cible morte ou endormie → auto-resume puis livraison.
                     let d = Arc::clone(self);
@@ -81,7 +85,7 @@ impl Daemon {
                             });
                         }
                     });
-                    Ok(json!({"queued": true, "resumed": true}))
+                    Ok(json!({"queued": true, "resumed": true, "delivery": dlv}))
                 }
     }
     pub(super) async fn h_peer_spawn(self: &Arc<Self>, from: String, agent: Option<String>, cwd: Option<String>, title: Option<String>, model: Option<String>, mode: Option<String>, prompt: Option<String>, group: Option<String>) -> Result<Value> {
