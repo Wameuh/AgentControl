@@ -8,8 +8,7 @@
 
 import "./styles.css";
 import "./mesh-bg.ts";
-import { listen } from "@tauri-apps/api/event";
-import { getVersion } from "@tauri-apps/api/app";
+import { listen, getVersion } from "./core/bridge";
 import { $, notify } from "./core/dom";
 import { app } from "./core/state";
 import { initRpc } from "./core/rpc";

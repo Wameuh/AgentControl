@@ -3,7 +3,9 @@
 // ---------------------------------------------------------------------------
 
 // Doit refléter conn_key() côté Rust : ssh → "ssh{,-native}:host:sshport".
+// "web" = connexion unique du mode navigateur (le démon qui sert la SPA).
 export function connKeyOf(cfg: Record<string, unknown>, isAndroid = false) {
+  if (cfg.kind === "web") return "web";
   if (cfg.kind === "ssh") {
     const nat = cfg.native === true || isAndroid;
     const p = Number(cfg.port) || 22;

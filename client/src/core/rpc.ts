@@ -3,7 +3,7 @@
 // Dépendances injectées au boot par initRpc() — pas d'import des features.
 // ---------------------------------------------------------------------------
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./bridge";
 import { t } from "../i18n";
 import type { ConnLive } from "./types";
 

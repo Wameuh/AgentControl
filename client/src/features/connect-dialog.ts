@@ -3,9 +3,7 @@
 // sauvegardées, bootstrap/install du démon distant, garde-fous de version.
 // ---------------------------------------------------------------------------
 
-import { invoke } from "@tauri-apps/api/core";
-import { getVersion } from "@tauri-apps/api/app";
-import { listen } from "@tauri-apps/api/event";
+import { invoke, getVersion, listen, isWeb } from "../core/bridge";
 import { $, dlgErr, esc, notify } from "../core/dom";
 import { call } from "../core/rpc";
 import { cmpVer, connKeyOf, daemonParams, minorOf } from "../core/conn";
@@ -527,7 +525,9 @@ export class ConnectDialog {
     invoke<SavedConn[]>("saved_connections")
       .then(async (conns) => {
         this.saved = conns;
-        if (localStorage.getItem("ac-autoconnect") === "0") return;
+        // Web : la conn unique (le démon qui sert la page) est vitale —
+        // la préférence "autoconnect off" n'a pas de sens ici.
+        if (!isWeb && localStorage.getItem("ac-autoconnect") === "0") return;
         // Les échecs tombent en toast (dialogue fermé) ; l'écran vide
         // affiche "connexion à X…" — la liste rétrécit au fil des
         // connexions réussies (une lente ne maintient pas les rapides).

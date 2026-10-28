@@ -4,8 +4,7 @@
 // quand le démon est plus récent (minor).
 // ---------------------------------------------------------------------------
 
-import { invoke } from "@tauri-apps/api/core";
-import { getVersion } from "@tauri-apps/api/app";
+import { invoke, getVersion, isWeb } from "../core/bridge";
 import { $, esc } from "../core/dom";
 import { icon } from "../ui/icons";
 import { isAndroid, shellOpen } from "../core/chrome";
@@ -120,6 +119,9 @@ export async function checkUpdate(): Promise<{ local: string; remote: string }> 
 // main) > locale → chip "⬆ vX" dans la titlebar → clic = update (deb+dpkg)
 // ou ouverture de la page releases si aucun asset.
 export function checkBootUpdate() {
+  // Pas de client à mettre à jour en mode web : la SPA est livrée par le
+  // démon — sa « version » suit celle du binaire qui la sert.
+  if (isWeb) return;
   void (async () => {
     try {
       const remote = await remoteVersion();

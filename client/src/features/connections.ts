@@ -7,8 +7,7 @@
 // est relancé par systemd (Restart=always) — jamais de réinstall en boucle.
 // ---------------------------------------------------------------------------
 
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { invoke, listen } from "../core/bridge";
 import { $, esc, q, showErr } from "../core/dom";
 import { call } from "../core/rpc";
 import { app } from "../core/state";

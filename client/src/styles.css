@@ -10,3 +10,4 @@
 @import "./styles/files.css";   /* panneau + explorateur de fichiers, viewer */
 @import "./styles/term.css";    /* panneau terminal PTY (xterm.js) */
 @import "./styles/mobile.css";  /* Android : bottom sheets, drawer, tactile */
+@import "./styles/web.css";     /* navigateur : chrome masqué + modale token */

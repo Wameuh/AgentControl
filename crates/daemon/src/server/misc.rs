@@ -19,6 +19,9 @@ impl Daemon {
                     // Même gate capacité : ReqKind::TermOpen connu →
                     // le client affiche le bouton terminal.
                     "terminal": true,
+                    // Interface web servie par ce démon (null si
+                    // bind_http absent) : {"bind", "url"?token=…}.
+                    "web": self.web.read().await.clone(),
                 }))
     }
     /// `UpdateDaemon` : télécharge la release demandée et remplace le

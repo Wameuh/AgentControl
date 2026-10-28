@@ -47,6 +47,15 @@ jobs:
         run: python3 client/tools/bump_version.py "${GITHUB_REF_NAME#v}"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Le binaire démon embarque client/dist (build.rs) : la SPA doit
+      # être buildée en amont pour que la web UI release soit servie.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: client
       - run: cargo build --release -p agentcontrol-daemon -p acctl
       - name: package
         run: |

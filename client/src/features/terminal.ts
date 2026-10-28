@@ -9,7 +9,7 @@
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { listen } from "@tauri-apps/api/event";
+import { listen } from "../core/bridge";
 import { $, logUi, showErr } from "../core/dom";
 import { call } from "../core/rpc";
 import { app } from "../core/state";

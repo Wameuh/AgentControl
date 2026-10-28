@@ -213,8 +213,8 @@ impl Daemon {
 
 /// Résout `path` (relatif au cwd de la session) en chemin canonique et
 /// garantit qu'il reste dans le workspace — anti `..`, chemins absolus et
-/// liens symboliques sortants.
-fn resolve_in_cwd(s: &Session, path: &str) -> Result<PathBuf> {
+/// liens symboliques sortants. Réutilisé par le serveur web (/media).
+pub(crate) fn resolve_in_cwd(s: &Session, path: &str) -> Result<PathBuf> {
     let cwd = std::fs::canonicalize(&s.meta_snapshot().cwd)
         .with_context(|| format!("cwd: {}", s.meta_snapshot().cwd))?;
     let p = std::fs::canonicalize(cwd.join(path))
@@ -441,6 +441,28 @@ async fn download_path(
         "name": format!("{name}.zip"), "dir": true, "total": total,
         "offset": offset, "data": b64(&data), "archive": zip_name,
     }))
+}
+
+/// Construit l'archive `blobs/dl-*.zip` d'un dossier workspace —
+/// mutualisé avec l'endpoint HTTP `/download` : même mécanique que
+/// `download_path` (nom unique, .part + rename, purge LRU ensuite).
+/// Renvoie (chemin de l'archive, nom dl-*.zip).
+pub(crate) async fn download_archive(
+    s: &Session,
+    dir: &std::path::Path,
+) -> Result<(PathBuf, String)> {
+    let zip_name = new_zip_name(dir);
+    let (src, dst) = (dir.to_path_buf(), s.dir.join("blobs").join(&zip_name));
+    tokio::task::spawn_blocking(move || {
+        let r = zip_dir(&src, &dst);
+        if r.is_err() {
+            let _ = std::fs::remove_file(dst.with_extension("part"));
+        }
+        r
+    })
+    .await
+    .context("zip task")??;
+    Ok((s.dir.join("blobs").join(&zip_name), zip_name))
 }
 
 /// Lit [offset, offset+limit) d'un fichier. Retourne (données, taille totale).

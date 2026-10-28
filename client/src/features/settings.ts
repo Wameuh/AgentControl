@@ -4,7 +4,7 @@
 // vérification manuelle des mises à jour.
 // ---------------------------------------------------------------------------
 
-import { getVersion } from "@tauri-apps/api/app";
+import { getVersion, isWeb } from "../core/bridge";
 import { $ } from "../core/dom";
 import { applyTheme, isAndroid } from "../core/chrome";
 import { defaultEncoding } from "../core/encoding";
@@ -71,6 +71,11 @@ export class SettingsPanel {
     this.syncSndOpts();
     $("s-update-status").textContent = "";
     ($("s-doupdate") as HTMLButtonElement).hidden = true;
+    // Web : pas d'auto-connexion optionnelle (la conn unique est vitale)
+    // ni d'update client (la SPA suit le binaire démon) ni de canal rc.
+    ($("s-autoconn").closest(".s-row") as HTMLElement).hidden = isWeb;
+    ($("s-rcchan").closest(".s-row") as HTMLElement).hidden = isWeb;
+    $("s-update-row").hidden = isWeb;
     void getVersion()
       .then((v) => ($("s-version").textContent = `v${v}`))
       .catch(() => ($("s-version").textContent = ""));

@@ -3,7 +3,7 @@
 // fenêtre custom (drag, min/max/close), ouverture de liens externes.
 // ---------------------------------------------------------------------------
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isWeb } from "./bridge";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { gemSVG } from "../crystal";
 import { t } from "../i18n";
@@ -57,6 +57,9 @@ export function applyAndroidChrome() {
 }
 
 export function initPlatform() {
+  // Web : le navigateur gère sa fenêtre — pas de chrome custom ni de
+  // connexion multi-démons (le démon qui sert la page est celui piloté).
+  if (isWeb) document.body.classList.add("web");
   invoke<string>("platform").then((p) => {
     android = p === "android";
     windows = p === "windows";
@@ -76,7 +79,8 @@ export function shellOpen(url: string) {
 // explicite — pas de data-tauri-drag-region : son handler WRY n'est pas
 // gardé par e.detail et relancerait un move-drag au double-clic (grab
 // tué par toggleMaximize → curseur "main fermée" résiduel sous Wayland).
-const appWin = getCurrentWindow();
+// En webview navigateur (isWeb), getCurrentWindow() lèverait — gardé.
+const appWin = isWeb ? null : getCurrentWindow();
 
 // dragDropEnabled:false → WebView2 garde AllowExternalDrop=true : un
 // fichier OS droppé sur la fenêtre ferait naviguer la webview vers
@@ -86,6 +90,7 @@ const appWin = getCurrentWindow();
 const isFileDrag = (e: DragEvent) => e.dataTransfer?.types.includes("Files") ?? false;
 
 export function initWindowChrome() {
+  if (!appWin) return; // navigateur : la fenêtre n'est pas pilotable
   $("tb-min").onclick = () => appWin.minimize();
   $("tb-max").onclick = () => appWin.toggleMaximize();
   $("tb-close").onclick = () => appWin.close();
