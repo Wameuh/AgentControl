@@ -24,7 +24,7 @@ export function dotIcon(state: string): string {
  *  (jamais prévu côté démon, mais la confiance n'est pas un filtre)
  *  retombe sur "dead" plutôt que d'être interpolé brut. */
 export function dotCls(state: string): string {
-  return state in DOT_ROLE ? state : "dead";
+  return Object.hasOwn(DOT_ROLE, state) ? state : "dead";
 }
 
 /** Icône fenêtre : rouge si une question attend, dorée si un agent tourne,
