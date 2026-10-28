@@ -211,9 +211,11 @@ export class FileExplorer {
   // ------------------------------------------------------------------
 
   /** Récupère la tranche suivante et l'ajoute au rendu courant. Sérialisé :
-   *  un fetch en vol fait attendre l'appelant (loadAll ne peut pas spinner). */
+   *  un fetch en vol fait attendre l'appelant (loadAll ne peut pas spinner) ;
+   *  un save en vol aussi — une tranche lue pendant write_file serait un
+   *  mélange ancien/nouveau (la taille inchangée passerait le garde gen). */
   private async fetchChunk(cur: CurFile) {
-    while (cur.fetching) await new Promise((r) => setTimeout(r, 30));
+    while (cur.fetching || this.saving) await new Promise((r) => setTimeout(r, 30));
     if (this.cur !== cur || cur.done || cur.binary) return;
     cur.fetching = true;
     const gen = cur.gen;
