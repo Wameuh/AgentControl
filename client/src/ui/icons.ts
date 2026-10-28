@@ -78,6 +78,21 @@ const SHAPES: Record<string, string> = {
     '<circle cx="12" cy="12" r="9"/>' +
     '<path d="M9.4 9.2a2.6 2.6 0 0 1 5.1.7c0 1.7-2.5 2.1-2.5 3.6"/><path d="M12 17.2h.01"/>',
   tool: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+  // Vue sidebar
+  bot:
+    '<rect x="4.5" y="9" width="15" height="10.5" rx="2.5"/>' +
+    '<path d="M12 9V6"/><circle cx="12" cy="4.2" r="1.4"/>' +
+    '<circle cx="9.4" cy="13.4" r="1" fill="currentColor" stroke="none"/>' +
+    '<circle cx="14.6" cy="13.4" r="1" fill="currentColor" stroke="none"/>' +
+    '<path d="M9.6 16.6h4.8"/>',
+  pr:
+    '<circle cx="6.5" cy="6" r="2.7"/><circle cx="6.5" cy="18" r="2.7"/>' +
+    '<path d="M6.5 8.7v6.6"/>' +
+    '<circle cx="17.5" cy="8.5" r="2.7"/>' +
+    '<path d="M14.8 8.5h-2.3a4 4 0 0 0-4 4v2.9"/>',
+  repo:
+    '<path d="M6.5 3A2.5 2.5 0 0 0 4 5.5v13A2.5 2.5 0 0 0 6.5 21H20V3Z"/>' +
+    '<path d="M9 3v4.4l2-1.4 2 1.4V3"/>',
 };
 
 export type IconName = keyof typeof SHAPES;

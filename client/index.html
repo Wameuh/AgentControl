@@ -28,11 +28,16 @@
             <button id="btn-connect" data-i18n="new_conn">New connection</button>
             <button id="conn-chip" class="badge warn" hidden data-icon="refresh"></button>
           </div>
+          <div id="side-view" role="tablist">
+            <button id="sv-agents" class="sv on" role="tab" data-i18n-title="view_agents_title" title="Agent sessions"><span class="sv-ic" data-icon="bot"></span><span data-i18n="view_agents">Agents</span></button>
+            <button id="sv-repos" class="sv" role="tab" data-i18n-title="view_repos_title" title="Pull requests"><span class="sv-ic" data-icon="pr"></span><span data-i18n="view_repos">Repos</span><span id="sv-count" hidden></span></button>
+          </div>
           <div id="sess-filter">
             <input id="sess-filter-input" data-i18n-ph="sess_filter_ph" data-i18n-title="sess_filter_title" placeholder="Filter sessions…" />
             <button id="sess-filter-clear" hidden data-icon="close" data-i18n-title="sess_filter_clear" title="Clear the filter"></button>
           </div>
           <div id="session-list"></div>
+          <div id="pr-list" hidden></div>
           <button id="btn-new-session"><span data-icon="user-plus"></span><span data-i18n="new_session">New agent</span></button>
           <div id="sidebar-resize" title="Drag to resize"></div>
         </aside>

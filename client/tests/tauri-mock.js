@@ -82,6 +82,21 @@
         { conn: "local", repo: "Wameuh/AgentControl", pr: 42,
           session: SESSIONS[0].id, branch: "feat/x", title: "feat: exemple",
           status: "open", via: "detected" },
+        { conn: "local", repo: "Wameuh/AgentControl", pr: 95,
+          session: SESSIONS[1].id, branch: "feat/sous-agents",
+          title: "feat: sous-agents dans l'arbre", status: "draft",
+          via: "manual" },
+        { conn: "local", repo: "Wameuh/AgentControl", pr: 88,
+          session: SESSIONS[3].id, branch: "fix/scroll",
+          title: "fix: scroll ancré au bas", status: "open",
+          via: "detected" },
+        { conn: "local", repo: "cli/cli", pr: 1204,
+          session: "agent-externe-qui-n-existe-plus", branch: "patch-1",
+          title: "fix: token refresh retry", status: "conflict",
+          via: "manual" },
+        { conn: "local", repo: "cli/cli", pr: 1190,
+          session: "", branch: "docs/readme",
+          title: "docs: contribution guide", status: "open", via: "manual" },
       ];
       case "clear_session": return { session: args.session };
       case "list_native_sessions": return { sessions: [] };

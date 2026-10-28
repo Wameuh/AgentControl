@@ -87,6 +87,18 @@ body.android #session-list .sess .sess-del {
   min-width: 40px; min-height: 40px; font-size: 15px;
 }
 body.android #btn-new-session { min-height: 46px; font-size: 15px; }
+/* Sélecteur de vue + liste PR : cibles tactiles ≥44px */
+body.android #side-view .sv { min-height: 42px; font-size: 14px; }
+body.android #side-view .sv .ic { width: 15px; height: 15px; }
+body.android #pr-list .pr { padding: 11px 10px; }
+body.android #pr-list .pr .pr-t { font-size: 14px; }
+body.android #pr-list .pr .pr-st { font-size: 10px; }
+body.android #pr-list .pr .pr-sub { font-size: 12px; margin-top: 6px; }
+body.android #pr-list .pr .pr-branch,
+body.android #pr-list .pr .pr-repo-lbl { font-size: 11.5px; }
+body.android #pr-list .pr .pr-sess { min-height: 40px; font-size: 12px; }
+body.android #pr-list .pr-note { font-size: 12px; padding: 8px 10px; }
+body.android .pr-repo .pr-n { font-size: 12px; }
 
 /* Dialogues → bottom sheets : ancrées bas, coins arrondis haut, poignée. */
 body.android dialog {
