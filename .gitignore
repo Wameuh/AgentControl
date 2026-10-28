@@ -15,6 +15,7 @@ dist/
 # Projet Android généré (CI : `tauri android init --ci`)
 client/src-tauri/gen/
 client/shots/
+client/audit-shots/
 __pycache__/
 *.pyc
 
