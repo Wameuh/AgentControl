@@ -37,7 +37,7 @@
 /* Chip update dispo dans la titlebar */
 .tb-update {
   display: inline-flex; align-items: center; gap: 4px;
-  border: 1px solid var(--sand); color: var(--sand); background: transparent;
+  border: 1px solid var(--accent); color: var(--accent); background: transparent;
   padding: 3px 10px; border-radius: 7px; font-size: 11.5px; font-weight: 500;
   cursor: pointer; flex: none; animation: pulse 2s infinite;
 }

@@ -10,16 +10,51 @@ import { t } from "../i18n";
 import { icon } from "../ui/icons";
 import { $ } from "./dom";
 
-const mesh = (window as { MeshBackground?: { setMood: (m: string, o: object) => void } })
-  .MeshBackground;
+const mesh = (window as {
+  MeshBackground?: {
+    setMood: (m: string, o: object) => void;
+    setAnimated: (on: boolean) => void;
+    isAnimated: () => boolean;
+  };
+}).MeshBackground;
 export const bgMood = () => (document.documentElement.classList.contains("light") ? "paper" : "sand");
-export const meshSetMood = (o: object) => mesh?.setMood(bgMood(), o);
+// Fond figé (« Fond animé » off) : les humeurs dynamiques (compte d'agents)
+// sont des no-ops — pas de redraw sur un rendu volontairement statique.
+export const meshSetMood = (o: object) => {
+  if (mesh?.isAnimated() !== false) mesh?.setMood(bgMood(), o);
+};
 
 export function applyTheme(name: "dark" | "light") {
   document.documentElement.classList.toggle("light", name === "light");
   localStorage.setItem("ac-theme", name);
   mesh?.setMood(bgMood(), { intensity: 0.55 });
 }
+
+// Couleur d'accent — dimension orthogonale à dark/light (cf. styles/base.css).
+// « sauge » = défaut, famille khaki/olive de la gemme neutre (identité app).
+export type Accent = "sage" | "gold" | "grey" | "violet" | "red";
+const ACCENTS: Accent[] = ["sage", "gold", "grey", "violet", "red"];
+
+/** Accent persisté, « sage » si absent ou inconnu. */
+export function accentPref(): Accent {
+  const v = localStorage.getItem("ac-accent");
+  return (ACCENTS as string[]).includes(v ?? "") ? (v as Accent) : "sage";
+}
+
+export function applyAccent(name: Accent) {
+  const el = document.documentElement;
+  for (const a of ACCENTS) if (a !== "sage") el.classList.toggle(`theme-${a}`, name === a);
+  localStorage.setItem("ac-accent", name);
+}
+
+/** « Fond animé » : persiste la préférence et l'applique au rendu mesh. */
+export function applyBgAnim(on: boolean) {
+  localStorage.setItem("ac-bganim", on ? "1" : "0");
+  mesh?.setAnimated(on);
+}
+
+/** État effectif du fond animé (résout ac-bganim / reduced-motion / Android). */
+export const bgAnimOn = () => mesh?.isAnimated() ?? false;
 
 /** Gemme cristal : verte (neutral) = identité app ; dorée (human) = travail. */
 export function initGems() {

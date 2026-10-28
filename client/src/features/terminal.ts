@@ -51,7 +51,7 @@ function termTheme() {
   return {
     background: v("--panel-solid") || "#161c18",
     foreground: v("--ink") || "#ece6d8",
-    cursor: v("--sand") || "#cdb68c",
+    cursor: v("--accent") || "#cdb68c",
     cursorAccent: v("--panel-solid") || "#161c18",
     selectionBackground: v("--line-strong") || "#555",
     black: "#1a1d16",
