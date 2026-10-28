@@ -91,8 +91,8 @@ body.android #session-list .sess .sess-del {
   min-width: 40px; min-height: 40px; font-size: 15px;
 }
 /* Lisibilité : contenu lu ≥ 12px — badges d'état/compteurs ornementaux
-   (.badge.st-*, #sv-count, .steer-badge, .pr-st, .sr-type, .toast-x)
-   exclus du seuil. */
+   (.badge.st-*, #sv-count, .steer-badge, .pr-st, .sr-type, .perm-kind,
+   .toast-x, .farrow) exclus du seuil. */
 body.android #session-list .sess .a,
 body.android #session-list .sess .sess-pr { font-size: 12px; }
 body.android .grp-head .grp-name, body.android .grp-sub .grp-name,
@@ -142,6 +142,9 @@ body.android dialog input[type="checkbox"] {
   min-height: 0; width: 24px; height: 24px; accent-color: var(--accent);
 }
 body.android dialog textarea { min-height: 90px; }
+/* Le select du log-bar est plus spécifique (ID) que la règle dialogues :
+   le remettre au standard tactile des selects de sheet. */
+body.android dialog #log-bar select { font-size: 16px; min-height: 46px; padding: 10px 12px; }
 body.android dialog button {
   min-height: 46px; font-size: 15.5px; padding: 10px 16px;
 }
@@ -188,6 +191,8 @@ body.android .fhit { padding: 9px 8px; font-size: 15px; min-height: 44px; }
 body.android .fhit .fhdir, body.android .fhit .fsize { font-size: 12px; }
 body.android .froot { font-size: 12px; }
 body.android .fnode .fsize { font-size: 12px; }
+body.android .fempty, body.android .ferr { font-size: 12px; }
+body.android #fv-status, body.android #fv-loadall { font-size: 12px; }
 body.android #file-viewer {
   display: flex; flex-direction: column;
   position: fixed; inset: 0; z-index: 50;
@@ -267,6 +272,7 @@ body.android #btn-bottom {
 }
 body.android #events { padding: 8px 10px; }
 body.android .msg { font-size: 15px; }
+body.android .msg.peer .peer-head { font-size: 12px; }
 body.android .q-item .q-txt { font-size: 12px; }
 
 /* Champs SSH natifs dans le dialogue de connexion */
