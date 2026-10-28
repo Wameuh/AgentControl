@@ -87,6 +87,8 @@ export class GroupStore {
     );
     for (const s of members) await this.applyAssign(s, undefined);
     this.remove(conn, name);
+    // État de collapse persisté du header — orphelin après dissolution.
+    localStorage.removeItem(`ac-grp-${conn}::${name}`);
   }
 
   init() {

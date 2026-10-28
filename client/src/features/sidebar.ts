@@ -408,15 +408,21 @@ export class Sidebar {
       this.groups.openDlg("rename", null, conn, grp);
     });
     // Dissoudre dégroupe toutes les sessions membres — destructif →
-    // double-clic armé comme ctx_exit / sess-del.
+    // double-clic armé comme ctx_exit / sess-del (label dédié : on
+    // dégroupe, on ne supprime pas les sessions).
+    const nMembers = app.lastSessions.filter(
+      (s) => (s.conn ?? "default") === conn && s.group === grp,
+    ).length;
     menuBtn(this.ctx, t("dissolve_group"), "danger", (b) => {
       if (!b.dataset.armed) {
         b.dataset.armed = "1";
-        b.textContent = t("ctx_confirm");
+        b.textContent = t("ctx_dissolve_armed", { n: nMembers });
         return;
       }
       hideSessCtx();
-      void this.groups.dissolve(conn, grp).then(() => this.refresh());
+      void this.groups.dissolve(conn, grp)
+        .then(() => this.refresh())
+        .catch((e) => showErr(String(e)));
     });
     placeMenu(this.ctx, "sctx", x, y);
   }
