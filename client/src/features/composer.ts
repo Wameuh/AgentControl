@@ -280,11 +280,9 @@ export class Composer {
       };
       // Tête de file + cancel → envoi forcé (reste de file préservée)
       const p = qIco("top", t("queue_send_now"));
-      p.onclick = () =>
-        call("queue_promote", { session: sid, index: i, conn }).then(() => this.refreshQueue());
+      p.onclick = () => this.queueCall("queue_promote", { session: sid, index: i, conn });
       const x = qIco("close", t("queue_remove"));
-      x.onclick = () =>
-        call("queue_drop", { session: sid, index: i, conn }).then(() => this.refreshQueue());
+      x.onclick = () => this.queueCall("queue_drop", { session: sid, index: i, conn });
       d.append(e, p, x);
       bar.appendChild(d);
     });
@@ -349,20 +347,36 @@ export class Composer {
         const m = qIco("down", t("queue_to_composer"));
         m.onclick = () => {
           this.setInput(txt);
-          call("queue_drop", { session: sid, index: i, conn }).then(() => this.refreshQueue());
+          ($("input") as HTMLTextAreaElement).focus();
+          this.queueCall("queue_drop", { session: sid, index: i, conn });
         };
         acts.append(e, m);
       }
       const p = qIco("top", t("queue_send_now"));
-      p.onclick = () =>
-        call("queue_promote", { session: sid, index: i, conn }).then(() => this.refreshQueue());
+      p.onclick = () => this.queueCall("queue_promote", { session: sid, index: i, conn });
       const x = qIco("close", t("queue_remove"));
-      x.onclick = () =>
-        call("queue_drop", { session: sid, index: i, conn }).then(() => this.refreshQueue());
+      x.onclick = () => this.queueCall("queue_drop", { session: sid, index: i, conn });
       acts.append(p, x);
+      // preventDefault sur mousedown de chaque bouton : sinon le clic
+      // déplace le focus → blur de la textarea d'édition → done() →
+      // rebuild synchrone qui détache le bouton avant son click →
+      // action silencieusement perdue (le focus reste, le clic part,
+      // et le refreshQueue de l'action referme l'éditeur si l'entrée
+      // a bougé).
+      for (const b of acts.querySelectorAll<HTMLButtonElement>("button")) {
+        b.onmousedown = (e) => e.preventDefault();
+      }
       row.appendChild(acts);
       list.appendChild(row);
     });
+  }
+
+  /** queue_* puis re-render : l'erreur part en toast plutôt que de
+   *  finir en unhandled rejection (conn down, index périmé…). */
+  private queueCall(method: string, params: Record<string, unknown>) {
+    void call(method, params)
+      .then(() => this.refreshQueue())
+      .catch((e) => showErr(String(e)));
   }
 
   /** Item en édition inline : textarea + ✓/✗. Sauvegarde = {mod}+Entrée
@@ -394,7 +408,9 @@ export class Composer {
       // Blur zombie : la textarea est détachée par un rebuild de la
       // liste (refreshQueue), pas par un choix de l'utilisateur → la
       // nouvelle instance de l'éditeur prend le relais, rien à faire.
-      if (this.qRebuilding) {
+      // isConnected couvre un blur dispatché après détachement (timing
+      // webview), indépendamment du flag synchrone qRebuilding.
+      if (this.qRebuilding || !ta.isConnected) {
         finished = true;
         return;
       }
@@ -405,7 +421,12 @@ export class Composer {
       // écrire, l'index viserait un autre slot.
       const live = this.qEditing === ed;
       this.qEditing = null;
-      if (!save || !live || text === ed.orig) {
+      // Texte vidé → pas de prompt zombie en file : annulation +
+      // avertissement plutôt que queue_edit "".
+      if (save && live && text !== ed.orig && !text.trim()) {
+        notify("warn", t("queue_edit_empty"));
+      }
+      if (!save || !live || text === ed.orig || !text.trim()) {
         this.renderQueuePanel();
         return;
       }
@@ -420,7 +441,7 @@ export class Composer {
           if (!r.ok) notify("warn", t("queue_edit_failed"));
         })
         .catch((e) => {
-          this.markQueueEditBroken(e);
+          this.markQueueEditBroken(conn ?? "default", e);
           showErr(String(e));
         })
         .finally(() => this.refreshQueue());
@@ -428,6 +449,9 @@ export class Composer {
     ta.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         e.preventDefault();
+        // Scoper la touche : un Échap remontant à window fermerait aussi
+        // un éventuel overlay ouvert au-dessus (settings…).
+        e.stopPropagation();
         done(false);
       }
       if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
@@ -455,7 +479,6 @@ export class Composer {
   private toggleQueuePanel() {
     if (this.qOpen) {
       this.closeQueuePanel();
-      $("queue-open")?.classList.remove("on");
     } else if (this.qSnapshot.length && app.current) {
       this.qOpen = true;
       nav.push("queue");
@@ -465,20 +488,21 @@ export class Composer {
   }
 
   /** Ferme le panneau (✕, file vide, session changée, back Android) —
-   *  dépile aussi l'entrée nav pour garder le bouton retour cohérent. */
+   *  dépile aussi l'entrée nav et l'état « on » du bouton horloge. */
   closeQueuePanel() {
     if (this.qOpen) nav.close("queue");
     this.qOpen = false;
     this.qEditing = null;
     const panel = $("queue-panel");
     if (panel) panel.hidden = true;
+    $("queue-open")?.classList.remove("on");
   }
 
   /** Vieux démon : ReqKind::QueueEdit inconnu → « parse: unknown
-   *  variant ». L'édition est désactivée pour la conn courante. */
-  private markQueueEditBroken(e: unknown) {
+   *  variant ». L'édition est désactivée pour la conn de l'appel. */
+  private markQueueEditBroken(connKey: string, e: unknown) {
     if (/unknown variant|parse:/i.test(String(e))) {
-      this.qEditBroken.add(app.current?.conn ?? "default");
+      this.qEditBroken.add(connKey);
     }
   }
 
