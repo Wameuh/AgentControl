@@ -2,9 +2,13 @@
 #app-body { flex: 1; display: flex; min-height: 0; }
 
 
+/* Hauteur totale de la titlebar — référence unique pour tout ce qui doit
+   s'ancrer sous elle (#toasts…) ; surchargée sur Android (mobile.css). */
+:root { --tb-h: 34px; }
+
 /* Barre de titre custom (decorations: false) — même verre que le reste */
 #titlebar {
-  height: 34px; flex: none; display: flex; align-items: center; gap: 8px;
+  height: var(--tb-h); flex: none; display: flex; align-items: center; gap: 8px;
   padding: 0 4px 0 12px; user-select: none;
   background: var(--glass); backdrop-filter: blur(14px);
   border-bottom: 1px solid var(--line);
