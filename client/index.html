@@ -86,6 +86,14 @@
           </div>
           <button id="btn-bottom" hidden data-icon="down" data-i18n-title="bottom_title" title="Latest"></button>
           <div id="queue-bar" hidden></div>
+          <div id="queue-panel" hidden>
+            <header id="qp-head">
+              <span id="qp-title" data-i18n="queue_panel_title">Queued prompts</span>
+              <span id="qp-count" class="badge"></span>
+              <button id="qp-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <div id="qp-list"></div>
+          </div>
           <div id="term-panel" hidden>
             <div id="term-resize" data-i18n-title="term_drag" title="Drag to resize"></div>
             <header id="term-head">

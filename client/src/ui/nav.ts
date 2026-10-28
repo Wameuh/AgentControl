@@ -117,6 +117,9 @@ export class OverlayNav {
     } else if (id === "term") {
       // Passe par le handler de ✕ : wantOpen retombe + nav.close.
       $("btn-term-hide").click();
+    } else if (id === "queue") {
+      // Idem : le ✕ du panneau file synchronise qOpen côté composer.
+      $("qp-close")?.click();
     } else if (id === "settings") {
       // Passe par le handler de ✕ : hidden + levée de l'inert + nav.close.
       $("settings-close").click();
