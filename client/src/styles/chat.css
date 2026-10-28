@@ -83,7 +83,8 @@
   animation: gemspin 1.4s ease-in-out infinite;
 }
 /* Échec de chargement : icône + message + retry à la place de la gemme */
-#conv-loading .cl-ico { font-size: 34px; color: var(--err); }
+#conv-loading .cl-ico { color: var(--err); }
+#conv-loading .cl-ico .ic { width: 34px; height: 34px; }
 #conv-loading .cl-txt { max-width: 420px; text-align: center; white-space: pre-wrap; user-select: text; }
 #conv-loading .cl-retry { margin-top: 4px; pointer-events: auto; }
 

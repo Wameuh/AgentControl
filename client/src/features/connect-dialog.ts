@@ -66,7 +66,7 @@ export class ConnectDialog {
     for (const id of steps) {
       const li = document.createElement("li");
       li.innerHTML =
-        `<span class="st-ico">○</span><span>${esc(t(`dstep_${id}` as Key))}</span>`;
+        `<span class="st-ico">${icon("dot")}</span><span>${esc(t(`dstep_${id}` as Key))}</span>`;
       ul.appendChild(li);
       this.stepEls.set(id, li);
     }
@@ -82,10 +82,10 @@ export class ConnectDialog {
       if (id === step) {
         seen = true;
         li.className = "cur";
-        ico.textContent = "◌";
+        ico.innerHTML = icon("loader");
       } else if (!seen) {
         li.className = "done";
-        ico.textContent = "✓";
+        ico.innerHTML = icon("check");
       }
     }
   }
@@ -93,7 +93,7 @@ export class ConnectDialog {
   private daemonFinish() {
     for (const li of this.stepEls.values()) {
       li.className = "done";
-      li.querySelector<HTMLElement>(".st-ico")!.textContent = "✓";
+      li.querySelector<HTMLElement>(".st-ico")!.innerHTML = icon("check");
     }
   }
 

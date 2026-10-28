@@ -115,7 +115,7 @@ export class ChatView {
       this.convLoadingEl.id = "conv-loading";
       this.convLoadingEl.innerHTML =
         `<span class="load-gem">${gemSVG("agent")}</span>` +
-        `<span class="cl-ico" hidden>⚠</span>` +
+        `<span class="cl-ico" hidden>${icon("warn")}</span>` +
         `<span class="cl-txt">${esc(t("loading"))}</span>` +
         `<button class="cl-retry" hidden>${esc(t("retry"))}</button>`;
     }
