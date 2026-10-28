@@ -92,10 +92,16 @@ export class SettingsPanel {
   }
 
   close() {
-    if (!this.isOpen()) return;
+    // L'inert est retiré même si le panneau avait déjà été masqué par un
+    // autre chemin (early-return historique : un résiduel gelait #chat
+    // sans cause visible — le watchdog core/modal filet de sécurité).
+    const was = this.isOpen();
     $("settings-view").hidden = true;
     this.setChatInert(false);
+    // nav.close est idempotent (entrée absente = no-op) : l'appeler même
+    // si le panneau avait été masqué ailleurs purge la pile nav résiduelle.
     nav.close("settings");
+    if (!was) return;
     // Focus rendu au champ (pas sous Android : ouvrirait le clavier virtuel).
     if (!isAndroid()) ($("input") as HTMLTextAreaElement).focus();
   }

@@ -12,6 +12,7 @@ import { listen, getVersion } from "./core/bridge";
 import { $, notify } from "./core/dom";
 import { app } from "./core/state";
 import { initRpc } from "./core/rpc";
+import { initModalGuard } from "./core/modal";
 import {
   applyTheme,
   applyAccent,
@@ -52,6 +53,9 @@ applyStatic();
 initGems();
 initPlatform();
 initWindowChrome();
+// Log open/close des modals + watchdog anti-gel (dialog invisible, inert
+// résiduel) — avant tout showModal pour tracer aussi les dialogs du boot.
+initModalGuard();
 
 // Le menu natif du clic droit n'a pas de sens dans l'app — chaque menu
 // contextuel custom gère son propre preventDefault/stopPropagation.

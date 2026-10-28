@@ -28,6 +28,11 @@ export class ConnectDialog {
   connecting: (_hosts: string[]) => void = () => {};
   private saved: SavedConn[] = [];
   private stepEls = new Map<string, HTMLElement>();
+  /** L'utilisateur a détaché le dialogue de progression démon (Échap /
+   *  « arrière-plan ») : les étapes suivantes du MÊME flux ne doivent pas
+   *  le re-pop (install → self-update → script enchaînés). Réarmé à
+   *  chaque nouvelle tentative de connexion. */
+  private daemonDetached = false;
 
   bind(conns: ConnectionManager) {
     this.conns = conns;
@@ -68,7 +73,7 @@ export class ConnectDialog {
       ul.appendChild(li);
       this.stepEls.set(id, li);
     }
-    if (!d.open) d.showModal();
+    if (!d.open && !this.daemonDetached) d.showModal();
   }
 
   /** Marqueur `step:<id>` reçu : les étapes passées → done, celle-ci → cur. */
@@ -205,6 +210,9 @@ export class ConnectDialog {
 
   async connect(cfg: Record<string, unknown>) {
     const host = String(cfg.host ?? cfg.addr ?? cfg.path ?? "local");
+    // Nouvelle tentative : la progression redevient visible (le flag
+    // détaché du flux précédent ne doit pas masquer celle-ci).
+    this.daemonDetached = false;
     dlgErr("c-err", null);
     this.cStatus(t("connecting_to", { host }));
     let status: unknown;
@@ -431,11 +439,17 @@ export class ConnectDialog {
     // Progression du script distant (marqueurs step:* streamés par
     // ensure_daemon) — met à jour la liste si le dialogue est ouvert.
     void listen<string>("daemon-step", (e) => this.daemonStep(e.payload));
-    // Un <dialog> modal se ferme sur Échap — pendant install/update le
-    // travail continuerait en arrière-plan sans retour visible → bloqué.
-    ($("dlg-daemon") as HTMLDialogElement).addEventListener("cancel", (e) =>
-      e.preventDefault(),
-    );
+    // Fermer (Échap ou « arrière-plan ») DÉTACHE le dialogue : l'opération
+    // distante continue, son résultat revient via report()/cStatus (dlg-conn
+    // reste ouvert dessous) ou toast. Laisser la page inerte sans issue
+    // serait pire qu'un suivi en tâche de fond.
+    ($("dlg-daemon") as HTMLDialogElement).addEventListener("cancel", () => {
+      this.daemonDetached = true;
+    });
+    $("daemon-bg").onclick = () => {
+      this.daemonDetached = true;
+      ($("dlg-daemon") as HTMLDialogElement).close();
+    };
     $("c-pubkey-copy").onclick = async () => {
       const txt = $("c-pubkey").textContent ?? "";
       try {

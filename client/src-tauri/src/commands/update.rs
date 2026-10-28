@@ -10,7 +10,11 @@ use std::path::PathBuf;
 
 #[cfg(not(target_os = "android"))]
 fn gh_get(url: &str) -> Result<serde_json::Value, String> {
+    // Timeout global (connect+read) : le front borne déjà ses fetch — un
+    // réseau en blackhole ne doit pas faire attendre le popup « outdated »
+    // des dizaines de secondes via le fallback Rust.
     ureq::get(url)
+        .timeout(std::time::Duration::from_secs(15))
         .set("User-Agent", "agentcontrol-updater")
         .call()
         .map_err(|e| e.to_string())?

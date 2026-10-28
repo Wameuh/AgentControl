@@ -204,6 +204,7 @@ const STR = {
     agents_loading: "loading agents…",
     agents_failed: "⚠ could not load agents",
     creating_agent: "creating the agent…",
+    create_wait: "This can take a while on a remote server — Esc detaches, the session opens when ready.",
     spawn_failed: "« {title} » failed to start — open the session for details",
     dstep_check: "Check remote state",
     dstep_download: "Download release binaries",
@@ -214,6 +215,7 @@ const STR = {
     dstep_restart: "Daemon restarts — reconnect is automatic",
     dinstall_title: "Daemon install",
     dupdate_running: "Daemon update",
+    run_bg: "Run in background",
     session_deleted_toast: "session deleted on the server",
   },
   fr: {
@@ -410,6 +412,7 @@ const STR = {
     agents_loading: "chargement des agents…",
     agents_failed: "⚠ chargement des agents impossible",
     creating_agent: "création de l'agent…",
+    create_wait: "Peut être long sur un serveur distant — Échap détache, la session s'ouvrira d'elle-même.",
     spawn_failed: "« {title} » n'a pas démarré — ouvrir la session pour le détail",
     dstep_check: "Vérification de l'existant",
     dstep_download: "Téléchargement des binaires",
@@ -420,6 +423,7 @@ const STR = {
     dstep_restart: "Redémarrage du démon — reconnexion auto",
     dinstall_title: "Installation du démon",
     dupdate_running: "Mise à jour du démon",
+    run_bg: "Continuer en arrière-plan",
     session_deleted_toast: "session supprimée sur le serveur",
   },
 } as const;
