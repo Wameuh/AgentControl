@@ -123,6 +123,14 @@
                 <input type="checkbox" id="s-rcchan" />
                 <span data-i18n="rcchan_label">Also offer release candidates (rc)</span>
               </label>
+              <label class="s-row"><span data-i18n="enc_label">File encoding</span>
+                <select id="s-encoding">
+                  <option value="utf-8">UTF-8</option>
+                  <option value="windows-1252">Windows-1252 / Latin-1</option>
+                  <option value="utf-16le">UTF-16 LE</option>
+                  <option value="utf-16be">UTF-16 BE</option>
+                </select>
+              </label>
               <div class="s-row" id="s-update-row">
                 <button id="s-checkupdate" type="button" data-i18n="check_update">Check for updates</button>
                 <span id="s-update-status"></span>
@@ -152,8 +160,26 @@
               <div id="fv-bar">
                 <button id="fv-back" data-icon="back" data-i18n-title="menu_title" title="Back"></button>
                 <span id="fv-name"></span>
+                <span id="fv-status"></span>
+                <span class="fv-spacer"></span>
+                <button id="fv-loadall" hidden data-i18n="fv_loadall">load all</button>
+                <select id="fv-enc" title="Encoding"></select>
+                <button id="fv-edit" hidden data-icon="edit" data-i18n-title="fv_edit_title" title="Edit"></button>
+                <button id="fv-save" hidden data-icon="check" data-i18n-title="fv_save_title" title="Save"></button>
+              </div>
+              <div id="fv-conflict" hidden>
+                <span id="fv-conflict-msg" data-i18n="conflict_msg">changed on disk</span>
+                <button id="fv-reload" data-i18n="conflict_reload">Reload</button>
+                <button id="fv-overwrite" data-i18n="conflict_overwrite">Overwrite</button>
               </div>
               <pre id="file-view" class="syn"></pre>
+              <div id="file-edwrap" hidden>
+                <pre id="file-nums" aria-hidden="true"></pre>
+                <div id="file-edscroll">
+                  <pre id="file-hl" class="syn" aria-hidden="true"></pre>
+                  <textarea id="file-edit" wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
+                </div>
+              </div>
             </div>
           </div>
         </aside>
@@ -272,6 +298,18 @@
         <menu>
           <button type="button" id="first-copy" data-i18n="copy">Copy</button>
           <button value="ok" data-i18n="close">Close</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-filedirty">
+      <form method="dialog">
+        <h3 data-i18n="dirty_h">Unsaved changes</h3>
+        <p data-i18n="dirty_msg">Discard the modified buffer?</p>
+        <menu>
+          <button type="button" id="fd-stay" data-i18n="dirty_stay">Keep editing</button>
+          <button type="button" id="fd-discard" data-i18n="dirty_discard">Discard</button>
+          <button type="button" id="fd-save" data-i18n="dirty_save">Save</button>
         </menu>
       </form>
     </dialog>

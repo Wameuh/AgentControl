@@ -17,8 +17,10 @@ impl Daemon {
                     PathBuf::from(&s.meta_snapshot().cwd).join(p)
                 };
                 if let Some(limit) = limit {
-                    // Lecture bornée (streaming vidéo côté client) — tranche
-                    // brute base64, plafonnée comme DL_CHUNK (~5,4 Mio JSON).
+                    // Lecture bornée (streaming vidéo + chargement progressif
+                    // de l'éditeur côté client) — tranche brute base64,
+                    // plafonnée comme DL_CHUNK (~5,4 Mio JSON). `mtime_ms`
+                    // alimente la garde anti-écrasement de write_file.
                     let (data, size) = read_slice(&full, offset, limit.min(DL_CHUNK))
                         .with_context(|| format!("{}", full.display()))?;
                     return Ok(json!({
@@ -26,6 +28,7 @@ impl Daemon {
                         "offset": offset,
                         "size": size,
                         "data": b64(&data),
+                        "mtime_ms": mtime_ms(&full),
                     }));
                 }
                 if binary {
@@ -105,6 +108,50 @@ impl Daemon {
                 tokio::task::spawn_blocking(move || find_files(&cwd, &root, &q, limit))
                     .await
                     .context("find task")?
+    }
+    /// Éditeur du client : remplace [offset, offset+delete_len) par `data`
+    /// (base64) — atomique (.part + rename), borné workspace, garde mtime
+    /// optionnelle ("conflit: <mtime>" si le disque a changé).
+    pub(super) async fn h_write_file(self: &Arc<Self>, session: String, path: String, offset: u64, delete_len: u64, data: String, if_mtime_ms: Option<u64>) -> Result<Value> {
+                let s = self.get_session(&session).await?;
+                let p = resolve_in_cwd_create(&s, &path)?;
+                if p.is_dir() {
+                    anyhow::bail!("cible est un dossier: {path}");
+                }
+                // data est une ligne JSON — ~12 Mio décodés max (le client
+                // envoie le buffer édité complet en une tranche).
+                const WRITE_CAP: usize = 16 * 1024 * 1024;
+                if data.len() > WRITE_CAP {
+                    anyhow::bail!("tranche trop grosse (> {} o)", WRITE_CAP);
+                }
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&data)
+                    .context("data base64")?;
+                let len = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                if let Some(want) = if_mtime_ms {
+                    match mtime_ms(&p) {
+                        Some(m) if m == want => {}
+                        Some(m) => anyhow::bail!("conflit: {m}"),
+                        None => anyhow::bail!("conflit: fichier supprimé"),
+                    }
+                }
+                if offset > len {
+                    anyhow::bail!("offset au-delà de la fin ({offset} > {len})");
+                }
+                let delete_len = delete_len.min(len - offset);
+                let data_len = bytes.len() as u64;
+                let p2 = p.clone();
+                // La copie de queue peut brasser un gros reliquat — hors de
+                // la boucle d'events tokio.
+                tokio::task::spawn_blocking(move || splice_write(&p2, offset, delete_len, &bytes))
+                    .await
+                    .context("write task")??;
+                Ok(json!({
+                    "path": p.display().to_string(),
+                    "size": len - delete_len + data_len,
+                    "mtime_ms": mtime_ms(&p),
+                }))
     }
     pub(super) async fn h_delete_path(self: &Arc<Self>, session: String, path: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
@@ -202,6 +249,76 @@ fn find_files(cwd: &Path, root: &Path, q: &str, limit: usize) -> Result<Value> {
         "truncated": truncated,
         "scanned": scanned,
     }))
+}
+
+/// Variante pour l'écriture : la feuille peut être absente (création) —
+/// le parent est canonicalisé et doit rester dans le workspace. Un lien
+/// symbolique existant (même pendant) est résolu : la cible doit rester
+/// dans le workspace sinon refus.
+fn resolve_in_cwd_create(s: &Session, path: &str) -> Result<PathBuf> {
+    let cwd = std::fs::canonicalize(&s.meta_snapshot().cwd)
+        .with_context(|| format!("cwd: {}", s.meta_snapshot().cwd))?;
+    let joined = cwd.join(path);
+    // symlink_metadata (pas exists()) : voit aussi les liens pendants.
+    if std::fs::symlink_metadata(&joined).is_ok() {
+        let p = std::fs::canonicalize(&joined)
+            .with_context(|| format!("{}", joined.display()))?;
+        if !p.starts_with(&cwd) {
+            anyhow::bail!("hors du workspace: {path}");
+        }
+        return Ok(p);
+    }
+    let parent = joined.parent().unwrap_or(cwd.as_path());
+    let base = std::fs::canonicalize(parent)
+        .with_context(|| format!("{}", parent.display()))?;
+    if !base.starts_with(&cwd) {
+        anyhow::bail!("hors du workspace: {path}");
+    }
+    let name = joined
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("nom de fichier invalide: {path}"))?;
+    Ok(base.join(name))
+}
+
+/// mtime en ms depuis epoch (None si absent/illisible).
+fn mtime_ms(p: &std::path::Path) -> Option<u64> {
+    let m = std::fs::metadata(p).ok()?.modified().ok()?;
+    Some(m.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64)
+}
+
+/// Remplace [offset, offset+delete_len) par `data` via un fichier .part
+/// puis renommage atomique (le mode unix de l'original est préservé).
+fn splice_write(p: &std::path::Path, offset: u64, delete_len: u64, data: &[u8]) -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let tmp = p.with_extension("part");
+    let perms = std::fs::metadata(p).ok().map(|m| m.permissions());
+    let res = (|| -> Result<()> {
+        let mut out = std::fs::File::create(&tmp)?;
+        if let Ok(mut f) = std::fs::File::open(p) {
+            // (&mut f) est lui-même Read — `take` consomme en bornant à
+            // `offset` octets (by_ref serait ambigu : File est Read+Write).
+            std::io::copy(&mut (&mut f).take(offset), &mut out)?;
+            f.seek(SeekFrom::Start(offset + delete_len))?;
+            out.write_all(data)?;
+            std::io::copy(&mut f, &mut out)?;
+        } else {
+            out.write_all(data)?;
+        }
+        // Durabilité avant le rename : sans fsync le .part peut perdre
+        // des données en cas de crash pile après le renommage.
+        out.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = res {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    #[cfg(unix)]
+    if let Some(perms) = perms {
+        let _ = std::fs::set_permissions(&tmp, perms);
+    }
+    std::fs::rename(&tmp, p)?;
+    Ok(())
 }
 
 /// Taille max d'une tranche download (le base64 enfle ~×1,34 sur le fil).

@@ -239,7 +239,7 @@ fn print_event(ev: &Value) {
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|search|find|resume|attach|fork|cancel|kill|clear|sleep|mode|respond|blob|download|daemon-update");
+        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|search|find|resume|attach|fork|cancel|kill|clear|sleep|mode|respond|blob|download|write|daemon-update");
         std::process::exit(2);
     }
     let mut c = connect().await?;
@@ -549,6 +549,34 @@ async fn main() -> Result<()> {
                 if offset >= total { break; }
             }
             eprintln!("\n→ {dest} ({offset} o)");
+        }
+        "write" | "wr" => {
+            // acctl write <session> <path> [src] — src absent ou "-" = stdin.
+            // Remplace tout le fichier (delete_len clampé serveur) ou le crée.
+            if args.len() < 3 { bail!("write <session> <path> [src]"); }
+            let bytes = match args.get(3).map(String::as_str) {
+                None | Some("-") => {
+                    let mut b = Vec::new();
+                    std::io::Read::read_to_end(&mut std::io::stdin(), &mut b)?;
+                    b
+                }
+                Some(src) => std::fs::read(src)
+                    .with_context(|| format!("source: {src}"))?,
+            };
+            use base64::Engine;
+            let v = c.call(proto::ReqKind::WriteFile {
+                session: args[1].clone(),
+                path: args[2].clone(),
+                offset: 0,
+                delete_len: u64::MAX,
+                data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                if_mtime_ms: None,
+            }).await?;
+            eprintln!(
+                "→ {} ({} o)",
+                v["path"].as_str().unwrap_or(""),
+                v["size"].as_u64().unwrap_or(0),
+            );
         }
         "pr" => {
             // acctl pr [ls] [--all] | add <N> | note <N> <txt…> | rm <N> | sync

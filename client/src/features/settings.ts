@@ -7,6 +7,7 @@
 import { getVersion } from "@tauri-apps/api/app";
 import { $ } from "../core/dom";
 import { applyTheme, isAndroid } from "../core/chrome";
+import { defaultEncoding } from "../core/encoding";
 import { inlineImages } from "../core/format";
 import { cmpVer } from "../core/conn";
 import { setLang, getLang, t, type Lang } from "../i18n";
@@ -48,6 +49,7 @@ export class SettingsPanel {
       localStorage.getItem("ac-autoconnect") !== "0";
     ($("s-images") as HTMLInputElement).checked = inlineImages();
     ($("s-rcchan") as HTMLInputElement).checked = rcChannel();
+    ($("s-encoding") as HTMLSelectElement).value = defaultEncoding();
     $("s-update-status").textContent = "";
     ($("s-doupdate") as HTMLButtonElement).hidden = true;
     void getVersion()
@@ -146,6 +148,8 @@ export class SettingsPanel {
         "ac-rcchannel",
         (e.target as HTMLInputElement).checked ? "1" : "0",
       );
+    ($("s-encoding") as HTMLSelectElement).onchange = (e) =>
+      localStorage.setItem("ac-encoding", (e.target as HTMLSelectElement).value);
     ($("s-checkupdate") as HTMLButtonElement).onclick = () => this.runUpdateCheck();
   }
 }

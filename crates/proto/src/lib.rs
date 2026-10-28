@@ -520,8 +520,9 @@ pub enum ReqKind {
     /// `binary` → réponse {path, data(base64), size, truncated} au lieu de
     /// {path, content(utf8 lossy), truncated} — aperçu image du client.
     /// `limit` présent → lecture bornée [offset, offset+limit) : réponse
-    /// {path, offset, size, data(base64)} — streaming vidéo du client.
-    /// (`binary` est alors ignoré : la tranche est toujours brute.)
+    /// {path, offset, size, data(base64), mtime_ms} — streaming vidéo du
+    /// client + chargement progressif de l'éditeur. (`binary` est alors
+    /// ignoré : la tranche est toujours brute.)
     ReadFile {
         session: String,
         path: String,
@@ -531,6 +532,27 @@ pub enum ReqKind {
         offset: u64,
         #[serde(default)]
         limit: Option<u64>,
+    },
+    /// Écrit des octets dans un fichier du workspace — borné au cwd de la
+    /// session (parent existant requis ; la cible peut être absente →
+    /// création). `data` (base64) remplace la tranche [offset,
+    /// offset+delete_len) — `delete_len` est clampé à la fin du fichier
+    /// (u64::MAX = « remplacer tout »). `if_mtime_ms` : garde
+    /// anti-écrasement — la mtime disque doit égaler celle lue par le
+    /// client, sinon erreur préfixée "conflit: <mtime_ms>" (fichier
+    /// supprimé entre-temps → conflit aussi). Écriture atomique
+    /// (.part + rename, mode unix préservé). Réponse
+    /// {path, size, mtime_ms} — la nouvelle mtime réarme la garde.
+    WriteFile {
+        session: String,
+        path: String,
+        #[serde(default)]
+        offset: u64,
+        #[serde(default)]
+        delete_len: u64,
+        data: String,
+        #[serde(default)]
+        if_mtime_ms: Option<u64>,
     },
     /// Liste un dossier du workspace (arborescence côté client). `path`
     /// relatif au cwd de la session ("" = racine) — borné au workspace.
@@ -739,6 +761,7 @@ impl ReqKind {
             Self::PeerSend { .. } => "peer_send",
             Self::PeerSpawn { .. } => "peer_spawn",
             Self::ReadFile { .. } => "read_file",
+            Self::WriteFile { .. } => "write_file",
             Self::ListDir { .. } => "list_dir",
             Self::DeletePath { .. } => "delete_path",
             Self::FindFiles { .. } => "find_files",
