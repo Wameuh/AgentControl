@@ -290,7 +290,8 @@ export class Sidebar {
           this.newSess.setPendingGroup({ conn: apiConn, name: grp });
           void this.newSess.open(apiConn, sessions.find((x) => x.group === grp));
         });
-        bindCtx(g, () => this.groups.openDlg("rename", null, conn, grp));
+        bindCtx(g, (x, y) =>
+          this.openGroupCtx(x, y, conn, grp, sessions.find((m) => m.group === grp)));
         this.bindDropTarget(g, conn, grp);
         el.appendChild(g);
         for (const s of rows) {
@@ -384,6 +385,38 @@ export class Sidebar {
       void call("kill_session", { session: s.id, conn: s.conn })
         .then(() => this.refresh())
         .catch((e) => showErr(String(e)));
+    });
+    placeMenu(this.ctx, "sctx", x, y);
+  }
+
+  /** Menu contextuel d'un groupe nommé (clic droit / appui long) : nouvelle
+   *  session dans le groupe / renommer / dissoudre — même composant #sctx
+   *  que les menus session/fichier/connexion (action-sheet sur Android).
+   *  `ref` = 1er membre affiché, préremplit agent + workspace (comme "+"). */
+  private openGroupCtx(
+    x: number, y: number, conn: string, grp: string, ref?: SessionMeta,
+  ) {
+    this.ctx.innerHTML = `<div class="fctx-path">${esc(grp)}</div>`;
+    menuBtn(this.ctx, t("new_sess_grp"), "", () => {
+      hideSessCtx();
+      const apiConn = conn === "default" ? undefined : conn;
+      this.newSess.setPendingGroup({ conn: apiConn, name: grp });
+      void this.newSess.open(apiConn, ref);
+    });
+    menuBtn(this.ctx, t("rename_group"), "", () => {
+      hideSessCtx();
+      this.groups.openDlg("rename", null, conn, grp);
+    });
+    // Dissoudre dégroupe toutes les sessions membres — destructif →
+    // double-clic armé comme ctx_exit / sess-del.
+    menuBtn(this.ctx, t("dissolve_group"), "danger", (b) => {
+      if (!b.dataset.armed) {
+        b.dataset.armed = "1";
+        b.textContent = t("ctx_confirm");
+        return;
+      }
+      hideSessCtx();
+      void this.groups.dissolve(conn, grp).then(() => this.refresh());
     });
     placeMenu(this.ctx, "sctx", x, y);
   }
