@@ -74,8 +74,10 @@ export class SettingsPanel {
     const was = this.isOpen();
     $("settings-view").hidden = true;
     this.setChatInert(false);
-    if (!was) return;
+    // nav.close est idempotent (entrée absente = no-op) : l'appeler même
+    // si le panneau avait été masqué ailleurs purge la pile nav résiduelle.
     nav.close("settings");
+    if (!was) return;
     // Focus rendu au champ (pas sous Android : ouvrirait le clavier virtuel).
     if (!isAndroid()) ($("input") as HTMLTextAreaElement).focus();
   }

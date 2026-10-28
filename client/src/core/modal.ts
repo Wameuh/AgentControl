@@ -52,11 +52,11 @@ export function initModalGuard() {
   const origShowModal = HTMLDialogElement.prototype.showModal;
   HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) {
     origShowModal.call(this);
-    openedAt.set(this.id, Date.now());
+    if (this.id) openedAt.set(this.id, Date.now()); // close skip les sans-id
     const under = document.querySelectorAll("dialog[open]").length - 1;
     logUi(
       "info",
-      `modal +#${this.id}${under > 0 ? ` (${under} autre(s) dessous)` : ""}`,
+      `modal +#${this.id || "(anonyme)"}${under > 0 ? ` (${under} autre(s) dessous)` : ""}`,
     );
   };
   // `close` est un event capture : natif (Échap, method="dialog") comme

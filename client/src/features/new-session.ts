@@ -93,6 +93,7 @@ export class NewSessionDialog {
     cs.disabled = conn !== undefined;
     ($("f-conn-wrap") as HTMLElement).hidden = conns.length < 2;
     dlgErr("f-err", null); // chaque ouverture repart d'une zone propre
+    $("f-status").hidden = true; // bandeau d'attente d'un appel encore en vol
     const effConn = cs.disabled ? (conn ?? "") : cs.value;
     await this.fillAgents(effConn, ref?.agent);
     if (ref) ($("f-cwd") as HTMLInputElement).value = ref.cwd;
