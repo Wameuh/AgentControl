@@ -507,6 +507,11 @@ export class FileExplorer {
     hd.addEventListener("mousedown", (e) => {
       e.preventDefault();
       const move = (ev: MouseEvent) => {
+        // Bouton relâché hors fenêtre → mouseup perdu : auto-relâcher.
+        if (ev.buttons === 0) {
+          up();
+          return;
+        }
         const w = Math.min(
           Math.max(window.innerWidth - ev.clientX, 240),
           window.innerWidth - 120,

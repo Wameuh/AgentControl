@@ -48,7 +48,6 @@ export function applyAndroidChrome() {
   $("tb-menu").hidden = false;
   $("tb-more").hidden = false;
   $("chat-more").hidden = false;
-  $("titlebar").removeAttribute("data-tauri-drag-region");
   ($("input") as HTMLTextAreaElement).enterKeyHint = "send";
   ($("input") as HTMLTextAreaElement).placeholder = t("input_ph_mobile");
   // Page fichiers → flèche retour. dataset.icon + innerHTML : déclaratif et
@@ -73,7 +72,10 @@ export function shellOpen(url: string) {
   invoke("plugin:opener|open_url", { url }).catch(() => {});
 }
 
-// Fenêtre custom (decorations: false) : drag natif via data-tauri-drag-region
+// Fenêtre custom (decorations: false) : drag natif via startDragging()
+// explicite — pas de data-tauri-drag-region : son handler WRY n'est pas
+// gardé par e.detail et relancerait un move-drag au double-clic (grab
+// tué par toggleMaximize → curseur "main fermée" résiduel sous Wayland).
 const appWin = getCurrentWindow();
 
 // dragDropEnabled:false → WebView2 garde AllowExternalDrop=true : un
@@ -94,9 +96,14 @@ export function initWindowChrome() {
   $("titlebar").addEventListener("dblclick", (e) => {
     if (!android && !(e.target as HTMLElement).closest("button")) appWin.toggleMaximize();
   });
-  // Drag fenêtre explicite (plus fiable que data-tauri-drag-region seul)
+  // Drag fenêtre explicite (garantit le garde-fou e.detail, absent de
+  // l'attribut WRY). e.detail === 1 : au double-clic, le 2e mousedown
+  // relancerait un move-drag pendant que toggleMaximize() change la
+  // géométrie — le grab WM tué en plein vol laisse le curseur "main
+  // fermée" collé sous Wayland/GTK (famille des drags interrompus).
   $("titlebar").addEventListener("mousedown", (e) => {
-    if (!android && e.button === 0 && !(e.target as HTMLElement).closest("button"))
+    if (!android && e.button === 0 && e.detail === 1 &&
+        !(e.target as HTMLElement).closest("button"))
       void appWin.startDragging();
   });
   document.querySelectorAll<HTMLElement>(".resize-edge").forEach((el) => {

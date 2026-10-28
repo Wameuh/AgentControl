@@ -48,6 +48,14 @@ export class Sidebar {
   private editCount = 0;
   private rebuildPending = false;
 
+  /** Drag HTML5 en vol (toute source : ligne de session, sélection de
+   *  texte…). Tant qu'il est >0, renderList() diffère son rebuild —
+   *  détacher l'élément source du drag le tue anormalement et, sous
+   *  WebKitGTK/Wayland, laisse le curseur "grabbing" collé sans recours
+   *  côté web (bug toolkit connu). dragend — ou le watchdog mouseup —
+   *  solde le compteur et rejoue le rendu différé. */
+  private dragging = 0;
+
   /** Suppression initiée ici — l'event session_deleted qui suit ne doit
    *  pas re-notifier (la ligne a déjà disparu, l'utilisateur sait). */
   wasPendingDel(id: string) {
@@ -189,7 +197,9 @@ export class Sidebar {
     // dernier done() rejoue renderList(). Couvre les deux appelants :
     // refresh() (status_changed d'une session qui travaille) et les
     // frappes du filtre. Le flag se consomme au prochain rendu réel.
-    if (this.editCount > 0) {
+    // Même garde pendant un drag : détacher l'élément source tuerait le
+    // drag anormalement (curseur "grabbing" résiduel — voir init()).
+    if (this.editCount > 0 || this.dragging > 0) {
       this.rebuildPending = true;
       return;
     }
@@ -549,6 +559,41 @@ export class Sidebar {
     });
     $("session-list").addEventListener("scroll", hideSessCtx);
 
+    // ── Cycle de vie du drag & drop ──────────────────────────────
+    // Un rebuild de la liste pendant un drag détache l'élément source
+    // → le drag meurt de façon anormale et, sous WebKitGTK/Wayland,
+    // le curseur "grabbing" (main fermée) reste collé sans recours
+    // possible côté web (bug toolkit connu). Trois gardes :
+    //  · compteur de drags en vol → renderList() diffère ses rebuilds ;
+    //  · drop d'une session hors cible avalé au niveau document =
+    //    annulation propre partout (le chemin "drop refusé" déclenche
+    //    le même curseur collé) ;
+    //  · dragend solde le compteur et purge les .drop-hint qu'un drag
+    //    annulé (Échap) laisserait allumés ; mouseup sert de watchdog
+    //    si le toolkit tue le drag sans émettre dragend.
+    const endDrag = () => {
+      this.dragging = 0;
+      document
+        .querySelectorAll(".drop-hint")
+        .forEach((el) => el.classList.remove("drop-hint"));
+      if (this.rebuildPending) this.renderList();
+    };
+    document.addEventListener("dragstart", () => {
+      this.dragging++;
+    });
+    document.addEventListener("dragend", endDrag);
+    document.addEventListener("dragover", (e) => {
+      if (e.dataTransfer?.types.includes(DTYPE)) e.preventDefault();
+    });
+    document.addEventListener("drop", (e) => {
+      if (e.dataTransfer?.types.includes(DTYPE)) e.preventDefault();
+    });
+    document.addEventListener("mouseup", () => {
+      // Aucun mouseup n'atteint le document pendant un drag vivant :
+      // en recevoir un alors que dragging>0 = drag mort sans dragend.
+      if (this.dragging) endDrag();
+    });
+
     // Redimensionnement de la sidebar : drag sur la poignée bord droit.
     // Largeur persistée dans localStorage.
     const bar = $("sidebar");
@@ -564,6 +609,12 @@ export class Sidebar {
       grip.classList.add("drag");
       document.body.style.userSelect = "none";
       const move = (ev: MouseEvent) => {
+        // Bouton relâché hors fenêtre → mouseup perdu : auto-relâcher
+        // (sinon userSelect reste "none" et le grip suit la souris).
+        if (ev.buttons === 0) {
+          up(ev);
+          return;
+        }
         const w = clamp(ev.clientX);
         bar.style.width = w + "px";
         bar.style.minWidth = w + "px";

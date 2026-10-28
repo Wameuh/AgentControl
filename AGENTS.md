@@ -311,3 +311,11 @@ Manuel hors-PR : `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]
   binaire + ~/.local/bin + nvm (`$NVM_BIN`, sinon dernier
   `~/.nvm/versions/node/*/bin`) — requis pour les agents npm-globaux
   (shebang `#!/usr/bin/env node`).
+- **Drag interrompu → curseur "grabbing" collé** (WebKitGTK/Wayland,
+  bug toolkit sans recours côté web) : ne JAMAIS détacher un élément
+  pouvant être source de drag (rebuild de liste, `.remove()`) tant
+  qu'un drag est en vol — cf. compteur `dragging` + diffère-rebuild
+  dans `sidebar.ts`. `startDragging()` uniquement sur `e.detail===1`
+  (un 2e mousedown pendant toggleMaximize tue le grab WM pareil).
+  `<a>`/`<img>` désarmés via `-webkit-user-drag:none` (base.css) ;
+  garder `draggable` uniquement sur les vraies sources de DnD.
