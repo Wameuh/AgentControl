@@ -166,6 +166,36 @@ impl Daemon {
                 }
                 Ok(json!({"deleted": p.display().to_string()}))
     }
+    /// Création exclusive d'un fichier vide ou d'un dossier (explorateur
+    /// « nouveau ») — même borne workspace que write_file. La cible ne
+    /// doit exister sous aucune forme : create_new/O_EXCL garantit
+    /// l'exclusivité même en cas de course (write_file, lui, écrirait
+    /// sans broncher dans un fichier apparu entre-temps).
+    pub(super) async fn h_create_path(self: &Arc<Self>, session: String, path: String, dir: bool) -> Result<Value> {
+                let s = self.get_session(&session).await?;
+                let p = resolve_in_cwd_create(&s, &path)?;
+                if p == resolve_in_cwd(&s, "")? {
+                    anyhow::bail!("racine du workspace");
+                }
+                // resolve_in_cwd_create renvoie la cible canonique quand la
+                // feuille existe (symlink suivi) → déjà là sous une forme ou
+                // une autre = collision explicite plutôt qu'erreur système
+                // (lien pendant : canonicalize échoue plus tôt — refus pareil).
+                if std::fs::symlink_metadata(&p).is_ok() {
+                    anyhow::bail!("existe déjà: {path}");
+                }
+                if dir {
+                    std::fs::create_dir(&p)
+                        .with_context(|| format!("{}", p.display()))?;
+                } else {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&p)
+                        .with_context(|| format!("{}", p.display()))?;
+                }
+                Ok(json!({"path": p.display().to_string(), "dir": dir}))
+    }
     pub(super) async fn h_download_path(self: &Arc<Self>, session: String, path: String, offset: u64, limit: u64, archive: Option<String>) -> Result<Value> {
                 let s = self.get_session(&session).await?;
                 download_path(&s, &path, offset, limit, archive.as_deref()).await

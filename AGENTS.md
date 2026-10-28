@@ -299,6 +299,12 @@ Manuel hors-PR : `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]
   `conflit:` (le client propose Recharger/Écraser) ; écriture atomique
   `.part`+`rename` en `spawn_blocking`, mode unix préservé ; cap
   `data` 16 Mio encodé. Réponse `{path, size, mtime_ms}`.
+- `create_path{path, dir}` : création EXCLUSIVE d'un fichier vide ou
+  d'un dossier (clic droit « nouveau » de l'explorateur) — même borne
+  `resolve_in_cwd_create`, racine refusée, cible déjà présente
+  (toute forme, symlink suivi) → « existe déjà » ; O_EXCL = pas
+  d'écrasement même en course. Réponse `{path, dir}`. CLI :
+  `acctl create <session> <path> [--dir]`.
 - Le client envoie `offset:0, delete_len:loaded` (buffer = préfixe du
   disque → sauver sans avoir tout chargé) ; CRLF et BOM ré-écrits ;
   encodages : utf-8, windows-1252, utf-16 le/be — décodage
