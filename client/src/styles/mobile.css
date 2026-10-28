@@ -255,6 +255,46 @@ body.android #btn-bottom {
 body.android #events { padding: 8px 10px; }
 body.android .msg { font-size: 15px; }
 
+/* ── Landscape bas (téléphone couché) ─────────────────────────────────
+   Sous ~500px de hauteur utile, la chrome fixe (titlebar + header +
+   composer) mangeait ~60% du fil : le header passait sur 2 lignes
+   (#chat-opts dédiée) et le composer gardait son gabarit portrait.
+   Ici : header sur une seule ligne (les selects restent dans la rangée,
+   scroll-x interne si ça manque de place), paddings resserrés, champ
+   borné à ~2 lignes. Les cibles tactiles gardent ~44px — le gain vient
+   des lignes et des paddings, pas du shrink des cibles. */
+@media (orientation: landscape) and (max-height: 500px) {
+  body.android #titlebar { height: 48px; }
+  body.android .tb-btns button { padding: 8px 11px; }
+  body.android #chat-header { padding: 4px 8px; row-gap: 3px; }
+  /* #chat-opts redevient un item de la rangée (fin de ligne, scrollable)
+     au lieu d'imposer sa propre ligne pleine largeur. */
+  body.android #chat-opts { width: auto; flex: 0 1 auto; padding-bottom: 0; gap: 6px; }
+  body.android #chat-header button, body.android #chat-header select {
+    min-height: 44px; padding: 5px 10px;
+  }
+  /* Selects resserrés pour que la rangée tienne même sous ~700px de
+     large — au-delà #chat-opts scrolle horizontalement, sans wrap. */
+  body.android #chat-header select, body.android #model-free {
+    max-width: 110px; font-size: 13px;
+  }
+  body.android #composer {
+    padding: 5px 8px max(6px, env(safe-area-inset-bottom));
+  }
+  body.android #composer button { min-height: 44px; padding: 6px 14px; }
+  /* Champ borné à ~2 lignes : au-delà il scrolle. fitInput pose height
+     inline — max-height le clamp ; overflow-y:auto permanent car le cap
+     est sous le seuil .over du JS (sinon le surplus serait inatteignable).
+     La pill « N ⌃ » est cachée : l'expansion serait clampée au même cap. */
+  body.android #input {
+    min-height: 44px; max-height: 54px; padding: 5px 11px; overflow-y: auto;
+  }
+  body.android #input-wrap.over #input { padding-right: 11px; }
+  body.android #composer button#btn-expand { display: none !important; }
+  /* La dropdown des slash-commandes ne doit pas couvrir tout le fil. */
+  body.android #cmd-ac { max-height: 180px; }
+}
+
 /* Champs SSH natifs dans le dialogue de connexion */
 #c-pubkey {
   margin: 0; padding: 8px; font-size: 11px; white-space: pre-wrap;
