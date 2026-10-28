@@ -12,4 +12,9 @@ export const app = {
   alive: false,
   /** Dernière liste de sessions fusionnée (refresh de la sidebar). */
   lastSessions: [] as SessionMeta[],
+  /** Sessions créées par ce client dont le spawn tourne en tâche de fond
+   *  (id → timestamp de création) — suivies par la sidebar jusqu'au
+   *  premier état résolu pour notifier un échec même si l'utilisateur a
+   *  navigué ailleurs (aucun canal event hors session ouverte). */
+  spawnWatch: new Map<string, number>(),
 };

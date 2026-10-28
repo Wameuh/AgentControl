@@ -77,6 +77,11 @@ pub struct Session {
     /// sa génération à la courante : périmée → son on_agent_exit se tait
     /// (pas de "agent exited"/dead ni de take() sur le child du successeur).
     spawn_gen: AtomicU64,
+    /// Génération qu'un kill_for_respawn vient d'invalider (dernier en
+    /// date) — un spawn concurrent la compare à sa génération de départ
+    /// : > départ = kill/rebind intervenu pendant SON spawn → la session
+    /// appartient au nouveau cycle, l'erreur du spawn doit se taire.
+    supplant_mark: AtomicU64,
     /// Réveil (respawn auto sur envoi vers une session "asleep") en cours —
     /// déduplique les envois concurrents : les suivants s'enfilent sans
     /// relancer un second spawn.
@@ -145,6 +150,7 @@ impl Session {
             compacting: Mutex::new(None),
             me: me.clone(),
             spawn_gen: AtomicU64::new(0),
+            supplant_mark: AtomicU64::new(0),
             waking: std::sync::atomic::AtomicBool::new(false),
             spawning: std::sync::atomic::AtomicBool::new(false),
             runner_active: std::sync::atomic::AtomicBool::new(false),

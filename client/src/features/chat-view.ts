@@ -335,7 +335,7 @@ export class ChatView {
     }
   }
 
-  async open(id: string, force = false) {
+  async open(id: string, force = false, conn = "") {
     const seq = ++this.openSeq;
     const stale = () => seq !== this.openSeq; // un open plus récent a pris le relais
     const prevId = app.current?.id;
@@ -343,7 +343,7 @@ export class ChatView {
     // la liste (stampée par le merge) pour router session_info sur le bon
     // serveur ; "" → connexion par défaut.
     const listMeta = app.lastSessions.find((s) => s.id === id);
-    const connHint = listMeta?.conn ?? "";
+    const connHint = listMeta?.conn ?? conn;
 
     // Feedback immédiat : la ligne cliquée passe active tout de suite.
     this.deps.setActiveRow(id);
@@ -404,7 +404,11 @@ export class ChatView {
     // plutôt qu'un "interrupted" qui demande un clic. Sauf "asleep" :
     // consulter l'historique d'une session endormie ne doit pas réveiller
     // l'agent — le prochain envoi le fera (h_send → respawn côté démon).
-    if (!app.alive && app.current.native_session_id && app.current.state !== "asleep") {
+    // Ni "starting" : le spawn est déjà en vol — un resume ici ne ferait
+    // qu'attendre le spawn_lock derrière lui (sysline « reprise »
+    // trompeuse pendant le boot normal).
+    if (!app.alive && app.current.native_session_id &&
+        app.current.state !== "asleep" && app.current.state !== "starting") {
       const sys = document.createElement("div");
       sys.className = "sysline";
       sys.innerHTML = `${icon("loader")} ${esc(t("resume_wait"))}`;
@@ -615,8 +619,10 @@ export class ChatView {
       gem.dataset.role = gemRole;
       gem.innerHTML = gemSVG(gemRole);
     }
-    // Reprendre = process mort, quel que soit l'état persisté dans meta.json
-    $("btn-resume").hidden = app.alive;
+    // Reprendre = process mort, quel que soit l'état persisté dans
+    // meta.json — sauf "starting" : le spawn tourne déjà (afficher
+    // Reprendre suggérerait un échec alors que le boot est en cours).
+    $("btn-resume").hidden = app.alive || app.current.state === "starting";
     const busySt =
       app.current.state === "working" ||
       app.current.state === "waiting_input" ||

@@ -4,7 +4,7 @@
 // drag & drop inter-groupes, poignée de redimensionnement.
 // ---------------------------------------------------------------------------
 
-import { $, esc, q, showErr } from "../core/dom";
+import { $, esc, notify, q, showErr } from "../core/dom";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
 import { isAndroid, meshSetMood } from "../core/chrome";
@@ -207,6 +207,31 @@ export class Sidebar {
       }
     }
     app.lastSessions = list;
+    this.checkSpawns(list);
+    // Un spawn tourne sans canal event (session non ouverte → pas de
+    // status_changed) → repoller tant qu'un "starting" reste dans son
+    // budget (3 min chacune — un spawn bloqué ne poll pas indéfiniment,
+    // mais un second spawn du même épisode ré-arme sa propre deadline).
+    const now = Date.now();
+    const seen = new Set<string>();
+    let spawning = false;
+    for (const s of list) {
+      if (s.offline || s.state !== "starting") continue;
+      const key = `${s.conn ?? "default"}:${s.id}`;
+      seen.add(key);
+      const t0 = this.startingSeen.get(key) ?? now;
+      this.startingSeen.set(key, t0);
+      if (now - t0 < 180_000) spawning = true;
+    }
+    for (const k of [...this.startingSeen.keys()]) {
+      if (!seen.has(k)) this.startingSeen.delete(k);
+    }
+    if (spawning && this.spawnPoll === undefined) {
+      this.spawnPoll = window.setTimeout(() => {
+        this.spawnPoll = undefined;
+        void this.refresh();
+      }, 2500);
+    }
     // Vue « Repos » : croise les entrées du registre avec les sessions
     // fusionnées (cache offline inclus) + compteur sur l'onglet.
     this.prsView.setData(this.prRows, list, this.prFailed);
@@ -244,6 +269,35 @@ export class Sidebar {
     this.renderView();
     // La liste arrive → l'accueil recalcule son état (0 session → CTA).
     this.chat.updateEmptyState();
+  }
+
+  /** Repoll interne tant qu'une session est "starting" (budget par
+   *  session) — spawn sans canal event : la session n'est pas forcément
+   *  ouverte. startingSeen = première apparition par conn:id. */
+  private spawnPoll: number | undefined;
+  private startingSeen = new Map<string, number>();
+
+  /** Issue des spawns lancés par ce client (app.spawnWatch) : échec
+   *  (dead/interrupted) → toast ; état résolu ou TTL dépassé → fin de
+   *  suivi. Couvre le cas où l'utilisateur navigue ailleurs pendant le
+   *  boot : hors session ouverte aucun event ne signale l'échec. */
+  private checkSpawns(list: SessionMeta[]) {
+    const now = Date.now();
+    for (const [id, ts] of app.spawnWatch) {
+      const s = list.find((x) => x.id === id);
+      if (!s || now - ts > 10 * 60 * 1000) {
+        // Sortie de la liste (supprimée) ou jamais résolue — oubli.
+        app.spawnWatch.delete(id);
+        continue;
+      }
+      if (s.offline || s.state === "starting") continue;
+      // Session ouverte : l'event Error est déjà visible dans le chat —
+      // le toast ne sert que quand l'échec arrive hors de la vue.
+      if ((s.state === "dead" || s.state === "interrupted") && app.current?.id !== id) {
+        notify("warn", t("spawn_failed", { title: s.title }));
+      }
+      app.spawnWatch.delete(id);
+    }
   }
 
   /** Rend la liste de la vue active : arbre sessions ou PRs par dépôt.
@@ -612,6 +666,9 @@ export class Sidebar {
         return;
       }
       hideSessCtx();
+      // Kill volontaire d'une session en starting : pas un échec de
+      // spawn — retirer le watch pour ne pas toaster « n'a pas démarré ».
+      app.spawnWatch.delete(s.id);
       void call("kill_session", { session: s.id, conn: s.conn })
         .then(() => this.refresh())
         .catch((e) => showErr(String(e)));
@@ -768,6 +825,10 @@ export class Sidebar {
         this.chat.dropConv(s.id);
       }
       div.remove();
+      // Suppression volontaire : même garde que kill — pas un échec de
+      // spawn à notifier (checkSpawns l'oublierait de toute façon à la
+      // sortie de liste, mais autant ne pas toaster entre-temps).
+      app.spawnWatch.delete(s.id);
       void this.refresh();
       void call("delete_session", { session: s.id, conn: s.conn })
         .catch((er) => {

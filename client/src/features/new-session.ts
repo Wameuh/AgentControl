@@ -13,6 +13,9 @@ import type { GroupStore } from "./groups";
 export class NewSessionDialog {
   /** Rafraîchit la sidebar après création (injecté). */
   refresh: () => void = () => {};
+  /** Ouvre la session fraîchement créée (injecté) — l'utilisateur voit le
+   *  spawn se dérouler dans le chat (events « agent started », erreurs). */
+  openSession: (id: string, conn: string) => void = () => {};
   /** Connexions connues (clés) pour le select serveur (injecté). */
   knownConns: () => string[] = () => [];
   private groups!: GroupStore;
@@ -194,8 +197,14 @@ export class NewSessionDialog {
         this.groups.add(gconn || "default", grp.name);
         this.pendingGroup = null;
       }
+      // Le démon a répondu dès l'insert : le spawn tourne en tâche de fond.
+      // Suivi pour le toast d'échec + ouverture directe — le chat montre le
+      // boot en direct (« agent started », erreur éventuelle) et un envoi
+      // pendant le spawn s'enfile côté démon.
+      app.spawnWatch.set(res.session, Date.now());
       ($("dlg-new") as HTMLDialogElement).close();
       await this.refresh();
+      this.openSession(res.session, grp?.conn ?? selConn ?? "");
     });
   }
 }
