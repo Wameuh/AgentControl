@@ -1,7 +1,9 @@
 // ---------------------------------------------------------------------------
-// Explorateur de fichiers du workspace (list_dir/read_file/delete_path) :
-// panneau latéral, arborescence paresseuse, viewer texte/image, menu
-// contextuel et téléchargement par tranches.
+// Explorateur de fichiers du workspace (list_dir/read_file/write_file/
+// delete_path) : panneau latéral, arborescence paresseuse, viewer
+// texte/image/vidéo — texte chargé par tranches (fichiers de toute taille) —
+// éditeur intégré (coloration live, encodage, garde anti-écrasement mtime),
+// menu contextuel et téléchargement par tranches.
 // ---------------------------------------------------------------------------
 
 import { invoke } from "@tauri-apps/api/core";
@@ -9,6 +11,17 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { appDataDir, downloadDir } from "@tauri-apps/api/path";
 import { $, copyText, esc, showErr } from "../core/dom";
 import { fmtSize, highlight, IMG_MIME, VID_MIME } from "../core/format";
+import {
+  b64decode,
+  b64encode,
+  defaultEncoding,
+  encode,
+  ENCODINGS,
+  makeDecoder,
+  sniffBinary,
+  sniffBom,
+  type Encoding,
+} from "../core/encoding";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
 import { isAndroid, isWindows } from "../core/chrome";
@@ -34,12 +47,47 @@ function stopVideo() {
   if (v) { v.pause(); v.removeAttribute("src"); v.load(); }
 }
 
+/** Tranche réseau du pipeline progressif. */
+const PAGE = 256 * 1024;
+/** Au-delà, pas de re-coloration en édition (highlight() est O(n)). */
+const HL_MAX = 1500 * 1024;
+/** Gouttière de numéros : recomptée à la frappe — capée pour la perf. */
+const NUMS_MAX = 300_000;
+
+/** Fichier texte ouvert dans le viewer — chargé progressivement. */
+interface CurFile {
+  rel: string;
+  abs: string;              // chemin résolu renvoyé par le démon
+  ext: string;
+  sid: string;              // session/conn figées à l'ouverture (le write
+  conn?: string;            //   vise toujours le bon serveur)
+  enc: Encoding;
+  bom: boolean;             // BOM détectée sur la 1re tranche → ré-écrite
+  crlf: boolean;            // fins de ligne CRLF → ré-écrites à la sauvegarde
+  size: number;             // taille disque à la dernière tranche lue
+  mtimeMs: number;          // mtime disque à la dernière tranche lue (garde)
+  loaded: number;           // octets du fichier chargés (curseur read)
+  decoder: ((b: Uint8Array, last?: boolean) => string) | null;
+  chunks: string[];         // texte décodé par tranche (jamais re-joint)
+  binary: boolean;          // sniffé binaire → vue seule, pas d'édition
+  fetching: boolean;        // tranche réseau en vol
+  done: boolean;            // loaded >= size
+  gen: number;              // ++ à chaque save → tranches en vol invalidées
+}
+
 export class FileExplorer {
   private ctx = $("fctx");
   private treeOpen = false;
   /** cwd absolu de la session (rempli par loadTreeRoot) — sert à
    *  reconstruire le chemin absolu des résultats de recherche. */
   private treeRootDir = "";
+  private cur: CurFile | null = null;
+  private editOn = false;
+  private dirty = false;
+  private cleanRes: ((ok: boolean) => void) | null = null;
+  private saving = false;
+  private hlTimer: ReturnType<typeof setTimeout> | undefined;
+  private numsTimer: ReturnType<typeof setTimeout> | undefined;
   private deps = {
     /** Ligne de progression de téléchargement dans le fil. */
     sysline: (_text: string, _ic?: IconName): HTMLElement => document.createElement("div"),
@@ -57,8 +105,10 @@ export class FileExplorer {
     }
   }
 
-  async openFilePanel(path: string) {
+  async openFilePanel(path: string, opts?: { edit?: boolean; enc?: Encoding }) {
     if (!app.current) return;
+    if (!(await this.ensureClean())) return;
+    this.resetView();
     if ($("file-panel").hidden) { $("file-panel").hidden = false; nav.push("files"); }
     // Android : le viewer glisse par-dessus la liste (navigation plein écran).
     if (isAndroid()) {
@@ -120,28 +170,399 @@ export class FileExplorer {
         }
         return;
       }
-      const r = await call<{ content: string; truncated: boolean; path: string }>("read_file", {
-        session: app.current.id,
-        path,
-      });
-      $("file-path").title = r.path;
-      $("file-view").innerHTML =
-        highlight(r.content, ext) + (r.truncated ? "\n… (tronqué)" : "");
+      // Texte : pipeline progressif — la 1re page s'affiche tout de suite,
+      // la suite arrive au fil du scroll (ou « tout charger »).
+      const cur: CurFile = {
+        rel: path, abs: "", ext,
+        sid: app.current.id, conn: app.current.conn,
+        enc: opts?.enc ?? defaultEncoding(),
+        bom: false, crlf: false, size: 0, mtimeMs: 0, loaded: 0,
+        decoder: null, chunks: [], binary: false,
+        fetching: false, done: false, gen: 0,
+      };
+      this.cur = cur;
+      this.syncEncSelect();
+      this.updateStatus();
+      await this.fetchChunk(cur);
+      if (opts?.edit && this.cur === cur && this.editable()) this.enterEdit();
     } catch (e) {
       $("file-view").textContent = String(e);
     }
   }
 
+  /** Ramène viewer + état d'édition à zéro (changement de fichier). */
+  private resetView() {
+    this.cur = null;
+    this.editOn = false;
+    this.dirty = false;
+    $("file-edwrap").hidden = true;
+    $("file-view").hidden = false;
+    $("file-view").innerHTML = "";
+    $("fv-edit").hidden = true;
+    $("fv-edit").classList.remove("on");
+    $("fv-save").hidden = true;
+    $("fv-conflict").hidden = true;
+    $("fv-loadall").hidden = true;
+    $("fv-status").textContent = "";
+  }
+
+  // ------------------------------------------------------------------
+  // Chargement progressif (read_file offset/limit → base64 → décodage)
+  // ------------------------------------------------------------------
+
+  /** Récupère la tranche suivante et l'ajoute au rendu courant. Sérialisé :
+   *  un fetch en vol fait attendre l'appelant (loadAll ne peut pas spinner) ;
+   *  un save en vol aussi — une tranche lue pendant write_file serait un
+   *  mélange ancien/nouveau (la taille inchangée passerait le garde gen). */
+  private async fetchChunk(cur: CurFile) {
+    while (cur.fetching || this.saving) await new Promise((r) => setTimeout(r, 30));
+    if (this.cur !== cur || cur.done || cur.binary) return;
+    cur.fetching = true;
+    const gen = cur.gen;
+    try {
+      const r = await call<{
+        path: string; offset: number; size: number; data: string;
+        mtime_ms?: number;
+      }>("read_file", {
+        session: cur.sid, conn: cur.conn, path: cur.rel,
+        offset: cur.loaded, limit: PAGE,
+      });
+      // Tranche de l'ANCIEN fichier : saveEdit a bumpé gen pendant le vol
+      // → on jette, le prochain fetch repart du nouveau curseur.
+      if (this.cur !== cur || cur.gen !== gen) return;
+      const bytes = b64decode(r.data ?? "");
+      // Course avec un autre changement de curseur : la tranche attendue
+      // n'est plus à cet offset → on la jette pareil.
+      if (r.offset !== cur.loaded) return;
+      cur.size = r.size;
+      if (r.mtime_ms != null) cur.mtimeMs = r.mtime_ms;
+      cur.loaded = r.offset + bytes.length;
+      if (cur.abs === "") {
+        // Première tranche : chemin résolu + BOM (vide → rien à sniffer).
+        cur.abs = r.path;
+        $("file-path").title = r.path;
+        const bomEnc = sniffBom(bytes);
+        cur.bom = bomEnc != null;
+        if (bomEnc) cur.enc = bomEnc;
+        this.syncEncSelect();
+      }
+      if (!bytes.length) {
+        cur.done = true;
+        this.updateStatus();
+        return;
+      }
+      cur.decoder ??= makeDecoder(cur.enc);
+      const text = cur.decoder(bytes, cur.loaded >= cur.size);
+      if (cur.chunks.length === 0) cur.crlf = text.includes("\r\n");
+      if (cur.loaded === bytes.length && sniffBinary(text)) {
+        cur.binary = true;
+        cur.done = true;
+        $("file-view").innerHTML =
+          `<div class="fv-msg">${esc(t("binary_file", { size: fmtSize(cur.size) }))}</div>`;
+        this.updateStatus();
+        return;
+      }
+      cur.chunks.push(text);
+      if (cur.loaded >= cur.size) cur.done = true;
+      this.appendChunk(cur, text);
+      this.updateStatus();
+    } catch (e) {
+      cur.done = true;
+      if (this.cur === cur) {
+        $("file-view").textContent = String(e);
+        this.updateStatus();
+      }
+    } finally {
+      cur.fetching = false;
+    }
+  }
+
+  /** Proche du bas de la zone chargée → tranche suivante. */
+  private maybeMore() {
+    const cur = this.cur;
+    if (!cur || cur.fetching || cur.done || cur.binary) return;
+    void this.fetchChunk(cur);
+  }
+
+  /** « Tout charger » : tranches séquentielles jusqu'au bout du fichier. */
+  private async loadAll() {
+    const cur = this.cur;
+    if (!cur) return;
+    while (this.cur === cur && !cur.done && !cur.binary) {
+      await this.fetchChunk(cur);
+    }
+  }
+
+  /** Ajoute le texte décodé à la représentation visible (viewer coloré
+   *  ou buffer d'édition + overlay). */
+  private appendChunk(cur: CurFile, text: string) {
+    if (this.editOn) {
+      const ta = $("file-edit") as HTMLTextAreaElement;
+      // setRangeText préserve le caret — append en fond pendant la frappe.
+      ta.setRangeText(text, ta.value.length, ta.value.length);
+      this.scheduleHl();
+      this.scheduleNums();
+    } else {
+      $("file-view").insertAdjacentHTML("beforeend", highlight(text, cur.ext));
+    }
+  }
+
+  /** Éditable : texte non-binaire dont le chemin résolu reste dans le cwd
+   *  de la session (write_file est borné au workspace côté démon). Le
+   *  `path` renvoyé par read_file n'est pas canonisé → segments `..`
+   *  normalisés ici avant le test de préfixe. */
+  private editable(): boolean {
+    const cur = this.cur;
+    if (!cur || cur.binary || !app.current) return false;
+    if (!cur.abs) return !cur.rel.startsWith("/"); // en attente du 1er octet
+    const norm = (p: string) =>
+      "/" + p.split("/").reduce<string[]>((acc, seg) => {
+        if (seg === "..") acc.pop();
+        else if (seg !== "." && seg !== "") acc.push(seg);
+        return acc;
+      }, []).join("/");
+    const cwd = norm(app.current.cwd).replace(/\/+$/, "");
+    const abs = norm(cur.abs);
+    return abs.startsWith(cwd + "/") || abs === cwd;
+  }
+
+  private updateStatus() {
+    const st = $("fv-status");
+    const cur = this.cur;
+    if (!cur) { st.textContent = ""; return; }
+    if (this.dirty) {
+      st.textContent = `● ${t("fv_dirty")}`;
+    } else if (!cur.done && !cur.binary) {
+      st.textContent = `${fmtSize(cur.loaded)} / ${fmtSize(cur.size)}`;
+    } else {
+      st.textContent = fmtSize(cur.size);
+    }
+    ($("fv-save") as HTMLButtonElement).disabled = !this.dirty;
+    $("fv-edit").hidden = !(this.editOn || this.editable());
+    $("fv-loadall").hidden = cur.done || cur.binary;
+  }
+
+  private syncEncSelect() {
+    const cur = this.cur;
+    if (cur) ($("fv-enc") as HTMLSelectElement).value = cur.enc;
+  }
+
+  // ------------------------------------------------------------------
+  // Éditeur : textarea transparente sur overlay coloré + gouttière
+  // ------------------------------------------------------------------
+
+  private enterEdit() {
+    const cur = this.cur;
+    // `abs` vide = première tranche pas encore arrivée → on attend
+    // (éditer un buffer vide sur un fichier existant = insertion en tête).
+    if (!cur || !this.editable() || !cur.abs) return;
+    this.editOn = true;
+    const ta = $("file-edit") as HTMLTextAreaElement;
+    ta.value = cur.chunks.join("");
+    $("file-view").hidden = true;
+    $("file-edwrap").hidden = false;
+    $("fv-edit").classList.add("on");
+    $("fv-save").hidden = false;
+    this.refreshHl();
+    this.refreshNums();
+    this.updateStatus();
+    ta.focus();
+  }
+
+  private exitEdit() {
+    if (!this.editOn) return;
+    void (async () => {
+      if (!(await this.ensureClean())) return;
+      this.exitEditNow();
+    })();
+  }
+
+  /** Sortie effective : le viewer re-rend le contenu courant (sauvegardé
+   *  = buffer édité, abandonné = chunks disque). */
+  private exitEditNow() {
+    const cur = this.cur;
+    this.editOn = false;
+    this.dirty = false;
+    $("file-edwrap").hidden = true;
+    $("file-view").hidden = false;
+    $("fv-edit").classList.remove("on");
+    $("fv-save").hidden = true;
+    $("fv-conflict").hidden = true;
+    if (cur) {
+      const view = $("file-view");
+      view.innerHTML = "";
+      for (const c of cur.chunks) {
+        view.insertAdjacentHTML("beforeend", highlight(c, cur.ext));
+      }
+    }
+    this.updateStatus();
+  }
+
+  private onEditInput() {
+    if (!this.editOn) return;
+    this.dirty = true;
+    this.updateStatus();
+    this.scheduleHl();
+    this.scheduleNums();
+  }
+
+  /** Re-coloration debouncée : highlight() est un regex global O(n) —
+   *  au-delà de HL_MAX on bascule en miroir plain (le texte reste éditable). */
+  private scheduleHl() {
+    clearTimeout(this.hlTimer);
+    this.hlTimer = setTimeout(() => this.refreshHl(), 140);
+  }
+
+  private refreshHl() {
+    const cur = this.cur;
+    if (!cur) return;
+    const ta = $("file-edit") as HTMLTextAreaElement;
+    const hl = $("file-hl");
+    // \n final : le textarea « voit » une ligne de plus quand le texte
+    // finit par \n — le pre doit avoir la même hauteur de scroll.
+    if (ta.value.length > HL_MAX) {
+      hl.textContent = ta.value + "\n";
+    } else {
+      hl.innerHTML = highlight(ta.value, cur.ext) + "\n";
+    }
+  }
+
+  private scheduleNums() {
+    clearTimeout(this.numsTimer);
+    this.numsTimer = setTimeout(() => this.refreshNums(), 150);
+  }
+
+  private refreshNums() {
+    const ta = $("file-edit") as HTMLTextAreaElement;
+    const nums = $("file-nums");
+    // Comptage sans split : au-delà du cap on sort tôt (pas d'allocation
+    // de tableau de lignes sur un fichier énorme).
+    const v = ta.value;
+    let lines = v === "" ? 0 : 1;
+    for (let i = 0; i < v.length && lines <= NUMS_MAX; i++) {
+      if (v.charCodeAt(i) === 10) lines++;
+    }
+    if (lines > NUMS_MAX) {
+      nums.hidden = true;
+      return;
+    }
+    nums.hidden = false;
+    nums.textContent = Array.from({ length: Math.max(lines, 1) }, (_, i) => i + 1).join("\n");
+  }
+
+  /** Scroll du textarea → overlay + gouttière suivent ; proche du bas →
+   *  tranche suivante du fichier. */
+  private syncEditScroll() {
+    const ta = $("file-edit") as HTMLTextAreaElement;
+    $("file-hl").scrollTop = ta.scrollTop;
+    $("file-hl").scrollLeft = ta.scrollLeft;
+    $("file-nums").scrollTop = ta.scrollTop;
+    if (ta.scrollTop + ta.clientHeight >= ta.scrollHeight * 0.85) this.maybeMore();
+  }
+
+  /** Le buffer = préfixe du fichier disque : sauvegarder remplace les
+   *  `cur.loaded` premiers octets par le buffer encodé — inutile d'avoir
+   *  tout chargé pour sauver (le reliquat disque est conservé). */
+  private async saveEdit(force = false) {
+    const cur = this.cur;
+    if (!cur || !this.editOn || this.saving) return;
+    this.saving = true;
+    // Invalide les tranches réseau en vol : elles portent du contenu de
+    // l'ancien fichier et souilleraient le buffer édité.
+    cur.gen++;
+    const ta = $("file-edit") as HTMLTextAreaElement;
+    // Le textarea normalise les fins de ligne en \n — on ré-écrit \r\n
+    // si le fichier était CRLF (sinon diffs parasites sur tout le fichier).
+    const text = cur.crlf ? ta.value.replace(/\r?\n/g, "\r\n") : ta.value;
+    const bytes = encode(cur.enc, text, cur.bom);
+    const b = $("fv-save") as HTMLButtonElement;
+    b.disabled = true;
+    let saved = false;
+    try {
+      const r = await call<{ path: string; size: number; mtime_ms?: number }>(
+        "write_file",
+        {
+          session: cur.sid, conn: cur.conn, path: cur.rel,
+          offset: 0, delete_len: cur.loaded, data: b64encode(bytes),
+          ...(force || !cur.mtimeMs ? {} : { if_mtime_ms: cur.mtimeMs }),
+        },
+      );
+      if (r.mtime_ms != null) cur.mtimeMs = r.mtime_ms;
+      cur.size = r.size;
+      cur.loaded = bytes.length;
+      cur.chunks = [ta.value];
+      // Frontière octets neuve : une éventuelle séquence multi-octets à
+      // cheval sur l'ancienne frontière ne doit pas se rejouer.
+      cur.decoder = null;
+      this.dirty = false;
+      $("fv-conflict").hidden = true;
+      saved = true;
+    } catch (e) {
+      if (String(e).includes("conflit:")) {
+        $("fv-conflict").hidden = false;
+      } else {
+        showErr(String(e));
+      }
+    } finally {
+      this.saving = false;
+      this.updateStatus();
+      // « ✓ enregistré » posé après updateStatus (il réécrit le statut).
+      if (saved) $("fv-status").textContent = `✓ ${t("fv_saved")}`;
+    }
+  }
+
+  /** Bandeau conflit : disque changé depuis la lecture — Recharger
+   *  (ré-ouvre, jette le buffer) ou Écraser (renvoi sans garde). */
+  private async reloadFile() {
+    const cur = this.cur;
+    this.dirty = false;
+    const edit = this.editOn;
+    if (cur) await this.openFilePanel(cur.rel, { edit, enc: cur.enc });
+  }
+
+  // ------------------------------------------------------------------
+  // Garde « modifications non enregistrées »
+  // ------------------------------------------------------------------
+
+  /** false → l'action appelante doit s'arrêter (dialog affiché). */
+  private ensureClean(): Promise<boolean> {
+    if (!this.dirty) return Promise.resolve(true);
+    const dlg = $("dlg-filedirty") as HTMLDialogElement;
+    if (dlg.open) {
+      // Un ensureClean est déjà en cours — la même résolution s'applique.
+      return new Promise((res) => {
+        const prev = this.cleanRes;
+        this.cleanRes = (ok) => { prev?.(ok); res(ok); };
+      });
+    }
+    return new Promise((res) => {
+      this.cleanRes = res;
+      dlg.showModal();
+    });
+  }
+
+  private resolveClean(ok: boolean) {
+    const r = this.cleanRes;
+    this.cleanRes = null;
+    const dlg = $("dlg-filedirty") as HTMLDialogElement;
+    if (dlg.open) dlg.close();
+    r?.(ok);
+  }
+
   private closeFilePanel() {
-    // Coupe la lecture en cours — sinon le stream acvideo continue en
-    // tâche de fond après fermeture du panneau.
-    stopVideo();
-    // Le viewer glissé par-dessus doit être dépilé aussi (pile back propre).
-    nav.close("fileview");
-    $("file-viewer").classList.remove("open");
-    nav.close("files");
-    $("file-panel").hidden = true;
-    this.clearSearch();
+    void (async () => {
+      if (!(await this.ensureClean())) return;
+      // Coupe la lecture en cours — sinon le stream acvideo continue en
+      // tâche de fond après fermeture du panneau.
+      stopVideo();
+      this.resetView();
+      // Le viewer glissé par-dessus doit être dépilé aussi (pile back propre).
+      nav.close("fileview");
+      $("file-viewer").classList.remove("open");
+      nav.close("files");
+      $("file-panel").hidden = true;
+      this.clearSearch();
+    })();
   }
 
   /** Nœud de l'arbre : dossier (pliable) ou fichier (ouvre le viewer). */
@@ -388,14 +809,18 @@ export class FileExplorer {
     hideMenu(this.ctx, "fctx");
   }
 
-  /** Menu contextuel clic droit : copier contenu / chemin absolu / supprimer.
-   *  Android : rendu en action-sheet ancré en bas (pas de positionnement x/y). */
+  /** Menu contextuel clic droit : éditer / copier contenu / chemin absolu /
+   *  supprimer. Android : rendu en action-sheet ancré en bas. */
   private openFileCtx(x: number, y: number, el: HTMLElement) {
     const rel = el.dataset.rel ?? "";
     const abs = el.dataset.abs ?? rel;
     const isDir = el.classList.contains("is-dir");
     this.ctx.innerHTML = `<div class="fctx-path">${esc(abs)}</div>`;
     if (!isDir) {
+      menuBtn(this.ctx, t("ctx_edit"), "", () => {
+        this.hideFileCtx();
+        void this.openFilePanel(rel, { edit: true });
+      });
       menuBtn(this.ctx, t("ctx_copy"), "", () => {
         this.hideFileCtx();
         void call<{ content: string }>("read_file", { session: app.current!.id, path: rel })
@@ -494,9 +919,100 @@ export class FileExplorer {
   }
 
   init() {
+    // État initial du select d'encodage (options i18n-free, fixes).
+    const encSel = $("fv-enc") as HTMLSelectElement;
+    encSel.innerHTML = ENCODINGS.map(
+      (e) => `<option value="${e.id}">${e.label}</option>`,
+    ).join("");
+    encSel.value = defaultEncoding();
+    encSel.onchange = () => {
+      const cur = this.cur;
+      if (!cur) return;
+      const enc = encSel.value as Encoding;
+      // Encodage changé → re-télécharge et re-décode depuis le disque
+      // (dirty guardé : re-décoder écraserait les éditions en cours).
+      void (async () => {
+        if (!(await this.ensureClean())) {
+          this.syncEncSelect();
+          return;
+        }
+        await this.openFilePanel(cur.rel, { enc, edit: this.editOn });
+      })();
+    };
+
+    $("fv-edit").onclick = () => {
+      if (this.editOn) this.exitEdit();
+      else this.enterEdit();
+    };
+    ($("fv-save") as HTMLButtonElement).onclick = () => void this.saveEdit();
+    $("fv-loadall").onclick = () => void this.loadAll();
+    $("fv-reload").onclick = () => void this.reloadFile();
+    $("fv-overwrite").onclick = () => void this.saveEdit(true);
+
+    const ta = $("file-edit") as HTMLTextAreaElement;
+    ta.addEventListener("input", () => this.onEditInput());
+    ta.addEventListener("scroll", () => this.syncEditScroll());
+    ta.addEventListener("keydown", (e) => {
+      if (e.key === "Tab") {
+        e.preventDefault();
+        ta.setRangeText("\t", ta.selectionStart, ta.selectionEnd, "end");
+        this.onEditInput();
+      } else if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
+        e.preventDefault();
+        void this.saveEdit();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        this.exitEdit();
+      }
+    });
+    $("file-view").addEventListener("scroll", (e) => {
+      const el = e.target as HTMLElement;
+      if (el.scrollTop + el.clientHeight >= el.scrollHeight * 0.85) this.maybeMore();
+    });
+
+    // Dialogue dirty : rester / abandonner / enregistrer-puis-continuer.
+    // Fermé par Esc/back sans bouton → « rester » (la promesse ne pend pas).
+    ($("dlg-filedirty") as HTMLDialogElement).addEventListener("close", () => {
+      if (this.cleanRes) this.resolveClean(false);
+    });
+    $("fd-stay").onclick = () => this.resolveClean(false);
+    $("fd-discard").onclick = () => {
+      this.dirty = false;
+      this.resolveClean(true);
+    };
+    $("fd-save").onclick = () => {
+      void this.saveEdit().then(() => {
+        // Conflit → dirty toujours vrai : le bandeau prend le relais.
+        this.resolveClean(!this.dirty);
+      });
+    };
+
+    // Back Android : véto quand le buffer est sale — la fermeture ne doit
+    // pas perdre les éditions sans confirmation.
+    nav.backGuard = (id) => {
+      if ((id === "fileview" || id === "files") && this.dirty) {
+        void this.ensureClean().then((ok) => {
+          if (!ok) return;
+          this.exitEditNow();
+          if (id === "fileview") {
+            nav.close("fileview");
+            $("file-viewer").classList.remove("open");
+          } else {
+            this.closeFilePanel();
+          }
+        });
+        return false;
+      }
+      return true;
+    };
+
     $("file-close").onclick = () => this.closeFilePanel();
-    // Retour viewer → liste (Android)
+    // Retour viewer → liste (Android) : en édition, sort d'abord du mode.
     $("fv-back").onclick = () => {
+      if (this.editOn) {
+        this.exitEdit();
+        return;
+      }
       stopVideo();
       nav.close("fileview");
       $("file-viewer").classList.remove("open");

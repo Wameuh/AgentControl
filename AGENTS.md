@@ -285,6 +285,27 @@ Manuel hors-PR : `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]
   tests d'intégration qui valident les flux réels (daemon ↔ client,
   appels ACP, SSH, …).
 
+## Protocole fichiers (viewer/éditeur)
+
+- `read_file{path, offset, limit}` : avec `limit` → réponse paginée
+  `{path, offset, size, data(base64), mtime_ms}` (octets bruts — le
+  client décode, pas le démon ; supporte fichiers de toute taille et
+  le streaming vidéo acvideo). Sans `limit` → réponse legacy
+  `{content, truncated}` UTF-8 512 Kio.
+- `write_file{path, offset, delete_len, data(base64), if_mtime_ms?}` :
+  splice borné au workspace (`resolve_in_cwd_create` — parent
+  canonicalisé, feuille absente OK, `..`/symlink sortant refusé) ;
+  `delete_len` clampé ; `if_mtime_ms` ≠ mtime disque → erreur
+  `conflit:` (le client propose Recharger/Écraser) ; écriture atomique
+  `.part`+`rename` en `spawn_blocking`, mode unix préservé ; cap
+  `data` 16 Mio encodé. Réponse `{path, size, mtime_ms}`.
+- Le client envoie `offset:0, delete_len:loaded` (buffer = préfixe du
+  disque → sauver sans avoir tout chargé) ; CRLF et BOM ré-écrits ;
+  encodages : utf-8, windows-1252, utf-16 le/be — décodage
+  `TextDecoder` streamé, encodage maison (`core/encoding.ts`).
+- `acctl write <session> <path> [src|-]` = remplacement complet
+  (`delete_len: u64::MAX`, sans garde mtime).
+
 ## Pièges rencontrés
 
 - `anyhow::bail!` dans une fonction `Result<_, String>` → E0308.

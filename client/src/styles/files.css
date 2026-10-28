@@ -15,8 +15,67 @@
   color: var(--sand); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 #file-body { flex: 1; display: flex; min-height: 0; }
+/* Barre d'outils du viewer : visible sur desktop aussi (statut, encodage,
+   édition) — fv-back/fv-name restent réservés à l'overlay Android. */
+#file-viewer { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+#fv-bar {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  padding: 5px 12px; border-bottom: 1px solid var(--line); min-height: 30px;
+}
+#fv-back, #fv-name { display: none; }
+#fv-status { color: var(--dim); font-size: 11px; white-space: nowrap; }
+.fv-spacer { flex: 1; }
+#fv-enc {
+  background: transparent; color: var(--muted); border: 1px solid var(--line);
+  border-radius: 4px; font-size: 11px; padding: 1px 3px;
+}
+#fv-loadall {
+  background: none; border: 1px solid var(--line); border-radius: 4px;
+  color: var(--dim); font-size: 11px; padding: 1px 7px; cursor: pointer;
+}
+#fv-loadall:hover { color: var(--ink); border-color: var(--sand); }
+#fv-edit, #fv-save {
+  display: flex; align-items: center; background: none; border: 0;
+  color: var(--muted); cursor: pointer; padding: 3px;
+}
+#fv-edit:hover, #fv-save:hover:not(:disabled) { color: var(--ink); }
+#fv-edit.on { color: var(--sand); }
+#fv-save:disabled { opacity: .35; cursor: default; }
+/* Bandeau conflit : le fichier a changé sur disque pendant l'édition */
+#fv-conflict {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  padding: 6px 12px; font-size: 12px; color: var(--sand);
+  background: rgba(205, 182, 140, .09); border-bottom: 1px solid var(--line);
+}
+#fv-conflict-msg { flex: 1; }
+#fv-conflict button {
+  background: none; border: 1px solid var(--line); border-radius: 4px;
+  color: var(--ink); font-size: 11px; padding: 2px 8px; cursor: pointer;
+}
+#fv-conflict button:hover { border-color: var(--sand); }
+/* Éditeur : gouttière + overlay coloré sous la textarea transparente.
+   Le pre (#file-hl) et la textarea doivent rester pixel-identiques :
+   même font, line-height, padding, tab-size, white-space. */
+#file-edwrap { flex: 1; min-height: 0; display: flex; }
+#file-nums {
+  flex: none; overflow: hidden; margin: 0; padding: 12px 6px 12px 12px;
+  font: 12px/1.5 Mono, ui-monospace, monospace; text-align: right;
+  color: var(--dim); user-select: none; white-space: pre; min-width: 3ch;
+}
+#file-edscroll { position: relative; flex: 1; min-width: 0; overflow: hidden; }
+#file-hl, #file-edit {
+  position: absolute; inset: 0; margin: 0; padding: 12px;
+  font: 12px/1.5 Mono, ui-monospace, monospace;
+  white-space: pre; tab-size: 4;
+}
+#file-hl { overflow: hidden; pointer-events: none; color: var(--ink); }
+#file-edit {
+  resize: none; border: 0; outline: none; overflow: auto;
+  background: transparent; color: transparent; caret-color: var(--ink);
+}
+#file-edit::selection { background: rgba(205, 182, 140, .30); }
 #file-view {
-  flex: 1; min-width: 0; overflow: auto; margin: 0; padding: 12px;
+  flex: 1; min-width: 0; min-height: 0; overflow: auto; margin: 0; padding: 12px;
   font: 12px/1.5 Mono, ui-monospace, monospace; white-space: pre;
   color: var(--ink); user-select: text;
 }

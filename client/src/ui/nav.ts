@@ -23,6 +23,9 @@ export class OverlayNav {
   private scrimOwner: ScrimOwner | null = null;
   private scrim: HTMLElement;
   private omenu: HTMLElement;
+  /** Véto sur la fermeture par back système — `false` = l'overlay reste
+   *  (l'état history est re-poussé). Posé par FileExplorer (buffer sale). */
+  backGuard?: (id: string) => boolean;
 
   constructor() {
     // Drawer mobile : ☰ ouvre la sidebar, tap dehors/selection ferme.
@@ -52,8 +55,16 @@ export class OverlayNav {
     window.addEventListener("popstate", () => {
       if (!isAndroid()) return;
       if (this.suppressPops > 0) { this.suppressPops--; return; }
-      const top = this.stack.pop();
-      if (top) this.rawCloseOverlay(top);
+      const top = this.stack[this.stack.length - 1];
+      if (!top) return;
+      // Véto : l'overlay refuse la fermeture (ex. éditeur avec buffer sale)
+      // → on ré-empile l'état pour annuler le back sans toucher à la vue.
+      if (this.backGuard && !this.backGuard(top)) {
+        try { history.pushState({ ac: top }, ""); } catch { /* noop */ }
+        return;
+      }
+      this.stack.pop();
+      this.rawCloseOverlay(top);
     });
     // Dialogs trackés automatiquement dans la pile (Cancel = back propre).
     if (isAndroid()) {

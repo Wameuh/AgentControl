@@ -200,6 +200,14 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             offset: p.get("offset").and_then(Value::as_u64).unwrap_or(0),
             limit: p.get("limit").and_then(Value::as_u64),
         },
+        "write_file" => ReqKind::WriteFile {
+            session: s("session"),
+            path: s("path"),
+            offset: p.get("offset").and_then(Value::as_u64).unwrap_or(0),
+            delete_len: p.get("delete_len").and_then(Value::as_u64).unwrap_or(0),
+            data: s("data"),
+            if_mtime_ms: p.get("if_mtime_ms").and_then(Value::as_u64),
+        },
         "list_dir" => ReqKind::ListDir { session: s("session"), path: s("path") },
         "find_files" => ReqKind::FindFiles {
             session: s("session"),

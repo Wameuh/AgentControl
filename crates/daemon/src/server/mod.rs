@@ -428,6 +428,17 @@ impl Daemon {
                 offset,
                 limit,
             } => self.h_read_file(session, path, binary, offset, limit).await,
+            ReqKind::WriteFile {
+                session,
+                path,
+                offset,
+                delete_len,
+                data,
+                if_mtime_ms,
+            } => {
+                self.h_write_file(session, path, offset, delete_len, data, if_mtime_ms)
+                    .await
+            }
             ReqKind::ListDir { session, path } => self.h_list_dir(session, path).await,
             ReqKind::FindFiles {
                 session,
