@@ -32,7 +32,7 @@ function findChrome() {
   if (existsSync("/usr/bin/chromium")) return "/usr/bin/chromium";
   const base = `${process.env.HOME}/.cache/audit-chrome/chrome-headless-shell`;
   try {
-    for (const v of readdirSync(base)) {
+    for (const v of readdirSync(base).sort()) {
       const p = `${base}/${v}/chrome-headless-shell-linux64/chrome-headless-shell`;
       if (existsSync(p)) return p;
     }
@@ -46,6 +46,13 @@ console.log("Chrome:", CHROME);
 const server = spawn("npx", ["vite", "preview", "--port", String(PORT), "--strictPort"], {
   cwd: new URL("..", import.meta.url).pathname, stdio: "ignore",
 });
+let browser = null;
+// Filet de sécurité : un throw en amont ne doit pas laisser le preview
+// (port aléatoire) ni chrome orphelins.
+process.on("exit", () => {
+  try { server.kill(); } catch { /* déjà mort */ }
+  try { browser?.process()?.kill(); } catch { /* déjà mort */ }
+});
 // Attente active : le preview est prêt quand il répond HTTP (plus fiable
 // qu'un sleep fixe sur un cold start).
 for (let i = 0; i < 60; i++) {
@@ -57,7 +64,7 @@ for (let i = 0; i < 60; i++) {
   if (i === 59) throw new Error("vite preview injoignable après 24s");
 }
 
-const browser = await puppeteer.launch({
+browser = await puppeteer.launch({
   executablePath: CHROME,
   headless: "shell",
   args: ["--no-sandbox", "--disable-dev-shm-usage", "--font-render-hinting=none"],
@@ -131,6 +138,12 @@ await page.evaluateOnNewDocument(`
     "\`\`\`sh\\necho hello && ls -la\\n\`\`\`\\n\\n> Une citation pour la forme.\\n";
   const __PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
   window.__rpcOver.read_file = (p) => {
+    // Caveat : le démon réel renvoie la forme paginée seulement si limit est
+    // fourni ; sans limit il renvoie la forme legacy {content, truncated}
+    // (chemin « Copier le contenu » du fctx, inatteignable ici). Le mock
+    // sert toujours la forme paginée — suffisant pour les scénarios joués.
+    // daemon_status ignore params.conn : l'appel par-conn renverrait le
+    // statut à plat chez le vrai démon ; le mock ne sert que la map fusionnée.
     // path canonique sous le cwd mocké (/home/agent/api) — requis par
     // editable() (fv-edit caché sinon).
     const rel = (p.path || "").split("/").filter(Boolean).join("/");
@@ -157,16 +170,17 @@ await page.evaluateOnNewDocument(`
     next_before: 2, done: true, scanned: 500,
   });
 `);
-page.on("pageerror", (e) => console.log("[pageerror]", e.message));
-
 // ── Helpers ──────────────────────────────────────────────────────────────────
 const violations = [];
 const V = (screen, kind, detail) => {
   violations.push({ screen, kind, detail });
   console.log(`  ⚠ [${kind}] ${detail}`);
 };
+let curScreen = "init";
+page.on("pageerror", (e) => V(curScreen, "pageerror", e.message));
 
 const shot = async (name, ms = 380) => {
+  curScreen = name;
   await new Promise((r) => setTimeout(r, ms));
   await page.screenshot({ path: `${OUT}/${name}.png` });
   const dlgs = await ev(() => [...document.querySelectorAll("dialog[open]")].map((d) => d.id).join(","));
@@ -189,7 +203,8 @@ const tap = async (sel, ms = 320) => {
 };
 const longPress = async (sel, ms = 380) => {
   const el = await page.$(sel);
-  const box = await el.boundingBox();
+  const box = el && await el.boundingBox();
+  if (!box) throw new Error(`longPress: ${sel} absent ou sans box`);
   const x = box.x + box.width / 2, y = box.y + Math.min(box.height / 2, 30);
   const cdp = await page.createCDPSession();
   await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y, id: 1 }] });
@@ -293,7 +308,9 @@ async function collect(screen) {
       }
     }
     // 2. Cibles tactiles < 44px (hauteur OU largeur pour les éléments
-    // compacts ; hauteur seule pour les lignes quasi pleine largeur)
+    // compacts ; hauteur seule pour les lignes quasi pleine largeur).
+    // Seuil à 43 : tolérance sub-pixel — getBoundingClientRect rend des
+    // fractions, un élément théoriquement 44px peut mesurer 43.6px.
     const SEL = "button, select, input, textarea, a[href], [role=tab], .sess, .fnode, .fhit, .froot, .om-item, .ac-item, .pr, .pr-sess, .sv, .sr-row, .q-item button, .perm-opts button, label.s-row, .tool-head, .btn-more, .toast-x, .grp-add, .sess-del, .badge.st-dead, .badge.st-failed";
     const seen = new Set();
     for (const el of document.querySelectorAll(SEL)) {
@@ -521,7 +538,7 @@ await step("a18-fctx", async () => {
     window.__pushLog = [];
     return n;
   });
-  if (pushes2 > 1) V("a18-fctx", "ctx-double-push", `nav.push("fctx") ×${pushes2} pour un seul long-press`);
+  if (pushes2 !== 1) V("a18-fctx", "ctx-double-push", `nav.push("fctx") ×${pushes2} pour un seul long-press`);
   await dismissCtx();
   await sleep(200);
   await ev(() => { document.getElementById("fctx").hidden = true; });
@@ -665,6 +682,8 @@ await step("a27-term", async () => {
   await ev(() => [...document.querySelectorAll("#omenu .om-item")]
     .find((b) => /terminal/i.test(b.textContent))?.click());
   await sleep(700);
+  if (!(await visible("#term-panel")))
+    V("a27-term", "script-step", "item Terminal absent du ⋮ ou panneau non ouvert (caps watchdog ?)");
   await shot("a27-term");
   await collect("a27-term");
   await ev(() => document.getElementById("btn-term-hide")?.click());
@@ -688,18 +707,30 @@ await ev(async () => {
 await sleep(400);
 await collect("a28b-rafale");
 
-// ── Back-stack : drawer + sheet → back ×2 dépile un par un ──────────────────
+// ── Back-stack : drawer + ctx session → back ×2 dépile un par un ────────────
+// NB : la combinaison drawer + sheet ⋮ est INATTEIGNABLE au tactile — tout
+// tap hors du drawer tombe sur le scrim (qui ferme le drawer). Le combo
+// réellement empilable est drawer + #sctx (long-press sur une ligne session).
 await step("a29-backstack", async () => {
   await closeDialogs();
   await dismissToasts();
-  await tap("#tb-menu", 450);
-  await tap("#chat-more", 350);
+  await openDrawer();
+  await sleep(400);
+  for (let i = 0; i < 3 && !(await visible("#sctx")); i++) {
+    if (!(await drawerOpen())) await openDrawer();
+    await longPress(".sess");
+    await sleep(350);
+  }
+  if (!(await visible("#sctx"))) throw new Error("sctx non ouvert — setup impossible");
+  if (!(await drawerOpen())) throw new Error("drawer fermé avant le test");
   await shot("a29-stack");
   await appBack();
-  if (!(await ev(() => document.getElementById("omenu").hidden)))
-    V("a29-backstack", "back-stack", "back n'a pas fermé le sheet ⋮");
+  if (await visible("#sctx"))
+    V("a29-backstack", "back-stack", "back n'a pas fermé sctx");
+  if (!(await drawerOpen()))
+    V("a29-backstack", "back-stack", "le 1er back a aussi fermé le drawer");
   await appBack();
-  if (!(await ev(() => !document.getElementById("sidebar").classList.contains("open"))))
+  if (await drawerOpen())
     V("a29-backstack", "back-stack", "2e back n'a pas fermé le drawer");
   await shot("a29b-after-backs");
 });

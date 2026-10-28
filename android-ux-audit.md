@@ -149,8 +149,10 @@ layout de l'éditeur n'est pas contraint en largeur mobile).
 
 ## Ce qui fonctionne bien
 
-- Back-stack Android : retour ferme la sheet ⋮ puis le drawer, dans l'ordre —
-  pas de double-push ctx.
+- Back-stack Android : avec drawer + menu ctx session empilés (combo réel —
+  la sheet ⋮ est inatteignable au tactile quand le drawer est ouvert, le scrim
+  intercepte), le retour ferme le ctx puis le drawer, dans l'ordre — pas de
+  double-push ctx.
 - Garde de buffer sale : retour arrière en édition non sauvegardée ouvre bien
   `dlg-filedirty` (`a17`).
 - Tous les dialogues s'ouvrent et restent dans le viewport : connexion (+ volet
