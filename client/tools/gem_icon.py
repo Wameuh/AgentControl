@@ -7,11 +7,12 @@
   - src-tauri/icons/32x32.png
   - src-tauri/icons/128x128.png
   - src-tauri/icons/icon.ico  (16..256 multi-tailles)
+  - src-tauri/icons/nsis-*.bmp (habillage du wizard d'installation Windows)
 Usage : python3 client/tools/gem_icon.py
 """
 import math
 import os
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLIENT = os.path.dirname(HERE)
@@ -217,6 +218,76 @@ def write_squares(icons, big):
     tile.save(os.path.join(icons, "StoreLogo.png"))
 
 
+# ---- Wizard NSIS ----------------------------------------------------------
+# Le wizard NSIS classique ne permet pas un vrai thème sombre (fonds de
+# pages, textes et boutons restent ceux du système) — on habille les deux
+# zones bitmap aux couleurs de l'app : MUI_WELCOMEFINISHPAGE_BITMAP
+# (panneau latéral des pages Welcome/Finish) et MUI_HEADERIMAGE_BITMAP
+# (bandeau des pages internes). Palette :root de base.css (thème sombre) ;
+# wordmark dans la fonte de l'app. Le vrai thème dark exigerait nsis
+# moderne/extra — hors scope.
+NSIS_BG_TOP = (22, 28, 24)     # --panel-solid #161c18
+NSIS_BG_BOT = (13, 18, 14)     # --bg #121614 assombri vers le bas
+NSIS_INK = "#ece6d8"           # --ink
+NSIS_ACCENT = "#cdb68c"        # --sand / --accent
+NSIS_FONT = os.path.join(CLIENT, "public", "fonts",
+                        "InstrumentSans-Medium.ttf")
+
+
+def _nsis_gradient(w, h):
+    img = Image.new("RGB", (w, h))
+    d = ImageDraw.Draw(img)
+    for y in range(h):
+        k = y / (h - 1)
+        d.line([(0, y), (w, y)],
+               fill=tuple(round(a + (b - a) * k)
+                          for a, b in zip(NSIS_BG_TOP, NSIS_BG_BOT)))
+    return img
+
+
+def _rgb(hexs):
+    return tuple(int(hexs[i:i + 2], 16) for i in (1, 3, 5))
+
+
+def _nsis_glow(img, box):
+    """Halo --accent très léger derrière la gemme (radial, flou gaussien)."""
+    glow = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ImageDraw.Draw(glow).ellipse(box, fill=_rgb(NSIS_ACCENT) + (22,))
+    glow = glow.filter(ImageFilter.GaussianBlur(30))
+    return Image.alpha_composite(img.convert("RGBA"), glow).convert("RGB")
+
+
+def _nsis_paste_gem(img, gem, width, cx, cy):
+    k = width / max(gem.size)
+    g = gem.resize((round(gem.width * k), round(gem.height * k)),
+                   Image.LANCZOS)
+    img.paste(g, (round(cx - g.width / 2), round(cy - g.height / 2)), g)
+
+
+def write_nsis(icons, big):
+    gem = big.crop(big.getbbox())
+    font = lambda s: ImageFont.truetype(NSIS_FONT, s)
+
+    # Panneau latéral 164×314 des pages Welcome/Finish : gemme surmontée
+    # d'un halo doux, wordmark --ink, trait --accent.
+    img = _nsis_gradient(164, 314)
+    img = _nsis_glow(img, (24, 20, 140, 164))
+    _nsis_paste_gem(img, gem, 96, 82, 92)
+    d = ImageDraw.Draw(img)
+    d.text((82, 170), "AgentControl", font=font(17), fill=NSIS_INK,
+           anchor="mm")
+    d.line((62, 190, 102, 190), fill=NSIS_ACCENT, width=1)
+    img.save(os.path.join(icons, "nsis-sidebar.bmp"))
+
+    # Bandeau 150×57 des pages internes : gemme à gauche + wordmark.
+    hdr = _nsis_gradient(150, 57)
+    _nsis_paste_gem(hdr, gem, 36, 30, 29)
+    d = ImageDraw.Draw(hdr)
+    d.text((54, 29), "AgentControl", font=font(14), fill=NSIS_INK,
+           anchor="lm")
+    hdr.save(os.path.join(icons, "nsis-header.bmp"))
+
+
 def main():
     boundary, faces = geometry("bauxite")
     icons = os.path.join(CLIENT, "src-tauri", "icons")
@@ -248,6 +319,7 @@ def main():
     write_android(icons, big)
     write_ios(icons, big)
     write_squares(icons, big)
+    write_nsis(icons, big)
     print("icons écrites dans", icons, "et", pub)
 
 
