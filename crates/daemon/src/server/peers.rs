@@ -2,6 +2,7 @@
 //! par paire et par créatrice, auto-resume de la cible morte.
 
 use super::*;
+use super::sessions::FreshDeliver;
 use proto::{EventKind, SessionMeta};
 
 impl Daemon {
@@ -178,19 +179,7 @@ impl Daemon {
                     text: format!("session créée par «{}» ({from})", cm.title),
                 });
 
-                let (cmd, envs) = self.agent_parts(
-                    &profile,
-                    meta.model.as_deref(),
-                    meta.mode.as_deref(),
-                    &sid2,
-                );
-                session2
-                    .spawn_agent(&cmd, &envs, None, true, self.mcp_servers(&sid2))
-                    .await?;
-                session2
-                    .apply_spawn_config(meta.mode.as_deref(), meta.model.as_deref())
-                    .await;
-
+                let mut deliver = FreshDeliver::None;
                 if let Some(task) = prompt {
                     // Délégation de tâche = message pair→pair : PeerMessage
                     // journalisé dans les deux journaux (lien cliquable
@@ -216,22 +205,27 @@ impl Daemon {
                         pas de compte-rendu.",
                         cm.title, cm.agent
                     );
-                    let d = Arc::clone(self);
-                    let s2 = Arc::clone(&session2);
-                    let sid3 = sid2.clone();
-                    tokio::spawn(async move {
-                        // Ok(true) : endormie entre le spawn et la
-                        // livraison — le message est en file, on lance
-                        // le réveil (dedoublonné par `waking`).
-                        match s2.send_peer_prompt(&wrapped, false).await {
-                            Ok(true) => d.spawn_wake(&s2, &sid3),
-                            Ok(false) => {}
-                            Err(e) => s2.emit(EventKind::Error {
-                                message: format!("tâche déléguée: {e:#}"),
-                            }),
-                        }
-                    });
+                    deliver = FreshDeliver::Peer { wrapped, creator: creator.clone() };
                 }
+                let (cmd, envs) = self.agent_parts(
+                    &profile,
+                    meta.model.as_deref(),
+                    meta.mode.as_deref(),
+                    &sid2,
+                );
+                // Réponse immédiate comme new_session : la session fille
+                // est visible en "starting" — l'agent créateur n'attend
+                // pas les secondes du handshake dans son appel d'outil.
+                self.spawn_fresh(
+                    &session2,
+                    cmd,
+                    envs,
+                    None,
+                    true,
+                    meta.mode.clone(),
+                    meta.model.clone(),
+                    deliver,
+                );
                 Ok(json!({"session": sid2, "agent": agent_id, "title": title}))
     }
     /// Rate-limit par paire (from→to) : borne les boucles ping-pong.

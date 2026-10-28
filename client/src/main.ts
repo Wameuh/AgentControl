@@ -115,6 +115,7 @@ connectDlg.refresh = () => sidebar.refresh();
 connectDlg.connecting = (hosts) => chat.setConnecting(hosts);
 newSess.bind(groups);
 newSess.refresh = () => void sidebar.refresh();
+newSess.openSession = (id, conn) => void chat.open(id, false, conn);
 newSess.knownConns = () => conns.knownConns();
 groups.refresh = () => void sidebar.refresh();
 files.bind({ sysline: (txt, ic) => chat.sysline(txt, ic) });
@@ -193,7 +194,7 @@ $("chat-more").onclick = () => {
   if (app.current && term.supported())
     items.push({ icon: "terminal", label: t("term_title"), fn: () => $("btn-term").click() });
   if (app.current) items.push({ icon: "folder", label: t("files_title"), fn: () => $("btn-files").click() });
-  if (app.current && !app.alive)
+  if (app.current && !app.alive && app.current.state !== "starting")
     items.push({ icon: "play", label: t("resume"), fn: () => $("btn-resume").click() });
   if (app.current && app.alive)
     items.push({ icon: "sleep", label: t("ctx_sleep"), fn: () => $("btn-sleep").click() });

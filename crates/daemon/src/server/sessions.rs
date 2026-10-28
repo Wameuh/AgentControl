@@ -49,30 +49,14 @@ impl Daemon {
                 self.watch_prs(&session);
                 self.sessions.write().await.insert(sid.clone(), session.clone());
 
+                // Réponse immédiate : la session est visible en "starting",
+                // le spawn (process + handshake) tourne en tâche de fond —
+                // le dialogue client n'attend plus les secondes de l'init.
                 let (cmd, envs) =
                     self.agent_parts(&profile, model.as_deref(), mode.as_deref(), &sid);
-                session
-                    .spawn_agent(&cmd, &envs, None, true, self.mcp_servers(&sid))
-                    .await?;
-                // Mode/modèle demandés à la création : appliqués via ACP pour
-                // les agents sans placeholder {mode}/{model} (cursor, codex) —
-                // le premier prompt doit déjà voir la config demandée.
-                session
-                    .apply_spawn_config(mode.as_deref(), model.as_deref())
-                    .await;
-                if let Some(p) = prompt {
-                    // Ok(true) : session endormie entre la création et la
-                    // livraison — le prompt est en file, réveil à lancer.
-                    let d = Arc::clone(self);
-                    let s = Arc::clone(&session);
-                    let sid2 = sid.clone();
-                    tokio::spawn(async move {
-                        if let Ok(true) = s.send_prompt(&p, false, false).await {
-                            d.spawn_wake(&s, &sid2);
-                        }
-                    });
-                }
-                info!("session créée: {sid} (agent={agent})");
+                let deliver = prompt.map_or(FreshDeliver::None, FreshDeliver::UserPrompt);
+                self.spawn_fresh(&session, cmd, envs, None, true, mode, model, deliver);
+                info!("session créée: {sid} (agent={agent}) — spawn en tâche de fond");
                 Ok(json!({"session": sid}))
     }
 
@@ -109,11 +93,14 @@ impl Daemon {
                 self.sessions.write().await.insert(sid.clone(), session.clone());
                 let (cmd, envs) = self.agent_parts(&profile, None, None, &sid);
                 let natif = meta.native_session_id.clone();
-                session
-                    .spawn_agent(&cmd, &envs, meta.native_session_id, true, self.mcp_servers(&sid))
-                    .await?;
+                // Même traitement que new_session : réponse dès l'insert,
+                // spawn + session/load en tâche de fond.
+                self.spawn_fresh(
+                    &session, cmd, envs, natif.clone(), true, None, None,
+                    FreshDeliver::None,
+                );
                 info!(
-                    "session attachée: {sid} (agent={agent}, natif={})",
+                    "session attachée: {sid} (agent={agent}, natif={}) — spawn en tâche de fond",
                     natif.as_deref().unwrap_or_default()
                 );
                 Ok(json!({"session": sid}))
@@ -229,17 +216,21 @@ impl Daemon {
                     .await
                     .insert(sid2.clone(), session2.clone());
                 let (cmd2, envs2) = spawn_args(&profile, &meta2);
-                session2
-                    .spawn_agent(
-                        &cmd2,
-                        &envs2,
-                        meta2.native_session_id.clone(),
-                        false,
-                        self.mcp_servers(&sid2),
-                    )
-                    .await
-                    .context("attach de la session forkée")?;
-                info!("session forkée: {sid2} (source={session})");
+                // Même traitement async que new/attach : la session
+                // forkée apparaît en "starting" tout de suite, l'attache
+                // (session/load + replay du journal) tourne en tâche de
+                // fond — skip_replay=false pour journaliser le replay.
+                self.spawn_fresh(
+                    &session2,
+                    cmd2,
+                    envs2,
+                    meta2.native_session_id.clone(),
+                    false,
+                    meta2.mode.clone(),
+                    meta2.model.clone(),
+                    FreshDeliver::None,
+                );
+                info!("session forkée: {sid2} (source={session}) — spawn en tâche de fond");
                 Ok(json!({ "session": sid2 }))
     }
 
@@ -488,6 +479,102 @@ impl Daemon {
         r
     }
 
+    /// Spawn d'une session fraîche en tâche de fond : la requête de
+    /// création a déjà répondu (la session est insérée, visible en
+    /// "starting") — process + handshake + config demandée à la création
+    /// + livraison post-spawn (prompt initial / message de délégation)
+    /// s'enchaînent ici au lieu de bloquer le caller.
+    /// Sur échec : event Error + état "dead" — sauf si la session a
+    /// changé de main entre-temps : sleep (asleep), kill (dead), un
+    /// autre spawn en vol, clear/rebind ("supplanté"), suppression
+    /// (sortie de la liste) possèdent déjà leur état — un "dead" posé
+    /// ici l'écraserait à tort. La créatrice d'un peer_spawn est
+    /// notifiée de l'échec (sinon elle croirait sa fille au travail).
+    pub(super) fn spawn_fresh(
+        self: &Arc<Self>,
+        s: &Arc<Session>,
+        cmd: Vec<String>,
+        envs: HashMap<String, String>,
+        native: Option<String>,
+        skip_replay: bool,
+        mode: Option<String>,
+        model: Option<String>,
+        deliver: FreshDeliver,
+    ) {
+        // Le spawn est logiquement "en vol" dès la réponse rendue : un
+        // envoi tombé avant le démarrage effectif de spawn_agent
+        // s'enfile au lieu de bailer "agent not running".
+        s.mark_spawning();
+        let d = Arc::clone(self);
+        let s = Arc::clone(s);
+        let sid = s.meta_snapshot().id;
+        tokio::spawn(async move {
+            let r = s
+                .spawn_agent(&cmd, &envs, native, skip_replay, d.mcp_servers(&sid))
+                .await;
+            // Supprimée pendant le spawn : tuer l'agent frais éventuel —
+            // ni état ni event pour une session disparue.
+            if !d.sessions.read().await.contains_key(&sid) {
+                s.kill().await;
+                return;
+            }
+            match r {
+                Ok(()) => {
+                    // Mode/modèle demandés à la création : appliqués via
+                    // ACP pour les agents sans placeholder (cursor, codex).
+                    s.apply_spawn_config(mode.as_deref(), model.as_deref())
+                        .await;
+                    match deliver {
+                        FreshDeliver::None => {}
+                        FreshDeliver::UserPrompt(p) => {
+                            // Ok(true) : endormie entre le spawn et la
+                            // livraison — prompt en file, réveil à lancer.
+                            if let Ok(true) = s.send_prompt(&p, false, false).await {
+                                d.spawn_wake(&s, &sid);
+                            }
+                        }
+                        FreshDeliver::Peer { wrapped, .. } => {
+                            match s.send_peer_prompt(&wrapped, false).await {
+                                // Endormie entre-temps → en file + réveil.
+                                Ok(true) => d.spawn_wake(&s, &sid),
+                                Ok(false) => {}
+                                Err(e) => s.emit(EventKind::Error {
+                                    message: format!("tâche déléguée: {e:#}"),
+                                }),
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    let st = s.meta_snapshot().state;
+                    // Une op concurrente a repris la main : kill/clear/
+                    // rebind (génération invalidée — "supplanté", pending
+                    // soldé "agent replaced"), sleep (asleep) ou respawn
+                    // déjà reparti — son état fait foi, ni event ni dead.
+                    let supplanted =
+                        msg.contains("supplanté") || msg.contains("agent replaced");
+                    if supplanted || st == "asleep" || s.is_spawning() {
+                        return;
+                    }
+                    // Mort naturelle pendant le spawn ("/bin/false" & co) :
+                    // on_agent_exit a déjà posé dead + "agent process
+                    // exited" — l'erreur de handshake apporte le pourquoi
+                    // et s'émet quand même (mark_dead no-op si déjà dead).
+                    s.emit(EventKind::Error {
+                        message: format!("spawn impossible: {msg}"),
+                    });
+                    s.mark_dead();
+                    if let FreshDeliver::Peer { creator, .. } = deliver {
+                        creator.emit(EventKind::Error {
+                            message: format!("la session fille {sid} n'a pas démarré: {msg}"),
+                        });
+                    }
+                }
+            }
+        });
+    }
+
     pub(super) async fn h_events(self: &Arc<Self>, session: String, before_seq: Option<u64>, after_seq: Option<u64>, limit: u32) -> Result<Value> {
                 let s = self.get_session(&session).await?;
                 // after_seq présent → page ascendante (saut de recherche) ;
@@ -655,7 +742,15 @@ impl Daemon {
 
     pub(super) async fn h_delete_session(self: &Arc<Self>, session: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
-                s.kill().await;
+                // Spawn en vol : invalider la génération fait avorter le
+                // handshake immédiatement (kill simple = rien à tuer tant
+                // que l'enfant n'est pas posé — il finirait session/new
+                // pour être tué après coup).
+                if s.is_spawning() {
+                    s.kill_for_respawn().await;
+                } else {
+                    s.kill().await;
+                }
                 // Event terminal : les clients abonnés apprennent la
                 // suppression avant que le flux ne se ferme.
                 s.emit_ephemeral(proto::EventKind::SessionDeleted {});
@@ -667,7 +762,19 @@ impl Daemon {
 
     pub(super) async fn h_kill_session(self: &Arc<Self>, session: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
-                s.kill().await;
+                if s.is_spawning() {
+                    // Kill pendant un spawn en vol (création async,
+                    // réveil, resume) : aucun enfant à tuer ou handshake
+                    // en cours — le kill simple laisserait le spawn
+                    // livrer un agent vivant après l'ordre de mort.
+                    // Invalider la génération fait échouer le spawn
+                    // ("supplanté") ; on_agent_exit se taira donc →
+                    // l'état dead est posé ici explicitement.
+                    s.kill_for_respawn().await;
+                    s.mark_dead();
+                } else {
+                    s.kill().await;
+                }
                 info!("agent tué: {session}");
                 Ok(json!({"killed": session}))
     }
@@ -677,6 +784,19 @@ impl Daemon {
                 let s = self.get_session(&session).await?;
                 Ok(json!({"subscribed": session, "after_seq": after_seq, "last_seq": s.journal.last_seq()}))
     }
+}
+
+/// Livraison post-spawn d'une session fraîche — voir `Daemon::spawn_fresh`.
+/// Le prompt n'est livré qu'une fois l'agent prêt (handshake terminé) ;
+/// les envois arrivés entre-temps en file passent avant lui (FIFO).
+pub(super) enum FreshDeliver {
+    /// Rien à livrer (attach simple).
+    None,
+    /// Prompt initial de new_session — envoi utilisateur standard.
+    UserPrompt(String),
+    /// Délégation peer_spawn : message pair déjà wrappé (provenance
+    /// incluse) ; la créatrice est notifiée en cas d'échec du spawn.
+    Peer { wrapped: String, creator: Arc<Session> },
 }
 
 /// Extrait ~`ctx` caractères de contexte autour de la 1re occurrence de

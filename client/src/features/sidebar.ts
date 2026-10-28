@@ -4,7 +4,7 @@
 // drag & drop inter-groupes, poignée de redimensionnement.
 // ---------------------------------------------------------------------------
 
-import { $, esc, q, showErr } from "../core/dom";
+import { $, esc, notify, q, showErr } from "../core/dom";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
 import { isAndroid, meshSetMood } from "../core/chrome";
@@ -207,6 +207,23 @@ export class Sidebar {
       }
     }
     app.lastSessions = list;
+    this.checkSpawns(list);
+    // Un spawn tourne sans canal event (session non ouverte → pas de
+    // status_changed) → repoller tant qu'un "starting" reste, borné :
+    // un spawn bloqué ne doit pas poller indéfiniment (deadline armée à
+    // l'apparition du premier spawn, les events reprennent ensuite).
+    const spawning = list.some((s) => !s.offline && s.state === "starting");
+    if (spawning) {
+      if (!this.spawnPollEnd) this.spawnPollEnd = Date.now() + 180_000;
+      if (Date.now() < this.spawnPollEnd && this.spawnPoll === undefined) {
+        this.spawnPoll = window.setTimeout(() => {
+          this.spawnPoll = undefined;
+          void this.refresh();
+        }, 2500);
+      }
+    } else {
+      this.spawnPollEnd = 0;
+    }
     // Vue « Repos » : croise les entrées du registre avec les sessions
     // fusionnées (cache offline inclus) + compteur sur l'onglet.
     this.prsView.setData(this.prRows, list, this.prFailed);
@@ -244,6 +261,34 @@ export class Sidebar {
     this.renderView();
     // La liste arrive → l'accueil recalcule son état (0 session → CTA).
     this.chat.updateEmptyState();
+  }
+
+  /** Repoll interne tant qu'une session est "starting" (deadline bornée)
+   *  — spawn sans canal event : la session n'est pas forcément ouverte. */
+  private spawnPoll: number | undefined;
+  private spawnPollEnd = 0;
+
+  /** Issue des spawns lancés par ce client (app.spawnWatch) : échec
+   *  (dead/interrupted) → toast ; état résolu ou TTL dépassé → fin de
+   *  suivi. Couvre le cas où l'utilisateur navigue ailleurs pendant le
+   *  boot : hors session ouverte aucun event ne signale l'échec. */
+  private checkSpawns(list: SessionMeta[]) {
+    const now = Date.now();
+    for (const [id, ts] of app.spawnWatch) {
+      const s = list.find((x) => x.id === id);
+      if (!s || now - ts > 10 * 60 * 1000) {
+        // Sortie de la liste (supprimée) ou jamais résolue — oubli.
+        app.spawnWatch.delete(id);
+        continue;
+      }
+      if (s.offline || s.state === "starting") continue;
+      // Session ouverte : l'event Error est déjà visible dans le chat —
+      // le toast ne sert que quand l'échec arrive hors de la vue.
+      if ((s.state === "dead" || s.state === "interrupted") && app.current?.id !== id) {
+        notify("warn", t("spawn_failed", { title: s.title }));
+      }
+      app.spawnWatch.delete(id);
+    }
   }
 
   /** Rend la liste de la vue active : arbre sessions ou PRs par dépôt.

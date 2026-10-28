@@ -677,6 +677,16 @@ impl Session {
         self.set_state("dead");
     }
 
+    /// Signale un spawn imminent sans attendre spawn_agent : la création
+    /// async répond dès l'insert de la session et lance le spawn en tâche
+    /// de fond — sans ce flag posé ici, un envoi tombé dans la fenêtre
+    /// entre la réponse et le démarrage effectif bailerait "agent not
+    /// running" au lieu de s'enfiler. spawn_agent reprend le flag
+    /// (store true→false autour de ses tentatives réelles).
+    pub fn mark_spawning(&self) {
+        self.spawning.store(true, Ordering::SeqCst);
+    }
+
     /// Remet la session en sommeil — retour d'état quand un réveil
     /// (respawn) a échoué : le prochain envoi retentera.
     pub fn mark_asleep(&self) {
