@@ -15,7 +15,9 @@ file d'attente de prompts :
 
 ![Chat desktop](docs/screenshots/desktop-chat.png)
 
-Explorateur de fichiers distant :
+Explorateur de fichiers distant — aperçu d'images et lecteur vidéo
+streamé (ranges HTTP via le schéma `acvideo://` → tranches `read_file`
+démon ; seul le buffer consommé est transféré, pas le fichier entier) :
 
 ![Explorateur de fichiers](docs/screenshots/desktop-files.png)
 

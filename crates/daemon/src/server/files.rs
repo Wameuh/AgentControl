@@ -7,7 +7,7 @@ use super::*;
 use crate::journal;
 
 impl Daemon {
-    pub(super) async fn h_read_file(self: &Arc<Self>, session: String, path: String, binary: bool) -> Result<Value> {
+    pub(super) async fn h_read_file(self: &Arc<Self>, session: String, path: String, binary: bool, offset: u64, limit: Option<u64>) -> Result<Value> {
                 let s = self.get_session(&session).await?;
                 let p = PathBuf::from(&path);
                 let full = if p.is_absolute() {
@@ -15,6 +15,18 @@ impl Daemon {
                 } else {
                     PathBuf::from(&s.meta_snapshot().cwd).join(p)
                 };
+                if let Some(limit) = limit {
+                    // Lecture bornée (streaming vidéo côté client) — tranche
+                    // brute base64, plafonnée comme DL_CHUNK (~5,4 Mio JSON).
+                    let (data, size) = read_slice(&full, offset, limit.min(DL_CHUNK))
+                        .with_context(|| format!("{}", full.display()))?;
+                    return Ok(json!({
+                        "path": full.display().to_string(),
+                        "offset": offset,
+                        "size": size,
+                        "data": b64(&data),
+                    }));
+                }
                 if binary {
                     // Aperçu image : ~16 Mio de JSON base64 max ; `data` omis
                     // si tronqué (le client n'affiche que « trop grosse »).

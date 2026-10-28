@@ -158,6 +158,8 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             session: s("session"),
             path: s("path"),
             binary: p.get("binary").and_then(Value::as_bool).unwrap_or(false),
+            offset: p.get("offset").and_then(Value::as_u64).unwrap_or(0),
+            limit: p.get("limit").and_then(Value::as_u64),
         },
         "list_dir" => ReqKind::ListDir { session: s("session"), path: s("path") },
         "delete_path" => ReqKind::DeletePath { session: s("session"), path: s("path") },
