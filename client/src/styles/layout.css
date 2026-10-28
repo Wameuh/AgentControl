@@ -30,7 +30,7 @@
 
 /* Zones de resize fenêtre (plus de bordures natives sans decorations) */
 .resize-edge { position: fixed; z-index: 60; }
-#re-right { top: 34px; right: 0; bottom: 0; width: 5px; cursor: e-resize; }
+#re-right { top: var(--tb-h); right: 0; bottom: 0; width: 5px; cursor: e-resize; }
 #re-bottom { left: 0; right: 0; bottom: 0; height: 5px; cursor: s-resize; }
 #re-corner { right: 0; bottom: 0; width: 14px; height: 14px; cursor: se-resize; }
 
