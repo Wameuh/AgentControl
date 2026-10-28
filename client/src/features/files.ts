@@ -28,6 +28,7 @@ import { isAndroid, isWindows } from "../core/chrome";
 import type { DirEntry } from "../core/types";
 import { t } from "../i18n";
 import { icon, type IconName } from "../ui/icons";
+import { MdView } from "./md-view";
 import { bindCtx, hideMenu, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
 
@@ -84,6 +85,12 @@ export class FileExplorer {
   private cur: CurFile | null = null;
   private editOn = false;
   private dirty = false;
+  private mdView = new MdView({
+    text: () => this.cur?.chunks.join("") ?? "",
+    done: () => this.cur?.done ?? true,
+    openFile: (rel) => void this.openFilePanel(rel),
+    more: () => this.maybeMore(),
+  });
   private cleanRes: ((ok: boolean) => void) | null = null;
   private saving = false;
   private hlTimer: ReturnType<typeof setTimeout> | undefined;
@@ -181,11 +188,13 @@ export class FileExplorer {
         fetching: false, done: false, gen: 0,
       };
       this.cur = cur;
+      this.mdView.attach(path, ext);
       this.syncEncSelect();
       this.updateStatus();
       await this.fetchChunk(cur);
       if (opts?.edit && this.cur === cur && this.editable()) this.enterEdit();
     } catch (e) {
+      this.mdView.detach();
       $("file-view").textContent = String(e);
     }
   }
@@ -195,6 +204,7 @@ export class FileExplorer {
     this.cur = null;
     this.editOn = false;
     this.dirty = false;
+    this.mdView.detach();
     $("file-edwrap").hidden = true;
     $("file-view").hidden = false;
     $("file-view").innerHTML = "";
@@ -257,6 +267,7 @@ export class FileExplorer {
       if (cur.loaded === bytes.length && sniffBinary(text)) {
         cur.binary = true;
         cur.done = true;
+        this.mdView.detach();
         $("file-view").innerHTML =
           `<div class="fv-msg">${esc(t("binary_file", { size: fmtSize(cur.size) }))}</div>`;
         this.updateStatus();
@@ -269,6 +280,10 @@ export class FileExplorer {
     } catch (e) {
       cur.done = true;
       if (this.cur === cur) {
+        // En mode rendu, #file-view est masqué → l'erreur serait invisible
+        // (« … » éternel ou document tronqué en silence) : retomber en vue
+        // source comme pour un binaire.
+        this.mdView.detach();
         $("file-view").textContent = String(e);
         this.updateStatus();
       }
@@ -305,6 +320,7 @@ export class FileExplorer {
     } else {
       $("file-view").insertAdjacentHTML("beforeend", highlight(text, cur.ext));
     }
+    this.mdView.changed();
   }
 
   /** Éditable : texte non-binaire dont le chemin résolu reste dans le cwd
@@ -357,6 +373,7 @@ export class FileExplorer {
     // (éditer un buffer vide sur un fichier existant = insertion en tête).
     if (!cur || !this.editable() || !cur.abs) return;
     this.editOn = true;
+    this.mdView.setEditing(true);
     const ta = $("file-edit") as HTMLTextAreaElement;
     ta.value = cur.chunks.join("");
     $("file-view").hidden = true;
@@ -395,6 +412,10 @@ export class FileExplorer {
         view.insertAdjacentHTML("beforeend", highlight(c, cur.ext));
       }
     }
+    // Le buffer sauvegardé peut différer des chunks affichés avant
+    // l'édition → rendu Markdown à refaire avant de le ré-afficher.
+    this.mdView.changed();
+    this.mdView.setEditing(false);
     this.updateStatus();
   }
 
@@ -1119,6 +1140,7 @@ export class FileExplorer {
       })();
     };
 
+    this.mdView.init();
     $("fv-edit").onclick = () => {
       if (this.editOn) this.exitEdit();
       else this.enterEdit();
