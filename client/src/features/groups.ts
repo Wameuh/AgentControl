@@ -79,6 +79,18 @@ export class GroupStore {
     if (group) this.add(s.conn ?? "default", group);
   }
 
+  /** Dissout un groupe : dégroupe toutes ses sessions puis oublie le nom
+   *  stocké (utilisé par le dialogue rename ET le menu ctx du groupe). */
+  async dissolve(conn: string, name: string) {
+    const members = app.lastSessions.filter(
+      (s) => (s.conn ?? "default") === conn && s.group === name,
+    );
+    for (const s of members) await this.applyAssign(s, undefined);
+    this.remove(conn, name);
+    // État de collapse persisté du header — orphelin après dissolution.
+    localStorage.removeItem(`ac-grp-${conn}::${name}`);
+  }
+
   init() {
     ($("dlg-group") as HTMLDialogElement).addEventListener("close", async (e) => {
       const rv = (e.target as HTMLDialogElement).returnValue;
@@ -87,13 +99,12 @@ export class GroupStore {
       if (this.mode === "session" && this.target) {
         await this.applyAssign(this.target, rv === "none" ? undefined : name || undefined);
       } else if (this.mode === "rename" && this.ctx.name) {
-        const members = app.lastSessions.filter(
-          (s) => (s.conn ?? "default") === this.ctx.conn && s.group === this.ctx.name,
-        );
         if (rv === "none" || !name) {
-          for (const s of members) await this.applyAssign(s, undefined);
-          this.remove(this.ctx.conn, this.ctx.name);
+          await this.dissolve(this.ctx.conn, this.ctx.name);
         } else if (name !== this.ctx.name) {
+          const members = app.lastSessions.filter(
+            (s) => (s.conn ?? "default") === this.ctx.conn && s.group === this.ctx.name,
+          );
           for (const s of members) await this.applyAssign(s, name);
           this.remove(this.ctx.conn, this.ctx.name);
         }
