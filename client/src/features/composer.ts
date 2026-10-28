@@ -48,6 +48,9 @@ export class Composer {
   private setInput(v: string) {
     ($("input") as HTMLTextAreaElement).value = v;
     this.fitInput();
+    // La dropdown suit la valeur même quand elle change sans event input
+    // (envoi, applyAc, reprise de file) — sinon elle resterait affichée.
+    this.refreshAc();
   }
 
   fitInput() {
@@ -280,7 +283,6 @@ export class Composer {
 
   private applyAc(name: string) {
     this.setInput("/" + name + " ");
-    $("cmd-ac").hidden = true;
     ($("input") as HTMLTextAreaElement).focus();
   }
 
