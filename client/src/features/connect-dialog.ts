@@ -307,7 +307,7 @@ export class ConnectDialog {
       }
     }
     this.cStatus(null);
-    this.conns.markConnected(cfg);
+    this.conns.markConnected(cfg, status as Record<string, unknown>);
     await this.refresh();
   }
 

@@ -14,6 +14,8 @@ impl Daemon {
                     // démon plus vieux répondrait `parse: unknown variant`
                     // avec id=0, droppé par le routage client → 60 s muet.
                     "self_update": true,
+                    // Idem pour ReqKind::FirstPost (bouton « premier post »).
+                    "first_post": true,
                 }))
     }
     /// `UpdateDaemon` : télécharge la release demandée et remplace le

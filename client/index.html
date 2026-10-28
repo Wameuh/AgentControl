@@ -51,6 +51,7 @@
               <span id="dyn-opts"></span>
             </div>
             <button id="btn-search" hidden data-icon="search" data-i18n-title="search_title" title="Search"></button>
+            <button id="btn-first" hidden data-icon="top" data-i18n-title="first_post" title="First post"></button>
             <button id="btn-files" hidden data-icon="folder" data-i18n-title="files_title" title="Files"></button>
             <button id="btn-refresh" data-icon="refresh" data-i18n-title="refresh_title" title="Reload"></button>
             <button id="btn-resume" hidden data-i18n="resume">Resume</button>
@@ -260,6 +261,18 @@
         <h3 data-i18n="resume_h">Agent sessions to resume</h3>
         <div id="native-list">…</div>
         <menu><button value="cancel" data-i18n="close">Close</button></menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-first">
+      <form method="dialog">
+        <h3 data-i18n="first_post">First post</h3>
+        <div id="first-meta"></div>
+        <pre id="first-body"></pre>
+        <menu>
+          <button type="button" id="first-copy" data-i18n="copy">Copy</button>
+          <button value="ok" data-i18n="close">Close</button>
+        </menu>
       </form>
     </dialog>
 

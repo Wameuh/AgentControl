@@ -30,6 +30,19 @@ pub struct Journal {
     inner: Mutex<Inner>,
 }
 
+/// Résultat du scan « premier post » : le journal ne garde que le
+/// cycle courant, mais la compaction peut avoir coupé la tête —
+/// présenter le premier `user_message` restant comme « premier »
+/// serait un faux.
+pub enum FirstPost {
+    /// Premier `user_message` du cycle (seq/ts/texte intacts).
+    Found(Event),
+    /// La tête du journal a été supprimée par la compaction.
+    Truncated,
+    /// Pas de `user_message` dans la fenêtre scannée.
+    Empty,
+}
+
 impl Journal {
     /// Ouvre (ou crée) events.jsonl : un seul scan pour bâtir l'index.
     pub fn open(dir: &Path) -> Result<Self> {
@@ -188,6 +201,54 @@ impl Journal {
         }
         std::fs::create_dir_all(&bdir)?;
         Ok(())
+    }
+
+    /// Premier `user_message` du journal (cycle courant) — scan de la
+    /// tête en flux, borné par FIRST_POST_SCAN_MAX lignes : le journal
+    /// peut faire des centaines de Mo, on ne le charge jamais entier.
+    /// La compaction supprime la TÊTE du fichier : sans détection, le
+    /// premier `user_message` restant serait un prompt de milieu de
+    /// cycle présenté comme « premier post » → Truncated dans ce cas.
+    pub fn first_post(&self, dir: &Path) -> Result<FirstPost> {
+        /// Le prelude d'un cycle (status/system/commands post-spawn) ne
+        /// fait que quelques events — la borne est très large au-delà.
+        const FIRST_POST_SCAN_MAX: usize = 4096;
+        // Tête perdue à la compaction ? L'index connaît le plus petit
+        // seq retenu — s'il n'est pas 1, tout le début a été coupé
+        // (les seqs ne sont jamais renumérotées).
+        let first_seq = self.inner.lock().unwrap().offsets.first().map(|(s, _)| *s);
+        match first_seq {
+            Some(1) | None => {} // tête intacte, ou index vide → le scan décide
+            Some(_) => return Ok(FirstPost::Truncated),
+        }
+        let path = dir.join("events.jsonl");
+        let f = match File::open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(FirstPost::Empty),
+            Err(e) => return Err(e.into()),
+        };
+        let mut first_seen = false;
+        for (n, line) in BufReader::new(f).lines().enumerate() {
+            if n >= FIRST_POST_SCAN_MAX {
+                break;
+            }
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(ev) = serde_json::from_str::<Event>(&line) else {
+                continue;
+            };
+            // Repli du test d'index (index jamais peuplé) : le premier
+            // event du fichier n'est pas seq 1 → la tête a été coupée.
+            if !std::mem::replace(&mut first_seen, true) && ev.seq != 1 {
+                return Ok(FirstPost::Truncated);
+            }
+            if matches!(ev.kind, EventKind::UserMessage { .. }) {
+                return Ok(FirstPost::Found(ev));
+            }
+        }
+        Ok(FirstPost::Empty)
     }
 
     /// Rattrapage borné : les events avec seq > after_seq, mais au plus les
