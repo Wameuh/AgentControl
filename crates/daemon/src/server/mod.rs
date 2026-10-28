@@ -449,6 +449,11 @@ impl Daemon {
             ReqKind::DeletePath { session, path } => {
                 self.h_delete_path(session, path).await
             }
+            ReqKind::CreatePath {
+                session,
+                path,
+                dir,
+            } => self.h_create_path(session, path, dir).await,
             ReqKind::DownloadPath {
                 session,
                 path,

@@ -153,6 +153,16 @@
 .fempty, .ferr { padding: 3px 10px; color: var(--dim); font-size: 11px; white-space: normal; }
 .ferr { color: var(--err); }
 
+/* Saisie inline « nouveau fichier/dossier » */
+.fnode.fnew { color: var(--ink); }
+.fnew-name {
+  flex: 1; min-width: 0; padding: 1px 5px;
+  background: rgba(236, 230, 216, .06); border: 1px solid var(--sand);
+  border-radius: 4px; color: var(--ink); font: inherit; font-size: 12px;
+}
+.fnew-name:focus { outline: none; }
+body.android .fnew-name { font-size: 15px; padding: 4px 6px; }
+
 
 /* Panneau fichier : poignée de redimensionnement (bord gauche) */
 #file-resize {

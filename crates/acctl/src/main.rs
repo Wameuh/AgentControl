@@ -239,7 +239,7 @@ fn print_event(ev: &Value) {
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|search|find|resume|attach|fork|cancel|kill|clear|sleep|mode|respond|blob|download|write|daemon-update");
+        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|search|find|create|resume|attach|fork|cancel|kill|clear|sleep|mode|respond|blob|download|write|daemon-update");
         std::process::exit(2);
     }
     let mut c = connect().await?;
@@ -509,6 +509,24 @@ async fn main() -> Result<()> {
             if v["truncated"].as_bool().unwrap_or(false) {
                 eprintln!("(résultats tronqués — {} entrées scannées)", v["scanned"].as_u64().unwrap_or(0));
             }
+        }
+        "create" => {
+            // acctl create <session> <path> [--dir] — fichier vide ou
+            // dossier (création exclusive : échoue si la cible existe).
+            if args.len() < 3 {
+                bail!("create <session> <path> [--dir]");
+            }
+            let dir = args[3..].iter().any(|a| a == "--dir" || a == "-d");
+            let v = c.call(proto::ReqKind::CreatePath {
+                session: args[1].clone(),
+                path: args[2].clone(),
+                dir,
+            }).await?;
+            println!(
+                "{}{}",
+                v["path"].as_str().unwrap_or(""),
+                if dir { "/" } else { "" },
+            );
         }
         "resume" => println!("{}", c.call(proto::ReqKind::ResumeSession {
             session: args[1].clone(),

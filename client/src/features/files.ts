@@ -607,12 +607,14 @@ export class FileExplorer {
     if (next?.classList.contains("fchildren")) return next as HTMLElement;
     const arrow = el.querySelector<HTMLElement>(".farrow")!;
     const rel = el.dataset.rel ?? "";
+    const sid = app.current?.id;
+    if (!sid) { arrow.textContent = "\u25b8"; return null; }
     arrow.textContent = "…";
     const box = document.createElement("div");
     box.className = "fchildren";
     try {
       const r = await call<{ dir: string; entries: DirEntry[] }>("list_dir", {
-        session: app.current!.id,
+        session: sid,
         path: rel,
       });
       if (!r.entries.length) {
@@ -644,9 +646,12 @@ export class FileExplorer {
       });
       const hd = document.createElement("div");
       hd.className = "froot";
+      hd.dataset.rel = "";
+      hd.dataset.abs = r.dir;
       hd.innerHTML = `<span class="fico">${icon("folder")}</span><span class="fname">${esc(r.dir)}</span>`;
       hd.title = r.dir;
       this.treeRootDir = r.dir;
+      bindCtx(hd, (x, y) => this.openFileCtx(x, y, hd));
       tree.appendChild(hd);
       for (const en of r.entries) {
         tree.appendChild(this.treeNode(en.name, en.name, en, 0, `${r.dir}/${en.name}`));
@@ -777,11 +782,24 @@ export class FileExplorer {
    *  par niveau), sélectionne le nœud et le rend visible. */
   private async revealDir(rel: string) {
     this.clearSearch();
+    const node = await this.expandTo(rel);
+    if (!node) return;
+    for (const n of $("file-tree").querySelectorAll<HTMLElement>(".fnode.sel")) {
+      n.classList.remove("sel");
+    }
+    node.classList.add("sel");
+    node.scrollIntoView({ block: "nearest" });
+  }
+
+  /** Déplie les ancêtres de `rel` et renvoie son nœud — null si un
+   *  segment a disparu entre-temps ou n'est pas un dossier. */
+  private async expandTo(rel: string): Promise<HTMLElement | null> {
     const segs = rel.split("/");
     let container: HTMLElement = $("file-tree");
+    let node: HTMLElement | null = null;
     for (let i = 0; i < segs.length; i++) {
       const cur = segs.slice(0, i + 1).join("/");
-      let node: HTMLElement | null = null;
+      node = null;
       for (const ch of Array.from(container.children)) {
         const h = ch as HTMLElement;
         if (h.classList.contains("fnode") && h.dataset.rel === cur) {
@@ -789,33 +807,49 @@ export class FileExplorer {
           break;
         }
       }
-      if (!node) return; // renommé/supprimé entre-temps
-      if (i === segs.length - 1) {
-        for (const n of $("file-tree").querySelectorAll<HTMLElement>(".fnode.sel")) {
-          n.classList.remove("sel");
-        }
-        node.classList.add("sel");
-        node.scrollIntoView({ block: "nearest" });
-        return;
+      if (!node) return null;
+      if (i < segs.length - 1) {
+        if (!node.classList.contains("is-dir")) return null;
+        const box = await this.expandDir(node);
+        if (!box) return null;
+        container = box;
       }
-      if (!node.classList.contains("is-dir")) return;
-      const box = await this.expandDir(node);
-      if (!box) return;
-      container = box;
     }
+    return node;
   }
 
   private hideFileCtx() {
     hideMenu(this.ctx, "fctx");
   }
 
-  /** Menu contextuel clic droit : éditer / copier contenu / chemin absolu /
-   *  supprimer. Android : rendu en action-sheet ancré en bas. */
+  /** Menu contextuel clic droit : nouveau fichier/dossier, éditer /
+   *  copier contenu / chemin absolu / supprimer. Android : rendu en
+   *  action-sheet ancré en bas. */
   private openFileCtx(x: number, y: number, el: HTMLElement) {
     const rel = el.dataset.rel ?? "";
     const abs = el.dataset.abs ?? rel;
     const isDir = el.classList.contains("is-dir");
-    this.ctx.innerHTML = `<div class="fctx-path">${esc(abs)}</div>`;
+    // Racine (en-tête cwd) ou fond de l'arbre : création seulement.
+    const isRoot = el.classList.contains("froot") || el.id === "file-tree";
+    this.ctx.innerHTML = abs ? `<div class="fctx-path">${esc(abs)}</div>` : "";
+    menuBtn(this.ctx, t("ctx_new_file"), "", () => {
+      this.hideFileCtx();
+      void this.beginCreate(el, false);
+    });
+    menuBtn(this.ctx, t("ctx_new_folder"), "", () => {
+      this.hideFileCtx();
+      void this.beginCreate(el, true);
+    });
+    if (isRoot) {
+      if (abs) {
+        menuBtn(this.ctx, t("ctx_copy_path"), "", () => {
+          this.hideFileCtx();
+          void copyText(abs);
+        });
+      }
+      placeMenu(this.ctx, "fctx", x, y);
+      return;
+    }
     if (!isDir) {
       menuBtn(this.ctx, t("ctx_edit"), "", () => {
         this.hideFileCtx();
@@ -860,6 +894,151 @@ export class FileExplorer {
         .catch((e) => showErr(String(e)));
     });
     placeMenu(this.ctx, "fctx", x, y);
+  }
+
+  /** Entrée ctx « nouveau » : dossier cible = le dossier cliqué, le
+   *  parent d'un fichier, ou la racine (en-tête cwd / fond de l'arbre).
+   *  Déplie la cible puis ouvre la saisie inline du nom. */
+  private async beginCreate(el: HTMLElement, dir: boolean) {
+    if (!app.current) return;
+    const rel = el.dataset.rel ?? "";
+    const isDir =
+      el.classList.contains("is-dir") ||
+      el.classList.contains("froot") ||
+      el.id === "file-tree";
+    const parentRel = isDir
+      ? rel
+      : rel.includes("/")
+        ? rel.slice(0, rel.lastIndexOf("/"))
+        : "";
+    this.clearSearch();
+    let box: HTMLElement | null = $("file-tree");
+    if (parentRel) {
+      // Le dossier peut être encore replié (ctx depuis un résultat de
+      // recherche) — dépliage lazy niveau par niveau.
+      const node = await this.expandTo(parentRel);
+      if (!node || !node.classList.contains("is-dir")) {
+        showErr(t("tree_gone"));
+        return;
+      }
+      box = await this.expandDir(node);
+      if (!box || !box.isConnected) return;
+    }
+    // L'entrée va remplir la boîte — « (vide) »/erreur n'ont plus lieu
+    // d'être. Enfants directs seulement : le .fempty d'un sous-dossier
+    // déplié ne doit pas disparaître (restauré dans close() si annulé).
+    box.querySelector(":scope > .fempty")?.remove();
+    box.querySelector(":scope > .ferr")?.remove();
+    this.inlineNameRow(box, parentRel, dir);
+  }
+
+  /** Ligne de saisie du nom dans `box` : Enter crée via create_path,
+   *  Échap/perte de focus annule. Après création le nœud est inséré à
+   *  sa place triée (pas de rechargement) et un fichier s'ouvre en
+   *  édition dans le viewer. */
+  private inlineNameRow(box: HTMLElement, parentRel: string, dir: boolean) {
+    if (!app.current) return; // session fermée pendant le dépliage
+    const depth = parentRel ? parentRel.split("/").length : 0;
+    const row = document.createElement("div");
+    row.className = "fnode fnew";
+    row.style.paddingLeft = `${6 + depth * 14}px`;
+    row.innerHTML =
+      `<span class="farrow"></span>` +
+      `<span class="fico">${icon(dir ? "folder" : "file")}</span>`;
+    const inp = document.createElement("input");
+    inp.className = "fnew-name";
+    inp.placeholder = t(dir ? "new_folder_ph" : "new_file_ph");
+    row.appendChild(inp);
+    // En tête de boîte — sous l'en-tête .froot quand c'est la racine.
+    const first = box.id === "file-tree"
+      ? box.querySelector(".froot")?.nextElementSibling
+      : box.firstElementChild;
+    box.insertBefore(row, first ?? null);
+    const sid = app.current!.id;
+    const conn = app.current!.conn;
+    let closed = false;
+    // Appel RPC en vol : Chromium dispatche blur quand l'input focalisé
+    // devient disabled (WebView2, Android) — sans ce garde le blur
+    // fermerait la saisie en plein commit.
+    let inflight = false;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      row.remove();
+      // Restaure « (vide) » si la boîte reste sans entrée après annulation.
+      if (box.isConnected && !box.querySelector(":scope > .fnode")) {
+        box.insertAdjacentHTML("beforeend", `<div class="fempty">${t("tree_empty")}</div>`);
+      }
+    };
+    const commit = async () => {
+      if (closed || inflight) return;
+      const name = inp.value.trim();
+      if (!name) { close(); return; } // vide = annuler
+      if (/[\\/]/.test(name) || name === "." || name === "..") {
+        showErr(t("name_invalid"));
+        inp.focus();
+        return;
+      }
+      // Session changée pendant la saisie → annuler plutôt que créer
+      // dans le mauvais workspace.
+      if (app.current?.id !== sid) { close(); return; }
+      const rel = parentRel ? `${parentRel}/${name}` : name;
+      inflight = true;
+      inp.disabled = true;
+      try {
+        await call("create_path", { session: sid, conn, path: rel, dir });
+      } catch (e) {
+        inflight = false;
+        inp.disabled = false;
+        showErr(String(e));
+        inp.focus();
+        return;
+      }
+      closed = true;
+      row.remove();
+      // Boîte remplacée ou session changée pendant l'appel : l'entrée
+      // existe mais l'arbre visible n'est plus le bon — rien à insérer.
+      if (app.current?.id !== sid || !box.isConnected) return;
+      const en: DirEntry = { name, dir, size: 0 };
+      const node = this.treeNode(rel, name, en, depth,
+        this.treeRootDir ? `${this.treeRootDir}/${rel}` : rel);
+      this.insertSorted(box, node);
+      for (const n of $("file-tree").querySelectorAll<HTMLElement>(".fnode.sel")) {
+        n.classList.remove("sel");
+      }
+      node.classList.add("sel");
+      node.scrollIntoView({ block: "nearest" });
+      if (!dir) void this.openFilePanel(rel, { edit: true });
+    };
+    inp.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") void commit();
+      else if (e.key === "Escape") close();
+    });
+    inp.addEventListener("click", (e) => e.stopPropagation());
+    // Perte de focus = annuler : pas de création surprise d'un nom à
+    // moitié tapé. Pas pendant l'appel (blur synthétique du disabled).
+    inp.addEventListener("blur", () => { if (!inflight) close(); });
+    inp.focus();
+    inp.scrollIntoView({ block: "nearest" });
+  }
+
+  /** Insère `node` dans `box` selon le tri du démon : dossiers d'abord,
+   *  puis nom alpha insensible à la casse. */
+  private insertSorted(box: HTMLElement, node: HTMLElement) {
+    const dir = node.classList.contains("is-dir");
+    const name = (node.dataset.rel?.split("/").pop() ?? "").toLowerCase();
+    for (const ch of Array.from(box.children)) {
+      const h = ch as HTMLElement;
+      if (!h.classList.contains("fnode")) continue;
+      const hDir = h.classList.contains("is-dir");
+      if (!hDir && dir) { box.insertBefore(node, h); return; }
+      if (hDir === dir) {
+        const hName = (h.dataset.rel?.split("/").pop() ?? "").toLowerCase();
+        if (hName > name) { box.insertBefore(node, h); return; }
+      }
+    }
+    box.appendChild(node);
   }
 
   /** Télécharge un fichier/dossier du workspace vers le disque local :
@@ -1093,5 +1272,18 @@ export class FileExplorer {
     });
     $("file-tree").addEventListener("scroll", () => this.hideFileCtx());
     $("file-hits").addEventListener("scroll", () => this.hideFileCtx());
+    // Clic droit sur le fond de l'arbre = création à la racine du
+    // workspace. Le filtre n'accepte que le conteneur lui-même et les
+    // lignes d'état : le touch des nœuds remonterait sinon en bubbling
+    // et doublerait le menu (ils ont leur propre bindCtx).
+    bindCtx($("file-tree"), (x, y) => this.openFileCtx(x, y, $("file-tree")),
+      (e) => {
+        const t = e.target as HTMLElement;
+        // Enfants directs seulement : un .fempty dans un .fchildren
+        // appartient au contexte du sous-dossier, pas à la racine.
+        return t === $("file-tree") ||
+          (t.parentElement === $("file-tree") &&
+            (t.classList.contains("fempty") || t.classList.contains("ferr")));
+      });
   }
 }

@@ -567,6 +567,17 @@ pub enum ReqKind {
         session: String,
         path: String,
     },
+    /// Crée un fichier vide (`dir` false) ou un dossier (`dir` true) dans
+    /// le workspace — borné au cwd de la session, racine refusée.
+    /// Création EXCLUSIVE : la cible ne doit exister sous aucune forme
+    /// (fichier, dossier ou lien symbolique) sinon erreur — jamais
+    /// d'écrasement silencieux. Réponse {path, dir}.
+    CreatePath {
+        session: String,
+        path: String,
+        #[serde(default)]
+        dir: bool,
+    },
     /// Recherche récursive de fichiers par nom dans le workspace
     /// (sous-chaîne, insensible à la casse). `path` = sous-arbre de départ
     /// ("" = racine), borné au cwd. Renvoie {matches: [{path, dir, size}],
@@ -789,6 +800,7 @@ impl ReqKind {
             Self::WriteFile { .. } => "write_file",
             Self::ListDir { .. } => "list_dir",
             Self::DeletePath { .. } => "delete_path",
+            Self::CreatePath { .. } => "create_path",
             Self::FindFiles { .. } => "find_files",
             Self::DownloadPath { .. } => "download_path",
             Self::QueueList { .. } => "queue_list",

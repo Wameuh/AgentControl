@@ -8,8 +8,17 @@ import { isAndroid } from "../core/chrome";
 import { nav } from "./nav";
 
 /// Clic droit (desktop) ou appui long ~500 ms (tactile) → menu contextuel.
-export function bindCtx(el: HTMLElement, cb: (x: number, y: number) => void) {
+/// `filter` optionnel : l'événement est ignoré s'il ne le passe pas —
+/// utile sur un conteneur dont les enfants ont leur propre bindCtx (le
+/// touch des enfants remonte par bubbling, le contextmenu non — il est
+/// stopPropagation'd — d'où le filtre des deux chemins).
+export function bindCtx(
+  el: HTMLElement,
+  cb: (x: number, y: number) => void,
+  filter?: (e: Event) => boolean,
+) {
   el.addEventListener("contextmenu", (e) => {
+    if (filter && !filter(e)) return;
     e.preventDefault();
     e.stopPropagation();
     cb(e.clientX, e.clientY);
@@ -21,6 +30,7 @@ export function bindCtx(el: HTMLElement, cb: (x: number, y: number) => void) {
   // ne pas déclencher l'action normale de l'élément ni refermer le menu.
   const swallowClick = (e: Event) => { e.preventDefault(); e.stopPropagation(); };
   el.addEventListener("touchstart", (e) => {
+    if (filter && !filter(e)) return;
     const t0 = e.touches[0];
     px = t0.clientX;
     py = t0.clientY;
