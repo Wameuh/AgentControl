@@ -363,7 +363,10 @@ select option { background: var(--panel-solid); color: var(--ink); }
   border: 1px solid var(--line); font-family: Mono, ui-monospace, monospace;
 }
 .badge.ok, .badge.st-idle, .badge.st-running { color: var(--sage); border-color: rgba(184, 207, 174, .4); }
-.badge.st-working, .badge.st-waiting_input { color: var(--accent); border-color: rgba(var(--accent-rgb), .45); }
+/* Occupé/en attente : sand littéral, pas --accent — certains accents
+   (violet, doré) aliaseraient compacting/asleep/warn. « sauge » = sand :
+   le défaut garde le rendu actuel, l'état reste unique sous tout accent. */
+.badge.st-working, .badge.st-waiting_input { color: var(--sand); border-color: rgba(205, 182, 140, .45); }
 .badge.st-compacting { color: var(--violet); border-color: rgba(196, 169, 220, .45); }
 .badge.warn, .badge.st-interrupted { color: var(--gold); border-color: rgba(224, 201, 150, .4); }
 .badge.st-asleep { color: var(--violet); border-color: rgba(196, 169, 220, .45); }

@@ -253,7 +253,9 @@
     target = { ...preset, intensity: options.intensity ?? 1 };
     mood.dark = !!preset.dark;
     agentCount = Math.max(0, Math.min(MAX_AGENTS, options.agents | 0));
-    if (!running) {
+    // freeze : la cible suit sans repaint (fond figé — reprise sur une
+    // humeur à jour à la réactivation, pas de redraw sur rendu statique).
+    if (!running && !options.freeze) {
       snapToTarget();
       draw();
     }

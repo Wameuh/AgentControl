@@ -18,10 +18,11 @@ const mesh = (window as {
   };
 }).MeshBackground;
 export const bgMood = () => (document.documentElement.classList.contains("light") ? "paper" : "sand");
-// Fond figé (« Fond animé » off) : les humeurs dynamiques (compte d'agents)
-// sont des no-ops — pas de redraw sur un rendu volontairement statique.
+// Fond figé (« Fond animé » off) : pas de repaint — mais la cible de mood
+// suit quand même (freeze) pour que la réactivation reparte à jour.
 export const meshSetMood = (o: object) => {
-  if (mesh?.isAnimated() !== false) mesh?.setMood(bgMood(), o);
+  const freeze = mesh?.isAnimated() === false;
+  mesh?.setMood(bgMood(), freeze ? { ...o, freeze } : o);
 };
 
 export function applyTheme(name: "dark" | "light") {
@@ -47,9 +48,8 @@ export function applyAccent(name: Accent) {
   localStorage.setItem("ac-accent", name);
 }
 
-/** « Fond animé » : persiste la préférence et l'applique au rendu mesh. */
+/** « Fond animé » : setAnimated applique + persiste (propriétaire unique). */
 export function applyBgAnim(on: boolean) {
-  localStorage.setItem("ac-bganim", on ? "1" : "0");
   mesh?.setAnimated(on);
 }
 
