@@ -108,6 +108,32 @@ npx tauri build    # binaire natif
 Connexion SSH : type « SSH », `user@serveur` — le client ouvre
 `ssh -N -L <port>:127.0.0.1:7331` automatiquement (clés/agent ssh standard).
 
+### macOS
+
+`.dmg` arm64 dans l'artifact `agentcontrol-client-macos` (releases et
+builds de PR) : ouvrir le dmg, glisser `AgentControl.app` dans
+`/Applications` (ou `~/Applications`).
+
+**App non signée** — le compte Apple Developer (certificat +
+notarisation `notarytool`) est une étape prévue mais pas encore en
+place : au premier lancement Gatekeeper bloque → clic droit sur l'app →
+**Ouvrir**, ou :
+
+```bash
+xattr -dr com.apple.quarantine /Applications/AgentControl.app
+```
+
+- **Update in-app** : le chip « ⬆ vX » / le dialogue « client périmé »
+  télécharge le `.dmg` de la release, remplace le `.app` et relance —
+  sans quarantine à lever (téléchargement direct, hors navigateur).
+- **Raccourcis** : `Cmd` remplace `Ctrl` (Cmd+Entrée = envoi forcé,
+  Cmd+S = enregistrer le fichier, Cmd+F = recherche).
+- **Fullscreen Spaces (⌃⌘F)** : indisponible sur fenêtre borderless
+  (decorations custom) — le bouton maximize couvre l'écran à la place.
+- Le canal rc suit la même limite que Windows : l'artefact rc
+  s'identifie `X.Y.Z` (CFBundleVersion exige du numérique) → pas de
+  chaîne auto-update rc→rc+1, réinstallation manuelle.
+
 ## Test CLI (acctl)
 
 ```bash

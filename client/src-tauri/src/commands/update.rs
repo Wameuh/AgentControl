@@ -136,7 +136,7 @@ pub(crate) async fn update_client(_tag: String) -> Result<(), String> {
 
 /// Update en un clic : télécharge le .deb de la release via l'API REST et
 /// l'installe (pkexec demande le mot de passe), puis relance l'app.
-#[cfg(all(not(target_os = "android"), not(target_os = "windows")))]
+#[cfg(target_os = "linux")]
 #[tauri::command]
 pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     let deb = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
@@ -190,6 +190,125 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     if let Ok(exe) = std::env::current_exe() {
         let _ = std::process::Command::new(exe).spawn();
     }
+    std::process::exit(0);
+}
+
+/// Update en un clic (macOS) : télécharge le .dmg de la release, le monte
+/// puis remplace le .app courant (rename atomique + ditto, restauration du
+/// backup si la copie échoue) et relance — équivalent d'une install
+/// manuelle. Pas de quarantine à lever : le téléchargement hors navigateur
+/// ne pose pas l'attribut. Hors bundle .app (binaire nu, dev) ou dossier
+/// d'install non inscriptible → Err → le frontend ouvre la page releases.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub(crate) async fn update_client(tag: String) -> Result<(), String> {
+    // <bundle>.app/Contents/MacOS/<exe> — le bundle courant est la cible.
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let app: PathBuf = exe
+        .ancestors()
+        .find(|p| p.extension().is_some_and(|e| e == "app"))
+        .ok_or("hors bundle .app — update manuelle via la page releases")?
+        .to_path_buf();
+    tokio::task::spawn_blocking({
+        let app = app.clone();
+        move || -> Result<(), String> {
+            // Tag exact d'abord (les rc sont des prereleases — latest
+            // renverrait la STABLE à la place), latest en repli.
+            let rel = gh_get(&format!(
+                "https://api.github.com/repos/Wameuh/AgentControl/releases/tags/v{tag}"
+            ))
+            .or_else(|_| {
+                gh_get("https://api.github.com/repos/Wameuh/AgentControl/releases/latest")
+            })?;
+            let arch = if cfg!(target_arch = "aarch64") {
+                "aarch64"
+            } else {
+                "x86_64"
+            };
+            let url = rel["assets"]
+                .as_array()
+                .and_then(|a| {
+                    a.iter().find_map(|x| {
+                        let n = x["name"].as_str().unwrap_or("");
+                        if n.ends_with(".dmg") && n.contains(arch) {
+                            x["browser_download_url"].as_str().map(String::from)
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .context("pas de .dmg dans la release")
+                .map_err(|e| e.to_string())?;
+            let dir = std::env::temp_dir().join("agentcontrol-update");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let dmg = dir.join("agentcontrol.dmg");
+            let resp = ureq::get(&url)
+                .set("User-Agent", "agentcontrol-updater")
+                .call()
+                .map_err(|e| e.to_string())?;
+            let mut r = resp.into_reader();
+            let mut f = std::fs::File::create(&dmg).map_err(|e| e.to_string())?;
+            std::io::copy(&mut r, &mut f).map_err(|e| e.to_string())?;
+            let run = |cmd: &mut std::process::Command| -> Result<(), String> {
+                let st = cmd.status().map_err(|e| e.to_string())?;
+                if st.success() {
+                    Ok(())
+                } else {
+                    Err(format!("{:?} → {st}", cmd.get_program()))
+                }
+            };
+            // Montage read-only sur un point de montage privé (pas de
+            // nom de volume à deviner, pas de fenêtre Finder).
+            let mnt = dir.join("mnt");
+            std::fs::create_dir_all(&mnt).map_err(|e| e.to_string())?;
+            let attach = run(std::process::Command::new("hdiutil")
+                .args(["attach", "-nobrowse", "-readonly", "-mountpoint"])
+                .arg(&mnt)
+                .arg(&dmg));
+            // Swap protégé par detach systématique : rename de l'ancien
+            // bundle (atomique, même volume) puis ditto du neuf —
+            // l'ancien est restauré si la copie échoue.
+            let res = attach.and_then(|()| -> Result<(), String> {
+                let src = std::fs::read_dir(&mnt)
+                    .map_err(|e| e.to_string())?
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .find(|p| p.extension().is_some_and(|e| e == "app"))
+                    .ok_or("pas de .app dans le dmg")?;
+                let old = app.with_extension("app.old");
+                let _ = std::fs::remove_dir_all(&old);
+                std::fs::rename(&app, &old)
+                    .map_err(|e| format!("{} non remplaçable: {e}", app.display()))?;
+                if let Err(e) = run(std::process::Command::new("ditto").arg(&src).arg(&app)) {
+                    let _ = std::fs::remove_dir_all(&app);
+                    let _ = std::fs::rename(&old, &app);
+                    return Err(e);
+                }
+                let _ = std::fs::remove_dir_all(&old);
+                Ok(())
+            });
+            let _ = std::process::Command::new("hdiutil")
+                .args(["detach", "-quiet"])
+                .arg(&mnt)
+                .status();
+            let _ = std::fs::remove_dir_all(&dir);
+            res
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    // Défensif : un dmg récupéré via navigateur propagerait quarantine
+    // via ditto — strip ignoré si l'attribut est absent (cas nominal).
+    let _ = std::process::Command::new("xattr")
+        .args(["-dr", "com.apple.quarantine"])
+        .arg(&app)
+        .status();
+    // -n force une nouvelle instance : l'actuelle n'est pas encore morte
+    // quand open s'exécute (simple `open` ne ferait que l'activer).
+    let _ = std::process::Command::new("open")
+        .arg("-n")
+        .arg(&app)
+        .spawn();
     std::process::exit(0);
 }
 

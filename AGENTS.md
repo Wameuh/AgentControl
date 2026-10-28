@@ -146,10 +146,11 @@ PAT déclenche `build.yml` qui publie une **prerelease GitHub** (jamais
 marquée `latest`). Le build rc **injecte le suffixe `-rc.k` dans les
 fichiers de version** (non commité — le tag pointe le commit propre
 X.Y.Z) → le binaire s'identifie `X.Y.Z-rc.k`, et la finale `X.Y.Z` est
-proposée en update ensuite (semver : rc < stable). Windows exclu de
-l'injection (MSI/NSIS exigent du numérique) — conséquence : un artefact
-rc Windows s'identifie `X.Y.Z` → pas de chemin auto-update vers rc.k+1
-ni vers la finale, réinstall manuelle. Pour installer la rc depuis
+proposée en update ensuite (semver : rc < stable). Windows et macOS
+exclus de l'injection (MSI/NSIS et CFBundleVersion exigent du
+numérique) — conséquence : un artefact rc Windows/macOS s'identifie
+`X.Y.Z` → pas de chemin auto-update vers rc.k+1 ni vers la finale,
+réinstall manuelle. Pour installer la rc depuis
 l'app : canal rc opt-in dans les paramètres → la sonde passe de
 `releases/latest` (qui exclut les prereleases) à la liste `/releases`
 + max semver. Au merge, `release-on-merge` nettoie les releases+tags
@@ -207,7 +208,8 @@ gh run view <id> --log-failed   # si failure
 ```
 
 Le workflow `.github/workflows/build.yml` build : daemon x86_64+aarch64,
-client Tauri Ubuntu+Windows, et publie une release sur les tags `v*`.
+client Tauri Ubuntu+Windows+macOS (dmg arm64), APK Android, et publie
+une release sur les tags `v*`.
 
 ## Version automatique (mots-clés de commit)
 

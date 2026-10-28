@@ -7,13 +7,15 @@ use tauri::State;
 
 use crate::state::AppState;
 
-/// "android" | "windows" | "linux" — pour les gates frontend.
+/// "android" | "windows" | "macos" | "linux" — pour les gates frontend.
 #[tauri::command]
 pub(crate) fn platform() -> &'static str {
     if cfg!(target_os = "android") {
         "android"
     } else if cfg!(windows) {
         "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
     } else {
         "linux"
     }
