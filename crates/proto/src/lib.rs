@@ -545,6 +545,20 @@ pub enum ReqKind {
         session: String,
         path: String,
     },
+    /// Recherche récursive de fichiers par nom dans le workspace
+    /// (sous-chaîne, insensible à la casse). `path` = sous-arbre de départ
+    /// ("" = racine), borné au cwd. Renvoie {matches: [{path, dir, size}],
+    /// truncated, scanned} — `truncated` si la limite de résultats ou
+    /// d'entrées scannées est atteinte (gros node_modules…). Les liens
+    /// symboliques sont listés mais jamais descendus.
+    FindFiles {
+        session: String,
+        #[serde(default)]
+        path: String,
+        query: String,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
     /// Télécharge un fichier ou dossier du workspace, en tranches base64.
     /// `limit` = 0 → métadonnées seules {name, dir, size} ; sinon renvoie
     /// {name, dir, total, offset, data(b64)}. Un dossier est zippé côté
@@ -716,6 +730,7 @@ impl ReqKind {
             Self::ReadFile { .. } => "read_file",
             Self::ListDir { .. } => "list_dir",
             Self::DeletePath { .. } => "delete_path",
+            Self::FindFiles { .. } => "find_files",
             Self::DownloadPath { .. } => "download_path",
             Self::QueueList { .. } => "queue_list",
             Self::QueueEdit { .. } => "queue_edit",

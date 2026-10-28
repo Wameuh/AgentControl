@@ -5,6 +5,7 @@
 use super::*;
 
 use crate::journal;
+use std::path::Path;
 
 impl Daemon {
     pub(super) async fn h_read_file(self: &Arc<Self>, session: String, path: String, binary: bool, offset: u64, limit: Option<u64>) -> Result<Value> {
@@ -88,6 +89,23 @@ impl Daemon {
                     "truncated": truncated,
                 }))
     }
+    pub(super) async fn h_find_files(self: &Arc<Self>, session: String, path: String, query: String, limit: Option<u32>) -> Result<Value> {
+                let s = self.get_session(&session).await?;
+                let root = resolve_in_cwd(&s, &path)?;
+                if !root.is_dir() {
+                    anyhow::bail!("pas un dossier: {path}");
+                }
+                let q = query.to_lowercase();
+                if q.is_empty() {
+                    return Ok(json!({"matches": [], "truncated": false, "scanned": 0}));
+                }
+                let cwd = resolve_in_cwd(&s, "")?;
+                let limit = limit.unwrap_or(200).clamp(1, 1000) as usize;
+                // Walk bloquant (read_dir récursif) → spawn_blocking, borné.
+                tokio::task::spawn_blocking(move || find_files(&cwd, &root, &q, limit))
+                    .await
+                    .context("find task")?
+    }
     pub(super) async fn h_delete_path(self: &Arc<Self>, session: String, path: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
                 let p = resolve_in_cwd(&s, &path)?;
@@ -128,6 +146,62 @@ fn resolve_in_cwd(s: &Session, path: &str) -> Result<PathBuf> {
         anyhow::bail!("hors du workspace: {path}");
     }
     Ok(p)
+}
+
+/// Plafond d'entrées parcourues par find_files — un workspace peut
+/// contenir des centaines de milliers de fichiers (node_modules, .git) ;
+/// au-delà on rend `truncated` plutôt que de scanner indéfiniment.
+const FIND_MAX_SCANNED: usize = 100_000;
+
+/// Parcours BFS de `root` : entrées dont le nom contient `q` (déjà
+/// lowercasé). `path` renvoyé relatif au cwd (séparateurs `/`). Les liens
+/// symboliques matchent par leur nom mais ne sont jamais descendus (pas
+/// de boucle, pas de sortie du workspace — resolve_in_cwd a déjà borné
+/// la racine). Ordre BFS = résultats peu profonds d'abord.
+fn find_files(cwd: &Path, root: &Path, q: &str, limit: usize) -> Result<Value> {
+    let mut matches: Vec<Value> = Vec::new();
+    let mut queue = std::collections::VecDeque::from([root.to_path_buf()]);
+    let mut scanned = 0usize;
+    let mut truncated = false;
+    'walk: while let Some(dir) = queue.pop_front() {
+        let rd = match std::fs::read_dir(&dir) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("find: skip {}: {e}", dir.display());
+                continue;
+            }
+        };
+        for e in rd.flatten() {
+            scanned += 1;
+            if scanned > FIND_MAX_SCANNED || matches.len() >= limit {
+                truncated = true;
+                break 'walk;
+            }
+            let ft = match e.file_type() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let name = e.file_name().to_string_lossy().into_owned();
+            let p = e.path();
+            if name.to_lowercase().contains(q) {
+                let rel = p
+                    .strip_prefix(cwd)
+                    .unwrap_or(&p)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+                matches.push(json!({"path": rel, "dir": ft.is_dir(), "size": size}));
+            }
+            if ft.is_dir() {
+                queue.push_back(p);
+            }
+        }
+    }
+    Ok(json!({
+        "matches": matches,
+        "truncated": truncated,
+        "scanned": scanned,
+    }))
 }
 
 /// Taille max d'une tranche download (le base64 enfle ~×1,34 sur le fil).

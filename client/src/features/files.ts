@@ -37,6 +37,9 @@ function stopVideo() {
 export class FileExplorer {
   private ctx = $("fctx");
   private treeOpen = false;
+  /** cwd absolu de la session (rempli par loadTreeRoot) — sert à
+   *  reconstruire le chemin absolu des résultats de recherche. */
+  private treeRootDir = "";
   private deps = {
     /** Ligne de progression de téléchargement dans le fil. */
     sysline: (_text: string, _ic?: IconName): HTMLElement => document.createElement("div"),
@@ -48,7 +51,10 @@ export class FileExplorer {
 
   /** L'arbre suit le workspace de la session nouvellement ouverte. */
   onSessionOpened() {
-    if (this.treeOpen) void this.loadTreeRoot();
+    if (this.treeOpen) {
+      this.clearSearch();
+      void this.loadTreeRoot();
+    }
   }
 
   async openFilePanel(path: string) {
@@ -135,6 +141,7 @@ export class FileExplorer {
     $("file-viewer").classList.remove("open");
     nav.close("files");
     $("file-panel").hidden = true;
+    this.clearSearch();
   }
 
   /** Nœud de l'arbre : dossier (pliable) ou fichier (ouvre le viewer). */
@@ -146,7 +153,7 @@ export class FileExplorer {
     d.dataset.abs = abs;
     d.innerHTML =
       `<span class="farrow">${en.dir ? "\u25b8" : ""}</span>` +
-      `<span class="fico">${en.dir ? "\u{1f4c1}" : "\u{1f4c4}"}</span>` +
+      `<span class="fico">${icon(en.dir ? "folder" : "file")}</span>` +
       `<span class="fname">${esc(name)}</span>` +
       (en.dir ? "" : `<span class="fsize">${fmtSize(en.size)}</span>`);
     d.title = abs;
@@ -169,6 +176,15 @@ export class FileExplorer {
       arrow.textContent = "\u25b8";
       return;
     }
+    await this.expandDir(el);
+  }
+
+  /** Charge les enfants d'un dossier (lazy) et renvoie la boîte `.fchildren`
+   *  — ou celle déjà ouverte. null si le nœud a été détaché entre-temps. */
+  private async expandDir(el: HTMLElement): Promise<HTMLElement | null> {
+    const next = el.nextElementSibling;
+    if (next?.classList.contains("fchildren")) return next as HTMLElement;
+    const arrow = el.querySelector<HTMLElement>(".farrow")!;
     const rel = el.dataset.rel ?? "";
     arrow.textContent = "…";
     const box = document.createElement("div");
@@ -189,10 +205,10 @@ export class FileExplorer {
     } catch (e) {
       box.innerHTML = `<div class="ferr">${esc(String(e))}</div>`;
     }
-    if (el.isConnected) {
-      el.after(box);
-      arrow.textContent = "\u25be";
-    }
+    if (!el.isConnected) return null;
+    el.after(box);
+    arrow.textContent = "\u25be";
+    return box;
   }
 
   /** Racine = cwd canonique de la session (renvoyé par list_dir ""). */
@@ -207,8 +223,9 @@ export class FileExplorer {
       });
       const hd = document.createElement("div");
       hd.className = "froot";
-      hd.innerHTML = `<span class="fico">\u{1f4c1}</span><span class="fname">${esc(r.dir)}</span>`;
+      hd.innerHTML = `<span class="fico">${icon("folder")}</span><span class="fname">${esc(r.dir)}</span>`;
       hd.title = r.dir;
+      this.treeRootDir = r.dir;
       tree.appendChild(hd);
       for (const en of r.entries) {
         tree.appendChild(this.treeNode(en.name, en.name, en, 0, `${r.dir}/${en.name}`));
@@ -223,9 +240,148 @@ export class FileExplorer {
 
   private setTreeVisible(v: boolean) {
     this.treeOpen = v;
-    $("file-tree").hidden = !v;
+    $("ft-side").hidden = !v;
     $("btn-tree-refresh").hidden = !v;
+    this.clearSearch();
     if (v && !$("file-panel").hidden) void this.loadTreeRoot();
+  }
+
+  // -- Recherche par nom de fichier (find_files démon) -----------------------
+
+  private searchSeq = 0;
+  private searchTimer = 0;
+
+  /** Debounce la recherche à la frappe. */
+  private onSearchInput() {
+    window.clearTimeout(this.searchTimer);
+    this.searchTimer = window.setTimeout(() => void this.runSearch(), 250);
+  }
+
+  /** Vide la recherche et rend sa place à l'arbre (annule aussi la
+   *  requête en vol via searchSeq). */
+  private clearSearch() {
+    window.clearTimeout(this.searchTimer);
+    this.searchSeq++;
+    const q = $("ft-q") as HTMLInputElement;
+    if (q.value) q.value = "";
+    $("file-hits").hidden = true;
+    $("file-hits").innerHTML = "";
+    $("file-tree").hidden = false;
+  }
+
+  /** Recherche récursive côté démon ; repli sur le filtrage local des
+   *  dossiers déjà ouverts si le démon ne connaît pas find_files. */
+  private async runSearch() {
+    const q = ($("ft-q") as HTMLInputElement).value.trim();
+    const seq = ++this.searchSeq;
+    if (!q) {
+      $("file-hits").hidden = true;
+      $("file-tree").hidden = false;
+      return;
+    }
+    if (!app.current) return;
+    const sid = app.current.id;
+    $("file-tree").hidden = true;
+    $("file-hits").hidden = false;
+    try {
+      const r = await call<{
+        matches: { path: string; dir: boolean; size: number }[];
+        truncated: boolean;
+      }>("find_files", { session: sid, query: q });
+      if (seq !== this.searchSeq || app.current?.id !== sid) return;
+      this.renderHits(r.matches, r.truncated);
+    } catch (e) {
+      if (seq !== this.searchSeq || app.current?.id !== sid) return;
+      // Démon sans find_files → erreur « parse: unknown variant …» ;
+      // client hybride sans le bras req_from → « méthode inconnue ».
+      // Volontairement étroit : « session inconnue » etc. ne doivent
+      // pas tomber dans le repli.
+      if (/unknown variant|méthode inconnue/i.test(String(e))) {
+        this.localSearch(q.toLowerCase());
+      } else {
+        $("file-hits").innerHTML = `<div class="ferr">${esc(String(e))}</div>`;
+      }
+    }
+  }
+
+  /** Rendu des résultats : clic fichier → viewer, clic dossier → déplie
+   *  l'arbre jusqu'au nœud. */
+  private renderHits(matches: { path: string; dir: boolean; size: number }[], truncated: boolean) {
+    const hits = $("file-hits");
+    hits.innerHTML = "";
+    for (const m of matches) hits.appendChild(this.hitNode(m.path, m.dir, fmtSize(m.size)));
+    if (!matches.length) {
+      hits.innerHTML = `<div class="fempty">${esc(t("file_search_none"))}</div>`;
+    } else if (truncated) {
+      hits.insertAdjacentHTML("beforeend", `<div class="fempty">${esc(t("file_search_trunc"))}</div>`);
+    }
+  }
+
+  private hitNode(rel: string, dir: boolean, sizeText: string): HTMLElement {
+    const name = rel.split("/").pop() ?? rel;
+    const parent = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
+    const d = document.createElement("div");
+    d.className = "fhit" + (dir ? " is-dir" : "") + (name.startsWith(".") ? " fdot" : "");
+    d.dataset.rel = rel;
+    d.dataset.abs = this.treeRootDir ? `${this.treeRootDir}/${rel}` : rel;
+    d.innerHTML =
+      `<span class="fico">${icon(dir ? "folder" : "file")}</span>` +
+      `<span class="fname">${esc(name)}</span>` +
+      `<span class="fhdir">${esc(parent)}</span>` +
+      (dir ? "" : `<span class="fsize">${esc(sizeText)}</span>`);
+    d.title = rel;
+    d.onclick = () => {
+      if (dir) void this.revealDir(rel);
+      else void this.openFilePanel(rel);
+    };
+    bindCtx(d, (x, y) => this.openFileCtx(x, y, d));
+    return d;
+  }
+
+  /** Vieux démon sans find_files : filtre les nœuds déjà chargés dans
+   *  l'arbre (dossiers ouverts seulement), avec un bandeau d'info. */
+  private localSearch(lq: string) {
+    const hits = $("file-hits");
+    hits.innerHTML = `<div class="fempty">${esc(t("file_search_local"))}</div>`;
+    for (const n of $("file-tree").querySelectorAll<HTMLElement>(".fnode")) {
+      const name = n.dataset.rel?.split("/").pop() ?? "";
+      if (!name.toLowerCase().includes(lq)) continue;
+      const isDir = n.classList.contains("is-dir");
+      const size = n.querySelector(".fsize")?.textContent ?? "";
+      hits.appendChild(this.hitNode(n.dataset.rel ?? name, isDir, size));
+    }
+  }
+
+  /** Déplie les ancêtres de `rel` dans l'arbre (chargement lazy niveau
+   *  par niveau), sélectionne le nœud et le rend visible. */
+  private async revealDir(rel: string) {
+    this.clearSearch();
+    const segs = rel.split("/");
+    let container: HTMLElement = $("file-tree");
+    for (let i = 0; i < segs.length; i++) {
+      const cur = segs.slice(0, i + 1).join("/");
+      let node: HTMLElement | null = null;
+      for (const ch of Array.from(container.children)) {
+        const h = ch as HTMLElement;
+        if (h.classList.contains("fnode") && h.dataset.rel === cur) {
+          node = h;
+          break;
+        }
+      }
+      if (!node) return; // renommé/supprimé entre-temps
+      if (i === segs.length - 1) {
+        for (const n of $("file-tree").querySelectorAll<HTMLElement>(".fnode.sel")) {
+          n.classList.remove("sel");
+        }
+        node.classList.add("sel");
+        node.scrollIntoView({ block: "nearest" });
+        return;
+      }
+      if (!node.classList.contains("is-dir")) return;
+      const box = await this.expandDir(node);
+      if (!box) return;
+      container = box;
+    }
   }
 
   private hideFileCtx() {
@@ -265,9 +421,16 @@ export class FileExplorer {
       this.hideFileCtx();
       void call("delete_path", { session: app.current!.id, path: rel })
         .then(() => {
-          const nx = el.nextElementSibling;
-          if (nx?.classList.contains("fchildren")) nx.remove();
-          el.remove();
+          // Le même chemin peut être rendu dans l'arbre ET dans les
+          // résultats de recherche — retirer les deux occurrences.
+          for (const host of [$("file-tree"), $("file-hits")]) {
+            for (const n of host.querySelectorAll<HTMLElement>(".fnode,.fhit")) {
+              if (n.dataset.rel !== rel) continue;
+              const nx = n.nextElementSibling;
+              if (nx?.classList.contains("fchildren")) nx.remove();
+              n.remove();
+            }
+          }
         })
         .catch((e) => showErr(String(e)));
     });
@@ -386,8 +549,19 @@ export class FileExplorer {
       }
     };
     // 🗂 dans le panneau : bascule juste la colonne arborescence
-    $("btn-tree").onclick = () => this.setTreeVisible($("file-tree").hidden);
+    $("btn-tree").onclick = () => this.setTreeVisible($("ft-side").hidden);
     $("btn-tree-refresh").onclick = () => void this.loadTreeRoot();
+
+    // Recherche par nom : debounce à la frappe, Échap efface (sans
+    // déclencher les raccourcis globaux).
+    const fq = $("ft-q");
+    fq.addEventListener("input", () => this.onSearchInput());
+    fq.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        this.clearSearch();
+      }
+    });
 
     // Le menu se ferme au clic ailleurs / Échap / scroll de l'arbre — mais un
     // clic DANS le menu ne doit pas le fermer avant l'action (delete armé).
@@ -397,5 +571,6 @@ export class FileExplorer {
       if (e.key === "Escape") this.hideFileCtx();
     });
     $("file-tree").addEventListener("scroll", () => this.hideFileCtx());
+    $("file-hits").addEventListener("scroll", () => this.hideFileCtx());
   }
 }
