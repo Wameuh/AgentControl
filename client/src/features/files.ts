@@ -72,6 +72,7 @@ interface CurFile {
   binary: boolean;          // sniffé binaire → vue seule, pas d'édition
   fetching: boolean;        // tranche réseau en vol
   done: boolean;            // loaded >= size
+  gen: number;              // ++ à chaque save → tranches en vol invalidées
 }
 
 export class FileExplorer {
@@ -84,6 +85,7 @@ export class FileExplorer {
   private editOn = false;
   private dirty = false;
   private cleanRes: ((ok: boolean) => void) | null = null;
+  private saving = false;
   private hlTimer: ReturnType<typeof setTimeout> | undefined;
   private numsTimer: ReturnType<typeof setTimeout> | undefined;
   private deps = {
@@ -176,7 +178,7 @@ export class FileExplorer {
         enc: opts?.enc ?? defaultEncoding(),
         bom: false, crlf: false, size: 0, mtimeMs: 0, loaded: 0,
         decoder: null, chunks: [], binary: false,
-        fetching: false, done: false,
+        fetching: false, done: false, gen: 0,
       };
       this.cur = cur;
       this.syncEncSelect();
@@ -214,6 +216,7 @@ export class FileExplorer {
     while (cur.fetching) await new Promise((r) => setTimeout(r, 30));
     if (this.cur !== cur || cur.done || cur.binary) return;
     cur.fetching = true;
+    const gen = cur.gen;
     try {
       const r = await call<{
         path: string; offset: number; size: number; data: string;
@@ -222,10 +225,12 @@ export class FileExplorer {
         session: cur.sid, conn: cur.conn, path: cur.rel,
         offset: cur.loaded, limit: PAGE,
       });
-      if (this.cur !== cur) return;
+      // Tranche de l'ANCIEN fichier : saveEdit a bumpé gen pendant le vol
+      // → on jette, le prochain fetch repart du nouveau curseur.
+      if (this.cur !== cur || cur.gen !== gen) return;
       const bytes = b64decode(r.data ?? "");
-      // Course avec saveEdit : la tranche attendue n'est plus à cet offset
-      // → on la jette, le prochain fetch repart du nouveau curseur.
+      // Course avec un autre changement de curseur : la tranche attendue
+      // n'est plus à cet offset → on la jette pareil.
       if (r.offset !== cur.loaded) return;
       cur.size = r.size;
       if (r.mtime_ms != null) cur.mtimeMs = r.mtime_ms;
@@ -428,7 +433,13 @@ export class FileExplorer {
   private refreshNums() {
     const ta = $("file-edit") as HTMLTextAreaElement;
     const nums = $("file-nums");
-    const lines = ta.value === "" ? 0 : ta.value.split("\n").length;
+    // Comptage sans split : au-delà du cap on sort tôt (pas d'allocation
+    // de tableau de lignes sur un fichier énorme).
+    const v = ta.value;
+    let lines = v === "" ? 0 : 1;
+    for (let i = 0; i < v.length && lines <= NUMS_MAX; i++) {
+      if (v.charCodeAt(i) === 10) lines++;
+    }
     if (lines > NUMS_MAX) {
       nums.hidden = true;
       return;
@@ -452,7 +463,11 @@ export class FileExplorer {
    *  tout chargé pour sauver (le reliquat disque est conservé). */
   private async saveEdit(force = false) {
     const cur = this.cur;
-    if (!cur || !this.editOn) return;
+    if (!cur || !this.editOn || this.saving) return;
+    this.saving = true;
+    // Invalide les tranches réseau en vol : elles portent du contenu de
+    // l'ancien fichier et souilleraient le buffer édité.
+    cur.gen++;
     const ta = $("file-edit") as HTMLTextAreaElement;
     // Le textarea normalise les fins de ligne en \n — on ré-écrit \r\n
     // si le fichier était CRLF (sinon diffs parasites sur tout le fichier).
@@ -474,6 +489,9 @@ export class FileExplorer {
       cur.size = r.size;
       cur.loaded = bytes.length;
       cur.chunks = [ta.value];
+      // Frontière octets neuve : une éventuelle séquence multi-octets à
+      // cheval sur l'ancienne frontière ne doit pas se rejouer.
+      cur.decoder = null;
       this.dirty = false;
       $("fv-conflict").hidden = true;
       saved = true;
@@ -484,6 +502,7 @@ export class FileExplorer {
         showErr(String(e));
       }
     } finally {
+      this.saving = false;
       this.updateStatus();
       // « ✓ enregistré » posé après updateStatus (il réécrit le statut).
       if (saved) $("fv-status").textContent = `✓ ${t("fv_saved")}`;

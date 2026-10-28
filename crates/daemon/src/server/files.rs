@@ -288,12 +288,30 @@ fn mtime_ms(p: &std::path::Path) -> Option<u64> {
 
 /// Remplace [offset, offset+delete_len) par `data` via un fichier .part
 /// puis renommage atomique (le mode unix de l'original est préservé).
+/// Le temporaire porte un nom unique `.<nom>.part-<pid>-<seq>` et est
+/// ouvert en `create_new` (O_EXCL) : un `foo.part` symlink préexistant
+/// ne peut pas faire écrire hors du workspace, et un vrai `foo.part`
+/// utilisateur n'est jamais tronqué.
 fn splice_write(p: &std::path::Path, offset: u64, delete_len: u64, data: &[u8]) -> Result<()> {
     use std::io::{Read, Seek, SeekFrom, Write};
-    let tmp = p.with_extension("part");
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let name = p
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("nom de fichier invalide"))?
+        .to_string_lossy();
+    let tmp = p.with_file_name(format!(
+        ".{name}.part-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    ));
     let perms = std::fs::metadata(p).ok().map(|m| m.permissions());
     let res = (|| -> Result<()> {
-        let mut out = std::fs::File::create(&tmp)?;
+        // O_EXCL : toute entrée existante — symlink compris — refuse
+        // l'ouverture (jamais de suivi de lien, jamais d'écrasement).
+        let mut out = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
         if let Ok(mut f) = std::fs::File::open(p) {
             // (&mut f) est lui-même Read — `take` consomme en bornant à
             // `offset` octets (by_ref serait ambigu : File est Read+Write).
