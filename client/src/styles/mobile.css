@@ -90,7 +90,7 @@ body.android #session-list .sess.sub {
 body.android #session-list .sess.sub .dot { width: 14px; height: 14px; }
 body.android #session-list .sess.sub::before { margin-top: -6px; height: 14px; }
 body.android #session-list .sess .sess-del {
-  min-width: 40px; min-height: 40px; font-size: 15px;
+  min-width: 44px; min-height: 44px; font-size: 15px;
 }
 /* Lisibilité : contenu lu ≥ 12px — badges d'état/compteurs ornementaux
    (.badge.st-*, #sv-count, .steer-badge, .pr-st, .sr-type, .perm-kind,
@@ -101,7 +101,7 @@ body.android .grp-head .grp-name, body.android .grp-sub .grp-name,
 body.android .grp-add-lbl { font-size: 12px; }
 body.android #btn-new-session { min-height: 46px; font-size: 15px; }
 /* Sélecteur de vue + liste PR : cibles tactiles ≥44px */
-body.android #side-view .sv { min-height: 42px; font-size: 14px; }
+body.android #side-view .sv { min-height: 44px; font-size: 14px; }
 body.android #side-view .sv .ic { width: 15px; height: 15px; }
 body.android #pr-list .pr { padding: 11px 10px; }
 body.android #pr-list .pr .pr-t { font-size: 14px; }
@@ -110,7 +110,7 @@ body.android #pr-list .pr .pr-sub { font-size: 12px; margin-top: 6px; }
 body.android #pr-list .pr .pr-num,
 body.android #pr-list .pr .pr-branch,
 body.android #pr-list .pr .pr-repo-lbl { font-size: 12px; }
-body.android #pr-list .pr .pr-sess { min-height: 40px; font-size: 12px; }
+body.android #pr-list .pr .pr-sess { min-height: 44px; font-size: 12px; }
 body.android #pr-list .pr-note { font-size: 12px; padding: 8px 10px; }
 body.android .pr-repo { font-size: 12px; }
 body.android .pr-repo .pr-n { font-size: 12px; }
@@ -136,12 +136,9 @@ body.android dialog::backdrop { background: rgba(0, 0, 0, .6); }
 body.android dialog h3 { font-size: 18px; }
 body.android dialog form { gap: 13px; }
 body.android dialog label { font-size: 15px; }
-body.android dialog input, body.android dialog select,
-body.android dialog textarea {
+body.android dialog input:not([type="checkbox"]),
+body.android dialog select, body.android dialog textarea {
   font-size: 16px; min-height: 46px; padding: 10px 12px;
-}
-body.android dialog input[type="checkbox"] {
-  min-height: 0; width: 24px; height: 24px; accent-color: var(--accent);
 }
 body.android dialog textarea { min-height: 90px; }
 /* Le select du log-bar est plus spécifique (ID) que la règle dialogues :
@@ -187,7 +184,7 @@ body.android #ft-side:not([hidden]) { flex: 1; width: auto; }
 body.android #ft-bar { padding: 8px 10px; }
 body.android #ft-ico { left: 18px; }
 body.android #ft-ico .ic { width: 15px; height: 15px; }
-body.android #ft-q { font-size: 15px; min-height: 40px; padding-left: 30px; }
+body.android #ft-q { font-size: 15px; min-height: 44px; padding-left: 30px; }
 body.android .fnode { padding: 9px 8px 9px 0; font-size: 15px; min-height: 44px; }
 body.android .fhit { padding: 9px 8px; font-size: 15px; min-height: 44px; }
 body.android .fhit .fhdir, body.android .fhit .fsize { font-size: 12px; }
@@ -220,7 +217,7 @@ body.android #fv-name {
   font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 body.android #fv-bar button { min-width: 44px; min-height: 44px; }
-body.android #fv-bar select { min-height: 36px; font-size: 13px; }
+body.android #fv-bar select { min-height: 44px; font-size: 13px; }
 body.android #fv-enc { max-width: 96px; }
 /* Save épinglé au bord droit : visible même si la barre défile. */
 body.android #fv-save {
@@ -230,7 +227,7 @@ body.android #file-view { flex: 1; overflow: auto; font-size: 13px; margin: 0; p
 body.android #file-hl, body.android #file-edit { font-size: 13px; padding: 12px; }
 body.android #file-nums { font-size: 13px; }
 body.android #fv-conflict { font-size: 13px; padding: 8px 12px; }
-body.android #fv-conflict button { min-height: 40px; padding: 6px 12px; font-size: 13px; }
+body.android #fv-conflict button { min-height: 44px; padding: 6px 12px; font-size: 13px; }
 /* Menus contextuels (fichiers, sessions) → action sheet ancré bas. */
 body.android #fctx, body.android #sctx {
   position: fixed; left: 0 !important; right: 0; bottom: 0; top: auto !important;
@@ -245,8 +242,9 @@ body.android #fctx .fctx-path, body.android #sctx .fctx-path { padding: 10px 16p
 body.android #chat-header {
   flex-wrap: wrap; row-gap: 6px; min-height: 48px; padding: 6px 8px;
 }
-body.android #chat-header button, body.android #chat-header select {
-  min-height: 42px; font-size: 14px; padding: 6px 12px;
+body.android #chat-header button, body.android #chat-header select,
+body.android #chat-header input {
+  min-height: 44px; font-size: 14px; padding: 6px 12px;
 }
 body.android #chat-header #btn-first,
 body.android #chat-header #btn-term,
@@ -254,11 +252,11 @@ body.android #chat-header #btn-files,
 body.android #chat-header #btn-refresh,
 body.android #chat-header #btn-resume,
 body.android #chat-header #btn-search { display: none !important; }
-body.android #chat-more { display: inline-block; font-size: 20px; min-width: 42px; }
+body.android #chat-more { display: inline-block; font-size: 20px; min-width: 44px; min-height: 44px; }
 body.android #search-bar { padding: 8px 10px; }
 body.android #search-input { font-size: 16px; min-height: 44px; }
-body.android #search-bar button { min-height: 44px; font-size: 15px; padding: 6px 12px; }
-body.android .sr-row { padding: 12px; font-size: 14px; }
+body.android #search-bar button { min-width: 44px; min-height: 44px; font-size: 15px; padding: 6px 12px; }
+body.android .sr-row { padding: 12px; font-size: 14px; min-height: 44px; }
 body.android .sr-ts { font-size: 12px; }
 body.android #chat-opts {
   flex: none; width: 100%; padding-bottom: 2px;
@@ -271,7 +269,83 @@ body.android #composer button { min-height: 46px; font-size: 15px; padding: 8px 
 body.android #input { font-size: 16px; min-height: 46px; }
 /* Pill « N lignes » : cible tactile correcte, alignée sur le coin champ */
 body.android #composer button#btn-expand {
-  min-height: 30px; font-size: 12px; padding: 3px 10px; top: 7px;
+  min-width: 44px; min-height: 44px; font-size: 12px; padding: 3px 10px; top: 1px;
+}
+/* ── Cibles tactiles ≥44px (audit Android) ────────────────────────────── */
+/* Chip update dans la titlebar (56px de haut — 44 tient sans la gonfler) */
+body.android .tb-update { min-height: 44px; }
+/* Fermeture de toast : ✕ gardé petit visuellement, boîte transparente 44px. */
+body.android .toast-x { min-width: 44px; min-height: 44px; padding: 0; }
+/* Boutons « + groupe » / « + agent » des headers de groupes : le texte
+   reste compact, la boîte (sans fond) monte à 44px → lignes ~50px. */
+body.android .grp-head .grp-add, body.android .grp-sub .grp-add {
+  min-height: 44px;
+}
+/* Racine de l'arbre fichiers */
+body.android .froot { min-height: 44px; }
+/* Filtre de sessions : champ pleine hauteur + croix d'effacement 44px
+   (boîte transparente, l'icône reste petite). */
+body.android #sess-filter input { min-height: 44px; font-size: 15px; padding-right: 46px; }
+body.android #sess-filter-clear { min-width: 44px; min-height: 44px; padding: 0; }
+/* Headers pliables des tool calls + boutons « voir plus » */
+body.android .tool-head { min-height: 44px; }
+body.android .btn-more { min-height: 44px; }
+/* Permissions / questions : actions et champ réponse */
+body.android .btn-allow, body.android .btn-reject { min-height: 44px; }
+body.android .q-input { min-height: 44px; font-size: 16px; }
+/* File de prompts : boutons icône ✏️/⬆/× (transparent → boîte 44px) */
+body.android .q-item button {
+  min-width: 44px; min-height: 44px; padding: 0; justify-content: center;
+}
+/* Autocomplete des slash-commands */
+body.android .ac-item { min-height: 44px; }
+/* Badge d'état cliquable (dead/failed → respawn) dans le chat header */
+body.android .badge.st-dead, body.android .badge.st-failed {
+  display: inline-flex; align-items: center; min-height: 44px;
+}
+/* Écran d'accueil */
+body.android #empty-cta { min-height: 44px; }
+/* Panneau paramètres (#settings-view — un panneau, pas un <dialog>) :
+   lignes et contrôles à 44px ; la croix de fermeture est carrée. */
+body.android .s-row { min-height: 44px; }
+body.android .s-row select { min-height: 44px; font-size: 15px; }
+body.android #settings-view button { min-height: 44px; }
+body.android #settings-close { min-width: 44px; }
+body.android #s-snd-vol { min-height: 44px; }
+/* Checkbox : vraie boîte 44px (cible mesurée), carré visuel ~26px dessiné
+   au centre — appearance:none rend les pseudo-éléments possibles dans la
+   WebView Chromium. --accent suivi → thèmes couleur OK. */
+body.android input[type="checkbox"] {
+  appearance: none; -webkit-appearance: none;
+  width: 44px; height: 44px; margin: 0; padding: 0; flex: none;
+  position: relative; border: 0; background: none;
+}
+body.android input[type="checkbox"]::before {
+  content: ""; position: absolute; inset: 9px;
+  border: 1.5px solid var(--line-strong); border-radius: 6px;
+  background: rgba(236, 230, 216, .06);
+}
+body.android input[type="checkbox"]:checked::before {
+  background: var(--accent); border-color: var(--accent);
+}
+body.android input[type="checkbox"]::after {
+  content: ""; position: absolute; left: 19px; top: 14px;
+  width: 5px; height: 11px;
+  border: solid transparent; border-width: 0 2.5px 2.5px 0;
+  transform: rotate(45deg);
+}
+body.android input[type="checkbox"]:checked::after {
+  border-color: var(--msg-user-fg);
+}
+body.android input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
+/* Boutons du panneau terminal (restart/hide) */
+body.android #term-head button { min-width: 44px; min-height: 44px; }
+/* Helper IME invisible d'xterm (opacity:0, posé au curseur) — pas une
+   cible mais l'audit le mesure ; ses dimensions sont inline → !important. */
+body.android .xterm-helper-textarea {
+  min-width: 44px !important; min-height: 44px !important;
 }
 body.android #statusbar { display: none; }
 body.android #btn-bottom {
