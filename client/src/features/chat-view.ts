@@ -358,7 +358,7 @@ export class ChatView {
     // Session affichée différente → la recherche se ferme : ses résultats
     // indexent le journal de l'ancienne session, pas celui de la nouvelle.
     if (app.current?.id !== prevId) this.deps.onSessionChanged();
-    if (app.current) $("chat-title").textContent = `${app.current.title} — ${app.current.agent}`;
+    this.setChatTitle();
     this.updateHeader();
     // L'écran d'accueil disparaît dès qu'une session est ouverte.
     $("empty-state").hidden = true;
@@ -392,7 +392,7 @@ export class ChatView {
     app.alive = info.alive;
     app.current = info.meta;
     if (!app.current.conn && connHint) app.current.conn = connHint;
-    $("chat-title").textContent = `${app.current.title} — ${app.current.agent}`;
+    this.setChatTitle();
     this.updateHeader();
 
     // Auto-resume : agent mort (ex. restart démon) → reprise silencieuse
@@ -572,6 +572,15 @@ export class ChatView {
       pct,
     });
     el.classList.toggle("ctx-hot", pct >= 80);
+  }
+
+  /** "titre — agent" dans le header. getElementById plutôt que $() : un
+   *  renommage inline en cours remplace #chat-title par #title-edit →
+   *  l'écriture est un no-op (done() réécrira via cette même méthode)
+   *  plutôt qu'un crash qui avorterait open() en plein milieu. */
+  setChatTitle() {
+    const tl = document.getElementById("chat-title");
+    if (tl && app.current) tl.textContent = `${app.current.title} — ${app.current.agent}`;
   }
 
   updateHeader() {

@@ -364,23 +364,29 @@ export class Composer {
     // ⟳ = vrai rechargement : le cache de conversation est ignoré.
     $("btn-refresh").onclick = () => app.current && this.chat.open(app.current.id, true);
 
-    // Double-clic sur le titre → renommage inline
+    // Double-clic sur le titre → renommage inline. La session est capturée
+    // au début : app.current peut changer pendant l'édition (clic sur une
+    // autre ligne → blur → done), et le RPC doit viser la session éditée.
     $("chat-title").addEventListener("dblclick", () => {
       if (!app.current) return;
+      const sess = app.current;
       const tl = $("chat-title");
       const inp = document.createElement("input");
       inp.id = "title-edit";
-      inp.value = app.current.title;
+      inp.value = sess.title;
       tl.replaceWith(inp);
       inp.focus();
       inp.select();
+      let finished = false;
       const done = async (save: boolean) => {
+        if (finished) return;
+        finished = true;
         const v = inp.value.trim();
-        inp.replaceWith(tl);
-        if (save && v && v !== app.current!.title) {
-          app.current!.title = v;
-          tl.textContent = v;
-          await call("rename_session", { session: app.current!.id, title: v })
+        if (inp.isConnected) inp.replaceWith(tl);
+        if (save && v && v !== sess.title) {
+          sess.title = v;
+          if (app.current?.id === sess.id) this.chat.setChatTitle();
+          await call("rename_session", { session: sess.id, title: v, conn: sess.conn })
             .catch((e) => showErr(String(e)));
           void this.refresh();
         }
