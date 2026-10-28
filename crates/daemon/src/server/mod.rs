@@ -4,7 +4,8 @@
 //! + blobs), peers.rs (agent↔agent), prs.rs (registre PR), misc.rs.
 
 mod cfg;
-mod files;
+/// Bornage workspace réutilisé par l'endpoint HTTP /media|/download.
+pub(crate) mod files;
 mod misc;
 mod peers;
 mod prs;
@@ -55,6 +56,9 @@ pub struct Daemon {
     >,
     /// Registre PR ↔ session (prs.json) — voir prs.rs.
     pub prs: Arc<PrRegistry>,
+    /// Surface web activée : {"bind": addr, "url": "http://…/?token=…"} —
+    /// renseigné par main après le bind, reflété dans daemon_status.
+    pub web: RwLock<Option<Value>>,
 }
 
 
@@ -78,6 +82,7 @@ impl Daemon {
             peer_rate: std::sync::Mutex::new(HashMap::new()),
             spawn_rate: std::sync::Mutex::new(HashMap::new()),
             prs: Arc::new(PrRegistry::open(&root)),
+            web: RwLock::new(None),
         });
         let mut resumable = Vec::new();
         let sdir = root.join("sessions");
@@ -255,7 +260,7 @@ impl Daemon {
         }
     }
 
-    async fn get_session(&self, id: &str) -> Result<Arc<Session>> {
+    pub(crate) async fn get_session(&self, id: &str) -> Result<Arc<Session>> {
         self.sessions
             .read()
             .await

@@ -5,7 +5,7 @@
 // Le rendu des events eux-mêmes est délégué à EventRenderer.
 // ---------------------------------------------------------------------------
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../core/bridge";
 import { $, esc, showErr } from "../core/dom";
 import { fmtTok } from "../core/format";
 import { call } from "../core/rpc";

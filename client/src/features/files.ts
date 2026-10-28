@@ -6,7 +6,8 @@
 // menu contextuel et téléchargement par tranches.
 // ---------------------------------------------------------------------------
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isWeb } from "../core/bridge";
+import { wsClient } from "../core/wsclient";
 import { save } from "@tauri-apps/plugin-dialog";
 import { appDataDir, downloadDir } from "@tauri-apps/api/path";
 import { $, copyText, esc, showErr } from "../core/dom";
@@ -33,9 +34,15 @@ import { bindCtx, hideMenu, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
 
 /** URL du schéma custom acvideo — forme imposée par plateforme :
- *  http://acvideo.localhost sous Windows/Android, acvideo:// ailleurs. */
+ *  http://acvideo.localhost sous Windows/Android, acvideo:// ailleurs.
+ *  En mode web : endpoint HTTP natif /media du démon (ranges réelles,
+ *  token en query — le navigateur ne peut pas poser de header sur <video>). */
 function videoUrl(path: string): string {
   const q = new URLSearchParams({ session: app.current?.id ?? "", path });
+  if (isWeb) {
+    q.set("token", wsClient.token() ?? "");
+    return `/media?${q}`;
+  }
   if (app.current?.conn) q.set("conn", app.current.conn);
   const base = isAndroid() || isWindows() ? "http://acvideo.localhost/" : "acvideo://localhost/";
   return `${base}?${q}`;
@@ -1080,6 +1087,19 @@ export class FileExplorer {
       return null;
     });
     if (!info) return;
+    if (isWeb) {
+      // Navigateur : téléchargement HTTP natif via /download — le
+      // navigateur gère dossier de destination, progression, reprise.
+      const q = new URLSearchParams({
+        session: sid, path: rel, token: wsClient.token() ?? "",
+      });
+      const a = document.createElement("a");
+      a.href = `/download?${q}`;
+      a.download = info.name;
+      a.click();
+      this.deps.sysline(t("dl_done_web", { name: info.name }), "check");
+      return;
+    }
     let dest: string | null = isAndroid()
       ? `${await downloadDir()}/AgentControl/${info.name}`
       : await save({ defaultPath: info.name, title: t("ctx_download") });

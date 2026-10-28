@@ -4,6 +4,16 @@
 # sans TLS/auth — tout le monde sur la machine pourrait piloter les agents.
 bind_tcp = "127.0.0.1:7331"
 
+# Interface web : le démon sert la même SPA que le client Tauri — sessions,
+# chat live (WebSocket), fichiers, terminal, téléchargements. Loopback
+# obligatoire : l'accès distant passe par un tunnel SSH
+# (`ssh -N -L <port local>:127.0.0.1:<bind_http> hôte`). Le token d'accès est
+# généré dans <root>/web.token (l'URL complète est donnée par `acctl status`).
+# bind_http = "127.0.0.1:7332"
+# Dossier des assets SPA — défaut : embarqués dans le binaire, puis
+# <root>/web, <exe>/web. Utile en dev (`client/dist`) ou install manuelle.
+# web_dir = "/chemin/vers/dist"
+
 # Reprise auto après un arrêt brutal (crash, SIGKILL, OOM) : les sessions
 # qui travaillaient sont relancées (session/load) et reçoivent un prompt
 # "continue please". Les sessions idle ne sont jamais relancées. Un arrêt

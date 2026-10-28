@@ -3,7 +3,7 @@
 // (mémoire/CPU du client, rafraîchie périodiquement).
 // ---------------------------------------------------------------------------
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isWeb } from "../core/bridge";
 import { gemSVG } from "../crystal";
 import { $ } from "../core/dom";
 
@@ -42,7 +42,11 @@ async function updateStatusbar() {
   try {
     const s = await invoke<{ rss_mb: number; cpu: number; rx_bps: number; tx_bps: number }>("sys_stats");
     const fmt = (b: number) => b >= 1_048_576 ? `${(b / 1_048_576).toFixed(1)} MB/s` : b >= 1024 ? `${(b / 1024).toFixed(0)} kB/s` : `${Math.round(b)} B/s`;
-    $("sb-stats").textContent = `mem ${Math.round(s.rss_mb)} MB · cpu ${s.cpu}% · ↓${fmt(s.rx_bps)} ↑${fmt(s.tx_bps)}`;
+    // Web : rss/cpu = métriques du process Tauri (0 en navigateur) — on
+    // n'affiche que le trafic de la WebSocket vers le démon.
+    $("sb-stats").textContent = isWeb
+      ? `↓${fmt(s.rx_bps)} ↑${fmt(s.tx_bps)}`
+      : `mem ${Math.round(s.rss_mb)} MB · cpu ${s.cpu}% · ↓${fmt(s.rx_bps)} ↑${fmt(s.tx_bps)}`;
   } catch { /* silencieux */ }
 }
 

@@ -2,7 +2,7 @@
 // Helpers DOM génériques
 // ---------------------------------------------------------------------------
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./bridge";
 
 export const $ = <T extends HTMLElement>(id: string) =>
   document.getElementById(id) as T;

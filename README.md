@@ -73,6 +73,17 @@ AGENTCONTROL_HOME=~/.agentcontrol ./agentcontrol-daemon
 Écoute : `~/.agentcontrol/daemon.sock` + `127.0.0.1:7331` (loopback → tunnel SSH).
 Agents configurés dans `~/.agentcontrol/config.toml` (voir `packaging/config.example.toml`).
 
+### Interface web (optionnelle)
+
+`bind_http = "127.0.0.1:7332"` dans `config.toml` : le démon sert la même
+SPA que le client Tauri — sessions, chat temps réel (WebSocket),
+explorateur/viewer de fichiers (ranges HTTP pour la vidéo), terminaux,
+téléchargements. Loopback uniquement ; l'accès distant se fait par tunnel :
+`ssh -N -L 7332:127.0.0.1:7332 hôte` puis `http://localhost:7332/?token=…`
+(token dans `~/.agentcontrol/web.token`, ou l'URL complète via
+`acctl status`). Les assets sont embarqués dans le binaire ; `web_dir`
+permet de surcharger (dev : `client/dist`).
+
 ### Agents supportés
 
 Tout agent parlant ACP sur stdio fonctionne ; chaque entrée `[agents.<id>]`

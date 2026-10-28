@@ -28,3 +28,5 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
 flate2 = "1"
 tar = "0.4"
+# Hash Sec-WebSocket-Accept du handshake WS (RFC 6455) — serveur web.
+sha1 = "0.11"
