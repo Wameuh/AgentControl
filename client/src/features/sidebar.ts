@@ -209,20 +209,28 @@ export class Sidebar {
     app.lastSessions = list;
     this.checkSpawns(list);
     // Un spawn tourne sans canal event (session non ouverte → pas de
-    // status_changed) → repoller tant qu'un "starting" reste, borné :
-    // un spawn bloqué ne doit pas poller indéfiniment (deadline armée à
-    // l'apparition du premier spawn, les events reprennent ensuite).
-    const spawning = list.some((s) => !s.offline && s.state === "starting");
-    if (spawning) {
-      if (!this.spawnPollEnd) this.spawnPollEnd = Date.now() + 180_000;
-      if (Date.now() < this.spawnPollEnd && this.spawnPoll === undefined) {
-        this.spawnPoll = window.setTimeout(() => {
-          this.spawnPoll = undefined;
-          void this.refresh();
-        }, 2500);
-      }
-    } else {
-      this.spawnPollEnd = 0;
+    // status_changed) → repoller tant qu'un "starting" reste dans son
+    // budget (3 min chacune — un spawn bloqué ne poll pas indéfiniment,
+    // mais un second spawn du même épisode ré-arme sa propre deadline).
+    const now = Date.now();
+    const seen = new Set<string>();
+    let spawning = false;
+    for (const s of list) {
+      if (s.offline || s.state !== "starting") continue;
+      const key = `${s.conn ?? "default"}:${s.id}`;
+      seen.add(key);
+      const t0 = this.startingSeen.get(key) ?? now;
+      this.startingSeen.set(key, t0);
+      if (now - t0 < 180_000) spawning = true;
+    }
+    for (const k of [...this.startingSeen.keys()]) {
+      if (!seen.has(k)) this.startingSeen.delete(k);
+    }
+    if (spawning && this.spawnPoll === undefined) {
+      this.spawnPoll = window.setTimeout(() => {
+        this.spawnPoll = undefined;
+        void this.refresh();
+      }, 2500);
     }
     // Vue « Repos » : croise les entrées du registre avec les sessions
     // fusionnées (cache offline inclus) + compteur sur l'onglet.
@@ -263,10 +271,11 @@ export class Sidebar {
     this.chat.updateEmptyState();
   }
 
-  /** Repoll interne tant qu'une session est "starting" (deadline bornée)
-   *  — spawn sans canal event : la session n'est pas forcément ouverte. */
+  /** Repoll interne tant qu'une session est "starting" (budget par
+   *  session) — spawn sans canal event : la session n'est pas forcément
+   *  ouverte. startingSeen = première apparition par conn:id. */
   private spawnPoll: number | undefined;
-  private spawnPollEnd = 0;
+  private startingSeen = new Map<string, number>();
 
   /** Issue des spawns lancés par ce client (app.spawnWatch) : échec
    *  (dead/interrupted) → toast ; état résolu ou TTL dépassé → fin de
@@ -657,6 +666,9 @@ export class Sidebar {
         return;
       }
       hideSessCtx();
+      // Kill volontaire d'une session en starting : pas un échec de
+      // spawn — retirer le watch pour ne pas toaster « n'a pas démarré ».
+      app.spawnWatch.delete(s.id);
       void call("kill_session", { session: s.id, conn: s.conn })
         .then(() => this.refresh())
         .catch((e) => showErr(String(e)));
@@ -813,6 +825,10 @@ export class Sidebar {
         this.chat.dropConv(s.id);
       }
       div.remove();
+      // Suppression volontaire : même garde que kill — pas un échec de
+      // spawn à notifier (checkSpawns l'oublierait de toute façon à la
+      // sortie de liste, mais autant ne pas toaster entre-temps).
+      app.spawnWatch.delete(s.id);
       void this.refresh();
       void call("delete_session", { session: s.id, conn: s.conn })
         .catch((er) => {

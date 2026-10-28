@@ -155,6 +155,7 @@ impl Daemon {
                                     meta.native_session_id.clone(),
                                     true,
                                     self.mcp_servers(&session),
+                                    None,
                                 )
                                 .await;
                         }
@@ -177,10 +178,11 @@ impl Daemon {
                                 meta.native_session_id.clone(),
                                 true,
                                 self.mcp_servers(&session),
+                                None,
                             )
                             .await
                         {
-                            Ok(()) => break,
+                            Ok(_) => break,
                             Err(e) => {
                                 if attempt == 7 || !format!("{e:#}").contains("already open") {
                                     s.emit(EventKind::System {
@@ -305,7 +307,7 @@ impl Daemon {
                 s.leave_asleep();
                 // resume_native_id=None → session/new : contexte agent vide.
                 if let Err(e) = s
-                    .spawn_agent(&cmd, &envs, None, true, self.mcp_servers(&session))
+                    .spawn_agent(&cmd, &envs, None, true, self.mcp_servers(&session), None)
                     .await
                 {
                     // État cohérent avec la réalité : l'agent n'a pas
@@ -471,12 +473,13 @@ impl Daemon {
                 meta.native_session_id.clone(),
                 skip_replay,
                 self.mcp_servers(&meta.id),
+                None,
             )
             .await;
         if r.is_err() && was_asleep && s.generation() == gen0 {
             s.mark_asleep();
         }
-        r
+        r.map(|_| ())
     }
 
     /// Spawn d'une session fraîche en tâche de fond : la requête de
@@ -508,9 +511,23 @@ impl Daemon {
         let d = Arc::clone(self);
         let s = Arc::clone(s);
         let sid = s.meta_snapshot().id;
+        // Génération de départ : un kill_for_respawn (kill/clear/rebind/
+        // sleep) pendant notre spawn pose supplant_mark au-delà — signal
+        // typé, indépendant des libellés d'erreur remontés.
+        let gen0 = s.generation();
         tokio::spawn(async move {
+            // spawn_cfg : mode/model appliqués par spawn_agent SOUS le
+            // flag spawning — ni le drain post-spawn ni un envoi
+            // concurrent ne peut partir avant la config demandée.
             let r = s
-                .spawn_agent(&cmd, &envs, native, skip_replay, d.mcp_servers(&sid))
+                .spawn_agent(
+                    &cmd,
+                    &envs,
+                    native,
+                    skip_replay,
+                    d.mcp_servers(&sid),
+                    Some((mode, model)),
+                )
                 .await;
             // Supprimée pendant le spawn : tuer l'agent frais éventuel —
             // ni état ni event pour une session disparue.
@@ -519,11 +536,7 @@ impl Daemon {
                 return;
             }
             match r {
-                Ok(()) => {
-                    // Mode/modèle demandés à la création : appliqués via
-                    // ACP pour les agents sans placeholder (cursor, codex).
-                    s.apply_spawn_config(mode.as_deref(), model.as_deref())
-                        .await;
+                Ok(true) => {
                     match deliver {
                         FreshDeliver::None => {}
                         FreshDeliver::UserPrompt(p) => {
@@ -545,16 +558,18 @@ impl Daemon {
                         }
                     }
                 }
+                // Supplanté en douceur après le handshake (kill/rebind
+                // tombé dans la fenêtre) : le nouveau cycle possède la
+                // session — ni config, ni livraison, ni état.
+                Ok(false) => {}
                 Err(e) => {
                     let msg = format!("{e:#}");
                     let st = s.meta_snapshot().state;
                     // Une op concurrente a repris la main : kill/clear/
-                    // rebind (génération invalidée — "supplanté", pending
-                    // soldé "agent replaced"), sleep (asleep) ou respawn
-                    // déjà reparti — son état fait foi, ni event ni dead.
-                    let supplanted =
-                        msg.contains("supplanté") || msg.contains("agent replaced");
-                    if supplanted || st == "asleep" || s.is_spawning() {
+                    // rebind (supplant_mark dépassé), sleep (asleep) ou
+                    // respawn déjà reparti — son état fait foi, ni event
+                    // ni dead.
+                    if s.supplant_mark() > gen0 || st == "asleep" || s.is_spawning() {
                         return;
                     }
                     // Mort naturelle pendant le spawn ("/bin/false" & co) :

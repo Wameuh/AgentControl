@@ -177,13 +177,16 @@ impl Daemon {
             return;
         }
         match s
-            .spawn_agent(&cmd, &envs, Some(native), true, self.mcp_servers(sid))
+            .spawn_agent(&cmd, &envs, Some(native), true, self.mcp_servers(sid), None)
             .await
         {
-            Ok(()) => {
+            Ok(true) => {
                 info!("{sid}: agent relancé — envoi « {AUTO_RESUME_PROMPT} »");
                 self.send_resume_prompt(&s, sid).await;
             }
+            // Supplanté après le handshake (kill/rebind pendant le spawn) :
+            // le nouveau cycle possède la session — pas de prompt de reprise.
+            Ok(false) => {}
             Err(e) => {
                 warn!("{sid}: reprise auto échouée: {e:#}");
                 s.emit(proto::EventKind::Error {

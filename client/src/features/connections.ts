@@ -274,12 +274,13 @@ export class ConnectionManager {
       await Promise.all(
         app.lastSessions
           .filter((x) => (x.conn ?? "default") === conn)
-          .map((s) =>
-            call("delete_session", { session: s.id, conn }).catch((e) => {
+          .map((s) => {
+            app.spawnWatch.delete(s.id); // suppression voulue, pas un échec
+            return call("delete_session", { session: s.id, conn }).catch((e) => {
               this.deps.clearPendingDel(s.id); // échec → la session existe encore
               showErr(String(e));
-            }),
-          ),
+            });
+          }),
       );
     }
     await this.disconnect(conn);
