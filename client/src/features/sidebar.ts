@@ -177,7 +177,7 @@ export class Sidebar {
     const el = $("session-list");
     el.innerHTML = "";
     const f = this.filter;
-    const hit = (txt: string) => txt.toLowerCase().includes(f);
+    const hit = (txt: string) => (txt ?? "").toLowerCase().includes(f);
     // Rendu : connexion → groupes nommés (le store client garde les groupes
     // VIDES visibles hors filtre) → sessions non groupées.
     const byConn = new Map<string, SessionMeta[]>();
@@ -230,6 +230,9 @@ export class Sidebar {
       ch.innerHTML = `<span class="grp-arrow">${icon(connClosed ? "chev-right" : "chev-down")}</span> ${badge}${this.hl(conn)}` +
         `<button class="grp-add" title="${esc(t("new_group"))}">${icon("plus")}</button>`;
       ch.onclick = () => {
+        // Sous filtre l'arbre est forcé déplié : toggler persisterait un
+        // état invisible à l'écran (+ RPC refresh inutile).
+        if (this.filter) return;
         localStorage.setItem(key, connClosed ? "0" : "1");
         void this.refresh();
       };
@@ -255,6 +258,7 @@ export class Sidebar {
         g.innerHTML = `<span class="grp-arrow">${icon(grpClosed ? "chev-right" : "chev-down")}</span> ${this.hl(grp)}` +
           `<button class="grp-add" title="${esc(t("new_sess_grp"))}">${icon("plus")}</button>`;
         g.onclick = () => {
+          if (this.filter) return; // idem : pas de toggle invisible sous filtre
           localStorage.setItem(gkey, localStorage.getItem(gkey) === "1" ? "0" : "1");
           void this.refresh();
         };
@@ -497,8 +501,10 @@ export class Sidebar {
     });
     // Ctrl/Cmd+F sans session ouverte → filtre d'arbre (avec session, le
     // handler de search.ts prend la main pour la recherche d'historique).
+    // Pas sous un <dialog> ouvert : l'input invisible volerait les frappes.
     window.addEventListener("keydown", (e) => {
-      if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F") && !app.current) {
+      if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F") &&
+          !app.current && !document.querySelector("dialog[open]")) {
         e.preventDefault();
         fIn.focus();
         fIn.select();
