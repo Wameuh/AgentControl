@@ -99,8 +99,10 @@ export class OverlayNav {
       this.scrimOff("sheet");
     } else if (id === "fileview") {
       $("file-viewer").classList.remove("open");
+      stopVideos($("file-viewer"));
     } else if (id === "files") {
       $("file-panel").hidden = true;
+      stopVideos($("file-panel"));
     } else if (id === "settings") {
       // Passe par le handler de ✕ : hidden + levée de l'inert + nav.close.
       $("settings-close").click();
@@ -173,6 +175,17 @@ export class OverlayNav {
       else if (dx < -56 && $("sidebar").classList.contains("open")) { this.closeDrawer(); swiping = false; }
     }, { passive: true });
   }
+}
+
+/** Coupe les <video> présentes dans l'overlay fermé — sinon lecture
+ *  et stream démon continuent en tâche de fond (pas d'import de la
+ *  feature fichiers : nettoyage purement DOM, quel que soit l'overlay). */
+function stopVideos(root: HTMLElement) {
+  root.querySelectorAll("video").forEach((v) => {
+    v.pause();
+    v.removeAttribute("src");
+    v.load();
+  });
 }
 
 export const nav = new OverlayNav();

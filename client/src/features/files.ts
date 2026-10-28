@@ -334,6 +334,7 @@ export class FileExplorer {
     $("file-close").onclick = () => this.closeFilePanel();
     // Retour viewer → liste (Android)
     $("fv-back").onclick = () => {
+      stopVideo();
       nav.close("fileview");
       $("file-viewer").classList.remove("open");
     };

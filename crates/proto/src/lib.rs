@@ -521,6 +521,7 @@ pub enum ReqKind {
     /// {path, content(utf8 lossy), truncated} — aperçu image du client.
     /// `limit` présent → lecture bornée [offset, offset+limit) : réponse
     /// {path, offset, size, data(base64)} — streaming vidéo du client.
+    /// (`binary` est alors ignoré : la tranche est toujours brute.)
     ReadFile {
         session: String,
         path: String,

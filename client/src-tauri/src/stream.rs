@@ -85,7 +85,14 @@ async fn serve(app: &AppHandle, req: &Request<Vec<u8>>) -> Response<Vec<u8>> {
         Some(Range::Span(a, b)) if b >= a => {
             (a, b.saturating_sub(a).saturating_add(1).min(MAX_SERVE))
         }
-        Some(Range::Span(..)) => return unsatisfiable(probe_size.unwrap_or(0)),
+        Some(Range::Span(..)) => {
+            // Range inversée (jamais émise par les lecteurs) → 416 avec
+            // la taille réelle plutôt que */0 — sonde d'1 octet.
+            match chunk(&client, &q, 0, 1).await {
+                Ok((_, size)) => return unsatisfiable(size),
+                Err(e) => return err(StatusCode::NOT_FOUND, &e),
+            }
+        }
         Some(Range::From(a)) => (a, MAX_SERVE),
         Some(Range::Suffix(n)) => {
             let size = probe_size.unwrap_or(0);
@@ -114,7 +121,16 @@ async fn serve(app: &AppHandle, req: &Request<Vec<u8>>) -> Response<Vec<u8>> {
                 }
                 body.extend_from_slice(&bytes);
             }
-            Err(e) => return err(StatusCode::NOT_FOUND, &e),
+            // 1ʳᵉ tranche en échec → fichier absent/inaccessible ; en
+            // cours d'assemblage → erreur transitoire, rejouable (502).
+            Err(e) => {
+                let sc = if body.is_empty() {
+                    StatusCode::NOT_FOUND
+                } else {
+                    StatusCode::BAD_GATEWAY
+                };
+                return err(sc, &e);
+            }
         }
     }
     if start >= size || body.is_empty() {
@@ -127,7 +143,14 @@ async fn serve(app: &AppHandle, req: &Request<Vec<u8>>) -> Response<Vec<u8>> {
         .header(header::CONTENT_LENGTH, body.len())
         .header(
             header::CONTENT_RANGE,
-            format!("bytes {}-{}/{}", start, start + body.len() as u64 - 1, size),
+            // Fin bornée par size-1 : si le fichier a rétréci en cours
+            // d'assemblage, on n'annonce pas une range au-delà de l'EOF.
+            format!(
+                "bytes {}-{}/{}",
+                start,
+                (start + body.len() as u64 - 1).min(size.saturating_sub(1)),
+                size
+            ),
         )
         .header(header::CACHE_CONTROL, "no-store")
         .body(body)
@@ -188,7 +211,11 @@ enum Range {
 }
 
 fn parse_range(v: &str) -> Option<Range> {
-    let v = v.strip_prefix("bytes=")?.split(',').next()?.trim();
+    let v = v.trim();
+    if !v.get(..6).is_some_and(|p| p.eq_ignore_ascii_case("bytes=")) {
+        return None;
+    }
+    let v = v[6..].split(',').next()?.trim();
     let (a, b) = v.split_once('-')?;
     if a.is_empty() {
         return b.trim().parse().ok().map(Range::Suffix);
