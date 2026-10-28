@@ -162,6 +162,12 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             limit: p.get("limit").and_then(Value::as_u64),
         },
         "list_dir" => ReqKind::ListDir { session: s("session"), path: s("path") },
+        "find_files" => ReqKind::FindFiles {
+            session: s("session"),
+            path: s("path"),
+            query: s("query"),
+            limit: p.get("limit").and_then(Value::as_u64).map(|v| v as u32),
+        },
         "delete_path" => ReqKind::DeletePath { session: s("session"), path: s("path") },
         "download_path" => ReqKind::DownloadPath {
             session: s("session"),

@@ -427,6 +427,12 @@ impl Daemon {
                 limit,
             } => self.h_read_file(session, path, binary, offset, limit).await,
             ReqKind::ListDir { session, path } => self.h_list_dir(session, path).await,
+            ReqKind::FindFiles {
+                session,
+                path,
+                query,
+                limit,
+            } => self.h_find_files(session, path, query, limit).await,
             ReqKind::DeletePath { session, path } => {
                 self.h_delete_path(session, path).await
             }

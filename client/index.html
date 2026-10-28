@@ -139,7 +139,14 @@
             <button id="file-close" data-icon="close"></button>
           </header>
           <div id="file-body">
-            <div id="file-tree" hidden></div>
+            <div id="ft-side" hidden>
+              <div id="ft-bar">
+                <span id="ft-ico" data-icon="search"></span>
+                <input id="ft-q" data-i18n-ph="file_search_ph" data-i18n-title="file_search_ph" placeholder="Search files…" autocomplete="off" spellcheck="false" />
+              </div>
+              <div id="file-tree"></div>
+              <div id="file-hits" hidden></div>
+            </div>
             <div id="file-viewer">
               <div id="fv-bar">
                 <button id="fv-back" data-icon="back" data-i18n-title="menu_title" title="Back"></button>

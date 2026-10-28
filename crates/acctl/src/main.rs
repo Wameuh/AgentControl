@@ -239,7 +239,7 @@ fn print_event(ev: &Value) {
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|search|resume|attach|fork|cancel|kill|clear|sleep|mode|respond|blob|download|daemon-update");
+        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|search|find|resume|attach|fork|cancel|kill|clear|sleep|mode|respond|blob|download|daemon-update");
         std::process::exit(2);
     }
     let mut c = connect().await?;
@@ -432,6 +432,29 @@ async fn main() -> Result<()> {
             }
             if !v["done"].as_bool().unwrap_or(true) {
                 eprintln!("(scan partiel — {} events parcourus)", v["scanned"].as_u64().unwrap_or(0));
+            }
+        }
+        "find" => {
+            // acctl find <session> <query...> — recherche par nom de
+            // fichier dans le workspace (récursif, insensible à la casse).
+            if args.len() < 3 {
+                bail!("find <session> <query...>");
+            }
+            let v = c.call(proto::ReqKind::FindFiles {
+                session: args[1].clone(),
+                path: String::new(),
+                query: args[2..].join(" "),
+                limit: None,
+            }).await?;
+            for m in v["matches"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
+                println!(
+                    "{}{}",
+                    m["path"].as_str().unwrap_or(""),
+                    if m["dir"].as_bool().unwrap_or(false) { "/" } else { "" },
+                );
+            }
+            if v["truncated"].as_bool().unwrap_or(false) {
+                eprintln!("(résultats tronqués — {} entrées scannées)", v["scanned"].as_u64().unwrap_or(0));
             }
         }
         "resume" => println!("{}", c.call(proto::ReqKind::ResumeSession {

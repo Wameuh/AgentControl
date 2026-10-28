@@ -146,8 +146,14 @@ body.android #file-panel {
 body.android #file-resize { display: none; }
 body.android #file-head { min-height: 52px; gap: 6px; }
 body.android #file-head button { min-width: 44px; min-height: 44px; font-size: 17px; }
-body.android #file-tree:not([hidden]) { flex: 1; width: auto; }
+body.android #ft-side:not([hidden]) { flex: 1; width: auto; }
+body.android #ft-bar { padding: 8px 10px; }
+body.android #ft-ico { left: 18px; }
+body.android #ft-ico .ic { width: 15px; height: 15px; }
+body.android #ft-q { font-size: 15px; min-height: 40px; padding-left: 30px; }
 body.android .fnode { padding: 9px 8px 9px 0; font-size: 15px; min-height: 44px; }
+body.android .fhit { padding: 9px 8px; font-size: 15px; min-height: 44px; }
+body.android .fhit .fhdir, body.android .fhit .fsize { font-size: 12px; }
 body.android #file-viewer {
   display: flex; flex-direction: column;
   position: fixed; inset: 0; z-index: 50;
