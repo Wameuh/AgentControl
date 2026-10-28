@@ -58,6 +58,7 @@ jobs:
         with:
           name: agentcontrol-server-${{ matrix.arch }}-linux
           path: agentcontrol-server-${{ matrix.arch }}-linux.tar.gz
+          if-no-files-found: error
 
   # -----------------------------------------------------------------
   # Client desktop Tauri : Ubuntu + Windows
@@ -112,6 +113,7 @@ jobs:
             client/src-tauri/target/release/bundle/deb/*.deb
             client/src-tauri/target/release/bundle/appimage/*.AppImage
             client/src-tauri/target/release/agentcontrol
+          if-no-files-found: error
 
       # Exe brut = version PORTABLE (sans install) — renommé pour
       # distinguer portable vs installer (nsis -setup.exe / msi).
@@ -133,6 +135,7 @@ jobs:
             client/src-tauri/target/release/bundle/msi/*.msi
             client/src-tauri/target/release/bundle/nsis/*.exe
             client/dist-win/*.exe
+          if-no-files-found: error
 
   # -----------------------------------------------------------------
   # Client desktop Tauri : macOS arm64 (.app + .dmg — non signé pour
@@ -176,6 +179,7 @@ jobs:
         with:
           name: agentcontrol-client-macos
           path: client/dist-mac/*.dmg
+          if-no-files-found: error
 
   # -----------------------------------------------------------------
   # Client Android : APK aarch64 (debug-signé, installable directement).
@@ -240,6 +244,7 @@ jobs:
         with:
           name: agentcontrol-client-android
           path: client/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
 
   # -----------------------------------------------------------------
   # Release GitHub sur tag v* (permet l'auto-update + install démon distant)

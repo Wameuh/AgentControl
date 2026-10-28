@@ -34,7 +34,7 @@ export function initGems() {
   }
 }
 
-// Plateforme (android | windows | linux) — gates UI mobile.
+// Plateforme (android | windows | macos | linux) — gates UI mobile.
 // Détection synchrone par UA (avant le resolve de platform()).
 let android = /Android/i.test(navigator.userAgent);
 export const isAndroid = () => android;

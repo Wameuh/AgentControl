@@ -3,7 +3,9 @@
 ## Workflow : `next_release` → `main`
 
 Deux branches protégées (**push direct impossible**, PR obligatoire,
-5 checks CI requis : `daemon-linux` ×2, `client` ×2, `client-android`) :
+checks CI : `daemon-linux` ×2, `client` ×2, `client-macos`,
+`client-android` — 6 runs dont 5 requis par le ruleset,
+`client-macos` restant à y inclure) :
 
 - **`next_release`** = branche d'intégration. **Toutes les PR de
   feature/fix visent `next_release`** (`gh pr create --base next_release`)
@@ -15,7 +17,7 @@ Workflow : créer une branche depuis `next_release` → push →
 `gh pr create --base next_release --draft` → finir le travail →
 `/mr review` **sur la draft** → traiter la review (fix → push →
 relancer, toujours en draft) → review soldée → `gh pr ready`
-(≥30 s après le dernier push) → attendre les 5 checks verts → merge.
+(≥30 s après le dernier push) → attendre les checks CI verts → merge.
 **Merge** : vers `main`, toujours l'utilisateur. Vers `next_release`,
 **l'agent peut merger** via `gh pr merge <N>` quand la dernière review
 auto porte un verdict **`Verdict: APPROVED` en titre** postérieur au
@@ -36,7 +38,7 @@ en parallèle sans se marcher dessus. Nettoyer à la fin :
 
 **Drafts** : une PR reste en **draft tout le cycle travail + review**
 — les pipelines ne se lancent qu'**après** la review (`gh pr ready` =
-feu vert final : event `ready_for_review` → les 5 checks). **La
+feu vert final : event `ready_for_review` → les checks CI). **La
 review se demande sur la draft** : `/mr review` lance la session même
 sans ready (le trigger ne gate pas `isDraft`) → itérer (corriger →
 push → relancer `/mr review`) autant de rounds que nécessaire en
@@ -132,7 +134,7 @@ l'ajout du scope).
 Release = PR `next_release` → `main` passée **ready** →
 le job `release-bump` de `version.yml` calcule `dernier tag + niveau`,
 commit `chore: bump version` poussé sur `next_release` (la PR se met
-à jour, les 5 checks tournent sur le head bumpé) → au merge (par
+à jour, les checks CI tournent sur le head bumpé) → au merge (par
 l'utilisateur), `release-on-merge.yml` tague `v<version>` (lu depuis
 `client/package.json`) et dispatche `build.yml` sur le tag (le push
 de tag via GITHUB_TOKEN ne déclenche pas les workflows d'où le
@@ -213,9 +215,10 @@ une release sur les tags `v*`.
 
 ## Version automatique (mots-clés de commit)
 
-PR → **`next_release`** (pas `main` directement). 5 checks requis
-(`daemon-linux` ×2, `client` ×2, `client-android`). Le CI build les
-artefacts sur les PR (APK suffixé `-<sha>`).
+PR → **`next_release`** (pas `main` directement). Checks CI
+(`daemon-linux` ×2, `client` ×2, `client-android`, `client-macos` —
+5 requis au ruleset, `client-macos` à y inclure). Le CI build les
+artefacts sur les PR (APK et dmg suffixés `-<sha>`).
 
 **Pas de bump par PR** — la version ne bouge qu'à la release. Le niveau
 est décidé par des **mots-clés parenthésés dans les sujets de commit**

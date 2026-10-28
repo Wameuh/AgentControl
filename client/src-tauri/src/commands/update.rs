@@ -134,46 +134,57 @@ pub(crate) async fn update_client(_tag: String) -> Result<(), String> {
     Err("non supporté sur Android — installez le nouvel APK".into())
 }
 
+/// Télécharge un asset de la release `tag` vers un dossier temporaire
+/// dédié (agentcontrol-update, purgé à l'appel) et rend son chemin.
+/// Tag exact d'abord (les rc sont des prereleases — latest renverrait
+/// la STABLE à la place), latest en repli. `pred` choisit l'asset par
+/// nom (`.deb`, `-setup.exe`, `.dmg`+arch…) — `name` sert au chemin de
+/// destination et au message d'erreur. Sync → spawn_blocking requis.
+#[cfg(not(target_os = "android"))]
+fn fetch_release_asset(
+    tag: &str,
+    name: &str,
+    pred: impl Fn(&str) -> bool,
+) -> Result<PathBuf, String> {
+    let rel = gh_get(&format!(
+        "https://api.github.com/repos/Wameuh/AgentControl/releases/tags/v{tag}"
+    ))
+    .or_else(|_| gh_get("https://api.github.com/repos/Wameuh/AgentControl/releases/latest"))?;
+    let url = rel["assets"]
+        .as_array()
+        .and_then(|a| {
+            a.iter().find_map(|x| {
+                let n = x["name"].as_str().unwrap_or("");
+                if pred(n) {
+                    x["browser_download_url"].as_str().map(String::from)
+                } else {
+                    None
+                }
+            })
+        })
+        .with_context(|| format!("pas de {name} dans la release"))
+        .map_err(|e| e.to_string())?;
+    let dir = std::env::temp_dir().join("agentcontrol-update");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dest = dir.join(name);
+    let resp = ureq::get(&url)
+        .set("User-Agent", "agentcontrol-updater")
+        .call()
+        .map_err(|e| e.to_string())?;
+    let mut r = resp.into_reader();
+    let mut f = std::fs::File::create(&dest).map_err(|e| e.to_string())?;
+    std::io::copy(&mut r, &mut f).map_err(|e| e.to_string())?;
+    Ok(dest)
+}
+
 /// Update en un clic : télécharge le .deb de la release via l'API REST et
 /// l'installe (pkexec demande le mot de passe), puis relance l'app.
 #[cfg(target_os = "linux")]
 #[tauri::command]
 pub(crate) async fn update_client(tag: String) -> Result<(), String> {
-    let deb = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
-        // Tag exact d'abord (les rc sont des prereleases — latest
-        // renverrait la STABLE à la place), latest en repli.
-        let rel = gh_get(&format!(
-            "https://api.github.com/repos/Wameuh/AgentControl/releases/tags/v{tag}"
-        ))
-        .or_else(|_| {
-            gh_get("https://api.github.com/repos/Wameuh/AgentControl/releases/latest")
-        })?;
-        let url = rel["assets"]
-            .as_array()
-            .and_then(|a| {
-                a.iter().find_map(|x| {
-                    let n = x["name"].as_str().unwrap_or("");
-                    if n.ends_with(".deb") {
-                        x["browser_download_url"].as_str().map(String::from)
-                    } else {
-                        None
-                    }
-                })
-            })
-            .context("pas de .deb dans la release")
-            .map_err(|e| e.to_string())?;
-        let dir = std::env::temp_dir().join("agentcontrol-update");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let deb = dir.join("agentcontrol.deb");
-        let resp = ureq::get(&url)
-            .set("User-Agent", "agentcontrol-updater")
-            .call()
-            .map_err(|e| e.to_string())?;
-        let mut r = resp.into_reader();
-        let mut f = std::fs::File::create(&deb).map_err(|e| e.to_string())?;
-        std::io::copy(&mut r, &mut f).map_err(|e| e.to_string())?;
-        Ok(deb)
+    let deb = tokio::task::spawn_blocking(move || {
+        fetch_release_asset(&tag, "agentcontrol.deb", |n| n.ends_with(".deb"))
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -212,44 +223,15 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     tokio::task::spawn_blocking({
         let app = app.clone();
         move || -> Result<(), String> {
-            // Tag exact d'abord (les rc sont des prereleases — latest
-            // renverrait la STABLE à la place), latest en repli.
-            let rel = gh_get(&format!(
-                "https://api.github.com/repos/Wameuh/AgentControl/releases/tags/v{tag}"
-            ))
-            .or_else(|_| {
-                gh_get("https://api.github.com/repos/Wameuh/AgentControl/releases/latest")
-            })?;
             let arch = if cfg!(target_arch = "aarch64") {
                 "aarch64"
             } else {
                 "x86_64"
             };
-            let url = rel["assets"]
-                .as_array()
-                .and_then(|a| {
-                    a.iter().find_map(|x| {
-                        let n = x["name"].as_str().unwrap_or("");
-                        if n.ends_with(".dmg") && n.contains(arch) {
-                            x["browser_download_url"].as_str().map(String::from)
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .context("pas de .dmg dans la release")
-                .map_err(|e| e.to_string())?;
-            let dir = std::env::temp_dir().join("agentcontrol-update");
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            let dmg = dir.join("agentcontrol.dmg");
-            let resp = ureq::get(&url)
-                .set("User-Agent", "agentcontrol-updater")
-                .call()
-                .map_err(|e| e.to_string())?;
-            let mut r = resp.into_reader();
-            let mut f = std::fs::File::create(&dmg).map_err(|e| e.to_string())?;
-            std::io::copy(&mut r, &mut f).map_err(|e| e.to_string())?;
+            let dmg = fetch_release_asset(&tag, "agentcontrol.dmg", |n| {
+                n.ends_with(".dmg") && n.contains(arch)
+            })?;
+            let dir = dmg.parent().ok_or("chemin dmg inattendu")?;
             let run = |cmd: &mut std::process::Command| -> Result<(), String> {
                 let st = cmd.status().map_err(|e| e.to_string())?;
                 if st.success() {
@@ -259,8 +241,14 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
                 }
             };
             // Montage read-only sur un point de montage privé (pas de
-            // nom de volume à deviner, pas de fenêtre Finder).
+            // nom de volume à deviner, pas de fenêtre Finder). Le detach
+            // préalable couvre un mount résiduel au même point après un
+            // detach raté précédent (best-effort — erreur ignorée).
             let mnt = dir.join("mnt");
+            let _ = std::process::Command::new("hdiutil")
+                .args(["detach", "-quiet", "-force"])
+                .arg(&mnt)
+                .status();
             std::fs::create_dir_all(&mnt).map_err(|e| e.to_string())?;
             let attach = run(std::process::Command::new("hdiutil")
                 .args(["attach", "-nobrowse", "-readonly", "-mountpoint"])
@@ -291,7 +279,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
                 .args(["detach", "-quiet"])
                 .arg(&mnt)
                 .status();
-            let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(dir);
             res
         }
     })
@@ -337,41 +325,11 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     if local.is_empty() || !cur_l.starts_with(&local) {
         return Err("build portable — update manuelle via la page releases".into());
     }
-    let dir = std::env::temp_dir().join("agentcontrol-update");
-    let setup = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
-        // Tag exact d'abord (idem — les rc sont des prereleases).
-        let rel = gh_get(&format!(
-            "https://api.github.com/repos/Wameuh/AgentControl/releases/tags/v{tag}"
-        ))
-        .or_else(|_| {
-            gh_get("https://api.github.com/repos/Wameuh/AgentControl/releases/latest")
-        })?;
-        let url = rel["assets"]
-            .as_array()
-            .and_then(|a| {
-                a.iter().find_map(|x| {
-                    let n = x["name"].as_str().unwrap_or("");
-                    // NSIS : AgentControl_<ver>_x64-setup.exe
-                    if n.ends_with("-setup.exe") {
-                        x["browser_download_url"].as_str().map(String::from)
-                    } else {
-                        None
-                    }
-                })
-            })
-            .context("pas de setup .exe dans la release")
-            .map_err(|e| e.to_string())?;
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let setup = dir.join("agentcontrol-setup.exe");
-        let resp = ureq::get(&url)
-            .set("User-Agent", "agentcontrol-updater")
-            .call()
-            .map_err(|e| e.to_string())?;
-        let mut r = resp.into_reader();
-        let mut f = std::fs::File::create(&setup).map_err(|e| e.to_string())?;
-        std::io::copy(&mut r, &mut f).map_err(|e| e.to_string())?;
-        Ok(setup)
+    let setup = tokio::task::spawn_blocking(move || {
+        // NSIS : AgentControl_<ver>_x64-setup.exe
+        fetch_release_asset(&tag, "agentcontrol-setup.exe", |n| {
+            n.ends_with("-setup.exe")
+        })
     })
     .await
     .map_err(|e| e.to_string())??;
