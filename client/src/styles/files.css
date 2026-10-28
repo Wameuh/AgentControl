@@ -34,12 +34,12 @@
   color: var(--dim); font-size: 11px; padding: 1px 7px; cursor: pointer;
 }
 #fv-loadall:hover { color: var(--ink); border-color: var(--sand); }
-#fv-edit, #fv-save {
+#fv-md, #fv-edit, #fv-save {
   display: flex; align-items: center; background: none; border: 0;
   color: var(--muted); cursor: pointer; padding: 3px;
 }
-#fv-edit:hover, #fv-save:hover:not(:disabled) { color: var(--ink); }
-#fv-edit.on { color: var(--sand); }
+#fv-md:hover, #fv-edit:hover, #fv-save:hover:not(:disabled) { color: var(--ink); }
+#fv-md.on, #fv-edit.on { color: var(--sand); }
 #fv-save:disabled { opacity: .35; cursor: default; }
 /* Bandeau conflit : le fichier a changé sur disque pendant l'édition */
 #fv-conflict {
@@ -78,6 +78,13 @@
   flex: 1; min-width: 0; min-height: 0; overflow: auto; margin: 0; padding: 12px;
   font: 12px/1.5 Mono, ui-monospace, monospace; white-space: pre;
   color: var(--ink); user-select: text;
+}
+/* Rendu Markdown dans le viewer : même cadre que #file-view, typographie
+   document (les styles de contenu sont les .md de chat.css, mutualisés) */
+#file-md {
+  flex: 1; min-width: 0; min-height: 0; overflow: auto; padding: 12px;
+  font-size: 13px; line-height: 1.5; color: var(--ink);
+  user-select: text; overflow-wrap: break-word;
 }
 /* Aperçu image dans le panneau fichier (damier pour la transparence) */
 #file-view .fv-img {
@@ -161,8 +168,8 @@
 }
 #file-resize:hover { background: rgba(205, 182, 140, .3); }
 
-/* Coloration syntaxique légère (viewer) */
-#file-view .syn-kw { color: var(--violet); font-weight: 600; }
-#file-view .syn-str { color: var(--sage); }
-#file-view .syn-com { color: var(--dim); font-style: italic; }
-#file-view .syn-num { color: var(--sand); }
+/* Coloration syntaxique légère (viewer + blocs de code du rendu md) */
+#file-view .syn-kw, #file-md .syn-kw { color: var(--violet); font-weight: 600; }
+#file-view .syn-str, #file-md .syn-str { color: var(--sage); }
+#file-view .syn-com, #file-md .syn-com { color: var(--dim); font-style: italic; }
+#file-view .syn-num, #file-md .syn-num { color: var(--sand); }
