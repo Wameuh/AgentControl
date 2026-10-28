@@ -5,7 +5,7 @@
 // le cache de conversation à chaque changement de session.
 // ---------------------------------------------------------------------------
 
-import { $, esc, mkEv, showErr } from "../core/dom";
+import { $, esc, mkEv, q, showErr } from "../core/dom";
 import { linkify, mdRender } from "../core/format";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
@@ -86,7 +86,7 @@ export class EventRenderer {
           ? `${t("peer_to")} «${ev.to_title}»`
           : `${t("peer_from")} «${ev.from_title}»`;
         d.innerHTML =
-          `<div class="peer-head" title="${esc(peerId)}">${icon(outgoing ? "arrow-right" : "peer")} ${esc(label)}</div>` +
+          `<div class="peer-head" title="${q(esc(peerId))}">${icon(outgoing ? "arrow-right" : "peer")} ${esc(label)}</div>` +
           `<div class="peer-body">${linkify(esc(ev.text as string))}</div>`;
         d.querySelector(".peer-head")?.addEventListener("click", () =>
           this.deps.openSession(peerId));

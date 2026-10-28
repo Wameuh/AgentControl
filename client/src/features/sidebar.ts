@@ -4,13 +4,13 @@
 // drag & drop inter-groupes, poignée de redimensionnement.
 // ---------------------------------------------------------------------------
 
-import { $, esc, showErr } from "../core/dom";
+import { $, esc, q, showErr } from "../core/dom";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
 import { isAndroid, meshSetMood } from "../core/chrome";
 import type { PrEntry, SessionMeta } from "../core/types";
 import { t } from "../i18n";
-import { dotIcon, setAppIcon } from "./status";
+import { dotCls, dotIcon, setAppIcon } from "./status";
 import { icon } from "../ui/icons";
 import { bindCtx, hideSessCtx, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
@@ -38,6 +38,25 @@ export class Sidebar {
    *  supprimé ne réapparaît jamais) ; retiré seulement en cas d'échec,
    *  où la session existe encore. */
   private pendingDel = new Set<string>();
+
+  /** Suppression initiée ici — l'event session_deleted qui suit ne doit
+   *  pas re-notifier (la ligne a déjà disparu, l'utilisateur sait). */
+  wasPendingDel(id: string) {
+    return this.pendingDel.has(id);
+  }
+
+  /** Marque des suppressions initiées en masse hors sidebar (ex. delete
+   *  d'une connexion → cascade delete_session) : leurs events
+   *  session_deleted ne doivent pas spammer de toasts. */
+  notePendingDel(ids: string[]) {
+    for (const id of ids) this.pendingDel.add(id);
+  }
+
+  /** Démarque une suppression en échec (cascade) : la session existe
+   *  encore, elle ne doit pas rester filtrée de la liste. */
+  clearPendingDel(id: string) {
+    this.pendingDel.delete(id);
+  }
   private ctx = $("sctx");
 
   bind(conns: ConnectionManager, groups: GroupStore, newSess: NewSessionDialog, chat: ChatView, settings: SettingsPanel) {
@@ -70,6 +89,7 @@ export class Sidebar {
     const [raw, prs] = await Promise.all([
       call<SessionMeta[]>("list_sessions").catch((e) => {
         setAppIcon("grey"); // démon injoignable → aucun agent joignable
+        this.chat.updateEmptyState(); // l'accueil ne doit pas attendre la liste
         throw e;
       }),
       call<PrEntry[]>("pr_list").catch(() => [] as PrEntry[]),
@@ -150,7 +170,7 @@ export class Sidebar {
       ch.className = "grp-head" + (connClosed ? " closed" : "");
       const badge = this.conns.hasCfg(conn)
         ? `<span class="conn-st ${st === "ok" ? "ok" : st === "reconnecting" ? "warn" : "bad"}"` +
-          ` title="${esc(this.conns.tip(st))}">${st === "reconnecting" ? icon("refresh") : icon("dot")}</span> `
+          ` title="${q(esc(this.conns.tip(st, conn)))}">${st === "reconnecting" ? icon("refresh") : icon("dot")}</span> `
         : "";
       ch.innerHTML = `<span class="grp-arrow">${icon(connClosed ? "chev-right" : "chev-down")}</span> ${badge}${esc(conn)}` +
         `<button class="grp-add" title="${esc(t("new_group"))}">${icon("plus")}</button>`;
@@ -208,6 +228,8 @@ export class Sidebar {
         el.appendChild(this.sessRow(s, conn, "", connClosed));
       }
     }
+    // La liste arrive → l'accueil recalcule son état (0 session → CTA).
+    this.chat.updateEmptyState();
   }
 
   /** Cible de drop pour une session : conn = câble, group undefined = dégrouper. */
@@ -339,9 +361,9 @@ export class Sidebar {
     if (closed) div.style.display = "none";
     const prs = this.prBySess.get(`${conn}${s.id}`) ?? [];
     const prHtml = prs.length
-      ? `<span class="sess-pr" title="${esc(prs.map((p) => `${p.repo}#${p.pr}${p.title ? ` — ${p.title}` : ""}${p.status ? ` (${p.status})` : ""}`).join("\n"))}">${prs.map((p) => `#${p.pr}`).join(" ")}</span>`
+      ? `<span class="sess-pr" title="${q(esc(prs.map((p) => `${p.repo}#${p.pr}${p.title ? ` — ${p.title}` : ""}${p.status ? ` (${p.status})` : ""}`).join("\n")))}">${prs.map((p) => `#${p.pr}`).join(" ")}</span>`
       : "";
-    div.innerHTML = `<span class="dot st-${s.state}" title="${esc(s.state)}">${dotIcon(s.state)}</span><span class="t">${esc(s.title)}</span>${prHtml}<span class="a">${esc(s.agent)}</span><button class="sess-del" title="Supprimer">${icon("close")}</button>`;
+    div.innerHTML = `<span class="dot st-${dotCls(s.state)}" title="${q(esc(s.state))}">${dotIcon(s.state)}</span><span class="t">${esc(s.title)}</span>${prHtml}<span class="a">${esc(s.agent)}</span><button class="sess-del" title="Supprimer">${icon("close")}</button>`;
     div.onclick = () => {
       void this.openSession(s.id);
       // Mobile : fermer le drawer après sélection.

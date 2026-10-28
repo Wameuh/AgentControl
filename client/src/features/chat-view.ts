@@ -14,6 +14,7 @@ import type { AcEvent, SessionMeta } from "../core/types";
 import { gemSVG } from "../crystal";
 import { t } from "../i18n";
 import { icon, type IconName } from "../ui/icons";
+import { nav } from "../ui/nav";
 import { fillEfforts, splitModel } from "./modelbar";
 import type { EventRenderer } from "./event-renderers";
 
@@ -82,6 +83,8 @@ export class ChatView {
   private jumpSeq = 0; // invalidation des sauts de recherche en vol
   private unseenBelow = 0;
   private convLoadingEl: HTMLElement | null = null;
+  /** Hôtes en cours d'auto-connexion (écran vide "connexion à…"). */
+  private connectingHosts: string[] = [];
 
   private deps = {
     /** Marque la ligne de session active dans la sidebar. */
@@ -96,6 +99,8 @@ export class ChatView {
      *  journal vidé) — la recherche ferme, ses résultats sont d'un
      *  autre journal. */
     onSessionChanged: () => {},
+    /** Nb de connexions connues — pour l'écran d'accueil (injecté). */
+    connCount: (): number => 0,
   };
 
   bind(renderer: EventRenderer, d: Partial<typeof this.deps>) {
@@ -109,16 +114,105 @@ export class ChatView {
       this.convLoadingEl = document.createElement("div");
       this.convLoadingEl.id = "conv-loading";
       this.convLoadingEl.innerHTML =
-        `<span class="load-gem">${gemSVG("agent")}</span><span>${esc(t("loading"))}</span>`;
+        `<span class="load-gem">${gemSVG("agent")}</span>` +
+        `<span class="cl-ico" hidden>${icon("warn")}</span>` +
+        `<span class="cl-txt">${esc(t("loading"))}</span>` +
+        `<button class="cl-retry" hidden>${esc(t("retry"))}</button>`;
     }
-    if (v) this.eventsEl.appendChild(this.convLoadingEl);
-    else this.convLoadingEl.remove();
+    if (v) {
+      // Mode chargement : gemme visible, état d'erreur masqué.
+      this.convLoadingEl.querySelector(".load-gem")!.removeAttribute("hidden");
+      this.convLoadingEl.querySelector(".cl-ico")!.setAttribute("hidden", "");
+      const txt = this.convLoadingEl.querySelector(".cl-txt")!;
+      txt.textContent = t("loading");
+      this.convLoadingEl.querySelector(".cl-retry")!.setAttribute("hidden", "");
+      this.eventsEl.appendChild(this.convLoadingEl);
+    } else {
+      this.convLoadingEl.remove();
+    }
   }
 
-  /** Vide la zone (sentinelle conservée) et réinitialise l'état de rendu. */
+  /** Échec de chargement sans cache : message centré + bouton Réessayer. */
+  private showConvError(msg: string) {
+    this.showConvLoading(true);
+    const el = this.convLoadingEl!;
+    el.querySelector(".load-gem")!.setAttribute("hidden", "");
+    el.querySelector(".cl-ico")!.removeAttribute("hidden");
+    el.querySelector(".cl-txt")!.textContent = `${t("conv_load_fail")} — ${msg}`;
+    const retry = el.querySelector<HTMLButtonElement>(".cl-retry")!;
+    retry.removeAttribute("hidden");
+    retry.onclick = () => {
+      const id = app.current?.id;
+      if (id) void this.open(id, true);
+    };
+  }
+
+  /** Écran d'accueil dans #events : aucune session affichée → gemme +
+   *  contexte (connexion en cours / aucun serveur / aucune session) et
+   *  l'action qui débloque (Connecter / Nouvel agent). Re-rendu par
+   *  sidebar.refresh() et les transitions de connexion. */
+  updateEmptyState() {
+    const el = $("empty-state");
+    const hasConv =
+      !!app.current || this.eventsEl.querySelector(".ev") != null;
+    if (hasConv || this.convLoadingEl?.isConnected) {
+      el.hidden = true;
+      return;
+    }
+    const nConns = this.deps.connCount();
+    const nSess = app.lastSessions.length;
+    const h = $("empty-h");
+    const txt = $("empty-txt");
+    const cta = $("empty-cta") as HTMLButtonElement;
+    el.classList.remove("spin");
+    cta.hidden = true;
+    if (this.connectingHosts.length) {
+      el.hidden = false;
+      el.classList.add("spin");
+      h.textContent = t("empty_connecting", { host: this.connectingHosts.join(", ") });
+      txt.textContent = "";
+    } else if (!nConns) {
+      el.hidden = false;
+      h.textContent = t("empty_h");
+      txt.textContent = t("empty_no_conn");
+      cta.hidden = false;
+      cta.textContent = t("new_conn");
+      cta.onclick = () => {
+        nav.closeDrawer();
+        $("btn-connect").click();
+      };
+    } else if (!nSess) {
+      el.hidden = false;
+      h.textContent = t("empty_h");
+      txt.textContent = t("empty_no_sess");
+      cta.hidden = false;
+      cta.textContent = t("new_session");
+      cta.onclick = () => {
+        nav.closeDrawer();
+        $("btn-new-session").click();
+      };
+    } else {
+      el.hidden = true;
+    }
+  }
+
+  /** Auto-connexion au boot : les hôtes en cours apparaissent sur l'écran
+   *  vide ; [] = terminé (retour à l'état calculé). */
+  setConnecting(hosts: string[]) {
+    this.connectingHosts = hosts;
+    this.updateEmptyState();
+  }
+
+  /** Éléments décoratifs conservés au vidage/stash (sentinelle + accueil). */
+  private isDecor(n: Element) {
+    return n === this.sentinel || n.id === "empty-state";
+  }
+
+  /** Vide la zone (sentinelle + empty-state conservés) et réinitialise
+   *  l'état de rendu. */
   clearConv() {
     for (const n of [...this.eventsEl.children]) {
-      if (n !== this.sentinel) n.remove();
+      if (!this.isDecor(n)) n.remove();
     }
     this.renderer.toolBlocks = new Map();
     this.renderer.pendingToolUpdates = new Map();
@@ -143,7 +237,7 @@ export class ChatView {
     const atBottom = this.nearBottom();
     const scroll = this.eventsEl.scrollTop; // lu avant détachement (clamp après)
     for (const n of [...this.eventsEl.children]) {
-      if (n === this.sentinel || n === this.convLoadingEl) continue;
+      if (this.isDecor(n) || n === this.convLoadingEl) continue;
       const s = Number((n as HTMLElement).dataset.seq ?? 0);
       if (s > lastSeq) lastSeq = s;
       frag.appendChild(n);
@@ -188,7 +282,7 @@ export class ChatView {
   /** Réinstalle une conversation cachée : contenu + position de scroll. */
   private restoreConv(c: ConvCache) {
     for (const n of [...this.eventsEl.children]) {
-      if (n !== this.sentinel) n.remove();
+      if (!this.isDecor(n)) n.remove();
     }
     this.eventsEl.appendChild(c.frag);
     this.renderer.toolBlocks = c.toolBlocks;
@@ -225,6 +319,7 @@ export class ChatView {
       app.current = null;
       this.clearConv();
       this.deps.onSessionChanged();
+      this.updateEmptyState();
     }
   }
 
@@ -265,6 +360,8 @@ export class ChatView {
     if (app.current?.id !== prevId) this.deps.onSessionChanged();
     if (app.current) $("chat-title").textContent = `${app.current.title} — ${app.current.agent}`;
     this.updateHeader();
+    // L'écran d'accueil disparaît dès qu'une session est ouverte.
+    $("empty-state").hidden = true;
 
     // Cache frais → conversation réaffichée d'emblée ; sinon zone vidée +
     // grande gemme le temps du rechargement.
@@ -276,16 +373,20 @@ export class ChatView {
       this.showConvLoading(true);
     }
 
+    let lastErr: unknown = null;
     const info = await call<{
       meta: SessionMeta; pending: string[]; alive: boolean; last_seq: number;
     }>("session_info", { session: id, conn: connHint }).catch((e) => {
+      lastErr = e;
       showErr(`session_info: ${e}`);
       return null;
     });
     if (stale()) return;
     if (!info) {
-      // Échec : on garde le cache affiché s'il existe, sinon on retire la gemme.
-      this.showConvLoading(false);
+      // Échec : le cache restauré reste affiché ; sans rien à l'écran,
+      // état d'erreur centré + bouton Réessayer (plutôt qu'une zone vide).
+      if (cached) this.showConvLoading(false);
+      else this.showConvError(String(lastErr));
       return;
     }
     app.alive = info.alive;
@@ -301,7 +402,7 @@ export class ChatView {
     if (!app.alive && app.current.native_session_id && app.current.state !== "asleep") {
       const sys = document.createElement("div");
       sys.className = "sysline";
-      sys.innerHTML = `${icon("loader")} ${esc("reprise de l'agent…")}`;
+      sys.innerHTML = `${icon("loader")} ${esc(t("resume_wait"))}`;
       this.eventsEl.appendChild(sys);
       try {
         await call("resume_session", { session: id });
@@ -313,10 +414,10 @@ export class ChatView {
         app.alive = info2.alive;
         app.current = info2.meta;
         if (!app.current.conn && connHint) app.current.conn = connHint;
-        sys.innerHTML = `${icon("check")} ${esc("agent repris")}`;
+        sys.innerHTML = `${icon("check")} ${esc(t("resume_ok"))}`;
         this.updateHeader();
       } catch (e) {
-        sys.innerHTML = `${icon("warn")} ${esc(`reprise: ${e}`)}`;
+        sys.innerHTML = `${icon("warn")} ${esc(`${t("resume_fail")} ${e}`)}`;
       }
     }
 
@@ -965,5 +1066,7 @@ export class ChatView {
       },
       true,
     );
+    // Boot : écran d'accueil avant la première réponse de list_sessions.
+    this.updateEmptyState();
   }
 }

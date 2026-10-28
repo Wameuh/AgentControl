@@ -23,7 +23,7 @@ export function applyTheme(name: "dark" | "light") {
 
 /** Gemme cristal : verte (neutral) = identité app ; dorée (human) = travail. */
 export function initGems() {
-  for (const id of ["titlebar-gem", "about-gem"]) {
+  for (const id of ["titlebar-gem", "about-gem", "empty-gem"]) {
     const el = document.getElementById(id);
     if (el) el.innerHTML = gemSVG("neutral");
   }

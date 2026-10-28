@@ -146,6 +146,7 @@ pub(crate) async fn subscribe(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn ensure_daemon(
+    app: AppHandle,
     host: String,
     args: Option<Vec<String>>,
     tag: String,
@@ -166,8 +167,11 @@ pub(crate) async fn ensure_daemon(
     // Docker, forwardé) n'est jamais écrasé par l'artefact release.
     // `rc=0; cmd || rc=$?` car `set -e` tue le shell sur tout échec de
     // commande — `rc=$?` seul ne s'exécuterait jamais.
+    // `echo step:<id> >&2` : marqueurs de progression streamés sur
+    // stderr → events `daemon-step` côté client (stdout garde le
+    // résultat métier `ok:*`/`installed:*` en dernière ligne).
     let script = format!(
-        "set -e; arch=$(uname -m); \
+        "set -e; echo step:check >&2; arch=$(uname -m); \
          case $arch in x86_64|aarch64) ;; *) echo \"arch non supportée: $arch\" >&2; exit 1;; esac; \
          command -v curl >/dev/null 2>&1 || {{ echo \"curl absent sur l'hôte\" >&2; exit 1; }}; \
          bin=$HOME/.local/bin/agentcontrol-daemon; \
@@ -179,12 +183,15 @@ pub(crate) async fn ensure_daemon(
             echo newer:$ver; exit 0; fi; \
          rc=0; curl -s -o /dev/null --max-time 2 http://127.0.0.1:{p} 2>/dev/null || rc=$?; \
          if [ \"$rc\" -ne 7 ]; then echo busy:127.0.0.1:{p}; exit 0; fi; \
+         echo step:download >&2; \
          d=$HOME/.cache/agentcontrol-upd; rm -rf \"$d\"; mkdir -p \"$d\"; cd \"$d\" || exit 1; \
          curl -fsSL -o acd.tgz \"{base}/download/v{t}/agentcontrol-server-$arch-linux.tar.gz\" || \
          curl -fsSL -o acd.tgz \"{base}/latest/download/agentcontrol-server-$arch-linux.tar.gz\"; \
          tar xzf acd.tgz; \
+         echo step:install >&2; \
          install -Dm755 agentcontrol-daemon $bin; \
          install -Dm755 acctl $HOME/.local/bin/acctl; \
+         echo step:service >&2; \
          confs=\"/etc/supervisor/conf.d/*.conf /etc/supervisord.d/*.conf $HOME/.supervisor/conf.d/*.conf\"; \
          prog=$(awk 'FNR==1 {{ p=\"\" }} /^\\[/ {{ p=\"\"; if ($0 ~ /^\\[program:/) {{ p=$0; sub(/.*\\[program:/,\"\",p); sub(/\\].*/,\"\",p) }} }} /^command[[:space:]]*=/ && /agentcontrol-daemon/ && p != \"\" {{ print p; exit }}' $confs 2>/dev/null); \
          if [ -n \"$prog\" ]; then \
@@ -206,6 +213,7 @@ pub(crate) async fn ensure_daemon(
          pgrep -x agentcontrol-da >/dev/null 2>&1 || nohup \"$bin\" >/dev/null 2>&1 </dev/null & \
          fi; \
          rm -rf \"$d\"; \
+         echo step:verify >&2; \
          v=\"\"; for i in 1 2 3; do \
          v=$($HOME/.local/bin/acctl status 2>/dev/null | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4); \
          [ -n \"$v\" ] && break; sleep 1; done; \
@@ -215,25 +223,43 @@ pub(crate) async fn ensure_daemon(
         p = remote_port.unwrap_or(7331)
     );
     client_core::log(Level::Info, format!("ensure_daemon {host} tag={tag}"));
+    // Marqueurs `step:*` du script (stderr) → event `daemon-step` : le
+    // dialogue de progression les affiche au fil de l'eau. Le reste de
+    // stderr est conservé pour le rapport d'erreur.
     if native.unwrap_or(false) || cfg!(target_os = "android") {
         let (user, h) = split_user_host(&host, user.as_deref())?;
-        let (code, out) = client_core::ssh_native::ssh_exec(
+        let err_acc = std::sync::Mutex::new(String::new());
+        let app2 = app.clone();
+        let (code, out, _err) = client_core::ssh_native::ssh_exec(
             &h,
             port.unwrap_or(22),
             &user,
             password.as_deref(),
             key.map(PathBuf::from).as_deref(),
             &script,
+            Some(&mut |line: &str| {
+                if let Some(s) = line.trim().strip_prefix("step:") {
+                    let _ = app2.emit("daemon-step", s.to_string());
+                } else {
+                    let mut g = err_acc.lock().unwrap();
+                    g.push_str(line);
+                    g.push('\n');
+                }
+            }),
         )
         .await
         .map_err(|e| format!("{e:#}"))?;
         let out = out.trim().to_string();
+        let err_buf = err_acc.into_inner().unwrap_or_default();
+        // Le stderr hors marqueurs est journalisé : en cas d'échec le
+        // log garde la cause (ssh, droits, download) qui sinon ne vit
+        // que dans le toast éphémère.
         client_core::log(
             if code == 0 { Level::Info } else { Level::Warn },
-            format!("ensure_daemon {host}: code={code} {out}"),
+            format!("ensure_daemon {host}: code={code} out={out} err={}", err_buf.trim()),
         );
         if code != 0 {
-            return Err(out);
+            return Err(if err_buf.trim().is_empty() { out } else { err_buf.trim().to_string() });
         }
         return Ok(out);
     }
@@ -241,21 +267,72 @@ pub(crate) async fn ensure_daemon(
     cmd.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
         .args(&args.unwrap_or_default())
         .arg(&host)
-        .arg(&script);
+        .arg(&script)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
     client_core::hide_console(&mut cmd);
-    let out = tokio::time::timeout(std::time::Duration::from_secs(120), cmd.output())
-        .await
-        .map_err(|_| "ssh ensure_daemon timeout".to_string())?
-        .map_err(|e| format!("ssh: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| format!("ssh: {e}"))?;
+    // stderr streamé : marqueurs → events, le reste collecté pour
+    // l'erreur. kill_on_drop tue le ssh si le timeout le lâche.
+    let stderr_task = {
+        let app2 = app.clone();
+        let host2 = host.clone();
+        let pipe = child.stderr.take();
+        tauri::async_runtime::spawn(async move {
+            let mut buf = String::new();
+            if let Some(p) = pipe {
+                use tokio::io::AsyncBufReadExt;
+                let mut lines = tokio::io::BufReader::new(p).lines();
+                loop {
+                    match lines.next_line().await {
+                        Ok(Some(l)) => {
+                            if let Some(s) = l.trim().strip_prefix("step:") {
+                                let _ = app2.emit("daemon-step", s.to_string());
+                            } else {
+                                buf.push_str(&l);
+                                buf.push('\n');
+                            }
+                        }
+                        Ok(None) => break,
+                        // Ligne non-UTF8 : le drain s'arrête mais la
+                        // coupure est tracée (et dans le buffer rendu).
+                        Err(e) => {
+                            client_core::log(
+                                Level::Warn,
+                                format!("ensure_daemon {host2}: drain stderr interrompu: {e}"),
+                            );
+                            buf.push_str(&format!("(stderr illisible: {e})\n"));
+                            break;
+                        }
+                    }
+                }
+            }
+            buf
+        })
+    };
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        child.wait_with_output(),
+    )
+    .await
+    .map_err(|_| "ssh ensure_daemon timeout".to_string())?
+    .map_err(|e| format!("ssh: {e}"))?;
+    let stderr = stderr_task.await.unwrap_or_default();
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if !out.status.success() {
-        let e = String::from_utf8_lossy(&out.stderr);
+        let e = if stderr.trim().is_empty() {
+            stdout.clone()
+        } else {
+            stderr.trim().to_string()
+        };
         // 255 = échec de ssh lui-même (transport) ; un autre code = le
         // script distant a répondu en erreur, déjà remontée à
         // l'utilisateur → Warn comme le chemin natif (code != 0).
         let lv = if out.status.code() == Some(255) { Level::Error } else { Level::Warn };
         client_core::log(lv, format!("ensure_daemon {host}: {e}"));
-        return Err(e.to_string());
+        return Err(e);
     }
     client_core::log(Level::Info, format!("ensure_daemon {host}: {stdout}"));
     Ok(stdout)

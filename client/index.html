@@ -33,7 +33,6 @@
           <div id="sidebar-resize" title="Drag to resize"></div>
         </aside>
         <main id="chat">
-          <div id="err-bar" hidden><span id="err-text"></span><button id="err-close" data-icon="close"></button></div>
           <header id="chat-header">
             <span id="chat-gem" hidden></span>
             <span id="chat-title" data-i18n-title="title_dblclick">—</span>
@@ -67,6 +66,12 @@
           </div>
           <div id="events">
             <div id="scroll-sentinel"></div>
+            <div id="empty-state" hidden>
+              <span class="load-gem" id="empty-gem"></span>
+              <div id="empty-h"></div>
+              <div id="empty-txt"></div>
+              <button id="empty-cta" hidden></button>
+            </div>
           </div>
           <button id="btn-bottom" hidden data-icon="down" data-i18n-title="bottom_title" title="Latest"></button>
           <div id="queue-bar" hidden></div>
@@ -165,6 +170,7 @@
         <datalist id="model-list"></datalist>
         <label><span data-i18n="attach_label">Resume native ID</span> <input id="f-attach" data-i18n-ph="attach_ph" placeholder="(optional)" /></label>
         <label><span data-i18n="prompt_label">Initial message</span> <textarea id="f-prompt" rows="3"></textarea></label>
+        <div id="f-err" class="dlg-err" role="alert" hidden></div>
         <menu>
           <button type="button" id="f-cancel" data-i18n="cancel">Cancel</button>
           <button id="f-create" value="default" data-i18n="create">Create</button>
@@ -213,6 +219,8 @@
           </select>
         </div>
         <pre id="log-view" hidden></pre>
+        <div id="c-status" class="dlg-status" hidden></div>
+        <div id="c-err" class="dlg-err" role="alert" hidden></div>
         <menu>
           <button id="c-logs" type="button" data-i18n="logs">Logs</button>
           <button type="button" id="c-cancel" data-i18n="cancel">Cancel</button>
@@ -228,6 +236,7 @@
         <label><span data-i18n="main_effort">Main effort</span> <select id="fu-ea"></select></label>
         <label><span data-i18n="sidekick">Sidekick</span> <select id="fu-b"></select></label>
         <label><span data-i18n="sidekick_effort">Sidekick effort</span> <select id="fu-eb"></select></label>
+        <div id="fu-err" class="dlg-err" role="alert" hidden></div>
         <menu>
           <button type="button" id="fu-cancel" data-i18n="cancel">Cancel</button>
           <button id="fu-ok" value="default" data-i18n="apply">Apply</button>
@@ -258,13 +267,18 @@
 
     <dialog id="dlg-daemon">
       <form method="dialog">
-        <h3 id="dlg-daemon-title">Daemon update</h3>
+        <h3 id="dlg-daemon-title">Daemon</h3>
         <div class="daemon-dlg">
           <span class="spin-ico" data-icon="loader"></span>
-          <p id="dlg-daemon-msg"></p>
+          <div class="daemon-body">
+            <p id="dlg-daemon-msg"></p>
+            <ul id="dlg-daemon-steps"></ul>
+          </div>
         </div>
       </form>
     </dialog>
+
+    <div id="toasts"></div>
 
     <dialog id="dlg-dupdate">
       <form method="dialog">

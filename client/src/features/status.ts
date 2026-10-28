@@ -20,6 +20,13 @@ export function dotIcon(state: string): string {
   return gemSVG(DOT_ROLE[state] ?? "slate");
 }
 
+/** Classe `st-*` whitelistée pour l'attribut class : un état arbitraire
+ *  (jamais prévu côté démon, mais la confiance n'est pas un filtre)
+ *  retombe sur "dead" plutôt que d'être interpolé brut. */
+export function dotCls(state: string): string {
+  return Object.hasOwn(DOT_ROLE, state) ? state : "dead";
+}
+
 /** Icône fenêtre : rouge si une question attend, dorée si un agent tourne,
  *  violette si une session compacte, grise sans agent vivant, gemme sauge
  *  sinon (no-op sur Android). */
