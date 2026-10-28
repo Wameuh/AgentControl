@@ -21,7 +21,7 @@
 /* Toasts : notifications empilées en haut à droite (sous les modals
    natifs — les erreurs de dialogues passent par .dlg-err) */
 #toasts {
-  position: fixed; top: 42px; right: 12px; z-index: 55;
+  position: fixed; top: calc(var(--tb-h) + 8px); right: 12px; z-index: 55;
   display: flex; flex-direction: column; gap: 8px;
   max-width: min(430px, calc(100vw - 24px));
 }

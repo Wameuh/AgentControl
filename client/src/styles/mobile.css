@@ -32,6 +32,9 @@ body.android {
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
   overscroll-behavior: none;
+  /* Titlebar : 56px utiles SOUS la status bar — l'inset s'ajoute à la
+     hauteur (border-box l'écraserait sinon : boutons 44px dans 56−inset). */
+  --tb-h: calc(56px + env(safe-area-inset-top));
 }
 /* « Fond animé » : forcé statique sur Android (batterie) — réglage masqué. */
 body.android #s-bganim-row { display: none; }
@@ -45,7 +48,6 @@ body.android .toast {
   background: var(--panel-solid);
 }
 body.android #titlebar {
-  height: 56px;
   padding: env(safe-area-inset-top) 8px 0 8px;
 }
 body.android #titlebar-gem { width: 24px; height: 24px; }
