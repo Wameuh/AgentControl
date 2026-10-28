@@ -39,6 +39,15 @@ export class Sidebar {
    *  où la session existe encore. */
   private pendingDel = new Set<string>();
 
+  /** Renommage inline en cours (compteur : plusieurs lignes peuvent
+   *  théoriquement être en édition). Tant qu'il est >0, renderList()
+   *  diffère son rebuild — innerHTML="" détacherait l'input de titre
+   *  (blur → annulation ou sauvegarde prématurée), ce qui tuait
+   *  l'édition dès qu'une session qui travaille émettait un
+   *  status_changed. Le dernier done() rejoue le rendu différé. */
+  private editCount = 0;
+  private rebuildPending = false;
+
   /** Suppression initiée ici — l'event session_deleted qui suit ne doit
    *  pas re-notifier (la ligne a déjà disparu, l'utilisateur sait). */
   wasPendingDel(id: string) {
@@ -175,6 +184,16 @@ export class Sidebar {
    *  Filtre actif : seules les branches avec ≥1 session visible survivent,
    *  tout est déplié, et la 1re occurrence du filtre est surlignée. */
   private renderList() {
+    // Une édition de titre est en cours : reconstruire la liste
+    // détacherait l'input (blur → fin d'édition) — rebuild différé, le
+    // dernier done() rejoue renderList(). Couvre les deux appelants :
+    // refresh() (status_changed d'une session qui travaille) et les
+    // frappes du filtre. Le flag se consomme au prochain rendu réel.
+    if (this.editCount > 0) {
+      this.rebuildPending = true;
+      return;
+    }
+    this.rebuildPending = false;
     const el = $("session-list");
     el.innerHTML = "";
     const f = this.filter;
@@ -375,33 +394,42 @@ export class Sidebar {
     const span = row.querySelector<HTMLElement>(".t");
     if (!span) return;
     const inp = document.createElement("input");
-    inp.id = "title-edit";
+    inp.className = "title-edit";
     inp.value = s.title;
     span.replaceWith(inp);
     row.draggable = false; // sinon un drag depuis l'input part en drag de ligne
     inp.focus();
     inp.select();
-    // blur ré-entrant : retirer l'input focusé (Escape, ou refresh
-    // qui rebuild la liste) redéclenche blur → sans garde, une annulation
-    // persisterait le texte tapé. !isConnected = ligne déjà reconstruite.
+    // Tant que l'édition est ouverte, refresh() diffère son rebuild de
+    // liste (un status_changed d'une session qui travaille ne doit pas
+    // tuer la saisie) ; done() le déclenche à la fin.
+    this.editCount++;
     let finished = false;
     const done = async (save: boolean) => {
-      if (finished || !inp.isConnected) { finished = true; return; }
+      if (finished) return;
       finished = true;
       if (!isAndroid()) row.draggable = true;
       const v = inp.value.trim();
-      inp.replaceWith(span);
-      if (save && v && v !== s.title) {
+      if (inp.isConnected) inp.replaceWith(span);
+      const changed = !!(save && v && v !== s.title);
+      if (changed) {
         s.title = v;
         span.textContent = v;
         if (app.current?.id === s.id) {
           app.current.title = v;
-          $("chat-title").textContent = v;
+          this.chat.setChatTitle();
         }
         await call("rename_session", { session: s.id, title: v, conn: s.conn })
           .catch((e) => showErr(String(e)));
-        void this.refresh();
       }
+      this.editCount--;
+      // Refresh seulement si utile : sauvegarde (retri par titre +
+      // resync complet) ou rebuilds différés à rejouer — renderList()
+      // suffit, les données sont déjà à jour (lastSessions et filtre ont
+      // continué de bouger pendant l'édition). Un Escape/blur sans
+      // changement ne vaut pas un round-trip.
+      if (changed) void this.refresh();
+      else if (this.editCount === 0 && this.rebuildPending) this.renderList();
     };
     inp.addEventListener("click", (e) => e.stopPropagation());
     inp.addEventListener("keydown", (e) => {
