@@ -16,11 +16,28 @@ import { bindCtx, hideSessCtx, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
 import type { ChatView } from "./chat-view";
 import type { ConnectionManager } from "./connections";
+import { grpNorm, grpParent, inSubtree } from "./groups";
 import type { GroupStore } from "./groups";
 import type { NewSessionDialog } from "./new-session";
 import type { SettingsPanel } from "./settings";
 
 const DTYPE = "application/x-ac-session";
+
+/** Charge d'un drag interne à l'arbre : session (id) ou sous-arbre de
+ *  groupe (path). `kind` absent = session (payloads antérieurs). */
+type DragPayload =
+  | { kind?: "session"; id: string; conn: string }
+  | { kind: "group"; path: string; conn: string };
+
+/** Nœud de l'arbre des groupes d'une connexion : un chemin "a/b/c"
+ *  s'affiche comme 3 nœuds imbriqués ; les sessions sont feuilles du
+ *  nœud de leur chemin exact. */
+interface GNode {
+  path: string;
+  name: string;
+  kids: Map<string, GNode>;
+  rows: SessionMeta[];
+}
 
 /** Ordonne un compartiment de sessions en arbre parent→sous-agents :
  *  une session spawnée (spawned_by) dont la créatrice est rendue dans le
@@ -259,26 +276,59 @@ export class Sidebar {
       const sessions = (byConn.get(conn) ?? []).sort((a, b) => a.title.localeCompare(b.title));
       // Une connexion ou un groupe dont le NOM matche affiche toutes ses
       // sessions (sinon l'utilisateur ne verrait que les titres chanceux).
+      // Le hit porte sur le chemin complet : « a » matche « a/b » — le
+      // sous-arbre du groupe nommé reste visible (sémantique « groupe »
+      // étendue aux descendants).
       const connHit = !!f && hit(conn);
-      const grpHit = (g: string) => !!f && hit(g);
-      const pass = (s: SessionMeta, gHit: boolean) =>
-        !f || connHit || gHit || hit(s.title) || hit(s.agent);
-      const grpNames = [
-        ...new Set([
-          ...(f ? [] : this.groups.stored(conn)),
-          ...sessions.map((s) => s.group).filter((g): g is string => !!g),
-        ]),
-      ].sort();
-      // Hors filtre les groupes stockés VIDES restent visibles ; filtré,
-      // un groupe sans session visible disparaît.
-      const grpRows = grpNames
-        .map((grp) => ({ grp, rows: sessions.filter((x) => x.group === grp && pass(x, grpHit(grp))) }))
-        .filter((g) => !f || g.rows.length > 0);
-      const plain = sessions.filter((x) => !x.group && pass(x, false));
+      const pass = (s: SessionMeta) =>
+        !f || connHit || hit(s.group ? grpNorm(s.group) : "") || hit(s.title) || hit(s.agent);
+
+      // Arbre des groupes : chemins stockés (groupes VIDES visibles hors
+      // filtre, ancêtres explicites) + chemins portés par les sessions ;
+      // un nœud préfixe sans session propre est affiché quand même.
+      const gRoot = new Map<string, GNode>();
+      const ensure = (path: string): GNode => {
+        let kids = gRoot, acc = "";
+        let node: GNode = { path: "", name: "", kids: gRoot, rows: [] };
+        for (const seg of path.split("/")) {
+          acc = acc ? `${acc}/${seg}` : seg;
+          let n = kids.get(seg);
+          if (!n) {
+            n = { path: acc, name: seg, kids: new Map(), rows: [] };
+            kids.set(seg, n);
+          }
+          node = n;
+          kids = n.kids;
+        }
+        return node;
+      };
+      if (!f) {
+        for (const p of this.groups.stored(conn)) {
+          const n = grpNorm(p);
+          if (n) ensure(n);
+        }
+      }
+      for (const s of sessions) {
+        const g = s.group ? grpNorm(s.group) : "";
+        if (g && pass(s)) ensure(g).rows.push(s);
+      }
+      // Groupe qui se normalise en "" (méta mal formée ex. "a//b" → ok,
+      // "  " → vide) : la session retombe non groupée plutôt que perdue.
+      const plain = sessions.filter((x) => !grpNorm(x.group ?? "") && pass(x));
+      // Filtré : un nœud sans aucune session visible dans son sous-arbre
+      // disparaît (règle inchangée, portée à la profondeur).
+      const prune = (n: GNode): boolean => {
+        for (const [k, kid] of [...n.kids]) if (!prune(kid)) n.kids.delete(k);
+        return n.rows.length + n.kids.size > 0;
+      };
+      if (f) for (const [k, n] of [...gRoot]) if (!prune(n)) gRoot.delete(k);
+      const countRows = (n: GNode): number =>
+        n.rows.length + [...n.kids.values()].reduce((a, k) => a + countRows(k), 0);
+      const treeRows = [...gRoot.values()].reduce((a, n) => a + countRows(n), 0);
       // Filtré : conn sans aucune session visible → pas de header. Hors
       // filtre : le header s'affiche même sans session (conns suivies).
-      if (f && !grpRows.length && !plain.length) continue;
-      shown += plain.length + grpRows.reduce((acc, g) => acc + g.rows.length, 0);
+      if (f && !gRoot.size && !plain.length) continue;
+      shown += plain.length + treeRows;
 
       const key = `ac-grp-${conn}`;
       const connClosed = !f && localStorage.getItem(key) === "1";
@@ -308,17 +358,36 @@ export class Sidebar {
         e.stopPropagation();
         if ((this.conns.state(conn) ?? "ok") !== "ok") this.conns.retry(conn);
       });
-      // Déposer sur le header connexion = dégrouper la session
+      // Déposer sur le header connexion = racine : dégroupe une session,
+      // remonte un sous-arbre (move(..., "") — comme un drop sans parent).
       this.bindDropTarget(ch, conn, undefined);
       bindCtx(ch, (x, y) => this.conns.openCtx(x, y, conn));
       el.appendChild(ch);
 
-      for (const { grp, rows } of grpRows) {
-        const gkey = `ac-grp-${conn}::${grp}`;
-        const grpClosed = !f && (connClosed || localStorage.getItem(gkey) === "1");
+      // Rendu récursif d'un nœud : header pliable (état persisté par
+      // CHEMIN COMPLET) → sous-groupes triés → sessions membres (sous-
+      // agents imbriqués juste après leur parent via nestSessions).
+      // Sémantique arbre : un ancêtre plié cache le nœud ENTIER (header
+      // inclus), pas seulement ses sessions — contrairement à l'ancien
+      // rendu plat où les headers de groupe survivaient au pliage conn.
+      const firstMember = (n: GNode): SessionMeta | undefined => {
+        if (n.rows[0]) return n.rows[0];
+        for (const k of n.kids.values()) {
+          const m = firstMember(k);
+          if (m) return m;
+        }
+        return undefined;
+      };
+      const renderNode = (n: GNode, gDepth: number, foldedAbove: boolean) => {
+        const gkey = `ac-grp-${conn}::${n.path}`;
+        const folded = !f && localStorage.getItem(gkey) === "1";
         const g = document.createElement("div");
-        g.className = "grp-sub" + (grpClosed ? " closed" : "");
-        g.innerHTML = `<span class="grp-arrow">${icon(grpClosed ? "chev-right" : "chev-down")}</span> <span class="grp-name">${this.hl(grp)}</span>` +
+        g.className = "grp-sub" + (folded ? " closed" : "");
+        if (foldedAbove) g.style.display = "none";
+        if (gDepth > 0) g.style.paddingLeft = `${18 + 14 * gDepth}px`;
+        g.title = t("drop_to_group"); // tooltip hors nom (le nom porte le chemin)
+        g.innerHTML = `<span class="grp-arrow">${icon(folded ? "chev-right" : "chev-down")}</span> ` +
+          `<span class="grp-name" title="${q(esc(n.path))}">${this.hl(n.name)}</span>` +
           `<button class="grp-add" title="${esc(t("new_sess_grp"))}">${icon("user-plus")}` +
           `<span class="grp-add-lbl">${esc(t("new_sess_grp_lbl"))}</span></button>`;
         g.onclick = () => {
@@ -326,24 +395,32 @@ export class Sidebar {
           localStorage.setItem(gkey, localStorage.getItem(gkey) === "1" ? "0" : "1");
           void this.refresh();
         };
-        // + : nouvel agent dans le groupe — agent + workspace du 1er membre
-        // préremplis (sessions triées par titre → "le premier" = premier affiché).
+        // + : nouvel agent dans le groupe — agent + workspace du 1er
+        // membre du sous-arbre préremplis (tri titre → "premier affiché").
+        const ref = firstMember(n);
         g.querySelector(".grp-add")!.addEventListener("click", (e) => {
           e.stopPropagation();
           const apiConn = conn === "default" ? undefined : conn;
-          this.newSess.setPendingGroup({ conn: apiConn, name: grp });
-          void this.newSess.open(apiConn, sessions.find((x) => x.group === grp));
+          this.newSess.setPendingGroup({ conn: apiConn, name: n.path });
+          void this.newSess.open(apiConn, ref);
         });
-        bindCtx(g, (x, y) =>
-          this.openGroupCtx(x, y, conn, grp, sessions.find((m) => m.group === grp)));
-        this.bindDropTarget(g, conn, grp);
+        bindCtx(g, (x, y) => this.openGroupCtx(x, y, conn, n.path, ref));
+        this.bindDropTarget(g, conn, n.path);
+        this.bindGroupDrag(g, conn, n.path);
         el.appendChild(g);
-        for (const { s, depth } of nestSessions(rows)) {
-          el.appendChild(this.sessRow(s, conn, grp, grpClosed, depth));
+        const innerFolded = foldedAbove || folded;
+        for (const k of [...n.kids.values()].sort((a, b) => a.name.localeCompare(b.name))) {
+          renderNode(k, gDepth + 1, innerFolded);
         }
+        for (const { s, depth } of nestSessions(n.rows)) {
+          el.appendChild(this.sessRow(s, conn, gDepth + 1, innerFolded, depth));
+        }
+      };
+      for (const n of [...gRoot.values()].sort((a, b) => a.name.localeCompare(b.name))) {
+        renderNode(n, 0, connClosed);
       }
       for (const { s, depth } of nestSessions(plain)) {
-        el.appendChild(this.sessRow(s, conn, "", connClosed, depth));
+        el.appendChild(this.sessRow(s, conn, 0, connClosed, depth));
       }
     }
     if (f && !shown) {
@@ -354,10 +431,31 @@ export class Sidebar {
     }
   }
 
-  /** Cible de drop pour une session : conn = câble, group undefined = dégrouper. */
+  /** Payload du drag en cours — renseigné au dragstart (ligne session ou
+   *  header de groupe). dataTransfer.getData n'est lisible qu'au drop :
+   *  sans ce champ, impossible de refuser les cibles invalides pendant
+   *  le survol (drop dans son propre sous-arbre, no-op…). */
+  private dragPayload: DragPayload | null = null;
+
+  /** Cible de drop : conn = câble (inter-serveur toujours refusé),
+   *  group = chemin cible (undefined = racine → dégroupe une session,
+   *  remonte un sous-arbre). Les cibles qui ne changeraient rien ou
+   *  casseraient l'arbre n'allument pas le hint et refusent le drop. */
   private bindDropTarget(el: HTMLElement, conn: string, group: string | undefined) {
+    const target = group ?? "";
+    const ok = (p: DragPayload | null): boolean => {
+      if (!p || p.conn !== conn) return false;
+      if (p.kind === "group") {
+        // Pas sur soi-même, pas dans son propre sous-arbre, pas sur son
+        // parent actuel (déjà à cet endroit).
+        return target !== p.path && !(target && inSubtree(target, p.path)) &&
+          grpParent(p.path) !== target;
+      }
+      const s = app.lastSessions.find((x) => x.id === p.id);
+      return !!s && grpNorm(s.group ?? "") !== target;
+    };
     el.addEventListener("dragover", (e) => {
-      if (e.dataTransfer?.types.includes(DTYPE)) {
+      if (e.dataTransfer?.types.includes(DTYPE) && ok(this.dragPayload)) {
         e.preventDefault();
         el.classList.add("drop-hint");
       }
@@ -367,15 +465,38 @@ export class Sidebar {
       e.preventDefault();
       el.classList.remove("drop-hint");
       try {
-        const d = JSON.parse(e.dataTransfer!.getData(DTYPE)) as { id: string; conn: string };
-        if (d.conn !== conn) return; // pas de déplacement inter-serveur
-        const s = app.lastSessions.find((x) => x.id === d.id);
-        if (!s || (s.group ?? "") === (group ?? "")) return;
-        await this.groups.applyAssign(s, group);
+        const d = JSON.parse(e.dataTransfer!.getData(DTYPE)) as DragPayload;
+        if (!ok(d)) return;
+        if (d.kind === "group") {
+          // Sous-arbre entier déplacé : meta.group de toutes les sessions
+          // sous `d.path` + chemins stockés + clés de collapse migrés.
+          if (!(await this.groups.move(conn, d.path, target))) {
+            showErr(t("group_path_invalid"));
+          }
+        } else {
+          const s = app.lastSessions.find((x) => x.id === d.id);
+          if (!s) return;
+          await this.groups.applyAssign(s, target || undefined);
+        }
         void this.refresh();
       } catch {
         /* donnée étrangère : ignorer */
       }
+    });
+  }
+
+  /** Header de groupe = source de drag du sous-arbre entier. Desktop
+   *  seulement — pas de DnD tactile : sur Android, déplacer un groupe
+   *  = éditer son chemin dans le dialogue renommer. */
+  private bindGroupDrag(el: HTMLElement, conn: string, path: string) {
+    if (isAndroid()) return;
+    el.draggable = true;
+    el.addEventListener("dragstart", (e) => {
+      const p: DragPayload = { kind: "group", path, conn };
+      e.dataTransfer!.setData(DTYPE, JSON.stringify(p));
+      e.dataTransfer!.effectAllowed = "move";
+      this.dragPayload = p;
+      // dragend → endDrag() (listener document, init) solde dragPayload.
     });
   }
 
@@ -447,16 +568,18 @@ export class Sidebar {
       this.newSess.setPendingGroup({ conn: apiConn, name: grp });
       void this.newSess.open(apiConn, ref);
     });
+    menuBtn(this.ctx, t("new_subgroup"), "", () => {
+      hideSessCtx();
+      this.groups.openDlg("new", null, conn, "", grp);
+    });
     menuBtn(this.ctx, t("rename_group"), "", () => {
       hideSessCtx();
       this.groups.openDlg("rename", null, conn, grp);
     });
-    // Dissoudre dégroupe toutes les sessions membres — destructif →
-    // double-clic armé comme ctx_exit / sess-del (label dédié : on
-    // dégroupe, on ne supprime pas les sessions).
-    const nMembers = app.lastSessions.filter(
-      (s) => (s.conn ?? "default") === conn && s.group === grp,
-    ).length;
+    // Dissoudre dégroupe tout le SOUS-ARBRE (sessions du nœud et de ses
+    // descendants) — destructif → double-clic armé comme ctx_exit /
+    // sess-del (label dédié : on dégroupe, on ne supprime pas).
+    const nMembers = this.groups.subtreeSize(conn, grp);
     menuBtn(this.ctx, t("dissolve_group"), "danger", (b) => {
       if (!b.dataset.armed) {
         b.dataset.armed = "1";
@@ -522,17 +645,17 @@ export class Sidebar {
     inp.addEventListener("blur", () => done(true));
   }
 
-  private sessRow(s: SessionMeta, conn: string, grp: string, closed: boolean, depth = 0): HTMLElement {
+  private sessRow(s: SessionMeta, conn: string, gDepth: number, closed: boolean, depth = 0): HTMLElement {
     const div = document.createElement("div");
     div.dataset.sid = s.id;
-    div.className = "sess" + (grp ? " in-grp" : "") + (depth > 0 ? " sub" : "") +
+    div.className = "sess" + (gDepth ? " in-grp" : "") + (depth > 0 ? " sub" : "") +
       (s.offline ? " offline" : "") + (app.current?.id === s.id ? " active" : "");
     if (closed) div.style.display = "none";
-    // Sous-agent : indentation par niveau (cap visuel — les arbres de
-    // délégation restent peu profonds), tooltip = provenance.
-    if (depth > 0) {
-      div.style.marginLeft = `${(grp ? 14 : 0) + Math.min(depth, 4) * 14}px`;
-    }
+    // Indentation = profondeur de groupe (14px/niveau) + profondeur de
+    // sous-agent (14px/niveau, cap visuel — les arbres de délégation
+    // restent peu profonds), tooltip = provenance.
+    const indent = gDepth * 14 + Math.min(depth, 4) * 14;
+    if (indent > 0) div.style.marginLeft = `${indent}px`;
     if (s.spawned_by) {
       const parent = app.lastSessions.find((x) => x.id === s.spawned_by);
       div.title = t("spawned_by", { parent: parent?.title ?? s.spawned_by });
@@ -551,8 +674,10 @@ export class Sidebar {
     if (!isAndroid()) {
       div.draggable = true;
       div.addEventListener("dragstart", (e) => {
-        e.dataTransfer!.setData(DTYPE, JSON.stringify({ id: s.id, conn }));
+        const p: DragPayload = { kind: "session", id: s.id, conn };
+        e.dataTransfer!.setData(DTYPE, JSON.stringify(p));
         e.dataTransfer!.effectAllowed = "move";
+        this.dragPayload = p; // soldé par endDrag() au dragend
       });
     }
     const del = div.querySelector<HTMLElement>(".sess-del")!;
@@ -650,11 +775,14 @@ export class Sidebar {
     //  · drop d'une session hors cible avalé au niveau document =
     //    annulation propre partout (le chemin "drop refusé" déclenche
     //    le même curseur collé) ;
-    //  · dragend solde le compteur et purge les .drop-hint qu'un drag
-    //    annulé (Échap) laisserait allumés ; mouseup sert de watchdog
-    //    si le toolkit tue le drag sans émettre dragend.
+    //  · dragend solde le compteur, purge les .drop-hint qu'un drag
+    //    annulé (Échap) laisserait allumés et oublie dragPayload
+    //    (sinon les hints resteraient pilotés par un payload périmé) ;
+    //    mouseup sert de watchdog si le toolkit tue le drag sans
+    //    émettre dragend — endDrag est l'unique point « drag mort ».
     const endDrag = () => {
       this.dragging = 0;
+      this.dragPayload = null;
       document
         .querySelectorAll(".drop-hint")
         .forEach((el) => el.classList.remove("drop-hint"));
