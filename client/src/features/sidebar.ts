@@ -19,6 +19,7 @@ import type { ChatView } from "./chat-view";
 import type { ConnectionManager } from "./connections";
 import { grpNorm, grpParent, inSubtree } from "./groups";
 import type { GroupStore } from "./groups";
+import { sounds } from "./sounds";
 import type { NewSessionDialog } from "./new-session";
 import type { SettingsPanel } from "./settings";
 
@@ -207,6 +208,9 @@ export class Sidebar {
       }
     }
     app.lastSessions = list;
+    // Alertes sonores : diff d'états (la liste fusionnée couvre toutes les
+    // conns — le canal event ne suit que la session ouverte).
+    sounds.noteStates(list);
     this.checkSpawns(list);
     // Un spawn tourne sans canal event (session non ouverte → pas de
     // status_changed) → repoller tant qu'un "starting" reste dans son

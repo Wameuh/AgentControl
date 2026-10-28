@@ -150,6 +150,34 @@
                   <option value="utf-16be">UTF-16 BE</option>
                 </select>
               </label>
+              <label class="s-row chk">
+                <input type="checkbox" id="s-snd" checked />
+                <span data-i18n="sounds_label">Sound alerts</span>
+              </label>
+              <div id="s-snd-opts">
+                <div class="s-row s-snd-opt">
+                  <input type="checkbox" id="s-snd-done" checked />
+                  <label for="s-snd-done" data-i18n="sounds_done">Turn finished</label>
+                  <button type="button" class="s-test" id="s-snd-test-done" data-i18n="sounds_test">Test</button>
+                </div>
+                <div class="s-row s-snd-opt">
+                  <input type="checkbox" id="s-snd-question" checked />
+                  <label for="s-snd-question" data-i18n="sounds_question">Question / permission</label>
+                  <button type="button" class="s-test" id="s-snd-test-question" data-i18n="sounds_test">Test</button>
+                </div>
+                <div class="s-row s-snd-opt">
+                  <input type="checkbox" id="s-snd-error" checked />
+                  <label for="s-snd-error" data-i18n="sounds_error">Error / dead session</label>
+                  <button type="button" class="s-test" id="s-snd-test-error" data-i18n="sounds_test">Test</button>
+                </div>
+                <label class="s-row chk s-snd-opt">
+                  <input type="checkbox" id="s-snd-unfocused" />
+                  <span data-i18n="sounds_unfocused">Only when the window is not focused</span>
+                </label>
+                <div class="s-row s-snd-opt"><span data-i18n="sounds_vol">Volume</span>
+                  <input type="range" id="s-snd-vol" min="0" max="100" step="5" />
+                </div>
+              </div>
               <div class="s-row" id="s-update-row">
                 <button id="s-checkupdate" type="button" data-i18n="check_update">Check for updates</button>
                 <span id="s-update-status"></span>
