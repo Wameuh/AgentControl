@@ -75,7 +75,7 @@
 }
 #file-edit::selection { background: rgba(205, 182, 140, .30); }
 #file-view {
-  flex: 1; min-width: 0; overflow: auto; margin: 0; padding: 12px;
+  flex: 1; min-width: 0; min-height: 0; overflow: auto; margin: 0; padding: 12px;
   font: 12px/1.5 Mono, ui-monospace, monospace; white-space: pre;
   color: var(--ink); user-select: text;
 }
