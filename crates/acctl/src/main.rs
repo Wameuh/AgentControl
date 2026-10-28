@@ -4,7 +4,8 @@
 //!   acctl status | agents | list
 //!   acctl new <agent> <cwd> [prompt...] [--title T] [--mode M] [--model X]
 //!   acctl send <session> <text...>
-//!   acctl msg <from> <to> [--steer] <text...>   (message agent→agent)
+//!   acctl msg <from> <to> [--queue] <text...>   (message agent→agent —
+//!       steer par défaut ; --steer accepté, sans effet)
 //!   acctl spawn <from> [task...] [--agent A] [--cwd C] [--title T]
 //!               [--mode M] [--model X] [--group G]   (session agent→agent)
 //!   acctl events <session> [before_seq] [limit]
@@ -404,13 +405,16 @@ async fn main() -> Result<()> {
             }).await?;
         }
         "msg" => {
-            // acctl msg <from> <to> [--steer] <text...>
-            if args.len() < 4 { bail!("msg <from> <to> [--steer] <text...>"); }
-            let mut steer = false;
+            // acctl msg <from> <to> [--queue|--steer] <text...>
+            // steer est le défaut agent→agent — --steer reste accepté
+            // (compat scripts) mais n'a plus d'effet.
+            if args.len() < 4 { bail!("msg <from> <to> [--queue|--steer] <text...>"); }
+            let mut queue = false;
             let mut parts = Vec::new();
             for a in &args[3..] {
                 match a.as_str() {
-                    "--steer" => steer = true,
+                    "--steer" => {}
+                    "--queue" => queue = true,
                     _ => parts.push(a.clone()),
                 }
             }
@@ -418,7 +422,7 @@ async fn main() -> Result<()> {
                 from: args[1].clone(),
                 session: args[2].clone(),
                 text: parts.join(" "),
-                delivery: if steer { "steer".into() } else { "queue".into() },
+                delivery: if queue { "queue".into() } else { "steer".into() },
             }).await?);
         }
         "spawn" => {

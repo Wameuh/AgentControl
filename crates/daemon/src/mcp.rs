@@ -89,10 +89,10 @@ fn tools_list() -> Value {
                     "delivery": {
                         "type": "string",
                         "enum": ["queue", "steer"],
-                        "description": "queue (défaut) : livré quand la tâche \
-                            courante de la cible se termine. steer : injecté \
-                            pendant son tour, après le tool call en cours, si \
-                            l'agent cible le supporte (sinon en file).",
+                        "description": "steer (défaut) : injecté pendant le \
+                            tour de la cible, après le tool call en cours, si \
+                            l'agent le supporte (sinon en file). queue : livré \
+                            quand sa tâche courante se termine.",
                     },
                 },
                 "required": ["session", "text"],

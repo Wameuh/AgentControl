@@ -38,7 +38,11 @@ impl Daemon {
                     pas de réponse.",
                     fm.title, from, fm.agent, text, from
                 );
-                let steer = delivery == "steer";
+                // Défaut steer : les messages agent→agent sont des
+                // comptes-rendus/réponses utiles pendant le tour — la
+                // file n'est retenue que sur "queue" explicite (valeur
+                // inconnue → steer, comme un delivery absent).
+                let steer = delivery != "queue";
                 // Livraison en tâche de fond : si send_peer_prompt
                 // signale que la cible a basculé "asleep" entre le check
                 // ci-dessous et l'enfilement, le réveil est déclenché
