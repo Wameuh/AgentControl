@@ -95,7 +95,11 @@
 #session-list .sess.sub .a { font-size: 10px; }
 #session-list .sess.sub .sess-pr { font-size: 9px; padding: 0 4px; }
 
-#btn-new-session { border-style: dashed; color: var(--muted); }
+#btn-new-session {
+  border-style: dashed; color: var(--muted);
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+}
+#btn-new-session .ic { width: 14px; height: 14px; display: block; }
 #btn-new-session:hover { color: var(--sand); border-color: var(--sand); }
 
 button {
@@ -115,9 +119,17 @@ button:disabled { opacity: .5; cursor: default; }
 .grp-head:hover { color:var(--fg) }
 .grp-head .grp-add, .grp-sub .grp-add {
   margin-left: auto; border: 0; background: none; color: var(--dim);
-  font-size: 14px; cursor: pointer; padding: 0 4px; border-radius: 4px; line-height: 1;
+  cursor: pointer; padding: 1px 5px; border-radius: 4px; line-height: 1;
+  display: inline-flex; align-items: center; gap: 4px; flex: none;
 }
 .grp-head .grp-add:hover, .grp-sub .grp-add:hover { color: var(--sand); background: rgba(236,230,216,.08); }
+/* Micro-libellé à côté de l'icône : distingue « + groupe » de « + agent »
+   sans dépendre du tooltip. */
+.grp-add-lbl { font-size: 9px; font-weight: 600; letter-spacing: .4px; text-transform: uppercase; }
+/* Le nom rétrécit en ellipsis avant de pousser le bouton hors du header. */
+.grp-head .grp-name, .grp-sub .grp-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .drop-hint {
   outline: 2px dashed var(--accent); outline-offset: -2px; border-radius: 6px;
   background: rgba(224, 201, 150, .08);
@@ -136,7 +148,7 @@ button:disabled { opacity: .5; cursor: default; }
 #conn-chip .ic { width: 11px; height: 11px; }
 #conn-chip .ic-refresh { animation: spin 1.1s linear infinite; }
 .sess-del .ic, .grp-add .ic { display: block; }
-.grp-add .ic { width: 12px; height: 12px; }
+.grp-add .ic { width: 13px; height: 13px; }
 #session-list .sess.offline { opacity:.45 }
 
 

@@ -289,8 +289,9 @@ export class Sidebar {
         ? `<span class="conn-st ${st === "ok" ? "ok" : st === "reconnecting" ? "warn" : "bad"}"` +
           ` title="${q(esc(this.conns.tip(st, conn)))}">${st === "reconnecting" ? icon("refresh") : icon("dot")}</span> `
         : "";
-      ch.innerHTML = `<span class="grp-arrow">${icon(connClosed ? "chev-right" : "chev-down")}</span> ${badge}${this.hl(conn)}` +
-        `<button class="grp-add" title="${esc(t("new_group"))}">${icon("plus")}</button>`;
+      ch.innerHTML = `<span class="grp-arrow">${icon(connClosed ? "chev-right" : "chev-down")}</span> ${badge}<span class="grp-name">${this.hl(conn)}</span>` +
+        `<button class="grp-add" title="${esc(t("new_group"))}">${icon("folder-plus")}` +
+        `<span class="grp-add-lbl">${esc(t("new_group_lbl"))}</span></button>`;
       ch.onclick = () => {
         // Sous filtre l'arbre est forcé déplié : toggler persisterait un
         // état invisible à l'écran (+ RPC refresh inutile).
@@ -317,8 +318,9 @@ export class Sidebar {
         const grpClosed = !f && (connClosed || localStorage.getItem(gkey) === "1");
         const g = document.createElement("div");
         g.className = "grp-sub" + (grpClosed ? " closed" : "");
-        g.innerHTML = `<span class="grp-arrow">${icon(grpClosed ? "chev-right" : "chev-down")}</span> ${this.hl(grp)}` +
-          `<button class="grp-add" title="${esc(t("new_sess_grp"))}">${icon("plus")}</button>`;
+        g.innerHTML = `<span class="grp-arrow">${icon(grpClosed ? "chev-right" : "chev-down")}</span> <span class="grp-name">${this.hl(grp)}</span>` +
+          `<button class="grp-add" title="${esc(t("new_sess_grp"))}">${icon("user-plus")}` +
+          `<span class="grp-add-lbl">${esc(t("new_sess_grp_lbl"))}</span></button>`;
         g.onclick = () => {
           if (this.filter) return; // idem : pas de toggle invisible sous filtre
           localStorage.setItem(gkey, localStorage.getItem(gkey) === "1" ? "0" : "1");
