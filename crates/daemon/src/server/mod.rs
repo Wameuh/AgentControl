@@ -716,6 +716,9 @@ impl Daemon {
                     // biased : la voie réponses est drainée avant les
                     // pushes — une réponse ne piétine plus derrière un
                     // backlog de pushes sur un lien congestionné.
+                    // None sur une voie = sender droppé → break : les deux
+                    // senders vivent/moururent ensemble dans l'Outbox,
+                    // dont un clone survit à la boucle (relays, dispatch).
                     let line = tokio::select! {
                         biased;
                         l = wrx_hi.recv() => l,
@@ -755,6 +758,10 @@ impl Daemon {
         // arrivée au lieu de rester orphelin jusqu'à la déconnexion.
         let mut pending_close: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        // Génération d'insertion — un Done tardif de la génération
+        // précédente (reap jusqu'à EXIT_GRACE) ne doit pas tuer un
+        // reopen sous le même id.
+        let mut next_gen = 0u64;
 
         loop {
             tokio::select! {
@@ -965,15 +972,23 @@ impl Daemon {
                 // qu'ici — pas de course entre tâches.
                 ev = term_evt_rx.recv(), if !terms.is_empty() || in_flight > 0 => {
                     match ev {
-                        Some(term::TermEvt::Done(tid)) => {
-                            // Sortir de la map → drop → kill/réap si
-                            // encore vivant.
-                            terms.remove(&tid);
+                        Some(term::TermEvt::Done { id, gen }) => {
+                            // Sortir de la map SEULEMENT si c'est bien
+                            // la génération du relay — un reopen sous le
+                            // même id a remplacé l'entrée entre-temps.
+                            if terms.get(&id).is_some_and(|(g, _)| *g == gen) {
+                                terms.remove(&id);
+                            }
                         }
                         Some(term::TermEvt::Spawned(sp)) => {
                             in_flight = in_flight.saturating_sub(1);
                             match sp.res {
                                 Ok((t, rx, cwd)) => {
+                                    // Consommé sur TOUS les chemins du
+                                    // spawn — une entrée orpheline
+                                    // tuerait un reopen ultérieur sous
+                                    // le même id.
+                                    let closed = pending_close.remove(&t.id);
                                     // Collision d'id client, ou close
                                     // reçu pendant le spawn (open
                                     // abandonné côté client) : le Term
@@ -984,7 +999,7 @@ impl Daemon {
                                             sp.id,
                                             format!("id terminal déjà utilisé: {}", t.id),
                                         )
-                                    } else if pending_close.remove(&t.id) {
+                                    } else if closed {
                                         Response::err(
                                             sp.id,
                                             "terminal fermé pendant l'ouverture",
@@ -992,9 +1007,11 @@ impl Daemon {
                                     } else {
                                         let tid = t.id.clone();
                                         Self::term_relay(
-                                            rx, tid.clone(), &outbox, &term_evt_tx,
+                                            rx, tid.clone(), next_gen,
+                                            &outbox, &term_evt_tx,
                                         );
-                                        terms.insert(t.id.clone(), t);
+                                        terms.insert(t.id.clone(), (next_gen, t));
+                                        next_gen += 1;
                                         Response::ok(
                                             sp.id,
                                             json!({"term": tid, "cwd": cwd}),
@@ -1003,6 +1020,9 @@ impl Daemon {
                                     Self::send_resp(&outbox, &resp)?;
                                 }
                                 Err(e) => {
+                                    if let Some(h) = &sp.hint {
+                                        pending_close.remove(h);
+                                    }
                                     Self::send_resp(
                                         &outbox,
                                         &Response::err(sp.id, e),

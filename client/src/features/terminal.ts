@@ -300,7 +300,9 @@ export class TermPanel {
     // Liaison lente (tunnel SSH distant) : term_open peut prendre des
     // secondes sans que rien ne bouge — le hint évite l'écran "mort".
     const slowHint = setTimeout(() => {
-      if (!entry.termId && !entry.exited)
+      // terms.get(key) : l'entrée a pu être remplacée/supprimée pendant
+      // l'attente (restart, dropSession) — writeln sur un xterm disposé.
+      if (this.terms.get(key) === entry && !entry.termId && !entry.exited)
         xterm.writeln(`\x1b[2m${t("term_slow")}\x1b[0m`);
     }, 6000);
     const t0 = performance.now();

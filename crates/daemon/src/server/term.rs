@@ -9,21 +9,29 @@ use crate::term::{Term, TermMsg};
 use base64::Engine;
 use tokio::sync::mpsc;
 
-pub(super) type Terms = HashMap<String, Term>;
+/// (génération, Term) par id — la gen distingue un Done tardif de la
+/// génération précédente : close→reopen sous le même id livre le nouveau
+/// shell au Done de l'ancien relay (spawn < reap, jusqu'à EXIT_GRACE).
+pub(super) type Terms = HashMap<String, (u64, Term)>;
 
 /// Résultat d'un `term_open` dispatché : le Term + son flux de sortie à
 /// brancher sur la connexion, ou l'erreur à répondre. `id` = id de la
-/// requête — la réponse est émise par la boucle de lecture.
+/// requête — la réponse est émise par la boucle de lecture. `hint` =
+/// l'id demandé par le client : consommé de `pending_close` sur TOUS
+/// les chemins (échec, collision, insertion) — une entrée orpheline
+/// tuerait un reopen ultérieur sous le même id.
 pub(super) struct SpawnedTerm {
     pub id: u64,
+    pub hint: Option<String>,
     pub res: Result<(Term, mpsc::Receiver<TermMsg>, String), String>,
 }
 
 /// Messages du flux terminal vers la boucle `serve_conn`.
 pub(super) enum TermEvt {
     /// Fin d'un flux PTY (shell mort ou reader coupé) — sortir le term
-    /// de la map → drop → kill/réap si encore vivant.
-    Done(String),
+    /// de la map si la génération correspond (sinon l'entry a déjà été
+    /// remplacée par un reopen sous le même id → ne pas y toucher).
+    Done { id: String, gen: u64 },
     /// Un term_open dispatché a abouti (ou échoué) : insérer le Term
     /// dans la map puis répondre au client.
     Spawned(Box<SpawnedTerm>),
@@ -82,7 +90,7 @@ impl Daemon {
                 tokio::spawn(async move {
                     let t0 = std::time::Instant::now();
                     let res = d
-                        .term_open(session.clone(), id_hint, cols, rows)
+                        .term_open(session.clone(), id_hint.clone(), cols, rows)
                         .await
                         .map_err(|e| format!("{e:#}"));
                     // Instrumentation du chemin d'ouverture (spawn + lookup
@@ -98,14 +106,18 @@ impl Daemon {
                         ),
                         Err(e) => warn!("[{}] term_open a échoué: {}", session, e),
                     }
-                    let _ = evt.send(TermEvt::Spawned(Box::new(SpawnedTerm { id, res })));
+                    let _ = evt.send(TermEvt::Spawned(Box::new(SpawnedTerm {
+                        id,
+                        hint: id_hint,
+                        res,
+                    })));
                 });
                 TermReply::Spawned
             }
             ReqKind::TermInput { term, data } => TermReply::Resp(
                 match base64::engine::general_purpose::STANDARD.decode(data) {
                     Ok(b) => {
-                        if let Some(t) = terms.get(term) {
+                        if let Some((_, t)) = terms.get(term) {
                             t.input(&b);
                         }
                         // Term inconnu (déjà mort/fermé) : la saisie part
@@ -117,7 +129,7 @@ impl Daemon {
                 },
             ),
             ReqKind::TermResize { term, cols, rows } => {
-                if let Some(t) = terms.get(term) {
+                if let Some((_, t)) = terms.get(term) {
                     t.resize(*cols, *rows);
                 }
                 TermReply::Resp(Response::ok(id, json!({})))
@@ -176,10 +188,14 @@ impl Daemon {
 
     /// Branche le flux de sortie d'un PTY sur la connexion (pushes
     /// term_data, puis term_exit final + TermEvt::Done de nettoyage).
-    /// Appelé par la boucle de lecture à la réception d'un Spawned.
+    /// Appelé par la boucle de lecture à la réception d'un Spawned —
+    /// `gen` = génération de l'insertion, renvoyée dans le Done pour
+    /// qu'un close→reopen sous le même id ne soit pas tué par le Done
+    /// tardif de la génération précédente.
     pub(super) fn term_relay(
         rx: mpsc::Receiver<TermMsg>,
         tid: String,
+        gen: u64,
         write: &Outbox,
         evt: &mpsc::UnboundedSender<TermEvt>,
     ) {
@@ -207,8 +223,9 @@ impl Daemon {
                 }
             }
             // Nettoyage de la map côté boucle de lecture (le term peut
-            // être déjà parti via TermClose — sans effet alors).
-            let _ = evt.send(TermEvt::Done(tid2));
+            // être déjà parti via TermClose — sans effet alors ; la gen
+            // protège un éventuel reopen sous le même id).
+            let _ = evt.send(TermEvt::Done { id: tid2, gen });
         });
     }
 }

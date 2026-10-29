@@ -588,17 +588,21 @@ impl Client {
                     }
                 }
                 // Fin de boucle = transport mort (EOF ou erreur de lecture).
+                // dead D'ABORD : un call() qui vérifie entre le drain et
+                // le signal s'insérerait après lui → timeout 60 s, la
+                // classe de bug corrigée ici.
+                let _ = c.dead_tx.send(true);
                 // Solder tous les appels en vol avec une erreur immédiate :
                 // sinon chacun resterait pendu jusqu'au timeout de 60 s —
                 // un term_open sur tunnel coupé figeait le client une
-                // minute sans message.
+                // minute sans message. Le check-then-insert de call()
+                // sous le même lock ferme la fenêtre de course.
                 {
                     let mut m = c.pending.lock().await;
                     for (_, tx) in m.drain() {
                         let _ = tx.send(Err("connexion fermée".into()));
                     }
                 }
-                let _ = c.dead_tx.send(true);
             });
         }
         Ok(client)
@@ -618,7 +622,17 @@ impl Client {
             .unwrap_or_else(|| "?".into());
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
+        {
+            let mut m = self.pending.lock().await;
+            // Revérifier dead sous le lock : le reader peut mourir entre
+            // le check en tête et cet insert — check-then-insert atomique
+            // vs le drain des pendings (sinon l'entrée s'insère après le
+            // drain et attend 60 s pour rien).
+            if *self.dead.borrow() {
+                bail!("connexion fermée");
+            }
+            m.insert(id, tx);
+        }
         // La future peut être droppée en vol (timeout externe, JoinSet) ou
         // timeout interne → sans guard l'entrée pending fuirait jusqu'au
         // drop du client.

@@ -19,6 +19,7 @@ use std::sync::mpsc as std_mpsc;
 use tokio::sync::mpsc;
 
 /// Messages du flux PTY vers la connexion : données puis Exit terminal.
+#[derive(Debug)]
 pub enum TermMsg {
     Data(Vec<u8>),
     /// Le shell est mort (ou la lecture a coupé) — dernier message du flux.
@@ -164,5 +165,61 @@ fn reap(child: &mut dyn portable_pty::Child) -> Option<i64> {
             }
             Err(_) => return None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `id_hint` valide → repris tel quel (anti-orphelin côté client) ;
+    /// absent/vide/trop long → id serveur `t-*`.
+    #[tokio::test]
+    async fn spawn_id_hint() {
+        let (t, _rx) = Term::spawn("/tmp", 80, 24, &[], Some("t-ui-abcd")).unwrap();
+        assert_eq!(t.id, "t-ui-abcd");
+        let (t2, _rx2) = Term::spawn("/tmp", 80, 24, &[], None).unwrap();
+        assert!(t2.id.starts_with("t-"));
+        let long = "x".repeat(100);
+        let (t3, _rx3) = Term::spawn("/tmp", 80, 24, &[], Some(&long)).unwrap();
+        assert_ne!(t3.id, long);
+        let (t4, _rx4) = Term::spawn("/tmp", 80, 24, &[], Some("")).unwrap();
+        assert!(t4.id.starts_with("t-"));
+    }
+
+    /// Le shell démarre, répond à une saisie, et le flux se termine par
+    /// Exit — couvre le canal borné + le reap au drop.
+    #[tokio::test]
+    async fn spawn_io_exit() {
+        let (t, mut rx) = Term::spawn("/tmp", 80, 24, &[], Some("t-ui-io")).unwrap();
+        t.input(b"echo ac-term-ok\n");
+        let got = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut buf = Vec::new();
+            while let Some(m) = rx.recv().await {
+                if let TermMsg::Data(b) = m {
+                    buf.extend_from_slice(&b);
+                    if buf.windows(10).any(|w| w == b"ac-term-ok") {
+                        return true;
+                    }
+                }
+            }
+            false
+        })
+        .await;
+        assert!(matches!(got, Ok(true)), "pas de sortie shell : {got:?}");
+
+        drop(t); // master fermé → reader EOF → reap → Exit final
+        let last = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut last = None;
+            while let Some(m) = rx.recv().await {
+                last = Some(m);
+            }
+            last
+        })
+        .await;
+        assert!(
+            matches!(last, Ok(Some(TermMsg::Exit(_)))),
+            "flux non terminé par Exit : {last:?}"
+        );
     }
 }
