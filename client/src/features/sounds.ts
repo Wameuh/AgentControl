@@ -11,6 +11,7 @@
 // Réglages localStorage ac-* + sons synthétisés par tools/gen_sounds.py.
 // ---------------------------------------------------------------------------
 
+import { logUi } from "../core/dom";
 import type { SessionMeta } from "../core/types";
 
 export type SoundKind = "done" | "question" | "error";
@@ -79,7 +80,14 @@ class SoundAlerts {
   /** Bouton « tester » des paramètres — volontairement sans garde (toggle,
    *  focus, cooldown) : le geste utilisateur débloque aussi l'autoplay. */
   test(kind: SoundKind) {
-    this.emit(kind);
+    void this.emit(kind);
+  }
+
+  /** Vrai tant que la politique autoplay garde l'AudioContext suspendu
+   *  (aucun geste utilisateur reçu depuis le boot) — affiché dans les
+   *  réglages pour expliquer un éventuel silence. */
+  blocked() {
+    return this.ctx !== null && this.ctx.state === "suspended";
   }
 
   private play(kind: SoundKind) {
@@ -88,15 +96,91 @@ class SoundAlerts {
     const now = Date.now();
     if (now - (this.lastPlay.get(kind) ?? -COOLDOWN_MS) < COOLDOWN_MS) return;
     this.lastPlay.set(kind, now);
-    this.emit(kind);
+    void this.emit(kind);
   }
 
-  private emit(kind: SoundKind) {
-    const a = new Audio(FILES[kind]);
-    a.volume = sndVolume();
-    // Avant le premier geste utilisateur la webview peut refuser play()
-    // (autoplay policy, Android) — silence plutôt qu'une erreur remontée.
-    void a.play().catch(() => {});
+  // --- Pipeline WebAudio ---------------------------------------------------
+  // `new Audio(path).play()` hors geste utilisateur est rejeté par la
+  // politique autoplay des webviews (Tauri/Android/web) → silence total.
+  // Un AudioContext débloqué par resume() au premier geste (pointerdown/
+  // keydown) permet ensuite les lectures programmées à tout moment.
+
+  private ctx: AudioContext | null = null;
+  private buffers = new Map<SoundKind, Promise<AudioBuffer | null>>();
+  private warnedBlocked = false;
+
+  private audioCtx(): AudioContext | null {
+    if (!this.ctx) {
+      try {
+        this.ctx = new AudioContext();
+      } catch (e) {
+        logUi("error", `audio: AudioContext indisponible: ${e}`);
+        return null;
+      }
+      // Déverrouillage autoplay : le contexte démarre "suspended" tant que
+      // la page n'a pas reçu de geste — le premier suffit (capture, once).
+      const unlock = () => void this.ctx?.resume();
+      for (const ev of ["pointerdown", "keydown"] as const) {
+        document.addEventListener(ev, unlock, { once: true, capture: true });
+      }
+      // Le hint « audio bloqué » des réglages suit l'état réel du contexte.
+      this.ctx.addEventListener("statechange", () => {
+        const el = document.getElementById("s-snd-blocked");
+        if (el) el.hidden = !this.blocked();
+      });
+    }
+    return this.ctx;
+  }
+
+  /** fetch + decode d'un son, mis en cache (null si l'asset est absent). */
+  private buffer(kind: SoundKind): Promise<AudioBuffer | null> {
+    let p = this.buffers.get(kind);
+    if (!p) {
+      const ctx = this.audioCtx();
+      p = ctx
+        ? fetch(FILES[kind])
+            .then((r) => {
+              if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+              return r.arrayBuffer();
+            })
+            .then((ab) => ctx.decodeAudioData(ab))
+            .catch((e) => {
+              logUi("error", `audio: ${FILES[kind]} illisible: ${e}`);
+              return null;
+            })
+        : Promise.resolve(null);
+      this.buffers.set(kind, p);
+    }
+    return p;
+  }
+
+  private async emit(kind: SoundKind) {
+    const ctx = this.audioCtx();
+    if (!ctx) return;
+    // Hors geste (event réseau) resume() peut rester pending jusqu'au
+    // geste suivant : le son part alors tout de même dès le déblocage.
+    if (ctx.state === "suspended") {
+      try {
+        await ctx.resume();
+      } catch {
+        /* encore verrouillé — le resume du premier geste suivra */
+      }
+    }
+    if (ctx.state !== "running") {
+      if (!this.warnedBlocked) {
+        this.warnedBlocked = true;
+        logUi("warn", "audio: bloqué par la politique autoplay — un clic débloque");
+      }
+      return;
+    }
+    const buf = await this.buffer(kind);
+    if (!buf) return;
+    const src = ctx.createBufferSource();
+    const gain = ctx.createGain();
+    gain.gain.value = sndVolume();
+    src.buffer = buf;
+    src.connect(gain).connect(ctx.destination);
+    src.start();
   }
 }
 
