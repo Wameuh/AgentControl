@@ -11,11 +11,12 @@
 // idle/waiting a souvent soldé sa tâche ; session_created/deleted — un
 // spawn qui pop ou une session libérée).
 // Onglet inactif : cycle lent (~60 s) qui ne sert qu'au compteur de
-// l'onglet — la file peut être mutée par un autre worker ou par
-// l'utilisateur en CLI sans aucun event visible côté client ; les mêmes
-// events session débouchent le même refresh debouncé (un pop = badge
-// quasi immédiat). Le détail du panneau profite du même fetch — aucune
-// requête « count » plus légère n'existe dans la spec du composant.
+// l'onglet — vraie couverture des mutations externes (autre worker,
+// CLI) : les pushes session-event ne suivent que la session ouverte —
+// quand c'est elle qui travaille la file, le même debounce rafraîchit
+// le badge sans attendre le tick. Le détail du panneau profite du
+// même fetch — aucune requête « count » plus légère n'existe dans la
+// spec du composant.
 // ---------------------------------------------------------------------------
 
 import { $, esc, q } from "../core/dom";
@@ -121,8 +122,9 @@ export class BacklogView {
   }
 
   /** Invalidation par event session — debounce : une rafale de
-   *  status_changed = un seul fetch. Valable onglet actif ou non : un
-   *  pop/spawn d'un autre worker met aussi le badge à jour. */
+   *  status_changed = un seul fetch. Onglet actif ou non — les pushes
+   *  ne couvrant que la session ouverte, le cas utile est « la session
+   *  affichée travaille la file » ; le reste relève du poll lent. */
   noteSessionEvent(type: string) {
     if (
       type !== "status_changed" &&
@@ -136,6 +138,13 @@ export class BacklogView {
       this.evTimer = undefined;
       void this.refresh();
     }, 800);
+  }
+
+  /** Capability `components` (re)découverte — premier paint du badge
+   *  sans attendre le prochain tick (le poll lent part du boot, avant
+   *  la connexion). */
+  noteCaps() {
+    void this.refresh();
   }
 
   setFilter(f: string) {

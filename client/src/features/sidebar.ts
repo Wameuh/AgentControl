@@ -321,16 +321,24 @@ export class Sidebar {
    *  le watcher du démon… Tick sauté sur l'onglet Repos lui-même :
    *  `prSyncCycle` y fait déjà un refresh() complet toutes les 60 s. */
   private prCountTimer: number | undefined;
+  /** Intervalle == timeout RPC (60 s) : un pr_list pendu laisserait le
+   *  tick suivant se chevaucher — garde anti-réentrance. */
+  private prTickBusy = false;
 
   private async prCountTick() {
-    if (this.view === "repos") return;
-    const r = await call<PrRow[]>("pr_list").then(
-      (rows) => ({ rows, failed: false }),
-      () => ({ rows: [] as PrRow[], failed: true }),
-    );
-    this.applyPrRows(r.rows, r.failed);
-    this.prsView.setData(this.prRows, app.lastSessions, this.prFailed);
-    this.renderPrBadge();
+    if (this.view === "repos" || this.prTickBusy) return;
+    this.prTickBusy = true;
+    try {
+      const r = await call<PrRow[]>("pr_list").then(
+        (rows) => ({ rows, failed: false }),
+        () => ({ rows: [] as PrRow[], failed: true }),
+      );
+      this.applyPrRows(r.rows, r.failed);
+      this.prsView.setData(this.prRows, app.lastSessions, this.prFailed);
+      this.renderPrBadge();
+    } finally {
+      this.prTickBusy = false;
+    }
   }
 
   /** Repoll interne tant qu'une session est "starting" (budget par
@@ -479,10 +487,17 @@ export class Sidebar {
     this.renderView();
   }
 
-  /** Event session poussé par le démon → invalidation debouncée de la
-   *  file (onglet backlog actif ou non — le badge suit aussi). */
+  /** Event session poussé par le démon (pushes = session ouverte
+   *  seulement) → invalidation debouncée de la file et du badge. */
   noteSessionEvent(type: string) {
     this.backlogView.noteSessionEvent(type);
+  }
+
+  /** Capabilities (re)connues : la vue backlog peut devenir capable
+   *  sans action — poke pour peindre son badge dès que possible (au
+   *  lieu du premier tick ~60 s après le boot). */
+  noteCapsChanged() {
+    this.backlogView.noteCaps();
   }
 
   /** Filtre de l'arbre (normalisé : trim + bas de casse) — vide = tout. */
