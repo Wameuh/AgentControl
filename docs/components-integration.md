@@ -1,0 +1,319 @@
+# Intégration des composants au démon — analyse & architecture
+
+> Document de conception : cartographie de l'écosystème, modèle de
+> « composant » managé par le démon, surface proto, vue diagramme, et
+> plan de découpage en tâches implémentables (items AgentBacklog).
+> Date : 2026-10-29 — analyse pour la tâche backlog #19.
+
+---
+
+## 1. Cartographie de l'existant
+
+L'écosystème a grandi organiquement. Aujourd'hui, seul le serveur MCP est
+intégré au démon ; tout le reste vit à côté, supervisé par d'autres moyens
+(supervisord du conteneur dev, systemd --user, crontab, rien du tout).
+
+### 1.1 Ce que le démon gère déjà (interne, compilé dedans)
+
+| Élément | Rôle | Où |
+| --- | --- | --- |
+| Sessions agent ACP | spawn/monitor des process agents, journal events.jsonl + blobs, reprise auto post-crash | `crates/daemon/src/session/`, `server/sessions.rs` |
+| Serveur MCP `agentcontrol` | outils agent↔agent (list/send/create/read/sleep) injecté via `mcpServers` de session/new\|load ; sous-commande cachée `mcp-serve` du même binaire, spawnée par chaque agent | `crates/daemon/src/mcp.rs`, injection `server/mod.rs::mcp_servers` |
+| Registre PR ↔ session | prs.json, watcher par session (détection `gh pr create`), RPC `pr_list/track/untrack` | `crates/daemon/src/prs.rs`, `server/prs.rs` |
+| Web UI | listener HTTP loopback + token (`bind_http`), sert la SPA (embed ou disque), pont WS vers le proto NDJSON, /rpc /media /download | `crates/daemon/src/web/` |
+| Janitor | rétention : compaction journaux, purge LRU blobs, purge sessions inactives | `server/mod.rs::janitor` |
+| Terminaux PTY | shell par connexion, cycle de vie borné à la conn | `server/term.rs` |
+| Self-update | `UpdateDaemon` : download release + remplacement binaire + exit (relance par superviseur) | `selfupdate.rs` |
+| `acctl` | CLI client du démon (même proto NDJSON) | `crates/acctl` |
+
+### 1.2 Ce qui vit à côté (externe)
+
+| Programme | Rôle | Supervision actuelle | État/log |
+| --- | --- | --- | --- |
+| `backlog-orchestrator.py` | poll 60 s : spawn les workers `Backlog-W*` (acctl spawn, devin/bypass/swe-2-high, groupe AgentControl), nudge les workers idle avec PR ouverte/tâche wip, supprime les sessions soldées, release les wip orphelins ; ledger worker→{tâches,PRs} dans son state | `~/.supervisor/conf.d/backlog-orchestrator.conf` (autostart+autorestart, env `AGENTCONTROL_TCP=127.0.0.1:7331`) | `~/.agentbacklog/orchestrator-{state.json,log,stdout.log,stderr.log}` ; lock flock `orchestrator.lock` ; pause via `orchestrator.pause` ; CLI `--status/--once/--dry-run` |
+| `agentbacklog` (CLI) | file FIFO de features en SQLite — transactions atomiques, **pas de démon** | `uv tool` dans `~/.local/bin` (repo `github.com/Wameuh/AgentBacklog`) | `~/.agentbacklog/backlog.db` |
+| `pr-db` | registre PR local sqlite — **legacy**, remplacé par le registre intégré (feat #59) | `~/.local/bin` | `~/.agentcontrol/prs.db` |
+| `graphify`, `graphify-mcp` | outils uv externes | `~/.local/bin` | — |
+| `acp-mock-agent` | agent ACP factice de test | binaire du tarball release | — |
+| `supervisord` | **PID 1 du conteneur dev** : sshd + cron + agentcontrol-daemon + backlog-orchestrator | conf `/etc/supervisor/conf.d/` + `~/.supervisor/conf.d/` | — |
+| `cron`/`crontab` | jobs planifiés | supervisé (volume `cron-spool`) | — |
+| Review automation | `/mr review` → session de review | **autre serveur**, hors périmètre local | — |
+| systemd `agentcontrol-daemon.service` | superviseur du démon en prod (`Restart=always`) | `packaging/` | — |
+
+### 1.3 Managé vs externe — le constat
+
+- Le démon sait déjà gérer **des process** (sessions agents) : spawn via
+  `tokio::process`, surveillance de l'exit, redémarrage à la demande,
+  env injectée. Le mécanisme existe — il est spécialisé ACP.
+- Les services satellites (orchestrateur, futurs MCP/scripts) refont chacun
+  leur propre supervision, logs, état et CLI — et sont **invisibles dans le
+  client** : on ne voit ni qu'ils tournent, ni qu'ils sont liés aux sessions.
+- La vision : tout programme de l'écosystème devient un **composant
+  déclaré** — le démon l'affiche, offre sa configuration, et (selon le
+  type) pilote son cycle de vie ; le client propose une vue diagramme des
+  programmes + sessions attachées.
+
+---
+
+## 2. Architecture cible
+
+### 2.1 Modèle de composant : quatre `kind`
+
+```toml
+# <root>/components.toml — fichier possédé par le démon
+# (config.toml reste édité à la main ; components.toml est réécrit
+#  atomiquement par les RPC d'édition)
+
+[[components]]
+name = "backlog-orchestrator"
+kind = "process"                 # internal | process | external | tool
+command = ["/usr/bin/python3", "/home/dev/.local/bin/backlog-orchestrator.py"]
+cwd = "/home/dev"
+autostart = true
+restart = "on-failure"           # always | on-failure | never
+restart_sec = 5                  # backoff de base (exponentiel ×2, cap 60 s)
+healthcheck = { kind = "process" }  # none | process | tcp | http | command
+description = "Spawn les workers du backlog AgentBacklog"
+
+[components.env]
+AGENTCONTROL_TCP = "127.0.0.1:7331"
+
+[[components]]
+name = "agentbacklog"
+kind = "tool"                    # CLI stateless : pas de process
+command = ["agentbacklog", "--version"]
+description = "File FIFO de features (SQLite ~/.agentbacklog/backlog.db)"
+```
+
+| `kind` | Sens | Cycle de vie | Exemples |
+| --- | --- | --- | --- |
+| `internal` | feature compilée dans le démon | pas de process ; état déduit de la config (web actif si `bind_http`, a2a si activé…) | mcp-serve, prs, web, janitor |
+| `process` | programme long managé par le démon | spawn/stop/restart/healthcheck/logs | backlog-orchestrator, futurs MCP/scripts |
+| `external` | déclaré, géré ailleurs | observé par healthcheck seulement — le démon ne touche jamais au cycle de vie | supervisord, sshd, cron, review-bot, systemd unit |
+| `tool` | CLI/install stateless | présence + version (`command --version` sonde) ; pas de process long | agentbacklog, acctl, graphify |
+
+Les composants `internal` sont **déclarés dans le code** (pas dans
+components.toml) et apparaissent dans `ListComponents` comme les autres —
+le diagramme montre ainsi tout l'écosystème d'un coup.
+
+### 2.2 Cycle de vie d'un `process` managé
+
+- **Spawn** : `tokio::process::Command` au boot du démon si `autostart`,
+  sinon à la demande (`ComponentStart`). `setsid` n'est pas nécessaire :
+  le process meurt avec le démon, comme les agents.
+- **Env injectée automatiquement** (comme `agent_parts` pour l'a2a) :
+  `AGENTCONTROL_SOCK`, `AGENTCONTROL_TCP`, `AGENTCONTROL_HOME`,
+  `AGENTCONTROL_COMPONENT=<name>` → un composant découvre le démon sans
+  config, sur n'importe quelle installation.
+- **Restart** : `on-failure`/`always` avec backoff exponentiel
+  (`restart_sec` de base, ×2, cap 60 s, reset après 5 min stables) ;
+  compteur `restarts` + `last_exit` exposés.
+- **Healthcheck** périodique (30 s) : `process` = pid vivant ;
+  `tcp`/`http` = sonde ; `command` = petit check exécuté. État :
+  `running | degraded | stopped | failed | starting`.
+- **Logs** : stdout/stderr redirigés vers
+  `<root>/components/<name>.log`, rotation bornée (1 Mio ×2).
+  `ComponentLogs` fait du tail paginé.
+- **Arrêt du démon** : SIGTERM aux process managés (même destin que les
+  agents : un restart démon les interrompt ; ils repartent au boot si
+  autostart). Un composant qui **ne doit pas** être interrompu par un
+  restart démon → `kind = "external"`.
+- **Orphans** (démon SIGKILLé) : pidfile
+  `<root>/components/<name>.pid`. Au boot : pid mort → clean ; pid vivant
+  → V1 kill + respawn (déterministe — évite un process orphelin qui garde
+  des fd/état). Option `adopt` possible plus tard.
+- **Garde** : refuser une spec `process` dont la commande pointe le
+  binaire démon lui-même, `supervisord` ou `systemctl` — le système de
+  composants ne gère ni son propre superviseur ni lui-même.
+
+### 2.3 Surface proto
+
+Nouveaux `ReqKind` (NDJSON, comme le reste — ajout rétrocompatible : un
+vieux client les ignore ; un vieux démon répond `parse: unknown variant`
+avec l'`id` correctement extrait, donc l'appel échoue proprement) :
+
+| ReqKind | Réponse |
+| --- | --- |
+| `ListComponents` | `[{name, kind, state, pid?, autostart, health, uptime_s?, restarts, last_exit?, description?, source?}]` |
+| `ComponentInfo {name}` | spec complète + état détaillé |
+| `ComponentStart/Stop/Restart {name}` | `{name, state}` |
+| `ComponentLogs {name, offset?, limit?}` | `{data(b64)|lines, size, truncated}` (tail paginé) |
+| `ComponentUpsert {name, spec}` | réécrit components.toml atomiquement |
+| `ComponentRemove {name}` | idem (+ stop si process vivant) |
+| `ComponentCatalog {refresh?}` | entrées du catalogue (§2.5) |
+| `ComponentInstall {name}` | exécute la recette + upsert la spec |
+
+Capability : `daemon_status.components = true` → le client gate ses
+boutons comme pour `terminal`/`first_post`. Le commit qui ajoute les
+ReqKind porte le mot-clé `(minor)` (nouvelle surface client↔démon).
+
+Push : pas de canal d'events daemon-wide (le `Subscribe` actuel est
+par-session) — le client **poll** (`ListComponents` + `ListSessions`,
+~3 s pendant que la vue est ouverte), comme le watchdog connexions
+existant (10 s). Un `component_status_changed` push viendra en V2 si le
+poll s'avère insuffisant.
+
+### 2.4 acctl
+
+`acctl comp <sub>` — miroir des RPC pour l'usage terminal (agents,
+scripts, orchestrateur lui-même) :
+
+```
+acctl comp ls [--json]            # nom, kind, état, pid, uptime, restarts
+acctl comp info <name>            # spec + état
+acctl comp start|stop|restart <name>
+acctl comp logs <name> [--tail N]
+acctl comp catalog [--json]       # + versions upstream
+acctl comp install <name>         # recette catalogue → spec managée
+```
+
+### 2.5 Catalogue & installation — les « options d'intégration »
+
+Objectif : **sur une autre installation**, proposer d'intégrer un
+composant connu en quelques clics — ses métadonnées (description,
+version, doc) étant récupérées depuis sa source upstream.
+
+- **Catalogue embarqué** dans le démon (table const ou JSON packagé) :
+  `name, description, repo ("Wameuh/AgentBacklog"), homepage,
+  suggested_spec (kind/command/env/healthcheck préremplis), recipe`.
+- **Fetch upstream** (`ComponentCatalog refresh: true`) :
+  `ureq` (déjà dep du démon, TLS rustls) →
+  `api.github.com/repos/<repo>/releases/latest` (tag + body) ; repli
+  `releases` → `tags` → HEAD. Résultat mis en cache quelques minutes.
+  Ex. agentbacklog → `Wameuh/AgentBacklog`, dernière release/tag.
+- **Recettes déclaratives** auditées dans le code (jamais de commande
+  arbitraire envoyée par le client) : étapes typées
+  `run {argv}` / `write_file {path, content}` / `upsert_spec {}`.
+  Exemples :
+  - `agentbacklog` : `uv tool install git+https://github.com/Wameuh/AgentBacklog`
+    (install upstream documentée) + spec `tool`.
+  - `backlog-orchestrator` : le script vit aujourd'hui hors repo dans
+    `~/.local/bin` → **recommandation : le versionner** (repo
+    `Wameuh/AgentBacklog` ou `contrib/` d'AgentControl) pour que la
+    recette ait une source canonique (`raw.githubusercontent.com`) ;
+    en attendant, la recette installe la spec `process` pointant le
+    chemin existant quand il est détecté.
+- **Détection** : la catalogue marque chaque entrée `installed` (commande
+  trouvée sur le PATH du démon / fichier présent) + version si sondable
+  → le client affiche « installé v0.2 — intégrer ? » vs « disponible ».
+- Futurs composants = une entrée catalogue, pas de nouveau code client.
+
+### 2.6 UI client — panneau « Composants »
+
+Vue overlay plein `#chat` (pattern `settings-view`) ouverte depuis un
+bouton titlebar/menu ⋮ :
+
+- **Liste** des composants de la connexion courante : nom, kind badge,
+  état animé, uptime, restarts ; actions contextuelles
+  start/stop/restart + viewer logs (tail auto-refresh).
+- **Édition** : formulaire sur la spec (command, env, autostart, restart,
+  healthcheck) → `ComponentUpsert`.
+- **Onglet Catalogue** : cartes des entrées connues (nom, description,
+  version upstream fetchée, « installé ? »), bouton « Intégrer » →
+  `ComponentInstall` puis formulaire prérempli de la `suggested_spec`.
+- Capability-gated sur `components: true`.
+
+### 2.7 Vue diagramme animée
+
+La pièce « vivante » : **graphe des programmes et des sessions**.
+
+- **Nœuds** : le démon au centre ; composants en anneau (icône par kind) ;
+  sessions groupées autour de leur parent (`spawned_by` — les workers
+  `Backlog-W*` sous l'orchestrateur le cas échéant, sous le démon sinon).
+- **Arêtes** : démon→composant managé (`manages`), composant→démon
+  (RPC — l'orchestrateur parle au socket), démon→session (`spawned`),
+  session→session (`spawned_by`/`peer_message`).
+- **États animés** : pulse sur les sessions `working`, point coloré par
+  état (idle/working/waiting/dead/degraded/stopped), arêtes en pointillés
+  animés sur les flux actifs. Tooltips : titre, état, uptime ; clic
+  session → ouvre le chat ; clic composant → panneau §2.6.
+- **Technique** : **SVG en vanilla TS** (le client n'a aucune dep de
+  graphe — pas de lib externe). Layout radial déterministe (démon centre,
+  composants sur un cercle, sessions sur des arcs autour de leur parent)
+  — pas de force-directed : stable, lisible, suffisant (< ~100 nœuds).
+  Animations CSS (`stroke-dashoffset`, `transform`) — pas de canvas.
+- **Données** : `ListComponents` + `ListSessions` + `PrList` en poll ~3 s
+  uniquement pendant que la vue est ouverte.
+- Intégration : nouvelle vue overlay `map-view` à côté de `settings-view`
+  (même mécanique open/close + `nav.push`), ouverte via le menu ⋮ et un
+  bouton titlebar.
+
+### 2.8 Choix tranchés : internal vs managé vs externe
+
+| Composant | Décision | Pourquoi |
+| --- | --- | --- |
+| mcp-serve | `internal` | déjà sous-commande du binaire — le diagramme compte les instances par session |
+| registre PR | `internal` | déjà dans le démon |
+| web UI | `internal` | feature `bind_http` — état = actif/inactif |
+| janitor | `internal` | tâche interne |
+| backlog-orchestrator | **`process` managé** | cas d'usage typique : migre de supervisord vers le démon (cycle de vie + logs + visibilité) |
+| agentbacklog | `tool` | CLI stateless — nœud passif + version + install catalogue |
+| acctl | `tool` | idem |
+| pr-db | externe/legacy | en fin de transition (feat #59) — déclarable en `external` si encore présent |
+| supervisord / sshd / cron | `external` | infra du conteneur — jamais managés (le démon ne touche pas à son propre superviseur) |
+| review bot | `external` | autre serveur — healthcheck optionnel |
+| le démon lui-même | nœud racine, pas un composant | le système ne se supervise pas lui-même |
+
+---
+
+## 3. Risques & contraintes
+
+1. **Le démon orchestre les agents** — le redémarrer tue les sessions
+   (règle AGENTS.md). Un `process` managé subit le même sort (SIGTERM à
+   l'arrêt, respawn au boot si autostart). C'est **cohérent** mais à
+   documenter : un service devant survivre au restart démon → `external`.
+   Le développement/test des features démon se fait sur un
+   `AGENTCONTROL_HOME` jetable — jamais sur le démon live.
+2. **Compat proto** : nouveaux `ReqKind` = extension sûre (vieux client
+   ignore ; vieux démon → `parse:` propre avec id extrait). Le client
+   gate sur `daemon_status.components`. Mot-clé `(minor)` sur la PR
+   proto+daemon (incompat client↔démon = auto-update).
+3. **Sécurité** : le démon ne bind que loopback — les RPC composants ont
+   la même confiance que `NewSession` (pouvoir équivalent : spawn de
+   process). `ComponentInstall` n'exécute que des **recettes déclaratives
+   embarquées** (pas de shell arbitraire client). Gardes : refuser les
+   specs visant le démon/supervisord/systemd ; components.toml hérite les
+   permissions du root (0600 conseillé, comme daemon.sock).
+4. **Persistance** : `components.toml` réécrit en `.part`+rename atomique
+   (pattern `write_file`). `config.toml` n'est **pas** réécrit par le
+   démon — deux fichiers, deux responsabilités.
+5. **Windows** : le démon est Linux-only (socket Unix) — le modèle ne
+   l'interdit pas mais le `process` management Windows est hors scope.
+6. **Charge** : un superviseur de plus dans l'event-loop démon — borné :
+   healthchecks ~30 s, spawns rares. Aucune dep Rust nouvelle requise
+   (`toml`, `ureq` déjà présents).
+7. **Orphans/split-brain** : un composant externe qui garde un état
+   (orchestrateur : son ledger + flock) doit rester **singleton** — le
+   flock existant du script couvre déjà les doublons ; la migration
+   retire la conf supervisord pour éviter deux superviseurs qui le
+   relancent (flock = second instance exit propre, safe).
+
+---
+
+## 4. Plan de découpage — items AgentBacklog
+
+Ordre : A (cœur démon) → B (édition+catalogue) → {C, D, E, F, G}.
+
+| # | Item backlog | Contenu | Dépend de |
+| --- | --- | --- | --- |
+| A | **#24** | daemon — modèle de composants + superviseur + RPC lecture (`ListComponents/ComponentInfo/Start/Stop/Restart/Logs`, components.toml, logs, healthcheck, capability) | — |
+| B | **#25** | daemon — édition de config + catalogue + install (`ComponentUpsert/Remove/Catalog/Install`, fetch GitHub, recettes agentbacklog + orchestrateur) | #24 |
+| C | **#27** | acctl — commandes `comp` (ls/info/start/stop/restart/logs/catalog/install) | #25 |
+| D | **#26** | client — vue diagramme animée SVG (nœuds programmes+sessions, états, flux) | #24 |
+| E | **#28** | client — panneau gestion composants (liste, actions, logs, édition spec, onglet catalogue/intégration) | #25 |
+| F | **#29** | orchestrateur — migration supervisord → composant managé (spec, doc migration, retrait conf après bascule) | #25 |
+| G | **#30** | kind `tool` — détection/version + nœuds passifs catalogue (agentbacklog dans le diagramme) | #25 |
+
+#24 est poppable immédiatement ; #26 dès que #24 est `done` ; les
+autres se débloquent quand #25 passe `done` — le `--depends-on`
+d'AgentBacklog garantit l'ordre de prise en charge entre workers.
+
+### Critères de prise en charge
+
+Chaque item est autonome : worktree dédié basé sur `origin/next_release`,
+spec complète dans sa description backlog, PR draft → `/mr review` →
+ready → 5 checks verts (workflow AGENTS.md). Le champ `description`
+embarque : fichiers concernés, schéma exact des types/reqs, vérifs
+(`cargo build --release -p agentcontrol-daemon` / `npm run build`),
+et interdit de toucher au démon live (tests sur `AGENTCONTROL_HOME`
+jetable).
