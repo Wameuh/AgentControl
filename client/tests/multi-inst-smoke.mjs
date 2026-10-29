@@ -321,12 +321,14 @@ await pD.evaluate(() => document.querySelector('#backlog-list .bl-sec.wip .bl-ag
 await sleep(500);
 ok((await pD.evaluate(() => document.querySelector("#chat-title")?.textContent.includes("Fix login crash"))) === true,
   "H8 clic pastille agent → chat de la session ouvert");
-// Quitter l'onglet coupe le trafic : plus aucun component_query.
+// Quitter l'onglet coupe le poll rapide : plus aucun component_query dans
+// la fenêtre mesurée (le cycle badge ~60 s continue hors de cette fenêtre —
+// c'est voulu : le compteur de l'onglet reste vivant sans clic).
 await pD.evaluate(() => document.querySelector("#sv-agents")?.click());
 const qN = await pD.evaluate(() => window.__qCalls || 0);
 await sleep(4700);
 ok((await pD.evaluate(() => window.__qCalls || 0)) === qN,
-  "H9 onglet quitté → poll arrêté (0 component_query de plus)");
+  "H9 onglet quitté → poll rapide arrêté (0 component_query de plus)");
 // Composant masqué → état « non déclaré » + CTA ; Intégrer → install → file.
 await pD.evaluate(() => { window.__blHide = true; document.querySelector("#sv-backlog")?.click(); });
 await sleep(700);
