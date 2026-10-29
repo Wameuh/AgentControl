@@ -128,7 +128,26 @@ fn catalog(entries: &[Value]) {
     }
 }
 
-/// `comp add` — construit la `ComponentSpec` minimale depuis les flags.
+/// Sonde `--hc` : `none` | `process` | `tcp:ADDR` | `http:URL` |
+/// `cmd:"<argv>"` (argv quoté comme --cmd).
+fn parse_healthcheck(s: &str) -> Result<proto::Healthcheck> {
+    Ok(match s {
+        "none" => proto::Healthcheck::None,
+        "process" => proto::Healthcheck::Process,
+        _ if s.starts_with("tcp:") => proto::Healthcheck::Tcp {
+            addr: s["tcp:".len()..].to_string(),
+        },
+        _ if s.starts_with("http:") || s.starts_with("https:") => {
+            proto::Healthcheck::Http { url: s.to_string() }
+        }
+        _ if s.starts_with("cmd:") => proto::Healthcheck::Command {
+            argv: split_argv(&s["cmd:".len()..])?,
+        },
+        _ => bail!("--hc none|process|tcp:ADDR|http:URL|cmd:\"<argv>\" (reçu: {s})"),
+    })
+}
+
+/// `comp add` — construit la `ComponentSpec` depuis les flags.
 fn spec_from_args(name: &str, args: &[String]) -> Result<proto::ComponentSpec> {
     let kind = match flag_val(args, "--kind").unwrap_or("process") {
         "process" => proto::ComponentKind::Process,
@@ -149,9 +168,28 @@ fn spec_from_args(name: &str, args: &[String]) -> Result<proto::ComponentSpec> {
             _ => "tool",
         });
     }
+    let healthcheck = match flag_val(args, "--hc") {
+        Some(s) => parse_healthcheck(s)?,
+        None => proto::Healthcheck::None,
+    };
+    // Mêmes gardes que check_usable/check_editable côté démon : une
+    // sonde `process` exige un pid managé, et un `external` sans sonde
+    // ne serait jamais sondé — inerte à vie.
+    if matches!(healthcheck, proto::Healthcheck::Process)
+        && kind != proto::ComponentKind::Process
+    {
+        bail!("--hc process exige kind=process (pid managé)");
+    }
+    if kind == proto::ComponentKind::External
+        && matches!(healthcheck, proto::Healthcheck::None)
+    {
+        bail!("kind=external sans sonde resterait inerte — passez \
+               --hc tcp:ADDR|http:URL|cmd:\"<argv>\"");
+    }
     let mut env = std::collections::HashMap::new();
     for kv in flag_vals(args, "--env") {
         let (k, v) = kv.split_once('=').context("--env K=V attendu")?;
+        anyhow::ensure!(!k.is_empty(), "--env K=V attendu (clé vide)");
         env.insert(k.to_string(), v.to_string());
     }
     Ok(proto::ComponentSpec {
@@ -163,15 +201,31 @@ fn spec_from_args(name: &str, args: &[String]) -> Result<proto::ComponentSpec> {
         autostart: args.iter().any(|a| a == "--autostart"),
         restart: proto::RestartPolicy::OnFailure,
         restart_sec: 5,
-        healthcheck: proto::Healthcheck::None,
+        healthcheck,
         description: flag_val(args, "--desc").map(String::from),
     })
 }
 
+/// Argument positionnel `<name>` — un flag `--x` à cette place est une
+/// erreur d'usage, pas un nom.
+fn name_arg<'a>(args: &'a [String], usage: &'static str) -> Result<&'a str> {
+    let n = args.get(2).context(usage)?;
+    anyhow::ensure!(!n.starts_with("--"), "nom de composant invalide: {n}");
+    Ok(n)
+}
+
 /// `acctl comp [ls] [--json] | info <n> | start|stop|restart <n> |
 /// logs <n> [--tail N] | catalog [--json] [--refresh] | install <n> |
-/// add <n> --kind K --cmd "<argv>" [--env K=V …] [--autostart] | rm <n>`.
+/// add <n> [--kind K] [--cmd "<argv>"] [--hc S] [--env K=V …]
+/// [--cwd C] [--desc D] [--autostart] | rm <n>`.
 pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
+    // Un flag à valeur en dernière position est une erreur d'usage —
+    // mieux qu'une absorption silencieuse.
+    const VAL_FLAGS: [&str; 7] =
+        ["--kind", "--cmd", "--hc", "--env", "--cwd", "--desc", "--tail"];
+    if let Some(f) = args.last().filter(|a| VAL_FLAGS.contains(&a.as_str())) {
+        bail!("{f} sans valeur");
+    }
     let sub = args.get(1).map(String::as_str).unwrap_or("ls");
     match sub {
         "ls" | "--json" => {
@@ -183,18 +237,18 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             }
         }
         "info" => {
-            let name = args.get(2).context("comp info <name>")?;
+            let name = name_arg(args, "comp info <name>")?;
             let v = c
-                .call(proto::ReqKind::ComponentInfo { name: name.clone() })
+                .call(proto::ReqKind::ComponentInfo { name: name.into() })
                 .await?;
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
         "start" | "stop" | "restart" => {
-            let name = args.get(2).context("comp start|stop|restart <name>")?;
+            let name = name_arg(args, "comp start|stop|restart <name>")?;
             let req = match sub {
-                "start" => proto::ReqKind::ComponentStart { name: name.clone() },
-                "stop" => proto::ReqKind::ComponentStop { name: name.clone() },
-                _ => proto::ReqKind::ComponentRestart { name: name.clone() },
+                "start" => proto::ReqKind::ComponentStart { name: name.into() },
+                "stop" => proto::ReqKind::ComponentStop { name: name.into() },
+                _ => proto::ReqKind::ComponentRestart { name: name.into() },
             };
             let v = c.call(req).await?;
             println!(
@@ -204,15 +258,17 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             );
         }
         "logs" => {
-            let name = args.get(2).context("comp logs <name> [--tail N]")?;
+            let name = name_arg(args, "comp logs <name> [--tail N]")?;
             let tail: Option<usize> = flag_val(args, "--tail")
                 .map(|s| s.parse().context("--tail N invalide"))
                 .transpose()?;
             let v = c
                 .call(proto::ReqKind::ComponentLogs {
-                    name: name.clone(),
+                    name: name.into(),
                     offset: None,
-                    limit: None,
+                    // --tail N borne par la page serveur : le cap max
+                    // (256 Kio) couvre bien plus de lignes que le défaut.
+                    limit: tail.map(|_| 256 * 1024),
                 })
                 .await?;
             use base64::Engine;
@@ -254,9 +310,9 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             }
         }
         "install" => {
-            let name = args.get(2).context("comp install <name>")?;
+            let name = name_arg(args, "comp install <name>")?;
             let v = c
-                .call(proto::ReqKind::ComponentInstall { name: name.clone() })
+                .call(proto::ReqKind::ComponentInstall { name: name.into() })
                 .await?;
             println!(
                 "{} — installed={} state={}",
@@ -271,13 +327,15 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             }
         }
         "add" => {
-            let name = args.get(2).context(
-                "comp add <name> --kind K --cmd \"<argv>\" [--env K=V …] [--autostart]",
+            let name = name_arg(
+                args,
+                "comp add <name> [--kind K] [--cmd \"<argv>\"] [--hc S] \
+                 [--env K=V …] [--cwd C] [--desc D] [--autostart]",
             )?;
             let spec = spec_from_args(name, &args[3..])?;
             let v = c
                 .call(proto::ReqKind::ComponentUpsert {
-                    name: name.clone(),
+                    name: name.into(),
                     spec,
                 })
                 .await?;
@@ -288,8 +346,8 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             );
         }
         "rm" => {
-            let name = args.get(2).context("comp rm <name>")?;
-            c.call(proto::ReqKind::ComponentRemove { name: name.clone() })
+            let name = name_arg(args, "comp rm <name>")?;
+            c.call(proto::ReqKind::ComponentRemove { name: name.into() })
                 .await?;
             println!("{name} retiré");
         }

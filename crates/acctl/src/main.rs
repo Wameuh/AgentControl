@@ -25,8 +25,9 @@
 //!   acctl pr note <N|I<cid>> <texte...> | acctl pr rm <N|I<cid>> | acctl pr sync
 //!   acctl comp [ls] [--json] | info <n> | start|stop|restart <n>
 //!       | logs <n> [--tail N] | catalog [--json] [--refresh]
-//!       | install <n> | add <n> --kind K --cmd "<argv>" [--env K=V ...]
-//!       [--autostart] | rm <n>          — composants managés du démon
+//!       | install <n> | add <n> [--kind K] [--cmd "<argv>"] [--hc S]
+//!       [--env K=V ...] [--cwd C] [--desc D] [--autostart] | rm <n>
+//!                                     — composants managés du démon
 //!
 //! Connexion : $AGENTCONTROL_SOCK (défaut ~/.agentcontrol/daemon.sock)
 //!             ou $AGENTCONTROL_TCP host:port
