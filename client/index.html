@@ -210,6 +210,82 @@
               </div>
             </div>
           </div>
+          <div id="conn-view" tabindex="-1" hidden>
+            <header id="connview-head">
+              <span id="connview-title" data-i18n="conn_h">Connect to daemon</span>
+              <button id="connview-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <div id="connview-body">
+              <section id="cv-saved-sec" hidden>
+                <h4 data-i18n="recent">Recent connections</h4>
+                <ul id="cv-saved"></ul>
+              </section>
+              <section id="cv-progress" hidden>
+                <div class="daemon-dlg">
+                  <span class="spin-ico" data-icon="loader"></span>
+                  <div class="daemon-body">
+                    <p id="cv-progress-msg"></p>
+                    <ul id="cv-progress-steps"></ul>
+                  </div>
+                </div>
+                <button type="button" id="cv-progress-bg" data-i18n="run_bg">Run in background</button>
+              </section>
+              <div id="c-status" class="dlg-status" hidden></div>
+              <div id="c-err" class="dlg-err" role="alert" hidden></div>
+              <section id="cv-form-sec">
+                <h4 id="cv-form-title" data-i18n="new_conn">New connection</h4>
+                <label><span data-i18n="type_label">Type</span>
+                  <select id="c-kind">
+                    <option value="local" data-i18n="local_sock">Local socket</option>
+                    <option value="ssh" data-i18n="ssh_label">SSH (remote server)</option>
+                    <option value="tcp" data-i18n="tcp_label">Direct TCP</option>
+                  </select>
+                </label>
+                <label id="c-native-wrap" class="chk-row">
+                  <input type="checkbox" id="c-native" />
+                  <span data-i18n="ssh_native_label">Native SSH (russh)</span>
+                </label>
+                <label><span data-i18n="host_label">Host</span> <input id="c-host" list="ssh-hosts" data-i18n-ph="host_ph" placeholder="user@server" /></label>
+                <datalist id="ssh-hosts"></datalist>
+                <label class="nat-row"><span data-i18n="ssh_port_label">SSH port</span> <input id="c-sport" type="number" value="22" /></label>
+                <label class="nat-row"><span data-i18n="user_label">User</span> <input id="c-user" data-i18n-ph="user_ph" placeholder="(user@host if blank)" /></label>
+                <label class="nat-row"><span data-i18n="password_label">Password</span> <input id="c-pass" type="password" data-i18n-ph="password_ph" placeholder="(key preferred)" /></label>
+                <label><span data-i18n="port_label">Remote daemon port</span> <input id="c-port" type="number" value="7331" /></label>
+                <label id="c-args-wrap"><span data-i18n="ssh_args_label">SSH args</span> <input id="c-args" data-i18n-ph="ssh_args_ph" placeholder="-i ~/.ssh/key -p 22" /></label>
+                <label><span data-i18n="conn_color">Connection color</span>
+                  <select id="c-accent">
+                    <option value="" data-i18n="conn_color_auto">App accent (default)</option>
+                    <option value="sage" data-i18n="accent_sage">Sage</option>
+                    <option value="gold" data-i18n="accent_gold">Golden</option>
+                    <option value="grey" data-i18n="accent_grey">Grey</option>
+                    <option value="violet" data-i18n="accent_violet">Violet</option>
+                    <option value="red" data-i18n="accent_red">Red</option>
+                  </select>
+                </label>
+                <div id="c-pubkey-box" class="nat-row" hidden>
+                  <span data-i18n="pubkey_label">App public key (server authorized_keys)</span>
+                  <pre id="c-pubkey"></pre>
+                  <button id="c-pubkey-copy" type="button" data-i18n="copy">Copy</button>
+                </div>
+                <div class="cv-actions">
+                  <button type="button" id="cv-form-reset" data-i18n="cancel" hidden>Cancel</button>
+                  <button id="c-go" data-i18n="connect">Connect</button>
+                </div>
+              </section>
+              <details id="cv-logs">
+                <summary data-i18n="logs">Logs</summary>
+                <div id="log-bar">
+                  <select id="log-level" data-i18n-title="log_level" title="Minimum level">
+                    <option value="debug">DEBUG</option>
+                    <option value="info" selected>INFO</option>
+                    <option value="warn">WARN</option>
+                    <option value="error">ERROR</option>
+                  </select>
+                </div>
+                <pre id="log-view"></pre>
+              </details>
+            </div>
+          </div>
         </main>
         <aside id="file-panel" hidden>
           <div id="file-resize" title="Drag to resize"></div>
@@ -291,68 +367,6 @@
       </form>
     </dialog>
 
-    <dialog id="dlg-conn">
-      <form method="dialog">
-        <h3 data-i18n="conn_h">Connect to daemon</h3>
-        <label><span data-i18n="recent">Recent connections</span>
-          <span id="c-saved-row">
-            <select id="c-saved"><option value="">— choose —</option></select>
-            <button type="button" id="c-saved-new" data-icon="external" data-i18n-title="conn_spawn" title="Open in a new instance"></button>
-            <button type="button" id="c-saved-del" data-icon="close" data-i18n-title="del_saved_conn" title="Remove"></button>
-          </span>
-        </label>
-        <label><span data-i18n="type_label">Type</span>
-          <select id="c-kind">
-            <option value="local" data-i18n="local_sock">Local socket</option>
-            <option value="ssh" data-i18n="ssh_label">SSH (remote server)</option>
-            <option value="tcp" data-i18n="tcp_label">Direct TCP</option>
-          </select>
-        </label>
-        <label id="c-native-wrap" class="chk-row">
-          <input type="checkbox" id="c-native" />
-          <span data-i18n="ssh_native_label">Native SSH (russh)</span>
-        </label>
-        <label><span data-i18n="host_label">Host</span> <input id="c-host" list="ssh-hosts" data-i18n-ph="host_ph" placeholder="user@server" /></label>
-        <datalist id="ssh-hosts"></datalist>
-        <label class="nat-row"><span data-i18n="ssh_port_label">SSH port</span> <input id="c-sport" type="number" value="22" /></label>
-        <label class="nat-row"><span data-i18n="user_label">User</span> <input id="c-user" data-i18n-ph="user_ph" placeholder="(user@host if blank)" /></label>
-        <label class="nat-row"><span data-i18n="password_label">Password</span> <input id="c-pass" type="password" data-i18n-ph="password_ph" placeholder="(key preferred)" /></label>
-        <label><span data-i18n="port_label">Remote daemon port</span> <input id="c-port" type="number" value="7331" /></label>
-        <label id="c-args-wrap"><span data-i18n="ssh_args_label">SSH args</span> <input id="c-args" data-i18n-ph="ssh_args_ph" placeholder="-i ~/.ssh/key -p 22" /></label>
-        <label><span data-i18n="conn_color">Connection color</span>
-          <select id="c-accent">
-            <option value="" data-i18n="conn_color_auto">App accent (default)</option>
-            <option value="sage" data-i18n="accent_sage">Sage</option>
-            <option value="gold" data-i18n="accent_gold">Golden</option>
-            <option value="grey" data-i18n="accent_grey">Grey</option>
-            <option value="violet" data-i18n="accent_violet">Violet</option>
-            <option value="red" data-i18n="accent_red">Red</option>
-          </select>
-        </label>
-        <div id="c-pubkey-box" class="nat-row" hidden>
-          <span data-i18n="pubkey_label">App public key (server authorized_keys)</span>
-          <pre id="c-pubkey"></pre>
-          <button id="c-pubkey-copy" type="button" data-i18n="copy">Copy</button>
-        </div>
-        <div id="log-bar" hidden>
-          <select id="log-level" data-i18n-title="log_level" title="Minimum level">
-            <option value="debug">DEBUG</option>
-            <option value="info" selected>INFO</option>
-            <option value="warn">WARN</option>
-            <option value="error">ERROR</option>
-          </select>
-        </div>
-        <pre id="log-view" hidden></pre>
-        <div id="c-status" class="dlg-status" hidden></div>
-        <div id="c-err" class="dlg-err" role="alert" hidden></div>
-        <menu>
-          <button id="c-logs" type="button" data-i18n="logs">Logs</button>
-          <button type="button" id="c-cancel" data-i18n="cancel">Cancel</button>
-          <button id="c-go" value="default" data-i18n="connect">Connect</button>
-        </menu>
-      </form>
-    </dialog>
-
     <dialog id="dlg-fusion">
       <form method="dialog">
         <h3 data-i18n="fusion_h">Fusion — two models in parallel</h3>
@@ -409,22 +423,6 @@
           <button type="button" id="g-none" data-i18n="group_none">No group</button>
           <button type="button" id="g-cancel" data-i18n="cancel">Cancel</button>
           <button id="g-ok" value="ok" data-i18n="ok">OK</button>
-        </menu>
-      </form>
-    </dialog>
-
-    <dialog id="dlg-daemon">
-      <form method="dialog">
-        <h3 id="dlg-daemon-title">Daemon</h3>
-        <div class="daemon-dlg">
-          <span class="spin-ico" data-icon="loader"></span>
-          <div class="daemon-body">
-            <p id="dlg-daemon-msg"></p>
-            <ul id="dlg-daemon-steps"></ul>
-          </div>
-        </div>
-        <menu>
-          <button type="button" id="daemon-bg" data-i18n="run_bg">Run in background</button>
         </menu>
       </form>
     </dialog>

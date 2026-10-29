@@ -35,11 +35,15 @@ function watch() {
     logUi("warn", `modal-watchdog: #${d.id} ouvert mais invisible → fermé`);
     d.close();
   }
-  // `inert` n'a de raison d'être que sous #settings-view ouvert (enfants
-  // directs de #chat, posés par setChatInert) : s'il est masqué par un
-  // chemin qui saute close(), les éléments recouverts restent inertes →
-  // composer/clics morts sans rien à l'écran.
-  if (($("settings-view") as HTMLElement | null)?.hidden !== false) {
+  // `inert` n'a de raison d'être que sous un overlay ouvert de #chat
+  // (#settings-view ou #conn-view — enfants directs, posés par
+  // setChatInert) : s'ils sont tous masqués par un chemin qui saute
+  // close(), les éléments recouverts restent inertes → composer/clics
+  // morts sans rien à l'écran.
+  const overlayUp =
+    ($("settings-view") as HTMLElement | null)?.hidden === false ||
+    ($("conn-view") as HTMLElement | null)?.hidden === false;
+  if (!overlayUp) {
     for (const el of document.querySelectorAll<HTMLElement>("#chat > [inert]")) {
       el.inert = false;
       logUi("warn", `modal-watchdog: inert résiduel retiré de #${el.id || el.tagName}`);

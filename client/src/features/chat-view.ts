@@ -109,6 +109,12 @@ export class ChatView {
     onSessionChanged: () => {},
     /** Nb de connexions connues — pour l'écran d'accueil (injecté). */
     connCount: (): number => 0,
+    /** Aucune conn bound, ou toutes hors ligne/déconnectées → la vue
+     *  connexion devient l'écran d'accueil (empty-state + CTA derrière). */
+    connsDownOrNone: (): boolean => true,
+    /** Demande à la vue connexion de s'auto-ouvrir en accueil (respecte
+     *  son flag « repoussée par l'utilisateur »). */
+    connHome: () => {},
     /** ⌨ affiché seulement si le démon de la conn connaît term_open. */
     termCapable: (_conn: string) => false,
   };
@@ -181,12 +187,17 @@ export class ChatView {
       el.classList.add("spin");
       h.textContent = t("empty_connecting", { host: this.connectingHosts.join(", ") });
       txt.textContent = "";
-    } else if (!nConns) {
+    } else if (!nConns || this.deps.connsDownOrNone()) {
+      // Aucune conn joignable (rien de bound ou toutes down/gone) → la vue
+      // connexion est l'écran d'accueil (mono-connexion) : elle s'auto-ouvre
+      // si l'utilisateur ne l'a pas repoussée ; l'empty-state derrière
+      // garde le rappel + le CTA.
+      this.deps.connHome();
       el.hidden = false;
       h.textContent = t("empty_h");
-      txt.textContent = t("empty_no_conn");
+      txt.textContent = nConns ? t("empty_conn_down") : t("empty_no_conn");
       cta.hidden = false;
-      cta.textContent = t("new_conn");
+      cta.textContent = nConns ? t("open_conns") : t("new_conn");
       cta.onclick = () => {
         nav.closeDrawer();
         $("btn-connect").click();

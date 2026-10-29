@@ -1,16 +1,21 @@
 // ---------------------------------------------------------------------------
-// Dialogue de connexion : formulaire SSH/TCP/local, connexions récentes
-// sauvegardées, bootstrap/install du démon distant, garde-fous de version.
+// Vue de connexion : remplace la zone de discussion pour choisir/éditer
+// une connexion — PAS un dialogue modal (bloquant, masque tout) : c'est un
+// panneau plein dans #chat comme settings-view (inert + nav + Échap).
+// Modèle mono-connexion (#31) : c'est aussi l'écran d'accueil quand aucune
+// connexion n'est up, et la progression d'install/update du démon y est
+// inline (plus de dlg-daemon qui gelait la saisie derrière un backdrop).
 // ---------------------------------------------------------------------------
 
 import { invoke, getVersion, listen, isWeb } from "../core/bridge";
-import { $, dlgErr, esc, notify } from "../core/dom";
+import { $, dlgErr, esc, notify, q } from "../core/dom";
 import { call } from "../core/rpc";
 import { cmpVer, connKeyOf, daemonParams, minorOf } from "../core/conn";
 import { accentOf, isAndroid } from "../core/chrome";
 import type { SavedConn, SessionMeta } from "../core/types";
 import { t, type Key } from "../i18n";
 import { icon } from "../ui/icons";
+import { nav } from "../ui/nav";
 import { showOutdated } from "./update";
 import type { ConnectionManager } from "./connections";
 
@@ -20,32 +25,55 @@ const SCRIPT_STEPS = ["check", "download", "install", "service", "verify"];
 // Variante pour l'auto-update via ReqKind::UpdateDaemon (pas de script).
 const SELF_STEPS = ["send", "restart"];
 
-export class ConnectDialog {
+export class ConnView {
   private conns!: ConnectionManager;
   /** Rafraîchit la sidebar après connexion (injecté). */
   refresh: () => Promise<void> = async () => {};
   /** Auto-connexion en cours : hôtes affichés sur l'écran vide (injecté). */
   connecting: (_hosts: string[]) => void = () => {};
+  /** La vue s'apprête à s'ouvrir : l'autre overlay de #chat (paramètres)
+   *  doit se fermer — deux panneaux pleins empilés seraient inertes l'un
+   *  sous l'autre (injecté par le bootstrap). */
+  onOpening: () => void = () => {};
   private saved: SavedConn[] = [];
   private stepEls = new Map<string, HTMLElement>();
-  /** L'utilisateur a détaché le dialogue de progression démon (Échap /
-   *  « arrière-plan ») : les étapes suivantes du MÊME flux ne doivent pas
-   *  le re-pop (install → self-update → script enchaînés). Réarmé à
-   *  chaque nouvelle tentative de connexion. */
+  /** Clés de conn dont le bouton supprimer est armé (2e tap = suppression) —
+   *  survit aux re-renders de la liste. */
+  private armedDel = new Set<string>();
+  /** L'utilisateur a fermé la vue pendant une progression démon : les
+   *  étapes suivantes du MÊME flux ne doivent pas la re-pop (install →
+   *  self-update → script enchaînés). Réarmé à chaque connect. */
   private daemonDetached = false;
+  /** La vue s'est auto-ouverte comme accueil (rien d'up) et l'utilisateur
+   *  l'a fermée sans connecter — pas de réouverture forcée tant qu'aucune
+   *  conn ne repasse « ok » (réarmement dans onLiveChanged). */
+  private homeDismissed = false;
 
   bind(conns: ConnectionManager) {
     this.conns = conns;
   }
 
-  /** Erreur du flux de connexion : dans le dialogue s'il est ouvert (les
-   *  toasts passent sous son backdrop modal), toast sinon (auto-connect). */
+  private isOpen() {
+    return !$("conn-view").hidden;
+  }
+
+  /** Rend les éléments recouverts de #chat inertes (clics + tabulation) —
+   *  même mécanisme que settings-view (un <div> ne capte pas le focus
+   *  comme un <dialog> modal). */
+  private setChatInert(v: boolean) {
+    for (const el of [...$("chat").children]) {
+      if (el.id !== "conn-view") (el as HTMLElement).inert = v;
+    }
+  }
+
+  /** Erreur du flux de connexion : dans la vue si elle est ouverte, toast
+   *  sinon (auto-connect en arrière-plan). */
   private report(msg: string, level: "info" | "success" | "warn" | "error" = "error") {
-    if (($("dlg-conn") as HTMLDialogElement).open) dlgErr("c-err", msg);
+    if (this.isOpen()) dlgErr("c-err", msg);
     else notify(level, msg);
   }
 
-  /** Ligne de statut bas du dialogue de connexion (étape en cours). */
+  /** Ligne de statut du flux de connexion (étape en cours). */
   private cStatus(msg: string | null) {
     const el = $("c-status");
     if (msg == null) {
@@ -57,13 +85,14 @@ export class ConnectDialog {
     el.hidden = false;
   }
 
-  /** Dialogue modal pendant install/update du démon distant — liste
-   *  d'étapes mises à jour par les events `daemon-step` du backend. */
-  private daemonShow(title: string, msg: string, steps: string[] = []) {
-    const d = $("dlg-daemon") as HTMLDialogElement;
-    $("dlg-daemon-title").textContent = title;
-    $("dlg-daemon-msg").textContent = msg;
-    const ul = $("dlg-daemon-steps");
+  /** Progression install/update du démon — inline dans la vue (steps
+   *  streamés par les events `daemon-step`). Ouvre la vue si besoin,
+   *  sauf si l'utilisateur l'a détachée pour ce flux. */
+  private daemonShow(msg: string, steps: string[] = []) {
+    if (!this.isOpen() && !this.daemonDetached) void this.open();
+    $("cv-progress").hidden = false;
+    $("cv-progress-msg").textContent = msg;
+    const ul = $("cv-progress-steps");
     ul.innerHTML = "";
     this.stepEls.clear();
     for (const id of steps) {
@@ -73,7 +102,6 @@ export class ConnectDialog {
       ul.appendChild(li);
       this.stepEls.set(id, li);
     }
-    if (!d.open && !this.daemonDetached) d.showModal();
   }
 
   /** Marqueur `step:<id>` reçu : les étapes passées → done, celle-ci → cur. */
@@ -101,8 +129,7 @@ export class ConnectDialog {
   }
 
   private daemonClose() {
-    const d = $("dlg-daemon") as HTMLDialogElement;
-    if (d.open) d.close();
+    $("cv-progress").hidden = true;
   }
 
   /** Démon plus vieux que le client (minor ≠) : l'update redémarre le démon
@@ -164,16 +191,16 @@ export class ConnectDialog {
     }
   }
 
-  /** `ensure_daemon` via le script distant, derrière le dialogue à étapes.
+  /** `ensure_daemon` via le script distant, derrière la progression inline.
    *  Retourne la réponse ("ok:*"|"newer:*"|"busy:*"|"installed:*"). */
   private async runDaemonScript(
-    cfg: Record<string, unknown>, tag: string, title: string, msg: string,
+    cfg: Record<string, unknown>, tag: string, msg: string,
   ): Promise<string> {
-    this.daemonShow(title, msg, SCRIPT_STEPS);
+    this.daemonShow(msg, SCRIPT_STEPS);
     try {
       const res = await invoke<string>("ensure_daemon", daemonParams(cfg, tag));
       this.daemonFinish();
-      // Laisser voir l'état « toutes étapes ✓ » un instant avant de fermer.
+      // Laisser voir l'état « toutes étapes ✓ » un instant avant de cacher.
       await new Promise((r) => setTimeout(r, 450));
       return res;
     } finally {
@@ -191,7 +218,9 @@ export class ConnectDialog {
   }
 
   /** Dialogue de confirmation générique pour une action mutante sur le
-   *  démon distant (dlg-dupdate réutilisé avec les strings de l'action). */
+   *  démon distant (dlg-dupdate réutilisé avec les strings de l'action).
+   *  Reste modal : c'est une question exigeant une réponse, pas une
+   *  progression — le gel visé par la spec était la modale longue. */
   private daemonAction(h3: string, msg: string, go: string): Promise<boolean> {
     const dlg = $("dlg-dupdate") as HTMLDialogElement;
     if (dlg.open) return Promise.resolve(false);
@@ -241,8 +270,7 @@ export class ConnectDialog {
       // l'hôte — confirmation explicite avant toute mutation.
       if (!(await this.confirmDaemonInstall(String(cfg.host)))) throw e;
       const res = await this.runDaemonScript(
-        cfg, ver, t("dinstall_title"),
-        t("installing_daemon") + " — " + host,
+        cfg, ver, t("installing_daemon") + " — " + host,
       );
       // Démon plus récent : le script distant refuse le downgrade.
       if (res.startsWith("newer:")) newerDaemon = res.slice(6);
@@ -279,8 +307,7 @@ export class ConnectDialog {
           let selfDone = false;
           if (canSelfUpdate) {
             this.daemonShow(
-              t("dupdate_running"), t("updating_daemon", { dv, lv }) + " — " + host,
-              SELF_STEPS,
+              t("updating_daemon", { dv, lv }) + " — " + host, SELF_STEPS,
             );
             this.daemonStep("send");
             selfDone = await this.tryDaemonSelfUpdate(conn, lv);
@@ -297,8 +324,7 @@ export class ConnectDialog {
           // script distant (ssh seulement — il faut un exec).
           if (!selfDone && cfg.kind === "ssh" && cfg.host) {
             const res = await this.runDaemonScript(
-              cfg, lv, t("dupdate_running"),
-              t("updating_daemon", { dv, lv }) + " — " + host,
+              cfg, lv, t("updating_daemon", { dv, lv }) + " — " + host,
             ).catch((e) => {
               this.report(String(e));
               return "";
@@ -340,6 +366,8 @@ export class ConnectDialog {
     // une autre instance. Pose aussi le chrome (accent/titre de la conn).
     await this.conns.evictExcept(wantKey);
     await this.refresh();
+    // Bind réussi → retour à la discussion (la vue était l'accueil).
+    this.close();
   }
 
   /** Purge les entrées sauvegardées matchant `conn` (re-fetch pour couvrir
@@ -352,6 +380,9 @@ export class ConnectDialog {
       }
     }
     this.saved = this.saved.filter((c) => connKeyOf(c, isAndroid()) !== conn);
+    // renderState (et donc onLiveChanged) a déjà tourné dans delete() —
+    // sans re-render la ligne resterait affichée alors qu'elle est purgée.
+    if (this.isOpen()) this.renderSavedList();
   }
 
   private fillForm(c: SavedConn) {
@@ -365,6 +396,32 @@ export class ConnectDialog {
     ($("c-native") as HTMLInputElement).checked = c.native === true || isAndroid();
     ($("c-accent") as HTMLSelectElement).value = c.color ?? "";
     this.syncSshFields();
+  }
+
+  /** Remet le formulaire en mode « nouvelle connexion » (sortie de
+   *  l'édition d'une saved conn). */
+  private resetForm() {
+    ($("cv-form-title") as HTMLElement).textContent = t("new_conn");
+    ($("cv-form-reset") as HTMLButtonElement).hidden = true;
+    // Défaut ssh : le cas nominal (démon sur serveur distant).
+    ($("c-kind") as HTMLSelectElement).value = "ssh";
+    for (const id of ["c-host", "c-args", "c-user", "c-pass"]) {
+      ($(id) as HTMLInputElement).value = "";
+    }
+    ($("c-port") as HTMLInputElement).value = "7331";
+    ($("c-sport") as HTMLInputElement).value = "22";
+    ($("c-native") as HTMLInputElement).checked = isAndroid();
+    ($("c-accent") as HTMLSelectElement).value = "";
+    this.syncSshFields();
+  }
+
+  /** Passage en édition d'une connexion sauvegardée : form prérempli +
+   *  bouton reset pour revenir au mode nouvelle connexion. */
+  private editSaved(c: SavedConn) {
+    this.fillForm(c);
+    ($("cv-form-title") as HTMLElement).textContent = t("edit_conn");
+    ($("cv-form-reset") as HTMLButtonElement).hidden = false;
+    $("cv-form-sec").scrollIntoView({ block: "nearest" });
   }
 
   /// Champs SSH natifs visibles si kind=ssh && (native || android) ;
@@ -420,29 +477,137 @@ export class ConnectDialog {
     v.scrollTop = v.scrollHeight;
   }
 
-  /** Repeuple le select des connexions récentes depuis `this.saved`. */
-  private fillSavedSelect(): HTMLSelectElement {
-    const sv = $("c-saved") as HTMLSelectElement;
-    sv.innerHTML = `<option value="">${t("choose")}</option>`;
-    this.saved.forEach((c, i) => {
-      const o = document.createElement("option");
-      o.value = String(i);
-      const acc = accentOf(c.color);
-      o.textContent = `${c.kind} ${c.host ?? c.addr ?? c.path ?? ""}${acc ? ` (${t(`accent_${acc}` as Key)})` : ""}`;
-      sv.appendChild(o);
-    });
-    return sv;
+  /** Appelé par chat.updateEmptyState quand aucune conv n'est affichée :
+   *  aucune conn bound OU toutes down/gone → la vue s'ouvre en accueil
+   *  (spec : « pas de conn configurée → vue accueil = cet écran » ; une
+   *  perte de conn avec une session ouverte n'ouvre PAS la vue — on
+   *  n'arrache pas l'utilisateur à sa lecture). Fermée manuellement →
+   *  pas de réouverture forcée jusqu'au prochain bind réussi. */
+  maybeAutoShow() {
+    if (this.conns.anyUp()) {
+      this.homeDismissed = false;
+      return;
+    }
+    if (this.homeDismissed || this.isOpen()) return;
+    void this.open();
   }
 
-  private async open() {
-    // Android : pas de socket local ni de binaire ssh → SSH natif par défaut.
+  /** États live changés (renderState de ConnectionManager) : réarme
+   *  l'accueil auto dès qu'une conn remonte « ok », et rafraîchit les
+   *  badges de statut de la liste si la vue est ouverte. */
+  onLiveChanged() {
+    if (this.conns.anyUp()) this.homeDismissed = false;
+    if (this.isOpen()) this.renderSavedList();
+  }
+
+  /** Liste des connexions sauvegardées : pastille couleur, hôte, statut
+   *  live quand la clé est bound, actions (connecter ici / nouvelle
+   *  instance desktop / éditer / supprimer en 2 taps). */
+  renderSavedList() {
+    const ul = $("cv-saved");
+    ul.innerHTML = "";
+    $("cv-saved-sec").hidden = this.saved.length === 0;
+    this.saved.forEach((c) => {
+      const key = connKeyOf(c, isAndroid());
+      const st = this.conns.state(key);
+      const bound = this.conns.hasCfg(key);
+      const li = document.createElement("li");
+      li.className = "cv-conn";
+      const acc = accentOf(c.color);
+      const dot = `<span class="cv-dot${acc ? ` c-${acc}` : ""}"></span>`;
+      const status = bound
+        ? `<span class="cv-st cv-st-${st ?? "down"}">${esc(
+            this.conns.tip(st ?? "down", key).split(" — ")[0])}</span>`
+        : "";
+      li.innerHTML =
+        `${dot}<span class="cv-name">${esc(c.kind)} ${esc(c.host ?? c.addr ?? c.path ?? "local")}</span>` +
+        status +
+        `<span class="cv-btns">` +
+        // Icônes inline : hydrateIcons() ne tourne qu'au boot — un
+        // <li> créé après resterait avec des boutons vides.
+        `<button type="button" class="cv-go" title="${q(esc(t("cv_connect_here")))}">${icon("play")}</button>` +
+        (isAndroid() || isWeb
+          ? ""
+          : `<button type="button" class="cv-new" title="${q(esc(t("conn_spawn")))}">${icon("external")}</button>`) +
+        `<button type="button" class="cv-edit" title="${q(esc(t("edit_conn")))}">${icon("edit")}</button>` +
+        `<button type="button" class="cv-del danger" title="${q(esc(t("ctx_delete_conn")))}">${icon("close")}</button>` +
+        `</span>`;
+      (li.querySelector(".cv-go") as HTMLButtonElement).onclick = () =>
+        void this.go({ ...c });
+      const nw = li.querySelector(".cv-new") as HTMLButtonElement | null;
+      if (nw) {
+        nw.onclick = async () => {
+          try {
+            await invoke("spawn_instance", { conn: key });
+            notify("success", t("conn_spawned"));
+          } catch (e) {
+            this.report(String(e));
+          }
+        };
+      }
+      (li.querySelector(".cv-edit") as HTMLButtonElement).onclick = () =>
+        this.editSaved(c);
+      const del = li.querySelector(".cv-del") as HTMLButtonElement;
+      if (this.armedDel.has(key)) del.classList.add("armed");
+      del.onclick = () => {
+        // Deux taps : le premier arme (icône rouge), le second supprime.
+        // L'armement vit dans armedDel — pas dans le DOM : un re-render
+        // (liveChanged) entre les deux taps effacerait sinon l'état.
+        if (!this.armedDel.has(key)) {
+          this.armedDel.add(key);
+          del.classList.add("armed");
+          setTimeout(() => {
+            this.armedDel.delete(key);
+            // Le bouton capturé a pu être détaché par un re-render
+            // (liveChanged) : le nouveau porte déjà .armed → re-render.
+            if (del.isConnected) del.classList.remove("armed");
+            else if (this.isOpen()) this.renderSavedList();
+          }, 2500);
+          return;
+        }
+        this.armedDel.delete(key);
+        if (bound) {
+          // Conn bound → delete complet (sessions démon tuées si joignable,
+          // cfg + saved + groupes purgés, chrome retombé au neutre).
+          void this.conns.delete(key);
+        } else {
+          void invoke("remove_connection", { cfg: c })
+            .then(() => {
+              this.saved = this.saved.filter((x) => x !== c);
+              this.renderSavedList();
+            })
+            .catch((e) => this.report(String(e)));
+        }
+      };
+      // Clic sur la ligne (hors boutons) = éditer aussi — geste rapide.
+      li.onclick = (e) => {
+        if ((e.target as HTMLElement).closest("button")) return;
+        this.editSaved(c);
+      };
+      ul.appendChild(li);
+    });
+  }
+
+  /** Ouvre la vue (idempotent — déjà ouverte = no-op, la liste et les
+   *  badges sont tenus à jour par onLiveChanged) : affichée AVANT les
+   *  awaits (retour visuel immédiat, et isOpen() devient vrai d'emblée —
+   *  un second appel pendant les fetches resterait un no-op). */
+  async open() {
+    if (this.isOpen()) return;
+    this.onOpening();
+    const view = $("conn-view");
+    view.hidden = false;
+    this.setChatInert(true);
+    // Focus au panneau : le focus résiduel dans #input enverrait des
+    // frappes invisibles à l'agent (même motif que settings-view).
+    view.focus({ preventScroll: true });
+    nav.push("connview");
+    // Android : pas de socket local → l'option n'existe pas (SSH natif
+    // par défaut, c'est resetForm/fillForm qui posent les valeurs).
     if (isAndroid()) {
-      const ks = $("c-kind") as HTMLSelectElement;
-      ks.querySelector('option[value="local"]')?.remove();
-      ks.value = "ssh";
-      ($("c-native") as HTMLInputElement).checked = true;
+      ($("c-kind") as HTMLSelectElement).querySelector('option[value="local"]')?.remove();
     }
-    this.syncSshFields();
+    this.resetForm();
     // Alias Host de ~/.ssh/config en suggestions
     const dl = $("ssh-hosts");
     dl.innerHTML = "";
@@ -451,32 +616,93 @@ export class ConnectDialog {
       o.value = h;
       dl.appendChild(o);
     }
-    // Connexions récentes sauvegardées
+    // Connexions sauvegardées → liste à pastilles (pas un <select>).
     this.saved = await invoke<SavedConn[]>("saved_connections").catch(() => []);
-    const sv = this.fillSavedSelect();
-    // Pré-remplir avec la dernière utilisée → un clic sur Connecter suffit
-    if (this.saved.length) {
-      sv.value = "0";
-      this.fillForm(this.saved[0]);
+    this.renderSavedList();
+  }
+
+  close() {
+    const was = this.isOpen();
+    $("conn-view").hidden = true;
+    // Ne lever l'inert que si l'autre overlay #chat est aussi fermé —
+    // sinon on ré-expose #input derrière settings-view (frappes
+    // invisibles, le bug exact que l'inert prévient).
+    if ($("settings-view").hidden) this.setChatInert(false);
+    nav.close("connview");
+    if (!was) return;
+    // Fermée pendant une progression démon → détachée pour ce flux (la
+    // suite tourne en tâche de fond, résultats via report/cStatus).
+    this.daemonDetached = true;
+    // Fermée alors que rien n'est up → épisode d'accueil soldé : pas de
+    // réouverture forcée (CTA de l'empty-state rouvre à la demande).
+    this.homeDismissed = !this.conns.anyUp();
+    // Focus rendu au champ (pas sous Android : ouvrirait le clavier virtuel).
+    if (!isAndroid()) ($("input") as HTMLTextAreaElement).focus();
+  }
+
+  toggle() {
+    if (this.isOpen()) this.close();
+    else void this.open();
+  }
+
+  /** Clique sur « Connecter » du formulaire (ou ligne « connecter ici ») :
+   *  construit la cfg depuis le form ou directement depuis la saved conn. */
+  private async go(cfg: Record<string, unknown>) {
+    const btn = $("c-go") as HTMLButtonElement;
+    btn.disabled = true;
+    btn.classList.add("spin");
+    try {
+      await this.connect(cfg);
+      invoke("save_connection", { cfg }).catch(console.error);
+    } catch (err) {
+      // La vue reste ouverte : l'erreur va dans sa zone interne.
+      dlgErr("c-err", String(err));
+    } finally {
+      this.cStatus(null);
+      btn.disabled = false;
+      btn.classList.remove("spin");
     }
-    ($("dlg-conn") as HTMLDialogElement).showModal();
+  }
+
+  private cfgFromForm(): Record<string, unknown> {
+    const kind = ($("c-kind") as HTMLSelectElement).value;
+    const cfg: Record<string, unknown> =
+      kind === "ssh"
+        ? {
+            kind: "ssh",
+            host: ($("c-host") as HTMLInputElement).value,
+            remote_port: Number(($("c-port") as HTMLInputElement).value) || 7331,
+            args: ($("c-args") as HTMLInputElement).value.split(" ").filter(Boolean),
+            port: Number(($("c-sport") as HTMLInputElement).value) || 22,
+            user: ($("c-user") as HTMLInputElement).value || undefined,
+            password: ($("c-pass") as HTMLInputElement).value || undefined,
+            native: ($("c-native") as HTMLInputElement).checked || isAndroid() || undefined,
+          }
+        : kind === "tcp"
+          ? { kind: "tcp", addr: ($("c-host") as HTMLInputElement).value }
+          : { kind: "local" };
+    // Couleur propre à la connexion ("" = accent global des réglages).
+    cfg.color = ($("c-accent") as HTMLSelectElement).value || undefined;
+    return cfg;
   }
 
   init() {
     // Progression du script distant (marqueurs step:* streamés par
-    // ensure_daemon) — met à jour la liste si le dialogue est ouvert.
+    // ensure_daemon) — met à jour la liste inline.
     void listen<string>("daemon-step", (e) => this.daemonStep(e.payload));
-    // Fermer (Échap ou « arrière-plan ») DÉTACHE le dialogue : l'opération
-    // distante continue, son résultat revient via report()/cStatus (dlg-conn
-    // reste ouvert dessous) ou toast. Laisser la page inerte sans issue
-    // serait pire qu'un suivi en tâche de fond.
-    ($("dlg-daemon") as HTMLDialogElement).addEventListener("cancel", () => {
+    // « Arrière-plan » = fermer la vue : l'opération distante continue,
+    // ses résultats reviennent via report()/cStatus (vue détachée).
+    $("cv-progress-bg").onclick = () => {
       this.daemonDetached = true;
-    });
-    $("daemon-bg").onclick = () => {
-      this.daemonDetached = true;
-      ($("dlg-daemon") as HTMLDialogElement).close();
+      this.close();
     };
+    $("connview-close").onclick = () => this.close();
+    // Échap ferme la vue — sauf si un dialogue est ouvert par-dessus
+    // (confirmation update/install du démon : Échap = lui).
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && this.isOpen() && !document.querySelector("dialog[open]"))
+        this.close();
+    });
     $("c-pubkey-copy").onclick = async () => {
       const txt = $("c-pubkey").textContent ?? "";
       try {
@@ -493,100 +719,29 @@ export class ConnectDialog {
     };
     ($("c-kind") as HTMLSelectElement).onchange = () => this.syncSshFields();
     ($("c-native") as HTMLInputElement).onchange = () => this.syncSshFields();
-
-    // ✕ : retire la connexion sauvegardée sélectionnée (fichier + liste).
-    $("c-saved-del").addEventListener("click", async () => {
-      const sv = $("c-saved") as HTMLSelectElement;
-      if (sv.value === "") return;
-      const c = this.saved[Number(sv.value)];
-      if (!c) return;
-      const ok = await invoke("remove_connection", { cfg: c })
-        .then(() => true)
-        .catch((e) => { dlgErr("c-err", String(e)); return false; });
-      if (!ok) return;
-      this.saved = this.saved.filter((x) => x !== c);
-      this.fillSavedSelect();
-    });
-
-    // ↗ : lance une NOUVELLE instance du client liée à la connexion
-    // sauvegardée sélectionnée (multi-instances : 1 processus = 1 conn).
-    // Desktop uniquement — masqué sur Android/web (pas de multi-processus).
-    const spawner = $("c-saved-new") as HTMLButtonElement;
-    spawner.hidden = isAndroid() || isWeb;
-    spawner.addEventListener("click", async () => {
-      const v = ($("c-saved") as HTMLSelectElement).value;
-      if (!v) return;
-      const c = this.saved[Number(v)];
-      if (!c) return;
-      try {
-        await invoke("spawn_instance", { conn: connKeyOf(c, isAndroid()) });
-        // Toast, pas report() : le dialogue est ouvert — report irait
-        // dans la zone d'erreur (et loggerait en « error »).
-        notify("success", t("conn_spawned"));
-      } catch (e) {
-        this.report(String(e));
-      }
-    });
-
-    $("btn-connect").onclick = () => this.open();
-
-    ($("c-saved") as HTMLSelectElement).onchange = (e) => {
-      const i = Number((e.target as HTMLSelectElement).value);
-      if (this.saved[i]) this.fillForm(this.saved[i]);
-    };
-    $("c-logs").addEventListener("click", async () => {
-      const show = ($("log-view")).hidden;
-      $("log-view").hidden = !show;
-      $("log-bar").hidden = !show;
-      if (show) await this.renderLog();
+    $("cv-form-reset").onclick = () => this.resetForm();
+    $("cv-logs").addEventListener("toggle", async (e) => {
+      if ((e.target as HTMLDetailsElement).open) await this.renderLog();
     });
     ($("log-level") as HTMLSelectElement).onchange = () => this.renderLog();
 
-    $("c-cancel").onclick = () => ($("dlg-conn") as HTMLDialogElement).close("cancel");
-
+    // Le bouton vit dans la sidebar — drawer sur Android : le refermer
+    // d'abord sinon la vue s'ouvre derrière le tiroir. Toggle : recliquer
+    // quand elle est déjà ouverte = « j'ai fini » → retour discussion.
+    $("btn-connect").onclick = () => {
+      nav.closeDrawer();
+      this.toggle();
+    };
     $("c-go").addEventListener("click", async (e) => {
       e.preventDefault();
-      const btn = e.currentTarget as HTMLButtonElement;
-      btn.disabled = true;
-      btn.classList.add("spin");
-      const kind = ($("c-kind") as HTMLSelectElement).value;
-      const cfg: Record<string, unknown> =
-        kind === "ssh"
-          ? {
-              kind: "ssh",
-              host: ($("c-host") as HTMLInputElement).value,
-              remote_port: Number(($("c-port") as HTMLInputElement).value) || 7331,
-              args: ($("c-args") as HTMLInputElement).value.split(" ").filter(Boolean),
-              port: Number(($("c-sport") as HTMLInputElement).value) || 22,
-              user: ($("c-user") as HTMLInputElement).value || undefined,
-              password: ($("c-pass") as HTMLInputElement).value || undefined,
-              native: ($("c-native") as HTMLInputElement).checked || isAndroid() || undefined,
-            }
-          : kind === "tcp"
-            ? { kind: "tcp", addr: ($("c-host") as HTMLInputElement).value }
-            : { kind: "local" };
-      // Couleur propre à la connexion ("" = accent global des réglages).
-      cfg.color = ($("c-accent") as HTMLSelectElement).value || undefined;
-      try {
-        await this.connect(cfg);
-        invoke("save_connection", { cfg }).catch(console.error);
-        ($("dlg-conn") as HTMLDialogElement).close();
-      } catch (err) {
-        // Le dialogue reste ouvert : l'erreur va dans sa zone interne
-        // (un toast passerait sous le backdrop modal).
-        dlgErr("c-err", String(err));
-      } finally {
-        this.cStatus(null);
-        btn.disabled = false;
-        btn.classList.remove("spin");
-      }
+      await this.go(this.cfgFromForm());
     });
   }
 
   /** Auto-reconnexion au démarrage — UNE connexion par instance (modèle
    *  multi-instances) : celle demandée par `--conn` (`want`, clé connKey),
    *  sinon la dernière utilisée (première entrée de connections.json).
-   *  Les autres connexions enregistrées restent disponibles au dialogue
+   *  Les autres connexions enregistrées restent disponibles dans la vue
    *  et aux autres instances. `saved` est préchargé par le boot. */
   autoConnect(saved: SavedConn[], want?: string) {
     this.saved = saved;

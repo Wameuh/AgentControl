@@ -90,17 +90,19 @@ const headsB = await connHeaders(pB);
 ok(headsB.length === 1 && headsB[0] === KEY_B, `B3 une seule conn, = --conn (${headsB})`);
 ok(!(await clsB()).includes("theme-violet"), "B4 indépendance des instances (pas l'accent de A)");
 
-// ---------- C : « ouvrir dans une nouvelle instance » depuis le dialogue ----------
+// ---------- C : « ouvrir dans une nouvelle instance » depuis la vue ----------
 await pA.evaluate(() => document.querySelector("#btn-connect")?.click());
 await sleep(400);
-await pA.evaluate(() => { const s = document.querySelector("#c-saved"); s.value = "1"; s.dispatchEvent(new Event("change")); });
-await sleep(200);
-await pA.evaluate(() => document.querySelector("#c-saved-new")?.click());
+ok(!(await pA.evaluate(() => document.querySelector("#conn-view")?.hidden)),
+  "C0 vue connexion ouverte dans #chat (pas un dialog)");
+await pA.evaluate(() =>
+  document.querySelectorAll("#cv-saved .cv-conn .cv-new")[1]?.click());
 await sleep(300);
 ok((await pA.evaluate(() => window.__calls.spawn[0])) === "ssh-native:me@pi5.local:22", "C1 spawn_instance avec la clé connKey de la saved conn");
 
-// ---------- D : re-bind exclusif — connecter l'autre conn évince la 1re ----------
-await pA.evaluate(() => document.querySelector("#c-go")?.click());
+// ---------- D : re-bind exclusif — « connecter ici » évince la 1re conn ----------
+await pA.evaluate(() =>
+  document.querySelectorAll("#cv-saved .cv-conn .cv-go")[1]?.click());
 await sleep(900);
 ok((await clsA()).includes("theme-gold"), "D1 re-bind → accent de la nouvelle conn");
 ok((await titleA()) === "AgentControl — me@pi5.local", "D2 titre mis à jour au re-bind");
@@ -136,5 +138,7 @@ ok((await pC.evaluate(() => [...document.documentElement.classList].join(" "))).
 
 console.log(`\n${fails === 0 ? "SMOKE OK" : "SMOKE FAIL"} — ${fails} échec(s)`);
 await b.close();
-try { process.kill(-server.pid, "SIGTERM"); } catch {}
+// SIGKILL sur le groupe : vite preview ignore SIGTERM dans certains runs
+// (preview orphelin déjà observé après une fin « propre »).
+try { process.kill(-server.pid, "SIGKILL"); } catch {}
 process.exit(fails ? 1 : 0);

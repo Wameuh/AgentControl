@@ -22,6 +22,7 @@ import type { GroupStore } from "./groups";
 import { sounds } from "./sounds";
 import type { NewSessionDialog } from "./new-session";
 import type { SettingsPanel } from "./settings";
+import type { ConnView } from "./conn-view";
 
 const DTYPE = "application/x-ac-session";
 
@@ -79,6 +80,7 @@ export class Sidebar {
   private newSess!: NewSessionDialog;
   private chat!: ChatView;
   private settings!: SettingsPanel;
+  private connView!: ConnView;
 
   /** PRs ouvertes par session ("conn\0sid") — rempli par refresh ;
    *  vide si le démon ne connaît pas pr_list (vieux démon → pas de badge). */
@@ -134,12 +136,13 @@ export class Sidebar {
   }
   private ctx = $("sctx");
 
-  bind(conns: ConnectionManager, groups: GroupStore, newSess: NewSessionDialog, chat: ChatView, settings: SettingsPanel) {
+  bind(conns: ConnectionManager, groups: GroupStore, newSess: NewSessionDialog, chat: ChatView, settings: SettingsPanel, connView: ConnView) {
     this.conns = conns;
     this.groups = groups;
     this.newSess = newSess;
     this.chat = chat;
     this.settings = settings;
+    this.connView = connView;
     this.prsView.bind({
       openSession: (id) => this.openSession(id),
       connState: (k) => this.conns.state(k),
@@ -147,11 +150,13 @@ export class Sidebar {
     });
   }
 
-  /** Ouvrir une session depuis la sidebar = quitter le panneau options
-   *  (il recouvre #chat — la session s'afficherait dessous, invisible ;
-   *  close() est un no-op quand il est déjà fermé). */
+  /** Ouvrir une session depuis la sidebar = quitter les overlays de
+   *  #chat (options et vue connexion la recouvrent — la session
+   *  s'afficherait dessous, invisible ; close() est un no-op quand
+   *  l'overlay est déjà fermé). */
   private openSession(id: string): Promise<void> {
     this.settings.close();
+    this.connView.close();
     return this.chat.open(id);
   }
 

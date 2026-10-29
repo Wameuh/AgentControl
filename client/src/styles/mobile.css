@@ -410,7 +410,17 @@ body.android #qp-title { font-size: 14px; }
   body.android #cmd-ac { max-height: 180px; }
 }
 
-/* Champs SSH natifs dans le dialogue de connexion */
+/* Vue connexion (#conn-view — panneau plein, pas un <dialog>) :
+   lignes de la liste et champs à 44px comme les réglages. */
+body.android #conn-view button { min-height: 44px; }
+body.android #connview-close { min-width: 44px; }
+body.android .cv-conn { min-height: 52px; }
+body.android #conn-view input, body.android #conn-view select {
+  min-height: 44px; font-size: 15px;
+}
+body.android .cv-btns button { min-width: 44px; }
+body.android #connview-body { padding: 16px; }
+/* Champs SSH natifs dans la vue connexion */
 #c-pubkey {
   margin: 0; padding: 8px; font-size: 11px; white-space: pre-wrap;
   word-break: break-all; user-select: all; max-height: 90px; overflow: auto;
