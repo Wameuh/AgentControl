@@ -201,8 +201,10 @@ acctl comp ls [--json]            # nom, kind, état, pid, uptime, restarts
 acctl comp info <name>            # spec + état
 acctl comp start|stop|restart <name>
 acctl comp logs <name> [--tail N]
-acctl comp catalog [--json]       # + versions upstream
+acctl comp catalog [--json] [--refresh]  # + versions upstream
 acctl comp install <name>         # recette catalogue → spec managée
+acctl comp add <name> --kind K --cmd "<argv>" [--env K=V …] [--autostart]
+acctl comp rm <name>
 ```
 
 ### 2.5 Catalogue & installation — les « options d'intégration »

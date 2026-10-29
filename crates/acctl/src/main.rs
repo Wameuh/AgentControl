@@ -23,10 +23,15 @@
 //!   acctl pr add <N|I<cid>> [--session S] [--repo R]
 //!       [--forge github|gitlab|gerrit] [--host H[:port]] [--note txt]
 //!   acctl pr note <N|I<cid>> <texte...> | acctl pr rm <N|I<cid>> | acctl pr sync
+//!   acctl comp [ls] [--json] | info <n> | start|stop|restart <n>
+//!       | logs <n> [--tail N] | catalog [--json] [--refresh]
+//!       | install <n> | add <n> --kind K --cmd "<argv>" [--env K=V ...]
+//!       [--autostart] | rm <n>          — composants managés du démon
 //!
 //! Connexion : $AGENTCONTROL_SOCK (défaut ~/.agentcontrol/daemon.sock)
 //!             ou $AGENTCONTROL_TCP host:port
 
+mod comp;
 mod pr;
 
 use anyhow::{bail, Context, Result};
@@ -205,7 +210,7 @@ fn print_event(ev: &Value) {
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|search|find|create|resume|attach|fork|cancel|kill|clear|sleep|mode|respond|blob|download|write|daemon-update");
+        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|search|find|create|resume|attach|fork|cancel|kill|clear|sleep|mode|respond|blob|download|write|pr|comp|daemon-update");
         std::process::exit(2);
     }
     let mut c = connect().await?;
@@ -630,6 +635,7 @@ async fn main() -> Result<()> {
             );
         }
         "pr" => pr::run(&args, &mut c).await?,
+        "comp" | "components" => comp::run(&args, &mut c).await?,
         other => bail!("commande inconnue: {other}"),
     }
     Ok(())
