@@ -1,10 +1,11 @@
 // ---------------------------------------------------------------------------
 // Surveillance connexions : ok | reconnecting | down
 // ---------------------------------------------------------------------------
-// Mort détectée via `conn-dead` (Rust : EOF du reader, instantané) ou une
-// entrée {error} de la sonde fusionnée → down → retry en backoff
-// exponentiel (2 s → 60 s max). Le retry est un `connect` simple : le démon
-// est relancé par systemd (Restart=always) — jamais de réinstall en boucle.
+// Mort détectée via `conn-dead` (Rust : EOF du reader, instantané) ou
+// 2 entrées {error} consécutives de la sonde fusionnée → down → retry en
+// backoff exponentiel + jitter ±25 % (2 s → 60 s de base, ~75 s réel
+// max). Le retry est un `connect` simple : le démon est relancé par
+// systemd (Restart=always) — jamais de réinstall en boucle.
 // ---------------------------------------------------------------------------
 
 import { invoke, listen, isWeb } from "../core/bridge";
@@ -35,6 +36,11 @@ export class ConnectionManager {
   private nextAt = new Map<string, number>();
   /** Essais consécutifs depuis le dernier succès (tooltip). */
   private attempts = new Map<string, number>();
+  /** Échecs de sonde consécutifs — une seule erreur ne déclare plus la
+   *  conn down : un ralenti transitoire (tunnel congestionné mais vivant)
+   *  ne doit pas déclencher un cycle de reconnexion complet. `conn-dead`
+   *  (EOF réel du transport) reste instantané. */
+  private strikes = new Map<string, number>();
   private gone = new Set<string>();
 
   private deps = {
@@ -203,9 +209,21 @@ export class ConnectionManager {
     this.delay.delete(key);
     this.nextAt.delete(key);
     this.attempts.delete(key);
+    this.strikes.delete(key);
     const was = this.live.get(key);
     this.live.set(key, "ok");
     if (was !== "ok") this.renderState();
+  }
+
+  /** Échec de sonde (timeout / error dans l'entrée fusionnée) : la conn
+   *  n'est déclarée down qu'au 2ᵉ échec consécutif — un hoquet du lien
+   *  (flush lent d'un tunnel congestionné) ne coûte plus un cycle
+   *  kill-tunnel/reconnect/replay qui le re-saturait aussitôt. */
+  private probeFailed(key: string) {
+    if (!this.cfg.has(key) || this.gone.has(key)) return;
+    const n = (this.strikes.get(key) ?? 0) + 1;
+    this.strikes.set(key, n);
+    if (n >= 2) this.markDead(key);
   }
 
   markDead(key: string) {
@@ -221,8 +239,12 @@ export class ConnectionManager {
   private scheduleRetry(key: string) {
     if (this.timer.has(key) || this.gone.has(key) || !this.cfg.has(key) ||
         this.live.get(key) === "reconnecting") return;
-    const d = this.delay.get(key) ?? RETRY_MIN;
-    this.delay.set(key, Math.min(d * 2, RETRY_MAX));
+    const base = this.delay.get(key) ?? RETRY_MIN;
+    this.delay.set(key, Math.min(base * 2, RETRY_MAX));
+    // Jitter ±25 % : des retry cadencés pile sur le tick watchdog se
+    // ré-alignaient en rafale (plusieurs conns/clients tombant ensemble
+    // se réveillaient ensemble et re-saturaient le lien malade).
+    const d = Math.round(base * (0.75 + Math.random() * 0.5));
     this.nextAt.set(key, Date.now() + d);
     this.timer.set(key, setTimeout(() => {
       this.timer.delete(key);
@@ -340,6 +362,7 @@ export class ConnectionManager {
     this.delay.delete(conn);
     this.nextAt.delete(conn);
     this.attempts.delete(conn);
+    this.strikes.delete(conn);
     this.caps.delete(conn);
     // La conn sort de cfg : renderState (sb-left/chip) la retire sans
     // attendre une transition d'état ultérieure.
@@ -458,16 +481,19 @@ export class ConnectionManager {
 
     // Watchdog : sonde fusionnée toutes les 10 s (timeout 8 s/conn côté Rust) —
     // filet de sécurité pour les blackholes réseau (pas d'EOF → pas de
-    // conn-dead). Entrées {error} → markDead → backoff de reconnexion.
+    // conn-dead). Entrées {error} → probeFailed (2 strikes) → backoff.
     setInterval(async () => {
       try {
         const st = await call<Record<string, unknown>>("daemon_status");
         let anyOk = false;
         for (const [k, v] of Object.entries(st)) {
           if (k === "servers" || k === "sessions") continue;
-          if ((v as { error?: string }).error) this.markDead(k);
+          if ((v as { error?: string }).error) this.probeFailed(k);
           else {
             anyOk = true;
+            // Succès = la série d'échecs est rompue, même si la conn
+            // n'avait jamais été déclarée down (1 strike effacé).
+            this.strikes.delete(k);
             this.setCaps(k, v as Record<string, unknown>);
             if ((this.live.get(k) ?? "ok") !== "ok") this.markAlive(k);
           }

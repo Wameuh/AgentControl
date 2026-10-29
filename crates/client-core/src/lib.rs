@@ -408,6 +408,15 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                 "-o",
                 "ServerAliveInterval=30",
                 "-o",
+                // Lien mort (NAT/firewall qui droppe l'idle, blackhole) :
+                // ssh meurt au bout de ~60-75 s au lieu de ~90+ — le reader
+                // EOF déclenche la reconnexion au lieu d'attendre en zombie.
+                "ServerAliveCountMax=2",
+                "-o",
+                // keepalive TCP en plus des sondes applicatives — détecte
+                // la mort du pair même sans trafic sur le canal forwardé.
+                "TCPKeepAlive=yes",
+                "-o",
                 // accepte les nouvelles host keys (1re connexion, pas de tty)
                 "StrictHostKeyChecking=accept-new",
                 // NOTE : pas de ClearAllForwardings / LocalForward=none

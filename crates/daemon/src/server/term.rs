@@ -9,21 +9,16 @@ use tokio::sync::mpsc;
 
 pub(super) type Terms = HashMap<String, Term>;
 
-/// Alias du sender partagé d'une connexion — signature de `serve_conn`.
-type SharedWrite<W> = Arc<tokio::sync::Mutex<BufWriter<W>>>;
-
 impl Daemon {
     /// Traite une requête terminal ; `None` = pas une requête terminal —
     /// le dispatch normal prend le relais.
-    pub(super) async fn h_term<W>(
+    pub(super) async fn h_term(
         self: &Arc<Self>,
         terms: &mut Terms,
         done: &mpsc::UnboundedSender<String>,
-        write: &SharedWrite<W>,
+        write: &Outbox,
         req: &Request,
     ) -> Option<Response>
-    where
-        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
         let id = req.id;
         let r = match &req.req {
@@ -65,17 +60,15 @@ impl Daemon {
 
     /// Ouvre le PTY dans le workspace de la session et branche le flux de
     /// sortie sur la connexion (pushes term_data, puis term_exit final).
-    async fn term_open<W>(
+    async fn term_open(
         self: &Arc<Self>,
         terms: &mut Terms,
         done: &mpsc::UnboundedSender<String>,
-        write: &SharedWrite<W>,
+        write: &Outbox,
         session: String,
         cols: u16,
         rows: u16,
     ) -> Result<Value>
-    where
-        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
         /// Garde-fou par connexion : chaque PTY = shell + 2 threads + une
         /// tâche de relais — un client qui floode term_open ne doit pas
@@ -111,7 +104,7 @@ impl Daemon {
         let tid = term.id.clone();
         info!("[{}] terminal {tid} ouvert ({}x{})", session, cols, rows);
         {
-            let w = Arc::clone(write);
+            let w = write.clone();
             let done = done.clone();
             let tid2 = tid.clone();
             tokio::spawn(async move {
@@ -126,7 +119,10 @@ impl Daemon {
                             true,
                         ),
                     };
-                    if Self::send_line(&w, &frame).await.is_err() || last {
+                    // File saturée → la conn est condamnée (signalé dans
+                    // line()) ; le relais s'arrête, le term est démonté
+                    // avec elle.
+                    if Self::send_line(&w, &frame).is_err() || last {
                         break;
                     }
                 }
