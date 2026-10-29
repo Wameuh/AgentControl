@@ -11,7 +11,12 @@ export function connKeyOf(cfg: Record<string, unknown>, isAndroid = false) {
     const p = Number(cfg.port) || 22;
     return `${nat ? "ssh-native" : "ssh"}:${cfg.host}:${p}`;
   }
-  return cfg.kind === "tcp" ? `tcp:${cfg.addr}` : "local";
+  if (cfg.kind === "tcp") return `tcp:${cfg.addr}`;
+  if (cfg.kind === "local") return "local";
+  // kind inconnu/absent (fichier legacy corrompu) : identité « kind:host »
+  // — miroir de conn_key_json côté Rust, pas de fusion avec "local"
+  // (dédup/suppression croisées entre entrées corrompues).
+  return `${cfg.kind ?? ""}:${cfg.host ?? ""}`;
 }
 
 /// Params ensure_daemon — forward les champs ssh de la cfg (natif ou CLI).

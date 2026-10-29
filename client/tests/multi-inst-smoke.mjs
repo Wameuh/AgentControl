@@ -24,12 +24,19 @@ const PATCH = `(() => {
   const keyOf = (c) => !c ? "" : c.kind === "ssh" ? \`\${c.native ? "ssh-native" : "ssh"}:\${c.host}:\${c.port ?? 22}\`
     : c.kind === "tcp" ? \`tcp:\${c.addr}\` : c.kind === "web" ? "web" : "local";
   window.__live = new Set(); window.__saved = []; window.__cliConn = null;
+  window.__delays = {};
   window.__calls = { spawn: [], disconnect: [] };
   window.__TAURI_INTERNALS__.invoke = (cmd, args) => {
     if (cmd === "saved_connections") return Promise.resolve(window.__saved);
     if (cmd === "cli_conn") return Promise.resolve(window.__cliConn);
     if (cmd === "spawn_instance") { window.__calls.spawn.push(args?.conn); return Promise.resolve(null); }
-    if (cmd === "connect") window.__live.add(keyOf(args?.cfg));
+    if (cmd === "connect") {
+      window.__live.add(keyOf(args?.cfg));
+      // Latence simulée par conn (__delays) — pour les scénarios de
+      // connects croisés (un flux résout longtemps après un autre).
+      const d = window.__delays[keyOf(args?.cfg)] ?? 0;
+      return new Promise((r) => setTimeout(r, d)).then(() => inv(cmd, args));
+    }
     if (cmd === "disconnect") { window.__calls.disconnect.push(args?.conn); window.__live.delete(args?.conn); }
     return inv(cmd, args).then((r) =>
       cmd === "call" && args?.method === "list_sessions" && Array.isArray(r)
@@ -37,12 +44,12 @@ const PATCH = `(() => {
         : r);
   };
 })();`;
-const initPage = async (saved, cliConn) => {
+const initPage = async (saved, cliConn, delays = {}) => {
   const p = await b.newPage();
   await p.setViewport({ width: 1280, height: 860 });
   await p.evaluateOnNewDocument(mock);
   await p.evaluateOnNewDocument(PATCH);
-  await p.evaluateOnNewDocument(`window.__saved = ${JSON.stringify(saved)}; window.__cliConn = ${JSON.stringify(cliConn)};`);
+  await p.evaluateOnNewDocument(`window.__saved = ${JSON.stringify(saved)}; window.__cliConn = ${JSON.stringify(cliConn)}; window.__delays = ${JSON.stringify(delays)};`);
   await p.goto("http://localhost:4203/#desktop", { waitUntil: "domcontentloaded" });
   await p.waitForSelector("#btn-connect", { timeout: 15000 });
   await sleep(1200);
@@ -100,6 +107,32 @@ ok((await titleA()) === "AgentControl — me@pi5.local", "D2 titre mis à jour a
 const headsA2 = await connHeaders(pA);
 ok(headsA2.length === 1 && headsA2[0] === KEY_B, `D3 ancienne conn évincée (${headsA2})`);
 ok((await pA.evaluate(() => window.__calls.disconnect)).includes("local"), "D4 disconnect invoqué sur l'ancienne conn");
+
+// ---------- E : garde de génération — deux connects croisés ----------
+// --conn vise SLOW dont le connect reste en vol (mock retardé) ; pendant
+// l'attente l'utilisateur connecte FAST via le dialogue → FAST se lie.
+// Quand SLOW résout enfin, son flux est périmé (gen ≠ connectSeq) : il
+// relâche son transport (disconnect SLOW) sans voler le binding.
+const SLOW = { kind: "ssh", host: "me@slow.local", remote_port: 7331, port: 22, native: true, color: "red" };
+const FAST = { kind: "ssh", host: "me@fast.local", remote_port: 7331, port: 22, native: true, color: "grey" };
+const KEY_SLOW = "ssh-native:me@slow.local:22";
+const KEY_FAST = "ssh-native:me@fast.local:22";
+const pC = await initPage([SLOW, FAST], KEY_SLOW, { [KEY_SLOW]: 2800 });
+
+await pC.evaluate(() => document.querySelector("#btn-connect")?.click());
+await sleep(400);
+await pC.evaluate(() => { const s = document.querySelector("#c-saved"); s.value = "1"; s.dispatchEvent(new Event("change")); });
+await sleep(200);
+await pC.evaluate(() => document.querySelector("#c-go")?.click());
+await sleep(600);
+const headsC0 = await connHeaders(pC);
+ok(headsC0.length === 1 && headsC0[0] === KEY_FAST, `E1 FAST liée pendant que SLOW est en vol (${headsC0})`);
+await sleep(3200); // SLOW résout → garde de génération doit le faire perdre
+const headsC1 = await connHeaders(pC);
+ok(headsC1.length === 1 && headsC1[0] === KEY_FAST, `E2 le perdant résolu en retard ne vole pas le binding (${headsC1})`);
+ok((await pC.evaluate(() => window.__calls.disconnect)).includes(KEY_SLOW), "E3 transport du perdant relâché (disconnect SLOW)");
+ok((await pC.evaluate(() => document.title)) === "AgentControl — me@fast.local", "E4 titre = conn gagnante");
+ok((await pC.evaluate(() => [...document.documentElement.classList].join(" "))).includes("theme-grey"), "E5 accent = couleur de la conn gagnante");
 
 console.log(`\n${fails === 0 ? "SMOKE OK" : "SMOKE FAIL"} — ${fails} échec(s)`);
 await b.close();

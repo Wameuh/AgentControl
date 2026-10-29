@@ -17,16 +17,22 @@ use tokio::sync::Mutex;
 /// connections.json ; une clé inconnue retombe sur la dernière connexion.
 fn cli_conn_arg() -> Option<String> {
     let mut it = std::env::args().skip(1);
+    let mut arg = None;
     while let Some(a) = it.next() {
         if a == "--conn" {
-            if let Some(v) = it.next() {
-                return Some(v);
-            }
-        } else if let Some(v) = a.strip_prefix("--conn=") {
-            return Some(v.to_string());
+            arg = it.next();
+            break;
+        }
+        if let Some(v) = a.strip_prefix("--conn=") {
+            arg = Some(v.to_string());
+            break;
         }
     }
-    std::env::var("AGENTCONTROL_CONN").ok().filter(|v| !v.is_empty())
+    // Valeur vide (« --conn "" », « --conn= ») = directive absente — comme
+    // côté env : sans ce filtre, willConnect teinterait pour un bind qui
+    // ne suivra pas (autoconnect off).
+    arg.filter(|v| !v.is_empty())
+        .or_else(|| std::env::var("AGENTCONTROL_CONN").ok().filter(|v| !v.is_empty()))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

@@ -278,7 +278,10 @@ export class ConnectionManager {
   /** Déconnexion volontaire : ferme le transport (le tunnel/process ssh est
    *  tué au drop du client côté Rust). La cfg reste posée → la conn
    *  reste listée (badge rouge) et reconnectable, mais hors surveillance :
-   *  gone la met à l'abri du retry auto et du chip d'alerte. */
+   *  gone la met à l'abri du retry auto et du chip d'alerte. Les sessions
+   *  démon restent vivantes mais leur transport client est relâché → même
+   *  cas qu'une éviction : aucun conn-dead ne viendra, les terminaux de
+   *  cette conn sont marqués morts explicitement. */
   async disconnect(conn: string) {
     this.gone.add(conn);
     const t0 = this.timer.get(conn);
@@ -288,6 +291,7 @@ export class ConnectionManager {
     }
     this.nextAt.delete(conn);
     this.live.set(conn, "down");
+    this.deps.termDead(conn);
     await invoke("disconnect", { conn }).catch((e) => showErr(String(e)));
     this.renderState();
   }
