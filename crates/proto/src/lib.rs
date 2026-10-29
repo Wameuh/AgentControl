@@ -905,6 +905,13 @@ pub enum ReqKind {
     /// `{code, data(b64), size, truncated, stderr?(b64)}` ; absent =
     /// composant ou query inconnue → erreur.
     ComponentQuery { name: String, query: String },
+    /// Bascule à chaud l'orchestrateur backlog natif (composant interne
+    /// `backlog-orchestrator`, section `[backlog_orchestrator]` de
+    /// config.toml pour l'activation par défaut) — bascule runtime
+    /// seulement, la config n'est pas réécrite. Réponse :
+    /// `{enabled, status}` — status = instantané exposé aussi dans
+    /// `ListComponents`/`ComponentInfo`.
+    OrchestratorSet { enabled: bool },
     DaemonStatus,
     /// Auto-update du démon vers la release `version` demandée par le
     /// client (ex. "0.5.0" → tag v0.5.0 — jamais « latest » : le démon
@@ -981,6 +988,7 @@ impl ReqKind {
             Self::ComponentCatalog { .. } => "component_catalog",
             Self::ComponentInstall { .. } => "component_install",
             Self::ComponentQuery { .. } => "component_query",
+            Self::OrchestratorSet { .. } => "orchestrator_set",
             Self::DaemonStatus => "daemon_status",
             Self::UpdateDaemon { .. } => "update_daemon",
         }

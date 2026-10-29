@@ -41,6 +41,10 @@ struct Config {
     /// Communication agent↔agent (serveur MCP injecté dans les sessions).
     #[serde(default)]
     a2a: server::A2aCfg,
+    /// Orchestrateur backlog natif (server/orch.rs) — opt-in via
+    /// `enabled = true`, bascule à chaud par RPC OrchestratorSet.
+    #[serde(default)]
+    backlog_orchestrator: server::OrchCfg,
     /// Forges de review au-delà de GitHub : `[[forges]]` {type, hosts,
     /// token_env} — détection des URLs GitLab/Gerrit dans les sorties
     /// outils (voir docs/forges.md). github.com + gitlab.com implicites.
@@ -74,6 +78,7 @@ impl Default for Config {
             agents: HashMap::new(),
             retention: server::RetentionCfg::default(),
             a2a: server::A2aCfg::default(),
+            backlog_orchestrator: server::OrchCfg::default(),
             forges: Vec::new(),
         }
     }
@@ -346,6 +351,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
         cfg.a2a.clone(),
         forges::Forges::resolve(&cfg.forges),
         cfg.bind_tcp.clone(),
+        cfg.backlog_orchestrator.clone(),
     )
     .await?;
     tracing::info!(
@@ -428,6 +434,10 @@ async fn serve(root: &std::path::Path) -> Result<()> {
         let c = daemon.components.clone();
         tokio::spawn(async move { c.boot().await });
     }
+
+    // Orchestrateur backlog natif : la boucle tourne toujours — la phase
+    // porte l'activation (opt-in config ou bascule RPC à chaud).
+    daemon.orch_boot();
 
     if crashed && !resumable.is_empty() {
         if cfg.auto_resume {
