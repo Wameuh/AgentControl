@@ -95,36 +95,57 @@ Service aujourd'hui sous `~/.supervisor/conf.d/backlog-orchestrator.conf`
 (script `~/.local/bin/backlog-orchestrator.py`, poll 60 s, **singleton
 garanti par flock** `~/.agentbacklog/orchestrator.lock`).
 
-**Bascule** — activer le composant **puis** retirer la conf supervisord.
-L'ordre garantit une couverture continue, et le flock rend la fenêtre de
-transition sans risque : si les deux superviseurs le lancent, la seconde
-instance sort proprement.
+**Bascule** — poser la spec, retirer la conf supervisord, **démarrer le
+composant**. Ni `component_install` ni `component_upsert` ne lancent le
+process : `autostart` n'agit qu'au boot du démon — sans `component_start`
+explicite, l'orchestrateur ne poll plus rien jusqu'au prochain restart.
+Le flock rend la fenêtre de transition sans risque : tant que l'ancienne
+instance tourne, toute seconde instance sort proprement.
 
 ```bash
 # 1. Installer le composant depuis le catalogue embarqué (recette
 #    déclarative : exige le script présent, pose la spec autostart +
-#    restart=on-failure + healthcheck=process)
+#    restart=on-failure + healthcheck=process — état : stopped)
 acctl comp install backlog-orchestrator   # acctl ≥ item #27
 
 #    Sans `acctl comp` (version antérieure) — NDJSON brut sur le socket :
 python3 - <<'EOF'
-import json, socket
-s = socket.socket(socket.AF_UNIX); s.connect("/home/dev/.agentcontrol/daemon.sock")
+import json, os, socket
+s = socket.socket(socket.AF_UNIX)
+s.connect(os.path.expanduser("~/.agentcontrol/daemon.sock"))
 f = s.makefile("rw")
 for req in ({"id":1,"req":"component_catalog"},
             {"id":2,"req":"component_install","name":"backlog-orchestrator"}):
     f.write(json.dumps(req)+"\n"); f.flush(); print(f.readline().strip())
 EOF
 
-# 2. Vérifier côté démon : running, logs qui défilent
-acctl comp ls                             # ou component_info/list_components en RPC
-acctl comp logs backlog-orchestrator
-
-# 3. Seulement ensuite, retirer la supervision historique
+# 2. Retirer la supervision historique — l'instance supervisord s'arrête
+#    et libère le flock
 rm ~/.supervisor/conf.d/backlog-orchestrator.conf
 supervisorctl reread && supervisorctl update
 supervisorctl status                      # backlog-orchestrator absent
+
+# 3. Démarrer le composant — le flock est libre, le managé prend le relais
+acctl comp start backlog-orchestrator     # ou le RPC ci-dessous
+python3 - <<'EOF'
+import json, os, socket
+s = socket.socket(socket.AF_UNIX)
+s.connect(os.path.expanduser("~/.agentcontrol/daemon.sock"))
+f = s.makefile("rw")
+f.write(json.dumps({"id":1,"req":"component_start","name":"backlog-orchestrator"})+"\n")
+f.flush(); print(f.readline().strip())
+EOF
+
+# 4. Vérifier côté démon : running, logs qui défilent
+acctl comp ls                             # ou component_info/list_components en RPC
+acctl comp logs backlog-orchestrator
 ```
+
+Variante « couverture continue » : démarrer le composant **avant** de
+retirer la conf supervisord. L'instance managée échoue au flock et
+`restart=on-failure` la retente (backoff ≤ 60 s) jusqu'à obtenir le
+lock — aucun trou de couverture, au prix de retries « lock » dans le
+log et d'un compteur `restarts` non nul.
 
 **Rollback** : `component_remove` (stop + spec retirée), restaurer la
 conf supervisord, `supervisorctl reread && supervisorctl update` —
