@@ -11,7 +11,15 @@ const EXE = process.env.CHROME_BIN ?? "/usr/bin/chromium";
 // detached:true → kill(-pid) tue tout le groupe (npx → sh → vite) : sinon le
 // preview survit orphelin après la fin du test.
 const server = spawn("npx", ["vite", "preview", "--port", "4203", "--strictPort"], { stdio: "ignore", detached: true });
-await new Promise((r) => setTimeout(r, 1800));
+// Attendre que le preview serve (npx cold peut dépasser 2 s) — un
+// goto prématuré donnait ERR_CONNECTION_REFUSED avant le cleanup.
+for (let i = 0; i < 40; i++) {
+  try {
+    const r = await fetch("http://localhost:4203/");
+    if (r.ok) break;
+  } catch {}
+  await new Promise((r) => setTimeout(r, 250));
+}
 const b = await puppeteer.launch({ executablePath: EXE, headless: true, args: ["--no-sandbox"] });
 const mock = readFileSync("tests/tauri-mock.js", "utf8");
 
@@ -138,8 +146,9 @@ ok((await pC.evaluate(() => document.title)) === "AgentControl — me@fast.local
 ok((await pC.evaluate(() => [...document.documentElement.classList].join(" "))).includes("theme-grey"), "E5 accent = couleur de la conn gagnante");
 
 // ---------- F : vue diagramme — nœuds, arêtes, clic session/composant ----------
-// Page liée à la conn "local" : 3 composants mockés (capability
-// components:true dans daemon_status), 4 sessions dont s2 spawnée par s1
+// Page liée à la conn "local" : 4 composants mockés (capability
+// components:true dans daemon_status — 2 tools : agentbacklog
+// installed+version, acctl absent), 4 sessions dont s2 spawnée par s1
 // et s4 rattachée au composant backlog-orchestrator via `origin`.
 const pD = await initPage([{ kind: "local" }], null);
 await pD.evaluate(() => document.querySelector("#tb-map")?.click());
@@ -147,10 +156,10 @@ await sleep(900);
 const cnt = (sel) => pD.evaluate((s) => document.querySelectorAll(s).length, sel);
 ok((await pD.evaluate(() => !document.querySelector("#map-view")?.hidden)), "F1 #tb-map ouvre la vue diagramme");
 ok((await cnt(".n-daemon")) === 1, "F2 nœud démon au centre");
-ok((await cnt(".n-comp")) === 3, `F3 3 composants en anneau (${await cnt(".n-comp")})`);
+ok((await cnt(".n-comp")) === 4, `F3 4 composants en anneau (${await cnt(".n-comp")})`);
 ok((await cnt(".n-sess")) === 4, `F4 4 sessions positionnées (${await cnt(".n-sess")})`);
-ok((await cnt(".e-dc")) === 3 && (await cnt(".e-s")) === 4,
-  `F5 arêtes : 3 démon→composant + 4 parent→session (${await cnt(".e-dc")}+${await cnt(".e-s")})`);
+ok((await cnt(".e-dc")) === 4 && (await cnt(".e-s")) === 4,
+  `F5 arêtes : 4 démon→composant + 4 parent→session (${await cnt(".e-dc")}+${await cnt(".e-s")})`);
 ok((await cnt(".e-s.flow")) >= 1, "F6 flux actif animé (s1 working)");
 ok((await cnt(".npr")) >= 1, "F7 badge PR #N sur les sessions du registre");
 ok((await pD.evaluate(() => document.querySelector('.n-sess[data-session="s4"]') != null)),
@@ -163,6 +172,16 @@ ok((await pD.evaluate(() => !document.querySelector("#map-info")?.hidden)) &&
    (await pD.evaluate(() => document.querySelector("#map-info")?.textContent.includes("backlog-orchestrator"))) &&
    (await pD.evaluate(() => document.querySelector("#map-info")?.textContent.includes("running"))),
   "F9 clic composant → carte info (nom + état running)");
+// Tools passifs : états installé/absent rendus + version en tooltip/carte.
+ok((await cnt(".n-comp.st-installed")) === 1 && (await cnt(".n-comp.st-absent")) === 1,
+  `F9b tools passifs : 1 installed + 1 absent (${await cnt(".n-comp.st-installed")}/${await cnt(".n-comp.st-absent")})`);
+ok((await pD.evaluate(() => document.querySelector('[data-comp="agentbacklog"] title')?.textContent.includes("agentbacklog 0.3.0"))),
+  "F9c tooltip du tool contient la version sondée");
+await pD.evaluate(() => document.querySelector('[data-comp="agentbacklog"]')
+  .dispatchEvent(new MouseEvent("click", { bubbles: true })));
+await sleep(300);
+ok((await pD.evaluate(() => document.querySelector("#map-info")?.textContent.includes("agentbacklog 0.3.0"))),
+  "F9d carte info du tool → ligne version");
 await pD.evaluate(() => document.querySelector('[data-session="s1"]')
   .dispatchEvent(new MouseEvent("click", { bubbles: true })));
 await sleep(600);

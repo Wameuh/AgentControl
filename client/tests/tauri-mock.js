@@ -26,10 +26,14 @@
       available_modes: [], available_models: [], available_commands: [], state: "compacting" },
   ];
   const COMPONENTS = [
+    { name: "acctl", kind: "tool", autostart: false,
+      description: "CLI de contrôle du démon", source: "components.toml",
+      spec: { name: "acctl", kind: "tool", command: ["acctl", "--version"] },
+      status: { state: "absent", health: "fail" } },
     { name: "agentbacklog", kind: "tool", autostart: false,
       description: "File de tâches partagée", source: "components.toml",
       spec: { name: "agentbacklog", kind: "tool", command: ["agentbacklog", "--version"] },
-      status: { state: "stopped" } },
+      status: { state: "installed", health: "ok", version: "agentbacklog 0.3.0" } },
     { name: "backlog-orchestrator", kind: "process", autostart: true,
       description: "Orchestrateur de la file", source: "components.toml",
       spec: { name: "backlog-orchestrator", kind: "process", command: ["backlog-orch"] },

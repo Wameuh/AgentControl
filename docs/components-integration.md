@@ -276,7 +276,10 @@ La pièce « vivante » : **graphe des programmes et des sessions**.
   (`spawned_by`/`peer_message`).
 - **États animés** : pulse sur les sessions `working`, point coloré par
   état (idle/working/waiting/dead/degraded/stopped), arêtes en pointillés
-  animés sur les flux actifs. Tooltips : titre, état, uptime ; clic
+  animés sur les flux actifs. Les `tool` sont des **nœuds passifs** :
+  icône dédiée, `installed` = liseré discret, `absent` = nœud et arête
+  en tirets quasi effacés (observation, pas panne), version sondée en
+  tooltip + carte info. Tooltips : titre, état, uptime ; clic
   session → ouvre le chat ; clic composant → panneau §2.6.
 - **Technique** : **SVG en vanilla TS** (le client n'a aucune dep de
   graphe — pas de lib externe). Layout radial déterministe (démon centre,
