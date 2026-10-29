@@ -1,7 +1,8 @@
 name: auto-release-pr
 
 # Après chaque push sur next_release (merge d'une PR feature/fix) :
-# s'assurer qu'une PR de release next_release -> main existe.
+# s'assurer qu'une PR de release next_release -> main existe, et que sa
+# description reste des notes de version à jour.
 #
 # La PR est créée en **draft** — elle accumule les merges
 # silencieusement (draft → synchronize = runs tout-skip, zéro CI).
@@ -12,17 +13,29 @@ name: auto-release-pr
 # installable via l'auto-update (canal rc des paramètres) pour tester
 # avant de merger ; merge par l'utilisateur → tag final + cleanup rc.
 #
+# La description de la PR est régénérée à chaque run par
+# `client/tools/release_notes.py` : notes de version orientées
+# utilisateur (Nouveautés / Corrections / Améliorations, catégorisées
+# depuis les sujets de squash `type: titre (#N)` du cycle), version
+# projetée = dernier tag + niveau (même règle que release-bump).
+# Le bloc généré vit entre marqueurs `release-notes:start/end` : la
+# régénération ne remplace que cette zone — une annotation manuelle
+# hors marqueurs survit aux pushes suivants. Idempotent : body
+# identique → pas d'edit (et `edited` n'est écouté par aucun
+# workflow → zéro run parasite).
+#
 # Le reset post-release de `reconcile-next-release` pointe nr sur le
 # même SHA que main : ce push (PAT) déclenche ce job, qui doit sortir
 # clean — `gh pr create` sur une branche sans avance échouerait
 # (« No commits between ») en vrai rouge sinon. Rien à releaser =
 # pas de release PR ; elle naîtra au premier merge du cycle.
 #
-# gh pr create via RELEASE_PAT (fallback GITHUB_TOKEN) : le réglage
+# gh pr create/edit via RELEASE_PAT (fallback GITHUB_TOKEN) : le réglage
 # repo « Allow GitHub Actions to create and approve pull requests »
 # interdit createPullRequest au GITHUB_TOKEN (arrivé : run 40209286139)
 # — le PAT passe par le rôle admin en bypass actor du ruleset. La PR
-# créée porte l'auteur du PAT.
+# créée porte l'auteur du PAT. Le PAT n'est présent que dans les steps
+# `gh` purs : les steps qui exécutent le générateur n'ont pas de token.
 
 on:
   push:
@@ -41,50 +54,78 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Corps de la PR
+      - name: Rien à releaser ?
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          cat > "$RUNNER_TEMP/release-pr-body.md" <<'EOF'
-          Release PR auto-créée — accumule les merges de `next_release`.
+          # nr alignée sur main (reset post-release) → rien à releaser.
+          AHEAD=$(gh api "repos/$GH_REPO/compare/main...next_release" \
+            --jq .ahead_by)
+          echo "next_release ahead_by=$AHEAD"
+          [ "$AHEAD" = "0" ] && echo "needed=false" >> "$GITHUB_OUTPUT" \
+                            || echo "needed=true"  >> "$GITHUB_OUTPUT"
 
-          Pour releaser : passer la PR **ready** → `release-bump` pousse
-          le bump de version (`dernier tag + niveau`, mots-clés
-          `(minor)`/`(major)`/`(sync)` des commits du cycle) → les 5
-          checks tournent sur le head bumpé et un tag `v<NEXT>-rc.<k>`
-          déclenche le build de la **prerelease** — installable depuis
-          l'app via l'auto-update en activant le canal rc dans les
-          paramètres, pour tester avant de merger → merge →
-          `release-on-merge` tague `v<NEXT>`, dispatche le build de
-          release final et nettoie les rc du cycle.
-          EOF
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.needed == 'true'
+        with:
+          ref: next_release
+          # Historique + tags complets : borne et range du générateur.
+          fetch-depth: 0
 
-      - name: Ouvrir la release PR si absente
+      - name: Body courante de la release PR (si ouverte)
+        id: current
+        if: steps.gate.outputs.needed == 'true'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
+          PR=$(gh pr list --base main --head next_release --state open \
+            --json number --jq '.[0].number // empty')
+          echo "pr=$PR" >> "$GITHUB_OUTPUT"
+          if [ -n "$PR" ]; then
+            gh pr view "$PR" --json body --jq .body \
+              > "$RUNNER_TEMP/current-body.md"
+          else
+            : > "$RUNNER_TEMP/current-body.md"
+          fi
+
+      - name: Fusion notes ↔ body existante
+        if: steps.gate.outputs.needed == 'true'
+        run: python3 client/tools/release_notes.py --ref HEAD \
+               --merge-into "$RUNNER_TEMP/current-body.md" \
+               --out "$RUNNER_TEMP/release-pr-body.md"
+
+      - name: Ouvrir ou mettre à jour la release PR
+        if: steps.gate.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ steps.current.outputs.pr }}
+        run: |
           set -e
-          # nr alignée sur main (reset post-release) → rien à releaser.
-          AHEAD=$(gh api "repos/$GH_REPO/compare/main...next_release" \
-            --jq .ahead_by)
-          if [ "$AHEAD" = "0" ]; then
-            echo "next_release sans avance sur main → skip"
+          if [ -z "$PR" ]; then
+            if ! gh pr create --base main --head next_release --draft \
+              --title "Next release" \
+              --body-file "$RUNNER_TEMP/release-pr-body.md"; then
+              # Race tolérée : une PR apparue entre list et create est
+              # OK ; sinon l'échec est réel → rouge.
+              OPEN=$(gh pr list --base main --head next_release \
+                --state open --json number --jq 'length')
+              [ "$OPEN" -gt 0 ] && { echo "PR créée entre-temps"; exit 0; }
+              echo "::error::gh pr create a échoué sans PR concurrente"
+              exit 1
+            fi
+            echo "release PR créée (draft)"
             exit 0
           fi
-          OPEN=$(gh pr list --base main --head next_release --state open \
-            --json number --jq 'length')
-          if [ "$OPEN" -gt 0 ]; then
-            echo "release PR déjà ouverte → skip"
-            exit 0
+          # Comparaison normalisée : $(cat) ignore les trailing newlines
+          # que l'API gh peut ajouter/retirer → vraie idempotence.
+          if [ "$(cat "$RUNNER_TEMP/current-body.md")" = \
+               "$(cat "$RUNNER_TEMP/release-pr-body.md")" ]; then
+            echo "body déjà à jour → skip"
+          else
+            gh pr edit "$PR" --body-file "$RUNNER_TEMP/release-pr-body.md"
+            echo "body de la PR #$PR régénérée (notes de version)"
           fi
-          if ! gh pr create --base main --head next_release --draft \
-            --title "Next release" \
-            --body-file "$RUNNER_TEMP/release-pr-body.md"; then
-            # Race tolérée : une PR apparue entre list et create est OK ;
-            # sinon l'échec est réel → rouge.
-            OPEN=$(gh pr list --base main --head next_release --state open \
-              --json number --jq 'length')
-            [ "$OPEN" -gt 0 ] && { echo "PR créée entre-temps"; exit 0; }
-            echo "::error::gh pr create a échoué sans PR concurrente"
-            exit 1
-          fi
-          echo "release PR créée (draft)"
