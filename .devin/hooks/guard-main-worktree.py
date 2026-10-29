@@ -18,9 +18,14 @@ PreToolUse:
   writes outside external scope (--global/--file…), remote mutations,
   branch -f/-d/-m and update-ref touching next_release, HEAD/@ (in
   main), any checked-out branch or its remote-tracking ref, fetch/pull
-  refspec dst writes (`src:dst`) and local-path pushes. `-c`/
-  `--config-env`/`GIT_CONFIG_*`/`export`ed alias injection is blocked
-  too — it would rename the whole verb table away.
+  refspec dst writes (`src:dst`) and local-path pushes, tag/symbolic-
+  ref/fast-import/receive-pack ref writes, `worktree add` of a
+  protected branch or `-b|-B|--orphan` naming one, and heads-shadow
+  create-forms (`branch <name>`, `checkout -b|-B`, `switch -c|-C`)
+  matching a protected tail — `refs/heads/origin/next_release` would
+  forge the ahead-check baseline (heads resolves before remotes).
+  `-c`/`--config-env`/`GIT_CONFIG_*`/`export`ed alias injection is
+  blocked too — it would rename the whole verb table away.
   Allowed: read-only git, fetch/pull/reset (documented resync path),
   restore and `checkout -- <paths>` (revert local edits toward clean),
   `checkout|switch next_release`, worktree add/remove/lock, config
@@ -32,7 +37,8 @@ PreToolUse:
   Command lines are split on `&&`/`||`/`;`/`|`/`&`/newlines/parens,
   heredoc bodies are stripped first (quote-aware, `<<<` excluded),
   `$(...)`/backtick substitutions and `bash|sh -c`/`eval` payloads are
-  scanned recursively, short flags are unbundled, and shell keywords
+  scanned recursively, short-flag bundles are expanded with per-verb
+  value-flag semantics (`-qm r` = `-q -m r`), and shell keywords
   (then/do/if/…) plus wrappers (sudo/env/nice/…) are transparent.
 - mcp__* mutation-named tools (write/edit/create/delete/rename/move/…):
   block absolute-path arguments inside the main worktree.
@@ -89,6 +95,22 @@ CFG_REMOVE = {"--unset", "--unset-all", "--remove-section",
 CFG_SCOPE_EXT = {"--global", "--system", "--file", "--blob", "-f"}
 CFG_VAL = {"-f", "--file", "--blob", "--default", "--type", "--value",
            "--fixed-value"}
+# per-verb flags consuming a value — needed to unbundle `-xyz`
+# correctly: a val-flag char ends the bundle and eats the rest of
+# the token, else the next one (`-qm r` = `-q -m r`, `-bfeat` = `-b feat`)
+VERB_VAL = {
+    "config": CFG_VAL,
+    "branch": {"-u", "--set-upstream-to"},
+    "update-ref": {"-m"}, "symbolic-ref": {"-m"},
+    "tag": {"-m", "-F", "-u", "--file", "--local-user",
+            "--cleanup", "--sort"},
+    "worktree": {"-b", "-B", "--orphan", "--reason"},
+    "checkout": {"-b", "-B", "--orphan", "-t", "--track",
+                 "--pathspec-from-file", "--conflict"},
+    "switch": {"-c", "-C", "--orphan", "-t", "--track"},
+    "restore": {"-s", "--source"},
+    "stash": {"-m"},
+}
 # env vars that inject or repoint git config (alias bypass vector)
 GIT_CONFIG_ENV = re.compile(
     r"GIT_CONFIG_(PARAMETERS|GLOBAL|SYSTEM|KEY_\d+|VALUE_\d+|COUNT)$")
@@ -345,6 +367,36 @@ def flags_of(args):
     return out
 
 
+def unbundle(args, val_flags=()):
+    """Expand single-dash bundles git-style: every char is a flag;
+    a `val_flags` char ends the bundle — the remaining chars are its
+    attached value, else the next token is. `--` boundary, long
+    flags and other tokens pass through verbatim."""
+    out, i, seen_dd = [], 0, False
+    while i < len(args):
+        a = args[i]
+        if seen_dd or a == "--" or a == "-" \
+                or not a.startswith("-") or a.startswith("--"):
+            out.append(a)
+            seen_dd = seen_dd or a == "--"
+            i += 1
+            continue
+        chars, j = a[1:], 0
+        while j < len(chars):
+            f = "-" + chars[j]
+            out.append(f)
+            j += 1
+            if f in val_flags:
+                if j < len(chars):
+                    out.append(chars[j:])
+                elif i + 1 < len(args):
+                    out.append(args[i + 1])
+                    i += 1
+                break
+        i += 1
+    return out
+
+
 def ref_tail(p):
     """Branch-ish tail of a ref: strip refs/, refs/heads/,
     refs/remotes/<r>/ and a leading '+'."""
@@ -357,11 +409,7 @@ def prot_hit(p, names):
     name (`feat/x`), a ref tail (`refs/remotes/o/next_release`) or a
     bare remote-tracked form (`origin/next_release`)."""
     t = ref_tail(p)
-    # suffix after first `/` covers `origin/<name>`; basename covers
-    # path-like operands (`--orphan <path>` names the branch after
-    # basename(path))
-    return t in names or t.split("/", 1)[-1] in names \
-        or t.rsplit("/", 1)[-1] in names
+    return t in names or t.split("/", 1)[-1] in names
 
 
 def verb_ok(verb, args):
@@ -442,14 +490,23 @@ def repo_verb_ok(verb, args, in_main, checked, cwd=None):
     if verb == "branch":
         pos = positionals(args, {"-u", "--set-upstream-to"}, cut=False)
         danger = flags & {"-f", "--force", "-m", "-M", "--move",
+                          "-c", "-C", "--copy",
                           "-d", "-D", "--delete"}
-        if not danger:
-            return True
         # `branch -m <new>` with no source renames the branch checked out
         # where the command runs — protected only in the main worktree
         if flags & {"-m", "-M", "--move"} and len(pos) <= 1 and in_main:
             return False
-        return not any(prot_hit(p, names) for p in pos)
+        if danger:
+            return not any(prot_hit(p, names) for p in pos)
+        readfl = flags & {"-l", "--list", "-a", "--all", "-r", "-v",
+                          "--show-current", "--contains",
+                          "--no-contains", "--merged", "--no-merged",
+                          "--points-at", "--format", "--sort"}
+        if readfl:
+            return True
+        # bare create: pos[0] names the new branch — a heads-shadow
+        # like `origin/next_release` forges the ahead-check baseline
+        return not pos or not prot_hit(pos[0], names)
     if verb == "update-ref":
         if "--stdin" in flags:
             return False  # ref list arrives on stdin — can't inspect
@@ -475,29 +532,39 @@ def repo_verb_ok(verb, args, in_main, checked, cwd=None):
             args, {"-m", "-F", "-u", "--file", "--local-user",
                    "--cleanup", "--sort"}, cut=False)
         return not (pos and prot_hit(pos[0], names))
+    if verb in ("checkout", "switch"):
+        # `-b|-B|-c|-C|--orphan <name>` creates an (unborn) branch
+        # wherever the command runs — a heads-shadow of a protected
+        # tail forges the ahead-check baseline
+        vf = {"-b", "-B"} if verb == "checkout" else {"-c", "-C"}
+        created = [args[i + 1] for i, a in enumerate(args)
+                   if a in vf | {"--orphan"} and i + 1 < len(args)]
+        created += [m.group(1) for a in args
+                    if (m := re.fullmatch(r"--orphan=(.+)", a))]
+        return not any(prot_hit(p, names) for p in created)
     if verb == "worktree":
         pos = positionals(args, {"-b", "-B", "--orphan"}, cut=False)
         if pos and pos[0] == "add":
+            ovals = [args[i + 1] for i, a in enumerate(args)
+                     if a == "--orphan" and i + 1 < len(args)]
+            ovals += [m.group(1) for a in args
+                      if (m := re.fullmatch(r"--orphan=(.+)", a))]
             bnames = [args[i + 1] for i, a in enumerate(args)
-                      if a in ("-b", "-B", "--orphan")
-                      and i + 1 < len(args)]
-            bnames += [m.group(1) for a in args
-                       if (m := re.fullmatch(r"-[bB](.+)", a))]
-            bnames += [m.group(1) for a in args
-                       if (m := re.fullmatch(r"--orphan=(.+)", a))]
-            # `-b<name>`/`-B<name>` attached stay whole in flags_of
-            # (inner `-` defeats the bundle regex) — a non-empty
-            # bnames is itself proof a creation flag was given
-            creates = bool(bnames) or flags & {"-b", "-B", "-d",
-                                               "--detach"} or any(
-                a == "--orphan" or a.startswith("--orphan=")
-                for a in args)
+                      if a in ("-b", "-B") and i + 1 < len(args)]
+            # a non-empty bnames/ovals is itself proof a creation
+            # flag was given (bundles are unbundled upstream)
+            creates = bool(bnames or ovals) or flags & {
+                "-b", "-B", "-d", "--detach"}
             if creates:
                 # `-b|--orphan <name>` names an (unborn) branch —
-                # prot_hit it (prot_hit's tail check also covers the
-                # basename-of-path form of `--orphan`); the tail
-                # operand is a start point, not an attach
-                return not any(prot_hit(p, names) for p in bnames)
+                # prot_hit it. `--orphan` on older gits takes no
+                # value and names the branch after basename(path) —
+                # checking the basename covers both forms.
+                return not (
+                    any(prot_hit(p, names) for p in bnames)
+                    or any(prot_hit(p, names)
+                           or prot_hit(os.path.basename(p), names)
+                           for p in ovals))
             # `worktree add <path> <committish>` — a second checkout of
             # a protected branch is refused
             return not any(prot_hit(p, names) for p in pos[2:])
@@ -610,12 +677,20 @@ def scan_segments(cmd, cwd, roots, checked, env0=None, depth=0):
         if any(c.split("=", 1)[0].lower().startswith("alias.")
                for c in configs):
             return "block"
-        if verb in ("config", "remote", "branch", "update-ref",
-                    "fetch", "pull", "push", "symbolic-ref", "tag",
-                    "worktree", "fast-import", "receive-pack"):
+        # `-qm` / `-b<name>` bundle the val-flag — expand before any
+        # positional/flag classification downstream
+        args = unbundle(args, VERB_VAL.get(verb, ()))
+        repo_only = ("config", "remote", "branch", "update-ref",
+                     "fetch", "pull", "push", "symbolic-ref", "tag",
+                     "worktree", "fast-import", "receive-pack")
+        # checkout/switch get BOTH gates: create-operands write
+        # shared refs (repo scope) and the flag set mutates the
+        # worktree (main scope)
+        if verb in repo_only or verb in ("checkout", "switch"):
             if not repo_verb_ok(verb, args, in_main, checked, cwd):
                 return "block"
-        elif in_main and not verb_ok(verb, args):
+        if verb not in repo_only and in_main \
+                and not verb_ok(verb, args):
             return "block"
         if depth < 3:
             # exec-capable config/env values spawn unseen inner git —
