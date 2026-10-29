@@ -99,16 +99,14 @@ CFG_VAL = {"-f", "--file", "--blob", "--default", "--type", "--value",
 # correctly: a val-flag char ends the bundle and eats the rest of
 # the token, else the next one (`-qm r` = `-q -m r`, `-bfeat` = `-b feat`)
 VERB_VAL = {
-    "config": CFG_VAL,
-    "branch": {"-u", "--set-upstream-to"},
+    "config": {"-f"},
+    "branch": {"-u"},
     "update-ref": {"-m"}, "symbolic-ref": {"-m"},
-    "tag": {"-m", "-F", "-u", "--file", "--local-user",
-            "--cleanup", "--sort"},
-    "worktree": {"-b", "-B", "--orphan", "--reason"},
-    "checkout": {"-b", "-B", "--orphan", "-t", "--track",
-                 "--pathspec-from-file", "--conflict"},
-    "switch": {"-c", "-C", "--orphan", "-t", "--track"},
-    "restore": {"-s", "--source"},
+    "tag": {"-m", "-F", "-u"},
+    "worktree": {"-b", "-B"},
+    "checkout": {"-b", "-B", "-t"},
+    "switch": {"-c", "-C", "-t"},
+    "restore": {"-s"},
     "stash": {"-m"},
 }
 # env vars that inject or repoint git config (alias bypass vector)
@@ -399,8 +397,11 @@ def unbundle(args, val_flags=()):
 
 def ref_tail(p):
     """Branch-ish tail of a ref: strip refs/, refs/heads/,
-    refs/remotes/<r>/ and a leading '+'."""
-    return re.sub(r"^refs/(heads/|remotes/[^/]+/)?", "",
+    refs/remotes/<r>/, refs/tags/ and a leading '+'. The tags/ strip
+    matters: `refs/tags/origin/next_release` resolves before
+    `refs/remotes/origin/next_release` in gitrevisions — a forged tag
+    shadows the ahead-check baseline."""
+    return re.sub(r"^refs/(heads/|remotes/[^/]+/|tags/)?", "",
                   p.lstrip("+"))
 
 
@@ -533,24 +534,30 @@ def repo_verb_ok(verb, args, in_main, checked, cwd=None):
                    "--cleanup", "--sort"}, cut=False)
         return not (pos and prot_hit(pos[0], names))
     if verb in ("checkout", "switch"):
-        # `-b|-B|-c|-C|--orphan <name>` creates an (unborn) branch
-        # wherever the command runs — a heads-shadow of a protected
-        # tail forges the ahead-check baseline
-        vf = {"-b", "-B"} if verb == "checkout" else {"-c", "-C"}
-        created = [args[i + 1] for i, a in enumerate(args)
-                   if a in vf | {"--orphan"} and i + 1 < len(args)]
-        created += [m.group(1) for a in args
-                    if (m := re.fullmatch(r"--orphan=(.+)", a))]
+        # `-b|-B|-c|-C|--create|--force-create|--orphan <name>`
+        # creates an (unborn) branch wherever the command runs — a
+        # heads-shadow of a protected tail forges the baseline.
+        # Post-`--` tokens are operands, never flags.
+        vf = {"-b", "-B"} if verb == "checkout" else {
+            "-c", "-C", "--create", "--force-create"}
+        pre = args[:args.index("--")] if "--" in args else args
+        created = [pre[i + 1] for i, a in enumerate(pre)
+                   if a in vf | {"--orphan"} and i + 1 < len(pre)]
+        created += [m.group(1) for a in pre
+                    if (m := re.fullmatch(
+                        r"--(?:create|force-create|orphan)=(.+)", a))]
         return not any(prot_hit(p, names) for p in created)
     if verb == "worktree":
         pos = positionals(args, {"-b", "-B", "--orphan"}, cut=False)
         if pos and pos[0] == "add":
-            ovals = [args[i + 1] for i, a in enumerate(args)
-                     if a == "--orphan" and i + 1 < len(args)]
-            ovals += [m.group(1) for a in args
+            # post-`--` tokens are path operands, never flags
+            pre = args[:args.index("--")] if "--" in args else args
+            ovals = [pre[i + 1] for i, a in enumerate(pre)
+                     if a == "--orphan" and i + 1 < len(pre)]
+            ovals += [m.group(1) for a in pre
                       if (m := re.fullmatch(r"--orphan=(.+)", a))]
-            bnames = [args[i + 1] for i, a in enumerate(args)
-                      if a in ("-b", "-B") and i + 1 < len(args)]
+            bnames = [pre[i + 1] for i, a in enumerate(pre)
+                      if a in ("-b", "-B") and i + 1 < len(pre)]
             # a non-empty bnames/ovals is itself proof a creation
             # flag was given (bundles are unbundled upstream)
             creates = bool(bnames or ovals) or flags & {
