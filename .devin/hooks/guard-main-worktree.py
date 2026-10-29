@@ -15,34 +15,36 @@ PreToolUse:
   checkout-index, filter-branch, checkout/switch to anything but
   next_release, restore --source, symbolic-ref writes. Blocked anywhere
   in the repo (refs and config are shared across worktrees): config
-  writes, branch -f/-d/-m on next_release, update-ref touching
-  next_release. `-c alias.*`/`--config-env alias.*` are blocked too —
-  they'd rename the whole verb table away.
+  writes outside external scope (--global/--file…), remote mutations,
+  branch -f/-d/-m and update-ref touching next_release, HEAD/@ (in
+  main) or any checked-out branch. `-c`/`--config-env`/`GIT_CONFIG_*`
+  alias injection is blocked too — it would rename the whole verb
+  table away.
   Allowed: read-only git, fetch/pull/reset (documented resync path),
   restore and `checkout -- <paths>` (revert local edits toward clean),
-  `checkout|switch next_release`, worktree add/remove/lock, external-
-  scope config writes (--global/--file).
+  `checkout|switch next_release`, worktree add/remove/lock, config
+  reads and --unset removals, external-scope config writes.
   The effective repo dir is tracked per command segment (exec `workdir`,
-  cd/pushd, `git -C`, --git-dir/--work-tree, GIT_DIR/GIT_WORK_TREE env)
-  and compared against `git worktree list` roots. Command lines are
-  split on `&&`/`||`/`;`/`|`/`&`/newlines/parens, heredoc bodies are
-  stripped first, `$(...)`/backtick substitutions are scanned, and
-  shell keywords (then/do/if/…) plus wrappers (sudo/env/nice/…) are
-  transparent.
+  cd/pushd/popd with OLDPWD, `git -C`, --git-dir/--work-tree, GIT_DIR/
+  GIT_WORK_TREE env) and compared against `git worktree list` roots.
+  Command lines are split on `&&`/`||`/`;`/`|`/`&`/newlines/parens,
+  heredoc bodies are stripped first (quote-aware, `<<<` excluded),
+  `$(...)`/backtick substitutions and `bash|sh -c`/`eval` payloads are
+  scanned recursively, and shell keywords (then/do/if/…) plus wrappers
+  (sudo/env/nice/…) are transparent.
 - mcp__* mutation-named tools (write/edit/create/delete/rename/move/…):
   block absolute-path arguments inside the main worktree.
 
 Stop: refuse to stop while the main worktree carries tracked
-modifications or sits on a branch other than next_release — backstop
-for shell-side edits the exec scan cannot see. SessionStart warns
-about the same state.
+modifications, sits on a branch other than next_release, or is ahead
+of origin/next_release — backstop for shell-side edits and ref moves
+the exec scan cannot see. SessionStart warns about the same state.
 
 Tripwire, not a security boundary (same stance as block-merge.py):
-each shell's persistent cwd is not observable, so `cd`-then-mutate
-split across two tool calls escapes the exec scan; plain shell writes
-(`>`, `sed -i`, `rm`), `xargs`/`find -exec`-style indirection and
-untracked files are out of scope — the Stop check catches the tracked
-dirt they leave behind.
+each shell's persistent cwd is not fully observable, plain shell
+writes (`>`, `sed -i`, `rm`), `xargs`/`find -exec`-style indirection
+and untracked files are out of scope — the Stop check catches the
+tracked dirt and ahead-state they leave behind.
 """
 import json
 import os
@@ -67,17 +69,22 @@ WRAPPER_VAL = {"sudo": {"-u", "-g", "-h", "-p", "-C", "-T", "-D", "-r",
 TRANSPARENT = {"then", "do", "else", "elif", "if", "while", "until",
                "for", "fi", "done", "esac", "case", "in", "select",
                "coproc", "{", "}", "!", "time"}
+SHELLS = {"bash", "sh", "dash", "zsh", "ksh", "eval"}
 # git global options that consume a separate value token
 VAL_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace",
             "--exec-path", "--config-env"}
 # config flags that read instead of writing / point outside the repo
 CFG_READ = {"--get", "-l", "--list", "--get-all", "--get-regexp",
             "--get-color", "--get-urlmatch"}
-CFG_WRITE = {"--unset", "--unset-all", "--add", "--replace-all",
-             "--rename-section", "--remove-section"}
+CFG_WRITE = {"--add", "--replace-all"}
+CFG_REMOVE = {"--unset", "--unset-all", "--remove-section",
+              "--rename-section"}
 CFG_SCOPE_EXT = {"--global", "--system", "--file", "--blob", "-f"}
 CFG_VAL = {"-f", "--file", "--blob", "--default", "--type", "--value",
            "--fixed-value"}
+# env vars that inject or repoint git config (alias bypass vector)
+GIT_CONFIG_ENV = re.compile(
+    r"GIT_CONFIG_(PARAMETERS|GLOBAL|SYSTEM|KEY_\d+|VALUE_\d+)$")
 
 FLAT_BLOCK = {
     "commit", "add", "stage", "rm", "mv", "clean", "cherry-pick",
@@ -106,9 +113,20 @@ def real(p):
     return os.path.realpath(os.path.expanduser(p))
 
 
-def worktree_roots():
+def worktree_info():
+    """(roots, checked-out short branch names) — main worktree first."""
     out = run(["git", "-C", REPO, "worktree", "list", "--porcelain"])
-    return [l[9:] for l in out.splitlines() if l.startswith("worktree ")]
+    roots, branches = [], set()
+    for l in out.splitlines():
+        if l.startswith("worktree "):
+            roots.append(l[9:])
+        elif l.startswith("branch "):
+            branches.add(l[7:].removeprefix("refs/heads/"))
+    return roots, branches
+
+
+def worktree_roots():
+    return worktree_info()[0]
 
 
 def under(p, root):
@@ -141,38 +159,65 @@ def toplevel(d):
 def locate(cwd, cdir, gitdir, roots):
     """(in_main, in_repo) for a git invocation. With --git-dir the index
     and HEAD live in that gitdir regardless of any work-tree override,
-    so the main gitdir means main unconditionally."""
+    so the main gitdir means main unconditionally. Unknown cwd
+    (`popd`/`cd -` into the void) fails closed as main."""
     main = real(roots[0])
     if gitdir:
-        g = real(os.path.join(cwd, gitdir))
+        g = real(os.path.join(cwd or "/", gitdir))
         mg = os.path.join(main, ".git")
         return g == mg, g == mg or g.startswith(mg + os.sep)
-    d = os.path.join(cwd, cdir) if cdir else cwd
+    if cwd is None and cdir is None:
+        return True, True
+    d = os.path.join(cwd or "/", cdir) if cdir else cwd
     tl = toplevel(d)
     return tl == main, tl in {real(r) for r in roots}
 
 
 def strip_heredocs(cmd):
     """Drop heredoc bodies so their literal lines aren't scanned as
-    commands. `<<-` delimiters tolerate leading tabs."""
-    out, pending = [], []
+    commands. Quote-aware (`<<` inside '…'/"…" is not an operator) and
+    `<<<` here-strings are not heredocs. `<<-` tolerates leading tabs
+    on the delimiter line."""
+    out, pending, quote = [], [], None
     for line in cmd.split("\n"):
         if pending:
             want, dash = pending[0]
             if (line.lstrip("\t") if dash else line) == want:
                 pending.pop(0)
             continue
-        for m in re.finditer(r"<<(-?)\s*(['\"]?)(\w+)\2", line):
-            pending.append((m.group(3), bool(m.group(1))))
+        i, n = 0, len(line)
+        while i < n:
+            c = line[i]
+            if quote:
+                if c == quote:
+                    quote = None
+                elif c == "\\" and quote == '"':
+                    i += 1
+            elif c in "'\"":
+                quote = c
+            elif c == "\\":
+                i += 1
+            elif c == "<":
+                if line[i:i + 3] == "<<<":  # here-string, not a heredoc
+                    i += 3
+                    continue
+                m = re.match(
+                    r"<<(-?)\s*(?:\\(\w+)|(['\"])([^'\"]*?)\3|(\w+))",
+                    line[i:])
+                if m:
+                    pending.append(
+                        (m.group(2) or m.group(4) or m.group(5),
+                         bool(m.group(1))))
+                    i += m.end() - 1
+            i += 1
         out.append(line)
     return "\n".join(out)
 
 
-def git_invocation(toks):
-    """Locate a `git` invocation in the tokens (past env assignments,
-    shell keywords and wrappers like sudo/env) → (verb, args, cdir,
-    gitdir, configs) or None."""
-    env = {}
+def preamble(toks, env0=None):
+    """Skip leading env assignments, shell keywords and wrappers →
+    (env, index of the real command)."""
+    env = dict(env0 or {})
     i, n = 0, len(toks)
     while i < n:
         t = toks[i]
@@ -202,6 +247,14 @@ def git_invocation(toks):
                 break
             continue
         break
+    return env, i
+
+
+def git_invocation(toks, env0=None):
+    """Locate a `git` invocation in the tokens → (verb, args, cdir,
+    gitdir, configs, env) or None."""
+    env, i = preamble(toks, env0)
+    n = len(toks)
     if i >= n or os.path.basename(toks[i]) != "git":
         return None
     i += 1
@@ -235,7 +288,7 @@ def git_invocation(toks):
         i += 1
     if i >= n:
         return None
-    return toks[i], toks[i + 1:], cdir, gitdir, configs
+    return toks[i], toks[i + 1:], cdir, gitdir, configs, env
 
 
 def positionals(args, val_flags=()):
@@ -285,21 +338,29 @@ def verb_ok(verb, args):
     return True
 
 
-def repo_verb_ok(verb, args, in_main):
-    """Whether `git <verb> <args>` is safe anywhere in the repo — refs
-    and config are shared across all worktrees."""
+def repo_verb_ok(verb, args, in_main, checked):
+    """Whether `git <verb> <args>` is safe anywhere in the repo — refs,
+    remotes and config are shared across all worktrees. `checked` holds
+    the short names of branches checked out in some worktree."""
     flags = {a for a in args if a.startswith("-") and a != "-"}
+    protected = {PROTECTED_BRANCH} | checked
     if verb == "config":
         pos = positionals(args, CFG_VAL)
-        name = pos[0] if pos else ""
+        name = (pos[0] if pos else "").lower()
+        if flags & CFG_REMOVE or flags & CFG_READ:
+            return True
+        if len(pos) <= 1 and not (flags & CFG_WRITE):
+            return True  # `config name` read form
         if name.startswith("alias."):
             return False
-        if flags & CFG_READ or (len(pos) <= 1
-                                and not (flags & CFG_WRITE)):
-            return True
         # write form: only external scope (--global/--file…) is allowed;
         # default/--local/--worktree scopes land in shared repo config
         return bool(flags & CFG_SCOPE_EXT)
+    if verb == "remote":
+        pos = positionals(args)
+        # bare `remote`/`-v` list; `show`/`get-url` read — rest mutates
+        # the shared config
+        return not pos or pos[0] in ("show", "get-url")
     if verb == "branch":
         pos = positionals(args, {"-u", "--set-upstream-to"})
         danger = flags & {"-f", "--force", "-m", "-M", "--move",
@@ -310,14 +371,16 @@ def repo_verb_ok(verb, args, in_main):
         # where the command runs — protected only in the main worktree
         if flags & {"-m", "-M", "--move"} and len(pos) <= 1 and in_main:
             return False
-        return PROTECTED_BRANCH not in pos
+        return not (set(pos) & protected)
     if verb == "update-ref":
         if "--stdin" in flags:
             return False  # ref list arrives on stdin — can't inspect
         pos = positionals(args, {"-m"})
-        return not any(p in (PROTECTED_BRANCH,
-                             f"refs/heads/{PROTECTED_BRANCH}")
-                       for p in pos)
+        names = set(protected)
+        if in_main:
+            names |= {"HEAD", "@"}  # indirections to next_release
+        return not any(
+            re.sub(r"^refs/(heads/)?", "", p) in names for p in pos)
     return True
 
 
@@ -339,16 +402,35 @@ def check_file_tool(ti):
                 return block()
 
 
-def check_exec(ti, cwd):
-    cmd = " ".join(str(ti.get(k) or "")
-                   for k in ("command", "text_input", "bytes_input"))
-    roots = worktree_roots()
-    if not roots:
-        return
+def inner_script(toks, env0):
+    """For `bash|sh -c <script>` / `eval <script>` invocations, return
+    (inner command string, env parsed from the outer preamble) so
+    GIT_DIR-style exports still apply inside, else None."""
+    env, i = preamble(toks, env0)
+    if i >= len(toks):
+        return None
+    b = os.path.basename(toks[i])
+    if b == "eval":
+        s = " ".join(toks[i + 1:])
+        return (s, env) if s else None
+    if b in SHELLS:
+        for j in range(i + 1, len(toks) - 1):
+            t = toks[j]
+            if t == "-c" or (t.startswith("-") and not t.startswith("--")
+                             and "c" in t[1:]):
+                return toks[j + 1], env
+            if not t.startswith("-"):
+                break  # positional script file — not inline
+    return None
+
+
+def scan_segments(cmd, cwd, roots, checked, env0=None, depth=0):
+    """Scan a command string; returns "block" on a policy hit."""
     cmd = strip_heredocs(cmd)
     segs = re.split(r"&&|\|\||[;|&\n()]", cmd)
     subs = re.findall(r"\$\((.*?)\)|`([^`]*)`", cmd, re.S)
     segs += [s for pair in subs for s in pair if s]
+    old = None
     for seg in segs:
         try:
             toks = shlex.split(seg)
@@ -356,26 +438,53 @@ def check_exec(ti, cwd):
             continue
         if not toks:
             continue
-        if re.fullmatch(r"cd|pushd", toks[0]):
-            if len(toks) > 1 and not toks[1].startswith("-"):
-                cwd = os.path.normpath(os.path.join(cwd, toks[1]))
+        if re.fullmatch(r"cd|pushd|popd", toks[0]):
+            tgt = next((t for t in toks[1:]
+                        if not t.startswith("-") or t == "-"), None)
+            if toks[0] == "popd" or tgt == "-" \
+                    or (toks[0] == "pushd" and tgt is None):
+                cwd, old = old, cwd  # OLDPWD swap; unknown → None
             else:
-                cwd = os.path.expanduser("~")
+                newd = tgt or "~"
+                old, cwd = cwd, os.path.normpath(
+                    os.path.join(cwd or os.sep, newd))
             continue
-        inv = git_invocation(toks)
+        if depth < 3:
+            inner = inner_script(toks, env0)
+            if inner is not None:
+                script, env1 = inner
+                if scan_segments(script, cwd, roots, checked, env1,
+                                 depth + 1) == "block":
+                    return "block"
+                continue
+        inv = git_invocation(toks, env0)
         if not inv:
             continue
-        verb, args, cdir, gitdir, configs = inv
+        verb, args, cdir, gitdir, configs, env = inv
         in_main, in_repo = locate(cwd, cdir, gitdir, roots)
         if not in_repo:
             continue
-        if any(c.split("=", 1)[0].startswith("alias.") for c in configs):
-            return block()
-        if verb in ("config", "branch", "update-ref"):
-            if not repo_verb_ok(verb, args, in_main):
-                return block()
+        if any(GIT_CONFIG_ENV.match(k) for k in env) \
+                or env.get("GIT_CONFIG_COUNT") not in (None, "", "0"):
+            return "block"
+        if any(c.split("=", 1)[0].lower().startswith("alias.")
+               for c in configs):
+            return "block"
+        if verb in ("config", "remote", "branch", "update-ref"):
+            if not repo_verb_ok(verb, args, in_main, checked):
+                return "block"
         elif in_main and not verb_ok(verb, args):
-            return block()
+            return "block"
+
+
+def check_exec(ti, cwd):
+    cmd = " ".join(str(ti.get(k) or "")
+                   for k in ("command", "text_input", "bytes_input"))
+    roots, checked = worktree_info()
+    if not roots:
+        return
+    if scan_segments(cmd, cwd, roots, checked) == "block":
+        block()
 
 
 def check_mcp(ti):
@@ -394,10 +503,10 @@ def check_mcp(ti):
 
 
 def main_state():
-    """(branch, dirty tracked entries) of the main worktree."""
+    """(branch, dirty tracked entries, ahead-of-origin count)."""
     roots = worktree_roots()
     if not roots:
-        return "", []
+        return "", [], 0
     out = run(["git", "-C", roots[0], "status", "--porcelain=v1", "-b"])
     branch, dirty = "", []
     for l in out.splitlines():
@@ -406,10 +515,15 @@ def main_state():
             branch = m.group(1) if m else ""
         elif not l.startswith("??"):
             dirty.append(l)
-    return branch, dirty
+    ahead = 0
+    if branch == PROTECTED_BRANCH:
+        cnt = run(["git", "-C", roots[0], "rev-list", "--count",
+                   PROTECTED_BRANCH, "^origin/" + PROTECTED_BRANCH])
+        ahead = int(cnt) if cnt.isdigit() else 0
+    return branch, dirty, ahead
 
 
-def state_reason(branch, dirty):
+def state_reason(branch, dirty, ahead):
     bits = []
     if branch != PROTECTED_BRANCH:
         bits.append(f"branche `{branch or 'HEAD détaché'}` ≠ "
@@ -418,16 +532,19 @@ def state_reason(branch, dirty):
         shown = ", ".join(x[3:].strip() for x in dirty[:5])
         bits.append(f"{len(dirty)} fichier(s) tracké(s) modifié(s) "
                     f"({shown}{', …' if len(dirty) > 5 else ''})")
+    if ahead:
+        bits.append(f"{ahead} commit(s) locaux ahead "
+                    f"d'origin/{PROTECTED_BRANCH}")
     return "Worktree principal souillé : " + "; ".join(bits) + (
         ". Restaurer l'état propre (git switch " + PROTECTED_BRANCH +
         ", git restore/git reset --hard, ou finir depuis un worktree).")
 
 
 def check_state(block_stop):
-    branch, dirty = main_state()
-    if branch == PROTECTED_BRANCH and not dirty:
+    branch, dirty, ahead = main_state()
+    if branch == PROTECTED_BRANCH and not dirty and not ahead:
         return
-    reason = state_reason(branch, dirty)
+    reason = state_reason(branch, dirty, ahead)
     if block_stop:
         print(json.dumps({"decision": "block", "reason": reason}))
     else:
