@@ -66,6 +66,7 @@ dependencies = [
  "base64",
  "chrono",
  "flate2",
+ "libc",
  "portable-pty",
  "proto",
  "serde",

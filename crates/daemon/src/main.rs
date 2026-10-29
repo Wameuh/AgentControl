@@ -1,4 +1,5 @@
 mod acp;
+mod components;
 mod forges;
 mod journal;
 mod logging;
@@ -344,6 +345,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
         cfg.retention.clone(),
         cfg.a2a.clone(),
         forges::Forges::resolve(&cfg.forges),
+        cfg.bind_tcp.clone(),
     )
     .await?;
     tracing::info!(
@@ -419,6 +421,14 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     let d2 = daemon.clone();
     tokio::spawn(async move { server::janitor(d2).await });
 
+    // Composants managés : orphelins d'un crash éventuel, autostarts et
+    // boucle de sondes — après le bind des listeners : l'env injectée
+    // (AGENTCONTROL_SOCK) n'est joignable qu'à partir d'ici.
+    {
+        let c = daemon.components.clone();
+        tokio::spawn(async move { c.boot().await });
+    }
+
     if crashed && !resumable.is_empty() {
         if cfg.auto_resume {
             let d3 = daemon.clone();
@@ -436,6 +446,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     // `clean` distingue l'arrêt demandé (signal) d'une mort inattendue :
     // le marqueur n'est effacé que sur arrêt propre — tout autre exit
     // laisse un marqueur périmé → reprise auto au prochain démarrage.
+    let d_shutdown = daemon.clone();
     let clean = tokio::select! {
         _ = server::accept_unix(d1, unix_listener) => {
             tracing::error!("accept_unix a retourné — arrêt inattendu");
@@ -452,6 +463,11 @@ async fn serve(root: &std::path::Path) -> Result<()> {
             true
         }
     };
+    // Composants managés : SIGTERM gracieux aux `process` vivants —
+    // même destin que les agents, ils meurent avec le démon (et les
+    // autostarts repartiront au prochain boot). Propre ou non : un
+    // exit inattendu ne doit pas laisser d'orphelins managés.
+    d_shutdown.components.shutdown().await;
     if clean {
         let _ = std::fs::remove_file(&pid_path);
     }

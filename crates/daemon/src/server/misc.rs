@@ -26,6 +26,10 @@ impl Daemon {
                     // Interface web servie par ce démon (null si
                     // bind_http absent) : {"bind", "url"?token=…}.
                     "web": self.web.read().await.clone(),
+                    // Même gate capacité : les ReqKind Component* /
+                    // ListComponents sont connus → le client peut
+                    // afficher la section composants.
+                    "components": true,
                 }))
     }
     /// `UpdateDaemon` : télécharge la release demandée et remplace le

@@ -30,3 +30,7 @@ flate2 = "1"
 tar = "0.4"
 # Hash Sec-WebSocket-Accept du handshake WS (RFC 6455) — serveur web.
 sha1 = "0.11"
+
+[target.'cfg(unix)'.dependencies]
+# SIGTERM/SIGKILL aux composants managés (arrêt gracieux + orphelins).
+libc = "0.2"
