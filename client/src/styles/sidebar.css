@@ -238,6 +238,11 @@ button:disabled { opacity: .5; cursor: default; }
 #pr-list .pr .pr-st.st-open { color: var(--sage); border-color: rgba(184, 207, 174, .5); }
 #pr-list .pr .pr-st.st-draft { color: var(--dim); border-style: dashed; }
 #pr-list .pr .pr-st.st-conflict { color: var(--err); border-color: rgba(232, 148, 134, .55); }
+#pr-list .pr .pr-st.st-merged { color: var(--violet); border-color: color-mix(in srgb, var(--violet) 55%, transparent); }
+#pr-list .pr .pr-st.st-closed { color: var(--err); border-color: color-mix(in srgb, var(--err) 55%, transparent); }
+/* Entrées « terminées » (section historique) : estompées pour rester
+   lisibles sans rivaliser avec les PR ouvertes. */
+#pr-list .pr.pr-done { opacity: .7; }
 #pr-list .pr .pr-sub {
   display: flex; align-items: center; gap: 8px; margin-top: 4px;
   font-size: 11px; color: var(--dim); min-width: 0;

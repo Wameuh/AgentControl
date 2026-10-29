@@ -15,15 +15,18 @@ use crate::state::{get_conn, AppState};
 pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: String, params: Value) -> Result<Value, String> {
     // Connexion cible : params.conn explicite, sinon connexion par défaut.
     let conn = params.get("conn").and_then(Value::as_str).map(String::from);
-    // list_sessions / daemon_status / pr_list : fusion multi-serveurs — en
-    // parallèle avec timeout par conn (une conn morte en blackhole ne doit
-    // pas bloquer la réponse des autres).
-    if method == "list_sessions" || method == "daemon_status" || method == "pr_list" {
-        let merged = method == "daemon_status";
+    // list_sessions / daemon_status / pr_list / pr_sync : fusion
+    // multi-serveurs — en parallèle avec timeout par conn (une conn morte
+    // en blackhole ne doit pas bloquer la réponse des autres).
+    if method == "list_sessions" || method == "daemon_status" || method == "pr_list" || method == "pr_sync" {
+        // daemon_status / pr_sync : objet par conn ; list_* : tableaux
+        // concaténés avec `conn` injectée par entrée.
+        let merged = method == "daemon_status" || method == "pr_sync";
         if merged {
             if let Some(k) = conn {
                 let c = get_conn(&state, Some(&k)).await?;
-                return c.call(ReqKind::DaemonStatus).await.map_err(|e| format!("{e:#}"));
+                let req = req_from(&method, params)?;
+                return c.call(req).await.map_err(|e| format!("{e:#}"));
             }
         }
         let pairs: Vec<(String, Arc<Client>)> = {
@@ -33,6 +36,8 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
         let n_conns = pairs.len();
         let req = if method == "pr_list" {
             ReqKind::PrList { session: None }
+        } else if method == "pr_sync" {
+            ReqKind::PrSync {}
         } else if merged {
             ReqKind::DaemonStatus
         } else {
@@ -76,8 +81,12 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
         if !merged {
             return Ok(json!(all));
         }
-        out["servers"] = json!(n_conns);
-        out["sessions"] = json!(n_ok);
+        // Compteurs propres à daemon_status — pr_sync renvoie juste la
+        // map {conn: réponse|{error}}.
+        if method == "daemon_status" {
+            out["servers"] = json!(n_conns);
+            out["sessions"] = json!(n_ok);
+        }
         return Ok(out);
     }
     let c = get_conn(&state, conn.as_deref()).await?;
@@ -265,6 +274,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             change_id: so("change_id"),
         },
         "forge_list" => ReqKind::ForgeList {},
+        "pr_sync" => ReqKind::PrSync {},
         // Composants managés (docs/components-integration.md §2.3) —
         // gate capability daemon_status.components côté frontend.
         "list_components" => ReqKind::ListComponents,

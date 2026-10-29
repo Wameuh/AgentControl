@@ -373,6 +373,58 @@ export class Sidebar {
     this.applyView();
   }
 
+  /** Poll du sync des statuts PR, actif seulement sur l'onglet Repos :
+   *  cycle à l'ouverture puis toutes les 60 s (le démon throttle à ~45 s
+   *  et déduplique les runs — plusieurs clients/fenêtres peuvent
+   *  demander en rafale). */
+  private prSyncTimer: number | undefined;
+  /** Vieux démon sans `pr_sync` → on arrête de demander (une erreur
+   *  réseau n'arme pas le flag : la retente passe au prochain tick). */
+  private prSyncDead = false;
+
+  private prsSetActive(on: boolean) {
+    if (on) {
+      // Réarme à l'activation : un démon mis à jour depuis la dernière
+      // visite de l'onglet doit pouvoir sync à nouveau.
+      this.prSyncDead = false;
+      void this.prSyncCycle();
+      if (this.prSyncTimer === undefined) {
+        this.prSyncTimer = window.setInterval(
+          () => void this.prSyncCycle(),
+          60_000,
+        );
+      }
+    } else if (this.prSyncTimer !== undefined) {
+      window.clearInterval(this.prSyncTimer);
+      this.prSyncTimer = undefined;
+    }
+  }
+
+  /** pr_sync puis refresh : le premier rendu (refresh() immédiat, à
+   *  l'ouverture de l'onglet) montre le registre courant ; celui-ci
+   *  reflète les états live dès que la forge a répondu. */
+  private async prSyncCycle() {
+    if (!this.prSyncDead) {
+      try {
+        const r = await call<Record<string, { error?: string }>>("pr_sync");
+        // Fusion multi-conns : les échecs remontent en {conn:{error}} —
+        // 100% « méthode inconnue » = tous les démons sont trop vieux
+        // pour pr_sync → on arrête de demander (une erreur réseau
+        // n'arme pas le flag : la retente passe au prochain tick).
+        const errs = Object.values(r ?? {}).map((x) => String(x?.error ?? ""));
+        if (
+          errs.length > 0 &&
+          errs.every((e) => /inconnue|unknown|variant/i.test(e))
+        ) {
+          this.prSyncDead = true;
+        }
+      } catch (e) {
+        if (/inconnue|unknown|variant/i.test(String(e))) this.prSyncDead = true;
+      }
+    }
+    if (this.view === "repos") await this.refresh();
+  }
+
   /** Visibilité des panneaux + état visuel de l'onglet actif. */
   private applyView() {
     const v = this.view;
@@ -390,8 +442,10 @@ export class Sidebar {
     $("backlog-list").hidden = v !== "backlog";
     $("btn-new-session").hidden = v !== "agents";
     // L'onglet backlog pilote son propre cycle de fetch (ouverture +
-    // intervalle borné + events) — la coupure se fait ici.
+    // intervalle borné + events) — la coupure se fait ici. Pareil pour
+    // le poll pr_sync de l'onglet repos (arrêté hors de la vue).
     this.backlogView.setActive(v === "backlog");
+    this.prsSetActive(v === "repos");
     this.renderView();
   }
 

@@ -1,0 +1,10 @@
+[package]
+name = "forgesync"
+version = "0.7.1"
+edition = "2021"
+
+[dependencies]
+proto = { path = "../proto" }
+serde_json = { workspace = true }
+# Sync GitLab/Gerrit du registre PR : appels REST (rustls — pas d'openssl).
+ureq = { version = "2.12", default-features = false, features = ["tls"] }

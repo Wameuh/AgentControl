@@ -50,6 +50,9 @@ export interface PrEntry {
   url?: string;
   /** `I<40 hex>` Gerrit — adressage quand `pr` vaut 0. */
   change_id?: string;
+  /** Horodatages ISO du registre — tri de la section « terminées ». */
+  created_at?: string;
+  updated_at?: string;
 }
 
 /** État runtime d'un composant (champ `status` des items ListComponents). */

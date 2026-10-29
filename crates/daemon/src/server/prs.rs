@@ -8,6 +8,27 @@ use proto::EventKind;
 use crate::forges::Forges;
 use crate::prs::{PrRegistry, TrackIn};
 
+/// Intervalle minimal entre deux syncs réussis — l'onglet Dépôts du
+/// client redemande un sync à l'ouverture et périodiquement.
+const PR_SYNC_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(45);
+/// Un run encore en vol passé ce délai est considéré coincé (gh
+/// suspendu, socket morte) → un nouveau run est autorisé à repartir.
+const PR_SYNC_STUCK: std::time::Duration = std::time::Duration::from_secs(180);
+/// L'appelant n'attend pas indéfiniment : passé ce délai la réponse
+/// part en `running` — le worker termine quand même et applique ses
+/// updates en tâche de fond.
+const PR_SYNC_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// État d'un `pr_sync` — Mutex non async : les sections critiques ne
+/// contiennent aucun await.
+#[derive(Default)]
+pub(super) struct PrSyncCtl {
+    /// Départ du run en vol (None = aucun).
+    running_since: Option<std::time::Instant>,
+    /// Fin du dernier run abouti (throttle).
+    last_done: Option<std::time::Instant>,
+}
+
 impl Daemon {
     // -----------------------------------------------------------------------
     // Registre PR : détection auto dans les sorties de tool calls
@@ -102,6 +123,79 @@ impl Daemon {
     /// un nom de variable d'environnement, jamais le token.
     pub(super) async fn h_forge_list(self: &Arc<Self>) -> Result<Value> {
                 Ok(self.forges.list_json())
+    }
+
+    /// `pr_sync` : resynchronise les statuts du registre depuis les
+    /// forges live — même collecte que `acctl pr sync` (crate
+    /// forgesync : gh pour github, REST gitlab/gerrit), appliquée
+    /// directement au registre (`session: None` = retouche métadonnées,
+    /// ne sanctifie pas `via`). Throttlé à PR_SYNC_MIN_INTERVAL et
+    /// non réentrant : les onglets Dépôts de plusieurs clients peuvent
+    /// demander en rafale sans dupliquer les appels forge.
+    pub(super) async fn h_pr_sync(self: &Arc<Self>) -> Result<Value> {
+        {
+            let mut c = self.pr_sync.lock().unwrap();
+            if c.running_since.is_some_and(|t| t.elapsed() < PR_SYNC_STUCK) {
+                return Ok(json!({ "synced": false, "running": true }));
+            }
+            // Un run « coincé » (> PR_SYNC_STUCK) n'exclut plus — ses
+            // updates tardives restent idempotentes si elles atterrissent.
+            if c.last_done.is_some_and(|t| t.elapsed() < PR_SYNC_MIN_INTERVAL) {
+                return Ok(json!({ "synced": false, "throttled": true }));
+            }
+            c.running_since = Some(std::time::Instant::now());
+        }
+        let prs = Arc::clone(&self.prs);
+        let set = self.forges.list_json();
+        let ctl = Arc::clone(&self.pr_sync);
+        let work = tokio::task::spawn_blocking(move || {
+            let entries: Vec<Value> = prs
+                .list()
+                .iter()
+                .filter_map(|e| serde_json::to_value(e).ok())
+                .collect();
+            let set = set.as_array().cloned().unwrap_or_default();
+            let out = forgesync::collect_updates(&set, &entries);
+            let mut applied = 0usize;
+            for u in &out.updates {
+                match prs.track(TrackIn {
+                    session: None,
+                    repo: u.repo.clone(),
+                    pr: u.pr,
+                    forge: u.forge.clone(),
+                    host: u.host.clone(),
+                    change_id: u.change_id.clone(),
+                    url: u.url.clone(),
+                    branch: u.branch.clone(),
+                    title: u.title.clone(),
+                    status: Some(u.status.clone()),
+                    note: None,
+                }) {
+                    Ok(_) => applied += 1,
+                    Err(e) => warn!("pr_sync track {} {}: {e:#}", u.repo, u.pr),
+                }
+            }
+            // Soldé quoi qu'il arrive : les notes restent dans la
+            // réponse/logs, le throttle repart de la fin du run.
+            let mut c = ctl.lock().unwrap();
+            c.running_since = None;
+            c.last_done = Some(std::time::Instant::now());
+            (out, applied)
+        });
+        match tokio::time::timeout(PR_SYNC_REPLY_TIMEOUT, work).await {
+            Ok(Ok((out, applied))) => Ok(json!({
+                "synced": true,
+                "checked": out.checked,
+                "updated": applied,
+                "notes": out.notes,
+            })),
+            // Panic du worker : l'état reste « en vol » jusqu'à
+            // PR_SYNC_STUCK — un crash ne doit pas relancer en rafale.
+            Ok(Err(e)) => Err(anyhow::anyhow!("pr_sync: {e:#}")),
+            // Timeout de réponse : le worker continue en tâche de fond,
+            // les updates tomberont (running_since est soldé par lui).
+            Err(_) => Ok(json!({ "synced": false, "running": true })),
+        }
     }
 }
 
