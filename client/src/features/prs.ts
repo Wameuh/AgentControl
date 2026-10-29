@@ -30,6 +30,40 @@ export interface PrListDeps {
 const CLOSED = new Set(["merged", "closed"]);
 const skey = (conn: string | undefined, id: string) => `${conn ?? "default"} ${id}`;
 
+/** Badge de la référence : `#N` github, `!N` gitlab, `c#N`/`c#I<8>` gerrit
+ *  (même convention que `forge_badge` côté proto/acctl). */
+export function prBadge(p: PrEntry): string {
+  const f = p.forge || "github";
+  if (f === "gitlab") return `!${p.pr}`;
+  if (f === "gerrit") {
+    return p.pr ? `c#${p.pr}` : `c#${(p.change_id ?? "").slice(0, 9)}`;
+  }
+  return `#${p.pr}`;
+}
+
+/** Lien web de la référence : `url` du registre d'abord, sinon
+ *  reconstruite par forge (hôtes auto-hébergés inclus). */
+function prUrl(p: PrEntry): string {
+  if (p.url) return p.url;
+  const f = p.forge || "github";
+  const host = p.host || (f === "github" ? "github.com" : f === "gitlab" ? "gitlab.com" : "");
+  if (f === "gitlab" && host) return `https://${host}/${p.repo}/-/merge_requests/${p.pr}`;
+  if (f === "gerrit" && host) {
+    return p.pr
+      ? `https://${host}/c/${p.repo}/+/${p.pr}`
+      : `https://${host}/q/${p.change_id ?? ""}`;
+  }
+  return p.repo.includes("/") ? `https://github.com/${p.repo}/pull/${p.pr}` : "";
+}
+
+/** Libellé de groupe : `o/r` github, `host:g/p` ailleurs (plusieurs
+ *  forges peuvent servir le même chemin de projet). */
+export function repoLabel(p: PrEntry): string {
+  const f = p.forge || "github";
+  if (f === "github") return p.repo;
+  return p.repo ? `${p.host ?? ""}:${p.repo}` : (p.host ?? "?");
+}
+
 export class PrListView {
   private deps!: PrListDeps;
   private rows: PrRow[] = [];
@@ -119,11 +153,11 @@ export class PrListView {
       : st;
     const div = document.createElement("div");
     div.className = "pr";
-    div.title = `${p.repo}#${p.pr} — ${stTxt}${p.via ? ` · ${p.via}` : ""}` +
+    div.title = `${repoLabel(p)} ${prBadge(p)} — ${stTxt}${p.via ? ` · ${p.via}` : ""}` +
       `${p.branch ? `\n${p.branch}` : ""}${p.note ? `\n${p.note}` : ""}\n${t("pr_open_title")}`;
     const top = document.createElement("div");
     top.className = "pr-top";
-    top.innerHTML = `<span class="pr-num">#${p.pr}</span>` +
+    top.innerHTML = `<span class="pr-num">${esc(prBadge(p))}</span>` +
       `<span class="pr-t">${this.deps.hl(p.title ?? "")}</span>` +
       `<span class="pr-st st-${["open", "draft", "conflict"].includes(st) ? st : "other"}">${esc(stTxt)}</span>`;
     div.appendChild(top);
@@ -131,13 +165,14 @@ export class PrListView {
     sub.className = "pr-sub";
     // Non attribuées : pas de chip session — le dépôt remplace l'info.
     sub.innerHTML = unassigned
-      ? `<span class="pr-repo-lbl">${this.deps.hl(p.repo)}</span>` +
+      ? `<span class="pr-repo-lbl">${this.deps.hl(repoLabel(p))}</span>` +
         (p.branch ? `<span class="pr-branch">${this.deps.hl(p.branch)}</span>` : "")
       : (p.branch ? `<span class="pr-branch">${this.deps.hl(p.branch)}</span>` : "");
     if (!unassigned) sub.appendChild(this.sessChip(p));
     div.appendChild(sub);
     div.onclick = () => {
-      if (p.repo.includes("/")) shellOpen(`https://github.com/${p.repo}/pull/${p.pr}`);
+      const u = prUrl(p);
+      if (u) shellOpen(u);
     };
     return div;
   }
@@ -192,14 +227,14 @@ export class PrListView {
     const byRepo = new Map<string, { label: string; rows: PrEntry[] }>();
     const match = (p: PrEntry) => {
       const s = this.sessOf(p);
-      return !f || hit(p.repo) || hit(`#${p.pr}`) || hit(p.title) ||
-        hit(p.branch) || hit(s?.title) || hit(s?.agent);
+      return !f || hit(repoLabel(p)) || hit(prBadge(p)) || hit(p.title) ||
+        hit(p.branch) || hit(p.change_id) || hit(s?.title) || hit(s?.agent);
     };
     for (const p of open) {
       if (!match(p)) continue;
-      const k = p.repo.toLowerCase();
+      const k = repoLabel(p).toLowerCase();
       let g = byRepo.get(k);
-      if (!g) byRepo.set(k, (g = { label: p.repo, rows: [] }));
+      if (!g) byRepo.set(k, (g = { label: repoLabel(p), rows: [] }));
       g.rows.push(p);
     }
     let shown = 0;

@@ -112,6 +112,8 @@ AgentControl is a Rust workspace (daemon, protocol, client core, CLI)
 plus a Tauri 2 front end (vanilla TypeScript).
 
 - Architecture, protocol and design rationale: [ANALYSE.md](ANALYSE.md)
+- Review registry across forges (GitHub/GitLab/Gerrit):
+  [docs/forges.md](docs/forges.md)
 - Manual server setup & systemd unit:
   [packaging/INSTALL.md](packaging/INSTALL.md)
 - Repo workflow & conventions: [AGENTS.md](AGENTS.md)

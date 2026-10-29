@@ -14,7 +14,7 @@ import { dotCls, dotIcon, setAppIcon } from "./status";
 import { icon } from "../ui/icons";
 import { bindCtx, hideSessCtx, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
-import { PrListView, type PrRow } from "./prs";
+import { PrListView, prBadge, repoLabel, type PrRow } from "./prs";
 import type { ChatView } from "./chat-view";
 import type { ConnectionManager } from "./connections";
 import { grpNorm, grpParent, inSubtree } from "./groups";
@@ -791,7 +791,7 @@ export class Sidebar {
     }
     const prs = this.prBySess.get(`${conn}${s.id}`) ?? [];
     const prHtml = prs.length
-      ? `<span class="sess-pr" title="${q(esc(prs.map((p) => `${p.repo}#${p.pr}${p.title ? ` — ${p.title}` : ""}${p.status ? ` (${p.status})` : ""}`).join("\n")))}">${prs.map((p) => `#${p.pr}`).join(" ")}</span>`
+      ? `<span class="sess-pr" title="${q(esc(prs.map((p) => `${repoLabel(p)} ${prBadge(p)}${p.title ? ` — ${p.title}` : ""}${p.status ? ` (${p.status})` : ""}`).join("\n")))}">${prs.map((p) => prBadge(p)).join(" ")}</span>`
       : "";
     const originHtml = s.origin
       ? `<span class="sess-origin" title="${q(esc(t("origin_tip", { origin: s.origin })))}">${t("via")} ${this.hl(s.origin)}</span>`

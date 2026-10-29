@@ -403,13 +403,32 @@ fn default_state() -> String {
 // Registre PR ↔ session (prs.json à la racine du démon)
 // ---------------------------------------------------------------------------
 
-/// Quelle session a créé quelle pull request. Alimenté automatiquement
-/// (scan des sorties outils) et manuellement (PrTrack / `acctl pr add`).
+/// Quelle session a créé quelle pull request / merge request / change.
+/// Alimenté automatiquement (scan des sorties outils) et manuellement
+/// (PrTrack / `acctl pr add`). Multi-forges : GitHub (défaut historique),
+/// GitLab et Gerrit — le type d'hébergement est porté par `forge`+`host`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrEntry {
-    /// "owner/name" du repo.
+    /// "owner/name" (github), "group/sub/project" (gitlab), "project"
+    /// (gerrit) — vide pour un change Gerrit connu par son seul Change-Id.
     pub repo: String,
+    /// Numéro de la référence — 0 pour un Change-Id Gerrit non résolu.
     pub pr: u64,
+    /// "github" | "gitlab" | "gerrit" — "" (entrées pré-multi-forges)
+    /// est lu comme "github" à la charge du registre.
+    #[serde(default)]
+    pub forge: String,
+    /// Hôte de la forge ("github.com", "gitlab.com", auto-hébergé…).
+    /// "" → hôte par défaut de la forge (legacy).
+    #[serde(default)]
+    pub host: String,
+    /// URL canonique de la référence (lien d'ouverture client).
+    #[serde(default)]
+    pub url: String,
+    /// Change-Id Gerrit ("I<40 hex>") — présent aussi après résolution
+    /// du numéro (le change garde sa double identité).
+    #[serde(default)]
+    pub change_id: Option<String>,
     /// Id de session ("s-xxxx") ou label libre ("auto-release-bot").
     pub session: String,
     #[serde(default)]
@@ -773,11 +792,22 @@ pub enum ReqKind {
     },
     /// Upsert manuel d'une entrée (champs Some écrasent, None conservent —
     /// `session` requis pour une entrée nouvelle). Prime sur `via: detected`.
+    /// `forge`/`host`/`change_id`/`url` adressent les forges non-GitHub
+    /// (défauts : github / github.com). Un Change-Id seul (repo vide,
+    /// pr 0) adresse un change Gerrit non résolu.
     PrTrack {
         #[serde(default)]
         session: Option<String>,
         repo: String,
         pr: u64,
+        #[serde(default)]
+        forge: Option<String>,
+        #[serde(default)]
+        host: Option<String>,
+        #[serde(default)]
+        change_id: Option<String>,
+        #[serde(default)]
+        url: Option<String>,
         #[serde(default)]
         branch: Option<String>,
         #[serde(default)]
@@ -790,7 +820,18 @@ pub enum ReqKind {
     PrUntrack {
         repo: String,
         pr: u64,
+        #[serde(default)]
+        forge: Option<String>,
+        #[serde(default)]
+        host: Option<String>,
+        #[serde(default)]
+        change_id: Option<String>,
     },
+    /// Forges de review actives (détection + sync) — effective set :
+    /// github/gitlab.com implicites + `[[forges]]` de config.toml.
+    /// Réponse : `[{type, hosts: [{host, token_env?}]}]` — `token_env`
+    /// est le NOM d'une variable d'environnement, jamais un secret.
+    ForgeList {},
     DaemonStatus,
     /// Auto-update du démon vers la release `version` demandée par le
     /// client (ex. "0.5.0" → tag v0.5.0 — jamais « latest » : le démon
@@ -854,9 +895,68 @@ impl ReqKind {
             Self::PrList { .. } => "pr_list",
             Self::PrTrack { .. } => "pr_track",
             Self::PrUntrack { .. } => "pr_untrack",
+            Self::ForgeList {} => "forge_list",
             Self::DaemonStatus => "daemon_status",
             Self::UpdateDaemon { .. } => "update_daemon",
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Forges de review — conventions partagées démon ↔ acctl
+// ---------------------------------------------------------------------------
+
+/// Hôte implicite d'une forge — "" (entrée legacy) se résout là.
+/// Gerrit n'a pas d'hôte implicite : toujours déclaré via `[[forges]]`.
+pub fn forge_default_host(forge: &str) -> &'static str {
+    match forge_kind(forge) {
+        "gitlab" => "gitlab.com",
+        "gerrit" => "",
+        _ => "github.com",
+    }
+}
+
+/// Forge normalisée d'une entrée : "" (legacy) → "github".
+pub fn forge_kind(forge: &str) -> &str {
+    if forge.is_empty() {
+        "github"
+    } else {
+        forge
+    }
+}
+
+/// URL canonique web d'une référence — lien d'ouverture côté client.
+/// Gerrit sans numéro : URL de recherche du Change-Id.
+pub fn forge_url(forge: &str, host: &str, repo: &str, pr: u64, change_id: Option<&str>) -> String {
+    match forge_kind(forge) {
+        "gitlab" => format!("https://{host}/{repo}/-/merge_requests/{pr}"),
+        "gerrit" => {
+            if pr > 0 {
+                format!("https://{host}/c/{repo}/+/{pr}")
+            } else {
+                format!("https://{host}/q/{}", change_id.unwrap_or_default())
+            }
+        }
+        _ => format!("https://{host}/{repo}/pull/{pr}"),
+    }
+}
+
+/// Badge compact de la référence (sidebar client, `acctl list`) :
+/// `#N` github, `!N` gitlab, `c#N` gerrit, `c#I<8>` pour un Change-Id
+/// non résolu. Convention GitLab `!N` / préfixe `c#` — lisible et court.
+pub fn forge_badge(forge: &str, pr: u64, change_id: Option<&str>) -> String {
+    match forge_kind(forge) {
+        "gitlab" => format!("!{pr}"),
+        "gerrit" => {
+            if pr > 0 {
+                format!("c#{pr}")
+            } else {
+                let short: String =
+                    change_id.unwrap_or("").chars().take(9).collect();
+                format!("c#{short}")
+            }
+        }
+        _ => format!("#{pr}"),
     }
 }
 

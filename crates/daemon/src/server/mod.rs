@@ -32,6 +32,7 @@ use tracing::{debug, info, warn};
 /// un journal très volumineux saturait sinon le lien pendant des minutes.
 pub(crate) const SUBSCRIBE_REPLAY_MAX: usize = 500;
 
+use crate::forges::Forges;
 use crate::journal;
 use crate::prs::PrRegistry;
 use crate::session::Session;
@@ -56,6 +57,9 @@ pub struct Daemon {
     >,
     /// Registre PR ↔ session (prs.json) — voir prs.rs.
     pub prs: Arc<PrRegistry>,
+    /// Forges de review reconnues par le watcher PR (`[[forges]]` de
+    /// config.toml + implicites github/gitlab.com) — voir forges.rs.
+    pub forges: Forges,
     /// Surface web activée : {"bind": addr, "url": "http://…/?token=…"} —
     /// renseigné par main après le bind, reflété dans daemon_status.
     pub web: RwLock<Option<Value>>,
@@ -72,6 +76,7 @@ impl Daemon {
         agents: HashMap<String, AgentProfile>,
         retention: RetentionCfg,
         a2a: A2aCfg,
+        forges: Forges,
     ) -> Result<(Arc<Self>, Vec<String>)> {
         let d = Arc::new(Self {
             root: root.clone(),
@@ -82,6 +87,7 @@ impl Daemon {
             peer_rate: std::sync::Mutex::new(HashMap::new()),
             spawn_rate: std::sync::Mutex::new(HashMap::new()),
             prs: Arc::new(PrRegistry::open(&root)),
+            forges,
             web: RwLock::new(None),
         });
         let mut resumable = Vec::new();
@@ -525,15 +531,29 @@ impl Daemon {
                 session,
                 repo,
                 pr,
+                forge,
+                host,
+                change_id,
+                url,
                 branch,
                 title,
                 status,
                 note,
             } => {
-                self.h_pr_track(session, repo, pr, branch, title, status, note)
-                    .await
+                self.h_pr_track(
+                    session, repo, pr, forge, host, change_id, url, branch, title,
+                    status, note,
+                )
+                .await
             }
-            ReqKind::PrUntrack { repo, pr } => self.h_pr_untrack(repo, pr).await,
+            ReqKind::PrUntrack {
+                repo,
+                pr,
+                forge,
+                host,
+                change_id,
+            } => self.h_pr_untrack(repo, pr, forge, host, change_id).await,
+            ReqKind::ForgeList {} => self.h_forge_list().await,
             ReqKind::Subscribe { session, after_seq } => {
                 self.h_subscribe(session, after_seq).await
             }

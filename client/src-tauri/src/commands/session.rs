@@ -248,6 +248,10 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             session: so("session"),
             repo: s("repo"),
             pr: p.get("pr").and_then(Value::as_u64).unwrap_or(0),
+            forge: so("forge"),
+            host: so("host"),
+            change_id: so("change_id"),
+            url: so("url"),
             branch: so("branch"),
             title: so("title"),
             status: so("status"),
@@ -256,7 +260,11 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         "pr_untrack" => ReqKind::PrUntrack {
             repo: s("repo"),
             pr: p.get("pr").and_then(Value::as_u64).unwrap_or(0),
+            forge: so("forge"),
+            host: so("host"),
+            change_id: so("change_id"),
         },
+        "forge_list" => ReqKind::ForgeList {},
         "term_open" => ReqKind::TermOpen {
             session: s("session"),
             cols: p.get("cols").and_then(Value::as_u64).unwrap_or(0) as u16,

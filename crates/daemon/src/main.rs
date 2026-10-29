@@ -1,4 +1,5 @@
 mod acp;
+mod forges;
 mod journal;
 mod logging;
 mod mcp;
@@ -39,6 +40,11 @@ struct Config {
     /// Communication agent↔agent (serveur MCP injecté dans les sessions).
     #[serde(default)]
     a2a: server::A2aCfg,
+    /// Forges de review au-delà de GitHub : `[[forges]]` {type, hosts,
+    /// token_env} — détection des URLs GitLab/Gerrit dans les sorties
+    /// outils (voir docs/forges.md). github.com + gitlab.com implicites.
+    #[serde(default)]
+    forges: Vec<forges::ForgeCfg>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -67,6 +73,7 @@ impl Default for Config {
             agents: HashMap::new(),
             retention: server::RetentionCfg::default(),
             a2a: server::A2aCfg::default(),
+            forges: Vec::new(),
         }
     }
 }
@@ -331,8 +338,14 @@ async fn serve(root: &std::path::Path) -> Result<()> {
         );
     }
 
-    let (daemon, resumable) =
-        Daemon::open(root.to_path_buf(), agents, cfg.retention.clone(), cfg.a2a.clone()).await?;
+    let (daemon, resumable) = Daemon::open(
+        root.to_path_buf(),
+        agents,
+        cfg.retention.clone(),
+        cfg.a2a.clone(),
+        forges::Forges::resolve(&cfg.forges),
+    )
+    .await?;
     tracing::info!(
         "{} session(s) chargée(s), root={}, agents: {}",
         daemon.sessions.read().await.len(),

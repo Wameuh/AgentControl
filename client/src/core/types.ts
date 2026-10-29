@@ -42,6 +42,14 @@ export interface PrEntry {
   status?: string;
   note?: string;
   via?: string;
+  /** Type de forge : github (défaut) | gitlab | gerrit. */
+  forge?: string;
+  /** Hôte web canonique (`gitlab.example.com`, `gerrit.corp:8080`). */
+  host?: string;
+  /** URL canonique de la référence (lien badge). */
+  url?: string;
+  /** `I<40 hex>` Gerrit — adressage quand `pr` vaut 0. */
+  change_id?: string;
 }
 
 export interface ConfigOpt { value: string; name: string; description?: string }
