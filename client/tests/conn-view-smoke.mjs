@@ -10,6 +10,10 @@
 //   G. Conn sauvegardée mais auto-connect off → accueil auto sur la vue,
 //      « connecter ici » depuis la ligne.
 //   H. Android : back système (history.back) ferme la vue.
+//   I. Exclusion mutuelle settings ↔ conn-view : l'inert de l'overlay
+//      encore ouvert n'est jamais stripé par le close de l'autre.
+//   J. Clic sur une session de la sidebar pendant que la vue est
+//      ouverte → la vue se ferme (comme le panneau settings).
 // Usage : node tests/conn-view-smoke.mjs   (après npm run build)
 import puppeteer from "puppeteer-core";
 import { spawn } from "node:child_process";
@@ -115,6 +119,8 @@ ok((await pA.evaluate(() => document.querySelectorAll("#cv-saved .cv-new").lengt
   "D4 action « nouvelle instance » (desktop)");
 ok((await pA.evaluate(() => document.querySelectorAll("#cv-saved .cv-edit").length)) === 1,
   "D5 action « éditer »");
+ok((await pA.evaluate(() => document.querySelectorAll("#cv-saved .cv-btns button svg").length)) === 4,
+  "D6 icônes inline dans les 4 boutons d'action");
 
 // ---------- E : éditer / reset ----------
 await pA.evaluate(() => document.querySelector("#cv-saved .cv-edit").click());
@@ -166,6 +172,40 @@ await sleep(300);
 await pH.evaluate(() => history.back());
 await sleep(500);
 ok(!(await viewOpen(pH)), "H3 back ferme aussi une ouverture manuelle");
+
+// ---------- I : exclusion mutuelle — inert de l'overlay survivant ----------
+const pI = await initPage([], "#desktop");
+await sleep(300);
+ok(await viewOpen(pI), "I1 conn-view auto-ouverte (aucune conn)");
+await pI.evaluate(() => document.getElementById("tb-settings").click());
+await sleep(300);
+ok(!(await viewOpen(pI)) &&
+  !(await pI.evaluate(() => document.getElementById("settings-view").hidden)),
+  "I2 settings ouvert par-dessus → conn-view fermée");
+// (l'inert est posé sur les enfants directs de #chat — #composer parent
+// de #input — la propriété de #input elle-même reste toujours fausse)
+ok(await pI.evaluate(() => document.getElementById("composer").inert),
+  "I3 composer reste inerte sous settings (close conn-view ne stripe pas)");
+await pI.evaluate(() => document.getElementById("settings-close").click());
+await sleep(300);
+ok(!(await pI.evaluate(() => document.getElementById("composer").inert)),
+  "I4 settings fermé → inert levé, champ réutilisable");
+
+// ---------- J : clic session sidebar pendant que la vue est ouverte ----------
+// (localStorage est partagé entre pages du même navigateur/origine —
+//  la section G a posé ac-autoconnect=0 → le retirer pour que
+//  l'autoconnect de cette page bind bien la conn local)
+const pJ = await initPage([{ kind: "local" }], "#desktop",
+  `localStorage.removeItem("ac-autoconnect");`);
+await sleep(300);
+await pJ.evaluate(() => document.getElementById("btn-connect").click());
+await sleep(400);
+ok(await viewOpen(pJ), "J1 vue ouverte par-dessus une conn bound");
+await pJ.evaluate(() => document.querySelector("#session-list .sess").click());
+await sleep(500);
+ok(!(await viewOpen(pJ)), "J2 clic session → conn-view fermée (comme settings)");
+ok(!(await pJ.evaluate(() => document.getElementById("composer").inert)),
+  "J3 #input réutilisable après ouverture de la session");
 
 console.log(`\n${fails === 0 ? "SMOKE OK" : "SMOKE FAIL"} — ${fails} échec(s)`);
 await b.close();

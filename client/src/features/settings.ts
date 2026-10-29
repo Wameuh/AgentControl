@@ -102,7 +102,9 @@ export class SettingsPanel {
     // sans cause visible — le watchdog core/modal filet de sécurité).
     const was = this.isOpen();
     $("settings-view").hidden = true;
-    this.setChatInert(false);
+    // Ne lever l'inert que si l'autre overlay #chat est aussi fermé —
+    // sinon on ré-expose #input derrière conn-view (frappes invisibles).
+    if ($("conn-view").hidden) this.setChatInert(false);
     // nav.close est idempotent (entrée absente = no-op) : l'appeler même
     // si le panneau avait été masqué ailleurs purge la pile nav résiduelle.
     nav.close("settings");

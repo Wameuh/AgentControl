@@ -89,7 +89,7 @@ export class ConnView {
    *  streamés par les events `daemon-step`). Ouvre la vue si besoin,
    *  sauf si l'utilisateur l'a détachée pour ce flux. */
   private daemonShow(msg: string, steps: string[] = []) {
-    if (!this.isOpen() && !this.daemonDetached) this.open();
+    if (!this.isOpen() && !this.daemonDetached) void this.open();
     $("cv-progress").hidden = false;
     $("cv-progress-msg").textContent = msg;
     const ul = $("cv-progress-steps");
@@ -479,16 +479,17 @@ export class ConnView {
 
   /** Appelé par chat.updateEmptyState quand aucune conv n'est affichée :
    *  aucune conn bound OU toutes down/gone → la vue s'ouvre en accueil
-   *  (spec : « pas de conn configurée → vue accueil = cet écran » et
-   *  « connexion perdue → retour à la vue »). Fermée manuellement → pas
-   *  de réouverture forcée jusqu'au prochain bind réussi. */
+   *  (spec : « pas de conn configurée → vue accueil = cet écran » ; une
+   *  perte de conn avec une session ouverte n'ouvre PAS la vue — on
+   *  n'arrache pas l'utilisateur à sa lecture). Fermée manuellement →
+   *  pas de réouverture forcée jusqu'au prochain bind réussi. */
   maybeAutoShow() {
     if (this.conns.anyUp()) {
       this.homeDismissed = false;
       return;
     }
     if (this.homeDismissed || this.isOpen()) return;
-    this.open();
+    void this.open();
   }
 
   /** États live changés (renderState de ConnectionManager) : réarme
@@ -522,12 +523,14 @@ export class ConnView {
         `${dot}<span class="cv-name">${esc(c.kind)} ${esc(c.host ?? c.addr ?? c.path ?? "local")}</span>` +
         status +
         `<span class="cv-btns">` +
-        `<button type="button" class="cv-go" data-icon="play" title="${q(esc(t("cv_connect_here")))}"></button>` +
+        // Icônes inline : hydrateIcons() ne tourne qu'au boot — un
+        // <li> créé après resterait avec des boutons vides.
+        `<button type="button" class="cv-go" title="${q(esc(t("cv_connect_here")))}">${icon("play")}</button>` +
         (isAndroid() || isWeb
           ? ""
-          : `<button type="button" class="cv-new" data-icon="external" title="${q(esc(t("conn_spawn")))}"></button>`) +
-        `<button type="button" class="cv-edit" data-icon="edit" title="${q(esc(t("edit_conn")))}"></button>` +
-        `<button type="button" class="cv-del danger" data-icon="close" title="${q(esc(t("ctx_delete_conn")))}"></button>` +
+          : `<button type="button" class="cv-new" title="${q(esc(t("conn_spawn")))}">${icon("external")}</button>`) +
+        `<button type="button" class="cv-edit" title="${q(esc(t("edit_conn")))}">${icon("edit")}</button>` +
+        `<button type="button" class="cv-del danger" title="${q(esc(t("ctx_delete_conn")))}">${icon("close")}</button>` +
         `</span>`;
       (li.querySelector(".cv-go") as HTMLButtonElement).onclick = () =>
         void this.go({ ...c });
@@ -555,7 +558,10 @@ export class ConnView {
           del.classList.add("armed");
           setTimeout(() => {
             this.armedDel.delete(key);
-            del.classList.remove("armed");
+            // Le bouton capturé a pu être détaché par un re-render
+            // (liveChanged) : le nouveau porte déjà .armed → re-render.
+            if (del.isConnected) del.classList.remove("armed");
+            else if (this.isOpen()) this.renderSavedList();
           }, 2500);
           return;
         }
@@ -583,17 +589,23 @@ export class ConnView {
   }
 
   /** Ouvre la vue (idempotent — déjà ouverte = no-op, la liste et les
-   *  badges sont tenus à jour par onLiveChanged) : liste rechargée,
-   *  form remis en mode nouvelle connexion. */
+   *  badges sont tenus à jour par onLiveChanged) : affichée AVANT les
+   *  awaits (retour visuel immédiat, et isOpen() devient vrai d'emblée —
+   *  un second appel pendant les fetches resterait un no-op). */
   async open() {
     if (this.isOpen()) return;
     this.onOpening();
-    // Android : pas de socket local ni de binaire ssh → SSH natif par défaut.
+    const view = $("conn-view");
+    view.hidden = false;
+    this.setChatInert(true);
+    // Focus au panneau : le focus résiduel dans #input enverrait des
+    // frappes invisibles à l'agent (même motif que settings-view).
+    view.focus({ preventScroll: true });
+    nav.push("connview");
+    // Android : pas de socket local → l'option n'existe pas (SSH natif
+    // par défaut, c'est resetForm/fillForm qui posent les valeurs).
     if (isAndroid()) {
-      const ks = $("c-kind") as HTMLSelectElement;
-      ks.querySelector('option[value="local"]')?.remove();
-      ks.value = "ssh";
-      ($("c-native") as HTMLInputElement).checked = true;
+      ($("c-kind") as HTMLSelectElement).querySelector('option[value="local"]')?.remove();
     }
     this.resetForm();
     // Alias Host de ~/.ssh/config en suggestions
@@ -607,19 +619,15 @@ export class ConnView {
     // Connexions sauvegardées → liste à pastilles (pas un <select>).
     this.saved = await invoke<SavedConn[]>("saved_connections").catch(() => []);
     this.renderSavedList();
-    const view = $("conn-view");
-    view.hidden = false;
-    this.setChatInert(true);
-    // Focus au panneau : le focus résiduel dans #input enverrait des
-    // frappes invisibles à l'agent (même motif que settings-view).
-    view.focus({ preventScroll: true });
-    nav.push("connview");
   }
 
   close() {
     const was = this.isOpen();
     $("conn-view").hidden = true;
-    this.setChatInert(false);
+    // Ne lever l'inert que si l'autre overlay #chat est aussi fermé —
+    // sinon on ré-expose #input derrière settings-view (frappes
+    // invisibles, le bug exact que l'inert prévient).
+    if ($("settings-view").hidden) this.setChatInert(false);
     nav.close("connview");
     if (!was) return;
     // Fermée pendant une progression démon → détachée pour ce flux (la
