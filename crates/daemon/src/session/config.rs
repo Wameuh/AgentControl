@@ -256,6 +256,7 @@ impl Session {
         self.cur_text.lock().unwrap().take();
         self.tool_calls.lock().unwrap().clear();
         self.pending_agent.lock().unwrap().clear();
+        self.reset_text_anchor();
         // Prévient les abonnés AVANT le reset : émis dans l'ancienne
         // numérotation (dernier seq +1), il passe leur filtre et leur
         // fait jeter l'état affiché — sinon les events du nouveau

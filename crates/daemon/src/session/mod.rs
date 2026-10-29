@@ -56,8 +56,11 @@ pub struct Session {
     /// Dernier bloc agent texte/pensée journalisé (is_thought, texte
     /// normalisé) — ancre de l'anti-doublon : un agent peut réémettre
     /// sa réponse en pensée après le message (ou l'inverse) ; la copie
-    /// ne se journalise pas. Remis à zéro à chaque message user/peer :
-    /// répéter un texte dans un nouveau tour est un contenu légitime.
+    /// ne se journalise pas. La comparaison porte sur les blocs texte
+    /// (les events intermédiaires — tool_call, status… — n'y coupent
+    /// pas : le cas observé est message → tool_call → pensée identique).
+    /// Remise à zéro à chaque message user/peer et au reset du journal :
+    /// répéter un texte dans un nouveau cycle est un contenu légitime.
     last_text: Mutex<Option<(bool, String)>>,
     /// Titre/kind vus pour chaque tool call (pour les updates ultérieurs).
     tool_calls: Mutex<HashMap<String, (String, String)>>,
@@ -123,6 +126,23 @@ fn norm_collapse(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Amorce l'ancre anti-doublon depuis la queue du journal à l'open :
+/// le bloc texte agent le plus récent fixe l'état, sauf si un message
+/// user/peer plus récent a déjà ouvert un nouveau tour. Un écho émis
+/// juste après un restart du démon reste ainsi couvert par la dédup.
+fn seed_text_anchor(journal: &Journal, dir: &std::path::Path) -> Option<(bool, String)> {
+    let page = journal.read_page(dir, None, 50).ok()?;
+    for e in page.iter().rev() {
+        match &e.kind {
+            EventKind::AgentText { text } => return Some((false, norm_collapse(text))),
+            EventKind::AgentThought { text } => return Some((true, norm_collapse(text))),
+            EventKind::UserMessage { .. } | EventKind::PeerMessage { .. } => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Provenance d'un prompt en file — détermine si le drain journalise un
 /// `user_message` (user) ou passe en silence (peer, déjà journalisé).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,6 +163,7 @@ impl Session {
             &std::fs::read_to_string(dir.join("meta.json")).context("meta.json illisible")?,
         )?;
         let journal = Journal::open(&dir)?;
+        let last_text = seed_text_anchor(&journal, &dir);
         let (events_tx, _) = broadcast::channel(1024);
         Ok(Arc::new_cyclic(|me| Self {
             dir,
@@ -154,7 +175,7 @@ impl Session {
             pending_agent: Mutex::new(HashMap::new()),
             acp_next_id: AtomicU64::new(1),
             cur_text: Mutex::new(None),
-            last_text: Mutex::new(None),
+            last_text: Mutex::new(last_text),
             tool_calls: Mutex::new(HashMap::new()),
             loading_replay: std::sync::atomic::AtomicBool::new(false),
             busy: std::sync::atomic::AtomicBool::new(false),
@@ -244,6 +265,13 @@ impl Session {
             EventKind::UserMessage { .. } | EventKind::PeerMessage { .. } => *last = None,
             _ => {}
         }
+    }
+
+    /// Le journal repart à zéro (/clear, rebind de la session native) —
+    /// le premier bloc texte du nouveau cycle n'est pas un doublon du
+    /// dernier de l'ancien, même à contenu normalisé identique.
+    pub fn reset_text_anchor(&self) {
+        self.last_text.lock().unwrap().take();
     }
 
     /// Accumule un chunk de texte ; flushé au prochain event non-chunk ou fin de tour.
@@ -425,6 +453,22 @@ mod tests {
         assert_eq!(
             kinds(&dir).iter().filter(|k| **k == "agent_thought").count(),
             2
+        );
+        // Réouverture : l'ancre est amorcée depuis la queue du journal,
+        // un écho post-restart reste dédupliqué.
+        let s2 = Session::open(dir.clone()).unwrap();
+        s2.emit(EventKind::AgentThought { text: "espaces multiples ici".into() });
+        assert_eq!(
+            kinds(&dir).iter().filter(|k| **k == "agent_thought").count(),
+            2
+        );
+        // Reset du journal (/clear, rebind) : le même texte redevient
+        // journalisable — le nouveau cycle n'hérite d'aucune ancre.
+        s2.reset_text_anchor();
+        s2.emit(EventKind::AgentThought { text: "espaces multiples ici".into() });
+        assert_eq!(
+            kinds(&dir).iter().filter(|k| **k == "agent_thought").count(),
+            3
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

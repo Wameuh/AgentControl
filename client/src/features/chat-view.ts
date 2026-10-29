@@ -797,9 +797,10 @@ export class ChatView {
       this.renderer.updateToolBlock(ev);
       return;
     }
-    // Anti-doublon pensée/message : le même texte deux fois d'affilée
-    // n'est pas rendu une seconde fois ; une pensée déjà affichée cède
-    // sa place au message identique qui la suit (contenu canonique).
+    // Anti-doublon pensée/message : le même texte que le bloc texte
+    // agent précédent (les events intermédiaires n'y coupent pas) n'est
+    // pas rendu une seconde fois ; une pensée déjà affichée cède sa
+    // place au message identique qui la suit (contenu canonique).
     if (ev.type === "agent_text" || ev.type === "agent_thought") {
       const dup = this.renderer.textDup(ev);
       if (dup === "skip") return;

@@ -29,7 +29,9 @@ export class EventRenderer {
   inPrepend = false;
   /** Ancre anti-doublon pensée/message : un agent peut émettre le même
    *  texte dans les deux rôles (observé : bloc 💭 reprenant intégralement
-   *  le message qui précède). Swapée avec le reste de l'état de rendu. */
+   *  le message qui précède). La comparaison porte sur les blocs texte
+   *  — les events intermédiaires (tool_call, status…) n'y coupent pas.
+   *  Swapée avec le reste de l'état de rendu. */
   lastText: { thought: boolean; norm: string; el: HTMLElement } | null = null;
 
   private deps = {
@@ -52,7 +54,7 @@ export class EventRenderer {
   }
 
   /// Dédup pensée/message à l'append (même texte normalisé que le bloc
-  /// texte précédent) :
+  /// texte agent précédent, à travers les events non-texte) :
   ///  - "skip" : doublon pur — ne pas rendre ;
   ///  - HTMLElement : la pensée précédente était la redondante — la
   ///    retirer, le message identique la remplace ;
