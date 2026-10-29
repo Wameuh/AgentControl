@@ -29,6 +29,10 @@ pub(crate) const LOG_MAX: u64 = 1024 * 1024;
 /// Période des sondes de santé (process + external + tool).
 const HEALTH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Plafond du backoff de respawn (restart_sec de base, ×2 par échec) —
+/// la même borne que proc.rs applique aux délais effectifs.
+const BACKOFF_CAP_SECS: u64 = 60;
+
 /// Grâce de démarrage : un `process` dont la sonde échoue reste
 /// `starting` pendant cette fenêtre avant de passer `degraded`.
 const START_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
@@ -60,9 +64,10 @@ const INTERNALS: &[Internal] = &[
 ];
 
 pub struct Components {
-    /// `<root>` du démon (cwd par défaut + AGENTCONTROL_HOME injecté).
+    /// `<root>` du démon (cwd par défaut + AGENTCONTROL_HOME injecté,
+    /// et emplacement de `components.toml`).
     root: PathBuf,
-    /// `<root>/components` — components.toml, pidfiles et logs.
+    /// `<root>/components` — pidfiles et logs des `process`.
     dir: PathBuf,
     /// Adresse TCP du démon (AGENTCONTROL_TCP injecté).
     bind_tcp: String,
@@ -93,7 +98,7 @@ impl Components {
         web: Arc<RwLock<Option<Value>>>,
     ) -> Arc<Self> {
         let dir = root.join("components");
-        let specs = match read_specs(&dir.join("components.toml")) {
+        let specs = match read_specs(&root.join("components.toml")) {
             Ok(s) => s,
             Err(e) => {
                 warn!("components.toml illisible ({e:#}) — aucune spec chargée");
@@ -101,10 +106,19 @@ impl Components {
             }
         };
         let mut map = BTreeMap::new();
-        for spec in specs {
+        for mut spec in specs {
             if let Err(e) = check_usable(&spec) {
                 warn!("composant « {} » ignoré: {e}", spec.name);
                 continue;
+            }
+            // Le backoff plafonne à 60 s — un restart_sec au-delà est
+            // ramené à la borne plutôt que silencieusement ignoré.
+            if spec.restart_sec > BACKOFF_CAP_SECS {
+                warn!(
+                    "composant « {} »: restart_sec {} > {BACKOFF_CAP_SECS} — ramené à {BACKOFF_CAP_SECS}",
+                    spec.name, spec.restart_sec
+                );
+                spec.restart_sec = BACKOFF_CAP_SECS;
             }
             map.insert(spec.name.clone(), spec);
         }
@@ -130,9 +144,8 @@ impl Components {
             self.specs.read().await.values().cloned().collect();
         let txt = toml::to_string_pretty(&ComponentsFile { components: specs })
             .context("sérialisation specs")?;
-        tokio::fs::create_dir_all(&self.dir).await?;
-        let tmp = self.dir.join("components.toml.part");
-        let dst = self.dir.join("components.toml");
+        let tmp = self.root.join("components.toml.part");
+        let dst = self.root.join("components.toml");
         tokio::fs::write(&tmp, txt).await.context("écriture .part")?;
         tokio::fs::rename(&tmp, &dst).await.context("rename atomique")?;
         Ok(())
@@ -321,16 +334,31 @@ impl Components {
         }))
     }
 
-    /// Arrêt du démon : SIGTERM à tous les `process` managés (même
-    /// destin que les agents — ils repartent au boot si autostart).
-    /// Les sondes/watchers s'arrêtent via le flag `down`.
+    /// Arrêt du démon : SIGTERM à tous les `process` managés d'un coup
+    /// (la grâce court en parallèle — N composants ne coûtent pas
+    /// N × 3 s), puis reap + SIGKILL résiduels. Même destin que les
+    /// agents : ils repartent au boot si autostart. Les sondes et
+    /// watchers s'arrêtent via le flag `down`.
     pub async fn shutdown(&self) {
         self.down.store(true, Ordering::SeqCst);
-        let names: Vec<String> = self.procs.read().await.keys().cloned().collect();
-        for name in names {
-            if let Err(e) = self.shutdown_proc(&name).await {
-                warn!("composant « {name} »: shutdown: {e:#}");
-            }
+        let pids: Vec<u32> = {
+            let mut procs = self.procs.write().await;
+            procs
+                .values_mut()
+                .filter_map(|p| {
+                    p.gen += 1;
+                    p.desired = proc::Desired::Stopped;
+                    p.pid.take()
+                })
+                .collect()
+        };
+        proc::terminate_pids(pids).await;
+        let mut procs = self.procs.write().await;
+        for (name, p) in procs.iter_mut() {
+            p.state = ComponentState::Stopped;
+            p.started = None;
+            p.health = None;
+            let _ = std::fs::remove_file(self.dir.join(format!("{name}.pid")));
         }
     }
 
@@ -373,20 +401,28 @@ impl Components {
 
     /// Env injectée au spawn de tout `process` managé — le composant
     /// découvre le démon sans config (même idée qu'`agent_parts` a2a).
+    /// AGENTCONTROL_TCP : l'adresse de bind peut être un wildcard
+    /// (0.0.0.0/::) inutilisable comme cible de connexion → on expose
+    /// l'équivalent loopback.
     pub(crate) fn injected_env(&self, name: &str) -> HashMap<String, String> {
+        let tcp = match self.bind_tcp.rsplit_once(':') {
+            Some(("0.0.0.0", port)) => format!("127.0.0.1:{port}"),
+            Some(("::", port)) | Some(("[::]", port)) => format!("::1:{port}"),
+            _ => self.bind_tcp.clone(),
+        };
         HashMap::from([
             (
                 "AGENTCONTROL_SOCK".into(),
                 self.root.join("daemon.sock").display().to_string(),
             ),
-            ("AGENTCONTROL_TCP".into(), self.bind_tcp.clone()),
+            ("AGENTCONTROL_TCP".into(), tcp),
             ("AGENTCONTROL_HOME".into(), self.root.display().to_string()),
             ("AGENTCONTROL_COMPONENT".into(), name.to_string()),
         ])
     }
 }
 
-/// Lit et valide `<dir>/components.toml` — absent = liste vide.
+/// Lit et valide `<root>/components.toml` — absent = liste vide.
 fn read_specs(path: &Path) -> Result<Vec<ComponentSpec>> {
     let txt = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -419,10 +455,12 @@ pub(crate) fn kind_name(k: ComponentKind) -> &'static str {
     }
 }
 
-/// Refuse les specs inutilisables : nom invalide, `process` sans
-/// commande, ou garde superviseur — un composant managé ne doit jamais
-/// être le démon lui-même, supervisord ou systemctl (le système de
-/// composants ne gère ni son superviseur ni lui-même).
+/// Refuse les specs inutilisables : nom invalide ou réservé à un
+/// composant interne, `kind=internal` dans le fichier (les internes se
+/// déclarent dans le code, pas dans components.toml), `process`/`tool`
+/// sans commande (un tool sans commande n'a pas de sonde — sa commande
+/// *est* sa sonde), ou garde superviseur — un composant managé ne doit
+/// jamais être le démon lui-même, supervisord ou systemctl.
 fn check_usable(spec: &ComponentSpec) -> Result<()> {
     anyhow::ensure!(
         !spec.name.is_empty()
@@ -433,11 +471,20 @@ fn check_usable(spec: &ComponentSpec) -> Result<()> {
         "nom invalide « {} » ([a-z0-9-]+ attendu)",
         spec.name
     );
-    if spec.kind == ComponentKind::Process {
+    anyhow::ensure!(
+        spec.kind != ComponentKind::Internal,
+        "kind=internal ne se déclare pas dans components.toml"
+    );
+    anyhow::ensure!(
+        !INTERNALS.iter().any(|i| i.name == spec.name),
+        "nom « {} » réservé à un composant interne",
+        spec.name
+    );
+    if matches!(spec.kind, ComponentKind::Process | ComponentKind::Tool) {
         let argv0 = spec
             .command
             .first()
-            .context("spec `process` sans commande")?;
+            .with_context(|| format!("spec `{}` sans commande", kind_name(spec.kind)))?;
         let base = Path::new(argv0)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())

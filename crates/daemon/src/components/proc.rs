@@ -122,10 +122,32 @@ impl Components {
         let mut child = match spawn_child(self, spec).await {
             Ok(c) => c,
             Err(e) => {
-                let mut procs = self.procs.write().await;
-                if let Some(p) = procs.get_mut(&name) {
-                    p.state = ComponentState::Failed;
-                    p.desired = Desired::Stopped;
+                let mut delay = None;
+                {
+                    let mut procs = self.procs.write().await;
+                    if let Some(p) = procs.get_mut(&name) {
+                        p.state = ComponentState::Failed;
+                        if manual {
+                            p.desired = Desired::Stopped;
+                        } else {
+                            // Respawn supervisé : un échec transitoire
+                            // (binaire absent un instant, fds épuisés,
+                            // port pris) ne doit pas désactiver
+                            // restart=always — on replanifie avec le
+                            // backoff déjà doublé par on_exit.
+                            delay = Some(Duration::from_secs(
+                                p.backoff_secs.min(BACKOFF_CAP),
+                            ));
+                        }
+                    }
+                }
+                if let Some(d) = delay {
+                    warn!(
+                        "composant « {name} »: spawn impossible ({e:#}) — \
+                         nouvelle tentative dans {}s",
+                        d.as_secs()
+                    );
+                    schedule_respawn(self, &name, d);
                 }
                 return Err(e);
             }
@@ -216,20 +238,23 @@ impl Components {
     }
 
     /// Stop volontaire : desired=Stopped + gen++ (le watcher sort sans
-    /// respawn), SIGTERM, grâce, SIGKILL.
+    /// respawn), SIGTERM, grâce, SIGKILL. Idempotent : un composant
+    /// jamais démarré est déjà `stopped`.
     pub(super) async fn shutdown_proc(&self, name: &str) -> Result<ComponentStatus> {
         let pid = {
             let mut procs = self.procs.write().await;
-            let Some(p) = procs.get_mut(name) else {
-                anyhow::bail!("composant « {name} » jamais démarré");
-            };
-            p.gen += 1;
-            p.desired = Desired::Stopped;
-            let pid = p.pid.take();
-            if pid.is_none() {
-                p.state = ComponentState::Stopped;
+            match procs.get_mut(name) {
+                Some(p) => {
+                    p.gen += 1;
+                    p.desired = Desired::Stopped;
+                    let pid = p.pid.take();
+                    if pid.is_none() {
+                        p.state = ComponentState::Stopped;
+                    }
+                    pid
+                }
+                None => None, // jamais démarré → déjà arrêté
             }
-            pid
         };
         if let Some(pid) = pid {
             terminate_pid(pid).await;
@@ -244,8 +269,10 @@ impl Components {
             }
         }
         let _ = std::fs::remove_file(self.components_dir().join(format!("{name}.pid")));
-        let spec = self.spec_of(name).await.context("spec disparue")?;
-        Ok(self.status_of(&spec).await)
+        match self.spec_of(name).await {
+            Some(spec) => Ok(self.status_of(&spec).await),
+            None => Ok(ComponentStatus::default()),
+        }
     }
 
     /// État courant d'une spec — runtime `process` (procs) ou
@@ -290,10 +317,11 @@ impl Components {
 
     /// Boucle de sondes périodiques — process managés vivants +
     /// external/tool déclarés (observation seule, jamais de cycle de
-    /// vie pour ces kinds).
+    /// vie pour ces kinds). Première passe immédiate : sinon les états
+    /// affichés resteraient `starting`/`stopped` jusqu'à 30 s post-boot
+    /// alors que l'info est déjà disponible.
     pub(super) async fn health_loop(self: &Arc<Self>) {
         loop {
-            tokio::time::sleep(HEALTH_INTERVAL).await;
             if self.is_down() {
                 return;
             }
@@ -351,6 +379,7 @@ impl Components {
                     self.set_observed(&spec.name, ok).await;
                 }
             }
+            tokio::time::sleep(HEALTH_INTERVAL).await;
         }
     }
 }
@@ -404,8 +433,10 @@ async fn spawn_child(c: &Arc<Components>, spec: &ComponentSpec) -> Result<Child>
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
-        .envs(c.injected_env(&spec.name))
-        .envs(&spec.env);
+        // spec.env d'abord : l'env injectée AGENTCONTROL_* prime — un
+        // composant ne doit pas pouvoir mentir sur l'adresse du démon.
+        .envs(&spec.env)
+        .envs(c.injected_env(&spec.name));
     let mut child = cmd
         .spawn()
         .with_context(|| format!("spawn « {} » ({argv0})", spec.name))?;
@@ -472,6 +503,8 @@ impl LogWriter {
                 self.path.file_name().unwrap().to_string_lossy()
             ));
             let _ = self.file.sync_all();
+            // rename() ne remplace pas un dest existant hors unix.
+            let _ = std::fs::remove_file(&rotated);
             if std::fs::rename(&self.path, &rotated).is_ok() {
                 self.written = 0;
             }
@@ -510,13 +543,30 @@ fn health_str(ok: bool) -> String {
 /// SIGTERM puis SIGKILL si le pid survit à la grâce — utilisé pour
 /// stop volontaire, shutdown démon et orphelins de boot.
 pub(super) async fn terminate_pid(pid: u32) {
-    sigterm(pid);
+    terminate_pids(vec![pid]).await;
+}
+
+/// SIGTERM à tous les pids d'un coup, puis attente collective et
+/// SIGKILL des résiduels — la grâce court en parallèle (N composants ne
+/// coûtent pas N × TERM_GRACE à l'arrêt du démon).
+pub(super) async fn terminate_pids(pids: Vec<u32>) {
+    if pids.is_empty() {
+        return;
+    }
+    for &pid in &pids {
+        sigterm(pid);
+    }
     let deadline = Instant::now() + TERM_GRACE;
-    while Instant::now() < deadline && pid_alive(pid) {
+    while Instant::now() < deadline {
+        if pids.iter().all(|&pid| !pid_alive(pid)) {
+            return;
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    if pid_alive(pid) {
-        sigkill(pid);
+    for pid in pids {
+        if pid_alive(pid) {
+            sigkill(pid);
+        }
     }
 }
 
@@ -554,23 +604,39 @@ fn pid_alive(pid: u32) -> bool {
     }
 }
 
-/// Orphelin de boot : pid du pidfile encore vivant ET son argv[0]
-/// correspond à la commande de la spec — la comparaison évite de tuer
-/// un process étranger qui aurait récupéré le pid entre-temps.
+/// Orphelin de boot : le pid du pidfile est-il *notre* process ?
+/// Marqueur fiable : `AGENTCONTROL_COMPONENT=<name>` injecté au spawn —
+/// présent dans `/proc/<pid>/environ` (même uid), qu'un process étranger
+/// ayant récupéré le pid ne peut pas reproduire par accident. Environ
+/// illisible → repli sur la comparaison argv[0] (basename), fenêtre très
+/// courte entre pidfile et boot.
 pub(super) fn is_our_orphan(pid: u32, spec: &ComponentSpec) -> bool {
     if !pid_alive(pid) {
         return false;
     }
-    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
-        return false;
-    };
-    let first = cmdline
-        .split(|b| *b == 0)
-        .next()
-        .map(|b| String::from_utf8_lossy(b).into_owned())
-        .unwrap_or_default();
-    let want = spec.command.first().map(|a| basename(a)).unwrap_or_default();
-    !want.is_empty() && basename(&first) == want
+    match std::fs::read(format!("/proc/{pid}/environ")) {
+        Ok(env) => env
+            .split(|b| *b == 0)
+            .any(|kv| kv == format!("AGENTCONTROL_COMPONENT={}", spec.name).as_bytes()),
+        Err(_) => {
+            // Environ inaccessible (process en train de mourir, autre
+            // uid…) : le basename reste le seul signal disponible.
+            let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+                return false;
+            };
+            let first = cmdline
+                .split(|b| *b == 0)
+                .next()
+                .map(|b| String::from_utf8_lossy(b).into_owned())
+                .unwrap_or_default();
+            let want = spec
+                .command
+                .first()
+                .map(|a| basename(a))
+                .unwrap_or_default();
+            !want.is_empty() && basename(&first) == want
+        }
+    }
 }
 
 fn basename(p: &str) -> String {
