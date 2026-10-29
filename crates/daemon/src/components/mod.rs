@@ -79,6 +79,9 @@ pub struct Components {
     /// Dernier verdict de sonde pour external/tool (kind sans cycle de
     /// vie : leur « état » n'est qu'une observation périodique).
     observed: RwLock<HashMap<String, bool>>,
+    /// Dernière version sondée des `tool` (1re ligne de leur commande
+    /// — absente de la map tant que la sonde n'a rien rapporté).
+    versions: RwLock<HashMap<String, String>>,
     a2a_enabled: bool,
     /// Surface web du démon (partagé avec `Daemon.web`) — l'état du
     /// composant interne `web-ui` suit la présence du listener.
@@ -135,6 +138,7 @@ impl Components {
             specs: RwLock::new(map),
             procs: RwLock::new(HashMap::new()),
             observed: RwLock::new(HashMap::new()),
+            versions: RwLock::new(HashMap::new()),
             a2a_enabled,
             web,
             down: Arc::new(AtomicBool::new(false)),
@@ -377,6 +381,7 @@ impl Components {
         }
         self.procs.write().await.remove(name);
         self.observed.write().await.remove(name);
+        self.versions.write().await.remove(name);
         if let Err(e) = self.save().await {
             warn!("composant « {name} » retiré en mémoire mais save() a échoué — il ressuscitera au prochain boot: {e:#}");
             return Err(e);
@@ -481,6 +486,25 @@ impl Components {
 
     pub(crate) async fn set_observed(&self, name: &str, ok: bool) {
         self.observed.write().await.insert(name.to_string(), ok);
+    }
+
+    /// Version sondée courante d'un `tool` (pour status_of).
+    pub(crate) async fn tool_version(&self, name: &str) -> Option<String> {
+        self.versions.read().await.get(name).cloned()
+    }
+
+    /// Pose/efface la version rapportée par la sonde d'un `tool` —
+    /// `None` = sonde sans sortie exploitable (ou tool absent).
+    pub(crate) async fn set_tool_version(&self, name: &str, v: Option<String>) {
+        let mut m = self.versions.write().await;
+        match v {
+            Some(v) => {
+                m.insert(name.to_string(), v);
+            }
+            None => {
+                m.remove(name);
+            }
+        }
     }
 
     /// Env injectée au spawn de tout `process` managé — le composant

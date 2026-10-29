@@ -26,7 +26,9 @@ use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tracing::{info, warn};
 
+use super::catalog::{expand_home_str, run_version_probe};
 use super::{Components, BACKOFF_CAP_SECS, HEALTH_INTERVAL, LOG_MAX, START_GRACE};
+use crate::server::misc::command_available;
 
 /// Uptime au-delà duquel le backoff repart à `restart_sec`.
 const STABLE_RESET: Duration = Duration::from_secs(300);
@@ -319,11 +321,12 @@ impl Components {
                         },
                         restarts: p.restarts,
                         last_exit: p.last_exit,
+                        ..Default::default()
                     },
                     None => ComponentStatus::default(),
                 }
             }
-            ComponentKind::External | ComponentKind::Tool => {
+            ComponentKind::External => {
                 let health = self.observed_health(&spec.name).await;
                 ComponentStatus {
                     state: match health {
@@ -332,6 +335,28 @@ impl Components {
                         None => ComponentState::Stopped,
                     },
                     health: health.map(health_str),
+                    ..Default::default()
+                }
+            }
+            ComponentKind::Tool => {
+                // « installed » = argv0 résolvable (PATH du démon ou
+                // chemin exécutable) — sondé à la demande : le check est
+                // cheap, l'état est frais même avant la 1re passe de
+                // health_loop. `absent` est une observation, pas une
+                // panne. Version/santé viennent du cache de la sonde.
+                let present = tool_present(spec);
+                ComponentStatus {
+                    state: if present {
+                        ComponentState::Installed
+                    } else {
+                        ComponentState::Absent
+                    },
+                    health: self.observed_health(&spec.name).await.map(health_str),
+                    version: if present {
+                        self.tool_version(&spec.name).await
+                    } else {
+                        None
+                    },
                     ..Default::default()
                 }
             }
@@ -390,8 +415,8 @@ impl Components {
                     .into_iter()
                     .filter(|s| {
                         // external : uniquement si une sonde est
-                        // configurée ; tool : toujours sondé (sa
-                        // commande est la sonde présence/version).
+                        // configurée ; tool : toujours sondé (présence
+                        // + version + healthcheck éventuel).
                         s.kind == ComponentKind::Tool
                             || (s.kind == ComponentKind::External
                                 && !matches!(s.healthcheck, Healthcheck::None))
@@ -399,12 +424,37 @@ impl Components {
                     .collect()
             };
             for spec in sondes {
-                if let Some(ok) = probe(&spec, None).await {
-                    self.set_observed(&spec.name, ok).await;
+                match spec.kind {
+                    ComponentKind::Tool => self.probe_tool(&spec).await,
+                    _ => {
+                        if let Some(ok) = probe(&spec, None).await {
+                            self.set_observed(&spec.name, ok).await;
+                        }
+                    }
                 }
             }
             tokio::time::sleep(HEALTH_INTERVAL).await;
         }
+    }
+
+    /// Sonde d'un `tool` : présence (argv0 résolvable — cheap, pas de
+    /// spawn), version (sa `command` exécutée — typiquement
+    /// `… --version` : timeout 3 s, 1re ligne ≤200 c) et santé =
+    /// healthcheck déclaré s'il y en a un (resonde de présence /
+    /// répondant), sinon la présence elle-même.
+    async fn probe_tool(&self, spec: &ComponentSpec) {
+        let present = tool_present(spec);
+        let version = if present {
+            run_version_probe(&spec.command).await
+        } else {
+            None
+        };
+        let health = match spec.healthcheck {
+            Healthcheck::None => present,
+            _ => probe(spec, None).await.unwrap_or(present),
+        };
+        self.set_observed(&spec.name, health).await;
+        self.set_tool_version(&spec.name, version).await;
     }
 }
 
@@ -684,9 +734,11 @@ async fn probe(spec: &ComponentSpec, pid: Option<u32>) -> Option<bool> {
             // « Aucune sonde : un process managé vivant est réputé
             // sain » — la présence du pid est la sonde.
             ComponentKind::Process => Some(pid.map(pid_alive).unwrap_or(false)),
-            // La sonde d'un tool est sa commande elle-même
-            // (typiquement `--version`) : présence + version.
-            ComponentKind::Tool => Some(command_ok(&spec.command).await),
+            // La sonde de présence d'un tool est argv0 résolvable sur
+            // le PATH (pas de spawn — la version est sondée à part par
+            // probe_tool). Atteint seulement si une sonde explicite est
+            // configurée ET qu'on l'interroge hors du chemin dédié.
+            ComponentKind::Tool => Some(tool_present(spec)),
             _ => None,
         },
         Healthcheck::Process => Some(pid.map(pid_alive).unwrap_or(false)),
@@ -719,8 +771,17 @@ async fn probe(spec: &ComponentSpec, pid: Option<u32>) -> Option<bool> {
     }
 }
 
-/// `argv` exécuté — exit 0 = sain. Sonde d'un `tool` (sa commande est
-/// typiquement `--version`), ou healthcheck explicite `command`.
+/// argv0 d'un `tool` résolvable — `command_available` (PATH du démon
+/// ou chemin absolu exécutable, même check que la détection du
+/// catalogue) après expansion `~`.
+fn tool_present(spec: &ComponentSpec) -> bool {
+    spec.command
+        .first()
+        .map(|a| command_available(&expand_home_str(a)))
+        .unwrap_or(false)
+}
+
+/// `argv` exécuté — exit 0 = sain (healthcheck explicite `command`).
 async fn command_ok(argv: &[String]) -> bool {
     let Some(argv0) = argv.first() else {
         return false;
@@ -738,5 +799,53 @@ async fn command_ok(argv: &[String]) -> bool {
     {
         Ok(Ok(st)) => st.success(),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool_spec(argv: &[&str]) -> ComponentSpec {
+        ComponentSpec {
+            name: "t".into(),
+            kind: ComponentKind::Tool,
+            command: argv.iter().map(|s| s.to_string()).collect(),
+            env: std::collections::HashMap::new(),
+            cwd: None,
+            autostart: false,
+            restart: RestartPolicy::Never,
+            restart_sec: 0,
+            healthcheck: Healthcheck::None,
+            description: None,
+        }
+    }
+
+    /// « installed » = argv0 résolvable sur le PATH du démon — un shell
+    /// système est présent, un nom bidon ne l'est pas, argv vide non plus.
+    #[test]
+    fn tool_present_detecte_argv0() {
+        assert!(tool_present(&tool_spec(&["sh", "-c", "true"])));
+        assert!(!tool_present(&tool_spec(&["ac-tool-inexistant-xyz"])));
+        assert!(!tool_present(&tool_spec(&[])));
+    }
+
+    /// Version = 1re ligne de la commande sondée, bornée à 200 c ; une
+    /// commande inexistante ne rapporte rien.
+    #[tokio::test]
+    async fn version_probe_premiere_ligne_bornee() {
+        let v = run_version_probe(&[
+            "sh".into(),
+            "-c".into(),
+            "echo 'outil 1.2.3'; echo 'ligne2'".into(),
+        ])
+        .await;
+        assert_eq!(v.as_deref(), Some("outil 1.2.3"));
+        let long = "x".repeat(500);
+        let v = run_version_probe(&["sh".into(), "-c".into(), format!("echo {long}")]).await;
+        assert_eq!(v.map(|s| s.chars().count()), Some(200));
+        assert!(run_version_probe(&["ac-tool-inexistant-xyz".into()])
+            .await
+            .is_none());
     }
 }

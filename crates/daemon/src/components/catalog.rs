@@ -296,9 +296,8 @@ fn detected(d: &CatalogDetect) -> bool {
 }
 
 /// Sonde de version : `detect.bin --version` si déclaré, sinon la
-/// commande de la spec `tool` (qui *est* sa sonde version) — timeout
-/// 3 s, 1re ligne de stdout ≤200 c. Pas de sonde applicable (process,
-/// external) → None.
+/// commande de la spec `tool` (qui *est* sa sonde version). Pas de
+/// sonde applicable (process, external) → None.
 async fn probe_version(e: &CatalogEntry) -> Option<String> {
     let argv: Vec<String> = if let Some(bin) = &e.detect.bin {
         vec![bin.clone(), "--version".into()]
@@ -307,6 +306,15 @@ async fn probe_version(e: &CatalogEntry) -> Option<String> {
     } else {
         return None;
     };
+    run_version_probe(&argv).await
+}
+
+/// `argv` exécuté pour en lire la version : timeout `VERSION_PROBE`
+/// (3 s), 1re ligne de stdout ≤ `VERSION_MAX` caractères. Partagée
+/// entre la détection du catalogue (`probe_version` ci-dessus) et la
+/// sonde périodique des `tool` déclarés (`probe_tool`, proc.rs) —
+/// `~` expansé sous le HOME du démon partout où un chemin peut figurer.
+pub(super) async fn run_version_probe(argv: &[String]) -> Option<String> {
     let argv0 = expand_home_str(argv.first()?);
     let out = tokio::time::timeout(
         VERSION_PROBE,
@@ -370,7 +378,7 @@ fn fetch_upstream(repo: &str) -> Option<Upstream> {
     }
     if let Some(v) = get(format!("{base}/releases?per_page=1")) {
         answered = true;
-        if let Some((tag, notes)) = v.as_array().and_then(|a| a.first()).and_then(&release) {
+        if let Some((tag, notes)) = v.as_array().and_then(|a| a.first()).and_then(release) {
             return Some(Upstream { tag: Some(tag), notes, at: Instant::now() });
         }
     }
@@ -499,6 +507,9 @@ fn expand_home(path: &str) -> PathBuf {
     PathBuf::from(expand_home_str(path))
 }
 
+/// `pub(super)` : réutilisé par la sonde `tool` de proc.rs. Défensif
+/// depuis #141 — `expand_home_fields` normalise déjà `~` au chargement
+/// et à l'upsert, l'expansion ici est donc normalement une no-op.
 pub(super) fn expand_home_str(path: &str) -> String {
     if path == "~" || path.starts_with("~/") {
         if let Some(home) = std::env::var_os("HOME") {

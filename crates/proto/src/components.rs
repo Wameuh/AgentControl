@@ -48,18 +48,25 @@ pub enum ComponentState {
     Running,
     /// Process vivant mais sonde KO (ou healthcheck externe KO).
     Degraded,
-    /// Arrêté (volontaire, jamais lancé, ou sans sonde à observer).
+    /// Arrêté (volontaire, jamais lancé, ou sans sonde à observer —
+    /// aussi l'état d'un tool jamais sondé).
     #[default]
     Stopped,
     /// Mort sur erreur sans relance prévue.
     Failed,
+    /// `tool` dont argv[0] est résolvable (PATH ou chemin exécutable).
+    Installed,
+    /// `tool` dont argv[0] est introuvable — l'état « absent » est une
+    /// observation, pas une panne : rien ne tourne à réparer.
+    Absent,
 }
 
 /// Sonde de santé — `healthcheck = { kind = "…", … }` dans le TOML.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Healthcheck {
     /// Aucune sonde : un process managé vivant est réputé sain.
+    #[default]
     None,
     /// Le pid du process managé est vivant.
     Process,
@@ -69,12 +76,6 @@ pub enum Healthcheck {
     Http { url: String },
     /// `argv` exécuté, code 0 = sain.
     Command { argv: Vec<String> },
-}
-
-impl Default for Healthcheck {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 /// Déclaration d'un composant — `[[components]]` de components.toml.
@@ -135,6 +136,10 @@ pub struct ComponentStatus {
     /// Code du dernier exit (128+signal si tué par signal).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_exit: Option<i64>,
+    /// Version rapportée par la sonde d'un `tool` (1re ligne de sa
+    /// commande, typiquement `--version` — bornée à 200 caractères).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 /// Racine de `<root>/components.toml`.
