@@ -14,6 +14,7 @@ import type { CmdInfo, SendMode } from "../core/types";
 import { t } from "../i18n";
 import { cmdDesc, cmdHint, cmdName } from "./modelbar";
 import { sendPref } from "./settings";
+import { Attachments } from "./attachments";
 import type { ChatView } from "./chat-view";
 
 // ---- Commandes built-in (toujours dispo, exécutées côté client) ----
@@ -29,6 +30,9 @@ const BUILTINS = (): { name: string; description: string; hint: string }[] => [
 
 export class Composer {
   private chat!: ChatView;
+  /** Pièces jointes : chips, uploads (.ac-uploads), chemins pour
+   *  l'agent — module dédié (picker « + », drop, collage). */
+  private attach = new Attachments();
   /** Rafraîchit la sidebar (injecté). */
   refresh: () => Promise<void> = async () => {};
   private acSel = 0;
@@ -514,9 +518,9 @@ export class Composer {
 
   async sendInput(mode: SendMode = "normal") {
     const txt = ($("input") as HTMLTextAreaElement).value.trim();
-    if (!txt || !app.current) return;
+    if (!app.current) return;
     // Built-ins client (interceptent avant envoi à l'agent)
-    const bm = /^\/(\w+)(?:\s+(.*))?$/.exec(txt);
+    const bm = txt ? /^\/(\w+)(?:\s+(.*))?$/.exec(txt) : null;
     if (bm && BUILTINS().some((b) => b.name === bm[1])) {
       this.setInput("");
       try {
@@ -541,13 +545,36 @@ export class Composer {
       this.chat.sysline(t("cmd_unknown", { cmd: bm[1] }), "warn");
       return;
     }
+    // Pièces jointes : envoyer maintenant perdrait les chemins des
+    // uploads en vol — avertir plutôt que tronquer le message.
+    if (this.attach.pending()) {
+      notify("warn", t("att_wait"));
+      return;
+    }
+    const files = this.attach.ready();
+    if (!txt && !files.length) return;
+    // Le message porte les chemins absolus — l'agent lit les pièces
+    // avec ses outils fichiers habituels (bornés au même workspace).
+    const atLines = files
+      .map((f) => `[fichier joint: ${f.name} → ${f.path}]`)
+      .join("\n");
+    const payload = txt
+      ? atLines
+        ? `${txt}\n\n${atLines}`
+        : txt
+      : atLines;
     this.setInput("");
-    await call("send", {
-      session: app.current.id,
-      text: txt,
-      force: mode === "force",
-      steer: mode === "steer",
-    }).catch((e) => showErr(String(e)));
+    try {
+      await call("send", {
+        session: app.current.id,
+        text: payload,
+        force: mode === "force",
+        steer: mode === "steer",
+      });
+      this.attach.sent();
+    } catch (e) {
+      showErr(String(e));
+    }
     // Commande slash non-builtin : l'agent l'applique au prochain tour (ex.
     // /compact → "context compacted" n'arrive qu'au message suivant) → hint.
     // (/compact : le démon arme la retenue "compacting" à la livraison.)
@@ -629,6 +656,7 @@ export class Composer {
    *  en file). Pendant compact les deux modes sont retenus en file —
    *  bouton sans différence → caché. */
   syncAltBtn() {
+    this.attach.syncVisible();
     const b = $("btn-alt") as HTMLButtonElement;
     const queue = this.altMode() === "normal";
     const st = app.current?.state;
@@ -659,7 +687,20 @@ export class Composer {
       sendPref() === "steer" ? t("input_ph_steer") : t("input_ph");
   }
 
+  /** Session affichée changée — les chips d'upload visent l'ancien
+   *  cwd : elles sont purgées par le module pièces jointes. */
+  sessionChanged() {
+    this.attach.onSessionChanged();
+  }
+
+  /** Capacité « fichiers » du démon courant (injecté depuis conns.cap)
+   *  — le + est masqué si le démon ignore write_file/create_path. */
+  bindAttachCapable(capable: (conn: string | undefined) => boolean) {
+    this.attach.capable = capable;
+  }
+
   init() {
+    this.attach.init();
     this.refreshHints();
     $("btn-send").onclick = () => this.sendInput(this.defaultMode());
     $("btn-alt").onclick = () => this.sendInput(this.altMode());

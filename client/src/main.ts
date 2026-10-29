@@ -92,7 +92,10 @@ chat.bind(renderer, {
     files.onSessionOpened();
     term.onSessionSwitched();
   },
-  onSessionChanged: () => search.onSessionChanged(),
+  onSessionChanged: () => {
+    search.onSessionChanged();
+    composer.sessionChanged();
+  },
   connCount: () => conns.knownConns().length,
   firstPostCapable: (c) => conns.cap(c)?.first_post === true,
   termCapable: (c) => conns.cap(c)?.terminal === true,
@@ -107,6 +110,7 @@ renderer.bind({
 sidebar.bind(conns, groups, newSess, chat, settings);
 composer.bind(chat);
 composer.refresh = () => sidebar.refresh();
+composer.bindAttachCapable((c) => conns.cap(c ?? "default")?.files === true);
 conns.bind({
   refresh: () => sidebar.refresh(),
   reopenIfConn: (c) => chat.reopenIfConn(c),
