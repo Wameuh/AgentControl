@@ -26,10 +26,8 @@ use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tracing::{info, warn};
 
-use super::{Components, HEALTH_INTERVAL, LOG_MAX, START_GRACE};
+use super::{Components, BACKOFF_CAP_SECS, HEALTH_INTERVAL, LOG_MAX, START_GRACE};
 
-/// Plafond du backoff de respawn (restart_sec de base, ×2 par échec).
-const BACKOFF_CAP: u64 = 60;
 /// Uptime au-delà duquel le backoff repart à `restart_sec`.
 const STABLE_RESET: Duration = Duration::from_secs(300);
 /// Grâce SIGTERM avant SIGKILL (stop volontaire / shutdown démon).
@@ -70,8 +68,21 @@ pub(super) enum Desired {
 }
 
 impl Components {
-    /// Spawn manuel / autostart — erreur si déjà lancé (vivant ou en
-    /// cours de démarrage) ; le backoff repart de `restart_sec`.
+    /// Autostart au boot : la voie *supervisée* — un échec transitoire
+    /// du premier spawn est retenté avec backoff au lieu de désarmer
+    /// `restart=always` (la voie manuelle `spawn` échouerait sec).
+    pub(super) async fn autostart(self: &Arc<Self>, spec: &ComponentSpec) -> Result<()> {
+        {
+            let mut procs = self.procs.write().await;
+            let p = procs.entry(spec.name.clone()).or_default();
+            p.desired = Desired::Running;
+            p.backoff_secs = spec.restart_sec.max(1);
+        }
+        self.spawn_cycle(spec, false).await
+    }
+
+    /// Spawn manuel — erreur si déjà lancé (vivant ou en cours de
+    /// démarrage) ; le backoff repart de `restart_sec`.
     pub(super) async fn spawn(self: &Arc<Self>, name: String) -> Result<ComponentStatus> {
         let spec = self
             .spec_of(&name)
@@ -126,17 +137,19 @@ impl Components {
                 {
                     let mut procs = self.procs.write().await;
                     if let Some(p) = procs.get_mut(&name) {
-                        p.state = ComponentState::Failed;
                         if manual {
+                            p.state = ComponentState::Failed;
                             p.desired = Desired::Stopped;
                         } else {
                             // Respawn supervisé : un échec transitoire
                             // (binaire absent un instant, fds épuisés,
                             // port pris) ne doit pas désactiver
                             // restart=always — on replanifie avec le
-                            // backoff déjà doublé par on_exit.
+                            // backoff déjà doublé par on_exit. Starting
+                            // comme l'attente post-exit : un retry suit.
+                            p.state = ComponentState::Starting;
                             delay = Some(Duration::from_secs(
-                                p.backoff_secs.min(BACKOFF_CAP),
+                                p.backoff_secs.min(BACKOFF_CAP_SECS),
                             ));
                         }
                     }
@@ -222,8 +235,8 @@ impl Components {
             if uptime >= STABLE_RESET {
                 p.backoff_secs = spec.restart_sec.max(1);
             }
-            let delay = Duration::from_secs(p.backoff_secs.min(BACKOFF_CAP));
-            p.backoff_secs = p.backoff_secs.saturating_mul(2).min(BACKOFF_CAP);
+            let delay = Duration::from_secs(p.backoff_secs.min(BACKOFF_CAP_SECS));
+            p.backoff_secs = p.backoff_secs.saturating_mul(2).min(BACKOFF_CAP_SECS);
             p.restarts += 1;
             p.state = ComponentState::Starting;
             p.started = None;

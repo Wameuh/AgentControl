@@ -162,7 +162,7 @@ impl Components {
             }
             self.reap_orphan(spec).await;
             if spec.autostart {
-                if let Err(e) = Arc::clone(self).spawn(spec.name.clone()).await {
+                if let Err(e) = self.autostart(spec).await {
                     warn!("composant « {} »: autostart impossible: {e:#}", spec.name);
                 }
             }
@@ -407,7 +407,7 @@ impl Components {
     pub(crate) fn injected_env(&self, name: &str) -> HashMap<String, String> {
         let tcp = match self.bind_tcp.rsplit_once(':') {
             Some(("0.0.0.0", port)) => format!("127.0.0.1:{port}"),
-            Some(("::", port)) | Some(("[::]", port)) => format!("::1:{port}"),
+            Some(("::", port)) | Some(("[::]", port)) => format!("[::1]:{port}"),
             _ => self.bind_tcp.clone(),
         };
         HashMap::from([
