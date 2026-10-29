@@ -667,7 +667,17 @@ impl Daemon {
             dead: dead_tx.clone(),
             queued: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
-        {
+        // Guard : au retour de serve_conn (client parti, dead signalé,
+        // erreur) le writer est avorté — dead = fermer maintenant, pas
+        // de drain post-mort qui garderait socket et clones vivants tant
+        // qu'un consommateur suintant réarme le timeout ligne à ligne.
+        struct AbortOnDrop(tokio::task::JoinHandle<()>);
+        impl Drop for AbortOnDrop {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let _writer = AbortOnDrop({
             let queued = Arc::clone(&outbox.queued);
             tokio::spawn(async move {
                 let mut w = BufWriter::new(write);
@@ -683,8 +693,8 @@ impl Daemon {
                     }
                 }
                 let _ = dead_tx.send(true);
-            });
-        }
+            })
+        });
 
         // État de subscription : (session_id, broadcast rx, last_sent,
         // journal_gen) — la gen trahit un reset quand les seqs coïncident.

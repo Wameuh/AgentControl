@@ -1,10 +1,11 @@
 // ---------------------------------------------------------------------------
 // Surveillance connexions : ok | reconnecting | down
 // ---------------------------------------------------------------------------
-// Mort détectée via `conn-dead` (Rust : EOF du reader, instantané) ou une
-// entrée {error} de la sonde fusionnée → down → retry en backoff
-// exponentiel (2 s → 60 s max). Le retry est un `connect` simple : le démon
-// est relancé par systemd (Restart=always) — jamais de réinstall en boucle.
+// Mort détectée via `conn-dead` (Rust : EOF du reader, instantané) ou
+// 2 entrées {error} consécutives de la sonde fusionnée → down → retry en
+// backoff exponentiel + jitter ±25 % (2 s → 60 s de base, ~75 s réel
+// max). Le retry est un `connect` simple : le démon est relancé par
+// systemd (Restart=always) — jamais de réinstall en boucle.
 // ---------------------------------------------------------------------------
 
 import { invoke, listen, isWeb } from "../core/bridge";
