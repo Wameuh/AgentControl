@@ -1,8 +1,8 @@
 // E2E « zone de saisie gelée » — repro du bug + filets de sécurité.
 //  1. new_session lent : dlg-new modal → #input inerte (attendu by design),
 //     Échap détache → frappe à nouveau possible, la session s'ouvre ensuite.
-//  2. ensure_daemon lent : dlg-daemon → Échap le détache (l'op continue,
-//     résultat via le dialogue de connexion).
+//  2. ensure_daemon lent : progression inline dans conn-view (plus de
+//     dlg-daemon modal) → Échap ferme la vue (op continue en fond).
 //  3. Watchdog : inert résiduel retiré ; dialog open-invisible fermé.
 // Usage : npm run build && node tests/frozen-input-e2e.mjs
 import puppeteer from "puppeteer-core";
@@ -165,8 +165,11 @@ const side = await p.evaluate(() =>
 check("session spawnée apparue après détachement", side.some((x) => /proj/i.test(x)),
   JSON.stringify(side));
 
-// --- 2. dlg-daemon pendant ensure_daemon lent → Échap détache ---------------
+// --- 2. progression inline pendant ensure_daemon lent → Échap détache ----
 await click("#btn-connect"); await sleep(300);
+check("vue connexion ouverte (overlay #chat, pas dialog)",
+  await p.evaluate(() => !document.getElementById("conn-view").hidden
+    && !document.querySelector("dialog#dlg-conn")));
 await p.evaluate(() => {
   document.getElementById("c-kind").value = "ssh";
   document.getElementById("c-kind").dispatchEvent(new Event("change"));
@@ -178,18 +181,23 @@ await sleep(700);
 check("install démon proposée", await dlgOpen("dlg-dupdate"));
 await click("#dupdate-go");
 await sleep(600);
-check("dlg-daemon affiché pendant ensure_daemon", await dlgOpen("dlg-daemon"));
+check("progression inline visible (#cv-progress, pas dlg-daemon)",
+  await p.evaluate(() => !document.getElementById("cv-progress").hidden
+    && !document.querySelector("#dlg-daemon")));
 r = await typedDuringModal("dlg-daemon");
-check("ensure_daemon : #input inerte", r.blocked, JSON.stringify(r));
+check("ensure_daemon : #input inerte sous la vue", r.blocked, JSON.stringify(r));
 await p.keyboard.press("Escape");
 await sleep(300);
-check("Échap : dlg-daemon détaché", !(await dlgOpen("dlg-daemon")),
-  "cancel était bloqué historiquement");
-// ensure_daemon continue → retry connect → connexion aboutie → dlg-conn
-// se ferme tout seul : l'opération détachée a mené à son terme.
+check("Échap : vue connexion fermée (op détachée)",
+  await p.evaluate(() => document.getElementById("conn-view").hidden));
+await typeInput("bg");
+check("Échap : #input à nouveau accessible", (await inputVal()) === "bg",
+  await inputVal());
+// ensure_daemon continue → retry connect → connexion aboutie — la vue
+// reste fermée (déjà close, rien à re-pop) et le bind réussit.
 await sleep(3500);
-check("opération détachée menée à terme (dlg-conn refermée)",
-  !(await dlgOpen("dlg-conn")));
+check("opération détachée menée à terme (sessions listées)",
+  await p.evaluate(() => document.querySelectorAll("#session-list .sess").length > 0));
 
 // --- 3. Watchdog ------------------------------------------------------------
 await p.evaluate(() => { document.getElementById("events").inert = true; });

@@ -35,7 +35,7 @@ import { initFusionDialog, openFusion } from "./features/fusion-dialog";
 import { GroupStore } from "./features/groups";
 import { NewSessionDialog } from "./features/new-session";
 import { ConnectionManager } from "./features/connections";
-import { ConnectDialog } from "./features/connect-dialog";
+import { ConnView } from "./features/conn-view";
 import { EventRenderer } from "./features/event-renderers";
 import { ChatView } from "./features/chat-view";
 import { SessionSearch } from "./features/search";
@@ -94,7 +94,7 @@ const sidebar = new Sidebar();
 const composer = new Composer();
 const files = new FileExplorer();
 const term = new TermPanel();
-const connectDlg = new ConnectDialog();
+const connView = new ConnView();
 const newSess = new NewSessionDialog();
 const settings = new SettingsPanel();
 const search = new SessionSearch();
@@ -120,6 +120,8 @@ chat.bind(renderer, {
     composer.sessionChanged();
   },
   connCount: () => conns.knownConns().length,
+  connsDownOrNone: () => !conns.anyUp(),
+  connHome: () => connView.maybeAutoShow(),
   firstPostCapable: (c) => conns.cap(c)?.first_post === true,
   termCapable: (c) => conns.cap(c)?.terminal === true,
 });
@@ -139,17 +141,22 @@ conns.bind({
   reopenIfConn: (c) => chat.reopenIfConn(c),
   closeIfConn: (c) => chat.closeIfConn(c),
   dropConvsForConn: (c) => chat.dropConvsForConn(c),
-  purgeSaved: (c) => connectDlg.purgeSaved(c),
+  purgeSaved: (c) => connView.purgeSaved(c),
   clearGroups: (c) => groups.clearConn(c),
   notePendingDel: (ids) => sidebar.notePendingDel(ids),
   clearPendingDel: (id) => sidebar.clearPendingDel(id),
   capsChanged: () => chat.updateHeader(),
   connChrome: (c, color) => applyConnChrome(c, color),
   termDead: (k) => term.markConnDead(k),
+  liveChanged: () => connView.onLiveChanged(),
 });
-connectDlg.bind(conns);
-connectDlg.refresh = () => sidebar.refresh();
-connectDlg.connecting = (hosts) => chat.setConnecting(hosts);
+connView.bind(conns);
+connView.refresh = () => sidebar.refresh();
+connView.connecting = (hosts) => chat.setConnecting(hosts);
+// Overlays plein #chat mutuellement exclusifs (paramètres ↔ connexions) :
+// empilés, le panneau du dessous resterait inerte sans moyen d'y revenir.
+connView.onOpening = () => settings.close();
+settings.onOpening = () => connView.close();
 newSess.bind(groups);
 newSess.refresh = () => void sidebar.refresh();
 newSess.openSession = (id, conn) => void chat.open(id, false, conn);
@@ -254,7 +261,7 @@ hydrateIcons();
 groups.init();
 newSess.init();
 conns.init();
-connectDlg.init();
+connView.init();
 chat.init();
 search.init();
 sidebar.init();
@@ -267,4 +274,4 @@ initModelBar(openFusion);
 initFusionDialog();
 initStatus();
 checkBootUpdate();
-connectDlg.autoConnect(savedConns, cliConn ?? undefined);
+connView.autoConnect(savedConns, cliConn ?? undefined);

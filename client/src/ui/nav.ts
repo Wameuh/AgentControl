@@ -123,6 +123,9 @@ export class OverlayNav {
     } else if (id === "settings") {
       // Passe par le handler de ✕ : hidden + levée de l'inert + nav.close.
       $("settings-close").click();
+    } else if (id === "connview") {
+      // Même motif : le ✕ de la vue connexion porte le close complet.
+      $("connview-close").click();
     } else if (id.startsWith("dlg:")) {
       (document.getElementById(id.slice(4)) as HTMLDialogElement | null)?.close();
     }

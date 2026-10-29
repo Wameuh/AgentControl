@@ -64,6 +64,9 @@ export class ConnectionManager {
      *  encore (éviction) : aucun event conn-dead/session_deleted ne
      *  viendra — les terminaux de cette conn doivent être marqués morts. */
     termDead: (_conn: string) => {},
+    /** États live recalculés (renderState) — la vue connexion met à jour
+     *  ses badges de statut et réarme son accueil auto. */
+    liveChanged: () => {},
   };
 
   bind(d: Partial<typeof this.deps>) {
@@ -398,6 +401,16 @@ export class ConnectionManager {
     placeMenu(ctx, "sctx", x, y);
   }
 
+  /** Une conn bound est-elle joignable (« ok » ou « reconnecting ») ?
+   *  Faux si rien n'est bound ou si tout est down/gone — la vue connexion
+   *  devient alors l'écran d'accueil (maybeAutoShow). */
+  anyUp() {
+    return [...this.cfg.keys()].some((k) => {
+      const s = this.gone.has(k) ? "down" : this.live.get(k);
+      return s === "ok" || s === "reconnecting";
+    });
+  }
+
   /** État agrégé → chip header + résumé statusbar ; badges sidebar via
    *  refresh. Une seule conn down → son nom dans le chip ; plusieurs →
    *  le compte. Le tooltip liste le détail par connexion. */
@@ -436,6 +449,7 @@ export class ConnectionManager {
       })
       .join('<span class="sb-sep"> · </span>');
     this.deps.refresh().catch(() => {});
+    this.deps.liveChanged();
   }
 
   init() {
