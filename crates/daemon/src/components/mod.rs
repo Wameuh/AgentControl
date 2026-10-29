@@ -333,14 +333,21 @@ impl Components {
             self.specs.read().await.get(name),
             Some(prev) if prev.kind == ComponentKind::Process && spec.kind != ComponentKind::Process
         );
-        if demote {
-            self.shutdown_proc(name).await?;
-        }
+        // Mutation mémoire AVANT le cycle de vie : un `start` concurrent
+        // lit la nouvelle spec (kind≠process → require_process refuse) et
+        // un respawn planifié sort via la garde kind — la fenêtre où un
+        // process tournerait sous une spec remplacée est fermée.
         self.specs
             .write()
             .await
             .insert(name.to_string(), spec.clone());
-        self.save().await?;
+        if demote {
+            self.shutdown_proc(name).await?;
+        }
+        if let Err(e) = self.save().await {
+            warn!("composant « {name} » upsert en mémoire mais save() a échoué — runtime diverge du toml jusqu'au prochain boot: {e:#}");
+            return Err(e);
+        }
         Ok(self.status_of(&spec).await)
     }
 
@@ -357,14 +364,22 @@ impl Components {
             .get(name)
             .cloned()
             .with_context(|| format!("composant inconnu: {name}"))?;
+        // Retrait de la spec AVANT le cycle de vie : tout start/stop/
+        // respawn concurrent échoue alors « composant inconnu »
+        // (require_process/spec_of) — pas de process démarré puis
+        // dé-tracké qui fuirait en orphelin invisible.
+        self.specs.write().await.remove(name);
         if spec.kind == ComponentKind::Process {
             self.shutdown_proc(name).await?;
             self.reap_orphan(&spec).await;
         }
-        self.specs.write().await.remove(name);
         self.procs.write().await.remove(name);
         self.observed.write().await.remove(name);
-        self.save().await
+        if let Err(e) = self.save().await {
+            warn!("composant « {name} » retiré en mémoire mais save() a échoué — il ressuscitera au prochain boot: {e:#}");
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Lecture du log `<root>/components/<name>.log` — tail paginé.
@@ -552,15 +567,30 @@ fn check_usable(spec: &ComponentSpec) -> Result<()> {
             .command
             .first()
             .with_context(|| format!("spec `{}` sans commande", kind_name(spec.kind)))?;
-        let base = Path::new(argv0)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| argv0.clone());
-        anyhow::ensure!(
-            !matches!(base.as_str(), "agentcontrol-daemon" | "supervisord" | "systemctl"),
-            "commande interdite « {argv0} » — un composant ne gère ni le démon ni son superviseur"
-        );
+        check_not_supervisor(argv0)?;
     }
+    // Même garde sur la sonde `command` — elle tourne toutes les 30 s,
+    // un `systemctl`/`supervisord` y serait exécuté en boucle.
+    if let Healthcheck::Command { argv } = &spec.healthcheck {
+        if let Some(argv0) = argv.first() {
+            check_not_supervisor(argv0)?;
+        }
+    }
+    Ok(())
+}
+
+/// argv0 ne doit jamais être le démon ni son superviseur — un
+/// composant managé ne gère ni l'un ni l'autre (commande du process
+/// ou sonde `command`, exécutée toutes les 30 s).
+fn check_not_supervisor(argv0: &str) -> Result<()> {
+    let base = Path::new(argv0)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| argv0.to_string());
+    anyhow::ensure!(
+        !matches!(base.as_str(), "agentcontrol-daemon" | "supervisord" | "systemctl"),
+        "commande interdite « {argv0} » — un composant ne gère ni le démon ni son superviseur"
+    );
     Ok(())
 }
 

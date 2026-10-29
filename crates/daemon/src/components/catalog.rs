@@ -24,6 +24,9 @@ use crate::server::misc::command_available;
 /// non authentifié (~12 appels/repo/h) et les allers réseau à chaque
 /// ouverture du panneau catalogue.
 const UPSTREAM_TTL: Duration = Duration::from_secs(300);
+/// Débrayage minimal même pour `refresh:true` — un client en boucle
+/// ne doit pas marteler l'API GitHub (rate-limit ~60 req/h/IP).
+const REFRESH_MIN: Duration = Duration::from_secs(30);
 /// Timeout d'une sonde `argv --version`.
 const VERSION_PROBE: Duration = Duration::from_secs(3);
 /// Timeout d'un appel API GitHub.
@@ -76,7 +79,11 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
             },
             detect: CatalogDetect {
                 bin: Some("agentbacklog".into()),
-                path: None,
+                // Repli fichier : `uv tool install` pose dans
+                // ~/.local/bin — présent sur le PATH via
+                // ensure_agent_path mais pas garanti selon le
+                // superviseur du démon (systemd minimal…).
+                path: Some("~/.local/bin/agentbacklog".into()),
             },
             recipe: vec![
                 RecipeStep::Run {
@@ -179,22 +186,34 @@ impl Components {
     /// `spawn_blocking` (ureq est synchrone). Jamais d'erreur : réseau
     /// coupé, rate-limit, repo sans release → champs null.
     async fn upstream(&self, repo: &str, refresh: bool) -> UpstreamOut {
-        if !refresh {
-            let cached = self
-                .upstream
-                .lock()
-                .ok()
-                .and_then(|m| m.get(repo).map(|u| (u.at, u.tag.clone(), u.notes.clone())));
-            if let Some((at, tag, notes)) = cached {
-                if at.elapsed() < UPSTREAM_TTL {
-                    return UpstreamOut { tag, notes };
-                }
+        let ttl = if refresh { REFRESH_MIN } else { UPSTREAM_TTL };
+        let cached = self
+            .upstream
+            .lock()
+            .ok()
+            .and_then(|m| m.get(repo).map(|u| (u.at, u.tag.clone(), u.notes.clone())));
+        if let Some((at, tag, notes)) = &cached {
+            if at.elapsed() < ttl {
+                return UpstreamOut {
+                    tag: tag.clone(),
+                    notes: notes.clone(),
+                };
             }
         }
         let r = repo.to_string();
         let fetched = tokio::task::spawn_blocking(move || fetch_upstream(&r))
             .await
-            .unwrap_or_else(|_| Upstream::empty());
+            .ok()
+            .flatten();
+        let Some(fetched) = fetched else {
+            // Fetch impossible (réseau coupé, panic) : conserver
+            // l'entrée précédente plutôt que d'évincer un tag sain
+            // pour 5 min — le client voit null seulement sans
+            // aucun cache valide.
+            return cached
+                .map(|(_, tag, notes)| UpstreamOut { tag, notes })
+                .unwrap_or_default();
+        };
         let out = UpstreamOut {
             tag: fetched.tag.clone(),
             notes: fetched.notes.clone(),
@@ -259,19 +278,10 @@ impl Components {
 }
 
 /// Tag + notes remontés au client par `catalog()`.
+#[derive(Default)]
 struct UpstreamOut {
     tag: Option<String>,
     notes: Option<String>,
-}
-
-impl Upstream {
-    fn empty() -> Self {
-        Self {
-            tag: None,
-            notes: None,
-            at: Instant::now(),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -323,8 +333,11 @@ async fn probe_version(e: &CatalogEntry) -> Option<String> {
 
 /// GitHub `repos/<repo>/releases/latest` → tag_name + body ; repli
 /// `/releases` (plus récente non-draft) puis `/tags` (repos sans
-/// release formelle). Tout échec → champs null.
-fn fetch_upstream(repo: &str) -> Upstream {
+/// release formelle). `None` = aucun endpoint n'a répondu (réseau
+/// coupé, DNS, rate-limit) — l'appelant conserve alors l'ancien
+/// cache ; `Some(tag/notes vides)` = « sondé : rien upstream », caché
+/// pareil pour ne pas marteler l'API.
+fn fetch_upstream(repo: &str) -> Option<Upstream> {
     let get = |url: String| -> Option<Value> {
         let resp = ureq::get(&url)
             .set("User-Agent", "agentcontrol-daemon")
@@ -348,32 +361,39 @@ fn fetch_upstream(repo: &str) -> Upstream {
         Some((tag, notes))
     };
     let base = format!("https://api.github.com/repos/{repo}");
-    if let Some((tag, notes)) = get(format!("{base}/releases/latest"))
-        .as_ref()
-        .and_then(&release)
-    {
-        return Upstream { tag: Some(tag), notes, at: Instant::now() };
+    let mut answered = false;
+    if let Some(v) = get(format!("{base}/releases/latest")) {
+        answered = true;
+        if let Some((tag, notes)) = release(&v) {
+            return Some(Upstream { tag: Some(tag), notes, at: Instant::now() });
+        }
     }
     if let Some(v) = get(format!("{base}/releases?per_page=1")) {
+        answered = true;
         if let Some((tag, notes)) = v.as_array().and_then(|a| a.first()).and_then(&release) {
-            return Upstream { tag: Some(tag), notes, at: Instant::now() };
+            return Some(Upstream { tag: Some(tag), notes, at: Instant::now() });
         }
     }
     if let Some(v) = get(format!("{base}/tags?per_page=1")) {
+        answered = true;
         if let Some(tag) = v
             .as_array()
             .and_then(|a| a.first())
             .and_then(|t| t.get("name"))
             .and_then(|n| n.as_str())
         {
-            return Upstream {
+            return Some(Upstream {
                 tag: Some(tag.to_string()),
                 notes: None,
                 at: Instant::now(),
-            };
+            });
         }
     }
-    Upstream::empty()
+    answered.then(|| Upstream {
+        tag: None,
+        notes: None,
+        at: Instant::now(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -381,14 +401,17 @@ fn fetch_upstream(repo: &str) -> Upstream {
 // ---------------------------------------------------------------------------
 
 /// `run {argv}` — exécution directe (jamais de shell), timeout
-/// `RUN_TIMEOUT`. Échec → Err avec code + queue de sortie (stderr
-/// sinon stdout), bornée `STEP_TAIL`.
+/// `RUN_TIMEOUT`. `~` est expansé sous HOME comme partout ailleurs
+/// dans les recettes. Échec → Err avec code + queue de sortie
+/// (stderr sinon stdout), bornée `STEP_TAIL`.
 async fn run_step(argv: &[String]) -> Result<()> {
     let argv0 = argv.first().context("run: argv vide")?;
+    let argv0 = expand_home_str(argv0);
+    let args: Vec<String> = argv[1..].iter().map(|a| expand_home_str(a)).collect();
     let out = tokio::time::timeout(
         RUN_TIMEOUT,
-        Command::new(argv0)
-            .args(&argv[1..])
+        Command::new(&argv0)
+            .args(&args)
             .stdin(std::process::Stdio::null())
             .output(),
     )
@@ -403,21 +426,50 @@ async fn run_step(argv: &[String]) -> Result<()> {
 }
 
 /// `write_file {path, content}` — borné sous le HOME du démon : `~`
-/// expansé, `..` hors HOME refusé, parent créé puis canonicalisé
-/// (symlink sortant refusé) — même garde que `resolve_in_cwd_create`.
-/// Écriture atomique `.part` + rename.
+/// expansé, `..` refusé et présence sous HOME vérifiée
+/// *lexicalement* avant tout `create_dir_all` (un chemin sortant ne
+/// doit pas créer de répertoires dehors), puis parent canonicalisé
+/// (sortie par symlink refusée) — même garde que
+/// `resolve_in_cwd_create`. Écriture atomique `.part` + rename.
 async fn write_home_file(path: &str, content: &str) -> Result<()> {
     let home = home_dir().context("HOME du démon absent")?;
     let home = std::fs::canonicalize(&home).unwrap_or(home);
-    let p = expand_home(path);
-    let p = if p.is_relative() { home.join(p) } else { p };
+    // `~`/relatif ancré sur le HOME *canonicalisé* — sinon un HOME
+    // symlinké ferait échouer la garde lexicale à tort.
+    let p = if path == "~" {
+        home.clone()
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        home.join(rest)
+    } else {
+        let p = PathBuf::from(path);
+        if p.is_relative() {
+            home.join(p)
+        } else {
+            p
+        }
+    };
+    // Garde lexicale AVANT la moindre écriture disque : aucun `..`
+    // (un chemin normalisé sous HOME ne peut pas en sortir
+    // textuellement), présence sous HOME exigée.
+    anyhow::ensure!(
+        !p.components()
+            .any(|c| matches!(c, std::path::Component::ParentDir)),
+        "« .. » refusé dans write_file : {}",
+        p.display()
+    );
+    anyhow::ensure!(
+        p.starts_with(&home),
+        "chemin hors HOME refusé : {}",
+        p.display()
+    );
     let parent = p.parent().context("chemin sans parent")?;
     tokio::fs::create_dir_all(parent).await?;
     let base = std::fs::canonicalize(parent)
         .with_context(|| format!("parent inexistant {}", parent.display()))?;
+    // Sortie par symlink : le parent résolu doit rester sous HOME.
     anyhow::ensure!(
         base.starts_with(&home),
-        "chemin hors HOME refusé : {}",
+        "chemin hors HOME refusé (symlink) : {}",
         p.display()
     );
     let leaf = p.file_name().context("chemin sans nom de fichier")?;
@@ -429,11 +481,21 @@ async fn write_home_file(path: &str, content: &str) -> Result<()> {
 }
 
 /// Spec effective posée par `upsert_spec` : `suggested_spec` avec `~`
-/// expansé sous HOME (chemins absolus à l'écriture dans le toml).
+/// expansé sous HOME partout où un chemin peut figurer (command, cwd,
+/// env, argv d'une sonde `command`) — le toml écrit porte des
+/// chemins absolus.
 fn materialize_spec(e: &CatalogEntry) -> ComponentSpec {
     let mut s = e.suggested_spec.clone();
     s.command = s.command.iter().map(|a| expand_home_str(a)).collect();
     s.cwd = s.cwd.as_deref().map(expand_home_str);
+    s.env = s
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), expand_home_str(v)))
+        .collect();
+    if let Healthcheck::Command { argv } = &mut s.healthcheck {
+        *argv = argv.iter().map(|a| expand_home_str(a)).collect();
+    }
     s
 }
 
