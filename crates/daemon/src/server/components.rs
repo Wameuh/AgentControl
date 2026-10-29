@@ -88,4 +88,15 @@ impl Daemon {
     pub(super) async fn h_component_install(self: &Arc<Self>, name: String) -> Result<Value> {
         self.components.install(&name).await
     }
+
+    /// `ComponentQuery{name, query}` — exécute la requête de données
+    /// déclarée `spec.queries[query]` (argv fixe, jamais de shell) →
+    /// {code, data(b64), size, truncated, stderr?(b64)}.
+    pub(super) async fn h_component_query(
+        self: &Arc<Self>,
+        name: String,
+        query: String,
+    ) -> Result<Value> {
+        self.components.query(&name, &query).await
+    }
 }

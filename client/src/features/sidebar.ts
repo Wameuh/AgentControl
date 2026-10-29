@@ -15,6 +15,7 @@ import { icon } from "../ui/icons";
 import { bindCtx, hideSessCtx, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
 import { PrListView, prBadge, repoLabel, type PrRow } from "./prs";
+import { BacklogView } from "./backlog";
 import type { ChatView } from "./chat-view";
 import type { ConnectionManager } from "./connections";
 import { grpNorm, grpParent, inSubtree } from "./groups";
@@ -88,9 +89,10 @@ export class Sidebar {
    *  vide si le démon ne connaît pas pr_list (vieux démon → pas de badge). */
   private prBySess = new Map<string, PrEntry[]>();
 
-  // --- Vue sidebar : « agents » (arbre sessions) ↔ « repos » (PRs par dépôt)
+  // --- Vue sidebar : « agents » ↔ « repos » ↔ « backlog » (file partagée)
   private prsView = new PrListView();
-  private view: "agents" | "repos" = "agents";
+  private backlogView = new BacklogView();
+  private view: "agents" | "repos" | "backlog" = "agents";
   /** Réponse brute du dernier pr_list (entrées + marqueurs conn_error). */
   private prRows: PrRow[] = [];
   private prFailed = false;
@@ -149,6 +151,17 @@ export class Sidebar {
     this.prsView.bind({
       openSession: (id) => this.openSession(id),
       connState: (k) => this.conns.state(k),
+      hl: (txt) => this.hl(txt),
+    });
+    this.backlogView.bind({
+      // Composants = 1 démon lié — même convention que la map-view.
+      conn: () => this.conns.knownConns()[0] ?? "",
+      componentsCapable: (c) => this.conns.cap(c)?.components === true,
+      openSession: (id, conn) => {
+        this.settings.close();
+        this.connView.close();
+        void this.chat.open(id, false, conn);
+      },
       hl: (txt) => this.hl(txt),
     });
   }
@@ -217,6 +230,8 @@ export class Sidebar {
       }
     }
     app.lastSessions = list;
+    // La vue backlog résout agent_id → titre de session : snapshot frais.
+    this.backlogView.noteSessions();
     // Alertes sonores : diff d'états (la liste fusionnée couvre toutes les
     // conns — le canal event ne suit que la session ouverte).
     sounds.noteStates(list);
@@ -318,21 +333,27 @@ export class Sidebar {
    *  le réécrire au changement de langue pendant la vue repos). */
   private renderView() {
     const fIn = $("sess-filter-input") as HTMLInputElement;
-    const repos = this.view === "repos";
-    fIn.placeholder = t(repos ? "pr_filter_ph" : "sess_filter_ph");
-    fIn.title = t(repos ? "pr_filter_title" : "sess_filter_title");
-    if (repos) {
+    const v = this.view;
+    fIn.placeholder = t(
+      v === "repos" ? "pr_filter_ph" : v === "backlog" ? "bl_filter_ph" : "sess_filter_ph",
+    );
+    fIn.title = t(
+      v === "repos" ? "pr_filter_title" : v === "backlog" ? "bl_filter_title" : "sess_filter_title",
+    );
+    if (v === "repos") {
       this.prsView.setFilter(this.filter);
       this.prsView.render();
+    } else if (v === "backlog") {
+      this.backlogView.setFilter(this.filter);
     } else {
       this.renderList();
     }
   }
 
-  /** Bascule agents ↔ repos (persistée). Passer en repos resynchronise
-   *  le registre — la vue reflète la fraîcheur d'un refresh, pas un
-   *  cache d'il y a plusieurs minutes. */
-  private setView(v: "agents" | "repos") {
+  /** Bascule agents ↔ repos ↔ backlog (persistée). Passer en repos
+   *  resynchronise le registre ; passer en backlog démarre son fetch
+   *  borné (le quitter l'arrête — pas de poll en arrière-plan). */
+  private setView(v: "agents" | "repos" | "backlog") {
     if (this.view === v) return;
     this.view = v;
     localStorage.setItem("ac-sideview", v);
@@ -342,15 +363,27 @@ export class Sidebar {
 
   /** Visibilité des panneaux + état visuel de l'onglet actif. */
   private applyView() {
-    const repos = this.view === "repos";
-    $("sv-agents").classList.toggle("on", !repos);
-    $("sv-repos").classList.toggle("on", repos);
-    $("sv-agents").setAttribute("aria-selected", String(!repos));
-    $("sv-repos").setAttribute("aria-selected", String(repos));
-    $("session-list").hidden = repos;
-    $("pr-list").hidden = !repos;
-    $("btn-new-session").hidden = repos;
+    const v = this.view;
+    $("sv-agents").classList.toggle("on", v === "agents");
+    $("sv-repos").classList.toggle("on", v === "repos");
+    $("sv-backlog").classList.toggle("on", v === "backlog");
+    $("sv-agents").setAttribute("aria-selected", String(v === "agents"));
+    $("sv-repos").setAttribute("aria-selected", String(v === "repos"));
+    $("sv-backlog").setAttribute("aria-selected", String(v === "backlog"));
+    $("session-list").hidden = v !== "agents";
+    $("pr-list").hidden = v !== "repos";
+    $("backlog-list").hidden = v !== "backlog";
+    $("btn-new-session").hidden = v !== "agents";
+    // L'onglet backlog pilote son propre cycle de fetch (ouverture +
+    // intervalle borné + events) — la coupure se fait ici.
+    this.backlogView.setActive(v === "backlog");
     this.renderView();
+  }
+
+  /** Event session poussé par le démon → invalidation debouncée de la
+   *  file (seulement si l'onglet backlog est actif). */
+  noteSessionEvent(type: string) {
+    this.backlogView.noteSessionEvent(type);
   }
 
   /** Filtre de l'arbre (normalisé : trim + bas de casse) — vide = tout. */
@@ -868,12 +901,15 @@ export class Sidebar {
   }
 
   init() {
-    // Sélecteur de vue agents ↔ repos : état persisté, restauration
-    // avant le premier refresh (la vue repos se synchronisera dessus).
-    this.view = localStorage.getItem("ac-sideview") === "repos" ? "repos" : "agents";
+    // Sélecteur de vue agents ↔ repos ↔ backlog : état persisté,
+    // restauration avant le premier refresh (repos se synchronise
+    // dessus, backlog démarre son fetch borné via applyView).
+    const sv = localStorage.getItem("ac-sideview");
+    this.view = sv === "repos" || sv === "backlog" ? sv : "agents";
     this.applyView();
     $("sv-agents").onclick = () => this.setView("agents");
     $("sv-repos").onclick = () => this.setView("repos");
+    $("sv-backlog").onclick = () => this.setView("backlog");
 
     // Filtre de l'arbre : recherche par nom de session / agent / groupe /
     // connexion. Rendu local instantané — pas de debounce, pas de RPC.

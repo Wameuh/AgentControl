@@ -76,6 +76,16 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 description: Some(
                     "File FIFO de features partagée entre agents".into(),
                 ),
+                // Le composant expose la file : `component_query
+                // {name:"agentbacklog", query:"list"}` → items JSON.
+                queries: HashMap::from([(
+                    "list".into(),
+                    vec![
+                        "agentbacklog".into(),
+                        "--list".into(),
+                        "--json".into(),
+                    ],
+                )]),
             },
             detect: CatalogDetect {
                 bin: Some("agentbacklog".into()),
@@ -120,6 +130,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 description: Some(
                     "Spawn les workers du backlog AgentBacklog".into(),
                 ),
+                queries: HashMap::new(),
             },
             detect: CatalogDetect {
                 bin: None,
@@ -508,7 +519,7 @@ fn materialize_spec(e: &CatalogEntry) -> ComponentSpec {
 // ---------------------------------------------------------------------------
 
 /// `~` / `~/x` → HOME du démon — sinon le chemin tel quel.
-fn expand_home(path: &str) -> PathBuf {
+pub(crate) fn expand_home(path: &str) -> PathBuf {
     PathBuf::from(expand_home_str(path))
 }
 

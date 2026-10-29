@@ -240,6 +240,54 @@ await pD.evaluate(() => window.dispatchEvent(new KeyboardEvent("keydown", { key:
 await sleep(200);
 ok((await pD.evaluate(() => document.querySelector("#components-view")?.hidden)) === true,
   "G7 Échap referme le panneau");
+// ---------- H : onglet backlog — file via component_query, refresh borné --
+// Même page pD (conn "local", components:true) : le mock sert BACKLOG via
+// component_query{name:agentbacklog,query:list} ; __BACKLOG/__blHide/
+// __qCalls pilotent mutation, absence du composant et comptage de trafic.
+await pD.evaluate(() => document.querySelector("#sv-backlog")?.click());
+await sleep(900); // fetch initial + rendu
+ok((await pD.evaluate(() =>
+  !document.querySelector("#backlog-list")?.hidden &&
+  document.querySelector("#session-list")?.hidden === true &&
+  document.querySelector("#sv-backlog")?.classList.contains("on"))) === true,
+  "H1 onglet Backlog → #backlog-list visible, sessions masquées");
+ok((await pD.evaluate(() => document.querySelectorAll("#backlog-list .bl-item").length)) === 4,
+  "H2 4 items rendus (wip+pending+done)");
+ok((await pD.evaluate(() => document.querySelector("#backlog-list .bl-sec.wip .bl-agent span")?.textContent)) === "Fix login crash",
+  "H3 wip : agent_id=s2 résolu en titre de session");
+ok((await pD.evaluate(() => document.querySelectorAll("#backlog-list .bl-blocked").length)) === 1,
+  "H4 #34 bloquée (dep_status≠done → cadenas)");
+ok((await pD.evaluate(() => document.querySelector("#sv-bcount")?.textContent)) === "3",
+  "H5 badge onglet = wip+pending (3)");
+ok((await pD.evaluate(() => document.querySelectorAll("#backlog-list .bl-agent.off").length)) === 1,
+  "H6 done : agent_id inconnu → pastille non cliquable");
+// Mutation live : push d'un item → le poll borné le ramène sans reload.
+await pD.evaluate(() => window.__BACKLOG.push(
+  { id: 40, title: "[test] item live", status: "pending", agent_id: null,
+    created_at: new Date().toISOString(), done_at: null, priority: 0 }));
+await sleep(4600);
+ok((await pD.evaluate(() => document.querySelector("#backlog-list")?.textContent.includes("item live"))) === true,
+  "H7 item ajouté → visible via le poll borné, sans reload");
+// Clic pastille agent → chat de la session s2.
+await pD.evaluate(() => document.querySelector('#backlog-list .bl-sec.wip .bl-agent[data-sid]')?.click());
+await sleep(500);
+ok((await pD.evaluate(() => document.querySelector("#chat-title")?.textContent.includes("Fix login crash"))) === true,
+  "H8 clic pastille agent → chat de la session ouvert");
+// Quitter l'onglet coupe le trafic : plus aucun component_query.
+await pD.evaluate(() => document.querySelector("#sv-agents")?.click());
+const qN = await pD.evaluate(() => window.__qCalls || 0);
+await sleep(4700);
+ok((await pD.evaluate(() => window.__qCalls || 0)) === qN,
+  "H9 onglet quitté → poll arrêté (0 component_query de plus)");
+// Composant masqué → état « non déclaré » + CTA ; Intégrer → install → file.
+await pD.evaluate(() => { window.__blHide = true; document.querySelector("#sv-backlog")?.click(); });
+await sleep(700);
+ok((await pD.evaluate(() => document.querySelector("#bl-install") != null)) === true,
+  "H10 composant absent → état propre + CTA Intégrer");
+await pD.evaluate(() => document.querySelector("#bl-install")?.click());
+await sleep(900);
+ok((await pD.evaluate(() => document.querySelectorAll("#backlog-list .bl-item").length)) >= 5,
+  "H11 Intégrer → component_install → file visible");
 
 console.log(`\n${fails === 0 ? "SMOKE OK" : "SMOKE FAIL"} — ${fails} échec(s)`);
 await b.close();
