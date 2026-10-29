@@ -9,7 +9,7 @@
   background: none; border: none; color: var(--ink); text-align: left;
   padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 12px;
 }
-#fctx button:hover, #sctx button:hover { background: rgba(236, 230, 216, .08); }
+#fctx button:hover, #sctx button:hover { background: rgba(var(--tint-rgb), .08); }
 #fctx button:disabled, #sctx button:disabled { opacity: .4; cursor: default; }
 #fctx button:disabled:hover, #sctx button:disabled:hover { background: none; }
 #fctx button.danger, #sctx button.danger { color: var(--red); }
@@ -39,7 +39,7 @@ dialog h3 { margin: 0 0 8px; font-weight: 500; }
 dialog form { display: flex; flex-direction: column; gap: 10px; }
 dialog label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; color: var(--muted); }
 dialog input, dialog select, dialog textarea {
-  background: rgba(236, 230, 216, .07); color: var(--ink);
+  background: rgba(var(--tint-rgb), .07); color: var(--ink);
   border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; font: inherit;
 }
 dialog input:focus, dialog select:focus, dialog textarea:focus { border-color: var(--accent); outline: none; }
@@ -84,7 +84,7 @@ dialog input[type="checkbox"]:focus-visible {
 #first-meta { color: var(--dim); font-size: 12px; min-height: 1em; }
 #first-body {
   margin: 0; padding: 10px 12px; max-height: 55vh; overflow-y: auto;
-  background: rgba(236, 230, 216, .05); border: 1px solid var(--line);
+  background: rgba(var(--tint-rgb), .05); border: 1px solid var(--line);
   border-radius: 8px; font-size: 13px; line-height: 1.5; font-family: inherit;
   white-space: pre-wrap; word-break: break-word; user-select: text;
 }
@@ -117,5 +117,5 @@ dialog input[type="checkbox"]:focus-visible {
 .dlg-status { color: var(--dim); font-size: 12.5px; }
 
 
-#g-name { width:100%; box-sizing:border-box; background:rgba(236,230,216,.05); color:var(--ink);
+#g-name { width:100%; box-sizing:border-box; background:rgba(var(--tint-rgb),.05); color:var(--ink);
   border:1px solid var(--line); border-radius:8px; padding:8px 10px; font:inherit; margin:8px 0 }

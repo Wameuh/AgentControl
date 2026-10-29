@@ -13,7 +13,7 @@ import { listen } from "../core/bridge";
 import { $, logUi, showErr } from "../core/dom";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
-import { isAndroid } from "../core/chrome";
+import { isAndroid, themeRgb } from "../core/chrome";
 import { t } from "../i18n";
 import { nav } from "../ui/nav";
 
@@ -48,11 +48,14 @@ const apiConn = (c: string) => (c === "default" ? undefined : c);
 function termTheme() {
   const v = (n: string) =>
     getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  // --panel-solid est un color-mix sous les thèmes d'accent : token brut
+  // inexploitable par le canvas → résolution via sonde (themeRgb).
+  const panel = themeRgb("--panel-solid") || "#161c18";
   return {
-    background: v("--panel-solid") || "#161c18",
+    background: panel,
     foreground: v("--ink") || "#ece6d8",
     cursor: v("--accent") || "#cdb68c",
-    cursorAccent: v("--panel-solid") || "#161c18",
+    cursorAccent: panel,
     selectionBackground: v("--line-strong") || "#555",
     black: "#1a1d16",
     red: v("--red") || "#e89486",

@@ -154,7 +154,12 @@ conns.bind({
     chat.updateHeader();
     comps.syncBtn();
   },
-  connChrome: (c, color) => applyConnChrome(c, color),
+  connChrome: (c, color) => {
+    applyConnChrome(c, color);
+    // L'accent de l'instance vient de changer (couleur de conn ou retour
+    // au neutre) : --panel-solid en dépend → refresh des terminaux ouverts.
+    term.refreshTheme();
+  },
   termDead: (k) => term.markConnDead(k),
   liveChanged: () => connView.onLiveChanged(),
 });

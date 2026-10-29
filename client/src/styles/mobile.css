@@ -172,7 +172,7 @@ body.android #omenu .om-item {
   padding: 15px 16px; font-size: 16.5px; text-align: left;
   background: none; border: 0; color: var(--fg); border-radius: 10px;
 }
-body.android #omenu .om-item:active { background: rgba(236, 230, 216, .07); }
+body.android #omenu .om-item:active { background: rgba(var(--tint-rgb), .07); }
 body.android #omenu .om-item.danger { color: var(--red); }
 body.android #omenu .om-item .ic { width: 17px; height: 17px; }
 /* Explorateur = page plein écran ; le viewer glisse par-dessus la liste. */
@@ -326,7 +326,7 @@ body.android input[type="checkbox"] {
 body.android input[type="checkbox"]::before {
   content: ""; position: absolute; inset: 9px;
   border: 1.5px solid var(--line-strong); border-radius: 6px;
-  background: rgba(236, 230, 216, .06);
+  background: rgba(var(--tint-rgb), .06);
 }
 body.android input[type="checkbox"]:checked::before {
   background: var(--accent); border-color: var(--accent);
@@ -425,7 +425,7 @@ body.android #connview-body { padding: 16px; }
 #c-pubkey {
   margin: 0; padding: 8px; font-size: 11px; white-space: pre-wrap;
   word-break: break-all; user-select: all; max-height: 90px; overflow: auto;
-  background: rgba(236, 230, 216, .05); border-radius: 6px; color: var(--accent);
+  background: rgba(var(--tint-rgb), .05); border-radius: 6px; color: var(--accent);
 }
 #c-pubkey-box { display: flex; flex-direction: column; gap: 6px;
   font-size: 13px; color: var(--muted); }

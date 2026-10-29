@@ -22,7 +22,7 @@
 }
 .comp-tab:hover { color: var(--ink); }
 .comp-tab.on { color: var(--accent); border-color: var(--line);
-  background: rgba(236, 230, 216, .06); }
+  background: rgba(var(--tint-rgb), .06); }
 .comp-sp { flex: 1; }
 #comp-head > button {
   background: none; border: none; color: var(--dim); cursor: pointer;
@@ -79,7 +79,7 @@
   background: none; border: none; color: var(--dim); cursor: pointer;
   padding: 6px; border-radius: 6px; min-width: 30px; min-height: 30px;
 }
-.comp-acts button:hover { color: var(--ink); background: rgba(236, 230, 216, .08); }
+.comp-acts button:hover { color: var(--ink); background: rgba(var(--tint-rgb), .08); }
 .comp-acts .ic { width: 14px; height: 14px; display: inline-block; vertical-align: middle; }
 
 /* --- Onglet Catalogue ------------------------------------------------ */
@@ -119,7 +119,7 @@
 #comp-editor label { display: flex; flex-direction: column; gap: 5px;
   font-size: 13px; color: var(--muted); }
 #comp-editor input, #comp-editor select, #comp-editor textarea {
-  background: rgba(236, 230, 216, .07); color: var(--ink);
+  background: rgba(var(--tint-rgb), .07); color: var(--ink);
   border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px;
   font: inherit;
 }
@@ -158,7 +158,7 @@
   font-family: var(--mono, monospace); font-size: 12px; line-height: 1.5;
   color: var(--ink); white-space: pre-wrap; word-break: break-all;
 }
-:root.light #comp-logs { background: rgba(43, 42, 36, .05); }
+:root.light #comp-logs { background: rgba(var(--tint-rgb), .05); }
 
 body.android #comp-body { padding-bottom: calc(20px + env(safe-area-inset-bottom)); }
 body.android #components-view button { min-height: 44px; }
