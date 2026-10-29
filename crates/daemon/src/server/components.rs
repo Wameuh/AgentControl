@@ -21,20 +21,39 @@ impl Daemon {
     }
 
     /// `ComponentStart{name}` → {name, state} — `process` seulement
-    /// (internal/external/tool refusés côté Components).
+    /// (internal/external/tool refusés côté Components). Exception
+    /// `backlog-orchestrator` : « démarrer » l'interne = basculer
+    /// l'orchestrateur natif à chaud (même effet qu'`OrchestratorSet`).
     pub(super) async fn h_component_start(self: &Arc<Self>, name: String) -> Result<Value> {
+        if name == crate::server::orch::COMPONENT_NAME {
+            self.orch.set_enabled(true);
+            info!("orchestrateur: démarré via component_start");
+            return Ok(json!({ "name": name, "state": self.orch.component_state() }));
+        }
         let st = self.components.start(&name).await?;
         Ok(json!({ "name": name, "state": st.state }))
     }
 
     /// `ComponentStop{name}` → {name, state} — SIGTERM gracieux.
+    /// `backlog-orchestrator` : arrête la boucle (runtime seulement).
     pub(super) async fn h_component_stop(self: &Arc<Self>, name: String) -> Result<Value> {
+        if name == crate::server::orch::COMPONENT_NAME {
+            self.orch.set_enabled(false);
+            info!("orchestrateur: arrêté via component_stop");
+            return Ok(json!({ "name": name, "state": self.orch.component_state() }));
+        }
         let st = self.components.stop(&name).await?;
         Ok(json!({ "name": name, "state": st.state }))
     }
 
     /// `ComponentRestart{name}` → {name, state} — stop + start.
+    /// `backlog-orchestrator` : restart = (ré)activation idempotente.
     pub(super) async fn h_component_restart(self: &Arc<Self>, name: String) -> Result<Value> {
+        if name == crate::server::orch::COMPONENT_NAME {
+            self.orch.set_enabled(true);
+            info!("orchestrateur: redémarré via component_restart");
+            return Ok(json!({ "name": name, "state": self.orch.component_state() }));
+        }
         let st = self.components.restart(&name).await?;
         Ok(json!({ "name": name, "state": st.state }))
     }

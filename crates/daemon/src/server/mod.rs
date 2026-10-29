@@ -8,14 +8,19 @@ mod components;
 /// Bornage workspace réutilisé par l'endpoint HTTP /media|/download.
 pub(crate) mod files;
 /// `command_available` est réutilisé par la détection du catalogue
-/// (components/catalog.rs).
+/// (components/catalog.rs) et par la garde AgentBacklog de
+/// l'orchestrateur natif.
 pub(crate) mod misc;
+/// `OrchProbe` est partagé avec `crate::components` (statut du
+/// composant interne `backlog-orchestrator` dans list_components).
+pub(crate) mod orch;
 mod peers;
 mod prs;
 mod sessions;
 mod term;
 
-pub use cfg::{A2aCfg, AgentProfile, RetentionCfg};
+pub use cfg::{A2aCfg, AgentProfile, OrchCfg, RetentionCfg};
+pub(crate) use orch::OrchProbe;
 
 use anyhow::{Context, Result};
 use proto::{Push, ReqKind, Request, Response};
@@ -143,6 +148,10 @@ pub struct Daemon {
     /// Composants managés : specs components.toml + superviseur des
     /// `process` + internal (components/mod.rs, proc.rs).
     pub components: Arc<Components>,
+    /// Orchestrateur backlog natif (server/orch.rs) — boucle interne
+    /// opt-in, statut exposé via le composant interne
+    /// `backlog-orchestrator`.
+    pub orch: Arc<OrchProbe>,
 }
 
 
@@ -158,14 +167,23 @@ impl Daemon {
         a2a: A2aCfg,
         forges: Forges,
         bind_tcp: String,
+        orch: OrchCfg,
     ) -> Result<(Arc<Self>, Vec<String>)> {
         let web = Arc::new(RwLock::new(None));
+        let orch = Arc::new(OrchProbe::open(orch));
         let d = Arc::new(Self {
             root: root.clone(),
             sessions: RwLock::new(HashMap::new()),
             agents,
             retention,
-            components: Components::open(&root, bind_tcp, a2a.enabled, Arc::clone(&web)),
+            components: Components::open(
+                &root,
+                bind_tcp,
+                a2a.enabled,
+                Arc::clone(&web),
+                Arc::clone(&orch),
+            ),
+            orch,
             a2a,
             peer_rate: std::sync::Mutex::new(HashMap::new()),
             spawn_rate: std::sync::Mutex::new(HashMap::new()),
@@ -659,6 +677,9 @@ impl Daemon {
             ReqKind::ComponentInstall { name } => self.h_component_install(name).await,
             ReqKind::ComponentQuery { name, query } => {
                 self.h_component_query(name, query).await
+            }
+            ReqKind::OrchestratorSet { enabled } => {
+                self.h_orch_set(enabled).await
             }
             ReqKind::Subscribe { session, after_seq } => {
                 self.h_subscribe(session, after_seq).await

@@ -15,6 +15,7 @@ use proto::{
     ComponentKind, ComponentSpec, ComponentState, ComponentStatus, ComponentsFile,
     Healthcheck, RestartPolicy,
 };
+use crate::server::{orch, OrchProbe};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -68,6 +69,12 @@ const INTERNALS: &[Internal] = &[
         name: "janitor",
         description: "Maintenance périodique (compaction journaux, purge blobs/sessions)",
     },
+    Internal {
+        name: "backlog-orchestrator",
+        description: "Orchestrateur backlog AgentBacklog — boucle interne \
+                      opt-in (workers, nudges, release orphelins, garde \
+                      release PR ; ex-script Python)",
+    },
 ];
 
 pub struct Components {
@@ -96,6 +103,9 @@ pub struct Components {
     /// Posé au shutdown du démon : watchers et sondes s'arrêtent —
     /// aucun respawn pendant l'arrêt.
     down: Arc<AtomicBool>,
+    /// Orchestrateur backlog natif — l'état du composant interne
+    /// `backlog-orchestrator` suit sa phase (server/orch.rs).
+    orch: Arc<OrchProbe>,
     /// Cache des sondes upstream du catalogue (tag+notes par repo,
     /// TTL ~5 min) — voir catalog.rs. Mutex std : sections courtes
     /// (get/insert), jamais tenue pendant un await.
@@ -111,6 +121,7 @@ impl Components {
         bind_tcp: String,
         a2a_enabled: bool,
         web: Arc<RwLock<Option<Value>>>,
+        orch: Arc<OrchProbe>,
     ) -> Arc<Self> {
         let dir = root.join("components");
         let specs = match read_specs(&root.join("components.toml")) {
@@ -149,6 +160,7 @@ impl Components {
             a2a_enabled,
             web,
             down: Arc::new(AtomicBool::new(false)),
+            orch,
             upstream: Mutex::new(HashMap::new()),
         })
     }
@@ -209,6 +221,8 @@ impl Components {
     }
 
     /// « Le feature interne tourne-t-il ? » — déduit de la cfg/runtime.
+    /// `backlog-orchestrator` n'est pas appelé ici : `item_of` déduit son
+    /// état de la phase de l'orchestrateur (running/degraded/stopped).
     async fn internal_active(&self, name: &str) -> bool {
         match name {
             "mcp-serve" => self.a2a_enabled,
@@ -226,6 +240,31 @@ impl Components {
         if let Some(spec) = self.specs.read().await.get(name).cloned() {
             let st = self.status_of(&spec).await;
             return Some(item_json(&spec, &st, "components.toml"));
+        }
+        if name == orch::COMPONENT_NAME {
+            // État déduit de la phase de l'orchestrateur natif + son
+            // instantané (ledger workers, gardes) dans `orchestrator`.
+            let i = INTERNALS.iter().find(|i| i.name == name)?;
+            let spec = ComponentSpec {
+                name: name.to_string(),
+                kind: ComponentKind::Internal,
+                command: Vec::new(),
+                env: HashMap::new(),
+                cwd: None,
+                autostart: self.orch.cfg.enabled,
+                restart: RestartPolicy::Never,
+                restart_sec: 0,
+                healthcheck: Healthcheck::None,
+                description: Some(i.description.to_string()),
+                queries: HashMap::new(),
+            };
+            let st = ComponentStatus {
+                state: self.orch.component_state(),
+                ..Default::default()
+            };
+            let mut item = item_json(&spec, &st, "internal");
+            item["orchestrator"] = self.orch.status_json();
+            return Some(item);
         }
         if let Some(i) = INTERNALS.iter().find(|i| i.name == name) {
             let running = self.internal_active(name).await;

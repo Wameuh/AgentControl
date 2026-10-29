@@ -79,6 +79,102 @@ impl Default for RetentionCfg {
     }
 }
 
+/// Orchestrateur backlog natif (section [backlog_orchestrator] de
+/// config.toml) — port interne du service `backlog-orchestrator.py`
+/// (voir server/orch.rs). **Désactivé par défaut** (opt-in explicite) ;
+/// bascule à chaud possible via `ReqKind::OrchestratorSet`.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct OrchCfg {
+    /// Activé au boot — défaut false : rien ne tourne sans opt-in.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Workers `title_prefix*` simultanés max (défaut 5).
+    #[serde(default = "d5")]
+    pub max_workers: u32,
+    /// Période de la boucle en secondes (défaut 60, min 10).
+    #[serde(default = "d60")]
+    pub poll_secs: u64,
+    /// Préfixe de titre des sessions workers (défaut "Backlog-W").
+    #[serde(default = "dprefix")]
+    pub title_prefix: String,
+    /// Groupe sidebar des workers (défaut "AgentControl").
+    #[serde(default = "dgroup")]
+    pub group: String,
+    /// cwd des sessions workers ET cwd des appels `gh` (défaut /workspace).
+    #[serde(default = "dws")]
+    pub workspace: String,
+    /// Profil agent des workers (défaut "devin").
+    #[serde(default = "dagent")]
+    pub agent: String,
+    /// Mode demandé au spawn (défaut "bypass").
+    #[serde(default = "dmode")]
+    pub mode: String,
+    /// Modèle demandé au spawn (défaut "swe-2-high").
+    #[serde(default = "dmodel")]
+    pub model: String,
+    /// Option `thought_level` posée après chaque spawn (défaut "max",
+    /// vide = ne rien poser).
+    #[serde(default = "dlevel")]
+    pub thought_level: String,
+    /// Cooldown entre deux nudges à la même session (défaut 900 s).
+    #[serde(default = "d900")]
+    pub nudge_cooldown_secs: u64,
+    /// Prompt worker sur mesure — None = le prompt intégré (celui du
+    /// script d'origine, adapté au cahier des charges AgentBacklog).
+    #[serde(default)]
+    pub prompt: Option<String>,
+}
+
+fn d5() -> u32 {
+    5
+}
+fn d60() -> u64 {
+    60
+}
+fn d900() -> u64 {
+    900
+}
+fn dprefix() -> String {
+    "Backlog-W".into()
+}
+fn dgroup() -> String {
+    "AgentControl".into()
+}
+fn dws() -> String {
+    "/workspace".into()
+}
+fn dagent() -> String {
+    "devin".into()
+}
+fn dmode() -> String {
+    "bypass".into()
+}
+fn dmodel() -> String {
+    "swe-2-high".into()
+}
+fn dlevel() -> String {
+    "max".into()
+}
+
+impl Default for OrchCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_workers: 5,
+            poll_secs: 60,
+            title_prefix: dprefix(),
+            group: dgroup(),
+            workspace: dws(),
+            agent: dagent(),
+            mode: dmode(),
+            model: dmodel(),
+            thought_level: dlevel(),
+            nudge_cooldown_secs: 900,
+            prompt: None,
+        }
+    }
+}
+
 /// Communication agent↔agent (section [a2a] de config.toml).
 /// Quand activé, chaque session reçoit un serveur MCP "agentcontrol" dans
 /// session/new|load — l'agent peut lister/envoyer/lire les sessions paires.
