@@ -521,6 +521,13 @@ impl Session {
                 }
             }
             acp::Mapped::Event(kind) => {
+                // Pendant le replay de session/load : les events sont
+                // traités pour leurs effets de bord méta (mode, config,
+                // contexte) mais PAS re-journalisés — le journal local
+                // contient déjà l'historique (sinon chaque resume
+                // empilait commands_available/config_options en double,
+                // et un `plan` rejoué dupliquerait un message entier).
+                let replaying = self.loading_replay.load(Ordering::SeqCst);
                 let mut compact_done = false;
                 match &kind {
                     EventKind::ModeChanged { mode } => {
@@ -577,7 +584,9 @@ impl Session {
                     }
                     _ => {}
                 }
-                self.emit(kind);
+                if !replaying {
+                    self.emit(kind);
+                }
                 if compact_done {
                     self.end_compact("contexte réduit");
                 }
