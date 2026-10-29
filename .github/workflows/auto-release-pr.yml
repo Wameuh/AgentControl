@@ -74,11 +74,6 @@ jobs:
           # Historique + tags complets : borne et range du générateur.
           fetch-depth: 0
 
-      - name: Notes de version du cycle
-        if: steps.gate.outputs.needed == 'true'
-        run: python3 client/tools/release_notes.py --ref HEAD \
-               --out "$RUNNER_TEMP/release-notes.md"
-
       - name: Body courante de la release PR (si ouverte)
         id: current
         if: steps.gate.outputs.needed == 'true'

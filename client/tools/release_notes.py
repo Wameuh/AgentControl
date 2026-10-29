@@ -40,7 +40,7 @@ CATEGORIES = [
     ("perf", "Améliorations"),
 ]
 
-SUBJECT = re.compile(r"^(\w+)(?:\([^)]*\))?\s*:\s*(.+?)\s*(?:\(#(\d+)\)\s*)?$")
+SUBJECT = re.compile(r"^(\w+)(?:\([^)]*\))?!?\s*:\s*(.+?)\s*(?:\(#(\d+)\)\s*)?$")
 SEMVER = re.compile(r"^v\d+\.\d+\.\d+$")
 # Mots-clés de bump : info pipeline, jamais montrée à l'utilisateur.
 KEYWORD = re.compile(r"\s*\((?:major|minor|sync|patch)\)", re.IGNORECASE)
@@ -75,8 +75,10 @@ def find_bound(ref):
     """Dernier bump DEJA RELEASE = commit `chore: bump version` dont le
     tag vX.Y.Z existe ; sinon dernier tag semver ; sinon None (racine)."""
     for c in git("rev-list", "--grep=^chore: bump version", ref).split():
-        m = re.search(r"(\d+\.\d+\.\d+)", git("log", "-1", "--format=%s", c))
-        if m and f"v{m.group(1)}" in semver_tags():
+        # Dernière occurrence X.Y.Z du sujet — comme `tail -1` de
+        # version.yml, les deux implémentations restent synchrones.
+        v = re.findall(r"\d+\.\d+\.\d+", git("log", "-1", "--format=%s", c))
+        if v and f"v{v[-1]}" in semver_tags():
             return c
     tags = semver_tags()
     return tags[0] if tags else None
@@ -118,6 +120,8 @@ def entries(rev_range):
         if not m or m.group(1) not in types:
             continue
         title = KEYWORD.sub("", m.group(2)).strip()
+        if not title:
+            continue
         title = title[0].upper() + title[1:]
         out[types[m.group(1)]].append((title, m.group(3)))
     return out
