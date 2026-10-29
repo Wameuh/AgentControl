@@ -153,6 +153,7 @@ conns.bind({
   capsChanged: () => {
     chat.updateHeader();
     comps.syncBtn();
+    sidebar.noteCapsChanged();
   },
   connChrome: (c, color) => {
     applyConnChrome(c, color);
@@ -226,8 +227,9 @@ void listen<string>("conn-dead", (e) => term.markConnDead(e.payload));
 
 await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
   const { session, event } = msg.payload;
-  // File AgentBacklog : un worker qui change d'état/pop/disparaît peut
-  // avoir muté la file — invalidation debouncée (onglet actif seul).
+  // File AgentBacklog : la session ouverte qui change d'état/pop/
+  // disparaît peut avoir muté la file — invalidation debouncée (badge
+  // + panneau ; les autres mutations remontent par le poll lent).
   sidebar.noteSessionEvent(event.type);
   // Suppression côté serveur : l'event terminal arrive avant la coupure.
   if (event.type === "session_deleted") {

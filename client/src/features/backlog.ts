@@ -6,10 +6,17 @@
 // déclarée (components.toml → spec.queries.list), exécuté borné côté démon.
 //
 // Refresh (spec #35) : fetch à l'ouverture de l'onglet + intervalle court
-// (~4 s) SEULEMENT tant que l'onglet est actif + invalidation debouncée sur
+// (~4 s) tant que l'onglet est actif + invalidation debouncée sur
 // les events session pertinents (status_changed — un worker qui passe
 // idle/waiting a souvent soldé sa tâche ; session_created/deleted — un
-// spawn qui pop ou une session libérée). Onglet inactif = zéro trafic.
+// spawn qui pop ou une session libérée).
+// Onglet inactif : cycle lent (~60 s) qui ne sert qu'au compteur de
+// l'onglet — vraie couverture des mutations externes (autre worker,
+// CLI) : les pushes session-event ne suivent que la session ouverte —
+// quand c'est elle qui travaille la file, le même debounce rafraîchit
+// le badge sans attendre le tick. Le détail du panneau profite du
+// même fetch — aucune requête « count » plus légère n'existe dans la
+// spec du composant.
 // ---------------------------------------------------------------------------
 
 import { $, esc, q } from "../core/dom";
@@ -24,6 +31,10 @@ import type { CompItem } from "../core/types";
 const COMP = "agentbacklog";
 const QUERY = "list";
 const POLL_MS = 4000;
+/** Cadence du badge onglet inactif — assez rare pour rester du bruit de
+ *  fond (2 RPC locales), assez dense pour qu'un item ajouté ailleurs
+ *  apparaisse au compteur sans action. */
+const IDLE_POLL_MS = 60_000;
 const DONE_KEEP_MS = 24 * 3600 * 1000; // « récentes » : done_at < 24 h
 const DONE_MAX = 8;
 
@@ -78,33 +89,43 @@ export class BacklogView {
   private evTimer: number | undefined;
   private installing = false;
   private filter = "";
-  /** Signature du dernier rendu — le poll 4 s ne rebuild le DOM que si la
+  /** Signature du dernier rendu — le poll ne rebuild le DOM que si la
    *  file ou la résolution d'agents a réellement changé. */
   private lastSig = "";
 
   bind(d: Partial<BacklogDeps>) {
     Object.assign(this.deps, d);
+    // Cycle badge lent dès le boot : le compteur doit refléter la file
+    // même sans jamais ouvrir l'onglet.
+    this.armPoll(IDLE_POLL_MS);
   }
 
-  /** Onglet activé : fetch immédiat + poll borné. Désactivé : tout s'arrête. */
+  /** Intervalle unique du fetch — la cadence dépend de l'onglet
+   *  (rapide actif, lente pour le badge inactif). */
+  private armPoll(ms: number) {
+    clearInterval(this.timer);
+    this.timer = window.setInterval(() => void this.refresh(), ms);
+  }
+
+  /** Onglet activé : fetch immédiat + poll rapide. Désactivé : retombe
+   *  sur la cadence badge (60 s) — l'evTimer survit : ses events
+   *  continuent d'invalider le compteur. */
   setActive(on: boolean) {
     if (this.active === on) return;
     this.active = on;
     if (on) {
       void this.refresh();
-      this.timer = window.setInterval(() => void this.refresh(), POLL_MS);
+      this.armPoll(POLL_MS);
     } else {
-      clearInterval(this.timer);
-      this.timer = undefined;
-      clearTimeout(this.evTimer);
-      this.evTimer = undefined;
+      this.armPoll(IDLE_POLL_MS);
     }
   }
 
   /** Invalidation par event session — debounce : une rafale de
-   *  status_changed = un seul fetch. */
+   *  status_changed = un seul fetch. Onglet actif ou non — les pushes
+   *  ne couvrant que la session ouverte, le cas utile est « la session
+   *  affichée travaille la file » ; le reste relève du poll lent. */
   noteSessionEvent(type: string) {
-    if (!this.active) return;
     if (
       type !== "status_changed" &&
       type !== "session_created" &&
@@ -117,6 +138,13 @@ export class BacklogView {
       this.evTimer = undefined;
       void this.refresh();
     }, 800);
+  }
+
+  /** Capability `components` (re)découverte — premier paint du badge
+   *  sans attendre le prochain tick (le poll lent part du boot, avant
+   *  la connexion). */
+  noteCaps() {
+    void this.refresh();
   }
 
   setFilter(f: string) {
@@ -140,7 +168,6 @@ export class BacklogView {
     const comps = await call<CompItem[]>("list_components", { conn }).catch(
       () => null,
     );
-    if (!this.active) return; // onglet quitté pendant le fetch → ne rien rendre
     if (!comps) {
       this.state = { kind: "err", msg: t("bl_fetch_err") };
       this.render();
@@ -163,7 +190,6 @@ export class BacklogView {
       name: COMP,
       query: QUERY,
     }).catch((e: unknown) => ({ err: String(e) }));
-    if (!this.active) return;
     if ("err" in r) {
       this.state = { kind: "err", msg: r.err };
       this.render();
