@@ -77,7 +77,8 @@ pub struct Components {
     /// Runtime des `process` managés (voir proc.rs).
     procs: RwLock<HashMap<String, proc::Proc>>,
     /// Dernier verdict de sonde pour external/tool (kind sans cycle de
-    /// vie : leur « état » n'est qu'une observation périodique).
+    /// vie : leur « état » n'est qu'une observation périodique — pour
+    /// un `tool` absent il n'y a rien à retenir, l'entrée est effacée).
     observed: RwLock<HashMap<String, bool>>,
     /// Dernière version sondée des `tool` (1re ligne de leur commande
     /// — absente de la map tant que la sonde n'a rien rapporté).
@@ -335,9 +336,10 @@ impl Components {
         check_editable(&spec)?;
         // Même borne qu'au chargement : le backoff plafonne à 60 s.
         spec.restart_sec = spec.restart_sec.min(BACKOFF_CAP_SECS);
+        let prev_kind = self.specs.read().await.get(name).map(|p| p.kind);
         let demote = matches!(
-            self.specs.read().await.get(name),
-            Some(prev) if prev.kind == ComponentKind::Process && spec.kind != ComponentKind::Process
+            prev_kind,
+            Some(ComponentKind::Process) if spec.kind != ComponentKind::Process
         );
         // Mutation mémoire AVANT le cycle de vie : un `start` concurrent
         // lit la nouvelle spec (kind≠process → require_process refuse) et
@@ -347,10 +349,18 @@ impl Components {
             .write()
             .await
             .insert(name.to_string(), spec.clone());
-        // Une spec tool dont la `command` change ne doit pas garder la
-        // version sondée de l'ancienne — purge du cache, la prochaine
-        // passe de health_loop resonde.
+        // Purge des caches sondés (inconditionnelle : éditer le seul
+        // `healthcheck` invalide tout autant le verdict) — la prochaine
+        // passe de health_loop resonde. `observed` porte le `state` des
+        // `external` : conservé entre deux éditions de même kind pour ne
+        // pas les faire clignoter « stopped », purgé dès que le kind
+        // change ou que la spec est un `tool` — le verdict d'un tool ne
+        // doit pas piloter l'état d'un nouvel external (permanent sans
+        // healthcheck).
         self.versions.write().await.remove(name);
+        if spec.kind == ComponentKind::Tool || prev_kind != Some(spec.kind) {
+            self.observed.write().await.remove(name);
+        }
         if demote {
             self.shutdown_proc(name).await?;
         }
@@ -488,8 +498,20 @@ impl Components {
         self.observed.read().await.get(name).copied()
     }
 
-    pub(crate) async fn set_observed(&self, name: &str, ok: bool) {
-        self.observed.write().await.insert(name.to_string(), ok);
+    /// Pose/efface le verdict courant — `None` = rien de valable à
+    /// retenir (tool absent : l'état se suffit, et un `false` conservé
+    /// flasherait « fail » à la réinstallation avant la prochaine
+    /// passe).
+    pub(crate) async fn set_observed(&self, name: &str, ok: Option<bool>) {
+        let mut m = self.observed.write().await;
+        match ok {
+            Some(ok) => {
+                m.insert(name.to_string(), ok);
+            }
+            None => {
+                m.remove(name);
+            }
+        }
     }
 
     /// Version sondée courante d'un `tool` (pour status_of).
