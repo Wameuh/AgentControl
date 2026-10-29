@@ -95,6 +95,10 @@ const SHAPES: Record<string, string> = {
     '<circle cx="9.4" cy="13.4" r="1" fill="currentColor" stroke="none"/>' +
     '<circle cx="14.6" cy="13.4" r="1" fill="currentColor" stroke="none"/>' +
     '<path d="M9.6 16.6h4.8"/>',
+  backlog:
+    '<path d="M8.5 6h12M8.5 12h12M8.5 18h12"/>' +
+    '<path d="m3 5.9 1.2 1.2 2.3-2.4"/><path d="m3 11.9 1.2 1.2 2.3-2.4"/>' +
+    '<path d="m3 17.9 1.2 1.2 2.3-2.4"/>',
   pr:
     '<circle cx="6.5" cy="6" r="2.7"/><circle cx="6.5" cy="18" r="2.7"/>' +
     '<path d="M6.5 8.7v6.6"/>' +

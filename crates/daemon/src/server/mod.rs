@@ -641,6 +641,9 @@ impl Daemon {
                 self.h_component_catalog(refresh).await
             }
             ReqKind::ComponentInstall { name } => self.h_component_install(name).await,
+            ReqKind::ComponentQuery { name, query } => {
+                self.h_component_query(name, query).await
+            }
             ReqKind::Subscribe { session, after_seq } => {
                 self.h_subscribe(session, after_seq).await
             }

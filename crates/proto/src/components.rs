@@ -105,6 +105,13 @@ pub struct ComponentSpec {
     pub healthcheck: Healthcheck,
     #[serde(default)]
     pub description: Option<String>,
+    /// Requêtes de données déclarées — `ComponentQuery{name, query}`
+    /// exécute `queries[query]` en argv direct (pas de shell). Le
+    /// composant « expose » ainsi ses données auditées (ex. la file
+    /// d'un tool comme `agentbacklog --list --json`) sans ouvrir un
+    /// canal de commande libre au client.
+    #[serde(default)]
+    pub queries: HashMap<String, Vec<String>>,
 }
 
 fn default_kind() -> ComponentKind {

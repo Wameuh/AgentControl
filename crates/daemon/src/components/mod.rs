@@ -38,6 +38,12 @@ const BACKOFF_CAP_SECS: u64 = 60;
 /// `starting` pendant cette fenêtre avant de passer `degraded`.
 const START_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// `ComponentQuery` : timeout d'une requête déclarée et plafonds de
+/// sortie (stdout tronqué, stderr en queue).
+const QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const QUERY_MAX: usize = 512 * 1024;
+const QUERY_ERR_MAX: usize = 8 * 1024;
+
 /// Une feature interne exposée comme composant : état déduit de la
 /// config/runtime du démon, jamais de cycle de vie.
 struct Internal {
@@ -234,6 +240,7 @@ impl Components {
                 restart_sec: 0,
                 healthcheck: Healthcheck::None,
                 description: Some(i.description.to_string()),
+                queries: HashMap::new(),
             };
             let st = ComponentStatus {
                 state: if running {
@@ -437,6 +444,59 @@ impl Components {
         }))
     }
 
+    /// `ComponentQuery{name, query}` — exécute `spec.queries[query]`
+    /// en argv direct (jamais de shell) : le composant expose ainsi
+    /// des données auditées (file AgentBacklog, stats…) sans ouvrir
+    /// un canal de commande libre au client. Bornes : timeout
+    /// `QUERY_TIMEOUT`, stdout plafonné `QUERY_MAX`, stderr réduit à
+    /// `QUERY_ERR_MAX` (diagnostic, pas un flux). `code` vaut null si
+    /// le process est tué par signal.
+    pub async fn query(&self, name: &str, query: &str) -> Result<Value> {
+        let spec = self
+            .specs
+            .read()
+            .await
+            .get(name)
+            .cloned()
+            .with_context(|| format!("composant inconnu: {name}"))?;
+        let argv = spec
+            .queries
+            .get(query)
+            .with_context(|| format!("pas de query « {query} » déclarée pour « {name} »"))?
+            .clone();
+        let argv0 = argv.first().context("query déclarée vide")?;
+        let mut cmd = tokio::process::Command::new(catalog::expand_home(argv0));
+        cmd.args(argv[1..].iter().map(|a| catalog::expand_home(a)))
+            .envs(&spec.env)
+            .envs(self.injected_env(name))
+            .current_dir(
+                spec.cwd
+                    .as_deref()
+                    .map(catalog::expand_home)
+                    .unwrap_or_else(|| self.root.clone()),
+            )
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let out = tokio::time::timeout(QUERY_TIMEOUT, cmd.output())
+            .await
+            .with_context(|| format!("query `{argv0}` : timeout {}s", QUERY_TIMEOUT.as_secs()))?
+            .with_context(|| format!("query `{argv0}` : spawn impossible"))?;
+        let size = out.stdout.len() as u64;
+        let slice = &out.stdout[..(size as usize).min(QUERY_MAX)];
+        use base64::Engine;
+        let mut resp = json!({
+            "code": out.status.code(),
+            "data": base64::engine::general_purpose::STANDARD.encode(slice),
+            "size": size,
+            "truncated": size as usize > QUERY_MAX,
+        });
+        if !out.stderr.is_empty() {
+            let tail = &out.stderr[out.stderr.len().saturating_sub(QUERY_ERR_MAX)..];
+            resp["stderr"] = json!(base64::engine::general_purpose::STANDARD.encode(tail));
+        }
+        Ok(resp)
+    }
+
     /// Arrêt du démon : SIGTERM à tous les `process` managés d'un coup
     /// (la grâce court en parallèle — N composants ne coûtent pas
     /// N × 3 s), puis reap + SIGKILL résiduels. Même destin que les
@@ -612,6 +672,16 @@ fn expand_home_fields(spec: &mut ComponentSpec) {
             .map(|a| catalog::expand_home_str(a))
             .collect();
     }
+    spec.queries = spec
+        .queries
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                v.iter().map(|a| catalog::expand_home_str(a)).collect(),
+            )
+        })
+        .collect();
 }
 
 /// Refuse les specs inutilisables : nom invalide ou réservé à un
@@ -652,6 +722,19 @@ fn check_usable(spec: &ComponentSpec) -> Result<()> {
         if let Some(argv0) = argv.first() {
             check_not_supervisor(argv0)?;
         }
+    }
+    // Queries déclarées : nom [a-z0-9-]+, argv non vide, argv0 jamais
+    // superviseur — `ComponentQuery` les exécute sans audit au runtime.
+    for (qname, qargv) in &spec.queries {
+        anyhow::ensure!(
+            !qname.is_empty()
+                && qname
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+            "query « {qname} » invalide ([a-z0-9-]+ attendu)"
+        );
+        anyhow::ensure!(!qargv.is_empty(), "query « {qname} » : argv vide");
+        check_not_supervisor(&qargv[0])?;
     }
     Ok(())
 }

@@ -269,6 +269,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         // gate capability daemon_status.components côté frontend.
         "list_components" => ReqKind::ListComponents,
         "component_info" => ReqKind::ComponentInfo { name: s("name") },
+        "component_query" => ReqKind::ComponentQuery { name: s("name"), query: s("query") },
         "component_start" => ReqKind::ComponentStart { name: s("name") },
         "component_stop" => ReqKind::ComponentStop { name: s("name") },
         "component_restart" => ReqKind::ComponentRestart { name: s("name") },

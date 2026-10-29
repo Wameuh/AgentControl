@@ -33,6 +33,7 @@
           <div id="side-view" role="tablist">
             <button id="sv-agents" class="sv on" role="tab" data-i18n-title="view_agents_title" title="Agent sessions"><span class="sv-ic" data-icon="bot"></span><span data-i18n="view_agents">Agents</span></button>
             <button id="sv-repos" class="sv" role="tab" data-i18n-title="view_repos_title" title="Pull requests"><span class="sv-ic" data-icon="pr"></span><span data-i18n="view_repos">Repos</span><span id="sv-count" hidden></span></button>
+            <button id="sv-backlog" class="sv" role="tab" data-i18n-title="view_backlog_title" title="Backlog"><span class="sv-ic" data-icon="backlog"></span><span data-i18n="view_backlog">Backlog</span><span id="sv-bcount" hidden></span></button>
           </div>
           <div id="sess-filter">
             <input id="sess-filter-input" data-i18n-ph="sess_filter_ph" data-i18n-title="sess_filter_title" placeholder="Filter sessions…" />
@@ -40,6 +41,7 @@
           </div>
           <div id="session-list"></div>
           <div id="pr-list" hidden></div>
+          <div id="backlog-list" hidden></div>
           <button id="btn-new-session"><span data-icon="user-plus"></span><span data-i18n="new_session">New agent</span></button>
           <div id="sidebar-resize" title="Drag to resize"></div>
         </aside>

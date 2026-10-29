@@ -882,6 +882,13 @@ pub enum ReqKind {
     /// `run` argv fixe, `write_file` borné HOME, `upsert_spec`…) →
     /// {installed, name, state, notes}.
     ComponentInstall { name: String },
+    /// Exécute une requête de données déclarée sur le composant —
+    /// `spec.queries[query]` en argv direct, jamais de shell (le
+    /// composant expose ses données auditées : ex.
+    /// `agentbacklog --list --json`). Réponse :
+    /// `{code, data(b64), size, truncated, stderr?(b64)}` ; absent =
+    /// composant ou query inconnue → erreur.
+    ComponentQuery { name: String, query: String },
     DaemonStatus,
     /// Auto-update du démon vers la release `version` demandée par le
     /// client (ex. "0.5.0" → tag v0.5.0 — jamais « latest » : le démon
@@ -956,6 +963,7 @@ impl ReqKind {
             Self::ComponentRemove { .. } => "component_remove",
             Self::ComponentCatalog { .. } => "component_catalog",
             Self::ComponentInstall { .. } => "component_install",
+            Self::ComponentQuery { .. } => "component_query",
             Self::DaemonStatus => "daemon_status",
             Self::UpdateDaemon { .. } => "update_daemon",
         }

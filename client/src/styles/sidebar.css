@@ -270,3 +270,50 @@ button:disabled { opacity: .5; cursor: default; }
   padding: 18px 12px; text-align: center; font-size: 12px;
   color: var(--dim); font-style: italic;
 }
+
+/* ── Vue backlog : file AgentBacklog (via component_query) ─────────────── */
+#backlog-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+#backlog-list mark { background: rgba(224, 201, 150, .3); color: inherit; border-radius: 3px; padding: 0 1px; }
+#backlog-list .sess-none {
+  padding: 18px 12px; font-size: 12px; color: var(--dim); font-style: italic;
+  display: flex; align-items: center; justify-content: center; gap: 7px; text-align: center;
+}
+#backlog-list .sess-none .ic { width: 13px; height: 13px; flex: none; }
+#backlog-list .sess-none.warn { color: var(--gold); }
+#sv-bcount {
+  font-size: 10px; font-family: Mono, ui-monospace, monospace; line-height: 1;
+  background: rgba(var(--accent-rgb), .18); color: var(--accent);
+  border-radius: 8px; padding: 2px 5px;
+}
+.bl-cta {
+  align-self: center; display: flex; align-items: center; gap: 6px;
+  margin: 4px 10px 10px; padding: 5px 12px; font-size: 12px;
+  border: 1px solid rgba(var(--accent-rgb), .4); border-radius: 7px;
+  background: none; color: var(--accent); cursor: pointer;
+}
+.bl-cta:hover { background: rgba(var(--accent-rgb), .12); }
+.bl-cta[disabled] { opacity: .55; cursor: default; }
+.bl-cta .ic { width: 13px; height: 13px; }
+.bl-sec { padding-bottom: 4px; }
+.bl-sec .grp-head { cursor: default; }
+.bl-sec .grp-head:hover { color: var(--dim); }
+.bl-sec .grp-head .bl-n { margin-left: 4px; font-weight: 400; }
+.bl-item {
+  display: flex; align-items: center; gap: 7px;
+  padding: 5px 10px; font-size: 12px; border-radius: 6px;
+}
+.bl-item:hover { background: rgba(236, 230, 216, .05); }
+.bl-item .bl-id { color: var(--dim); font-family: Mono, ui-monospace, monospace; flex: none; }
+.bl-item .bl-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bl-item .bl-blocked { color: var(--gold); flex: none; display: inline-flex; }
+.bl-item .bl-blocked .ic { width: 12px; height: 12px; }
+.bl-item .bl-agent {
+  display: inline-flex; align-items: center; gap: 4px; flex: none; max-width: 42%;
+  padding: 1px 8px; font-size: 11px; border-radius: 10px; cursor: pointer;
+  border: 1px solid rgba(var(--accent-rgb), .35); background: none; color: var(--accent);
+}
+.bl-item .bl-agent:hover { background: rgba(var(--accent-rgb), .12); }
+.bl-item .bl-agent .ic { width: 11px; height: 11px; flex: none; }
+.bl-item .bl-agent > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bl-item .bl-agent.off { border: 0; color: var(--dim); cursor: default; padding: 1px 2px; font-family: Mono, ui-monospace, monospace; }
+.bl-item .bl-when { color: var(--dim); font-size: 11px; flex: none; white-space: nowrap; }
