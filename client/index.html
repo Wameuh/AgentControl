@@ -15,6 +15,7 @@
         <span id="titlebar-title">AgentControl</span>
         <div class="tb-btns">
           <button id="tb-map" data-icon="map" title="Map" data-i18n-title="map_title"></button>
+          <button id="tb-components" hidden data-icon="tool" title="Components" data-i18n-title="comp_h"></button>
           <button id="tb-settings" data-icon="settings" title="Settings" data-i18n-title="settings_title"></button>
           <button id="tb-about" data-icon="info" title="About" data-i18n-title="about_title"></button>
           <button id="tb-more" hidden data-icon="more" data-i18n-title="menu_title" title="Menu"></button>
@@ -303,6 +304,78 @@
                 <span><i class="lg-flow"></i><b data-i18n="map_leg_flow">active flow</b></span>
               </div>
               <div id="map-info" hidden></div>
+            </div>
+          </div>
+          <div id="components-view" tabindex="-1" hidden>
+            <header id="comp-head">
+              <span id="comp-title" data-i18n="comp_h">Components</span>
+              <div id="comp-tabs" role="tablist">
+                <button type="button" id="comp-tab-list" class="comp-tab on" role="tab" data-i18n="comp_tab_list">Installed</button>
+                <button type="button" id="comp-tab-cat" class="comp-tab" role="tab" data-i18n="comp_tab_catalog">Catalog</button>
+              </div>
+              <span class="comp-sp"></span>
+              <button type="button" id="comp-add" data-icon="plus" data-i18n-title="comp_add" title="New component"></button>
+              <button type="button" id="comp-refresh" data-icon="refresh" data-i18n-title="comp_refresh" title="Refresh"></button>
+              <button type="button" id="comp-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <div id="comp-body">
+              <div id="comp-err" class="dlg-err" role="alert" hidden></div>
+              <div id="comp-list"></div>
+              <div id="comp-catalog" hidden></div>
+              <div id="comp-editor" hidden>
+                <h4 id="comp-ed-title"></h4>
+                <div id="comp-ed-form">
+                  <label><span data-i18n="comp_f_name">Name</span> <input id="ce-name" autocomplete="off" spellcheck="false" /></label>
+                  <label><span data-i18n="comp_f_kind">Kind</span>
+                    <select id="ce-kind">
+                      <option value="process">process</option>
+                      <option value="external">external</option>
+                      <option value="tool">tool</option>
+                    </select>
+                  </label>
+                  <label><span data-i18n="comp_f_desc">Description</span> <input id="ce-desc" autocomplete="off" /></label>
+                  <label class="ce-f-cmd"><span data-i18n="comp_f_cmd">Command (one arg per line)</span> <textarea id="ce-cmd" rows="3" spellcheck="false"></textarea></label>
+                  <label class="ce-f-env"><span data-i18n="comp_f_env">Environment (KEY=VALUE per line)</span> <textarea id="ce-env" rows="3" spellcheck="false"></textarea></label>
+                  <label class="ce-f-cwd"><span data-i18n="workdir">Working directory</span> <input id="ce-cwd" autocomplete="off" spellcheck="false" /></label>
+                  <label class="ce-f-autostart chk-row">
+                    <input type="checkbox" id="ce-autostart" />
+                    <span data-i18n="comp_f_autostart">Start with the daemon</span>
+                  </label>
+                  <label class="ce-f-restart"><span data-i18n="comp_f_restart">Restart policy</span>
+                    <select id="ce-restart">
+                      <option value="on-failure">on-failure</option>
+                      <option value="always">always</option>
+                      <option value="never">never</option>
+                    </select>
+                  </label>
+                  <label class="ce-f-rsec"><span data-i18n="comp_f_restart_sec">Restart delay (s)</span> <input id="ce-rsec" type="number" min="0" max="60" /></label>
+                  <label><span data-i18n="comp_f_hc">Healthcheck</span>
+                    <select id="ce-hc">
+                      <option value="none">none</option>
+                      <option value="process">process</option>
+                      <option value="tcp">tcp</option>
+                      <option value="http">http</option>
+                      <option value="command">command</option>
+                    </select>
+                  </label>
+                  <label class="ce-f-hc-tcp"><span data-i18n="comp_f_hc_addr">TCP address</span> <input id="ce-hc-addr" placeholder="127.0.0.1:8080" autocomplete="off" spellcheck="false" /></label>
+                  <label class="ce-f-hc-http"><span data-i18n="comp_f_hc_url">HTTP URL</span> <input id="ce-hc-url" placeholder="http://127.0.0.1:8080/health" autocomplete="off" spellcheck="false" /></label>
+                  <label class="ce-f-hc-cmd"><span data-i18n="comp_f_hc_argv">Probe command (one arg per line)</span> <textarea id="ce-hc-argv" rows="2" spellcheck="false"></textarea></label>
+                  <div class="cv-actions">
+                    <button type="button" id="ce-del" class="danger" hidden data-i18n="delete">Delete</button>
+                    <button type="button" id="ce-cancel" data-i18n="cancel">Cancel</button>
+                    <button type="button" id="ce-save" data-i18n="comp_save">Save</button>
+                  </div>
+                </div>
+              </div>
+              <div id="comp-logs-view" hidden>
+                <div id="comp-logs-bar">
+                  <button type="button" id="comp-logs-back" data-icon="back" data-i18n-title="comp_back" title="Back"></button>
+                  <span id="comp-logs-name"></span>
+                  <span id="comp-logs-trunc" hidden></span>
+                </div>
+                <pre id="comp-logs"></pre>
+              </div>
             </div>
           </div>
         </main>

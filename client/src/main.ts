@@ -45,6 +45,7 @@ import { FileExplorer } from "./features/files";
 import { MapView } from "./features/map-view";
 import { TermPanel } from "./features/terminal";
 import { SettingsPanel } from "./features/settings";
+import { ComponentsPanel } from "./features/components";
 import { initFirstPost } from "./features/first-post";
 import { initLang, t, applyStatic } from "./i18n";
 import type { AcEvent, SavedConn } from "./core/types";
@@ -99,6 +100,7 @@ const term = new TermPanel();
 const connView = new ConnView();
 const newSess = new NewSessionDialog();
 const settings = new SettingsPanel();
+const comps = new ComponentsPanel();
 const search = new SessionSearch();
 
 // call() a besoin de la conn courante + des états live — injectés pour éviter
@@ -134,7 +136,7 @@ renderer.bind({
   statusChanged: () => void sidebar.refresh(),
   openSession: (id) => void chat.open(id),
 });
-sidebar.bind(conns, groups, newSess, chat, settings, connView);
+sidebar.bind(conns, groups, newSess, chat, settings, connView, comps);
 composer.bind(chat);
 composer.refresh = () => sidebar.refresh();
 composer.bindAttachCapable((c) => conns.cap(c ?? "default")?.files === true);
@@ -147,7 +149,10 @@ conns.bind({
   clearGroups: (c) => groups.clearConn(c),
   notePendingDel: (ids) => sidebar.notePendingDel(ids),
   clearPendingDel: (id) => sidebar.clearPendingDel(id),
-  capsChanged: () => chat.updateHeader(),
+  capsChanged: () => {
+    chat.updateHeader();
+    comps.syncBtn();
+  },
   connChrome: (c, color) => applyConnChrome(c, color),
   termDead: (k) => term.markConnDead(k),
   liveChanged: () => connView.onLiveChanged(),
@@ -155,19 +160,23 @@ conns.bind({
 connView.bind(conns);
 connView.refresh = () => sidebar.refresh();
 connView.connecting = (hosts) => chat.setConnecting(hosts);
-// Exclusion mutuelle des 3 overlays plein #chat — chaque open() ferme
-// les deux autres (sinon : empilement opaque + inert, écran "figé").
-connView.onOpening = () => { settings.close(); map.close(); };
-settings.onOpening = () => { connView.close(); map.close(); };
+// Exclusion mutuelle des overlays plein #chat — chaque open() ferme
+// les autres (sinon : empilement opaque + inert, écran "figé").
+connView.onOpening = () => { settings.close(); map.close(); comps.close(); };
+settings.onOpening = () => { connView.close(); map.close(); comps.close(); };
+comps.bind(conns);
+comps.onOpening = () => { settings.close(); connView.close(); map.close(); };
 newSess.bind(groups);
 newSess.refresh = () => void sidebar.refresh();
 // Le bouton « New agent » vit dans la sidebar (hors #chat — accessible
-// sous les overlays) : fermer settings/conn-view avant d'ouvrir la
-// session créée, sinon elle charge derrière l'overlay (même motif que
+// sous les overlays) : fermer les overlays de #chat avant d'ouvrir la
+// session créée, sinon elle charge derrière (même motif que
 // sidebar.openSession ; close() est un no-op quand l'overlay est fermé).
 newSess.openSession = (id, conn) => {
   settings.close();
   connView.close();
+  map.close();
+  comps.close();
   void chat.open(id, false, conn);
 };
 newSess.knownConns = () => conns.knownConns();
@@ -199,7 +208,7 @@ map.bind({
   conn: () => conns.knownConns()[0] ?? "",
   componentsCapable: (c) => conns.cap(c)?.components === true,
   openSession: (id, conn) => void chat.open(id, false, conn),
-  onOpening: () => { settings.close(); connView.close(); },
+  onOpening: () => { settings.close(); connView.close(); comps.close(); },
 });
 
 // Conn perdue (EOF transport) : les PTY du démon meurent avec → bannière
@@ -247,12 +256,20 @@ $("tb-about").onclick = async () => {
 };
 // Menus ⋮ (Android) : l'app-level ouvre Settings/About, celui du chat les
 // actions de session (cachées du header sur mobile).
-$("tb-more").onclick = () =>
-  nav.sheet([
+$("tb-more").onclick = () => {
+  const items: SheetItem[] = [
     { icon: "map", label: t("map_title"), fn: () => $("tb-map").click() },
+  ];
+  // Composants : même gate capability que le bouton titlebar masqué
+  // sur mobile — pas d'entrée vers un panneau inutilisable.
+  if (comps.capable())
+    items.push({ icon: "tool", label: t("comp_h"), fn: () => $("tb-components").click() });
+  items.push(
     { icon: "settings", label: t("settings_title"), fn: () => $("tb-settings").click() },
     { icon: "info", label: t("about_title"), fn: () => $("tb-about").click() },
-  ]);
+  );
+  nav.sheet(items);
+};
 $("chat-more").onclick = () => {
   const items: SheetItem[] = [];
   if (app.current) items.push({ icon: "search", label: t("search_title"), fn: () => search.open() });
@@ -288,6 +305,7 @@ files.init();
 term.init();
 map.init();
 settings.init();
+comps.init();
 initFirstPost((c) => conns.cap(c)?.first_post === true);
 initModelBar(openFusion);
 initFusionDialog();
