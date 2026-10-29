@@ -10,12 +10,27 @@ import { readFileSync } from "node:fs";
 const EXE = process.env.CHROME_BIN ?? "/usr/bin/chromium";
 // detached:true → kill(-pid) tue tout le groupe (npx → sh → vite) : sinon le
 // preview survit orphelin après la fin du test.
-const server = spawn("npx", ["vite", "preview", "--port", "4203", "--strictPort"], { stdio: "ignore", detached: true });
+// Port éphémère (`--port 0`) lu sur la sortie vite — un port fixe est
+// squatté par les previews des autres worktrees et le test pilotait
+// alors leur build (faux négatifs déjà observés).
+const server = spawn("npx", ["vite", "preview", "--port", "0", "--strictPort"], { stdio: ["ignore", "pipe", "ignore"], detached: true });
+const BASE = await new Promise((res, rej) => {
+  let buf = "";
+  const to = setTimeout(() => rej(new Error("vite preview: URL introuvable")), 15000);
+  server.stdout.on("data", (d) => {
+    buf += d;
+    const m = buf.match(/https?:\/\/localhost:(\d+)/);
+    if (m) {
+      clearTimeout(to);
+      res(`http://localhost:${m[1]}`);
+    }
+  });
+});
 // Attendre que le preview serve (npx cold peut dépasser 2 s) — un
 // goto prématuré donnait ERR_CONNECTION_REFUSED avant le cleanup.
 for (let i = 0; i < 40; i++) {
   try {
-    const r = await fetch("http://localhost:4203/");
+    const r = await fetch(BASE + "/");
     if (r.ok) break;
   } catch {}
   await new Promise((r) => setTimeout(r, 250));
@@ -58,7 +73,7 @@ const initPage = async (saved, cliConn, delays = {}) => {
   await p.evaluateOnNewDocument(mock);
   await p.evaluateOnNewDocument(PATCH);
   await p.evaluateOnNewDocument(`window.__saved = ${JSON.stringify(saved)}; window.__cliConn = ${JSON.stringify(cliConn)}; window.__delays = ${JSON.stringify(delays)};`);
-  await p.goto("http://localhost:4203/#desktop", { waitUntil: "domcontentloaded" });
+  await p.goto(BASE + "/#desktop", { waitUntil: "domcontentloaded" });
   await p.waitForSelector("#btn-connect", { timeout: 15000 });
   await sleep(1200);
   return p;

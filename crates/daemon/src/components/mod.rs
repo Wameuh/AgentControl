@@ -347,6 +347,10 @@ impl Components {
             .write()
             .await
             .insert(name.to_string(), spec.clone());
+        // Une spec tool dont la `command` change ne doit pas garder la
+        // version sondée de l'ancienne — purge du cache, la prochaine
+        // passe de health_loop resonde.
+        self.versions.write().await.remove(name);
         if demote {
             self.shutdown_proc(name).await?;
         }

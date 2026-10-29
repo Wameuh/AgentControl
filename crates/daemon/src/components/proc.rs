@@ -351,7 +351,14 @@ impl Components {
                     } else {
                         ComponentState::Absent
                     },
-                    health: self.observed_health(&spec.name).await.map(health_str),
+                    // `absent` se suffit (observation, pas panne) — pas
+                    // de ligne « Santé : fail » qui suggérerait un
+                    // composant à réparer.
+                    health: if present {
+                        self.observed_health(&spec.name).await.map(health_str)
+                    } else {
+                        None
+                    },
                     version: if present {
                         self.tool_version(&spec.name).await
                     } else {

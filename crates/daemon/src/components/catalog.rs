@@ -327,6 +327,11 @@ pub(super) async fn run_version_probe(argv: &[String]) -> Option<String> {
     .await
     .ok()?
     .ok()?;
+    // Un `--version` qui échoue en écrivant sur stdout ne publie pas
+    // son message d'erreur comme « version ».
+    if !out.status.success() {
+        return None;
+    }
     let stdout = String::from_utf8_lossy(&out.stdout);
     let line = stdout.lines().next()?.trim();
     if line.is_empty() {

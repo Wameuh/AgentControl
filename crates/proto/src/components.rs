@@ -48,8 +48,7 @@ pub enum ComponentState {
     Running,
     /// Process vivant mais sonde KO (ou healthcheck externe KO).
     Degraded,
-    /// Arrêté (volontaire, jamais lancé, ou sans sonde à observer —
-    /// aussi l'état d'un tool jamais sondé).
+    /// Arrêté (volontaire, jamais lancé, ou sans sonde à observer).
     #[default]
     Stopped,
     /// Mort sur erreur sans relance prévue.

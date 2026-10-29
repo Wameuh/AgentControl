@@ -29,7 +29,7 @@
     { name: "acctl", kind: "tool", autostart: false,
       description: "CLI de contrôle du démon", source: "components.toml",
       spec: { name: "acctl", kind: "tool", command: ["acctl", "--version"] },
-      status: { state: "absent", health: "fail" } },
+      status: { state: "absent" } },
     { name: "agentbacklog", kind: "tool", autostart: false,
       description: "File de tâches partagée", source: "components.toml",
       spec: { name: "agentbacklog", kind: "tool", command: ["agentbacklog", "--version"] },
