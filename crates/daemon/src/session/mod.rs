@@ -407,6 +407,7 @@ mod tests {
             state: "idle".into(),
             group: None,
             spawned_by: None,
+            origin: None,
             context_used: None,
             context_size: None,
         };
@@ -445,7 +446,11 @@ mod tests {
         s.emit(EventKind::AgentText { text: "autre".into() });
         assert_eq!(kinds(&dir), ["agent_text", "agent_thought", "agent_text"]);
         // Message user → nouveau tour : répéter le texte est légitime.
-        s.emit(EventKind::UserMessage { text: "autre".into(), steer: false });
+        s.emit(EventKind::UserMessage {
+            text: "autre".into(),
+            steer: false,
+            origin: None,
+        });
         s.emit(EventKind::AgentText { text: "autre".into() });
         assert_eq!(kinds(&dir).len(), 5);
         // Comparaison insensible aux espaces/retours.
