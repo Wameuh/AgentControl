@@ -857,6 +857,31 @@ pub enum ReqKind {
         #[serde(default)]
         limit: Option<u64>,
     },
+    /// Édition : insère/remplace la spec d'un composant déclaré —
+    /// `name` doit valoir `spec.name` ; réécriture atomique de
+    /// components.toml. Un `process` vivant garde la spec avec
+    /// laquelle il a été lancé jusqu'au prochain (re)start, explicite
+    /// ou supervisé — la spec rechargée s'applique alors.
+    ComponentUpsert {
+        name: String,
+        spec: ComponentSpec,
+    },
+    /// Retire une spec déclarée (un `process` vivant est arrêté
+    /// proprement d'abord). Les `internal`, déclarés en code, sont
+    /// inatteignables → « composant inconnu ».
+    ComponentRemove { name: String },
+    /// Catalogue embarqué (§2.5) : métadonnées + `installed`/`version`
+    /// détectés + `latest_version`/`latest_notes` upstream — cache
+    /// ~5 min, `refresh:true` force le refetch ; échec réseau → champs
+    /// null, jamais d'erreur.
+    ComponentCatalog {
+        #[serde(default)]
+        refresh: Option<bool>,
+    },
+    /// Exécute la recette d'une entrée catalogue (steps auditées :
+    /// `run` argv fixe, `write_file` borné HOME, `upsert_spec`…) →
+    /// {installed, name, state, notes}.
+    ComponentInstall { name: String },
     DaemonStatus,
     /// Auto-update du démon vers la release `version` demandée par le
     /// client (ex. "0.5.0" → tag v0.5.0 — jamais « latest » : le démon
@@ -927,6 +952,10 @@ impl ReqKind {
             Self::ComponentStop { .. } => "component_stop",
             Self::ComponentRestart { .. } => "component_restart",
             Self::ComponentLogs { .. } => "component_logs",
+            Self::ComponentUpsert { .. } => "component_upsert",
+            Self::ComponentRemove { .. } => "component_remove",
+            Self::ComponentCatalog { .. } => "component_catalog",
+            Self::ComponentInstall { .. } => "component_install",
             Self::DaemonStatus => "daemon_status",
             Self::UpdateDaemon { .. } => "update_daemon",
         }

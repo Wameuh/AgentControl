@@ -59,7 +59,8 @@ impl Daemon {
 
 /// `argv[0]` d'un profil agent résolvable : binaire sur le PATH du démon
 /// (tel qu'assuré par ensure_agent_path) ou chemin absolu existant.
-fn command_available(cmd: &str) -> bool {
+/// Réutilisé par la détection « installed » du catalogue composants.
+pub(crate) fn command_available(cmd: &str) -> bool {
     let p = PathBuf::from(cmd);
     if p.is_absolute() {
         return is_executable(&p);

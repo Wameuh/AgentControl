@@ -97,6 +97,11 @@ impl Components {
     /// arrêté ou déjà relancé → no-op silencieux.
     async fn respawn(self: &Arc<Self>, name: &str) -> Result<()> {
         let Some(spec) = self.spec_of(name).await else { return Ok(()) };
+        // Un upsert a pu changer le kind entre l'exit et le respawn :
+        // sans cycle de vie managé il n'y a plus rien à relancer.
+        if spec.kind != ComponentKind::Process {
+            return Ok(());
+        }
         self.spawn_cycle(&spec, false).await
     }
 
