@@ -297,6 +297,7 @@
         <label><span data-i18n="recent">Recent connections</span>
           <span id="c-saved-row">
             <select id="c-saved"><option value="">— choose —</option></select>
+            <button type="button" id="c-saved-new" data-icon="external" data-i18n-title="conn_spawn" title="Open in a new instance"></button>
             <button type="button" id="c-saved-del" data-icon="close" data-i18n-title="del_saved_conn" title="Remove"></button>
           </span>
         </label>
@@ -318,6 +319,16 @@
         <label class="nat-row"><span data-i18n="password_label">Password</span> <input id="c-pass" type="password" data-i18n-ph="password_ph" placeholder="(key preferred)" /></label>
         <label><span data-i18n="port_label">Remote daemon port</span> <input id="c-port" type="number" value="7331" /></label>
         <label id="c-args-wrap"><span data-i18n="ssh_args_label">SSH args</span> <input id="c-args" data-i18n-ph="ssh_args_ph" placeholder="-i ~/.ssh/key -p 22" /></label>
+        <label><span data-i18n="conn_color">Connection color</span>
+          <select id="c-accent">
+            <option value="" data-i18n="conn_color_auto">App accent (default)</option>
+            <option value="sage" data-i18n="accent_sage">Sage</option>
+            <option value="gold" data-i18n="accent_gold">Golden</option>
+            <option value="grey" data-i18n="accent_grey">Grey</option>
+            <option value="violet" data-i18n="accent_violet">Violet</option>
+            <option value="red" data-i18n="accent_red">Red</option>
+          </select>
+        </label>
         <div id="c-pubkey-box" class="nat-row" hidden>
           <span data-i18n="pubkey_label">App public key (server authorized_keys)</span>
           <pre id="c-pubkey"></pre>

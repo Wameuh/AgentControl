@@ -7,12 +7,12 @@
 // est relancé par systemd (Restart=always) — jamais de réinstall en boucle.
 // ---------------------------------------------------------------------------
 
-import { invoke, listen } from "../core/bridge";
+import { invoke, listen, isWeb } from "../core/bridge";
 import { $, esc, q, showErr } from "../core/dom";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
-import { connKeyOf } from "../core/conn";
-import { isAndroid } from "../core/chrome";
+import { connKeyOf, connLabel } from "../core/conn";
+import { accentOf, isAndroid, type Accent } from "../core/chrome";
 import type { ConnLive } from "../core/types";
 import { t } from "../i18n";
 import { setAppIcon } from "./status";
@@ -22,11 +22,6 @@ import { hideMenu, menuBtn, placeMenu } from "../ui/ctxmenu";
 // Conns déconnectées volontairement : ni alerte chip ni retry auto — un
 // retry explicite (menu ctx / badge) les ré-active (delete dans retryConn).
 const RETRY_MIN = 2_000, RETRY_MAX = 60_000;
-
-/** "ssh:user@hôte:22" → "user@hôte" pour l'affichage compact
- *  (le port ssh par défaut est masqué, les autres gardés). */
-const connLabel = (k: string) =>
-  k.replace(/^(ssh-native|ssh|tcp):/, "").replace(/:22$/, "");
 
 export class ConnectionManager {
   private live = new Map<string, ConnLive>();
@@ -62,6 +57,13 @@ export class ConnectionManager {
     clearPendingDel: (_id: string) => {},
     /** Capabilities rafraîchies → gates UI dépendants du démon. */
     capsChanged: () => {},
+    /** Chrome (accent + liseré + titre) de la connexion liée — null quand
+     *  plus aucune conn n'est liée (suppression de la dernière). */
+    connChrome: (_conn: string | null, _color?: Accent | null) => {},
+    /** Transport d'une conn relâché alors que ses sessions démon vivent
+     *  encore (éviction) : aucun event conn-dead/session_deleted ne
+     *  viendra — les terminaux de cette conn doivent être marqués morts. */
+    termDead: (_conn: string) => {},
   };
 
   bind(d: Partial<typeof this.deps>) {
@@ -130,6 +132,50 @@ export class ConnectionManager {
         if (!v.error) this.setCaps(ck, v);
       })
       .catch(() => {});
+  }
+
+  /** Re-bind exclusif (modèle multi-instances : 1 instance = 1 connexion)
+   *  — appelé après markConnected : toute autre connexion encore vivante
+   *  est déconnectée et oubliée SANS toucher à ses sessions démon (elles
+   *  restent pilotables par une autre instance) ni à ses données client
+   *  (groupes persistés, entrée sauvegardée — valables à la prochaine
+   *  liaison). Seule la conversation affichée d'une conn évincée se ferme
+   *  (sa session n'appartient plus à ce monde). */
+  async evictExcept(keep: string) {
+    const others = [
+      ...new Set([...this.cfg.keys(), ...this.live.keys()]),
+    ].filter((k) => k !== keep);
+    for (const k of others) {
+      const t0 = this.timer.get(k);
+      if (t0) clearTimeout(t0);
+      this.timer.delete(k);
+      this.live.delete(k);
+      this.cfg.delete(k);
+      this.caps.delete(k);
+      this.delay.delete(k);
+      this.nextAt.delete(k);
+      this.attempts.delete(k);
+      this.gone.delete(k);
+      this.deps.dropConvsForConn(k);
+      this.deps.closeIfConn(k);
+      this.deps.termDead(k);
+      await invoke("disconnect", { conn: k }).catch(() => {});
+    }
+    if (others.length) this.renderState();
+    this.chromeForCurrent();
+  }
+
+  /** Accent + titre de la connexion liée courante (null = aucune). */
+  private chromeForCurrent() {
+    const k = this.cfg.keys().next().value ?? null;
+    this.deps.connChrome(k, k ? (accentOf(this.cfg.get(k)?.color) ?? null) : null);
+  }
+
+  /** Ré-applique le chrome de la conn liée — après un changement de
+   *  l'accent global (la couleur de la conn reprend le dessus si elle
+   *  en a une). */
+  reapplyChrome() {
+    this.chromeForCurrent();
   }
 
   /** Tooltip du badge selon l'état (avec prochain essai / nb de
@@ -304,6 +350,9 @@ export class ConnectionManager {
     this.deps.dropConvsForConn(conn);
     this.deps.closeIfConn(conn);
     await this.deps.refresh();
+    // Plus de conn liée (single-conn : c'était forcément la sienne) →
+    // retour au chrome neutre tant que rien n'est reconnecté.
+    this.chromeForCurrent();
   }
 
   /** Menu contextuel connexion (clic droit / appui long sur le header de
@@ -326,6 +375,15 @@ export class ConnectionManager {
       void this.disconnect(conn);
     });
     dis.disabled = !this.cfg.has(conn) || this.gone.has(conn) || busy;
+    // Nouvelle instance liée à cette connexion (multi-instances : 1
+    // processus = 1 connexion — desktop seulement, ni web ni Android).
+    if (!isAndroid() && !isWeb) {
+      const ni = menuBtn(ctx, t("ctx_new_instance"), "", () => {
+        hide();
+        invoke("spawn_instance", { conn }).catch((e) => showErr(String(e)));
+      });
+      ni.disabled = !this.cfg.has(conn);
+    }
     const del = menuBtn(ctx, t("ctx_delete_conn"), "danger", (b) => {
       if (!b.dataset.armed) {
         b.dataset.armed = "1";

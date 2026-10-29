@@ -11,6 +11,24 @@ use state::AppState;
 use tauri::Manager;
 use tokio::sync::Mutex;
 
+/// Connexion cible passée à l'instance : `--conn <clé>` / `--conn=<clé>`
+/// (clé `ssh{,-native}:h:p` | `tcp:addr` | `local`), repli env
+/// AGENTCONTROL_CONN. Le frontend résout la cfg complète dans
+/// connections.json ; une clé inconnue retombe sur la dernière connexion.
+fn cli_conn_arg() -> Option<String> {
+    let mut it = std::env::args().skip(1);
+    while let Some(a) = it.next() {
+        if a == "--conn" {
+            if let Some(v) = it.next() {
+                return Some(v);
+            }
+        } else if let Some(v) = a.strip_prefix("--conn=") {
+            return Some(v.to_string());
+        }
+    }
+    std::env::var("AGENTCONTROL_CONN").ok().filter(|v| !v.is_empty())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Workaround WebKitGTK : webview blanche/noire après unfocus ou au boot
@@ -57,6 +75,7 @@ pub fn run() {
             subs: Mutex::new(std::collections::HashMap::new()),
             sys: Mutex::new(sysinfo::System::new()),
             net: Mutex::new(std::collections::VecDeque::new()),
+            cli_conn: cli_conn_arg(),
         })
         .invoke_handler(tauri::generate_handler![
             commands::connect::connect,
@@ -70,6 +89,8 @@ pub fn run() {
             commands::saved::remove_connection,
             commands::saved::ssh_hosts,
             commands::system::platform,
+            commands::system::cli_conn,
+            commands::system::spawn_instance,
             commands::system::ssh_pubkey,
             commands::system::sys_stats,
             commands::system::log_tail,

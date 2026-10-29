@@ -72,8 +72,11 @@ app key for you to authorize.
   is detached: kill the app, reboot your machine — the agents don't
   notice. If the server-side daemon itself crashes, working sessions are
   automatically resumed.
-- **Organize sessions into groups** — nested, drag & drop — filter them,
-  and jump between servers from one sidebar.
+- **Organize sessions into groups** — nested, drag & drop — filter them.
+- **Drive several servers side by side**: one window per connection, each
+  tinted its own color with the host in the title bar. Spawn another
+  instance from a connection's context menu or the saved-connection
+  picker — under the hood it's just `agentcontrol --conn <conn-key>`.
 - **Queue messages** while an agent is busy, or **steer it mid-turn** to
   inject a correction right after the current step.
 - **Let agents work together**: an agent can spawn sub-sessions,

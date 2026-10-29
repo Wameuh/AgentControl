@@ -2,6 +2,7 @@
 //! tail du log client, icône fenêtre dynamique.
 
 use anyhow::Result;
+use client_core::Level;
 use serde_json::{json, Value};
 use tauri::State;
 
@@ -18,6 +19,45 @@ pub(crate) fn platform() -> &'static str {
         "macos"
     } else {
         "linux"
+    }
+}
+
+/// Connexion demandée à cette instance (`--conn` / AGENTCONTROL_CONN au
+/// lancement). `None` = comportement par défaut : la dernière connexion
+/// utilisée (première entrée de connections.json).
+#[tauri::command]
+pub(crate) fn cli_conn(state: State<'_, AppState>) -> Option<String> {
+    state.cli_conn.clone()
+}
+
+/// Lance une AUTRE instance du client liée à `conn` (clé connKey —
+/// `ssh{,-native}:h:p` | `tcp:addr` | `local`) : le modèle multi-instances
+/// est « 1 processus = 1 connexion », plusieurs instances en parallèle
+/// chacune sur son démon, distinguée par sa couleur. L'instance courante
+/// n'est pas modifiée ; la nouvelle hérite de --conn <clé>.
+/// Limites : Android exclu (pas de multi-processus applicatif) ; macOS ok
+/// (exec direct du binaire dans le .app, indépendant de LaunchServices).
+#[tauri::command]
+#[allow(unused_variables)]
+pub(crate) fn spawn_instance(conn: String) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        return Err("multi-instances indisponible sur Android".to_string());
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let mut cmd = tokio::process::Command::new(exe);
+        cmd.arg("--conn")
+            .arg(&conn)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        client_core::hide_console(&mut cmd);
+        // Détaché : l'enfant survit à la fermeture de cette instance.
+        cmd.spawn().map_err(|e| format!("{e}"))?;
+        client_core::log(Level::Info, format!("spawn_instance conn={conn}"));
+        Ok(())
     }
 }
 

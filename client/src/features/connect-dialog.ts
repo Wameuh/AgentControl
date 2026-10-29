@@ -7,7 +7,7 @@ import { invoke, getVersion, listen, isWeb } from "../core/bridge";
 import { $, dlgErr, esc, notify } from "../core/dom";
 import { call } from "../core/rpc";
 import { cmpVer, connKeyOf, daemonParams, minorOf } from "../core/conn";
-import { isAndroid } from "../core/chrome";
+import { accentOf, isAndroid } from "../core/chrome";
 import type { SavedConn, SessionMeta } from "../core/types";
 import { t, type Key } from "../i18n";
 import { icon } from "../ui/icons";
@@ -208,8 +208,18 @@ export class ConnectDialog {
     });
   }
 
+  /// Compteur de génération des connect() — le flux contient de longues
+  /// attentes utilisateur (install/update du démon) : un connect initié
+  /// plus tard doit gagner le binding, pas le dernier résolu en vol.
+  private connectSeq = 0;
+  /// Clé de conn visée par le DERNIER connect initié (cf. garde gen).
+  private wantedKey = "";
+
   async connect(cfg: Record<string, unknown>) {
     const host = String(cfg.host ?? cfg.addr ?? cfg.path ?? "local");
+    const gen = ++this.connectSeq;
+    const wantKey = this.conns.keyOf(cfg);
+    this.wantedKey = wantKey;
     // Nouvelle tentative : la progression redevient visible (le flag
     // détaché du flux précédent ne doit pas masquer celle-ci).
     this.daemonDetached = false;
@@ -313,7 +323,22 @@ export class ConnectDialog {
       }
     }
     this.cStatus(null);
+    // Un connect plus récent a été initié pendant les attentes de ce flux
+    // (install/update confirmées par l'utilisateur) : il gagne le binding.
+    // Le transport résolu ici est relâché — sauf s'il sert le flux plus
+    // récent (même clé = même endpoint, ctx Rust déjà remplacé).
+    if (gen !== this.connectSeq) {
+      if (wantKey !== this.wantedKey) {
+        await invoke("disconnect", { conn: wantKey }).catch(() => {});
+      }
+      return;
+    }
     this.conns.markConnected(cfg, status as Record<string, unknown>);
+    // Modèle multi-instances : cette instance se lie à UNE connexion —
+    // les autres transports encore ouverts (conn précédente) sont
+    // relâchés ; leurs sessions démon restent vivantes, pilotables par
+    // une autre instance. Pose aussi le chrome (accent/titre de la conn).
+    await this.conns.evictExcept(wantKey);
     await this.refresh();
   }
 
@@ -338,6 +363,7 @@ export class ConnectDialog {
     ($("c-user") as HTMLInputElement).value = c.user ?? "";
     ($("c-pass") as HTMLInputElement).value = c.password ?? "";
     ($("c-native") as HTMLInputElement).checked = c.native === true || isAndroid();
+    ($("c-accent") as HTMLSelectElement).value = c.color ?? "";
     this.syncSshFields();
   }
 
@@ -401,7 +427,8 @@ export class ConnectDialog {
     this.saved.forEach((c, i) => {
       const o = document.createElement("option");
       o.value = String(i);
-      o.textContent = `${c.kind} ${c.host ?? c.addr ?? c.path ?? ""}`;
+      const acc = accentOf(c.color);
+      o.textContent = `${c.kind} ${c.host ?? c.addr ?? c.path ?? ""}${acc ? ` (${t(`accent_${acc}` as Key)})` : ""}`;
       sv.appendChild(o);
     });
     return sv;
@@ -481,6 +508,26 @@ export class ConnectDialog {
       this.fillSavedSelect();
     });
 
+    // ↗ : lance une NOUVELLE instance du client liée à la connexion
+    // sauvegardée sélectionnée (multi-instances : 1 processus = 1 conn).
+    // Desktop uniquement — masqué sur Android/web (pas de multi-processus).
+    const spawner = $("c-saved-new") as HTMLButtonElement;
+    spawner.hidden = isAndroid() || isWeb;
+    spawner.addEventListener("click", async () => {
+      const v = ($("c-saved") as HTMLSelectElement).value;
+      if (!v) return;
+      const c = this.saved[Number(v)];
+      if (!c) return;
+      try {
+        await invoke("spawn_instance", { conn: connKeyOf(c, isAndroid()) });
+        // Toast, pas report() : le dialogue est ouvert — report irait
+        // dans la zone d'erreur (et loggerait en « error »).
+        notify("success", t("conn_spawned"));
+      } catch (e) {
+        this.report(String(e));
+      }
+    });
+
     $("btn-connect").onclick = () => this.open();
 
     ($("c-saved") as HTMLSelectElement).onchange = (e) => {
@@ -518,6 +565,8 @@ export class ConnectDialog {
           : kind === "tcp"
             ? { kind: "tcp", addr: ($("c-host") as HTMLInputElement).value }
             : { kind: "local" };
+      // Couleur propre à la connexion ("" = accent global des réglages).
+      cfg.color = ($("c-accent") as HTMLSelectElement).value || undefined;
       try {
         await this.connect(cfg);
         invoke("save_connection", { cfg }).catch(console.error);
@@ -534,26 +583,26 @@ export class ConnectDialog {
     });
   }
 
-  /** Auto-reconnexion au démarrage avec la dernière connexion utilisée. */
-  autoConnect() {
-    invoke<SavedConn[]>("saved_connections")
-      .then(async (conns) => {
-        this.saved = conns;
-        // Web : la conn unique (le démon qui sert la page) est vitale —
-        // la préférence "autoconnect off" n'a pas de sens ici.
-        if (!isWeb && localStorage.getItem("ac-autoconnect") === "0") return;
-        // Les échecs tombent en toast (dialogue fermé) ; l'écran vide
-        // affiche "connexion à X…" — la liste rétrécit au fil des
-        // connexions réussies (une lente ne maintient pas les rapides).
-        const hosts = conns.map((c) => c.host ?? c.addr ?? c.path ?? "local");
-        this.connecting(hosts);
-        for (const c of conns) {
-          await this.connect({ ...c }).catch((e) => this.report(String(e)));
-          hosts.splice(hosts.indexOf(c.host ?? c.addr ?? c.path ?? "local"), 1);
-          this.connecting(hosts);
-        }
-        this.connecting([]);
-      })
-      .catch(() => {});
+  /** Auto-reconnexion au démarrage — UNE connexion par instance (modèle
+   *  multi-instances) : celle demandée par `--conn` (`want`, clé connKey),
+   *  sinon la dernière utilisée (première entrée de connections.json).
+   *  Les autres connexions enregistrées restent disponibles au dialogue
+   *  et aux autres instances. `saved` est préchargé par le boot. */
+  autoConnect(saved: SavedConn[], want?: string) {
+    this.saved = saved;
+    // Web : la conn unique (le démon qui sert la page) est vitale —
+    // la préférence "autoconnect off" n'a pas de sens ici. Et `want`
+    // (--conn) est une intention explicite (instance spawnée depuis une
+    // autre) — pas une reconnexion passive : elle court-circuite la pref.
+    if (!want && !isWeb && localStorage.getItem("ac-autoconnect") === "0") return;
+    const target =
+      (want ? saved.find((c) => connKeyOf(c, isAndroid()) === want) : undefined) ??
+      saved[0];
+    if (!target) return;
+    const host = String(target.host ?? target.addr ?? target.path ?? "local");
+    this.connecting([host]);
+    void this.connect({ ...target })
+      .catch((e) => this.report(String(e)))
+      .finally(() => this.connecting([]));
   }
 }

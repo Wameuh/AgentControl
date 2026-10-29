@@ -8,17 +8,21 @@
 
 import "./styles.css";
 import "./mesh-bg.ts";
-import { listen, getVersion } from "./core/bridge";
+import { invoke, listen, getVersion, isWeb } from "./core/bridge";
 import { $, notify } from "./core/dom";
 import { app } from "./core/state";
 import { initRpc } from "./core/rpc";
 import { initModalGuard } from "./core/modal";
+import { connKeyOf } from "./core/conn";
 import {
   applyTheme,
   applyAccent,
   accentPref,
+  accentOf,
+  applyConnChrome,
   initGems,
   initPlatform,
+  isAndroid,
   initWindowChrome,
   shellOpen,
 } from "./core/chrome";
@@ -42,7 +46,7 @@ import { TermPanel } from "./features/terminal";
 import { SettingsPanel } from "./features/settings";
 import { initFirstPost } from "./features/first-post";
 import { initLang, t, applyStatic } from "./i18n";
-import type { AcEvent } from "./core/types";
+import type { AcEvent, SavedConn } from "./core/types";
 
 // Thème + langue persistés (localStorage), appliqués au boot
 initLang();
@@ -60,6 +64,25 @@ initModalGuard();
 // Le menu natif du clic droit n'a pas de sens dans l'app — chaque menu
 // contextuel custom gère son propre preventDefault/stopPropagation.
 window.addEventListener("contextmenu", (e) => e.preventDefault());
+
+// Modèle multi-instances : cette instance se lie à UNE connexion — celle
+// demandée par --conn <clé> (spawn_instance d'une autre instance), sinon
+// la dernière utilisée (1re entrée de connections.json). Son accent
+// éventuel est posé avant le premier rendu utile (pas de flash de la
+// couleur par défaut) ; le connect auto lui-même part en fin de boot.
+const [cliConn, savedConns] = await Promise.all([
+  invoke<string | null>("cli_conn").catch(() => null),
+  invoke<SavedConn[]>("saved_connections").catch(() => [] as SavedConn[]),
+]);
+const bootConn =
+  (cliConn ? savedConns.find((c) => connKeyOf(c, isAndroid()) === cliConn) : undefined) ??
+  savedConns[0];
+// Ne teinter que si un bind va réellement suivre — avec autoconnect off et
+// sans --conn, aucune conn ne sera liée : pas de couleur mensongère.
+const willConnect =
+  cliConn != null || isWeb || localStorage.getItem("ac-autoconnect") !== "0";
+const bootAccent = accentOf(bootConn?.color);
+if (willConnect && bootAccent) applyAccent(bootAccent, false);
 
 // --- Features stateful -------------------------------------------------------
 
@@ -121,6 +144,8 @@ conns.bind({
   notePendingDel: (ids) => sidebar.notePendingDel(ids),
   clearPendingDel: (id) => sidebar.clearPendingDel(id),
   capsChanged: () => chat.updateHeader(),
+  connChrome: (c, color) => applyConnChrome(c, color),
+  termDead: (k) => term.markConnDead(k),
 });
 connectDlg.bind(conns);
 connectDlg.refresh = () => sidebar.refresh();
@@ -138,7 +163,12 @@ settings.langChanged = () => {
   chat.updateHeader();
 };
 settings.sendModeChanged = () => composer.refreshHints();
-settings.themeChanged = () => term.refreshTheme();
+settings.themeChanged = () => {
+  term.refreshTheme();
+  // Changement d'accent global : la couleur propre à la conn liée garde
+  // la priorité (ré-appliquée ici), l'accent global s'applique sinon.
+  conns.reapplyChrome();
+};
 term.bind({
   termCapable: (c) => conns.cap(c)?.terminal === true,
   // "default" n'est résoluble en clé réelle qu'en mono-connexion.
@@ -237,4 +267,4 @@ initModelBar(openFusion);
 initFusionDialog();
 initStatus();
 checkBootUpdate();
-connectDlg.autoConnect();
+connectDlg.autoConnect(savedConns, cliConn ?? undefined);
