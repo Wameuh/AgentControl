@@ -166,12 +166,17 @@ ok((await pC.evaluate(() => [...document.documentElement.classList].join(" "))).
 // installed+version, acctl absent), 4 sessions dont s2 spawnée par s1
 // et s4 rattachée au composant backlog-orchestrator via `origin`.
 const pD = await initPage([{ kind: "local" }], null);
-await pD.evaluate(() => document.querySelector("#tb-map")?.click());
+await pD.evaluate(() => document.querySelector("#sv-map")?.click());
 await sleep(900);
 const cnt = (sel) => pD.evaluate((s) => document.querySelectorAll(s).length, sel);
-ok((await pD.evaluate(() => !document.querySelector("#map-view")?.hidden)), "F1 #tb-map ouvre la vue diagramme");
+ok((await pD.evaluate(() => !document.querySelector("#map-view")?.hidden)), "F1 #sv-map ouvre la vue diagramme");
+ok((await pD.evaluate(() => document.querySelector("#sv-map")?.classList.contains("on"))) === true &&
+   (await pD.evaluate(() => document.querySelector("#sv-agents")?.classList.contains("on"))) === false,
+  "F1b onglet « Diagramme » actif pendant l'ouverture");
 ok((await cnt(".n-daemon")) === 1, "F2 nœud démon au centre");
 ok((await cnt(".n-comp")) === 4, `F3 4 composants en anneau (${await cnt(".n-comp")})`);
+ok((await pD.evaluate(() => document.querySelector("#map-nocomps")?.hidden)) === true,
+  "F3b note « aucun composant » masquée (4 présents)");
 ok((await cnt(".n-sess")) === 4, `F4 4 sessions positionnées (${await cnt(".n-sess")})`);
 ok((await cnt(".e-dc")) === 4 && (await cnt(".e-s")) === 4,
   `F5 arêtes : 4 démon→composant + 4 parent→session (${await cnt(".e-dc")}+${await cnt(".e-s")})`);
@@ -208,6 +213,14 @@ await sleep(300);
 await pD.evaluate(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
 await sleep(200);
 ok((await pD.evaluate(() => document.querySelector("#map-view")?.hidden)) === true, "F11 Échap referme la vue");
+ok((await pD.evaluate(() => document.querySelector("#sv-agents")?.classList.contains("on"))) === true &&
+   (await pD.evaluate(() => document.querySelector("#sv-map")?.classList.contains("on"))) === false,
+  "F12 fermeture → l'onglet de la vue liste reprend l'état actif");
+await pD.evaluate(() => document.querySelector("#tb-map")?.click());
+await sleep(300);
+ok((await pD.evaluate(() => !document.querySelector("#map-view")?.hidden)), "F13 #tb-map (icône titlebar) ouvre aussi la vue");
+await pD.evaluate(() => document.querySelector("#map-close")?.click());
+await sleep(200);
 
 // ---------- G : panneau composants — états passifs + version des tools ----------
 // Même page pD (conn "local", capability components:true). Le panneau

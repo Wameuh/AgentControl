@@ -210,6 +210,7 @@ map.bind({
   componentsCapable: (c) => conns.cap(c)?.components === true,
   openSession: (id, conn) => void chat.open(id, false, conn),
   onOpening: () => { settings.close(); connView.close(); comps.close(); },
+  onToggle: (open) => sidebar.setMapOpen(open),
 });
 
 // Conn perdue (EOF transport) : les PTY du démon meurent avec → bannière

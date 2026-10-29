@@ -34,6 +34,7 @@
             <button id="sv-agents" class="sv on" role="tab" data-i18n-title="view_agents_title" title="Agent sessions"><span class="sv-ic" data-icon="bot"></span><span data-i18n="view_agents">Agents</span></button>
             <button id="sv-repos" class="sv" role="tab" data-i18n-title="view_repos_title" title="Pull requests"><span class="sv-ic" data-icon="pr"></span><span data-i18n="view_repos">Repos</span><span id="sv-count" hidden></span></button>
             <button id="sv-backlog" class="sv" role="tab" data-i18n-title="view_backlog_title" title="Backlog"><span class="sv-ic" data-icon="backlog"></span><span data-i18n="view_backlog">Backlog</span><span id="sv-bcount" hidden></span></button>
+            <button id="sv-map" class="sv" role="tab" data-i18n-title="map_title" title="Diagram"><span class="sv-ic" data-icon="map"></span><span data-i18n="map_title">Diagram</span></button>
           </div>
           <div id="sess-filter">
             <input id="sess-filter-input" data-i18n-ph="sess_filter_ph" data-i18n-title="sess_filter_title" placeholder="Filter sessions…" />
@@ -304,6 +305,7 @@
                 <span><i class="lg-dot st-idle"></i><b data-i18n="map_leg_idle">idle</b></span>
                 <span><i class="lg-dot st-dead"></i><b data-i18n="map_leg_dead">dead</b></span>
                 <span><i class="lg-flow"></i><b data-i18n="map_leg_flow">active flow</b></span>
+                <span id="map-nocomps" hidden></span>
               </div>
               <div id="map-info" hidden></div>
             </div>

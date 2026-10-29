@@ -74,6 +74,9 @@ export interface MapDeps {
    *  (paramètres, vue connexion) doivent se fermer — même motif que
    *  settings-view/conn-view (injecté par le bootstrap). */
   onOpening: () => void;
+  /** Ouverture/fermeture effective — la sidebar y reflète son onglet
+   *  « Diagramme » (sv-map), qui lance cette vue. */
+  onToggle: (open: boolean) => void;
 }
 
 export class MapView {
@@ -82,6 +85,7 @@ export class MapView {
     componentsCapable: () => false,
     openSession: () => {},
     onOpening: () => {},
+    onToggle: () => {},
   };
   private timer: ReturnType<typeof setInterval> | null = null;
   /** Dernier jeu de données du poll — re-rendu de la carte info au tick. */
@@ -117,6 +121,7 @@ export class MapView {
     this.setChatInert(true);
     view.focus({ preventScroll: true });
     nav.push("map");
+    this.deps.onToggle(true);
     void this.load();
     this.timer = setInterval(() => void this.load(), 3000);
   }
@@ -136,6 +141,7 @@ export class MapView {
     }
     this.hideInfo();
     nav.close("map");
+    if (was) this.deps.onToggle(false);
     if (!was) return;
     if (!isAndroid()) ($("input") as HTMLTextAreaElement).focus();
   }
@@ -363,6 +369,17 @@ export class MapView {
       comps: String(comps.length),
       sess: String(sess.length),
     });
+    // Composants absents : l'expliciter dans la légende plutôt qu'un
+    // anneau silencieusement vide — rien de configuré, ou démon trop
+    // ancien pour les ReqKind Component* (gate capability). Sans
+    // connexion, map-empty porte déjà le message.
+    const nc = $("map-nocomps");
+    nc.hidden = !conn || comps.length > 0;
+    if (!nc.hidden) {
+      nc.textContent = t(
+        this.deps.componentsCapable(conn) ? "map_nocomps" : "map_nocomps_old",
+      );
+    }
   }
 
   // --- Interactions ------------------------------------------------------
@@ -432,6 +449,12 @@ export class MapView {
 
   init() {
     $("tb-map").onclick = () => this.toggle();
+    // Entrée labellée du sélecteur de vues — l'endroit où l'on cherche
+    // les vues ; le drawer Android recouvrirait l'overlay (le fermer).
+    $("sv-map").onclick = () => {
+      nav.closeDrawer();
+      this.toggle();
+    };
     $("map-close").onclick = () => this.close();
     // Délégation : les nœuds sont réécrits à chaque poll — un handler par
     // nœud mourrait avec le DOM précédent.
