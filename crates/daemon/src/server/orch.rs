@@ -255,43 +255,63 @@ impl OrchProbe {
         })
     }
 
-    /// Tente la prise du flock partagé — déjà détenu par nous → true ;
-    /// détenu par un autre → false (phase blocked). Non-unix : pas de
-    /// mécanisme → toujours true (la garde n'existe que pour la
-    /// coexistence avec le script, qui est unix-only de toute façon).
-    fn ensure_lock(&self) -> bool {
+    /// Tente la prise du flock partagé. `Held` : acquis (ou déjà
+    /// détenu par nous) ; `Busy` : une autre instance le détient
+    /// (EWOULDBLOCK — script Python encore actif ?) ; `Error` : échec
+    /// local (dossier impossible à créer, open, errno inattendu) —
+    /// distinct de Busy pour ne pas diagnostiquer « autre instance »
+    /// sur une erreur d'I/O. Non-unix : pas de mécanisme → Held (la
+    /// garde n'existe que pour la coexistence avec le script, qui est
+    /// unix-only de toute façon).
+    fn ensure_lock(&self) -> LockState {
         let mut held = self.lock_file.lock().unwrap();
         if held.is_some() {
-            return true;
+            return LockState::Held;
         }
         #[cfg(unix)]
         {
             use std::os::unix::io::AsRawFd;
             let dir = state_dir();
             // Comme le log_setup du script : le dossier existe avant
-            // l'ouverture du lock (sinon l'échec d'open serait lu
-            // « autre instance » à tort).
-            if std::fs::create_dir_all(&dir).is_err() {
-                return false;
+            // l'ouverture du lock.
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                return LockState::Error(format!("mkdir {}: {e}", dir.display()));
             }
             let path = dir.join("orchestrator.lock");
-            let Ok(f) = std::fs::OpenOptions::new().create(true).write(true).open(&path) else {
-                return false;
+            let f = match std::fs::OpenOptions::new().create(true).write(true).open(&path) {
+                Ok(f) => f,
+                Err(e) => return LockState::Error(format!("open {}: {e}", path.display())),
             };
             // flock(2) LOCK_EX|LOCK_NB — même primitive que le fcntl du
             // script : un seul orchestrateur agit à la fois.
             let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
             if rc != 0 {
-                return false;
+                let e = std::io::Error::last_os_error();
+                return match e.raw_os_error() {
+                    // EWOULDBLOCK == EAGAIN sur Linux — le guard
+                    // évite le pattern dupliqué.
+                    Some(c) if c == libc::EWOULDBLOCK || c == libc::EAGAIN => {
+                        LockState::Busy
+                    }
+                    _ => LockState::Error(format!("flock {}: {e}", path.display())),
+                };
             }
             *held = Some(f);
-            true
+            LockState::Held
         }
         #[cfg(not(unix))]
         {
-            true
+            LockState::Held
         }
     }
+}
+
+/// Verdict de `ensure_lock` — la phase posée en dépend (Busy →
+/// blocked « une autre instance orchestre », Error → error local).
+enum LockState {
+    Held,
+    Busy,
+    Error(String),
 }
 
 /// `~/.agentbacklog` — le dossier d'état partagé avec le script
@@ -382,43 +402,53 @@ impl Daemon {
             self.orch.set_status(Phase::Paused, None);
             return;
         }
-        if !self.orch.ensure_lock() {
-            self.orch.set_status(
-                Phase::Blocked,
-                Some("flock ~/.agentbacklog/orchestrator.lock détenu par une \
-                      autre instance (script Python encore actif ?) — le \
-                      natif prend le relais dès qu'il se libère".into()),
-            );
-            return;
+        match self.orch.ensure_lock() {
+            LockState::Held => {}
+            LockState::Busy => {
+                self.orch.set_status(
+                    Phase::Blocked,
+                    Some("flock ~/.agentbacklog/orchestrator.lock détenu par une \
+                          autre instance (script Python encore actif ?) — le \
+                          natif prend le relais dès qu'il se libère".into()),
+                );
+                return;
+            }
+            LockState::Error(e) => {
+                self.orch.set_status(Phase::Error, Some(format!("lock: {e}")));
+                return;
+            }
         }
-        if !self.orch_agentbacklog_ok().await {
-            self.orch.set_status(
-                Phase::Waiting,
-                Some("waiting: agentbacklog manquant".into()),
-            );
-            return;
-        }
-        if let Err(e) = self.orch_cycle().await {
+        let bin = match self.orch_agentbacklog_bin().await {
+            Some(b) => b,
+            None => {
+                self.orch.set_status(
+                    Phase::Waiting,
+                    Some("waiting: agentbacklog manquant".into()),
+                );
+                return;
+            }
+        };
+        if let Err(e) = self.orch_cycle(&bin).await {
             warn!("orchestrateur: cycle échoué: {e:#}");
             self.orch.set_status(Phase::Error, Some(format!("{e:#}")));
         }
     }
 
-    /// Garde AgentBacklog : le binaire est résolvable (PATH du démon)
-    /// ou un composant `tool` déclaré pointe dessus et est installé.
-    async fn orch_agentbacklog_ok(&self) -> bool {
+    /// Garde AgentBacklog → le binaire résolu à réutiliser en argv[0] :
+    /// nom nu sur le PATH du démon, ou argv0 d'un composant `tool`
+    /// déclaré et installé (chemin absolu hors PATH accepté — la
+    /// garde et l'exécution voient le même binaire).
+    async fn orch_agentbacklog_bin(&self) -> Option<String> {
         if command_available("agentbacklog") {
-            return true;
+            return Some("agentbacklog".into());
         }
-        self.components.specs_all().await.iter().any(|s| {
-            s.kind == ComponentKind::Tool
-                && s.command.first().is_some_and(|c| {
-                    Path::new(c)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        == Some("agentbacklog")
-                        && command_available(c)
-                })
+        self.components.specs_all().await.iter().find_map(|s| {
+            if s.kind != ComponentKind::Tool {
+                return None;
+            }
+            let c = s.command.first()?;
+            let name = Path::new(c).file_name()?.to_str()?;
+            (name == "agentbacklog" && command_available(c)).then(|| c.clone())
         })
     }
 
@@ -426,14 +456,14 @@ impl Daemon {
     // Le cycle — sémantique du script d'origine, appels internes.
     // -------------------------------------------------------------------
 
-    async fn orch_cycle(self: &Arc<Self>) -> Result<()> {
+    async fn orch_cycle(self: &Arc<Self>, bin: &str) -> Result<()> {
         let cfg = &self.orch.cfg;
         let ws = Path::new(&cfg.workspace);
         // Pas de liste → pas de cycle : décider sur une DB illisible
         // rm'erait des workers sains (leurs items « absents ») ou créerait
         // un item notes intempestif. Phase Error, retry au prochain tick.
         let tasks = self
-            .orch_tasks(ws)
+            .orch_tasks(bin, ws)
             .await
             .context("agentbacklog --list a échoué")?;
         let (metas, session_ids): (Vec<SessionMeta>, HashSet<String>) = {
@@ -457,6 +487,14 @@ impl Daemon {
         let now = now_secs();
         let mut st = self.orch.state.lock().unwrap().clone();
 
+        // Un `orch off` en vol de cycle arrête tout : les étapes
+        // suivantes (release, rm, nudge, spawn, garde PR) sont des
+        // actions — un cycle qui continue après le relâchement du
+        // flock ouvre une fenêtre de double orchestration.
+        if !self.orch.is_enabled() {
+            return Ok(());
+        }
+
         // 1. wip orphelines (agent_id = session disparue) → release.
         for t in tasks.iter().filter(|t| task_status(t) == "wip") {
             let aid = task_agent(t);
@@ -466,7 +504,7 @@ impl Daemon {
                     task_id(t)
                 );
                 let _ = run_out(
-                    &["agentbacklog", "--release", &task_id(t).to_string(),
+                    &[bin, "--release", &task_id(t).to_string(),
                       "--agent-id", aid],
                     ws,
                 )
@@ -477,6 +515,9 @@ impl Daemon {
 
         // 2. ledger worker → {items, prs} + gestion des inactifs.
         for w in workers.clone() {
+            if !self.orch.is_enabled() {
+                return Ok(());
+            }
             let sid = w.id.as_str();
             let state = w.state.as_str();
             // items possédés par ce worker (agent_id persiste après done)
@@ -495,11 +536,17 @@ impl Daemon {
                 .filter(|(_, s)| s.as_str() == "done")
                 .map(|(i, _)| i)
                 .collect();
-            // PRs du registre attribuées à ce worker, état forge réel
-            // (entrées « closed » au registre écartées avant l'appel gh).
+            // PRs du registre attribuées à ce worker, état forge réel —
+            // `gh pr view` n'a de sens que pour GitHub : une MR GitLab
+            // `!N` rapporterait l'état de la PR GitHub #N du workspace
+            // (fausse attribution), et un Change-Id Gerrit non résolu
+            // (pr 0) sonderait pour rien. Hors GitHub ou registre déjà
+            // terminal : confiance au statut enregistré.
             let mut my_prs: BTreeMap<String, String> = BTreeMap::new();
-            for p in prs.iter().filter(|p| p.session == sid && p.status != "closed") {
-                let st_gh = self.gh_pr_state(p.pr, ws).await;
+            for p in prs.iter().filter(|p| {
+                p.session == sid && !matches!(p.status.as_str(), "closed" | "merged")
+            }) {
+                let st_gh = self.orch_pr_state(p, ws).await;
                 my_prs.insert(p.pr.to_string(), st_gh);
             }
             let open_prs: Vec<&String> = my_prs
@@ -560,6 +607,9 @@ impl Daemon {
         }
 
         // 3. spawn pour les pending poppables.
+        if !self.orch.is_enabled() {
+            return Ok(());
+        }
         let slots = (cfg.max_workers as usize).saturating_sub(workers.len());
         let to_spawn = pending.len().min(slots);
         for _ in 0..to_spawn {
@@ -582,6 +632,9 @@ impl Daemon {
         // 4. garde release PR : notes+ready quand vide, draft quand du
         //    travail revient (les items notes ne comptent pas comme du
         //    vrai travail : c'est eux qui passent la PR ready).
+        if !self.orch.is_enabled() {
+            return Ok(());
+        }
         let notes_ids: HashSet<u64> = st.notes_items.iter().copied().collect();
         let active_notes = tasks.iter().any(|t| {
             notes_ids.contains(&task_id(t))
@@ -616,7 +669,10 @@ impl Daemon {
                 // un merge tardif.
                 let mut open_any = Vec::new();
                 for p in &prs {
-                    if self.gh_pr_state(p.pr, ws).await == "OPEN" {
+                    if matches!(p.status.as_str(), "closed" | "merged") {
+                        continue;
+                    }
+                    if self.orch_pr_state(p, ws).await == "OPEN" {
                         open_any.push(p.pr);
                     }
                 }
@@ -631,7 +687,7 @@ impl Daemon {
                          création item patchnotes",
                         r.0
                     );
-                    if let Some(nid) = self.orch_add_notes(ws).await {
+                    if let Some(nid) = self.orch_add_notes(bin, ws).await {
                         st.notes_items.push(nid);
                         st.notes_cycle_done = true;
                     }
@@ -655,15 +711,19 @@ impl Daemon {
         }
         *self.orch.state.lock().unwrap() = st.clone();
         self.orch_save(&st);
-        self.orch.set_status(Phase::Active, None);
+        // off pendant le cycle : ne pas écraser le Disabled posé par
+        // set_enabled (le composant remonterait « running » à tort).
+        if self.orch.is_enabled() {
+            self.orch.set_status(Phase::Active, None);
+        }
         Ok(())
     }
 
     /// `agentbacklog --list --all --json` → items, None si la lecture
     /// a échoué (le cycle avorte : aucune décision sur du flou).
-    async fn orch_tasks(&self, ws: &Path) -> Option<Vec<Task>> {
+    async fn orch_tasks(&self, bin: &str, ws: &Path) -> Option<Vec<Task>> {
         let (rc, out, err) = run_out(
-            &["agentbacklog", "--list", "--all", "--json"],
+            &[bin, "--list", "--all", "--json"],
             ws,
         )
         .await
@@ -673,6 +733,23 @@ impl Daemon {
             return None;
         }
         serde_json::from_str(&out).ok()
+    }
+
+    /// État d'une entrée du registre : sonde `gh` réservée aux PR
+    /// GitHub numérotées (les entrées legacy sont normalisées
+    /// github/github.com à la charge) ; GitLab/Gerrit, Change-Id non
+    /// résolu (pr 0) ou statut exotique → statut enregistré mappé sur
+    /// l'échelle de gh ("open"/"draft" → OPEN).
+    async fn orch_pr_state(&self, p: &proto::PrEntry, ws: &Path) -> String {
+        if p.forge == "github" && p.pr > 0 {
+            return self.gh_pr_state(p.pr, ws).await;
+        }
+        match p.status.as_str() {
+            "open" | "draft" => "OPEN".into(),
+            "merged" => "MERGED".into(),
+            "closed" => "CLOSED".into(),
+            _ => "UNKNOWN".into(),
+        }
     }
 
     /// État forge d'une PR du workspace (`gh pr view`) — "UNKNOWN" en
@@ -713,10 +790,14 @@ impl Daemon {
             })
     }
 
-    /// `agentbacklog --add` de l'item patchnotes → son id.
-    async fn orch_add_notes(&self, ws: &Path) -> Option<u64> {
+    /// `agentbacklog --add` de l'item patchnotes → Some(id) si rc==0.
+    /// Some(0) quand l'id n'est pas récupérable : l'item est vraisem-
+    /// blablement créé quand même — le cycle doit le compter pour ne
+    /// pas en ajouter un second au tick suivant (0 n'est jamais un id
+    /// réel, l'entrée notes_items est inerte).
+    async fn orch_add_notes(&self, bin: &str, ws: &Path) -> Option<u64> {
         let (rc, out, _) = run_out(
-            &["agentbacklog", "--add", NOTES_TITLE, "--desc", NOTES_DESC, "--json"],
+            &[bin, "--add", NOTES_TITLE, "--desc", NOTES_DESC, "--json"],
             ws,
         )
         .await
@@ -725,7 +806,7 @@ impl Daemon {
             warn!("orchestrateur: notes item add rc={rc} out={out}");
             return None;
         }
-        serde_json::from_str::<Value>(&out)
+        let id = serde_json::from_str::<Value>(&out)
             .ok()
             .and_then(|v| v.get("id").and_then(Value::as_u64))
             .or_else(|| {
@@ -736,6 +817,11 @@ impl Daemon {
                     .last()
                     .and_then(|s| s.parse().ok())
             })
+            .unwrap_or_else(|| {
+                warn!("orchestrateur: notes item créé mais id non parsé (out={out})");
+                0
+            });
+        Some(id)
     }
 
     /// Nudge ACP du script : send, puis resume + send si la session ne
