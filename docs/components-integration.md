@@ -170,19 +170,26 @@ nœud composant** (l'env `AGENTCONTROL_COMPONENT` vit côté composant,
 le démon ne la revoit pas sur le RPC).
 
 Mécanisme : un champ **`created_by`** sur les requêtes de création
-(`NewSession`, à marge `PeerSpawn`), persisté dans `SessionMeta` et
-exposé par `ListSessions`/`SessionInfo` — valeurs
+(`NewSession`, à marge `PeerSpawn` — `AttachSession` idem si besoin :
+attacher une session native sous un nœud composant), persisté dans
+`SessionMeta` et exposé par `ListSessions`/`SessionInfo` — valeurs
 `component:<name>` | `service:<nom>` | `user` (défaut). Le composant
 connaît son nom via `AGENTCONTROL_COMPONENT` (§2.2) et le re-transmet
 — ex. l'orchestrateur `acctl new … --as backlog-orchestrator` produit
 des `Backlog-W*` rattachés au nœud orchestrateur dans le diagramme.
+Validation cheap côté démon (spec #24) : n'accepter `component:<name>`
+que si `<name>` figure dans components.toml — le champ reste
+auto-déclaré (même confiance que `NewSession`), mais un composant ne
+peut pas s'attribuer un nom inexistant.
 
 C'est **le même canal que la provenance externe de l'item #21**
 (spawn par services externes, en cours) : les deux chantiers décrivent
 le même besoin — le champ de la spec de #24 est celui que #26 consomme
-pour les arêtes ; la forme retenue par #21 (`origin`/`created_by`)
-fait foi, le diagramme s'y aligne. À intégrer au modèle dès #24 pour
-éviter une seconde évolution proto (un second cycle `(minor)`).
+pour les arêtes ; si #21 a déjà tranché une forme (`origin`) au moment
+où #24 lande, elle fait foi et le diagramme s'y aligne — sinon c'est
+le choix de #24 (`created_by`) qui fixe le nom consommé par #26.
+À intégrer au modèle dès #24 pour éviter une seconde évolution proto
+(un second cycle `(minor)`).
 
 ### 2.4 acctl
 
