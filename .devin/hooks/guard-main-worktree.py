@@ -357,7 +357,11 @@ def prot_hit(p, names):
     name (`feat/x`), a ref tail (`refs/remotes/o/next_release`) or a
     bare remote-tracked form (`origin/next_release`)."""
     t = ref_tail(p)
-    return t in names or t.split("/", 1)[-1] in names
+    # suffix after first `/` covers `origin/<name>`; basename covers
+    # path-like operands (`--orphan <path>` names the branch after
+    # basename(path))
+    return t in names or t.split("/", 1)[-1] in names \
+        or t.rsplit("/", 1)[-1] in names
 
 
 def verb_ok(verb, args):
@@ -452,7 +456,7 @@ def repo_verb_ok(verb, args, in_main, checked, cwd=None):
         pos = positionals(args, {"-m"}, cut=False)
         return not any(prot_hit(p, names) for p in pos)
     if verb == "symbolic-ref":
-        pos = positionals(args, cut=False)
+        pos = positionals(args, {"-m"}, cut=False)
         if len(pos) >= 2:
             # a symref written *or pointing at* a protected ref is the
             # hazard (update-ref through it moves the protected ref)
@@ -472,13 +476,27 @@ def repo_verb_ok(verb, args, in_main, checked, cwd=None):
                    "--cleanup", "--sort"}, cut=False)
         return not (pos and prot_hit(pos[0], names))
     if verb == "worktree":
-        pos = positionals(args, {"-b", "-B"}, cut=False)
+        pos = positionals(args, {"-b", "-B", "--orphan"}, cut=False)
         if pos and pos[0] == "add":
             bnames = [args[i + 1] for i, a in enumerate(args)
-                      if a in ("-b", "-B") and i + 1 < len(args)]
-            if flags & {"-b", "-B", "--detach"}:
-                # `-b <name>` creates a branch — prot_hit the name;
-                # the tail operand is a start point, not an attach
+                      if a in ("-b", "-B", "--orphan")
+                      and i + 1 < len(args)]
+            bnames += [m.group(1) for a in args
+                       if (m := re.fullmatch(r"-[bB](.+)", a))]
+            bnames += [m.group(1) for a in args
+                       if (m := re.fullmatch(r"--orphan=(.+)", a))]
+            # `-b<name>`/`-B<name>` attached stay whole in flags_of
+            # (inner `-` defeats the bundle regex) — a non-empty
+            # bnames is itself proof a creation flag was given
+            creates = bool(bnames) or flags & {"-b", "-B", "-d",
+                                               "--detach"} or any(
+                a == "--orphan" or a.startswith("--orphan=")
+                for a in args)
+            if creates:
+                # `-b|--orphan <name>` names an (unborn) branch —
+                # prot_hit it (prot_hit's tail check also covers the
+                # basename-of-path form of `--orphan`); the tail
+                # operand is a start point, not an attach
                 return not any(prot_hit(p, names) for p in bnames)
             # `worktree add <path> <committish>` — a second checkout of
             # a protected branch is refused
