@@ -265,6 +265,31 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             change_id: so("change_id"),
         },
         "forge_list" => ReqKind::ForgeList {},
+        // Composants managés (docs/components-integration.md §2.3) —
+        // gate capability daemon_status.components côté frontend.
+        "list_components" => ReqKind::ListComponents,
+        "component_info" => ReqKind::ComponentInfo { name: s("name") },
+        "component_start" => ReqKind::ComponentStart { name: s("name") },
+        "component_stop" => ReqKind::ComponentStop { name: s("name") },
+        "component_restart" => ReqKind::ComponentRestart { name: s("name") },
+        "component_logs" => ReqKind::ComponentLogs {
+            name: s("name"),
+            offset: p.get("offset").and_then(Value::as_u64),
+            limit: p.get("limit").and_then(Value::as_u64),
+        },
+        "component_upsert" => ReqKind::ComponentUpsert {
+            name: s("name"),
+            spec: p
+                .get("spec")
+                .cloned()
+                .and_then(|v| serde_json::from_value(v).ok())
+                .ok_or("component_upsert: spec absente ou invalide")?,
+        },
+        "component_remove" => ReqKind::ComponentRemove { name: s("name") },
+        "component_catalog" => ReqKind::ComponentCatalog {
+            refresh: p.get("refresh").and_then(Value::as_bool),
+        },
+        "component_install" => ReqKind::ComponentInstall { name: s("name") },
         "term_open" => ReqKind::TermOpen {
             session: s("session"),
             cols: p.get("cols").and_then(Value::as_u64).unwrap_or(0) as u16,
@@ -297,8 +322,6 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             prompt: so("prompt"),
             group: so("group"),
         },
-        "list_components" => ReqKind::ListComponents,
-        "component_info" => ReqKind::ComponentInfo { name: s("name") },
         m => return Err(format!("méthode inconnue: {m}")),
     })
 }

@@ -121,3 +121,68 @@ export type SavedConn = {
 export type SendMode = "normal" | "steer" | "force";
 
 export type ConnLive = "ok" | "reconnecting" | "down";
+
+// ---------------------------------------------------------------------------
+// Composants managés (miroir proto::components — docs/components-integration.md)
+// ---------------------------------------------------------------------------
+
+export type ComponentKind = "internal" | "process" | "external" | "tool";
+export type ComponentState =
+  | "starting" | "running" | "degraded" | "stopped" | "failed" | (string & {});
+
+/** healthcheck sérialisé `{kind, …}` (tag interne serde). */
+export type ComponentHealthcheck =
+  | { kind: "none" }
+  | { kind: "process" }
+  | { kind: "tcp"; addr: string }
+  | { kind: "http"; url: string }
+  | { kind: "command"; argv: string[] };
+
+/** Spec [[components]] de components.toml — lue et écrite telle quelle. */
+export interface ComponentSpec {
+  name: string;
+  kind: ComponentKind;
+  command: string[];
+  env: Record<string, string>;
+  cwd: string | null;
+  autostart: boolean;
+  restart: "always" | "on-failure" | "never";
+  restart_sec: number;
+  healthcheck: ComponentHealthcheck;
+  description: string | null;
+}
+
+export interface ComponentStatus {
+  state: ComponentState;
+  health?: string;
+  pid?: number;
+  uptime_s?: number;
+  restarts?: number;
+  last_exit?: number;
+}
+
+/** Item ListComponents / ComponentInfo : spec + état runtime. `source`
+ *  = "internal" (déclaré en code, non éditable) | "components.toml". */
+export interface ComponentItem {
+  name: string;
+  kind: ComponentKind;
+  autostart: boolean;
+  description?: string | null;
+  source?: string;
+  spec: ComponentSpec;
+  status: ComponentStatus;
+}
+
+/** Entrée du catalogue embarqué (ComponentCatalog) : métadonnées +
+ *  detection installed/version + sondes upstream. */
+export interface CatalogEntry {
+  name: string;
+  description: string;
+  repo?: string | null;
+  homepage?: string | null;
+  suggested_spec: ComponentSpec;
+  installed: boolean;
+  version?: string | null;
+  latest_version?: string | null;
+  latest_notes?: string | null;
+}

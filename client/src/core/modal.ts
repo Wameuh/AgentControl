@@ -43,7 +43,8 @@ function watch() {
   const overlayUp =
     ($("settings-view") as HTMLElement | null)?.hidden === false ||
     ($("conn-view") as HTMLElement | null)?.hidden === false ||
-    ($("map-view") as HTMLElement | null)?.hidden === false;
+    ($("map-view") as HTMLElement | null)?.hidden === false ||
+    ($("components-view") as HTMLElement | null)?.hidden === false;
   if (!overlayUp) {
     for (const el of document.querySelectorAll<HTMLElement>("#chat > [inert]")) {
       el.inert = false;

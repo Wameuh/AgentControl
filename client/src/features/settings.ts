@@ -104,9 +104,9 @@ export class SettingsPanel {
     const was = this.isOpen();
     $("settings-view").hidden = true;
     // Ne lever l'inert que si les autres overlays #chat sont aussi
-    // fermés — sinon on ré-expose #input derrière conn-view/map-view
-    // (frappes invisibles).
-    if ($("conn-view").hidden && $("map-view").hidden) {
+    // fermés — sinon on ré-expose #input derrière conn-view/map-view/
+    // components-view (frappes invisibles).
+    if ($("conn-view").hidden && $("map-view").hidden && $("components-view").hidden) {
       this.setChatInert(false);
     }
     // nav.close est idempotent (entrée absente = no-op) : l'appeler même

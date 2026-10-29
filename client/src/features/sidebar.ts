@@ -23,6 +23,7 @@ import { sounds } from "./sounds";
 import type { NewSessionDialog } from "./new-session";
 import type { SettingsPanel } from "./settings";
 import type { ConnView } from "./conn-view";
+import type { ComponentsPanel } from "./components";
 
 const DTYPE = "application/x-ac-session";
 
@@ -81,6 +82,7 @@ export class Sidebar {
   private chat!: ChatView;
   private settings!: SettingsPanel;
   private connView!: ConnView;
+  private comps!: ComponentsPanel;
 
   /** PRs ouvertes par session ("conn\0sid") — rempli par refresh ;
    *  vide si le démon ne connaît pas pr_list (vieux démon → pas de badge). */
@@ -136,13 +138,14 @@ export class Sidebar {
   }
   private ctx = $("sctx");
 
-  bind(conns: ConnectionManager, groups: GroupStore, newSess: NewSessionDialog, chat: ChatView, settings: SettingsPanel, connView: ConnView) {
+  bind(conns: ConnectionManager, groups: GroupStore, newSess: NewSessionDialog, chat: ChatView, settings: SettingsPanel, connView: ConnView, comps: ComponentsPanel) {
     this.conns = conns;
     this.groups = groups;
     this.newSess = newSess;
     this.chat = chat;
     this.settings = settings;
     this.connView = connView;
+    this.comps = comps;
     this.prsView.bind({
       openSession: (id) => this.openSession(id),
       connState: (k) => this.conns.state(k),
@@ -157,6 +160,7 @@ export class Sidebar {
   private openSession(id: string): Promise<void> {
     this.settings.close();
     this.connView.close();
+    this.comps.close();
     return this.chat.open(id);
   }
 

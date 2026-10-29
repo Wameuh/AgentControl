@@ -129,6 +129,9 @@ export class OverlayNav {
     } else if (id === "map") {
       // Idem : le ✕ du diagramme rend l'inert + purge le poll timer.
       $("map-close").click();
+    } else if (id === "components") {
+      // Idem : le ✕ du panneau composants porte le close complet.
+      $("comp-close").click();
     } else if (id.startsWith("dlg:")) {
       (document.getElementById(id.slice(4)) as HTMLDialogElement | null)?.close();
     }
