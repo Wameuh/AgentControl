@@ -227,6 +227,8 @@ await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
     chat.dropConv(session);
     term.dropSession(session);
     if (app.current && session === app.current.id) chat.markGone();
+    // Brouillon du composer + pièces garées : la session les emporte.
+    composer.dropSession(session);
     // Toast seulement pour une suppression externe — la nôtre a déjà
     // retiré la ligne optimistement, re-notifier serait du bruit.
     if (!sidebar.wasPendingDel(session)) notify("info", t("session_deleted_toast"));

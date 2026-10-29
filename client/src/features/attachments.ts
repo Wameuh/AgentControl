@@ -58,8 +58,13 @@ export class Attachments {
    *  write_file/create_path → bouton + masqué, drop averti). */
   capable: (conn: string | undefined) => boolean = () => true;
   private items: Att[] = [];
-  /** Session propriétaire des chips (les chemins visent son cwd). */
+  /** Session propriétaire des chips affichés (les chemins visent son cwd). */
   private sid: string | null = null;
+  /** Chips garés par session non affichée — repris à son retour, même
+   *  scoping que le brouillon du composer. Les uploads en vol inclus
+   *  continuent : chaque Att épingle sid+conn, la boucle n'a pas besoin
+   *  de l'affichage pour finir. */
+  private parked = new Map<string, Att[]>();
   /** Compteur dragenter/dragleave — évite le clignotement en traversant
    *  les enfants de #chat. */
   private dragDepth = 0;
@@ -79,16 +84,21 @@ export class Attachments {
       .map((a) => ({ name: a.name, path: a.abs }));
   }
 
-  /** Envoi accepté : les chips partent, les fichiers RESTENT (l'agent
-   *  les lit pendant le tour). */
-  sent() {
-    this.items = [];
-    this.render();
+  /** Envoi accepté : les chips de la session qui a envoyé partent (les
+   *  fichiers RESTENT — l'agent les lit pendant le tour). Elle peut
+   *  ne plus être affichée si l'utilisateur a basculé pendant l'envoi :
+   *  ses chips sont alors garés, pas rendus — on jette sa liste. */
+  sent(sid: string) {
+    if (sid === this.sid) {
+      this.items = [];
+      this.render();
+    } else {
+      this.parked.delete(sid);
+    }
   }
 
-  /** La session affichée a changé : les chips pointaient vers l'ancien
-   *  cwd — uploads interrompus (fichiers déjà complets laissés en
-   *  place, visibles dans l'explorateur de l'ancienne session). */
+  /** La session affichée a changé : ses chips sont garés sous son id
+   *  (uploads en vol poursuivis), ceux de la session affichée reviennent. */
   onSessionChanged() {
     this.syncSession();
   }
@@ -152,20 +162,34 @@ export class Attachments {
   }
 
   /** Les chips appartiennent à la session qui les a reçues : changement
-   *  de session → purge (un upload en vol vers l'ancienne session est
-   *  abandonné, son reliquat nettoyé). */
+   *  de session → les siens sont garés (un upload en vol continue — ses
+   *  tranches visent toujours la bonne session), ceux de la session
+   *  affichée sont réinstallés. */
   private syncSession() {
     const cur = app.current?.id ?? null;
     if (cur === this.sid) return;
-    for (const a of this.items) a.aborted = true;
-    this.items = [];
+    if (this.sid && this.items.length) this.parked.set(this.sid, this.items);
+    this.items = (cur && this.parked.get(cur)) || [];
+    if (cur) this.parked.delete(cur);
     this.sid = cur;
     this.render();
   }
 
+  /** Session supprimée : ses chips garés partent avec elle — upload en
+   *  vol abandonné (sa boucle nettoiera son reliquat), pièce déjà posée
+   *  retirée au mieux pour ne pas orpheliner .ac-uploads. */
+  dropSession(id: string) {
+    const items = this.parked.get(id);
+    if (!items) return;
+    this.parked.delete(id);
+    for (const a of items) {
+      a.aborted = true;
+      if (a.status !== "up") this.removeRemote(a);
+    }
+  }
+
   addFiles(files: File[]) {
     this.syncSession();
-    this.sid = app.current?.id ?? null;
     if (!this.sid) {
       notify("warn", t("att_no_session"));
       return;
@@ -275,8 +299,20 @@ export class Attachments {
   }
 
   private dropChip(a: Att) {
-    const i = this.items.indexOf(a);
-    if (i >= 0) this.items.splice(i, 1);
+    let i = this.items.indexOf(a);
+    if (i >= 0) {
+      this.items.splice(i, 1);
+    } else {
+      // Chip garé (session non affichée — abort ou erreur en vol) :
+      // le retirer de la liste de sa session.
+      for (const items of this.parked.values()) {
+        i = items.indexOf(a);
+        if (i >= 0) {
+          items.splice(i, 1);
+          break;
+        }
+      }
+    }
     this.render();
   }
 

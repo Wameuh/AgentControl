@@ -39,6 +39,13 @@ export class Composer {
   /** Champ déplié manuellement (bouton expand) — replie dès que le
       contenu rentre sous le cap normal. */
   private inpExpanded = false;
+  /** Brouillons par session (id → texte non envoyé). La map ne contient
+   *  que les sessions non affichées : le texte de la session courante
+   *  vit dans #input et n'y revient qu'à la bascule suivante. Volatil —
+   *  pas de persistance disque. */
+  private drafts = new Map<string, string>();
+  /** Session propriétaire du texte actuellement dans #input. */
+  private draftSid: string | null = null;
 
   bind(chat: ChatView) {
     this.chat = chat;
@@ -563,17 +570,27 @@ export class Composer {
         ? `${txt}\n\n${atLines}`
         : txt
       : atLines;
+    const sid = app.current.id; // peut changer pendant l'await
     this.setInput("");
     try {
       await call("send", {
-        session: app.current.id,
+        session: sid,
         text: payload,
         force: mode === "force",
         steer: mode === "steer",
       });
-      this.attach.sent();
+      this.attach.sent(sid);
     } catch (e) {
       showErr(String(e));
+      // Envoi refusé : le brouillon n'est vidé que sur succès — rendre
+      // le texte à SA session (champ encore vide, ou draft garé si
+      // l'utilisateur a changé de session entre-temps), sans écraser
+      // une frappe plus récente.
+      if (app.current?.id === sid) {
+        if (txt && !($("input") as HTMLTextAreaElement).value.trim()) this.setInput(txt);
+      } else if (txt && !this.drafts.has(sid)) {
+        this.drafts.set(sid, txt);
+      }
     }
     // Commande slash non-builtin : l'agent l'applique au prochain tour (ex.
     // /compact → "context compacted" n'arrive qu'au message suivant) → hint.
@@ -687,10 +704,36 @@ export class Composer {
       sendPref() === "steer" ? t("input_ph_steer") : t("input_ph");
   }
 
-  /** Session affichée changée — les chips d'upload visent l'ancien
-   *  cwd : elles sont purgées par le module pièces jointes. */
+  /** Session affichée changée : le brouillon comme les chips de pièces
+   *  jointes appartiennent à la session qui les a vus — garés sous son
+   *  id, ceux de la session affichée sont réinstallés. */
   sessionChanged() {
+    const cur = app.current?.id ?? null;
+    if (cur !== this.draftSid) {
+      const text = ($("input") as HTMLTextAreaElement).value;
+      if (this.draftSid) {
+        // Le texte affiché appartient à la session quittée.
+        if (text) this.drafts.set(this.draftSid, text);
+        else this.drafts.delete(this.draftSid);
+      }
+      // Réinstaller le brouillon de la session affichée ; un texte tapé
+      // sans session ouverte est attribué à celle qui arrive (il visait
+      // l'agent à venir).
+      let next = cur ? (this.drafts.get(cur) ?? "") : "";
+      if (cur) this.drafts.delete(cur);
+      if (!this.draftSid && cur && text) next = next ? `${next}\n${text}` : text;
+      this.draftSid = cur;
+      this.setInput(next);
+    }
     this.attach.onSessionChanged();
+  }
+
+  /** Session supprimée : son brouillon et ses pièces garées partent
+   *  avec elle (appelé sur session_deleted — après markGone, qui gare
+   *  encore le contenu affiché sous son id). */
+  dropSession(id: string) {
+    this.drafts.delete(id);
+    this.attach.dropSession(id);
   }
 
   /** Capacité « fichiers » du démon courant (injecté depuis conns.cap)
@@ -701,6 +744,7 @@ export class Composer {
 
   init() {
     this.attach.init();
+    this.draftSid = app.current?.id ?? null;
     this.refreshHints();
     $("btn-send").onclick = () => this.sendInput(this.defaultMode());
     $("btn-alt").onclick = () => this.sendInput(this.altMode());
