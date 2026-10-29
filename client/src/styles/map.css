@@ -24,6 +24,9 @@
 }
 /* internal : pas de process — lien structurel plus discret. */
 #map-svg .e.k-internal { stroke-width: 1; opacity: .5; }
+/* tool : passif aussi ; `absent` = lien en pointillés quasi effacé. */
+#map-svg .e.k-tool { opacity: .65; }
+#map-svg .e.st-absent { stroke-dasharray: 2 5; opacity: .4; }
 #map-svg .e.st-failed { stroke: var(--err); opacity: .65; }
 #map-svg .e.st-degraded { stroke: var(--warn); }
 #map-svg .e.st-dead, #map-svg .e.st-interrupted, #map-svg .e.st-asleep {
@@ -69,6 +72,11 @@
 .n-comp.st-running .nc { stroke: var(--sage); }
 .n-comp.st-degraded .nc { stroke: var(--gold); }
 .n-comp.st-stopped .nc { stroke: var(--dim); }
+/* tool : nœud passif — `installed` ≈ présent (sage discret), `absent`
+   = simple observation (dim + tirets, pas une panne). */
+.n-comp.st-installed .nc { stroke: var(--sage); }
+.n-comp.st-absent { opacity: .55; }
+.n-comp.st-absent .nc { stroke: var(--dim); stroke-dasharray: 3 4; }
 .n.st-dead .nc, .n.st-interrupted .nc, .n.st-asleep .nc { stroke: var(--dim); }
 .n.st-dead, .n.st-interrupted, .n.st-asleep { opacity: .55; }
 @keyframes mpulse { 50% { stroke-opacity: .3; } }
@@ -79,6 +87,8 @@
 .n-comp.st-starting .nd { fill: var(--gold); }
 .n-comp.st-degraded .nd { fill: var(--gold); }
 .n-comp.st-failed .nd { fill: var(--red); }
+.n-comp.st-installed .nd { fill: var(--sage); }
+.n-comp.st-absent .nd { fill: var(--dim); }
 
 /* --- Légende --- */
 #map-legend {

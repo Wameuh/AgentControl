@@ -35,9 +35,12 @@ const KIND_ICON: Record<string, IconName> = {
   tool: "tool",
 };
 
-/** États wire du proto (snake_case) — whitelist pour l'attribut class. */
+/** États wire du proto (snake_case) — whitelist pour l'attribut class.
+ *  `installed`/`absent` sont les états d'observation des `tool` (pas de
+ *  cycle de vie). */
 const COMP_STATES = new Set([
   "starting", "running", "degraded", "stopped", "failed",
+  "installed", "absent",
 ]);
 const compCls = (s?: string) => (s && COMP_STATES.has(s) ? s : "stopped");
 
@@ -310,6 +313,7 @@ export class MapView {
       const tip = [
         c.name,
         `${c.kind} · ${c.status?.state ?? "?"}`,
+        c.status?.version ?? "",
         c.status?.uptime_s ? `${t("map_uptime")} ${fmtUp(c.status.uptime_s)}` : "",
         c.description ?? "",
       ]
@@ -409,6 +413,7 @@ export class MapView {
       (c.description ? `<p class="mi-desc">${esc(c.description)}</p>` : "") +
       `<div class="mi-rows">` +
       row(t("map_state"), st.state) +
+      row(t("map_version"), st.version) +
       row(t("map_health"), st.health) +
       row("PID", st.pid) +
       row(t("map_uptime"), st.uptime_s ? fmtUp(st.uptime_s) : undefined) +

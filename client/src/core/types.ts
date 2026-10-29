@@ -54,7 +54,8 @@ export interface PrEntry {
 
 /** État runtime d'un composant (champ `status` des items ListComponents). */
 export interface CompStatus {
-  /** starting | running | degraded | stopped | failed (proto snake_case). */
+  /** starting | running | degraded | stopped | failed — ou les états
+   *  d'observation d'un `tool` : installed | absent (snake_case proto). */
   state: string;
   /** Verdict de la dernière sonde : "ok" | "fail" — absent sans sonde. */
   health?: string;
@@ -65,6 +66,8 @@ export interface CompStatus {
   restarts?: number;
   /** Code du dernier exit (128+signal si tué par signal). */
   last_exit?: number;
+  /** Version sondée d'un `tool` (1re ligne de sa commande, ≤200 c). */
+  version?: string;
 }
 
 /** Item ListComponents : spec aplatie + état (`item_json` côté démon). */

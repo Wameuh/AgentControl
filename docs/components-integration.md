@@ -90,11 +90,19 @@ description = "File FIFO de features (SQLite ~/.agentbacklog/backlog.db)"
 | `internal` | feature compilée dans le démon | pas de process ; état déduit de la config (web actif si `bind_http`, a2a si activé…) | mcp-serve, prs, web, janitor |
 | `process` | programme long managé par le démon | spawn/stop/restart/healthcheck/logs | backlog-orchestrator, futurs MCP/scripts |
 | `external` | déclaré, géré ailleurs | observé par healthcheck seulement — le démon ne touche jamais au cycle de vie | supervisord, sshd, cron, review-bot, systemd unit |
-| `tool` | CLI/install stateless | présence + version (`command --version` sonde) ; pas de process long | agentbacklog, acctl, graphify |
+| `tool` | CLI/install stateless | présence + version (`command --version` sonde) ; pas de process long — états `installed`/`absent` | agentbacklog, acctl, graphify |
 
 Les composants `internal` sont **déclarés dans le code** (pas dans
 components.toml) et apparaissent dans `ListComponents` comme les autres —
 le diagramme montre ainsi tout l'écosystème d'un coup.
+
+Les `tool` n'ont **pas de cycle de vie** — `ComponentStart/Stop/Restart`
+sont refusés. Leur `state` est une observation : `installed` quand
+argv0 est résolvable (PATH du démon ou chemin exécutable), `absent`
+sinon — pas une panne, juste « pas là ». La sonde périodique (30 s)
+exécute `command` (typiquement `… --version`, timeout 3 s) et publie
+la 1re ligne en `status.version` (≤200 c) — l'état `installed`
+lui-même est resondé à la demande, frais même avant la 1re passe.
 
 ### 2.2 Cycle de vie d'un `process` managé
 
@@ -138,7 +146,7 @@ avec l'`id` correctement extrait, donc l'appel échoue proprement) :
 
 | ReqKind | Réponse |
 | --- | --- |
-| `ListComponents` | `[{name, kind, state, pid?, autostart, health, uptime_s?, restarts, last_exit?, description?, source?}]` |
+| `ListComponents` | `[{name, kind, state, pid?, autostart, health, uptime_s?, restarts, last_exit?, version?, description?, source?}]` |
 | `ComponentInfo {name}` | spec complète + état détaillé |
 | `ComponentStart/Stop/Restart {name}` | `{name, state}` |
 | `ComponentLogs {name, offset?, limit?}` | `{data(b64)|lines, size, truncated}` (tail paginé) |
@@ -268,7 +276,10 @@ La pièce « vivante » : **graphe des programmes et des sessions**.
   (`spawned_by`/`peer_message`).
 - **États animés** : pulse sur les sessions `working`, point coloré par
   état (idle/working/waiting/dead/degraded/stopped), arêtes en pointillés
-  animés sur les flux actifs. Tooltips : titre, état, uptime ; clic
+  animés sur les flux actifs. Les `tool` sont des **nœuds passifs** :
+  icône dédiée, `installed` = liseré discret, `absent` = nœud et arête
+  en tirets quasi effacés (observation, pas panne), version sondée en
+  tooltip + carte info. Tooltips : titre, état, uptime ; clic
   session → ouvre le chat ; clic composant → panneau §2.6.
 - **Technique** : **SVG en vanilla TS** (le client n'a aucune dep de
   graphe — pas de lib externe). Layout radial déterministe (démon centre,
