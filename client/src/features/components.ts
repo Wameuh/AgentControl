@@ -79,6 +79,9 @@ export class ComponentsPanel {
   private catalogLoaded = false;
   private pollTimer: ReturnType<typeof setInterval> | undefined;
   private pollBusy = false;
+  /** Fingerprint de la dernière liste rendue — le poll ne rebâtit le DOM
+   *  que si la structure a bougé (voir renderList/fpOf). */
+  private renderedFp = "";
   /** Composant dont le log tail est affiché (mode logs). */
   private logsName = "";
   /** Nom du composant en édition ("" = nouvelle spec). */
@@ -152,7 +155,8 @@ export class ComponentsPanel {
     }
     // L'inert ne tombe que si les autres overlays #chat sont fermés —
     // sinon #input serait ré-exposé derrière eux (frappes invisibles).
-    if ($("conn-view").hidden && $("settings-view").hidden) this.setChatInert(false);
+    if ($("conn-view").hidden && $("settings-view").hidden && $("map-view").hidden)
+      this.setChatInert(false);
     nav.close("components");
     if (!was) return;
     if (!isAndroid()) ($("input") as HTMLTextAreaElement).focus();
@@ -204,6 +208,9 @@ export class ComponentsPanel {
   // -------------------------------------------------------------------
 
   private async refreshList(silent = false) {
+    // Render avant le fetch : tant que rien n'a répondu la zone affiche
+    // « chargement… » plutôt qu'un blanc.
+    if (this.mode === "list") this.renderList();
     try {
       this.items = await call<ComponentItem[]>("list_components", {
         conn: this.connParam(),
@@ -268,20 +275,11 @@ export class ComponentsPanel {
     line1.title = it.description ?? "";
     main.appendChild(line1);
 
-    const meta: string[] = [];
-    if (st.pid) meta.push(`pid ${st.pid}`);
-    if (it.kind === "process" && (st.uptime_s ?? 0) > 0)
-      meta.push(`↑${fmtUp(st.uptime_s!)}`);
-    if ((st.restarts ?? 0) > 0)
-      meta.push(`↻${st.restarts} ${t("comp_restarts")}`);
-    if (st.health) meta.push(st.health === "ok" ? "♥ ok" : "♥ fail");
-    if (st.last_exit !== undefined && st.last_exit !== null)
-      meta.push(`exit ${st.last_exit}`);
-    if (it.description) meta.push(it.description);
-    if (meta.length) {
+    const meta = this.metaText(it);
+    if (meta) {
       const line2 = document.createElement("div");
       line2.className = "comp-meta";
-      line2.textContent = meta.join(" · ");
+      line2.textContent = meta;
       main.appendChild(line2);
     }
     row.appendChild(main);
@@ -321,15 +319,59 @@ export class ComponentsPanel {
     return row;
   }
 
+  /** Ligne méta d'un item (pid/uptime/restarts/health/exit/description)
+   *  — extraite pour être rafraîchie en place au poll. */
+  private metaText(it: ComponentItem): string {
+    const st = it.status;
+    const meta: string[] = [];
+    if (st.pid) meta.push(`pid ${st.pid}`);
+    if (it.kind === "process" && (st.uptime_s ?? 0) > 0)
+      meta.push(`↑${fmtUp(st.uptime_s!)}`);
+    if ((st.restarts ?? 0) > 0)
+      meta.push(`↻${st.restarts} ${t("comp_restarts")}`);
+    if (st.health) meta.push(st.health === "ok" ? "♥ ok" : "♥ fail");
+    if (st.last_exit !== undefined && st.last_exit !== null)
+      meta.push(`exit ${st.last_exit}`);
+    if (it.description) meta.push(it.description);
+    return meta.join(" · ");
+  }
+
+  /** Fingerprint structurel d'un item — tout sauf l'uptime qui tick à la
+   *  seconde : identique → le poll ne rebâtit pas le DOM (un clic qui
+   *  chevauche le re-render serait avalé, hover/focus perdus ; le même
+   *  problème était résolu dans map-view par sa signature « pas de
+   *  changement → pas de re-render »). */
+  private fpOf(it: ComponentItem): string {
+    const st = it.status;
+    return [
+      it.name, it.kind, st.state, st.pid, st.restarts, st.health,
+      st.last_exit, it.autostart, it.source, it.description,
+    ].join("|");
+  }
+
   private renderList() {
     const el = $("comp-list");
-    el.innerHTML = "";
     if (!this.items.length) {
+      this.renderedFp = "";
+      el.innerHTML = "";
       el.appendChild(
         this.empty(!this.listLoaded ? t("loading") : t("comp_none")),
       );
       return;
     }
+    const fp = this.items.map((it) => this.fpOf(it)).join(";");
+    if (fp === this.renderedFp && el.childElementCount === this.items.length) {
+      // Même structure : seule la ligne méta (uptime) change — update en
+      // place, les lignes gardent hover/focus/handlers. Indexation par
+      // ligne (une row sans méta ne décale pas la suivante).
+      this.items.forEach((it, i) => {
+        const m = el.children[i]?.querySelector<HTMLElement>(".comp-meta");
+        if (m) m.textContent = this.metaText(it);
+      });
+      return;
+    }
+    this.renderedFp = fp;
+    el.innerHTML = "";
     for (const it of this.items) el.appendChild(this.compRow(it));
   }
 
@@ -338,6 +380,7 @@ export class ComponentsPanel {
   // -------------------------------------------------------------------
 
   private async refreshCatalog(refresh = false) {
+    if (this.mode === "catalog") this.renderCatalog();
     try {
       this.catalog = await call<CatalogEntry[]>("component_catalog", {
         refresh,
@@ -500,19 +543,25 @@ export class ComponentsPanel {
 
   /** Form → ComponentSpec — validation minimale alignée sur les gardes
    *  du démon (nom [a-z0-9-]+, commande exigée pour process/tool, env
-   *  KEY=VALUE) pour échouer avant l'envoi plutôt que sur erreur RPC. */
+   *  KEY=VALUE) pour échouer avant l'envoi plutôt que sur erreur RPC.
+   *  Les champs masqués selon le kind sont normalisés, pas lus : sinon
+   *  un process re-basculé en external persisterait un argv/autostart
+   *  caducs dans components.toml. */
   private collectSpec(): ComponentSpec {
     const name = ($("ce-name") as HTMLInputElement).value.trim();
     if (!/^[a-z0-9-]+$/.test(name)) throw new Error(t("comp_name_invalid"));
     const kind = ($("ce-kind") as HTMLSelectElement).value as ComponentKind;
-    const command = LINES("ce-cmd");
+    const proc = kind === "process";
+    const command = kind === "external" ? [] : LINES("ce-cmd");
     if (kind !== "external" && !command.length)
       throw new Error(t("comp_cmd_required", { kind }));
     const env: Record<string, string> = {};
-    for (const l of LINES("ce-env")) {
-      const i = l.indexOf("=");
-      if (i <= 0) throw new Error(t("comp_env_invalid", { l }));
-      env[l.slice(0, i).trim()] = l.slice(i + 1);
+    if (proc) {
+      for (const l of LINES("ce-env")) {
+        const i = l.indexOf("=");
+        if (i <= 0) throw new Error(t("comp_env_invalid", { l }));
+        env[l.slice(0, i).trim()] = l.slice(i + 1);
+      }
     }
     let healthcheck: ComponentHealthcheck = { kind: "none" };
     const hcKind = ($("ce-hc") as HTMLSelectElement).value;
@@ -535,14 +584,14 @@ export class ComponentsPanel {
       kind,
       command,
       env,
-      cwd: ($("ce-cwd") as HTMLInputElement).value.trim() || null,
-      autostart: ($("ce-autostart") as HTMLInputElement).checked,
-      restart: ($("ce-restart") as HTMLSelectElement)
-        .value as ComponentSpec["restart"],
-      restart_sec: Math.max(
-        0,
-        Number(($("ce-rsec") as HTMLInputElement).value) || 0,
-      ),
+      cwd: proc ? ($("ce-cwd") as HTMLInputElement).value.trim() || null : null,
+      autostart: proc && ($("ce-autostart") as HTMLInputElement).checked,
+      restart: proc
+        ? (($("ce-restart") as HTMLSelectElement).value as ComponentSpec["restart"])
+        : "on-failure",
+      restart_sec: proc
+        ? Math.max(0, Number(($("ce-rsec") as HTMLInputElement).value) || 0)
+        : 5,
       healthcheck,
       description: ($("ce-desc") as HTMLInputElement).value.trim() || null,
     };
@@ -618,7 +667,9 @@ export class ComponentsPanel {
   }
 
   /** Tail du log managé : dernière page (offset absent → le démon taille
-   *  de lui-même) recollée à chaque tick — le suivi reste en bas. */
+   *  de lui-même) recollée à chaque tick — suivi en bas seulement si
+   *  l'utilisateur n'a pas remonté lire (sinon le tick arracherait le
+   *  scroll toutes les 3 s). */
   private async refreshLogs() {
     try {
       const r = await call<{
@@ -628,10 +679,12 @@ export class ComponentsPanel {
       }>("component_logs", { name: this.logsName, conn: this.connParam() });
       const pre = $("comp-logs");
       const txt = new TextDecoder().decode(b64dec(r.data));
+      const atBottom =
+        pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 24;
       pre.textContent = txt;
       $("comp-logs-trunc").textContent = r.truncated ? t("comp_logs_trunc") : "";
       $("comp-logs-trunc").hidden = !r.truncated;
-      pre.scrollTop = pre.scrollHeight;
+      if (atBottom) pre.scrollTop = pre.scrollHeight;
     } catch (e) {
       // Pas de log (jamais lancé) ou refus : la vue affiche l'état vide,
       // l'erreur reste dans client.log — le poll réessaiera.
