@@ -331,9 +331,11 @@ def positionals(args, val_flags=(), cut=True):
 
 def flags_of(args):
     """Flag tokens with single-dash bundles unbundled (`-rd` →
-    `-r` + `-d`)."""
+    `-r` + `-d`). Post-`--` tokens are operands, never options."""
     out = set()
     for a in args:
+        if a == "--":
+            break
         if a == "-" or not a.startswith("-"):
             continue
         if re.fullmatch(r"-[^-\s]{2,}", a):
@@ -451,7 +453,12 @@ def repo_verb_ok(verb, args, in_main, checked, cwd=None):
         return not any(prot_hit(p, names) for p in pos)
     if verb == "symbolic-ref":
         pos = positionals(args, cut=False)
-        if len(pos) >= 2 or flags & {"-d", "--delete"}:
+        if len(pos) >= 2:
+            # a symref written *or pointing at* a protected ref is the
+            # hazard (update-ref through it moves the protected ref)
+            return not (prot_hit(pos[0], names)
+                        or prot_hit(pos[1], names))
+        if flags & {"-d", "--delete"}:
             return not pos or not prot_hit(pos[0], names)
         return True
     if verb == "tag":
@@ -465,10 +472,16 @@ def repo_verb_ok(verb, args, in_main, checked, cwd=None):
                    "--cleanup", "--sort"}, cut=False)
         return not (pos and prot_hit(pos[0], names))
     if verb == "worktree":
-        pos = positionals(args, cut=False)
-        # `worktree add <path> <committish>` — a second checkout of a
-        # protected branch is refused
+        pos = positionals(args, {"-b", "-B"}, cut=False)
         if pos and pos[0] == "add":
+            bnames = [args[i + 1] for i, a in enumerate(args)
+                      if a in ("-b", "-B") and i + 1 < len(args)]
+            if flags & {"-b", "-B", "--detach"}:
+                # `-b <name>` creates a branch — prot_hit the name;
+                # the tail operand is a start point, not an attach
+                return not any(prot_hit(p, names) for p in bnames)
+            # `worktree add <path> <committish>` — a second checkout of
+            # a protected branch is refused
             return not any(prot_hit(p, names) for p in pos[2:])
         return True
     if verb in ("fast-import", "receive-pack"):
