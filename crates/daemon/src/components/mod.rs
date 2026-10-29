@@ -112,6 +112,7 @@ impl Components {
         };
         let mut map = BTreeMap::new();
         for mut spec in specs {
+            expand_home_fields(&mut spec);
             if let Err(e) = check_usable(&spec) {
                 warn!("composant « {} » ignoré: {e}", spec.name);
                 continue;
@@ -326,6 +327,7 @@ impl Components {
             "spec.name « {} » ≠ name « {name} » — la clé d'édition est le nom déclaré",
             spec.name
         );
+        expand_home_fields(&mut spec);
         check_editable(&spec)?;
         // Même borne qu'au chargement : le backoff plafonne à 60 s.
         spec.restart_sec = spec.restart_sec.min(BACKOFF_CAP_SECS);
@@ -534,6 +536,31 @@ pub(crate) fn kind_name(k: ComponentKind) -> &'static str {
         ComponentKind::Process => "process",
         ComponentKind::External => "external",
         ComponentKind::Tool => "tool",
+    }
+}
+
+/// Normalise `~`/`~/…` en tête de champ → HOME du démon, partout où
+/// un chemin peut figurer (command, cwd, valeurs env, argv d'une
+/// sonde `command`). Appliquée au chargement ET à l'upsert : la spec
+/// persistée porte des chemins absolus (comme `materialize_spec`),
+/// et `~` en spec brute fonctionne sans shell.
+fn expand_home_fields(spec: &mut ComponentSpec) {
+    spec.command = spec
+        .command
+        .iter()
+        .map(|a| catalog::expand_home_str(a))
+        .collect();
+    spec.cwd = spec.cwd.as_deref().map(catalog::expand_home_str);
+    spec.env = spec
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), catalog::expand_home_str(v)))
+        .collect();
+    if let Healthcheck::Command { argv } = &mut spec.healthcheck {
+        *argv = argv
+            .iter()
+            .map(|a| catalog::expand_home_str(a))
+            .collect();
     }
 }
 
