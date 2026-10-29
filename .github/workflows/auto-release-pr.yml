@@ -93,9 +93,12 @@ jobs:
 
       - name: Fusion notes ↔ body existante
         if: steps.gate.outputs.needed == 'true'
-        run: python3 client/tools/release_notes.py --ref HEAD \
-               --merge-into "$RUNNER_TEMP/current-body.md" \
-               --out "$RUNNER_TEMP/release-pr-body.md"
+        # `run: |` obligatoire : en plain scalar YAML, la continuation
+        # `\` reste littérale et les args ne sont pas reconnus (exit 2).
+        run: |
+          python3 client/tools/release_notes.py --ref HEAD \
+            --merge-into "$RUNNER_TEMP/current-body.md" \
+            --out "$RUNNER_TEMP/release-pr-body.md"
 
       - name: Ouvrir ou mettre à jour la release PR
         if: steps.gate.outputs.needed == 'true'
