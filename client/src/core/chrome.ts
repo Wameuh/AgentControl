@@ -35,8 +35,12 @@ function cssColor(varName: string): string {
   probeEl.style.color = `var(${varName})`;
   return getComputedStyle(probeEl).color;
 }
-/** --var résolue → [r, g, b] 0-255 (« rgb(…) » direct ; « color(srgb …) » = 0-1). */
+/** --var résolue → [r, g, b] 0-255 (« rgb(…) » direct ; « color(srgb …) » = 0-1).
+ *  null si la var n'existe pas — la sonde hériterait sinon une couleur
+ *  légitime (faux positif silencieux). */
 function rgbOf(varName: string): number[] | null {
+  if (!getComputedStyle(document.documentElement)
+        .getPropertyValue(varName).trim()) return null;
   const v = cssColor(varName);
   const nums = v.match(/[\d.]+/g)?.map(Number);
   if (!nums || nums.length < 3) return null;

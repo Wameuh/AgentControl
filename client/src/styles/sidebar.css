@@ -117,8 +117,8 @@ button {
   border-radius: 10px; padding: 6px 12px; cursor: pointer; font: inherit;
   transition: border-color .15s, background .15s, color .15s;
 }
-button:hover { border-color: var(--accent); background: rgba(var(--accent-rgb), .09); }
-button:active { background: rgba(var(--accent-rgb), .18); }
+button:hover:not(:disabled) { border-color: var(--accent); background: rgba(var(--accent-rgb), .09); }
+button:active:not(:disabled) { background: rgba(var(--accent-rgb), .18); }
 button:disabled { opacity: .5; cursor: default; }
 #btn-connect { border-color: rgba(var(--accent-rgb), .4); color: var(--accent); }
 

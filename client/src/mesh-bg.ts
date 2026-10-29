@@ -30,7 +30,7 @@
     night: { base: [12, 15, 20], light: [116, 138, 172], agent: [147, 173, 140] },
     // Thème clair : même maillage, fond papier, accents nettement plus
     // foncés que la base → lumière "négative" (facettes sombres, sobre)
-    paper: { base: [233, 229, 216], light: [160, 128, 78], agent: [88, 118, 78], dark: true },
+    paper: { base: [233, 229, 216], light: [138, 111, 62], agent: [88, 118, 78], dark: true },
   };
   const MAX_AGENTS = 4;
   const IDLE_AFTER_MS = 3000;
@@ -256,7 +256,10 @@
     if (options.base) target.base = options.base;
     if (options.light) target.light = options.light;
     mood.dark = !!preset.dark;
-    agentCount = Math.max(0, Math.min(MAX_AGENTS, options.agents | 0));
+    // agents absent = conserver le compteur (les changements de teinte ne
+    // doivent pas éteindre les lumières agents).
+    if (options.agents !== undefined)
+      agentCount = Math.max(0, Math.min(MAX_AGENTS, options.agents));
     // freeze : la cible suit sans repaint (fond figé — reprise sur une
     // humeur à jour à la réactivation, pas de redraw sur rendu statique).
     if (!running && !options.freeze) {
