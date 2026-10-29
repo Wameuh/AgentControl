@@ -3,7 +3,7 @@
 // serveur, de l'agent, workspace, modèle, assignation de groupe.
 // ---------------------------------------------------------------------------
 
-import { $, showErr } from "../core/dom";
+import { $, dlgErr, showErr } from "../core/dom";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
 import type { AgentOpt, SessionMeta } from "../core/types";
@@ -13,6 +13,9 @@ import type { GroupStore } from "./groups";
 export class NewSessionDialog {
   /** Rafraîchit la sidebar après création (injecté). */
   refresh: () => void = () => {};
+  /** Ouvre la session fraîchement créée (injecté) — l'utilisateur voit le
+   *  spawn se dérouler dans le chat (events « agent started », erreurs). */
+  openSession: (id: string, conn: string) => void = () => {};
   /** Connexions connues (clés) pour le select serveur (injecté). */
   knownConns: () => string[] = () => [];
   private groups!: GroupStore;
@@ -34,6 +37,16 @@ export class NewSessionDialog {
     return call<AgentOpt[]>("list_agents", conn ? { conn } : {});
   }
 
+  /** Placeholder unique dans le select agent (chargement / erreur). */
+  private agentPlaceholder(msg: string) {
+    const sel = $("f-agent") as HTMLSelectElement;
+    sel.innerHTML = "";
+    const o = document.createElement("option");
+    o.textContent = msg;
+    o.disabled = true;
+    sel.appendChild(o);
+  }
+
   private renderAgents(agents: AgentOpt[], keep?: string) {
     const sel = $("f-agent") as HTMLSelectElement;
     sel.innerHTML = "";
@@ -44,11 +57,20 @@ export class NewSessionDialog {
       o.disabled = a.available === false;
       sel.appendChild(o);
     }
+    if (!agents.length) this.agentPlaceholder(t("agents_failed"));
     if (keep && [...sel.options].some((o) => o.value === keep)) sel.value = keep;
   }
 
+  /** Remplit le select : placeholder "chargement…" pendant l'appel ;
+   *  erreur → zone interne du dialogue (un toast passerait sous le modal). */
   private async fillAgents(conn: string, keep?: string) {
-    this.renderAgents(await this.listAgents(conn), keep);
+    this.agentPlaceholder(t("agents_loading"));
+    try {
+      this.renderAgents(await this.listAgents(conn), keep);
+    } catch (e) {
+      this.agentPlaceholder(`⚠ ${t("agents_failed")}`);
+      dlgErr("f-err", String(e));
+    }
   }
 
   /** Dialogue "nouvelle session". `conn` route list_agents/new_session vers le
@@ -70,6 +92,8 @@ export class NewSessionDialog {
     cs.value = conns.includes(want) ? want : (conns[0] ?? "");
     cs.disabled = conn !== undefined;
     ($("f-conn-wrap") as HTMLElement).hidden = conns.length < 2;
+    dlgErr("f-err", null); // chaque ouverture repart d'une zone propre
+    $("f-status").hidden = true; // bandeau d'attente d'un appel encore en vol
     const effConn = cs.disabled ? (conn ?? "") : cs.value;
     await this.fillAgents(effConn, ref?.agent);
     if (ref) ($("f-cwd") as HTMLInputElement).value = ref.cwd;
@@ -102,13 +126,14 @@ export class NewSessionDialog {
     $("f-conn").addEventListener("change", async () => {
       const req = ++this.agentsReq;
       const conn = ($("f-conn") as HTMLSelectElement).value;
+      this.agentPlaceholder(t("agents_loading"));
       try {
         const agents = await this.listAgents(conn);
         if (req === this.agentsReq) this.renderAgents(agents);
       } catch (e) {
         if (req !== this.agentsReq) return;
-        ($("f-agent") as HTMLSelectElement).innerHTML = "";
-        showErr(String(e));
+        this.agentPlaceholder(`⚠ ${t("agents_failed")}`);
+        dlgErr("f-err", String(e));
       }
     });
 
@@ -124,10 +149,25 @@ export class NewSessionDialog {
       e.preventDefault();
       const cwd = ($("f-cwd") as HTMLInputElement).value.trim();
       if (!cwd) return;
+      const btn = e.currentTarget as HTMLButtonElement;
       const attach = ($("f-attach") as HTMLInputElement).value.trim();
       const grp = this.pendingGroup;
       // Serveur cible : le select (désactivé = conn imposée par le groupe).
       const selConn = ($("f-conn") as HTMLSelectElement).value || undefined;
+      // Le spawn peut durer (agent npm, premier prompt) : bouton occupé +
+      // erreur visible DANS le dialogue (un toast passerait sous le modal).
+      btn.disabled = true;
+      btn.classList.add("spin");
+      const label0 = btn.textContent;
+      btn.textContent = t("creating_agent");
+      dlgErr("f-err", null);
+      // L'appel peut durer sur un démon distant (spawn/attach synchrone,
+      // timeout RPC 60 s) — l'utilisateur doit savoir qu'Échap détache
+      // plutôt que croire à un gel.
+      const fst = $("f-status");
+      fst.textContent = t("create_wait");
+      fst.hidden = false;
+      const dlg = $("dlg-new") as HTMLDialogElement;
       const res = await (attach
         ? call<{ session: string }>("attach_session", {
             agent: ($("f-agent") as HTMLSelectElement).value,
@@ -146,9 +186,16 @@ export class NewSessionDialog {
             prompt: ($("f-prompt") as HTMLTextAreaElement).value || undefined,
           })
       ).catch((er) => {
-        showErr(String(er));
+        // Dialogue détaché (Échap) pendant l'appel : une erreur dans
+        // f-err serait invisible — basculer en toast.
+        if (dlg.open) dlgErr("f-err", String(er));
+        else showErr(String(er));
         return null;
       });
+      fst.hidden = true;
+      btn.disabled = false;
+      btn.classList.remove("spin");
+      btn.textContent = label0;
       if (!res) return;
       if (grp) {
         // conn "" = connexion par défaut côté routage — la même que celle qui
@@ -162,8 +209,14 @@ export class NewSessionDialog {
         this.groups.add(gconn || "default", grp.name);
         this.pendingGroup = null;
       }
+      // Le démon a répondu dès l'insert : le spawn tourne en tâche de fond.
+      // Suivi pour le toast d'échec + ouverture directe — le chat montre le
+      // boot en direct (« agent started », erreur éventuelle) et un envoi
+      // pendant le spawn s'enfile côté démon.
+      app.spawnWatch.set(res.session, Date.now());
       ($("dlg-new") as HTMLDialogElement).close();
       await this.refresh();
+      this.openSession(res.session, grp?.conn ?? selConn ?? "");
     });
   }
 }

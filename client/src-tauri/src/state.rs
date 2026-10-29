@@ -23,6 +23,10 @@ pub(crate) struct AppState {
     pub(crate) sys: Mutex<sysinfo::System>,
     /// Échantillons (instant, rx, tx) — débit lissé sur ~5 s
     pub(crate) net: Mutex<std::collections::VecDeque<(std::time::Instant, u64, u64)>>,
+    /// Connexion demandée au lancement (`--conn <clé>` ou env
+    /// AGENTCONTROL_CONN) — modèle multi-instances : une instance = une
+    /// connexion, le frontend la lit via la commande `cli_conn`.
+    pub(crate) cli_conn: Option<String>,
 }
 
 pub(crate) async fn get_conn(state: &State<'_, AppState>, key: Option<&str>) -> Result<Arc<Client>, String> {

@@ -32,6 +32,12 @@ impl Session {
     /// `skip_replay` : le journal local contient déjà l'historique de cette
     /// session native → les updates rejouées par session/load sont ignorées.
     /// Passer false après un rebind (journal reset) pour les journaliser.
+    /// `spawn_cfg` : (mode, model) demandés à la création — appliqués via
+    /// ACP tant que `spawning` est encore vrai, donc avant tout drain ou
+    /// envoi concurrent (le premier prompt voit la config demandée).
+    /// Retour : Ok(true) spawn livré, Ok(false) supplanté en douceur — un
+    /// kill/rebind a invalidé la génération après le handshake : la session
+    /// appartient à un nouveau cycle (ni config, ni livraison, ni état).
     pub async fn spawn_agent(
         self: &Arc<Self>,
         command: &[String],
@@ -39,15 +45,83 @@ impl Session {
         resume_native_id: Option<String>,
         skip_replay: bool,
         mcp_servers: Value,
-    ) -> Result<()> {
+        spawn_cfg: Option<(Option<String>, Option<String>)>,
+    ) -> Result<bool> {
+        // Un seul spawn à la fois : un sleep pendant un réveil en vol
+        // libère `waking`, et un nouvel envoi peut alors lancer un
+        // second respawn — sans le lock les deux spawn_agent_once
+        // s'exécuteraient en parallèle (handshakes ACP écrits dans le
+        // stdin l'un de l'autre, stdin_tx/child en last-writer-wins).
+        let _guard = self.spawn_lock.lock().await;
+        // Le spawn attendu derrière le lock a livré un agent vivant :
+        // respawner par-dessus le tuerait pour rien (deuxième réveil,
+        // resume pendant un spawn).
+        if self.is_alive() {
+            return Ok(true);
+        }
         // Nouveau process = nouveau cycle de livraison : retenue compact
         // et flag busy d'un éventuel tour mort avec l'ancien process.
         self.take_compact_hold();
         self.busy.store(false, Ordering::SeqCst);
+        // Fenêtre "pas encore prêt" : stdin posé tôt mais session/load pas
+        // terminé — drain_queue/envois directs doivent rester en file.
+        self.spawning.store(true, Ordering::SeqCst);
+        let r = self
+            .spawn_attempts(command, envs, resume_native_id, skip_replay, mcp_servers)
+            .await;
+        // Config de création APPLIQUÉE sous le flag spawning : le drain
+        // post-spawn (lancé juste après) et les envois extérieurs restent
+        // en file tant que spawning est vrai — aucun tour ne peut partir
+        // sous le mode par défaut devant la config demandée.
+        if matches!(r, Ok(true)) {
+            if let Some((mode, model)) = &spawn_cfg {
+                self.apply_spawn_config(mode.as_deref(), model.as_deref())
+                    .await;
+            }
+        }
+        self.spawning.store(false, Ordering::SeqCst);
+        // Drain post-spawn ici, flag retombé : lancé depuis
+        // spawn_attempts (avant le store) la tâche pouvait casser sur
+        // "spawn en vol" et les prompts en file n'étaient jamais livrés
+        // (resume explicite, /clear — pas de second déclencheur).
+        if matches!(r, Ok(true))
+            && self.accepting_prompts()
+            && !self.prompt_queue.lock().unwrap().is_empty()
+        {
+            self.spawn_drain();
+        }
+        r
+    }
+
+    async fn spawn_attempts(
+        self: &Arc<Self>,
+        command: &[String],
+        envs: &HashMap<String, String>,
+        resume_native_id: Option<String>,
+        skip_replay: bool,
+        mcp_servers: Value,
+    ) -> Result<bool> {
         let mut last = anyhow::anyhow!("spawn not attempted");
         let sid = self.meta_snapshot().id;
         info!("[{sid}] spawn agent: {}", command.join(" "));
+        // Génération attendue par tentative : spawn_agent_once incrémente
+        // spawn_gen à son entrée. Un kill (sleep/clear/rebind) entre deux
+        // essais la ferait dépasser — retenter produirait un agent sur un
+        // contexte déjà supplanté.
+        let mut expect = self.spawn_gen.load(Ordering::SeqCst);
         for attempt in 0..2 {
+            // Une mise en sommeil pendant le spawn (ou pendant le backoff
+            // d'un essai raté) arrête la boucle — pas de respawn : la
+            // session appartient désormais à l'état "asleep". Ne vaut que
+            // pour les reprises (session/load) : un /clear sur session
+            // endormie doit repartir sur un contexte neuf.
+            if resume_native_id.is_some() && self.meta_snapshot().state == "asleep" {
+                return Err(anyhow::anyhow!("session endormie pendant le spawn"));
+            }
+            expect += 1;
+            if self.spawn_gen.load(Ordering::SeqCst) >= expect {
+                return Err(anyhow::anyhow!("spawn supplanté par un kill/rebind"));
+            }
             match self
                 .spawn_agent_once(
                     command,
@@ -58,19 +132,18 @@ impl Session {
                 )
                 .await
             {
-                Ok(()) => {
-                    // Des prompts restés en file (session morte puis
-                    // reprise) sont livrés au nouvel agent.
-                    if !self.prompt_queue.lock().unwrap().is_empty() {
-                        let s = Arc::clone(self);
-                        tokio::spawn(async move { s.drain_queue().await });
-                    }
-                    return Ok(());
-                }
+                Ok(delivered) => return Ok(delivered),
                 Err(e) => {
                     warn!("[{sid}] spawn échoué (essai {}): {e:#}", attempt + 1);
                     last = e;
                     if attempt == 0 {
+                        // Endormie pendant l'essai : pas de ligne "retry"
+                        // trompeuse ni d'attente pour un arrêt volontaire.
+                        if self.meta_snapshot().state == "asleep" {
+                            return Err(anyhow::anyhow!(
+                                "session endormie pendant le spawn"
+                            ));
+                        }
                         self.emit(EventKind::System {
                             text: format!("agent exited au init — retry ({last:#})"),
                         });
@@ -83,6 +156,9 @@ impl Session {
         Err(last)
     }
 
+    /// Retour : Ok(true) agent prêt (session idle posée), Ok(false) le
+    /// handshake a réussi mais un kill/rebind a supplanté la génération
+    /// entre-temps — le nouveau cycle possède la session (rien à poser).
     async fn spawn_agent_once(
         self: &Arc<Self>,
         command: &[String],
@@ -90,7 +166,7 @@ impl Session {
         resume_native_id: Option<String>,
         skip_replay: bool,
         mcp_servers: Value,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         // Nouvelle génération : tout reader d'un process précédent devient
         // périmé — son on_agent_exit ne touchera plus l'état partagé.
         let gen = self.spawn_gen.fetch_add(1, Ordering::SeqCst) + 1;
@@ -158,6 +234,15 @@ impl Session {
         }
 
         *self.child.lock().unwrap() = Some(child);
+        // Un kill a pu atterrir pendant Command::spawn (sleep, clear,
+        // rebind) — avant que le child soit posé, il n'y avait rien à
+        // prendre : le process serait resté vivant sur un contexte
+        // supplanté. Kill + bail ; la boucle ne retentera pas (check de
+        // génération en tête).
+        if self.spawn_gen.load(Ordering::SeqCst) != gen {
+            self.kill_for_respawn().await;
+            bail!("spawn supplanté (kill pendant le spawn)");
+        }
 
         // ACP handshake
         let init = self
@@ -245,6 +330,14 @@ impl Session {
             }
         }
         self.save_meta();
+        // Un kill (sleep/clear/respawn concurrent) a invalidé la génération
+        // pendant le handshake : le process vient d'être tué — ni line de
+        // spawn, ni replay de config, ni "idle" (ils pollueraient le cycle
+        // qui a pris le relais ; la config reste en pending_config pour le
+        // prochain spawn).
+        if self.spawn_gen.load(Ordering::SeqCst) != gen {
+            return Ok(false);
+        }
         self.emit(EventKind::System {
             text: if resume_native_id.is_some() {
                 format!("agent respawned (session/load={}, resumed)", supports_load)
@@ -279,7 +372,7 @@ impl Session {
             }
         }
         self.set_state("idle");
-        Ok(())
+        Ok(true)
     }
 
     async fn on_agent_exit(&self, gen: u64) {
@@ -428,6 +521,13 @@ impl Session {
                 }
             }
             acp::Mapped::Event(kind) => {
+                // Pendant le replay de session/load : les events sont
+                // traités pour leurs effets de bord méta (mode, config,
+                // contexte) mais PAS re-journalisés — le journal local
+                // contient déjà l'historique (sinon chaque resume
+                // empilait commands_available/config_options en double,
+                // et un `plan` rejoué dupliquerait un message entier).
+                let replaying = self.loading_replay.load(Ordering::SeqCst);
                 let mut compact_done = false;
                 match &kind {
                     EventKind::ModeChanged { mode } => {
@@ -484,7 +584,9 @@ impl Session {
                     }
                     _ => {}
                 }
-                self.emit(kind);
+                if !replaying {
+                    self.emit(kind);
+                }
                 if compact_done {
                     self.end_compact("contexte réduit");
                 }
@@ -587,7 +689,12 @@ impl Session {
     /// appelants resteraient suspendus indéfiniment.
     pub async fn kill_for_respawn(&self) {
         debug!("[{}] kill pour respawn", self.meta_snapshot().id);
-        self.spawn_gen.fetch_add(1, Ordering::SeqCst);
+        // supplant_mark = génération invalidée : un spawn concurrent la
+        // compare à sa génération de départ — > départ = kill/rebind
+        // intervenu PENDANT son spawn (signal typé, indépendant des
+        // libellés d'erreur remontés par les pending soldés).
+        let g = self.spawn_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        self.supplant_mark.store(g, Ordering::SeqCst);
         *self.stdin_tx.lock().unwrap() = None;
         {
             let mut p = self.acp_pending.lock().unwrap();
@@ -604,8 +711,72 @@ impl Session {
         self.set_state("dead");
     }
 
+    /// Signale un spawn imminent sans attendre spawn_agent : la création
+    /// async répond dès l'insert de la session et lance le spawn en tâche
+    /// de fond — sans ce flag posé ici, un envoi tombé dans la fenêtre
+    /// entre la réponse et le démarrage effectif bailerait "agent not
+    /// running" au lieu de s'enfiler. spawn_agent reprend le flag
+    /// (store true→false autour de ses tentatives réelles).
+    pub fn mark_spawning(&self) {
+        self.spawning.store(true, Ordering::SeqCst);
+    }
+
+    /// Remet la session en sommeil — retour d'état quand un réveil
+    /// (respawn) a échoué : le prochain envoi retentera.
+    pub fn mark_asleep(&self) {
+        self.set_state("asleep");
+    }
+
+    /// Mise en sommeil : état persisté "asleep" posé AVANT le kill —
+    /// accepting_prompts() rend faux dès ici, donc un envoi tombé dans
+    /// la fenêtre s'enfile pour le réveil au lieu d'être livré à un
+    /// agent en train de mourir ou de bailer "agent not running". Kill
+    /// silencieux (génération invalidée — ni "agent exited" ni dead) ;
+    /// la session native, le journal et la file de prompts sont
+    /// conservés — le prochain envoi (user ou peer) la réveillera via
+    /// session/load. La retenue compact est levée : sinon son timer
+    /// relancerait un drain sur un agent mort ("prompt failed" en
+    /// rafale). Un réveil en vol s'arrête au check "asleep" de la
+    /// boucle de spawn — `waking` n'est PAS relâché ici : le flag
+    /// appartient à la tâche de réveil, qui le libère via wake_done
+    /// (sinon un nouvel envoi ré-acquerrait le flag pendant que
+    /// l'ancienne tâche le libère aussi — double relâchement croisé).
+    pub async fn sleep(&self) {
+        self.set_state("asleep");
+        self.take_compact_hold();
+        self.kill_for_respawn().await;
+        self.flush_text();
+        self.emit(EventKind::System {
+            text: "session endormie — l'agent sera relancé au prochain message".into(),
+        });
+    }
+
+    /// Sort de l'état "asleep" avant un spawn légitime (réveil auto ou
+    /// resume explicite) — sans ça le garde "asleep" de spawn_agent
+    /// arrêterait le réveil. Retourne vrai si la session était endormie
+    /// (à restaurer via set_state("asleep") si le spawn échoue).
+    pub fn leave_asleep(&self) -> bool {
+        if self.meta_snapshot().state == "asleep" {
+            self.set_state("starting");
+            return true;
+        }
+        false
+    }
+
     pub fn is_alive(&self) -> bool {
         self.stdin_tx.lock().unwrap().is_some()
+    }
+
+    /// Génération courante des spawns — comparée avant/après une
+    /// opération pour détecter un kill/rebind intervenu entre-temps.
+    pub fn generation(&self) -> u64 {
+        self.spawn_gen.load(Ordering::SeqCst)
+    }
+
+    /// Dernière génération invalidée par un kill_for_respawn — > `gen0`
+    /// (génération au départ d'un spawn) = supplanté pendant le spawn.
+    pub fn supplant_mark(&self) -> u64 {
+        self.supplant_mark.load(Ordering::SeqCst)
     }
 
     /// Vrai si l'état persisté implique un tour de travail en vol au

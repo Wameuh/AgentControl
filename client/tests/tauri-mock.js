@@ -15,14 +15,56 @@
       state: "working" },
     { id: "s2", conn: "local", agent: "mock", title: "Fix login crash",
       cwd: "/home/agent/app", created_at: "2026-10-19T09:00:00Z", group: "Serveur pi",
+      spawned_by: "s1",
       available_modes: [], available_models: [], available_commands: [], state: "idle" },
     { id: "s3", conn: "local", agent: "devin", title: "Write unit tests",
       cwd: "/home/agent/tests", created_at: "2026-10-18T08:00:00Z", group: "Serveur pi",
       available_modes: [], available_models: [], available_commands: [], state: "dead" },
     { id: "s4", conn: "local", agent: "mock", title: "Reduce context usage",
       cwd: "/home/agent/infra", created_at: "2026-10-21T07:30:00Z",
+      origin: "component:backlog-orchestrator",
       available_modes: [], available_models: [], available_commands: [], state: "compacting" },
   ];
+  const COMPONENTS = [
+    { name: "acctl", kind: "tool", autostart: false,
+      description: "CLI de contrôle du démon", source: "components.toml",
+      spec: { name: "acctl", kind: "tool", command: ["acctl", "--version"] },
+      status: { state: "absent" } },
+    { name: "agentbacklog", kind: "tool", autostart: false,
+      description: "File de tâches partagée", source: "components.toml",
+      spec: { name: "agentbacklog", kind: "tool", command: ["agentbacklog", "--version"],
+        queries: { list: ["agentbacklog", "--list", "--json"] } },
+      status: { state: "installed", health: "ok", version: "agentbacklog 0.3.0" } },
+    { name: "backlog-orchestrator", kind: "process", autostart: true,
+      description: "Orchestrateur de la file", source: "components.toml",
+      spec: { name: "backlog-orchestrator", kind: "process", command: ["backlog-orch"] },
+      status: { state: "running", health: "ok", pid: 4210, uptime_s: 3725, restarts: 1 } },
+    { name: "web", kind: "internal", autostart: true,
+      description: "Interface web servie par le démon", source: "internal",
+      spec: { name: "web", kind: "internal" },
+      status: { state: "running" } },
+  ];
+  // File AgentBacklog servie par component_query{name,query:"list"} — les
+  // tests la font évoluer via window.__BACKLOG (push) pour vérifier le
+  // refresh sans reload, et masquent le composant via window.__blHide
+  // (état « non déclaré » + CTA Intégrer → component_install le retire).
+  const BACKLOG = [
+    { id: 31, title: "[client] Panneau backlog : liste + refresh",
+      description: "x", status: "wip", agent_id: "s2",
+      created_at: "2026-10-28T10:00:00Z", started_at: new Date(Date.now() - 3700e3).toISOString(),
+      done_at: null, priority: 0 },
+    { id: 33, title: "[acctl] comp query <name> <query>", status: "pending",
+      agent_id: null, created_at: "2026-10-28T11:00:00Z", started_at: null,
+      done_at: null, priority: 0 },
+    { id: 34, title: "[daemon] garde queries dans check_usable", status: "pending",
+      agent_id: null, created_at: "2026-10-28T11:30:00Z", started_at: null,
+      done_at: null, priority: 0, depends_on: 33, dep_status: "pending" },
+    { id: 26, title: "[client] Vue diagramme", status: "done",
+      agent_id: "s-orphan-1", created_at: "2026-10-27T09:00:00Z",
+      started_at: "2026-10-27T09:05:00Z",
+      done_at: new Date(Date.now() - 3600e3).toISOString(), priority: 0 },
+  ];
+  window.__BACKLOG = BACKLOG; // mutable par les tests (push → poll le ramasse)
   const EVENTS = [
     { seq: 1, ts: "10:01", type: "user_message", text: "Refactorise le client API pour utiliser fetch avec retry exponentiel." },
     { seq: 2, ts: "10:01", type: "agent_thought", text: "I need to look at the existing client structure first, then introduce a retry wrapper around fetch calls." },
@@ -64,7 +106,10 @@
     switch (method) {
       case "list_sessions": return SESSIONS;
       case "list_agents": return [{ id: "devin", name: "Devin" }, { id: "mock", name: "Mock agent" }];
-      case "session_info": return { meta: SESSIONS[0], pending: ["r1"], alive: true, last_seq: EVENTS.length };
+      case "session_info": {
+        const m = SESSIONS.find((x) => x.id === args.session) ?? SESSIONS[0];
+        return { meta: m, pending: ["r1"], alive: true, last_seq: EVENTS.length };
+      }
       case "events": return { events: EVENTS, last_seq: EVENTS.length };
       case "queue_list": return { queue: ["Compile aussi la doc quand tu as fini"] };
       case "list_dir": return DIR;
@@ -77,11 +122,40 @@
         if (s) s.group = args.group;
         return { group: args.group };
       }
-      case "daemon_status": return { version: "0.2.9", sessions: SESSIONS.length };
+      case "daemon_status": return { version: "0.2.9", sessions: SESSIONS.length, components: true };
+      case "list_components":
+        return COMPONENTS.filter((c) => c.name !== "agentbacklog" || !window.__blHide);
+      case "component_query": {
+        window.__qCalls = (window.__qCalls || 0) + 1;
+        if (args.name !== "agentbacklog" || args.query !== "list")
+          return Promise.reject(new Error(`query inconnue: ${args.name}/${args.query}`));
+        const raw = JSON.stringify(window.__BACKLOG ?? BACKLOG);
+        return { code: 0, data: btoa(unescape(encodeURIComponent(raw))),
+          size: raw.length, truncated: false };
+      }
+      case "component_install": {
+        if (args.name === "agentbacklog") window.__blHide = false;
+        return { installed: true, name: args.name, state: "stopped", notes: [] };
+      }
       case "pr_list": return [
         { conn: "local", repo: "Wameuh/AgentControl", pr: 42,
           session: SESSIONS[0].id, branch: "feat/x", title: "feat: exemple",
           status: "open", via: "detected" },
+        { conn: "local", repo: "Wameuh/AgentControl", pr: 95,
+          session: SESSIONS[1].id, branch: "feat/sous-agents",
+          title: "feat: sous-agents dans l'arbre", status: "draft",
+          via: "manual" },
+        { conn: "local", repo: "Wameuh/AgentControl", pr: 88,
+          session: SESSIONS[3].id, branch: "fix/scroll",
+          title: "fix: scroll ancré au bas", status: "open",
+          via: "detected" },
+        { conn: "local", repo: "cli/cli", pr: 1204,
+          session: "agent-externe-qui-n-existe-plus", branch: "patch-1",
+          title: "fix: token refresh retry", status: "conflict",
+          via: "manual" },
+        { conn: "local", repo: "cli/cli", pr: 1190,
+          session: "", branch: "docs/readme",
+          title: "docs: contribution guide", status: "open", via: "manual" },
       ];
       case "clear_session": return { session: args.session };
       case "list_native_sessions": return { sessions: [] };
@@ -105,10 +179,12 @@
       if (cmd === "plugin:event|unlisten") return p.then(() => null);
       if (cmd.startsWith("plugin:")) return p.then(() => null);
       switch (cmd) {
-        case "connect": return p.then(() => ({ version: "0.2.9", sessions: SESSIONS.length, servers: 1 }));
+        case "connect": return p.then(() => ({ version: "0.2.9", sessions: SESSIONS.length, servers: 1, components: true }));
         case "call": return p.then(() => rpc(args.method, args.params ?? args));
         case "subscribe": return p.then(() => null);
         case "saved_connections": return p.then(() => []);
+        case "cli_conn": return p.then(() => null);
+        case "spawn_instance": return p.then(() => null);
         case "ssh_hosts": return p.then(() => []);
         case "ssh_pubkey": return p.then(() => "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDemoAgentControlKeyExample agentcontrol");
         case "check_update": return p.then(() => { throw new Error("offline"); });

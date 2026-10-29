@@ -68,6 +68,7 @@ impl Session {
                 // Fallback : beaucoup d'agents exposent /model en slash command
                 self.send_prompt(&format!("/model {model}"), false, false)
                     .await
+                    .map(|_| ())
             }
         }
     }
@@ -255,6 +256,12 @@ impl Session {
         self.cur_text.lock().unwrap().take();
         self.tool_calls.lock().unwrap().clear();
         self.pending_agent.lock().unwrap().clear();
+        self.reset_text_anchor();
+        // Prévient les abonnés AVANT le reset : émis dans l'ancienne
+        // numérotation (dernier seq +1), il passe leur filtre et leur
+        // fait jeter l'état affiché — sinon les events du nouveau
+        // cycle (seqs reparties à 1) seraient droppés comme déjà vus.
+        self.emit_ephemeral(EventKind::SessionCleared {});
         self.journal.reset(&self.dir)?;
         {
             let mut m = self.meta.lock().unwrap();

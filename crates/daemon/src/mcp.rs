@@ -65,8 +65,9 @@ fn tools_list() -> Value {
         {
             "name": "agentcontrol_list_sessions",
             "description": "Liste les sessions d'agents pilotées par AgentControl \
-                (id, agent, titre, état, cwd, groupe). Utilise les `id` pour \
-                envoyer des messages ou lire leur transcript.",
+                (id, agent, titre, état, cwd, groupe, session créatrice ou \
+                provenance service « via » le cas échéant). Utilise les `id` \
+                pour envoyer des messages ou lire leur transcript.",
             "inputSchema": {"type": "object", "properties": {}},
         },
         {
@@ -88,10 +89,11 @@ fn tools_list() -> Value {
                     "delivery": {
                         "type": "string",
                         "enum": ["queue", "steer"],
-                        "description": "queue (défaut) : livré quand la tâche \
-                            courante de la cible se termine. steer : injecté \
-                            pendant son tour, après le tool call en cours, si \
-                            l'agent cible le supporte (sinon en file).",
+                        "description": "steer (défaut) : injecté pendant le \
+                            tour de la cible, après le tool call en cours, si \
+                            l'agent le supporte (sinon en file ; pas d'ordre \
+                            garanti entre steers). queue : livré quand sa \
+                            tâche courante se termine (FIFO strict).",
                     },
                 },
                 "required": ["session", "text"],
@@ -144,6 +146,25 @@ fn tools_list() -> Value {
             },
         },
         {
+            "name": "agentcontrol_sleep_session",
+            "description": "Endort une session : son process agent est libéré \
+                (la session native et l'historique sont conservés). Elle se \
+                réveille automatiquement dès qu'un message lui est envoyé \
+                (user ou agent). Utile pour garer une session devenue \
+                inutile sans la supprimer.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session": {
+                        "type": "string",
+                        "description": "id de session à endormir — voir \
+                            agentcontrol_list_sessions",
+                    },
+                },
+                "required": ["session"],
+            },
+        },
+        {
             "name": "agentcontrol_read_events",
             "description": "Lit la fin du transcript d'une autre session \
                 (messages user/agent/peer/système) pour prendre du contexte \
@@ -177,7 +198,7 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
                 let id = s["id"].as_str().unwrap_or("?");
                 let mark = if Some(id.to_string()) == me { " (toi)" } else { "" };
                 out.push_str(&format!(
-                    "{id}{mark} | {} | {} | {} | cwd={}{}\n",
+                    "{id}{mark} | {} | {} | {} | cwd={}{}{}{}\n",
                     s["agent"].as_str().unwrap_or("?"),
                     s["state"].as_str().unwrap_or("?"),
                     s["title"].as_str().unwrap_or(""),
@@ -185,6 +206,14 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
                     s["group"]
                         .as_str()
                         .map(|g| format!(" | group={g}"))
+                        .unwrap_or_default(),
+                    s["spawned_by"]
+                        .as_str()
+                        .map(|p| format!(" | sub-of={p}"))
+                        .unwrap_or_default(),
+                    s["origin"]
+                        .as_str()
+                        .map(|o| format!(" | via={o}"))
                         .unwrap_or_default(),
                 ));
             }
@@ -234,6 +263,23 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
                 v["title"].as_str().unwrap_or("")
             ))
         }
+        "agentcontrol_sleep_session" => {
+            let session = args["session"]
+                .as_str()
+                .ok_or("argument 'session' manquant")?;
+            let v = daemon_call(proto::ReqKind::SleepSession {
+                session: session.into(),
+            })
+            .await?;
+            Ok(format!(
+                "session endormie : {session}{}",
+                if v["already"].as_bool().unwrap_or(false) {
+                    " (déjà endormie)"
+                } else {
+                    " — elle se réveillera au prochain message"
+                }
+            ))
+        }
         "agentcontrol_read_events" => {
             let session = args["session"]
                 .as_str()
@@ -242,6 +288,7 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
             let v = daemon_call(proto::ReqKind::Events {
                 session: session.into(),
                 before_seq: None,
+                after_seq: None,
                 limit,
             })
             .await?;
@@ -330,7 +377,7 @@ pub async fn serve_stdio() -> Result<()> {
                     "instructions": "Outils de communication entre agents \
                         AgentControl : liste les sessions, envoie des \
                         messages, lis leurs transcripts, crée des sessions \
-                        (délégation de tâche).",
+                        (délégation de tâche), endort les sessions inutiles.",
                 }
             }),
             ("ping", Some(id)) => json!({"jsonrpc": "2.0", "id": id, "result": {}}),

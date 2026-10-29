@@ -5,10 +5,35 @@
 
 mod commands;
 mod state;
+mod stream;
 
 use state::AppState;
 use tauri::Manager;
 use tokio::sync::Mutex;
+
+/// Connexion cible passée à l'instance : `--conn <clé>` / `--conn=<clé>`
+/// (clé `ssh{,-native}:h:p` | `tcp:addr` | `local`), repli env
+/// AGENTCONTROL_CONN. Le frontend résout la cfg complète dans
+/// connections.json ; une clé inconnue retombe sur la dernière connexion.
+fn cli_conn_arg() -> Option<String> {
+    let mut it = std::env::args().skip(1);
+    let mut arg = None;
+    while let Some(a) = it.next() {
+        if a == "--conn" {
+            arg = it.next();
+            break;
+        }
+        if let Some(v) = a.strip_prefix("--conn=") {
+            arg = Some(v.to_string());
+            break;
+        }
+    }
+    // Valeur vide (« --conn "" », « --conn= ») = directive absente — comme
+    // côté env : sans ce filtre, willConnect teinterait pour un bind qui
+    // ne suivra pas (autoconnect off).
+    arg.filter(|v| !v.is_empty())
+        .or_else(|| std::env::var("AGENTCONTROL_CONN").ok().filter(|v| !v.is_empty()))
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -27,6 +52,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // Lecteur vidéo du panneau fichiers : ranges HTTP → tranches
+        // read_file RPC (jamais le fichier entier en mémoire).
+        .register_asynchronous_uri_scheme_protocol("acvideo", stream::handler)
         .setup(|app| {
             // Android : pas de HOME — les chemins client-core (clé SSH,
             // connexions, logs) racinent dans le app_data_dir.
@@ -53,6 +81,7 @@ pub fn run() {
             subs: Mutex::new(std::collections::HashMap::new()),
             sys: Mutex::new(sysinfo::System::new()),
             net: Mutex::new(std::collections::VecDeque::new()),
+            cli_conn: cli_conn_arg(),
         })
         .invoke_handler(tauri::generate_handler![
             commands::connect::connect,
@@ -66,9 +95,12 @@ pub fn run() {
             commands::saved::remove_connection,
             commands::saved::ssh_hosts,
             commands::system::platform,
+            commands::system::cli_conn,
+            commands::system::spawn_instance,
             commands::system::ssh_pubkey,
             commands::system::sys_stats,
             commands::system::log_tail,
+            commands::system::log_write,
             commands::system::set_app_icon,
             commands::update::check_update,
             commands::update::update_client,

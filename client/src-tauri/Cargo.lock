@@ -47,7 +47,7 @@ dependencies = [
 
 [[package]]
 name = "agentcontrol"
-version = "0.4.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -62,6 +62,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tokio",
  "ureq",
+ "url",
 ]
 
 [[package]]
@@ -645,7 +646,7 @@ dependencies = [
 
 [[package]]
 name = "client-core"
-version = "0.4.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "getrandom 0.4.3",
@@ -3559,7 +3560,7 @@ dependencies = [
 
 [[package]]
 name = "proto"
-version = "0.4.0"
+version = "0.7.0"
 dependencies = [
  "chrono",
  "serde",

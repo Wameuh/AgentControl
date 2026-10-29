@@ -1,0 +1,44 @@
+# Composants déclarés — <AGENTCONTROL_HOME>/components.toml
+#
+# Ce fichier est POSSÉDÉ par le démon : il est réécrit atomiquement par
+# les RPC d'édition (component_upsert / component_remove /
+# component_install). Le modifier à la main ne sert qu'à semer des specs
+# avant le premier démarrage — pour éditer à chaud, passer par les RPC
+# (à terme `acctl comp edit`, cf docs/components-integration.md).
+#
+# `~`/`~/…` en tête d'un champ chemin est expansé sous le HOME du démon
+# au chargement — la spec persistée porte des chemins absolus.
+#
+# Référence complète des kinds/champs : docs/components-integration.md §2.1.
+
+# ---------------------------------------------------------------------------
+# backlog-orchestrator — cas d'usage typique : un service qui vivait sous
+# supervisord passe sous le cycle de vie du démon (start/stop/restart,
+# healthcheck, logs paginés via component_logs).
+# ---------------------------------------------------------------------------
+[[components]]
+name = "backlog-orchestrator"
+kind = "process"                    # internal | process | external | tool
+command = ["python3", "~/.local/bin/backlog-orchestrator.py"]
+cwd = "~"                           # défaut : <AGENTCONTROL_HOME>
+autostart = true
+restart = "on-failure"              # always | on-failure | never
+restart_sec = 5                     # backoff de base (×2, cap 60 s)
+healthcheck = { kind = "process" }  # none | process | tcp | http | command
+description = "Spawn les workers du backlog AgentBacklog"
+
+# Env additionnelle (facultatif). AGENTCONTROL_SOCK/TCP/HOME/COMPONENT
+# sont de toute façon injectées par le démon et PRIMENT sur ce bloc — un
+# composant ne peut pas mentir sur l'adresse de son démon.
+[components.env]
+AGENTCONTROL_TCP = "127.0.0.1:7331"  # informatif — écrasé par l'injection
+
+# ---------------------------------------------------------------------------
+# agentbacklog — kind `tool` : CLI stateless, pas de process long. Sa
+# commande sert de sonde de présence/version (exécutée ~30 s).
+# ---------------------------------------------------------------------------
+# [[components]]
+# name = "agentbacklog"
+# kind = "tool"
+# command = ["agentbacklog", "--version"]
+# description = "File FIFO de features (SQLite ~/.agentbacklog/backlog.db)"

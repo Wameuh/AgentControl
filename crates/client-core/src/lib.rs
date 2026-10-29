@@ -23,12 +23,61 @@ type BoxedStream = Box<dyn AsyncRead + Unpin + Send>;
 type BoxedWriter = Box<dyn AsyncWrite + Unpin + Send>;
 
 // ---------------------------------------------------------------------------
-// Mini-log rotatif : ~/.agentcontrol/logs/client.log (+ stderr en dev)
-// Rotation à 1 MiB → client.log.1 … client.log.3 (borné à ~4 MiB au total).
+// Mini-log rotatif à niveaux : ~/.agentcontrol/logs/client.log (+ stderr).
+// Format : [horodatage ISO] [NIVEAU] fichier.rs:ligne message. Rotation à
+// 1 MiB → client.log.1 … client.log.3 (borné à ~4 MiB au total).
+// Seuil via env `AGENTCONTROL_LOG=debug|info|warn|error`
+// (défaut : debug en build dev, info en release).
 // ---------------------------------------------------------------------------
 
 const LOG_MAX_BYTES: u64 = 1 << 20; // 1 MiB
 const LOG_KEEP: usize = 3;
+
+/// Niveau de gravité d'une ligne de log — DEBUG < INFO < WARN < ERROR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Level {
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl Level {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Debug => "DEBUG",
+            Self::Info => "INFO",
+            Self::Warn => "WARN",
+            Self::Error => "ERROR",
+        }
+    }
+
+    /// Parse tolérant (env `AGENTCONTROL_LOG`, niveau passé par le frontend).
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "debug" | "trace" => Self::Debug,
+            "info" => Self::Info,
+            "warn" | "warning" => Self::Warn,
+            "error" | "err" => Self::Error,
+            _ => return None,
+        })
+    }
+}
+
+/// Seuil minimal d'émission — lu une fois dans `AGENTCONTROL_LOG`.
+fn min_level() -> Level {
+    static MIN: std::sync::OnceLock<Level> = std::sync::OnceLock::new();
+    *MIN.get_or_init(|| {
+        std::env::var("AGENTCONTROL_LOG")
+            .ok()
+            .and_then(|v| Level::parse(&v))
+            .unwrap_or(if cfg!(debug_assertions) {
+                Level::Debug
+            } else {
+                Level::Info
+            })
+    })
+}
 
 struct LogWriter {
     dir: PathBuf,
@@ -120,9 +169,31 @@ fn logfile() -> &'static std::sync::Mutex<LogWriter> {
     LOGFILE.get_or_init(|| std::sync::Mutex::new(LogWriter::open(log_path())))
 }
 
-/// Ajoute une ligne de log (horodatée) dans client.log + stderr.
-pub fn log(msg: impl std::fmt::Display) {
-    let line = format!("[{}] {}", proto::now_iso(), msg);
+/// Ajoute une ligne de log (horodatée + niveau + file:line de l'appelant)
+/// dans client.log + stderr, si `level` atteint le seuil `AGENTCONTROL_LOG`.
+#[track_caller]
+pub fn log(level: Level, msg: impl std::fmt::Display) {
+    let loc = std::panic::Location::caller();
+    log_at(level, loc.file(), loc.line(), msg);
+}
+
+/// Variante à source explicite — pour les lignes dont la vraie origine
+/// n'est pas ce callsite (frontend via `log_write` : `file` vide → pas de
+/// file:line, le message porte le préfixe `ui:`).
+pub fn log_at(level: Level, file: &str, line_no: u32, msg: impl std::fmt::Display) {
+    if level < min_level() {
+        return;
+    }
+    let src = if file.is_empty() {
+        String::new()
+    } else {
+        format!(" {file}:{line_no}")
+    };
+    // Une ligne physique par entrée : \n → ␤. Un message multi-lignes
+    // (sortie ssh, erreur remontée) ne doit ni injecter de fausse entrée
+    // ni perdre ses continuations au filtrage par niveau de l'UI.
+    let msg = msg.to_string().replace(['\r', '\n'], "␤");
+    let line = format!("[{}] [{}]{} {}", proto::now_iso(), level.as_str(), src, msg);
     eprintln!("{line}");
     if let Ok(mut w) = logfile().lock() {
         w.write_line(&line);
@@ -142,11 +213,34 @@ pub fn load_connections() -> Vec<serde_json::Value> {
         .unwrap_or_default()
 }
 
-/// Ajoute une connexion en tête (dédupliquée), max 10.
+/// Clé d'identité d'une connexion sauvegardée — miroir de `conn_key`
+/// côté client Tauri : `ssh{,-native}:host:sshport` | `tcp:addr` |
+/// `local` | `web`. Les champs annexes (args, user, couleur…) ne font
+/// PAS partie de la clé : éditer la couleur ou les args d'une connexion
+/// met à jour son entrée au lieu de créer un doublon.
+pub fn conn_key_json(cfg: &serde_json::Value) -> String {
+    let s = |k: &str| cfg.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    match s("kind") {
+        "ssh" => {
+            // Même règle que conn_key : SSH forcé natif sur Android.
+            let nat = cfg.get("native").and_then(|v| v.as_bool()).unwrap_or(false)
+                || cfg!(target_os = "android");
+            let port = cfg.get("port").and_then(|v| v.as_u64()).unwrap_or(22);
+            format!("{}:{}:{}", if nat { "ssh-native" } else { "ssh" }, s("host"), port)
+        }
+        "tcp" => format!("tcp:{}", s("addr")),
+        "web" => "web".into(),
+        "local" => "local".into(),
+        // kind inconnu/legacy : identité propre, pas de fusion avec local.
+        other => format!("{}:{}", other, s("host")),
+    }
+}
+
+/// Ajoute une connexion en tête (dédupliquée par conn_key), max 10.
 pub fn save_connection(cfg: &serde_json::Value) {
     let mut list = load_connections();
-    let key = cfg.to_string();
-    list.retain(|c| c.to_string() != key);
+    let key = conn_key_json(cfg);
+    list.retain(|c| conn_key_json(c) != key);
     list.insert(0, cfg.clone());
     list.truncate(10);
     let _ = std::fs::write(config_path(), serde_json::to_string_pretty(&list).unwrap());
@@ -155,8 +249,8 @@ pub fn save_connection(cfg: &serde_json::Value) {
 /// Retire une connexion de la liste (même clé de dédup que save).
 pub fn remove_connection(cfg: &serde_json::Value) {
     let mut list = load_connections();
-    let key = cfg.to_string();
-    list.retain(|c| c.to_string() != key);
+    let key = conn_key_json(cfg);
+    list.retain(|c| conn_key_json(c) != key);
     let _ = std::fs::write(config_path(), serde_json::to_string_pretty(&list).unwrap());
 }
 
@@ -269,7 +363,7 @@ pub fn hide_console(cmd: &mut Command) {
 }
 
 async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<Arc<SshGuard>>)> {
-    log(format!("connect transport={:?}", std::mem::discriminant(t)));
+    log(Level::Debug, format!("connect transport={:?}", std::mem::discriminant(t)));
     match t {
         Transport::Unix(path) => {
             #[cfg(unix)]
@@ -298,7 +392,7 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
         } => {
             let local = free_port()?;
             let spec = format!("{local}:127.0.0.1:{remote_port}");
-            log(format!(
+            log(Level::Debug, format!(
                 "ssh -N -L {spec} {host} args={args:?} SSH_AUTH_SOCK={:?}",
                 std::env::var("SSH_AUTH_SOCK").unwrap_or_else(|_| "<absent>".into())
             ));
@@ -313,6 +407,15 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                 "ConnectTimeout=10",
                 "-o",
                 "ServerAliveInterval=30",
+                "-o",
+                // Lien mort (NAT/firewall qui droppe l'idle, blackhole) :
+                // ssh meurt au bout de ~60-75 s au lieu de ~90+ — le reader
+                // EOF déclenche la reconnexion au lieu d'attendre en zombie.
+                "ServerAliveCountMax=2",
+                "-o",
+                // keepalive TCP en plus des sondes applicatives — détecte
+                // la mort du pair même sans trafic sur le canal forwardé.
+                "TCPKeepAlive=yes",
                 "-o",
                 // accepte les nouvelles host keys (1re connexion, pas de tty)
                 "StrictHostKeyChecking=accept-new",
@@ -349,7 +452,7 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                         };
                         if let Some(st) = dead {
                             let e = drain_err(&mut stderr).await;
-                            log(format!("ssh mort ({st}): {e}"));
+                            log(Level::Error, format!("ssh mort ({st}): {e}"));
                             bail!("ssh a quitté ({st}){}", if e.is_empty() { String::new() } else { format!(" : {e}") });
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await
@@ -362,7 +465,7 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                 }
             }
             let e = drain_err(&mut stderr).await;
-            log(format!("tunnel ssh {host} timeout (stderr: {e})"));
+            log(Level::Error, format!("tunnel ssh {host} timeout (stderr: {e})"));
             bail!("tunnel ssh {host} timeout{}", if e.is_empty() { String::new() } else { format!(" : {e}") })
         }
         Transport::SshNative {
@@ -441,7 +544,7 @@ impl Client {
                     if !busy || attempt >= 4 {
                         return Err(e);
                     }
-                    log(format!("port local occupé — retry tunnel {attempt}/3"));
+                    log(Level::Warn, format!("port local occupé — retry tunnel {attempt}/3"));
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 }
             }
@@ -511,7 +614,7 @@ impl Client {
             let mut w = self.w.lock().await;
             TX_TOTAL.fetch_add(s.len() as u64, Ordering::Relaxed);
             if let Err(e) = w.write_all(s.as_bytes()).await {
-                log(format!("daemon {name}: écriture ko {e}"));
+                log(Level::Error, format!("daemon {name}: écriture ko {e}"));
                 return Err(e.into());
             }
             w.flush().await?;
@@ -519,15 +622,15 @@ impl Client {
         match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
             Ok(Ok(Ok(v))) => Ok(v),
             Ok(Ok(Err(e))) => {
-                log(format!("daemon {name}: {e}"));
+                log(Level::Warn, format!("daemon {name}: {e}"));
                 bail!(e)
             }
             Ok(Err(_)) => {
-                log(format!("daemon {name}: connexion fermée"));
+                log(Level::Error, format!("daemon {name}: connexion fermée"));
                 bail!("connexion fermée")
             }
             Err(_) => {
-                log(format!("daemon {name}: timeout"));
+                log(Level::Error, format!("daemon {name}: timeout"));
                 bail!("timeout démon")
             }
         }
@@ -552,7 +655,7 @@ impl Client {
 // ---------------------------------------------------------------------------
 
 pub mod ssh_native {
-    use super::{base_dir, log};
+    use super::{base_dir, log, Level};
     use anyhow::{bail, Context, Result};
     use russh::client;
     use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
@@ -605,7 +708,7 @@ pub mod ssh_native {
         }
         let pub_line = format!("{} agentcontrol", key.public_key().to_openssh().unwrap_or_default());
         std::fs::write(p.with_extension("pub"), &pub_line)?;
-        log(format!("clé ssh app générée : {}", pub_line));
+        log(Level::Info, format!("clé ssh app générée : {}", pub_line));
         Ok(p)
     }
 
@@ -629,12 +732,12 @@ pub mod ssh_native {
         ) -> Result<bool, Self::Error> {
             // accept-new equivalent : on logge la clé vue (TOFU implicite v1).
             match key {
-                PublicKeyOrCertificate::PublicKey { key, .. } => log(format!(
+                PublicKeyOrCertificate::PublicKey { key, .. } => log(Level::Info, format!(
                     "ssh host key: {}",
                     key.fingerprint(russh::keys::HashAlg::Sha256)
                 )),
                 PublicKeyOrCertificate::Certificate(_) => {
-                    log("ssh host key: certificate")
+                    log(Level::Info, "ssh host key: certificate")
                 }
             }
             Ok(true)
@@ -675,8 +778,8 @@ pub mod ssh_native {
                 .await;
             match auth {
                 Ok(r) if r.success() => return Ok(h),
-                Ok(_) => log("clé refusée (auth partielle) — essai mot de passe"),
-                Err(e) => log(format!("auth clé: {e} — essai mot de passe")),
+                Ok(_) => log(Level::Warn, "clé refusée (auth partielle) — essai mot de passe"),
+                Err(e) => log(Level::Warn, format!("auth clé: {e} — essai mot de passe")),
             }
         }
         if let Some(pw) = password.filter(|p| !p.is_empty()) {
@@ -713,7 +816,11 @@ pub mod ssh_native {
         Ok((NativeGuard(h), ch.into_stream()))
     }
 
-    /// `ssh host <script>` sans binaire : canal exec → stdout collecté.
+    /// `ssh host <script>` sans binaire : canal exec → stdout/stderr
+    /// collectés à part. `on_stderr` reçoit chaque ligne stderr complète
+    /// au fil de l'eau (progression `step:*`, erreurs lisibles…) — le
+    /// retour est `(code, stdout, stderr)` : le résultat métier reste
+    /// sur stdout, les messages de diagnostic sur stderr.
     pub async fn ssh_exec(
         host: &str,
         port: u16,
@@ -721,7 +828,8 @@ pub mod ssh_native {
         password: Option<&str>,
         key_path: Option<&Path>,
         script: &str,
-    ) -> Result<(i32, String)> {
+        mut on_stderr: Option<&mut (dyn FnMut(&str) + Send)>,
+    ) -> Result<(i32, String, String)> {
         use russh::ChannelMsg;
         let h = connect_auth(host, port, user, password, key_path).await?;
         let mut ch = h.channel_open_session().await.context("channel session")?;
@@ -729,12 +837,27 @@ pub mod ssh_native {
             .await
             .context("exec")?;
         let mut out = Vec::new();
+        let mut err = Vec::new();
+        // Lignes stderr complètes → callback (les lignes partielles en
+        // fin de flux sont livrées aussi, via le drain post-boucle).
+        let mut err_rest = Vec::new();
+        let mut feed_err = |data: &[u8]| {
+            err.extend_from_slice(data);
+            if let Some(cb) = on_stderr.as_deref_mut() {
+                err_rest.extend_from_slice(data);
+                while let Some(i) = err_rest.iter().position(|b| *b == b'\n') {
+                    let line = String::from_utf8_lossy(&err_rest[..i]).to_string();
+                    err_rest.drain(..=i);
+                    cb(line.trim_end_matches('\r'));
+                }
+            }
+        };
         let mut code = -1i32;
         tokio::time::timeout(Duration::from_secs(120), async {
             while let Some(msg) = ch.wait().await {
                 match msg {
                     ChannelMsg::Data { data } => out.extend_from_slice(&data),
-                    ChannelMsg::ExtendedData { data, .. } => out.extend_from_slice(&data),
+                    ChannelMsg::ExtendedData { data, .. } => feed_err(&data),
                     ChannelMsg::ExitStatus { exit_status } => code = exit_status as i32,
                     _ => {}
                 }
@@ -742,7 +865,17 @@ pub mod ssh_native {
         })
         .await
         .context("exec timeout")?;
-        Ok((code, String::from_utf8_lossy(&out).to_string()))
+        // Reliquat stderr sans '\n' final → dernière ligne au callback.
+        if !err_rest.is_empty() {
+            if let Some(cb) = on_stderr.as_deref_mut() {
+                cb(&String::from_utf8_lossy(&err_rest).to_string());
+            }
+        }
+        Ok((
+            code,
+            String::from_utf8_lossy(&out).to_string(),
+            String::from_utf8_lossy(&err).to_string(),
+        ))
     }
 }
 
@@ -755,6 +888,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn level_parse_and_order() {
+        assert_eq!(Level::parse("WARN"), Some(Level::Warn));
+        assert_eq!(Level::parse(" warning "), Some(Level::Warn));
+        assert_eq!(Level::parse("err"), Some(Level::Error));
+        assert_eq!(Level::parse("nope"), None);
+        assert!(Level::Debug < Level::Info && Level::Info < Level::Warn && Level::Warn < Level::Error);
     }
 
     #[test]

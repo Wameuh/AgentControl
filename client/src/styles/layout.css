@@ -2,9 +2,13 @@
 #app-body { flex: 1; display: flex; min-height: 0; }
 
 
+/* Hauteur totale de la titlebar — référence unique pour tout ce qui doit
+   s'ancrer sous elle (#toasts…) ; surchargée sur Android (mobile.css). */
+:root { --tb-h: 34px; }
+
 /* Barre de titre custom (decorations: false) — même verre que le reste */
 #titlebar {
-  height: 34px; flex: none; display: flex; align-items: center; gap: 8px;
+  height: var(--tb-h); flex: none; display: flex; align-items: center; gap: 8px;
   padding: 0 4px 0 12px; user-select: none;
   background: var(--glass); backdrop-filter: blur(14px);
   border-bottom: 1px solid var(--line);
@@ -19,13 +23,14 @@
   border: 0; background: transparent; padding: 5px 11px; border-radius: 7px;
   color: var(--muted); font-size: 12px; line-height: 1;
 }
+.tb-btns .ic { width: 14px; height: 14px; }
 .tb-btns button:hover { background: rgba(236, 230, 216, .1); color: var(--ink); }
 :root.light .tb-btns button:hover { background: rgba(43, 42, 36, .08); }
 #tb-close:hover { background: rgba(232, 148, 134, .3) !important; color: var(--red); }
 
 /* Zones de resize fenêtre (plus de bordures natives sans decorations) */
 .resize-edge { position: fixed; z-index: 60; }
-#re-right { top: 34px; right: 0; bottom: 0; width: 5px; cursor: e-resize; }
+#re-right { top: var(--tb-h); right: 0; bottom: 0; width: 5px; cursor: e-resize; }
 #re-bottom { left: 0; right: 0; bottom: 0; height: 5px; cursor: s-resize; }
 #re-corner { right: 0; bottom: 0; width: 14px; height: 14px; cursor: se-resize; }
 
@@ -35,10 +40,12 @@
 
 /* Chip update dispo dans la titlebar */
 .tb-update {
-  border: 1px solid var(--sand); color: var(--sand); background: transparent;
+  display: inline-flex; align-items: center; gap: 4px;
+  border: 1px solid var(--accent); color: var(--accent); background: transparent;
   padding: 3px 10px; border-radius: 7px; font-size: 11.5px; font-weight: 500;
   cursor: pointer; flex: none; animation: pulse 2s infinite;
 }
+.tb-update .ic { width: 12px; height: 12px; }
 
 /* Fix : backdrop-filter glitchait le compositing WebKit après unfocus
    (titlebar noire sans icônes ni texte) — fond opaque à la place. */
@@ -50,3 +57,19 @@
   font-size:11px; color:var(--dim); border-top:1px solid var(--line);
   background:var(--panel-solid); user-select:none; flex:none }
 .sb-flex { flex:1 }
+#sb-left { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+
+
+/* Couleur de connexion (multi-instances : 1 instance = 1 connexion) —
+   quand la conn liée a un accent propre, :root.conn-tinted pose des
+   repères francs pour identifier l'instance d'un coup d'œil : liseré
+   sous la titlebar, bord gauche de la sidebar, ligne du statusbar et
+   titre coloré. Posé/retiré par applyConnChrome (core/chrome.ts). */
+:root.conn-tinted #titlebar { box-shadow: inset 0 -3px 0 var(--accent); }
+:root.conn-tinted #titlebar-title { color: var(--accent); }
+:root.conn-tinted #sidebar { box-shadow: inset 3px 0 0 var(--accent); }
+:root.conn-tinted #statusbar { box-shadow: inset 0 1px 0 var(--accent); }
+#sb-left .conn-st { font-size:9px }
+#sb-left .conn-seg.clk { cursor:pointer }
+#sb-left .conn-seg.clk:hover { color:var(--ink) }
+.sb-sep { opacity:.4 }

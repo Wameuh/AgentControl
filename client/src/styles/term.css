@@ -1,0 +1,76 @@
+/* Panneau terminal PTY en bas de la vue conversation (xterm.js) */
+
+#term-panel {
+  flex-shrink: 0;
+  height: 38vh;
+  min-height: 120px;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--line);
+  background: var(--panel-solid);
+  position: relative;
+}
+
+#term-resize {
+  position: absolute;
+  top: -3px;
+  left: 0;
+  right: 0;
+  height: 6px;
+  cursor: ns-resize;
+  z-index: 2;
+}
+
+#term-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--dim);
+  flex: none;
+}
+
+#term-title {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+#term-cwd {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, "Cascadia Mono", Menlo, monospace;
+}
+
+#term-head button {
+  padding: 2px 8px;
+  font-size: 13px;
+}
+
+#term-box {
+  flex: 1;
+  min-height: 0;
+  padding: 4px 0 4px 8px;
+  overflow: hidden;
+}
+
+.term-inst {
+  height: 100%;
+}
+
+/* xterm remplit son conteneur (FitAddon mesure dessus) */
+.term-inst .xterm {
+  height: 100%;
+}
+
+body.android #term-panel {
+  height: 46vh;
+}
+
+body.android #term-resize {
+  display: none;
+}

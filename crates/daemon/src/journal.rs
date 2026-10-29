@@ -18,10 +18,29 @@ struct Inner {
     /// Position de fin de fichier (prochain offset d'écriture).
     end: u64,
     last_seq: u64,
+    /// Génération du journal : incrémentée par `reset()`. Les seqs
+    /// seules ne suffisent pas à détecter un vidage (le nouveau
+    /// journal peut déjà dépasser l'ancien `last_seq` vu côté
+    /// subscriber) — la génération le fait sans ambiguïté. Volatile :
+    /// elle n'a de sens que dans la durée de vie du démon.
+    gen: u64,
 }
 
 pub struct Journal {
     inner: Mutex<Inner>,
+}
+
+/// Résultat du scan « premier post » : le journal ne garde que le
+/// cycle courant, mais la compaction peut avoir coupé la tête —
+/// présenter le premier `user_message` restant comme « premier »
+/// serait un faux.
+pub enum FirstPost {
+    /// Premier `user_message` du cycle (seq/ts/texte intacts).
+    Found(Event),
+    /// La tête du journal a été supprimée par la compaction.
+    Truncated,
+    /// Pas de `user_message` dans la fenêtre scannée.
+    Empty,
 }
 
 impl Journal {
@@ -58,12 +77,18 @@ impl Journal {
                 offsets,
                 end,
                 last_seq,
+                gen: 0,
             }),
         })
     }
 
     pub fn last_seq(&self) -> u64 {
         self.inner.lock().unwrap().last_seq
+    }
+
+    /// Génération courante — voir `Inner::gen`.
+    pub fn gen(&self) -> u64 {
+        self.inner.lock().unwrap().gen
     }
 
     /// Ajoute un événement. Doit être suivi d'un broadcast.
@@ -133,6 +158,31 @@ impl Journal {
         Self::read_from(dir, start_off, before, n)
     }
 
+    /// Page ascendante : les `limit` événements avec seq > `after_seq`,
+    /// en ordre croissant — pagination vers le présent depuis une vue
+    /// ancrée en plein journal (saut vers un résultat de recherche).
+    pub fn read_page_after(&self, dir: &Path, after_seq: u64, limit: usize) -> Result<Vec<Event>> {
+        let start_off = {
+            let g = self.inner.lock().unwrap();
+            if g.offsets.is_empty() {
+                // Index mémoire vide → scan complet, même repli que read_page.
+                drop(g);
+                let v = Self::read_from(dir, 0, u64::MAX, usize::MAX)?;
+                return Ok(v
+                    .into_iter()
+                    .filter(|e| e.seq > after_seq)
+                    .take(limit)
+                    .collect());
+            }
+            let idx = g.offsets.partition_point(|(s, _)| *s <= after_seq);
+            if idx >= g.offsets.len() {
+                return Ok(vec![]);
+            }
+            g.offsets[idx].1
+        };
+        Self::read_from(dir, start_off, u64::MAX, limit)
+    }
+
     /// Vide le journal et les blobs — utilisé quand la session se rebinde
     /// vers une AUTRE session native : l'historique local n'est plus valide
     /// et sera re-rempli par le replay de `session/load`.
@@ -144,12 +194,61 @@ impl Journal {
         g.offsets.clear();
         g.end = 0;
         g.last_seq = 0;
+        g.gen += 1;
         let bdir = dir.join("blobs");
         if bdir.exists() {
             let _ = std::fs::remove_dir_all(&bdir);
         }
         std::fs::create_dir_all(&bdir)?;
         Ok(())
+    }
+
+    /// Premier `user_message` du journal (cycle courant) — scan de la
+    /// tête en flux, borné par FIRST_POST_SCAN_MAX lignes : le journal
+    /// peut faire des centaines de Mo, on ne le charge jamais entier.
+    /// La compaction supprime la TÊTE du fichier : sans détection, le
+    /// premier `user_message` restant serait un prompt de milieu de
+    /// cycle présenté comme « premier post » → Truncated dans ce cas.
+    pub fn first_post(&self, dir: &Path) -> Result<FirstPost> {
+        /// Le prelude d'un cycle (status/system/commands post-spawn) ne
+        /// fait que quelques events — la borne est très large au-delà.
+        const FIRST_POST_SCAN_MAX: usize = 4096;
+        // Tête perdue à la compaction ? L'index connaît le plus petit
+        // seq retenu — s'il n'est pas 1, tout le début a été coupé
+        // (les seqs ne sont jamais renumérotées).
+        let first_seq = self.inner.lock().unwrap().offsets.first().map(|(s, _)| *s);
+        match first_seq {
+            Some(1) | None => {} // tête intacte, ou index vide → le scan décide
+            Some(_) => return Ok(FirstPost::Truncated),
+        }
+        let path = dir.join("events.jsonl");
+        let f = match File::open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(FirstPost::Empty),
+            Err(e) => return Err(e.into()),
+        };
+        let mut first_seen = false;
+        for (n, line) in BufReader::new(f).lines().enumerate() {
+            if n >= FIRST_POST_SCAN_MAX {
+                break;
+            }
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(ev) = serde_json::from_str::<Event>(&line) else {
+                continue;
+            };
+            // Repli du test d'index (index jamais peuplé) : le premier
+            // event du fichier n'est pas seq 1 → la tête a été coupée.
+            if !std::mem::replace(&mut first_seen, true) && ev.seq != 1 {
+                return Ok(FirstPost::Truncated);
+            }
+            if matches!(ev.kind, EventKind::UserMessage { .. }) {
+                return Ok(FirstPost::Found(ev));
+            }
+        }
+        Ok(FirstPost::Empty)
     }
 
     /// Rattrapage borné : les events avec seq > after_seq, mais au plus les
@@ -323,4 +422,79 @@ pub fn purge_blobs(dir: &Path, max_bytes: u64) -> Result<usize> {
 
 pub fn session_dir(root: &Path, id: &str) -> PathBuf {
     root.join("sessions").join(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "ac-journal-test-{}-{}",
+            std::process::id(),
+            tag
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn fill(dir: &Path, texts: &[&str]) -> Journal {
+        let j = Journal::open(dir).unwrap();
+        for t in texts {
+            j.append(EventKind::AgentText { text: t.to_string() }).unwrap();
+        }
+        j
+    }
+
+    #[test]
+    fn page_after() {
+        let dir = tmpdir("after");
+        let j = fill(&dir, &["a", "b", "c", "d", "e", "f"]);
+        let page = j.read_page_after(&dir, 2, 3).unwrap();
+        let seqs: Vec<u64> = page.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, vec![3, 4, 5]);
+        // après la fin → vide
+        assert!(j.read_page_after(&dir, 6, 3).unwrap().is_empty());
+        // après 0 = tout depuis le début, borné
+        assert_eq!(j.read_page_after(&dir, 0, 2).unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn page_after_index_vide() {
+        // Journal écrit, fermé, réouvert avec index reconstruit — même
+        // comportement que le chemin indexé.
+        let dir = tmpdir("reopen");
+        let j = fill(&dir, &["x", "y", "z"]);
+        drop(j);
+        let j = Journal::open(&dir).unwrap();
+        let page = j.read_page_after(&dir, 1, 10).unwrap();
+        assert_eq!(page.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![2, 3]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn page_after_trous() {
+        // Journal compacté = trou de seqs en tête : la pagination avant
+        // doit sauter le trou et ne jamais rendre un seq <= borne.
+        let dir = tmpdir("holes");
+        let j = fill(&dir, &["a", "b", "c", "d", "e", "f", "g", "h"]);
+        // max_bytes minuscule + keep_bytes ~2 events (~90 o/ligne) → la
+        // tête du journal saute, les seqs 1..n-2 deviennent un trou.
+        assert!(j.compact_if_needed(&dir, 1, 250).unwrap());
+        j.append(EventKind::AgentText { text: "i".into() }).unwrap();
+        j.append(EventKind::AgentText { text: "j".into() }).unwrap();
+        // La borne peut tomber dans le trou : seuls des seqs > borne
+        // doivent ressortir, dans l'ordre.
+        let kept = j.read_page(&dir, None, 100).unwrap();
+        let first_kept = kept[0].seq;
+        assert!(first_kept > 1); // le trou existe bien
+        let page = j.read_page_after(&dir, first_kept - 1, 100).unwrap();
+        assert_eq!(
+            page.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            kept.iter().map(|e| e.seq).collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

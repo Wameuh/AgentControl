@@ -1,4 +1,6 @@
 mod acp;
+mod components;
+mod forges;
 mod journal;
 mod logging;
 mod mcp;
@@ -6,7 +8,9 @@ mod prs;
 mod selfupdate;
 mod server;
 mod session;
+mod term;
 mod tui;
+mod web;
 
 use anyhow::{Context, Result};
 use server::{AgentProfile, Daemon};
@@ -17,6 +21,14 @@ use std::path::PathBuf;
 struct Config {
     #[serde(default = "default_tcp")]
     bind_tcp: String,
+    /// Interface web servie par le démon (AC#14) — loopback uniquement,
+    /// accès distant via `ssh -L`. Absent = désactivé.
+    #[serde(default)]
+    bind_http: Option<String>,
+    /// Dossier des assets SPA — défaut : `<root>/web`, `<exe>/web` puis
+    /// `<repo>/client/dist` en dev. `index.html` requis.
+    #[serde(default)]
+    web_dir: Option<String>,
     /// Reprise auto après un arrêt brutal : les sessions qui travaillaient
     /// au moment du crash sont respawnées et reçoivent un prompt de
     /// reprise. Les sessions idle ne sont jamais relancées.
@@ -29,6 +41,11 @@ struct Config {
     /// Communication agent↔agent (serveur MCP injecté dans les sessions).
     #[serde(default)]
     a2a: server::A2aCfg,
+    /// Forges de review au-delà de GitHub : `[[forges]]` {type, hosts,
+    /// token_env} — détection des URLs GitLab/Gerrit dans les sorties
+    /// outils (voir docs/forges.md). github.com + gitlab.com implicites.
+    #[serde(default)]
+    forges: Vec<forges::ForgeCfg>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -45,6 +62,121 @@ fn default_tcp() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            bind_tcp: default_tcp(),
+            bind_http: None,
+            web_dir: None,
+            auto_resume: true,
+            agents: HashMap::new(),
+            retention: server::RetentionCfg::default(),
+            a2a: server::A2aCfg::default(),
+            forges: Vec::new(),
+        }
+    }
+}
+
+/// Options CLI du démon (la config reste la source normale — les flags
+/// servent aux tests et à l'activation ponctuelle).
+#[derive(Default)]
+struct Cli {
+    bind_http: Option<String>,
+    web_dir: Option<String>,
+}
+
+fn parse_cli() -> Result<Cli> {
+    let mut cli = Cli::default();
+    let mut it = std::env::args().skip(1);
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            // Déjà intercepté par main() — toléré si répété.
+            "mcp-serve" => {}
+            "--bind-http" => {
+                cli.bind_http = Some(it.next().context("--bind-http <addr>")?);
+            }
+            "--web-dir" => {
+                cli.web_dir = Some(it.next().context("--web-dir <path>")?);
+            }
+            other => anyhow::bail!("argument inconnu: {other}"),
+        }
+    }
+    Ok(cli)
+}
+
+/// Le listener web ne doit JAMAIS exposer le démon sur le réseau :
+/// loopback strict, l'accès distant passe par le tunnel SSH (`ssh -L`).
+fn check_loopback(addr: &str) -> Result<()> {
+    let host = addr
+        .rsplit_once(':')
+        .map(|(h, _)| h.trim_matches(['[', ']']))
+        .unwrap_or_default();
+    anyhow::ensure!(
+        matches!(host, "127.0.0.1" | "localhost" | "::1"),
+        "bind_http « {addr} » n'est pas loopback — utilisez 127.0.0.1 / ::1 \
+         (l'accès distant se fait via ssh -L, jamais par exposition réseau)"
+    );
+    Ok(())
+}
+
+/// Token d'accès web : aléa /dev/urandom (32 o → 64 hex), persisté
+/// `<root>/web.token` mode 600 — l'utilisateur le copie dans l'URL ou
+/// le colle dans le dialogue du front (`acctl status` l'affiche aussi
+/// via daemon_status.web.url).
+fn gen_web_token(root: &std::path::Path) -> Result<String> {
+    use std::io::Read;
+    let mut b = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .context("/dev/urandom")?
+        .read_exact(&mut b)?;
+    let token: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    let p = root.join("web.token");
+    std::fs::write(&p, &token).context("écriture web.token")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(token)
+}
+
+/// Source des assets de la web UI, par ordre : `--web-dir`/`web_dir`
+/// explicite (override, index.html requis) > assets embarqués au build
+/// (binaire autonome) > dossiers disque connus (`<root>/web` install
+/// manuelle, `<exe>/web` tarball déballée, `<repo>/client/dist` quand
+/// le binaire a été compilé sans frontend). `None` → placeholder.
+fn resolve_assets(explicit: Option<&str>, root: &std::path::Path) -> Option<web::Assets> {
+    if let Some(d) = explicit {
+        let p = PathBuf::from(d);
+        if p.join("index.html").is_file() {
+            return Some(web::Assets::Dir(p));
+        }
+        tracing::warn!("web_dir {d}: index.html absent — ignoré");
+    }
+    if let Some(m) = web::embedded_assets() {
+        return Some(web::Assets::Embed(m));
+    }
+    let mut candidates = vec![root.join("web")];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(d) = exe.parent() {
+            candidates.push(d.join("web"));
+        }
+        // Dev : ancêtres du binaire → <repo>/client/dist.
+        for anc in exe.ancestors() {
+            candidates.push(anc.join("client/dist"));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        for anc in cwd.ancestors() {
+            candidates.push(anc.join("client/dist"));
+        }
+    }
+    candidates
+        .into_iter()
+        .find(|p| p.join("index.html").is_file())
+        .map(web::Assets::Dir)
 }
 
 fn default_agents() -> HashMap<String, AgentProfile> {
@@ -187,14 +319,13 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     let cfg: Config = if cfg_path.exists() {
         toml::from_str(&std::fs::read_to_string(&cfg_path)?).context("config.toml invalide")?
     } else {
-        Config {
-            bind_tcp: default_tcp(),
-            auto_resume: true,
-            agents: HashMap::new(),
-            retention: server::RetentionCfg::default(),
-            a2a: server::A2aCfg::default(),
-        }
+        Config::default()
     };
+    // CLI (optionnel) : --bind-http / --web-dir — utile en test et pour
+    // activer la web UI sans toucher la config.
+    let cli = parse_cli()?;
+    let bind_http = cli.bind_http.or(cfg.bind_http.clone());
+    let web_dir_cfg = cli.web_dir.or(cfg.web_dir.clone());
 
     let mut agents = default_agents();
     for (id, c) in cfg.agents {
@@ -208,8 +339,15 @@ async fn serve(root: &std::path::Path) -> Result<()> {
         );
     }
 
-    let (daemon, resumable) =
-        Daemon::open(root.to_path_buf(), agents, cfg.retention.clone(), cfg.a2a.clone()).await?;
+    let (daemon, resumable) = Daemon::open(
+        root.to_path_buf(),
+        agents,
+        cfg.retention.clone(),
+        cfg.a2a.clone(),
+        forges::Forges::resolve(&cfg.forges),
+        cfg.bind_tcp.clone(),
+    )
+    .await?;
     tracing::info!(
         "{} session(s) chargée(s), root={}, agents: {}",
         daemon.sessions.read().await.len(),
@@ -234,6 +372,36 @@ async fn serve(root: &std::path::Path) -> Result<()> {
         .await
         .with_context(|| format!("bind {}", cfg.bind_tcp))?;
 
+    // Listener web (opt-in) : SPA + WS/RPC/media loopback, token dans
+    // web.token. Une panne/erreur de ce listener ne doit pas abattre le
+    // démon → tâche séparée, hors du select de shutdown.
+    if let Some(addr) = &bind_http {
+        check_loopback(addr)?;
+        let token = gen_web_token(root)?;
+        let assets = resolve_assets(web_dir_cfg.as_deref(), root);
+        match &assets {
+            Some(web::Assets::Embed(m)) => {
+                tracing::info!("web assets: {} fichier(s) embarqué(s)", m.len())
+            }
+            Some(web::Assets::Dir(d)) => tracing::info!("web assets: {}", d.display()),
+            None => tracing::warn!(
+                "assets web introuvables (ni embed, ni root/web, ni exe/web, \
+                 ni client/dist) — page placeholder servie"
+            ),
+        }
+        let http_listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("bind {addr}"))?;
+        let ctx = web::WebCtx::new(assets, token.clone());
+        *daemon.web.write().await = Some(serde_json::json!({
+            "bind": addr,
+            "url": format!("http://{addr}/?token={token}"),
+        }));
+        let d = daemon.clone();
+        tokio::spawn(async move { web::accept_http(d, http_listener, ctx).await });
+        tracing::info!("web ui: http://{addr}/ (token: web.token)");
+    }
+
     tracing::info!(
         "listening: unix:{} + {} | rétention: journal>{}MB→{}MB, blobs<{}MB, purge_days={}",
         sock_path.display(),
@@ -253,6 +421,14 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     let d2 = daemon.clone();
     tokio::spawn(async move { server::janitor(d2).await });
 
+    // Composants managés : orphelins d'un crash éventuel, autostarts et
+    // boucle de sondes — après le bind des listeners : l'env injectée
+    // (AGENTCONTROL_SOCK) n'est joignable qu'à partir d'ici.
+    {
+        let c = daemon.components.clone();
+        tokio::spawn(async move { c.boot().await });
+    }
+
     if crashed && !resumable.is_empty() {
         if cfg.auto_resume {
             let d3 = daemon.clone();
@@ -270,6 +446,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     // `clean` distingue l'arrêt demandé (signal) d'une mort inattendue :
     // le marqueur n'est effacé que sur arrêt propre — tout autre exit
     // laisse un marqueur périmé → reprise auto au prochain démarrage.
+    let d_shutdown = daemon.clone();
     let clean = tokio::select! {
         _ = server::accept_unix(d1, unix_listener) => {
             tracing::error!("accept_unix a retourné — arrêt inattendu");
@@ -286,6 +463,11 @@ async fn serve(root: &std::path::Path) -> Result<()> {
             true
         }
     };
+    // Composants managés : SIGTERM gracieux aux `process` vivants —
+    // même destin que les agents, ils meurent avec le démon (et les
+    // autostarts repartiront au prochain boot). Propre ou non : un
+    // exit inattendu ne doit pas laisser d'orphelins managés.
+    d_shutdown.components.shutdown().await;
     if clean {
         let _ = std::fs::remove_file(&pid_path);
     }

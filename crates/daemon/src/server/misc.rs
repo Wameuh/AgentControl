@@ -14,6 +14,22 @@ impl Daemon {
                     // démon plus vieux répondrait `parse: unknown variant`
                     // avec id=0, droppé par le routage client → 60 s muet.
                     "self_update": true,
+                    // Idem pour ReqKind::FirstPost (bouton « premier post »).
+                    "first_post": true,
+                    // Même gate capacité : ReqKind::TermOpen connu →
+                    // le client affiche le bouton terminal.
+                    "terminal": true,
+                    // Idem pour les RPC fichiers en écriture
+                    // (WriteFile/CreatePath, AC#93/#99) — masque le « + »
+                    // pièces jointes sur les démons trop vieux.
+                    "files": true,
+                    // Interface web servie par ce démon (null si
+                    // bind_http absent) : {"bind", "url"?token=…}.
+                    "web": self.web.read().await.clone(),
+                    // Même gate capacité : les ReqKind Component* /
+                    // ListComponents sont connus → le client peut
+                    // afficher la section composants.
+                    "components": true,
                 }))
     }
     /// `UpdateDaemon` : télécharge la release demandée et remplace le
@@ -43,7 +59,8 @@ impl Daemon {
 
 /// `argv[0]` d'un profil agent résolvable : binaire sur le PATH du démon
 /// (tel qu'assuré par ensure_agent_path) ou chemin absolu existant.
-fn command_available(cmd: &str) -> bool {
+/// Réutilisé par la détection « installed » du catalogue composants.
+pub(crate) fn command_available(cmd: &str) -> bool {
     let p = PathBuf::from(cmd);
     if p.is_absolute() {
         return is_executable(&p);

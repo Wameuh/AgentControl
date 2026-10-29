@@ -3,7 +3,9 @@
 ## Workflow : `next_release` → `main`
 
 Deux branches protégées (**push direct impossible**, PR obligatoire,
-5 checks CI requis : `daemon-linux` ×2, `client` ×2, `client-android`) :
+checks CI : `daemon-linux` ×2, `client` ×2, `client-macos`,
+`client-android` — 6 runs dont 5 requis par le ruleset,
+`client-macos` restant à y inclure) :
 
 - **`next_release`** = branche d'intégration. **Toutes les PR de
   feature/fix visent `next_release`** (`gh pr create --base next_release`)
@@ -15,7 +17,7 @@ Workflow : créer une branche depuis `next_release` → push →
 `gh pr create --base next_release --draft` → finir le travail →
 `/mr review` **sur la draft** → traiter la review (fix → push →
 relancer, toujours en draft) → review soldée → `gh pr ready`
-(≥30 s après le dernier push) → attendre les 5 checks verts → merge.
+(≥30 s après le dernier push) → attendre les checks CI verts → merge.
 **Merge** : vers `main`, toujours l'utilisateur. Vers `next_release`,
 **l'agent peut merger** via `gh pr merge <N>` quand la dernière review
 auto porte un verdict **`Verdict: APPROVED` en titre** postérieur au
@@ -29,14 +31,23 @@ review réelle. PR déjà mergée ?
 Le CI build tous les artefacts sur les PR (APK suffixé `-<sha>`).
 
 **Worktrees** : travailler dans un **git worktree séparé par tâche**
-(`git worktree add ../AgentControl-<feat> -b <br> next_release`) — le
-checkout principal reste propre et plusieurs tâches peuvent avancer
-en parallèle sans se marcher dessus. Nettoyer à la fin :
-`git worktree remove ../AgentControl-<feat>`.
+(`git worktree add ~/worktrees/ac-<feat> -b <br> origin/next_release`)
+— le checkout principal reste propre et plusieurs tâches peuvent
+avancer en parallèle sans se marcher dessus. Nettoyer à la fin :
+`git worktree remove ~/worktrees/ac-<feat>`. **Le checkout principal
+est verrouillé** : le hook `.devin/hooks/guard-main-worktree.py`
+bloque les outils fichiers (`write`/`edit`/…) sur tout chemin qui s'y
+résout et les commandes git mutantes qui le ciblent (`commit`, `add`,
+`checkout`/`switch` hors `next_release`, `stash`, `clean`, `rebase`,
+`update-ref`…) ; un `Stop`-hook refuse de terminer tant qu'il est sale
+ou hors `next_release`, et `SessionStart` signale l'état. `fetch` /
+`pull` / `reset` / `restore` / `checkout -- <paths>` restent permis
+(resync et retour-au-propre). Tripwire assumé : les écrits shell (`>`,
+`sed -i`) ne sont pas interceptés — le `Stop`-hook est le filet.
 
 **Drafts** : une PR reste en **draft tout le cycle travail + review**
 — les pipelines ne se lancent qu'**après** la review (`gh pr ready` =
-feu vert final : event `ready_for_review` → les 5 checks). **La
+feu vert final : event `ready_for_review` → les checks CI). **La
 review se demande sur la draft** : `/mr review` lance la session même
 sans ready (le trigger ne gate pas `isDraft`) → itérer (corriger →
 push → relancer `/mr review`) autant de rounds que nécessaire en
@@ -132,12 +143,36 @@ l'ajout du scope).
 Release = PR `next_release` → `main` passée **ready** →
 le job `release-bump` de `version.yml` calcule `dernier tag + niveau`,
 commit `chore: bump version` poussé sur `next_release` (la PR se met
-à jour, les 5 checks tournent sur le head bumpé) → au merge (par
+à jour, les checks CI tournent sur le head bumpé) → au merge (par
 l'utilisateur), `release-on-merge.yml` tague `v<version>` (lu depuis
 `client/package.json`) et dispatche `build.yml` sur le tag (le push
 de tag via GITHUB_TOKEN ne déclenche pas les workflows d'où le
 dispatch). Idempotent : tag existant → skip, package.json déjà à
 NEXT → pas de re-bump. Tant que la PR reste draft, rien ne bump.
+
+**Release candidate** : quand la release PR passe ready, `release-bump`
+pousse aussi un tag `v<NEXT>-rc.<k>` (k incrémental, un rc par état de
+head — un synchronize post-ready produit rc.k+1) → le push du tag via
+PAT déclenche `build.yml` qui publie une **prerelease GitHub** (jamais
+marquée `latest`). Le build rc **injecte le suffixe `-rc.k` dans les
+fichiers de version** (non commité — le tag pointe le commit propre
+X.Y.Z) → le binaire s'identifie `X.Y.Z-rc.k`, et la finale `X.Y.Z` est
+proposée en update ensuite (semver : rc < stable). Windows et macOS
+exclus de l'injection (MSI/NSIS et CFBundleVersion exigent du
+numérique) — conséquence : un artefact rc Windows/macOS s'identifie
+`X.Y.Z` → pas de chemin auto-update vers rc.k+1 ni vers la finale,
+réinstall manuelle. Le bundling Linux est limité à `deb`+`appimage`
+(`client/src-tauri/tauri.linux.conf.json`) : le rpm n'est pas distribué
+et son validateur refuse `-` dans `Version` (semver `-rc.K` —
+convention RPM = `~`, fix upstream tauri-apps/tauri#16336 ouvert). Le
+.deb `X.Y.Z-rc.K` est accepté par dpkg et `update_client` installe via
+`pkexec dpkg -i` (pas de dépôt apt → l'ordre Debian ne joue pas). Pour
+installer la rc depuis
+l'app : canal rc opt-in dans les paramètres → la sonde passe de
+`releases/latest` (qui exclut les prereleases) à la liste `/releases`
++ max semver. Au merge, `release-on-merge` nettoie les releases+tags
+`v<NEXT>-rc.*` du cycle — et une release PR fermée sans merge déclenche
+le même cleanup (`rc-cleanup` de version.yml).
 
 **Reconcile** : tout merge nr→main est un squash → le commit `main`
 n'est jamais ancêtre des commits nr : sans reconcile la release
@@ -173,10 +208,12 @@ bypass ruleset), **Pull requests RW** (auto-release-pr :
 (app first-party → 422), et un push `GITHUB_TOKEN` ne déclencherait
 pas les checks sur le head poussé (anti-récursion). Le ruleset
 `next_release` a le rôle **`Repository admin`** en bypass actor
-(Settings → Rules → Rulesets). Sans `RELEASE_PAT`, un push réellement
-nécessaire échoue fail-fast (« secret RELEASE_PAT manquant ») — rien à
-pousser → skip clean, pas d'échec ; les fine-grained PAT expirent →
-renouveler le secret à l'échéance (sinon échec opaque au checkout).
+(Settings → Rules → Rulesets). Sans `RELEASE_PAT` : le guard de
+`release-bump` tire dès que `next` est connu (le tag rc pousse
+toujours, même bump sauté) → fail-fast « secret RELEASE_PAT manquant »
+sur tout run non-draft ; `reconcile` lui reste skip-clean sans push.
+Les fine-grained PAT expirent → renouveler le secret à l'échéance
+(sinon échec opaque au checkout).
 
 ## Après chaque push : vérifier le CI
 
@@ -188,13 +225,15 @@ gh run view <id> --log-failed   # si failure
 ```
 
 Le workflow `.github/workflows/build.yml` build : daemon x86_64+aarch64,
-client Tauri Ubuntu+Windows, et publie une release sur les tags `v*`.
+client Tauri Ubuntu+Windows+macOS (dmg arm64), APK Android, et publie
+une release sur les tags `v*`.
 
 ## Version automatique (mots-clés de commit)
 
-PR → **`next_release`** (pas `main` directement). 5 checks requis
-(`daemon-linux` ×2, `client` ×2, `client-android`). Le CI build les
-artefacts sur les PR (APK suffixé `-<sha>`).
+PR → **`next_release`** (pas `main` directement). Checks CI
+(`daemon-linux` ×2, `client` ×2, `client-android`, `client-macos` —
+5 requis au ruleset, `client-macos` à y inclure). Le CI build les
+artefacts sur les PR (APK et dmg suffixés `-<sha>`).
 
 **Pas de bump par PR** — la version ne bouge qu'à la release. Le niveau
 est décidé par des **mots-clés parenthésés dans les sujets de commit**
@@ -266,6 +305,33 @@ Manuel hors-PR : `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]
   tests d'intégration qui valident les flux réels (daemon ↔ client,
   appels ACP, SSH, …).
 
+## Protocole fichiers (viewer/éditeur)
+
+- `read_file{path, offset, limit}` : avec `limit` → réponse paginée
+  `{path, offset, size, data(base64), mtime_ms}` (octets bruts — le
+  client décode, pas le démon ; supporte fichiers de toute taille et
+  le streaming vidéo acvideo). Sans `limit` → réponse legacy
+  `{content, truncated}` UTF-8 512 Kio.
+- `write_file{path, offset, delete_len, data(base64), if_mtime_ms?}` :
+  splice borné au workspace (`resolve_in_cwd_create` — parent
+  canonicalisé, feuille absente OK, `..`/symlink sortant refusé) ;
+  `delete_len` clampé ; `if_mtime_ms` ≠ mtime disque → erreur
+  `conflit:` (le client propose Recharger/Écraser) ; écriture atomique
+  `.part`+`rename` en `spawn_blocking`, mode unix préservé ; cap
+  `data` 16 Mio encodé. Réponse `{path, size, mtime_ms}`.
+- `create_path{path, dir}` : création EXCLUSIVE d'un fichier vide ou
+  d'un dossier (clic droit « nouveau » de l'explorateur) — même borne
+  `resolve_in_cwd_create`, racine refusée, cible déjà présente
+  (toute forme, symlink suivi) → « existe déjà » ; O_EXCL = pas
+  d'écrasement même en course. Réponse `{path, dir}`. CLI :
+  `acctl create <session> <path> [--dir]`.
+- Le client envoie `offset:0, delete_len:loaded` (buffer = préfixe du
+  disque → sauver sans avoir tout chargé) ; CRLF et BOM ré-écrits ;
+  encodages : utf-8, windows-1252, utf-16 le/be — décodage
+  `TextDecoder` streamé, encodage maison (`core/encoding.ts`).
+- `acctl write <session> <path> [src|-]` = remplacement complet
+  (`delete_len: u64::MAX`, sans garde mtime).
+
 ## Pièges rencontrés
 
 - `anyhow::bail!` dans une fonction `Result<_, String>` → E0308.
@@ -292,3 +358,11 @@ Manuel hors-PR : `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]
   binaire + ~/.local/bin + nvm (`$NVM_BIN`, sinon dernier
   `~/.nvm/versions/node/*/bin`) — requis pour les agents npm-globaux
   (shebang `#!/usr/bin/env node`).
+- **Drag interrompu → curseur "grabbing" collé** (WebKitGTK/Wayland,
+  bug toolkit sans recours côté web) : ne JAMAIS détacher un élément
+  pouvant être source de drag (rebuild de liste, `.remove()`) tant
+  qu'un drag est en vol — cf. compteur `dragging` + diffère-rebuild
+  dans `sidebar.ts`. `startDragging()` uniquement sur `e.detail===1`
+  (un 2e mousedown pendant toggleMaximize tue le grab WM pareil).
+  `<a>`/`<img>` désarmés via `-webkit-user-drag:none` (base.css) ;
+  garder `draggable` uniquement sur les vraies sources de DnD.

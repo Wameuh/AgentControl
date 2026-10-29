@@ -5,12 +5,13 @@
 // le cache de conversation à chaque changement de session.
 // ---------------------------------------------------------------------------
 
-import { $, esc, mkEv, showErr } from "../core/dom";
+import { $, esc, mkEv, q, showErr } from "../core/dom";
 import { linkify, mdRender } from "../core/format";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
 import type { AcEvent, CmdInfo, ConfigOption } from "../core/types";
 import { t } from "../i18n";
+import { icon } from "../ui/icons";
 
 // Seuils au-delà desquels une bulle user est repliée par défaut.
 const USER_FOLD_CHARS = 480;
@@ -26,6 +27,12 @@ export class EventRenderer {
   pendingToolUpdates = new Map<string, AcEvent[]>();
   // Pendant un prepend, la compensation de fin de page couvre déjà tout.
   inPrepend = false;
+  /** Ancre anti-doublon pensée/message : un agent peut émettre le même
+   *  texte dans les deux rôles (observé : bloc 💭 reprenant intégralement
+   *  le message qui précède). La comparaison porte sur les blocs texte
+   *  — les events intermédiaires (tool_call, status…) n'y coupent pas.
+   *  Swapée avec le reste de l'état de rendu. */
+  lastText: { thought: boolean; norm: string; el: HTMLElement } | null = null;
 
   private deps = {
     /** Meta de la session affichée mutée par un event (mode/model/state…) →
@@ -42,6 +49,39 @@ export class EventRenderer {
     Object.assign(this.deps, d);
   }
 
+  private normText(t: unknown) {
+    return String(t ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  /// Dédup pensée/message à l'append (même texte normalisé que le bloc
+  /// texte agent précédent, à travers les events non-texte) :
+  ///  - "skip" : doublon pur — ne pas rendre ;
+  ///  - HTMLElement : la pensée précédente était la redondante — la
+  ///    retirer, le message identique la remplace ;
+  ///  - null : rendre normalement.
+  textDup(ev: AcEvent): "skip" | HTMLElement | null {
+    if (ev.type !== "agent_text" && ev.type !== "agent_thought") return null;
+    const norm = this.normText(ev.text);
+    if (!norm) return null;
+    const prev = this.lastText;
+    if (!prev || prev.norm !== norm) return null;
+    if (ev.type === "agent_text" && prev.thought) return prev.el;
+    return "skip";
+  }
+
+  /// Enregistre le bloc texte réellement rendu — ancre de la dédup
+  /// suivante (à appeler après l'insertion du nœud). Un message user/peer
+  /// ouvre un nouveau tour : répéter un texte y est légitime → reset.
+  noteText(ev: AcEvent, el: HTMLElement) {
+    if (ev.type === "user_message" || ev.type === "peer_message") {
+      this.lastText = null;
+      return;
+    }
+    if (ev.type !== "agent_text" && ev.type !== "agent_thought") return;
+    const norm = this.normText(ev.text);
+    if (norm) this.lastText = { thought: ev.type === "agent_thought", norm, el };
+  }
+
   render(ev: AcEvent, live: boolean): HTMLElement {
     switch (ev.type) {
       case "user_message": {
@@ -50,6 +90,9 @@ export class EventRenderer {
         const body = document.createElement("div");
         body.className = "um-body";
         body.innerHTML =
+          (ev.origin
+            ? `<span class="origin-badge">${esc(t("via"))} ${esc(ev.origin as string)}</span> `
+            : "") +
           (ev.steer ? `<span class="steer-badge">${t("steer_badge")}</span> ` : "") +
           linkify(esc(txt));
         d.appendChild(body);
@@ -59,10 +102,12 @@ export class EventRenderer {
           const btn = document.createElement("button");
           btn.type = "button";
           btn.className = "um-toggle";
-          btn.textContent = t("um_expand");
+          const setLabel = (collapsed: boolean) => {
+            btn.innerHTML = `${icon("chev-down", "ic-caret")} ${esc(t(collapsed ? "um_expand" : "um_collapse"))}`;
+          };
+          setLabel(true);
           btn.addEventListener("click", () => {
-            const collapsed = d.classList.toggle("um-collapsed");
-            btn.textContent = t(collapsed ? "um_expand" : "um_collapse");
+            setLabel(d.classList.toggle("um-collapsed"));
           });
           d.appendChild(btn);
         }
@@ -80,10 +125,10 @@ export class EventRenderer {
         const peerId = (outgoing ? ev.to_session : ev.from_session) as string;
         const d = mkEv(`msg peer ${outgoing ? "out" : "in"}`, ev.seq);
         const label = outgoing
-          ? `→ ${t("peer_to")} «${ev.to_title}»`
-          : `💬 ${t("peer_from")} «${ev.from_title}»`;
+          ? `${t("peer_to")} «${ev.to_title}»`
+          : `${t("peer_from")} «${ev.from_title}»`;
         d.innerHTML =
-          `<div class="peer-head" title="${esc(peerId)}">${esc(label)}</div>` +
+          `<div class="peer-head" title="${q(esc(peerId))}">${icon(outgoing ? "arrow-right" : "peer")} ${esc(label)}</div>` +
           `<div class="peer-body">${linkify(esc(ev.text as string))}</div>`;
         d.querySelector(".peer-head")?.addEventListener("click", () =>
           this.deps.openSession(peerId));
@@ -93,7 +138,7 @@ export class EventRenderer {
         const d = mkEv("thought", ev.seq);
         const txt = ev.text as string;
         const head = txt.trim().split("\n")[0].slice(0, 110);
-        d.innerHTML = `<details class="th"><summary>💭 ${esc(head)}</summary><div class="md th-body">${mdRender(txt)}</div></details>`;
+        d.innerHTML = `<details class="th"><summary>${icon("chev-right", "ic-caret")} ${icon("thought")} ${esc(head)}</summary><div class="md th-body">${mdRender(txt)}</div></details>`;
         return d;
       }
       case "tool_call":
@@ -107,7 +152,7 @@ export class EventRenderer {
         const d = mkEv("resolved", ev.seq);
         const rid = ev.request_id as string;
         this.answered.add(rid);
-        d.textContent = t("resolved") + ((ev.outcome ?? ev.answer) as string);
+        d.innerHTML = `${icon("check")} ${esc(t("resolved") + ((ev.outcome ?? ev.answer) as string))}`;
         const card = $("events").querySelector(`[data-req="${rid}"]`);
         if (card) card.classList.add("done");
         return d;
@@ -164,7 +209,8 @@ export class EventRenderer {
         // d'une session morte → bouton Reprendre masqué).
         if (live && app.current) {
           app.current.state = ev.state as string;
-          app.alive = ev.state !== "dead";
+          app.alive = ev.state !== "dead" && ev.state !== "asleep" &&
+            ev.state !== "interrupted";
           this.deps.metaChanged();
           this.deps.statusChanged();
         }
@@ -172,12 +218,12 @@ export class EventRenderer {
       }
       case "error": {
         const d = mkEv("errline", ev.seq);
-        d.textContent = `⚠ ${ev.message}`;
+        d.innerHTML = `${icon("warn")} ${esc(ev.message as string)}`;
         return d;
       }
       case "system": {
         const d = mkEv("sysline", ev.seq);
-        d.textContent = `⦿ ${ev.text}`;
+        d.innerHTML = `${icon("sys")} ${esc(ev.text as string)}`;
         return d;
       }
       default: {
@@ -198,7 +244,8 @@ export class EventRenderer {
     d.dataset.callId = ev.call_id as string;
     d.innerHTML = `
       <div class="tool-head">
-        <span class="tool-ico">⚙</span>
+        ${icon("chev-right", "ic-caret")}
+        <span class="tool-ico">${icon("tool")}</span>
         <span class="tool-title">${esc(ev.title as string)}</span>
         <span class="badge st-${status}">${status}</span>
       </div>
@@ -328,7 +375,7 @@ export class EventRenderer {
     const kind = ev.kind as string | undefined;
     const detail = ev.detail as string | undefined;
     d.innerHTML =
-      `<div class="perm-title">🔐 ${esc(ev.title as string)}` +
+      `<div class="perm-title">${icon("lock")} ${esc(ev.title as string)}` +
       (kind ? ` <span class="perm-kind">${esc(kind)}</span>` : "") +
       `</div>` +
       (detail ? `<pre class="perm-detail">${esc(detail)}</pre>` : "") +
@@ -357,7 +404,7 @@ export class EventRenderer {
     const d = mkEv("perm question", ev.seq);
     d.dataset.req = ev.request_id as string;
     d.innerHTML = `
-      <div class="perm-title">❓ ${esc(ev.message as string)}</div>
+      <div class="perm-title">${icon("question")} ${esc(ev.message as string)}</div>
       <div class="q-row">
         <input class="q-input" placeholder='${t("answer_ph")}' />
         <button class="btn-allow">${t("answer_btn")}</button>

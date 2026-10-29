@@ -1,6 +1,6 @@
 [package]
 name = "agentcontrol-daemon"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 
 [[bin]]
@@ -19,9 +19,18 @@ tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 toml = "0.8"
 base64 = "0.22"
+# PTY interactif pour le terminal client (shell dans le workspace d'une
+# session) — portable-pty : fork/exec + setsid corrects, resize natif.
+portable-pty = "0.9"
 # deflate pur-Rust (miniz_oxide) — pas de compilateur C requis
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # Self-update : download https (rustls — pas d'openssl/C) + tar.gz
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
 flate2 = "1"
 tar = "0.4"
+# Hash Sec-WebSocket-Accept du handshake WS (RFC 6455) — serveur web.
+sha1 = "0.11"
+
+[target.'cfg(unix)'.dependencies]
+# SIGTERM/SIGKILL aux composants managés (arrêt gracieux + orphelins).
+libc = "0.2"

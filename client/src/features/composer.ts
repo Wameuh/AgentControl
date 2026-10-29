@@ -4,7 +4,9 @@
 // prompts, picker de sessions natives (reprise).
 // ---------------------------------------------------------------------------
 
-import { $, esc, qBtn, showErr } from "../core/dom";
+import { $, esc, notify, showErr } from "../core/dom";
+import { icon, qIco } from "../ui/icons";
+import { nav } from "../ui/nav";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
 import { isAndroid } from "../core/chrome";
@@ -12,6 +14,7 @@ import type { CmdInfo, SendMode } from "../core/types";
 import { t } from "../i18n";
 import { cmdDesc, cmdHint, cmdName } from "./modelbar";
 import { sendPref } from "./settings";
+import { Attachments } from "./attachments";
 import type { ChatView } from "./chat-view";
 
 // ---- Commandes built-in (toujours dispo, exécutées côté client) ----
@@ -22,16 +25,72 @@ const BUILTINS = (): { name: string; description: string; hint: string }[] => [
   { name: "fork", description: t("builtin_fork"), hint: "" },
   { name: "clear", description: t("builtin_clear"), hint: "" },
   { name: "new", description: t("builtin_new"), hint: "" },
+  { name: "sleep", description: t("builtin_sleep"), hint: "" },
 ];
 
 export class Composer {
   private chat!: ChatView;
+  /** Pièces jointes : chips, uploads (.ac-uploads), chemins pour
+   *  l'agent — module dédié (picker « + », drop, collage). */
+  private attach = new Attachments();
   /** Rafraîchit la sidebar (injecté). */
   refresh: () => Promise<void> = async () => {};
   private acSel = 0;
+  /** Champ déplié manuellement (bouton expand) — replie dès que le
+      contenu rentre sous le cap normal. */
+  private inpExpanded = false;
 
   bind(chat: ChatView) {
     this.chat = chat;
+  }
+
+  // ---- Hauteur du champ : auto-grow borné + bouton expand ----
+  // Le champ grandit avec le contenu jusqu'à ~1/3 de la hauteur du fil ;
+  // au-delà il reste borné et scrollable, et le bouton « N ⌃ » permet de
+  // l'étendre à ~2/3 (re-clic = repli). Le bouton disparaît dès que le
+  // texte redevient court (ou le champ est vidé/envoyé).
+
+  private setInput(v: string) {
+    ($("input") as HTMLTextAreaElement).value = v;
+    this.fitInput();
+    // La dropdown suit la valeur même quand elle change sans event input
+    // (envoi, applyAc, reprise de file) — sinon elle resterait affichée.
+    this.refreshAc();
+  }
+
+  fitInput() {
+    const inp = $("input") as HTMLTextAreaElement;
+    const wrap = $("input-wrap");
+    const btn = $("btn-expand");
+    // Mesure : retour à la hauteur naturelle (rows=2) puis scrollHeight
+    // = hauteur nécessaire. +2 pour les bordures (box-sizing border-box).
+    inp.style.height = "auto";
+    const need = inp.scrollHeight + 2;
+    // Référence stable : la colonne #chat (hauteur fixée par le viewport)
+    // — pas #events, qui rétrécit quand le champ grandit (cap mouvant).
+    const chatH = $("chat")?.clientHeight || window.innerHeight;
+    const small = Math.max(100, Math.round(chatH * 0.33));
+    const big = Math.max(small + 80, Math.round(chatH * 0.66));
+    const over = need > small;
+    if (!over) this.inpExpanded = false;
+    const cap = this.inpExpanded ? big : small;
+    inp.style.height = Math.min(need, cap) + "px";
+    wrap.classList.toggle("over", over);
+    btn.hidden = !over;
+    if (over) {
+      const cs = getComputedStyle(inp);
+      const padV = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+      const lh = parseFloat(cs.lineHeight) || 21;
+      const lines = Math.max(
+        inp.value.split("\n").length,
+        Math.round((need - padV) / lh),
+      );
+      btn.innerHTML =
+        icon(this.inpExpanded ? "chev-down" : "chev-up") +
+        `<span class="n">${lines}</span>`;
+      btn.title = t(this.inpExpanded ? "input_collapse" : "input_expand");
+      btn.setAttribute("aria-label", btn.title);
+    }
   }
 
   private async runBuiltin(name: string, arg: string): Promise<boolean> {
@@ -57,6 +116,12 @@ export class Composer {
         await this.chat.open(id);
         return true;
       }
+      case "sleep":
+        // Endort : libère le process, la session native reste reprenable —
+        // le prochain envoi la réveille via session/load côté démon.
+        await call("sleep_session", { session: app.current.id });
+        await this.refresh();
+        return true;
       case "fork": {
         // Le daemon libère la session native, /fork via le TUI de l'agent,
         // puis attache la session forkée (même groupe, titre + "_fork").
@@ -95,6 +160,7 @@ export class Composer {
           `<span class="h">${esc((s.updatedAt || "").slice(0, 16).replace("T", " "))}</span>`;
         row.onclick = async () => {
           ($("dlg-resume") as HTMLDialogElement).close();
+          notify("info", t("resume_wait"));
           await call("resume_session", { session: app.current!.id, native_id: s.sessionId })
             .catch((e) => showErr(String(e)));
           await this.chat.open(app.current!.id);
@@ -106,9 +172,10 @@ export class Composer {
       box.innerHTML = `<div class="errline">${esc(String(e))}</div>`;
       const row = document.createElement("div");
       row.className = "ac-item";
-      row.innerHTML = `<span class="n">↻</span><span class="d">${t("resume_current")}</span>`;
+      row.innerHTML = `<span class="n">${icon("play")}</span><span class="d">${t("resume_current")}</span>`;
       row.onclick = async () => {
         ($("dlg-resume") as HTMLDialogElement).close();
+        notify("info", t("resume_wait"));
         await call("resume_session", { session: app.current!.id }).catch((er) => showErr(String(er)));
         await this.chat.open(app.current!.id);
       };
@@ -117,44 +184,329 @@ export class Composer {
   }
 
   // ---- File d'attente des prompts (queue_list/edit/drop/promote) ----
+  // #queue-bar = bande résumé (chips tronquées) ; le bouton horloge +
+  // compteur ouvre #queue-panel : messages complets multi-lignes, édition
+  // en place via queue_edit, promote/drop par entrée et action secondaire
+  // « reprendre dans le composer » (copie + drop).
+
+  /** Panneau d'inspection ouvert — persiste tant que la file n'est pas
+   *  vide (la file qui se vide referme tout, édition comprise). */
+  private qOpen = false;
+  /** Dernier snapshot de queue_list — les re-renders déclenchés par les
+   *  boutons l'utilisent sans refetch. */
+  private qSnapshot: string[] = [];
+  /** Édition inline en cours : index dans la file + texte serveur au
+   *  moment de l'ouverture (un écart = entrée déplacée/supprimée
+   *  ailleurs → éditeur refermé) + brouillon tapé et curseur, qui
+   *  survivent aux rebuilds de refreshQueue pendant la frappe. */
+  private qEditing: {
+    index: number;
+    orig: string;
+    draft: string;
+    sel?: [number, number];
+  } | null = null;
+  /** Conns dont le démon ne connaît pas QueueEdit (« parse: unknown
+   *  variant ») : l'édition y est désactivée (tooltip) — list/promote/
+   *  drop sont des ReqKind plus anciens et restent utilisables. */
+  private qEditBroken = new Set<string>();
+  /** Rebuild du panneau en cours : le blur d'une textarea détachée par
+   *  innerHTML ne doit ni sauvegarder ni annuler (l'éditeur est recréé
+   *  juste après si l'entrée est toujours là). */
+  private qRebuilding = false;
+
   async refreshQueue() {
     const bar = $("queue-bar");
     if (!app.current) {
       bar.hidden = true;
+      this.closeQueuePanel();
       return;
     }
+    const sid = app.current.id;
     try {
-      const r = await call<{ queue: string[] }>("queue_list", {
-        session: app.current.id,
-      });
-      bar.innerHTML = "";
-      bar.hidden = r.queue.length === 0;
-      r.queue.forEach((txt, i) => {
-        const d = document.createElement("div");
-        d.className = "q-item";
-        const sp = document.createElement("span");
-        sp.className = "q-txt";
-        sp.textContent = txt;
-        sp.title = txt;
-        d.appendChild(sp);
-        // ✎ = reprendre dans le champ + retirer de la file
-        const e = qBtn("✎", "Edit");
-        e.onclick = () => {
-          ($("input") as HTMLTextAreaElement).value = txt;
-          call("queue_drop", { session: app.current!.id, index: i }).then(() => this.refreshQueue());
-        };
-        // ⏫ = tête de file + cancel → envoi forcé (reste de file préservée)
-        const p = qBtn("⏫", "Send now");
-        p.onclick = () =>
-          call("queue_promote", { session: app.current!.id, index: i }).then(() => this.refreshQueue());
-        const x = qBtn("✕", "Remove");
-        x.onclick = () =>
-          call("queue_drop", { session: app.current!.id, index: i }).then(() => this.refreshQueue());
-        d.append(e, p, x);
-        bar.appendChild(d);
-      });
+      const r = await call<{ queue: string[] }>("queue_list", { session: sid });
+      // La session affichée a pu changer pendant l'appel → ne pas rendre
+      // une file qui n'est plus celle de la vue.
+      if (app.current?.id !== sid) return;
+      this.qSnapshot = r.queue;
+      if (!r.queue.length) {
+        bar.hidden = true;
+        this.closeQueuePanel();
+        return;
+      }
+      bar.hidden = false;
+      // Entrée éditée déplacée/supprimée entre-temps (drop/promote ici
+      // ou par un autre client) → fermer l'éditeur plutôt que risquer
+      // d'écraser un autre slot (le protocole est index-based).
+      if (this.qEditing && r.queue[this.qEditing.index] !== this.qEditing.orig) {
+        this.qEditing = null;
+      }
+      this.renderQueueBar(sid);
+      this.renderQueuePanel();
     } catch {
       bar.hidden = true;
+      this.closeQueuePanel();
+    }
+  }
+
+  /** Bande résumé : bouton d'ouverture (horloge + compteur) puis un chip
+   *  tronqué par message avec les actions rapides. */
+  private renderQueueBar(sid: string) {
+    const bar = $("queue-bar");
+    const queue = this.qSnapshot;
+    // conn RPC : la clé réelle de la session (absente → call() injecte
+    // currentConn ou laisse get_conn résoudre la conn par défaut) ;
+    // "default" n'est une clé valide que côté client (qEditBroken).
+    const conn = app.current?.conn;
+    const connKey = conn ?? "default";
+    bar.innerHTML = "";
+    const open = qIco("clock", t("queue_inspect"));
+    open.id = "queue-open";
+    open.classList.toggle("on", this.qOpen);
+    open.insertAdjacentHTML("beforeend", `<span class="n">${queue.length}</span>`);
+    open.onclick = () => this.toggleQueuePanel();
+    bar.appendChild(open);
+    const broken = this.qEditBroken.has(connKey);
+    queue.forEach((txt, i) => {
+      const d = document.createElement("div");
+      d.className = "q-item";
+      const sp = document.createElement("span");
+      sp.className = "q-txt";
+      sp.textContent = txt;
+      sp.title = txt;
+      d.appendChild(sp);
+      // ✏️ = ouvrir le panneau directement en édition sur cette entrée.
+      const e = qIco("edit", broken ? t("queue_edit_unsupported") : t("queue_edit_title"));
+      e.disabled = broken;
+      e.onclick = () => {
+        this.qEditing = { index: i, orig: txt, draft: txt };
+        if (!this.qOpen) this.toggleQueuePanel();
+        else this.renderQueuePanel();
+      };
+      // Tête de file + cancel → envoi forcé (reste de file préservée)
+      const p = qIco("top", t("queue_send_now"));
+      p.onclick = () => this.queueCall("queue_promote", { session: sid, index: i, conn });
+      const x = qIco("close", t("queue_remove"));
+      x.onclick = () => this.queueCall("queue_drop", { session: sid, index: i, conn });
+      d.append(e, p, x);
+      bar.appendChild(d);
+    });
+  }
+
+  /** Panneau d'inspection : chaque message en entier (multi-lignes),
+   *  dans l'ordre, avec édition inline / promote / drop / reprise dans
+   *  le composer. */
+  private renderQueuePanel() {
+    const panel = $("queue-panel");
+    if (!this.qOpen || !this.qSnapshot.length || !app.current) {
+      panel.hidden = true;
+      return;
+    }
+    const sid = app.current.id;
+    const conn = app.current.conn;
+    const connKey = conn ?? "default";
+    const queue = this.qSnapshot;
+    panel.hidden = false;
+    $("qp-count").textContent = String(queue.length);
+    const list = $("qp-list");
+    // Rebuild pendant une édition (refreshQueue déclenché par un nouveau
+    // message en file) : la textarea va être recréée — sauvegarder le
+    // curseur pour ne pas sauter en fin de texte à chaque frappe.
+    const activeEl = document.activeElement;
+    if (
+      this.qEditing &&
+      activeEl instanceof HTMLTextAreaElement &&
+      activeEl.classList.contains("qp-edit")
+    ) {
+      this.qEditing.sel = [activeEl.selectionStart, activeEl.selectionEnd];
+    }
+    this.qRebuilding = true;
+    list.innerHTML = "";
+    this.qRebuilding = false;
+    const broken = this.qEditBroken.has(connKey);
+    queue.forEach((txt, i) => {
+      const row = document.createElement("div");
+      row.className = "qp-item";
+      const idx = document.createElement("span");
+      idx.className = "qp-idx";
+      idx.textContent = `${i + 1}`;
+      row.appendChild(idx);
+      const acts = document.createElement("span");
+      acts.className = "qp-acts";
+      if (this.qEditing?.index === i && !broken) {
+        this.renderQueueEditor(row, acts, sid, conn, i);
+      } else {
+        const sp = document.createElement("span");
+        sp.className = "qp-txt";
+        sp.textContent = txt;
+        row.appendChild(sp);
+        const e = qIco("edit", broken ? t("queue_edit_unsupported") : t("queue_edit_title"));
+        e.disabled = broken;
+        e.onclick = () => {
+          this.qEditing = { index: i, orig: txt, draft: txt };
+          this.renderQueuePanel();
+        };
+        // Action secondaire : copier dans le composer + retirer de la
+        // file (perte de position — l'édition inline couvre le cas
+        // « corriger avant envoi »).
+        const m = qIco("down", t("queue_to_composer"));
+        m.onclick = () => {
+          this.setInput(txt);
+          ($("input") as HTMLTextAreaElement).focus();
+          this.queueCall("queue_drop", { session: sid, index: i, conn });
+        };
+        acts.append(e, m);
+      }
+      const p = qIco("top", t("queue_send_now"));
+      p.onclick = () => this.queueCall("queue_promote", { session: sid, index: i, conn });
+      const x = qIco("close", t("queue_remove"));
+      x.onclick = () => this.queueCall("queue_drop", { session: sid, index: i, conn });
+      acts.append(p, x);
+      // preventDefault sur mousedown de chaque bouton : sinon le clic
+      // déplace le focus → blur de la textarea d'édition → done() →
+      // rebuild synchrone qui détache le bouton avant son click →
+      // action silencieusement perdue (le focus reste, le clic part,
+      // et le refreshQueue de l'action referme l'éditeur si l'entrée
+      // a bougé).
+      for (const b of acts.querySelectorAll<HTMLButtonElement>("button")) {
+        b.onmousedown = (e) => e.preventDefault();
+      }
+      row.appendChild(acts);
+      list.appendChild(row);
+    });
+  }
+
+  /** queue_* puis re-render : l'erreur part en toast plutôt que de
+   *  finir en unhandled rejection (conn down, index périmé…). */
+  private queueCall(method: string, params: Record<string, unknown>) {
+    void call(method, params)
+      .then(() => this.refreshQueue())
+      .catch((e) => showErr(String(e)));
+  }
+
+  /** Item en édition inline : textarea + ✓/✗. Sauvegarde = {mod}+Entrée
+   *  ou perte de focus ; Échap = annulation. preventDefault sur le
+   *  mousedown des boutons : sans ça le clic tirerait le blur de la
+   *  textarea (= sauvegarde) avant leur onclick — l'annuler serait perdu. */
+  private renderQueueEditor(
+    row: HTMLElement,
+    acts: HTMLElement,
+    sid: string,
+    conn: string | undefined,
+    i: number,
+  ) {
+    const ed = this.qEditing!;
+    const ta = document.createElement("textarea");
+    ta.className = "qp-edit";
+    ta.value = ed.draft;
+    ta.rows = Math.min(10, Math.max(2, ed.draft.split("\n").length));
+    ta.spellcheck = false;
+    ta.title = t("queue_edit_hint");
+    ta.setAttribute("aria-label", ta.title);
+    ta.addEventListener("input", () => {
+      ed.draft = ta.value;
+    });
+    row.appendChild(ta);
+    let finished = false;
+    const done = (save: boolean) => {
+      if (finished) return;
+      // Blur zombie : la textarea est détachée par un rebuild de la
+      // liste (refreshQueue), pas par un choix de l'utilisateur → la
+      // nouvelle instance de l'éditeur prend le relais, rien à faire.
+      // isConnected couvre un blur dispatché après détachement (timing
+      // webview), indépendamment du flag synchrone qRebuilding.
+      if (this.qRebuilding || !ta.isConnected) {
+        finished = true;
+        return;
+      }
+      finished = true;
+      const text = ta.value;
+      // qEditing invalidé entre-temps (entrée déplacée → le rebuild a
+      // détaché cette textarea, dont le blur rappelle done) : ne rien
+      // écrire, l'index viserait un autre slot.
+      const live = this.qEditing === ed;
+      this.qEditing = null;
+      // Texte vidé → pas de prompt zombie en file : annulation +
+      // avertissement plutôt que queue_edit "".
+      if (save && live && text !== ed.orig && !text.trim()) {
+        notify("warn", t("queue_edit_empty"));
+      }
+      if (!save || !live || text === ed.orig || !text.trim()) {
+        this.renderQueuePanel();
+        return;
+      }
+      call<{ ok: boolean }>("queue_edit", {
+        session: sid,
+        index: i,
+        text,
+        conn,
+      })
+        .then((r) => {
+          // Index périmé (entrée déplacée/supprimée par ailleurs).
+          if (!r.ok) notify("warn", t("queue_edit_failed"));
+        })
+        .catch((e) => {
+          this.markQueueEditBroken(conn ?? "default", e);
+          showErr(String(e));
+        })
+        .finally(() => this.refreshQueue());
+    };
+    ta.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        // Scoper la touche : un Échap remontant à window fermerait aussi
+        // un éventuel overlay ouvert au-dessus (settings…).
+        e.stopPropagation();
+        done(false);
+      }
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        done(true);
+      }
+    });
+    ta.addEventListener("blur", () => done(true));
+    const save = qIco("check", t("queue_save"));
+    save.onmousedown = (e) => e.preventDefault();
+    save.onclick = () => done(true);
+    const cancel = qIco("close", t("queue_cancel_edit"));
+    cancel.onmousedown = (e) => e.preventDefault();
+    cancel.onclick = () => done(false);
+    acts.append(save, cancel);
+    queueMicrotask(() => {
+      if (ed.sel) {
+        const [s, e2] = ed.sel;
+        ta.setSelectionRange(Math.min(s, ta.value.length), Math.min(e2, ta.value.length));
+      }
+      ta.focus();
+    });
+  }
+
+  private toggleQueuePanel() {
+    if (this.qOpen) {
+      this.closeQueuePanel();
+    } else if (this.qSnapshot.length && app.current) {
+      this.qOpen = true;
+      nav.push("queue");
+      this.renderQueuePanel();
+      $("queue-open")?.classList.add("on");
+    }
+  }
+
+  /** Ferme le panneau (✕, file vide, session changée, back Android) —
+   *  dépile aussi l'entrée nav et l'état « on » du bouton horloge. */
+  closeQueuePanel() {
+    if (this.qOpen) nav.close("queue");
+    this.qOpen = false;
+    this.qEditing = null;
+    const panel = $("queue-panel");
+    if (panel) panel.hidden = true;
+    $("queue-open")?.classList.remove("on");
+  }
+
+  /** Vieux démon : ReqKind::QueueEdit inconnu → « parse: unknown
+   *  variant ». L'édition est désactivée pour la conn de l'appel. */
+  private markQueueEditBroken(connKey: string, e: unknown) {
+    if (/unknown variant|parse:/i.test(String(e))) {
+      this.qEditBroken.add(connKey);
     }
   }
 
@@ -166,11 +518,11 @@ export class Composer {
 
   async sendInput(mode: SendMode = "normal") {
     const txt = ($("input") as HTMLTextAreaElement).value.trim();
-    if (!txt || !app.current) return;
+    if (!app.current) return;
     // Built-ins client (interceptent avant envoi à l'agent)
-    const bm = /^\/(\w+)(?:\s+(.*))?$/.exec(txt);
+    const bm = txt ? /^\/(\w+)(?:\s+(.*))?$/.exec(txt) : null;
     if (bm && BUILTINS().some((b) => b.name === bm[1])) {
-      ($("input") as HTMLTextAreaElement).value = "";
+      this.setInput("");
       try {
         await this.runBuiltin(bm[1], (bm[2] ?? "").trim());
       } catch (e) {
@@ -189,17 +541,40 @@ export class Composer {
         (c) => cmdName(c).toLowerCase() === bm[1].toLowerCase(),
       )
     ) {
-      ($("input") as HTMLTextAreaElement).value = "";
-      this.chat.sysline(t("cmd_unknown", { cmd: bm[1] }));
+      this.setInput("");
+      this.chat.sysline(t("cmd_unknown", { cmd: bm[1] }), "warn");
       return;
     }
-    ($("input") as HTMLTextAreaElement).value = "";
-    await call("send", {
-      session: app.current.id,
-      text: txt,
-      force: mode === "force",
-      steer: mode === "steer",
-    }).catch((e) => showErr(String(e)));
+    // Pièces jointes : envoyer maintenant perdrait les chemins des
+    // uploads en vol — avertir plutôt que tronquer le message.
+    if (this.attach.pending()) {
+      notify("warn", t("att_wait"));
+      return;
+    }
+    const files = this.attach.ready();
+    if (!txt && !files.length) return;
+    // Le message porte les chemins absolus — l'agent lit les pièces
+    // avec ses outils fichiers habituels (bornés au même workspace).
+    const atLines = files
+      .map((f) => `[fichier joint: ${f.name} → ${f.path}]`)
+      .join("\n");
+    const payload = txt
+      ? atLines
+        ? `${txt}\n\n${atLines}`
+        : txt
+      : atLines;
+    this.setInput("");
+    try {
+      await call("send", {
+        session: app.current.id,
+        text: payload,
+        force: mode === "force",
+        steer: mode === "steer",
+      });
+      this.attach.sent();
+    } catch (e) {
+      showErr(String(e));
+    }
     // Commande slash non-builtin : l'agent l'applique au prochain tour (ex.
     // /compact → "context compacted" n'arrive qu'au message suivant) → hint.
     // (/compact : le démon arme la retenue "compacting" à la livraison.)
@@ -219,10 +594,8 @@ export class Composer {
   }
 
   private applyAc(name: string) {
-    const inp = $("input") as HTMLTextAreaElement;
-    inp.value = "/" + name + " ";
-    $("cmd-ac").hidden = true;
-    inp.focus();
+    this.setInput("/" + name + " ");
+    ($("input") as HTMLTextAreaElement).focus();
   }
 
   private refreshAc() {
@@ -268,17 +641,69 @@ export class Composer {
     return sendPref() === "steer" ? "steer" : "normal";
   }
 
+  /** Mode du bouton secondaire = l'inverse de la préférence : file ↔
+   *  steer. C'est LA voie « autre mode » sur mobile (pas d'Alt+Entrée). */
+  private altMode(): SendMode {
+    return this.defaultMode() === "steer" ? "normal" : "steer";
+  }
+
+  /** Icône, tooltip, label et visibilité du bouton d'envoi alternatif —
+   *  suivent la préférence (sans reload) et l'état de la session.
+   *  Rôle steer : pertinent seulement pendant un vrai tour (hors working
+   *  un steer tombe dans le flux normal — même effet que Envoyer).
+   *  Rôle file : envoi normal — pertinent quand le steer ferait autre
+   *  chose, donc agent occupé (working / waiting_input : un normal part
+   *  en file). Pendant compact les deux modes sont retenus en file —
+   *  bouton sans différence → caché. */
+  syncAltBtn() {
+    this.attach.syncVisible();
+    const b = $("btn-alt") as HTMLButtonElement;
+    const queue = this.altMode() === "normal";
+    const st = app.current?.state;
+    b.hidden = queue
+      ? st !== "working" && st !== "waiting_input"
+      : st !== "working";
+    const ic = queue ? "clock" : "steer";
+    if (b.dataset.icon !== ic) {
+      b.dataset.icon = ic;
+      b.innerHTML = icon(ic);
+    }
+    // data-i18n-title tenu à jour : applyStatic (changement de langue)
+    // retraduit depuis l'attribut, pas depuis b.title.
+    const key = queue ? "queue_title" : "steer_title";
+    b.dataset.i18nTitle = key;
+    b.title = t(key);
+    b.setAttribute("aria-label", b.title);
+  }
+
   /** Hints clavier du champ — dépendent du mode d'envoi choisi. */
   refreshHints() {
+    // Un placeholder plus long peut wrapper → refit, et le titre de la
+    // pill suit la langue courante.
+    this.fitInput();
+    this.syncAltBtn(); // bouton alternatif : suit la préférence/langue
     if (isAndroid()) return; // placeholder mobile sans raccourcis
     ($("input") as HTMLTextAreaElement).placeholder =
       sendPref() === "steer" ? t("input_ph_steer") : t("input_ph");
   }
 
+  /** Session affichée changée — les chips d'upload visent l'ancien
+   *  cwd : elles sont purgées par le module pièces jointes. */
+  sessionChanged() {
+    this.attach.onSessionChanged();
+  }
+
+  /** Capacité « fichiers » du démon courant (injecté depuis conns.cap)
+   *  — le + est masqué si le démon ignore write_file/create_path. */
+  bindAttachCapable(capable: (conn: string | undefined) => boolean) {
+    this.attach.capable = capable;
+  }
+
   init() {
+    this.attach.init();
     this.refreshHints();
     $("btn-send").onclick = () => this.sendInput(this.defaultMode());
-    $("btn-steer").onclick = () => this.sendInput("steer");
+    $("btn-alt").onclick = () => this.sendInput(this.altMode());
     $("input").addEventListener("keydown", (e) => {
       const ac = $("cmd-ac");
       if (!ac.hidden) {
@@ -298,15 +723,17 @@ export class Composer {
           return;
         }
       }
-      if (e.key === "Enter" && e.ctrlKey) {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
-        this.sendInput("force"); // Ctrl+Entrée = envoi forcé (annule le tour en cours)
+        // Ctrl+Entrée (Cmd+Entrée sur macOS) = envoi forcé (annule le
+        // tour en cours).
+        this.sendInput("force");
         return;
       }
       if (e.key === "Enter" && e.altKey) {
         e.preventDefault();
         // Alt+Entrée = l'autre mode (queue ↔ steer selon la préférence).
-        this.sendInput(this.defaultMode() === "steer" ? "normal" : "steer");
+        this.sendInput(this.altMode());
         return;
       }
       if (e.key === "Enter" && !e.shiftKey) {
@@ -314,41 +741,91 @@ export class Composer {
         this.sendInput(this.defaultMode());
       }
     });
-    $("input").addEventListener("input", () => this.refreshAc());
+    $("input").addEventListener("input", () => {
+      this.refreshAc();
+      this.fitInput();
+    });
     $("input").addEventListener("blur", () => {
       // délai pour laisser le click sur un item passer
       setTimeout(() => ($("cmd-ac").hidden = true), 150);
     });
 
+    // ✕ du panneau d'inspection de la file (aussi cliqué par le back
+    // Android via nav.rawCloseOverlay).
+    $("qp-close").onclick = () => this.closeQueuePanel();
+
+    // Bouton « N lignes » : bascule replié ↔ étendu, puis redonne le focus
+    // au champ pour continuer la frappe.
+    $("btn-expand").onclick = () => {
+      this.inpExpanded = !this.inpExpanded;
+      this.fitInput();
+      ($("input") as HTMLTextAreaElement).focus();
+    };
+    // Les caps dépendent de la hauteur du fil (resize, rotation mobile).
+    window.addEventListener("resize", () => this.fitInput());
+    this.fitInput();
+
     $("btn-cancel").onclick = () =>
       app.current && call("cancel", { session: app.current.id }).catch((e) => showErr(String(e)));
 
-    $("btn-resume").onclick = () =>
+    // Reprise d'un agent mort : spawn + session/load peuvent durer
+    // plusieurs secondes — le bouton montre l'attente, l'échec part en
+    // toast persistant (dialogue fermé à ce stade).
+    const resumeBtn = $("btn-resume") as HTMLButtonElement;
+    resumeBtn.onclick = async () => {
+      if (!app.current) return;
+      resumeBtn.disabled = true;
+      resumeBtn.classList.add("spin");
+      try {
+        await call("resume_session", { session: app.current.id });
+        await this.chat.open(app.current.id);
+      } catch (e) {
+        showErr(String(e));
+      } finally {
+        resumeBtn.disabled = false;
+        resumeBtn.classList.remove("spin");
+      }
+    };
+
+    // 💤 = endort la session (libère le process ; réveil auto au prochain
+    // envoi) — cachée du header sur desktop, utilisée par le menu ⋮ mobile.
+    $("btn-sleep").onclick = () =>
       app.current &&
-      call("resume_session", { session: app.current.id })
-        .then(() => this.chat.open(app.current!.id))
+      call("sleep_session", { session: app.current.id })
+        .then(() => this.refresh())
         .catch((e) => showErr(String(e)));
 
     // ⟳ = vrai rechargement : le cache de conversation est ignoré.
     $("btn-refresh").onclick = () => app.current && this.chat.open(app.current.id, true);
 
-    // Double-clic sur le titre → renommage inline
+    // Double-clic sur le titre → renommage inline. La session est capturée
+    // au début : app.current peut changer pendant l'édition (clic sur une
+    // autre ligne → blur → done), et le RPC doit viser la session éditée.
     $("chat-title").addEventListener("dblclick", () => {
       if (!app.current) return;
+      const sess = app.current;
       const tl = $("chat-title");
+      const parent = tl.parentElement;
       const inp = document.createElement("input");
-      inp.id = "title-edit";
-      inp.value = app.current.title;
+      inp.className = "title-edit";
+      inp.value = sess.title;
       tl.replaceWith(inp);
       inp.focus();
       inp.select();
+      let finished = false;
       const done = async (save: boolean) => {
+        if (finished) return;
+        finished = true;
         const v = inp.value.trim();
-        inp.replaceWith(tl);
-        if (save && v && v !== app.current!.title) {
-          app.current!.title = v;
-          tl.textContent = v;
-          await call("rename_session", { session: app.current!.id, title: v })
+        // Restaurer le titre quoiqu'il arrive : si l'input a été détaché
+        // par un chemin externe, replaceWith ne remettrait rien et le
+        // header resterait sans #chat-title (setChatTitle en no-op).
+        if (inp.isConnected) inp.replaceWith(tl);
+        else if (parent && !tl.isConnected) parent.appendChild(tl);
+        if (save && v && v !== sess.title) {
+          sess.title = v;
+          if (app.current?.id === sess.id) this.chat.setChatTitle();
+          await call("rename_session", { session: sess.id, title: v, conn: sess.conn })
             .catch((e) => showErr(String(e)));
           void this.refresh();
         }

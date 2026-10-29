@@ -4,11 +4,16 @@
 //! + blobs), peers.rs (agent↔agent), prs.rs (registre PR), misc.rs.
 
 mod cfg;
-mod files;
-mod misc;
+mod components;
+/// Bornage workspace réutilisé par l'endpoint HTTP /media|/download.
+pub(crate) mod files;
+/// `command_available` est réutilisé par la détection du catalogue
+/// (components/catalog.rs).
+pub(crate) mod misc;
 mod peers;
 mod prs;
 mod sessions;
+mod term;
 
 pub use cfg::{A2aCfg, AgentProfile, RetentionCfg};
 
@@ -20,7 +25,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::UnixStream;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
@@ -29,6 +34,63 @@ use tracing::{debug, info, warn};
 /// paginable via `ReqKind::Events`). Borne la bande passante du replay —
 /// un journal très volumineux saturait sinon le lien pendant des minutes.
 pub(crate) const SUBSCRIBE_REPLAY_MAX: usize = 500;
+
+use crate::components::Components;
+use crate::forges::Forges;
+
+/// Backlog maximal de la file d'émission par connexion, en OCTETS de
+/// lignes sérialisées : absorbe les bursts (replay de journal,
+/// term_data) et les micro-coupures sans geler la lecture des requêtes.
+/// Backlog ≥ borne = client durablement plus lent que la production →
+/// la connexion est refermée (un push ne doit jamais bloquer un req).
+/// Ne borne QUE le backlog : une frame unique plus grosse (aperçu
+/// binaire ~17 Mio) est admise — sinon elle tuerait la conn à coup sûr.
+const WRITE_QUEUE_BYTES: usize = 8 << 20; // 8 Mio
+/// Un flush qui ne s'écoule pas en 30 s = lien noir : la connexion meurt
+/// au lieu de rester zombie avec sa file qui gonfle.
+const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Extrémité émission d'une connexion : les réponses/pushes sérialisés
+/// partent dans la file drainée par la tâche d'écriture dédiée —
+/// un flush congestionné (tunnel SSH sous backpressure) ne bloque plus
+/// ni la boucle de lecture ni les handlers des autres requêtes.
+#[derive(Clone)]
+pub(crate) struct Outbox {
+    tx: mpsc::UnboundedSender<String>,
+    dead: watch::Sender<bool>,
+    /// Octets actuellement en file — décrémenté par la tâche d'écriture
+    /// à chaque ligne drainée (comptage approximatif suffisant : il ne
+    /// sert qu'à borner la mémoire par connexion).
+    queued: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Outbox {
+    /// Enfile une ligne JSON terminée par '\n'. File pleine/fermée →
+    /// la connexion est signalée morte (toute la boucle se démonte,
+    /// y compris le lecteur qui attendait des requêtes).
+    fn line(&self, v: &impl serde::Serialize) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let mut s = serde_json::to_string(v)?;
+        s.push('\n');
+        let len = s.len();
+        // La borne couvre le BACKLOG (client durablement plus lent que la
+        // production), pas la frame isolée : une ligne unique > capacité
+        // (aperçu binaire ~17 Mio) est admise sur file quasi vide —
+        // sinon toute grosse réponse tuerait la connexion à coup sûr.
+        // fetch_add préalable = réservation atomique entre producteurs.
+        if self.queued.fetch_add(len, Ordering::Relaxed) >= WRITE_QUEUE_BYTES {
+            self.queued.fetch_sub(len, Ordering::Relaxed);
+            let _ = self.dead.send(true);
+            anyhow::bail!("file d'émission saturée");
+        }
+        if self.tx.send(s).is_err() {
+            self.queued.fetch_sub(len, Ordering::Relaxed);
+            let _ = self.dead.send(true);
+            anyhow::bail!("file d'émission fermée");
+        }
+        Ok(())
+    }
+}
 
 use crate::journal;
 use crate::prs::PrRegistry;
@@ -54,6 +116,17 @@ pub struct Daemon {
     >,
     /// Registre PR ↔ session (prs.json) — voir prs.rs.
     pub prs: Arc<PrRegistry>,
+    /// Forges de review reconnues par le watcher PR (`[[forges]]` de
+    /// config.toml + implicites github/gitlab.com) — voir forges.rs.
+    pub forges: Forges,
+    /// Surface web activée : {"bind": addr, "url": "http://…/?token=…"} —
+    /// renseigné par main après le bind, reflété dans daemon_status.
+    /// Partagé avec Components : l'état du composant interne `web-ui`
+    /// suit la présence du listener.
+    pub web: Arc<RwLock<Option<Value>>>,
+    /// Composants managés : specs components.toml + superviseur des
+    /// `process` + internal (components/mod.rs, proc.rs).
+    pub components: Arc<Components>,
 }
 
 
@@ -67,16 +140,22 @@ impl Daemon {
         agents: HashMap<String, AgentProfile>,
         retention: RetentionCfg,
         a2a: A2aCfg,
+        forges: Forges,
+        bind_tcp: String,
     ) -> Result<(Arc<Self>, Vec<String>)> {
+        let web = Arc::new(RwLock::new(None));
         let d = Arc::new(Self {
             root: root.clone(),
             sessions: RwLock::new(HashMap::new()),
             agents,
             retention,
+            components: Components::open(&root, bind_tcp, a2a.enabled, Arc::clone(&web)),
             a2a,
             peer_rate: std::sync::Mutex::new(HashMap::new()),
             spawn_rate: std::sync::Mutex::new(HashMap::new()),
             prs: Arc::new(PrRegistry::open(&root)),
+            forges,
+            web,
         });
         let mut resumable = Vec::new();
         let sdir = root.join("sessions");
@@ -138,15 +217,17 @@ impl Daemon {
     /// Une session à reprendre : même mécanique que ResumeSession (journal
     /// local = source de vérité → skip_replay), puis prompt "continue
     /// please" livré comme un envoi utilisateur.
-    async fn resume_after_crash(&self, sid: &str) {
+    async fn resume_after_crash(self: &Arc<Self>, sid: &str) {
         let Ok(s) = self.get_session(sid).await else {
             return; // purgée entre le chargement et la reprise
         };
-        // Un client reconnecté peut avoir déjà relancé l'agent (resume à
+        // Un client reconnecté peut relancer l'agent en parallèle (resume à
         // l'ouverture de la session côté UI) — même garde que
-        // h_resume_session, pour ne pas doubler le spawn.
-        if s.is_alive() {
-            debug!("{sid}: déjà relancée — reprise auto ignorée");
+        // h_resume_session pour ne pas doubler le spawn. Mais le resume
+        // client est silencieux : sauter toute la reprise laisserait
+        // l'agent relancé sans consigne. Attendre la fin d'un spawn en vol
+        // puis livrer le prompt si la session finit idle.
+        if s.is_alive() && self.wait_revived_or_done(&s, sid).await {
             return;
         }
         let meta = s.meta_snapshot();
@@ -165,22 +246,25 @@ impl Daemon {
             meta.mode.as_deref(),
             sid,
         );
-        s.emit(proto::EventKind::System {
-            text: "démon relancé après un arrêt brutal — reprise du travail…".into(),
-        });
+        // Dernier re-check : l'essai suivant d'un spawn client peut
+        // repartir dans la fenêtre (sleep 800 ms entre ses essais) —
+        // le spawn_lock de spawn_agent empêche le doublon, mais le
+        // prompt de reprise doit quand même être livré si le spawn
+        // client finit idle plutôt que sauter toute la reprise.
+        if s.is_alive() && self.wait_revived_or_done(&s, sid).await {
+            return;
+        }
         match s
-            .spawn_agent(&cmd, &envs, Some(native), true, self.mcp_servers(sid))
+            .spawn_agent(&cmd, &envs, Some(native), true, self.mcp_servers(sid), None)
             .await
         {
-            Ok(()) => {
+            Ok(true) => {
                 info!("{sid}: agent relancé — envoi « {AUTO_RESUME_PROMPT} »");
-                if let Err(e) = s.send_prompt(AUTO_RESUME_PROMPT, false, false).await {
-                    warn!("{sid}: prompt de reprise non délivré: {e:#}");
-                    s.emit(proto::EventKind::Error {
-                        message: format!("prompt de reprise: {e:#}"),
-                    });
-                }
+                self.send_resume_prompt(&s, sid).await;
             }
+            // Supplanté après le handshake (kill/rebind pendant le spawn) :
+            // le nouveau cycle possède la session — pas de prompt de reprise.
+            Ok(false) => {}
             Err(e) => {
                 warn!("{sid}: reprise auto échouée: {e:#}");
                 s.emit(proto::EventKind::Error {
@@ -190,7 +274,66 @@ impl Daemon {
         }
     }
 
-    async fn get_session(&self, id: &str) -> Result<Arc<Session>> {
+    /// Spawn en vol (is_alive) : attendre sa fin — l'état reste
+    /// "interrupted" pendant tout le handshake et ne passe à "idle"
+    /// qu'après session/load (borne 2 min, réveillé par les events de la
+    /// session) — puis livrer le prompt de reprise si la session finit
+    /// sans travail ; si elle tourne déjà (prompt client, permission
+    /// rejeuée) quelqu'un la pilote → ne rien envoyer.
+    /// Renvoie vrai quand la session est traitée — faux si l'agent est
+    /// mort entre-temps : l'appelant reprend la main avec son propre spawn.
+    async fn wait_revived_or_done(self: &Arc<Self>, s: &Arc<Session>, sid: &str) -> bool {
+        let mut ev_rx = s.events_tx.subscribe();
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+        while s.is_alive() && s.meta_snapshot().state == "interrupted" {
+            if tokio::time::timeout_at(deadline, ev_rx.recv())
+                .await
+                .is_err()
+            {
+                break; // borne atteinte — spawn très lent ou bloqué
+            }
+        }
+        if !s.is_alive() {
+            return false;
+        }
+        let st = s.meta_snapshot().state;
+        match st.as_str() {
+            "idle" => {
+                info!("{sid}: déjà relancée — envoi « {AUTO_RESUME_PROMPT} »");
+                self.send_resume_prompt(s, sid).await;
+            }
+            "interrupted" => {
+                // Le cas que la reprise auto devait couvrir : visible
+                // (le spawn peut être simplement lent, pas bloqué).
+                warn!("{sid}: spawn en vol depuis plus de 2 min — prompt de reprise non envoyé");
+            }
+            _ => debug!("{sid}: déjà relancée (état {st}) — reprise auto ignorée"),
+        }
+        true
+    }
+
+    /// Prompt « continue please » de la reprise post-crash : le sysline
+    /// qui explique le contexte puis l'envoi utilisateur lui-même.
+    async fn send_resume_prompt(self: &Arc<Self>, s: &Arc<Session>, sid: &str) {
+        s.emit(proto::EventKind::System {
+            text: "démon relancé après un arrêt brutal — reprise du travail…".into(),
+        });
+        match s.send_prompt(AUTO_RESUME_PROMPT, false, false).await {
+            // Rendormie entre le respawn et l'envoi : le prompt
+            // en file déclenche quand même le réveil.
+            Ok(true) => self.spawn_wake(s, sid),
+            Ok(false) => {}
+            Err(e) => {
+                warn!("{sid}: prompt de reprise non délivré: {e:#}");
+                s.emit(proto::EventKind::Error {
+                    message: format!("prompt de reprise: {e:#}"),
+                });
+            }
+        }
+    }
+
+    pub(crate) async fn get_session(&self, id: &str) -> Result<Arc<Session>> {
         self.sessions
             .read()
             .await
@@ -299,8 +442,9 @@ impl Daemon {
                 model,
                 mode,
                 prompt,
+                origin,
             } => {
-                self.h_new_session(agent, cwd, title, model, mode, prompt)
+                self.h_new_session(agent, cwd, title, model, mode, prompt, origin)
                     .await
             }
             ReqKind::AttachSession {
@@ -317,6 +461,7 @@ impl Daemon {
                 self.h_resume_session(session, native_id).await
             }
             ReqKind::ClearSession { session } => self.h_clear_session(session).await,
+            ReqKind::SleepSession { session } => self.h_sleep_session(session).await,
             ReqKind::Send {
                 session,
                 text,
@@ -345,15 +490,52 @@ impl Daemon {
             ReqKind::Events {
                 session,
                 before_seq,
+                after_seq,
                 limit,
-            } => self.h_events(session, before_seq, limit).await,
-            ReqKind::ReadFile { session, path, binary } => {
-                self.h_read_file(session, path, binary).await
+            } => self.h_events(session, before_seq, after_seq, limit).await,
+            ReqKind::SearchEvents {
+                session,
+                query,
+                before_seq,
+                limit,
+            } => {
+                self.h_search_events(session, query, before_seq, limit)
+                    .await
+            }
+            ReqKind::FirstPost { session } => self.h_first_post(session).await,
+            ReqKind::ReadFile {
+                session,
+                path,
+                binary,
+                offset,
+                limit,
+            } => self.h_read_file(session, path, binary, offset, limit).await,
+            ReqKind::WriteFile {
+                session,
+                path,
+                offset,
+                delete_len,
+                data,
+                if_mtime_ms,
+            } => {
+                self.h_write_file(session, path, offset, delete_len, data, if_mtime_ms)
+                    .await
             }
             ReqKind::ListDir { session, path } => self.h_list_dir(session, path).await,
+            ReqKind::FindFiles {
+                session,
+                path,
+                query,
+                limit,
+            } => self.h_find_files(session, path, query, limit).await,
             ReqKind::DeletePath { session, path } => {
                 self.h_delete_path(session, path).await
             }
+            ReqKind::CreatePath {
+                session,
+                path,
+                dir,
+            } => self.h_create_path(session, path, dir).await,
             ReqKind::DownloadPath {
                 session,
                 path,
@@ -416,17 +598,62 @@ impl Daemon {
                 session,
                 repo,
                 pr,
+                forge,
+                host,
+                change_id,
+                url,
                 branch,
                 title,
                 status,
                 note,
             } => {
-                self.h_pr_track(session, repo, pr, branch, title, status, note)
-                    .await
+                self.h_pr_track(
+                    session, repo, pr, forge, host, change_id, url, branch, title,
+                    status, note,
+                )
+                .await
             }
-            ReqKind::PrUntrack { repo, pr } => self.h_pr_untrack(repo, pr).await,
+            ReqKind::PrUntrack {
+                repo,
+                pr,
+                forge,
+                host,
+                change_id,
+            } => self.h_pr_untrack(repo, pr, forge, host, change_id).await,
+            ReqKind::ForgeList {} => self.h_forge_list().await,
+            ReqKind::ListComponents => self.h_list_components().await,
+            ReqKind::ComponentInfo { name } => self.h_component_info(name).await,
+            ReqKind::ComponentStart { name } => self.h_component_start(name).await,
+            ReqKind::ComponentStop { name } => self.h_component_stop(name).await,
+            ReqKind::ComponentRestart { name } => {
+                self.h_component_restart(name).await
+            }
+            ReqKind::ComponentLogs {
+                name,
+                offset,
+                limit,
+            } => self.h_component_logs(name, offset, limit).await,
+            ReqKind::ComponentUpsert { name, spec } => {
+                self.h_component_upsert(name, spec).await
+            }
+            ReqKind::ComponentRemove { name } => self.h_component_remove(name).await,
+            ReqKind::ComponentCatalog { refresh } => {
+                self.h_component_catalog(refresh).await
+            }
+            ReqKind::ComponentInstall { name } => self.h_component_install(name).await,
+            ReqKind::ComponentQuery { name, query } => {
+                self.h_component_query(name, query).await
+            }
             ReqKind::Subscribe { session, after_seq } => {
                 self.h_subscribe(session, after_seq).await
+            }
+            // Interceptés par la couche connexion (ordre des inputs +
+            // cycle de vie borné à la connexion) — jamais atteint ici.
+            ReqKind::TermOpen { .. }
+            | ReqKind::TermInput { .. }
+            | ReqKind::TermResize { .. }
+            | ReqKind::TermClose { .. } => {
+                anyhow::bail!("requête terminal hors couche connexion")
             }
         }
     }
@@ -439,10 +666,57 @@ impl Daemon {
     {
         let (read, write) = tokio::io::split(stream);
         let mut lines = BufReader::new(read).lines();
-        let write = Arc::new(tokio::sync::Mutex::new(BufWriter::new(write)));
+        // Tâche d'écriture dédiée : seule propriétaire du socket sortant,
+        // alimentée par une file bornée. Avant, tout l'émission passait par
+        // un Mutex<BufWriter> awaité inline — un flush piétinant (tunnel
+        // SSH congestionné) gelait la lecture des requêtes → toutes les
+        // requêtes de la conn timeout côté client → rafale de reconnects
+        // (chaque replay subscribe re-saturait le lien). Découplé : la
+        // file absorbe les bursts, et pleine = connexion refermée.
+        let (wtx, mut wrx) = mpsc::unbounded_channel::<String>();
+        let (dead_tx, mut wdead) = watch::channel(false);
+        let outbox = Outbox {
+            tx: wtx,
+            dead: dead_tx.clone(),
+            queued: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        // Guard : au retour de serve_conn (client parti, dead signalé,
+        // erreur) le writer est avorté — dead = fermer maintenant, pas
+        // de drain post-mort qui garderait socket et clones vivants tant
+        // qu'un consommateur suintant réarme le timeout ligne à ligne.
+        struct AbortOnDrop(tokio::task::JoinHandle<()>);
+        impl Drop for AbortOnDrop {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let _writer = AbortOnDrop({
+            let queued = Arc::clone(&outbox.queued);
+            tokio::spawn(async move {
+                let mut w = BufWriter::new(write);
+                while let Some(line) = wrx.recv().await {
+                    queued.fetch_sub(line.len(), std::sync::atomic::Ordering::Relaxed);
+                    let wr = tokio::time::timeout(WRITE_TIMEOUT, async {
+                        w.write_all(line.as_bytes()).await?;
+                        w.flush().await
+                    })
+                    .await;
+                    if wr.is_err() || matches!(wr, Ok(Err(_))) {
+                        break;
+                    }
+                }
+                let _ = dead_tx.send(true);
+            })
+        });
 
-        // État de subscription : (session_id, broadcast rx, last_sent)
-        let mut sub: Option<(String, broadcast::Receiver<proto::Event>, u64)> = None;
+        // État de subscription : (session_id, broadcast rx, last_sent,
+        // journal_gen) — la gen trahit un reset quand les seqs coïncident.
+        let mut sub: Option<(String, broadcast::Receiver<proto::Event>, u64, u64)> = None;
+        // Terminaux ouverts par CETTE connexion — bornés à sa durée de vie :
+        // déconnexion → la map est droppée → master fermé → shells SIGHUP.
+        let mut terms = term::Terms::new();
+        let (term_done_tx, mut term_done_rx) =
+            tokio::sync::mpsc::unbounded_channel::<String>();
 
         loop {
             tokio::select! {
@@ -462,7 +736,7 @@ impl Daemon {
                         Ok(v) => v,
                         Err(e) => {
                             let resp = Response::err(0, format!("parse: {e}"));
-                            Self::send_line(&write, &resp).await?;
+                            Self::send_line(&outbox, &resp)?;
                             continue;
                         }
                     };
@@ -471,7 +745,7 @@ impl Daemon {
                         Err(e) => {
                             let id = raw.get("id").and_then(Value::as_u64).unwrap_or(0);
                             let resp = Response::err(id, format!("parse: {e}"));
-                            Self::send_line(&write, &resp).await?;
+                            Self::send_line(&outbox, &resp)?;
                             continue;
                         }
                     };
@@ -479,6 +753,31 @@ impl Daemon {
                     if let ReqKind::Subscribe { ref session, after_seq } = req.req {
                         match self.get_session(session).await {
                             Ok(s) => {
+                                // Receiver créé AVANT toute lecture :
+                                // un reset pendant le setup (read_tail
+                                // = I/O disque) déposerait sinon son
+                                // cleared éphémère sans destinataire →
+                                // `last` resterait dans l'ancien cycle
+                                // et tout le nouveau serait filtré.
+                                let rx = s.events_tx.subscribe();
+                                let gen = s.journal.gen();
+                                // after_seq au-delà de la fin du journal :
+                                // le client vient d'un cycle précédent
+                                // (reset entre son session_info et ce
+                                // subscribe) — sans SessionCleared il
+                                // garderait l'ancien affichage et `last`
+                                // bloquerait tout le nouveau cycle.
+                                // Cas indétectable à seq seule (limite
+                                // connue) : after_seq ≤ last_seq issu
+                                // d'un ancien cycle — le client couvre
+                                // ça via nativeId/staleCache.
+                                let cleared = (after_seq > s.journal.last_seq())
+                                    .then(|| proto::Event {
+                                        seq: s.journal.last_seq(),
+                                        ts: proto::now_iso(),
+                                        kind: proto::EventKind::SessionCleared {},
+                                    });
+                                let after = if cleared.is_some() { 0 } else { after_seq };
                                 // Rattrapage borné : un trou > REPLAY_MAX
                                 // n'est pas rejoué en entier (les events
                                 // sautés restent paginables via Events) —
@@ -487,27 +786,40 @@ impl Daemon {
                                 // concurrentes par timeout.
                                 let (backlog, skipped) = s
                                     .journal
-                                    .read_tail(&s.dir, after_seq, SUBSCRIBE_REPLAY_MAX)
+                                    .read_tail(&s.dir, after, SUBSCRIBE_REPLAY_MAX)
                                     .unwrap_or_default();
                                 let resp = Response::ok(req.id, json!({
                                     "subscribed": session,
                                     "last_seq": s.journal.last_seq(),
                                     "skipped": skipped,
                                 }));
-                                Self::send_line(&write, &resp).await?;
-                                let rx = s.events_tx.subscribe();
+                                Self::send_line(&outbox, &resp)?;
+                                // Le signal de reset part avant le
+                                // rattrapage du journal.
+                                if let Some(ev) = cleared {
+                                    Self::send_push(&outbox, session, &ev)?;
+                                }
                                 // Rattrapage du journal avant de passer en live
-                                let mut last = after_seq;
+                                let mut last = after;
                                 for ev in backlog {
                                     last = ev.seq;
-                                    Self::send_push(&write, session, &ev).await?;
+                                    Self::send_push(&outbox, session, &ev)?;
                                 }
-                                sub = Some((session.clone(), rx, last));
+                                sub = Some((session.clone(), rx, last, gen));
                             }
                             Err(e) => {
-                                Self::send_line(&write, &Response::err(req.id, format!("{e:#}"))).await?;
+                                Self::send_line(&outbox, &Response::err(req.id, format!("{e:#}")))?;
                             }
                         }
+                        continue;
+                    }
+                    // Terminal : inline (pas de tâche — l'ordre des inputs
+                    // compte et l'état vit dans la map locale `terms`).
+                    if let Some(resp) = self
+                        .h_term(&mut terms, &term_done_tx, &outbox, &req)
+                        .await
+                    {
+                        Self::send_line(&outbox, &resp)?;
                         continue;
                     }
                     // Requêtes concurrentes par connexion : chaque dispatch dans
@@ -515,24 +827,44 @@ impl Daemon {
                     // session/load + replay) ne bloque plus les autres appels.
                     // Les réponses sont démux côté client par id.
                     let d = Arc::clone(self);
-                    let w = Arc::clone(&write);
+                    let w = outbox.clone();
                     tokio::spawn(async move {
                         let resp = d.dispatch(req).await;
-                        let _ = Self::send_line(&w, &resp).await;
+                        let _ = Self::send_line(&w, &resp);
                     });
+                }
+                // La tâche d'écriture est morte (flush timeout, socket
+                // ko) ou a été signalée par un producteur (file pleine) :
+                // conn refermée proprement — plus rien ne peut sortir.
+                _ = wdead.changed() => {
+                    return Ok(());
                 }
                 ev = async {
                     match sub.as_mut() {
-                        Some((_, rx, _)) => rx.recv().await,
+                        Some((_, rx, _, _)) => rx.recv().await,
                         None => std::future::pending().await,
                     }
                 }, if sub.is_some() => {
                     match ev {
                         Ok(event) => {
-                            let (sid, _, last) = sub.as_mut().unwrap();
-                            if event.seq > *last {
-                                *last = event.seq;
-                                Self::send_push(&write, sid, &event).await?;
+                            let (sid, _, last, gen) = sub.as_mut().unwrap();
+                            // Journal reset (clear/rebind) : les seqs
+                            // repartent à 1 — l'event de contrôle est
+                            // émis dans l'ANCIENNE numérotation → il
+                            // passe le filtre, puis `last` est recalé
+                            // pour laisser passer le nouveau cycle. La
+                            // gen est relue à la source (pas +=1 : un
+                            // cleared réel encore bufferisé peut être
+                            // délivré après une resync Lagged →
+                            // double-compte sinon).
+                            let cleared =
+                                matches!(event.kind, proto::EventKind::SessionCleared {});
+                            if cleared || event.seq > *last {
+                                *last = if cleared { 0 } else { event.seq };
+                                if cleared {
+                                    *gen = self.get_session(sid).await?.journal.gen();
+                                }
+                                Self::send_push(&outbox, sid, &event)?;
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -540,8 +872,26 @@ impl Daemon {
                             // fenêtre laisse un trou de seq — comblable
                             // via Events mais non signalé au client, on le
                             // logge au moins.
-                            let (sid, _, last) = sub.as_mut().unwrap();
+                            let (sid, _, last, gen) = sub.as_mut().unwrap();
                             let s = self.get_session(sid).await?;
+                            // Journal reset pendant le lag : la gen (et
+                            // non les seqs — le nouveau journal peut
+                            // déjà dépasser l'ancien `last`) le trahit.
+                            // Le client a raté l'éphémère → le
+                            // resynthétiser avant le backlog du nouveau
+                            // cycle, sinon il empilerait les events
+                            // rejoués sous l'ancien affichage.
+                            let cur_gen = s.journal.gen();
+                            if cur_gen != *gen {
+                                *gen = cur_gen;
+                                *last = 0;
+                                let ev = proto::Event {
+                                    seq: s.journal.last_seq(),
+                                    ts: proto::now_iso(),
+                                    kind: proto::EventKind::SessionCleared {},
+                                };
+                                Self::send_push(&outbox, sid, &ev)?;
+                            }
                             let (backlog, skipped) = s
                                 .journal
                                 .read_tail(&s.dir, *last, SUBSCRIBE_REPLAY_MAX)
@@ -551,33 +901,31 @@ impl Daemon {
                             }
                             for event in backlog {
                                 *last = event.seq;
-                                Self::send_push(&write, sid, &event).await?;
+                                Self::send_push(&outbox, sid, &event)?;
                             }
                         }
                         Err(_) => { sub = None; }
+                    }
+                }
+                // Fin d'un flux PTY (shell mort ou reader coupé) : sortir
+                // le term de la map → drop → kill/réap si encore vivant.
+                tid = term_done_rx.recv(), if !terms.is_empty() => {
+                    if let Some(tid) = tid {
+                        terms.remove(&tid);
                     }
                 }
             }
         }
     }
 
-    async fn send_line<W>(w: &Arc<tokio::sync::Mutex<BufWriter<W>>>, v: &impl serde::Serialize) -> Result<()>
-    where
-        W: tokio::io::AsyncWrite + Unpin,
-    {
-        let mut g = w.lock().await;
-        let mut s = serde_json::to_string(v)?;
-        s.push('\n');
-        g.write_all(s.as_bytes()).await?;
-        g.flush().await?;
-        Ok(())
+    /// Enfile une réponse/erreur (sérialisée en ligne NDJSON) — retour
+    /// immédiat sauf file saturée, cas où la connexion est condamnée.
+    fn send_line(w: &Outbox, v: &impl serde::Serialize) -> Result<()> {
+        w.line(v)
     }
 
-    async fn send_push<W>(w: &Arc<tokio::sync::Mutex<BufWriter<W>>>, session: &str, ev: &proto::Event) -> Result<()>
-    where
-        W: tokio::io::AsyncWrite + Unpin,
-    {
-        Self::send_line(w, &Push { push: "event", session: session.into(), event: ev.clone() }).await
+    fn send_push(w: &Outbox, session: &str, ev: &proto::Event) -> Result<()> {
+        Self::send_line(w, &Push { push: "event", session: session.into(), event: ev.clone() })
     }
 }
 

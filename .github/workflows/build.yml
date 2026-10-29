@@ -38,8 +38,24 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      # Tags vX.Y.Z-rc.K : la version buildée porte le suffixe rc (non
+      # commité — le tag pointe un commit propre X.Y.Z) → les binaires
+      # s'identifient "X.Y.Z-rc.K" : la finale X.Y.Z restera proposée en
+      # update (semver : rc < stable) et ensure_daemon matche le tag rc.
+      - name: Version RC
+        if: contains(github.ref_name, '-rc.')
+        run: python3 client/tools/bump_version.py "${GITHUB_REF_NAME#v}"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Le binaire démon embarque client/dist (build.rs) : la SPA doit
+      # être buildée en amont pour que la web UI release soit servie.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: client
       - run: cargo build --release -p agentcontrol-daemon -p acctl
       - name: package
         run: |
@@ -51,6 +67,7 @@ jobs:
         with:
           name: agentcontrol-server-${{ matrix.arch }}-linux
           path: agentcontrol-server-${{ matrix.arch }}-linux.tar.gz
+          if-no-files-found: error
 
   # -----------------------------------------------------------------
   # Client desktop Tauri : Ubuntu + Windows
@@ -64,6 +81,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
+      # Idem daemon : suffixe rc dans la version buildée. Windows exclu
+      # — MSI/NSIS exigent une version numérique, l'injection casserait
+      # le bundling (artefacts rc Windows gardent X.Y.Z en interne).
+      - name: Version RC
+        if: runner.os == 'Linux' && contains(github.ref_name, '-rc.')
+        run: python3 client/tools/bump_version.py "${GITHUB_REF_NAME#v}"
 
       - name: Deps Tauri (Ubuntu)
         if: runner.os == 'Linux'
@@ -98,6 +122,7 @@ jobs:
             client/src-tauri/target/release/bundle/deb/*.deb
             client/src-tauri/target/release/bundle/appimage/*.AppImage
             client/src-tauri/target/release/agentcontrol
+          if-no-files-found: error
 
       # Exe brut = version PORTABLE (sans install) — renommé pour
       # distinguer portable vs installer (nsis -setup.exe / msi).
@@ -119,6 +144,51 @@ jobs:
             client/src-tauri/target/release/bundle/msi/*.msi
             client/src-tauri/target/release/bundle/nsis/*.exe
             client/dist-win/*.exe
+          if-no-files-found: error
+
+  # -----------------------------------------------------------------
+  # Client desktop Tauri : macOS arm64 (.app + .dmg — non signé pour
+  # l'instant, cf. README : installation via clic droit → Ouvrir ou
+  # xattr -dr com.apple.quarantine).
+  # -----------------------------------------------------------------
+  client-macos:
+    if: github.event.pull_request.draft != true
+    timeout-minutes: 45
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pas d'injection de version rc (idem Windows) : CFBundleVersion
+      # exige du numérique — un artefact rc macOS s'identifie X.Y.Z.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client/src-tauri
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci
+        working-directory: client
+      - name: Build Tauri
+        working-directory: client
+        run: npx tauri build
+      - name: Renommer le .dmg avec la version
+        working-directory: client
+        run: |
+          VER=$(grep -oE '"version": "[^"]+"' src-tauri/tauri.conf.json | head -1 | cut -d'"' -f4)
+          # hors tag : suffixe SHA pour distinguer les builds de test (PR/main)
+          SUFFIX=""
+          if [ "${GITHUB_REF_NAME#v}" = "$GITHUB_REF_NAME" ]; then SUFFIX="-${GITHUB_SHA:0:7}"; fi
+          mkdir -p dist-mac
+          find src-tauri/target/release/bundle/dmg -name "*.dmg" \
+            -exec sh -c 'mv "$1" "dist-mac/AgentControl_'"$VER$SUFFIX"'_aarch64.dmg"' _ {} \;
+          find dist-mac -name "*.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agentcontrol-client-macos
+          path: client/dist-mac/*.dmg
+          if-no-files-found: error
 
   # -----------------------------------------------------------------
   # Client Android : APK aarch64 (debug-signé, installable directement).
@@ -130,6 +200,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Version RC
+        if: contains(github.ref_name, '-rc.')
+        run: python3 client/tools/bump_version.py "${GITHUB_REF_NAME#v}"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -180,13 +253,14 @@ jobs:
         with:
           name: agentcontrol-client-android
           path: client/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
 
   # -----------------------------------------------------------------
   # Release GitHub sur tag v* (permet l'auto-update + install démon distant)
   # -----------------------------------------------------------------
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [daemon-linux, client, client-android]
+    needs: [daemon-linux, client, client-macos, client-android]
     timeout-minutes: 10
     runs-on: ubuntu-latest
     permissions:
@@ -196,4 +270,10 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: "**/*"
+          # Tags vX.Y.Z-rc.K → prerelease GitHub JAMAIS marquée "latest"
+          # (sinon releases/latest — la sonde stable de l'app et le
+          # Dockerfile devcontainer — renverrait la rc aux utilisateurs
+          # du canal stable).
+          prerelease: ${{ contains(github.ref_name, '-rc.') }}
+          make_latest: ${{ !contains(github.ref_name, '-rc.') }}
 

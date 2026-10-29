@@ -2,6 +2,7 @@
 //! par paire et par créatrice, auto-resume de la cible morte.
 
 use super::*;
+use super::sessions::FreshDeliver;
 use proto::{EventKind, SessionMeta};
 
 impl Daemon {
@@ -37,19 +38,44 @@ impl Daemon {
                     pas de réponse.",
                     fm.title, from, fm.agent, text, from
                 );
-                let steer = delivery == "steer";
-                if target.is_alive() {
+                // Défaut steer : les messages agent→agent sont des
+                // comptes-rendus/réponses utiles pendant le tour — la
+                // file n'est retenue que sur "queue" explicite (valeur
+                // inconnue → steer, comme un delivery absent).
+                let steer = delivery != "queue";
+                if !matches!(delivery.as_str(), "" | "queue" | "steer") {
+                    warn!("peer_send {from}→{session}: delivery «{delivery}» inconnu → steer");
+                }
+                let dlv = if steer { "steer" } else { "queue" };
+                // Livraison en tâche de fond : si send_peer_prompt
+                // signale que la cible a basculé "asleep" entre le check
+                // ci-dessous et l'enfilement, le réveil est déclenché
+                // ici (dedoublonné par `waking`).
+                let deliver = |wrapped: String, steer: bool| {
+                    let d = Arc::clone(self);
                     let t = Arc::clone(&target);
+                    let sid = session.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = t.send_peer_prompt(&wrapped, steer).await {
-                            t.emit(EventKind::Error {
+                        match t.send_peer_prompt(&wrapped, steer).await {
+                            Ok(true) => d.spawn_wake(&t, &sid),
+                            Ok(false) => {}
+                            Err(e) => t.emit(EventKind::Error {
                                 message: format!("peer send: {e:#}"),
-                            });
+                            }),
                         }
                     });
-                    Ok(json!({"queued": true}))
+                };
+                if target.is_alive() {
+                    deliver(wrapped, steer);
+                    Ok(json!({"queued": true, "delivery": dlv}))
+                } else if target.is_waking() || target.is_spawning() {
+                    // Réveil déjà lancé par un envoi user, ou spawn déjà
+                    // en vol (init, resume, /clear) : enfiler — le drain
+                    // post-spawn livrera (pas de second spawn).
+                    deliver(wrapped, steer);
+                    Ok(json!({"queued": true, "resuming": true, "delivery": dlv}))
                 } else {
-                    // Cible morte → auto-resume puis livraison.
+                    // Cible morte ou endormie → auto-resume puis livraison.
                     let d = Arc::clone(self);
                     let t = Arc::clone(&target);
                     tokio::spawn(async move {
@@ -59,7 +85,7 @@ impl Daemon {
                             });
                         }
                     });
-                    Ok(json!({"queued": true, "resumed": true}))
+                    Ok(json!({"queued": true, "resumed": true, "delivery": dlv}))
                 }
     }
     pub(super) async fn h_peer_spawn(self: &Arc<Self>, from: String, agent: Option<String>, cwd: Option<String>, title: Option<String>, model: Option<String>, mode: Option<String>, prompt: Option<String>, group: Option<String>) -> Result<Value> {
@@ -139,6 +165,7 @@ impl Daemon {
                     state: "starting".into(),
                     group: group.or_else(|| cm.group.clone()),
                     spawned_by: Some(from.clone()),
+                    origin: None,
                     context_used: None,
                     context_size: None,
                 };
@@ -161,19 +188,7 @@ impl Daemon {
                     text: format!("session créée par «{}» ({from})", cm.title),
                 });
 
-                let (cmd, envs) = self.agent_parts(
-                    &profile,
-                    meta.model.as_deref(),
-                    meta.mode.as_deref(),
-                    &sid2,
-                );
-                session2
-                    .spawn_agent(&cmd, &envs, None, true, self.mcp_servers(&sid2))
-                    .await?;
-                session2
-                    .apply_spawn_config(meta.mode.as_deref(), meta.model.as_deref())
-                    .await;
-
+                let mut deliver = FreshDeliver::None;
                 if let Some(task) = prompt {
                     // Délégation de tâche = message pair→pair : PeerMessage
                     // journalisé dans les deux journaux (lien cliquable
@@ -199,15 +214,27 @@ impl Daemon {
                         pas de compte-rendu.",
                         cm.title, cm.agent
                     );
-                    let s2 = Arc::clone(&session2);
-                    tokio::spawn(async move {
-                        if let Err(e) = s2.send_peer_prompt(&wrapped, false).await {
-                            s2.emit(EventKind::Error {
-                                message: format!("tâche déléguée: {e:#}"),
-                            });
-                        }
-                    });
+                    deliver = FreshDeliver::Peer { wrapped, creator: creator.clone() };
                 }
+                let (cmd, envs) = self.agent_parts(
+                    &profile,
+                    meta.model.as_deref(),
+                    meta.mode.as_deref(),
+                    &sid2,
+                );
+                // Réponse immédiate comme new_session : la session fille
+                // est visible en "starting" — l'agent créateur n'attend
+                // pas les secondes du handshake dans son appel d'outil.
+                self.spawn_fresh(
+                    &session2,
+                    cmd,
+                    envs,
+                    None,
+                    true,
+                    meta.mode.clone(),
+                    meta.model.clone(),
+                    deliver,
+                );
                 Ok(json!({"session": sid2, "agent": agent_id, "title": title}))
     }
     /// Rate-limit par paire (from→to) : borne les boucles ping-pong.
@@ -262,30 +289,45 @@ impl Daemon {
         Ok(())
     }
 
-    /// Cible morte : respawn de l'agent (même mécanique que ResumeSession)
-    /// puis livraison du message.
-    async fn resume_and_deliver(&self, session: &str, wrapped: String, steer: bool) -> Result<()> {
+    /// Cible morte ou endormie : respawn de l'agent (même mécanique que
+    /// ResumeSession — respawn sort "asleep" le cas échéant) puis
+    /// livraison du message. Si un réveil déclenché par l'utilisateur est
+    /// déjà en vol, on s'enfile simplement (drain post-spawn) plutôt que
+    /// de lancer un second spawn.
+    async fn resume_and_deliver(self: &Arc<Self>, session: &str, wrapped: String, steer: bool) -> Result<()> {
         let s = self.get_session(session).await?;
-        let meta = s.meta_snapshot();
-        let profile = self
-            .agents
-            .get(&meta.agent)
-            .with_context(|| format!("agent inconnu: {}", meta.agent))?
-            .clone();
-        let (cmd, envs) =
-            self.agent_parts(&profile, meta.model.as_deref(), meta.mode.as_deref(), session);
-        s.emit(EventKind::System {
-            text: "agent relancé (message agent→agent)".into(),
-        });
-        s.spawn_agent(
-            &cmd,
-            &envs,
-            meta.native_session_id,
-            true,
-            self.mcp_servers(session),
-        )
-        .await?;
-        s.send_peer_prompt(&wrapped, steer).await
+        if !s.wake_begin() {
+            // Un autre réveil est en vol : enfiler seulement. Ok(true) =
+            // il a relâché `waking` entre-temps et la cible est endormie
+            // → relancer (dedoublonné si un réveil a repris le flag).
+            if s.send_peer_prompt(&wrapped, steer).await? {
+                self.spawn_wake(&s, session);
+            }
+            return Ok(());
+        }
+        let r: Result<bool> = async {
+            s.emit(EventKind::System {
+                text: "agent relancé (message agent→agent)".into(),
+            });
+            self.respawn(&s, true).await?;
+            s.send_peer_prompt(&wrapped, steer).await
+        }
+        .await;
+        s.wake_done();
+        // Ok(true) : rendormie entre le respawn et la livraison — le
+        // message est en file ; relancer un réveil (wake_done vient de
+        // libérer le flag) plutôt que l'y laisser jusqu'au prochain
+        // envoi. Idem pour un envoi dedoublonné pendant ce réveil —
+        // wake_pending armé + session retournée endormie + file non
+        // vide = missed wakeup à combler par une nouvelle chaîne.
+        let needs = matches!(r, Ok(true))
+            || (s.take_wake_pending()
+                && s.meta_snapshot().state == "asleep"
+                && s.has_queued());
+        if needs {
+            self.spawn_wake(&s, session);
+        }
+        r.map(|_| ())
     }
 
 }

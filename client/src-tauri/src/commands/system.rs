@@ -2,20 +2,62 @@
 //! tail du log client, icône fenêtre dynamique.
 
 use anyhow::Result;
+use client_core::Level;
 use serde_json::{json, Value};
 use tauri::State;
 
 use crate::state::AppState;
 
-/// "android" | "windows" | "linux" — pour les gates frontend.
+/// "android" | "windows" | "macos" | "linux" — pour les gates frontend.
 #[tauri::command]
 pub(crate) fn platform() -> &'static str {
     if cfg!(target_os = "android") {
         "android"
     } else if cfg!(windows) {
         "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
     } else {
         "linux"
+    }
+}
+
+/// Connexion demandée à cette instance (`--conn` / AGENTCONTROL_CONN au
+/// lancement). `None` = comportement par défaut : la dernière connexion
+/// utilisée (première entrée de connections.json).
+#[tauri::command]
+pub(crate) fn cli_conn(state: State<'_, AppState>) -> Option<String> {
+    state.cli_conn.clone()
+}
+
+/// Lance une AUTRE instance du client liée à `conn` (clé connKey —
+/// `ssh{,-native}:h:p` | `tcp:addr` | `local`) : le modèle multi-instances
+/// est « 1 processus = 1 connexion », plusieurs instances en parallèle
+/// chacune sur son démon, distinguée par sa couleur. L'instance courante
+/// n'est pas modifiée ; la nouvelle hérite de --conn <clé>.
+/// Limites : Android exclu (pas de multi-processus applicatif) ; macOS ok
+/// (exec direct du binaire dans le .app, indépendant de LaunchServices).
+#[tauri::command]
+#[allow(unused_variables)]
+pub(crate) fn spawn_instance(conn: String) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        return Err("multi-instances indisponible sur Android".to_string());
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let mut cmd = tokio::process::Command::new(exe);
+        cmd.arg("--conn")
+            .arg(&conn)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        client_core::hide_console(&mut cmd);
+        // Détaché : l'enfant survit à la fermeture de cette instance.
+        cmd.spawn().map_err(|e| format!("{e}"))?;
+        client_core::log(Level::Info, format!("spawn_instance conn={conn}"));
+        Ok(())
     }
 }
 
@@ -56,6 +98,15 @@ pub(crate) async fn sys_stats(state: State<'_, AppState>) -> Result<Value, Strin
 #[tauri::command]
 pub(crate) fn log_tail(n: Option<usize>) -> String {
     client_core::log_tail(n.unwrap_or(200))
+}
+
+/// Écrit une ligne dans client.log depuis le frontend (erreurs UI,
+/// diagnostics webview — préfixées `ui:`). Niveau tolérant, info si inconnu.
+/// file vide : la callsite Rust ne dirait rien d'utile sur la source TS.
+#[tauri::command]
+pub(crate) fn log_write(level: &str, msg: &str) {
+    let lv = client_core::Level::parse(level).unwrap_or(client_core::Level::Info);
+    client_core::log_at(lv, "", 0, format!("ui: {msg}"));
 }
 
 /// Icône fenêtre dynamique selon l'état agrégé des agents :

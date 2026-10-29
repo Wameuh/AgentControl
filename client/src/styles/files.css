@@ -9,15 +9,99 @@
   display: flex; align-items: center; gap: 8px; padding: 9px 12px;
   border-bottom: 1px solid var(--line);
 }
+#file-head .ic, #fv-bar .ic { width: 15px; height: 15px; }
 #file-path {
   flex: 1; font-family: Mono, ui-monospace, monospace; font-size: 12px;
-  color: var(--sand); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 #file-body { flex: 1; display: flex; min-height: 0; }
+/* Barre d'outils du viewer : visible sur desktop aussi (statut, encodage,
+   édition) — fv-back/fv-name restent réservés à l'overlay Android. */
+#file-viewer { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+#fv-bar {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  padding: 5px 12px; border-bottom: 1px solid var(--line); min-height: 30px;
+  /* Dernier recours quand les items ne tiennent pas (panneau étroit,
+     mobile) : la barre défile au lieu de pousser les contrôles dehors. */
+  overflow-x: auto; scrollbar-width: none;
+}
+#fv-bar::-webkit-scrollbar { display: none; }
+#fv-back, #fv-name { display: none; }
+#fv-status {
+  color: var(--dim); font-size: 11px; white-space: nowrap;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+}
+.fv-spacer { flex: 1; }
+#fv-enc {
+  background: transparent; color: var(--muted); border: 1px solid var(--line);
+  border-radius: 4px; font-size: 11px; padding: 1px 3px;
+  /* Le select prend la largeur de son option la plus longue
+     (« Windows-1252 / Latin-1 ») : plafonné pour ne pas manger la barre. */
+  max-width: 11em;
+}
+#fv-loadall {
+  background: none; border: 1px solid var(--line); border-radius: 4px;
+  color: var(--dim); font-size: 11px; padding: 1px 7px; cursor: pointer;
+}
+#fv-loadall:hover { color: var(--ink); border-color: var(--accent); }
+#fv-md, #fv-edit, #fv-save {
+  display: flex; align-items: center; background: none; border: 0;
+  color: var(--muted); cursor: pointer; padding: 3px;
+}
+#fv-md:hover, #fv-edit:hover, #fv-save:hover:not(:disabled) { color: var(--ink); }
+#fv-md.on, #fv-edit.on { color: var(--accent); }
+#fv-save:disabled { opacity: .35; cursor: default; }
+/* Bandeau conflit : le fichier a changé sur disque pendant l'édition */
+#fv-conflict {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  padding: 6px 12px; font-size: 12px; color: var(--accent);
+  background: rgba(var(--accent-rgb), .09); border-bottom: 1px solid var(--line);
+}
+#fv-conflict-msg { flex: 1; }
+#fv-conflict button {
+  background: none; border: 1px solid var(--line); border-radius: 4px;
+  color: var(--ink); font-size: 11px; padding: 2px 8px; cursor: pointer;
+}
+#fv-conflict button:hover { border-color: var(--accent); }
+/* Éditeur : gouttière + overlay coloré sous la textarea transparente.
+   Le pre (#file-hl) et la textarea doivent rester pixel-identiques :
+   même font, line-height, padding, tab-size, white-space. */
+#file-edwrap { flex: 1; min-height: 0; display: flex; }
+#file-nums {
+  flex: none; overflow: hidden; margin: 0; padding: 12px 6px 12px 12px;
+  font: 12px/1.5 Mono, ui-monospace, monospace; text-align: right;
+  color: var(--dim); user-select: none; white-space: pre; min-width: 3ch;
+}
+#file-edscroll { position: relative; flex: 1; min-width: 0; overflow: hidden; }
+#file-hl, #file-edit {
+  position: absolute; inset: 0; margin: 0; padding: 12px;
+  font: 12px/1.5 Mono, ui-monospace, monospace;
+  white-space: pre; tab-size: 4;
+}
+/* Overlay en miroir du scroll de la textarea (sync JS) : c'est un vrai
+   conteneur scroll-x — ses contenus longs sont scrollés, pas perdus.
+   Scrollbars masquées : seule la textarea en affiche. */
+#file-hl {
+  overflow: auto; scrollbar-width: none;
+  pointer-events: none; color: var(--ink);
+}
+#file-hl::-webkit-scrollbar { display: none; }
+#file-edit {
+  resize: none; border: 0; outline: none; overflow: auto;
+  background: transparent; color: transparent; caret-color: var(--ink);
+}
+#file-edit::selection { background: rgba(var(--accent-rgb), .30); }
 #file-view {
-  flex: 1; min-width: 0; overflow: auto; margin: 0; padding: 12px;
+  flex: 1; min-width: 0; min-height: 0; overflow: auto; margin: 0; padding: 12px;
   font: 12px/1.5 Mono, ui-monospace, monospace; white-space: pre;
   color: var(--ink); user-select: text;
+}
+/* Rendu Markdown dans le viewer : même cadre que #file-view, typographie
+   document (les styles de contenu sont les .md de chat.css, mutualisés) */
+#file-md {
+  flex: 1; min-width: 0; min-height: 0; overflow: auto; padding: 12px;
+  font-size: 13px; line-height: 1.5; color: var(--ink);
+  user-select: text; overflow-wrap: break-word;
 }
 /* Aperçu image dans le panneau fichier (damier pour la transparence) */
 #file-view .fv-img {
@@ -25,20 +109,60 @@
   background:
     repeating-conic-gradient(var(--line) 0% 25%, transparent 0% 50%) 0 0 / 16px 16px;
 }
+/* Lecteur vidéo streamé (schéma acvideo — ranges démon) */
+#file-view .fv-vid {
+  display: block; max-width: 100%; max-height: 100%;
+  margin: auto; border-radius: 6px; background: #000;
+}
 #file-view .fv-msg { color: var(--dim); white-space: pre-wrap; }
 
-/* Explorateur de fichiers du workspace (colonne gauche du panneau) */
-#file-tree {
-  width: 44%; min-width: 150px; flex: none; overflow: auto;
-  border-right: 1px solid var(--line); padding: 4px 0; font-size: 12px;
-  user-select: none;
+/* Explorateur de fichiers du workspace (colonne gauche du panneau) :
+   barre de recherche au-dessus de l'arbre / de la liste de résultats. */
+#ft-side {
+  width: 44%; min-width: 150px; flex: none; min-height: 0;
+  display: flex; flex-direction: column;
+  border-right: 1px solid var(--line);
 }
+#ft-bar {
+  flex: none; position: relative; padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+}
+#ft-ico {
+  position: absolute; left: 15px; top: 50%; transform: translateY(-50%);
+  display: flex; color: var(--dim); pointer-events: none;
+}
+#ft-ico .ic { width: 13px; height: 13px; }
+#ft-q {
+  width: 100%; box-sizing: border-box; padding: 4px 8px 4px 26px;
+  background: rgba(236, 230, 216, .06); border: 1px solid var(--line);
+  border-radius: 6px; color: var(--ink); font: inherit; font-size: 12px;
+}
+#ft-q:focus { border-color: var(--accent); outline: none; }
+#ft-q::placeholder { color: var(--dim); }
+#file-tree, #file-hits {
+  flex: 1; min-height: 0; overflow: auto;
+  padding: 4px 0; font-size: 12px; user-select: none;
+}
+.fhit {
+  display: flex; align-items: center; gap: 4px; padding: 2px 8px;
+  cursor: pointer; white-space: nowrap; color: var(--muted);
+}
+.fhit:hover { background: rgba(236, 230, 216, .06); color: var(--ink); }
+.fhit .fico { flex: none; }
+.fhit .fname { overflow: hidden; text-overflow: ellipsis; }
+.fhit.fdot .fname { opacity: .65; }
+.fhit .fhdir {
+  margin-left: auto; padding-left: 8px; color: var(--dim); font-size: 10px;
+  flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; direction: rtl;
+}
+.fhit .fsize { margin-left: 6px; color: var(--dim); font-size: 10px; flex: none; }
+.fico .ic { width: 12px; height: 12px; display: block; }
 .fnode {
   display: flex; align-items: center; gap: 4px; padding: 2px 8px 2px 0;
   cursor: pointer; white-space: nowrap; color: var(--muted);
 }
 .fnode:hover { background: rgba(236, 230, 216, .06); color: var(--ink); }
-.fnode.sel { background: rgba(205, 182, 140, .12); color: var(--ink); }
+.fnode.sel { background: rgba(var(--accent-rgb), .12); color: var(--ink); }
 .fnode .farrow { width: 11px; flex: none; opacity: .7; font-size: 10px; }
 .fnode .fico { flex: none; font-size: 11px; }
 .fnode .fname { overflow: hidden; text-overflow: ellipsis; }
@@ -46,12 +170,22 @@
 .fnode.fdot .fname { opacity: .65; }
 .froot {
   display: flex; align-items: center; gap: 4px; padding: 4px 8px;
-  color: var(--sand); font-family: Mono, ui-monospace, monospace; font-size: 11px;
+  color: var(--accent); font-family: Mono, ui-monospace, monospace; font-size: 11px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   border-bottom: 1px solid var(--line); margin-bottom: 2px;
 }
 .fempty, .ferr { padding: 3px 10px; color: var(--dim); font-size: 11px; white-space: normal; }
 .ferr { color: var(--err); }
+
+/* Saisie inline « nouveau fichier/dossier » */
+.fnode.fnew { color: var(--ink); }
+.fnew-name {
+  flex: 1; min-width: 0; padding: 1px 5px;
+  background: rgba(236, 230, 216, .06); border: 1px solid var(--accent);
+  border-radius: 4px; color: var(--ink); font: inherit; font-size: 12px;
+}
+.fnew-name:focus { outline: none; }
+body.android .fnew-name { font-size: 15px; padding: 4px 6px; }
 
 
 /* Panneau fichier : poignée de redimensionnement (bord gauche) */
@@ -59,10 +193,10 @@
   position: absolute; left: 0; top: 0; bottom: 0; width: 6px;
   cursor: col-resize; z-index: 5;
 }
-#file-resize:hover { background: rgba(205, 182, 140, .3); }
+#file-resize:hover { background: rgba(var(--accent-rgb), .3); }
 
-/* Coloration syntaxique légère (viewer) */
-#file-view .syn-kw { color: var(--violet); font-weight: 600; }
-#file-view .syn-str { color: var(--sage); }
-#file-view .syn-com { color: var(--dim); font-style: italic; }
-#file-view .syn-num { color: var(--sand); }
+/* Coloration syntaxique légère (viewer + blocs de code du rendu md) */
+#file-view .syn-kw, #file-md .syn-kw { color: var(--violet); font-weight: 600; }
+#file-view .syn-str, #file-md .syn-str { color: var(--sage); }
+#file-view .syn-com, #file-md .syn-com { color: var(--dim); font-style: italic; }
+#file-view .syn-num, #file-md .syn-num { color: var(--accent); }

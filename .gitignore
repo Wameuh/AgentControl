@@ -15,8 +15,12 @@ dist/
 # Projet Android généré (CI : `tauri android init --ci`)
 client/src-tauri/gen/
 client/shots/
+client/audit-shots/
 __pycache__/
 *.pyc
 
 # Sortie locale de graphify (analyse code — régénérable)
 graphify-out/
+
+# artefact local du workflow /mr review
+.review_ts

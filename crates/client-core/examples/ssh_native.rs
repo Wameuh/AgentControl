@@ -33,16 +33,17 @@ async fn main() -> anyhow::Result<()> {
     let r = c.call(ReqKind::DaemonStatus).await?;
     println!("DaemonStatus: {r:?}");
 
-    let (code, out) = ssh_native::ssh_exec(
+    let (code, out, err) = ssh_native::ssh_exec(
         std::env::var("SSH_HOST").ok().as_deref().unwrap_or("127.0.0.1"),
         port,
         std::env::var("USER").unwrap_or_else(|_| "user".into()).as_str(),
         None,
         None,
-        "echo native-exec-ok && uname -m",
+        "echo native-exec-ok && uname -m && echo warn >&2",
+        Some(&mut |l: &str| eprintln!("[stderr] {l}")),
     )
     .await?;
-    println!("exec[{code}]: {out}");
+    println!("exec[{code}]: {out} (stderr: {err})");
     Ok(())
 }
 

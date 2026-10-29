@@ -1,0 +1,167 @@
+/* Panneau « Composants » : overlay plein #chat (même mécanisme que
+   settings-view/conn-view) — liste des composants managés, catalogue
+   d'intégration, éditeur de spec et viewer de logs. */
+
+#components-view {
+  position: absolute; inset: 0; z-index: 25;
+  display: flex; flex-direction: column;
+  background: var(--bg);
+}
+#components-view[hidden] { display: none; }
+#comp-head {
+  display: flex; align-items: center; gap: 10px; flex: none;
+  padding: 10px 16px; background: var(--glass); backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--line);
+}
+#comp-title { font-weight: 500; }
+#comp-tabs { display: flex; gap: 4px; margin-left: 8px; }
+.comp-tab {
+  background: none; border: 1px solid transparent; border-radius: 8px;
+  color: var(--dim); cursor: pointer; font: inherit; font-size: 12.5px;
+  padding: 4px 10px;
+}
+.comp-tab:hover { color: var(--ink); }
+.comp-tab.on { color: var(--accent); border-color: var(--line);
+  background: rgba(236, 230, 216, .06); }
+.comp-sp { flex: 1; }
+#comp-head > button {
+  background: none; border: none; color: var(--dim); cursor: pointer;
+  padding: 4px; border-radius: 6px;
+}
+#comp-head > button:hover { color: var(--ink); }
+#comp-head .ic { width: 15px; height: 15px; display: block; }
+#comp-body {
+  flex: 1; overflow-y: auto; padding: 16px 22px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+
+/* --- Onglet Installés ------------------------------------------------ */
+
+#comp-list { display: flex; flex-direction: column; gap: 6px; max-width: 720px; }
+.comp-none { color: var(--dim); font-size: 13px; padding: 20px 4px; }
+.comp {
+  display: flex; align-items: center; gap: 10px;
+  border: 1px solid var(--line); border-radius: 10px;
+  padding: 8px 10px; min-height: 42px;
+}
+/* Dot d'état animé : pulse sur starting/degraded (transitoire ou malade),
+   plein sinon. */
+.comp-dot { width: 10px; height: 10px; border-radius: 50%; flex: none;
+  background: var(--dim); }
+.comp-dot.cst-running { background: var(--sage); }
+/* tool : `installed` ≈ présent (sage), `absent` = observation dim. */
+.comp-dot.cst-installed { background: var(--sage); }
+.comp-dot.cst-absent { background: var(--dim); opacity: .55; }
+.comp-dot.cst-stopped { background: var(--dim); }
+.comp-dot.cst-failed { background: var(--err); }
+.comp-dot.cst-starting { background: var(--gold); animation: comp-pulse 1.2s ease-in-out infinite; }
+.comp-dot.cst-degraded { background: var(--warn, var(--gold)); animation: comp-pulse 1.2s ease-in-out infinite; }
+@keyframes comp-pulse { 50% { opacity: .25; } }
+.comp-main { flex: 1; min-width: 0; }
+.comp-l1 { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.comp-name { font-size: 13px; color: var(--ink); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.comp-kind {
+  flex: none; font-size: 10.5px; padding: 1px 7px; border-radius: 99px;
+  border: 1px solid var(--line); color: var(--muted);
+}
+.comp-kind.k-process { color: var(--sage); border-color: color-mix(in srgb, var(--sage) 40%, transparent); }
+.comp-kind.k-internal { color: var(--violet); border-color: color-mix(in srgb, var(--violet) 40%, transparent); }
+.comp-kind.k-external { color: var(--gold); border-color: color-mix(in srgb, var(--gold) 40%, transparent); }
+.comp-kind.k-tool { color: var(--muted); }
+.comp-src { flex: none; font-size: 10.5px; color: var(--dim); }
+.comp-auto { flex: none; color: var(--dim); display: inline-flex; }
+.comp-auto .ic { width: 11px; height: 11px; display: block; }
+.comp-meta { font-size: 11.5px; color: var(--dim); margin-top: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.comp-acts { display: flex; gap: 2px; flex: none; }
+.comp-acts button {
+  background: none; border: none; color: var(--dim); cursor: pointer;
+  padding: 6px; border-radius: 6px; min-width: 30px; min-height: 30px;
+}
+.comp-acts button:hover { color: var(--ink); background: rgba(236, 230, 216, .08); }
+.comp-acts .ic { width: 14px; height: 14px; display: inline-block; vertical-align: middle; }
+
+/* --- Onglet Catalogue ------------------------------------------------ */
+
+#comp-catalog { display: flex; flex-direction: column; gap: 8px; max-width: 720px; }
+.cat-card {
+  border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.cat-l1 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cat-inst, .cat-abs, .cat-latest {
+  font-size: 10.5px; padding: 1px 7px; border-radius: 99px;
+  border: 1px solid var(--line); display: inline-flex; align-items: center; gap: 4px;
+}
+.cat-inst { color: var(--sage); border-color: color-mix(in srgb, var(--sage) 40%, transparent); }
+.cat-inst .ic { width: 10px; height: 10px; }
+.cat-abs { color: var(--dim); }
+.cat-latest { color: var(--gold); border-color: color-mix(in srgb, var(--gold) 40%, transparent); }
+.cat-desc { font-size: 12.5px; color: var(--muted); }
+.cat-acts { display: flex; align-items: center; gap: 8px; }
+.cat-link {
+  background: none; border: none; color: var(--dim); cursor: pointer;
+  font: inherit; font-size: 11.5px; padding: 3px 6px; border-radius: 6px;
+  display: inline-flex; align-items: center; gap: 5px;
+}
+.cat-link:hover { color: var(--accent); }
+.cat-link .ic { width: 11px; height: 11px; }
+.cat-go { font-size: 12px; padding: 4px 12px; }
+.cat-go:disabled { opacity: .5; cursor: default; }
+
+/* --- Éditeur de spec -------------------------------------------------- */
+
+#comp-editor { max-width: 560px; }
+#comp-editor h4 { margin: 0 0 4px; font-size: 12px; text-transform: uppercase;
+  letter-spacing: .06em; color: var(--dim); font-weight: 600; }
+#comp-ed-form { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+#comp-editor label { display: flex; flex-direction: column; gap: 5px;
+  font-size: 13px; color: var(--muted); }
+#comp-editor input, #comp-editor select, #comp-editor textarea {
+  background: rgba(236, 230, 216, .07); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px;
+  font: inherit;
+}
+#comp-editor textarea { font-family: var(--mono, monospace); font-size: 12px;
+  resize: vertical; }
+#comp-editor input:focus, #comp-editor select:focus, #comp-editor textarea:focus {
+  border-color: var(--accent); outline: none;
+}
+#comp-editor input:disabled { opacity: .55; }
+#comp-editor label.chk-row { flex-direction: row; align-items: center; gap: 10px;
+  cursor: pointer; }
+#comp-editor input[type="checkbox"] {
+  width: 15px; height: 15px; flex: none; margin: 0; padding: 0;
+  border: 0; background: none; accent-color: var(--accent);
+}
+#ce-del { margin-right: auto; }
+#ce-del.armed { color: var(--err); border-color: var(--err); }
+
+/* --- Viewer de logs --------------------------------------------------- */
+
+#comp-logs-view { display: flex; flex-direction: column; gap: 8px;
+  flex: 1; min-height: 0; }
+#comp-logs-bar { display: flex; align-items: center; gap: 10px; flex: none; }
+#comp-logs-back {
+  background: none; border: none; color: var(--dim); cursor: pointer;
+  padding: 4px; border-radius: 6px;
+}
+#comp-logs-back:hover { color: var(--ink); }
+#comp-logs-back .ic { width: 15px; height: 15px; display: block; }
+#comp-logs-name { font-size: 13px; color: var(--ink); font-weight: 500; }
+#comp-logs-trunc { font-size: 11.5px; color: var(--dim); }
+#comp-logs {
+  flex: 1; min-height: 200px; margin: 0; overflow: auto;
+  background: rgba(0, 0, 0, .25); border: 1px solid var(--line);
+  border-radius: 8px; padding: 10px 12px;
+  font-family: var(--mono, monospace); font-size: 12px; line-height: 1.5;
+  color: var(--ink); white-space: pre-wrap; word-break: break-all;
+}
+:root.light #comp-logs { background: rgba(43, 42, 36, .05); }
+
+body.android #comp-body { padding-bottom: calc(20px + env(safe-area-inset-bottom)); }
+body.android #components-view button { min-height: 44px; }
+body.android #components-view input,
+body.android #components-view select,
+body.android #components-view textarea { font-size: 15px; }

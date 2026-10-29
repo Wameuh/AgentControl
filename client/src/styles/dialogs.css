@@ -42,32 +42,79 @@ dialog input, dialog select, dialog textarea {
   background: rgba(236, 230, 216, .07); color: var(--ink);
   border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; font: inherit;
 }
-dialog input:focus, dialog select:focus, dialog textarea:focus { border-color: var(--sand); outline: none; }
+dialog input:focus, dialog select:focus, dialog textarea:focus { border-color: var(--accent); outline: none; }
 dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 0; padding: 0; }
-#c-saved-row { display: flex; gap: 6px; }
-#c-saved-row select { flex: 1; min-width: 0; }
+/* Case à cocher dans un dialogue : les labels sont en colonne par
+   défaut → la case passait sous son texte ; .chk-row réaligne. */
+dialog label.chk-row { flex-direction: row; align-items: center; gap: 10px; cursor: pointer; }
+dialog input[type="checkbox"] {
+  width: 15px; height: 15px; flex: none; margin: 0; padding: 0;
+  border: 0; background: none; accent-color: var(--accent);
+}
+/* dialog input:focus pose outline:none — restaurer un indicateur
+   visible sur la case sinon la navigation clavier est aveugle. */
+dialog input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
 
 #native-list { display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow-y: auto; }
+#log-bar { display: flex; justify-content: flex-end; margin-bottom: 4px; }
+#log-bar select { font-size: 11px; padding: 2px 4px; }
 #log-view {
   max-height: 320px; overflow-y: auto; background: rgba(0, 0, 0, .35);
   border: 1px solid var(--line); border-radius: 10px; padding: 9px;
   font: 11px/1.5 Mono, ui-monospace, monospace; white-space: pre-wrap;
   word-break: break-all; user-select: text; color: var(--muted);
 }
+#log-view .ll-debug { color: var(--dim); }
+#log-view .ll-warn { color: var(--warn); }
+#log-view .ll-error { color: var(--err); }
+#log-view .ll-meta { color: var(--dim); }
 
 /* Spinner */
 .spin::after {
   content: ""; display: inline-block; width: 11px; height: 11px; margin-left: 7px;
-  border: 2px solid var(--dim); border-top-color: var(--sand); border-radius: 50%;
+  border: 2px solid var(--dim); border-top-color: var(--accent); border-radius: 50%;
   animation: rot .7s linear infinite; vertical-align: -2px;
 }
 @keyframes rot { to { transform: rotate(360deg); } }
 
 
-/* Dialogue install/update démon */
-.daemon-dlg { display:flex; gap:12px; align-items:center; padding:6px 0; }
-.spin-ico { display:inline-block; animation: spin 1s linear infinite; font-size:22px; color:var(--sand); }
+/* Dialogue « premier post » : texte intégral scrollable, sélectionnable. */
+#first-meta { color: var(--dim); font-size: 12px; min-height: 1em; }
+#first-body {
+  margin: 0; padding: 10px 12px; max-height: 55vh; overflow-y: auto;
+  background: rgba(236, 230, 216, .05); border: 1px solid var(--line);
+  border-radius: 8px; font-size: 13px; line-height: 1.5; font-family: inherit;
+  white-space: pre-wrap; word-break: break-word; user-select: text;
+}
+
+/* Dialogue install/update démon : spinner + étapes détaillées */
+.daemon-dlg { display:flex; gap:14px; align-items:flex-start; padding:6px 0; }
+.daemon-body { flex:1; min-width:0; }
+.daemon-body p { margin:0 0 10px; }
+#cv-progress-msg { font-size:13px; }
+#cv-progress-steps { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:5px; }
+#cv-progress-steps:empty { display:none; }
+#cv-progress-steps li { display:flex; gap:9px; align-items:baseline; font-size:12.5px; color:var(--dim); }
+#cv-progress-steps li .st-ico { width:15px; flex:none; text-align:center; }
+#cv-progress-steps li .st-ico .ic { width:13px; height:13px; display:inline-block; vertical-align:-2px; }
+#cv-progress-steps li.cur { color:var(--ink); }
+#cv-progress-steps li.cur .st-ico { color:var(--accent); animation:spin 1s linear infinite; display:inline-block; }
+#cv-progress-steps li.done { color:var(--sage); }
+.spin-ico { display:inline-block; animation: spin 1s linear infinite; color:var(--accent); }
+.spin-ico .ic { width: 22px; height: 22px; display: block; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Erreur / statut interne à un dialogue modal (les toasts passent sous
+   le backdrop — les erreurs de flux modaux vivent dans le dialogue) */
+.dlg-err {
+  color: var(--err); font-size: 12.5px; padding: 8px 10px; margin-top: 2px;
+  border: 1px solid rgba(232, 148, 134, .4); border-radius: 8px;
+  background: rgba(232, 148, 134, .08);
+  white-space: pre-wrap; word-break: break-word; user-select: text;
+}
+.dlg-status { color: var(--dim); font-size: 12.5px; }
 
 
 #g-name { width:100%; box-sizing:border-box; background:rgba(236,230,216,.05); color:var(--ink);

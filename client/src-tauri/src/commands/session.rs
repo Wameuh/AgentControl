@@ -3,16 +3,16 @@
 //! pour list_sessions / daemon_status / pr_list.
 
 use anyhow::Result;
-use client_core::Client;
+use client_core::{Client, Level};
 use proto::ReqKind;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::state::{get_conn, AppState};
 
 #[tauri::command]
-pub(crate) async fn call(state: State<'_, AppState>, method: String, params: Value) -> Result<Value, String> {
+pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: String, params: Value) -> Result<Value, String> {
     // Connexion cible : params.conn explicite, sinon connexion par défaut.
     let conn = params.get("conn").and_then(Value::as_str).map(String::from);
     // list_sessions / daemon_status / pr_list : fusion multi-serveurs — en
@@ -68,7 +68,7 @@ pub(crate) async fn call(state: State<'_, AppState>, method: String, params: Val
                 // Le frontend filtre ce marqueur → conn marquée down et
                 // sessions servies depuis le cache au lieu de disparaître.
                 Err(e) => {
-                    client_core::log(format!("{method} {k}: {e:#}"));
+                    client_core::log(Level::Warn, format!("{method} {k}: {e:#}"));
                     all.push(json!({"conn": k, "conn_error": true}));
                 }
             }
@@ -81,8 +81,46 @@ pub(crate) async fn call(state: State<'_, AppState>, method: String, params: Val
         return Ok(out);
     }
     let c = get_conn(&state, conn.as_deref()).await?;
+    // term_open : la pompe de flux PTY s'abonne aux pushes AVANT l'appel —
+    // le démon peut émettre les premiers octets du shell immédiatement.
+    let term_rx = (method == "term_open").then(|| c.pushes.subscribe());
     let req = req_from(&method, params)?;
-    c.call(req).await.map_err(|e| format!("{e:#}"))
+    let v = c.call(req).await.map_err(|e| format!("{e:#}"))?;
+    if let (Some(mut rx), Some(tid)) = (
+        term_rx,
+        v.get("term").and_then(Value::as_str).map(String::from),
+    ) {
+        // Relais term_id → events Tauri `term-data` / `term-exit`. Vit
+        // indépendamment du pump subscribe (rechargements de session).
+        tauri::async_runtime::spawn(async move {
+            loop {
+                let v = match rx.recv().await {
+                    Ok(v) => v,
+                    // Trou de broadcast (bursts) : le flux PTY a sauté —
+                    // tracer le gap dans le terminal plutôt que rien.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        use base64::Engine;
+                        json!({"push":"term_data","term":tid,
+                               "data": base64::engine::general_purpose::STANDARD
+                                   .encode("\r\n\x1b[31m[données perdues]\x1b[0m\r\n")})
+                    }
+                    Err(_) => break,
+                };
+                if v.get("term").and_then(Value::as_str) != Some(tid.as_str()) {
+                    continue;
+                }
+                let ev = match v.get("push").and_then(Value::as_str) {
+                    Some("term_data") => "term-data",
+                    Some("term_exit") => "term-exit",
+                    _ => continue,
+                };
+                if app.emit(ev, &v).is_err() || ev == "term-exit" {
+                    break;
+                }
+            }
+        });
+    }
+    Ok(v)
 }
 
 fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
@@ -101,6 +139,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             model: so("model"),
             mode: so("mode"),
             prompt: so("prompt"),
+            origin: so("origin"),
         },
         "resume_session" => ReqKind::ResumeSession {
             session: s("session"),
@@ -125,8 +164,16 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         "events" => ReqKind::Events {
             session: s("session"),
             before_seq: p.get("before_seq").and_then(Value::as_u64),
+            after_seq: p.get("after_seq").and_then(Value::as_u64),
             limit: p.get("limit").and_then(Value::as_u64).unwrap_or(200) as u32,
         },
+        "search_events" => ReqKind::SearchEvents {
+            session: s("session"),
+            query: s("query"),
+            before_seq: p.get("before_seq").and_then(Value::as_u64),
+            limit: p.get("limit").and_then(Value::as_u64).unwrap_or(30) as u32,
+        },
+        "first_post" => ReqKind::FirstPost { session: s("session") },
         "cancel" => ReqKind::Cancel { session: s("session") },
         "set_mode" => ReqKind::SetMode { session: s("session"), mode: s("mode") },
         "set_model" => ReqKind::SetModel { session: s("session"), model: s("model") },
@@ -151,9 +198,30 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             session: s("session"),
             path: s("path"),
             binary: p.get("binary").and_then(Value::as_bool).unwrap_or(false),
+            offset: p.get("offset").and_then(Value::as_u64).unwrap_or(0),
+            limit: p.get("limit").and_then(Value::as_u64),
+        },
+        "write_file" => ReqKind::WriteFile {
+            session: s("session"),
+            path: s("path"),
+            offset: p.get("offset").and_then(Value::as_u64).unwrap_or(0),
+            delete_len: p.get("delete_len").and_then(Value::as_u64).unwrap_or(0),
+            data: s("data"),
+            if_mtime_ms: p.get("if_mtime_ms").and_then(Value::as_u64),
         },
         "list_dir" => ReqKind::ListDir { session: s("session"), path: s("path") },
+        "find_files" => ReqKind::FindFiles {
+            session: s("session"),
+            path: s("path"),
+            query: s("query"),
+            limit: p.get("limit").and_then(Value::as_u64).map(|v| v as u32),
+        },
         "delete_path" => ReqKind::DeletePath { session: s("session"), path: s("path") },
+        "create_path" => ReqKind::CreatePath {
+            session: s("session"),
+            path: s("path"),
+            dir: p.get("dir").and_then(Value::as_bool).unwrap_or(false),
+        },
         "download_path" => ReqKind::DownloadPath {
             session: s("session"),
             path: s("path"),
@@ -180,6 +248,10 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             session: so("session"),
             repo: s("repo"),
             pr: p.get("pr").and_then(Value::as_u64).unwrap_or(0),
+            forge: so("forge"),
+            host: so("host"),
+            change_id: so("change_id"),
+            url: so("url"),
             branch: so("branch"),
             title: so("title"),
             status: so("status"),
@@ -188,9 +260,52 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         "pr_untrack" => ReqKind::PrUntrack {
             repo: s("repo"),
             pr: p.get("pr").and_then(Value::as_u64).unwrap_or(0),
+            forge: so("forge"),
+            host: so("host"),
+            change_id: so("change_id"),
         },
+        "forge_list" => ReqKind::ForgeList {},
+        // Composants managés (docs/components-integration.md §2.3) —
+        // gate capability daemon_status.components côté frontend.
+        "list_components" => ReqKind::ListComponents,
+        "component_info" => ReqKind::ComponentInfo { name: s("name") },
+        "component_query" => ReqKind::ComponentQuery { name: s("name"), query: s("query") },
+        "component_start" => ReqKind::ComponentStart { name: s("name") },
+        "component_stop" => ReqKind::ComponentStop { name: s("name") },
+        "component_restart" => ReqKind::ComponentRestart { name: s("name") },
+        "component_logs" => ReqKind::ComponentLogs {
+            name: s("name"),
+            offset: p.get("offset").and_then(Value::as_u64),
+            limit: p.get("limit").and_then(Value::as_u64),
+        },
+        "component_upsert" => ReqKind::ComponentUpsert {
+            name: s("name"),
+            spec: p
+                .get("spec")
+                .cloned()
+                .and_then(|v| serde_json::from_value(v).ok())
+                .ok_or("component_upsert: spec absente ou invalide")?,
+        },
+        "component_remove" => ReqKind::ComponentRemove { name: s("name") },
+        "component_catalog" => ReqKind::ComponentCatalog {
+            refresh: p.get("refresh").and_then(Value::as_bool),
+        },
+        "component_install" => ReqKind::ComponentInstall { name: s("name") },
+        "term_open" => ReqKind::TermOpen {
+            session: s("session"),
+            cols: p.get("cols").and_then(Value::as_u64).unwrap_or(0) as u16,
+            rows: p.get("rows").and_then(Value::as_u64).unwrap_or(0) as u16,
+        },
+        "term_input" => ReqKind::TermInput { term: s("term"), data: s("data") },
+        "term_resize" => ReqKind::TermResize {
+            term: s("term"),
+            cols: p.get("cols").and_then(Value::as_u64).unwrap_or(0) as u16,
+            rows: p.get("rows").and_then(Value::as_u64).unwrap_or(0) as u16,
+        },
+        "term_close" => ReqKind::TermClose { term: s("term") },
         "kill_session" => ReqKind::KillSession { session: s("session") },
         "clear_session" => ReqKind::ClearSession { session: s("session") },
+        "sleep_session" => ReqKind::SleepSession { session: s("session") },
         "fork_session" => ReqKind::ForkSession { session: s("session") },
         "peer_send" => ReqKind::PeerSend {
             from: s("from"),

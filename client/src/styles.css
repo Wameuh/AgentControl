@@ -8,4 +8,8 @@
 @import "./styles/chat.css";    /* conversation, messages, tools, composer, badges */
 @import "./styles/dialogs.css"; /* dialogs, menus contextuels, spinners */
 @import "./styles/files.css";   /* panneau + explorateur de fichiers, viewer */
+@import "./styles/map.css";     /* vue diagramme composants/sessions */
+@import "./styles/term.css";    /* panneau terminal PTY (xterm.js) */
+@import "./styles/components.css"; /* panneau composants managés (§2.6) */
 @import "./styles/mobile.css";  /* Android : bottom sheets, drawer, tactile */
+@import "./styles/web.css";     /* navigateur : chrome masqué + modale token */

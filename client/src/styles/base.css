@@ -32,17 +32,24 @@
   --panel: rgba(13, 19, 15, .82);
   --panel-solid: #161c18;
   --accent: var(--sand);
+  --accent-rgb: 205, 182, 140;
   --ok: var(--sage);
   --warn: var(--gold);
   --err: var(--red);
   --border: var(--line);
-  --msg-user-bg: var(--sand);
+  --msg-user-bg: var(--accent);
   --msg-user-fg: #1a1d16;
   --msg-user-link: #5b3f7d;
   --radius: 14px;
 }
 
 * { box-sizing: border-box; }
+/* <a> et <img> sont draggables nativement : un drag accidentel qui
+   finit mal (drop refusé, source détachée en plein vol) laisse le
+   curseur "grabbing" collé sous WebKitGTK/Wayland — sans recours
+   possible côté web. Aucun drag de lien/image n'est voulu dans l'app
+   (seule la ligne de session, draggable explicite) → désarmés ici. */
+a, img { -webkit-user-drag: none; }
 html, body, #app { height: 100%; margin: 0; }
 body {
   color: var(--ink);
@@ -68,7 +75,8 @@ body {
   --glass: rgba(233, 229, 216, .72);
   --panel: rgba(240, 237, 228, .85);
   --panel-solid: #efece2;
-  --msg-user-bg: var(--sand);
+  --accent-rgb: 138, 111, 62;
+  --msg-user-bg: var(--accent);
   --msg-user-fg: #f5f1e4;
   --msg-user-link: #dccdf0;
 }
@@ -76,8 +84,64 @@ body {
 :root.light .msg.agent { background: rgba(107, 77, 140, .08); border-color: rgba(107, 77, 140, .3); }
 :root.light button { background: rgba(43, 42, 36, .05); }
 
+/* Couleur d'accent — dimension orthogonale à dark/light : la classe
+   :root.theme-<c> remappe --accent (+ --accent-rgb pour les teintes rgba()
+   et --msg-user-* pour la bulle utilisateur). « sauge » = défaut (valeurs
+   :root, famille khaki/olive de la gemme neutre). Les vars gemme
+   --sage/--gold/--violet/--red gardent leur sens d'état (badges, dots,
+   toasts) — l'accent ne les réassigne pas. Sombre : accent clair + bulle
+   à texte foncé ; clair : accent soutenu + bulle à texte clair. */
+:root.theme-gold {
+  --accent: #e0c996; --accent-rgb: 224, 201, 150;
+  --msg-user-fg: #1a1d16; --msg-user-link: #5b3f7d;
+}
+:root.theme-grey {
+  /* Slate froid, plus clair que --muted/--dim pour rester distinct. */
+  --accent: #c6cdd5; --accent-rgb: 198, 205, 213;
+  --msg-user-fg: #1a1d16; --msg-user-link: #3f4a63;
+}
+:root.theme-violet {
+  --accent: #c4a9dc; --accent-rgb: 196, 169, 220;
+  --msg-user-fg: #1a1d16; --msg-user-link: #4b395f;
+}
+:root.theme-red {
+  /* Saumon éclairci — lisible sur fond sombre sans copier --err. */
+  --accent: #f2a79a; --accent-rgb: 242, 167, 154;
+  --msg-user-fg: #1a1d16; --msg-user-link: #70313a;
+}
+:root.light.theme-gold {
+  /* Ambre soutenu, distinct du sable olive #8a6f3e. */
+  --accent: #8a6a1a; --accent-rgb: 138, 106, 26;
+  --msg-user-fg: #f5f1e4; --msg-user-link: #e6d8f5;
+}
+:root.light.theme-grey {
+  --accent: #5d6b78; --accent-rgb: 93, 107, 120;
+  --msg-user-fg: #f5f1e4; --msg-user-link: #d7e3f2;
+}
+:root.light.theme-violet {
+  --accent: #6b4d8c; --accent-rgb: 107, 77, 140;
+  --msg-user-fg: #f5f1e4; --msg-user-link: #dccdf0;
+}
+:root.light.theme-red {
+  /* Brique foncée — contraste sur papier, distincte de --err. */
+  --accent: #a03d33; --accent-rgb: 160, 61, 51;
+  --msg-user-fg: #f5f1e4; --msg-user-link: #f4d3d6;
+}
 
-::selection { background: var(--sand); color: var(--bg); }
+::selection { background: var(--accent); color: var(--bg); }
 ::-webkit-scrollbar { width: 9px; }
 ::-webkit-scrollbar-thumb { background: rgba(236, 230, 216, .16); border-radius: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* Icônes SVG inline (ui/icons.ts) — remplacent les glyphes Unicode dont le
+   rendu dépendait des fonts système (fallback incohérent, bascule emoji).
+   1em suit la taille du contexte ; -0.18em aligne sur la ligne de base. */
+.ic {
+  width: 1em; height: 1em; flex: none;
+  display: inline-block; vertical-align: -0.18em;
+}
+/* Boutons « icône seule » du markup statique : centrés par construction. */
+[data-icon] { display: inline-flex; align-items: center; justify-content: center; }
+[data-icon] .ic { display: block; vertical-align: 0; }
+/* Carets de dépliage : rotation animée à l'ouverture. */
+.ic-caret { transition: transform .15s ease; }

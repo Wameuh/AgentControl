@@ -9,31 +9,43 @@
   <body>
     <canvas id="mesh-bg"></canvas>
     <div id="app">
-      <div id="titlebar" data-tauri-drag-region>
-        <button id="tb-menu" hidden data-i18n-title="menu_title" title="Menu">☰</button>
+      <div id="titlebar">
+        <button id="tb-menu" hidden data-icon="menu" data-i18n-title="menu_title" title="Menu"></button>
         <span id="titlebar-gem"></span>
         <span id="titlebar-title">AgentControl</span>
         <div class="tb-btns">
-          <button id="tb-settings" title="Settings" data-i18n-title="settings_title">⚙</button>
-          <button id="tb-about" title="About" data-i18n-title="about_title">ⓘ</button>
-          <button id="tb-more" hidden data-i18n-title="menu_title" title="Menu">⋮</button>
-          <button id="tb-min" title="—">—</button>
-          <button id="tb-max" title="▢">▢</button>
-          <button id="tb-close" title="✕">✕</button>
+          <button id="tb-map" data-icon="map" title="Map" data-i18n-title="map_title"></button>
+          <button id="tb-components" hidden data-icon="tool" title="Components" data-i18n-title="comp_h"></button>
+          <button id="tb-settings" data-icon="settings" title="Settings" data-i18n-title="settings_title"></button>
+          <button id="tb-about" data-icon="info" title="About" data-i18n-title="about_title"></button>
+          <button id="tb-more" hidden data-icon="more" data-i18n-title="menu_title" title="Menu"></button>
+          <button id="tb-min" data-icon="min" data-i18n-title="win_min" title="Minimize"></button>
+          <button id="tb-max" data-icon="max" data-i18n-title="win_max" title="Maximize"></button>
+          <button id="tb-close" data-icon="close" data-i18n-title="close" title="Close"></button>
         </div>
       </div>
       <div id="app-body">
         <aside id="sidebar">
           <div id="conn-bar">
             <button id="btn-connect" data-i18n="new_conn">New connection</button>
-            <button id="conn-chip" class="badge warn" hidden>⟳</button>
+            <button id="conn-chip" class="badge warn" hidden data-icon="refresh"></button>
+          </div>
+          <div id="side-view" role="tablist">
+            <button id="sv-agents" class="sv on" role="tab" data-i18n-title="view_agents_title" title="Agent sessions"><span class="sv-ic" data-icon="bot"></span><span data-i18n="view_agents">Agents</span></button>
+            <button id="sv-repos" class="sv" role="tab" data-i18n-title="view_repos_title" title="Pull requests"><span class="sv-ic" data-icon="pr"></span><span data-i18n="view_repos">Repos</span><span id="sv-count" hidden></span></button>
+            <button id="sv-backlog" class="sv" role="tab" data-i18n-title="view_backlog_title" title="Backlog"><span class="sv-ic" data-icon="backlog"></span><span data-i18n="view_backlog">Backlog</span><span id="sv-bcount" hidden></span></button>
+          </div>
+          <div id="sess-filter">
+            <input id="sess-filter-input" data-i18n-ph="sess_filter_ph" data-i18n-title="sess_filter_title" placeholder="Filter sessions…" />
+            <button id="sess-filter-clear" hidden data-icon="close" data-i18n-title="sess_filter_clear" title="Clear the filter"></button>
           </div>
           <div id="session-list"></div>
-          <button id="btn-new-session" data-i18n="new_session">New agent</button>
+          <div id="pr-list" hidden></div>
+          <div id="backlog-list" hidden></div>
+          <button id="btn-new-session"><span data-icon="user-plus"></span><span data-i18n="new_session">New agent</span></button>
           <div id="sidebar-resize" title="Drag to resize"></div>
         </aside>
         <main id="chat">
-          <div id="err-bar" hidden><span id="err-text"></span><button id="err-close">✕</button></div>
           <header id="chat-header">
             <span id="chat-gem" hidden></span>
             <span id="chat-title" data-i18n-title="title_dblclick">—</span>
@@ -43,32 +55,77 @@
               <select id="mode-select" hidden></select>
               <select id="model-select" hidden></select>
               <select id="effort-select" hidden data-i18n-title="effort_title" title="Effort"></select>
-              <button id="btn-fusion-edit" hidden title="Configure fusion">⚙✨</button>
+              <button id="btn-fusion-edit" hidden data-icon="merge" title="Configure fusion"></button>
               <input id="model-free" hidden data-i18n-ph="model_free_ph" data-i18n-title="model_free_title" placeholder="model…" />
               <span id="dyn-opts"></span>
             </div>
-            <button id="btn-files" hidden data-i18n-title="files_title" title="Files">📁</button>
-            <button id="btn-refresh" data-i18n-title="refresh_title" title="Reload">⟳</button>
+            <button id="btn-search" hidden data-icon="search" data-i18n-title="search_title" title="Search"></button>
+            <button id="btn-first" hidden data-icon="top" data-i18n-title="first_post" title="First post"></button>
+            <button id="btn-term" hidden data-icon="terminal" data-i18n-title="term_title" title="Terminal"></button>
+            <button id="btn-files" hidden data-icon="folder" data-i18n-title="files_title" title="Files"></button>
+            <button id="btn-refresh" data-icon="refresh" data-i18n-title="refresh_title" title="Reload"></button>
             <button id="btn-resume" hidden data-i18n="resume">Resume</button>
+            <button id="btn-sleep" hidden data-i18n="ctx_sleep">Sleep</button>
             <button id="btn-cancel" hidden data-i18n="stop">Stop</button>
-            <button id="chat-more" hidden data-i18n-title="menu_title" title="Menu">⋮</button>
+            <button id="chat-more" hidden data-icon="more" data-i18n-title="menu_title" title="Menu"></button>
           </header>
+          <div id="search-wrap" hidden>
+            <div id="search-bar">
+              <input id="search-input" data-i18n-ph="search_ph" placeholder="Search history…" />
+              <span id="search-count"></span>
+              <button id="search-prev" data-icon="up" data-i18n-title="search_prev" title="Previous"></button>
+              <button id="search-next" data-icon="down" data-i18n-title="search_next" title="Next"></button>
+              <button id="search-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </div>
+            <div id="search-results" hidden></div>
+          </div>
           <div id="events">
             <div id="scroll-sentinel"></div>
+            <div id="empty-state" hidden>
+              <span class="load-gem" id="empty-gem"></span>
+              <div id="empty-h"></div>
+              <div id="empty-txt"></div>
+              <button id="empty-cta" hidden></button>
+            </div>
           </div>
-          <button id="btn-bottom" hidden data-i18n-title="bottom_title" title="Latest">↓</button>
+          <button id="btn-bottom" hidden data-icon="down" data-i18n-title="bottom_title" title="Latest"></button>
           <div id="queue-bar" hidden></div>
+          <div id="queue-panel" hidden>
+            <header id="qp-head">
+              <span id="qp-title" data-i18n="queue_panel_title">Queued prompts</span>
+              <span id="qp-count" class="badge"></span>
+              <button id="qp-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <div id="qp-list"></div>
+          </div>
+          <div id="term-panel" hidden>
+            <div id="term-resize" data-i18n-title="term_drag" title="Drag to resize"></div>
+            <header id="term-head">
+              <span id="term-title" data-i18n="term_title">Terminal</span>
+              <span id="term-cwd"></span>
+              <button id="btn-term-restart" data-icon="refresh" data-i18n-title="term_new" title="New shell"></button>
+              <button id="btn-term-hide" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <div id="term-box"></div>
+          </div>
           <footer id="composer">
             <div id="cmd-ac" hidden></div>
-            <textarea id="input" data-i18n-ph="input_ph" placeholder="Message… (Enter = send)" rows="2"></textarea>
-            <button id="btn-steer" hidden data-i18n-title="steer_title" title="Steer">↪</button>
+            <div id="attach-bar" hidden></div>
+            <div id="drop-hint" data-i18n="att_drop" hidden>Drop files to attach</div>
+            <button id="btn-attach" hidden data-icon="plus" data-i18n-title="att_add" title="Attach file"></button>
+            <input id="attach-pick" type="file" multiple hidden>
+            <div id="input-wrap">
+              <textarea id="input" data-i18n-ph="input_ph" placeholder="Message… (Enter = send)" rows="2"></textarea>
+              <button id="btn-expand" type="button" hidden></button>
+            </div>
+            <button id="btn-alt" hidden data-icon="steer" data-i18n-title="steer_title" title="Steer"></button>
             <button id="btn-send" data-i18n="send">Send</button>
           </footer>
           <div id="settings-view" tabindex="-1" hidden>
             <header id="settings-head">
               <span id="settings-title" data-i18n="settings_h">Settings</span>
               <span id="s-version"></span>
-              <button id="settings-close" data-i18n-title="close" title="Close">✕</button>
+              <button id="settings-close" data-icon="close" data-i18n-title="close" title="Close"></button>
             </header>
             <div id="settings-body">
               <label class="s-row"><span data-i18n="theme_label">Theme</span>
@@ -76,6 +133,19 @@
                   <option value="dark" data-i18n="theme_dark">Dark</option>
                   <option value="light" data-i18n="theme_light">Light</option>
                 </select>
+              </label>
+              <label class="s-row"><span data-i18n="s-accent">Accent color</span>
+                <select id="s-accent">
+                  <option value="sage" data-i18n="accent_sage">Sage</option>
+                  <option value="gold" data-i18n="accent_gold">Golden</option>
+                  <option value="grey" data-i18n="accent_grey">Grey</option>
+                  <option value="violet" data-i18n="accent_violet">Violet</option>
+                  <option value="red" data-i18n="accent_red">Red</option>
+                </select>
+              </label>
+              <label class="s-row chk" id="s-bganim-row">
+                <input type="checkbox" id="s-bganim" checked />
+                <span data-i18n="s-bg-anim">Animated background</span>
               </label>
               <label class="s-row"><span data-i18n="lang_label">Language</span>
                 <select id="s-lang">
@@ -97,10 +167,216 @@
                 <input type="checkbox" id="s-images" checked />
                 <span data-i18n="images_label">Inline images</span>
               </label>
+              <label class="s-row chk">
+                <input type="checkbox" id="s-rcchan" />
+                <span data-i18n="rcchan_label">Also offer release candidates (rc)</span>
+              </label>
+              <label class="s-row"><span data-i18n="enc_label">File encoding</span>
+                <select id="s-encoding">
+                  <option value="utf-8">UTF-8</option>
+                  <option value="windows-1252">Windows-1252 / Latin-1</option>
+                  <option value="utf-16le">UTF-16 LE</option>
+                  <option value="utf-16be">UTF-16 BE</option>
+                </select>
+              </label>
+              <label class="s-row chk">
+                <input type="checkbox" id="s-snd" checked />
+                <span data-i18n="sounds_label">Sound alerts</span>
+              </label>
+              <div id="s-snd-opts">
+                <div class="s-row s-snd-opt">
+                  <input type="checkbox" id="s-snd-done" checked />
+                  <label for="s-snd-done" data-i18n="sounds_done">Turn finished</label>
+                  <button type="button" class="s-test" id="s-snd-test-done" data-i18n="sounds_test">Test</button>
+                </div>
+                <div class="s-row s-snd-opt">
+                  <input type="checkbox" id="s-snd-question" checked />
+                  <label for="s-snd-question" data-i18n="sounds_question">Question / permission</label>
+                  <button type="button" class="s-test" id="s-snd-test-question" data-i18n="sounds_test">Test</button>
+                </div>
+                <div class="s-row s-snd-opt">
+                  <input type="checkbox" id="s-snd-error" checked />
+                  <label for="s-snd-error" data-i18n="sounds_error">Error / dead session</label>
+                  <button type="button" class="s-test" id="s-snd-test-error" data-i18n="sounds_test">Test</button>
+                </div>
+                <label class="s-row chk s-snd-opt">
+                  <input type="checkbox" id="s-snd-unfocused" />
+                  <span data-i18n="sounds_unfocused">Only when the window is not focused</span>
+                </label>
+                <div class="s-row s-snd-opt"><span data-i18n="sounds_vol">Volume</span>
+                  <input type="range" id="s-snd-vol" min="0" max="100" step="5" />
+                </div>
+              </div>
               <div class="s-row" id="s-update-row">
                 <button id="s-checkupdate" type="button" data-i18n="check_update">Check for updates</button>
                 <span id="s-update-status"></span>
                 <button id="s-doupdate" type="button" hidden data-i18n="update_now">Update now</button>
+              </div>
+            </div>
+          </div>
+          <div id="conn-view" tabindex="-1" hidden>
+            <header id="connview-head">
+              <span id="connview-title" data-i18n="conn_h">Connect to daemon</span>
+              <button id="connview-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <div id="connview-body">
+              <section id="cv-saved-sec" hidden>
+                <h4 data-i18n="recent">Recent connections</h4>
+                <ul id="cv-saved"></ul>
+              </section>
+              <section id="cv-progress" hidden>
+                <div class="daemon-dlg">
+                  <span class="spin-ico" data-icon="loader"></span>
+                  <div class="daemon-body">
+                    <p id="cv-progress-msg"></p>
+                    <ul id="cv-progress-steps"></ul>
+                  </div>
+                </div>
+                <button type="button" id="cv-progress-bg" data-i18n="run_bg">Run in background</button>
+              </section>
+              <div id="c-status" class="dlg-status" hidden></div>
+              <div id="c-err" class="dlg-err" role="alert" hidden></div>
+              <section id="cv-form-sec">
+                <h4 id="cv-form-title" data-i18n="new_conn">New connection</h4>
+                <label><span data-i18n="type_label">Type</span>
+                  <select id="c-kind">
+                    <option value="local" data-i18n="local_sock">Local socket</option>
+                    <option value="ssh" data-i18n="ssh_label">SSH (remote server)</option>
+                    <option value="tcp" data-i18n="tcp_label">Direct TCP</option>
+                  </select>
+                </label>
+                <label id="c-native-wrap" class="chk-row">
+                  <input type="checkbox" id="c-native" />
+                  <span data-i18n="ssh_native_label">Native SSH (russh)</span>
+                </label>
+                <label><span data-i18n="host_label">Host</span> <input id="c-host" list="ssh-hosts" data-i18n-ph="host_ph" placeholder="user@server" /></label>
+                <datalist id="ssh-hosts"></datalist>
+                <label class="nat-row"><span data-i18n="ssh_port_label">SSH port</span> <input id="c-sport" type="number" value="22" /></label>
+                <label class="nat-row"><span data-i18n="user_label">User</span> <input id="c-user" data-i18n-ph="user_ph" placeholder="(user@host if blank)" /></label>
+                <label class="nat-row"><span data-i18n="password_label">Password</span> <input id="c-pass" type="password" data-i18n-ph="password_ph" placeholder="(key preferred)" /></label>
+                <label><span data-i18n="port_label">Remote daemon port</span> <input id="c-port" type="number" value="7331" /></label>
+                <label id="c-args-wrap"><span data-i18n="ssh_args_label">SSH args</span> <input id="c-args" data-i18n-ph="ssh_args_ph" placeholder="-i ~/.ssh/key -p 22" /></label>
+                <label><span data-i18n="conn_color">Connection color</span>
+                  <select id="c-accent">
+                    <option value="" data-i18n="conn_color_auto">App accent (default)</option>
+                    <option value="sage" data-i18n="accent_sage">Sage</option>
+                    <option value="gold" data-i18n="accent_gold">Golden</option>
+                    <option value="grey" data-i18n="accent_grey">Grey</option>
+                    <option value="violet" data-i18n="accent_violet">Violet</option>
+                    <option value="red" data-i18n="accent_red">Red</option>
+                  </select>
+                </label>
+                <div id="c-pubkey-box" class="nat-row" hidden>
+                  <span data-i18n="pubkey_label">App public key (server authorized_keys)</span>
+                  <pre id="c-pubkey"></pre>
+                  <button id="c-pubkey-copy" type="button" data-i18n="copy">Copy</button>
+                </div>
+                <div class="cv-actions">
+                  <button type="button" id="cv-form-reset" data-i18n="cancel" hidden>Cancel</button>
+                  <button id="c-go" data-i18n="connect">Connect</button>
+                </div>
+              </section>
+              <details id="cv-logs">
+                <summary data-i18n="logs">Logs</summary>
+                <div id="log-bar">
+                  <select id="log-level" data-i18n-title="log_level" title="Minimum level">
+                    <option value="debug">DEBUG</option>
+                    <option value="info" selected>INFO</option>
+                    <option value="warn">WARN</option>
+                    <option value="error">ERROR</option>
+                  </select>
+                </div>
+                <pre id="log-view"></pre>
+              </details>
+            </div>
+          </div>
+          <div id="map-view" tabindex="-1" hidden>
+            <header id="map-head">
+              <span id="map-h" data-i18n="map_title">Map</span>
+              <span id="map-stats"></span>
+              <button id="map-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <div id="map-body">
+              <svg id="map-svg"></svg>
+              <div id="map-legend">
+                <span><i class="lg-dot st-working"></i><b data-i18n="map_leg_working">working</b></span>
+                <span><i class="lg-dot st-waiting_input"></i><b data-i18n="map_leg_wait">waiting</b></span>
+                <span><i class="lg-dot st-idle"></i><b data-i18n="map_leg_idle">idle</b></span>
+                <span><i class="lg-dot st-dead"></i><b data-i18n="map_leg_dead">dead</b></span>
+                <span><i class="lg-flow"></i><b data-i18n="map_leg_flow">active flow</b></span>
+              </div>
+              <div id="map-info" hidden></div>
+            </div>
+          </div>
+          <div id="components-view" tabindex="-1" hidden>
+            <header id="comp-head">
+              <span id="comp-title" data-i18n="comp_h">Components</span>
+              <div id="comp-tabs" role="tablist">
+                <button type="button" id="comp-tab-list" class="comp-tab on" role="tab" data-i18n="comp_tab_list">Installed</button>
+                <button type="button" id="comp-tab-cat" class="comp-tab" role="tab" data-i18n="comp_tab_catalog">Catalog</button>
+              </div>
+              <span class="comp-sp"></span>
+              <button type="button" id="comp-add" data-icon="plus" data-i18n-title="comp_add" title="New component"></button>
+              <button type="button" id="comp-refresh" data-icon="refresh" data-i18n-title="comp_refresh" title="Refresh"></button>
+              <button type="button" id="comp-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <div id="comp-body">
+              <div id="comp-err" class="dlg-err" role="alert" hidden></div>
+              <div id="comp-list"></div>
+              <div id="comp-catalog" hidden></div>
+              <div id="comp-editor" hidden>
+                <h4 id="comp-ed-title"></h4>
+                <div id="comp-ed-form">
+                  <label><span data-i18n="comp_f_name">Name</span> <input id="ce-name" autocomplete="off" spellcheck="false" /></label>
+                  <label><span data-i18n="comp_f_kind">Kind</span>
+                    <select id="ce-kind">
+                      <option value="process">process</option>
+                      <option value="external">external</option>
+                      <option value="tool">tool</option>
+                    </select>
+                  </label>
+                  <label><span data-i18n="comp_f_desc">Description</span> <input id="ce-desc" autocomplete="off" /></label>
+                  <label class="ce-f-cmd"><span data-i18n="comp_f_cmd">Command (one arg per line)</span> <textarea id="ce-cmd" rows="3" spellcheck="false"></textarea></label>
+                  <label class="ce-f-env"><span data-i18n="comp_f_env">Environment (KEY=VALUE per line)</span> <textarea id="ce-env" rows="3" spellcheck="false"></textarea></label>
+                  <label class="ce-f-cwd"><span data-i18n="workdir">Working directory</span> <input id="ce-cwd" autocomplete="off" spellcheck="false" /></label>
+                  <label class="ce-f-autostart chk-row">
+                    <input type="checkbox" id="ce-autostart" />
+                    <span data-i18n="comp_f_autostart">Start with the daemon</span>
+                  </label>
+                  <label class="ce-f-restart"><span data-i18n="comp_f_restart">Restart policy</span>
+                    <select id="ce-restart">
+                      <option value="on-failure">on-failure</option>
+                      <option value="always">always</option>
+                      <option value="never">never</option>
+                    </select>
+                  </label>
+                  <label class="ce-f-rsec"><span data-i18n="comp_f_restart_sec">Restart delay (s)</span> <input id="ce-rsec" type="number" min="0" max="60" /></label>
+                  <label><span data-i18n="comp_f_hc">Healthcheck</span>
+                    <select id="ce-hc">
+                      <option value="none">none</option>
+                      <option value="process">process</option>
+                      <option value="tcp">tcp</option>
+                      <option value="http">http</option>
+                      <option value="command">command</option>
+                    </select>
+                  </label>
+                  <label class="ce-f-hc-tcp"><span data-i18n="comp_f_hc_addr">TCP address</span> <input id="ce-hc-addr" placeholder="127.0.0.1:8080" autocomplete="off" spellcheck="false" /></label>
+                  <label class="ce-f-hc-http"><span data-i18n="comp_f_hc_url">HTTP URL</span> <input id="ce-hc-url" placeholder="http://127.0.0.1:8080/health" autocomplete="off" spellcheck="false" /></label>
+                  <label class="ce-f-hc-cmd"><span data-i18n="comp_f_hc_argv">Probe command (one arg per line)</span> <textarea id="ce-hc-argv" rows="2" spellcheck="false"></textarea></label>
+                  <div class="cv-actions">
+                    <button type="button" id="ce-del" class="danger" hidden data-i18n="delete">Delete</button>
+                    <button type="button" id="ce-cancel" data-i18n="cancel">Cancel</button>
+                    <button type="button" id="ce-save" data-i18n="comp_save">Save</button>
+                  </div>
+                </div>
+              </div>
+              <div id="comp-logs-view" hidden>
+                <div id="comp-logs-bar">
+                  <button type="button" id="comp-logs-back" data-icon="back" data-i18n-title="comp_back" title="Back"></button>
+                  <span id="comp-logs-name"></span>
+                  <span id="comp-logs-trunc" hidden></span>
+                </div>
+                <pre id="comp-logs"></pre>
               </div>
             </div>
           </div>
@@ -109,18 +385,45 @@
           <div id="file-resize" title="Drag to resize"></div>
           <header id="file-head">
             <span id="file-path"></span>
-            <button id="btn-tree" data-i18n-title="tree_title" title="File tree">🗂</button>
-            <button id="btn-tree-refresh" hidden data-i18n-title="tree_refresh" title="Refresh">⟳</button>
-            <button id="file-close">✕</button>
+            <button id="btn-tree" data-icon="panel" data-i18n-title="tree_title" title="File tree"></button>
+            <button id="btn-tree-refresh" hidden data-icon="refresh" data-i18n-title="tree_refresh" title="Refresh"></button>
+            <button id="file-close" data-icon="close"></button>
           </header>
           <div id="file-body">
-            <div id="file-tree" hidden></div>
+            <div id="ft-side" hidden>
+              <div id="ft-bar">
+                <span id="ft-ico" data-icon="search"></span>
+                <input id="ft-q" data-i18n-ph="file_search_ph" data-i18n-title="file_search_ph" placeholder="Search files…" autocomplete="off" spellcheck="false" />
+              </div>
+              <div id="file-tree"></div>
+              <div id="file-hits" hidden></div>
+            </div>
             <div id="file-viewer">
               <div id="fv-bar">
-                <button id="fv-back" data-i18n-title="menu_title" title="Back">‹</button>
+                <button id="fv-back" data-icon="back" data-i18n-title="menu_title" title="Back"></button>
                 <span id="fv-name"></span>
+                <span id="fv-status"></span>
+                <span class="fv-spacer"></span>
+                <button id="fv-loadall" hidden data-i18n="fv_loadall">load all</button>
+                <select id="fv-enc" title="Encoding"></select>
+                <button id="fv-md" hidden data-icon="code" data-i18n-title="md_view" title="Rendered"></button>
+                <button id="fv-edit" hidden data-icon="edit" data-i18n-title="fv_edit_title" title="Edit"></button>
+                <button id="fv-save" hidden data-icon="check" data-i18n-title="fv_save_title" title="Save"></button>
+              </div>
+              <div id="fv-conflict" hidden>
+                <span id="fv-conflict-msg" data-i18n="conflict_msg">changed on disk</span>
+                <button id="fv-reload" data-i18n="conflict_reload">Reload</button>
+                <button id="fv-overwrite" data-i18n="conflict_overwrite">Overwrite</button>
               </div>
               <pre id="file-view" class="syn"></pre>
+              <div id="file-md" class="md" hidden></div>
+              <div id="file-edwrap" hidden>
+                <pre id="file-nums" aria-hidden="true"></pre>
+                <div id="file-edscroll">
+                  <pre id="file-hl" class="syn" aria-hidden="true"></pre>
+                  <textarea id="file-edit" wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
+                </div>
+              </div>
             </div>
           </div>
         </aside>
@@ -149,49 +452,11 @@
         <datalist id="model-list"></datalist>
         <label><span data-i18n="attach_label">Resume native ID</span> <input id="f-attach" data-i18n-ph="attach_ph" placeholder="(optional)" /></label>
         <label><span data-i18n="prompt_label">Initial message</span> <textarea id="f-prompt" rows="3"></textarea></label>
+        <div id="f-status" class="dlg-status" role="status" hidden></div>
+        <div id="f-err" class="dlg-err" role="alert" hidden></div>
         <menu>
           <button type="button" id="f-cancel" data-i18n="cancel">Cancel</button>
           <button id="f-create" value="default" data-i18n="create">Create</button>
-        </menu>
-      </form>
-    </dialog>
-
-    <dialog id="dlg-conn">
-      <form method="dialog">
-        <h3 data-i18n="conn_h">Connect to daemon</h3>
-        <label><span data-i18n="recent">Recent connections</span>
-          <span id="c-saved-row">
-            <select id="c-saved"><option value="">— choose —</option></select>
-            <button type="button" id="c-saved-del" data-i18n-title="del_saved_conn" title="Remove">✕</button>
-          </span>
-        </label>
-        <label><span data-i18n="type_label">Type</span>
-          <select id="c-kind">
-            <option value="local" data-i18n="local_sock">Local socket</option>
-            <option value="ssh" data-i18n="ssh_label">SSH (remote server)</option>
-            <option value="tcp" data-i18n="tcp_label">Direct TCP</option>
-          </select>
-        </label>
-        <label id="c-native-wrap"><span data-i18n="ssh_native_label">Native SSH (russh)</span>
-          <input type="checkbox" id="c-native" />
-        </label>
-        <label><span data-i18n="host_label">Host</span> <input id="c-host" list="ssh-hosts" data-i18n-ph="host_ph" placeholder="user@server" /></label>
-        <datalist id="ssh-hosts"></datalist>
-        <label class="nat-row"><span data-i18n="ssh_port_label">SSH port</span> <input id="c-sport" type="number" value="22" /></label>
-        <label class="nat-row"><span data-i18n="user_label">User</span> <input id="c-user" data-i18n-ph="user_ph" placeholder="(user@host if blank)" /></label>
-        <label class="nat-row"><span data-i18n="password_label">Password</span> <input id="c-pass" type="password" data-i18n-ph="password_ph" placeholder="(key preferred)" /></label>
-        <label><span data-i18n="port_label">Remote daemon port</span> <input id="c-port" type="number" value="7331" /></label>
-        <label id="c-args-wrap"><span data-i18n="ssh_args_label">SSH args</span> <input id="c-args" data-i18n-ph="ssh_args_ph" placeholder="-i ~/.ssh/key -p 22" /></label>
-        <div id="c-pubkey-box" class="nat-row" hidden>
-          <span data-i18n="pubkey_label">App public key (server authorized_keys)</span>
-          <pre id="c-pubkey"></pre>
-          <button id="c-pubkey-copy" type="button" data-i18n="copy">Copy</button>
-        </div>
-        <pre id="log-view" hidden></pre>
-        <menu>
-          <button id="c-logs" type="button" data-i18n="logs">Logs</button>
-          <button type="button" id="c-cancel" data-i18n="cancel">Cancel</button>
-          <button id="c-go" value="default" data-i18n="connect">Connect</button>
         </menu>
       </form>
     </dialog>
@@ -203,6 +468,7 @@
         <label><span data-i18n="main_effort">Main effort</span> <select id="fu-ea"></select></label>
         <label><span data-i18n="sidekick">Sidekick</span> <select id="fu-b"></select></label>
         <label><span data-i18n="sidekick_effort">Sidekick effort</span> <select id="fu-eb"></select></label>
+        <div id="fu-err" class="dlg-err" role="alert" hidden></div>
         <menu>
           <button type="button" id="fu-cancel" data-i18n="cancel">Cancel</button>
           <button id="fu-ok" value="default" data-i18n="apply">Apply</button>
@@ -215,6 +481,30 @@
         <h3 data-i18n="resume_h">Agent sessions to resume</h3>
         <div id="native-list">…</div>
         <menu><button value="cancel" data-i18n="close">Close</button></menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-first">
+      <form method="dialog">
+        <h3 data-i18n="first_post">First post</h3>
+        <div id="first-meta"></div>
+        <pre id="first-body"></pre>
+        <menu>
+          <button type="button" id="first-copy" data-i18n="copy">Copy</button>
+          <button value="ok" data-i18n="close">Close</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-filedirty">
+      <form method="dialog">
+        <h3 data-i18n="dirty_h">Unsaved changes</h3>
+        <p data-i18n="dirty_msg">Discard the modified buffer?</p>
+        <menu>
+          <button type="button" id="fd-stay" data-i18n="dirty_stay">Keep editing</button>
+          <button type="button" id="fd-discard" data-i18n="dirty_discard">Discard</button>
+          <button type="button" id="fd-save" data-i18n="dirty_save">Save</button>
+        </menu>
       </form>
     </dialog>
 
@@ -231,15 +521,7 @@
       </form>
     </dialog>
 
-    <dialog id="dlg-daemon">
-      <form method="dialog">
-        <h3 id="dlg-daemon-title">Daemon update</h3>
-        <div class="daemon-dlg">
-          <span class="spin-ico">◌</span>
-          <p id="dlg-daemon-msg"></p>
-        </div>
-      </form>
-    </dialog>
+    <div id="toasts"></div>
 
     <dialog id="dlg-dupdate">
       <form method="dialog">

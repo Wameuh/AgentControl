@@ -3,31 +3,45 @@
 //! Usage :
 //!   acctl status | agents | list
 //!   acctl new <agent> <cwd> [prompt...] [--title T] [--mode M] [--model X]
+//!               [--origin O]   (provenance service — badge « via » client ;
+//!               ex. --origin service:backlog-orchestrator)
 //!   acctl send <session> <text...>
-//!   acctl msg <from> <to> [--steer] <text...>   (message agent→agent)
+//!   acctl msg <from> <to> [--queue] <text...>   (message agent→agent —
+//!       steer par défaut ; --steer accepté, sans effet)
 //!   acctl spawn <from> [task...] [--agent A] [--cwd C] [--title T]
 //!               [--mode M] [--model X] [--group G]   (session agent→agent)
 //!   acctl events <session> [before_seq] [limit]
 //!   acctl tail <session> [after_seq]
-//!   acctl resume|cancel|kill|clear <session>
+//!   acctl resume|cancel|kill|clear|sleep <session>
+//!       (sleep = libère le process, la session reste — réveil auto au
+//!        prochain envoi)
 //!   acctl mode <session> <mode>
 //!   acctl respond <session> <request_id> [option_id | --answer JSON]
 //!   acctl blob <session> <blob> [offset] [limit]
 //!   acctl download <session> <path> [dest]     (dossier → zip auto)
 //!   acctl pr [ls] [--all]            — registre PR ↔ session du démon
-//!   acctl pr add <N> [--session S] [--repo R] [--note txt]
-//!   acctl pr note <N> <texte...> | acctl pr rm <N> | acctl pr sync
+//!   acctl pr add <N|I<cid>> [--session S] [--repo R]
+//!       [--forge github|gitlab|gerrit] [--host H[:port]] [--note txt]
+//!   acctl pr note <N|I<cid>> <texte...> | acctl pr rm <N|I<cid>> | acctl pr sync
+//!   acctl comp [ls] [--json] | info <n> | start|stop|restart <n>
+//!       | logs <n> [--tail N] | catalog [--json] [--refresh]
+//!       | install <n> | add <n> [--kind K] [--cmd "<argv>"] [--hc S]
+//!       [--env K=V ...] [--cwd C] [--desc D] [--autostart] | rm <n>
+//!                                     — composants managés du démon
 //!
 //! Connexion : $AGENTCONTROL_SOCK (défaut ~/.agentcontrol/daemon.sock)
 //!             ou $AGENTCONTROL_TCP host:port
 
+mod comp;
+mod pr;
+
 use anyhow::{bail, Context, Result};
 use proto::Request;
-use serde_json::{json, Value};
+use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
-struct Conn {
+pub(crate) struct Conn {
     w: Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
     lines: tokio::io::Lines<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>>,
     next_id: u64,
@@ -65,7 +79,7 @@ async fn connect() -> Result<Conn> {
 }
 
 impl Conn {
-    async fn call(&mut self, req: proto::ReqKind) -> Result<Value> {
+    pub(crate) async fn call(&mut self, req: proto::ReqKind) -> Result<Value> {
         let r = Request {
             id: self.next_id,
             req,
@@ -112,53 +126,9 @@ impl Conn {
     }
 }
 
-/// Sortie stdout d'une commande `gh` (None si gh absent ou en échec).
-fn gh_out(args: &[&str]) -> Option<String> {
-    std::process::Command::new("gh")
-        .args(args)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-/// "owner/name" du repo du cwd (ou --repo explicite).
-fn detect_repo(args: &[String]) -> Result<String> {
-    for (i, a) in args.iter().enumerate() {
-        if a == "--repo" {
-            return args
-                .get(i + 1)
-                .cloned()
-                .context("--repo sans valeur");
-        }
-    }
-    gh_out(&["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])
-        .context("repo introuvable — passez --repo owner/name (ou lancez depuis le clone)")
-}
-
-/// État GitHub → label du registre.
-fn gh_state(v: &Value) -> String {
-    let st = v["state"].as_str().unwrap_or("").to_lowercase();
-    if st == "open" && v["isDraft"].as_bool().unwrap_or(false) {
-        "draft".into()
-    } else {
-        st
-    }
-}
-
-/// Résout un id de session vers "Titre (agent)" via list_sessions.
-fn session_label(sessions: &Value, sid: &str) -> String {
-    for s in sessions.as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
-        if s["id"].as_str() == Some(sid) {
-            return format!(
-                "{} ({})",
-                s["title"].as_str().unwrap_or("?"),
-                s["agent"].as_str().unwrap_or("?")
-            );
-        }
-    }
-    sid.to_string() // session supprimée ou label libre
+/// Badge compact `#N`/`!N`/`c#N` — partagé avec le client.
+fn badge_of(e: &Value) -> String {
+    pr::badge_of(e)
 }
 
 fn print_event(ev: &Value) {
@@ -166,12 +136,16 @@ fn print_event(ev: &Value) {
     let ty = ev["type"].as_str().unwrap_or("?");
     match ty {
         "user_message" => println!(
-            "\x1b[36m[{seq}] vous{}> {}\x1b[0m",
+            "\x1b[36m[{seq}] vous{}{}> {}\x1b[0m",
             if ev["steer"].as_bool().unwrap_or(false) {
                 " (steer)"
             } else {
                 ""
             },
+            ev["origin"]
+                .as_str()
+                .map(|o| format!(" (via {o})"))
+                .unwrap_or_default(),
             ev["text"].as_str().unwrap_or("")
         ),
         "peer_message" => println!(
@@ -226,6 +200,7 @@ fn print_event(ev: &Value) {
             println!("[{seq}] commandes: {}", names.join(" "));
         }
         "status_changed" => println!("\x1b[90m[{seq}] état → {}\x1b[0m", ev["state"].as_str().unwrap_or("")),
+        "session_cleared" => println!("\x1b[90m[{seq}] ── contexte effacé ──\x1b[0m"),
         "error" => println!("\x1b[31m[{seq}] ERREUR {}\x1b[0m", ev["message"].as_str().unwrap_or("")),
         "system" => println!("\x1b[90m[{seq}] ⦿ {}\x1b[0m", ev["text"].as_str().unwrap_or("")),
         _ => println!("[{seq}] {ty} {ev}"),
@@ -236,7 +211,7 @@ fn print_event(ev: &Value) {
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|resume|attach|fork|cancel|kill|clear|mode|respond|blob|download|daemon-update");
+        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|search|find|create|resume|attach|fork|cancel|kill|clear|sleep|mode|respond|blob|download|write|pr|comp|daemon-update");
         std::process::exit(2);
     }
     let mut c = connect().await?;
@@ -265,44 +240,104 @@ async fn main() -> Result<()> {
                 .ok()
                 .and_then(|v| v.as_array().cloned())
                 .unwrap_or_default();
-            for s in v.as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
-                let sid = s["id"].as_str().unwrap_or("");
-                let badge: Vec<String> = prs
-                    .iter()
-                    .filter(|p| {
-                        p["session"].as_str() == Some(sid)
-                            && !matches!(p["status"].as_str(), Some("merged" | "closed"))
-                    })
-                    .map(|p| {
-                        let st = p["status"].as_str().unwrap_or("");
-                        format!(
-                            "#{}{}",
-                            p["pr"].as_u64().unwrap_or(0),
-                            if st.is_empty() || st == "open" {
-                                String::new()
-                            } else {
-                                format!("({st})")
-                            }
-                        )
-                    })
-                    .collect();
-                println!(
-                    "{}  {:<12} {:<14} {}  {}{}",
-                    sid,
-                    s["state"].as_str().unwrap_or(""),
-                    s["agent"].as_str().unwrap_or(""),
-                    s["created_at"].as_str().unwrap_or("").get(..16).unwrap_or(""),
-                    s["title"].as_str().unwrap_or(""),
-                    if badge.is_empty() {
+            let rows: Vec<&Value> =
+                v.as_array().map(|a| a.iter().collect()).unwrap_or_default();
+            // Sous-agents : spawned_by pointant une ligne de la liste →
+            // la session s'imprime sous sa créatrice, indentée (↳,
+            // estompée). Les orphelines restent racines.
+            // id vide exclu : sinon un spawned_by "" s'imbriquerait sous
+            // une ligne sans identité, et `seen` les dédoublonnerait à tort.
+            let ids: std::collections::HashSet<&str> = rows
+                .iter()
+                .filter_map(|s| s["id"].as_str())
+                .filter(|i| !i.is_empty())
+                .collect();
+            let mut children: std::collections::HashMap<&str, Vec<&Value>> =
+                Default::default();
+            let mut roots: Vec<&Value> = Vec::new();
+            for s in &rows {
+                match s["spawned_by"].as_str().filter(|p| ids.contains(p)) {
+                    Some(p) => children.entry(p).or_default().push(*s),
+                    None => roots.push(*s),
+                }
+            }
+            let mut seen = std::collections::HashSet::new();
+            // `rows` en second passage : un cycle spawned_by (meta
+            // corrompu) réinjecte ses membres en racines plutôt que
+            // de les faire disparaître.
+            for seed in roots.iter().chain(rows.iter()) {
+                let mut stack = vec![(*seed, 0usize)];
+                while let Some((s, depth)) = stack.pop() {
+                    let sid = s["id"].as_str().unwrap_or("");
+                    // Dédoublonnage par identité de ligne : une ligne sans
+                    // id s'imprime quand même, et un cycle repassant par la
+                    // même entrée de `rows` est bloqué.
+                    if !seen.insert(s as *const Value) {
+                        continue;
+                    }
+                    let badge: Vec<String> = prs
+                        .iter()
+                        .filter(|p| {
+                            p["session"].as_str() == Some(sid)
+                                && !matches!(p["status"].as_str(), Some("merged" | "closed"))
+                        })
+                        .map(|p| {
+                            let st = p["status"].as_str().unwrap_or("");
+                            format!(
+                                "{}{}",
+                                badge_of(p),
+                                if st.is_empty() || st == "open" {
+                                    String::new()
+                                } else {
+                                    format!("({st})")
+                                }
+                            )
+                        })
+                        .collect();
+                    // Cap d'indentation comme la sidebar (4 niveaux puis
+                    // retrait fixe) — les arbres très profonds restent
+                    // lisibles dans un terminal étroit.
+                    let indent = if depth == 0 {
                         String::new()
                     } else {
-                        format!("  [{}]", badge.join(" "))
+                        format!("{}↳ ", "  ".repeat((depth - 1).min(4)))
+                    };
+                    let line = format!(
+                        "{}{}  {:<12} {:<14} {}  {}{}{}",
+                        indent,
+                        sid,
+                        s["state"].as_str().unwrap_or(""),
+                        s["agent"].as_str().unwrap_or(""),
+                        s["created_at"].as_str().unwrap_or("").get(..16).unwrap_or(""),
+                        s["title"].as_str().unwrap_or(""),
+                        if badge.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  [{}]", badge.join(" "))
+                        },
+                        // Provenance service (meta.origin) — même format
+                        // « [via X] » que les badges PR, ignoré du titre.
+                        s["origin"]
+                            .as_str()
+                            .map(|o| format!("  [via {o}]"))
+                            .unwrap_or_default()
+                    );
+                    if depth == 0 {
+                        println!("{line}");
+                    } else {
+                        println!("\x1b[2m{line}\x1b[0m");
                     }
-                );
+                    if let Some(kids) = children.get(sid) {
+                        for c in kids.iter().rev() {
+                            stack.push((*c, depth + 1));
+                        }
+                    }
+                }
             }
         }
         "new" => {
-            // acctl new <agent> <cwd> [prompt...] [--title T] [--mode M] [--model X]
+            // acctl new <agent> <cwd> [prompt...] [--title T] [--mode M]
+            //             [--model X] [--origin O]
             if args.len() < 3 {
                 bail!("new <agent> <cwd> [prompt...]");
             }
@@ -312,17 +347,19 @@ async fn main() -> Result<()> {
             let mut title = None;
             let mut mode = None;
             let mut model = None;
+            let mut origin = None;
             let mut i = 3;
             while i < args.len() {
                 match args[i].as_str() {
                     "--title" => { title = args.get(i + 1).cloned(); i += 2; }
                     "--mode" => { mode = args.get(i + 1).cloned(); i += 2; }
                     "--model" => { model = args.get(i + 1).cloned(); i += 2; }
+                    "--origin" => { origin = args.get(i + 1).cloned(); i += 2; }
                     p => { prompt_parts.push(p.to_string()); i += 1; }
                 }
             }
             let v = c.call(proto::ReqKind::NewSession {
-                agent, cwd, title, model, mode,
+                agent, cwd, title, model, mode, origin,
                 prompt: if prompt_parts.is_empty() { None } else { Some(prompt_parts.join(" ")) },
             }).await?;
             println!("{}", v["session"].as_str().unwrap_or(""));
@@ -348,21 +385,26 @@ async fn main() -> Result<()> {
             }).await?;
         }
         "msg" => {
-            // acctl msg <from> <to> [--steer] <text...>
-            if args.len() < 4 { bail!("msg <from> <to> [--steer] <text...>"); }
-            let mut steer = false;
-            let mut parts = Vec::new();
-            for a in &args[3..] {
-                match a.as_str() {
-                    "--steer" => steer = true,
-                    _ => parts.push(a.clone()),
+            // acctl msg <from> <to> [--queue|--steer] <text...>
+            // steer est le défaut agent→agent — --steer reste accepté
+            // (compat scripts) mais n'a plus d'effet. Flags en tête
+            // seulement : « --queue » dans le corps reste du texte.
+            if args.len() < 4 { bail!("msg <from> <to> [--queue|--steer] <text...>"); }
+            let mut queue = false;
+            let mut i = 3;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--steer" => i += 1,
+                    "--queue" => { queue = true; i += 1; }
+                    _ => break,
                 }
             }
+            if i >= args.len() { bail!("msg <from> <to> [--queue|--steer] <text...>"); }
             println!("{}", c.call(proto::ReqKind::PeerSend {
                 from: args[1].clone(),
                 session: args[2].clone(),
-                text: parts.join(" "),
-                delivery: if steer { "steer".into() } else { "queue".into() },
+                text: args[i..].join(" "),
+                delivery: if queue { "queue".into() } else { "steer".into() },
             }).await?);
         }
         "spawn" => {
@@ -395,7 +437,7 @@ async fn main() -> Result<()> {
             let before = args.get(2).and_then(|s| s.parse().ok()).filter(|n: &u64| *n > 0);
             let limit = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(200);
             let v = c.call(proto::ReqKind::Events {
-                session: args[1].clone(), before_seq: before, limit,
+                session: args[1].clone(), before_seq: before, after_seq: None, limit,
             }).await?;
             for ev in v["events"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
                 print_event(ev);
@@ -405,6 +447,72 @@ async fn main() -> Result<()> {
         "tail" => {
             let after = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
             c.tail(&args[1], after).await?;
+        }
+        "search" => {
+            // acctl search <session> <query...> — scan plein-texte du
+            // journal, plus récent d'abord (curseur non exposé pour
+            // l'instant : un appel couvre ~20k events scannés).
+            if args.len() < 3 {
+                bail!("search <session> <query...>");
+            }
+            let v = c.call(proto::ReqKind::SearchEvents {
+                session: args[1].clone(),
+                query: args[2..].join(" "),
+                before_seq: None,
+                limit: 50,
+            }).await?;
+            for m in v["matches"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
+                println!(
+                    "[{}] {} {}",
+                    m["seq"].as_u64().unwrap_or(0),
+                    m["type"].as_str().unwrap_or(""),
+                    m["excerpt"].as_str().unwrap_or("")
+                );
+            }
+            if !v["done"].as_bool().unwrap_or(true) {
+                eprintln!("(scan partiel — {} events parcourus)", v["scanned"].as_u64().unwrap_or(0));
+            }
+        }
+        "find" => {
+            // acctl find <session> <query...> — recherche par nom de
+            // fichier dans le workspace (récursif, insensible à la casse).
+            if args.len() < 3 {
+                bail!("find <session> <query...>");
+            }
+            let v = c.call(proto::ReqKind::FindFiles {
+                session: args[1].clone(),
+                path: String::new(),
+                query: args[2..].join(" "),
+                limit: None,
+            }).await?;
+            for m in v["matches"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
+                println!(
+                    "{}{}",
+                    m["path"].as_str().unwrap_or(""),
+                    if m["dir"].as_bool().unwrap_or(false) { "/" } else { "" },
+                );
+            }
+            if v["truncated"].as_bool().unwrap_or(false) {
+                eprintln!("(résultats tronqués — {} entrées scannées)", v["scanned"].as_u64().unwrap_or(0));
+            }
+        }
+        "create" => {
+            // acctl create <session> <path> [--dir] — fichier vide ou
+            // dossier (création exclusive : échoue si la cible existe).
+            if args.len() < 3 {
+                bail!("create <session> <path> [--dir]");
+            }
+            let dir = args[3..].iter().any(|a| a == "--dir" || a == "-d");
+            let v = c.call(proto::ReqKind::CreatePath {
+                session: args[1].clone(),
+                path: args[2].clone(),
+                dir,
+            }).await?;
+            println!(
+                "{}{}",
+                v["path"].as_str().unwrap_or(""),
+                if dir { "/" } else { "" },
+            );
         }
         "resume" => println!("{}", c.call(proto::ReqKind::ResumeSession {
             session: args[1].clone(),
@@ -422,6 +530,7 @@ async fn main() -> Result<()> {
         "cancel" => println!("{}", c.call(proto::ReqKind::Cancel { session: args[1].clone() }).await?),
         "kill" => println!("{}", c.call(proto::ReqKind::KillSession { session: args[1].clone() }).await?),
         "clear" => println!("{}", c.call(proto::ReqKind::ClearSession { session: args[1].clone() }).await?),
+        "sleep" => println!("{}", c.call(proto::ReqKind::SleepSession { session: args[1].clone() }).await?),
         "rm" => println!("{}", c.call(proto::ReqKind::DeleteSession { session: args[1].clone() }).await?),
         "mode" => println!("{}", c.call(proto::ReqKind::SetMode { session: args[1].clone(), mode: args[2].clone() }).await?),
         "model" => println!("{}", c.call(proto::ReqKind::SetModel { session: args[1].clone(), model: args[2].clone() }).await?),
@@ -498,196 +607,36 @@ async fn main() -> Result<()> {
             }
             eprintln!("\n→ {dest} ({offset} o)");
         }
-        "pr" => {
-            // acctl pr [ls] [--all] | add <N> | note <N> <txt…> | rm <N> | sync
-            let sub = args.get(1).map(String::as_str).unwrap_or("ls");
-            match sub {
-                "ls" | "--all" | "--json" => {
-                    let all = args.iter().any(|a| a == "--all");
-                    let js = args.iter().any(|a| a == "--json");
-                    let v = c
-                        .call(proto::ReqKind::PrList { session: None })
-                        .await?;
-                    if js {
-                        println!("{v}");
-                        return Ok(());
-                    }
-                    let sessions = c.call(proto::ReqKind::ListSessions).await.unwrap_or(json!([]));
-                    let me = std::env::var("AGENTCONTROL_SESSION").ok();
-                    for e in v.as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
-                        let st = e["status"].as_str().unwrap_or("");
-                        if !all && (st == "merged" || st == "closed") {
-                            continue;
-                        }
-                        let who = session_label(&sessions, e["session"].as_str().unwrap_or(""));
-                        let mine = me.as_deref() == e["session"].as_str();
-                        println!(
-                            "#{:<5} [{:<6}] {:<28} {}{}{}",
-                            e["pr"].as_u64().unwrap_or(0),
-                            st,
-                            if mine { format!("{who} <- toi") } else { who },
-                            e["title"].as_str().unwrap_or(""),
-                            e["branch"]
-                                .as_str()
-                                .map(|b| format!("  ({b})"))
-                                .unwrap_or_default(),
-                            if e["via"].as_str() == Some("detected") { "  [auto]" } else { "" },
-                        );
-                        if let Some(n) = e["note"].as_str() {
-                            println!("         note: {n}");
-                        }
-                    }
+        "write" | "wr" => {
+            // acctl write <session> <path> [src] — src absent ou "-" = stdin.
+            // Remplace tout le fichier (delete_len clampé serveur) ou le crée.
+            if args.len() < 3 { bail!("write <session> <path> [src]"); }
+            let bytes = match args.get(3).map(String::as_str) {
+                None | Some("-") => {
+                    let mut b = Vec::new();
+                    std::io::Read::read_to_end(&mut std::io::stdin(), &mut b)?;
+                    b
                 }
-                "add" => {
-                    let n: u64 = args
-                        .get(2)
-                        .context("pr add <N>")?
-                        .parse()
-                        .context("numéro de PR invalide")?;
-                    let repo = detect_repo(&args)?;
-                    let session = args
-                        .iter()
-                        .position(|a| a == "--session")
-                        .and_then(|i| args.get(i + 1).cloned())
-                        .or_else(|| std::env::var("AGENTCONTROL_SESSION").ok())
-                        .context("--session requis hors session agent")?;
-                    // Métadonnées via gh quand dispo (tolère l'échec).
-                    let info = gh_out(&[
-                        "pr", "view", &n.to_string(), "--repo", &repo, "--json",
-                        "title,state,isDraft,headRefName",
-                    ])
-                    .and_then(|s| serde_json::from_str::<Value>(&s).ok());
-                    let note = args
-                        .iter()
-                        .position(|a| a == "--note")
-                        .and_then(|i| args.get(i + 1).cloned());
-                    let v = c
-                        .call(proto::ReqKind::PrTrack {
-                            session: Some(session),
-                            repo,
-                            pr: n,
-                            branch: info.as_ref().and_then(|i| i["headRefName"].as_str().map(String::from)),
-                            title: info.as_ref().and_then(|i| i["title"].as_str().map(String::from)),
-                            status: info.as_ref().map(|i| gh_state(i)),
-                            note,
-                        })
-                        .await?;
-                    println!(
-                        "#{} → {} [{}] {}",
-                        v["pr"].as_u64().unwrap_or(0),
-                        v["session"].as_str().unwrap_or(""),
-                        v["status"].as_str().unwrap_or(""),
-                        v["title"].as_str().unwrap_or("")
-                    );
-                }
-                "note" => {
-                    let n: u64 = args.get(2).context("pr note <N> <txt…>")?.parse()?;
-                    let repo = detect_repo(&args)?;
-                    // Le texte s'arrête au premier flag (--repo …).
-                    let words: Vec<&str> = args[3..]
-                        .iter()
-                        .take_while(|a| !a.starts_with("--"))
-                        .map(String::as_str)
-                        .collect();
-                    anyhow::ensure!(!words.is_empty(), "pr note <N> <txt…> — texte vide");
-                    c.call(proto::ReqKind::PrTrack {
-                        session: None,
-                        repo,
-                        pr: n,
-                        branch: None,
-                        title: None,
-                        status: None,
-                        note: Some(words.join(" ")),
-                    })
-                    .await?;
-                    println!("#{n}: note maj");
-                }
-                "rm" => {
-                    let n: u64 = args.get(2).context("pr rm <N>")?.parse()?;
-                    let repo = detect_repo(&args)?;
-                    println!(
-                        "{}",
-                        c.call(proto::ReqKind::PrUntrack { repo, pr: n }).await?
-                    );
-                }
-                "sync" => {
-                    // Rafraîchit les statuts depuis GitHub pour les repos connus.
-                    let v = c.call(proto::ReqKind::PrList { session: None }).await?;
-                    let mut repos: Vec<String> = v
-                        .as_array()
-                        .map(|a| a.as_slice())
-                        .unwrap_or(&[])
-                        .iter()
-                        .filter_map(|e| e["repo"].as_str().map(String::from))
-                        .collect();
-                    repos.sort();
-                    repos.dedup();
-                    for repo in repos {
-                        let live = gh_out(&[
-                            "pr", "list", "--repo", &repo, "--state", "all",
-                            "--limit", "200", "--json",
-                            "number,title,state,isDraft,headRefName",
-                        ])
-                        .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok())
-                        .unwrap_or_default();
-                        let entries: Vec<&Value> = v
-                            .as_array()
-                            .map(|a| a.as_slice())
-                            .unwrap_or(&[])
-                            .iter()
-                            .filter(|e| e["repo"].as_str() == Some(repo.as_str()))
-                            .collect();
-                        for e in entries {
-                            let n = e["pr"].as_u64().unwrap_or(0);
-                            let Some(p) = live.iter().find(|p| p["number"].as_u64() == Some(n)) else {
-                                continue;
-                            };
-                            let st = gh_state(p);
-                            if st != e["status"].as_str().unwrap_or("") {
-                                c.call(proto::ReqKind::PrTrack {
-                                    session: None,
-                                    repo: repo.clone(),
-                                    pr: n,
-                                    branch: p["headRefName"].as_str().map(String::from),
-                                    title: p["title"].as_str().map(String::from),
-                                    status: Some(st.clone()),
-                                    note: None,
-                                })
-                                .await?;
-                                println!("#{n}: {} -> {st}", e["status"].as_str().unwrap_or(""));
-                            }
-                        }
-                        let untracked: Vec<u64> = live
-                            .iter()
-                            .filter(|p| p["state"].as_str() == Some("OPEN"))
-                            .map(|p| p["number"].as_u64().unwrap_or(0))
-                            .filter(|n| {
-                                !v.as_array()
-                                    .map(|a| a.as_slice())
-                                    .unwrap_or(&[])
-                                    .iter()
-                                    .any(|e| {
-                                        e["pr"].as_u64() == Some(*n)
-                                            && e["repo"].as_str() == Some(repo.as_str())
-                                    })
-                            })
-                            .collect();
-                        if !untracked.is_empty() {
-                            println!(
-                                "{repo}: PRs ouvertes non enregistrées: {}",
-                                untracked
-                                    .iter()
-                                    .map(|n| format!("#{n}"))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            );
-                        }
-                    }
-                    println!("sync ok");
-                }
-                other => bail!("pr: sous-commande inconnue: {other} (add|ls|note|rm|sync)"),
-            }
+                Some(src) => std::fs::read(src)
+                    .with_context(|| format!("source: {src}"))?,
+            };
+            use base64::Engine;
+            let v = c.call(proto::ReqKind::WriteFile {
+                session: args[1].clone(),
+                path: args[2].clone(),
+                offset: 0,
+                delete_len: u64::MAX,
+                data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                if_mtime_ms: None,
+            }).await?;
+            eprintln!(
+                "→ {} ({} o)",
+                v["path"].as_str().unwrap_or(""),
+                v["size"].as_u64().unwrap_or(0),
+            );
         }
+        "pr" => pr::run(&args, &mut c).await?,
+        "comp" | "components" => comp::run(&args, &mut c).await?,
         other => bail!("commande inconnue: {other}"),
     }
     Ok(())

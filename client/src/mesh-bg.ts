@@ -15,8 +15,13 @@
   if (!canvas || !canvas.getContext) return;
   const ctx = canvas.getContext("2d", { alpha: false });
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
-  // Android : fond statique — pas de boucle rAF permanente (batterie).
-  const NO_ANIM = reducedMotion.matches || /Android/i.test(navigator.userAgent);
+  // « Fond animé » (réglage Paramètres, ac-bganim) : préférence persistée —
+  // à défaut, on respecte prefers-reduced-motion. Android : toujours
+  // statique (batterie), la préférence ne s'y applique pas.
+  const IS_ANDROID = /Android/i.test(navigator.userAgent);
+  const storedAnim = localStorage.getItem("ac-bganim");
+  let animOn = storedAnim === null ? !reducedMotion.matches : storedAnim === "1";
+  const animated = () => animOn && !IS_ANDROID;
 
   const MOODS = {
     sand: { base: [18, 22, 20], light: [205, 182, 140], agent: [147, 173, 140] },
@@ -232,7 +237,7 @@
   }
 
   function start() {
-    if (running || NO_ANIM || document.hidden) return;
+    if (running || !animated() || document.hidden) return;
     running = true;
     lastTime = performance.now();
     frameId = window.requestAnimationFrame(frame);
@@ -248,7 +253,9 @@
     target = { ...preset, intensity: options.intensity ?? 1 };
     mood.dark = !!preset.dark;
     agentCount = Math.max(0, Math.min(MAX_AGENTS, options.agents | 0));
-    if (!running) {
+    // freeze : la cible suit sans repaint (fond figé — reprise sur une
+    // humeur à jour à la réactivation, pas de redraw sur rendu statique).
+    if (!running && !options.freeze) {
       snapToTarget();
       draw();
     }
@@ -278,7 +285,9 @@
     else start();
   });
   const onMotionPreference = () => {
-    if (NO_ANIM) {
+    // Sans préférence explicite, l'état suit le réglage OS.
+    if (localStorage.getItem("ac-bganim") === null) animOn = !reducedMotion.matches;
+    if (!animated()) {
       stop();
       snapToTarget();
       draw();
@@ -288,10 +297,23 @@
   };
   if (reducedMotion.addEventListener) reducedMotion.addEventListener("change", onMotionPreference);
 
+  function setAnimated(on) {
+    animOn = !!on;
+    localStorage.setItem("ac-bganim", animOn ? "1" : "0");
+    if (animated()) {
+      start();
+    } else {
+      // Fige sur la cible de mood courante — frame statique propre.
+      stop();
+      snapToTarget();
+      draw();
+    }
+  }
+
   build();
   snapToTarget();
   draw();
   start();
 
-  window.MeshBackground = { setMood };
+  window.MeshBackground = { setMood, setAnimated, isAnimated: animated };
 })();
