@@ -828,6 +828,7 @@ mod tests {
             restart_sec: 0,
             healthcheck: Healthcheck::None,
             description: None,
+            queries: std::collections::HashMap::new(),
         }
     }
 

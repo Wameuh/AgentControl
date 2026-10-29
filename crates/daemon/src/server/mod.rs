@@ -54,21 +54,37 @@ const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// partent dans la file drainée par la tâche d'écriture dédiée —
 /// un flush congestionné (tunnel SSH sous backpressure) ne bloque plus
 /// ni la boucle de lecture ni les handlers des autres requêtes.
+/// Deux voies : `hi` (réponses RPC) est drainée en priorité — un appel
+/// ne piétine plus derrière un backlog de pushes (replay, term_data) ;
+/// `lo` absorbe les rafales de pushes. La borne d'octets est commune —
+/// un client durablement plus lent que la production est refermé pareil.
 #[derive(Clone)]
 pub(crate) struct Outbox {
-    tx: mpsc::UnboundedSender<String>,
+    hi: mpsc::UnboundedSender<String>,
+    lo: mpsc::UnboundedSender<String>,
     dead: watch::Sender<bool>,
-    /// Octets actuellement en file — décrémenté par la tâche d'écriture
-    /// à chaque ligne drainée (comptage approximatif suffisant : il ne
-    /// sert qu'à borner la mémoire par connexion).
+    /// Octets actuellement en file (les deux voies) — décrémenté par la
+    /// tâche d'écriture à chaque ligne drainée (comptage approximatif
+    /// suffisant : il ne sert qu'à borner la mémoire par connexion).
     queued: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Outbox {
-    /// Enfile une ligne JSON terminée par '\n'. File pleine/fermée →
-    /// la connexion est signalée morte (toute la boucle se démonte,
-    /// y compris le lecteur qui attendait des requêtes).
+    /// Enfile une ligne JSON (voie pushes — best effort, derrière les
+    /// réponses). File pleine/fermée → la connexion est signalée morte
+    /// (toute la boucle se démonte, lecteur inclus).
     fn line(&self, v: &impl serde::Serialize) -> Result<()> {
+        self.enqueue(&self.lo, v)
+    }
+
+    /// Enfile une réponse (voie prioritaire — drainée avant les pushes).
+    /// Mêmes conséquences que `line` en cas de saturation.
+    fn line_resp(&self, v: &impl serde::Serialize) -> Result<()> {
+        self.enqueue(&self.hi, v)
+    }
+
+    /// Enfile une ligne JSON terminée par '\n' sur `ch`.
+    fn enqueue(&self, ch: &mpsc::UnboundedSender<String>, v: &impl serde::Serialize) -> Result<()> {
         use std::sync::atomic::Ordering;
         let mut s = serde_json::to_string(v)?;
         s.push('\n');
@@ -83,7 +99,7 @@ impl Outbox {
             let _ = self.dead.send(true);
             anyhow::bail!("file d'émission saturée");
         }
-        if self.tx.send(s).is_err() {
+        if ch.send(s).is_err() {
             self.queued.fetch_sub(len, Ordering::Relaxed);
             let _ = self.dead.send(true);
             anyhow::bail!("file d'émission fermée");
@@ -674,9 +690,11 @@ impl Daemon {
         // (chaque replay subscribe re-saturait le lien). Découplé : la
         // file absorbe les bursts, et pleine = connexion refermée.
         let (wtx, mut wrx) = mpsc::unbounded_channel::<String>();
+        let (wtx_hi, mut wrx_hi) = mpsc::unbounded_channel::<String>();
         let (dead_tx, mut wdead) = watch::channel(false);
         let outbox = Outbox {
-            tx: wtx,
+            hi: wtx_hi,
+            lo: wtx,
             dead: dead_tx.clone(),
             queued: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
@@ -694,7 +712,19 @@ impl Daemon {
             let queued = Arc::clone(&outbox.queued);
             tokio::spawn(async move {
                 let mut w = BufWriter::new(write);
-                while let Some(line) = wrx.recv().await {
+                loop {
+                    // biased : la voie réponses est drainée avant les
+                    // pushes — une réponse ne piétine plus derrière un
+                    // backlog de pushes sur un lien congestionné.
+                    // None sur une voie = sender droppé → break : les deux
+                    // senders vivent/moururent ensemble dans l'Outbox,
+                    // dont un clone survit à la boucle (relays, dispatch).
+                    let line = tokio::select! {
+                        biased;
+                        l = wrx_hi.recv() => l,
+                        l = wrx.recv() => l,
+                    };
+                    let Some(line) = line else { break };
                     queued.fetch_sub(line.len(), std::sync::atomic::Ordering::Relaxed);
                     let wr = tokio::time::timeout(WRITE_TIMEOUT, async {
                         w.write_all(line.as_bytes()).await?;
@@ -715,8 +745,23 @@ impl Daemon {
         // Terminaux ouverts par CETTE connexion — bornés à sa durée de vie :
         // déconnexion → la map est droppée → master fermé → shells SIGHUP.
         let mut terms = term::Terms::new();
-        let (term_done_tx, mut term_done_rx) =
-            tokio::sync::mpsc::unbounded_channel::<String>();
+        // Retour des spawns dispatchés (TermEvt::Spawned) + fins de flux
+        // PTY (TermEvt::Done) — un seul canal préserve l'ordre relatif.
+        let (term_evt_tx, mut term_evt_rx) =
+            tokio::sync::mpsc::unbounded_channel::<term::TermEvt>();
+        // term_open dispatchés en vol — comptés dans le garde-fou
+        // MAX_TERMS avec les terms insérés (deux opens concurrents ne
+        // passent pas le seuil à deux).
+        let mut in_flight = 0usize;
+        // term_close reçus pour des ids pas encore insérés (spawn en
+        // vol — le client a abandonné/timeout) : le PTY est tué à son
+        // arrivée au lieu de rester orphelin jusqu'à la déconnexion.
+        let mut pending_close: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        // Génération d'insertion — un Done tardif de la génération
+        // précédente (reap jusqu'à EXIT_GRACE) ne doit pas tuer un
+        // reopen sous le même id.
+        let mut next_gen = 0u64;
 
         loop {
             tokio::select! {
@@ -736,7 +781,7 @@ impl Daemon {
                         Ok(v) => v,
                         Err(e) => {
                             let resp = Response::err(0, format!("parse: {e}"));
-                            Self::send_line(&outbox, &resp)?;
+                            Self::send_resp(&outbox, &resp)?;
                             continue;
                         }
                     };
@@ -745,7 +790,7 @@ impl Daemon {
                         Err(e) => {
                             let id = raw.get("id").and_then(Value::as_u64).unwrap_or(0);
                             let resp = Response::err(id, format!("parse: {e}"));
-                            Self::send_line(&outbox, &resp)?;
+                            Self::send_resp(&outbox, &resp)?;
                             continue;
                         }
                     };
@@ -793,7 +838,7 @@ impl Daemon {
                                     "last_seq": s.journal.last_seq(),
                                     "skipped": skipped,
                                 }));
-                                Self::send_line(&outbox, &resp)?;
+                                Self::send_resp(&outbox, &resp)?;
                                 // Le signal de reset part avant le
                                 // rattrapage du journal.
                                 if let Some(ev) = cleared {
@@ -808,19 +853,34 @@ impl Daemon {
                                 sub = Some((session.clone(), rx, last, gen));
                             }
                             Err(e) => {
-                                Self::send_line(&outbox, &Response::err(req.id, format!("{e:#}")))?;
+                                Self::send_resp(&outbox, &Response::err(req.id, format!("{e:#}")))?;
                             }
                         }
                         continue;
                     }
-                    // Terminal : inline (pas de tâche — l'ordre des inputs
-                    // compte et l'état vit dans la map locale `terms`).
-                    if let Some(resp) = self
-                        .h_term(&mut terms, &term_done_tx, &outbox, &req)
+                    // Terminal : input/resize/close inline (l'ordre des
+                    // inputs compte et l'état vit dans la map `terms`),
+                    // term_open dispatché en tâche — le fork/exec ne gèle
+                    // ni la lecture ni le dead-watch de la connexion.
+                    match self
+                        .h_term(
+                            &mut terms,
+                            in_flight,
+                            &mut pending_close,
+                            &term_evt_tx,
+                            &req,
+                        )
                         .await
                     {
-                        Self::send_line(&outbox, &resp)?;
-                        continue;
+                        term::TermReply::Resp(resp) => {
+                            Self::send_resp(&outbox, &resp)?;
+                            continue;
+                        }
+                        term::TermReply::Spawned => {
+                            in_flight += 1;
+                            continue;
+                        }
+                        term::TermReply::Pass => {}
                     }
                     // Requêtes concurrentes par connexion : chaque dispatch dans
                     // sa tâche — un handler lent (resume_session → spawn +
@@ -830,7 +890,7 @@ impl Daemon {
                     let w = outbox.clone();
                     tokio::spawn(async move {
                         let resp = d.dispatch(req).await;
-                        let _ = Self::send_line(&w, &resp);
+                        let _ = Self::send_resp(&w, &resp);
                     });
                 }
                 // La tâche d'écriture est morte (flush timeout, socket
@@ -907,21 +967,103 @@ impl Daemon {
                         Err(_) => { sub = None; }
                     }
                 }
-                // Fin d'un flux PTY (shell mort ou reader coupé) : sortir
-                // le term de la map → drop → kill/réap si encore vivant.
-                tid = term_done_rx.recv(), if !terms.is_empty() => {
-                    if let Some(tid) = tid {
-                        terms.remove(&tid);
+                // Flux PTY terminé (shell mort ou reader coupé) ou
+                // term_open dispatché revenu : la map n'est modifiée
+                // qu'ici — pas de course entre tâches.
+                ev = term_evt_rx.recv(), if !terms.is_empty() || in_flight > 0 => {
+                    match ev {
+                        Some(term::TermEvt::Done { id, gen, code }) => {
+                            // Sortir de la map SEULEMENT si c'est bien
+                            // la génération du relay — un reopen sous le
+                            // même id a remplacé l'entrée entre-temps.
+                            // term_exit est émis ici, APRES le check :
+                            // un Done d'une gen stale ne livre plus
+                            // rien à la génération suivante.
+                            if terms.get(&id).is_some_and(|(g, _)| *g == gen) {
+                                terms.remove(&id);
+                                if let Some(code) = code {
+                                    let frame = json!({
+                                        "push": "term_exit",
+                                        "term": id,
+                                        "code": code,
+                                    });
+                                    Self::send_line(&outbox, &frame)?;
+                                }
+                            }
+                        }
+                        Some(term::TermEvt::Spawned(sp)) => {
+                            in_flight = in_flight.saturating_sub(1);
+                            match sp.res {
+                                Ok((t, rx, cwd)) => {
+                                    // Consommé sur TOUS les chemins du
+                                    // spawn, sous les DEUX clés : un
+                                    // hint invalide (>64/vide) devient
+                                    // un id serveur — l'entrée serait
+                                    // sinon orpheline (un reopen sous
+                                    // le même id serait tué au spawn).
+                                    let mut closed = pending_close.remove(&t.id);
+                                    if let Some(h) = &sp.hint {
+                                        closed |= pending_close.remove(h);
+                                    }
+                                    // Collision d'id client, ou close
+                                    // reçu pendant le spawn (open
+                                    // abandonné côté client) : le Term
+                                    // est droppé (shell tué) — pas
+                                    // d'orphelin.
+                                    let resp = if terms.contains_key(&t.id) {
+                                        Response::err(
+                                            sp.id,
+                                            format!("id terminal déjà utilisé: {}", t.id),
+                                        )
+                                    } else if closed {
+                                        Response::err(
+                                            sp.id,
+                                            "terminal fermé pendant l'ouverture",
+                                        )
+                                    } else {
+                                        let tid = t.id.clone();
+                                        Self::term_relay(
+                                            rx, tid.clone(), next_gen,
+                                            &outbox, &term_evt_tx,
+                                        );
+                                        terms.insert(t.id.clone(), (next_gen, t));
+                                        next_gen += 1;
+                                        Response::ok(
+                                            sp.id,
+                                            json!({"term": tid, "cwd": cwd}),
+                                        )
+                                    };
+                                    Self::send_resp(&outbox, &resp)?;
+                                }
+                                Err(e) => {
+                                    if let Some(h) = &sp.hint {
+                                        pending_close.remove(h);
+                                    }
+                                    Self::send_resp(
+                                        &outbox,
+                                        &Response::err(sp.id, e),
+                                    )?;
+                                }
+                            }
+                        }
+                        None => {}
                     }
                 }
             }
         }
     }
 
-    /// Enfile une réponse/erreur (sérialisée en ligne NDJSON) — retour
-    /// immédiat sauf file saturée, cas où la connexion est condamnée.
+    /// Enfile une frame push (voie basse — best effort derrière les
+    /// réponses) — retour immédiat sauf file saturée, cas où la
+    /// connexion est condamnée.
     fn send_line(w: &Outbox, v: &impl serde::Serialize) -> Result<()> {
         w.line(v)
+    }
+
+    /// Enfile une réponse RPC (voie haute — drainée avant les pushes :
+    /// un appel ne piétine pas derrière un backlog de term_data/replay).
+    fn send_resp(w: &Outbox, v: &impl serde::Serialize) -> Result<()> {
+        w.line_resp(v)
     }
 
     fn send_push(w: &Outbox, session: &str, ev: &proto::Event) -> Result<()> {
