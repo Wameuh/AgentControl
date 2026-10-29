@@ -26,6 +26,9 @@ export interface SessionMeta {
   context_size?: number;
   /** Session créatrice (spawn agent→agent) — affichage imbriqué sidebar. */
   spawned_by?: string;
+  /** Provenance externe (session créée par un service via new_session
+   *  `origin`) — badge « via » sidebar + marquage du prompt initial. */
+  origin?: string;
 }
 
 /** Registre PR ↔ session du démon (prs.json) — badge sidebar. */

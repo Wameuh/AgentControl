@@ -51,6 +51,14 @@
   padding: 0 5px; border: 1px solid var(--accent); border-radius: 8px;
   color: var(--accent); opacity: .8;
 }
+/* Provenance service (meta.origin) : badge « via X » violet — distinct
+   des badges PR (accent) et du vert agent↔agent (peer). */
+#session-list .sess .sess-origin {
+  flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-size: 10px; font-family: Mono, ui-monospace, monospace;
+  padding: 0 5px; border: 1px solid var(--violet); border-radius: 8px;
+  color: var(--violet); opacity: .85;
+}
 /* Indicateur d'état : la même gemme cristal que le logo, colorée par rôle —
    sable (working), améthyste (compacting), grenat (waiting_input/failed),
    neutre (idle), ardoise (interrupted/dead). */
@@ -94,6 +102,7 @@
 #session-list .sess.sub .t { font-weight: 400; }
 #session-list .sess.sub .a { font-size: 10px; }
 #session-list .sess.sub .sess-pr { font-size: 9px; padding: 0 4px; }
+#session-list .sess.sub .sess-origin { font-size: 9px; padding: 0 4px; }
 
 #btn-new-session {
   border-style: dashed; color: var(--muted);

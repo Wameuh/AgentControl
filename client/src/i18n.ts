@@ -198,6 +198,7 @@ const STR = {
     pr_st_open: "open", pr_st_draft: "draft", pr_st_conflict: "conflict",
     pr_st_merged: "merged", pr_st_closed: "closed",
     spawned_by: "spawned by {parent}",
+    via: "via", origin_tip: "created by service {origin}",
     bottom_jump_title: "Back to live tail",
     // retours utilisateur : toasts, dialogue démon, états vides
     retry: "Retry",
@@ -418,6 +419,7 @@ const STR = {
     pr_st_open: "ouverte", pr_st_draft: "brouillon", pr_st_conflict: "conflit",
     pr_st_merged: "fusionnée", pr_st_closed: "fermée",
     spawned_by: "créée par {parent}",
+    via: "via", origin_tip: "créée par le service {origin}",
     bottom_jump_title: "Revenir au fil en direct",
     // retours utilisateur : toasts, dialogue démon, états vides
     retry: "Réessayer",

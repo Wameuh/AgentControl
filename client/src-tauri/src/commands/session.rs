@@ -139,6 +139,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             model: so("model"),
             mode: so("mode"),
             prompt: so("prompt"),
+            origin: so("origin"),
         },
         "resume_session" => ReqKind::ResumeSession {
             session: s("session"),

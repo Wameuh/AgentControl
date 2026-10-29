@@ -51,6 +51,9 @@ export class EventRenderer {
         const body = document.createElement("div");
         body.className = "um-body";
         body.innerHTML =
+          (ev.origin
+            ? `<span class="origin-badge">${esc(t("via"))} ${esc(ev.origin as string)}</span> `
+            : "") +
           (ev.steer ? `<span class="steer-badge">${t("steer_badge")}</span> ` : "") +
           linkify(esc(txt));
         d.appendChild(body);

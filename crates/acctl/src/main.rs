@@ -3,6 +3,8 @@
 //! Usage :
 //!   acctl status | agents | list
 //!   acctl new <agent> <cwd> [prompt...] [--title T] [--mode M] [--model X]
+//!               [--origin O]   (provenance service — badge « via » client ;
+//!               ex. --origin service:backlog-orchestrator)
 //!   acctl send <session> <text...>
 //!   acctl msg <from> <to> [--queue] <text...>   (message agent→agent —
 //!       steer par défaut ; --steer accepté, sans effet)
@@ -169,12 +171,16 @@ fn print_event(ev: &Value) {
     let ty = ev["type"].as_str().unwrap_or("?");
     match ty {
         "user_message" => println!(
-            "\x1b[36m[{seq}] vous{}> {}\x1b[0m",
+            "\x1b[36m[{seq}] vous{}{}> {}\x1b[0m",
             if ev["steer"].as_bool().unwrap_or(false) {
                 " (steer)"
             } else {
                 ""
             },
+            ev["origin"]
+                .as_str()
+                .map(|o| format!(" (via {o})"))
+                .unwrap_or_default(),
             ev["text"].as_str().unwrap_or("")
         ),
         "peer_message" => println!(
@@ -332,7 +338,7 @@ async fn main() -> Result<()> {
                         format!("{}↳ ", "  ".repeat((depth - 1).min(4)))
                     };
                     let line = format!(
-                        "{}{}  {:<12} {:<14} {}  {}{}",
+                        "{}{}  {:<12} {:<14} {}  {}{}{}",
                         indent,
                         sid,
                         s["state"].as_str().unwrap_or(""),
@@ -343,7 +349,13 @@ async fn main() -> Result<()> {
                             String::new()
                         } else {
                             format!("  [{}]", badge.join(" "))
-                        }
+                        },
+                        // Provenance service (meta.origin) — même format
+                        // « [via X] » que les badges PR, ignoré du titre.
+                        s["origin"]
+                            .as_str()
+                            .map(|o| format!("  [via {o}]"))
+                            .unwrap_or_default()
                     );
                     if depth == 0 {
                         println!("{line}");
@@ -359,7 +371,8 @@ async fn main() -> Result<()> {
             }
         }
         "new" => {
-            // acctl new <agent> <cwd> [prompt...] [--title T] [--mode M] [--model X]
+            // acctl new <agent> <cwd> [prompt...] [--title T] [--mode M]
+            //             [--model X] [--origin O]
             if args.len() < 3 {
                 bail!("new <agent> <cwd> [prompt...]");
             }
@@ -369,17 +382,19 @@ async fn main() -> Result<()> {
             let mut title = None;
             let mut mode = None;
             let mut model = None;
+            let mut origin = None;
             let mut i = 3;
             while i < args.len() {
                 match args[i].as_str() {
                     "--title" => { title = args.get(i + 1).cloned(); i += 2; }
                     "--mode" => { mode = args.get(i + 1).cloned(); i += 2; }
                     "--model" => { model = args.get(i + 1).cloned(); i += 2; }
+                    "--origin" => { origin = args.get(i + 1).cloned(); i += 2; }
                     p => { prompt_parts.push(p.to_string()); i += 1; }
                 }
             }
             let v = c.call(proto::ReqKind::NewSession {
-                agent, cwd, title, model, mode,
+                agent, cwd, title, model, mode, origin,
                 prompt: if prompt_parts.is_empty() { None } else { Some(prompt_parts.join(" ")) },
             }).await?;
             println!("{}", v["session"].as_str().unwrap_or(""));

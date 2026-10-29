@@ -404,7 +404,8 @@ export class Sidebar {
       // étendue aux descendants).
       const connHit = !!f && hit(conn);
       const pass = (s: SessionMeta) =>
-        !f || connHit || hit(s.group ? grpNorm(s.group) : "") || hit(s.title) || hit(s.agent);
+        !f || connHit || hit(s.group ? grpNorm(s.group) : "") || hit(s.title) ||
+        hit(s.agent) || hit(s.origin ?? "");
 
       // Arbre des groupes : chemins stockés (groupes VIDES visibles hors
       // filtre, ancêtres explicites) + chemins portés par les sessions ;
@@ -785,12 +786,17 @@ export class Sidebar {
     if (s.spawned_by) {
       const parent = app.lastSessions.find((x) => x.id === s.spawned_by);
       div.title = t("spawned_by", { parent: parent?.title ?? s.spawned_by });
+    } else if (s.origin) {
+      div.title = t("origin_tip", { origin: s.origin });
     }
     const prs = this.prBySess.get(`${conn}${s.id}`) ?? [];
     const prHtml = prs.length
       ? `<span class="sess-pr" title="${q(esc(prs.map((p) => `${p.repo}#${p.pr}${p.title ? ` — ${p.title}` : ""}${p.status ? ` (${p.status})` : ""}`).join("\n")))}">${prs.map((p) => `#${p.pr}`).join(" ")}</span>`
       : "";
-    div.innerHTML = `<span class="dot st-${dotCls(s.state)}" title="${q(esc(s.state))}">${dotIcon(s.state)}</span><span class="t">${this.hl(s.title)}</span>${prHtml}<span class="a">${this.hl(s.agent)}</span><button class="sess-del" title="Supprimer">${icon("close")}</button>`;
+    const originHtml = s.origin
+      ? `<span class="sess-origin" title="${q(esc(t("origin_tip", { origin: s.origin })))}">${t("via")} ${this.hl(s.origin)}</span>`
+      : "";
+    div.innerHTML = `<span class="dot st-${dotCls(s.state)}" title="${q(esc(s.state))}">${dotIcon(s.state)}</span><span class="t">${this.hl(s.title)}</span>${originHtml}${prHtml}<span class="a">${this.hl(s.agent)}</span><button class="sess-del" title="Supprimer">${icon("close")}</button>`;
     div.onclick = () => {
       void this.openSession(s.id);
       // Mobile : fermer le drawer après sélection.

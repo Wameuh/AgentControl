@@ -198,6 +198,14 @@
   border-radius: 999px; border: 1px solid var(--msg-user-link);
   color: var(--msg-user-link); vertical-align: 1px; opacity: .85;
 }
+/* pastille « via <service> » sur un user_message émis par un service
+   (session créée avec origin) — violet : provenance programme, pas humain. */
+.origin-badge {
+  display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .4px;
+  padding: 1px 6px; margin-right: 2px;
+  border-radius: 999px; border: 1px solid var(--violet);
+  color: var(--violet); vertical-align: 1px; opacity: .9;
+}
 .msg.agent {
   background: rgba(196, 169, 220, .1);
   border: 1px solid rgba(196, 169, 220, .22);

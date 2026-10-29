@@ -83,6 +83,7 @@ impl Session {
                 s.emit(EventKind::UserMessage {
                     text: text.clone(),
                     steer: true,
+                    origin: None,
                 });
                 match s.prompt_rpc(&text).await {
                     Ok(_) => {}
@@ -350,6 +351,7 @@ impl Session {
                 self.emit(EventKind::UserMessage {
                     text: next.clone(),
                     steer: false,
+                    origin: None,
                 });
             }
             let armed = is_compact_cmd(&next);

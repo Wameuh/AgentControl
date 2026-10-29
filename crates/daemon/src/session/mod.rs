@@ -238,6 +238,7 @@ impl Session {
                 "user" => EventKind::UserMessage {
                     text: buf,
                     steer: false,
+                    origin: None,
                 },
                 _ => EventKind::AgentText { text: buf },
             };
