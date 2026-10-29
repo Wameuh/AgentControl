@@ -1,9 +1,11 @@
 //! Handlers des RPC composants managés (docs/components-integration.md
-//! §2.3) : liste/infos lecture + cycle de vie `process` + tail de log.
-//! Toute la mécanique est dans `crate::components` — ici on ne fait que
-//! router la requête et formater la réponse.
+//! §2.3) : liste/infos lecture + cycle de vie `process` + tail de log
+//! + édition des specs + catalogue d'intégration. Toute la mécanique
+//! est dans `crate::components` — ici on ne fait que router la requête
+//! et formater la réponse.
 
 use super::*;
+use proto::ComponentSpec;
 
 impl Daemon {
     /// `ListComponents` — items {name, kind, state, pid?, autostart,
@@ -46,5 +48,44 @@ impl Daemon {
         limit: Option<u64>,
     ) -> Result<Value> {
         self.components.logs(&name, offset, limit).await
+    }
+
+    /// `ComponentUpsert{name, spec}` — insère/remplace la spec déclarée
+    /// (réécriture atomique de components.toml) → {name, state}. Un
+    /// `process` vivant garde sa spec courante jusqu'au prochain
+    /// (re)start, explicite ou supervisé.
+    pub(super) async fn h_component_upsert(
+        self: &Arc<Self>,
+        name: String,
+        spec: ComponentSpec,
+    ) -> Result<Value> {
+        let st = self.components.upsert(&name, spec).await?;
+        Ok(json!({ "name": name, "state": st.state }))
+    }
+
+    /// `ComponentRemove{name}` — retire la spec (stop préalable d'un
+    /// `process` vivant) → {name, removed}.
+    pub(super) async fn h_component_remove(self: &Arc<Self>, name: String) -> Result<Value> {
+        self.components.remove(&name).await?;
+        Ok(json!({ "name": name, "removed": true }))
+    }
+
+    /// `ComponentCatalog{refresh?}` — entrées du catalogue embarqué :
+    /// métadonnées + installed/version détectés + latest_version /
+    /// latest_notes upstream (cache ~5 min, offline → champs null).
+    pub(super) async fn h_component_catalog(
+        self: &Arc<Self>,
+        refresh: Option<bool>,
+    ) -> Result<Value> {
+        Ok(json!(
+            self.components.catalog(refresh.unwrap_or(false)).await
+        ))
+    }
+
+    /// `ComponentInstall{name}` — exécute la recette de l'entrée
+    /// (steps auditées : run argv fixe, write_file borné HOME,
+    /// require_file, upsert_spec) → {installed, name, state, notes}.
+    pub(super) async fn h_component_install(self: &Arc<Self>, name: String) -> Result<Value> {
+        self.components.install(&name).await
     }
 }

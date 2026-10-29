@@ -7,7 +7,9 @@ mod cfg;
 mod components;
 /// Bornage workspace réutilisé par l'endpoint HTTP /media|/download.
 pub(crate) mod files;
-mod misc;
+/// `command_available` est réutilisé par la détection du catalogue
+/// (components/catalog.rs).
+pub(crate) mod misc;
 mod peers;
 mod prs;
 mod sessions;
@@ -631,6 +633,14 @@ impl Daemon {
                 offset,
                 limit,
             } => self.h_component_logs(name, offset, limit).await,
+            ReqKind::ComponentUpsert { name, spec } => {
+                self.h_component_upsert(name, spec).await
+            }
+            ReqKind::ComponentRemove { name } => self.h_component_remove(name).await,
+            ReqKind::ComponentCatalog { refresh } => {
+                self.h_component_catalog(refresh).await
+            }
+            ReqKind::ComponentInstall { name } => self.h_component_install(name).await,
             ReqKind::Subscribe { session, after_seq } => {
                 self.h_subscribe(session, after_seq).await
             }

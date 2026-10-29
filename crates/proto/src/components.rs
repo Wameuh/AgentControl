@@ -143,3 +143,65 @@ pub struct ComponentsFile {
     #[serde(default)]
     pub components: Vec<ComponentSpec>,
 }
+
+// ---------------------------------------------------------------------------
+// Catalogue d'intégration (§2.5) — entrées embarquées dans le démon.
+// ---------------------------------------------------------------------------
+
+/// Étape déclarative d'une recette d'installation — auditée dans le
+/// code du démon : aucune commande arbitraire ne vient du client
+/// (`run` = argv fixe, jamais de shell libre).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "step", rename_all = "snake_case")]
+pub enum RecipeStep {
+    /// argv fixe exécuté directement (pas de shell).
+    Run { argv: Vec<String> },
+    /// Écrit `content` dans `path` — borné sous le HOME du démon
+    /// (`~` expansé, `..` hors HOME refusé, parent canonicalisé).
+    WriteFile { path: String, content: String },
+    /// Exige la présence de `path` (`~` expansé sous HOME) — sinon la
+    /// recette échoue avec `hint` : l'étape documentée reste à faire
+    /// à la main (ex. « versionner le script »).
+    RequireFile { path: String, hint: String },
+    /// Insère `suggested_spec` de l'entrée dans components.toml —
+    /// même validation que `ComponentUpsert`.
+    UpsertSpec,
+    /// Information affichée à l'utilisateur (aucune action).
+    Note { text: String },
+}
+
+/// Détection « déjà installé ? » d'une entrée du catalogue — `bin`
+/// résoluble sur le PATH du démon **ou** `path` présent.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct CatalogDetect {
+    /// argv0 résoluble sur le PATH du démon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bin: Option<String>,
+    /// Fichier présent (`~` = HOME du démon).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// Entrée du catalogue embarqué — « option d'intégration » connue du
+/// démon (docs/components-integration.md §2.5) : métadonnées + spec
+/// préremplie + recette d'installation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogEntry {
+    pub name: String,
+    pub description: String,
+    /// `owner/repo` GitHub sondé pour `latest_version` (None → champ
+    /// null côté client, jamais d'erreur).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homepage: Option<String>,
+    /// Spec préremplie posée par l'étape `upsert_spec` de la recette —
+    /// `~` dans command/cwd est expansé sous le HOME du démon.
+    pub suggested_spec: ComponentSpec,
+    #[serde(default)]
+    pub detect: CatalogDetect,
+    /// Recette déclarative — exécutée dans l'ordre par
+    /// `ComponentInstall`.
+    #[serde(default)]
+    pub recipe: Vec<RecipeStep>,
+}

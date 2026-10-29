@@ -7,6 +7,7 @@
 //! `server/components.rs` — ce module ne connaît que le modèle
 //! `proto::Component*` et la mécanique de supervision.
 
+mod catalog;
 mod proc;
 
 use anyhow::{Context, Result};
@@ -18,7 +19,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
@@ -85,6 +86,10 @@ pub struct Components {
     /// Posé au shutdown du démon : watchers et sondes s'arrêtent —
     /// aucun respawn pendant l'arrêt.
     down: Arc<AtomicBool>,
+    /// Cache des sondes upstream du catalogue (tag+notes par repo,
+    /// TTL ~5 min) — voir catalog.rs. Mutex std : sections courtes
+    /// (get/insert), jamais tenue pendant un await.
+    upstream: Mutex<HashMap<String, catalog::Upstream>>,
 }
 
 impl Components {
@@ -132,13 +137,13 @@ impl Components {
             a2a_enabled,
             web,
             down: Arc::new(AtomicBool::new(false)),
+            upstream: Mutex::new(HashMap::new()),
         })
     }
 
     /// Réécrit `components.toml` depuis les specs courantes — atomique
     /// `.part` + rename (même pattern que `write_file`), utilisée par
-    /// les RPC d'édition (upsert/remove, livrable suivant).
-    #[allow(dead_code)]
+    /// les RPC d'édition (upsert/remove/install).
     pub async fn save(&self) -> Result<()> {
         let specs: Vec<ComponentSpec> =
             self.specs.read().await.values().cloned().collect();
@@ -298,6 +303,83 @@ impl Components {
             kind_name(spec.kind),
         );
         Ok(spec)
+    }
+
+    // -------------------------------------------------------------------
+    // Édition des specs déclarées (RPC upsert/remove/install)
+    // -------------------------------------------------------------------
+
+    /// Insère/remplace la spec déclarée `name` — `name` == `spec.name`
+    /// exigé (la clé est le nom déclaré) — puis réécriture atomique de
+    /// components.toml.
+    ///
+    /// Un `process` déjà vivant garde la spec avec laquelle il a été
+    /// lancé : la nouvelle ne s'applique qu'au prochain (re)start —
+    /// explicite (`ComponentRestart`/`Start`) ou supervisé (respawn
+    /// sur exit). Exception : si l'édition change le kind hors
+    /// `process`, le process vivant est arrêté — un ancien managé ne
+    /// doit pas continuer à (re)tourner sous une spec sans cycle de
+    /// vie.
+    pub async fn upsert(self: &Arc<Self>, name: &str, mut spec: ComponentSpec) -> Result<ComponentStatus> {
+        anyhow::ensure!(
+            spec.name == name,
+            "spec.name « {} » ≠ name « {name} » — la clé d'édition est le nom déclaré",
+            spec.name
+        );
+        check_editable(&spec)?;
+        // Même borne qu'au chargement : le backoff plafonne à 60 s.
+        spec.restart_sec = spec.restart_sec.min(BACKOFF_CAP_SECS);
+        let demote = matches!(
+            self.specs.read().await.get(name),
+            Some(prev) if prev.kind == ComponentKind::Process && spec.kind != ComponentKind::Process
+        );
+        // Mutation mémoire AVANT le cycle de vie : un `start` concurrent
+        // lit la nouvelle spec (kind≠process → require_process refuse) et
+        // un respawn planifié sort via la garde kind — la fenêtre où un
+        // process tournerait sous une spec remplacée est fermée.
+        self.specs
+            .write()
+            .await
+            .insert(name.to_string(), spec.clone());
+        if demote {
+            self.shutdown_proc(name).await?;
+        }
+        if let Err(e) = self.save().await {
+            warn!("composant « {name} » upsert en mémoire mais save() a échoué — runtime diverge du toml jusqu'au prochain boot: {e:#}");
+            return Err(e);
+        }
+        Ok(self.status_of(&spec).await)
+    }
+
+    /// Retire la spec déclarée `name` : un `process` vivant est arrêté
+    /// proprement d'abord (SIGTERM → SIGKILL) et un éventuel orphelin
+    /// pidfile reapé comme au boot ; le runtime (procs/observed) est
+    /// purgé. Le fichier de log est conservé (trace). Réécriture
+    /// atomique de components.toml.
+    pub async fn remove(self: &Arc<Self>, name: &str) -> Result<()> {
+        let spec = self
+            .specs
+            .read()
+            .await
+            .get(name)
+            .cloned()
+            .with_context(|| format!("composant inconnu: {name}"))?;
+        // Retrait de la spec AVANT le cycle de vie : tout start/stop/
+        // respawn concurrent échoue alors « composant inconnu »
+        // (require_process/spec_of) — pas de process démarré puis
+        // dé-tracké qui fuirait en orphelin invisible.
+        self.specs.write().await.remove(name);
+        if spec.kind == ComponentKind::Process {
+            self.shutdown_proc(name).await?;
+            self.reap_orphan(&spec).await;
+        }
+        self.procs.write().await.remove(name);
+        self.observed.write().await.remove(name);
+        if let Err(e) = self.save().await {
+            warn!("composant « {name} » retiré en mémoire mais save() a échoué — il ressuscitera au prochain boot: {e:#}");
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Lecture du log `<root>/components/<name>.log` — tail paginé.
@@ -485,14 +567,46 @@ fn check_usable(spec: &ComponentSpec) -> Result<()> {
             .command
             .first()
             .with_context(|| format!("spec `{}` sans commande", kind_name(spec.kind)))?;
-        let base = Path::new(argv0)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| argv0.clone());
-        anyhow::ensure!(
-            !matches!(base.as_str(), "agentcontrol-daemon" | "supervisord" | "systemctl"),
-            "commande interdite « {argv0} » — un composant ne gère ni le démon ni son superviseur"
-        );
+        check_not_supervisor(argv0)?;
     }
+    // Même garde sur la sonde `command` — elle tourne toutes les 30 s,
+    // un `systemctl`/`supervisord` y serait exécuté en boucle.
+    if let Healthcheck::Command { argv } = &spec.healthcheck {
+        if let Some(argv0) = argv.first() {
+            check_not_supervisor(argv0)?;
+        }
+    }
+    Ok(())
+}
+
+/// argv0 ne doit jamais être le démon ni son superviseur — un
+/// composant managé ne gère ni l'un ni l'autre (commande du process
+/// ou sonde `command`, exécutée toutes les 30 s).
+fn check_not_supervisor(argv0: &str) -> Result<()> {
+    let base = Path::new(argv0)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| argv0.to_string());
+    anyhow::ensure!(
+        !matches!(base.as_str(), "agentcontrol-daemon" | "supervisord" | "systemctl"),
+        "commande interdite « {argv0} » — un composant ne gère ni le démon ni son superviseur"
+    );
+    Ok(())
+}
+
+/// Gardes d'édition (upsert/install) au-delà de `check_usable` : la
+/// sonde doit être cohérente avec le kind — `healthcheck=process`
+/// exige un pid managé, absent pour `external`/`tool`. Les champs de
+/// cycle de vie (autostart/restart*) sont acceptés hors `process` mais
+/// sans effet — la spec reste auto-porteuse.
+fn check_editable(spec: &ComponentSpec) -> Result<()> {
+    check_usable(spec)?;
+    anyhow::ensure!(
+        spec.kind == ComponentKind::Process
+            || !matches!(spec.healthcheck, Healthcheck::Process),
+        "healthcheck kind=process sans pid managé — « {} » est kind={}",
+        spec.name,
+        kind_name(spec.kind)
+    );
     Ok(())
 }
