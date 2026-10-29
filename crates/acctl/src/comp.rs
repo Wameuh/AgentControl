@@ -203,6 +203,7 @@ fn spec_from_args(name: &str, args: &[String]) -> Result<proto::ComponentSpec> {
         restart_sec: 5,
         healthcheck,
         description: flag_val(args, "--desc").map(String::from),
+        queries: std::collections::HashMap::new(),
     })
 }
 
