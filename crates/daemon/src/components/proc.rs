@@ -137,20 +137,26 @@ impl Components {
                 {
                     let mut procs = self.procs.write().await;
                     if let Some(p) = procs.get_mut(&name) {
-                        if manual {
+                        // `restart=never` s'applique aussi à l'échec de
+                        // lancement (autostart) : pas de retry — comme
+                        // la voie manuelle, Failed + désarmé.
+                        if manual || spec.restart == RestartPolicy::Never {
                             p.state = ComponentState::Failed;
                             p.desired = Desired::Stopped;
                         } else {
                             // Respawn supervisé : un échec transitoire
                             // (binaire absent un instant, fds épuisés,
                             // port pris) ne doit pas désactiver
-                            // restart=always — on replanifie avec le
-                            // backoff déjà doublé par on_exit. Starting
-                            // comme l'attente post-exit : un retry suit.
+                            // restart=always/on-failure — un lancement
+                            // raté compte comme un échec au sens de la
+                            // policy. Retry planifié avec backoff
+                            // exponentiel (×2 par échec consécutif).
                             p.state = ComponentState::Starting;
                             delay = Some(Duration::from_secs(
                                 p.backoff_secs.min(BACKOFF_CAP_SECS),
                             ));
+                            p.backoff_secs =
+                                p.backoff_secs.saturating_mul(2).min(BACKOFF_CAP_SECS);
                         }
                     }
                 }
