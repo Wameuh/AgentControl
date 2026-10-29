@@ -78,3 +78,69 @@ blob_max_mb = 512      # quota sorties de tool calls (LRU)
 purge_days = 0         # purge sessions inactives (0=off)
 interval_secs = 600
 ```
+
+## 5. Composants managés — migrer un service supervisord
+
+Le démon supervise lui-même les programmes satellites : `kind=process`
+(spawn/stop/restart, healthcheck, logs paginés), `tool`, `external` —
+modèle complet dans `docs/components-integration.md`. Les specs vivent
+dans `~/.agentcontrol/components.toml`, fichier **possédé par le
+démon** : on l'édite via RPC (`component_upsert`/`component_remove`),
+jamais en l'ouvrant à chaud. Exemple commenté :
+`packaging/components.example.toml`.
+
+### Cas type : backlog-orchestrator
+
+Service aujourd'hui sous `~/.supervisor/conf.d/backlog-orchestrator.conf`
+(script `~/.local/bin/backlog-orchestrator.py`, poll 60 s, **singleton
+garanti par flock** `~/.agentbacklog/orchestrator.lock`).
+
+**Bascule** — activer le composant **puis** retirer la conf supervisord.
+L'ordre garantit une couverture continue, et le flock rend la fenêtre de
+transition sans risque : si les deux superviseurs le lancent, la seconde
+instance sort proprement.
+
+```bash
+# 1. Installer le composant depuis le catalogue embarqué (recette
+#    déclarative : exige le script présent, pose la spec autostart +
+#    restart=on-failure + healthcheck=process)
+acctl comp install backlog-orchestrator   # acctl ≥ item #27
+
+#    Sans `acctl comp` (version antérieure) — NDJSON brut sur le socket :
+python3 - <<'EOF'
+import json, socket
+s = socket.socket(socket.AF_UNIX); s.connect("/home/dev/.agentcontrol/daemon.sock")
+f = s.makefile("rw")
+for req in ({"id":1,"req":"component_catalog"},
+            {"id":2,"req":"component_install","name":"backlog-orchestrator"}):
+    f.write(json.dumps(req)+"\n"); f.flush(); print(f.readline().strip())
+EOF
+
+# 2. Vérifier côté démon : running, logs qui défilent
+acctl comp ls                             # ou component_info/list_components en RPC
+acctl comp logs backlog-orchestrator
+
+# 3. Seulement ensuite, retirer la supervision historique
+rm ~/.supervisor/conf.d/backlog-orchestrator.conf
+supervisorctl reread && supervisorctl update
+supervisorctl status                      # backlog-orchestrator absent
+```
+
+**Rollback** : `component_remove` (stop + spec retirée), restaurer la
+conf supervisord, `supervisorctl reread && supervisorctl update` —
+là aussi sans doublon grâce au flock.
+
+⚠️ Un `process` managé partage le destin du démon : SIGTERM à l'arrêt
+du démon, respawn au boot si `autostart` — pour un service qui doit
+survivre au restart démon, déclarer `kind=external` à la place
+(observation seule).
+
+### Versionner le script (recommandé)
+
+La recette catalogue de `backlog-orchestrator` suppose le script déjà
+présent à `~/.local/bin/` — il n'est versionné nulle part. Le déposer
+dans **Wameuh/AgentBacklog** ou un `contrib/` d'AgentControl donnerait
+une source canonique téléchargeable (recette `run`/`write_file` au lieu
+de `require_file` + spec-only). En attendant, la recette reste
+volontairement **spec-only quand le script est détecté** : rien à
+installer, juste la spec à poser.

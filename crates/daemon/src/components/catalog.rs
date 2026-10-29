@@ -481,21 +481,12 @@ async fn write_home_file(path: &str, content: &str) -> Result<()> {
 }
 
 /// Spec effective posée par `upsert_spec` : `suggested_spec` avec `~`
-/// expansé sous HOME partout où un chemin peut figurer (command, cwd,
-/// env, argv d'une sonde `command`) — le toml écrit porte des
-/// chemins absolus.
+/// expansé sous HOME partout où un chemin peut figurer — le toml
+/// écrit porte des chemins absolus (même normalisation qu'au
+/// chargement/upsert, cf `expand_home_fields`).
 fn materialize_spec(e: &CatalogEntry) -> ComponentSpec {
     let mut s = e.suggested_spec.clone();
-    s.command = s.command.iter().map(|a| expand_home_str(a)).collect();
-    s.cwd = s.cwd.as_deref().map(expand_home_str);
-    s.env = s
-        .env
-        .iter()
-        .map(|(k, v)| (k.clone(), expand_home_str(v)))
-        .collect();
-    if let Healthcheck::Command { argv } = &mut s.healthcheck {
-        *argv = argv.iter().map(|a| expand_home_str(a)).collect();
-    }
+    super::expand_home_fields(&mut s);
     s
 }
 
@@ -508,7 +499,7 @@ fn expand_home(path: &str) -> PathBuf {
     PathBuf::from(expand_home_str(path))
 }
 
-fn expand_home_str(path: &str) -> String {
+pub(super) fn expand_home_str(path: &str) -> String {
     if path == "~" || path.starts_with("~/") {
         if let Some(home) = std::env::var_os("HOME") {
             return format!("{}{}", PathBuf::from(home).display(), &path[1..]);
