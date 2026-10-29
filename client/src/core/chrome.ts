@@ -19,17 +19,64 @@ const mesh = (window as {
   };
 }).MeshBackground;
 export const bgMood = () => (document.documentElement.classList.contains("light") ? "paper" : "sand");
+
+/* Sonde de résolution couleur : getPropertyValue rend les tokens bruts
+   (les var() sont substitués, pas les color-mix) — seule une vraie
+   propriété donne la valeur utilisée. Réutilisée par le mesh (triplets
+   canvas) et le thème xterm (chaîne résolue). */
+let probeEl: HTMLElement | null = null;
+function cssColor(varName: string): string {
+  if (!probeEl) {
+    probeEl = document.createElement("i");
+    probeEl.style.display = "none";
+    document.body.appendChild(probeEl);
+  }
+  probeEl.style.color = "";
+  probeEl.style.color = `var(${varName})`;
+  return getComputedStyle(probeEl).color;
+}
+/** --var résolue → [r, g, b] 0-255 (« rgb(…) » direct ; « color(srgb …) » = 0-1). */
+function rgbOf(varName: string): number[] | null {
+  const v = cssColor(varName);
+  const nums = v.match(/[\d.]+/g)?.map(Number);
+  if (!nums || nums.length < 3) return null;
+  const f = v.startsWith("color(") ? 255 : 1;
+  return nums.slice(0, 3).map((n) => Math.round(n * f));
+}
+/** --var résolue en « rgb(r, g, b) » — sûre pour canvas (xterm). */
+export function themeRgb(varName: string): string | null {
+  const rgb = rgbOf(varName);
+  return rgb ? `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})` : null;
+}
+
+// Couleurs du mesh = palette résolue courante (--bg + --accent, dérivés
+// du thème en base.css). Conservées en état : tout appel meshSetMood les
+// repasse — sinon un update « agents » écraserait la teinte d'accent.
+let meshColors: { base?: number[]; light?: number[] } = {};
 // Fond figé (« Fond animé » off) : pas de repaint — mais la cible de mood
 // suit quand même (freeze) pour que la réactivation reparte à jour.
 export const meshSetMood = (o: object) => {
   const freeze = mesh?.isAnimated() === false;
-  mesh?.setMood(bgMood(), freeze ? { ...o, freeze } : o);
+  mesh?.setMood(bgMood(), { ...meshColors, ...(freeze ? { freeze } : {}), ...o });
 };
+/** Re-lit la palette résolue et la pousse au mesh : sa lumière principale
+ *  = accent (thème, ou couleur de connexion quand l'instance est liée),
+ *  sa base = --bg dérivé. « sauge » retombe pile sur les presets.
+ *  Appel direct à setMood (pas meshSetMood) : changement de couleur
+ *  explicite → repaint immédiat même quand l'animation est off — le
+ *  freeze n'est que pour les mises à jour de fond (compteur agents). */
+function syncMeshAccent() {
+  const base = rgbOf("--bg");
+  const light = rgbOf("--accent");
+  if (base && light) meshColors = { base, light };
+  mesh?.setMood(bgMood(), { ...meshColors, intensity: 0.55 });
+}
 
 export function applyTheme(name: "dark" | "light") {
   document.documentElement.classList.toggle("light", name === "light");
   localStorage.setItem("ac-theme", name);
-  mesh?.setMood(bgMood(), { intensity: 0.55 });
+  // La palette dérivée dépend du mode : recalcul après le toggle.
+  syncMeshAccent();
 }
 
 // Couleur d'accent — dimension orthogonale à dark/light (cf. styles/base.css).
@@ -53,12 +100,18 @@ export function applyAccent(name: Accent, persist = true) {
   const el = document.documentElement;
   for (const a of ACCENTS) if (a !== "sage") el.classList.toggle(`theme-${a}`, name === a);
   if (persist) localStorage.setItem("ac-accent", name);
+  syncMeshAccent();
 }
 
 /** Chrome par connexion liée (modèle multi-instances : 1 instance = 1
  *  connexion) : accent propre à la conn (sinon celui des réglages),
  *  liseré d'identification (:root.conn-tinted, styles/layout.css) et
  *  titre de fenêtre « AgentControl — hôte » (taskbar + titlebar custom).
+ *  Arbitrage couleur : la couleur de connexion DEVIENT l'accent de
+ *  l'instance — elle a la priorité sur l'accent global partout (palette
+ *  de surfaces et fond mesh inclus), ce qui fait de toute la fenêtre
+ *  l'identifiant visuel de la connexion. Sans couleur de conn, l'accent
+ *  global des réglages s'applique.
  *  conn = clé connKey ; null = aucune connexion liée (retour au neutre). */
 export function applyConnChrome(conn: string | null, color?: Accent | null) {
   document.documentElement.classList.toggle("conn-tinted", !!color);

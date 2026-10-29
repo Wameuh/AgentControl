@@ -251,6 +251,10 @@
   function setMood(name, options = {}) {
     const preset = MOODS[name] || MOODS.sand;
     target = { ...preset, intensity: options.intensity ?? 1 };
+    // Teinte d'accent optionnelle (palette dérivée du thème) : la base
+    // remplace le fond du preset, la lumière principale suit l'accent.
+    if (options.base) target.base = options.base;
+    if (options.light) target.light = options.light;
     mood.dark = !!preset.dark;
     agentCount = Math.max(0, Math.min(MAX_AGENTS, options.agents | 0));
     // freeze : la cible suit sans repaint (fond figé — reprise sur une
