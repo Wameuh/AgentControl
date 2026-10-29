@@ -843,6 +843,14 @@ pub enum ReqKind {
     /// Réponse : `[{type, hosts: [{host, token_env?}]}]` — `token_env`
     /// est le NOM d'une variable d'environnement, jamais un secret.
     ForgeList {},
+    /// Resynchronise les statuts du registre PR depuis les forges live
+    /// (gh pour github, REST gitlab/gerrit — même logique que
+    /// `acctl pr sync`, appliquée côté démon). Throttlé : un appel dans
+    /// la foulée d'un sync récent répond `throttled`, un sync déjà en
+    /// vol répond `running`. Réponse :
+    /// `{synced, checked, updated, notes[]}` ou `{synced:false, running|
+    /// throttled: true}`.
+    PrSync {},
     /// Composants managés (docs/components-integration.md §2.3) :
     /// liste name/kind/state/pid/autostart/health/uptime/restarts/
     /// last_exit/description/source.
@@ -961,6 +969,7 @@ impl ReqKind {
             Self::PrTrack { .. } => "pr_track",
             Self::PrUntrack { .. } => "pr_untrack",
             Self::ForgeList {} => "forge_list",
+            Self::PrSync {} => "pr_sync",
             Self::ListComponents => "list_components",
             Self::ComponentInfo { .. } => "component_info",
             Self::ComponentStart { .. } => "component_start",

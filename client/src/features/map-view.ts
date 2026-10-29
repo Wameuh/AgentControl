@@ -437,7 +437,11 @@ export class MapView {
       );
     }
     const prOf = new Map<string, number>();
-    for (const p of prs) if (p.session && p.pr) prOf.set(p.session, p.pr);
+    for (const p of prs)
+      // Une PR merged/closed ne badge plus la session sur la map —
+      // même filtre que l'onglet Repos.
+      if (p.session && p.pr && p.status !== "merged" && p.status !== "closed")
+        prOf.set(p.session, p.pr);
     // Agent = cercle (icône d'état), titre sous le nœud + nom de l'agent
     // en sous-titre + badge PR éventuel.
     for (const s of sess) {

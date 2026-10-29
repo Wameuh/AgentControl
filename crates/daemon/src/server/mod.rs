@@ -132,6 +132,9 @@ pub struct Daemon {
     >,
     /// Registre PR ↔ session (prs.json) — voir prs.rs.
     pub prs: Arc<PrRegistry>,
+    /// État du sync des statuts PR (`pr_sync`) — throttle + exclusion
+    /// d'un second run pendant qu'un fetch forge est en vol.
+    pr_sync: Arc<std::sync::Mutex<prs::PrSyncCtl>>,
     /// Forges de review reconnues par le watcher PR (`[[forges]]` de
     /// config.toml + implicites github/gitlab.com) — voir forges.rs.
     pub forges: Forges,
@@ -170,6 +173,7 @@ impl Daemon {
             peer_rate: std::sync::Mutex::new(HashMap::new()),
             spawn_rate: std::sync::Mutex::new(HashMap::new()),
             prs: Arc::new(PrRegistry::open(&root)),
+            pr_sync: Arc::new(std::sync::Mutex::new(prs::PrSyncCtl::default())),
             forges,
             web,
         });
@@ -637,6 +641,7 @@ impl Daemon {
                 change_id,
             } => self.h_pr_untrack(repo, pr, forge, host, change_id).await,
             ReqKind::ForgeList {} => self.h_forge_list().await,
+            ReqKind::PrSync {} => self.h_pr_sync().await,
             ReqKind::ListComponents => self.h_list_components().await,
             ReqKind::ComponentInfo { name } => self.h_component_info(name).await,
             ReqKind::ComponentStart { name } => self.h_component_start(name).await,
