@@ -28,11 +28,19 @@ pub enum TermMsg {
 
 pub struct Term {
     pub id: String,
-    /// Conservé pour `resize` — droppé en premier : sa fermeture provoque
-    /// l'EOF côté reader (qui tue/réap le shell).
+    /// Conservé pour `resize` — droppé au close : sa fermeture fait
+    /// sortir le thread writer (file close) mais PAS tuer le shell —
+    /// reader et writer ont chacun un fd master duppé → jamais de
+    /// last-close → pas de SIGHUP du kernel.
     master: Option<Box<dyn portable_pty::MasterPty + Send>>,
     /// File vers le thread writer — l'ordre des saisies est préservé.
     input_tx: std_mpsc::Sender<Vec<u8>>,
+    /// Prise partagée avec le thread reader : tué explicitement au drop
+    /// (leader de session → SIGHUP au groupe fg → slave fermé → reader
+    /// EIO → reap du vrai code). `reap` côté reader conserve le wait.
+    child: std::sync::Arc<
+        std::sync::Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
+    >,
 }
 
 /// Attente max d'une mort naturelle après EOF avant de forcer SIGHUP.
@@ -68,7 +76,7 @@ impl Term {
         for (k, v) in envs {
             cmd.env(k, v);
         }
-        let mut child = pair.slave.spawn_command(cmd).context("spawn shell")?;
+        let child = pair.slave.spawn_command(cmd).context("spawn shell")?;
         // Le slave doit être fermé côté parent : sans ça le master ne voit
         // jamais EOF à la mort du shell (il garde une copie du fd ouvert).
         drop(pair.slave);
@@ -81,8 +89,10 @@ impl Term {
         // blocking_send : file pleine (client lent) → le reader attend au
         // lieu d'accumuler — la contre-pression remonte au PTY, pas à la RAM.
         let (tx, rx) = mpsc::channel::<TermMsg>(64);
+        let child = std::sync::Arc::new(std::sync::Mutex::new(child));
         {
             let tx = tx.clone();
+            let child = std::sync::Arc::clone(&child);
             std::thread::spawn(move || {
                 let mut buf = [0u8; 16384];
                 loop {
@@ -96,7 +106,7 @@ impl Term {
                         Err(_) => break, // EIO = slave fermé (mort du shell)
                     }
                 }
-                let code = reap(&mut *child);
+                let code = reap(&child);
                 let _ = tx.blocking_send(TermMsg::Exit(code));
             });
         }
@@ -120,6 +130,7 @@ impl Term {
                     .unwrap_or_else(|| proto::new_id("t")),
                 master: Some(pair.master),
                 input_tx,
+                child,
             },
             rx,
         ))
@@ -144,33 +155,68 @@ impl Term {
 
 impl Drop for Term {
     fn drop(&mut self) {
-        // Fermer le master réveille le reader (EIO) qui tue/réap le shell.
+        // Tuer le shell explicitement : fermer le master seul ne suffit
+        // pas — reader/writer duppent le fd (jamais de last-close → pas
+        // de SIGHUP kernel) et le VEOF de UnixMasterWriter n'est lu
+        // qu'en mode canonique (un TUI en mode raw survivait → process
+        // + thread + fd ptmx fuités à chaque term_close/déconnexion).
+        // kill() sans wait : reap côté reader conserve le vrai code de
+        // sortie pour le Exit final.
+        {
+            let mut c = self.child.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = c.kill();
+        }
         drop(self.master.take());
     }
 }
 
 /// Réap le process : mort naturelle → code ; encore vivant après
 /// `EXIT_GRACE` (shell qui ignore SIGHUP, stdio détaché) → kill + wait.
-fn reap(child: &mut dyn portable_pty::Child) -> Option<i64> {
+/// Le lock n'est tenu qu'un appel à la fois : `Drop` peut s'intercaler
+/// pour son `kill()` sans attendre la fin de la grâce.
+fn reap(
+    child: &std::sync::Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
+) -> Option<i64> {
     let t0 = std::time::Instant::now();
     loop {
-        match child.try_wait() {
-            Ok(Some(st)) => return Some(st.exit_code() as i64),
-            Ok(None) if t0.elapsed() < EXIT_GRACE => {
-                std::thread::sleep(std::time::Duration::from_millis(120));
+        {
+            let mut c = child.lock().unwrap_or_else(|e| e.into_inner());
+            match c.try_wait() {
+                Ok(Some(st)) => return Some(st.exit_code() as i64),
+                Ok(None) => {}
+                Err(_) => return None,
             }
-            Ok(None) => {
-                let _ = child.kill();
-                return child.wait().ok().map(|s| s.exit_code() as i64);
-            }
-            Err(_) => return None,
         }
+        if t0.elapsed() < EXIT_GRACE {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            continue;
+        }
+        let mut c = child.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = c.kill();
+        return c.wait().ok().map(|s| s.exit_code() as i64);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// fds /dev/ptmx du process — la preuve matérielle de la fuite :
+    /// un shell vivant après drop garde le reader (et son fd) bloqué.
+    #[cfg(unix)]
+    fn ptmx_fds() -> usize {
+        std::fs::read_dir(format!("/proc/{}/fd", std::process::id()))
+            .map(|d| {
+                d.filter_map(|e| e.ok())
+                    .filter(|e| {
+                        std::fs::read_link(e.path())
+                            .map(|p| p.to_string_lossy().contains("ptmx"))
+                            .unwrap_or(false)
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
 
     /// `id_hint` valide → repris tel quel (anti-orphelin côté client) ;
     /// absent/vide/trop long → id serveur `t-*`.
@@ -208,7 +254,7 @@ mod tests {
         .await;
         assert!(matches!(got, Ok(true)), "pas de sortie shell : {got:?}");
 
-        drop(t); // master fermé → reader EOF → reap → Exit final
+        drop(t); // shell tué → slave fermé → reader EIO → reap → Exit
         let last = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             let mut last = None;
             while let Some(m) = rx.recv().await {
@@ -221,5 +267,21 @@ mod tests {
             matches!(last, Ok(Some(TermMsg::Exit(_)))),
             "flux non terminé par Exit : {last:?}"
         );
+        // La preuve de la mort réelle : plus aucun fd master ouvert
+        // (sinon = shell+reader fuités — le bug du drop sans kill). Le
+        // reader ferme son fd une ligne après l'envoi de Exit → sondage
+        // borné plutôt qu'un check en course avec la fin du thread.
+        #[cfg(unix)]
+        {
+            let mut ok = false;
+            for _ in 0..40 {
+                if ptmx_fds() == 0 {
+                    ok = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            assert!(ok, "fds ptmx restants — shell fuité");
+        }
     }
 }

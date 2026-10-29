@@ -31,7 +31,17 @@ pub(super) enum TermEvt {
     /// Fin d'un flux PTY (shell mort ou reader coupé) — sortir le term
     /// de la map si la génération correspond (sinon l'entry a déjà été
     /// remplacée par un reopen sous le même id → ne pas y toucher).
-    Done { id: String, gen: u64 },
+    /// `code` = code de sortie quand le flux PTY s'est terminé (le
+    /// reader envoie toujours un Exit final — l'interne peut être
+    /// None si le code est inconnu ; None externe = relay coupé tôt,
+    /// conn morte) : le `term_exit` est émis par la boucle APRÈS le
+    /// check gen — un relay stale n'adresse plus rien à la génération
+    /// suivante.
+    Done {
+        id: String,
+        gen: u64,
+        code: Option<Option<i64>>,
+    },
     /// Un term_open dispatché a abouti (ou échoué) : insérer le Term
     /// dans la map puis répondre au client.
     Spawned(Box<SpawnedTerm>),
@@ -144,7 +154,7 @@ impl Daemon {
                         pending_close.insert(term.clone());
                     }
                 }
-                // drop → master fermé → shell SIGHUP
+                // drop → kill() du shell → reader EIO → reap
                 TermReply::Resp(Response::ok(id, json!({})))
             }
             _ => return TermReply::Pass,
@@ -204,28 +214,32 @@ impl Daemon {
         let tid2 = tid.clone();
         tokio::spawn(async move {
             let mut rx = rx;
+            // term_exit n'est PAS poussé ici : il part de la boucle de
+            // lecture au Done, après le check gen — sinon un reopen
+            // sous le même id recevrait l'exit de la génération morte.
+            let mut code: Option<Option<i64>> = None;
             while let Some(m) = rx.recv().await {
-                let (frame, last) = match m {
-                    TermMsg::Data(b) => (
-                        json!({"push":"term_data","term":tid2,"data":b64(&b)}),
-                        false,
-                    ),
-                    TermMsg::Exit(code) => (
-                        json!({"push":"term_exit","term":tid2,"code":code}),
-                        true,
-                    ),
-                };
-                // File saturée → la conn est condamnée (signalé dans
-                // line()) ; le relais s'arrête, le term est démonté
-                // avec elle.
-                if Self::send_line(&w, &frame).is_err() || last {
-                    break;
+                match m {
+                    TermMsg::Data(b) => {
+                        let frame =
+                            json!({"push":"term_data","term":tid2,"data":b64(&b)});
+                        // File saturée → la conn est condamnée (signalé
+                        // dans line()) ; le relais s'arrête, le term est
+                        // démonté avec elle.
+                        if Self::send_line(&w, &frame).is_err() {
+                            break;
+                        }
+                    }
+                    TermMsg::Exit(c) => {
+                        code = Some(c); // Exit(Option) : le code peut être null
+                        break;
+                    }
                 }
             }
             // Nettoyage de la map côté boucle de lecture (le term peut
             // être déjà parti via TermClose — sans effet alors ; la gen
             // protège un éventuel reopen sous le même id).
-            let _ = evt.send(TermEvt::Done { id: tid2, gen });
+            let _ = evt.send(TermEvt::Done { id: tid2, gen, code });
         });
     }
 }

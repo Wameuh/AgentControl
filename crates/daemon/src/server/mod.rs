@@ -972,12 +972,23 @@ impl Daemon {
                 // qu'ici — pas de course entre tâches.
                 ev = term_evt_rx.recv(), if !terms.is_empty() || in_flight > 0 => {
                     match ev {
-                        Some(term::TermEvt::Done { id, gen }) => {
+                        Some(term::TermEvt::Done { id, gen, code }) => {
                             // Sortir de la map SEULEMENT si c'est bien
                             // la génération du relay — un reopen sous le
                             // même id a remplacé l'entrée entre-temps.
+                            // term_exit est émis ici, APRES le check :
+                            // un Done d'une gen stale ne livre plus
+                            // rien à la génération suivante.
                             if terms.get(&id).is_some_and(|(g, _)| *g == gen) {
                                 terms.remove(&id);
+                                if let Some(code) = code {
+                                    let frame = json!({
+                                        "push": "term_exit",
+                                        "term": id,
+                                        "code": code,
+                                    });
+                                    Self::send_line(&outbox, &frame)?;
+                                }
                             }
                         }
                         Some(term::TermEvt::Spawned(sp)) => {
@@ -985,10 +996,15 @@ impl Daemon {
                             match sp.res {
                                 Ok((t, rx, cwd)) => {
                                     // Consommé sur TOUS les chemins du
-                                    // spawn — une entrée orpheline
-                                    // tuerait un reopen ultérieur sous
-                                    // le même id.
-                                    let closed = pending_close.remove(&t.id);
+                                    // spawn, sous les DEUX clés : un
+                                    // hint invalide (>64/vide) devient
+                                    // un id serveur — l'entrée serait
+                                    // sinon orpheline (un reopen sous
+                                    // le même id serait tué au spawn).
+                                    let mut closed = pending_close.remove(&t.id);
+                                    if let Some(h) = &sp.hint {
+                                        closed |= pending_close.remove(h);
+                                    }
                                     // Collision d'id client, ou close
                                     // reçu pendant le spawn (open
                                     // abandonné côté client) : le Term
