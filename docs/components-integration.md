@@ -104,19 +104,23 @@ le diagramme montre ainsi tout l'écosystème d'un coup.
 - **Env injectée automatiquement** (comme `agent_parts` pour l'a2a) :
   `AGENTCONTROL_SOCK`, `AGENTCONTROL_TCP`, `AGENTCONTROL_HOME`,
   `AGENTCONTROL_COMPONENT=<name>` → un composant découvre le démon sans
-  config, sur n'importe quelle installation.
+  config, sur n'importe quelle installation. `AGENTCONTROL_COMPONENT`
+  sert aussi à l'attribution des sessions créées (§2.3.1).
 - **Restart** : `on-failure`/`always` avec backoff exponentiel
   (`restart_sec` de base, ×2, cap 60 s, reset après 5 min stables) ;
   compteur `restarts` + `last_exit` exposés.
 - **Healthcheck** périodique (30 s) : `process` = pid vivant ;
-  `tcp`/`http` = sonde ; `command` = petit check exécuté. État :
+  `tcp`/`http` = sonde ; `command` = petit check exécuté — une spec
+  `command` est donc de l'exécution **périodique** (pas à la demande)
+  au même niveau de confiance que `NewSession` (§3). État :
   `running | degraded | stopped | failed | starting`.
 - **Logs** : stdout/stderr redirigés vers
   `<root>/components/<name>.log`, rotation bornée (1 Mio ×2).
   `ComponentLogs` fait du tail paginé.
-- **Arrêt du démon** : SIGTERM aux process managés (même destin que les
-  agents : un restart démon les interrompt ; ils repartent au boot si
-  autostart). Un composant qui **ne doit pas** être interrompu par un
+- **Arrêt du démon** : SIGTERM aux process managés — même destin que
+  les agents (interrompus au restart démon, relancés au boot si
+  autostart), avec un signal plus doux que le `kill_on_drop` des
+  agents. Un composant qui **ne doit pas** être interrompu par un
   restart démon → `kind = "external"`.
 - **Orphans** (démon SIGKILLé) : pidfile
   `<root>/components/<name>.pid`. Au boot : pid mort → clean ; pid vivant
@@ -152,6 +156,33 @@ par-session) — le client **poll** (`ListComponents` + `ListSessions`,
 ~3 s pendant que la vue est ouverte), comme le watchdog connexions
 existant (10 s). Un `component_status_changed` push viendra en V2 si le
 poll s'avère insuffisant.
+
+#### 2.3.1 Attribution composant ↔ session — le chaînon du diagramme
+
+La vue diagramme attache les sessions à leur programme parent ; pour
+cela le démon doit savoir **quel composant** a créé une session.
+Aujourd'hui `spawned_by` ne couvre que le cas session→session
+(`PeerSpawn` exige `from` = session vivante et pose
+`spawned_by = Some(from)` ; `NewSession` pose `None`) : un composant
+`process` qui crée des workers via `acctl` produirait des sessions
+rattachées à une session pivot invisible ou à la racine — **jamais au
+nœud composant** (l'env `AGENTCONTROL_COMPONENT` vit côté composant,
+le démon ne la revoit pas sur le RPC).
+
+Mécanisme : un champ **`created_by`** sur les requêtes de création
+(`NewSession`, à marge `PeerSpawn`), persisté dans `SessionMeta` et
+exposé par `ListSessions`/`SessionInfo` — valeurs
+`component:<name>` | `service:<nom>` | `user` (défaut). Le composant
+connaît son nom via `AGENTCONTROL_COMPONENT` (§2.2) et le re-transmet
+— ex. l'orchestrateur `acctl new … --as backlog-orchestrator` produit
+des `Backlog-W*` rattachés au nœud orchestrateur dans le diagramme.
+
+C'est **le même canal que la provenance externe de l'item #21**
+(spawn par services externes, en cours) : les deux chantiers décrivent
+le même besoin — le champ de la spec de #24 est celui que #26 consomme
+pour les arêtes ; la forme retenue par #21 (`origin`/`created_by`)
+fait foi, le diagramme s'y aligne. À intégrer au modèle dès #24 pour
+éviter une seconde évolution proto (un second cycle `(minor)`).
 
 ### 2.4 acctl
 
@@ -218,11 +249,14 @@ bouton titlebar/menu ⋮ :
 La pièce « vivante » : **graphe des programmes et des sessions**.
 
 - **Nœuds** : le démon au centre ; composants en anneau (icône par kind) ;
-  sessions groupées autour de leur parent (`spawned_by` — les workers
-  `Backlog-W*` sous l'orchestrateur le cas échéant, sous le démon sinon).
+  sessions groupées autour de leur parent — le nœud composant quand
+  `created_by` = `component:<name>` (§2.3.1 : les workers `Backlog-W*`
+  sous l'orchestrateur), la session parente quand `spawned_by`, le
+  démon sinon.
 - **Arêtes** : démon→composant managé (`manages`), composant→démon
-  (RPC — l'orchestrateur parle au socket), démon→session (`spawned`),
-  session→session (`spawned_by`/`peer_message`).
+  (RPC — l'orchestrateur parle au socket), composant→session
+  (`created_by`), démon→session (`spawned`), session→session
+  (`spawned_by`/`peer_message`).
 - **États animés** : pulse sur les sessions `working`, point coloré par
   état (idle/working/waiting/dead/degraded/stopped), arêtes en pointillés
   animés sur les flux actifs. Tooltips : titre, état, uptime ; clic
@@ -268,12 +302,16 @@ La pièce « vivante » : **graphe des programmes et des sessions**.
    ignore ; vieux démon → `parse:` propre avec id extrait). Le client
    gate sur `daemon_status.components`. Mot-clé `(minor)` sur la PR
    proto+daemon (incompat client↔démon = auto-update).
-3. **Sécurité** : le démon ne bind que loopback — les RPC composants ont
-   la même confiance que `NewSession` (pouvoir équivalent : spawn de
-   process). `ComponentInstall` n'exécute que des **recettes déclaratives
-   embarquées** (pas de shell arbitraire client). Gardes : refuser les
-   specs visant le démon/supervisord/systemd ; components.toml hérite les
-   permissions du root (0600 conseillé, comme daemon.sock).
+3. **Sécurité** : le démon ne bind que loopback **par défaut** —
+   socket unix 0600 et `bind_http` enforcé loopback ; `bind_tcp` reste
+   configurable librement dans `config.toml` (sans garde) — la
+   confiance des RPC composants vaut « qui parle au socket pilote les
+   agents » (`NewSession` peut déjà spawn des process ;
+   `ComponentInstall` n'exécute que des **recettes déclaratives
+   embarquées**, jamais du shell arbitraire envoyé par le client).
+   Gardes : refuser les specs visant le démon/supervisord/systemd ;
+   components.toml hérite les permissions du root (0600 conseillé,
+   comme daemon.sock).
 4. **Persistance** : `components.toml` réécrit en `.part`+rename atomique
    (pattern `write_file`). `config.toml` n'est **pas** réécrit par le
    démon — deux fichiers, deux responsabilités.
@@ -296,10 +334,10 @@ Ordre : A (cœur démon) → B (édition+catalogue) → {C, D, E, F, G}.
 
 | # | Item backlog | Contenu | Dépend de |
 | --- | --- | --- | --- |
-| A | **#24** | daemon — modèle de composants + superviseur + RPC lecture (`ListComponents/ComponentInfo/Start/Stop/Restart/Logs`, components.toml, logs, healthcheck, capability) | — |
+| A | **#24** | daemon — modèle de composants + superviseur + RPC lecture (`ListComponents/ComponentInfo/Start/Stop/Restart/Logs`, components.toml, logs, healthcheck, capability, **champ `created_by` d'attribution** §2.3.1) | — |
 | B | **#25** | daemon — édition de config + catalogue + install (`ComponentUpsert/Remove/Catalog/Install`, fetch GitHub, recettes agentbacklog + orchestrateur) | #24 |
 | C | **#27** | acctl — commandes `comp` (ls/info/start/stop/restart/logs/catalog/install) | #25 |
-| D | **#26** | client — vue diagramme animée SVG (nœuds programmes+sessions, états, flux) | #24 |
+| D | **#26** | client — vue diagramme animée SVG (nœuds programmes+sessions via `created_by`, états, flux) | #24 |
 | E | **#28** | client — panneau gestion composants (liste, actions, logs, édition spec, onglet catalogue/intégration) | #25 |
 | F | **#29** | orchestrateur — migration supervisord → composant managé (spec, doc migration, retrait conf après bascule) | #25 |
 | G | **#30** | kind `tool` — détection/version + nœuds passifs catalogue (agentbacklog dans le diagramme) | #25 |
@@ -312,7 +350,9 @@ d'AgentBacklog garantit l'ordre de prise en charge entre workers.
 
 Chaque item est autonome : worktree dédié basé sur `origin/next_release`,
 spec complète dans sa description backlog, PR draft → `/mr review` →
-ready → 5 checks verts (workflow AGENTS.md). Le champ `description`
+ready → les checks requis verts (5 requis par le ruleset sur les 6 runs
+du workflow, `client-macos` en attente d'inclusion — gating sur les
+check-runs du head SHA, workflow AGENTS.md). Le champ `description`
 embarque : fichiers concernés, schéma exact des types/reqs, vérifs
 (`cargo build --release -p agentcontrol-daemon` / `npm run build`),
 et interdit de toucher au démon live (tests sur `AGENTCONTROL_HOME`
