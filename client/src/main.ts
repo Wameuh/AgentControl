@@ -159,7 +159,15 @@ connView.onOpening = () => settings.close();
 settings.onOpening = () => connView.close();
 newSess.bind(groups);
 newSess.refresh = () => void sidebar.refresh();
-newSess.openSession = (id, conn) => void chat.open(id, false, conn);
+// Le bouton « New agent » vit dans la sidebar (hors #chat — accessible
+// sous les overlays) : fermer settings/conn-view avant d'ouvrir la
+// session créée, sinon elle charge derrière l'overlay (même motif que
+// sidebar.openSession ; close() est un no-op quand l'overlay est fermé).
+newSess.openSession = (id, conn) => {
+  settings.close();
+  connView.close();
+  void chat.open(id, false, conn);
+};
 newSess.knownConns = () => conns.knownConns();
 groups.refresh = () => void sidebar.refresh();
 files.bind({ sysline: (txt, ic) => chat.sysline(txt, ic) });
