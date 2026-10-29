@@ -177,9 +177,44 @@ ok((await cnt(".n-daemon")) === 1, "F2 nœud démon au centre");
 ok((await cnt(".n-comp")) === 4, `F3 4 composants en anneau (${await cnt(".n-comp")})`);
 ok((await pD.evaluate(() => document.querySelector("#map-nocomps")?.hidden)) === true,
   "F3b note « aucun composant » masquée (4 présents)");
+ok((await pD.evaluate(() => document.querySelector(".n-comp rect.nc") != null)),
+  "F3c programme = chip rectangulaire (rôle distinct de l'agent cercle)");
+ok((await cnt(".e-dc.e-manage")) + (await cnt(".e-dc.e-know")) === 4,
+  "F3d arêtes démon→programme typées (manages/observes)");
+ok((await pD.evaluate(() => {
+  const t = document.querySelector("#map-legend")?.textContent ?? "";
+  return t.includes("program") && t.includes("agent") &&
+         t.includes("manages") && t.includes("spawned");
+})), "F3e légende explicite : rôles (program/agent) + types d'arêtes");
+ok((await cnt(".nl-sub")) === 4, `F4b sous-titre agent sous chaque session (${await cnt(".nl-sub")})`);
 ok((await cnt(".n-sess")) === 4, `F4 4 sessions positionnées (${await cnt(".n-sess")})`);
 ok((await cnt(".e-dc")) === 4 && (await cnt(".e-s")) === 4,
   `F5 arêtes : 4 démon→composant + 4 parent→session (${await cnt(".e-dc")}+${await cnt(".e-s")})`);
+// La refonte sectorisée garantit l'absence de chevauchement — mesuré.
+ok((await pD.evaluate(() => {
+  const pts = [...document.querySelectorAll(".n-sess")].map((g) => {
+    const m = g.getAttribute("transform").match(/translate\(([-\d.]+) ([-\d.]+)\)/);
+    return [+m[1], +m[2]];
+  });
+  for (let i = 0; i < pts.length; i++)
+    for (let j = i + 1; j < pts.length; j++)
+      if (Math.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1]) < 26) return false;
+  return true;
+})), "F5b sessions : aucun nœud ne se chevauche");
+ok((await pD.evaluate(() => {
+  const boxes = [...document.querySelectorAll(".n-comp")].map((g) => {
+    const b = g.getBBox();
+    const m = g.getAttribute("transform").match(/translate\(([-\d.]+) ([-\d.]+)\)/);
+    return { x: +m[1] + b.x, y: +m[2] + b.y, w: b.width, h: b.height };
+  });
+  for (let i = 0; i < boxes.length; i++)
+    for (let j = i + 1; j < boxes.length; j++) {
+      const a = boxes[i], b = boxes[j];
+      if (a.x < b.x + b.w - 1 && b.x < a.x + a.w - 1 &&
+          a.y < b.y + b.h - 1 && b.y < a.y + a.h - 1) return false;
+    }
+  return true;
+})), "F5c chips programme : aucun chevauchement");
 ok((await cnt(".e-s.flow")) >= 1, "F6 flux actif animé (s1 working)");
 ok((await cnt(".npr")) >= 1, "F7 badge PR #N sur les sessions du registre");
 ok((await pD.evaluate(() => document.querySelector('.n-sess[data-session="s4"]') != null)),
