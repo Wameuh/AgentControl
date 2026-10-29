@@ -198,7 +198,7 @@ ok((await pD.evaluate(() => {
   });
   for (let i = 0; i < pts.length; i++)
     for (let j = i + 1; j < pts.length; j++)
-      if (Math.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1]) < 26) return false;
+      if (Math.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1]) < 30) return false;
   return true;
 })), "F5b sessions : aucun nœud ne se chevauche");
 ok((await pD.evaluate(() => {

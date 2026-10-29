@@ -7,8 +7,10 @@
 //
 // Layout déterministe = arbre radial sectorisé : chaque racine (composant
 // ou session sans parent) reçoit un secteur angulaire proportionnel à son
-// nombre de feuilles, subdivisé récursivement entre ses enfants — pas de
-// chevauchement par construction. Le rayon code la profondeur : démon au
+// nombre de feuilles, subdivisé récursivement entre ses enfants — les
+// formes ne peuvent pas se chevaucher (secteurs disjoints ; les labels
+// texte sous les nœuds peuvent encore se chevaucher sur les arbres très
+// denses). Le rayon code la profondeur : démon au
 // centre, programmes (chips) sur l'anneau interne, agents (cercles) à
 // RC + profondeur·STEP. Parent : `origin = component:<name>` (#24/§2.3.1),
 // la session `spawned_by`, le démon sinon.
@@ -30,8 +32,7 @@ const R_DAEMON = 27;
 const R_SESS = 15;
 /** Hauteur des chips programme (largeur calculée sur le nom). */
 const CHIP_H = 30;
-/** Pas radial entre deux profondeurs de sessions (agrandi si les
- *  secteurs deviennent trop étroits — voir STEP dans render()). */
+/** Pas radial entre deux profondeurs de sessions. */
 const STEP_MIN = 96;
 /** Corde minimale entre deux nœuds voisins de même profondeur. */
 const PITCH_MIN = 44;
@@ -309,7 +310,13 @@ export class MapView {
         chipW.get(a.key.slice(2))! / 2 + chipW.get(b.key.slice(2))! / 2 + 10;
       return need / (2 * Math.sin(Math.min(Math.PI / 2, ang / 2)));
     };
-    let RC = Math.max(120, (U * PITCH_MIN) / (2 * Math.PI));
+    // La contrainte arc porte sur le rayon des SESSIONS (RC+STEP) — les
+    // chips n'ont besoin que de pairNeed ; le −STEP évite ~96 px de rayon
+    // superflu sur les gros graphes.
+    let RC = Math.max(
+      120,
+      (U * PITCH_MIN) / (2 * Math.PI) - STEP_MIN,
+    );
     for (let i = 1; i < compTrees.length; i++) {
       RC = Math.max(RC, pairNeed(compTrees[i - 1], compTrees[i]));
     }
