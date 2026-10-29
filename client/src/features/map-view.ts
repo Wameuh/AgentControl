@@ -184,8 +184,15 @@ export class MapView {
       comps,
     };
     // Signature : un tick sans changement ne re-rend pas — le rebuild
-    // innerHTML détruirait sinon le focus clavier et le :hover à chaque poll.
-    const sig = JSON.stringify(this.data);
+    // innerHTML détruirait sinon le focus clavier et le :hover à chaque
+    // poll. `conn` et la capability sont inclus : ils pilotent le rendu
+    // (filtre sessions, map-empty, note « aucun composant ») sans faire
+    // partie des données — sinon leur changement laisserait un rendu
+    // périmé tant que la data ne bouge pas.
+    const sig =
+      JSON.stringify(this.data) +
+      "|" + conn +
+      "|" + (conn ? this.deps.componentsCapable(conn) : "");
     if (sig !== this.lastSig) {
       this.lastSig = sig;
       this.render();

@@ -177,7 +177,8 @@ button:disabled { opacity: .5; cursor: default; }
   border-radius: 11px;
 }
 #side-view .sv {
-  flex: 1; display: flex; align-items: center; justify-content: center;
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; justify-content: center;
   gap: 6px; padding: 5px 8px; font-size: 12px;
   border: 1px solid transparent; background: none; color: var(--dim);
   border-radius: 8px;
@@ -189,6 +190,12 @@ button:disabled { opacity: .5; cursor: default; }
 }
 #side-view .sv .sv-ic { display: inline-flex; flex: none; }
 #side-view .sv .ic { width: 13px; height: 13px; display: block; }
+/* 4 onglets (~57px chacun à 250px de sidebar) : « Diagramme » déborde —
+   ellipsis plutôt qu'un wrap cassé (le compteur #sv-*count garde sa
+   taille : il suit le label, pas .sv-ic). */
+#side-view .sv .sv-ic + span {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 #sv-count {
   font-size: 10px; font-family: Mono, ui-monospace, monospace; line-height: 1;
   background: rgba(var(--accent-rgb), .18); color: var(--accent);
