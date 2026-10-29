@@ -65,9 +65,9 @@ fn tools_list() -> Value {
         {
             "name": "agentcontrol_list_sessions",
             "description": "Liste les sessions d'agents pilotées par AgentControl \
-                (id, agent, titre, état, cwd, groupe, session créatrice le cas \
-                échéant). Utilise les `id` pour envoyer des messages ou lire \
-                leur transcript.",
+                (id, agent, titre, état, cwd, groupe, session créatrice ou \
+                provenance service « via » le cas échéant). Utilise les `id` \
+                pour envoyer des messages ou lire leur transcript.",
             "inputSchema": {"type": "object", "properties": {}},
         },
         {
@@ -198,7 +198,7 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
                 let id = s["id"].as_str().unwrap_or("?");
                 let mark = if Some(id.to_string()) == me { " (toi)" } else { "" };
                 out.push_str(&format!(
-                    "{id}{mark} | {} | {} | {} | cwd={}{}{}\n",
+                    "{id}{mark} | {} | {} | {} | cwd={}{}{}{}\n",
                     s["agent"].as_str().unwrap_or("?"),
                     s["state"].as_str().unwrap_or("?"),
                     s["title"].as_str().unwrap_or(""),
@@ -210,6 +210,10 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
                     s["spawned_by"]
                         .as_str()
                         .map(|p| format!(" | sub-of={p}"))
+                        .unwrap_or_default(),
+                    s["origin"]
+                        .as_str()
+                        .map(|o| format!(" | via={o}"))
                         .unwrap_or_default(),
                 ));
             }

@@ -17,12 +17,18 @@ impl Daemon {
                 Ok(serde_json::to_value(list)?)
     }
 
-    pub(super) async fn h_new_session(self: &Arc<Self>, agent: String, cwd: String, title: Option<String>, model: Option<String>, mode: Option<String>, prompt: Option<String>) -> Result<Value> {
+    pub(super) async fn h_new_session(self: &Arc<Self>, agent: String, cwd: String, title: Option<String>, model: Option<String>, mode: Option<String>, prompt: Option<String>, origin: Option<String>) -> Result<Value> {
                 let profile = self
                     .agents
                     .get(&agent)
                     .with_context(|| format!("agent inconnu: {agent}"))?
                     .clone();
+                // Provenance externe (service) : forme libre — on normalise
+                // juste (ligne unique, taille bornée) pour rester un badge.
+                let origin = origin
+                    .map(|o| o.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .filter(|o| !o.is_empty())
+                    .map(|o| o.chars().take(80).collect::<String>());
                 let meta = SessionMeta {
                     id: proto::new_id("s"),
                     agent: agent.clone(),
@@ -40,6 +46,7 @@ impl Daemon {
                     state: "starting".into(),
                     group: None,
                     spawned_by: None,
+                    origin: origin.clone(),
                     context_used: None,
                     context_size: None,
                 };
@@ -48,13 +55,42 @@ impl Daemon {
                 let sid = meta.id.clone();
                 self.watch_prs(&session);
                 self.sessions.write().await.insert(sid.clone(), session.clone());
+                // La création par un service est tracée dans le journal —
+                // pendant du "session créée par « parent »" de peer_spawn.
+                if let Some(o) = &origin {
+                    session.emit(EventKind::System {
+                        text: format!("session créée par le service « {o} »"),
+                    });
+                }
 
                 // Réponse immédiate : la session est visible en "starting",
                 // le spawn (process + handshake) tourne en tâche de fond —
                 // le dialogue client n'attend plus les secondes de l'init.
                 let (cmd, envs) =
                     self.agent_parts(&profile, model.as_deref(), mode.as_deref(), &sid);
-                let deliver = prompt.map_or(FreshDeliver::None, FreshDeliver::UserPrompt);
+                let deliver = match (prompt, &origin) {
+                    (Some(p), Some(o)) => {
+                        // Prompt initial d'un service : journalisé comme un
+                        // user_message portant la provenance (badge « via »
+                        // côté client — pas un faux PeerMessage d'une
+                        // session hôte), et livré wrappé pour que l'agent
+                        // sache qu'il répond à un programme.
+                        session.emit(EventKind::UserMessage {
+                            text: p.clone(),
+                            steer: false,
+                            origin: Some(o.clone()),
+                        });
+                        let wrapped = format!(
+                            "[AgentControl] tu es la session {sid}, créée par \
+                            le service externe « {o} » — la tâche ci-dessous \
+                            t'est confiée par ce programme (pas par un humain \
+                            ni une autre session).\n\
+                            ---\n{p}\n---",
+                        );
+                        FreshDeliver::Service { wrapped }
+                    }
+                    (p, _) => p.map_or(FreshDeliver::None, FreshDeliver::UserPrompt),
+                };
                 self.spawn_fresh(&session, cmd, envs, None, true, mode, model, deliver);
                 info!("session créée: {sid} (agent={agent}) — spawn en tâche de fond");
                 Ok(json!({"session": sid}))
@@ -83,6 +119,7 @@ impl Daemon {
                     state: "starting".into(),
                     group: None,
                     spawned_by: None,
+                    origin: None,
                     context_used: None,
                     context_size: None,
                 };
@@ -546,7 +583,8 @@ impl Daemon {
                                 d.spawn_wake(&s, &sid);
                             }
                         }
-                        FreshDeliver::Peer { wrapped, .. } => {
+                        FreshDeliver::Peer { wrapped, .. }
+                        | FreshDeliver::Service { wrapped } => {
                             match s.send_peer_prompt(&wrapped, false).await {
                                 // Endormie entre-temps → en file + réveil.
                                 Ok(true) => d.spawn_wake(&s, &sid),
@@ -665,10 +703,10 @@ impl Daemon {
                 let s = self.get_session(&session).await?;
                 Ok(match s.journal.first_post(&s.dir)? {
                     FirstPost::Found(ev) => {
-                        let proto::EventKind::UserMessage { text, steer } = ev.kind else {
+                        let proto::EventKind::UserMessage { text, steer, origin } = ev.kind else {
                             unreachable!() // Found ne porte que ce kind
                         };
-                        json!({"post": {"seq": ev.seq, "ts": ev.ts, "text": text, "steer": steer}})
+                        json!({"post": {"seq": ev.seq, "ts": ev.ts, "text": text, "steer": steer, "origin": origin}})
                     }
                     FirstPost::Truncated => json!({"post": null, "truncated": true}),
                     FirstPost::Empty => json!({"post": null}),
@@ -812,6 +850,12 @@ pub(super) enum FreshDeliver {
     /// Délégation peer_spawn : message pair déjà wrappé (provenance
     /// incluse) ; la créatrice est notifiée en cas d'échec du spawn.
     Peer { wrapped: String, creator: Arc<Session> },
+    /// Prompt initial d'une session « service » (origin) : wrappé de la
+    /// provenance comme un message pair, même livraison — mais le
+    /// user_message badgé est journalisé à la création (rien à réémettre
+    /// au drain) et il n'y a pas de session créatrice à notifier en cas
+    /// d'échec du spawn.
+    Service { wrapped: String },
 }
 
 /// Extrait ~`ctx` caractères de contexte autour de la 1re occurrence de

@@ -165,6 +165,7 @@ impl Daemon {
                     state: "starting".into(),
                     group: group.or_else(|| cm.group.clone()),
                     spawned_by: Some(from.clone()),
+                    origin: None,
                     context_used: None,
                     context_size: None,
                 };

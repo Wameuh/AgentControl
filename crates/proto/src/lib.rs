@@ -24,6 +24,12 @@ pub enum EventKind {
         /// Envoyé en injection mid-turn (steer) — badge côté client.
         #[serde(default)]
         steer: bool,
+        /// Provenance service du message (prompt initial d'une session
+        /// créée via `origin`) — le client le badge « via X » au lieu de
+        /// le présenter comme une saisie humaine. Absent des journaux
+        /// ordinaires (jamais sérialisé quand None).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<String>,
     },
     AgentText {
         text: String,
@@ -372,6 +378,15 @@ pub struct SessionMeta {
     /// créée par un client.
     #[serde(default)]
     pub spawned_by: Option<String>,
+    /// Provenance externe de la session — créée par un service/programme
+    /// hors session (orchestrateur, cron, intégration…) via le paramètre
+    /// `origin` de new_session. Champ libre : conventions suggérées
+    /// « service:<nom> », « external:<nom> », « mcp:<serveur> ».
+    /// Troisième cas de provenance : humain (ni l'un ni l'autre) /
+    /// agent (spawned_by) / service (origin) — mutuellement exclusif
+    /// avec spawned_by.
+    #[serde(default)]
+    pub origin: Option<String>,
     /// Dernière occupation contexte rapportée par l'agent (usage_update).
     #[serde(default)]
     pub context_used: Option<u64>,
@@ -441,6 +456,13 @@ pub enum ReqKind {
         mode: Option<String>,
         #[serde(default)]
         prompt: Option<String>,
+        /// Provenance externe (service/programme appelant hors session,
+        /// ex. "service:backlog-orchestrator") — persistée dans le meta
+        /// et reflétée sur le prompt initial (user_message badgé, pas un
+        /// PeerMessage). Ignorée par les démons anciens (champ optionnel,
+        /// dégradation douce).
+        #[serde(default)]
+        origin: Option<String>,
     },
     /// Reprend une session existante (respawn agent + session/load).
     /// native_id : reprendre une AUTRE session native de l'agent.

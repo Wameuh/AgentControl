@@ -97,7 +97,8 @@ body.android #session-list .sess .sess-del {
    (.badge.st-*, #sv-count, .steer-badge, .pr-st, .sr-type, .perm-kind,
    .toast-x, .farrow) exclus du seuil. */
 body.android #session-list .sess .a,
-body.android #session-list .sess .sess-pr { font-size: 12px; }
+body.android #session-list .sess .sess-pr,
+body.android #session-list .sess .sess-origin { font-size: 12px; }
 body.android .grp-head .grp-name, body.android .grp-sub .grp-name,
 body.android .grp-add-lbl { font-size: 12px; }
 body.android #btn-new-session { min-height: 46px; font-size: 15px; }

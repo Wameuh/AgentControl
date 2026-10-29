@@ -15,6 +15,7 @@ interface FirstPost {
   ts: string;
   text: string;
   steer: boolean;
+  origin?: string;
 }
 
 /** Câble le bouton ⤒ + le dialogue. `capable` = démon sait répondre à
@@ -54,6 +55,7 @@ export function initFirstPost(capable: (conn: string) => boolean) {
       current = p.text;
       meta.textContent =
         `#${p.seq} · ${new Date(p.ts).toLocaleString()}` +
+        (p.origin ? ` · ${t("via")} ${p.origin}` : "") +
         (p.steer ? " · ↪ steer" : "");
       body.textContent = p.text;
       copyBtn.disabled = false;
