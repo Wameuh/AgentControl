@@ -42,7 +42,11 @@ const fmtUp = (s: number) =>
 
 /** États connus du proto — whitelist pour la classe CSS et la clé i18n :
  *  un état inattendu retombe sur le libellé brut, jamais interpolé. */
-const KNOWN_ST = new Set(["starting", "running", "degraded", "stopped", "failed"]);
+const KNOWN_ST = new Set([
+  "starting", "running", "degraded", "stopped", "failed",
+  // États d'observation des `tool` (pas de cycle de vie) — proto ≥0.8.
+  "installed", "absent",
+]);
 
 const LINES = (id: string) =>
   ($(id) as HTMLTextAreaElement).value
@@ -332,6 +336,8 @@ export class ComponentsPanel {
     if (st.health) meta.push(st.health === "ok" ? "♥ ok" : "♥ fail");
     if (st.last_exit !== undefined && st.last_exit !== null)
       meta.push(`exit ${st.last_exit}`);
+    // Version sondée d'un `tool` (status.version, 1re ligne ≤200 c).
+    if (st.version) meta.push(st.version);
     if (it.description) meta.push(it.description);
     return meta.join(" · ");
   }
@@ -345,7 +351,7 @@ export class ComponentsPanel {
     const st = it.status;
     return [
       it.name, it.kind, st.state, st.pid, st.restarts, st.health,
-      st.last_exit, it.autostart, it.source, it.description,
+      st.last_exit, st.version, it.autostart, it.source, it.description,
     ].join("|");
   }
 

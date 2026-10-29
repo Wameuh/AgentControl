@@ -209,6 +209,38 @@ await pD.evaluate(() => window.dispatchEvent(new KeyboardEvent("keydown", { key:
 await sleep(200);
 ok((await pD.evaluate(() => document.querySelector("#map-view")?.hidden)) === true, "F11 Échap referme la vue");
 
+// ---------- G : panneau composants — états passifs + version des tools ----------
+// Même page pD (conn "local", capability components:true). Le panneau
+// liste les 4 composants ; les 2 tools affichent leurs états passifs
+// traduits, agentbacklog expose sa version sondée dans la méta.
+await pD.evaluate(() => document.querySelector("#tb-components")?.click());
+await sleep(900);
+ok((await pD.evaluate(() => !document.querySelector("#components-view")?.hidden)),
+  "G1 #tb-components ouvre le panneau");
+ok((await cnt(".comp")) === 4, `G2 4 lignes composants (${await cnt(".comp")})`);
+ok((await cnt(".comp-dot.cst-installed")) === 1 && (await cnt(".comp-dot.cst-absent")) === 1,
+  `G3 dots passifs : 1 installed + 1 absent (${await cnt(".comp-dot.cst-installed")}/${await cnt(".comp-dot.cst-absent")})`);
+const rowMeta = (n) => pD.evaluate((name) =>
+  [...document.querySelectorAll(".comp")]
+    .find((r) => r.querySelector(".comp-name")?.textContent === name)
+    ?.querySelector(".comp-meta")?.textContent ?? null, n);
+ok((await rowMeta("agentbacklog"))?.includes("agentbacklog 0.3.0") === true,
+  `G4 méta du tool → version sondée (${await rowMeta("agentbacklog")})`);
+ok((await pD.evaluate(() =>
+    document.querySelector(".comp-dot.cst-installed")?.title === "installed" &&
+    document.querySelector(".comp-dot.cst-absent")?.title === "absent")) === true,
+  "G5 titres des dots traduits (installed/absent)");
+// Tool : pas de cycle de vie ni logs (refusés démon) — seule l'édition reste.
+ok((await pD.evaluate(() => {
+    const r = [...document.querySelectorAll(".comp")]
+      .find((x) => x.querySelector(".comp-name")?.textContent === "agentbacklog");
+    return r?.querySelectorAll(".comp-acts button").length === 1;
+  })) === true, "G6 tool → une seule action (édition)");
+await pD.evaluate(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
+await sleep(200);
+ok((await pD.evaluate(() => document.querySelector("#components-view")?.hidden)) === true,
+  "G7 Échap referme le panneau");
+
 console.log(`\n${fails === 0 ? "SMOKE OK" : "SMOKE FAIL"} — ${fails} échec(s)`);
 await b.close();
 // SIGKILL sur le groupe : vite preview ignore SIGTERM dans certains runs

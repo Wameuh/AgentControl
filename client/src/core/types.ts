@@ -162,6 +162,8 @@ export interface ComponentStatus {
   uptime_s?: number;
   restarts?: number;
   last_exit?: number;
+  /** Version sondée d'un `tool` (1re ligne de sa commande, ≤200 c). */
+  version?: string;
 }
 
 /** Item ListComponents / ComponentInfo : spec + état runtime. `source`
