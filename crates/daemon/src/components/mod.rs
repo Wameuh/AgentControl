@@ -77,7 +77,8 @@ pub struct Components {
     /// Runtime des `process` managés (voir proc.rs).
     procs: RwLock<HashMap<String, proc::Proc>>,
     /// Dernier verdict de sonde pour external/tool (kind sans cycle de
-    /// vie : leur « état » n'est qu'une observation périodique).
+    /// vie : leur « état » n'est qu'une observation périodique — pour
+    /// un `tool` absent il n'y a rien à retenir, l'entrée est effacée).
     observed: RwLock<HashMap<String, bool>>,
     /// Dernière version sondée des `tool` (1re ligne de leur commande
     /// — absente de la map tant que la sonde n'a rien rapporté).
@@ -348,9 +349,15 @@ impl Components {
             .await
             .insert(name.to_string(), spec.clone());
         // Une spec tool dont la `command` change ne doit pas garder la
-        // version sondée de l'ancienne — purge du cache, la prochaine
-        // passe de health_loop resonde.
+        // version sondée ni le verdict santé de l'ancienne — purge des
+        // caches, la prochaine passe de health_loop resonde. `observed`
+        // porte aussi le `state` des `external` : leur purge est
+        // limitée aux tools pour ne pas les faire clignoter « stopped »
+        // à chaque édition.
         self.versions.write().await.remove(name);
+        if spec.kind == ComponentKind::Tool {
+            self.observed.write().await.remove(name);
+        }
         if demote {
             self.shutdown_proc(name).await?;
         }
@@ -488,8 +495,20 @@ impl Components {
         self.observed.read().await.get(name).copied()
     }
 
-    pub(crate) async fn set_observed(&self, name: &str, ok: bool) {
-        self.observed.write().await.insert(name.to_string(), ok);
+    /// Pose/efface le verdict courant — `None` = rien de valable à
+    /// retenir (tool absent : l'état se suffit, et un `false` conservé
+    /// flasherait « fail » à la réinstallation avant la prochaine
+    /// passe).
+    pub(crate) async fn set_observed(&self, name: &str, ok: Option<bool>) {
+        let mut m = self.observed.write().await;
+        match ok {
+            Some(ok) => {
+                m.insert(name.to_string(), ok);
+            }
+            None => {
+                m.remove(name);
+            }
+        }
     }
 
     /// Version sondée courante d'un `tool` (pour status_of).

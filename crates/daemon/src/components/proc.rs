@@ -435,7 +435,7 @@ impl Components {
                     ComponentKind::Tool => self.probe_tool(&spec).await,
                     _ => {
                         if let Some(ok) = probe(&spec, None).await {
-                            self.set_observed(&spec.name, ok).await;
+                            self.set_observed(&spec.name, Some(ok)).await;
                         }
                     }
                 }
@@ -449,16 +449,19 @@ impl Components {
     /// `… --version` : timeout 3 s, 1re ligne ≤200 c) et santé =
     /// healthcheck déclaré s'il y en a un (resonde de présence /
     /// répondant), sinon la présence elle-même.
+    /// Absent → version ET verdict santé invalidés : l'état `absent`
+    /// se suffit, et un `false` conservé ferait flasher « fail » à la
+    /// réinstallation le temps d'une nouvelle passe.
     async fn probe_tool(&self, spec: &ComponentSpec) {
-        let present = tool_present(spec);
-        let version = if present {
-            run_version_probe(&spec.command).await
-        } else {
-            None
-        };
+        if !tool_present(spec) {
+            self.set_observed(&spec.name, None).await;
+            self.set_tool_version(&spec.name, None).await;
+            return;
+        }
+        let version = run_version_probe(&spec.command).await;
         let health = match spec.healthcheck {
-            Healthcheck::None => present,
-            _ => probe(spec, None).await.unwrap_or(present),
+            Healthcheck::None => Some(true),
+            _ => probe(spec, None).await.or(Some(true)),
         };
         self.set_observed(&spec.name, health).await;
         self.set_tool_version(&spec.name, version).await;
@@ -835,6 +838,36 @@ mod tests {
         assert!(tool_present(&tool_spec(&["sh", "-c", "true"])));
         assert!(!tool_present(&tool_spec(&["ac-tool-inexistant-xyz"])));
         assert!(!tool_present(&tool_spec(&[])));
+    }
+
+    /// Un `tool` absent n'a ni version ni verdict santé retenus — un
+    /// `observed=false` stale exposerait « fail » à la réinstallation
+    /// jusqu'à la passe suivante (retour review #144).
+    #[tokio::test]
+    async fn probe_tool_absent_invalide_les_caches() {
+        let web: Arc<tokio::sync::RwLock<Option<serde_json::Value>>> =
+            Arc::new(tokio::sync::RwLock::new(None));
+        let c = Components::open(
+            &std::env::temp_dir().join(format!("ac-probe-{}", std::process::id())),
+            "127.0.0.1:0".into(),
+            false,
+            web,
+        );
+        let absent = tool_spec(&["ac-tool-inexistant-xyz"]);
+        // Verdicts d'une passe antérieure (tool alors installé).
+        c.set_observed("t", Some(false)).await;
+        c.set_tool_version("t", Some("1.0".into())).await;
+        c.probe_tool(&absent).await;
+        assert_eq!(c.observed_health("t").await, None);
+        assert_eq!(c.tool_version("t").await, None);
+
+        // Redevenu installé : pas de « fail » résiduel — health=None
+        // jusqu'à la passe qui resonde (ici, immédiate).
+        let installe = tool_spec(&["sh", "-c", "echo 1.2.3"]);
+        assert_eq!(c.status_of(&installe).await.health, None);
+        c.probe_tool(&installe).await;
+        assert_eq!(c.observed_health("t").await, Some(true));
+        assert_eq!(c.tool_version("t").await.as_deref(), Some("1.2.3"));
     }
 
     /// Version = 1re ligne de la commande sondée, bornée à 200 c ; une

@@ -103,6 +103,10 @@ sinon — pas une panne, juste « pas là ». La sonde périodique (30 s)
 exécute `command` (typiquement `… --version`, timeout 3 s) et publie
 la 1re ligne en `status.version` (≤200 c) — l'état `installed`
 lui-même est resondé à la demande, frais même avant la 1re passe.
+Santé et version ne sont retenues que pour un tool `installed` :
+`absent` invalide les deux caches (l'état se suffit — pas de
+« santé : fail » résiduel à la réinstallation), tout comme un upsert
+de spec, en attendant la passe suivante.
 
 ### 2.2 Cycle de vie d'un `process` managé
 
