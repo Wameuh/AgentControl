@@ -93,6 +93,10 @@ export class Sidebar {
   private prsView = new PrListView();
   private backlogView = new BacklogView();
   private view: "agents" | "repos" | "backlog" = "agents";
+  /** Le diagramme (#map-view, overlay plein #chat) n'est pas une vue de
+   *  la liste mais partage le sélecteur : ouvert, son onglet prend
+   *  l'état actif ; à sa fermeture this.view reprend la main. */
+  private mapOpen = false;
   /** Réponse brute du dernier pr_list (entrées + marqueurs conn_error). */
   private prRows: PrRow[] = [];
   private prFailed = false;
@@ -361,15 +365,26 @@ export class Sidebar {
     if (v === "repos") void this.refresh();
   }
 
+  /** Ouverture/fermeture du diagramme — notifiée par MapView via deps.
+   *  applyView est idempotent : simple re-calcul des états visuels. */
+  setMapOpen(open: boolean) {
+    if (this.mapOpen === open) return;
+    this.mapOpen = open;
+    this.applyView();
+  }
+
   /** Visibilité des panneaux + état visuel de l'onglet actif. */
   private applyView() {
     const v = this.view;
-    $("sv-agents").classList.toggle("on", v === "agents");
-    $("sv-repos").classList.toggle("on", v === "repos");
-    $("sv-backlog").classList.toggle("on", v === "backlog");
-    $("sv-agents").setAttribute("aria-selected", String(v === "agents"));
-    $("sv-repos").setAttribute("aria-selected", String(v === "repos"));
-    $("sv-backlog").setAttribute("aria-selected", String(v === "backlog"));
+    const m = this.mapOpen;
+    $("sv-agents").classList.toggle("on", !m && v === "agents");
+    $("sv-repos").classList.toggle("on", !m && v === "repos");
+    $("sv-backlog").classList.toggle("on", !m && v === "backlog");
+    $("sv-map").classList.toggle("on", m);
+    $("sv-agents").setAttribute("aria-selected", String(!m && v === "agents"));
+    $("sv-repos").setAttribute("aria-selected", String(!m && v === "repos"));
+    $("sv-backlog").setAttribute("aria-selected", String(!m && v === "backlog"));
+    $("sv-map").setAttribute("aria-selected", String(m));
     $("session-list").hidden = v !== "agents";
     $("pr-list").hidden = v !== "repos";
     $("backlog-list").hidden = v !== "backlog";
