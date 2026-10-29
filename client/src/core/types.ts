@@ -49,13 +49,6 @@ export interface PrEntry {
   change_id?: string;
 }
 
-/** Forge active déclarée par le démon (`forge_list`). */
-export interface ForgeInfo {
-  type: string;
-  /** Entrées `{host, token_env?}` — host[:port][/prefix]. */
-  hosts: { host: string; token_env?: string }[];
-}
-
 export interface ConfigOpt { value: string; name: string; description?: string }
 export interface ConfigOption {
   id: string; name: string; category?: string;

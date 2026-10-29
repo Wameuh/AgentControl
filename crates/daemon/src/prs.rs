@@ -135,14 +135,34 @@ impl PrRegistry {
                 // Re-clé si l'identité canonique a changé (Change-Id →
                 // numéro résolu). Clé cible déjà prise → fusion : les
                 // mêmes updates sont appliqués à l'entrée numérique, qui
-                // récupère aussi le Change-Id, et la fiche cid est
-                // absorbée.
+                // récupère ce que la fiche cid apporte (la fiche cid
+                // porte souvent la vraie attribution — détection issue
+                // du `git review` réel), puis elle est absorbée.
                 let nk = entry_key(&e);
                 if nk != k && g.contains_key(&nk) {
                     let mut other = g.remove(&nk).expect("clé cible absente");
                     apply_track(&mut other, &t, &forge, &host);
                     if other.change_id.is_none() {
                         other.change_id = e.change_id.clone();
+                    }
+                    if other.note.is_none() {
+                        other.note = e.note.clone();
+                    }
+                    if other.title.is_none() {
+                        other.title = e.title.clone();
+                    }
+                    if other.branch.is_none() {
+                        other.branch = e.branch.clone();
+                    }
+                    // Pas de session explicite et l'entrée numérique
+                    // n'est qu'une détection → la fiche cid (vrai git
+                    // review) a meilleure attribution.
+                    if t.session.is_none() && other.via == "detected" {
+                        other.session = e.session.clone();
+                        other.via = e.via.clone();
+                    }
+                    if e.created_at < other.created_at {
+                        other.created_at = e.created_at.clone();
                     }
                     g.insert(nk, other.clone());
                     other

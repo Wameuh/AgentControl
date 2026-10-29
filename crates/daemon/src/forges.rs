@@ -358,9 +358,12 @@ fn leading_num(s: &str) -> Option<u64> {
     (n > 0).then_some(n)
 }
 
-/// `I<40 hex>` en tête de chaîne → le Change-Id complet.
+/// `I<40 hex>` en tête de chaîne → le Change-Id complet. Teste les
+/// OCTETS avant tout slice : tout-ASCII garantit la frontière UTF-8
+/// (un `é` en position 41 ne doit pas paniquer le watcher).
 fn take_change_id(s: &str) -> Option<String> {
-    if s.len() >= 41 && s.starts_with('I') && s[1..41].chars().all(|c| c.is_ascii_hexdigit()) {
+    let b = s.as_bytes();
+    if b.len() >= 41 && b[0] == b'I' && b[1..41].iter().all(|b| b.is_ascii_hexdigit()) {
         Some(s[..41].to_string())
     } else {
         None
@@ -570,5 +573,15 @@ mod tests {
             token_env: None,
         }]);
         assert!(f.gerrit.is_empty());
+    }
+
+    #[test]
+    fn change_id_non_ascii() {
+        // Un multi-octet pile à la borne 41 : le test sur bytes évite le
+        // panic de slicing (régression : `s[1..41]` sur frontière UTF-8).
+        let cid39 = format!("I{}é", "a".repeat(39));
+        assert_eq!(take_change_id(&cid39), None);
+        let cid40 = format!("I{}zzz", "a".repeat(40));
+        assert_eq!(take_change_id(&cid40).as_deref(), Some(cid40[..41].to_string().as_str()));
     }
 }

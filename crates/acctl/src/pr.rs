@@ -20,11 +20,32 @@ fn gh_out(args: &[&str]) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Schéma HTTP d'un hôte de forge : `http` uniquement pour le loopback
+/// (Gerrit de test local) — `https` partout ailleurs. Règle unique
+/// utilisée par `pr add` ET `pr sync`.
+fn forge_scheme(host: &str) -> &'static str {
+    if host.starts_with("localhost") || host.starts_with("127.") || host.starts_with("[::1]") {
+        "http"
+    } else {
+        "https"
+    }
+}
+
+/// Base URL web canonique d'un hôte de forge.
+fn host_base(host: &str) -> String {
+    format!("{}://{host}", forge_scheme(host))
+}
+
 /// GET JSON avec timeout borné — sync GitLab/Gerrit. Tolérant : toute
 /// erreur (réseau, non-2xx, JSON) → None, l'appelant dégrade proprement.
-/// Le préfixe anti-XSSI `)]}'` de Gerrit est strippé.
+/// Le préfixe anti-XSSI `)]}'` de Gerrit est strippé. Redirects refusés :
+/// un en-tête d'auth ne doit jamais suivre vers un autre hôte.
 fn http_json(url: &str, headers: &[(&str, String)]) -> Option<Value> {
-    let mut req = ureq::get(url).timeout(std::time::Duration::from_secs(8));
+    let agent = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout(std::time::Duration::from_secs(8))
+        .build();
+    let mut req = agent.get(url);
     for (k, v) in headers {
         req = req.set(k, v.as_str());
     }
@@ -124,20 +145,24 @@ fn git_remote() -> Option<(String, String)> {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty())?;
+    // user@ est strippé pour TOUTES les formes (ssh://git@gerrit:29418/p
+    // est le remote canonique de git review).
+    let userless = |h: &str| -> String {
+        h.rsplit('@').next().unwrap_or(h).split(':').next().unwrap_or(h).to_lowercase()
+    };
     let (host, path) = if let Some(rest) = out.strip_prefix("ssh://") {
         let (h, p) = rest.split_once('/')?;
-        (h.split(':').next().unwrap_or(h).to_string(), p.to_string())
+        (userless(h), p.to_string())
     } else if let Some(rest) = out
         .strip_prefix("https://")
         .or_else(|| out.strip_prefix("http://"))
     {
         let (h, p) = rest.split_once('/')?;
-        (h.split(':').next().unwrap_or(h).to_string(), p.to_string())
+        (userless(h), p.to_string())
     } else {
         // scp-like : [user@]host:path
         let (h, p) = out.rsplit_once(':').or_else(|| out.split_once(':'))?;
-        let h = h.rsplit('@').next().unwrap_or(h);
-        (h.to_string(), p.to_string())
+        (userless(h), p.to_string())
     };
     let path = path.trim_start_matches('/').trim_end_matches(".git").to_string();
     (!host.is_empty() && !path.is_empty()).then_some((host, path))
@@ -196,12 +221,19 @@ async fn detect_target(args: &[String], c: &mut Conn, from: usize) -> Result<PrT
                     .split("/pull/")
                     .next()
                     .unwrap_or(p)
-                    .split("/+/")
-                    .next()
-                    .unwrap_or(p)
-                    .trim_start_matches("c/")
                     .trim_end_matches('/')
                     .to_string();
+                // Formes gerrit en dernier recours uniquement : une URL
+                // GitLab peut avoir un groupe « c » ou « pull » légitime
+                // (`gitlab.com/c/foo/-/merge_requests/1` → repo c/foo).
+                if !p.contains("/-/merge_requests/") && !p.contains("/pull/") {
+                    repo = repo
+                        .split("/+/")
+                        .next()
+                        .unwrap_or(&repo)
+                        .trim_start_matches("c/")
+                        .to_string();
+                }
             }
         }
     }
@@ -324,8 +356,12 @@ fn gerrit_state(v: &Value) -> String {
 }
 
 /// En-têtes d'auth d'une forge : `token_env` est lu dans l'env de
-/// l'appelant — GitLab `PRIVATE-TOKEN`. Gerrit public = anonyme.
+/// l'appelant — GitLab `PRIVATE-TOKEN` seulement (Gerrit sync =
+/// anonyme : un `token_env` sur type=gerrit est sans effet, documenté).
 fn forge_auth(set: &[Value], forge: &str, host: &str) -> Vec<(String, String)> {
+    if forge != "gitlab" {
+        return Vec::new();
+    }
     for (h, env) in forge_hosts(set, forge) {
         if h == host {
             if let Some(name) = env {
@@ -366,12 +402,6 @@ fn repo_label(e: &Value) -> String {
     }
 }
 
-/// Base URL web canonique d'un hôte de forge.
-fn host_base(host: &str, secure: bool) -> String {
-    let scheme = if secure { "https" } else { "http" };
-    format!("{scheme}://{host}")
-}
-
 /// Snapshot d'une référence depuis la forge live (None si indisponible).
 /// `{status, title, branch, url, pr}` — `pr` est le numéro résolu quand
 /// la référence était un Change-Id Gerrit.
@@ -400,7 +430,7 @@ fn live_ref(set: &[Value], t: &PrTarget) -> Option<Value> {
             })
         }
         "gitlab" => {
-            let base = host_base(&t.host, true);
+            let base = host_base(&t.host);
             let url = format!(
                 "{base}/api/v4/projects/{}/merge_requests/{}",
                 urlenc(&t.repo),
@@ -420,7 +450,7 @@ fn live_ref(set: &[Value], t: &PrTarget) -> Option<Value> {
             // Change-Id (`I<sha>`) ou numéro — l'API /changes/ accepte les deux.
             let n_str = t.pr.to_string();
             let q = t.change_id.as_deref().unwrap_or(&n_str);
-            let base = host_base(&t.host, true);
+            let base = host_base(&t.host);
             http_json(&format!("{base}/changes/{q}"), &headers).map(|v| {
                 json!({
                     "status": gerrit_state(&v),
@@ -530,7 +560,7 @@ async fn sync_gitlab(c: &mut Conn, set: &[Value], entries: &[Value]) {
             .iter()
             .map(|(k, v)| (k.as_str(), v.clone()))
             .collect();
-        let base = host_base(host, true);
+        let base = host_base(host);
         let url = format!(
             "{base}/api/v4/projects/{}/merge_requests/{n}",
             urlenc(repo)
@@ -564,7 +594,7 @@ async fn sync_gitlab(c: &mut Conn, set: &[Value], entries: &[Value]) {
 /// Sync Gerrit — REST `GET /changes/<ref>` anonyme (port web de
 /// l'hôte configuré). Les entrées adressées par `change_id` résolvent
 /// leur numéro au passage (PrTrack rekey côté démon).
-async fn sync_gerrit(c: &mut Conn, set: &[Value], entries: &[Value]) {
+async fn sync_gerrit(c: &mut Conn, _set: &[Value], entries: &[Value]) {
     for e in entries {
         if proto::forge_kind(e["forge"].as_str().unwrap_or("")) != "gerrit" {
             continue;
@@ -578,14 +608,9 @@ async fn sync_gerrit(c: &mut Conn, set: &[Value], entries: &[Value]) {
         let n = e["pr"].as_u64().unwrap_or(0);
         let n_str = n.to_string();
         let q = cid.unwrap_or(&n_str);
-        let auth = forge_auth(set, "gerrit", host);
-        let headers: Vec<(&str, String)> = auth
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.clone()))
-            .collect();
-        let base = host_base(host, host.contains("localhost") || host.starts_with("127."));
+        let base = host_base(host);
         let url = format!("{base}/changes/{q}");
-        let Some(v) = http_json(&url, &headers) else {
+        let Some(v) = http_json(&url, &[]) else {
             eprintln!("gerrit {host} {q}: indisponible — statut inchangé");
             continue;
         };
@@ -659,7 +684,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                 let who = session_label(&sessions, e["session"].as_str().unwrap_or(""));
                 let mine = me.as_deref() == e["session"].as_str();
                 println!(
-                    "{:<10} {:<24} [{:<6}] {:<28} {}{}{}",
+                    "{:<12} {:<24} [{:<6}] {:<28} {}{}{}",
                     badge_of(e),
                     repo_label(e),
                     st,
