@@ -352,6 +352,61 @@ fn task_poppable(t: &Task) -> bool {
         || t.get("dep_status").and_then(Value::as_str) == Some("done")
 }
 
+/// Titre d'item nettoyé pour un titre de session : espaces aplatis,
+/// `[`/`]` → `(`/`)` (des crochets dans le titre se confondent avec les
+/// badges `[#N]`/`[via X]` d'`acctl list` — le parse titre du script
+/// historique les tronquait → re-renommage à chaque cycle), tronqué à
+/// 40 caractères.
+fn clean_task_title(t: &Task) -> String {
+    let clean: String = t
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .map(|c| match c {
+            '[' => '(',
+            ']' => ')',
+            _ => c,
+        })
+        // Caractères de contrôle (ANSI…) — un titre d'item n'a pas à
+        // injecter de séquences dans `acctl list` ou le client.
+        .filter(|c| !c.is_control())
+        .collect();
+    let mut s: String = clean.chars().take(40).collect();
+    if clean.chars().count() > 40 {
+        s.push('…');
+    }
+    s
+}
+
+/// Titre voulu d'un worker : `<préfixe><N>` seul sans item wip, sinon
+/// `<préfixe><N> #<id> · <titre>` — l'identité de la session est
+/// l'item en charge, pas le boilerplate de mission (premier wip
+/// trouvé : l'invariant métier est un item par agent). Convention
+/// identique à `backlog-orchestrator.py` : le même ledger produit le
+/// même titre sous les deux orchestrateurs → la reprise supervisord →
+/// natif (et inverse) ne déclenche aucun ping-pong de renommages.
+/// `None` = base `<préfixe><N>` introuvable dans le titre courant
+/// (session renommée à la main → on n'y touche plus).
+fn orch_desired_title(prefix: &str, current: &str, wip: Option<&Task>) -> Option<String> {
+    let digits = current
+        .strip_prefix(prefix)?
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .count();
+    if digits == 0 {
+        return None;
+    }
+    let base = &current[..prefix.len() + digits];
+    Some(match wip {
+        None => base.to_string(),
+        Some(t) => format!("{base} #{} · {}", task_id(t), clean_task_title(t)),
+    })
+}
+
 /// argv → (code, stdout, stderr tronqués) — sous-processus bornés :
 /// `agentbacklog` (état partagé) et `gh` (forge) uniquement.
 async fn run_out(argv: &[&str], cwd: &Path) -> Result<(i64, String, String)> {
@@ -554,10 +609,39 @@ impl Daemon {
                 .filter(|(_, s)| s.as_str() == "OPEN")
                 .map(|(n, _)| n)
                 .collect();
+            // Identité : le titre de la session suit l'item wip courant
+            // (« <préfixe><N> #<id> · <titre> » — l'item, pas le
+            // boilerplate de mission). Renommage détaché :
+            // session/rename ACP peut rester sans réponse sur un agent
+            // occupé — le tick n'attend pas. Pas de renommage pour un
+            // worker sur le point d'être supprimé (inactif, tout soldé :
+            // le revert-to-base serait un rewrite meta + ACP pour rien).
+            let about_to_delete = !matches!(state, "working" | "compacting" | "starting")
+                && open_prs.is_empty()
+                && my_open.is_empty();
+            let my_wip = tasks
+                .iter()
+                .find(|t| task_agent(t) == sid && task_status(t) == "wip");
+            let title = match orch_desired_title(&cfg.title_prefix, &w.title, my_wip)
+                .filter(|_| !about_to_delete)
+            {
+                Some(want) if want != w.title => {
+                    info!("orchestrateur: rename {sid} : {:?} → {want:?}", w.title);
+                    let d = Arc::clone(self);
+                    let (sid2, want2) = (sid.to_string(), want.clone());
+                    tokio::spawn(async move {
+                        if let Err(e) = d.h_rename_session(sid2, want2).await {
+                            warn!("orchestrateur: rename: {e:#}");
+                        }
+                    });
+                    want
+                }
+                _ => w.title.clone(),
+            };
             st.assignments.insert(
                 sid.to_string(),
                 json!({
-                    "title": w.title, "state": state,
+                    "title": title, "state": state,
                     "tasks": my_items, "prs": my_prs,
                 }),
             );
