@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::UnixStream;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
@@ -35,6 +35,61 @@ pub(crate) const SUBSCRIBE_REPLAY_MAX: usize = 500;
 
 use crate::components::Components;
 use crate::forges::Forges;
+
+/// Backlog maximal de la file d'émission par connexion, en OCTETS de
+/// lignes sérialisées : absorbe les bursts (replay de journal,
+/// term_data) et les micro-coupures sans geler la lecture des requêtes.
+/// Backlog ≥ borne = client durablement plus lent que la production →
+/// la connexion est refermée (un push ne doit jamais bloquer un req).
+/// Ne borne QUE le backlog : une frame unique plus grosse (aperçu
+/// binaire ~17 Mio) est admise — sinon elle tuerait la conn à coup sûr.
+const WRITE_QUEUE_BYTES: usize = 8 << 20; // 8 Mio
+/// Un flush qui ne s'écoule pas en 30 s = lien noir : la connexion meurt
+/// au lieu de rester zombie avec sa file qui gonfle.
+const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Extrémité émission d'une connexion : les réponses/pushes sérialisés
+/// partent dans la file drainée par la tâche d'écriture dédiée —
+/// un flush congestionné (tunnel SSH sous backpressure) ne bloque plus
+/// ni la boucle de lecture ni les handlers des autres requêtes.
+#[derive(Clone)]
+pub(crate) struct Outbox {
+    tx: mpsc::UnboundedSender<String>,
+    dead: watch::Sender<bool>,
+    /// Octets actuellement en file — décrémenté par la tâche d'écriture
+    /// à chaque ligne drainée (comptage approximatif suffisant : il ne
+    /// sert qu'à borner la mémoire par connexion).
+    queued: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Outbox {
+    /// Enfile une ligne JSON terminée par '\n'. File pleine/fermée →
+    /// la connexion est signalée morte (toute la boucle se démonte,
+    /// y compris le lecteur qui attendait des requêtes).
+    fn line(&self, v: &impl serde::Serialize) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let mut s = serde_json::to_string(v)?;
+        s.push('\n');
+        let len = s.len();
+        // La borne couvre le BACKLOG (client durablement plus lent que la
+        // production), pas la frame isolée : une ligne unique > capacité
+        // (aperçu binaire ~17 Mio) est admise sur file quasi vide —
+        // sinon toute grosse réponse tuerait la connexion à coup sûr.
+        // fetch_add préalable = réservation atomique entre producteurs.
+        if self.queued.fetch_add(len, Ordering::Relaxed) >= WRITE_QUEUE_BYTES {
+            self.queued.fetch_sub(len, Ordering::Relaxed);
+            let _ = self.dead.send(true);
+            anyhow::bail!("file d'émission saturée");
+        }
+        if self.tx.send(s).is_err() {
+            self.queued.fetch_sub(len, Ordering::Relaxed);
+            let _ = self.dead.send(true);
+            anyhow::bail!("file d'émission fermée");
+        }
+        Ok(())
+    }
+}
+
 use crate::journal;
 use crate::prs::PrRegistry;
 use crate::session::Session;
@@ -598,7 +653,38 @@ impl Daemon {
     {
         let (read, write) = tokio::io::split(stream);
         let mut lines = BufReader::new(read).lines();
-        let write = Arc::new(tokio::sync::Mutex::new(BufWriter::new(write)));
+        // Tâche d'écriture dédiée : seule propriétaire du socket sortant,
+        // alimentée par une file bornée. Avant, tout l'émission passait par
+        // un Mutex<BufWriter> awaité inline — un flush piétinant (tunnel
+        // SSH congestionné) gelait la lecture des requêtes → toutes les
+        // requêtes de la conn timeout côté client → rafale de reconnects
+        // (chaque replay subscribe re-saturait le lien). Découplé : la
+        // file absorbe les bursts, et pleine = connexion refermée.
+        let (wtx, mut wrx) = mpsc::unbounded_channel::<String>();
+        let (dead_tx, mut wdead) = watch::channel(false);
+        let outbox = Outbox {
+            tx: wtx,
+            dead: dead_tx.clone(),
+            queued: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        {
+            let queued = Arc::clone(&outbox.queued);
+            tokio::spawn(async move {
+                let mut w = BufWriter::new(write);
+                while let Some(line) = wrx.recv().await {
+                    queued.fetch_sub(line.len(), std::sync::atomic::Ordering::Relaxed);
+                    let wr = tokio::time::timeout(WRITE_TIMEOUT, async {
+                        w.write_all(line.as_bytes()).await?;
+                        w.flush().await
+                    })
+                    .await;
+                    if wr.is_err() || matches!(wr, Ok(Err(_))) {
+                        break;
+                    }
+                }
+                let _ = dead_tx.send(true);
+            });
+        }
 
         // État de subscription : (session_id, broadcast rx, last_sent,
         // journal_gen) — la gen trahit un reset quand les seqs coïncident.
@@ -627,7 +713,7 @@ impl Daemon {
                         Ok(v) => v,
                         Err(e) => {
                             let resp = Response::err(0, format!("parse: {e}"));
-                            Self::send_line(&write, &resp).await?;
+                            Self::send_line(&outbox, &resp)?;
                             continue;
                         }
                     };
@@ -636,7 +722,7 @@ impl Daemon {
                         Err(e) => {
                             let id = raw.get("id").and_then(Value::as_u64).unwrap_or(0);
                             let resp = Response::err(id, format!("parse: {e}"));
-                            Self::send_line(&write, &resp).await?;
+                            Self::send_line(&outbox, &resp)?;
                             continue;
                         }
                     };
@@ -684,22 +770,22 @@ impl Daemon {
                                     "last_seq": s.journal.last_seq(),
                                     "skipped": skipped,
                                 }));
-                                Self::send_line(&write, &resp).await?;
+                                Self::send_line(&outbox, &resp)?;
                                 // Le signal de reset part avant le
                                 // rattrapage du journal.
                                 if let Some(ev) = cleared {
-                                    Self::send_push(&write, session, &ev).await?;
+                                    Self::send_push(&outbox, session, &ev)?;
                                 }
                                 // Rattrapage du journal avant de passer en live
                                 let mut last = after;
                                 for ev in backlog {
                                     last = ev.seq;
-                                    Self::send_push(&write, session, &ev).await?;
+                                    Self::send_push(&outbox, session, &ev)?;
                                 }
                                 sub = Some((session.clone(), rx, last, gen));
                             }
                             Err(e) => {
-                                Self::send_line(&write, &Response::err(req.id, format!("{e:#}"))).await?;
+                                Self::send_line(&outbox, &Response::err(req.id, format!("{e:#}")))?;
                             }
                         }
                         continue;
@@ -707,10 +793,10 @@ impl Daemon {
                     // Terminal : inline (pas de tâche — l'ordre des inputs
                     // compte et l'état vit dans la map locale `terms`).
                     if let Some(resp) = self
-                        .h_term(&mut terms, &term_done_tx, &write, &req)
+                        .h_term(&mut terms, &term_done_tx, &outbox, &req)
                         .await
                     {
-                        Self::send_line(&write, &resp).await?;
+                        Self::send_line(&outbox, &resp)?;
                         continue;
                     }
                     // Requêtes concurrentes par connexion : chaque dispatch dans
@@ -718,11 +804,17 @@ impl Daemon {
                     // session/load + replay) ne bloque plus les autres appels.
                     // Les réponses sont démux côté client par id.
                     let d = Arc::clone(self);
-                    let w = Arc::clone(&write);
+                    let w = outbox.clone();
                     tokio::spawn(async move {
                         let resp = d.dispatch(req).await;
-                        let _ = Self::send_line(&w, &resp).await;
+                        let _ = Self::send_line(&w, &resp);
                     });
+                }
+                // La tâche d'écriture est morte (flush timeout, socket
+                // ko) ou a été signalée par un producteur (file pleine) :
+                // conn refermée proprement — plus rien ne peut sortir.
+                _ = wdead.changed() => {
+                    return Ok(());
                 }
                 ev = async {
                     match sub.as_mut() {
@@ -749,7 +841,7 @@ impl Daemon {
                                 if cleared {
                                     *gen = self.get_session(sid).await?.journal.gen();
                                 }
-                                Self::send_push(&write, sid, &event).await?;
+                                Self::send_push(&outbox, sid, &event)?;
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -775,7 +867,7 @@ impl Daemon {
                                     ts: proto::now_iso(),
                                     kind: proto::EventKind::SessionCleared {},
                                 };
-                                Self::send_push(&write, sid, &ev).await?;
+                                Self::send_push(&outbox, sid, &ev)?;
                             }
                             let (backlog, skipped) = s
                                 .journal
@@ -786,7 +878,7 @@ impl Daemon {
                             }
                             for event in backlog {
                                 *last = event.seq;
-                                Self::send_push(&write, sid, &event).await?;
+                                Self::send_push(&outbox, sid, &event)?;
                             }
                         }
                         Err(_) => { sub = None; }
@@ -803,23 +895,14 @@ impl Daemon {
         }
     }
 
-    async fn send_line<W>(w: &Arc<tokio::sync::Mutex<BufWriter<W>>>, v: &impl serde::Serialize) -> Result<()>
-    where
-        W: tokio::io::AsyncWrite + Unpin,
-    {
-        let mut g = w.lock().await;
-        let mut s = serde_json::to_string(v)?;
-        s.push('\n');
-        g.write_all(s.as_bytes()).await?;
-        g.flush().await?;
-        Ok(())
+    /// Enfile une réponse/erreur (sérialisée en ligne NDJSON) — retour
+    /// immédiat sauf file saturée, cas où la connexion est condamnée.
+    fn send_line(w: &Outbox, v: &impl serde::Serialize) -> Result<()> {
+        w.line(v)
     }
 
-    async fn send_push<W>(w: &Arc<tokio::sync::Mutex<BufWriter<W>>>, session: &str, ev: &proto::Event) -> Result<()>
-    where
-        W: tokio::io::AsyncWrite + Unpin,
-    {
-        Self::send_line(w, &Push { push: "event", session: session.into(), event: ev.clone() }).await
+    fn send_push(w: &Outbox, session: &str, ev: &proto::Event) -> Result<()> {
+        Self::send_line(w, &Push { push: "event", session: session.into(), event: ev.clone() })
     }
 }
 
