@@ -123,9 +123,10 @@ const pC = await initPage([SLOW, FAST], KEY_SLOW, { [KEY_SLOW]: 2800 });
 
 await pC.evaluate(() => document.querySelector("#btn-connect")?.click());
 await sleep(400);
-await pC.evaluate(() => { const s = document.querySelector("#c-saved"); s.value = "1"; s.dispatchEvent(new Event("change")); });
-await sleep(200);
-await pC.evaluate(() => document.querySelector("#c-go")?.click());
+// Vue connexion (#137) : « connecter ici » = le ▶ de la saved conn
+// (la vue s'est aussi auto-ouverte en accueil — SLOW n'est pas up).
+await pC.evaluate(() =>
+  document.querySelectorAll("#cv-saved .cv-conn .cv-go")[1]?.click());
 await sleep(600);
 const headsC0 = await connHeaders(pC);
 ok(headsC0.length === 1 && headsC0[0] === KEY_FAST, `E1 FAST liée pendant que SLOW est en vol (${headsC0})`);
@@ -135,6 +136,44 @@ ok(headsC1.length === 1 && headsC1[0] === KEY_FAST, `E2 le perdant résolu en re
 ok((await pC.evaluate(() => window.__calls.disconnect)).includes(KEY_SLOW), "E3 transport du perdant relâché (disconnect SLOW)");
 ok((await pC.evaluate(() => document.title)) === "AgentControl — me@fast.local", "E4 titre = conn gagnante");
 ok((await pC.evaluate(() => [...document.documentElement.classList].join(" "))).includes("theme-grey"), "E5 accent = couleur de la conn gagnante");
+
+// ---------- F : vue diagramme — nœuds, arêtes, clic session/composant ----------
+// Page liée à la conn "local" : 3 composants mockés (capability
+// components:true dans daemon_status), 4 sessions dont s2 spawnée par s1
+// et s4 rattachée au composant backlog-orchestrator via `origin`.
+const pD = await initPage([{ kind: "local" }], null);
+await pD.evaluate(() => document.querySelector("#tb-map")?.click());
+await sleep(900);
+const cnt = (sel) => pD.evaluate((s) => document.querySelectorAll(s).length, sel);
+ok((await pD.evaluate(() => !document.querySelector("#map-view")?.hidden)), "F1 #tb-map ouvre la vue diagramme");
+ok((await cnt(".n-daemon")) === 1, "F2 nœud démon au centre");
+ok((await cnt(".n-comp")) === 3, `F3 3 composants en anneau (${await cnt(".n-comp")})`);
+ok((await cnt(".n-sess")) === 4, `F4 4 sessions positionnées (${await cnt(".n-sess")})`);
+ok((await cnt(".e-dc")) === 3 && (await cnt(".e-s")) === 4,
+  `F5 arêtes : 3 démon→composant + 4 parent→session (${await cnt(".e-dc")}+${await cnt(".e-s")})`);
+ok((await cnt(".e-s.flow")) >= 1, "F6 flux actif animé (s1 working)");
+ok((await cnt(".npr")) >= 1, "F7 badge PR #N sur les sessions du registre");
+ok((await pD.evaluate(() => document.querySelector('.n-sess[data-session="s4"]') != null)),
+  "F8 s4 (origin component) présente dans le graphe");
+// Clic composant → carte info ; clic session → chat ouvert + vue refermée.
+await pD.evaluate(() => document.querySelector('[data-comp="backlog-orchestrator"]')
+  .dispatchEvent(new MouseEvent("click", { bubbles: true })));
+await sleep(300);
+ok((await pD.evaluate(() => !document.querySelector("#map-info")?.hidden)) &&
+   (await pD.evaluate(() => document.querySelector("#map-info")?.textContent.includes("backlog-orchestrator"))) &&
+   (await pD.evaluate(() => document.querySelector("#map-info")?.textContent.includes("running"))),
+  "F9 clic composant → carte info (nom + état running)");
+await pD.evaluate(() => document.querySelector('[data-session="s1"]')
+  .dispatchEvent(new MouseEvent("click", { bubbles: true })));
+await sleep(600);
+ok((await pD.evaluate(() => document.querySelector("#map-view")?.hidden)) === true &&
+   (await pD.evaluate(() => document.querySelector("#chat-title")?.textContent.includes("Refactor API client"))) === true,
+  "F10 clic session → chat ouvert, vue refermée");
+await pD.evaluate(() => document.querySelector("#tb-map")?.click());
+await sleep(300);
+await pD.evaluate(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
+await sleep(200);
+ok((await pD.evaluate(() => document.querySelector("#map-view")?.hidden)) === true, "F11 Échap referme la vue");
 
 console.log(`\n${fails === 0 ? "SMOKE OK" : "SMOKE FAIL"} — ${fails} échec(s)`);
 await b.close();

@@ -35,9 +35,10 @@ export class SettingsPanel {
   sendModeChanged: () => void = () => {};
   /** Thème changé → les terminaux ouverts re-pick les couleurs (injecté). */
   themeChanged: () => void = () => {};
-  /** Le panneau s'apprête à s'ouvrir : l'autre overlay de #chat (vue
-   *  connexion) doit se fermer — deux panneaux pleins empilés seraient
-   *  inertes l'un sous l'autre (injecté par le bootstrap). */
+  /** Le panneau s'apprête à s'ouvrir : les autres overlays de #chat
+   *  (vue connexion, carte) doivent se fermer — deux panneaux pleins
+   *  empilés seraient inertes l'un sous l'autre (injecté par le
+   *  bootstrap). */
   onOpening: () => void = () => {};
 
   private isOpen() {
@@ -102,9 +103,12 @@ export class SettingsPanel {
     // sans cause visible — le watchdog core/modal filet de sécurité).
     const was = this.isOpen();
     $("settings-view").hidden = true;
-    // Ne lever l'inert que si l'autre overlay #chat est aussi fermé —
-    // sinon on ré-expose #input derrière conn-view (frappes invisibles).
-    if ($("conn-view").hidden) this.setChatInert(false);
+    // Ne lever l'inert que si les autres overlays #chat sont aussi
+    // fermés — sinon on ré-expose #input derrière conn-view/map-view
+    // (frappes invisibles).
+    if ($("conn-view").hidden && $("map-view").hidden) {
+      this.setChatInert(false);
+    }
     // nav.close est idempotent (entrée absente = no-op) : l'appeler même
     // si le panneau avait été masqué ailleurs purge la pile nav résiduelle.
     nav.close("settings");

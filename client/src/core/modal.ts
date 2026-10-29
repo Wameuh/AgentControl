@@ -36,13 +36,14 @@ function watch() {
     d.close();
   }
   // `inert` n'a de raison d'être que sous un overlay ouvert de #chat
-  // (#settings-view ou #conn-view — enfants directs, posés par
-  // setChatInert) : s'ils sont tous masqués par un chemin qui saute
+  // (#settings-view, #conn-view ou #map-view — enfants directs, posés
+  // par setChatInert) : s'ils sont tous masqués par un chemin qui saute
   // close(), les éléments recouverts restent inertes → composer/clics
   // morts sans rien à l'écran.
   const overlayUp =
     ($("settings-view") as HTMLElement | null)?.hidden === false ||
-    ($("conn-view") as HTMLElement | null)?.hidden === false;
+    ($("conn-view") as HTMLElement | null)?.hidden === false ||
+    ($("map-view") as HTMLElement | null)?.hidden === false;
   if (!overlayUp) {
     for (const el of document.querySelectorAll<HTMLElement>("#chat > [inert]")) {
       el.inert = false;

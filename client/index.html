@@ -14,6 +14,7 @@
         <span id="titlebar-gem"></span>
         <span id="titlebar-title">AgentControl</span>
         <div class="tb-btns">
+          <button id="tb-map" data-icon="map" title="Map" data-i18n-title="map_title"></button>
           <button id="tb-settings" data-icon="settings" title="Settings" data-i18n-title="settings_title"></button>
           <button id="tb-about" data-icon="info" title="About" data-i18n-title="about_title"></button>
           <button id="tb-more" hidden data-icon="more" data-i18n-title="menu_title" title="Menu"></button>
@@ -284,6 +285,24 @@
                 </div>
                 <pre id="log-view"></pre>
               </details>
+            </div>
+          </div>
+          <div id="map-view" tabindex="-1" hidden>
+            <header id="map-head">
+              <span id="map-h" data-i18n="map_title">Map</span>
+              <span id="map-stats"></span>
+              <button id="map-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <div id="map-body">
+              <svg id="map-svg"></svg>
+              <div id="map-legend">
+                <span><i class="lg-dot st-working"></i><b data-i18n="map_leg_working">working</b></span>
+                <span><i class="lg-dot st-waiting_input"></i><b data-i18n="map_leg_wait">waiting</b></span>
+                <span><i class="lg-dot st-idle"></i><b data-i18n="map_leg_idle">idle</b></span>
+                <span><i class="lg-dot st-dead"></i><b data-i18n="map_leg_dead">dead</b></span>
+                <span><i class="lg-flow"></i><b data-i18n="map_leg_flow">active flow</b></span>
+              </div>
+              <div id="map-info" hidden></div>
             </div>
           </div>
         </main>

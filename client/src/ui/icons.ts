@@ -82,6 +82,12 @@ const SHAPES: Record<string, string> = {
     '<circle cx="12" cy="12" r="9"/>' +
     '<path d="M9.4 9.2a2.6 2.6 0 0 1 5.1.7c0 1.7-2.5 2.1-2.5 3.6"/><path d="M12 17.2h.01"/>',
   tool: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+  // Graphe hub-and-spoke (vue diagramme)
+  map:
+    '<circle cx="12" cy="12" r="2.6"/>' +
+    '<circle cx="4.6" cy="5.6" r="2"/><circle cx="19.4" cy="5.6" r="2"/>' +
+    '<circle cx="12" cy="19.4" r="2"/>' +
+    '<path d="M10.3 10.2 6.2 7.2M13.7 10.2l4.1-3M12 14.7v2.6"/>',
   // Vue sidebar
   bot:
     '<rect x="4.5" y="9" width="15" height="10.5" rx="2.5"/>' +
