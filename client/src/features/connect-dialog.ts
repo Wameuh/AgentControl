@@ -7,7 +7,7 @@ import { invoke, getVersion, listen, isWeb } from "../core/bridge";
 import { $, dlgErr, esc, notify } from "../core/dom";
 import { call } from "../core/rpc";
 import { cmpVer, connKeyOf, daemonParams, minorOf } from "../core/conn";
-import { isAndroid } from "../core/chrome";
+import { accentOf, isAndroid } from "../core/chrome";
 import type { SavedConn, SessionMeta } from "../core/types";
 import { t, type Key } from "../i18n";
 import { icon } from "../ui/icons";
@@ -208,8 +208,18 @@ export class ConnectDialog {
     });
   }
 
+  /// Compteur de génération des connect() — le flux contient de longues
+  /// attentes utilisateur (install/update du démon) : un connect initié
+  /// plus tard doit gagner le binding, pas le dernier résolu en vol.
+  private connectSeq = 0;
+  /// Clé de conn visée par le DERNIER connect initié (cf. garde gen).
+  private wantedKey = "";
+
   async connect(cfg: Record<string, unknown>) {
     const host = String(cfg.host ?? cfg.addr ?? cfg.path ?? "local");
+    const gen = ++this.connectSeq;
+    const wantKey = this.conns.keyOf(cfg);
+    this.wantedKey = wantKey;
     // Nouvelle tentative : la progression redevient visible (le flag
     // détaché du flux précédent ne doit pas masquer celle-ci).
     this.daemonDetached = false;
@@ -313,12 +323,22 @@ export class ConnectDialog {
       }
     }
     this.cStatus(null);
+    // Un connect plus récent a été initié pendant les attentes de ce flux
+    // (install/update confirmées par l'utilisateur) : il gagne le binding.
+    // Le transport résolu ici est relâché — sauf s'il sert le flux plus
+    // récent (même clé = même endpoint, ctx Rust déjà remplacé).
+    if (gen !== this.connectSeq) {
+      if (wantKey !== this.wantedKey) {
+        await invoke("disconnect", { conn: wantKey }).catch(() => {});
+      }
+      return;
+    }
     this.conns.markConnected(cfg, status as Record<string, unknown>);
     // Modèle multi-instances : cette instance se lie à UNE connexion —
     // les autres transports encore ouverts (conn précédente) sont
     // relâchés ; leurs sessions démon restent vivantes, pilotables par
     // une autre instance. Pose aussi le chrome (accent/titre de la conn).
-    await this.conns.evictExcept(this.conns.keyOf(cfg));
+    await this.conns.evictExcept(wantKey);
     await this.refresh();
   }
 
@@ -407,7 +427,8 @@ export class ConnectDialog {
     this.saved.forEach((c, i) => {
       const o = document.createElement("option");
       o.value = String(i);
-      o.textContent = `${c.kind} ${c.host ?? c.addr ?? c.path ?? ""}${c.color ? ` (${c.color})` : ""}`;
+      const acc = accentOf(c.color);
+      o.textContent = `${c.kind} ${c.host ?? c.addr ?? c.path ?? ""}${acc ? ` (${t(`accent_${acc}` as Key)})` : ""}`;
       sv.appendChild(o);
     });
     return sv;
@@ -493,11 +514,15 @@ export class ConnectDialog {
     const spawner = $("c-saved-new") as HTMLButtonElement;
     spawner.hidden = isAndroid() || isWeb;
     spawner.addEventListener("click", async () => {
-      const c = this.saved[Number(($("c-saved") as HTMLSelectElement).value)];
+      const v = ($("c-saved") as HTMLSelectElement).value;
+      if (!v) return;
+      const c = this.saved[Number(v)];
       if (!c) return;
       try {
         await invoke("spawn_instance", { conn: connKeyOf(c, isAndroid()) });
-        this.report(t("conn_spawned"), "success");
+        // Toast, pas report() : le dialogue est ouvert — report irait
+        // dans la zone d'erreur (et loggerait en « error »).
+        notify("success", t("conn_spawned"));
       } catch (e) {
         this.report(String(e));
       }
@@ -566,8 +591,10 @@ export class ConnectDialog {
   autoConnect(saved: SavedConn[], want?: string) {
     this.saved = saved;
     // Web : la conn unique (le démon qui sert la page) est vitale —
-    // la préférence "autoconnect off" n'a pas de sens ici.
-    if (!isWeb && localStorage.getItem("ac-autoconnect") === "0") return;
+    // la préférence "autoconnect off" n'a pas de sens ici. Et `want`
+    // (--conn) est une intention explicite (instance spawnée depuis une
+    // autre) — pas une reconnexion passive : elle court-circuite la pref.
+    if (!want && !isWeb && localStorage.getItem("ac-autoconnect") === "0") return;
     const target =
       (want ? saved.find((c) => connKeyOf(c, isAndroid()) === want) : undefined) ??
       saved[0];

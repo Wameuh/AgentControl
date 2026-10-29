@@ -230,7 +230,9 @@ pub fn conn_key_json(cfg: &serde_json::Value) -> String {
         }
         "tcp" => format!("tcp:{}", s("addr")),
         "web" => "web".into(),
-        _ => "local".into(),
+        "local" => "local".into(),
+        // kind inconnu/legacy : identité propre, pas de fusion avec local.
+        other => format!("{}:{}", other, s("host")),
     }
 }
 

@@ -8,7 +8,7 @@
 
 import "./styles.css";
 import "./mesh-bg.ts";
-import { invoke, listen, getVersion } from "./core/bridge";
+import { invoke, listen, getVersion, isWeb } from "./core/bridge";
 import { $, notify } from "./core/dom";
 import { app } from "./core/state";
 import { initRpc } from "./core/rpc";
@@ -77,8 +77,12 @@ const [cliConn, savedConns] = await Promise.all([
 const bootConn =
   (cliConn ? savedConns.find((c) => connKeyOf(c, isAndroid()) === cliConn) : undefined) ??
   savedConns[0];
+// Ne teinter que si un bind va réellement suivre — avec autoconnect off et
+// sans --conn, aucune conn ne sera liée : pas de couleur mensongère.
+const willConnect =
+  cliConn != null || isWeb || localStorage.getItem("ac-autoconnect") !== "0";
 const bootAccent = accentOf(bootConn?.color);
-if (bootAccent) applyAccent(bootAccent, false);
+if (willConnect && bootAccent) applyAccent(bootAccent, false);
 
 // --- Features stateful -------------------------------------------------------
 
@@ -137,6 +141,7 @@ conns.bind({
   clearPendingDel: (id) => sidebar.clearPendingDel(id),
   capsChanged: () => chat.updateHeader(),
   connChrome: (c, color) => applyConnChrome(c, color),
+  termDead: (k) => term.markConnDead(k),
 });
 connectDlg.bind(conns);
 connectDlg.refresh = () => sidebar.refresh();

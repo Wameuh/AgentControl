@@ -7,7 +7,7 @@
 // est relancé par systemd (Restart=always) — jamais de réinstall en boucle.
 // ---------------------------------------------------------------------------
 
-import { invoke, listen } from "../core/bridge";
+import { invoke, listen, isWeb } from "../core/bridge";
 import { $, esc, q, showErr } from "../core/dom";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
@@ -60,6 +60,10 @@ export class ConnectionManager {
     /** Chrome (accent + liseré + titre) de la connexion liée — null quand
      *  plus aucune conn n'est liée (suppression de la dernière). */
     connChrome: (_conn: string | null, _color?: Accent | null) => {},
+    /** Transport d'une conn relâché alors que ses sessions démon vivent
+     *  encore (éviction) : aucun event conn-dead/session_deleted ne
+     *  viendra — les terminaux de cette conn doivent être marqués morts. */
+    termDead: (_conn: string) => {},
   };
 
   bind(d: Partial<typeof this.deps>) {
@@ -154,6 +158,7 @@ export class ConnectionManager {
       this.gone.delete(k);
       this.deps.dropConvsForConn(k);
       this.deps.closeIfConn(k);
+      this.deps.termDead(k);
       await invoke("disconnect", { conn: k }).catch(() => {});
     }
     if (others.length) this.renderState();
@@ -371,8 +376,8 @@ export class ConnectionManager {
     });
     dis.disabled = !this.cfg.has(conn) || this.gone.has(conn) || busy;
     // Nouvelle instance liée à cette connexion (multi-instances : 1
-    // processus = 1 connexion — desktop seulement).
-    if (!isAndroid()) {
+    // processus = 1 connexion — desktop seulement, ni web ni Android).
+    if (!isAndroid() && !isWeb) {
       const ni = menuBtn(ctx, t("ctx_new_instance"), "", () => {
         hide();
         invoke("spawn_instance", { conn }).catch((e) => showErr(String(e)));
