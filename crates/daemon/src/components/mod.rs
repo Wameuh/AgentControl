@@ -711,9 +711,8 @@ fn check_usable(spec: &ComponentSpec) -> Result<()> {
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
             "query « {qname} » invalide ([a-z0-9-]+ attendu)"
         );
-        if let Some(argv0) = qargv.first() {
-            check_not_supervisor(argv0)?;
-        }
+        anyhow::ensure!(!qargv.is_empty(), "query « {qname} » : argv vide");
+        check_not_supervisor(&qargv[0])?;
     }
     Ok(())
 }

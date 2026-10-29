@@ -12,7 +12,7 @@
 // spawn qui pop ou une session libérée). Onglet inactif = zéro trafic.
 // ---------------------------------------------------------------------------
 
-import { $, esc } from "../core/dom";
+import { $, esc, q } from "../core/dom";
 import { app } from "../core/state";
 import { call } from "../core/rpc";
 import { b64decode } from "../core/encoding";
@@ -186,7 +186,11 @@ export class BacklogView {
       const parsed: unknown = JSON.parse(raw);
       if (Array.isArray(parsed)) items = parsed as BacklogItem[];
     } catch {
-      this.state = { kind: "err", msg: t("bl_bad_data") };
+      // Sortie tronquée côté démon (>512 Kio) → JSON cassé : message dédié.
+      this.state = {
+        kind: "err",
+        msg: t(r.truncated ? "bl_truncated" : "bl_bad_data"),
+      };
       this.render();
       return;
     }
@@ -195,15 +199,26 @@ export class BacklogView {
   }
 
   /** CTA « Intégrer » : recette catalogue (install + upsert de la spec —
-   *  la query `list` vient avec). Utilisé pour les états absent/noquery. */
+   *  la query `list` vient avec). Utilisé pour les états absent/noquery.
+   *  Un échec du démon remonte en état `err` plutôt que de retomber
+   *  silencieusement sur l'état précédent. */
   private async install() {
     if (this.installing) return;
     this.installing = true;
     this.render();
     const conn = this.deps.conn();
-    await call("component_install", { conn, name: COMP }).catch(() => {});
+    const err = await call("component_install", { conn, name: COMP }).then(
+      () => null,
+      (e: unknown) => String(e),
+    );
     this.installing = false;
-    if (this.active) void this.refresh();
+    if (!this.active) return;
+    if (err) {
+      this.state = { kind: "err", msg: `${t("bl_install_err")} — ${err}` };
+      this.render();
+      return;
+    }
+    void this.refresh();
   }
 
   // --- Rendu ---------------------------------------------------------------
@@ -215,6 +230,7 @@ export class BacklogView {
     const sig =
       JSON.stringify(this.state) +
       this.filter +
+      this.installing +
       JSON.stringify(app.lastSessions.map((s) => [s.id, s.title, s.conn]));
     if (sig === this.lastSig) return;
     this.lastSig = sig;
@@ -317,12 +333,12 @@ export class BacklogView {
     if (s) {
       // title attr = meta complète ; pastille cliquable → ouvre le chat.
       return (
-        `<button class="bl-agent" data-sid="${esc(s.id)}" ` +
-        `data-conn="${esc(s.conn ?? "")}" title="${esc(s.id)} — ${esc(s.title ?? "")}">` +
+        `<button class="bl-agent" data-sid="${q(esc(s.id))}" ` +
+        `data-conn="${q(esc(s.conn ?? ""))}" title="${q(esc(s.id))} — ${q(esc(s.title ?? ""))}">` +
         `${icon("bot")}<span>${esc(s.title ?? s.id)}</span></button>`
       );
     }
-    return `<span class="bl-agent off" title="${esc(i.agent_id)}">${esc(shortId(i.agent_id))}</span>`;
+    return `<span class="bl-agent off" title="${q(esc(i.agent_id))}">${esc(shortId(i.agent_id))}</span>`;
   }
 
   private section(headKey: Key, items: BacklogItem[], cls: string) {
@@ -338,15 +354,15 @@ export class BacklogView {
       const blocked =
         cls === "pend" && i.dep_status && i.dep_status !== "done" && i.depends_on != null;
       html +=
-        `<div class="bl-item" title="${esc(i.title ?? "")}">` +
+        `<div class="bl-item" title="${q(esc(i.title ?? ""))}">` +
         `<span class="bl-id">#${esc(String(id))}</span>` +
         `<span class="bl-title">${this.deps.hl(i.title ?? "")}</span>` +
         (blocked
-          ? `<span class="bl-blocked" title="${esc(t("bl_blocked", { id: String(i.depends_on) }))}">${icon("lock")}</span>`
+          ? `<span class="bl-blocked" title="${q(esc(t("bl_blocked", { id: String(i.depends_on) })))}">${icon("lock")}</span>`
           : "") +
         this.agentHtml(i) +
         (when
-          ? `<span class="bl-when" title="${esc(when.title)}">${esc(when.label)}</span>`
+          ? `<span class="bl-when" title="${q(esc(when.title))}">${esc(when.label)}</span>`
           : "") +
         `</div>`;
     }
@@ -354,7 +370,7 @@ export class BacklogView {
   }
 }
 
-/** `s-84f27d4c` → `s-84f2…` — agent_id brut non résolu, lisible en 1 ligne. */
+/** `s-84f27d4c` → `s-84f27d4…` — agent_id brut non résolu, lisible en 1 ligne. */
 function shortId(id: string): string {
   return id.length > 9 ? `${id.slice(0, 8)}…` : id;
 }
