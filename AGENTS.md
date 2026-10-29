@@ -31,10 +31,19 @@ review réelle. PR déjà mergée ?
 Le CI build tous les artefacts sur les PR (APK suffixé `-<sha>`).
 
 **Worktrees** : travailler dans un **git worktree séparé par tâche**
-(`git worktree add ../AgentControl-<feat> -b <br> next_release`) — le
-checkout principal reste propre et plusieurs tâches peuvent avancer
-en parallèle sans se marcher dessus. Nettoyer à la fin :
-`git worktree remove ../AgentControl-<feat>`.
+(`git worktree add ~/worktrees/ac-<feat> -b <br> origin/next_release`)
+— le checkout principal reste propre et plusieurs tâches peuvent
+avancer en parallèle sans se marcher dessus. Nettoyer à la fin :
+`git worktree remove ~/worktrees/ac-<feat>`. **Le checkout principal
+est verrouillé** : le hook `.devin/hooks/guard-main-worktree.py`
+bloque les outils fichiers (`write`/`edit`/…) sur tout chemin qui s'y
+résout et les commandes git mutantes qui le ciblent (`commit`, `add`,
+`checkout`/`switch` hors `next_release`, `stash`, `clean`, `rebase`,
+`update-ref`…) ; un `Stop`-hook refuse de terminer tant qu'il est sale
+ou hors `next_release`, et `SessionStart` signale l'état. `fetch` /
+`pull` / `reset` / `restore` / `checkout -- <paths>` restent permis
+(resync et retour-au-propre). Tripwire assumé : les écrits shell (`>`,
+`sed -i`) ne sont pas interceptés — le `Stop`-hook est le filet.
 
 **Drafts** : une PR reste en **draft tout le cycle travail + review**
 — les pipelines ne se lancent qu'**après** la review (`gh pr ready` =

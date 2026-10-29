@@ -9,6 +9,40 @@
           "timeout": 20
         }
       ]
+    },
+    {
+      "matcher": "^(exec|write_to_process|write|edit|apply_patch|notebook_edit|mcp__.*)$",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "test ! -f \"${DEVIN_PROJECT_DIR:-.}/.devin/hooks/guard-main-worktree.py\" || python3 \"${DEVIN_PROJECT_DIR:-.}/.devin/hooks/guard-main-worktree.py\"",
+          "timeout": 20
+        }
+      ]
+    }
+  ],
+  "Stop": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "test ! -f \"${DEVIN_PROJECT_DIR:-.}/.devin/hooks/guard-main-worktree.py\" || python3 \"${DEVIN_PROJECT_DIR:-.}/.devin/hooks/guard-main-worktree.py\"",
+          "timeout": 20
+        }
+      ]
+    }
+  ],
+  "SessionStart": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "test ! -f \"${DEVIN_PROJECT_DIR:-.}/.devin/hooks/guard-main-worktree.py\" || python3 \"${DEVIN_PROJECT_DIR:-.}/.devin/hooks/guard-main-worktree.py\"",
+          "timeout": 20
+        }
+      ]
     }
   ]
 }
