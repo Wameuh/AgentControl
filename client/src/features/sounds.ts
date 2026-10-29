@@ -29,6 +29,10 @@ const ERR = new Set(["dead", "interrupted"]);
 
 /** Rafale évitée : un même type ne peut pas sonner deux fois en 2 s. */
 const COOLDOWN_MS = 2_000;
+/** Son mis en file (autoplay suspendu) : au-delà, la notification est
+ *  périmée — jouer un « done » vieux de plusieurs minutes au déblocage
+ *  n'a plus de sens, on le laisse tomber. */
+const STALE_MS = 15_000;
 
 // --- Réglages (localStorage) ------------------------------------------------
 
@@ -84,10 +88,11 @@ class SoundAlerts {
   }
 
   /** Vrai tant que la politique autoplay garde l'AudioContext suspendu
-   *  (aucun geste utilisateur reçu depuis le boot) — affiché dans les
-   *  réglages pour expliquer un éventuel silence. */
+   *  (aucun geste utilisateur reçu depuis le boot) — ou si le contexte
+   *  n'a pas pu être créé du tout. Affiché dans les réglages pour
+   *  expliquer un éventuel silence. */
   blocked() {
-    return this.ctx !== null && this.ctx.state === "suspended";
+    return this.ctxFailed || (this.ctx !== null && this.ctx.state === "suspended");
   }
 
   private play(kind: SoundKind) {
@@ -106,21 +111,24 @@ class SoundAlerts {
   // keydown) permet ensuite les lectures programmées à tout moment.
 
   private ctx: AudioContext | null = null;
+  private ctxFailed = false;
   private buffers = new Map<SoundKind, Promise<AudioBuffer | null>>();
   private warnedBlocked = false;
 
   private audioCtx(): AudioContext | null {
     if (!this.ctx) {
+      if (this.ctxFailed) return null;
       try {
         this.ctx = new AudioContext();
       } catch (e) {
+        this.ctxFailed = true;
         logUi("error", `audio: AudioContext indisponible: ${e}`);
         return null;
       }
       // Déverrouillage autoplay : le contexte démarre "suspended" tant que
       // la page n'a pas reçu de geste — le premier suffit (capture, once).
-      const unlock = () => void this.ctx?.resume();
-      for (const ev of ["pointerdown", "keydown"] as const) {
+      const unlock = () => void this.ctx?.resume().catch(() => {});
+      for (const ev of ["pointerdown", "keydown", "touchend", "click"] as const) {
         document.addEventListener(ev, unlock, { once: true, capture: true });
       }
       // Le hint « audio bloqué » des réglages suit l'état réel du contexte.
@@ -146,6 +154,9 @@ class SoundAlerts {
             .then((ab) => ctx.decodeAudioData(ab))
             .catch((e) => {
               logUi("error", `audio: ${FILES[kind]} illisible: ${e}`);
+              // Échec transitoire possible — retry au prochain emit
+              // plutôt que de figer null en cache pour la session.
+              this.buffers.delete(kind);
               return null;
             })
         : Promise.resolve(null);
@@ -159,6 +170,7 @@ class SoundAlerts {
     if (!ctx) return;
     // Hors geste (event réseau) resume() peut rester pending jusqu'au
     // geste suivant : le son part alors tout de même dès le déblocage.
+    const t0 = Date.now();
     if (ctx.state === "suspended") {
       try {
         await ctx.resume();
@@ -173,6 +185,9 @@ class SoundAlerts {
       }
       return;
     }
+    // Débloqué trop tard : la notification est périmée, on l'écarte
+    // plutôt que de jouer en rafale des sons obsolètes.
+    if (Date.now() - t0 > STALE_MS) return;
     const buf = await this.buffer(kind);
     if (!buf) return;
     const src = ctx.createBufferSource();
