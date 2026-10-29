@@ -481,7 +481,7 @@ export class ConnectionManager {
 
     // Watchdog : sonde fusionnée toutes les 10 s (timeout 8 s/conn côté Rust) —
     // filet de sécurité pour les blackholes réseau (pas d'EOF → pas de
-    // conn-dead). Entrées {error} → markDead → backoff de reconnexion.
+    // conn-dead). Entrées {error} → probeFailed (2 strikes) → backoff.
     setInterval(async () => {
       try {
         const st = await call<Record<string, unknown>>("daemon_status");
