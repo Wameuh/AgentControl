@@ -182,6 +182,8 @@ const STR = {
     sounds_question: "Question / permission", sounds_error: "Error / dead session",
     sounds_unfocused: "Only when the window is not focused",
     sounds_vol: "Volume", sounds_test: "Test",
+    sounds_blocked:
+      "Audio blocked until you interact — click anywhere or press Test",
     conflict_msg: "changed on disk since you opened it — reload or overwrite?",
     conflict_reload: "Reload", conflict_overwrite: "Overwrite",
     dirty_h: "Unsaved changes", dirty_msg: "Discard the modified buffer?",
@@ -478,6 +480,8 @@ const STR = {
     sounds_question: "Question / permission", sounds_error: "Erreur / session morte",
     sounds_unfocused: "Seulement quand la fenêtre n'a pas le focus",
     sounds_vol: "Volume", sounds_test: "Tester",
+    sounds_blocked:
+      "Audio bloqué jusqu'à une interaction — cliquez n'importe où ou sur Tester",
     conflict_msg: "modifié sur le disque depuis l'ouverture — recharger ou écraser ?",
     conflict_reload: "Recharger", conflict_overwrite: "Écraser",
     dirty_h: "Modifications non enregistrées", dirty_msg: "Abandonner le contenu modifié ?",

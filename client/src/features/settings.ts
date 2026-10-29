@@ -76,6 +76,7 @@ export class SettingsPanel {
     ($("s-snd-vol") as HTMLInputElement).value = String(
       Math.round(sndVolume() * 100),
     );
+    $("s-snd-blocked").hidden = !sounds.blocked();
     this.syncSndOpts();
     $("s-update-status").textContent = "";
     ($("s-doupdate") as HTMLButtonElement).hidden = true;
