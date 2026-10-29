@@ -588,6 +588,16 @@ impl Client {
                     }
                 }
                 // Fin de boucle = transport mort (EOF ou erreur de lecture).
+                // Solder tous les appels en vol avec une erreur immédiate :
+                // sinon chacun resterait pendu jusqu'au timeout de 60 s —
+                // un term_open sur tunnel coupé figeait le client une
+                // minute sans message.
+                {
+                    let mut m = c.pending.lock().await;
+                    for (_, tx) in m.drain() {
+                        let _ = tx.send(Err("connexion fermée".into()));
+                    }
+                }
                 let _ = c.dead_tx.send(true);
             });
         }
@@ -596,6 +606,11 @@ impl Client {
 
     /// Appel RPC. Réponse ou erreur du démon.
     pub async fn call(&self, req: ReqKind) -> Result<Value> {
+        // Reader mort : pas la peine d'écrire — la réponse ne viendra
+        // jamais. Échec immédiat plutôt qu'un timeout de 60 s.
+        if *self.dead.borrow() {
+            bail!("connexion fermée");
+        }
         // Nom de la requête pour le log (le tag serde "req").
         let name = serde_json::to_value(&req)
             .ok()

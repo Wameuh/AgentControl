@@ -5,6 +5,8 @@
 //! le resize interactif exige le master fd, que script garde pour lui).
 //! Reader et writer tournent sur des threads dédiés — les Read/Write du PTY
 //! sont bloquants et le write peut attendre quand le buffer du PTY est plein.
+//! Le flux reader → connexion est borné (64 trames) : un client lent fait
+//! pression sur le reader plutôt que de gonfler la mémoire du démon.
 //!
 //! Cycle de vie : `Term` est borné à la connexion client (map dans
 //! serve_conn). Drop = fermeture du master → le reader voit EIO/EOF, SIGHUP
@@ -37,13 +39,17 @@ const EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
 impl Term {
     /// Spawn `env SHELL` (ou /bin/sh) dans `cwd` sur un PTY de `cols`×`rows`.
+    /// `id_hint` = id choisi par le client (anti-orphelin : un term_open
+    /// abandonné côté client reste fermable par `term_close` car son id
+    /// est connu d'avance) — invalide → id serveur généré.
     /// Renvoie le Term + le flux de sortie (Data* puis un Exit final).
     pub fn spawn(
         cwd: &str,
         cols: u16,
         rows: u16,
         envs: &[(String, String)],
-    ) -> Result<(Self, mpsc::UnboundedReceiver<TermMsg>)> {
+        id_hint: Option<&str>,
+    ) -> Result<(Self, mpsc::Receiver<TermMsg>)> {
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: rows.max(1),
@@ -69,9 +75,11 @@ impl Term {
         let mut reader = pair.master.try_clone_reader().context("pty reader")?;
         let mut writer = pair.master.take_writer().context("pty writer")?;
 
-        // Reader : flux sortie → channel ; à EOF, réap le shell (mort
-        // naturelle → code de sortie ; toujours vivant → kill forcé).
-        let (tx, rx) = mpsc::unbounded_channel::<TermMsg>();
+        // Reader : flux sortie → channel BORNÉE ; à EOF, réap le shell
+        // (mort naturelle → code de sortie ; toujours vivant → kill forcé).
+        // blocking_send : file pleine (client lent) → le reader attend au
+        // lieu d'accumuler — la contre-pression remonte au PTY, pas à la RAM.
+        let (tx, rx) = mpsc::channel::<TermMsg>(64);
         {
             let tx = tx.clone();
             std::thread::spawn(move || {
@@ -80,7 +88,7 @@ impl Term {
                     match reader.read(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
-                            if tx.send(TermMsg::Data(buf[..n].to_vec())).is_err() {
+                            if tx.blocking_send(TermMsg::Data(buf[..n].to_vec())).is_err() {
                                 break; // conn tombée — plus personne ne lit
                             }
                         }
@@ -88,7 +96,7 @@ impl Term {
                     }
                 }
                 let code = reap(&mut *child);
-                let _ = tx.send(TermMsg::Exit(code));
+                let _ = tx.blocking_send(TermMsg::Exit(code));
             });
         }
 
@@ -105,7 +113,10 @@ impl Term {
 
         Ok((
             Self {
-                id: proto::new_id("t"),
+                id: id_hint
+                    .filter(|s| !s.is_empty() && s.len() <= 64)
+                    .map(String::from)
+                    .unwrap_or_else(|| proto::new_id("t")),
                 master: Some(pair.master),
                 input_tx,
             },

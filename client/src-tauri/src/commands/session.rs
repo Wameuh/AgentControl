@@ -293,6 +293,10 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         "component_install" => ReqKind::ComponentInstall { name: s("name") },
         "term_open" => ReqKind::TermOpen {
             session: s("session"),
+            // Id choisi côté client : un term_open abandonné (timeout,
+            // conn coupée après spawn démon) reste fermable via term_close.
+            // Optionnel — un vieux démon l'ignore et rend son propre id.
+            term: so("term"),
             cols: p.get("cols").and_then(Value::as_u64).unwrap_or(0) as u16,
             rows: p.get("rows").and_then(Value::as_u64).unwrap_or(0) as u16,
         },

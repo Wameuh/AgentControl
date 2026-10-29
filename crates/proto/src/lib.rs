@@ -768,12 +768,20 @@ pub enum ReqKind {
     /// `{push:"term_data", term, data:base64}` et la fin en
     /// `{push:"term_exit", term, code:i64|null}`.
     /// Cycle de vie borné à la connexion : le PTY est tué si elle tombe.
-    /// Ces requêtes sont traitées inline par la couche connexion
-    /// (jamais dispatchées en tâche — ordre des inputs garanti).
+    /// `term` optionnel = id choisi par le client : si l'appel abandonne
+    /// (timeout/coupure) alors que le démon a spawné, `term_close` peut
+    /// tuer l'orphelin — impossible avec un id serveur jamais reçu.
+    /// Champ ignoré par les démons anciens (dégradation douce : l'id
+    /// renvoyé est alors serveur-généré et le close anti-orphelin no-op).
+    /// Le spawn est dispatché en tâche par la couche connexion (le
+    /// fork/exec ne doit pas geler sa boucle de lecture) ; les autres
+    /// requêtes terminal restent inline — ordre des inputs garanti.
     TermOpen {
         session: String,
         cols: u16,
         rows: u16,
+        #[serde(default)]
+        term: Option<String>,
     },
     /// Octets vers le PTY (saisie clavier, coller…) — `data` en base64.
     TermInput {
