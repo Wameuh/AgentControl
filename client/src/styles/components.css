@@ -49,6 +49,9 @@
 .comp-dot { width: 10px; height: 10px; border-radius: 50%; flex: none;
   background: var(--dim); }
 .comp-dot.cst-running { background: var(--sage); }
+/* tool : `installed` ≈ présent (sage), `absent` = observation dim. */
+.comp-dot.cst-installed { background: var(--sage); }
+.comp-dot.cst-absent { background: var(--dim); opacity: .55; }
 .comp-dot.cst-stopped { background: var(--dim); }
 .comp-dot.cst-failed { background: var(--err); }
 .comp-dot.cst-starting { background: var(--gold); animation: comp-pulse 1.2s ease-in-out infinite; }

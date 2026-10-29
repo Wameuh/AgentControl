@@ -131,7 +131,9 @@ export type ConnLive = "ok" | "reconnecting" | "down";
 
 export type ComponentKind = "internal" | "process" | "external" | "tool";
 export type ComponentState =
-  | "starting" | "running" | "degraded" | "stopped" | "failed" | (string & {});
+  | "starting" | "running" | "degraded" | "stopped" | "failed"
+  // États passifs des `tool` (proto ≥0.8) — + tolérance aux états futurs.
+  | "installed" | "absent" | (string & {});
 
 /** healthcheck sérialisé `{kind, …}` (tag interne serde). */
 export type ComponentHealthcheck =
@@ -162,6 +164,8 @@ export interface ComponentStatus {
   uptime_s?: number;
   restarts?: number;
   last_exit?: number;
+  /** Version sondée d'un `tool` (1re ligne de sa commande, ≤200 c). */
+  version?: string;
 }
 
 /** Item ListComponents / ComponentInfo : spec + état runtime. `source`
