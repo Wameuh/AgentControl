@@ -45,6 +45,7 @@ interface ConvCache {
   toolBlocks: Map<string, HTMLElement>;
   pendingToolUpdates: Map<string, AcEvent[]>;
   answered: Set<string>;
+  lastText: { thought: boolean; norm: string; el: HTMLElement } | null;
   minRendered: number;
   renderedCount: number;
   hasMoreHistory: boolean;
@@ -226,6 +227,7 @@ export class ChatView {
     this.renderer.toolBlocks = new Map();
     this.renderer.pendingToolUpdates = new Map();
     this.renderer.answered = new Set();
+    this.renderer.lastText = null;
     this.minRendered = Number.MAX_SAFE_INTEGER;
     this.maxRendered = 0;
     this.renderedCount = 0;
@@ -261,6 +263,7 @@ export class ChatView {
       toolBlocks: this.renderer.toolBlocks,
       pendingToolUpdates: this.renderer.pendingToolUpdates,
       answered: this.renderer.answered,
+      lastText: this.renderer.lastText,
       minRendered: this.minRendered,
       renderedCount: this.renderedCount,
       hasMoreHistory: this.hasMoreHistory,
@@ -297,6 +300,7 @@ export class ChatView {
     this.renderer.toolBlocks = c.toolBlocks;
     this.renderer.pendingToolUpdates = c.pendingToolUpdates;
     this.renderer.answered = c.answered;
+    this.renderer.lastText = c.lastText;
     this.minRendered = c.minRendered;
     this.maxRendered = c.lastSeq; // dernier seq rendu = borne haute du cache
     this.renderedCount = c.renderedCount;
@@ -793,9 +797,19 @@ export class ChatView {
       this.renderer.updateToolBlock(ev);
       return;
     }
+    // Anti-doublon pensée/message : le même texte que le bloc texte
+    // agent précédent (les events intermédiaires n'y coupent pas) n'est
+    // pas rendu une seconde fois ; une pensée déjà affichée cède sa
+    // place au message identique qui la suit (contenu canonique).
+    if (ev.type === "agent_text" || ev.type === "agent_thought") {
+      const dup = this.renderer.textDup(ev);
+      if (dup === "skip") return;
+      if (dup && dup.isConnected) this.dropRendered(dup);
+    }
     const nearBottom = this.nearBottom();
     const node = this.renderer.render(ev, live);
     this.eventsEl.appendChild(node);
+    this.renderer.noteText(ev, node);
     this.renderedCount++;
     if (ev.seq < this.minRendered) this.minRendered = ev.seq;
     if (ev.type === "tool_call") {
@@ -808,6 +822,25 @@ export class ChatView {
       this.updateBottomBtn();
     }
     this.trimRendered();
+  }
+
+  /** Retire un nœud déjà rendu — pensée doublon remplacée par le message
+   *  identique (dedup). Même bookkeeping que trimRendered : compteur,
+   *  borne min, compensation de scroll si le nœud est entièrement
+   *  au-dessus du viewport. */
+  private dropRendered(d: HTMLElement) {
+    const above =
+      d.getBoundingClientRect().bottom < this.eventsEl.getBoundingClientRect().top;
+    const sh = this.eventsEl.scrollHeight;
+    d.remove();
+    if (above) this.eventsEl.scrollTop -= sh - this.eventsEl.scrollHeight;
+    this.renderedCount--;
+    if (Number(d.dataset.seq ?? 0) <= this.minRendered) {
+      this.minRendered = Number(
+        this.eventsEl.querySelector<HTMLElement>(".ev")?.dataset.seq ??
+          Number.MAX_SAFE_INTEGER,
+      );
+    }
   }
 
   /** Supprime les plus anciens events rendus au-delà du cap (buffer).

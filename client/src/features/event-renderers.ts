@@ -27,6 +27,12 @@ export class EventRenderer {
   pendingToolUpdates = new Map<string, AcEvent[]>();
   // Pendant un prepend, la compensation de fin de page couvre déjà tout.
   inPrepend = false;
+  /** Ancre anti-doublon pensée/message : un agent peut émettre le même
+   *  texte dans les deux rôles (observé : bloc 💭 reprenant intégralement
+   *  le message qui précède). La comparaison porte sur les blocs texte
+   *  — les events intermédiaires (tool_call, status…) n'y coupent pas.
+   *  Swapée avec le reste de l'état de rendu. */
+  lastText: { thought: boolean; norm: string; el: HTMLElement } | null = null;
 
   private deps = {
     /** Meta de la session affichée mutée par un event (mode/model/state…) →
@@ -41,6 +47,39 @@ export class EventRenderer {
 
   bind(d: Partial<typeof this.deps>) {
     Object.assign(this.deps, d);
+  }
+
+  private normText(t: unknown) {
+    return String(t ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  /// Dédup pensée/message à l'append (même texte normalisé que le bloc
+  /// texte agent précédent, à travers les events non-texte) :
+  ///  - "skip" : doublon pur — ne pas rendre ;
+  ///  - HTMLElement : la pensée précédente était la redondante — la
+  ///    retirer, le message identique la remplace ;
+  ///  - null : rendre normalement.
+  textDup(ev: AcEvent): "skip" | HTMLElement | null {
+    if (ev.type !== "agent_text" && ev.type !== "agent_thought") return null;
+    const norm = this.normText(ev.text);
+    if (!norm) return null;
+    const prev = this.lastText;
+    if (!prev || prev.norm !== norm) return null;
+    if (ev.type === "agent_text" && prev.thought) return prev.el;
+    return "skip";
+  }
+
+  /// Enregistre le bloc texte réellement rendu — ancre de la dédup
+  /// suivante (à appeler après l'insertion du nœud). Un message user/peer
+  /// ouvre un nouveau tour : répéter un texte y est légitime → reset.
+  noteText(ev: AcEvent, el: HTMLElement) {
+    if (ev.type === "user_message" || ev.type === "peer_message") {
+      this.lastText = null;
+      return;
+    }
+    if (ev.type !== "agent_text" && ev.type !== "agent_thought") return;
+    const norm = this.normText(ev.text);
+    if (norm) this.lastText = { thought: ev.type === "agent_thought", norm, el };
   }
 
   render(ev: AcEvent, live: boolean): HTMLElement {

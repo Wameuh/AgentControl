@@ -53,6 +53,15 @@ pub struct Session {
     acp_next_id: AtomicU64,
     /// Buffer de texte en cours d'accumulation (compactage des chunks).
     cur_text: Mutex<Option<(String, String)>>,
+    /// Dernier bloc agent texte/pensée journalisé (is_thought, texte
+    /// normalisé) — ancre de l'anti-doublon : un agent peut réémettre
+    /// sa réponse en pensée après le message (ou l'inverse) ; la copie
+    /// ne se journalise pas. La comparaison porte sur les blocs texte
+    /// (les events intermédiaires — tool_call, status… — n'y coupent
+    /// pas : le cas observé est message → tool_call → pensée identique).
+    /// Remise à zéro à chaque message user/peer et au reset du journal :
+    /// répéter un texte dans un nouveau cycle est un contenu légitime.
+    last_text: Mutex<Option<(bool, String)>>,
     /// Titre/kind vus pour chaque tool call (pour les updates ultérieurs).
     tool_calls: Mutex<HashMap<String, (String, String)>>,
     /// Vrai pendant session/load : les updates d'historique rejoué sont
@@ -111,6 +120,29 @@ pub struct Session {
 }
 
 
+/// Texte ramené à sa forme de comparaison anti-doublon : espaces
+/// collapsés — le rendu markdown est insensible à ces différences.
+fn norm_collapse(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Amorce l'ancre anti-doublon depuis la queue du journal à l'open :
+/// le bloc texte agent le plus récent fixe l'état, sauf si un message
+/// user/peer plus récent a déjà ouvert un nouveau tour. Un écho émis
+/// juste après un restart du démon reste ainsi couvert par la dédup.
+fn seed_text_anchor(journal: &Journal, dir: &std::path::Path) -> Option<(bool, String)> {
+    let page = journal.read_page(dir, None, 50).ok()?;
+    for e in page.iter().rev() {
+        match &e.kind {
+            EventKind::AgentText { text } => return Some((false, norm_collapse(text))),
+            EventKind::AgentThought { text } => return Some((true, norm_collapse(text))),
+            EventKind::UserMessage { .. } | EventKind::PeerMessage { .. } => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Provenance d'un prompt en file — détermine si le drain journalise un
 /// `user_message` (user) ou passe en silence (peer, déjà journalisé).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +163,7 @@ impl Session {
             &std::fs::read_to_string(dir.join("meta.json")).context("meta.json illisible")?,
         )?;
         let journal = Journal::open(&dir)?;
+        let last_text = seed_text_anchor(&journal, &dir);
         let (events_tx, _) = broadcast::channel(1024);
         Ok(Arc::new_cyclic(|me| Self {
             dir,
@@ -142,6 +175,7 @@ impl Session {
             pending_agent: Mutex::new(HashMap::new()),
             acp_next_id: AtomicU64::new(1),
             cur_text: Mutex::new(None),
+            last_text: Mutex::new(last_text),
             tool_calls: Mutex::new(HashMap::new()),
             loading_replay: std::sync::atomic::AtomicBool::new(false),
             busy: std::sync::atomic::AtomicBool::new(false),
@@ -188,12 +222,56 @@ impl Session {
     pub fn emit(&self, kind: EventKind) {
         // Flush un éventuel texte accumulé avant tout event non-chunk.
         self.flush_text();
+        // Même anti-doublon que flush_text pour les textes émis en
+        // direct (un update `plan` produit un AgentText).
+        let dup = match &kind {
+            EventKind::AgentText { text } => self.is_text_dup(false, &norm_collapse(text)),
+            EventKind::AgentThought { text } => self.is_text_dup(true, &norm_collapse(text)),
+            _ => false,
+        };
+        if dup {
+            return;
+        }
         match self.journal.append(kind) {
             Ok(ev) => {
+                self.note_text_anchor(&ev.kind);
                 let _ = self.events_tx.send(ev);
             }
             Err(e) => error!("[{}] journal append failed: {e}", self.meta_snapshot().id),
         }
+    }
+
+    /// Doublon de `is_thought`/`norm` par rapport au dernier bloc texte
+    /// journalisé ? Le message identique à une pensée n'est PAS un
+    /// doublon (contenu canonique) ; toute autre répétition en est une.
+    fn is_text_dup(&self, is_thought: bool, norm: &str) -> bool {
+        if norm.is_empty() {
+            return false;
+        }
+        let last = self.last_text.lock().unwrap();
+        let dup = matches!(last.as_ref(), Some((_, t)) if *t == norm);
+        let prev_thought = last.as_ref().is_some_and(|p| p.0);
+        dup && (is_thought || !prev_thought)
+    }
+
+    /// Maintient l'ancre anti-doublon : mémorise le dernier bloc
+    /// texte/pensée d'agent journalisé ; un message user/peer ouvre un
+    /// nouveau tour (répéter un texte y est légitime) → reset.
+    fn note_text_anchor(&self, kind: &EventKind) {
+        let mut last = self.last_text.lock().unwrap();
+        match kind {
+            EventKind::AgentText { text } => *last = Some((false, norm_collapse(text))),
+            EventKind::AgentThought { text } => *last = Some((true, norm_collapse(text))),
+            EventKind::UserMessage { .. } | EventKind::PeerMessage { .. } => *last = None,
+            _ => {}
+        }
+    }
+
+    /// Le journal repart à zéro (/clear, rebind de la session native) —
+    /// le premier bloc texte du nouveau cycle n'est pas un doublon du
+    /// dernier de l'ancien, même à contenu normalisé identique.
+    pub fn reset_text_anchor(&self) {
+        self.last_text.lock().unwrap().take();
     }
 
     /// Accumule un chunk de texte ; flushé au prochain event non-chunk ou fin de tour.
@@ -233,6 +311,22 @@ impl Session {
                 return;
             }
             let compact_done = kind == "agent" && compact_done_text(&buf);
+            // Anti-doublon : le même texte émis en pensée ET en message
+            // (observé en live : pensée reprise intégrale du message qui
+            // précède), ou répété dans le même rôle, ne se journalise
+            // qu'une fois. Exception : le message identique à la pensée
+            // qui précède reste journalisé — c'est le contenu canonique
+            // (la pensée redondante est masquée côté client).
+            if (kind == "agent" || kind == "thought")
+                && self.is_text_dup(kind == "thought", &norm_collapse(&buf))
+            {
+                // Un message dédupliqué peut quand même porter le
+                // signal de fin de compact — le traiter avant de sortir.
+                if compact_done {
+                    self.end_compact("signal agent");
+                }
+                return;
+            }
             let ev_kind = match kind.as_str() {
                 "thought" => EventKind::AgentThought { text: buf },
                 "user" => EventKind::UserMessage {
@@ -244,6 +338,7 @@ impl Session {
             };
             match self.journal.append(ev_kind) {
                 Ok(ev) => {
+                    self.note_text_anchor(&ev.kind);
                     let _ = self.events_tx.send(ev);
                 }
                 Err(e) => error!("journal append failed: {e}"),
@@ -281,4 +376,101 @@ impl Session {
         });
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_session(tag: &str) -> (Arc<Session>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "ac-dedup-test-{}-{}",
+            std::process::id(),
+            tag
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let meta = SessionMeta {
+            id: "s-test".into(),
+            agent: "test".into(),
+            title: "t".into(),
+            cwd: "/tmp".into(),
+            created_at: proto::now_iso(),
+            native_session_id: None,
+            mode: None,
+            model: None,
+            available_modes: vec![],
+            available_commands: vec![],
+            available_models: vec![],
+            config_options: vec![],
+            pending_config: Default::default(),
+            state: "idle".into(),
+            group: None,
+            spawned_by: None,
+            context_used: None,
+            context_size: None,
+        };
+        std::fs::write(
+            dir.join("meta.json"),
+            serde_json::to_string_pretty(&meta).unwrap(),
+        )
+        .unwrap();
+        (Session::open(dir.clone()).unwrap(), dir)
+    }
+
+    fn kinds(dir: &PathBuf) -> Vec<&'static str> {
+        let j = Journal::open(dir).unwrap();
+        j.read_page(dir, None, 100)
+            .unwrap()
+            .iter()
+            .map(|e| e.kind.type_tag())
+            .collect()
+    }
+
+    /// Anti-doublon pensée/message : la même charge textuelle n'est
+    /// journalisée qu'une fois, sauf le message canonique qui suit une
+    /// pensée identique ; un message user rouvre un tour légitime.
+    #[test]
+    fn text_dedup() {
+        let (s, dir) = tmp_session("dedup");
+        // Message puis pensée identique → la pensée n'est pas journalisée.
+        s.emit(EventKind::AgentText { text: "réponse finale".into() });
+        s.emit(EventKind::AgentThought { text: "réponse finale".into() });
+        // Message répété dans le même rôle → pas de copie non plus.
+        s.emit(EventKind::AgentText { text: "réponse finale".into() });
+        assert_eq!(kinds(&dir), ["agent_text"]);
+        // Pensée puis message identique → les DEUX : le message est
+        // canonique, la pensée est masquée au rendu.
+        s.emit(EventKind::AgentThought { text: "autre".into() });
+        s.emit(EventKind::AgentText { text: "autre".into() });
+        assert_eq!(kinds(&dir), ["agent_text", "agent_thought", "agent_text"]);
+        // Message user → nouveau tour : répéter le texte est légitime.
+        s.emit(EventKind::UserMessage { text: "autre".into(), steer: false });
+        s.emit(EventKind::AgentText { text: "autre".into() });
+        assert_eq!(kinds(&dir).len(), 5);
+        // Comparaison insensible aux espaces/retours.
+        s.emit(EventKind::AgentThought { text: "espaces   multiples\n\nici".into() });
+        s.emit(EventKind::AgentThought { text: "espaces multiples ici".into() });
+        assert_eq!(
+            kinds(&dir).iter().filter(|k| **k == "agent_thought").count(),
+            2
+        );
+        // Réouverture : l'ancre est amorcée depuis la queue du journal,
+        // un écho post-restart reste dédupliqué.
+        let s2 = Session::open(dir.clone()).unwrap();
+        s2.emit(EventKind::AgentThought { text: "espaces multiples ici".into() });
+        assert_eq!(
+            kinds(&dir).iter().filter(|k| **k == "agent_thought").count(),
+            2
+        );
+        // Reset du journal (/clear, rebind) : le même texte redevient
+        // journalisable — le nouveau cycle n'hérite d'aucune ancre.
+        s2.reset_text_anchor();
+        s2.emit(EventKind::AgentThought { text: "espaces multiples ici".into() });
+        assert_eq!(
+            kinds(&dir).iter().filter(|k| **k == "agent_thought").count(),
+            3
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
