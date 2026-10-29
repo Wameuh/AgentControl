@@ -297,6 +297,8 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             prompt: so("prompt"),
             group: so("group"),
         },
+        "list_components" => ReqKind::ListComponents,
+        "component_info" => ReqKind::ComponentInfo { name: s("name") },
         m => return Err(format!("méthode inconnue: {m}")),
     })
 }

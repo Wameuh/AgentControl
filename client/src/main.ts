@@ -42,6 +42,7 @@ import { SessionSearch } from "./features/search";
 import { Sidebar } from "./features/sidebar";
 import { Composer } from "./features/composer";
 import { FileExplorer } from "./features/files";
+import { MapView } from "./features/map-view";
 import { TermPanel } from "./features/terminal";
 import { SettingsPanel } from "./features/settings";
 import { initFirstPost } from "./features/first-post";
@@ -93,6 +94,7 @@ const chat = new ChatView();
 const sidebar = new Sidebar();
 const composer = new Composer();
 const files = new FileExplorer();
+const map = new MapView();
 const term = new TermPanel();
 const connView = new ConnView();
 const newSess = new NewSessionDialog();
@@ -153,10 +155,10 @@ conns.bind({
 connView.bind(conns);
 connView.refresh = () => sidebar.refresh();
 connView.connecting = (hosts) => chat.setConnecting(hosts);
-// Overlays plein #chat mutuellement exclusifs (paramètres ↔ connexions) :
-// empilés, le panneau du dessous resterait inerte sans moyen d'y revenir.
-connView.onOpening = () => settings.close();
-settings.onOpening = () => connView.close();
+// Exclusion mutuelle des 3 overlays plein #chat — chaque open() ferme
+// les deux autres (sinon : empilement opaque + inert, écran "figé").
+connView.onOpening = () => { settings.close(); map.close(); };
+settings.onOpening = () => { connView.close(); map.close(); };
 newSess.bind(groups);
 newSess.refresh = () => void sidebar.refresh();
 // Le bouton « New agent » vit dans la sidebar (hors #chat — accessible
@@ -191,6 +193,13 @@ term.bind({
     const k = conns.knownConns();
     return k.length === 1 ? k[0] : undefined;
   },
+});
+map.bind({
+  // 1 instance = 1 connexion liée — le diagramme montre son écosystème.
+  conn: () => conns.knownConns()[0] ?? "",
+  componentsCapable: (c) => conns.cap(c)?.components === true,
+  openSession: (id, conn) => void chat.open(id, false, conn),
+  onOpening: () => { settings.close(); connView.close(); },
 });
 
 // Conn perdue (EOF transport) : les PTY du démon meurent avec → bannière
@@ -240,6 +249,7 @@ $("tb-about").onclick = async () => {
 // actions de session (cachées du header sur mobile).
 $("tb-more").onclick = () =>
   nav.sheet([
+    { icon: "map", label: t("map_title"), fn: () => $("tb-map").click() },
     { icon: "settings", label: t("settings_title"), fn: () => $("tb-settings").click() },
     { icon: "info", label: t("about_title"), fn: () => $("tb-about").click() },
   ]);
@@ -276,6 +286,7 @@ sidebar.init();
 composer.init();
 files.init();
 term.init();
+map.init();
 settings.init();
 initFirstPost((c) => conns.cap(c)?.first_post === true);
 initModelBar(openFusion);

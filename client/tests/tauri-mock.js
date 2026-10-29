@@ -15,13 +15,29 @@
       state: "working" },
     { id: "s2", conn: "local", agent: "mock", title: "Fix login crash",
       cwd: "/home/agent/app", created_at: "2026-10-19T09:00:00Z", group: "Serveur pi",
+      spawned_by: "s1",
       available_modes: [], available_models: [], available_commands: [], state: "idle" },
     { id: "s3", conn: "local", agent: "devin", title: "Write unit tests",
       cwd: "/home/agent/tests", created_at: "2026-10-18T08:00:00Z", group: "Serveur pi",
       available_modes: [], available_models: [], available_commands: [], state: "dead" },
     { id: "s4", conn: "local", agent: "mock", title: "Reduce context usage",
       cwd: "/home/agent/infra", created_at: "2026-10-21T07:30:00Z",
+      origin: "component:backlog-orchestrator",
       available_modes: [], available_models: [], available_commands: [], state: "compacting" },
+  ];
+  const COMPONENTS = [
+    { name: "agentbacklog", kind: "tool", autostart: false,
+      description: "File de tâches partagée", source: "components.toml",
+      spec: { name: "agentbacklog", kind: "tool", command: ["agentbacklog", "--version"] },
+      status: { state: "stopped" } },
+    { name: "backlog-orchestrator", kind: "process", autostart: true,
+      description: "Orchestrateur de la file", source: "components.toml",
+      spec: { name: "backlog-orchestrator", kind: "process", command: ["backlog-orch"] },
+      status: { state: "running", health: "ok", pid: 4210, uptime_s: 3725, restarts: 1 } },
+    { name: "web", kind: "internal", autostart: true,
+      description: "Interface web servie par le démon", source: "internal",
+      spec: { name: "web", kind: "internal" },
+      status: { state: "running" } },
   ];
   const EVENTS = [
     { seq: 1, ts: "10:01", type: "user_message", text: "Refactorise le client API pour utiliser fetch avec retry exponentiel." },
@@ -77,7 +93,8 @@
         if (s) s.group = args.group;
         return { group: args.group };
       }
-      case "daemon_status": return { version: "0.2.9", sessions: SESSIONS.length };
+      case "daemon_status": return { version: "0.2.9", sessions: SESSIONS.length, components: true };
+      case "list_components": return COMPONENTS;
       case "pr_list": return [
         { conn: "local", repo: "Wameuh/AgentControl", pr: 42,
           session: SESSIONS[0].id, branch: "feat/x", title: "feat: exemple",
@@ -120,7 +137,7 @@
       if (cmd === "plugin:event|unlisten") return p.then(() => null);
       if (cmd.startsWith("plugin:")) return p.then(() => null);
       switch (cmd) {
-        case "connect": return p.then(() => ({ version: "0.2.9", sessions: SESSIONS.length, servers: 1 }));
+        case "connect": return p.then(() => ({ version: "0.2.9", sessions: SESSIONS.length, servers: 1, components: true }));
         case "call": return p.then(() => rpc(args.method, args.params ?? args));
         case "subscribe": return p.then(() => null);
         case "saved_connections": return p.then(() => []);

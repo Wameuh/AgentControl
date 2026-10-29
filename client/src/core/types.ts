@@ -52,6 +52,35 @@ export interface PrEntry {
   change_id?: string;
 }
 
+/** État runtime d'un composant (champ `status` des items ListComponents). */
+export interface CompStatus {
+  /** starting | running | degraded | stopped | failed (proto snake_case). */
+  state: string;
+  /** Verdict de la dernière sonde : "ok" | "fail" — absent sans sonde. */
+  health?: string;
+  pid?: number;
+  /** Secondes depuis le (re)spawn courant — 0 sans process vivant. */
+  uptime_s?: number;
+  /** Respawns supervisés depuis le boot du démon. */
+  restarts?: number;
+  /** Code du dernier exit (128+signal si tué par signal). */
+  last_exit?: number;
+}
+
+/** Item ListComponents : spec aplatie + état (`item_json` côté démon). */
+export interface CompItem {
+  name: string;
+  /** internal | process | external | tool. */
+  kind: string;
+  autostart?: boolean;
+  description?: string;
+  /** Provenance de la spec : "internal" | "components.toml". */
+  source?: string;
+  /** Spec complète (command, env, healthcheck…), sérialisée telle quelle. */
+  spec?: Record<string, unknown>;
+  status?: CompStatus;
+}
+
 export interface ConfigOpt { value: string; name: string; description?: string }
 export interface ConfigOption {
   id: string; name: string; category?: string;

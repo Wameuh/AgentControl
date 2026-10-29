@@ -624,10 +624,12 @@ export class ConnView {
   close() {
     const was = this.isOpen();
     $("conn-view").hidden = true;
-    // Ne lever l'inert que si l'autre overlay #chat est aussi fermé —
-    // sinon on ré-expose #input derrière settings-view (frappes
-    // invisibles, le bug exact que l'inert prévient).
-    if ($("settings-view").hidden) this.setChatInert(false);
+    // Ne lever l'inert que si les autres overlays #chat sont aussi
+    // fermés — sinon on ré-expose #input derrière settings-view/map-view
+    // (frappes invisibles, le bug exact que l'inert prévient).
+    if ($("settings-view").hidden && $("map-view").hidden) {
+      this.setChatInert(false);
+    }
     nav.close("connview");
     if (!was) return;
     // Fermée pendant une progression démon → détachée pour ce flux (la
