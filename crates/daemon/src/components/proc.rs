@@ -870,6 +870,34 @@ mod tests {
         assert_eq!(c.tool_version("t").await.as_deref(), Some("1.2.3"));
     }
 
+    /// Upsert `tool → external` : le verdict du tool ne doit pas
+    /// piloter le `state` du nouvel external — sinon `degraded`
+    /// permanent quand il n'a pas de healthcheck (jamais resondé).
+    #[tokio::test]
+    async fn upsert_tool_vers_external_purge_observed() {
+        let root =
+            std::env::temp_dir().join(format!("ac-upsert-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let web: Arc<tokio::sync::RwLock<Option<serde_json::Value>>> =
+            Arc::new(tokio::sync::RwLock::new(None));
+        let c = Components::open(&root, "127.0.0.1:0".into(), false, web);
+        c.upsert("t", tool_spec(&["sh"])).await.unwrap();
+        // Comme si le tool avait été sondé en échec avant la bascule.
+        c.set_observed("t", Some(false)).await;
+        let mut ext = tool_spec(&["sh"]);
+        ext.kind = ComponentKind::External;
+        c.upsert("t", ext).await.unwrap();
+        assert_eq!(c.observed_health("t").await, None);
+        // Un external→external garde son verdict : pas de clignotement
+        // « stopped » à chaque édition de spec.
+        c.set_observed("t", Some(true)).await;
+        let mut ext2 = tool_spec(&["sh", "-c", "true"]);
+        ext2.kind = ComponentKind::External;
+        c.upsert("t", ext2).await.unwrap();
+        assert_eq!(c.observed_health("t").await, Some(true));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Version = 1re ligne de la commande sondée, bornée à 200 c ; une
     /// commande inexistante ne rapporte rien.
     #[tokio::test]

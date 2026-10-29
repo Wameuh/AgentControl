@@ -336,9 +336,10 @@ impl Components {
         check_editable(&spec)?;
         // Même borne qu'au chargement : le backoff plafonne à 60 s.
         spec.restart_sec = spec.restart_sec.min(BACKOFF_CAP_SECS);
+        let prev_kind = self.specs.read().await.get(name).map(|p| p.kind);
         let demote = matches!(
-            self.specs.read().await.get(name),
-            Some(prev) if prev.kind == ComponentKind::Process && spec.kind != ComponentKind::Process
+            prev_kind,
+            Some(ComponentKind::Process) if spec.kind != ComponentKind::Process
         );
         // Mutation mémoire AVANT le cycle de vie : un `start` concurrent
         // lit la nouvelle spec (kind≠process → require_process refuse) et
@@ -348,14 +349,16 @@ impl Components {
             .write()
             .await
             .insert(name.to_string(), spec.clone());
-        // Une spec tool dont la `command` change ne doit pas garder la
-        // version sondée ni le verdict santé de l'ancienne — purge des
-        // caches, la prochaine passe de health_loop resonde. `observed`
-        // porte aussi le `state` des `external` : leur purge est
-        // limitée aux tools pour ne pas les faire clignoter « stopped »
-        // à chaque édition.
+        // Purge des caches sondés (inconditionnelle : éditer le seul
+        // `healthcheck` invalide tout autant le verdict) — la prochaine
+        // passe de health_loop resonde. `observed` porte le `state` des
+        // `external` : conservé entre deux éditions de même kind pour ne
+        // pas les faire clignoter « stopped », purgé dès que le kind
+        // change ou que la spec est un `tool` — le verdict d'un tool ne
+        // doit pas piloter l'état d'un nouvel external (permanent sans
+        // healthcheck).
         self.versions.write().await.remove(name);
-        if spec.kind == ComponentKind::Tool {
+        if spec.kind == ComponentKind::Tool || prev_kind != Some(spec.kind) {
             self.observed.write().await.remove(name);
         }
         if demote {
