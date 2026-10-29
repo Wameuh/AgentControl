@@ -583,13 +583,17 @@ export class Composer {
     } catch (e) {
       showErr(String(e));
       // Envoi refusé : le brouillon n'est vidé que sur succès — rendre
-      // le texte à SA session (champ encore vide, ou draft garé si
-      // l'utilisateur a changé de session entre-temps), sans écraser
-      // une frappe plus récente.
+      // le texte à SA session (champ, ou draft garé si l'utilisateur a
+      // changé de session entre-temps), fusionné à une frappe plus
+      // récente. Pas de regare sous une session qui n'existe plus.
       if (app.current?.id === sid) {
-        if (txt && !($("input") as HTMLTextAreaElement).value.trim()) this.setInput(txt);
-      } else if (txt && !this.drafts.has(sid)) {
-        this.drafts.set(sid, txt);
+        const v = ($("input") as HTMLTextAreaElement).value;
+        this.setInput([v, txt].filter(Boolean).join("\n"));
+      } else if (txt && app.lastSessions.some((s) => s.id === sid)) {
+        this.drafts.set(
+          sid,
+          [this.drafts.get(sid), txt].filter(Boolean).join("\n"),
+        );
       }
     }
     // Commande slash non-builtin : l'agent l'applique au prochain tour (ex.
@@ -729,10 +733,15 @@ export class Composer {
   }
 
   /** Session supprimée : son brouillon et ses pièces garées partent
-   *  avec elle (appelé sur session_deleted — après markGone, qui gare
-   *  encore le contenu affiché sous son id). */
+   *  avec elle (session_deleted, ou onSessionGone depuis markGone —
+   *  gare d'abord le contenu affiché sous son id). Cas défensif : si la
+   *  session visée est encore affichée, son texte est jeté du champ. */
   dropSession(id: string) {
     this.drafts.delete(id);
+    if (this.draftSid === id) {
+      this.draftSid = null;
+      this.setInput("");
+    }
     this.attach.dropSession(id);
   }
 

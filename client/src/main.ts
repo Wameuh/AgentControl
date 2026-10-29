@@ -123,6 +123,7 @@ chat.bind(renderer, {
     search.onSessionChanged();
     composer.sessionChanged();
   },
+  onSessionGone: (id) => composer.dropSession(id),
   connCount: () => conns.knownConns().length,
   connsDownOrNone: () => !conns.anyUp(),
   connHome: () => connView.maybeAutoShow(),

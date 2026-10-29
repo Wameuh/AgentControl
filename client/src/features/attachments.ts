@@ -175,16 +175,26 @@ export class Attachments {
     this.render();
   }
 
-  /** Session supprimée : ses chips garés partent avec elle — upload en
-   *  vol abandonné (sa boucle nettoiera son reliquat), pièce déjà posée
-   *  retirée au mieux pour ne pas orpheliner .ac-uploads. */
+  /** Session supprimée : ses chips partent avec elle — upload en vol
+   *  abandonné (sa boucle nettoiera son reliquat), pièce déjà posée
+   *  retirée au mieux pour ne pas orpheliner .ac-uploads. Cas défensif :
+   *  si la session visée est encore affichée, ses chips sont jetés. */
   dropSession(id: string) {
+    const kill = (items: Att[]) => {
+      for (const a of items) {
+        a.aborted = true;
+        if (a.status !== "up") this.removeRemote(a);
+      }
+    };
+    if (id === this.sid) {
+      kill(this.items);
+      this.items = [];
+      this.render();
+    }
     const items = this.parked.get(id);
-    if (!items) return;
-    this.parked.delete(id);
-    for (const a of items) {
-      a.aborted = true;
-      if (a.status !== "up") this.removeRemote(a);
+    if (items) {
+      this.parked.delete(id);
+      kill(items);
     }
   }
 
