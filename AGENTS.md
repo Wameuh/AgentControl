@@ -152,7 +152,13 @@ proposée en update ensuite (semver : rc < stable). Windows et macOS
 exclus de l'injection (MSI/NSIS et CFBundleVersion exigent du
 numérique) — conséquence : un artefact rc Windows/macOS s'identifie
 `X.Y.Z` → pas de chemin auto-update vers rc.k+1 ni vers la finale,
-réinstall manuelle. Pour installer la rc depuis
+réinstall manuelle. Le bundling Linux est limité à `deb`+`appimage`
+(`client/src-tauri/tauri.linux.conf.json`) : le rpm n'est pas distribué
+et son validateur refuse `-` dans `Version` (semver `-rc.K` —
+convention RPM = `~`, fix upstream tauri-apps/tauri#16336 ouvert). Le
+.deb `X.Y.Z-rc.K` est accepté par dpkg et `update_client` installe via
+`pkexec dpkg -i` (pas de dépôt apt → l'ordre Debian ne joue pas). Pour
+installer la rc depuis
 l'app : canal rc opt-in dans les paramètres → la sonde passe de
 `releases/latest` (qui exclut les prereleases) à la liste `/releases`
 + max semver. Au merge, `release-on-merge` nettoie les releases+tags
