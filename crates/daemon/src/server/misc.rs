@@ -19,6 +19,10 @@ impl Daemon {
                     // Même gate capacité : ReqKind::TermOpen connu →
                     // le client affiche le bouton terminal.
                     "terminal": true,
+                    // Idem pour les RPC fichiers en écriture
+                    // (WriteFile/CreatePath, AC#93/#99) — masque le « + »
+                    // pièces jointes sur les démons trop vieux.
+                    "files": true,
                     // Interface web servie par ce démon (null si
                     // bind_http absent) : {"bind", "url"?token=…}.
                     "web": self.web.read().await.clone(),
