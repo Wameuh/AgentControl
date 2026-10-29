@@ -14,3 +14,5 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 base64 = "0.22"
+# Sync GitLab/Gerrit du registre PR : appels REST (rustls — pas d'openssl).
+ureq = { version = "2.12", default-features = false, features = ["tls"] }

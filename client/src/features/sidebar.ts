@@ -14,7 +14,7 @@ import { dotCls, dotIcon, setAppIcon } from "./status";
 import { icon } from "../ui/icons";
 import { bindCtx, hideSessCtx, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
-import { PrListView, type PrRow } from "./prs";
+import { PrListView, prBadge, repoLabel, type PrRow } from "./prs";
 import type { ChatView } from "./chat-view";
 import type { ConnectionManager } from "./connections";
 import { grpNorm, grpParent, inSubtree } from "./groups";
@@ -788,7 +788,7 @@ export class Sidebar {
     }
     const prs = this.prBySess.get(`${conn}${s.id}`) ?? [];
     const prHtml = prs.length
-      ? `<span class="sess-pr" title="${q(esc(prs.map((p) => `${p.repo}#${p.pr}${p.title ? ` — ${p.title}` : ""}${p.status ? ` (${p.status})` : ""}`).join("\n")))}">${prs.map((p) => `#${p.pr}`).join(" ")}</span>`
+      ? `<span class="sess-pr" title="${q(esc(prs.map((p) => `${repoLabel(p)} ${prBadge(p)}${p.title ? ` — ${p.title}` : ""}${p.status ? ` (${p.status})` : ""}`).join("\n")))}">${prs.map((p) => prBadge(p)).join(" ")}</span>`
       : "";
     div.innerHTML = `<span class="dot st-${dotCls(s.state)}" title="${q(esc(s.state))}">${dotIcon(s.state)}</span><span class="t">${this.hl(s.title)}</span>${prHtml}<span class="a">${this.hl(s.agent)}</span><button class="sess-del" title="Supprimer">${icon("close")}</button>`;
     div.onclick = () => {
