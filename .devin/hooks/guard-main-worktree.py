@@ -89,7 +89,12 @@ CFG_VAL = {"-f", "--file", "--blob", "--default", "--type", "--value",
            "--fixed-value"}
 # env vars that inject or repoint git config (alias bypass vector)
 GIT_CONFIG_ENV = re.compile(
-    r"GIT_CONFIG_(PARAMETERS|GLOBAL|SYSTEM|KEY_\d+|VALUE_\d+)$")
+    r"GIT_CONFIG_(PARAMETERS|GLOBAL|SYSTEM|KEY_\d+|VALUE_\d+|COUNT)$")
+# env vars / config values git executes — rescan their contents
+EXEC_ENV = {"GIT_SSH_COMMAND", "GIT_SSH", "GIT_EXTERNAL_DIFF",
+            "GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "GIT_PAGER",
+            "GIT_ASKPASS", "GIT_SSH_ASKPASS", "GIT_PROXY_COMMAND"}
+EXEC_OPTS = {"--upload-pack", "--exec"}
 
 FLAT_BLOCK = {
     "commit", "add", "stage", "rm", "mv", "clean", "cherry-pick",
@@ -365,8 +370,6 @@ def verb_ok(verb, args):
         return bool(pos) and pos[0] in ("list", "show")
     if verb == "sparse-checkout":
         return bool(pos) and pos[0] == "list"
-    if verb == "symbolic-ref":
-        return not (len(pos) >= 2 or flags & {"-d", "--delete"})
     if verb == "submodule":
         return not pos or pos[0] not in ("update", "add", "deinit")
     return True
@@ -389,8 +392,9 @@ def repo_verb_ok(verb, args, in_main, checked, cwd=None):
         if name.startswith("alias."):
             return False
         # write form: only external scope (--global/--file…) is allowed;
-        # default/--local/--worktree scopes land in shared repo config
-        return bool(flags & CFG_SCOPE_EXT)
+        # --worktree is per-worktree — fine in linked ones only.
+        ext = CFG_SCOPE_EXT | ({"--worktree"} if not in_main else set())
+        return bool(flags & ext)
     if verb == "remote":
         pos = positionals(args)
         # bare `remote`/`-v` list; `show`/`get-url` read — rest mutates
@@ -432,6 +436,31 @@ def repo_verb_ok(verb, args, in_main, checked, cwd=None):
             return False  # ref list arrives on stdin — can't inspect
         pos = positionals(args, {"-m"})
         return not any(prot_hit(p, names) for p in pos)
+    if verb == "symbolic-ref":
+        pos = positionals(args)
+        if len(pos) >= 2 or flags & {"-d", "--delete"}:
+            return not prot_hit(pos[0], names)
+        return True
+    if verb == "tag":
+        # read/delete forms pass; creates prot_hit the tag name — a tag
+        # `origin/next_release` shadows the remote-tracking baseline
+        # (refs/tags/ resolves before refs/remotes/ in gitrevisions)
+        if flags & {"-l", "--list", "-n", "--show", "-v", "--verify",
+                    "-d", "--delete"}:
+            return True
+        pos = positionals(
+            args, {"-m", "-F", "-u", "--file", "--local-user",
+                   "--cleanup", "--sort"})
+        return not (pos and prot_hit(pos[0], names))
+    if verb == "worktree":
+        pos = positionals(args)
+        # `worktree add <path> <committish>` — a second checkout of a
+        # protected branch is refused
+        if pos and pos[0] == "add":
+            return not any(prot_hit(p, names) for p in pos[2:])
+        return True
+    if verb in ("fast-import", "receive-pack"):
+        return False  # stdin ref-write channel — no read form
     return True
 
 
@@ -492,12 +521,17 @@ def scan_segments(cmd, cwd, roots, checked, env0=None, depth=0):
             continue
         if toks[0] in ("export", "readonly", "declare", "local",
                        "typeset"):
-            # exported assignments persist for later segments
+            # exported assignments persist for later segments —
+            # exporting a GIT_CONFIG_* name is enough to block (the
+            # value may have been set by a bare assignment earlier)
             if toks[0] == "export" or "-x" in flags_of(toks[1:]):
                 for t in toks[1:]:
                     m = re.fullmatch(r"([A-Za-z_]\w*)=(.*)", t)
                     if m:
                         env0[m.group(1)] = m.group(2)
+                    elif re.fullmatch(r"[A-Za-z_]\w*", t) \
+                            and (GIT_CONFIG_ENV.match(t)):
+                        return "block"
             continue
         if re.fullmatch(r"cd|pushd|popd", toks[0]):
             tgt = next((t for t in toks[1:]
@@ -525,18 +559,32 @@ def scan_segments(cmd, cwd, roots, checked, env0=None, depth=0):
         in_main, in_repo = locate(cwd, cdir, gitdir, roots)
         if not in_repo:
             continue
-        if any(GIT_CONFIG_ENV.match(k) for k in env) \
-                or env.get("GIT_CONFIG_COUNT") not in (None, "", "0"):
+        if any(GIT_CONFIG_ENV.match(k) for k in env):
             return "block"
         if any(c.split("=", 1)[0].lower().startswith("alias.")
                for c in configs):
             return "block"
         if verb in ("config", "remote", "branch", "update-ref",
-                    "fetch", "pull", "push"):
+                    "fetch", "pull", "push", "symbolic-ref", "tag",
+                    "worktree", "fast-import", "receive-pack"):
             if not repo_verb_ok(verb, args, in_main, checked, cwd):
                 return "block"
         elif in_main and not verb_ok(verb, args):
             return "block"
+        if depth < 3:
+            # exec-capable config/env values spawn unseen inner git —
+            # rescan them like `bash -c` payloads
+            vals = [v for k, v in env.items() if k in EXEC_ENV and v]
+            vals += [c.split("=", 1)[1] for c in configs if "=" in c]
+            for j, a in enumerate(args):
+                if a in EXEC_OPTS and j + 1 < len(args):
+                    vals.append(args[j + 1])
+                elif a.split("=", 1)[0] in EXEC_OPTS and "=" in a:
+                    vals.append(a.split("=", 1)[1])
+            for v in vals:
+                if scan_segments(v, cwd, roots, checked, env,
+                                 depth + 1) == "block":
+                    return "block"
 
 
 def check_exec(ti, cwd):
