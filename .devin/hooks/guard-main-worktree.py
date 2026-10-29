@@ -17,21 +17,23 @@ PreToolUse:
   in the repo (refs and config are shared across worktrees): config
   writes outside external scope (--global/--file…), remote mutations,
   branch -f/-d/-m and update-ref touching next_release, HEAD/@ (in
-  main) or any checked-out branch. `-c`/`--config-env`/`GIT_CONFIG_*`
-  alias injection is blocked too — it would rename the whole verb
-  table away.
+  main), any checked-out branch or its remote-tracking ref, fetch/pull
+  refspec dst writes (`src:dst`) and local-path pushes. `-c`/
+  `--config-env`/`GIT_CONFIG_*`/`export`ed alias injection is blocked
+  too — it would rename the whole verb table away.
   Allowed: read-only git, fetch/pull/reset (documented resync path),
   restore and `checkout -- <paths>` (revert local edits toward clean),
   `checkout|switch next_release`, worktree add/remove/lock, config
-  reads and --unset removals, external-scope config writes.
+  reads and --unset removals, external-scope config writes, remote
+  pushes of non-protected branches.
   The effective repo dir is tracked per command segment (exec `workdir`,
   cd/pushd/popd with OLDPWD, `git -C`, --git-dir/--work-tree, GIT_DIR/
   GIT_WORK_TREE env) and compared against `git worktree list` roots.
   Command lines are split on `&&`/`||`/`;`/`|`/`&`/newlines/parens,
   heredoc bodies are stripped first (quote-aware, `<<<` excluded),
   `$(...)`/backtick substitutions and `bash|sh -c`/`eval` payloads are
-  scanned recursively, and shell keywords (then/do/if/…) plus wrappers
-  (sudo/env/nice/…) are transparent.
+  scanned recursively, short flags are unbundled, and shell keywords
+  (then/do/if/…) plus wrappers (sudo/env/nice/…) are transparent.
 - mcp__* mutation-named tools (write/edit/create/delete/rename/move/…):
   block absolute-path arguments inside the main worktree.
 
@@ -44,7 +46,10 @@ Tripwire, not a security boundary (same stance as block-merge.py):
 each shell's persistent cwd is not fully observable, plain shell
 writes (`>`, `sed -i`, `rm`), `xargs`/`find -exec`-style indirection
 and untracked files are out of scope — the Stop check catches the
-tracked dirt and ahead-state they leave behind.
+tracked dirt and ahead-state they leave behind. Deliberate
+over-blocks (safe direction): update-ref also scans the ref *value*
+positional, remote update/prune/set-head are refused repo-wide, and
+checked-out branches are protected from any worktree.
 """
 import json
 import os
@@ -69,7 +74,7 @@ WRAPPER_VAL = {"sudo": {"-u", "-g", "-h", "-p", "-C", "-T", "-D", "-r",
 TRANSPARENT = {"then", "do", "else", "elif", "if", "while", "until",
                "for", "fi", "done", "esac", "case", "in", "select",
                "coproc", "{", "}", "!", "time"}
-SHELLS = {"bash", "sh", "dash", "zsh", "ksh", "eval"}
+SHELLS = {"bash", "sh", "dash", "zsh", "ksh"}  # `eval` handled separately
 # git global options that consume a separate value token
 VAL_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace",
             "--exec-path", "--config-env"}
@@ -202,8 +207,8 @@ def strip_heredocs(cmd):
                     i += 3
                     continue
                 m = re.match(
-                    r"<<(-?)\s*(?:\\(\w+)|(['\"])([^'\"]*?)\3|(\w+))",
-                    line[i:])
+                    r"<<(-?)\s*(?:\\(\w+)|(['\"])([^'\"]*?)\3"
+                    r"|([^\s;&|<>()'\"]+))", line[i:])
                 if m:
                     pending.append(
                         (m.group(2) or m.group(4) or m.group(5),
@@ -308,11 +313,40 @@ def positionals(args, val_flags=()):
     return out
 
 
+def flags_of(args):
+    """Flag tokens with single-dash bundles unbundled (`-rd` →
+    `-r` + `-d`)."""
+    out = set()
+    for a in args:
+        if a == "-" or not a.startswith("-"):
+            continue
+        if re.fullmatch(r"-[^-\s]{2,}", a):
+            out.update("-" + c for c in a[1:])
+        else:
+            out.add(a)
+    return out
+
+
+def ref_tail(p):
+    """Branch-ish tail of a ref: strip refs/, refs/heads/,
+    refs/remotes/<r>/ and a leading '+'."""
+    return re.sub(r"^refs/(heads/|remotes/[^/]+/)?", "",
+                  p.lstrip("+"))
+
+
+def prot_hit(p, names):
+    """True iff positional `p` names a protected branch — as a full
+    name (`feat/x`), a ref tail (`refs/remotes/o/next_release`) or a
+    bare remote-tracked form (`origin/next_release`)."""
+    t = ref_tail(p)
+    return t in names or t.split("/", 1)[-1] in names
+
+
 def verb_ok(verb, args):
     """Whether `git <verb> <args>` leaves the main worktree untouched."""
     if verb in FLAT_BLOCK:
         return False
-    flags = {a for a in args if a.startswith("-") and a != "-"}
+    flags = flags_of(args)
     pos = positionals(args)
     if verb == "checkout":
         if flags & {"-b", "-B", "--detach", "-d", "--orphan", "-t",
@@ -338,12 +372,13 @@ def verb_ok(verb, args):
     return True
 
 
-def repo_verb_ok(verb, args, in_main, checked):
+def repo_verb_ok(verb, args, in_main, checked, cwd=None):
     """Whether `git <verb> <args>` is safe anywhere in the repo — refs,
     remotes and config are shared across all worktrees. `checked` holds
     the short names of branches checked out in some worktree."""
-    flags = {a for a in args if a.startswith("-") and a != "-"}
+    flags = flags_of(args)
     protected = {PROTECTED_BRANCH} | checked
+    names = protected | ({"HEAD", "@"} if in_main else set())
     if verb == "config":
         pos = positionals(args, CFG_VAL)
         name = (pos[0] if pos else "").lower()
@@ -361,6 +396,26 @@ def repo_verb_ok(verb, args, in_main, checked):
         # bare `remote`/`-v` list; `show`/`get-url` read — rest mutates
         # the shared config
         return not pos or pos[0] in ("show", "get-url")
+    if verb in ("fetch", "pull"):
+        pos = positionals(args)
+        # refspec dst writes (`+src:dst`) can forge remote-tracking refs
+        # — the ahead-check baseline lives under refs/remotes/origin/
+        if any(":" in s for s in pos[1:]) or any(
+                a.startswith("--refmap") and ":" in a for a in args):
+            return False
+        return True
+    if verb == "push":
+        pos = positionals(args)
+        # `push <local dir> src:dst` writes LOCAL refs → protect every
+        # checked-out branch; remote-side pushes only care about
+        # next_release (direct pushes to it are forbidden anyway).
+        if not pos or len(pos) == 1:
+            return not in_main  # bare push pushes the current branch
+        local = pos[0] in (".", "..") or os.path.isdir(
+            os.path.join(cwd or "/", pos[0]))
+        names = names if local else {PROTECTED_BRANCH}
+        return not any(
+            prot_hit(s.split(":", 1)[-1], names) for s in pos[1:])
     if verb == "branch":
         pos = positionals(args, {"-u", "--set-upstream-to"})
         danger = flags & {"-f", "--force", "-m", "-M", "--move",
@@ -371,16 +426,12 @@ def repo_verb_ok(verb, args, in_main, checked):
         # where the command runs — protected only in the main worktree
         if flags & {"-m", "-M", "--move"} and len(pos) <= 1 and in_main:
             return False
-        return not (set(pos) & protected)
+        return not any(prot_hit(p, names) for p in pos)
     if verb == "update-ref":
         if "--stdin" in flags:
             return False  # ref list arrives on stdin — can't inspect
         pos = positionals(args, {"-m"})
-        names = set(protected)
-        if in_main:
-            names |= {"HEAD", "@"}  # indirections to next_release
-        return not any(
-            re.sub(r"^refs/(heads/)?", "", p) in names for p in pos)
+        return not any(prot_hit(p, names) for p in pos)
     return True
 
 
@@ -430,6 +481,7 @@ def scan_segments(cmd, cwd, roots, checked, env0=None, depth=0):
     segs = re.split(r"&&|\|\||[;|&\n()]", cmd)
     subs = re.findall(r"\$\((.*?)\)|`([^`]*)`", cmd, re.S)
     segs += [s for pair in subs for s in pair if s]
+    env0 = dict(env0 or {})
     old = None
     for seg in segs:
         try:
@@ -437,6 +489,15 @@ def scan_segments(cmd, cwd, roots, checked, env0=None, depth=0):
         except ValueError:
             continue
         if not toks:
+            continue
+        if toks[0] in ("export", "readonly", "declare", "local",
+                       "typeset"):
+            # exported assignments persist for later segments
+            if toks[0] == "export" or "-x" in flags_of(toks[1:]):
+                for t in toks[1:]:
+                    m = re.fullmatch(r"([A-Za-z_]\w*)=(.*)", t)
+                    if m:
+                        env0[m.group(1)] = m.group(2)
             continue
         if re.fullmatch(r"cd|pushd|popd", toks[0]):
             tgt = next((t for t in toks[1:]
@@ -470,8 +531,9 @@ def scan_segments(cmd, cwd, roots, checked, env0=None, depth=0):
         if any(c.split("=", 1)[0].lower().startswith("alias.")
                for c in configs):
             return "block"
-        if verb in ("config", "remote", "branch", "update-ref"):
-            if not repo_verb_ok(verb, args, in_main, checked):
+        if verb in ("config", "remote", "branch", "update-ref",
+                    "fetch", "pull", "push"):
+            if not repo_verb_ok(verb, args, in_main, checked, cwd):
                 return "block"
         elif in_main and not verb_ok(verb, args):
             return "block"
