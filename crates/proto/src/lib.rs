@@ -1,6 +1,9 @@
 //! Types partagés : journal d'événements + protocole client <-> daemon.
 //! Tout est en JSON Lines (un objet JSON par ligne) sur socket Unix ou TCP.
 
+mod components;
+pub use components::*;
+
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -832,6 +835,28 @@ pub enum ReqKind {
     /// Réponse : `[{type, hosts: [{host, token_env?}]}]` — `token_env`
     /// est le NOM d'une variable d'environnement, jamais un secret.
     ForgeList {},
+    /// Composants managés (docs/components-integration.md §2.3) :
+    /// liste name/kind/state/pid/autostart/health/uptime/restarts/
+    /// last_exit/description/source.
+    ListComponents,
+    /// Spec complète + état détaillé d'un composant.
+    ComponentInfo { name: String },
+    /// Cycle de vie — `process` managés seulement : internal/external/
+    /// tool sont refusés (pas de process à piloter). Réponse {name,state}.
+    ComponentStart { name: String },
+    ComponentStop { name: String },
+    ComponentRestart { name: String },
+    /// Tail paginé du log `<root>/components/<name>.log` : `offset`
+    /// (absent = dernière page) + `limit` (défaut 64 Kio, cap 256 Kio) →
+    /// {data(b64), offset, size, truncated} (`truncated` = il reste
+    /// des octets en amont de la tranche renvoyée).
+    ComponentLogs {
+        name: String,
+        #[serde(default)]
+        offset: Option<u64>,
+        #[serde(default)]
+        limit: Option<u64>,
+    },
     DaemonStatus,
     /// Auto-update du démon vers la release `version` demandée par le
     /// client (ex. "0.5.0" → tag v0.5.0 — jamais « latest » : le démon
@@ -896,6 +921,12 @@ impl ReqKind {
             Self::PrTrack { .. } => "pr_track",
             Self::PrUntrack { .. } => "pr_untrack",
             Self::ForgeList {} => "forge_list",
+            Self::ListComponents => "list_components",
+            Self::ComponentInfo { .. } => "component_info",
+            Self::ComponentStart { .. } => "component_start",
+            Self::ComponentStop { .. } => "component_stop",
+            Self::ComponentRestart { .. } => "component_restart",
+            Self::ComponentLogs { .. } => "component_logs",
             Self::DaemonStatus => "daemon_status",
             Self::UpdateDaemon { .. } => "update_daemon",
         }

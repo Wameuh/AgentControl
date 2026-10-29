@@ -4,6 +4,7 @@
 //! + blobs), peers.rs (agent↔agent), prs.rs (registre PR), misc.rs.
 
 mod cfg;
+mod components;
 /// Bornage workspace réutilisé par l'endpoint HTTP /media|/download.
 pub(crate) mod files;
 mod misc;
@@ -32,6 +33,7 @@ use tracing::{debug, info, warn};
 /// un journal très volumineux saturait sinon le lien pendant des minutes.
 pub(crate) const SUBSCRIBE_REPLAY_MAX: usize = 500;
 
+use crate::components::Components;
 use crate::forges::Forges;
 use crate::journal;
 use crate::prs::PrRegistry;
@@ -62,7 +64,12 @@ pub struct Daemon {
     pub forges: Forges,
     /// Surface web activée : {"bind": addr, "url": "http://…/?token=…"} —
     /// renseigné par main après le bind, reflété dans daemon_status.
-    pub web: RwLock<Option<Value>>,
+    /// Partagé avec Components : l'état du composant interne `web-ui`
+    /// suit la présence du listener.
+    pub web: Arc<RwLock<Option<Value>>>,
+    /// Composants managés : specs components.toml + superviseur des
+    /// `process` + internal (components/mod.rs, proc.rs).
+    pub components: Arc<Components>,
 }
 
 
@@ -77,18 +84,21 @@ impl Daemon {
         retention: RetentionCfg,
         a2a: A2aCfg,
         forges: Forges,
+        bind_tcp: String,
     ) -> Result<(Arc<Self>, Vec<String>)> {
+        let web = Arc::new(RwLock::new(None));
         let d = Arc::new(Self {
             root: root.clone(),
             sessions: RwLock::new(HashMap::new()),
             agents,
             retention,
+            components: Components::open(&root, bind_tcp, a2a.enabled, Arc::clone(&web)),
             a2a,
             peer_rate: std::sync::Mutex::new(HashMap::new()),
             spawn_rate: std::sync::Mutex::new(HashMap::new()),
             prs: Arc::new(PrRegistry::open(&root)),
             forges,
-            web: RwLock::new(None),
+            web,
         });
         let mut resumable = Vec::new();
         let sdir = root.join("sessions");
@@ -554,6 +564,18 @@ impl Daemon {
                 change_id,
             } => self.h_pr_untrack(repo, pr, forge, host, change_id).await,
             ReqKind::ForgeList {} => self.h_forge_list().await,
+            ReqKind::ListComponents => self.h_list_components().await,
+            ReqKind::ComponentInfo { name } => self.h_component_info(name).await,
+            ReqKind::ComponentStart { name } => self.h_component_start(name).await,
+            ReqKind::ComponentStop { name } => self.h_component_stop(name).await,
+            ReqKind::ComponentRestart { name } => {
+                self.h_component_restart(name).await
+            }
+            ReqKind::ComponentLogs {
+                name,
+                offset,
+                limit,
+            } => self.h_component_logs(name, offset, limit).await,
             ReqKind::Subscribe { session, after_seq } => {
                 self.h_subscribe(session, after_seq).await
             }
