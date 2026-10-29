@@ -371,6 +371,9 @@ fn clean_task_title(t: &Task) -> String {
             ']' => ')',
             _ => c,
         })
+        // Caractères de contrôle (ANSI…) — un titre d'item n'a pas à
+        // injecter de séquences dans `acctl list` ou le client.
+        .filter(|c| !c.is_control())
         .collect();
     let mut s: String = clean.chars().take(40).collect();
     if clean.chars().count() > 40 {
@@ -381,7 +384,8 @@ fn clean_task_title(t: &Task) -> String {
 
 /// Titre voulu d'un worker : `<préfixe><N>` seul sans item wip, sinon
 /// `<préfixe><N> #<id> · <titre>` — l'identité de la session est
-/// l'item en charge, pas le boilerplate de mission. Convention
+/// l'item en charge, pas le boilerplate de mission (premier wip
+/// trouvé : l'invariant métier est un item par agent). Convention
 /// identique à `backlog-orchestrator.py` : le même ledger produit le
 /// même titre sous les deux orchestrateurs → la reprise supervisord →
 /// natif (et inverse) ne déclenche aucun ping-pong de renommages.
@@ -609,11 +613,18 @@ impl Daemon {
             // (« <préfixe><N> #<id> · <titre> » — l'item, pas le
             // boilerplate de mission). Renommage détaché :
             // session/rename ACP peut rester sans réponse sur un agent
-            // occupé — le tick n'attend pas.
+            // occupé — le tick n'attend pas. Pas de renommage pour un
+            // worker sur le point d'être supprimé (inactif, tout soldé :
+            // le revert-to-base serait un rewrite meta + ACP pour rien).
+            let about_to_delete = !matches!(state, "working" | "compacting" | "starting")
+                && open_prs.is_empty()
+                && my_open.is_empty();
             let my_wip = tasks
                 .iter()
                 .find(|t| task_agent(t) == sid && task_status(t) == "wip");
-            let title = match orch_desired_title(&cfg.title_prefix, &w.title, my_wip) {
+            let title = match orch_desired_title(&cfg.title_prefix, &w.title, my_wip)
+                .filter(|_| !about_to_delete)
+            {
                 Some(want) if want != w.title => {
                     info!("orchestrateur: rename {sid} : {:?} → {want:?}", w.title);
                     let d = Arc::clone(self);
