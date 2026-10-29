@@ -131,7 +131,11 @@ impl Daemon {
     /// directement au registre (`session: None` = retouche métadonnées,
     /// ne sanctifie pas `via`). Throttlé à PR_SYNC_MIN_INTERVAL et
     /// non réentrant : les onglets Dépôts de plusieurs clients peuvent
-    /// demander en rafale sans dupliquer les appels forge.
+    /// demander en rafale sans dupliquer les appels forge. La réponse
+    /// peut prendre des dizaines de secondes (REST séquentiel à 8 s par
+    /// entrée injoignable) — les clients bornent leur attente (60 s)
+    /// et relisent le registre au refresh suivant : le canal résultat
+    /// est best-effort, la convergence passe par le registre.
     pub(super) async fn h_pr_sync(self: &Arc<Self>) -> Result<Value> {
         {
             let mut c = self.pr_sync.lock().unwrap();

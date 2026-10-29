@@ -43,11 +43,17 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
         } else {
             ReqKind::ListSessions
         };
+        // pr_sync fait une collecte forge potentiellement longue (REST
+        // séquentiel à 8 s par entrée injoignable + appels gh) : timeout
+        // large comme le chemin web (CALL_TIMEOUT 60 s). Au-delà, le run
+        // démon se termine quand même en tâche de fond et le registre
+        // mis à jour est relu au refresh suivant.
+        let secs = if method == "pr_sync" { 60 } else { 8 };
         let mut set = tokio::task::JoinSet::new();
         for (k, c) in pairs {
             let req = req.clone();
             set.spawn(async move {
-                let r = tokio::time::timeout(std::time::Duration::from_secs(8), c.call(req)).await;
+                let r = tokio::time::timeout(std::time::Duration::from_secs(secs), c.call(req)).await;
                 (k, r.map_err(|_| anyhow::anyhow!("timeout")).and_then(|x| x))
             });
         }

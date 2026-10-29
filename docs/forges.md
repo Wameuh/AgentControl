@@ -79,6 +79,10 @@ déclaré) ; sinon GitHub comme avant.
   publiques (vérifié sur `gerrit-review.googlesource.com`). `status`
   NEW → open (+ `work_in_progress` → draft), MERGED → merged,
   ABANDONED → closed.
+- **Portée des hôtes** : la collecte n'interroge que les hôtes déclarés
+  (`forge_list` — gitlab.com implicite pour gitlab, github.com pour
+  github) ; une entrée du registre sur un hôte non déclaré est notée
+  « hôte non déclaré — statut inchangé », jamais requêtée.
 
 Le merge d'une review reste une **permission GitHub-only** : le hook de
 merge des PR (`/mr review`, gates CI) ne s'étend pas à GitLab ni Gerrit —

@@ -10,17 +10,63 @@
 
 use serde_json::{json, Value};
 
-/// Sortie stdout d'une commande `gh` (None si gh absent ou en échec).
-/// Publique : acctl s'en sert aussi pour résoudre un repo (`gh repo
-/// view`) hors du cycle de sync.
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+/// Deadline d'un appel `gh` : un gh wedged (credential helper bloqué,
+/// socket morte) ne doit pas retenir un thread `spawn_blocking` du
+/// démon indéfiniment — les runs « stuck » sont autorisés à repartir
+/// après 180 s côté démon, sans kill le process s'accumulerait.
+const GH_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Sortie stdout d'une commande `gh` (None si gh absent, en échec ou
+/// trop lent — le process est tué passé GH_TIMEOUT). Publique : acctl
+/// s'en sert aussi pour résoudre un repo (`gh repo view`) hors sync.
 pub fn gh_out(args: &[&str]) -> Option<String> {
-    std::process::Command::new("gh")
+    let mut child = Command::new("gh")
         .args(args)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        // Défense anti-wedge : pas de prompt interactif, pas de pager.
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("GH_PAGER", "cat")
+        .spawn()
+        .ok()?;
+    // Le pipe stdout est vidé en parallèle : une sortie > capacité du
+    // pipe (~64 Kio, `gh pr list --limit 200` la dépasse sur un repo à
+    // longs titres) bloquerait gh sur write() sans lecture concurrente.
+    let mut stdout = child.stdout.take()?;
+    let drain = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = stdout.read_to_string(&mut buf);
+        buf
+    });
+    let deadline = Instant::now() + GH_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            // Deadline ou erreur de wait : tuer puis récolter — pas de
+            // zombie ; le drain meurt de l'EOF d'après-mort seul.
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    if !status.success() {
+        return None;
+    }
+    let s = drain.join().ok()?.trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 /// Schéma HTTP d'un hôte de forge : `http` uniquement pour le loopback
@@ -282,14 +328,33 @@ pub fn collect_updates(set: &[Value], entries: &[Value]) -> SyncOutcome {
     out
 }
 
+/// Kind github dont l'hôte n'est pas github.com : hors périmètre —
+/// `gh` n'interroge que github.com et relibeller l'entrée la
+/// re-keyerait sur le mauvais hôte. Hôte absent = github.com (registre
+/// historique).
+fn gh_host_ok(e: &Value) -> bool {
+    e["host"].as_str().unwrap_or("github.com") == "github.com"
+}
+
 /// GitHub — `gh pr list` groupé par repo connu : les repos comptent
 /// comme « vus » dès que gh répond (un hôte down laisse les entrées
 /// inchangées, sans note — gh absent est le cas nominal d'un démon
 /// minimal).
 fn collect_github(entries: &[Value], out: &mut SyncOutcome) {
+    for e in entries {
+        if proto::forge_kind(e["forge"].as_str().unwrap_or("")) == "github" && !gh_host_ok(e) {
+            out.notes.push(format!(
+                "github {} #{}: hôte {} non géré — statut inchangé",
+                e["repo"].as_str().unwrap_or("?"),
+                e["pr"].as_u64().unwrap_or(0),
+                e["host"].as_str().unwrap_or("?"),
+            ));
+        }
+    }
     let mut repos: Vec<String> = entries
         .iter()
         .filter(|e| proto::forge_kind(e["forge"].as_str().unwrap_or("")) == "github")
+        .filter(|e| gh_host_ok(e))
         .filter_map(|e| e["repo"].as_str().map(String::from))
         .collect();
     repos.sort();
@@ -310,6 +375,7 @@ fn collect_github(entries: &[Value], out: &mut SyncOutcome) {
             .iter()
             .filter(|e| {
                 proto::forge_kind(e["forge"].as_str().unwrap_or("")) == "github"
+                    && gh_host_ok(e)
                     && e["repo"].as_str() == Some(repo.as_str())
             })
             .collect();
@@ -357,8 +423,14 @@ fn collect_github(entries: &[Value], out: &mut SyncOutcome) {
 
 /// GitLab — REST `/api/v4/…/merge_requests/<iid>` par entrée, token
 /// `PRIVATE-TOKEN` si `token_env` configuré. Hôte privé sans token →
-/// API 401 → entrée ignorée proprement.
+/// API 401 → entrée ignorée proprement. Hôtes bornés à ceux déclarés
+/// (`forge_list` inclut gitlab.com implicitement) — le registre ne doit
+/// pas devenir un vecteur de requêtes vers un hôte arbitraire.
 fn collect_gitlab(set: &[Value], entries: &[Value], out: &mut SyncOutcome) {
+    let declared: Vec<&str> = forge_hosts(set, "gitlab")
+        .iter()
+        .map(|(h, _)| *h)
+        .collect();
     for e in entries {
         if proto::forge_kind(e["forge"].as_str().unwrap_or("")) != "gitlab" {
             continue;
@@ -366,6 +438,12 @@ fn collect_gitlab(set: &[Value], entries: &[Value], out: &mut SyncOutcome) {
         let host = e["host"].as_str().unwrap_or("gitlab.com");
         let repo = e["repo"].as_str().unwrap_or("");
         let n = e["pr"].as_u64().unwrap_or(0);
+        if !declared.contains(&host) {
+            out.notes.push(format!(
+                "gitlab {host} {repo}!{n}: hôte non déclaré — statut inchangé"
+            ));
+            continue;
+        }
         let auth = forge_auth(set, "gitlab", host);
         let headers: Vec<(&str, String)> = auth
             .iter()
@@ -402,10 +480,15 @@ fn collect_gitlab(set: &[Value], entries: &[Value], out: &mut SyncOutcome) {
     }
 }
 
-/// Gerrit — REST `GET /changes/<ref>` anonyme (port web de l'hôte
-/// configuré). Les entrées adressées par `change_id` résolvent leur
-/// numéro au passage (rekey côté registre).
-fn collect_gerrit(_set: &[Value], entries: &[Value], out: &mut SyncOutcome) {
+/// Gerrit — REST `GET /changes/<ref>` anonyme, hôtes déclarés seulement
+/// (comme l'extraction de refs : rien ne distingue un hôte Gerrit d'un
+/// autre service sans déclaration). Les entrées adressées par
+/// `change_id` résolvent leur numéro au passage (rekey côté registre).
+fn collect_gerrit(set: &[Value], entries: &[Value], out: &mut SyncOutcome) {
+    let declared: Vec<&str> = forge_hosts(set, "gerrit")
+        .iter()
+        .map(|(h, _)| *h)
+        .collect();
     for e in entries {
         if proto::forge_kind(e["forge"].as_str().unwrap_or("")) != "gerrit" {
             continue;
@@ -419,6 +502,12 @@ fn collect_gerrit(_set: &[Value], entries: &[Value], out: &mut SyncOutcome) {
         let n = e["pr"].as_u64().unwrap_or(0);
         let n_str = n.to_string();
         let q = cid.unwrap_or(&n_str);
+        if !declared.contains(&host) {
+            out.notes.push(format!(
+                "gerrit {host} {q}: hôte non déclaré — statut inchangé"
+            ));
+            continue;
+        }
         let base = host_base(host);
         let url = format!("{base}/changes/{q}");
         let Some(v) = http_json(&url, &[]) else {
@@ -455,5 +544,74 @@ fn collect_gerrit(_set: &[Value], entries: &[Value], out: &mut SyncOutcome) {
                 old_status: old.into(),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn urlenc_path_segment() {
+        assert_eq!(urlenc("grp/sub proj"), "grp%2Fsub%20proj");
+        assert_eq!(urlenc("a.b-c_d~e"), "a.b-c_d~e");
+        assert_eq!(urlenc(""), "");
+    }
+
+    #[test]
+    fn gh_state_maps() {
+        assert_eq!(gh_state(&json!({"state": "OPEN"})), "open");
+        assert_eq!(gh_state(&json!({"state": "OPEN", "isDraft": true})), "draft");
+        assert_eq!(gh_state(&json!({"state": "MERGED"})), "merged");
+        assert_eq!(gh_state(&json!({"state": "CLOSED"})), "closed");
+        assert_eq!(gh_state(&json!({})), "");
+    }
+
+    #[test]
+    fn glab_state_maps() {
+        assert_eq!(glab_state(&json!({"state": "opened"})), "open");
+        assert_eq!(glab_state(&json!({"state": "opened", "draft": true})), "draft");
+        assert_eq!(
+            glab_state(&json!({"state": "opened", "work_in_progress": true})),
+            "draft"
+        );
+        assert_eq!(glab_state(&json!({"state": "merged"})), "merged");
+        assert_eq!(glab_state(&json!({"state": "closed"})), "closed");
+        assert_eq!(glab_state(&json!({"state": "locked"})), "open");
+    }
+
+    #[test]
+    fn gerrit_state_maps() {
+        assert_eq!(gerrit_state(&json!({"status": "NEW"})), "open");
+        assert_eq!(
+            gerrit_state(&json!({"status": "NEW", "work_in_progress": true})),
+            "draft"
+        );
+        assert_eq!(gerrit_state(&json!({"status": "MERGED"})), "merged");
+        assert_eq!(gerrit_state(&json!({"status": "ABANDONED"})), "closed");
+    }
+
+    /// Les hôtes absents de `forge_list` ne doivent jamais être
+    /// interrogés : la collecte les note « non déclarés » sans toucher
+    /// au réseau (test rapide — aucun appel sortant pour ces entrées).
+    #[test]
+    fn undeclared_hosts_are_skipped() {
+        let set = json!([
+            {"type": "gitlab", "hosts": [{"host": "gitlab.com"}]},
+            {"type": "gerrit", "hosts": [{"host": "gerrit.int"}]},
+        ]);
+        let entries = json!([
+            {"forge": "gitlab", "host": "gl.evil.example", "repo": "a/b", "pr": 7, "status": "open"},
+            {"forge": "gerrit", "host": "gr.evil.example", "repo": "a", "pr": 9, "status": "open"},
+            {"forge": "github", "host": "hub.evil.example", "repo": "a/b", "pr": 3, "status": "open"},
+        ]);
+        let out = collect_updates(
+            set.as_array().unwrap(),
+            entries.as_array().unwrap(),
+        );
+        assert_eq!(out.checked, 0);
+        assert!(out.updates.is_empty());
+        assert_eq!(out.notes.len(), 3);
+        assert!(out.notes.iter().all(|n| n.contains("non déclaré") || n.contains("non géré")));
     }
 }

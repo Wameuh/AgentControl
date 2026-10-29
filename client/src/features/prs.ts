@@ -191,7 +191,7 @@ export class PrListView {
 
   /** Header de groupe (dépôt ou section « non attribuées ») — pliable,
    *  état persisté par clé localStorage, forcé ouvert sous filtre. */
-  private groupHead(labelHtml: string, key: string, count: number, extraCls = "", defaultClosed = false): HTMLElement {
+  private groupHead(labelHtml: string, key: string, count: number | string, extraCls = "", defaultClosed = false): HTMLElement {
     const closed = this.isClosed(key, defaultClosed);
     const h = document.createElement("div");
     h.className = "grp-head pr-repo" + extraCls + (closed ? " closed" : "");
@@ -288,7 +288,8 @@ export class PrListView {
       const closed = this.isClosed(key, true);
       el.appendChild(this.groupHead(
         `<span class="pr-repo-ic">${icon("check")}</span>${esc(t("pr_done"))}`,
-        key, doneF.length, " unatt", true));
+        key, doneF.length > DONE_CAP ? `${DONE_CAP}+` : doneF.length,
+        " unatt", true));
       shown += shownDone.length;
       if (!closed) for (const p of shownDone) el.appendChild(this.prRow(p, true));
     }
