@@ -75,6 +75,10 @@ export type SavedConn = {
   password?: string;
   key?: string;
   native?: boolean;
+  /** Accent propre à la connexion (multi-instances : une couleur par
+   *  démon pour identifier l'instance d'un coup d'œil). Nom d'accent
+   *  ("sage" | "gold" | …) — absent = accent global des réglages. */
+  color?: string;
 };
 
 export type SendMode = "normal" | "steer" | "force";

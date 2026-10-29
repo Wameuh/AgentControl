@@ -213,11 +213,32 @@ pub fn load_connections() -> Vec<serde_json::Value> {
         .unwrap_or_default()
 }
 
-/// Ajoute une connexion en tête (dédupliquée), max 10.
+/// Clé d'identité d'une connexion sauvegardée — miroir de `conn_key`
+/// côté client Tauri : `ssh{,-native}:host:sshport` | `tcp:addr` |
+/// `local` | `web`. Les champs annexes (args, user, couleur…) ne font
+/// PAS partie de la clé : éditer la couleur ou les args d'une connexion
+/// met à jour son entrée au lieu de créer un doublon.
+pub fn conn_key_json(cfg: &serde_json::Value) -> String {
+    let s = |k: &str| cfg.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    match s("kind") {
+        "ssh" => {
+            // Même règle que conn_key : SSH forcé natif sur Android.
+            let nat = cfg.get("native").and_then(|v| v.as_bool()).unwrap_or(false)
+                || cfg!(target_os = "android");
+            let port = cfg.get("port").and_then(|v| v.as_u64()).unwrap_or(22);
+            format!("{}:{}:{}", if nat { "ssh-native" } else { "ssh" }, s("host"), port)
+        }
+        "tcp" => format!("tcp:{}", s("addr")),
+        "web" => "web".into(),
+        _ => "local".into(),
+    }
+}
+
+/// Ajoute une connexion en tête (dédupliquée par conn_key), max 10.
 pub fn save_connection(cfg: &serde_json::Value) {
     let mut list = load_connections();
-    let key = cfg.to_string();
-    list.retain(|c| c.to_string() != key);
+    let key = conn_key_json(cfg);
+    list.retain(|c| conn_key_json(c) != key);
     list.insert(0, cfg.clone());
     list.truncate(10);
     let _ = std::fs::write(config_path(), serde_json::to_string_pretty(&list).unwrap());
@@ -226,8 +247,8 @@ pub fn save_connection(cfg: &serde_json::Value) {
 /// Retire une connexion de la liste (même clé de dédup que save).
 pub fn remove_connection(cfg: &serde_json::Value) {
     let mut list = load_connections();
-    let key = cfg.to_string();
-    list.retain(|c| c.to_string() != key);
+    let key = conn_key_json(cfg);
+    list.retain(|c| conn_key_json(c) != key);
     let _ = std::fs::write(config_path(), serde_json::to_string_pretty(&list).unwrap());
 }
 

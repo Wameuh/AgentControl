@@ -29,6 +29,11 @@ export function daemonParams(cfg: Record<string, unknown>, tag: string) {
   };
 }
 
+/** "ssh:user@hôte:22" → "user@hôte" pour l'affichage compact
+ *  (le port ssh par défaut est masqué, les autres gardés). */
+export const connLabel = (k: string) =>
+  k.replace(/^(ssh-native|ssh|tcp):/, "").replace(/:22$/, "");
+
 export const minorOf = (v: string) => v.split(".").slice(0, 2).join(".");
 
 /// "1.2.3-rc.4" → parties numériques + identifiants de pré-release.

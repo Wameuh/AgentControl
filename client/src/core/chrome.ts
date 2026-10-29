@@ -9,6 +9,7 @@ import { gemSVG } from "../crystal";
 import { t } from "../i18n";
 import { icon } from "../ui/icons";
 import { $ } from "./dom";
+import { connLabel } from "./conn";
 
 const mesh = (window as {
   MeshBackground?: {
@@ -36,16 +37,38 @@ export function applyTheme(name: "dark" | "light") {
 export type Accent = "sage" | "gold" | "grey" | "violet" | "red";
 const ACCENTS: Accent[] = ["sage", "gold", "grey", "violet", "red"];
 
+/** Accent valide ou undefined — validation d'un champ libre (cfg conn). */
+export const accentOf = (v: unknown): Accent | undefined =>
+  (ACCENTS as string[]).includes(v as string) ? (v as Accent) : undefined;
+
 /** Accent persisté, « sage » si absent ou inconnu. */
 export function accentPref(): Accent {
   const v = localStorage.getItem("ac-accent");
   return (ACCENTS as string[]).includes(v ?? "") ? (v as Accent) : "sage";
 }
 
-export function applyAccent(name: Accent) {
+/** Applique l'accent ; `persist:false` pour un accent temporaire (couleur
+ *  de connexion — le réglage global ac-accent n'est pas écrasé). */
+export function applyAccent(name: Accent, persist = true) {
   const el = document.documentElement;
   for (const a of ACCENTS) if (a !== "sage") el.classList.toggle(`theme-${a}`, name === a);
-  localStorage.setItem("ac-accent", name);
+  if (persist) localStorage.setItem("ac-accent", name);
+}
+
+/** Chrome par connexion liée (modèle multi-instances : 1 instance = 1
+ *  connexion) : accent propre à la conn (sinon celui des réglages),
+ *  liseré d'identification (:root.conn-tinted, styles/layout.css) et
+ *  titre de fenêtre « AgentControl — hôte » (taskbar + titlebar custom).
+ *  conn = clé connKey ; null = aucune connexion liée (retour au neutre). */
+export function applyConnChrome(conn: string | null, color?: Accent | null) {
+  document.documentElement.classList.toggle("conn-tinted", !!color);
+  applyAccent(color ?? accentPref(), false);
+  const label = conn && conn !== "web" ? ` — ${connLabel(conn)}` : "";
+  const title = `AgentControl${label}`;
+  document.title = title;
+  const tt = $("titlebar-title");
+  if (tt) tt.textContent = title;
+  void appWin?.setTitle(title).catch(() => {});
 }
 
 /** « Fond animé » : setAnimated applique + persiste (propriétaire unique). */

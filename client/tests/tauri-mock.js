@@ -124,6 +124,8 @@
         case "call": return p.then(() => rpc(args.method, args.params ?? args));
         case "subscribe": return p.then(() => null);
         case "saved_connections": return p.then(() => []);
+        case "cli_conn": return p.then(() => null);
+        case "spawn_instance": return p.then(() => null);
         case "ssh_hosts": return p.then(() => []);
         case "ssh_pubkey": return p.then(() => "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDemoAgentControlKeyExample agentcontrol");
         case "check_update": return p.then(() => { throw new Error("offline"); });
