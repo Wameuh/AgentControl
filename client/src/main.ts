@@ -196,6 +196,7 @@ settings.langChanged = () => {
   chat.updateHeader();
 };
 settings.sendModeChanged = () => composer.refreshHints();
+settings.mdRenderChanged = (on) => files.setMdRender(on);
 settings.themeChanged = () => {
   term.refreshTheme();
   // Changement d'accent global : la couleur propre à la conn liée garde
