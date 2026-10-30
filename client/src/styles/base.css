@@ -84,6 +84,9 @@ body {
   --glass: rgba(233, 229, 216, .72);
   --panel: rgba(240, 237, 228, .85);
   --panel-solid: #efece2;
+  /* Puits de code papier : plus creux que --bg (comme #0d1310 sous
+     #121614 en sombre) — sinon texte --ink sombre sur puits noir. */
+  --code-bg: #d6d1bf;
   --accent-rgb: 138, 111, 62;
   --msg-user-bg: var(--accent);
   --msg-user-fg: #f5f1e4;
@@ -163,7 +166,7 @@ body {
   --panel:       color-mix(in srgb, var(--accent) 7%,  rgba(240, 237, 228, .85));
   --panel-solid: color-mix(in srgb, var(--accent) 9%,  #efece2);
   --glass:       color-mix(in srgb, var(--accent) 7%,  rgba(233, 229, 216, .72));
-  --code-bg:     color-mix(in srgb, var(--accent) 10%, #0d1310);
+  --code-bg:     color-mix(in srgb, var(--accent) 10%, #d6d1bf);
 }
 
 ::selection { background: var(--accent); color: var(--bg); }
