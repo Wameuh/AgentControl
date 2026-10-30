@@ -62,6 +62,7 @@
             </div>
             <button id="btn-search" hidden data-icon="search" data-i18n-title="search_title" title="Search"></button>
             <button id="btn-first" hidden data-icon="top" data-i18n-title="first_post" title="First post"></button>
+            <button id="btn-pins" hidden data-icon="pin" data-i18n-title="pins_title" title="Pinned messages"></button>
             <button id="btn-term" hidden data-icon="terminal" data-i18n-title="term_title" title="Terminal"></button>
             <button id="btn-files" hidden data-icon="folder" data-i18n-title="files_title" title="Files"></button>
             <button id="btn-refresh" data-icon="refresh" data-i18n-title="refresh_title" title="Reload"></button>
@@ -99,6 +100,14 @@
             </header>
             <div id="qp-list"></div>
           </div>
+          <div id="pins-panel" hidden>
+            <header id="pp-head">
+              <span id="pp-title" data-i18n="pins_title">Pinned messages</span>
+              <span id="pp-count" class="badge"></span>
+              <button id="pp-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <div id="pp-list"></div>
+          </div>
           <div id="term-panel" hidden>
             <div id="term-resize" data-i18n-title="term_drag" title="Drag to resize"></div>
             <header id="term-head">
@@ -129,93 +138,169 @@
               <button id="settings-close" data-icon="close" data-i18n-title="close" title="Close"></button>
             </header>
             <div id="settings-body">
-              <label class="s-row"><span data-i18n="theme_label">Theme</span>
-                <select id="s-theme">
-                  <option value="dark" data-i18n="theme_dark">Dark</option>
-                  <option value="light" data-i18n="theme_light">Light</option>
-                </select>
-              </label>
-              <label class="s-row"><span data-i18n="s-accent">Accent color</span>
-                <select id="s-accent">
-                  <option value="sage" data-i18n="accent_sage">Sage</option>
-                  <option value="gold" data-i18n="accent_gold">Golden</option>
-                  <option value="grey" data-i18n="accent_grey">Grey</option>
-                  <option value="violet" data-i18n="accent_violet">Violet</option>
-                  <option value="red" data-i18n="accent_red">Red</option>
-                </select>
-              </label>
-              <label class="s-row chk" id="s-bganim-row">
-                <input type="checkbox" id="s-bganim" checked />
-                <span data-i18n="s-bg-anim">Animated background</span>
-              </label>
-              <label class="s-row"><span data-i18n="lang_label">Language</span>
-                <select id="s-lang">
-                  <option value="en">English</option>
-                  <option value="fr">Français</option>
-                </select>
-              </label>
-              <label class="s-row"><span data-i18n="sendmode_label">Enter / Send</span>
-                <select id="s-sendmode">
-                  <option value="queue" data-i18n="sendmode_queue">Queue while busy</option>
-                  <option value="steer" data-i18n="sendmode_steer">Steer mid-turn</option>
-                </select>
-              </label>
-              <label class="s-row chk">
-                <input type="checkbox" id="s-autoconn" checked />
-                <span data-i18n="autoconnect_label">Auto-connect on launch</span>
-              </label>
-              <label class="s-row chk">
-                <input type="checkbox" id="s-images" checked />
-                <span data-i18n="images_label">Inline images</span>
-              </label>
-              <label class="s-row chk">
-                <input type="checkbox" id="s-rcchan" />
-                <span data-i18n="rcchan_label">Also offer release candidates (rc)</span>
-              </label>
-              <label class="s-row"><span data-i18n="enc_label">File encoding</span>
-                <select id="s-encoding">
-                  <option value="utf-8">UTF-8</option>
-                  <option value="windows-1252">Windows-1252 / Latin-1</option>
-                  <option value="utf-16le">UTF-16 LE</option>
-                  <option value="utf-16be">UTF-16 BE</option>
-                </select>
-              </label>
-              <label class="s-row chk">
-                <input type="checkbox" id="s-snd" checked />
-                <span data-i18n="sounds_label">Sound alerts</span>
-              </label>
-              <div id="s-snd-opts">
-                <div class="s-row s-snd-opt">
-                  <input type="checkbox" id="s-snd-done" checked />
-                  <label for="s-snd-done" data-i18n="sounds_done">Turn finished</label>
-                  <button type="button" class="s-test" id="s-snd-test-done" data-i18n="sounds_test">Test</button>
+              <details class="s-sec" open>
+                <summary>
+                  <span class="s-chev" data-icon="chev-down"></span>
+                  <span class="s-sec-title" data-i18n="sec_appearance">Appearance</span>
+                  <span class="s-sec-state" id="s-st-appearance"></span>
+                </summary>
+                <div class="s-sec-body">
+                  <label class="s-row"><span class="s-txt"><span data-i18n="theme_label">Theme</span>
+                      <small class="s-desc" data-i18n="theme_desc">Interface colors, dark or light</small></span>
+                    <select id="s-theme">
+                      <option value="dark" data-i18n="theme_dark">Dark</option>
+                      <option value="light" data-i18n="theme_light">Light</option>
+                    </select>
+                  </label>
+                  <label class="s-row"><span class="s-txt"><span data-i18n="s-accent">Accent color</span>
+                      <small class="s-desc" data-i18n="accent_desc">Highlights, active items and badges</small></span>
+                    <select id="s-accent">
+                      <option value="sage" data-i18n="accent_sage">Sage</option>
+                      <option value="gold" data-i18n="accent_gold">Golden</option>
+                      <option value="grey" data-i18n="accent_grey">Grey</option>
+                      <option value="violet" data-i18n="accent_violet">Violet</option>
+                      <option value="red" data-i18n="accent_red">Red</option>
+                    </select>
+                  </label>
+                  <label class="s-row chk" id="s-bganim-row">
+                    <input type="checkbox" id="s-bganim" checked />
+                    <span class="s-txt"><span data-i18n="s-bg-anim">Animated background</span>
+                      <small class="s-desc" data-i18n="bganim_desc">Slow-moving gradient behind the app — off saves battery</small></span>
+                  </label>
+                  <label class="s-row"><span class="s-txt"><span data-i18n="lang_label">Language</span>
+                      <small class="s-desc" data-i18n="lang_desc">Applied immediately to the whole interface</small></span>
+                    <select id="s-lang">
+                      <option value="en">English</option>
+                      <option value="fr">Français</option>
+                    </select>
+                  </label>
                 </div>
-                <div class="s-row s-snd-opt">
-                  <input type="checkbox" id="s-snd-question" checked />
-                  <label for="s-snd-question" data-i18n="sounds_question">Question / permission</label>
-                  <button type="button" class="s-test" id="s-snd-test-question" data-i18n="sounds_test">Test</button>
+              </details>
+              <details class="s-sec" open>
+                <summary>
+                  <span class="s-chev" data-icon="chev-down"></span>
+                  <span class="s-sec-title" data-i18n="sec_chat">Chat</span>
+                  <span class="s-sec-state" id="s-st-chat"></span>
+                </summary>
+                <div class="s-sec-body">
+                  <label class="s-row"><span class="s-txt"><span data-i18n="sendmode_label">Sending during a turn</span>
+                      <small class="s-desc" data-i18n="sendmode_desc">What Enter and Send do while the agent is busy</small></span>
+                    <select id="s-sendmode">
+                      <option value="queue" data-i18n="sendmode_queue">Queue for the next turn</option>
+                      <option value="steer" data-i18n="sendmode_steer">Inject mid-turn (steer)</option>
+                    </select>
+                  </label>
+                  <label class="s-row chk">
+                    <input type="checkbox" id="s-images" checked />
+                    <span class="s-txt"><span data-i18n="images_label">Show images linked in chat</span>
+                      <small class="s-desc" data-i18n="images_desc">Image attachments rendered inside the conversation</small></span>
+                  </label>
                 </div>
-                <div class="s-row s-snd-opt">
-                  <input type="checkbox" id="s-snd-error" checked />
-                  <label for="s-snd-error" data-i18n="sounds_error">Error / dead session</label>
-                  <button type="button" class="s-test" id="s-snd-test-error" data-i18n="sounds_test">Test</button>
+              </details>
+              <details class="s-sec" open>
+                <summary>
+                  <span class="s-chev" data-icon="chev-down"></span>
+                  <span class="s-sec-title" data-i18n="sec_notif">Notifications</span>
+                  <span class="s-sec-state" id="s-st-notif"></span>
+                </summary>
+                <div class="s-sec-body">
+                  <label class="s-row chk">
+                    <input type="checkbox" id="s-snd" checked />
+                    <span class="s-txt"><span data-i18n="sounds_label">Sound alerts</span>
+                      <small class="s-desc" data-i18n="sounds_desc">Play a sound when a session needs your attention</small></span>
+                  </label>
+                  <div id="s-snd-opts">
+                    <div class="s-row s-snd-opt">
+                      <input type="checkbox" id="s-snd-done" checked />
+                      <label class="s-txt" for="s-snd-done"><span data-i18n="sounds_done">Turn finished</span>
+                        <small class="s-desc" data-i18n="snd_done_desc">An agent completed its turn</small></label>
+                      <button type="button" class="s-test" id="s-snd-test-done" data-i18n="sounds_test">Test</button>
+                    </div>
+                    <div class="s-row s-snd-opt">
+                      <input type="checkbox" id="s-snd-question" checked />
+                      <label class="s-txt" for="s-snd-question"><span data-i18n="sounds_question">Question / permission</span>
+                        <small class="s-desc" data-i18n="snd_question_desc">An agent waits for an answer or an approval</small></label>
+                      <button type="button" class="s-test" id="s-snd-test-question" data-i18n="sounds_test">Test</button>
+                    </div>
+                    <div class="s-row s-snd-opt">
+                      <input type="checkbox" id="s-snd-error" checked />
+                      <label class="s-txt" for="s-snd-error"><span data-i18n="sounds_error">Error / dead session</span>
+                        <small class="s-desc" data-i18n="snd_error_desc">A session failed or stopped</small></label>
+                      <button type="button" class="s-test" id="s-snd-test-error" data-i18n="sounds_test">Test</button>
+                    </div>
+                    <label class="s-row chk s-snd-opt">
+                      <input type="checkbox" id="s-snd-unfocused" />
+                      <span class="s-txt"><span data-i18n="sounds_unfocused">Only when the window is not focused</span>
+                        <small class="s-desc" data-i18n="snd_unfocused_desc">Stay silent while you are already looking at the app</small></span>
+                    </label>
+                    <div class="s-row s-snd-opt"><span class="s-txt"><span data-i18n="sounds_vol">Volume</span>
+                        <small class="s-desc" data-i18n="snd_vol_desc">Applies to every sound alert</small></span>
+                      <input type="range" id="s-snd-vol" min="0" max="100" step="5" />
+                    </div>
+                    <div class="s-row s-snd-opt" id="s-snd-blocked" hidden>
+                      <span data-i18n="sounds_blocked">Audio blocked until you interact — click anywhere or press Test</span>
+                    </div>
+                  </div>
                 </div>
-                <label class="s-row chk s-snd-opt">
-                  <input type="checkbox" id="s-snd-unfocused" />
-                  <span data-i18n="sounds_unfocused">Only when the window is not focused</span>
-                </label>
-                <div class="s-row s-snd-opt"><span data-i18n="sounds_vol">Volume</span>
-                  <input type="range" id="s-snd-vol" min="0" max="100" step="5" />
+              </details>
+              <details class="s-sec" id="s-sec-conn" open>
+                <summary>
+                  <span class="s-chev" data-icon="chev-down"></span>
+                  <span class="s-sec-title" data-i18n="sec_conn">Connections</span>
+                  <span class="s-sec-state" id="s-st-conn"></span>
+                </summary>
+                <div class="s-sec-body">
+                  <label class="s-row chk">
+                    <input type="checkbox" id="s-autoconn" checked />
+                    <span class="s-txt"><span data-i18n="autoconnect_label">Reconnect on launch</span>
+                      <small class="s-desc" data-i18n="autoconnect_desc">Restores the last server connection when the app starts</small></span>
+                  </label>
                 </div>
-                <div class="s-row s-snd-opt" id="s-snd-blocked" hidden>
-                  <span data-i18n="sounds_blocked">Audio blocked until you interact — click anywhere or press Test</span>
+              </details>
+              <details class="s-sec" id="s-sec-update" open>
+                <summary>
+                  <span class="s-chev" data-icon="chev-down"></span>
+                  <span class="s-sec-title" data-i18n="sec_update">Updates</span>
+                  <span class="s-sec-state" id="s-st-update"></span>
+                </summary>
+                <div class="s-sec-body">
+                  <label class="s-row chk">
+                    <input type="checkbox" id="s-rcchan" />
+                    <span class="s-txt"><span data-i18n="rcchan_label">Release candidates (rc)</span>
+                      <small class="s-desc" data-i18n="rcchan_desc">Also propose pre-release builds when checking for updates</small></span>
+                  </label>
+                  <div class="s-row" id="s-update-row">
+                    <span class="s-txt"><span data-i18n="update_label">App update</span>
+                      <small class="s-desc" data-i18n="update_desc">Check GitHub for a newer release</small></span>
+                    <button id="s-checkupdate" type="button" data-i18n="check_update">Check for updates</button>
+                    <button id="s-doupdate" type="button" hidden data-i18n="update_now">Update now</button>
+                    <span id="s-update-status"></span>
+                  </div>
                 </div>
-              </div>
-              <div class="s-row" id="s-update-row">
-                <button id="s-checkupdate" type="button" data-i18n="check_update">Check for updates</button>
-                <span id="s-update-status"></span>
-                <button id="s-doupdate" type="button" hidden data-i18n="update_now">Update now</button>
-              </div>
+              </details>
+              <details class="s-sec" id="s-sec-files">
+                <summary>
+                  <span class="s-chev" data-icon="chev-down"></span>
+                  <span class="s-sec-title" data-i18n="sec_files">Files</span>
+                  <span class="s-sec-state" id="s-st-files"></span>
+                </summary>
+                <div class="s-sec-body">
+                  <label class="s-row"><span class="s-txt"><span data-i18n="enc_label">File encoding</span>
+                      <small class="s-desc" data-i18n="enc_desc">Charset used to read and save files in the viewer</small></span>
+                    <select id="s-encoding">
+                      <option value="utf-8">UTF-8</option>
+                      <option value="windows-1252">Windows-1252 / Latin-1</option>
+                      <option value="utf-16le">UTF-16 LE</option>
+                      <option value="utf-16be">UTF-16 BE</option>
+                    </select>
+                  </label>
+                  <label class="s-row chk">
+                    <input type="checkbox" id="s-mdrender" checked />
+                    <span class="s-txt"><span data-i18n="mdrender_label">Markdown preview</span>
+                      <small class="s-desc" data-i18n="mdrender_desc">Open .md files rendered — the viewer button flips the same default</small></span>
+                  </label>
+                </div>
+              </details>
             </div>
           </div>
           <div id="conn-view" tabindex="-1" hidden>

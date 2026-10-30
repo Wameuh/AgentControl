@@ -29,6 +29,11 @@ import { t, type Key } from "../i18n";
 import type { CompItem } from "../core/types";
 
 const COMP = "agentbacklog";
+const ORCH_COMP = "backlog-orchestrator";
+/** `origin` posé au spawn d'un Manager — constante partagée avec le
+ *  démon (orch.rs `MANAGER_ORIGIN`), comme `COMP` pour le nom du
+ *  composant. */
+const MGR_ORIGIN = "feature:backlog-manager";
 const QUERY = "list";
 const POLL_MS = 4000;
 /** Cadence du badge onglet inactif — assez rare pour rester du bruit de
@@ -37,6 +42,9 @@ const POLL_MS = 4000;
 const IDLE_POLL_MS = 60_000;
 const DONE_KEEP_MS = 24 * 3600 * 1000; // « récentes » : done_at < 24 h
 const DONE_MAX = 8;
+/** Sentinelle du filtre déroulant « items sans repo » — une valeur
+ *  qui ne peut pas être un nom de repo taggé. */
+const REPO_UNTAGGED = "__untagged__";
 
 export interface BacklogDeps {
   /** Clé connKey de la connexion liée — "" = démon par défaut. */
@@ -59,6 +67,10 @@ interface BacklogItem {
   done_at?: string | null;
   dep_status?: string | null;
   depends_on?: number | null;
+  /** Tag workspace/repo de l'item (multi-workspaces) — null = non
+   *  taggé (legacy) : pas de badge affiché, un libellé inventé genre
+   *  « défaut » induirait en erreur (aucun défaut n'est connu). */
+  repo?: string | null;
 }
 
 interface QueryResp {
@@ -89,6 +101,14 @@ export class BacklogView {
   private evTimer: number | undefined;
   private installing = false;
   private filter = "";
+  /** Repo sélectionné dans le filtre déroulant — "" = tous,
+   *  REPO_UNTAGGED = seulement les non taggés. */
+  private repoFilter = "";
+  /** Workspaces routés exposés par l'orchestrateur actif (surface
+   *  « Manager » — un proposable par repo sans session vivante). */
+  private mgrWs: { repo: string; cwd: string }[] = [];
+  private mgrBusy = new Set<string>();
+  private mgrErr: string | null = null;
   /** Signature du dernier rendu — le poll ne rebuild le DOM que si la
    *  file ou la résolution d'agents a réellement changé. */
   private lastSig = "";
@@ -162,6 +182,7 @@ export class BacklogView {
     const conn = this.deps.conn();
     if (!this.deps.componentsCapable(conn)) {
       this.state = { kind: "cap" };
+      this.mgrWs = []; // vieux démon : pas de surface Manager
       this.render();
       return;
     }
@@ -169,11 +190,22 @@ export class BacklogView {
       () => null,
     );
     if (!comps) {
+      this.mgrWs = []; // démon injoignable : boutons « Créer » voués à échouer
       this.state = { kind: "err", msg: t("bl_fetch_err") };
       this.render();
       return;
     }
     const comp = comps.find((c) => c.name === COMP);
+    // Surface « Manager » : workspaces routés exposés par
+    // l'orchestrateur actif (status.workspaces) — détection voulue
+    // = composant agentbacklog déclaré + orchestrateur actif.
+    const orch = comps.find((c) => c.name === ORCH_COMP)?.orchestrator;
+    this.mgrWs =
+      comp && orch?.enabled
+        ? (orch.workspaces ?? [])
+            .filter((w): w is { repo: string; cwd?: string } => !!w.repo)
+            .map((w) => ({ repo: w.repo, cwd: w.cwd ?? "" }))
+        : [];
     if (!comp) {
       this.state = { kind: "absent" };
       this.render();
@@ -251,17 +283,38 @@ export class BacklogView {
 
   private render() {
     const el = $("backlog-list");
+    const st = this.state;
+    // Le choix du filtre repo peut devenir invalide quand la file
+    // change (repo disparu, plus aucun non taggé) → normalisé avant la
+    // signature pour ne pas figer un filtrage fantôme dans lastSig.
+    if (st.kind === "ok") {
+      const rs = new Set(
+        st.items.map((i) => i.repo).filter((r): r is string => !!r),
+      );
+      if (
+        this.repoFilter === REPO_UNTAGGED
+          ? !st.items.some((i) => !i.repo)
+          : this.repoFilter !== "" && !rs.has(this.repoFilter)
+      ) {
+        this.repoFilter = "";
+      }
+    }
     // La résolution agent → titre dépend d'app.lastSessions : la signature
     // l'inclut (re-rendu si une session connue apparaît/change de titre).
     const sig =
       JSON.stringify(this.state) +
       this.filter +
+      this.repoFilter +
       this.installing +
-      JSON.stringify(app.lastSessions.map((s) => [s.id, s.title, s.conn]));
+      JSON.stringify(this.mgrWs) +
+      JSON.stringify([...this.mgrBusy]) +
+      this.mgrErr +
+      JSON.stringify(
+        app.lastSessions.map((s) => [s.id, s.title, s.conn, s.origin, s.state]),
+      );
     if (sig === this.lastSig) return;
     this.lastSig = sig;
 
-    const st = this.state;
     const badge = $("sv-bcount");
     if (st.kind === "ok") {
       const n = st.items.filter((i) => i.status !== "done").length;
@@ -271,8 +324,9 @@ export class BacklogView {
       badge.hidden = true;
     }
 
+    const mgr = this.mgrHtml();
     if (st.kind !== "ok") {
-      this.renderState(el, st);
+      this.renderState(el, st, mgr);
       return;
     }
     const items = st.items;
@@ -295,43 +349,89 @@ export class BacklogView {
     );
 
     const f = this.filter;
+    const rf = this.repoFilter;
     const match = (i: BacklogItem) => {
+      if (rf === REPO_UNTAGGED) {
+        if (i.repo) return false;
+      } else if (rf !== "" && i.repo !== rf) {
+        return false;
+      }
       if (!f) return true;
       const agent = this.agentTitle(i.agent_id) ?? i.agent_id ?? "";
-      const hay = `${i.id ?? ""} ${i.title ?? ""} ${agent}`.toLowerCase();
+      const hay =
+        `${i.id ?? ""} ${i.title ?? ""} ${agent} ${i.repo ?? ""}`.toLowerCase();
       return hay.includes(f);
     };
     const wv = wip.filter(match);
     const pv = pend.filter(match);
     const dv = done.filter(match);
 
-    if (!wv.length && !pv.length && !dv.length) {
-      el.innerHTML = `<div class="sess-none">${esc(t("bl_none_filt"))}</div>`;
-      return;
+    // Filtre par repo — rendu seulement quand ≥2 « files » coexistent
+    // (repos distincts + les non taggés comptés comme un groupe) :
+    // à un seul repo possible il n'apporte rien et encombre l'onglet.
+    // Posé AVANT les sections : un filtre qui masque tout doit rester
+    // visible au-dessus du « aucun item » pour pouvoir être défait.
+    const repos = [
+      ...new Set(items.map((i) => i.repo).filter((r): r is string => !!r)),
+    ].sort();
+    const untagged = items.some((i) => !i.repo);
+    let html = mgr; // section « Managers » en tête, avant filtre et file
+    if (repos.length + (untagged ? 1 : 0) >= 2) {
+      html +=
+        `<div class="bl-repo-filter"><select id="bl-repo-sel" title="${q(esc(t("bl_repo_filter")))}">` +
+        `<option value="">${esc(t("bl_all_repos"))}</option>` +
+        repos
+          .map(
+            (r) =>
+              `<option value="${q(esc(r))}"${r === rf ? " selected" : ""}>${esc(r)}</option>`,
+          )
+          .join("") +
+        (untagged
+          ? `<option value="${REPO_UNTAGGED}"${rf === REPO_UNTAGGED ? " selected" : ""}>${esc(t("bl_repo_none"))}</option>`
+          : "") +
+        `</select></div>`;
     }
-    let html = "";
-    if (wv.length) html += this.section("bl_wip", wv, "wip");
-    if (pv.length) html += this.section("bl_pending", pv, "pend");
-    if (dv.length) html += this.section("bl_done", dv, "done");
-    el.innerHTML = html;
+    if (!wv.length && !pv.length && !dv.length) {
+      el.innerHTML =
+        html + `<div class="sess-none">${esc(t("bl_none_filt"))}</div>`;
+    } else {
+      if (wv.length) html += this.section("bl_wip", wv, "wip");
+      if (pv.length) html += this.section("bl_pending", pv, "pend");
+      if (dv.length) html += this.section("bl_done", dv, "done");
+      el.innerHTML = html;
+    }
+    el.querySelector<HTMLSelectElement>("#bl-repo-sel")?.addEventListener(
+      "change",
+      (e) => {
+        this.repoFilter = (e.target as HTMLSelectElement).value;
+        this.render();
+      },
+    );
     el.querySelectorAll<HTMLElement>(".bl-agent[data-sid]").forEach((b) => {
       b.onclick = () => {
         nav.closeDrawer(); // mobile : la drawer laisserait le chat masqué
         this.deps.openSession(b.dataset.sid!, b.dataset.conn ?? "");
       };
     });
+    this.wireMgr(el);
   }
 
   /** États sans items : chargement, démon trop vieux (capability
    *  `components` absente), composant non déclaré / sans query « list »
    *  (CTA Intégrer), erreur de fetch, file vide. */
-  private renderState(el: HTMLElement, st: Exclude<State, { kind: "ok" }>) {
+  private renderState(
+    el: HTMLElement,
+    st: Exclude<State, { kind: "ok" }>,
+    pre: string,
+  ) {
     if (st.kind === "absent" || st.kind === "noquery") {
       el.innerHTML =
+        pre +
         `<div class="sess-none">${icon("warn")} ${esc(t(st.kind === "absent" ? "bl_absent" : "bl_noquery"))}</div>` +
         `<button class="bl-cta" id="bl-install"${this.installing ? " disabled" : ""}>` +
         `${icon(this.installing ? "loader" : "plus")} ${esc(this.installing ? t("bl_installing") : t("bl_integrate"))}</button>`;
       $("bl-install").onclick = () => void this.install();
+      this.wireMgr(el);
       return;
     }
     const [ic, txt, warn] =
@@ -343,7 +443,98 @@ export class BacklogView {
             ? (["warn", st.msg, true] as const)
             : (["check", t("bl_empty"), false] as const);
     el.innerHTML =
+      pre +
       `<div class="sess-none${warn ? " warn" : ""}">${icon(ic)} ${esc(txt)}</div>`;
+    this.wireMgr(el);
+  }
+
+  // --- Surface « Manager » ---------------------------------------------------
+
+  /** Session Manager vivante du workspace `repo` — provenance
+   *  `feature:backlog-manager` + titre « Manager · <repo> » ; dead /
+   *  interrupted = respawn proposable. */
+  private mgrSession(repo: string) {
+    const title = `Manager · ${repo}`;
+    const conn = this.deps.conn();
+    return app.lastSessions.find(
+      (s) =>
+        (s.conn ?? "") === conn && // lastSessions est fusionné multi-démons
+        s.origin === MGR_ORIGIN &&
+        s.title === title &&
+        s.state !== "dead" &&
+        s.state !== "interrupted",
+    );
+  }
+
+  /** Section « Managers » : une ligne par workspace routé — bouton
+   *  « Ouvrir » vers la session vivante, « Créer » sinon. Vide quand
+   *  l'orchestrateur n'est pas actif (ou backlog non déclaré). */
+  private mgrHtml(): string {
+    if (!this.mgrWs.length) return "";
+    let rows = "";
+    for (const w of this.mgrWs) {
+      const s = this.mgrSession(w.repo);
+      const busy = this.mgrBusy.has(w.repo);
+      rows +=
+        `<div class="bl-item" title="${q(esc(w.cwd))}">` +
+        `<span class="bl-title">${icon("bot")} Manager · ${esc(w.repo)}</span>` +
+        (s
+          ? `<button class="bl-cta" data-mgr-open="${q(esc(s.id))}" ` +
+            `data-conn="${q(esc(s.conn ?? ""))}">${esc(t("bl_mgr_open"))}</button>`
+          : `<button class="bl-cta" data-mgr-spawn="${q(esc(w.repo))}"${busy ? " disabled" : ""}>` +
+            `${icon(busy ? "loader" : "plus")} ${esc(busy ? t("bl_mgr_busy") : t("bl_mgr_create"))}</button>`) +
+        `</div>`;
+    }
+    if (this.mgrErr) {
+      rows += `<div class="sess-none warn">${icon("warn")} ${esc(this.mgrErr)}</div>`;
+    }
+    return (
+      `<div class="bl-sec"><div class="grp-head">${esc(t("bl_mgr_head"))}</div>` +
+      rows +
+      `</div>`
+    );
+  }
+
+  /** Boutons de la section Manager — rebind après chaque innerHTML. */
+  private wireMgr(el: HTMLElement) {
+    el.querySelectorAll<HTMLElement>("[data-mgr-open]").forEach((b) => {
+      b.onclick = () => {
+        nav.closeDrawer();
+        this.deps.openSession(b.dataset.mgrOpen!, b.dataset.conn ?? "");
+      };
+    });
+    el.querySelectorAll<HTMLElement>("[data-mgr-spawn]").forEach((b) => {
+      b.onclick = () => void this.spawnManager(b.dataset.mgrSpawn!);
+    });
+  }
+
+  /** CTA « Créer » : `manager_spawn` démon (idempotent côté démon —
+   *  un Manager vivant est renvoyé plutôt que doublonné), puis focus
+   *  sur la session. Erreur affichée dans la section, la file reste. */
+  private async spawnManager(repo: string) {
+    if (this.mgrBusy.has(repo)) return;
+    this.mgrBusy.add(repo);
+    this.mgrErr = null;
+    this.render();
+    const conn = this.deps.conn();
+    const r = await call<{ session?: string }>("manager_spawn", {
+      conn,
+      repo,
+    }).then(
+      (v) => ({ v, err: null as string | null }),
+      (e: unknown) => ({ v: null, err: String(e) }),
+    );
+    this.mgrBusy.delete(repo);
+    if (r.err) {
+      this.mgrErr = `${t("bl_mgr_err")} — ${r.err}`;
+      this.render();
+      return;
+    }
+    this.render();
+    if (r.v?.session) {
+      nav.closeDrawer(); // mobile : la drawer laisserait le chat masqué
+      this.deps.openSession(r.v.session, conn);
+    }
   }
 
   /** Titre de la session portant cet agent_id — null si inconnue/absente. */
@@ -382,6 +573,9 @@ export class BacklogView {
       html +=
         `<div class="bl-item" title="${q(esc(i.title ?? ""))}">` +
         `<span class="bl-id">#${esc(String(id))}</span>` +
+        (i.repo
+          ? `<span class="badge bl-repo" title="${q(esc(i.repo))}">${esc(i.repo)}</span>`
+          : "") +
         `<span class="bl-title">${this.deps.hl(i.title ?? "")}</span>` +
         (blocked
           ? `<span class="bl-blocked" title="${q(esc(t("bl_blocked", { id: String(i.depends_on) })))}">${icon("lock")}</span>`

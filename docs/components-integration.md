@@ -30,7 +30,7 @@ intégré au démon ; tout le reste vit à côté, supervisé par d'autres moyen
 
 | Programme | Rôle | Supervision actuelle | État/log |
 | --- | --- | --- | --- |
-| `backlog-orchestrator.py` | poll 60 s : spawn les workers `Backlog-W*` (acctl spawn, devin/bypass/swe-2-high, groupe AgentControl), nudge les workers idle avec PR ouverte/tâche wip, supprime les sessions soldées, release les wip orphelins ; ledger worker→{tâches,PRs} dans son state | `~/.supervisor/conf.d/backlog-orchestrator.conf` (autostart+autorestart, env `AGENTCONTROL_TCP=127.0.0.1:7331`) | `~/.agentbacklog/orchestrator-{state.json,log,stdout.log,stderr.log}` ; lock flock `orchestrator.lock` ; pause via `orchestrator.pause` ; CLI `--status/--once/--dry-run` |
+| `backlog-orchestrator.py` | poll 60 s : spawn les workers `Backlog-W*` (acctl spawn, devin/bypass/swe-2-high, groupe AgentControl), nudge les workers idle avec PR ouverte/tâche wip, supprime les sessions soldées, release les wip orphelins ; ledger worker→{tâches,PRs} dans son state ; le titre suit l'item wip et l'orchestrateur natif journalise le contenu de l'item popé en `user_message` `origin` (post présentationnel, jamais livré à l'agent ; suivi `posted_wip` dans le state — une reprise depuis le script Python, qui ne préserve pas ce champ dans `assignments`, reposte une fois le wip courant de chaque worker) | `~/.supervisor/conf.d/backlog-orchestrator.conf` (autostart+autorestart, env `AGENTCONTROL_TCP=127.0.0.1:7331`) | `~/.agentbacklog/orchestrator-{state.json,log,stdout.log,stderr.log}` ; lock flock `orchestrator.lock` ; pause via `orchestrator.pause` ; CLI `--status/--once/--dry-run` |
 | `agentbacklog` (CLI) | file FIFO de features en SQLite — transactions atomiques, **pas de démon** | `uv tool` dans `~/.local/bin` (repo `github.com/Wameuh/AgentBacklog`) | `~/.agentbacklog/backlog.db` |
 | `pr-db` | registre PR local sqlite — **legacy**, remplacé par le registre intégré (feat #59) | `~/.local/bin` | `~/.agentcontrol/prs.db` |
 | `graphify`, `graphify-mcp` | outils uv externes | `~/.local/bin` | — |
@@ -161,7 +161,7 @@ avec l'`id` correctement extrait, donc l'appel échoue proprement) :
 
 Capability : `daemon_status.components = true` → le client gate ses
 boutons comme pour `terminal`/`first_post`. Le commit qui ajoute les
-ReqKind porte le mot-clé `(minor)` (nouvelle surface client↔démon).
+ReqKind porte le mot-clé `(sync)` (nouvelle surface client↔démon).
 
 Push : pas de canal d'events daemon-wide (le `Subscribe` actuel est
 par-session) — le client **poll** (`ListComponents` + `ListSessions`,
@@ -201,7 +201,7 @@ pour les arêtes ; si #21 a déjà tranché une forme (`origin`) au moment
 où #24 lande, elle fait foi et le diagramme s'y aligne — sinon c'est
 le choix de #24 (`created_by`) qui fixe le nom consommé par #26.
 À intégrer au modèle dès #24 pour éviter une seconde évolution proto
-(un second cycle `(minor)`).
+(un second cycle `(sync)`).
 
 ### 2.4 acctl
 
@@ -239,6 +239,14 @@ version, doc) étant récupérées depuis sa source upstream.
   Exemples :
   - `agentbacklog` : `uv tool install git+https://github.com/Wameuh/AgentBacklog`
     (install upstream documentée) + spec `tool`.
+  - `agentreviewer` : `uv tool install git+https://github.com/Wameuh/AgentReviewer`
+    (packagé upstream : pyproject + console script) + seed `config.toml`
+    si absente + spec `process` (`agent-reviewer --watch`, boucle
+    in-process — il reçoit `AGENTCONTROL_SOCK`/`AGENTCONTROL_TCP`
+    injectés et crée ses reviews en sessions
+    `origin=component:agentreviewer`, groupe « AgentReviewer » ; SIGTERM
+    du `component stop` atteint le vrai process, pas d'orphelin de
+    boucle externe).
   - `backlog-orchestrator` : le script vit aujourd'hui hors repo dans
     `~/.local/bin` → **recommandation : le versionner** (repo
     `Wameuh/AgentBacklog` ou `contrib/` d'AgentControl) pour que la
@@ -309,8 +317,27 @@ La pièce « vivante » : **graphe des programmes et des sessions**.
 | acctl | `tool` | idem |
 | pr-db | externe/legacy | en fin de transition (feat #59) — déclarable en `external` si encore présent |
 | supervisord / sshd / cron | `external` | infra du conteneur — jamais managés (le démon ne touche pas à son propre superviseur) |
-| review bot | `external` | autre serveur — healthcheck optionnel |
+| agentreviewer | **`process` managé** | watcher du même démon qu'il pilote — env `AGENTCONTROL_*` injectée, reviews en sessions groupées (un watcher d'un autre démon/hôte resterait `external`) |
 | le démon lui-même | nœud racine, pas un composant | le système ne se supervise pas lui-même |
+
+### 2.9 « Manager » — intendance backlog par workspace
+
+Quand le composant `agentbacklog` est déclaré **et** l'orchestrateur
+natif actif (`enabled`), le démon expose `orchestrator.workspaces` —
+le routing **repo → cwd** (`[backlog_orchestrator] repo_workspaces`,
+défaut `{"AgentControl": "/workspace"}` hérité du `REPO_WORKSPACES` du
+script) — et la vue Backlog propose un Manager par entrée : bouton
+« Créer » → RPC `manager_spawn{repo}` → session `Manager · <repo>`
+(`origin: feature:backlog-manager`, prompt `MANAGER_PROMPT` intégré
+surchargeable via `manager_prompt`). Le Manager est une intendance —
+transformer des demandes en items structurés (`--add --repo`
+`--depends-on`, découpage ordonné), répondre aux questions d'état,
+ajuster la file — jamais un worker : pas de `--pop`/`--done`, et son
+titre échappe au `title_prefix` (en plus de l'exclusion `origin` du
+filtre workers → jamais nudge/rm/garde PR). Spawn idempotent
+(`manager_lock` + dédupe origin+titre+état vivant) — un Manager
+existant est renvoyé tel quel ; `rename_session` casse la dédup
+(assumé : le titre est le contrat).
 
 ---
 
@@ -324,7 +351,7 @@ La pièce « vivante » : **graphe des programmes et des sessions**.
    `AGENTCONTROL_HOME` jetable — jamais sur le démon live.
 2. **Compat proto** : nouveaux `ReqKind` = extension sûre (vieux client
    ignore ; vieux démon → `parse:` propre avec id extrait). Le client
-   gate sur `daemon_status.components`. Mot-clé `(minor)` sur la PR
+   gate sur `daemon_status.components`. Mot-clé `(sync)` sur la PR
    proto+daemon (incompat client↔démon = auto-update).
 3. **Sécurité** : le démon ne bind que loopback **par défaut** —
    socket unix 0600 et `bind_http` enforcé loopback ; `bind_tcp` reste

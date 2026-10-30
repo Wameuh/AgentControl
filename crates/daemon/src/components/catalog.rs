@@ -107,6 +107,135 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 RecipeStep::UpsertSpec,
             ],
         },
+        CatalogEntry {
+            name: "agentreviewer".into(),
+            description: "Watcher GitHub → reviews de PR en sessions du \
+                          démon (détecte les comments trigger, file \
+                          d'attente, spawn groupé « AgentReviewer »)"
+                .into(),
+            repo: Some("Wameuh/AgentReviewer".into()),
+            homepage: Some("https://github.com/Wameuh/AgentReviewer".into()),
+            suggested_spec: ComponentSpec {
+                name: "agentreviewer".into(),
+                kind: ComponentKind::Process,
+                // `--watch` = boucle in-process upstream (rythme du
+                // timer systemd qu'il remplace) — argv direct, pas de
+                // sh : un `component stop` SIGTERMe le vrai process
+                // (la passe en cours est interrompue, sans handler
+                // upstream — mais aucun fils orphelin de boucle
+                // externe). AGENTCONTROL_SOCK/TCP sont injectés au
+                // spawn : il trouve le démon sans config réseau.
+                command: vec!["agent-reviewer".into(), "--watch".into()],
+                env: HashMap::new(),
+                cwd: None,
+                // Config.toml à éditer avant le 1er run utile → l'auto-
+                // start reste un opt-in explicite, pas un crash-loop.
+                autostart: false,
+                restart: RestartPolicy::OnFailure,
+                restart_sec: 5,
+                // Sonde sentinelle plutôt que pid-vivant : la config
+                // seedée garde ses placeholders (`repo = "owner/repo"`)
+                // qui passent la validation `req()` du watcher — sans
+                // elle un composant « healthy » pollerait un repo
+                // inexistant. Ancrée sur la ligne *active* : un
+                // `owner/repo` laissé en commentaire ne fige pas le
+                // verdict ; `test -r` évite « healthy » sur un fichier
+                // illisible. Absente/illisible/placeholder → degraded ;
+                // le cycle de vie du process reste suivi par proc.rs.
+                healthcheck: Healthcheck::Command {
+                    argv: vec![
+                        "sh".into(),
+                        "-c".into(),
+                        "test -r ~/.config/agentreviewer/config.toml && \
+                         ! grep -q \
+                           '^[[:space:]]*repo[[:space:]]*=[[:space:]]*\"owner/repo\"' \
+                           ~/.config/agentreviewer/config.toml"
+                            .into(),
+                    ],
+                },
+                description: Some(
+                    "Watcher GitHub → reviews de PR en sessions du démon"
+                        .into(),
+                ),
+                queries: HashMap::from([
+                    (
+                        "state".into(),
+                        vec![
+                            "cat".into(),
+                            "~/.local/state/agentreviewer/state.json".into(),
+                        ],
+                    ),
+                    (
+                        "log".into(),
+                        vec![
+                            "tail".into(),
+                            "-n".into(),
+                            "80".into(),
+                            "~/.local/state/agentreviewer/watcher.log".into(),
+                        ],
+                    ),
+                ]),
+            },
+            detect: CatalogDetect {
+                bin: Some("agent-reviewer".into()),
+                // Posé par install.sh ou la recette dans ~/.local/bin.
+                path: Some("~/.local/bin/agent-reviewer".into()),
+            },
+            recipe: vec![
+                // Packagé upstream (pyproject + console script
+                // `agent-reviewer`, requires-python ≥3.11 géré par uv).
+                // `--force` est requis : l'install.sh historique posait
+                // le script dans ~/.local/bin hors uv → sans lui uv
+                // refuse d'écraser l'exécutable étranger ; sur un outil
+                // déjà managé il force le reinstall = vrai upgrade.
+                RecipeStep::Run {
+                    argv: vec![
+                        "uv".into(),
+                        "tool".into(),
+                        "install".into(),
+                        "--force".into(),
+                        "git+https://github.com/Wameuh/AgentReviewer".into(),
+                    ],
+                },
+                // Seed de la config si absente — jamais d'écrasement
+                // (`test -f` garde les éditions d'une ré-install).
+                RecipeStep::Run {
+                    argv: vec![
+                        "sh".into(),
+                        "-c".into(),
+                        "set -e; \
+                         mkdir -p ~/.config/agentreviewer; \
+                         test -f ~/.config/agentreviewer/config.toml || \
+                           curl -fsSL https://raw.githubusercontent.com/Wameuh/AgentReviewer/main/config.example.toml \
+                             -o ~/.config/agentreviewer/config.toml; \
+                         chmod 600 ~/.config/agentreviewer/config.toml"
+                            .into(),
+                    ],
+                },
+                RecipeStep::UpsertSpec,
+                RecipeStep::Note {
+                    text: "Éditez ~/.config/agentreviewer/config.toml \
+                           (reposée par l'install si absente — la sonde \
+                           restera « degraded » tant que ses placeholders \
+                           `owner/repo` seront en place) puis démarrez \
+                           le composant — en `process` managé le watcher \
+                           reçoit AGENTCONTROL_SOCK/TCP injectés et \
+                           crée ses reviews en sessions du démon \
+                           (origin component:agentreviewer, group \
+                           AgentReviewer). La config est chargée au \
+                           démarrage du watcher — après édition, \
+                           `component restart agentreviewer` pour \
+                           l'appliquer. Si le timer systemd upstream \
+                           était activé, désactivez-le \
+                           (`systemctl --user disable --now \
+                           agentreviewer-watch.timer`) pour éviter un \
+                           double polling — le flock interne les \
+                           sérialiserait mais gaspillerait des appels \
+                           API GitHub."
+                        .into(),
+                },
+            ],
+        },
         // NB : l'orchestrateur backlog n'a PAS d'entrée catalogue — il
         // est porté en interne par le démon (server/orch.rs, composant
         // `backlog-orchestrator` opt-in) et non plus comme process
@@ -500,6 +629,35 @@ fn home_dir() -> Result<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .context("HOME absent de l'environnement du démon")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Chaque entrée du catalogue embarque une spec qui passerait la
+    /// validation d'upsert — une entrée cassée (nom invalide, argv0
+    /// superviseur, query malformée…) casse l'intégration dès la seed.
+    #[test]
+    fn les_specs_du_catalogue_sont_upsertables() {
+        for e in CATALOG.iter() {
+            super::super::check_editable(&e.suggested_spec)
+                .unwrap_or_else(|err| panic!("spec catalogue « {} » : {err}", e.name));
+        }
+        let ar = CATALOG
+            .iter()
+            .find(|e| e.name == "agentreviewer")
+            .expect("entrée agentreviewer absente du catalogue");
+        assert_eq!(ar.suggested_spec.kind, ComponentKind::Process);
+        assert!(!ar.suggested_spec.command.is_empty());
+        // Le `process` managé découvre le démon via l'env injectée —
+        // la spec ne doit pas porter d'endpoint dupliqué qui dériverait.
+        assert!(!ar
+            .suggested_spec
+            .env
+            .keys()
+            .any(|k| k.starts_with("AGENTCONTROL_")));
+    }
 }
 
 /// Derniers `STEP_TAIL` octets de stderr (sinon stdout), UTF-8

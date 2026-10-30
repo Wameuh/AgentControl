@@ -14,7 +14,7 @@ import { dotCls, dotIcon, setAppIcon } from "./status";
 import { icon } from "../ui/icons";
 import { bindCtx, hideSessCtx, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
-import { PrListView, prBadge, repoLabel, type PrRow } from "./prs";
+import { PrListView, prBadge, prUnresolved, repoLabel, type PrRow } from "./prs";
 import { BacklogView } from "./backlog";
 import type { ChatView } from "./chat-view";
 import type { ConnectionManager } from "./connections";
@@ -25,6 +25,7 @@ import type { NewSessionDialog } from "./new-session";
 import type { SettingsPanel } from "./settings";
 import type { ConnView } from "./conn-view";
 import type { ComponentsPanel } from "./components";
+import type { MapView } from "./map-view";
 
 const DTYPE = "application/x-ac-session";
 
@@ -84,6 +85,7 @@ export class Sidebar {
   private settings!: SettingsPanel;
   private connView!: ConnView;
   private comps!: ComponentsPanel;
+  private map!: MapView;
 
   /** PRs ouvertes par session ("conn\0sid") — rempli par refresh ;
    *  vide si le démon ne connaît pas pr_list (vieux démon → pas de badge). */
@@ -144,7 +146,7 @@ export class Sidebar {
   }
   private ctx = $("sctx");
 
-  bind(conns: ConnectionManager, groups: GroupStore, newSess: NewSessionDialog, chat: ChatView, settings: SettingsPanel, connView: ConnView, comps: ComponentsPanel) {
+  bind(conns: ConnectionManager, groups: GroupStore, newSess: NewSessionDialog, chat: ChatView, settings: SettingsPanel, connView: ConnView, comps: ComponentsPanel, map: MapView) {
     this.conns = conns;
     this.groups = groups;
     this.newSess = newSess;
@@ -152,6 +154,7 @@ export class Sidebar {
     this.settings = settings;
     this.connView = connView;
     this.comps = comps;
+    this.map = map;
     this.prsView.bind({
       openSession: (id) => this.openSession(id),
       connState: (k) => this.conns.state(k),
@@ -162,22 +165,29 @@ export class Sidebar {
       conn: () => this.conns.knownConns()[0] ?? "",
       componentsCapable: (c) => this.conns.cap(c)?.components === true,
       openSession: (id, conn) => {
-        this.settings.close();
-        this.connView.close();
+        this.closeChatOverlays();
         void this.chat.open(id, false, conn);
       },
       hl: (txt) => this.hl(txt),
     });
   }
 
-  /** Ouvrir une session depuis la sidebar = quitter les overlays de
-   *  #chat (options et vue connexion la recouvrent — la session
-   *  s'afficherait dessous, invisible ; close() est un no-op quand
-   *  l'overlay est déjà fermé). */
-  private openSession(id: string): Promise<void> {
+  /** Ferme tous les overlays plein #chat — la navigation vers une
+   *  session prime : rien ne persiste par-dessus la discussion
+   *  demandée (diagramme inclus). close() est un no-op quand
+   *  l'overlay est déjà fermé. */
+  private closeChatOverlays() {
     this.settings.close();
     this.connView.close();
     this.comps.close();
+    this.map.close();
+  }
+
+  /** Ouvrir une session depuis la sidebar = quitter les overlays de
+   *  #chat (paramètres, vue connexion, composants, diagramme la
+   *  recouvrent — la session s'afficherait dessous, invisible). */
+  private openSession(id: string): Promise<void> {
+    this.closeChatOverlays();
     return this.chat.open(id);
   }
 
@@ -300,6 +310,9 @@ export class Sidebar {
     this.prBySess.clear();
     for (const p of rows) {
       if (!p.session || p.status === "merged" || p.status === "closed") continue;
+      // « Non résoluble » = probable fantôme — visible dans l'onglet
+      // mais pas en badge de session (rien d'actionnable dessus).
+      if (prUnresolved(p)) continue;
       const k = `${p.conn ?? "default"}${p.session}`;
       if (!this.prBySess.has(k)) this.prBySess.set(k, []);
       this.prBySess.get(k)!.push(p);
@@ -329,6 +342,16 @@ export class Sidebar {
     if (this.view === "repos" || this.prTickBusy) return;
     this.prTickBusy = true;
     try {
+      // Le badge suit la forge, pas le registre figé : tant que des PRs
+      // encore « open/draft » sont affichées sur des lignes session, on
+      // sync avant de relire — sinon un merge hors session (web GitHub,
+      // gh externe, automation) laissait le badge collé indéfiniment
+      // (pr_sync ne tournait que sur l'onglet Repos). Pas d'appel quand
+      // rien n'est tracké : zéro trafic forge sans badge. Le démon
+      // throttle (45 s) + déduplique — N clients = 1 round/min. Délai
+      // de disparition après merge : ≤ ~1 tick (pas d'état « merged »
+      // transitoire — le retrait est le comportement choisi/documenté).
+      if (this.prBySess.size > 0) await this.prSyncRequest();
       const r = await call<PrRow[]>("pr_list").then(
         (rows) => ({ rows, failed: false }),
         () => ({ rows: [] as PrRow[], failed: true }),
@@ -438,28 +461,34 @@ export class Sidebar {
     }
   }
 
+  /** Un `pr_sync` borné — partagé par le cycle de l'onglet Repos et le
+   *  tick badge : vieux démon sans la méthode → `prSyncDead` coupe la
+   *  demande (réarmé à l'activation de l'onglet). */
+  private async prSyncRequest() {
+    if (this.prSyncDead) return;
+    try {
+      const r = await call<Record<string, { error?: string }>>("pr_sync");
+      // Fusion multi-conns : les échecs remontent en {conn:{error}} —
+      // 100% « méthode inconnue » = tous les démons sont trop vieux
+      // pour pr_sync → on arrête de demander (une erreur réseau
+      // n'arme pas le flag : la retente passe au prochain tick).
+      const errs = Object.values(r ?? {}).map((x) => String(x?.error ?? ""));
+      if (
+        errs.length > 0 &&
+        errs.every((e) => /inconnue|unknown|variant/i.test(e))
+      ) {
+        this.prSyncDead = true;
+      }
+    } catch (e) {
+      if (/inconnue|unknown|variant/i.test(String(e))) this.prSyncDead = true;
+    }
+  }
+
   /** pr_sync puis refresh : le premier rendu (refresh() immédiat, à
    *  l'ouverture de l'onglet) montre le registre courant ; celui-ci
    *  reflète les états live dès que la forge a répondu. */
   private async prSyncCycle() {
-    if (!this.prSyncDead) {
-      try {
-        const r = await call<Record<string, { error?: string }>>("pr_sync");
-        // Fusion multi-conns : les échecs remontent en {conn:{error}} —
-        // 100% « méthode inconnue » = tous les démons sont trop vieux
-        // pour pr_sync → on arrête de demander (une erreur réseau
-        // n'arme pas le flag : la retente passe au prochain tick).
-        const errs = Object.values(r ?? {}).map((x) => String(x?.error ?? ""));
-        if (
-          errs.length > 0 &&
-          errs.every((e) => /inconnue|unknown|variant/i.test(e))
-        ) {
-          this.prSyncDead = true;
-        }
-      } catch (e) {
-        if (/inconnue|unknown|variant/i.test(String(e))) this.prSyncDead = true;
-      }
-    }
+    await this.prSyncRequest();
     if (this.view === "repos") await this.refresh();
   }
 
@@ -950,7 +979,7 @@ export class Sidebar {
       ? `<span class="sess-pr" title="${q(esc(prs.map((p) => `${repoLabel(p)} ${prBadge(p)}${p.title ? ` — ${p.title}` : ""}${p.status ? ` (${p.status})` : ""}`).join("\n")))}">${prs.map((p) => prBadge(p)).join(" ")}</span>`
       : "";
     const originHtml = s.origin
-      ? `<span class="sess-origin" title="${q(esc(t("origin_tip", { origin: s.origin })))}">${t("via")} ${this.hl(s.origin)}</span>`
+      ? `<span class="sess-origin" title="${q(esc(t("origin_tip", { origin: s.origin })))}">${t("via")} ${this.hl(s.origin.replace(/^component:/, "") || s.origin)}</span>`
       : "";
     div.innerHTML = `<span class="dot st-${dotCls(s.state)}" title="${q(esc(s.state))}">${dotIcon(s.state)}</span><span class="t">${this.hl(s.title)}</span>${originHtml}${prHtml}<span class="a">${this.hl(s.agent)}</span><button class="sess-del" title="Supprimer">${icon("close")}</button>`;
     div.onclick = () => {
@@ -1021,9 +1050,12 @@ export class Sidebar {
     const sv = localStorage.getItem("ac-sideview");
     this.view = sv === "repos" || sv === "backlog" ? sv : "agents";
     this.applyView();
-    $("sv-agents").onclick = () => this.setView("agents");
-    $("sv-repos").onclick = () => this.setView("repos");
-    $("sv-backlog").onclick = () => this.setView("backlog");
+    // Sélection d'un autre onglet que « Diagramme » = navigation : la
+    // vue diagramme se ferme, comme le font les clics session (elle ne
+    // persiste pas par-dessus le contenu demandé — no-op si déjà fermée).
+    $("sv-agents").onclick = () => { this.map.close(); this.setView("agents"); };
+    $("sv-repos").onclick = () => { this.map.close(); this.setView("repos"); };
+    $("sv-backlog").onclick = () => { this.map.close(); this.setView("backlog"); };
 
     // Badge « Repos » tenu à jour hors de l'onglet : pr_list = lecture
     // locale du registre (léger — pas de sync forge), cadence 60 s.
@@ -1114,11 +1146,27 @@ export class Sidebar {
     // Largeur persistée dans localStorage.
     const bar = $("sidebar");
     const grip = $("sidebar-resize");
-    const clamp = (x: number) => Math.min(520, Math.max(180, x));
+    // Pas de plafond arbitraire : la sidebar peut prendre toute la
+    // fenêtre moins un plancher pour le contenu principal (320 = le
+    // min-width des blocs de chat). Sur fenêtre très étroite le cap
+    // reste ≥ le min de la sidebar (elle ne compresse pas sous 180).
+    const clamp = (x: number) =>
+      Math.min(Math.max(180, window.innerWidth - 320), Math.max(180, x));
+    const applyW = (w: number) => {
+      bar.style.width = w + "px";
+      bar.style.minWidth = w + "px";
+    };
     const saved = Number(localStorage.getItem("sidebar-w"));
-    if (saved) {
-      bar.style.width = clamp(saved) + "px";
-      bar.style.minWidth = clamp(saved) + "px";
+    if (saved && !isAndroid()) applyW(clamp(saved));
+    // Fenêtre rétrécie : re-plafonner l'affichage — sinon la poignée
+    // sort de l'écran et la sidebar devient irréductible. localStorage
+    // n'est pas touché : la largeur voulue survit au ré-agrandissement.
+    // Android : la sidebar est un drawer 100vw (grip caché) — un
+    // re-plafonnement au resize le casserait (rotation, clavier).
+    if (!isAndroid()) {
+      window.addEventListener("resize", () => {
+        if (bar.offsetWidth) applyW(clamp(bar.offsetWidth));
+      });
     }
     grip.addEventListener("mousedown", (e) => {
       e.preventDefault();
@@ -1131,9 +1179,7 @@ export class Sidebar {
           up(ev);
           return;
         }
-        const w = clamp(ev.clientX);
-        bar.style.width = w + "px";
-        bar.style.minWidth = w + "px";
+        applyW(clamp(ev.clientX));
       };
       const up = (ev: MouseEvent) => {
         document.removeEventListener("mousemove", move);

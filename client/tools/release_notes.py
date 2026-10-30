@@ -7,9 +7,9 @@ next_release dans le cycle courant.
 Version affichée = prochaine release calculée comme release-bump
 (version.yml) : borne = dernier commit `chore: bump version` dont le tag
 vX.Y.Z existe, sinon dernier tag semver ; niveau = mot-clé parenthésé le
-plus fort du range `(major)` > `(minor)`|`(sync)` > patch. Toute
-divergence entre les deux implémentations doit être corrigée en les
-gardant synchrones.
+plus fort du range `(major)` > `(sync)` > patch — `(minor)` déprécié =
+patch. La règle vit dans bump_version.detect_level (source de vérité
+partagée avec release-bump).
 
 Le bloc généré est encadré de marqueurs `release-notes:start/end` : en
 mode --merge-into, seule la zone entre marqueurs est remplacée — tout
@@ -26,6 +26,8 @@ import os
 import re
 import subprocess
 import sys
+
+from bump_version import detect_level
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -50,7 +52,7 @@ KEYWORD = re.compile(r"\s*\((?:major|minor|sync|patch)\)", re.IGNORECASE)
 PROCESS = """<details><summary>Release process (internal)</summary>
 
 To release: mark this PR **ready** → `release-bump` pushes the version
-bump (`latest tag + level`, `(minor)`/`(major)`/`(sync)` keywords from the
+bump (`latest tag + level`, `(sync)`/`(major)` keywords from the
 cycle's commits) → the 5 checks run on the bumped head and a
 `v<NEXT>-rc.<k>` tag triggers the **prerelease** build — installable from
 the app via auto-update by enabling the rc channel in settings, to test
@@ -85,12 +87,9 @@ def find_bound(ref):
 
 
 def bump_level(rev_range):
-    msgs = git("log", "--format=%B", rev_range)
-    if re.search(r"\(major\)", msgs, re.IGNORECASE):
-        return "major"
-    if re.search(r"\((?:minor|sync)\)", msgs, re.IGNORECASE):
-        return "minor"
-    return "patch"
+    # Règle mots-clés → niveau : detect_level de bump_version.py fait
+    # foi (version.yml l'appelle en --detect-level) — pas de duplicata.
+    return detect_level(git("log", "--format=%B", rev_range))
 
 
 def next_version(rev_range):

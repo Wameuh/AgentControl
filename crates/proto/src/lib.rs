@@ -403,6 +403,33 @@ fn default_state() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Messages épinglés (pinned.json dans le dossier de session)
+// ---------------------------------------------------------------------------
+
+/// Un message épinglé : référence au seq de l'event + contenu copié au
+/// moment du pin. Le contenu copié survit au vidage du journal (/clear,
+/// /new, rebind, compaction) — l'épinglé reste lisible même quand son
+/// ancre est morte ; le couple (seq, ts) sert de détecteur : un event
+/// retrouvé au même seq avec un autre ts appartient à un cycle plus
+/// récent, pas au message épinglé (`live` recalculé au list).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PinEntry {
+    /// seq de l'event épinglé dans le journal de son cycle.
+    pub seq: u64,
+    /// ts de l'event au moment du pin — discriminant anti-collision de
+    /// seq après un reset du journal (les seqs repartent à 1).
+    pub ts: String,
+    /// Type d'event (type_tag : user_message, agent_text, …).
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Contenu textuel copié (searchable_text borné) — affiché dans le
+    /// panneau même si l'event source a disparu du journal.
+    pub text: String,
+    /// Horodatage ISO du pin.
+    pub pinned_at: String,
+}
+
+// ---------------------------------------------------------------------------
 // Registre PR ↔ session (prs.json à la racine du démon)
 // ---------------------------------------------------------------------------
 
@@ -446,11 +473,22 @@ pub struct PrEntry {
     /// "manual" (pr_track) — prioritaire — ou "detected" (scan auto).
     #[serde(default)]
     pub via: String,
+    /// Syncs consécutifs sans lecture live (hôte/repo injoignable,
+    /// référence absente). Au-delà de `PR_UNRESOLVED_AFTER` le client
+    /// affiche l'entrée « non résoluble » ; remis à 0 à la première
+    /// lecture réussie.
+    #[serde(default)]
+    pub sync_fails: u32,
     #[serde(default)]
     pub created_at: String,
     #[serde(default)]
     pub updated_at: String,
 }
+
+/// Seuil d'échecs de sync consécutifs au-delà duquel une entrée est
+/// présentée « non résoluble » (repo fantôme, hôte mort). Réinitialisé
+/// à la première lecture live — un hôte revenu démasque l'entrée.
+pub const PR_UNRESOLVED_AFTER: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Protocole client -> daemon : { "id": n, "req": "...", ... }
@@ -485,6 +523,13 @@ pub enum ReqKind {
         /// dégradation douce).
         #[serde(default)]
         origin: Option<String>,
+        /// Groupe d'appartenance posé à la création (même normalisation
+        /// que set_session_group : vide/blank → None) — évite un second
+        /// RPC aux services qui rangent leurs sessions (ex. le watcher
+        /// AgentReviewer groupe ses reviews). Ignoré par les démons
+        /// anciens (dégradation douce : session non groupée).
+        #[serde(default)]
+        group: Option<String>,
     },
     /// Reprend une session existante (respawn agent + session/load).
     /// native_id : reprendre une AUTRE session native de l'agent.
@@ -695,6 +740,27 @@ pub enum ReqKind {
     FirstPost {
         session: String,
     },
+    /// Épingle l'event de `seq` (message user/agent, ou tout event à
+    /// contenu texte) dans la session — persisté dans pinned.json,
+    /// visible de tout client. Idempotent : un seq déjà épinglé rend
+    /// l'entrée existante. Réponse : `{pin: PinEntry, pinned: [..]}` —
+    /// la liste complète recalculée (avec `live`) évite un second appel.
+    PinMessage {
+        session: String,
+        seq: u64,
+    },
+    /// Retire l'épinglé de `seq`. Réponse : `{ok, pinned: [..]}`.
+    UnpinMessage {
+        session: String,
+        seq: u64,
+    },
+    /// Liste les épinglés de la session : `[{seq, ts, type, text,
+    /// pinned_at, live}]` — `live` = l'event source est encore dans le
+    /// journal courant (saut possible) ; faux après /clear ou compaction
+    /// (l'extrait copié reste affiché, l'épinglé n'est pas perdu).
+    ListPinned {
+        session: String,
+    },
     /// Passe la connexion en mode push : tous les events > after_seq.
     Subscribe {
         session: String,
@@ -827,6 +893,10 @@ pub enum ReqKind {
         status: Option<String>,
         #[serde(default)]
         note: Option<String>,
+        /// Compteur d'échecs de sync à écrire tel quel (résultat d'un
+        /// `pr sync` côté acctl — 0 = vu live). None = inchangé.
+        #[serde(default)]
+        sync_fails: Option<u32>,
     },
     PrUntrack {
         repo: String,
@@ -912,6 +982,13 @@ pub enum ReqKind {
     /// `{enabled, status}` — status = instantané exposé aussi dans
     /// `ListComponents`/`ComponentInfo`.
     OrchestratorSet { enabled: bool },
+    /// Spawn d'un « Manager » pour le workspace routé `repo` (feature
+    /// d'intendance backlog : le client le propose quand le composant
+    /// `agentbacklog` + l'orchestrateur sont actifs — cf.
+    /// `orchestrator.workspaces` dans le status). Idempotent : un
+    /// Manager vivant pour ce repo est renvoyé tel quel. Réponse :
+    /// `{session, repo, cwd, title, existing}`.
+    ManagerSpawn { repo: String },
     DaemonStatus,
     /// Auto-update du démon vers la release `version` demandée par le
     /// client (ex. "0.5.0" → tag v0.5.0 — jamais « latest » : le démon
@@ -954,6 +1031,9 @@ impl ReqKind {
             Self::Events { .. } => "events",
             Self::SearchEvents { .. } => "search_events",
             Self::FirstPost { .. } => "first_post",
+            Self::PinMessage { .. } => "pin_message",
+            Self::UnpinMessage { .. } => "unpin_message",
+            Self::ListPinned { .. } => "list_pinned",
             Self::Subscribe { .. } => "subscribe",
             Self::Cancel { .. } => "cancel",
             Self::SessionInfo { .. } => "session_info",
@@ -989,6 +1069,7 @@ impl ReqKind {
             Self::ComponentInstall { .. } => "component_install",
             Self::ComponentQuery { .. } => "component_query",
             Self::OrchestratorSet { .. } => "orchestrator_set",
+            Self::ManagerSpawn { .. } => "manager_spawn",
             Self::DaemonStatus => "daemon_status",
             Self::UpdateDaemon { .. } => "update_daemon",
         }
@@ -1128,4 +1209,43 @@ pub fn new_id(prefix: &str) -> String {
     h ^= std::process::id() as u64;
     h = h.wrapping_mul(0x100000001b3);
     format!("{}-{:08x}", prefix, (h & 0xffff_ffff) as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `group` sur `new_session` : présent il traverse le fil, absent il
+    /// désérialise à None (dégradation douce côté vieux clients/démons).
+    #[test]
+    fn new_session_group_wire() {
+        let req = Request {
+            id: 1,
+            req: ReqKind::NewSession {
+                agent: "devin".into(),
+                cwd: "/w".into(),
+                title: None,
+                model: None,
+                mode: None,
+                prompt: None,
+                origin: Some("component:agentreviewer".into()),
+                group: Some("AgentReviewer".into()),
+            },
+        };
+        let txt = serde_json::to_string(&req).unwrap();
+        let back: Request = serde_json::from_str(&txt).unwrap();
+        let ReqKind::NewSession { group, origin, .. } = back.req else {
+            panic!("variant inattendue");
+        };
+        assert_eq!(group.as_deref(), Some("AgentReviewer"));
+        assert_eq!(origin.as_deref(), Some("component:agentreviewer"));
+
+        // Un client ancien n'envoie pas `group` → None, pas d'erreur.
+        let legacy = r#"{"id":2,"req":"new_session","agent":"devin","cwd":"/w"}"#;
+        let back: Request = serde_json::from_str(legacy).unwrap();
+        let ReqKind::NewSession { group, .. } = back.req else {
+            panic!("variant inattendue");
+        };
+        assert!(group.is_none());
+    }
 }

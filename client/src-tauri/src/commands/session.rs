@@ -48,23 +48,42 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
         // large comme le chemin web (CALL_TIMEOUT 60 s). Au-delà, le run
         // démon se termine quand même en tâche de fond et le registre
         // mis à jour est relu au refresh suivant.
+        // Timeout par conn : 8 s pour les sondes (SILENT_KILL_MS côté
+        // frontend = la fenêtre de « trafic récent » qui excuse un
+        // timeout — pas le même réglage, à ne pas aligner aveuglément).
         let secs = if method == "pr_sync" { 60 } else { 8 };
         let mut set = tokio::task::JoinSet::new();
         for (k, c) in pairs {
             let req = req.clone();
             set.spawn(async move {
+                let t0 = std::time::Instant::now();
                 let r = tokio::time::timeout(std::time::Duration::from_secs(secs), c.call(req)).await;
-                (k, r.map_err(|_| anyhow::anyhow!("timeout")).and_then(|x| x))
+                // silent_ms lu au retour : du trafic entrant récent prouve
+                // le transport vivant même quand la requête a expiré.
+                let silent = c.silent_ms();
+                // kind discrimine l'expiration (lenteur/blackhole, excusable
+                // si le transport vit) de l'erreur de transport (mort
+                // proche, strike direct) — consommé par le watchdog.
+                let kind = if r.is_err() { "timeout" } else { "error" };
+                (k, r.map_err(|_| anyhow::anyhow!("timeout")).and_then(|x| x),
+                    t0.elapsed().as_millis() as u64, silent, kind)
             });
         }
         let mut all = Vec::new();
         let mut out = json!({});
         let mut n_ok = 0u64;
         while let Some(res) = set.join_next().await {
-            let Ok((k, r)) = res else { continue };
+            let Ok((k, r, rtt, silent, kind)) = res else { continue };
             match r {
                 Ok(v) if merged => {
                     n_ok += 1;
+                    // Réponse lente mais arrivée — mesure de la latence
+                    // sous charge : warn au-delà de la moitié du timeout
+                    // de la méthode (4 s sonde / 30 s pr_sync).
+                    if rtt > secs * 500 {
+                        client_core::log(Level::Warn,
+                            format!("{method} {k}: réponse lente {rtt} ms"));
+                    }
                     out[k] = v;
                 }
                 Ok(mut v) => {
@@ -75,7 +94,15 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
                         all.append(arr);
                     }
                 }
-                Err(e) if merged => out[k] = json!({"error": format!("{e:#}")}),
+                Err(e) if merged => {
+                    // Télémétrie par échec — sinon les strikes client sont
+                    // déclenchés à l'aveugle (timeout lenteur vs mort réelle
+                    // indistinguables sans silent_ms).
+                    client_core::log(Level::Warn,
+                        format!("{method} {k}: {e:#} (rtt {rtt} ms, silent {silent} ms)"));
+                    out[k] = json!({"error": format!("{e:#}"), "kind": kind,
+                        "rtt_ms": rtt, "silent_ms": silent});
+                }
                 // Le frontend filtre ce marqueur → conn marquée down et
                 // sessions servies depuis le cache au lieu de disparaître.
                 Err(e) => {
@@ -155,6 +182,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             mode: so("mode"),
             prompt: so("prompt"),
             origin: so("origin"),
+            group: so("group"),
         },
         "resume_session" => ReqKind::ResumeSession {
             session: s("session"),
@@ -189,6 +217,16 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             limit: p.get("limit").and_then(Value::as_u64).unwrap_or(30) as u32,
         },
         "first_post" => ReqKind::FirstPost { session: s("session") },
+        // Épinglés — gate capability daemon_status.pinned côté frontend.
+        "pin_message" => ReqKind::PinMessage {
+            session: s("session"),
+            seq: p.get("seq").and_then(Value::as_u64).unwrap_or(0),
+        },
+        "unpin_message" => ReqKind::UnpinMessage {
+            session: s("session"),
+            seq: p.get("seq").and_then(Value::as_u64).unwrap_or(0),
+        },
+        "list_pinned" => ReqKind::ListPinned { session: s("session") },
         "cancel" => ReqKind::Cancel { session: s("session") },
         "set_mode" => ReqKind::SetMode { session: s("session"), mode: s("mode") },
         "set_model" => ReqKind::SetModel { session: s("session"), model: s("model") },
@@ -271,6 +309,10 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             title: so("title"),
             status: so("status"),
             note: so("note"),
+            sync_fails: p
+                .get("sync_fails")
+                .and_then(Value::as_u64)
+                .map(|v| v as u32),
         },
         "pr_untrack" => ReqKind::PrUntrack {
             repo: s("repo"),
@@ -286,6 +328,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         "list_components" => ReqKind::ListComponents,
         "component_info" => ReqKind::ComponentInfo { name: s("name") },
         "component_query" => ReqKind::ComponentQuery { name: s("name"), query: s("query") },
+        "manager_spawn" => ReqKind::ManagerSpawn { repo: s("repo") },
         "component_start" => ReqKind::ComponentStart { name: s("name") },
         "component_stop" => ReqKind::ComponentStop { name: s("name") },
         "component_restart" => ReqKind::ComponentRestart { name: s("name") },

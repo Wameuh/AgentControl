@@ -282,6 +282,10 @@ async fn main() -> Result<()> {
                         .filter(|p| {
                             p["session"].as_str() == Some(sid)
                                 && !matches!(p["status"].as_str(), Some("merged" | "closed"))
+                                // « non résoluble » = probable fantôme :
+                                // pas de badge de session (onglet seul).
+                                && (p["sync_fails"].as_u64().unwrap_or(0)
+                                    < proto::PR_UNRESOLVED_AFTER as u64)
                         })
                         .map(|p| {
                             let st = p["status"].as_str().unwrap_or("");
@@ -339,7 +343,7 @@ async fn main() -> Result<()> {
         }
         "new" => {
             // acctl new <agent> <cwd> [prompt...] [--title T] [--mode M]
-            //             [--model X] [--origin O]
+            //             [--model X] [--origin O] [--group G]
             if args.len() < 3 {
                 bail!("new <agent> <cwd> [prompt...]");
             }
@@ -350,6 +354,7 @@ async fn main() -> Result<()> {
             let mut mode = None;
             let mut model = None;
             let mut origin = None;
+            let mut group = None;
             let mut i = 3;
             while i < args.len() {
                 match args[i].as_str() {
@@ -357,11 +362,12 @@ async fn main() -> Result<()> {
                     "--mode" => { mode = args.get(i + 1).cloned(); i += 2; }
                     "--model" => { model = args.get(i + 1).cloned(); i += 2; }
                     "--origin" => { origin = args.get(i + 1).cloned(); i += 2; }
+                    "--group" => { group = args.get(i + 1).cloned(); i += 2; }
                     p => { prompt_parts.push(p.to_string()); i += 1; }
                 }
             }
             let v = c.call(proto::ReqKind::NewSession {
-                agent, cwd, title, model, mode, origin,
+                agent, cwd, title, model, mode, origin, group,
                 prompt: if prompt_parts.is_empty() { None } else { Some(prompt_parts.join(" ")) },
             }).await?;
             println!("{}", v["session"].as_str().unwrap_or(""));

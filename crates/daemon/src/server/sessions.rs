@@ -17,12 +17,15 @@ impl Daemon {
                 Ok(serde_json::to_value(list)?)
     }
 
-    pub(super) async fn h_new_session(self: &Arc<Self>, agent: String, cwd: String, title: Option<String>, model: Option<String>, mode: Option<String>, prompt: Option<String>, origin: Option<String>) -> Result<Value> {
+    pub(super) async fn h_new_session(self: &Arc<Self>, agent: String, cwd: String, title: Option<String>, model: Option<String>, mode: Option<String>, prompt: Option<String>, origin: Option<String>, group: Option<String>) -> Result<Value> {
                 let profile = self
                     .agents
                     .get(&agent)
                     .with_context(|| format!("agent inconnu: {agent}"))?
                     .clone();
+                // `~`/`$VAR` expansés + existence validée ici — sinon le
+                // spawn échouait en tâche de fond bien après la réponse.
+                let cwd = resolve_cwd(&cwd)?;
                 // Provenance externe (service) : forme libre — on normalise
                 // juste (ligne unique, taille bornée) pour rester un badge.
                 let origin = origin
@@ -44,14 +47,15 @@ impl Daemon {
                     config_options: vec![],
                     pending_config: Default::default(),
                     state: "starting".into(),
-                    group: None,
+                    // Même normalisation que set_group : blank → None.
+                    group: group.filter(|g| !g.trim().is_empty()),
                     spawned_by: None,
                     origin: origin.clone(),
                     context_used: None,
                     context_size: None,
                 };
                 let dir = Session::create_dir(&self.root, &meta)?;
-                let session = Session::open(dir)?;
+                let session = Session::open(dir, &self.compact)?;
                 let sid = meta.id.clone();
                 self.watch_prs(&session);
                 self.sessions.write().await.insert(sid.clone(), session.clone());
@@ -102,6 +106,7 @@ impl Daemon {
                     .get(&agent)
                     .with_context(|| format!("agent inconnu: {agent}"))?
                     .clone();
+                let cwd = resolve_cwd(&cwd)?;
                 let meta = SessionMeta {
                     id: proto::new_id("s"),
                     agent: agent.clone(),
@@ -124,7 +129,7 @@ impl Daemon {
                     context_size: None,
                 };
                 let dir = Session::create_dir(&self.root, &meta)?;
-                let session = Session::open(dir)?;
+                let session = Session::open(dir, &self.compact)?;
                 let sid = meta.id.clone();
                 self.watch_prs(&session);
                 self.sessions.write().await.insert(sid.clone(), session.clone());
@@ -247,7 +252,7 @@ impl Daemon {
                 meta2.context_used = None;
                 meta2.context_size = None;
                 let dir = Session::create_dir(&self.root, &meta2)?;
-                let session2 = Session::open(dir)?;
+                let session2 = Session::open(dir, &self.compact)?;
                 let sid2 = meta2.id.clone();
                 self.watch_prs(&session2);
                 self.sessions
@@ -717,6 +722,27 @@ impl Daemon {
     pub(super) async fn h_queue_list(self: &Arc<Self>, session: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
                 Ok(json!({"queue": s.queue_snapshot()}))
+    }
+
+    /// Épinglés : pin idempotent + liste complète renvoyée dans chaque
+    /// réponse (le client met à jour sans second appel — la liste est
+    /// bornée à PINS_MAX, pas de pagination).
+    pub(super) async fn h_pin_message(self: &Arc<Self>, session: String, seq: u64) -> Result<Value> {
+                let s = self.get_session(&session).await?;
+                let e = s.pin(seq)?;
+                info!("session {session}: message #{seq} épinglé");
+                Ok(json!({"pin": e, "pinned": s.pins_snapshot()}))
+    }
+
+    pub(super) async fn h_unpin_message(self: &Arc<Self>, session: String, seq: u64) -> Result<Value> {
+                let s = self.get_session(&session).await?;
+                let ok = s.unpin(seq);
+                Ok(json!({"ok": ok, "pinned": s.pins_snapshot()}))
+    }
+
+    pub(super) async fn h_list_pinned(self: &Arc<Self>, session: String) -> Result<Value> {
+                let s = self.get_session(&session).await?;
+                Ok(json!({"pinned": s.pins_snapshot()}))
     }
 
     pub(super) async fn h_queue_edit(self: &Arc<Self>, session: String, index: u64, text: String) -> Result<Value> {

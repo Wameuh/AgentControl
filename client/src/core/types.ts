@@ -50,6 +50,10 @@ export interface PrEntry {
   url?: string;
   /** `I<40 hex>` Gerrit — adressage quand `pr` vaut 0. */
   change_id?: string;
+  /** Syncs consécutifs sans lecture live — au-delà de
+   *  `PR_UNRESOLVED_AFTER` (3 côté proto) l'entrée est « non
+   *  résoluble » : repo/hôte injoignable ou référence inexistante. */
+  sync_fails?: number;
   /** Horodatages ISO du registre — tri de la section « terminées ». */
   created_at?: string;
   updated_at?: string;
@@ -85,6 +89,14 @@ export interface CompItem {
   /** Spec complète (command, env, healthcheck…), sérialisée telle quelle. */
   spec?: Record<string, unknown>;
   status?: CompStatus;
+  /** Instantané de l'orchestrateur natif — présent sur l'item
+   *  `backlog-orchestrator` (status_json côté démon). `workspaces` =
+   *  routing repo → cwd pour la surface « Manager » (vide si éteint). */
+  orchestrator?: {
+    enabled?: boolean;
+    workspaces?: { repo?: string; cwd?: string }[];
+    [k: string]: unknown;
+  };
 }
 
 export interface ConfigOpt { value: string; name: string; description?: string }

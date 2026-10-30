@@ -46,6 +46,10 @@ interface ConvCache {
   pendingToolUpdates: Map<string, AcEvent[]>;
   answered: Set<string>;
   lastText: { thought: boolean; norm: string; el: HTMLElement } | null;
+  userMsgs: number;
+  headSeen: boolean;
+  /** Seqs des events actuellement rendus — dédup anti-double-push. */
+  renderedSeqs: Set<number>;
   minRendered: number;
   renderedCount: number;
   hasMoreHistory: boolean;
@@ -77,12 +81,20 @@ export class ChatView {
   private minRendered = Number.MAX_SAFE_INTEGER;
   private maxRendered = 0;
   private renderedCount = 0;
+  // Seqs des events présents dans le DOM — dédup anti re-rendu (voir
+  // appendEvent) ; swapé avec ConvCache comme le reste de l'état de vue.
+  private renderedSeqs = new Set<number>();
   private loadingPage = false;
   private hasMoreHistory = true;
   private hasMoreNewer = false;
   private pendingLive: AcEvent[] = [];
   private jumpSeq = 0; // invalidation des sauts de recherche en vol
   private loadSeq = 0; // propriété du load en cours : un finally périmé ne doit pas libérer le flag d'un load plus récent
+  /** open() en vol : les events live sont tamponnés (pendingLive) —
+   *  intercalés entre la page rechargée et le replay du subscribe, ils
+   *  casseraient l'ordre affiché et se dupliqueraient (le replay démon
+   *  les renvoie). */
+  private opening = false;
   private unseenBelow = 0;
   private convLoadingEl: HTMLElement | null = null;
   /** Hôtes en cours d'auto-connexion (écran vide "connexion à…"). */
@@ -101,6 +113,11 @@ export class ChatView {
     /** Bouton « premier post » affiché seulement si le démon de la conn
      *  connaît first_post. */
     firstPostCapable: (_conn: string) => false,
+    /** Bouton « épinglés » + actions pin sur les messages — même gate
+     *  capability (daemon_status.pinned). */
+    pinCapable: (_conn: string) => false,
+    /** Marque l'état épinglé d'un nœud rendu (feature pins). */
+    pinsMark: (_el: HTMLElement) => {},
     /** L'arbre fichiers suit le workspace de la session ouverte. */
     onSessionOpened: () => {},
     /** Session affichée changée ou disparue (suppression, conn coupée,
@@ -243,6 +260,9 @@ export class ChatView {
     this.renderer.pendingToolUpdates = new Map();
     this.renderer.answered = new Set();
     this.renderer.lastText = null;
+    this.renderer.userMsgs = 0;
+    this.renderer.headSeen = false;
+    this.renderedSeqs = new Set();
     this.minRendered = Number.MAX_SAFE_INTEGER;
     this.maxRendered = 0;
     this.renderedCount = 0;
@@ -279,6 +299,9 @@ export class ChatView {
       pendingToolUpdates: this.renderer.pendingToolUpdates,
       answered: this.renderer.answered,
       lastText: this.renderer.lastText,
+      userMsgs: this.renderer.userMsgs,
+      headSeen: this.renderer.headSeen,
+      renderedSeqs: this.renderedSeqs,
       minRendered: this.minRendered,
       renderedCount: this.renderedCount,
       hasMoreHistory: this.hasMoreHistory,
@@ -316,6 +339,9 @@ export class ChatView {
     this.renderer.pendingToolUpdates = c.pendingToolUpdates;
     this.renderer.answered = c.answered;
     this.renderer.lastText = c.lastText;
+    this.renderer.userMsgs = c.userMsgs;
+    this.renderer.headSeen = c.headSeen;
+    this.renderedSeqs = c.renderedSeqs;
     this.minRendered = c.minRendered;
     this.maxRendered = c.lastSeq; // dernier seq rendu = borne haute du cache
     this.renderedCount = c.renderedCount;
@@ -360,6 +386,25 @@ export class ChatView {
 
   async open(id: string, force = false, conn = "") {
     const seq = ++this.openSeq;
+    // Les events live arrivant pendant le chargement (le sub précédent
+    // tourne encore jusqu'au subscribe) sont tamponnés : intercalés entre
+    // la page rechargée et le replay, ils casseraient l'ordre — et le
+    // replay démon les renverrait une seconde fois.
+    this.opening = true;
+    try {
+      await this.openInner(id, force, conn, seq);
+    } finally {
+      // Seul le dernier open vide le tampon — un open périmé laisse la
+      // file (et le flag) à celui qui lui a succédé. Vue ancrée : les
+      // tamponnés restent en attente, la sortie d'ancre les déversera.
+      if (seq === this.openSeq) {
+        this.opening = false;
+        if (!this.hasMoreNewer) this.flushPendingLive();
+      }
+    }
+  }
+
+  private async openInner(id: string, force: boolean, conn: string, seq: number) {
     const stale = () => seq !== this.openSeq; // un open plus récent a pris le relais
     const prevId = app.current?.id;
     // La meta démon ne porte pas sa conn (notion client) — la reprendre de
@@ -371,7 +416,15 @@ export class ChatView {
     // Feedback immédiat : la ligne cliquée passe active tout de suite.
     this.deps.setActiveRow(id);
     // La session quittée garde son DOM en mémoire (réaffichage instantané).
-    if (app.current && app.current.id !== id) this.stashConv(app.current.id, app.current.conn || "default");
+    // Même chose à la réouverture de la session affichée (reconnexion,
+    // re-clic, refresh) : le DOM vivant est stashé puis restauré comme un
+    // cache — pas de vidage visible, le subscribe rejoue juste le trou.
+    if (app.current) {
+      this.stashConv(
+        app.current.id,
+        app.current.id === id ? connHint || "default" : app.current.conn || "default",
+      );
+    }
     if (force) this.convCache.delete(id);
 
     // Bascule immédiate sur la meta connue de la liste — titre + header
@@ -551,12 +604,32 @@ export class ChatView {
     this.deps.onSessionChanged(); // les résultats pointent vers l'ancien journal
     if (!app.current) return;
     const sid = app.current.id;
-    const info = await call<{ meta: SessionMeta }>("session_info", {
+    const info = await call<{ meta: SessionMeta; last_seq: number }>("session_info", {
       session: sid,
     }).catch(() => null);
-    if (info && app.current?.id === sid) {
-      app.current = info.meta;
-      this.updateHeader();
+    if (!info || app.current?.id !== sid) return;
+    app.current = info.meta;
+    this.updateHeader();
+    // Filet de secours : un cleared parasite (resubscribe avec after_seq
+    // périmé) ou un cleared sans live derrière ne doit pas laisser la vue
+    // vide alors que le journal a du contenu — recharger la queue si rien
+    // n'a été rendu ni tamponné entre-temps (le doublon est dédoublonné
+    // par seq à l'arrivée des events live).
+    if (
+      info.last_seq > 0 &&
+      !this.eventsEl.querySelector(".ev") &&
+      this.pendingLive.length === 0
+    ) {
+      const page = await call<{ events: AcEvent[] }>("events", {
+        session: sid,
+        limit: INITIAL_PAGE,
+      }).catch(() => null);
+      if (page && app.current?.id === sid) {
+        // Des events live du nouveau cycle ont pu arriver pendant le RPC
+        // — renderedSeqs les déduplique à l'arrivée, appel direct.
+        for (const ev of page.events) this.appendEvent(ev, false);
+        this.scrollBottom();
+      }
     }
   }
 
@@ -627,6 +700,8 @@ export class ChatView {
     $("btn-search").hidden = !app.current;
     $("btn-first").hidden =
       !app.current || !this.deps.firstPostCapable(app.current?.conn ?? "default");
+    $("btn-pins").hidden =
+      !app.current || !this.deps.pinCapable(app.current?.conn ?? "default");
     $("btn-term").hidden =
       !app.current || !this.deps.termCapable(app.current?.conn ?? "default");
     if (!app.current) {
@@ -803,43 +878,91 @@ export class ChatView {
     // La queue enregistre aussi les updates (dedup par seq) — sinon une
     // réouverture via tail rend les tool_call sans leur output streamé.
     if (app.current) this.pushTail(app.current.id, app.current.conn ?? "default", ev);
-    // Vue ancrée (saut de recherche) : l'event live n'est pas contigu avec
-    // le rendu — il est tamponné jusqu'au retour au présent ; le compteur
-    // du bouton ⇥ reflète ce qui attend.
-    if (live && this.hasMoreNewer) {
+    // Vue ancrée (saut de recherche) ou rechargement en vol (open) :
+    // l'event live n'est pas contigu avec le rendu — il est tamponné
+    // jusqu'au retour au présent ; le compteur du bouton ⇥ reflète ce
+    // qui attend (vue ancrée seulement — pendant open la gemme signale
+    // déjà le chargement).
+    if (live && (this.hasMoreNewer || this.opening)) {
       const lastP = this.pendingLive[this.pendingLive.length - 1];
       if (!lastP || ev.seq > lastP.seq) this.pendingLive.push(ev);
-      this.unseenBelow++;
-      this.updateBottomBtn();
+      if (!this.opening) {
+        this.unseenBelow++;
+        this.updateBottomBtn();
+      }
       return;
     }
-    if (ev.seq > this.maxRendered) this.maxRendered = ev.seq;
-    // tool_call_update modifie le bloc existant
+    // Dédup par seq : un event déjà rendu ne se re-rend JAMAIS — quel
+    // que soit le chemin (push reçu pendant un open() en vol,
+    // resubscribe/replay qui chevauche, double subscriber). Les
+    // retraits (trim, remplacement pensée→message) sortent le seq du
+    // set : un event évincé puis re-prépaginé re-rend normalement.
+    // tool_call_update n'a pas de nœud propre → jamais dans le set,
+    // son propre garde (updSeq) dédup les rejouées.
+    if (this.renderedSeqs.has(ev.seq)) return;
+    // tool_call_update modifie le bloc existant (dedup par updSeq au
+    // niveau du nœud — un update rejoué est sans effet).
     if (ev.type === "tool_call_update") {
+      if (ev.seq > this.maxRendered) this.maxRendered = ev.seq;
       this.renderer.updateToolBlock(ev);
       return;
     }
+    // Replay de resubscribe : un seq ≤ dernier rendu (et absent de
+    // renderedSeqs — le cas couvert juste au-dessus) est un trou d'une
+    // resync : inséré à sa position plutôt qu'en queue. Le test doit
+    // lire maxRendered AVANT sa mise à jour par cet event.
+    let insertAt: HTMLElement | null = null;
+    if (live && ev.seq <= this.maxRendered) {
+      for (const n of this.eventsEl.querySelectorAll<HTMLElement>(".ev")) {
+        if (Number(n.dataset.seq ?? 0) > ev.seq) {
+          insertAt = n;
+          break;
+        }
+      }
+    }
+    if (ev.seq > this.maxRendered) this.maxRendered = ev.seq;
     // Anti-doublon pensée/message : le même texte que le bloc texte
     // agent précédent (les events intermédiaires n'y coupent pas) n'est
     // pas rendu une seconde fois ; une pensée déjà affichée cède sa
     // place au message identique qui la suit (contenu canonique).
-    if (ev.type === "agent_text" || ev.type === "agent_thought") {
+    // Réservé au flux de queue : pour un trou comblé en milieu de vue,
+    // comparer à lastText (ancré en bas) est hors sujet — la dédup par
+    // seq ci-dessus suffit.
+    if (!insertAt && (ev.type === "agent_text" || ev.type === "agent_thought")) {
       const dup = this.renderer.textDup(ev);
       if (dup === "skip") return;
       if (dup && dup.isConnected) this.dropRendered(dup);
     }
     const nearBottom = this.nearBottom();
     const node = this.renderer.render(ev, live);
-    this.eventsEl.appendChild(node);
-    this.renderer.noteText(ev, node);
+    // Insertion en plein rendu (trou comblé) : compenser le scroll si le
+    // point d'insertion est entièrement au-dessus du viewport — le
+    // contenu visible ne doit pas bouger.
+    const sh = this.eventsEl.scrollHeight;
+    this.eventsEl.insertBefore(node, insertAt);
+    this.renderedSeqs.add(ev.seq);
+    if (
+      insertAt &&
+      insertAt.getBoundingClientRect().bottom <
+        this.eventsEl.getBoundingClientRect().top
+    ) {
+      this.eventsEl.scrollTop += this.eventsEl.scrollHeight - sh;
+    }
+    this.deps.pinsMark(node);
+    // lastText reste ancré sur le dernier texte de la vue — un nœud
+    // inséré en milieu de vue ne doit pas le ré-ancrer (la dédup texte
+    // des events live suivants comparerait à un contenu hors flux).
+    if (!insertAt) this.renderer.noteText(ev, node);
     this.renderedCount++;
     if (ev.seq < this.minRendered) this.minRendered = ev.seq;
     if (ev.type === "tool_call") {
       this.renderer.toolBlocks.set(ev.call_id as string, node);
       this.renderer.flushToolUpdates(ev.call_id as string);
     }
-    if (live && nearBottom) this.scrollBottom();
-    if (live && !nearBottom) {
+    // Un trou comblé n'est pas du contenu neuf : ni scroll forcé ni
+    // compteur d'invisibles.
+    if (live && nearBottom && !insertAt) this.scrollBottom();
+    if (live && !nearBottom && !insertAt) {
       this.unseenBelow++;
       this.updateBottomBtn();
     }
@@ -855,6 +978,7 @@ export class ChatView {
       d.getBoundingClientRect().bottom < this.eventsEl.getBoundingClientRect().top;
     const sh = this.eventsEl.scrollHeight;
     d.remove();
+    this.renderedSeqs.delete(Number(d.dataset.seq ?? 0));
     if (above) this.eventsEl.scrollTop -= sh - this.eventsEl.scrollHeight;
     this.renderedCount--;
     if (Number(d.dataset.seq ?? 0) <= this.minRendered) {
@@ -885,6 +1009,7 @@ export class ChatView {
       // Suppression en haut → tout remonterait : compenser pour figer la vue.
       const sh = this.eventsEl.scrollHeight;
       first.remove();
+      this.renderedSeqs.delete(Number(first.dataset.seq ?? 0));
       this.eventsEl.scrollTop -= sh - this.eventsEl.scrollHeight;
       this.renderedCount--;
       this.minRendered = Number(
@@ -908,10 +1033,18 @@ export class ChatView {
     // toujours le recaler sur la méta courante pour refléter le cycle
     // des events poussés.
     t.nativeId = app.current?.native_session_id ?? undefined;
-    const last = t.evs[t.evs.length - 1];
-    if (last && last.seq >= ev.seq) return;
-    t.evs.push(ev);
-    if (t.evs.length > TAIL_KEEP) t.evs.splice(0, t.evs.length - TAIL_KEEP);
+    const evs = t.evs;
+    // Insertion triée : un replay hors-ordre (resync) prend sa place au
+    // lieu d'être droppé ; un seq déjà présent est ignoré. Les resets de
+    // cycle ne passent pas par ici — session_cleared vide l'entrée via
+    // dropConv.
+    let i = evs.length;
+    while (i > 0 && evs[i - 1].seq > ev.seq) i--;
+    // i pointe après le dernier élément ≤ ev.seq : le doublon éventuel
+    // est en i-1 (evs[i] est le premier strictement > ev.seq).
+    if (i > 0 && evs[i - 1].seq === ev.seq) return;
+    evs.splice(i, 0, ev);
+    if (evs.length > TAIL_KEEP) evs.splice(0, evs.length - TAIL_KEEP);
   }
 
   private prependEvents(events: AcEvent[]) {
@@ -928,6 +1061,7 @@ export class ChatView {
     this.renderer.inPrepend = true;
     try {
       for (const ev of events) {
+        if (this.renderedSeqs.has(ev.seq)) continue;
         if (ev.seq < this.minRendered) this.minRendered = ev.seq;
         if (ev.type === "tool_call_update") {
           this.renderer.updateToolBlock(ev); // pas de nœud : met à jour le bloc (ou stash)
@@ -935,6 +1069,8 @@ export class ChatView {
         }
         const node = this.renderer.render(ev, false);
         this.eventsEl.insertBefore(node, anchor);
+        this.renderedSeqs.add(ev.seq);
+        this.deps.pinsMark(node);
         this.renderedCount++;
         if (ev.type === "tool_call") {
           this.renderer.toolBlocks.set(ev.call_id as string, node);

@@ -45,6 +45,11 @@ struct Config {
     /// `enabled = true`, bascule à chaud par RPC OrchestratorSet.
     #[serde(default)]
     backlog_orchestrator: server::OrchCfg,
+    /// Compact automatique au seuil de contexte : `[compact]` global,
+    /// override par agent `[agents.<id>.compact]`, override par session
+    /// via setcfg `ac.compact_*` (compact.json).
+    #[serde(default)]
+    compact: server::CompactCfg,
     /// Forges de review au-delà de GitHub : `[[forges]]` {type, hosts,
     /// token_env} — détection des URLs GitLab/Gerrit dans les sorties
     /// outils (voir docs/forges.md). github.com + gitlab.com implicites.
@@ -58,6 +63,10 @@ struct AgentConf {
     command: Vec<String>,
     #[serde(default)]
     env: HashMap<String, String>,
+    /// Override du compact auto pour ce profil agent
+    /// (`[agents.<id>.compact]`) — session > agent > global.
+    #[serde(default)]
+    compact: server::CompactPartial,
 }
 
 fn default_tcp() -> String {
@@ -79,6 +88,7 @@ impl Default for Config {
             retention: server::RetentionCfg::default(),
             a2a: server::A2aCfg::default(),
             backlog_orchestrator: server::OrchCfg::default(),
+            compact: server::CompactCfg::default(),
             forges: Vec::new(),
         }
     }
@@ -194,6 +204,7 @@ fn default_agents() -> HashMap<String, AgentProfile> {
             name: "Devin CLI".into(),
             command: vec!["devin".into(), "acp".into()],
             env: devin_env,
+            compact: server::CompactPartial::default(),
         },
     );
     m
@@ -340,6 +351,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
                 name: c.name.unwrap_or(id),
                 command: c.command,
                 env: c.env,
+                compact: c.compact,
             },
         );
     }
@@ -352,6 +364,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
         forges::Forges::resolve(&cfg.forges),
         cfg.bind_tcp.clone(),
         cfg.backlog_orchestrator.clone(),
+        cfg.compact.clone(),
     )
     .await?;
     tracing::info!(

@@ -111,6 +111,12 @@ export class FileExplorer {
     Object.assign(this.deps, d);
   }
 
+  /** Préférence « rendu Markdown par défaut » changée dans les
+   *  paramètres — propagée au viewer pour basculer la vue courante. */
+  setMdRender(on: boolean) {
+    this.mdView.setRender(on);
+  }
+
   /** L'arbre suit le workspace de la session nouvellement ouverte. */
   onSessionOpened() {
     if (this.treeOpen) {

@@ -32,7 +32,7 @@
 
 use super::*;
 use crate::server::misc::command_available;
-use proto::{ComponentKind, SessionMeta};
+use proto::{ComponentKind, EventKind, SessionMeta};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,6 +51,11 @@ const CMD_TIMEOUT: Duration = Duration::from_secs(60);
 /// aucune PR n'est enregistrée : le watcher PR peut laguer quelques
 /// minutes derrière le `gh pr create` (cf. script — 240 s).
 const CLEAN_GRACE_S: f64 = 240.0;
+
+/// Borne (caractères) de la description reprise dans le post « sorti
+/// du backlog » — le post est un résumé de présentation, pas un dump
+/// du cahier des charges.
+const DESC_MAX: usize = 4000;
 
 /// Prompt worker intégré — repris tel quel du script d'origine (le
 /// cahier des charges AgentBacklog des sessions `Backlog-W*`).
@@ -87,6 +92,39 @@ MISSION :
 2. Passe la PR en ready : gh pr ready <N> — cela declenche release-bump (tag rc.k + commit de version sur next_release), c'est voulu. Ne merge JAMAIS la release PR vers main : le merge reste a l'utilisateur.
 3. Si le generateur produit un body defectueux, corrige-le via le cycle PR normal dans un worktree separe (base origin/next_release).
 4. Quand la release PR est ready avec un body a jour : agentbacklog --done <ID> --agent-id "<ton agent-id>"."#;
+
+/// `origin` des sessions Manager — rôle d'intendance backlog proposé
+/// par le client (un par workspace routé), distinct des workers : le
+/// préfixe `title_prefix` ne le matche pas → le cycle de vie
+/// orchestrateur (nudge/rm/garde PR) ne s'y applique pas.
+const MANAGER_ORIGIN: &str = "feature:backlog-manager";
+
+/// Titre d'une session Manager : `Manager · <repo>` — le repo est
+/// relu depuis le titre pour le statut exposé au client.
+const MANAGER_TITLE_PREFIX: &str = "Manager · ";
+
+/// Prompt Manager intégré — intendance de la file : transformer les
+/// demandes en items exploitables par les workers, répondre aux
+/// questions d'état, ajuster la file. Jamais worker (pas de --pop,
+/// pas de --done, pas d'implémentation). Surcharge :
+/// `[backlog_orchestrator] manager_prompt` (mêmes placeholders).
+const MANAGER_PROMPT: &str = r#"[Session creee automatiquement par la feature « Manager » d'AgentControl — pas par un agent humain ou une session parente.]
+
+Tu es le Manager du workspace {REPO} (cwd {WS}) : l'intendance de la file AgentBacklog partagee. On te donne des demandes en langage naturel ; tu les transformes en items backlog exploitables par les workers autonomes (sessions « Backlog-W* » pilotees par l'orchestrateur).
+
+MISSIONS :
+
+1. DEPOSER UN ITEM — pour chaque demande de feature/fix :
+   agentbacklog --add "<titre concis>" --desc "<description>" --repo {REPO}
+   Le titre : une ligne, actionnable (convention : [bug]/[feature] + objet). La description est le cahier des charges du worker — donne : le contexte (symptomes, fichiers/modules/pistes d'investigation dans {WS}), les verifications demandees (build/tests precis), et le rappel du cycle PR standard (worktree dedie base origin/next_release, PR draft -> /mr review -> corrections en draft -> ready -> checks verts -> merge).
+   Une demande qui enchaine des etapes ou depend d'un item existant : decoupe en sous-items ordonnes via --depends-on <ID> (et --depend ID DEP a posteriori). Une grosse demande floue : item d'exploration/decoupage d'abord.
+   Ne duplique pas : agentbacklog --list --json avant d'ajouter.
+
+2. REPONDRE AUX QUESTIONS D'ETAT — file (agentbacklog --list --json, --all pour l'historique), items wip/pending/bloques, workers actifs (acctl list), PRs en cours (acctl pr ls --all). Reponses concises, en francais.
+
+3. AJUSTER LA FILE SUR DEMANDE — priorite : agentbacklog --bump <ID> ; dependance : agentbacklog --depend <ID> <DEP> (DEP=0 retire) ; rendre un item wip abandonne : agentbacklog --release <ID> --force. Refuse toute demande qui depasse ton role.
+
+JAMAIS : --pop (tu n'implementes pas), --done (sauf item que TU as toi-meme cree par erreur et qu'il faut retirer — prefere --release + --depend sinon), pas de code a ecrire, pas de PR a mener. Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; reponds en francais."#;
 
 /// Phase courante de l'orchestrateur — exposée dans le statut
 /// `list_components`/`component_info` et l'état `component_state`.
@@ -159,6 +197,11 @@ pub struct OrchProbe {
     /// Fichier `.lock` ouvert et locké tant que le natif travaille —
     /// libéré sur disable pour laisser la place à une autre instance.
     lock_file: Mutex<Option<std::fs::File>>,
+    /// Sérialise le check-then-spawn de `h_manager_spawn` — deux requêtes
+    /// concurrentes ne doivent pas franchir ensemble la fenêtre entre la
+    /// dédupe et l'insertion de la session (doublon orphelin garanti :
+    /// un Manager échappe au cycle de vie orchestrateur).
+    manager_lock: tokio::sync::Mutex<()>,
     /// Réveille la boucle hors période (bascule enable → cycle immédiat).
     wake: tokio::sync::Notify,
 }
@@ -181,6 +224,7 @@ impl OrchProbe {
             }),
             state: Mutex::new(state),
             lock_file: Mutex::new(None),
+            manager_lock: tokio::sync::Mutex::new(()),
             wake: tokio::sync::Notify::new(),
             cfg,
         }
@@ -252,6 +296,11 @@ impl OrchProbe {
             "assignments": persist.assignments.clone(),
             "notes_cycle_done": persist.notes_cycle_done,
             "state_dir": state_dir().display().to_string(),
+            // Workspaces routés (repo → cwd) — la surface « Manager »
+            // du client en propose un par entrée quand l'orchestrateur
+            // est actif (vide sinon : pas de proposition sur un orch
+            // éteint).
+            "workspaces": workspaces_json(self.is_enabled(), &self.cfg),
         })
     }
 
@@ -426,6 +475,29 @@ async fn run_out(argv: &[&str], cwd: &Path) -> Result<(i64, String, String)> {
     ))
 }
 
+/// `orchestrator.workspaces` du status — routing repo → cwd exposé au
+/// client quand l'orchestrateur est actif (vide sinon : la surface
+/// « Manager » ne se propose pas sur un orch éteint).
+fn workspaces_json(enabled: bool, cfg: &cfg::OrchCfg) -> Vec<Value> {
+    if !enabled {
+        return Vec::new();
+    }
+    cfg.repo_workspaces
+        .iter()
+        .map(|(repo, cwd)| json!({"repo": repo, "cwd": cwd}))
+        .collect()
+}
+
+/// « Ce meta est-il un Manager vivant du workspace `repo` ? » —
+/// identité = provenance + titre (le titre est le contrat : un
+/// `rename_session` casse la dédup — assumé, cf. le spawn).
+fn is_live_manager(m: &SessionMeta, repo: &str) -> bool {
+    m.origin.as_deref() == Some(MANAGER_ORIGIN)
+        && m.title == format!("{MANAGER_TITLE_PREFIX}{repo}")
+        && m.state != "dead"
+        && m.state != "interrupted"
+}
+
 impl Daemon {
     /// Boucle de l'orchestrateur backlog — toujours spawnée (la phase
     /// porte l'activation, la bascule à chaud la réveille sans restart).
@@ -529,9 +601,16 @@ impl Daemon {
             (metas, ids)
         };
         let prs = self.prs.list();
+        // Exclusion `origin` par-dessus le préfixe : même un
+        // title_prefix custom qui matcherait « Manager · » ne doit pas
+        // faire entrer les Managers dans le cycle de vie worker
+        // (nudge/rm/garde PR) — leur rôle n'est pas d'implémenter.
         let mut workers: Vec<SessionMeta> = metas
             .iter()
-            .filter(|m| m.title.starts_with(&cfg.title_prefix))
+            .filter(|m| {
+                m.title.starts_with(&cfg.title_prefix)
+                    && m.origin.as_deref() != Some(MANAGER_ORIGIN)
+            })
             .cloned()
             .collect();
         let mut pending: Vec<Task> = tasks
@@ -638,13 +717,83 @@ impl Daemon {
                 }
                 _ => w.title.clone(),
             };
-            st.assignments.insert(
-                sid.to_string(),
-                json!({
-                    "title": title, "state": state,
-                    "tasks": my_items, "prs": my_prs,
-                }),
-            );
+            // Post « sorti du backlog » : à chaque NOUVEL item wip du
+            // worker, journaliser titre + description en user_message
+            // de service (origin) — JAMAIS livré à l'agent, qui a déjà
+            // l'item via son --pop : le post est purement
+            // présentationnel (premier message ACTIONNABLE du
+            // transcript ; le boilerplate de mission reste replié +
+            // badgé « via »). Un post par pop : --release puis re-pop
+            // reposte (posted_wip repasse à None entre-temps) ;
+            // session disparue entre le snapshot et ici → pas de post,
+            // retry au tick suivant.
+            let wip_id = my_wip.map(|t| task_id(t).to_string());
+            let prev_posted = st
+                .assignments
+                .get(sid)
+                .and_then(|a| a.get("posted_wip"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let mut posted_wip = wip_id.clone();
+            let mut just_posted = false;
+            if wip_id != prev_posted {
+                if let Some(t) = my_wip {
+                    let title_line: String = t
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let desc = t
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim();
+                    let mut dc = desc.chars();
+                    let desc_body: String = dc.by_ref().take(DESC_MAX).collect();
+                    let text = if desc_body.is_empty() {
+                        format!("[Backlog] item #{} — {title_line}", task_id(t))
+                    } else {
+                        format!(
+                            "[Backlog] item #{} — {title_line}\n\n{desc_body}{}",
+                            task_id(t),
+                            if dc.next().is_some() { "\n…" } else { "" }
+                        )
+                    };
+                    match self.get_session(sid).await {
+                        Ok(s) => {
+                            s.emit(EventKind::UserMessage {
+                                text,
+                                steer: false,
+                                origin: Some(COMPONENT_ORIGIN.to_string()),
+                            });
+                            just_posted = true;
+                        }
+                        Err(_) => posted_wip = prev_posted,
+                    }
+                }
+            }
+            let assignment = json!({
+                "title": title, "state": state,
+                "tasks": my_items, "prs": my_prs,
+                "posted_wip": posted_wip,
+            });
+            if just_posted {
+                // Le UserMessage est déjà commité au journal, mais `st`
+                // n'est repersisté qu'en fin de tick : un `orch off` en
+                // vol avant le write-back perdrait le marqueur → repost
+                // en doublon du même wip au prochain cycle. L'entrée
+                // complète est posée dans l'état live tout de suite (le
+                // write-back écrira la même valeur).
+                self.orch
+                    .state
+                    .lock()
+                    .unwrap()
+                    .assignments
+                    .insert(sid.to_string(), assignment.clone());
+            }
+            st.assignments.insert(sid.to_string(), assignment);
             if matches!(state, "working" | "compacting" | "starting") {
                 st.clean_since.remove(sid);
                 continue;
@@ -952,12 +1101,13 @@ impl Daemon {
     /// Spawn d'un worker via l'API interne : `h_new_session` (origin
     /// `component:backlog-orchestrator` — le prompt part wrappé service
     /// et la session se raccroche au nœud du composant dans le
-    /// diagramme), puis groupe + `thought_level` par handlers. Remplace
-    /// les `acctl new/setcfg`/RPC socket du script.
+    /// diagramme, groupe posé à la création), puis `thought_level` par
+    /// handler. Remplace les `acctl new/setcfg`/RPC socket du script.
     async fn orch_spawn(self: &Arc<Self>, number: u64) -> Option<String> {
         let cfg = &self.orch.cfg;
         let title = format!("{}{}", cfg.title_prefix, number);
         let prompt = cfg.prompt.clone().unwrap_or_else(|| PROMPT.to_string());
+        let group = (!cfg.group.is_empty()).then(|| cfg.group.clone());
         let v = match self
             .h_new_session(
                 cfg.agent.clone(),
@@ -967,6 +1117,7 @@ impl Daemon {
                 Some(cfg.mode.clone()),
                 Some(prompt),
                 Some(COMPONENT_ORIGIN.to_string()),
+                group,
             )
             .await
         {
@@ -977,20 +1128,23 @@ impl Daemon {
             }
         };
         let sid = v.get("session").and_then(Value::as_str)?.to_string();
-        if !cfg.group.is_empty() {
-            if let Err(e) = self
-                .h_set_session_group(sid.clone(), Some(cfg.group.clone()))
-                .await
-            {
-                warn!("orchestrateur: groupe {sid}: {e:#}");
-            }
-        }
+        self.apply_spawn_cfg(&sid).await;
+        info!("orchestrateur: spawned {title} = {sid}");
+        Some(sid)
+    }
+
+    /// Queue commune des spawns orchestrés (workers + Managers) :
+    /// `thought_level` de la config — best-effort, les échecs sont
+    /// loggés sans faire échouer le spawn. (Le groupe sidebar est posé
+    /// à la création via le param `group` de `h_new_session`.)
+    async fn apply_spawn_cfg(self: &Arc<Self>, sid: &str) {
+        let cfg = &self.orch.cfg;
         if !cfg.thought_level.is_empty() {
             // Posée en pending_config tant que l'agent n'est pas prêt —
             // rejouée au spawn (comme `acctl setcfg` juste après `new`).
             if let Err(e) = self
                 .h_set_config_option(
-                    sid.clone(),
+                    sid.to_string(),
                     "thought_level".to_string(),
                     cfg.thought_level.clone(),
                 )
@@ -999,8 +1153,75 @@ impl Daemon {
                 warn!("orchestrateur: thought_level {sid}: {e:#}");
             }
         }
-        info!("orchestrateur: spawned {title} = {sid}");
-        Some(sid)
+    }
+
+    /// `ManagerSpawn{repo}` — session Manager pour le workspace routé
+    /// `repo` (intendance backlog proposée par le client quand
+    /// `agentbacklog` + orchestrateur sont actifs). Idempotent : un
+    /// Manager vivant du repo est renvoyé (`existing:true`) — dédupe
+    /// clic double / re-ouverture de l'onglet.
+    pub(super) async fn h_manager_spawn(self: &Arc<Self>, repo: &str) -> Result<Value> {
+        anyhow::ensure!(
+            self.orch.is_enabled(),
+            "orchestrateur désactivé — la surface « Manager » n'est \
+             proposée que quand il est actif"
+        );
+        anyhow::ensure!(
+            self.orch_agentbacklog_bin().await.is_some(),
+            "agentbacklog non résolvable — un Manager sans file à gérer \
+             ne sert à rien"
+        );
+        let cfg = &self.orch.cfg;
+        let cwd = cfg.repo_workspaces.get(repo).cloned().with_context(|| {
+            format!(
+                "workspace inconnu: {repo} — routés : {}",
+                cfg.repo_workspaces.keys().cloned().collect::<Vec<_>>().join(", ")
+            )
+        })?;
+        let title = format!("{MANAGER_TITLE_PREFIX}{repo}");
+        // Check-then-spawn atomique : le lock couvre la dédupe ET le
+        // spawn (requêtes dispatchées en tâches concurrentes — sinon
+        // deux clics simultanés créent deux Managers orphelins, que le
+        // cycle orchestrateur ne réclame jamais).
+        let _spawn_lock = self.orch.manager_lock.lock().await;
+        {
+            let sessions = self.sessions.read().await;
+            let live = sessions
+                .values()
+                .map(|s| s.meta_snapshot())
+                .find(|m| is_live_manager(m, repo));
+            if let Some(m) = live {
+                return Ok(json!({
+                    "session": m.id, "repo": repo, "cwd": cwd,
+                    "title": title, "existing": true,
+                }));
+            }
+        }
+        let tpl = cfg.manager_prompt.as_deref().unwrap_or(MANAGER_PROMPT);
+        let prompt = tpl.replace("{REPO}", repo).replace("{WS}", &cwd);
+        let v = self
+            .h_new_session(
+                cfg.agent.clone(),
+                cwd.clone(),
+                Some(title.clone()),
+                Some(cfg.model.clone()),
+                Some(cfg.mode.clone()),
+                Some(prompt),
+                Some(MANAGER_ORIGIN.to_string()),
+                (!cfg.group.is_empty()).then(|| cfg.group.clone()),
+            )
+            .await?;
+        let sid = v
+            .get("session")
+            .and_then(Value::as_str)
+            .context("spawn Manager: pas de session dans la réponse")?
+            .to_string();
+        self.apply_spawn_cfg(&sid).await;
+        info!("manager: spawned {title} = {sid} (workspace {repo} → {cwd})");
+        Ok(json!({
+            "session": sid, "repo": repo, "cwd": cwd,
+            "title": title, "existing": false,
+        }))
     }
 
     /// Réécriture de `orchestrator-state.json` — atomique `.part` +
@@ -1035,5 +1256,76 @@ impl Daemon {
             "enabled": enabled,
             "status": self.orch.status_json(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta(origin: Option<&str>, title: &str, state: &str) -> SessionMeta {
+        SessionMeta {
+            id: "s-x".into(),
+            agent: "devin".into(),
+            title: title.into(),
+            cwd: "/workspace".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            native_session_id: None,
+            mode: None,
+            model: None,
+            available_modes: Vec::new(),
+            available_commands: Vec::new(),
+            available_models: Vec::new(),
+            config_options: Vec::new(),
+            pending_config: Default::default(),
+            state: state.into(),
+            group: None,
+            spawned_by: None,
+            origin: origin.map(str::to_string),
+            context_used: None,
+            context_size: None,
+        }
+    }
+
+    #[test]
+    fn live_manager_predicat() {
+        // Identité = origin + titre « Manager · <repo> », vivant.
+        assert!(is_live_manager(
+            &meta(Some(MANAGER_ORIGIN), "Manager · AgentControl", "idle"),
+            "AgentControl"
+        ));
+        // Mauvais repo → pas le nôtre.
+        assert!(!is_live_manager(
+            &meta(Some(MANAGER_ORIGIN), "Manager · Autre", "idle"),
+            "AgentControl"
+        ));
+        // États terminaux → respawn proposable.
+        for st in ["dead", "interrupted"] {
+            assert!(!is_live_manager(
+                &meta(Some(MANAGER_ORIGIN), "Manager · AgentControl", st),
+                "AgentControl"
+            ));
+        }
+        // Worker/humain sous le même titre → pas un Manager (origin
+        // est la clé de provenance, pas le titre seul).
+        for o in [None, Some(COMPONENT_ORIGIN)] {
+            assert!(!is_live_manager(
+                &meta(o, "Manager · AgentControl", "running"),
+                "AgentControl"
+            ));
+        }
+    }
+
+    #[test]
+    fn workspaces_gated_enabled() {
+        let mut cfg = cfg::OrchCfg::default();
+        assert!(workspaces_json(false, &cfg).is_empty());
+        let ws = workspaces_json(true, &cfg);
+        assert_eq!(ws.len(), 1);
+        assert_eq!(ws[0]["repo"], "AgentControl");
+        cfg.repo_workspaces.insert("Autre".into(), "/tmp/x".into());
+        assert_eq!(workspaces_json(true, &cfg).len(), 2);
+        cfg.repo_workspaces.clear();
+        assert!(workspaces_json(true, &cfg).is_empty());
     }
 }

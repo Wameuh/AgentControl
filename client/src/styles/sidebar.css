@@ -48,13 +48,15 @@
 #session-list .sess .a { color: var(--dim); font-size: 11px; font-family: Mono, ui-monospace, monospace; }
 #session-list .sess .sess-pr {
   flex: none; font-size: 10px; font-family: Mono, ui-monospace, monospace;
-  padding: 0 5px; border: 1px solid var(--accent); border-radius: 8px;
-  color: var(--accent); opacity: .8;
+  padding: 0 5px; border: 1px solid var(--gold); border-radius: 8px;
+  color: var(--gold); opacity: .8;
 }
 /* Provenance service (meta.origin) : badge « via X » violet — distinct
-   des badges PR (accent) et du vert agent↔agent (peer). */
+   des badges PR (or) et du vert agent↔agent (peer). Cap fixe en em :
+   la provenance reste une info secondaire qui ne doit pas pousser le
+   titre ; le nom complet reste en tooltip (origin_tip). */
 #session-list .sess .sess-origin {
-  flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis;
+  flex: none; max-width: 9em; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; font-size: 10px; font-family: Mono, ui-monospace, monospace;
   padding: 0 5px; border: 1px solid var(--violet); border-radius: 8px;
   color: var(--violet); opacity: .85;
@@ -211,6 +213,19 @@ button:disabled { opacity: .5; cursor: default; }
 .pr-repo { text-transform: none; letter-spacing: .2px; }
 .pr-repo .pr-repo-ic { display: inline-flex; flex: none; opacity: .75; }
 .pr-repo .pr-repo-ic .ic { width: 11px; height: 11px; display: block; }
+/* Couleur distincte par forge : github suit l'accent, gitlab sa
+   couleur de marque, gerrit le violet — le tag n'apparaît que hors
+   github (chemin de repo brut sinon ambigu). */
+.pr-repo-ic.fg-github { color: var(--accent); opacity: 1; }
+.pr-repo-ic.fg-gitlab { color: var(--forge-gitlab); opacity: 1; }
+.pr-repo-ic.fg-gerrit { color: var(--violet); opacity: 1; }
+.pr-repo .pr-forge {
+  flex: none; font-size: 8.5px; text-transform: uppercase; letter-spacing: .5px;
+  padding: 0 4px; margin-right: 5px; border-radius: 4px;
+  border: 1px solid currentColor;
+}
+.pr-forge.fg-gitlab { color: var(--forge-gitlab); }
+.pr-forge.fg-gerrit { color: var(--violet); }
 .pr-repo .pr-n {
   margin-left: auto; flex: none; font-size: 10px;
   font-family: Mono, ui-monospace, monospace; color: var(--dim);
@@ -224,7 +239,7 @@ button:disabled { opacity: .5; cursor: default; }
 #pr-list .pr .pr-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
 #pr-list .pr .pr-num {
   flex: none; font-size: 11px; font-family: Mono, ui-monospace, monospace;
-  color: var(--accent);
+  color: var(--gold);
 }
 #pr-list .pr .pr-t {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
@@ -240,6 +255,11 @@ button:disabled { opacity: .5; cursor: default; }
 #pr-list .pr .pr-st.st-conflict { color: var(--err); border-color: rgba(232, 148, 134, .55); }
 #pr-list .pr .pr-st.st-merged { color: var(--violet); border-color: color-mix(in srgb, var(--violet) 55%, transparent); }
 #pr-list .pr .pr-st.st-closed { color: var(--err); border-color: color-mix(in srgb, var(--err) 55%, transparent); }
+/* « non résoluble » : sync jamais abouti (repo fantôme, hôte mort) —
+   ligne estompée comme les terminées, pastille gold pointillée. */
+#pr-list .pr .pr-st.st-unres { color: var(--gold); border-style: dashed; border-color: color-mix(in srgb, var(--gold) 55%, transparent); }
+#pr-list .pr.pr-unres { opacity: .55; }
+#pr-list .pr.pr-unres:hover { opacity: .85; }
 /* Entrées « terminées » (section historique) : estompées pour rester
    lisibles sans rivaliser avec les PR ouvertes. */
 #pr-list .pr.pr-done { opacity: .7; }
@@ -329,4 +349,18 @@ button:disabled { opacity: .5; cursor: default; }
 .bl-item .bl-agent .ic { width: 11px; height: 11px; flex: none; }
 .bl-item .bl-agent > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bl-item .bl-agent.off { border: 0; color: var(--dim); cursor: default; padding: 1px 2px; font-family: Mono, ui-monospace, monospace; }
+/* Chip repo d'un item (classe générique .badge retaillée) : discret,
+   non cliquable — pure étiquette du workspace cible. */
+.bl-item .bl-repo {
+  flex: none; max-width: 34%; padding: 1px 7px; font-size: 10px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Filtre déroulant par repo — rendu seulement si ≥2 repos/groupes. */
+.bl-repo-filter { padding: 0 8px 5px; }
+.bl-repo-filter select {
+  width: 100%; padding: 3px 6px; font-size: 11px;
+  background: var(--panel-solid); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 7px;
+}
+.bl-repo-filter select:focus { border-color: var(--accent); outline: none; }
 .bl-item .bl-when { color: var(--dim); font-size: 11px; flex: none; white-space: nowrap; }

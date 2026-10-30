@@ -5,10 +5,12 @@
 //!   prompt.rs  — envois user/peer, file d'attente, réponses perm./questions
 //!   compact.rs — retenue des prompts pendant un /compact agent-side
 //!   config.rs  — mode/modèle/groupe/titre/options de config dynamiques
+//!   pins.rs    — messages épinglés persistés (pinned.json)
 
 mod agent;
 mod compact;
 mod config;
+mod pins;
 mod prompt;
 
 use anyhow::{Context, Result};
@@ -23,6 +25,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::error;
 
 use crate::journal::{self, Journal};
+use crate::server::{CompactPartial, CompactPolicy, CompactSrc};
 use self::compact::compact_done_text;
 
 /// Requête émise par l'agent, en attente de réponse d'un client.
@@ -32,10 +35,13 @@ enum PendingAgent {
 }
 
 /// Retenue active pendant un compact agent-side. `used_at_start` sert
-/// de référence au signal "contexte réduit", `timer` est le garde-fou.
+/// de référence au signal "contexte réduit", `timer` est le garde-fou,
+/// `auto` marque un compact déclenché par le démon sur seuil de
+/// contexte (→ « continue your task » relancé automatiquement à la fin).
 struct CompactHold {
     used_at_start: Option<u64>,
     timer: tokio::task::JoinHandle<()>,
+    auto: bool,
 }
 
 pub struct Session {
@@ -64,6 +70,8 @@ pub struct Session {
     last_text: Mutex<Option<(bool, String)>>,
     /// Titre/kind vus pour chaque tool call (pour les updates ultérieurs).
     tool_calls: Mutex<HashMap<String, (String, String)>>,
+    /// Messages épinglés (persistés pinned.json — pins.rs).
+    pinned: Mutex<Vec<proto::PinEntry>>,
     /// Vrai pendant session/load : les updates d'historique rejoué sont
     /// ignorés (le journal local est déjà la source de vérité).
     loading_replay: std::sync::atomic::AtomicBool,
@@ -80,12 +88,26 @@ pub struct Session {
     /// jusqu'au signal de fin (contexte réduit, message, cancel,
     /// timeout) — un prompt livré pendant le compact l'annulerait.
     compacting: Mutex<Option<CompactHold>>,
+    /// Seuil du compact auto résolu à l'open : global `[compact]` +
+    /// override `[agents.<id>.compact]` (server/cfg.rs, CompactSrc) —
+    /// l'override session (compact.json, clés `ac.compact_*`) s'applique
+    /// par-dessus à chaque lecture via compact_policy().
+    compact_base: CompactPolicy,
+    /// Override du seuil persisté en `compact.json` (sidecar, clés
+    /// `ac.compact_*` de setcfg) — session > agent > global.
+    compact_override: Mutex<CompactPartial>,
     /// Self-ref pour lancer des tâches internes (drain, timer compact).
     me: Weak<Session>,
     /// Incrémentée à chaque spawn — le reader d'un vieux process compare
     /// sa génération à la courante : périmée → son on_agent_exit se tait
     /// (pas de "agent exited"/dead ni de take() sur le child du successeur).
     spawn_gen: AtomicU64,
+    /// Baseline du seuil compact : vrai dès qu'un usage_update LIVE a
+    /// été vu depuis le dernier spawn. Reset au spawn → le premier
+    /// update live compte comme un franchissement quand il est déjà au
+    /// seuil (session reprise « chaude »), sans jamais déclencher sur
+    /// les updates rejoués du session/load.
+    usage_seen: std::sync::atomic::AtomicBool,
     /// Génération qu'un kill_for_respawn vient d'invalider (dernier en
     /// date) — un spawn concurrent la compare à sa génération de départ
     /// : > départ = kill/rebind intervenu pendant SON spawn → la session
@@ -154,16 +176,28 @@ enum PromptSrc {
     /// doit montrer la version réellement reçue par l'agent.
     UserJournaled,
     Peer,
+    /// Prompt interne du démon (compact auto, reprise « continue your
+    /// task ») : livré sans user_message — le System event émis au
+    /// déclenchement garde la traçabilité, et `Auto` arme la retenue
+    /// compact en mode auto (relance à la fin).
+    Auto,
 }
 
 impl Session {
     /// Ouvre une session existante sur disque (sans spawn d'agent).
-    pub fn open(dir: PathBuf) -> Result<Arc<Self>> {
+    /// `src` = seuils compact du démon (global + overrides par profil
+    /// agent) — résolus contre `meta.agent` puis l'override sidecar.
+    pub fn open(dir: PathBuf, compact_src: &CompactSrc) -> Result<Arc<Self>> {
         let meta: SessionMeta = serde_json::from_str(
             &std::fs::read_to_string(dir.join("meta.json")).context("meta.json illisible")?,
         )?;
         let journal = Journal::open(&dir)?;
         let last_text = seed_text_anchor(&journal, &dir);
+        // Chargé avant le struct literal : `dir` y est déplacé en premier
+        // champ — un open_pins(&dir) inline serait un borrow-after-move.
+        let pinned = Self::open_pins(&dir);
+        let compact_base = compact_src.base_for(&meta.agent);
+        let compact_override = Self::open_compact_override(&dir);
         let (events_tx, _) = broadcast::channel(1024);
         Ok(Arc::new_cyclic(|me| Self {
             dir,
@@ -177,13 +211,17 @@ impl Session {
             cur_text: Mutex::new(None),
             last_text: Mutex::new(last_text),
             tool_calls: Mutex::new(HashMap::new()),
+            pinned,
             loading_replay: std::sync::atomic::AtomicBool::new(false),
             busy: std::sync::atomic::AtomicBool::new(false),
             active_prompts: AtomicU64::new(0),
             prompt_queue: Mutex::new(std::collections::VecDeque::new()),
             compacting: Mutex::new(None),
+            compact_base,
+            compact_override,
             me: me.clone(),
             spawn_gen: AtomicU64::new(0),
+            usage_seen: std::sync::atomic::AtomicBool::new(false),
             supplant_mark: AtomicU64::new(0),
             waking: std::sync::atomic::AtomicBool::new(false),
             spawning: std::sync::atomic::AtomicBool::new(false),
@@ -213,6 +251,15 @@ impl Session {
 
     pub fn meta_snapshot(&self) -> SessionMeta {
         self.meta.lock().unwrap().clone()
+    }
+
+    /// Seuil compact effectif : base (global → agent) + override
+    /// session (compact.json). Recalculé à chaque lecture — un setcfg
+    /// `ac.compact_*` prend effet immédiatement.
+    fn compact_policy(&self) -> CompactPolicy {
+        let mut p = self.compact_base.clone();
+        self.compact_override.lock().unwrap().apply_to(&mut p);
+        p
     }
 
     // -----------------------------------------------------------------------
@@ -300,7 +347,7 @@ impl Session {
                 .as_ref()
                 .is_some_and(|(_, buf)| compact_done_text(buf));
         if compact_done {
-            self.end_compact("signal agent");
+            self.end_compact("signal agent", false);
         }
     }
 
@@ -323,7 +370,7 @@ impl Session {
                 // Un message dédupliqué peut quand même porter le
                 // signal de fin de compact — le traiter avant de sortir.
                 if compact_done {
-                    self.end_compact("signal agent");
+                    self.end_compact("signal agent", false);
                 }
                 return;
             }
@@ -346,7 +393,7 @@ impl Session {
             // L'agent annonce la fin de sa compaction par un message —
             // relâche les prompts retenus.
             if compact_done {
-                self.end_compact("signal agent");
+                self.end_compact("signal agent", false);
             }
         }
     }
@@ -382,6 +429,14 @@ impl Session {
 mod tests {
     use super::*;
 
+    /// CompactSrc de test : défauts globaux, aucun override agent.
+    fn test_compact_src() -> CompactSrc {
+        CompactSrc {
+            global: crate::server::CompactCfg::default(),
+            by_agent: Default::default(),
+        }
+    }
+
     fn tmp_session(tag: &str) -> (Arc<Session>, PathBuf) {
         let dir = std::env::temp_dir().join(format!(
             "ac-dedup-test-{}-{}",
@@ -416,7 +471,7 @@ mod tests {
             serde_json::to_string_pretty(&meta).unwrap(),
         )
         .unwrap();
-        (Session::open(dir.clone()).unwrap(), dir)
+        (Session::open(dir.clone(), &test_compact_src()).unwrap(), dir)
     }
 
     fn kinds(dir: &PathBuf) -> Vec<&'static str> {
@@ -462,7 +517,7 @@ mod tests {
         );
         // Réouverture : l'ancre est amorcée depuis la queue du journal,
         // un écho post-restart reste dédupliqué.
-        let s2 = Session::open(dir.clone()).unwrap();
+        let s2 = Session::open(dir.clone(), &test_compact_src()).unwrap();
         s2.emit(EventKind::AgentThought { text: "espaces multiples ici".into() });
         assert_eq!(
             kinds(&dir).iter().filter(|k| **k == "agent_thought").count(),
@@ -476,6 +531,244 @@ mod tests {
             kinds(&dir).iter().filter(|k| **k == "agent_thought").count(),
             3
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Épinglés : persistés dans pinned.json, ancrés (seq, ts) — un reset
+    /// de journal les conserve mais les passe `live:false`, et un event
+    /// du nouveau cycle au même seq ne les fait pas revivre (ts différent).
+    #[test]
+    fn pins() {
+        let (s, dir) = tmp_session("pins");
+        s.emit(EventKind::UserMessage {
+            text: "pin moi".into(),
+            steer: false,
+            origin: None,
+        });
+        s.emit(EventKind::AgentText {
+            text: "réponse".into(),
+        });
+        // Pin valide + idempotent (même entrée, pas de doublon).
+        let e = s.pin(1).unwrap();
+        assert_eq!(e.kind, "user_message");
+        assert!(e.text.contains("pin moi"));
+        let e2 = s.pin(1).unwrap();
+        assert_eq!(e2.pinned_at, e.pinned_at);
+        // Hors journal / sans contenu → erreurs.
+        assert!(s.pin(99).is_err());
+        s.emit(EventKind::StatusChanged {
+            state: "working".into(),
+        });
+        assert!(s.pin(3).is_err()); // status_changed : pas de texte
+        let list = s.pins_snapshot();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["live"], true);
+        // Persisté : la réouverture recharge pinned.json.
+        let s2 = Session::open(dir.clone(), &test_compact_src()).unwrap();
+        assert_eq!(s2.pins_snapshot().len(), 1);
+        // Journal vidé (/clear, rebind) : épinglé conservé mais mort.
+        s2.journal.reset(&dir).unwrap();
+        let dead = s2.pins_snapshot();
+        assert_eq!(dead.len(), 1);
+        assert_eq!(dead[0]["live"], false);
+        assert!(dead[0]["text"].as_str().unwrap().contains("pin moi"));
+        // Collision : un event du NOUVEAU cycle prend le seq 1 — le ts
+        // diffère → l'épinglé ne doit pas revenir « live ».
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        s2.emit(EventKind::UserMessage {
+            text: "autre cycle".into(),
+            steer: false,
+            origin: None,
+        });
+        assert_eq!(s2.pins_snapshot()[0]["live"], false);
+        // Re-pin du même seq = nouvel event : l'entrée morte est
+        // REMPLACÉE (pas de no-op silencieux, pas de doublon).
+        let e3 = s2.pin(1).unwrap();
+        assert!(e3.text.contains("autre cycle"));
+        assert_ne!(e3.ts, e.ts);
+        let relist = s2.pins_snapshot();
+        assert_eq!(relist.len(), 1);
+        assert_eq!(relist[0]["live"], true);
+        // Unpin : true puis false (déjà retiré), liste vidée et
+        // suppression persistée à la réouverture.
+        assert!(s2.unpin(1));
+        assert!(!s2.unpin(1));
+        let s3 = Session::open(dir.clone(), &test_compact_src()).unwrap();
+        assert!(s3.pins_snapshot().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// usage_update qui franchit le seuil (90 % de 100k) → « /compact »
+    /// en tête de file en provenance Auto + event système, sans
+    /// user_message ; un update qui RESTE au-dessus ne re-déclenche pas
+    /// (croisement, pas niveau), et la retenue armée bloque le doublon.
+    #[tokio::test]
+    async fn compact_auto_crossing() {
+        let (s, dir) = tmp_session("compact-auto");
+        let usage = |used: u64| {
+            serde_json::json!({"update": {"sessionUpdate": "usage_update", "used": used, "size": 100_000}})
+        };
+        s.handle_session_update(&usage(50_000)).await;
+        assert!(s.prompt_queue.lock().unwrap().is_empty());
+        s.handle_session_update(&usage(91_000)).await;
+        {
+            let q = s.prompt_queue.lock().unwrap();
+            let (txt, src) = q.front().unwrap();
+            assert_eq!(txt, "/compact");
+            assert_eq!(*src, PromptSrc::Auto);
+            assert_eq!(q.len(), 1);
+        }
+        // Toujours au-dessus (croissance 91k→95k) → pas de second /compact.
+        s.handle_session_update(&usage(95_000)).await;
+        assert_eq!(s.prompt_queue.lock().unwrap().len(), 1);
+        assert!(kinds(&dir).contains(&"system"));
+        assert!(!kinds(&dir).contains(&"user_message"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Session « reprise à chaud » : pas de baseline live au premier
+    /// usage_update → déjà au-dessus du seuil = franchissement, le
+    /// compact part tout de suite (usage_seen reset à chaque spawn).
+    #[tokio::test]
+    async fn compact_auto_resumed_hot() {
+        let (s, dir) = tmp_session("compact-hot");
+        s.handle_session_update(&serde_json::json!({
+            "update": {"sessionUpdate": "usage_update", "used": 95_000, "size": 100_000}
+        }))
+        .await;
+        assert_eq!(s.prompt_queue.lock().unwrap().front().unwrap().0, "/compact");
+        // Le suivant au-dessus ne redéclenche pas (baseline posée).
+        s.handle_session_update(&serde_json::json!({
+            "update": {"sessionUpdate": "usage_update", "used": 96_000, "size": 100_000}
+        }))
+        .await;
+        assert_eq!(s.prompt_queue.lock().unwrap().len(), 1);
+        // Dédup : un second déclencheur direct ne double pas la file.
+        s.request_auto_compact(96_000, 100_000);
+        assert_eq!(s.prompt_queue.lock().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Agent qui annonce des commandes SANS /compact : le déclencheur
+    /// court-circuite (rien en file) — un agent muet (liste vide) tente
+    /// quand même, le timeout borne l'échec.
+    #[tokio::test]
+    async fn compact_auto_unsupported() {
+        let (s, dir) = tmp_session("compact-nosup");
+        {
+            let mut m = s.meta.lock().unwrap();
+            m.available_commands = vec![proto::CmdInfo::Name("clear".into())];
+        }
+        s.handle_session_update(&serde_json::json!({
+            "update": {"sessionUpdate": "usage_update", "used": 91_000, "size": 100_000}
+        }))
+        .await;
+        assert!(s.prompt_queue.lock().unwrap().is_empty());
+        assert!(kinds(&dir).contains(&"system"));
+        // /compact déclaré → le déclencheur enfile bien.
+        {
+            let mut m = s.meta.lock().unwrap();
+            m.available_commands = vec![proto::CmdInfo::Name("compact".into())];
+            m.context_used = None; // re-simule un franchissement propre
+            m.context_size = None;
+        }
+        s.handle_session_update(&serde_json::json!({
+            "update": {"sessionUpdate": "usage_update", "used": 91_000, "size": 100_000}
+        }))
+        .await;
+        assert_eq!(s.prompt_queue.lock().unwrap().front().unwrap().0, "/compact");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// La relance « continue your task » n'est posée que pour un hold
+    /// auto terminé normalement — ni pour un compact manuel, ni quand
+    /// l'utilisateur a annulé la retenue.
+    #[tokio::test]
+    async fn compact_auto_continue() {
+        let (s, dir) = tmp_session("compact-cont");
+        s.arm_compact(true);
+        s.end_compact("contexte réduit", false);
+        {
+            let q = s.prompt_queue.lock().unwrap();
+            assert_eq!(q.front().unwrap().0, "continue your task");
+            assert_eq!(q.front().unwrap().1, PromptSrc::Auto);
+        }
+        s.prompt_queue.lock().unwrap().clear();
+        // Hold manuel → pas de relance.
+        s.arm_compact(false);
+        s.end_compact("contexte réduit", false);
+        assert!(s.prompt_queue.lock().unwrap().is_empty());
+        // Hold auto + cancel utilisateur → pas de relance non plus.
+        s.arm_compact(true);
+        s.end_compact("annulé", true);
+        assert!(s.prompt_queue.lock().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// setcfg `ac.compact_*` : override session effectif immédiatement
+    /// et persisté en compact.json (réouverture → toujours actif) ;
+    /// « off » sur un seuil = retour à la valeur héritée ; clés et
+    /// valeurs invalides rejetées.
+    #[tokio::test]
+    async fn compact_session_override() {
+        let (s, dir) = tmp_session("compact-cfg");
+        assert!(s.compact_policy().enabled); // défaut global
+        s.set_config_option("ac.compact_enabled", "off").await.unwrap();
+        assert!(!s.compact_policy().enabled);
+        s.set_config_option("ac.compact_at_tokens", "50000").await.unwrap();
+        assert_eq!(s.compact_policy().at_tokens, Some(50_000));
+        s.set_config_option("ac.compact_at_pct", "0.5").await.unwrap();
+        assert_eq!(s.compact_policy().at_pct, Some(0.5));
+        // off → retour à l'hérité global (0.9), pas « pas de règle ».
+        s.set_config_option("ac.compact_at_pct", "off").await.unwrap();
+        assert_eq!(s.compact_policy().at_pct, Some(0.9));
+        // Persisté : la réouverture relit compact.json.
+        let s2 = Session::open(dir.clone(), &test_compact_src()).unwrap();
+        let p = s2.compact_policy();
+        assert!(!p.enabled && p.at_tokens == Some(50_000) && p.at_pct == Some(0.9));
+        // Rejets : clé inconnue, booléen, borne %.
+        assert!(s2.set_config_option("ac.nope", "1").await.is_err());
+        assert!(s2.set_config_option("ac.compact_enabled", "maybe").await.is_err());
+        assert!(s2.set_config_option("ac.compact_at_pct", "1.5").await.is_err());
+        // « 0 » ≠ « off » : 0 décoche la règle héritée (at_tokens Some(0)
+        // → effectif None), off rend None = retour à l'hérité. Source
+        // globale à at_tokens posé pour distinguer les deux.
+        let src = CompactSrc {
+            global: crate::server::CompactCfg {
+                enabled: true,
+                at_tokens: Some(80_000),
+                at_pct: Some(0.9),
+            },
+            by_agent: Default::default(),
+        };
+        let s3 = Session::open(dir.clone(), &src).unwrap();
+        assert_eq!(s3.compact_policy().at_tokens, Some(50_000)); // override persistant
+        s3.set_config_option("ac.compact_at_tokens", "0").await.unwrap();
+        assert!(s3.compact_policy().at_tokens.is_none()); // règle décochée
+        s3.set_config_option("ac.compact_at_tokens", "off").await.unwrap();
+        assert_eq!(s3.compact_policy().at_tokens, Some(80_000)); // hérité global
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Setcfg à chaud : le seuil durci/réarmé alors que l'usage est
+    /// déjà au-dessus déclenche au prochain update — le reset de la
+    /// baseline (usage_seen) empêche `was` de rester vrai indéfiniment.
+    #[tokio::test]
+    async fn compact_setcfg_hot() {
+        let (s, dir) = tmp_session("compact-hot-cfg");
+        let usage = |used: u64| {
+            serde_json::json!({"update": {"sessionUpdate": "usage_update", "used": used, "size": 100_000}})
+        };
+        // Compact coupé pendant le dépassement → rien, mais la baseline
+        // s'est posée sur cette valeur déjà haute.
+        s.set_config_option("ac.compact_enabled", "off").await.unwrap();
+        s.handle_session_update(&usage(95_000)).await;
+        assert!(s.prompt_queue.lock().unwrap().is_empty());
+        // Réarmé à chaud : sans le reset, was(exceeds(95k)) resterait
+        // vrai → le déclencheur serait muet indéfiniment.
+        s.set_config_option("ac.compact_enabled", "on").await.unwrap();
+        s.handle_session_update(&usage(95_500)).await;
+        assert_eq!(s.prompt_queue.lock().unwrap().front().unwrap().0, "/compact");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

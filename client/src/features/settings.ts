@@ -33,6 +33,9 @@ export class SettingsPanel {
   langChanged: () => void = () => {};
   /** Mode d'envoi changé → hints du composer à mettre à jour (injecté). */
   sendModeChanged: () => void = () => {};
+  /** Préférence « rendu Markdown » changée → MdView du viewer à
+   *  re-synchroniser (injecté). */
+  mdRenderChanged: (on: boolean) => void = () => {};
   /** Thème changé → les terminaux ouverts re-pick les couleurs (injecté). */
   themeChanged: () => void = () => {};
   /** Le panneau s'apprête à s'ouvrir : les autres overlays de #chat
@@ -68,6 +71,8 @@ export class SettingsPanel {
     ($("s-images") as HTMLInputElement).checked = inlineImages();
     ($("s-rcchan") as HTMLInputElement).checked = rcChannel();
     ($("s-encoding") as HTMLSelectElement).value = defaultEncoding();
+    ($("s-mdrender") as HTMLInputElement).checked =
+      localStorage.getItem("ac-md-render") !== "0";
     ($("s-snd") as HTMLInputElement).checked = sndEnabled();
     for (const k of ["done", "question", "error"] as SoundKind[]) {
       ($(`s-snd-${k}`) as HTMLInputElement).checked = sndTypeOn(k);
@@ -80,14 +85,20 @@ export class SettingsPanel {
     this.syncSndOpts();
     $("s-update-status").textContent = "";
     ($("s-doupdate") as HTMLButtonElement).hidden = true;
-    // Web : pas d'auto-connexion optionnelle (la conn unique est vitale)
-    // ni d'update client (la SPA suit le binaire démon) ni de canal rc.
-    ($("s-autoconn").closest(".s-row") as HTMLElement).hidden = isWeb;
-    ($("s-rcchan").closest(".s-row") as HTMLElement).hidden = isWeb;
-    $("s-update-row").hidden = isWeb;
+    // Web : pas de reconnexion optionnelle (la conn unique est vitale) ni
+    // d'update client (la SPA suit le binaire démon) → sections masquées.
+    $("s-sec-conn").hidden = isWeb;
+    $("s-sec-update").hidden = isWeb;
     void getVersion()
-      .then((v) => ($("s-version").textContent = `v${v}`))
-      .catch(() => ($("s-version").textContent = ""));
+      .then((v) => {
+        $("s-version").textContent = `v${v}`;
+        this.syncSecStates();
+      })
+      .catch(() => {
+        $("s-version").textContent = "";
+        this.syncSecStates();
+      });
+    this.syncSecStates();
     const view = $("settings-view");
     view.hidden = false;
     this.setChatInert(true);
@@ -167,16 +178,21 @@ export class SettingsPanel {
     ($("s-theme") as HTMLSelectElement).onchange = (e) => {
       applyTheme((e.target as HTMLSelectElement).value as "dark" | "light");
       this.themeChanged();
+      this.syncSecStates();
     };
     ($("s-accent") as HTMLSelectElement).onchange = (e) => {
       applyAccent((e.target as HTMLSelectElement).value as Accent);
       this.themeChanged();
+      this.syncSecStates();
     };
     ($("s-bganim") as HTMLInputElement).onchange = (e) =>
       applyBgAnim((e.target as HTMLInputElement).checked);
     ($("s-lang") as HTMLSelectElement).onchange = (e) => {
       setLang((e.target as HTMLSelectElement).value as Lang);
       this.langChanged();
+      // setLang → applyStatic a retraduit les options → lire leurs
+      // libellés après coup pour les résumés de section.
+      this.syncSecStates();
     };
     ($("s-sendmode") as HTMLSelectElement).onchange = (e) => {
       localStorage.setItem(
@@ -184,12 +200,15 @@ export class SettingsPanel {
         (e.target as HTMLSelectElement).value === "steer" ? "steer" : "queue",
       );
       this.sendModeChanged();
+      this.syncSecStates();
     };
-    ($("s-autoconn") as HTMLInputElement).onchange = (e) =>
+    ($("s-autoconn") as HTMLInputElement).onchange = (e) => {
       localStorage.setItem(
         "ac-autoconnect",
         (e.target as HTMLInputElement).checked ? "1" : "0",
       );
+      this.syncSecStates();
+    };
     ($("s-images") as HTMLInputElement).onchange = (e) =>
       localStorage.setItem(
         "ac-inline-images",
@@ -200,14 +219,22 @@ export class SettingsPanel {
         "ac-rcchannel",
         (e.target as HTMLInputElement).checked ? "1" : "0",
       );
-    ($("s-encoding") as HTMLSelectElement).onchange = (e) =>
+    ($("s-encoding") as HTMLSelectElement).onchange = (e) => {
       localStorage.setItem("ac-encoding", (e.target as HTMLSelectElement).value);
+      this.syncSecStates();
+    };
+    ($("s-mdrender") as HTMLInputElement).onchange = (e) => {
+      const on = (e.target as HTMLInputElement).checked;
+      localStorage.setItem("ac-md-render", on ? "1" : "0");
+      this.mdRenderChanged(on);
+    };
     ($("s-snd") as HTMLInputElement).onchange = (e) => {
       localStorage.setItem(
         "ac-snd",
         (e.target as HTMLInputElement).checked ? "1" : "0",
       );
       this.syncSndOpts();
+      this.syncSecStates();
     };
     for (const k of ["done", "question", "error"] as SoundKind[]) {
       ($(`s-snd-${k}`) as HTMLInputElement).onchange = (e) =>
@@ -225,12 +252,33 @@ export class SettingsPanel {
         "ac-snd-unfocused",
         (e.target as HTMLInputElement).checked ? "1" : "0",
       );
-    ($("s-snd-vol") as HTMLInputElement).oninput = (e) =>
+    ($("s-snd-vol") as HTMLInputElement).oninput = (e) => {
       localStorage.setItem(
         "ac-snd-vol",
         (e.target as HTMLInputElement).value,
       );
+      this.syncSecStates();
+    };
     ($("s-checkupdate") as HTMLButtonElement).onclick = () => this.runUpdateCheck();
+  }
+
+  /** Résumé d'état à droite du titre de chaque section — la valeur
+   *  courante reste lisible quand la section est repliée. */
+  private syncSecStates() {
+    const opt = (id: string) =>
+      ($(id) as HTMLSelectElement).selectedOptions[0]?.textContent?.trim() ??
+      "";
+    $("s-st-appearance").textContent = `${opt("s-theme")} · ${opt("s-accent")}`;
+    $("s-st-chat").textContent = opt("s-sendmode");
+    const sndOn = ($("s-snd") as HTMLInputElement).checked;
+    $("s-st-notif").textContent = sndOn
+      ? `${t("st_on")} · ${($("s-snd-vol") as HTMLInputElement).value}%`
+      : t("st_off");
+    $("s-st-conn").textContent = ($("s-autoconn") as HTMLInputElement).checked
+      ? t("st_on")
+      : t("st_off");
+    $("s-st-update").textContent = $("s-version").textContent;
+    $("s-st-files").textContent = opt("s-encoding");
   }
 
   /** Master off → les sous-options sons sont grisées/inertes — sauf les

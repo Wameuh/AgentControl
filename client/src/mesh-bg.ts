@@ -252,9 +252,12 @@
     const preset = MOODS[name] || MOODS.sand;
     target = { ...preset, intensity: options.intensity ?? 1 };
     // Teinte d'accent optionnelle (palette dérivée du thème) : la base
-    // remplace le fond du preset, la lumière principale suit l'accent.
+    // remplace le fond du preset, la lumière principale suit l'accent,
+    // la teinte secondaire des agents aussi quand elle est fournie
+    // (agentTint — à ne pas confondre avec `agents`, le compteur).
     if (options.base) target.base = options.base;
     if (options.light) target.light = options.light;
+    if (options.agentTint) target.agent = options.agentTint;
     mood.dark = !!preset.dark;
     // agents absent = conserver le compteur (les changements de teinte ne
     // doivent pas éteindre les lumières agents).
@@ -322,5 +325,9 @@
   draw();
   start();
 
-  window.MeshBackground = { setMood, setAnimated, isAnimated: animated };
+  window.MeshBackground = {
+    setMood, setAnimated, isAnimated: animated,
+    // Introspection de la cible courante (tests : teinte agents = accent).
+    getMood: () => ({ base: [...target.base], light: [...target.light], agent: [...target.agent] }),
+  };
 })();

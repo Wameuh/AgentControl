@@ -68,6 +68,10 @@ pub async fn upgrade_and_serve(
     );
     stream.write_all(rsp.as_bytes()).await?;
 
+    let peer = stream
+        .peer_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| "?".into());
     let (rd, wr) = tokio::io::split(stream);
     // a_in : frames WS → octets NDJSON vers serve_conn.
     // b_out : octets NDJSON de serve_conn → frames WS.
@@ -75,9 +79,17 @@ pub async fn upgrade_and_serve(
     let (srv_out, b_out) = tokio::io::duplex(DUPLEX_CAP);
     let (otx, orx) = mpsc::channel::<OutFrame>(OUTBOUND_CAP);
 
+    tracing::info!("conn ws open {peer}");
     let d = Arc::clone(&daemon);
     let mut conn = tokio::spawn(async move {
-        d.serve_conn(tokio::io::join(srv_in, srv_out)).await
+        let t0 = std::time::Instant::now();
+        let r = d.serve_conn(tokio::io::join(srv_in, srv_out)).await;
+        let secs = t0.elapsed().as_secs();
+        match &r {
+            Ok(()) => tracing::info!("conn ws {peer} close ({secs}s) — client parti"),
+            Err(e) => tracing::info!("conn ws {peer} close ({secs}s): {e:#}"),
+        }
+        r
     });
     let mut reader = tokio::spawn(read_frames(rd, a_in, otx.clone()));
     let mut writer = tokio::spawn(write_frames(wr, b_out, orx));
