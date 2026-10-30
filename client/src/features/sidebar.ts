@@ -184,8 +184,8 @@ export class Sidebar {
   }
 
   /** Ouvrir une session depuis la sidebar = quitter les overlays de
-   *  #chat (options, vue connexion, diagramme la recouvrent — la session
-   *  s'afficherait dessous, invisible). */
+   *  #chat (paramètres, vue connexion, composants, diagramme la
+   *  recouvrent — la session s'afficherait dessous, invisible). */
   private openSession(id: string): Promise<void> {
     this.closeChatOverlays();
     return this.chat.open(id);

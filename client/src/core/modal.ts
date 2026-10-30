@@ -51,6 +51,14 @@ function watch() {
       logUi("warn", `modal-watchdog: inert résiduel retiré de #${el.id || el.tagName}`);
     }
   }
+  // Même filet pour la classe map-open (vue diagramme à fond transparent :
+  // les enfants de #chat sont visibility:hidden) — posée/retirée par
+  // MapView.open/close ; résiduelle, tout le chat resterait invisible.
+  if (($("map-view") as HTMLElement | null)?.hidden !== false &&
+      $("chat")?.classList.contains("map-open")) {
+    $("chat").classList.remove("map-open");
+    logUi("warn", "modal-watchdog: classe map-open résiduelle retirée de #chat");
+  }
 }
 
 /** À appeler une fois au boot. */
