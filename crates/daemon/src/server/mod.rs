@@ -19,7 +19,7 @@ mod prs;
 mod sessions;
 mod term;
 
-pub use cfg::{A2aCfg, AgentProfile, OrchCfg, RetentionCfg};
+pub use cfg::{A2aCfg, AgentProfile, CompactCfg, CompactPartial, CompactPolicy, CompactSrc, OrchCfg, RetentionCfg};
 pub(crate) use orch::OrchProbe;
 
 use anyhow::{Context, Result};
@@ -155,6 +155,10 @@ pub struct Daemon {
     /// opt-in, statut exposé via le composant interne
     /// `backlog-orchestrator`.
     pub orch: Arc<OrchProbe>,
+    /// Seuils du compact forcé automatique : global `[compact]` +
+    /// overrides `[agents.<id>.compact]` — résolution par session à
+    /// l'open (le sidecar `compact.json` complète par-dessus).
+    pub compact: CompactSrc,
 }
 
 
@@ -171,9 +175,33 @@ impl Daemon {
         forges: Forges,
         bind_tcp: String,
         orch: OrchCfg,
+        compact: CompactCfg,
     ) -> Result<(Arc<Self>, Vec<String>)> {
         let web = Arc::new(RwLock::new(None));
         let orch = Arc::new(OrchProbe::open(orch));
+        let compact = CompactSrc {
+            global: compact,
+            by_agent: agents
+                .iter()
+                .map(|(id, p)| (id.clone(), p.compact.clone()))
+                .collect(),
+        };
+        // at_pct hors [0,1] : règle % traitée « off » à la lecture (le
+        // TOML n'a pas de null, 0 = off documenté) — warn ici pour ne
+        // pas laisser une typo (90 au lieu de 0.90) silencieusement
+        // inerte.
+        if let Some(v) = compact.global.at_pct {
+            if !(0.0..=1.0).contains(&v) {
+                tracing::warn!("[compact] at_pct={v} hors borne (0<p≤1) — règle % ignorée");
+            }
+        }
+        for (id, part) in &compact.by_agent {
+            if let Some(v) = part.at_pct {
+                if !(0.0..=1.0).contains(&v) {
+                    tracing::warn!("[agents.{id}.compact] at_pct={v} hors borne (0<p≤1) — règle % ignorée");
+                }
+            }
+        }
         let d = Arc::new(Self {
             root: root.clone(),
             sessions: RwLock::new(HashMap::new()),
@@ -188,6 +216,7 @@ impl Daemon {
             ),
             orch,
             a2a,
+            compact,
             peer_rate: std::sync::Mutex::new(HashMap::new()),
             spawn_rate: std::sync::Mutex::new(HashMap::new()),
             prs: Arc::new(PrRegistry::open(&root)),
@@ -203,7 +232,7 @@ impl Daemon {
                 if !entry.file_type()?.is_dir() {
                     continue;
                 }
-                match Session::open(entry.path()) {
+                match Session::open(entry.path(), &d.compact) {
                     Ok(s) => {
                         // État persisté lu avant reconcile (qui efface la
                         // distinction actif/idle en passant tout à

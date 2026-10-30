@@ -61,7 +61,12 @@ impl Session {
         }
         // Nouveau process = nouveau cycle de livraison : retenue compact
         // et flag busy d'un éventuel tour mort avec l'ancien process.
+        // La baseline compact repart à zéro : si le contexte repris est
+        // déjà chaud, le premier usage_update live déclenchera (le seuil
+        // se mesure au franchissement — un cycle d'agent neuf en refait
+        // un, les updates rejoués par le load n'en font jamais).
         self.take_compact_hold();
+        self.usage_seen.store(false, Ordering::SeqCst);
         self.busy.store(false, Ordering::SeqCst);
         // Fenêtre "pas encore prêt" : stdin posé tôt mais session/load pas
         // terminé — drain_queue/envois directs doivent rester en file.
@@ -509,7 +514,7 @@ impl Session {
         }
     }
 
-    async fn handle_session_update(&self, params: &Value) {
+    pub(super) async fn handle_session_update(&self, params: &Value) {
         let update = match params.get("update") {
             Some(u) => u,
             None => return,
@@ -529,6 +534,7 @@ impl Session {
                 // et un `plan` rejoué dupliquerait un message entier).
                 let replaying = self.loading_replay.load(Ordering::SeqCst);
                 let mut compact_done = false;
+                let mut auto_compact: Option<(u64, u64)> = None;
                 match &kind {
                     EventKind::ModeChanged { mode } => {
                         let mut m = self.meta.lock().unwrap();
@@ -565,6 +571,7 @@ impl Session {
                         if m.context_used == Some(*used) && m.context_size == Some(*size) {
                             return; // déduplique (replay, heartbeat à l'identique)
                         }
+                        let (prev_used, prev_size) = (m.context_used, m.context_size);
                         m.context_used = Some(*used);
                         m.context_size = Some(*size);
                         drop(m);
@@ -581,6 +588,27 @@ impl Session {
                         {
                             compact_done = true;
                         }
+                        // Compact auto au seuil : déclenché au
+                        // FRANCHISSEMENT (prev sous seuil → now au-dessus)
+                        // — un usage qui reste haut après un compact
+                        // inefficace ne reboucle pas, un re-dépassement
+                        // ultérieur (croissance) redéclenche à juste titre.
+                        // Pas de baseline live encore (spawn récent) : le
+                        // premier update compte comme franchissement s'il
+                        // est déjà au-dessus — cas de la session reprise
+                        // « chaude » (le replay ne nourrit pas `was`).
+                        if !replaying {
+                            let pol = self.compact_policy();
+                            let over = pol.exceeds(*used, *size);
+                            let seen = self.usage_seen.swap(true, Ordering::SeqCst);
+                            let was = seen
+                                && prev_used.is_some_and(|u| {
+                                    pol.exceeds(u, prev_size.unwrap_or(*size))
+                                });
+                            if over && !was {
+                                auto_compact = Some((*used, *size));
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -588,7 +616,10 @@ impl Session {
                     self.emit(kind);
                 }
                 if compact_done {
-                    self.end_compact("contexte réduit");
+                    self.end_compact("contexte réduit", false);
+                }
+                if let Some((u, s)) = auto_compact {
+                    self.request_auto_compact(u, s);
                 }
             }
             acp::Mapped::ToolUpdate {
