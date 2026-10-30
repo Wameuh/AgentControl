@@ -123,6 +123,18 @@ pub struct OrchCfg {
     /// script d'origine, adapté au cahier des charges AgentBacklog).
     #[serde(default)]
     pub prompt: Option<String>,
+    /// Routing workspace repo → cwd : une entrée = un « workspace »
+    /// porté par le backlog (tag `--repo` des items). Sert aujourd'hui
+    /// à définir les Managers proposables (un par entrée) ; défaut
+    /// `{"AgentControl": "/workspace"}` — hérité du script d'origine.
+    #[serde(default = "drw")]
+    pub repo_workspaces: std::collections::BTreeMap<String, String>,
+    /// Prompt Manager sur mesure — None = le template intégré (rôle
+    /// d'intendance : transformer des demandes en items backlog
+    /// structurés, jamais worker). Placeholders `{REPO}`/`{WS}` comme
+    /// le template intégré.
+    #[serde(default)]
+    pub manager_prompt: Option<String>,
 }
 
 fn d5() -> u32 {
@@ -155,6 +167,9 @@ fn dmodel() -> String {
 fn dlevel() -> String {
     "max".into()
 }
+fn drw() -> std::collections::BTreeMap<String, String> {
+    [("AgentControl".to_string(), dws())].into_iter().collect()
+}
 
 impl Default for OrchCfg {
     fn default() -> Self {
@@ -171,6 +186,8 @@ impl Default for OrchCfg {
             thought_level: dlevel(),
             nudge_cooldown_secs: 900,
             prompt: None,
+            repo_workspaces: drw(),
+            manager_prompt: None,
         }
     }
 }

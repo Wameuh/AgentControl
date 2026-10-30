@@ -960,6 +960,13 @@ pub enum ReqKind {
     /// `{enabled, status}` — status = instantané exposé aussi dans
     /// `ListComponents`/`ComponentInfo`.
     OrchestratorSet { enabled: bool },
+    /// Spawn d'un « Manager » pour le workspace routé `repo` (feature
+    /// d'intendance backlog : le client le propose quand le composant
+    /// `agentbacklog` + l'orchestrateur sont actifs — cf.
+    /// `orchestrator.workspaces` dans le status). Idempotent : un
+    /// Manager vivant pour ce repo est renvoyé tel quel. Réponse :
+    /// `{session, repo, cwd, title, existing}`.
+    ManagerSpawn { repo: String },
     DaemonStatus,
     /// Auto-update du démon vers la release `version` demandée par le
     /// client (ex. "0.5.0" → tag v0.5.0 — jamais « latest » : le démon
@@ -1040,6 +1047,7 @@ impl ReqKind {
             Self::ComponentInstall { .. } => "component_install",
             Self::ComponentQuery { .. } => "component_query",
             Self::OrchestratorSet { .. } => "orchestrator_set",
+            Self::ManagerSpawn { .. } => "manager_spawn",
             Self::DaemonStatus => "daemon_status",
             Self::UpdateDaemon { .. } => "update_daemon",
         }

@@ -296,6 +296,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         "list_components" => ReqKind::ListComponents,
         "component_info" => ReqKind::ComponentInfo { name: s("name") },
         "component_query" => ReqKind::ComponentQuery { name: s("name"), query: s("query") },
+        "manager_spawn" => ReqKind::ManagerSpawn { repo: s("repo") },
         "component_start" => ReqKind::ComponentStart { name: s("name") },
         "component_stop" => ReqKind::ComponentStop { name: s("name") },
         "component_restart" => ReqKind::ComponentRestart { name: s("name") },
