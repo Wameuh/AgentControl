@@ -166,15 +166,55 @@ ok((await pC.evaluate(() => [...document.documentElement.classList].join(" "))).
 // installed+version, acctl absent), 4 sessions dont s2 spawnée par s1
 // et s4 rattachée au composant backlog-orchestrator via `origin`.
 const pD = await initPage([{ kind: "local" }], null);
-await pD.evaluate(() => document.querySelector("#tb-map")?.click());
+await pD.evaluate(() => document.querySelector("#sv-map")?.click());
 await sleep(900);
 const cnt = (sel) => pD.evaluate((s) => document.querySelectorAll(s).length, sel);
-ok((await pD.evaluate(() => !document.querySelector("#map-view")?.hidden)), "F1 #tb-map ouvre la vue diagramme");
+ok((await pD.evaluate(() => !document.querySelector("#map-view")?.hidden)), "F1 #sv-map ouvre la vue diagramme");
+ok((await pD.evaluate(() => document.querySelector("#sv-map")?.classList.contains("on"))) === true &&
+   (await pD.evaluate(() => document.querySelector("#sv-agents")?.classList.contains("on"))) === false,
+  "F1b onglet « Diagramme » actif pendant l'ouverture");
 ok((await cnt(".n-daemon")) === 1, "F2 nœud démon au centre");
 ok((await cnt(".n-comp")) === 4, `F3 4 composants en anneau (${await cnt(".n-comp")})`);
+ok((await pD.evaluate(() => document.querySelector("#map-nocomps")?.hidden)) === true,
+  "F3b note « aucun composant » masquée (4 présents)");
+ok((await pD.evaluate(() => document.querySelector(".n-comp rect.nc") != null)),
+  "F3c programme = chip rectangulaire (rôle distinct de l'agent cercle)");
+ok((await cnt(".e-dc.e-manage")) + (await cnt(".e-dc.e-know")) === 4,
+  "F3d arêtes démon→programme typées (manages/observes)");
+ok((await pD.evaluate(() => {
+  const t = document.querySelector("#map-legend")?.textContent ?? "";
+  return t.includes("program") && t.includes("agent") &&
+         t.includes("manages") && t.includes("spawned");
+})), "F3e légende explicite : rôles (program/agent) + types d'arêtes");
+ok((await cnt(".nl-sub")) === 4, `F4b sous-titre agent sous chaque session (${await cnt(".nl-sub")})`);
 ok((await cnt(".n-sess")) === 4, `F4 4 sessions positionnées (${await cnt(".n-sess")})`);
 ok((await cnt(".e-dc")) === 4 && (await cnt(".e-s")) === 4,
   `F5 arêtes : 4 démon→composant + 4 parent→session (${await cnt(".e-dc")}+${await cnt(".e-s")})`);
+// La refonte sectorisée garantit l'absence de chevauchement — mesuré.
+ok((await pD.evaluate(() => {
+  const pts = [...document.querySelectorAll(".n-sess")].map((g) => {
+    const m = g.getAttribute("transform").match(/translate\(([-\d.]+) ([-\d.]+)\)/);
+    return [+m[1], +m[2]];
+  });
+  for (let i = 0; i < pts.length; i++)
+    for (let j = i + 1; j < pts.length; j++)
+      if (Math.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1]) < 30) return false;
+  return true;
+})), "F5b sessions : aucun nœud ne se chevauche");
+ok((await pD.evaluate(() => {
+  const boxes = [...document.querySelectorAll(".n-comp")].map((g) => {
+    const b = g.getBBox();
+    const m = g.getAttribute("transform").match(/translate\(([-\d.]+) ([-\d.]+)\)/);
+    return { x: +m[1] + b.x, y: +m[2] + b.y, w: b.width, h: b.height };
+  });
+  for (let i = 0; i < boxes.length; i++)
+    for (let j = i + 1; j < boxes.length; j++) {
+      const a = boxes[i], b = boxes[j];
+      if (a.x < b.x + b.w - 1 && b.x < a.x + a.w - 1 &&
+          a.y < b.y + b.h - 1 && b.y < a.y + a.h - 1) return false;
+    }
+  return true;
+})), "F5c chips programme : aucun chevauchement");
 ok((await cnt(".e-s.flow")) >= 1, "F6 flux actif animé (s1 working)");
 ok((await cnt(".npr")) >= 1, "F7 badge PR #N sur les sessions du registre");
 ok((await pD.evaluate(() => document.querySelector('.n-sess[data-session="s4"]') != null)),
@@ -208,6 +248,14 @@ await sleep(300);
 await pD.evaluate(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
 await sleep(200);
 ok((await pD.evaluate(() => document.querySelector("#map-view")?.hidden)) === true, "F11 Échap referme la vue");
+ok((await pD.evaluate(() => document.querySelector("#sv-agents")?.classList.contains("on"))) === true &&
+   (await pD.evaluate(() => document.querySelector("#sv-map")?.classList.contains("on"))) === false,
+  "F12 fermeture → l'onglet de la vue liste reprend l'état actif");
+await pD.evaluate(() => document.querySelector("#tb-map")?.click());
+await sleep(300);
+ok((await pD.evaluate(() => !document.querySelector("#map-view")?.hidden)), "F13 #tb-map (icône titlebar) ouvre aussi la vue");
+await pD.evaluate(() => document.querySelector("#map-close")?.click());
+await sleep(200);
 
 // ---------- G : panneau composants — états passifs + version des tools ----------
 // Même page pD (conn "local", capability components:true). Le panneau
@@ -273,12 +321,14 @@ await pD.evaluate(() => document.querySelector('#backlog-list .bl-sec.wip .bl-ag
 await sleep(500);
 ok((await pD.evaluate(() => document.querySelector("#chat-title")?.textContent.includes("Fix login crash"))) === true,
   "H8 clic pastille agent → chat de la session ouvert");
-// Quitter l'onglet coupe le trafic : plus aucun component_query.
+// Quitter l'onglet coupe le poll rapide : plus aucun component_query dans
+// la fenêtre mesurée (le cycle badge ~60 s continue hors de cette fenêtre —
+// c'est voulu : le compteur de l'onglet reste vivant sans clic).
 await pD.evaluate(() => document.querySelector("#sv-agents")?.click());
 const qN = await pD.evaluate(() => window.__qCalls || 0);
 await sleep(4700);
 ok((await pD.evaluate(() => window.__qCalls || 0)) === qN,
-  "H9 onglet quitté → poll arrêté (0 component_query de plus)");
+  "H9 onglet quitté → poll rapide arrêté (0 component_query de plus)");
 // Composant masqué → état « non déclaré » + CTA ; Intégrer → install → file.
 await pD.evaluate(() => { window.__blHide = true; document.querySelector("#sv-backlog")?.click(); });
 await sleep(700);

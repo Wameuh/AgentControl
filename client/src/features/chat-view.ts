@@ -107,6 +107,10 @@ export class ChatView {
      *  journal vidé) — la recherche ferme, ses résultats sont d'un
      *  autre journal. */
     onSessionChanged: () => {},
+    /** Session affichée disparue pour de bon (markGone — toutes
+     *  origines confondues) : purge de son état volatil (brouillon du
+     *  composer, pièces garées). */
+    onSessionGone: (_id: string) => {},
     /** Nb de connexions connues — pour l'écran d'accueil (injecté). */
     connCount: (): number => 0,
     /** Aucune conn bound, ou toutes hors ligne/déconnectées → la vue
@@ -414,8 +418,13 @@ export class ChatView {
       return;
     }
     app.alive = info.alive;
+    // listMeta absente → current était null pendant le chargement : la
+    // session affichée ne devient celle-ci qu'ici — refire le
+    // changement (brouillon du composer, recherche, chips garés).
+    const shownId = app.current?.id;
     app.current = info.meta;
     if (!app.current.conn && connHint) app.current.conn = connHint;
+    if (app.current.id !== shownId) this.deps.onSessionChanged();
     this.setChatTitle();
     this.updateHeader();
 
@@ -557,9 +566,11 @@ export class ChatView {
   markGone() {
     if (!app.current) return;
     this.sysline(t("session_gone"), "warn");
-    this.dropConv(app.current.id);
+    const goneId = app.current.id;
+    this.dropConv(goneId);
     app.current = null;
     this.deps.onSessionChanged();
+    this.deps.onSessionGone(goneId);
     this.unseenBelow = 0;
     $("btn-bottom").hidden = true;
     $("chat-gem").hidden = true;

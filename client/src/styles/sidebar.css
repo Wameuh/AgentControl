@@ -23,7 +23,7 @@
 #sess-filter { position: relative; display: flex; flex: none; }
 #sess-filter input {
   flex: 1; min-width: 0; padding: 5px 24px 5px 9px; font: inherit; font-size: 12px;
-  color: var(--ink); background: rgba(236, 230, 216, .05);
+  color: var(--ink); background: rgba(var(--tint-rgb), .05);
   border: 1px solid var(--line); border-radius: 10px;
 }
 #sess-filter input:focus { outline: none; border-color: rgba(var(--accent-rgb), .5); }
@@ -42,7 +42,7 @@
   border-radius: 10px; cursor: pointer; border: 1px solid transparent;
   transition: background .15s, border-color .15s;
 }
-#session-list .sess:hover { background: rgba(236, 230, 216, .06); }
+#session-list .sess:hover { background: rgba(var(--tint-rgb), .06); }
 #session-list .sess.active { background: rgba(var(--accent-rgb), .1); border-color: rgba(var(--accent-rgb), .3); }
 #session-list .sess .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 #session-list .sess .a { color: var(--dim); font-size: 11px; font-family: Mono, ui-monospace, monospace; }
@@ -112,12 +112,13 @@
 #btn-new-session:hover { color: var(--accent); border-color: var(--accent); }
 
 button {
-  background: rgba(236, 230, 216, .06); color: var(--ink);
+  background: rgba(var(--tint-rgb), .06); color: var(--ink);
   border: 1px solid var(--line);
   border-radius: 10px; padding: 6px 12px; cursor: pointer; font: inherit;
   transition: border-color .15s, background .15s, color .15s;
 }
-button:hover { border-color: var(--accent); }
+button:hover:not(:disabled) { border-color: var(--accent); background: rgba(var(--accent-rgb), .09); }
+button:active:not(:disabled) { background: rgba(var(--accent-rgb), .18); }
 button:disabled { opacity: .5; cursor: default; }
 #btn-connect { border-color: rgba(var(--accent-rgb), .4); color: var(--accent); }
 
@@ -131,7 +132,7 @@ button:disabled { opacity: .5; cursor: default; }
   cursor: pointer; padding: 1px 5px; border-radius: 4px; line-height: 1;
   display: inline-flex; align-items: center; gap: 4px; flex: none;
 }
-.grp-head .grp-add:hover, .grp-sub .grp-add:hover { color: var(--accent); background: rgba(236,230,216,.08); }
+.grp-head .grp-add:hover, .grp-sub .grp-add:hover { color: var(--accent); background: rgba(var(--tint-rgb),.08); }
 /* Micro-libellé à côté de l'icône : distingue « + groupe » de « + agent »
    sans dépendre du tooltip. */
 .grp-add-lbl { font-size: 9px; font-weight: 600; letter-spacing: .4px; text-transform: uppercase; }
@@ -173,11 +174,12 @@ button:disabled { opacity: .5; cursor: default; }
 /* ── Sélecteur de vue : agents ↔ repos ───────────────────────────────── */
 #side-view {
   display: flex; gap: 3px; padding: 3px; flex: none;
-  background: rgba(236, 230, 216, .05); border: 1px solid var(--line);
+  background: rgba(var(--tint-rgb), .05); border: 1px solid var(--line);
   border-radius: 11px;
 }
 #side-view .sv {
-  flex: 1; display: flex; align-items: center; justify-content: center;
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; justify-content: center;
   gap: 6px; padding: 5px 8px; font-size: 12px;
   border: 1px solid transparent; background: none; color: var(--dim);
   border-radius: 8px;
@@ -189,6 +191,12 @@ button:disabled { opacity: .5; cursor: default; }
 }
 #side-view .sv .sv-ic { display: inline-flex; flex: none; }
 #side-view .sv .ic { width: 13px; height: 13px; display: block; }
+/* 4 onglets (~57px chacun à 250px de sidebar) : « Diagramme » déborde —
+   ellipsis plutôt qu'un wrap cassé (le compteur #sv-*count garde sa
+   taille : il suit le label, pas .sv-ic). */
+#side-view .sv .sv-ic + span {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 #sv-count {
   font-size: 10px; font-family: Mono, ui-monospace, monospace; line-height: 1;
   background: rgba(var(--accent-rgb), .18); color: var(--accent);
@@ -212,7 +220,7 @@ button:disabled { opacity: .5; cursor: default; }
   padding: 7px 10px 6px; border-radius: 10px; cursor: pointer;
   border: 1px solid transparent; transition: background .15s, border-color .15s;
 }
-#pr-list .pr:hover { background: rgba(236, 230, 216, .06); }
+#pr-list .pr:hover { background: rgba(var(--tint-rgb), .06); }
 #pr-list .pr .pr-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
 #pr-list .pr .pr-num {
   flex: none; font-size: 11px; font-family: Mono, ui-monospace, monospace;
@@ -230,6 +238,11 @@ button:disabled { opacity: .5; cursor: default; }
 #pr-list .pr .pr-st.st-open { color: var(--sage); border-color: rgba(184, 207, 174, .5); }
 #pr-list .pr .pr-st.st-draft { color: var(--dim); border-style: dashed; }
 #pr-list .pr .pr-st.st-conflict { color: var(--err); border-color: rgba(232, 148, 134, .55); }
+#pr-list .pr .pr-st.st-merged { color: var(--violet); border-color: color-mix(in srgb, var(--violet) 55%, transparent); }
+#pr-list .pr .pr-st.st-closed { color: var(--err); border-color: color-mix(in srgb, var(--err) 55%, transparent); }
+/* Entrées « terminées » (section historique) : estompées pour rester
+   lisibles sans rivaliser avec les PR ouvertes. */
+#pr-list .pr.pr-done { opacity: .7; }
 #pr-list .pr .pr-sub {
   display: flex; align-items: center; gap: 8px; margin-top: 4px;
   font-size: 11px; color: var(--dim); min-width: 0;
@@ -302,7 +315,7 @@ button:disabled { opacity: .5; cursor: default; }
   display: flex; align-items: center; gap: 7px;
   padding: 5px 10px; font-size: 12px; border-radius: 6px;
 }
-.bl-item:hover { background: rgba(236, 230, 216, .05); }
+.bl-item:hover { background: rgba(var(--tint-rgb), .05); }
 .bl-item .bl-id { color: var(--dim); font-family: Mono, ui-monospace, monospace; flex: none; }
 .bl-item .bl-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bl-item .bl-blocked { color: var(--gold); flex: none; display: inline-flex; }

@@ -56,6 +56,13 @@ acctl pr note <N|I<cid>> <texte…> | acctl pr rm <N|I<cid>>
 acctl pr sync                           # rafraîchit les statuts
 ```
 
+La même collecte tourne côté démon via le RPC `pr_sync` (crate
+`forgesync` partagée) : l'onglet « Dépôts » du client le demande à
+l'ouverture puis toutes les 60 s tant que l'onglet est actif —
+throttle démon ~45 s, un seul run à la fois (`{synced:false,
+running|throttled:true}` sinon). Dans ce cadre `token_env` est lu dans
+l'env du **démon** (dans celui d'acctl pour `acctl pr sync`).
+
 Sans flags, la cible est déduite du remote `origin` (hostname comparé aux
 hôtes configurés — le port ssh `:29418` d'un Gerrit matche l'hôte web
 déclaré) ; sinon GitHub comme avant.
@@ -72,6 +79,10 @@ déclaré) ; sinon GitHub comme avant.
   publiques (vérifié sur `gerrit-review.googlesource.com`). `status`
   NEW → open (+ `work_in_progress` → draft), MERGED → merged,
   ABANDONED → closed.
+- **Portée des hôtes** : la collecte n'interroge que les hôtes déclarés
+  (`forge_list` — gitlab.com implicite pour gitlab, github.com pour
+  github) ; une entrée du registre sur un hôte non déclaré est notée
+  « hôte non déclaré — statut inchangé », jamais requêtée.
 
 Le merge d'une review reste une **permission GitHub-only** : le hook de
 merge des PR (`/mr review`, gates CI) ne s'étend pas à GitLab ni Gerrit —

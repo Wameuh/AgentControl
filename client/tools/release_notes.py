@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Génère la description de la release PR : notes de version lisibles par
-des utilisateurs (sections Nouveautés / Corrections / Améliorations),
-construites à partir des sujets de squash mergés sur next_release dans le
-cycle courant.
+"""Génère la description de la release PR : notes de version en anglais,
+lisibles par des utilisateurs (sections New features / Bug fixes /
+Improvements), construites à partir des sujets de squash mergés sur
+next_release dans le cycle courant.
 
 Version affichée = prochaine release calculée comme release-bump
 (version.yml) : borne = dernier commit `chore: bump version` dont le tag
@@ -35,9 +35,9 @@ MARK_END = "<!-- release-notes:end -->"
 # type conventional -> section user-facing ; les autres types (docs,
 # test, chore, ci, build, refactor, style, …) sont internes et exclus.
 CATEGORIES = [
-    ("feat", "Nouveautés"),
-    ("fix", "Corrections"),
-    ("perf", "Améliorations"),
+    ("feat", "New features"),
+    ("fix", "Bug fixes"),
+    ("perf", "Improvements"),
 ]
 
 SUBJECT = re.compile(r"^(\w+)(?:\([^)]*\))?!?\s*:\s*(.+?)\s*(?:\(#(\d+)\)\s*)?$")
@@ -47,15 +47,15 @@ KEYWORD = re.compile(r"\s*\((?:major|minor|sync|patch)\)", re.IGNORECASE)
 
 # Bloc process interne, replié : comment la release se publie. Miroir du
 # commentaire d'en-tête de auto-release-pr.yml.
-PROCESS = """<details><summary>Processus de publication (interne)</summary>
+PROCESS = """<details><summary>Release process (internal)</summary>
 
-Pour releaser : passer la PR **ready** → `release-bump` pousse le bump de
-version (`dernier tag + niveau`, mots-clés `(minor)`/`(major)`/`(sync)` des
-commits du cycle) → les 5 checks tournent sur le head bumpé et un tag
-`v<NEXT>-rc.<k>` déclenche le build de la **prerelease** — installable depuis
-l'app via l'auto-update en activant le canal rc dans les paramètres, pour
-tester avant de merger → merge → `release-on-merge` tague `v<NEXT>`,
-dispatche le build de release final et nettoie les rc du cycle.
+To release: mark this PR **ready** → `release-bump` pushes the version
+bump (`latest tag + level`, `(minor)`/`(major)`/`(sync)` keywords from the
+cycle's commits) → the 5 checks run on the bumped head and a
+`v<NEXT>-rc.<k>` tag triggers the **prerelease** build — installable from
+the app via auto-update by enabling the rc channel in settings, to test
+before merging → merge → `release-on-merge` tags `v<NEXT>`, dispatches
+the final release build and cleans up the cycle's rc releases.
 
 </details>"""
 
@@ -129,9 +129,9 @@ def entries(rev_range):
 
 def render(version, date, ent):
     lines = [MARK_START,
-             f"## Notes de version — v{version}",
+             f"## Release notes — v{version}",
              "",
-             f"_Générées automatiquement — dernière mise à jour : {date}._",
+             f"_Automatically generated — last updated: {date}._",
              ""]
     written = False
     for _, name in CATEGORIES:
@@ -142,8 +142,8 @@ def render(version, date, ent):
         lines += [f"- {t}" + (f" (#{p})" if p else "") for t, p in ent[name]]
         lines.append("")
     if not written:
-        lines += ["Cette version contient des améliorations internes et "
-                  "de la maintenance.", ""]
+        lines += ["This release contains internal improvements and "
+                  "maintenance.", ""]
     lines += [PROCESS, "", MARK_END, ""]
     return "\n".join(lines)
 

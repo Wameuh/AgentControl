@@ -107,51 +107,12 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 RecipeStep::UpsertSpec,
             ],
         },
-        CatalogEntry {
-            name: "backlog-orchestrator".into(),
-            description: "Poll 60 s : spawn/nudge les workers du backlog \
-                          AgentBacklog, release les wip orphelins"
-                .into(),
-            repo: Some("Wameuh/AgentBacklog".into()),
-            homepage: Some("https://github.com/Wameuh/AgentBacklog".into()),
-            suggested_spec: ComponentSpec {
-                name: "backlog-orchestrator".into(),
-                kind: ComponentKind::Process,
-                command: vec![
-                    "python3".into(),
-                    "~/.local/bin/backlog-orchestrator.py".into(),
-                ],
-                env: HashMap::new(),
-                cwd: Some("~".into()),
-                autostart: true,
-                restart: RestartPolicy::OnFailure,
-                restart_sec: 5,
-                healthcheck: Healthcheck::Process,
-                description: Some(
-                    "Spawn les workers du backlog AgentBacklog".into(),
-                ),
-                queries: HashMap::new(),
-            },
-            detect: CatalogDetect {
-                bin: None,
-                path: Some("~/.local/bin/backlog-orchestrator.py".into()),
-            },
-            recipe: vec![
-                // Le script vit aujourd'hui hors repo — pas de source
-                // canonique à télécharger : la recette exige sa
-                // présence et documente la marche à suivre.
-                RecipeStep::RequireFile {
-                    path: "~/.local/bin/backlog-orchestrator.py".into(),
-                    hint: "backlog-orchestrator.py absent de ~/.local/bin — \
-                           le script n'est pas versionné : le déposer à la \
-                           main (recommandé : le versionner dans \
-                           Wameuh/AgentBacklog ou contrib/ d'AgentControl \
-                           pour disposer d'une source canonique)"
-                        .into(),
-                },
-                RecipeStep::UpsertSpec,
-            ],
-        },
+        // NB : l'orchestrateur backlog n'a PAS d'entrée catalogue — il
+        // est porté en interne par le démon (server/orch.rs, composant
+        // `backlog-orchestrator` opt-in) et non plus comme process
+        // supervisé (ex-backlog-orchestrator.py). Son nom est réservé
+        // aux internes : une spec components.toml du même nom est
+        // refusée à l'upsert.
     ]
 });
 

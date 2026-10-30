@@ -30,6 +30,9 @@ impl Daemon {
                     // ListComponents sont connus → le client peut
                     // afficher la section composants.
                     "components": true,
+                    // Idem pour ReqKind::OrchestratorSet (orchestrateur
+                    // backlog natif — bascule à chaud).
+                    "orchestrator": true,
                 }))
     }
     /// `UpdateDaemon` : télécharge la release demandée et remplace le

@@ -4,15 +4,15 @@ version = 4
 
 [[package]]
 name = "acctl"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "base64",
+ "forgesync",
  "proto",
  "serde",
  "serde_json",
  "tokio",
- "ureq",
 ]
 
 [[package]]
@@ -60,12 +60,13 @@ dependencies = [
 
 [[package]]
 name = "agentcontrol-daemon"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "base64",
  "chrono",
  "flate2",
+ "forgesync",
  "libc",
  "portable-pty",
  "proto",
@@ -307,7 +308,7 @@ dependencies = [
 
 [[package]]
 name = "client-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "getrandom 0.4.3",
@@ -688,6 +689,15 @@ dependencies = [
  "crc32fast",
  "miniz_oxide",
  "zlib-rs",
+]
+
+[[package]]
+name = "forgesync"
+version = "0.7.1"
+dependencies = [
+ "proto",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]
@@ -1539,7 +1549,7 @@ dependencies = [
 
 [[package]]
 name = "proto"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "serde",

@@ -22,10 +22,13 @@
 #map-svg .e {
   fill: none; stroke: var(--line-strong); stroke-width: 1.4;
 }
-/* internal : pas de process — lien structurel plus discret. */
-#map-svg .e.k-internal { stroke-width: 1; opacity: .5; }
-/* tool : passif aussi ; `absent` = lien en pointillés quasi effacé. */
-#map-svg .e.k-tool { opacity: .65; }
+/* Type d'arête : « supervises » (kind process — cycle de vie géré)
+   pleine et marquée ; « observes » (internal/external/tool — connu,
+   pas de process) en tirets discrets. */
+#map-svg .e.e-manage { stroke-width: 1.9; }
+#map-svg .e.e-know { stroke-width: 1; stroke-dasharray: 3 5; opacity: .55; }
+/* `absent` (tool non installé) : observation quasi effacée — doit
+   rester sous e-know dans le fichier pour garder la priorité. */
 #map-svg .e.st-absent { stroke-dasharray: 2 5; opacity: .4; }
 #map-svg .e.st-failed { stroke: var(--err); opacity: .65; }
 #map-svg .e.st-degraded { stroke: var(--warn); }
@@ -39,6 +42,11 @@
   animation: mdash 1.1s linear infinite;
 }
 @keyframes mdash { to { stroke-dashoffset: -14; } }
+/* Arête « spawned » teintée par l'état de l'enfant — working/starting
+   passent par .flow (accent animé, prioritaire), dead par st-dead. */
+#map-svg .e.e-s.st-idle { stroke: var(--sage); opacity: .75; }
+#map-svg .e.e-s.st-waiting_input { stroke: var(--red); opacity: .8; }
+#map-svg .e.e-s.st-compacting { stroke: var(--violet); opacity: .8; }
 
 /* --- Nœuds --- */
 #map-svg .n[data-session], #map-svg .n[data-comp] { cursor: pointer; }
@@ -52,6 +60,11 @@
   fill: var(--muted); font-size: 12px; text-anchor: middle;
   paint-order: stroke; stroke: var(--bg); stroke-width: 3;
 }
+/* Nom dans la chip programme (à droite de l'icône kind) — pas de halo,
+   le fond de la chip fait le contraste. */
+#map-svg .nt { fill: var(--ink); font-size: 12px; }
+/* Sous-titre agent sous le titre de session. */
+#map-svg .nl-sub { fill: var(--dim); font-size: 10px; }
 #map-svg .npr { fill: var(--violet); font-size: 10px; }
 #map-svg .n-comp { color: var(--muted); }
 #map-svg .n-daemon .nc { stroke: var(--accent); stroke-width: 2; }
@@ -93,12 +106,13 @@
 /* --- Légende --- */
 #map-legend {
   position: absolute; left: 12px; bottom: 10px;
-  display: flex; gap: 13px; align-items: center;
+  display: flex; flex-wrap: wrap; gap: 4px 13px; align-items: center;
+  max-width: min(560px, calc(100% - 24px));
   font-size: 11px; color: var(--dim);
   background: var(--glass); backdrop-filter: blur(10px);
   border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px;
 }
-#map-legend span { display: inline-flex; align-items: center; gap: 5px; }
+#map-legend span { display: inline-flex; align-items: center; gap: 5px; flex: none; }
 #map-legend b { font-weight: 400; }
 .lg-dot { width: 9px; height: 9px; border-radius: 50%; }
 .lg-dot.st-working { background: var(--gold); }
@@ -106,6 +120,20 @@
 .lg-dot.st-idle { background: var(--sage); }
 .lg-dot.st-dead { background: var(--dim); }
 .lg-flow { width: 16px; height: 0; border-top: 2px dashed var(--accent); }
+/* Échantillons de nœuds — mêmes formes que dans le graphe :
+   démon = cercle accentué, programme = chip, agent = cercle. */
+.lg-n { width: 12px; height: 12px; flex: none; background: var(--glass); border: 1.6px solid var(--line-strong); }
+.lg-daemon { border-radius: 50%; border-color: var(--accent); }
+.lg-prog { border-radius: 4px; }
+.lg-agent { border-radius: 50%; border-color: var(--sage); }
+/* Échantillons d'arêtes — supervises pleine, observes en tirets,
+   spawned teintée par l'état de l'enfant. */
+.lg-e { width: 16px; height: 0; flex: none; border-top: 2px solid var(--line-strong); }
+.lg-e.lg-know { border-top-width: 1px; border-top-style: dashed; opacity: .6; }
+.lg-e.lg-spawn { border-top-color: var(--muted); }
+/* « aucun composant » : explicité dans la légende (rien de configuré
+   ou démon trop ancien) plutôt qu'un anneau vide silencieux. */
+#map-legend #map-nocomps { font-style: italic; }
 
 /* --- Carte info composant (clic) --- */
 #map-info {

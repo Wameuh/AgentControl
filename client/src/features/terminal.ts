@@ -13,7 +13,7 @@ import { listen } from "../core/bridge";
 import { $, logUi, showErr } from "../core/dom";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
-import { isAndroid } from "../core/chrome";
+import { isAndroid, themeRgb } from "../core/chrome";
 import { t } from "../i18n";
 import { nav } from "../ui/nav";
 
@@ -22,6 +22,11 @@ interface TermEntry {
   conn: string;
   /** Id démon (t-xxxx) — null tant que term_open n'a pas répondu. */
   termId: string | null;
+  /** Id choisi par le client et envoyé dans term_open : le démon récent
+   *  le reprend tel quel → un open abandonné (timeout, conn coupée après
+   *  spawn) reste fermable par term_close au lieu de fuiter en orphelin.
+   *  Vieux démon : ignoré, l'id rendu est celui du serveur. */
+  wantId: string;
   xterm: Terminal;
   fit: FitAddon;
   /** Conteneur du xterm — détaché/réattaché dans #term-box au switch. */
@@ -48,11 +53,14 @@ const apiConn = (c: string) => (c === "default" ? undefined : c);
 function termTheme() {
   const v = (n: string) =>
     getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  // --panel-solid est un color-mix sous les thèmes d'accent : token brut
+  // inexploitable par le canvas → résolution via sonde (themeRgb).
+  const panel = themeRgb("--panel-solid") || "#161c18";
   return {
-    background: v("--panel-solid") || "#161c18",
+    background: panel,
     foreground: v("--ink") || "#ece6d8",
     cursor: v("--accent") || "#cdb68c",
-    cursorAccent: v("--panel-solid") || "#161c18",
+    cursorAccent: panel,
     selectionBackground: v("--line-strong") || "#555",
     black: "#1a1d16",
     red: v("--red") || "#e89486",
@@ -101,7 +109,11 @@ export class TermPanel {
     return s ? this.entryFor(s.id, s.conn ?? "default") : undefined;
   }
   private byTermId(tid: string) {
-    for (const e of this.terms.values()) if (e.termId === tid) return e;
+    // termId confirmé OU wantId : un démon récent émet term_data sous
+    // l'id client dès le spawn — avant que la réponse term_open ne
+    // pose termId. Sans ce fallback ces premiers octets tomberaient.
+    for (const e of this.terms.values())
+      if (e.termId === tid || e.wantId === tid) return e;
     return undefined;
   }
 
@@ -155,8 +167,12 @@ export class TermPanel {
   dropSession(sid: string) {
     for (const [k, e] of this.terms) {
       if (e.sid !== sid) continue;
-      if (e.termId) {
-        void call("term_close", { term: e.termId, conn: apiConn(e.conn) })
+      // termId ?? wantId : un open encore en vol n'a pas de termId —
+      // close quand même sous l'id client (le démon le reprend si le
+      // spawn aboutit après : pending_close le tuera à l'insertion).
+      const tid = e.termId ?? e.wantId;
+      if (tid) {
+        void call("term_close", { term: tid, conn: apiConn(e.conn) })
           .catch(() => {});
       }
       e.xterm.dispose();
@@ -214,8 +230,11 @@ export class TermPanel {
         this.mount(old);
         return;
       }
-      if (old.termId) {
-        void call("term_close", { term: old.termId, conn: apiConn(old.conn) })
+      // wantId en fallback : un open encore en vol est fermé sous l'id
+      // client — le démon tue le PTY à son insertion (pending_close).
+      const tid = old.termId ?? old.wantId;
+      if (tid) {
+        void call("term_close", { term: tid, conn: apiConn(old.conn) })
           .catch(() => {});
       }
       old.xterm.dispose();
@@ -240,6 +259,7 @@ export class TermPanel {
       sid: s.id,
       conn: s.conn ?? "default",
       termId: null,
+      wantId: `t-ui-${Math.random().toString(36).slice(2, 10)}`,
       xterm,
       fit,
       box,
@@ -280,13 +300,25 @@ export class TermPanel {
     });
 
     const dims = fit.proposeDimensions();
+    // Liaison lente (tunnel SSH distant) : term_open peut prendre des
+    // secondes sans que rien ne bouge — le hint évite l'écran "mort".
+    const slowHint = setTimeout(() => {
+      // terms.get(key) : l'entrée a pu être remplacée/supprimée pendant
+      // l'attente (restart, dropSession) — writeln sur un xterm disposé.
+      if (this.terms.get(key) === entry && !entry.termId && !entry.exited)
+        xterm.writeln(`\x1b[2m${t("term_slow")}\x1b[0m`);
+    }, 6000);
+    const t0 = performance.now();
     try {
       const r = await call<{ term: string; cwd: string }>("term_open", {
         session: s.id,
         conn: apiConn(s.conn ?? "default"),
+        term: entry.wantId,
         cols: dims?.cols ?? 120,
         rows: dims?.rows ?? 30,
       });
+      clearTimeout(slowHint);
+      logUi("debug", `term_open ${s.id}: ${Math.round(performance.now() - t0)} ms`);
       // Entrée supprimée/remplacée pendant l'ouverture (session_deleted,
       // restart, second ensure) : le shell démon n'a plus de référence
       // client — term_close sinon il fuiterait jusqu'à la déconnexion.
@@ -317,9 +349,20 @@ export class TermPanel {
       }
       xterm.focus();
     } catch (err) {
-      logUi("error", `term_open ${s.id}: ${err}`);
+      clearTimeout(slowHint);
+      logUi(
+        "error",
+        `term_open ${s.id}: ${err} (${Math.round(performance.now() - t0)} ms)`,
+      );
       entry.exited = true;
       xterm.writeln(`\x1b[31m${String(err)}\x1b[0m`);
+      // L'échec/timeout peut avoir eu lieu APRÈS le spawn démon (réponse
+      // perdue, conn coupée) : le PTY tourne sans référence client →
+      // close sous l'id client. No-op sur un vieux démon (id ignoré).
+      void call("term_close", {
+        term: entry.wantId,
+        conn: apiConn(entry.conn),
+      }).catch(() => {});
     }
   }
 

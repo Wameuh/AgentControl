@@ -828,6 +828,7 @@ mod tests {
             restart_sec: 0,
             healthcheck: Healthcheck::None,
             description: None,
+            queries: std::collections::HashMap::new(),
         }
     }
 
@@ -852,6 +853,9 @@ mod tests {
             "127.0.0.1:0".into(),
             false,
             web,
+            Arc::new(crate::server::OrchProbe::open(
+                crate::server::OrchCfg::default(),
+            )),
         );
         let absent = tool_spec(&["ac-tool-inexistant-xyz"]);
         // Verdicts d'une passe antérieure (tool alors installé).
@@ -880,7 +884,15 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let web: Arc<tokio::sync::RwLock<Option<serde_json::Value>>> =
             Arc::new(tokio::sync::RwLock::new(None));
-        let c = Components::open(&root, "127.0.0.1:0".into(), false, web);
+        let c = Components::open(
+            &root,
+            "127.0.0.1:0".into(),
+            false,
+            web,
+            Arc::new(crate::server::OrchProbe::open(
+                crate::server::OrchCfg::default(),
+            )),
+        );
         c.upsert("t", tool_spec(&["sh"])).await.unwrap();
         // Comme si le tool avait été sondé en échec avant la bascule.
         c.set_observed("t", Some(false)).await;

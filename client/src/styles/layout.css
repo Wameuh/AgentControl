@@ -24,8 +24,8 @@
   color: var(--muted); font-size: 12px; line-height: 1;
 }
 .tb-btns .ic { width: 14px; height: 14px; }
-.tb-btns button:hover { background: rgba(236, 230, 216, .1); color: var(--ink); }
-:root.light .tb-btns button:hover { background: rgba(43, 42, 36, .08); }
+.tb-btns button:hover { background: rgba(var(--tint-rgb), .1); color: var(--ink); }
+:root.light .tb-btns button:hover { background: rgba(var(--tint-rgb), .08); }
 #tb-close:hover { background: rgba(232, 148, 134, .3) !important; color: var(--red); }
 
 /* Zones de resize fenêtre (plus de bordures natives sans decorations) */

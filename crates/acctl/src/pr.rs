@@ -9,67 +9,6 @@ use crate::Conn;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
-/// Sortie stdout d'une commande `gh` (None si gh absent ou en échec).
-fn gh_out(args: &[&str]) -> Option<String> {
-    std::process::Command::new("gh")
-        .args(args)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-/// Schéma HTTP d'un hôte de forge : `http` uniquement pour le loopback
-/// (Gerrit de test local) — `https` partout ailleurs. Règle unique
-/// utilisée par `pr add` ET `pr sync`.
-fn forge_scheme(host: &str) -> &'static str {
-    if host.starts_with("localhost") || host.starts_with("127.") || host.starts_with("[::1]") {
-        "http"
-    } else {
-        "https"
-    }
-}
-
-/// Base URL web canonique d'un hôte de forge.
-fn host_base(host: &str) -> String {
-    format!("{}://{host}", forge_scheme(host))
-}
-
-/// GET JSON avec timeout borné — sync GitLab/Gerrit. Tolérant : toute
-/// erreur (réseau, non-2xx, JSON) → None, l'appelant dégrade proprement.
-/// Le préfixe anti-XSSI `)]}'` de Gerrit est strippé. Redirects refusés :
-/// un en-tête d'auth ne doit jamais suivre vers un autre hôte.
-fn http_json(url: &str, headers: &[(&str, String)]) -> Option<Value> {
-    let agent = ureq::AgentBuilder::new()
-        .redirects(0)
-        .timeout(std::time::Duration::from_secs(8))
-        .build();
-    let mut req = agent.get(url);
-    for (k, v) in headers {
-        req = req.set(k, v.as_str());
-    }
-    let body = req.call().ok()?.into_string().ok()?;
-    let body = body.strip_prefix(")]}'").map_or(body.as_str(), |b| {
-        b.trim_start_matches(|c| c == '\n' || c == '\'')
-    });
-    serde_json::from_str(body).ok()
-}
-
-/// Encodage path-segment (RFC 3986 unreserved) — chemins de projet dans
-/// les URLs d'API GitLab (`group%2Fsub%2Fproj`).
-fn urlenc(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
-
 /// Valeur d'un flag `--xxx` (None si absent).
 fn flag_val<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.iter()
@@ -292,7 +231,7 @@ async fn detect_target(args: &[String], c: &mut Conn, from: usize) -> Result<PrT
     if repo.is_empty() && change_id.is_none() {
         repo = repo_flag.or_else(|| {
             if forge == "github" {
-                gh_out(&["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])
+                forgesync::gh_out(&["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])
             } else {
                 None
             }
@@ -311,69 +250,6 @@ async fn detect_target(args: &[String], c: &mut Conn, from: usize) -> Result<PrT
         change_id,
         pr,
     })
-}
-
-/// État GitHub → label du registre.
-fn gh_state(v: &Value) -> String {
-    let st = v["state"].as_str().unwrap_or("").to_lowercase();
-    if st == "open" && v["isDraft"].as_bool().unwrap_or(false) {
-        "draft".into()
-    } else {
-        st
-    }
-}
-
-/// État GitLab → label du registre : opened(+draft) | merged | closed.
-fn glab_state(v: &Value) -> String {
-    match v["state"].as_str().unwrap_or("").to_lowercase().as_str() {
-        "merged" => "merged".into(),
-        "closed" => "closed".into(),
-        _ => {
-            if v["draft"].as_bool().unwrap_or(false)
-                || v["work_in_progress"].as_bool().unwrap_or(false)
-            {
-                "draft".into()
-            } else {
-                "open".into()
-            }
-        }
-    }
-}
-
-/// État Gerrit → label du registre : NEW(+wip) | MERGED | ABANDONED.
-fn gerrit_state(v: &Value) -> String {
-    match v["status"].as_str().unwrap_or("") {
-        "MERGED" => "merged".into(),
-        "ABANDONED" => "closed".into(),
-        _ => {
-            if v["work_in_progress"].as_bool().unwrap_or(false) {
-                "draft".into()
-            } else {
-                "open".into()
-            }
-        }
-    }
-}
-
-/// En-têtes d'auth d'une forge : `token_env` est lu dans l'env de
-/// l'appelant — GitLab `PRIVATE-TOKEN` seulement (Gerrit sync =
-/// anonyme : un `token_env` sur type=gerrit est sans effet, documenté).
-fn forge_auth(set: &[Value], forge: &str, host: &str) -> Vec<(String, String)> {
-    if forge != "gitlab" {
-        return Vec::new();
-    }
-    for (h, env) in forge_hosts(set, forge) {
-        if h == host {
-            if let Some(name) = env {
-                if let Ok(tok) = std::env::var(name) {
-                    if !tok.is_empty() {
-                        return vec![("PRIVATE-TOKEN".into(), tok)];
-                    }
-                }
-            }
-        }
-    }
-    Vec::new()
 }
 
 /// Badge compact `#N`/`!N`/`c#N` — partagé avec le client.
@@ -402,246 +278,17 @@ fn repo_label(e: &Value) -> String {
     }
 }
 
-/// Snapshot d'une référence depuis la forge live (None si indisponible).
-/// `{status, title, branch, url, pr}` — `pr` est le numéro résolu quand
-/// la référence était un Change-Id Gerrit.
-fn live_ref(set: &[Value], t: &PrTarget) -> Option<Value> {
-    let auth = forge_auth(set, &t.forge, &t.host);
-    let headers: Vec<(&str, String)> = auth
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.clone()))
-        .collect();
-    match t.forge.as_str() {
-        "github" => {
-            let n = t.pr;
-            gh_out(&[
-                "pr", "view", &n.to_string(), "--repo", &t.repo, "--json",
-                "title,state,isDraft,headRefName,url",
-            ])
-            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-            .map(|v| {
-                json!({
-                    "status": gh_state(&v),
-                    "title": v["title"],
-                    "branch": v["headRefName"],
-                    "url": v["url"],
-                    "pr": n,
-                })
-            })
-        }
-        "gitlab" => {
-            let base = host_base(&t.host);
-            let url = format!(
-                "{base}/api/v4/projects/{}/merge_requests/{}",
-                urlenc(&t.repo),
-                t.pr
-            );
-            http_json(&url, &headers).map(|v| {
-                json!({
-                    "status": glab_state(&v),
-                    "title": v["title"],
-                    "branch": v["source_branch"],
-                    "url": v["web_url"],
-                    "pr": t.pr,
-                })
-            })
-        }
-        "gerrit" => {
-            // Change-Id (`I<sha>`) ou numéro — l'API /changes/ accepte les deux.
-            let n_str = t.pr.to_string();
-            let q = t.change_id.as_deref().unwrap_or(&n_str);
-            let base = host_base(&t.host);
-            http_json(&format!("{base}/changes/{q}"), &headers).map(|v| {
-                json!({
-                    "status": gerrit_state(&v),
-                    "title": v["subject"],
-                    "branch": v["branch"],
-                    // `project` résolu — autorité sur le repo deviné.
-                    "repo": v["project"],
-                    "url": v["change_id"].as_str().map(|_| proto::forge_url(
-                        "gerrit", &t.host,
-                        v["project"].as_str().unwrap_or(&t.repo),
-                        v["_number"].as_u64().unwrap_or(t.pr),
-                        None,
-                    )),
-                    "pr": v["_number"].as_u64().unwrap_or(t.pr),
-                })
-            })
-        }
-        _ => None,
-    }
-}
-
-/// Sync GitHub — chemin `gh pr list` historique par repo connu.
-async fn sync_github(c: &mut Conn, entries: &[Value]) {
-    let mut repos: Vec<String> = entries
-        .iter()
-        .filter(|e| {
-            proto::forge_kind(e["forge"].as_str().unwrap_or("")) == "github"
-        })
-        .filter_map(|e| e["repo"].as_str().map(String::from))
-        .collect();
-    repos.sort();
-    repos.dedup();
-    for repo in repos {
-        let live = gh_out(&[
-            "pr", "list", "--repo", &repo, "--state", "all",
-            "--limit", "200", "--json",
-            "number,title,state,isDraft,headRefName",
-        ])
-        .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok())
-        .unwrap_or_default();
-        let tracked: Vec<&Value> = entries
-            .iter()
-            .filter(|e| {
-                proto::forge_kind(e["forge"].as_str().unwrap_or("")) == "github"
-                    && e["repo"].as_str() == Some(repo.as_str())
-            })
-            .collect();
-        for e in &tracked {
-            let n = e["pr"].as_u64().unwrap_or(0);
-            let Some(p) = live.iter().find(|p| p["number"].as_u64() == Some(n)) else {
-                continue;
-            };
-            let st = gh_state(p);
-            if st != e["status"].as_str().unwrap_or("") {
-                let _ = c
-                    .call(proto::ReqKind::PrTrack {
-                        session: None,
-                        repo: repo.clone(),
-                        pr: n,
-                        forge: Some("github".into()),
-                        host: Some("github.com".into()),
-                        change_id: None,
-                        url: None,
-                        branch: p["headRefName"].as_str().map(String::from),
-                        title: p["title"].as_str().map(String::from),
-                        status: Some(st.clone()),
-                        note: None,
-                    })
-                    .await;
-                println!("#{n}: {} -> {st}", e["status"].as_str().unwrap_or(""));
-            }
-        }
-        let untracked: Vec<u64> = live
-            .iter()
-            .filter(|p| p["state"].as_str() == Some("OPEN"))
-            .map(|p| p["number"].as_u64().unwrap_or(0))
-            .filter(|n| {
-                !tracked.iter().any(|e| e["pr"].as_u64() == Some(*n))
-            })
-            .collect();
-        if !untracked.is_empty() {
-            println!(
-                "{repo}: PRs ouvertes non enregistrées: {}",
-                untracked
-                    .iter()
-                    .map(|n| format!("#{n}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
-    }
-}
-
-/// Sync GitLab — REST `/api/v4/…/merge_requests/<iid>` par entrée,
-/// token `PRIVATE-TOKEN` si `token_env` configuré. Hôte privé sans
-/// token → API 401 → entrée ignorée proprement.
-async fn sync_gitlab(c: &mut Conn, set: &[Value], entries: &[Value]) {
-    for e in entries {
-        if proto::forge_kind(e["forge"].as_str().unwrap_or("")) != "gitlab" {
-            continue;
-        }
-        let host = e["host"].as_str().unwrap_or("gitlab.com");
-        let repo = e["repo"].as_str().unwrap_or("");
-        let n = e["pr"].as_u64().unwrap_or(0);
-        let auth = forge_auth(set, "gitlab", host);
-        let headers: Vec<(&str, String)> = auth
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.clone()))
-            .collect();
-        let base = host_base(host);
-        let url = format!(
-            "{base}/api/v4/projects/{}/merge_requests/{n}",
-            urlenc(repo)
-        );
-        let Some(v) = http_json(&url, &headers) else {
-            eprintln!("gitlab {host} {repo}!{n}: indisponible — statut inchangé");
-            continue;
-        };
-        let st = glab_state(&v);
-        if st != e["status"].as_str().unwrap_or("") {
-            let _ = c
-                .call(proto::ReqKind::PrTrack {
-                    session: None,
-                    repo: repo.to_string(),
-                    pr: n,
-                    forge: Some("gitlab".into()),
-                    host: Some(host.to_string()),
-                    change_id: None,
-                    url: v["web_url"].as_str().map(String::from),
-                    branch: v["source_branch"].as_str().map(String::from),
-                    title: v["title"].as_str().map(String::from),
-                    status: Some(st.clone()),
-                    note: None,
-                })
-                .await;
-            println!("{host}:{repo}!{n}: {} -> {st}", e["status"].as_str().unwrap_or(""));
-        }
-    }
-}
-
-/// Sync Gerrit — REST `GET /changes/<ref>` anonyme (port web de
-/// l'hôte configuré). Les entrées adressées par `change_id` résolvent
-/// leur numéro au passage (PrTrack rekey côté démon).
-async fn sync_gerrit(c: &mut Conn, _set: &[Value], entries: &[Value]) {
-    for e in entries {
-        if proto::forge_kind(e["forge"].as_str().unwrap_or("")) != "gerrit" {
-            continue;
-        }
-        let host = e["host"].as_str().unwrap_or("");
-        if host.is_empty() {
-            continue;
-        }
-        let repo = e["repo"].as_str().unwrap_or("");
-        let cid = e["change_id"].as_str();
-        let n = e["pr"].as_u64().unwrap_or(0);
-        let n_str = n.to_string();
-        let q = cid.unwrap_or(&n_str);
-        let base = host_base(host);
-        let url = format!("{base}/changes/{q}");
-        let Some(v) = http_json(&url, &[]) else {
-            eprintln!("gerrit {host} {q}: indisponible — statut inchangé");
-            continue;
-        };
-        let st = gerrit_state(&v);
-        let resolved = v["_number"].as_u64().unwrap_or(n);
-        if st != e["status"].as_str().unwrap_or("") || resolved != n {
-            let _ = c
-                .call(proto::ReqKind::PrTrack {
-                    session: None,
-                    repo: v["project"].as_str().unwrap_or(repo).to_string(),
-                    pr: resolved,
-                    forge: Some("gerrit".into()),
-                    host: Some(host.to_string()),
-                    change_id: e["change_id"]
-                        .as_str()
-                        .map(String::from)
-                        .or_else(|| v["change_id"].as_str().map(String::from)),
-                    url: v["change_id"].as_str().map(|_| proto::forge_url(
-                        "gerrit", host,
-                        v["project"].as_str().unwrap_or(repo),
-                        resolved,
-                        None,
-                    )),
-                    branch: v["branch"].as_str().map(String::from),
-                    title: v["subject"].as_str().map(String::from),
-                    status: Some(st.clone()),
-                    note: None,
-                })
-                .await;
-            println!("gerrit {host} {q}: {} -> {st}", e["status"].as_str().unwrap_or(""));
-        }
+/// Libellé d'une update sync pour la sortie CLI : `#N` github,
+/// `{host}:{repo}!{n}` gitlab, `gerrit {host} {ref}` gerrit.
+fn update_label(u: &forgesync::PrUpdate) -> String {
+    match u.forge.as_str() {
+        "gitlab" => format!("{}:{}!{}", u.host, u.repo, u.pr),
+        "gerrit" => format!(
+            "gerrit {} {}",
+            u.host,
+            u.change_id.as_deref().unwrap_or(&u.pr.to_string())
+        ),
+        _ => format!("#{}", u.pr),
     }
 }
 
@@ -709,7 +356,16 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                 .context("--session requis hors session agent")?;
             // Métadonnées live par forge (tolère l'échec).
             let set = forge_set(c).await;
-            let info = live_ref(&set, &t);
+            let info = forgesync::live_ref(
+                &set,
+                &forgesync::RefTarget {
+                    forge: t.forge.clone(),
+                    host: t.host.clone(),
+                    repo: t.repo.clone(),
+                    pr: t.pr,
+                    change_id: t.change_id.clone(),
+                },
+            );
             let note = flag_val(args, "--note").map(String::from);
             let v = c
                 .call(proto::ReqKind::PrTrack {
@@ -791,15 +447,36 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
         "sync" => {
             // Rafraîchit les statuts par forge (gh pour github,
             // REST pour gitlab/gerrit — dégradation propre par
-            // hôte injoignable).
+            // hôte injoignable). Collecte partagée avec le pr_sync du
+            // démon (crate forgesync) ; ici les updates repartent en
+            // pr_track puisque acctl est un client du registre.
             let set = forge_set(c).await;
             let v = c.call(proto::ReqKind::PrList { session: None }).await?;
             let entries: Vec<Value> =
                 v.as_array().map(|a| a.clone()).unwrap_or_default();
-            sync_github(c, &entries).await;
-            sync_gitlab(c, &set, &entries).await;
-            sync_gerrit(c, &set, &entries).await;
-            println!("sync ok");
+            let out = forgesync::collect_updates(&set, &entries);
+            for u in &out.updates {
+                let _ = c
+                    .call(proto::ReqKind::PrTrack {
+                        session: None,
+                        repo: u.repo.clone(),
+                        pr: u.pr,
+                        forge: Some(u.forge.clone()),
+                        host: Some(u.host.clone()),
+                        change_id: u.change_id.clone(),
+                        url: u.url.clone(),
+                        branch: u.branch.clone(),
+                        title: u.title.clone(),
+                        status: Some(u.status.clone()),
+                        note: None,
+                    })
+                    .await;
+                println!("{}: {} -> {}", update_label(u), u.old_status, u.status);
+            }
+            for n in &out.notes {
+                println!("{n}");
+            }
+            println!("sync ok ({} vérifiées, {} maj)", out.checked, out.updates.len());
         }
         other => anyhow::bail!("pr: sous-commande inconnue: {other} (add|ls|note|rm|sync)"),
     }

@@ -93,6 +93,10 @@ export class Sidebar {
   private prsView = new PrListView();
   private backlogView = new BacklogView();
   private view: "agents" | "repos" | "backlog" = "agents";
+  /** Le diagramme (#map-view, overlay plein #chat) n'est pas une vue de
+   *  la liste mais partage le sélecteur : ouvert, son onglet prend
+   *  l'état actif ; à sa fermeture this.view reprend la main. */
+  private mapOpen = false;
   /** Réponse brute du dernier pr_list (entrées + marqueurs conn_error). */
   private prRows: PrRow[] = [];
   private prFailed = false;
@@ -199,15 +203,7 @@ export class Sidebar {
         () => ({ rows: [] as PrRow[], failed: true }),
       ),
     ]);
-    this.prRows = prRes.rows;
-    this.prFailed = prRes.failed;
-    this.prBySess.clear();
-    for (const p of this.prRows) {
-      if (!p.session || p.status === "merged" || p.status === "closed") continue;
-      const k = `${p.conn ?? "default"}${p.session}`;
-      if (!this.prBySess.has(k)) this.prBySess.set(k, []);
-      this.prBySess.get(k)!.push(p);
-    }
+    this.applyPrRows(prRes.rows, prRes.failed);
     // Marqueur Rust `conn_error` : la sonde list_sessions d'une conn a
     // échoué (timeout 8 s) → la marquer down (une seule fois : déjà down,
     // markDead re-rendererait refresh en boucle).
@@ -263,10 +259,7 @@ export class Sidebar {
     // Vue « Repos » : croise les entrées du registre avec les sessions
     // fusionnées (cache offline inclus) + compteur sur l'onglet.
     this.prsView.setData(this.prRows, list, this.prFailed);
-    const prCount = this.prsView.openCount();
-    const svCount = $("sv-count");
-    svCount.hidden = prCount === 0;
-    svCount.textContent = String(prCount);
+    this.renderPrBadge();
     const live = list.filter((s) =>
       !s.offline && s.state !== "dead" && s.state !== "interrupted" && s.state !== "asleep");
     setAppIcon(
@@ -297,6 +290,55 @@ export class Sidebar {
     this.renderView();
     // La liste arrive → l'accueil recalcule son état (0 session → CTA).
     this.chat.updateEmptyState();
+  }
+
+  /** Applique une réponse `pr_list` : registre + marqueurs conn_error →
+   *  lignes de la vue Repos et index session → PRs (badges des lignes). */
+  private applyPrRows(rows: PrRow[], failed: boolean) {
+    this.prRows = rows;
+    this.prFailed = failed;
+    this.prBySess.clear();
+    for (const p of rows) {
+      if (!p.session || p.status === "merged" || p.status === "closed") continue;
+      const k = `${p.conn ?? "default"}${p.session}`;
+      if (!this.prBySess.has(k)) this.prBySess.set(k, []);
+      this.prBySess.get(k)!.push(p);
+    }
+  }
+
+  /** Compteur de l'onglet Repos — PRs encore ouvertes du registre. */
+  private renderPrBadge() {
+    const n = this.prsView.openCount();
+    const b = $("sv-count");
+    b.hidden = n === 0;
+    b.textContent = String(n);
+  }
+
+  /** Badge Repos vivant hors de l'onglet : `pr_list` lit le registre
+   *  local du démon (aucun appel forge — `pr_sync` reste l'affaire du
+   *  cycle propre à l'onglet). Couvre les changements sans event client
+   *  visible : PR mergée par un autre agent, attribution détectée par
+   *  le watcher du démon… Tick sauté sur l'onglet Repos lui-même :
+   *  `prSyncCycle` y fait déjà un refresh() complet toutes les 60 s. */
+  private prCountTimer: number | undefined;
+  /** Intervalle == timeout RPC (60 s) : un pr_list pendu laisserait le
+   *  tick suivant se chevaucher — garde anti-réentrance. */
+  private prTickBusy = false;
+
+  private async prCountTick() {
+    if (this.view === "repos" || this.prTickBusy) return;
+    this.prTickBusy = true;
+    try {
+      const r = await call<PrRow[]>("pr_list").then(
+        (rows) => ({ rows, failed: false }),
+        () => ({ rows: [] as PrRow[], failed: true }),
+      );
+      this.applyPrRows(r.rows, r.failed);
+      this.prsView.setData(this.prRows, app.lastSessions, this.prFailed);
+      this.renderPrBadge();
+    } finally {
+      this.prTickBusy = false;
+    }
   }
 
   /** Repoll interne tant qu'une session est "starting" (budget par
@@ -352,7 +394,7 @@ export class Sidebar {
 
   /** Bascule agents ↔ repos ↔ backlog (persistée). Passer en repos
    *  resynchronise le registre ; passer en backlog démarre son fetch
-   *  borné (le quitter l'arrête — pas de poll en arrière-plan). */
+   *  rapide (le quitter retombe sur la cadence badge ~60 s). */
   private setView(v: "agents" | "repos" | "backlog") {
     if (this.view === v) return;
     this.view = v;
@@ -361,29 +403,101 @@ export class Sidebar {
     if (v === "repos") void this.refresh();
   }
 
+  /** Ouverture/fermeture du diagramme — notifiée par MapView via deps.
+   *  applyView est idempotent : simple re-calcul des états visuels. */
+  setMapOpen(open: boolean) {
+    if (this.mapOpen === open) return;
+    this.mapOpen = open;
+    this.applyView();
+  }
+
+  /** Poll du sync des statuts PR, actif seulement sur l'onglet Repos :
+   *  cycle à l'ouverture puis toutes les 60 s (le démon throttle à ~45 s
+   *  et déduplique les runs — plusieurs clients/fenêtres peuvent
+   *  demander en rafale). */
+  private prSyncTimer: number | undefined;
+  /** Vieux démon sans `pr_sync` → on arrête de demander (une erreur
+   *  réseau n'arme pas le flag : la retente passe au prochain tick). */
+  private prSyncDead = false;
+
+  private prsSetActive(on: boolean) {
+    if (on) {
+      // Réarme à l'activation : un démon mis à jour depuis la dernière
+      // visite de l'onglet doit pouvoir sync à nouveau.
+      this.prSyncDead = false;
+      void this.prSyncCycle();
+      if (this.prSyncTimer === undefined) {
+        this.prSyncTimer = window.setInterval(
+          () => void this.prSyncCycle(),
+          60_000,
+        );
+      }
+    } else if (this.prSyncTimer !== undefined) {
+      window.clearInterval(this.prSyncTimer);
+      this.prSyncTimer = undefined;
+    }
+  }
+
+  /** pr_sync puis refresh : le premier rendu (refresh() immédiat, à
+   *  l'ouverture de l'onglet) montre le registre courant ; celui-ci
+   *  reflète les états live dès que la forge a répondu. */
+  private async prSyncCycle() {
+    if (!this.prSyncDead) {
+      try {
+        const r = await call<Record<string, { error?: string }>>("pr_sync");
+        // Fusion multi-conns : les échecs remontent en {conn:{error}} —
+        // 100% « méthode inconnue » = tous les démons sont trop vieux
+        // pour pr_sync → on arrête de demander (une erreur réseau
+        // n'arme pas le flag : la retente passe au prochain tick).
+        const errs = Object.values(r ?? {}).map((x) => String(x?.error ?? ""));
+        if (
+          errs.length > 0 &&
+          errs.every((e) => /inconnue|unknown|variant/i.test(e))
+        ) {
+          this.prSyncDead = true;
+        }
+      } catch (e) {
+        if (/inconnue|unknown|variant/i.test(String(e))) this.prSyncDead = true;
+      }
+    }
+    if (this.view === "repos") await this.refresh();
+  }
+
   /** Visibilité des panneaux + état visuel de l'onglet actif. */
   private applyView() {
     const v = this.view;
-    $("sv-agents").classList.toggle("on", v === "agents");
-    $("sv-repos").classList.toggle("on", v === "repos");
-    $("sv-backlog").classList.toggle("on", v === "backlog");
-    $("sv-agents").setAttribute("aria-selected", String(v === "agents"));
-    $("sv-repos").setAttribute("aria-selected", String(v === "repos"));
-    $("sv-backlog").setAttribute("aria-selected", String(v === "backlog"));
+    const m = this.mapOpen;
+    $("sv-agents").classList.toggle("on", !m && v === "agents");
+    $("sv-repos").classList.toggle("on", !m && v === "repos");
+    $("sv-backlog").classList.toggle("on", !m && v === "backlog");
+    $("sv-map").classList.toggle("on", m);
+    $("sv-agents").setAttribute("aria-selected", String(!m && v === "agents"));
+    $("sv-repos").setAttribute("aria-selected", String(!m && v === "repos"));
+    $("sv-backlog").setAttribute("aria-selected", String(!m && v === "backlog"));
+    $("sv-map").setAttribute("aria-selected", String(m));
     $("session-list").hidden = v !== "agents";
     $("pr-list").hidden = v !== "repos";
     $("backlog-list").hidden = v !== "backlog";
     $("btn-new-session").hidden = v !== "agents";
-    // L'onglet backlog pilote son propre cycle de fetch (ouverture +
-    // intervalle borné + events) — la coupure se fait ici.
+    // L'onglet backlog pilote sa cadence de fetch (rapide actif, lente
+    // pour le badge inactif) — la bascule se fait ici. Pareil pour
+    // le poll pr_sync de l'onglet repos (arrêté hors de la vue).
     this.backlogView.setActive(v === "backlog");
+    this.prsSetActive(v === "repos");
     this.renderView();
   }
 
-  /** Event session poussé par le démon → invalidation debouncée de la
-   *  file (seulement si l'onglet backlog est actif). */
+  /** Event session poussé par le démon (pushes = session ouverte
+   *  seulement) → invalidation debouncée de la file et du badge. */
   noteSessionEvent(type: string) {
     this.backlogView.noteSessionEvent(type);
+  }
+
+  /** Capabilities (re)connues : la vue backlog peut devenir capable
+   *  sans action — poke pour peindre son badge dès que possible (au
+   *  lieu du premier tick ~60 s après le boot). */
+  noteCapsChanged() {
+    this.backlogView.noteCaps();
   }
 
   /** Filtre de l'arbre (normalisé : trim + bas de casse) — vide = tout. */
@@ -910,6 +1024,10 @@ export class Sidebar {
     $("sv-agents").onclick = () => this.setView("agents");
     $("sv-repos").onclick = () => this.setView("repos");
     $("sv-backlog").onclick = () => this.setView("backlog");
+
+    // Badge « Repos » tenu à jour hors de l'onglet : pr_list = lecture
+    // locale du registre (léger — pas de sync forge), cadence 60 s.
+    this.prCountTimer = window.setInterval(() => void this.prCountTick(), 60_000);
 
     // Filtre de l'arbre : recherche par nom de session / agent / groupe /
     // connexion. Rendu local instantané — pas de debounce, pas de RPC.

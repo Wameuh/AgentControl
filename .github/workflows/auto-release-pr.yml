@@ -14,8 +14,8 @@ name: auto-release-pr
 # avant de merger ; merge par l'utilisateur → tag final + cleanup rc.
 #
 # La description de la PR est régénérée à chaque run par
-# `client/tools/release_notes.py` : notes de version orientées
-# utilisateur (Nouveautés / Corrections / Améliorations, catégorisées
+# `client/tools/release_notes.py` : notes de version anglaises orientées
+# utilisateur (New features / Bug fixes / Improvements, catégorisées
 # depuis les sujets de squash `type: titre (#N)` du cycle), version
 # projetée = dernier tag + niveau (même règle que release-bump).
 # Le bloc généré vit entre marqueurs `release-notes:start/end` : la

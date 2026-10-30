@@ -15,15 +15,18 @@ use crate::state::{get_conn, AppState};
 pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: String, params: Value) -> Result<Value, String> {
     // Connexion cible : params.conn explicite, sinon connexion par défaut.
     let conn = params.get("conn").and_then(Value::as_str).map(String::from);
-    // list_sessions / daemon_status / pr_list : fusion multi-serveurs — en
-    // parallèle avec timeout par conn (une conn morte en blackhole ne doit
-    // pas bloquer la réponse des autres).
-    if method == "list_sessions" || method == "daemon_status" || method == "pr_list" {
-        let merged = method == "daemon_status";
+    // list_sessions / daemon_status / pr_list / pr_sync : fusion
+    // multi-serveurs — en parallèle avec timeout par conn (une conn morte
+    // en blackhole ne doit pas bloquer la réponse des autres).
+    if method == "list_sessions" || method == "daemon_status" || method == "pr_list" || method == "pr_sync" {
+        // daemon_status / pr_sync : objet par conn ; list_* : tableaux
+        // concaténés avec `conn` injectée par entrée.
+        let merged = method == "daemon_status" || method == "pr_sync";
         if merged {
             if let Some(k) = conn {
                 let c = get_conn(&state, Some(&k)).await?;
-                return c.call(ReqKind::DaemonStatus).await.map_err(|e| format!("{e:#}"));
+                let req = req_from(&method, params)?;
+                return c.call(req).await.map_err(|e| format!("{e:#}"));
             }
         }
         let pairs: Vec<(String, Arc<Client>)> = {
@@ -33,16 +36,24 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
         let n_conns = pairs.len();
         let req = if method == "pr_list" {
             ReqKind::PrList { session: None }
+        } else if method == "pr_sync" {
+            ReqKind::PrSync {}
         } else if merged {
             ReqKind::DaemonStatus
         } else {
             ReqKind::ListSessions
         };
+        // pr_sync fait une collecte forge potentiellement longue (REST
+        // séquentiel à 8 s par entrée injoignable + appels gh) : timeout
+        // large comme le chemin web (CALL_TIMEOUT 60 s). Au-delà, le run
+        // démon se termine quand même en tâche de fond et le registre
+        // mis à jour est relu au refresh suivant.
+        let secs = if method == "pr_sync" { 60 } else { 8 };
         let mut set = tokio::task::JoinSet::new();
         for (k, c) in pairs {
             let req = req.clone();
             set.spawn(async move {
-                let r = tokio::time::timeout(std::time::Duration::from_secs(8), c.call(req)).await;
+                let r = tokio::time::timeout(std::time::Duration::from_secs(secs), c.call(req)).await;
                 (k, r.map_err(|_| anyhow::anyhow!("timeout")).and_then(|x| x))
             });
         }
@@ -76,8 +87,12 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
         if !merged {
             return Ok(json!(all));
         }
-        out["servers"] = json!(n_conns);
-        out["sessions"] = json!(n_ok);
+        // Compteurs propres à daemon_status — pr_sync renvoie juste la
+        // map {conn: réponse|{error}}.
+        if method == "daemon_status" {
+            out["servers"] = json!(n_conns);
+            out["sessions"] = json!(n_ok);
+        }
         return Ok(out);
     }
     let c = get_conn(&state, conn.as_deref()).await?;
@@ -265,6 +280,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             change_id: so("change_id"),
         },
         "forge_list" => ReqKind::ForgeList {},
+        "pr_sync" => ReqKind::PrSync {},
         // Composants managés (docs/components-integration.md §2.3) —
         // gate capability daemon_status.components côté frontend.
         "list_components" => ReqKind::ListComponents,
@@ -293,6 +309,10 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         "component_install" => ReqKind::ComponentInstall { name: s("name") },
         "term_open" => ReqKind::TermOpen {
             session: s("session"),
+            // Id choisi côté client : un term_open abandonné (timeout,
+            // conn coupée après spawn démon) reste fermable via term_close.
+            // Optionnel — un vieux démon l'ignore et rend son propre id.
+            term: so("term"),
             cols: p.get("cols").and_then(Value::as_u64).unwrap_or(0) as u16,
             rows: p.get("rows").and_then(Value::as_u64).unwrap_or(0) as u16,
         },

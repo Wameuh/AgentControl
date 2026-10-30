@@ -1,8 +1,10 @@
 // ---------------------------------------------------------------------------
 // Vue « Repos » de la sidebar : pull requests du registre démon regroupées
 // par dépôt — numéro, titre, statut (open/draft/conflict), branche, session
-// responsable croisée avec list_sessions. Clic sur la PR → GitHub (shellOpen) ;
-// clic sur la session → ouvre la session. Réutilise le filtre de la sidebar.
+// responsable croisée avec list_sessions ; merged/closed dans une section
+// « terminées » repliée (l'état live est resynchronisé par pr_sync quand
+// l'onglet est actif). Clic sur la PR → GitHub (shellOpen) ; clic sur la
+// session → ouvre la session. Réutilise le filtre de la sidebar.
 // ---------------------------------------------------------------------------
 
 import { $, esc, q } from "../core/dom";
@@ -28,6 +30,9 @@ export interface PrListDeps {
 }
 
 const CLOSED = new Set(["merged", "closed"]);
+/** Cap de la section « terminées » — un long historique reste
+ *  atteignable via le filtre partagé sans alourdir le DOM. */
+const DONE_CAP = 40;
 const skey = (conn: string | undefined, id: string) => `${conn ?? "default"} ${id}`;
 
 /** Badge de la référence : `#N` github, `!N` gitlab, `c#N`/`c#I<8>` gerrit
@@ -152,14 +157,14 @@ export class PrListView {
       : st === "closed" ? t("pr_st_closed")
       : st;
     const div = document.createElement("div");
-    div.className = "pr";
+    div.className = "pr" + (CLOSED.has(st) ? " pr-done" : "");
     div.title = `${repoLabel(p)} ${prBadge(p)} — ${stTxt}${p.via ? ` · ${p.via}` : ""}` +
       `${p.branch ? `\n${p.branch}` : ""}${p.note ? `\n${p.note}` : ""}\n${t("pr_open_title")}`;
     const top = document.createElement("div");
     top.className = "pr-top";
     top.innerHTML = `<span class="pr-num">${esc(prBadge(p))}</span>` +
       `<span class="pr-t">${this.deps.hl(p.title ?? "")}</span>` +
-      `<span class="pr-st st-${["open", "draft", "conflict"].includes(st) ? st : "other"}">${esc(stTxt)}</span>`;
+      `<span class="pr-st st-${["open", "draft", "conflict", "merged", "closed"].includes(st) ? st : "other"}">${esc(stTxt)}</span>`;
     div.appendChild(top);
     const sub = document.createElement("div");
     sub.className = "pr-sub";
@@ -177,10 +182,17 @@ export class PrListView {
     return div;
   }
 
+  /** État plié d'un groupe persisté par clé localStorage — `defaultClosed`
+   *  inverse le défaut (section « terminées » : historique replié). */
+  private isClosed(key: string, defaultClosed = false): boolean {
+    return !this.filter &&
+      (localStorage.getItem(key) ?? (defaultClosed ? "1" : "0")) === "1";
+  }
+
   /** Header de groupe (dépôt ou section « non attribuées ») — pliable,
    *  état persisté par clé localStorage, forcé ouvert sous filtre. */
-  private groupHead(labelHtml: string, key: string, count: number, extraCls = ""): HTMLElement {
-    const closed = !this.filter && localStorage.getItem(key) === "1";
+  private groupHead(labelHtml: string, key: string, count: number | string, extraCls = "", defaultClosed = false): HTMLElement {
+    const closed = this.isClosed(key, defaultClosed);
     const h = document.createElement("div");
     h.className = "grp-head pr-repo" + extraCls + (closed ? " closed" : "");
     h.innerHTML = `<span class="grp-arrow">${icon(closed ? "chev-right" : "chev-down")}</span> ` +
@@ -206,6 +218,7 @@ export class PrListView {
     let noted = this.failed;
     const open: PrEntry[] = [];
     const unassigned: PrEntry[] = [];
+    const done: PrEntry[] = [];
     for (const r of this.rows) {
       if (r.conn_error) {
         // Conn OK mais pr_list en échec → démon trop ancien pour le
@@ -216,7 +229,7 @@ export class PrListView {
         noted = true;
         continue;
       }
-      if (CLOSED.has(r.status ?? "open")) continue;
+      if (CLOSED.has(r.status ?? "open")) { done.push(r); continue; }
       if (r.session) open.push(r);
       else unassigned.push(r);
     }
@@ -241,7 +254,7 @@ export class PrListView {
     for (const g of [...byRepo.values()].sort((a, b) => a.label.localeCompare(b.label))) {
       g.rows.sort((a, b) => b.pr - a.pr);
       const key = `ac-prrepo-${g.label.toLowerCase()}`;
-      const closed = !f && localStorage.getItem(key) === "1";
+      const closed = this.isClosed(key);
       el.appendChild(this.groupHead(
         `<span class="pr-repo-ic">${icon("repo")}</span>${this.deps.hl(g.label)}`, key, g.rows.length));
       shown += g.rows.length;
@@ -253,12 +266,32 @@ export class PrListView {
     if (unF.length) {
       unF.sort((a, b) => b.pr - a.pr);
       const key = "ac-prrepo-?unassigned";
-      const closed = !f && localStorage.getItem(key) === "1";
+      const closed = this.isClosed(key);
       el.appendChild(this.groupHead(
         `<span class="pr-repo-ic">${icon("pr")}</span>${esc(t("pr_unassigned"))}`,
         key, unF.length, " unatt"));
       shown += unF.length;
       if (!closed) for (const p of unF) el.appendChild(this.prRow(p, true));
+    }
+
+    // Section « terminées » : merged/closed — la vue reflète l'état
+    // réel de la forge au lieu de masquer ces PR. Repliée par défaut
+    // (historique), bornée aux DONE_CAP plus récemment mises à jour.
+    const doneF = done.filter(match);
+    if (doneF.length) {
+      doneF.sort(
+        (a, b) =>
+          (b.updated_at ?? "").localeCompare(a.updated_at ?? "") || b.pr - a.pr,
+      );
+      const shownDone = doneF.slice(0, DONE_CAP);
+      const key = "ac-prrepo-?done";
+      const closed = this.isClosed(key, true);
+      el.appendChild(this.groupHead(
+        `<span class="pr-repo-ic">${icon("check")}</span>${esc(t("pr_done"))}`,
+        key, doneF.length > DONE_CAP ? `${DONE_CAP}+` : doneF.length,
+        " unatt", true));
+      shown += shownDone.length;
+      if (!closed) for (const p of shownDone) el.appendChild(this.prRow(p, true));
     }
 
     if (!shown && !noted) {

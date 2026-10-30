@@ -768,12 +768,20 @@ pub enum ReqKind {
     /// `{push:"term_data", term, data:base64}` et la fin en
     /// `{push:"term_exit", term, code:i64|null}`.
     /// Cycle de vie borné à la connexion : le PTY est tué si elle tombe.
-    /// Ces requêtes sont traitées inline par la couche connexion
-    /// (jamais dispatchées en tâche — ordre des inputs garanti).
+    /// `term` optionnel = id choisi par le client : si l'appel abandonne
+    /// (timeout/coupure) alors que le démon a spawné, `term_close` peut
+    /// tuer l'orphelin — impossible avec un id serveur jamais reçu.
+    /// Champ ignoré par les démons anciens (dégradation douce : l'id
+    /// renvoyé est alors serveur-généré et le close anti-orphelin no-op).
+    /// Le spawn est dispatché en tâche par la couche connexion (le
+    /// fork/exec ne doit pas geler sa boucle de lecture) ; les autres
+    /// requêtes terminal restent inline — ordre des inputs garanti.
     TermOpen {
         session: String,
         cols: u16,
         rows: u16,
+        #[serde(default)]
+        term: Option<String>,
     },
     /// Octets vers le PTY (saisie clavier, coller…) — `data` en base64.
     TermInput {
@@ -835,6 +843,14 @@ pub enum ReqKind {
     /// Réponse : `[{type, hosts: [{host, token_env?}]}]` — `token_env`
     /// est le NOM d'une variable d'environnement, jamais un secret.
     ForgeList {},
+    /// Resynchronise les statuts du registre PR depuis les forges live
+    /// (gh pour github, REST gitlab/gerrit — même logique que
+    /// `acctl pr sync`, appliquée côté démon). Throttlé : un appel dans
+    /// la foulée d'un sync récent répond `throttled`, un sync déjà en
+    /// vol répond `running`. Réponse :
+    /// `{synced, checked, updated, notes[]}` ou `{synced:false, running|
+    /// throttled: true}`.
+    PrSync {},
     /// Composants managés (docs/components-integration.md §2.3) :
     /// liste name/kind/state/pid/autostart/health/uptime/restarts/
     /// last_exit/description/source.
@@ -889,6 +905,13 @@ pub enum ReqKind {
     /// `{code, data(b64), size, truncated, stderr?(b64)}` ; absent =
     /// composant ou query inconnue → erreur.
     ComponentQuery { name: String, query: String },
+    /// Bascule à chaud l'orchestrateur backlog natif (composant interne
+    /// `backlog-orchestrator`, section `[backlog_orchestrator]` de
+    /// config.toml pour l'activation par défaut) — bascule runtime
+    /// seulement, la config n'est pas réécrite. Réponse :
+    /// `{enabled, status}` — status = instantané exposé aussi dans
+    /// `ListComponents`/`ComponentInfo`.
+    OrchestratorSet { enabled: bool },
     DaemonStatus,
     /// Auto-update du démon vers la release `version` demandée par le
     /// client (ex. "0.5.0" → tag v0.5.0 — jamais « latest » : le démon
@@ -953,6 +976,7 @@ impl ReqKind {
             Self::PrTrack { .. } => "pr_track",
             Self::PrUntrack { .. } => "pr_untrack",
             Self::ForgeList {} => "forge_list",
+            Self::PrSync {} => "pr_sync",
             Self::ListComponents => "list_components",
             Self::ComponentInfo { .. } => "component_info",
             Self::ComponentStart { .. } => "component_start",
@@ -964,6 +988,7 @@ impl ReqKind {
             Self::ComponentCatalog { .. } => "component_catalog",
             Self::ComponentInstall { .. } => "component_install",
             Self::ComponentQuery { .. } => "component_query",
+            Self::OrchestratorSet { .. } => "orchestrator_set",
             Self::DaemonStatus => "daemon_status",
             Self::UpdateDaemon { .. } => "update_daemon",
         }

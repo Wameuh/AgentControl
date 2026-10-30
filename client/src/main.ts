@@ -123,6 +123,7 @@ chat.bind(renderer, {
     search.onSessionChanged();
     composer.sessionChanged();
   },
+  onSessionGone: (id) => composer.dropSession(id),
   connCount: () => conns.knownConns().length,
   connsDownOrNone: () => !conns.anyUp(),
   connHome: () => connView.maybeAutoShow(),
@@ -152,8 +153,14 @@ conns.bind({
   capsChanged: () => {
     chat.updateHeader();
     comps.syncBtn();
+    sidebar.noteCapsChanged();
   },
-  connChrome: (c, color) => applyConnChrome(c, color),
+  connChrome: (c, color) => {
+    applyConnChrome(c, color);
+    // L'accent de l'instance vient de changer (couleur de conn ou retour
+    // au neutre) : --panel-solid en dépend → refresh des terminaux ouverts.
+    term.refreshTheme();
+  },
   termDead: (k) => term.markConnDead(k),
   liveChanged: () => connView.onLiveChanged(),
 });
@@ -209,6 +216,7 @@ map.bind({
   componentsCapable: (c) => conns.cap(c)?.components === true,
   openSession: (id, conn) => void chat.open(id, false, conn),
   onOpening: () => { settings.close(); connView.close(); comps.close(); },
+  onToggle: (open) => sidebar.setMapOpen(open),
 });
 
 // Conn perdue (EOF transport) : les PTY du démon meurent avec → bannière
@@ -219,14 +227,17 @@ void listen<string>("conn-dead", (e) => term.markConnDead(e.payload));
 
 await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
   const { session, event } = msg.payload;
-  // File AgentBacklog : un worker qui change d'état/pop/disparaît peut
-  // avoir muté la file — invalidation debouncée (onglet actif seul).
+  // File AgentBacklog : la session ouverte qui change d'état/pop/
+  // disparaît peut avoir muté la file — invalidation debouncée (badge
+  // + panneau ; les autres mutations remontent par le poll lent).
   sidebar.noteSessionEvent(event.type);
   // Suppression côté serveur : l'event terminal arrive avant la coupure.
   if (event.type === "session_deleted") {
     chat.dropConv(session);
     term.dropSession(session);
     if (app.current && session === app.current.id) chat.markGone();
+    // Brouillon du composer + pièces garées : la session les emporte.
+    composer.dropSession(session);
     // Toast seulement pour une suppression externe — la nôtre a déjà
     // retiré la ligne optimistement, re-notifier serait du bruit.
     if (!sidebar.wasPendingDel(session)) notify("info", t("session_deleted_toast"));

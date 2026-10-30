@@ -28,6 +28,8 @@
 //!       | install <n> | add <n> [--kind K] [--cmd "<argv>"] [--hc S]
 //!       [--env K=V ...] [--cwd C] [--desc D] [--autostart] | rm <n>
 //!                                     — composants managés du démon
+//!   acctl orch [on|off|status]       — orchestrateur backlog natif
+//!                                     (bascule à chaud, défaut status)
 //!
 //! Connexion : $AGENTCONTROL_SOCK (défaut ~/.agentcontrol/daemon.sock)
 //!             ou $AGENTCONTROL_TCP host:port
@@ -211,7 +213,7 @@ fn print_event(ev: &Value) {
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|search|find|create|resume|attach|fork|cancel|kill|clear|sleep|mode|respond|blob|download|write|pr|comp|daemon-update");
+        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|search|find|create|resume|attach|fork|cancel|kill|clear|sleep|mode|respond|blob|download|write|pr|comp|orch|daemon-update");
         std::process::exit(2);
     }
     let mut c = connect().await?;
@@ -637,6 +639,26 @@ async fn main() -> Result<()> {
         }
         "pr" => pr::run(&args, &mut c).await?,
         "comp" | "components" => comp::run(&args, &mut c).await?,
+        // `acctl orch` — bascule à chaud de l'orchestrateur backlog
+        // natif (RPC orchestrator_set) ; `status` = component_info de
+        // l'interne (phase, ledger workers, gardes).
+        "orch" | "orchestrator" => {
+            let sub = args.get(1).map(String::as_str).unwrap_or("status");
+            match sub {
+                "on" | "enable" | "start" => {
+                    println!("{}", c.call(proto::ReqKind::OrchestratorSet { enabled: true }).await?);
+                }
+                "off" | "disable" | "stop" => {
+                    println!("{}", c.call(proto::ReqKind::OrchestratorSet { enabled: false }).await?);
+                }
+                "status" => {
+                    println!("{}", c.call(proto::ReqKind::ComponentInfo {
+                        name: "backlog-orchestrator".into(),
+                    }).await?);
+                }
+                other => bail!("usage: acctl orch [on|off|status] (inconnu: {other})"),
+            }
+        }
         other => bail!("commande inconnue: {other}"),
     }
     Ok(())

@@ -19,7 +19,7 @@ intégré au démon ; tout le reste vit à côté, supervisé par d'autres moyen
 | --- | --- | --- |
 | Sessions agent ACP | spawn/monitor des process agents, journal events.jsonl + blobs, reprise auto post-crash | `crates/daemon/src/session/`, `server/sessions.rs` |
 | Serveur MCP `agentcontrol` | outils agent↔agent (list/send/create/read/sleep) injecté via `mcpServers` de session/new\|load ; sous-commande cachée `mcp-serve` du même binaire, spawnée par chaque agent | `crates/daemon/src/mcp.rs`, injection `server/mod.rs::mcp_servers` |
-| Registre PR ↔ session | prs.json, watcher par session (détection `gh pr create`), RPC `pr_list/track/untrack` | `crates/daemon/src/prs.rs`, `server/prs.rs` |
+| Registre PR ↔ session | prs.json, watcher par session (détection `gh pr create`), RPC `pr_list/track/untrack/sync` (collecte `crates/forgesync`) | `crates/daemon/src/prs.rs`, `server/prs.rs` |
 | Web UI | listener HTTP loopback + token (`bind_http`), sert la SPA (embed ou disque), pont WS vers le proto NDJSON, /rpc /media /download | `crates/daemon/src/web/` |
 | Janitor | rétention : compaction journaux, purge LRU blobs, purge sessions inactives | `server/mod.rs::janitor` |
 | Terminaux PTY | shell par connexion, cycle de vie borné à la conn | `server/term.rs` |

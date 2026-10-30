@@ -26,11 +26,16 @@
   --gold: #e0c996;
   --violet: #c4a9dc;
   --red: #e89486;
-  --line: rgba(236, 230, 216, .15);
-  --line-strong: rgba(236, 230, 216, .3);
+  /* --tint-rgb : canaux rgb des voiles neutres (surfaces de hover, fonds
+     d'inputs, badges, chips) — encre crème ici, réassignée sur l'accent
+     par les thèmes colorés (règle :root[class*="theme-"] plus bas). */
+  --tint-rgb: 236, 230, 216;
+  --line: rgba(var(--tint-rgb), .15);
+  --line-strong: rgba(var(--tint-rgb), .3);
   --glass: rgba(15, 20, 17, .72);
   --panel: rgba(13, 19, 15, .82);
   --panel-solid: #161c18;
+  --code-bg: #0d1310;
   --accent: var(--sand);
   --accent-rgb: 205, 182, 140;
   --ok: var(--sage);
@@ -70,8 +75,9 @@ body {
   --gold: #93712f;
   --violet: #6b4d8c;
   --red: #b04a3e;
-  --line: rgba(43, 42, 36, .16);
-  --line-strong: rgba(43, 42, 36, .32);
+  --tint-rgb: 43, 42, 36;
+  --line: rgba(var(--tint-rgb), .16);
+  --line-strong: rgba(var(--tint-rgb), .32);
   --glass: rgba(233, 229, 216, .72);
   --panel: rgba(240, 237, 228, .85);
   --panel-solid: #efece2;
@@ -80,14 +86,15 @@ body {
   --msg-user-fg: #f5f1e4;
   --msg-user-link: #dccdf0;
 }
-:root.light ::-webkit-scrollbar-thumb { background: rgba(43, 42, 36, .2); }
+:root.light ::-webkit-scrollbar-thumb { background: rgba(var(--tint-rgb), .2); }
 :root.light .msg.agent { background: rgba(107, 77, 140, .08); border-color: rgba(107, 77, 140, .3); }
-:root.light button { background: rgba(43, 42, 36, .05); }
+:root.light button { background: rgba(var(--tint-rgb), .05); }
 
 /* Couleur d'accent — dimension orthogonale à dark/light : la classe
    :root.theme-<c> remappe --accent (+ --accent-rgb pour les teintes rgba()
-   et --msg-user-* pour la bulle utilisateur). « sauge » = défaut (valeurs
-   :root, famille khaki/olive de la gemme neutre). Les vars gemme
+   et --msg-user-* pour la bulle utilisateur), et la règle unifiée plus
+   bas en dérive la palette de surfaces complète. « sauge » = défaut
+   (valeurs :root, famille khaki/olive de la gemme neutre). Les vars gemme
    --sage/--gold/--violet/--red gardent leur sens d'état (badges, dots,
    toasts) — l'accent ne les réassigne pas. Sombre : accent clair + bulle
    à texte foncé ; clair : accent soutenu + bulle à texte clair. */
@@ -128,9 +135,37 @@ body {
   --msg-user-fg: #f5f1e4; --msg-user-link: #f4d3d6;
 }
 
+/* Palette de surfaces dérivée de l'accent — l'UI entière suit la couleur
+   choisie, pas seulement les éléments déjà accentués. Une seule règle
+   couvre tous les thèmes : les blocs :root.theme-<c> ci-dessus ne posent
+   que --accent/--accent-rgb/--msg-user-*, et ces color-mix dérivent le
+   fond, les panneaux (verre/opaque), les puits de code et les voiles de
+   hover en mélangeant l'accent dans la surface canonique — la teinte
+   suit l'accent, la luminosité reste celle du thème actif (le texte
+   --ink/--muted, inchangé, garde son contraste ; dark/light modulés par
+   des pourcentages propres à chaque mode). Les lignes/bordures suivent
+   via --line/--line-strong, rebasées sur --tint-rgb = canaux de l'accent.
+   « sauge » (défaut) n'a pas de classe : surfaces neutres inchangées —
+   l'identité minérale khaki/olive est déjà sa palette. */
+:root[class*="theme-"] {
+  --tint-rgb: var(--accent-rgb);
+  --bg:          color-mix(in srgb, var(--accent) 10%, #121614);
+  --panel:       color-mix(in srgb, var(--accent) 9%,  rgba(13, 19, 15, .82));
+  --panel-solid: color-mix(in srgb, var(--accent) 12%, #161c18);
+  --glass:       color-mix(in srgb, var(--accent) 9%,  rgba(15, 20, 17, .72));
+  --code-bg:     color-mix(in srgb, var(--accent) 8%,  #0d1310);
+}
+:root.light[class*="theme-"] {
+  --bg:          color-mix(in srgb, var(--accent) 9%,  #e9e5d8);
+  --panel:       color-mix(in srgb, var(--accent) 7%,  rgba(240, 237, 228, .85));
+  --panel-solid: color-mix(in srgb, var(--accent) 9%,  #efece2);
+  --glass:       color-mix(in srgb, var(--accent) 7%,  rgba(233, 229, 216, .72));
+  --code-bg:     color-mix(in srgb, var(--accent) 10%, #0d1310);
+}
+
 ::selection { background: var(--accent); color: var(--bg); }
 ::-webkit-scrollbar { width: 9px; }
-::-webkit-scrollbar-thumb { background: rgba(236, 230, 216, .16); border-radius: 5px; }
+::-webkit-scrollbar-thumb { background: rgba(var(--tint-rgb), .16); border-radius: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
 
 /* Icônes SVG inline (ui/icons.ts) — remplacent les glyphes Unicode dont le
