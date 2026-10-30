@@ -36,6 +36,9 @@ class WsClient {
   private rxTotal = 0;
   private txTotal = 0;
   private lastNet = { at: 0, rx: 0, tx: 0 };
+  /** Dernier octet reçu — du trafic entrant récent prouve le transport
+   *  vivant même quand une requête expire (démon lent ≠ lien mort). */
+  private lastRxAt = Date.now();
   /** Promesse de token partagée : une seule modale à la fois. */
   private authGate: Promise<string> | null = null;
   private authResolve: ((t: string) => void) | null = null;
@@ -234,12 +237,21 @@ class WsClient {
     delete p.conn;
     // Formes fusionnées du bridge Tauri, émulées en mono-serveur :
     if (method === "daemon_status" && conn === undefined) {
+      const t0 = Date.now();
       try {
         const v = await this.callInner<Record<string, unknown>>(method, p);
         return { [WEB_CONN]: v, servers: 1, sessions: 1 } as T;
       } catch (e) {
+        // Même télémétrie que la fusion Tauri : silent_ms prouve le
+        // transport vivant (trafic entrant récent) → le watchdog
+        // distingue lenteur démon et blackhole.
         return {
-          [WEB_CONN]: { error: String(e) },
+          [WEB_CONN]: {
+            error: e instanceof Error && e.message === "timeout démon"
+              ? "timeout" : String(e),
+            rtt_ms: Date.now() - t0,
+            silent_ms: Date.now() - this.lastRxAt,
+          },
           servers: 1,
           sessions: 0,
         } as T;
@@ -288,6 +300,7 @@ class WsClient {
   private onMessage(m: MessageEvent) {
     const data = typeof m.data === "string" ? m.data : "";
     this.rxTotal += data.length;
+    this.lastRxAt = Date.now();
     let v: Record<string, unknown>;
     try {
       v = JSON.parse(data);

@@ -53,18 +53,30 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
         for (k, c) in pairs {
             let req = req.clone();
             set.spawn(async move {
+                let t0 = std::time::Instant::now();
                 let r = tokio::time::timeout(std::time::Duration::from_secs(secs), c.call(req)).await;
-                (k, r.map_err(|_| anyhow::anyhow!("timeout")).and_then(|x| x))
+                // silent_ms lu au retour : du trafic entrant récent prouve
+                // le transport vivant même quand la requête a expiré.
+                let silent = c.silent_ms();
+                (k, r.map_err(|_| anyhow::anyhow!("timeout")).and_then(|x| x),
+                    t0.elapsed().as_millis() as u64, silent)
             });
         }
         let mut all = Vec::new();
         let mut out = json!({});
         let mut n_ok = 0u64;
         while let Some(res) = set.join_next().await {
-            let Ok((k, r)) = res else { continue };
+            let Ok((k, r, rtt, silent)) = res else { continue };
             match r {
                 Ok(v) if merged => {
                     n_ok += 1;
+                    // Réponse lente mais arrivée — mesure de la latence
+                    // sous charge (seuil arbitraire, au-dessus on s'en
+                    // approche du timeout de sonde).
+                    if rtt > 4_000 {
+                        client_core::log(Level::Warn,
+                            format!("{method} {k}: réponse lente {rtt} ms"));
+                    }
                     out[k] = v;
                 }
                 Ok(mut v) => {
@@ -75,7 +87,15 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
                         all.append(arr);
                     }
                 }
-                Err(e) if merged => out[k] = json!({"error": format!("{e:#}")}),
+                Err(e) if merged => {
+                    // Télémétrie par échec — sinon les strikes client sont
+                    // déclenchés à l'aveugle (timeout lenteur vs mort réelle
+                    // indistinguables sans silent_ms).
+                    client_core::log(Level::Warn,
+                        format!("{method} {k}: {e:#} (rtt {rtt} ms, silent {silent} ms)"));
+                    out[k] = json!({"error": format!("{e:#}"),
+                        "rtt_ms": rtt, "silent_ms": silent});
+                }
                 // Le frontend filtre ce marqueur → conn marquée down et
                 // sessions servies depuis le cache au lieu de disparaître.
                 Err(e) => {

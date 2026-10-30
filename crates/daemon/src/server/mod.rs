@@ -831,7 +831,10 @@ impl Daemon {
                 line = lines.next_line() => {
                     let line = match line {
                         Ok(Some(l)) => l,
-                        _ => return Ok(()), // déconnexion
+                        // EOF propre (client parti) vs erreur de lecture :
+                        // le log de fermeture distingue les deux.
+                        Ok(None) => return Ok(()),
+                        Err(e) => return Err(e).context("lecture conn"),
                     };
                     if line.trim().is_empty() {
                         continue;
@@ -958,9 +961,10 @@ impl Daemon {
                 }
                 // La tâche d'écriture est morte (flush timeout, socket
                 // ko) ou a été signalée par un producteur (file pleine) :
-                // conn refermée proprement — plus rien ne peut sortir.
+                // conn refermée — plus rien ne peut sortir. Remontée en
+                // erreur pour que le log de fermeture donne la raison.
                 _ = wdead.changed() => {
-                    return Ok(());
+                    return Err(anyhow::anyhow!("writer mort (flush timeout / file pleine)"));
                 }
                 ev = async {
                     match sub.as_mut() {
@@ -1314,17 +1318,29 @@ mod tests {
     }
 }
 
+/// Cycle de vie d'une conn cliente : open → durée → raison de close.
+/// Le serveur ne logguait rien de tout ça — sous flap, impossible de
+/// corréler les reconnexions clientes avec ce que voit le démon.
+fn log_conn_close(peer: &str, t0: std::time::Instant, r: &Result<()>) {
+    let secs = t0.elapsed().as_secs();
+    match r {
+        Ok(()) => info!("conn {peer} close ({secs}s) — client parti"),
+        Err(e) => info!("conn {peer} close ({secs}s): {e:#}"),
+    }
+}
+
 /// Wrapper pour accepter des connexions Unix.
 pub async fn accept_unix(daemon: Arc<Daemon>, listener: tokio::net::UnixListener) {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
                 let d = Arc::clone(&daemon);
+                info!("conn unix open");
                 tokio::spawn(async move {
+                    let t0 = std::time::Instant::now();
                     let s: UnixStream = stream;
-                    if let Err(e) = d.serve_conn(s).await {
-                        debug!("conn unix close: {e:#}");
-                    }
+                    let r = d.serve_conn(s).await;
+                    log_conn_close("unix", t0, &r);
                 });
             }
             Err(e) => {
@@ -1339,13 +1355,14 @@ pub async fn accept_unix(daemon: Arc<Daemon>, listener: tokio::net::UnixListener
 pub async fn accept_tcp(daemon: Arc<Daemon>, listener: tokio::net::TcpListener) {
     loop {
         match listener.accept().await {
-            Ok((stream, _)) => {
+            Ok((stream, addr)) => {
                 let _ = stream.set_nodelay(true);
                 let d = Arc::clone(&daemon);
+                info!("conn tcp open {addr}");
                 tokio::spawn(async move {
-                    if let Err(e) = d.serve_conn(stream).await {
-                        debug!("conn tcp close: {e:#}");
-                    }
+                    let t0 = std::time::Instant::now();
+                    let r = d.serve_conn(stream).await;
+                    log_conn_close(&format!("tcp {addr}"), t0, &r);
                 });
             }
             Err(e) => {

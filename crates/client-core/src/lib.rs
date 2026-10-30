@@ -526,7 +526,19 @@ pub struct Client {
     /// coup doit voir l'état via `wait_for`, pas seulement la transition).
     pub dead: watch::Receiver<bool>,
     dead_tx: watch::Sender<bool>,
+    /// Horodatage (ms epoch) de la dernière ligne reçue — preuve de vie
+    /// du transport : du trafic entrant récent distingue un démon saturé
+    /// (lien vivant, réponse lente) d'un blackhole (silence total). La
+    /// sonde fusionnée s'en sert pour ne pas tuer une conn vivante.
+    last_rx_ms: AtomicU64,
     _guard: Option<Arc<SshGuard>>,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 impl Client {
@@ -557,6 +569,7 @@ impl Client {
             pushes: broadcast::channel(512).0,
             dead,
             dead_tx,
+            last_rx_ms: AtomicU64::new(now_ms()),
             _guard: guard,
         });
         // Reader task : dispatch responses / pushes
@@ -566,6 +579,7 @@ impl Client {
                 let mut lines = BufReader::new(r).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     RX_TOTAL.fetch_add(line.len() as u64 + 1, Ordering::Relaxed);
+                    c.last_rx_ms.store(now_ms(), Ordering::Relaxed);
                     if line.trim().is_empty() {
                         continue;
                     }
@@ -606,6 +620,14 @@ impl Client {
             });
         }
         Ok(client)
+    }
+
+    /// Millisecondes depuis la dernière ligne reçue — 0 si du trafic
+    /// vient d'arriver. Grand et croissant = lien silencieux (blackhole
+    /// suspect) ; petit = transport vivant (la lenteur d'une réponse est
+    /// alors imputable au démon, pas au lien).
+    pub fn silent_ms(&self) -> u64 {
+        now_ms().saturating_sub(self.last_rx_ms.load(Ordering::Relaxed))
     }
 
     /// Appel RPC. Réponse ou erreur du démon.
