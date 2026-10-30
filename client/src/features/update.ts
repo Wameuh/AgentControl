@@ -5,7 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import { invoke, getVersion, isWeb } from "../core/bridge";
-import { $, esc, logUi, notify } from "../core/dom";
+import { $, esc, notify } from "../core/dom";
 import { icon } from "../ui/icons";
 import { isAndroid, shellOpen } from "../core/chrome";
 import { cmpVer } from "../core/conn";
@@ -93,13 +93,12 @@ export async function performClientUpdate(tag: string) {
     shellOpen(await apkReleaseUrl(tag));
     return;
   }
+  // notify() verse déjà au client.log — pas de logUi en plus (doublon).
   notify("info", t("update_installing", { v: tag }));
-  logUi("info", `update: install v${tag} demandée`);
   try {
     await invoke("update_client", { tag });
   } catch (e) {
     const reason = String(e);
-    logUi("error", `update: install v${tag} échouée — ${reason}`);
     notify("error", t("update_failed_reason", { reason }));
     // Repli « page releases » quand le backend le désigne (hors bundle
     // .app, build portable…) — l'erreur affiche déjà la cause exacte.
@@ -150,13 +149,9 @@ async function reportLastUpdateStatus() {
   const st = await invoke<string | null>("update_last_status").catch(() => null);
   if (!st) return;
   if (st.startsWith("FAIL")) {
-    const reason = st.slice(4).trim();
-    notify("error", t("update_failed_reason", { reason }));
-    logUi("error", `update: install précédente échouée — ${reason}`);
+    notify("error", t("update_failed_reason", { reason: st.slice(4).trim() }));
   } else if (st.startsWith("OK")) {
-    const v = st.slice(2).trim();
-    notify("success", t("update_done", { v }));
-    logUi("info", `update: v${v} installée`);
+    notify("success", t("update_done", { v: st.slice(2).trim() }));
   }
 }
 

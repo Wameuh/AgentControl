@@ -164,9 +164,13 @@ fn verify_asset(path: &std::path::Path, name: &str) -> Result<(), String> {
         return Err(format!("{name} téléchargé vide"));
     }
     let mut head = [0u8; 8];
-    let _ = std::fs::File::open(path)
+    if std::fs::File::open(path)
         .map_err(|e| e.to_string())?
-        .read(&mut head);
+        .read_exact(&mut head)
+        .is_err()
+    {
+        return Err(format!("{name} invalide — fichier trop petit"));
+    }
     if name.ends_with(".deb") && !head.starts_with(b"!<arch>") {
         return Err(format!(
             "{name} invalide — pas une archive deb (téléchargement corrompu ?)"
@@ -212,10 +216,12 @@ fn write_update_status(s: &str) {
 pub(crate) fn update_last_status() -> Option<String> {
     let p = update_status_path();
     let s = std::fs::read_to_string(&p).ok()?.trim().to_string();
+    // Consommé même vide — sinon le fichier traînerait et serait relu
+    // à chaque boot.
+    let _ = std::fs::remove_file(&p);
     if s.is_empty() {
         return None;
     }
-    let _ = std::fs::remove_file(&p);
     ulog(format!("statut d'install précédente relevé : {s}"));
     Some(s)
 }
@@ -294,11 +300,13 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     // résoudre (hang) → timeout ; binaire absent → NotFound ; refus
     // utilisateur → 126 ; pkexec incapable de lancer → 127. stderr
     // capturée pour la cause réelle (dpkg y écrit ses erreurs).
-    let run = tokio::process::Command::new("pkexec")
-        .arg("dpkg")
-        .arg("-i")
-        .arg(&deb)
-        .output();
+    // kill_on_drop : au timeout le futur output() est droppé — sans lui
+    // le child fuirait détaché et pourrait installer en arrière-plan
+    // APRÈS le rapport d'échec (install silencieuse, exactement ce que
+    // ce correctif élimine).
+    let mut pkexec = tokio::process::Command::new("pkexec");
+    pkexec.arg("dpkg").arg("-i").arg(&deb).kill_on_drop(true);
+    let run = pkexec.output();
     let out = match tokio::time::timeout(std::time::Duration::from_secs(300), run).await {
         Err(_) => {
             let msg =
@@ -503,7 +511,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     std::fs::write(
         &bat,
         format!(
-            "@echo off\r\nping -n 2 127.0.0.1 >nul\r\nstart \"\" /wait \"{}\" /S\r\nif errorlevel 1 goto fail\r\n>\"{}\" echo OK {tag}\r\ndel \"{}\"\r\nstart \"\" \"{}\"\r\ndel \"%~f0\"\r\ngoto end\r\n:fail\r\n>\"{}\" echo FAIL installer exited with code %errorlevel%\r\nstart \"\" \"{}\"\r\n:end\r\n",
+            "@echo off\r\nping -n 2 127.0.0.1 >nul\r\nstart \"\" /wait \"{}\" /S\r\nif errorlevel 1 goto fail\r\n>\"{}\" echo OK {tag}\r\ndel \"{}\"\r\nstart \"\" \"{}\"\r\ndel \"%~f0\" & exit /b 0\r\n:fail\r\n>\"{}\" echo FAIL installer exited with code %errorlevel%\r\nstart \"\" \"{}\"\r\nexit /b 1\r\n",
             setup.display(),
             status.display(),
             setup.display(),
