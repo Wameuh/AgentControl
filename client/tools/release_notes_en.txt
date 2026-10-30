@@ -17,3 +17,4 @@
 189: Session diagram: roots of the same group are now placed contiguously.
 190: Fixed unreadable code blocks in the light theme.
 192: Sound alerts now offer a choice of presets per event — richer sounds synthesized live, no bundled audio files.
+193: AgentReviewer component gains a `repos` parameter (JSON) for multi-repo watching, and a new `json` parameter type renders structured values into managed configs; workers can now request a local pre-push diff review via `agent-reviewer review`.

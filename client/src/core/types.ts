@@ -161,7 +161,7 @@ export type ComponentHealthcheck =
 /** Type d'un paramètre déclaré — pilote le widget du formulaire et la
  *  validation côté démon. */
 export type ParamKind =
-  | "string" | "path" | "int" | "duration" | "bool" | "enum" | "list";
+  | "string" | "path" | "int" | "duration" | "bool" | "enum" | "list" | "json";
 
 /** Paramètre de config déclaré (catalogue → spec.params_schema) : la
  *  seule surface éditable d'un composant managé — la spec interne

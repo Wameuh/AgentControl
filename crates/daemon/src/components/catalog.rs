@@ -54,6 +54,7 @@ const AGENTREVIEWER_CONFIG_TEMPLATE: &str = "\
 repo = {{repo}}
 repo_dir = {{repo_dir}}
 worktree_root = {{worktree_root}}
+repos = {{repos}}
 
 # --- Trigger ------------------------------------------------------------
 trigger = {{trigger}}
@@ -289,6 +290,27 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                     default: Some(
                         "~/.local/state/agentreviewer/worktrees".into(),
                     ),
+                    secret: false,
+                    validation: None,
+                    choices: Vec::new(),
+                },
+                ParamSpec {
+                    key: "repos".into(),
+                    label: "Dépôts supplémentaires".into(),
+                    description: Some(
+                        "JSON — liste d'objets {repo, repo_dir, \
+                         worktree_root?, trigger?, group?, \
+                         max_parallel?, agent?, …} : chaque entrée \
+                         ajoute un dépôt surveillé en plus du dépôt \
+                         principal (multi-repo, agent-reviewer ≥ 0.3 — \
+                         toute clé globale y est overridable ; `~` est \
+                         expansé par le watcher, pas ici). Ex. \
+                         [{\"repo\": \"o/r\", \"repo_dir\": \"/chemin/clone\"}]"
+                            .into(),
+                    ),
+                    required: false,
+                    kind: ParamKind::Json,
+                    default: None,
                     secret: false,
                     validation: None,
                     choices: Vec::new(),
@@ -957,6 +979,29 @@ mod tests {
             .env
             .keys()
             .any(|k| k.starts_with("AGENTCONTROL_")));
+    }
+
+    /// Chaque `{{clé}}` d'un template de rendu doit être déclarée dans
+    /// les `params` de l'entrée — un placeholder hors schéma ferait
+    /// échouer le rendu au premier `comp set` (`render_template` le
+    /// rejette) : autant le casser au test.
+    #[test]
+    fn les_placeholders_des_templates_sont_declares() {
+        for e in CATALOG.iter() {
+            let Some(render) = &e.render else { continue };
+            let mut rest = render.template.as_str();
+            while let Some(s) = rest.find("{{") {
+                let after = &rest[s + 2..];
+                let end = after.find("}}").expect("placeholder {{ non fermé");
+                let key = after[..end].trim();
+                assert!(
+                    e.params.iter().any(|p| p.key == key),
+                    "entrée « {} » : placeholder {{{{{key}}}}} hors schéma",
+                    e.name
+                );
+                rest = &after[end + 2..];
+            }
+        }
     }
 }
 
