@@ -21,9 +21,9 @@ use std::time::{Duration, Instant};
 const GH_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Sortie stdout d'une commande `gh` (None si gh absent, en échec ou
-/// trop lent — le process est tué passé GH_TIMEOUT). Publique : acctl
-/// s'en sert aussi pour résoudre un repo (`gh repo view`) hors sync.
-pub fn gh_out(args: &[&str]) -> Option<String> {
+/// trop lent — le process est tué passé GH_TIMEOUT). Sortie vide
+/// conservée : `gh_ok` distingue « succès silencieux » d'un échec.
+fn gh_run(args: &[&str]) -> Option<String> {
     let mut child = Command::new("gh")
         .args(args)
         .stdout(Stdio::piped())
@@ -61,12 +61,21 @@ pub fn gh_out(args: &[&str]) -> Option<String> {
     if !status.success() {
         return None;
     }
-    let s = drain.join().ok()?.trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    Some(drain.join().ok()?.trim().to_string())
+}
+
+/// Sortie stdout d'une commande `gh` — None si gh absent, en échec ou
+/// stdout vide. Publique : acctl s'en sert aussi pour résoudre un repo
+/// (`gh repo view`) hors sync.
+pub fn gh_out(args: &[&str]) -> Option<String> {
+    let s = gh_run(args)?;
+    if s.is_empty() { None } else { Some(s) }
+}
+
+/// `true` si `gh` a répondu (exit 0) — probe pour les commandes qui
+/// n'écrivent rien ou rapportent sur stderr (`gh auth status`).
+fn gh_ok(args: &[&str]) -> bool {
+    gh_run(args).is_some()
 }
 
 /// Schéma HTTP d'un hôte de forge : `http` uniquement pour le loopback
@@ -399,9 +408,11 @@ fn collect_github(entries: &[Value], out: &mut SyncOutcome) {
         .collect();
     repos.sort();
     repos.dedup();
-    // Probe unique : `gh auth status` = binaire présent + token valide.
-    // Sans lui impossible de distinguer « repo absent » de « gh KO ».
-    let gh_up = !repos.is_empty() && gh_out(&["auth", "status"]).is_some();
+    // Probe unique : `gh auth status` = binaire présent + token valide
+    // (exit code seul — le rapport peut sortir sur stderr selon les
+    // versions). Sans lui impossible de distinguer « repo absent » de
+    // « gh KO ».
+    let gh_up = !repos.is_empty() && gh_ok(&["auth", "status"]);
     for repo in repos {
         let live = gh_out(&[
             "pr", "list", "--repo", &repo, "--state", "all",
@@ -410,10 +421,11 @@ fn collect_github(entries: &[Value], out: &mut SyncOutcome) {
         ])
         .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok());
         let Some(live) = live else {
-            out.notes
-                .push(format!("github {repo}: gh indisponible — statuts inchangés"));
             if gh_up {
                 // gh sert mais ce repo ne répond pas → fantôme/privé.
+                out.notes.push(format!(
+                    "github {repo}: repo absent ou inaccessible — statuts inchangés"
+                ));
                 for e in entries.iter().filter(|e| {
                     proto::forge_kind(e["forge"].as_str().unwrap_or("")) == "github"
                         && gh_host_ok(e)
@@ -421,6 +433,9 @@ fn collect_github(entries: &[Value], out: &mut SyncOutcome) {
                 }) {
                     out.failed.push(seen_of(e));
                 }
+            } else {
+                out.notes
+                    .push(format!("github {repo}: gh indisponible — statuts inchangés"));
             }
             continue;
         };
@@ -434,7 +449,21 @@ fn collect_github(entries: &[Value], out: &mut SyncOutcome) {
             .collect();
         for e in &tracked {
             let n = e["pr"].as_u64().unwrap_or(0);
-            let Some(p) = live.iter().find(|p| p["number"].as_u64() == Some(n)) else {
+            // `--limit 200` tronque la liste : sur un gros repo une
+            // entrée ancienne n'y figure plus sans être absente —
+            // requête directe avant de la compter injoignable.
+            let p = live
+                .iter()
+                .find(|p| p["number"].as_u64() == Some(n))
+                .cloned()
+                .or_else(|| {
+                    gh_out(&[
+                        "pr", "view", &n.to_string(), "--repo", &repo, "--json",
+                        "number,title,state,isDraft,headRefName",
+                    ])
+                    .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                });
+            let Some(p) = p.filter(|p| p["number"].as_u64() == Some(n)) else {
                 // Le repo répond mais la référence n'y est plus
                 // (supprimée, jamais existée) → non résoluble en cours.
                 out.failed.push(seen_of(e));
@@ -442,7 +471,7 @@ fn collect_github(entries: &[Value], out: &mut SyncOutcome) {
             };
             out.checked += 1;
             out.seen.push(seen_of(e));
-            let st = gh_state(p);
+            let st = gh_state(&p);
             let old = e["status"].as_str().unwrap_or("");
             if st != old {
                 out.updates.push(PrUpdate {

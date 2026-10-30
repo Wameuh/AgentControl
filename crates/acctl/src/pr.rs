@@ -43,62 +43,58 @@ fn parse_ref_arg(s: &str) -> Result<(u64, Option<String>)> {
 /// `repo_label`) → idem ; chemin nu → repo seul. Retourne
 /// (repo, host optionnel).
 fn split_repo_arg(arg: &str) -> (String, Option<String>) {
-    let mut host = None;
-    let mut repo = arg.to_string();
     if let Some(rest) = arg
         .strip_prefix("https://")
         .or_else(|| arg.strip_prefix("http://"))
     {
         if let Some((h, p)) = rest.split_once('/') {
-            host = Some(h.to_lowercase());
-            repo = p.to_string();
+            let host = h.to_lowercase();
+            let mut repo = p
+                .split("/-/merge_requests/")
+                .next()
+                .unwrap_or(p)
+                .split("/pull/")
+                .next()
+                .unwrap_or(p)
+                .split("/-/issues/")
+                .next()
+                .unwrap_or(p)
+                .trim_end_matches('/')
+                .to_string();
+            // Formes gerrit en dernier recours uniquement : une URL
+            // GitLab peut avoir un groupe « c » ou « pull » légitime.
+            if !p.contains("/-/merge_requests/") && !p.contains("/pull/") {
+                repo = repo
+                    .split("/+/")
+                    .next()
+                    .unwrap_or(&repo)
+                    .trim_start_matches("c/")
+                    .to_string();
+            }
+            return (repo, Some(host));
         }
-    } else if let Some((h, p)) = arg.split_once(':') {
-        // `host:path` ou `host:port:path` — un hôte ressemble à un
-        // domaine (point) et un 2e segment purement numérique est un
-        // port, pas un repo.
+        return (arg.to_string(), None);
+    }
+    if let Some((h, p)) = arg.split_once(':') {
+        // `host:path` ou `host:port:path` (libellé d'affichage copié —
+        // cf. `repo_label`) — un hôte ressemble à un domaine (point)
+        // et un 2e segment purement numérique est un port, pas un
+        // repo. Le path est déjà le repo : aucun trim d'URL ici (un
+        // groupe « c » gitlab resterait sinon écrêté).
         if h.contains('.') {
-            match p.split_once(':') {
+            return match p.split_once(':') {
                 Some((port, rest))
                     if !port.is_empty()
                         && port.chars().all(|c| c.is_ascii_digit())
                         && !rest.is_empty() =>
                 {
-                    host = Some(format!("{h}:{port}").to_lowercase());
-                    repo = rest.to_string();
+                    (rest.to_string(), Some(format!("{h}:{port}").to_lowercase()))
                 }
-                _ => {
-                    host = Some(h.to_lowercase());
-                    repo = p.to_string();
-                }
-            }
+                _ => (p.to_string(), Some(h.to_lowercase())),
+            };
         }
     }
-    if host.is_some() {
-        repo = repo
-            .split("/-/merge_requests/")
-            .next()
-            .unwrap_or(&repo)
-            .split("/pull/")
-            .next()
-            .unwrap_or(&repo)
-            .split("/-/issues/")
-            .next()
-            .unwrap_or(&repo)
-            .trim_end_matches('/')
-            .to_string();
-        // Formes gerrit en dernier recours uniquement : une URL GitLab
-        // peut avoir un groupe « c » ou « pull » légitime.
-        if !arg.contains("/-/merge_requests/") && !arg.contains("/pull/") {
-            repo = repo
-                .split("/+/")
-                .next()
-                .unwrap_or(&repo)
-                .trim_start_matches("c/")
-                .to_string();
-        }
-    }
-    (repo, host)
+    (arg.to_string(), None)
 }
 
 /// Sélecteur explicite d'une entrée du registre pour `rm`/`note` :
@@ -560,7 +556,10 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                         .as_ref()
                         .and_then(|i| i["status"].as_str().map(String::from)),
                     note,
-                    sync_fails: None,
+                    // live_ref a répondu : l'entrée est résoluble —
+                    // une fiche « non résoluble » reprend un compteur
+                    // propre au lieu d'attendre le prochain sync.
+                    sync_fails: info.as_ref().map(|_| 0),
                 })
                 .await?;
             println!(
@@ -584,7 +583,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             let v = c
                 .call(proto::ReqKind::PrList { session: None })
                 .await
-                .unwrap_or(json!([]));
+                .context("registre illisible (démon trop ancien pour pr_list ?)")?;
             let entries = v.as_array().cloned().unwrap_or_default();
             let e = resolve_in(&entries, &sel)?
                 .context("aucune entrée ne correspond (cf. acctl pr ls --all)")?;
@@ -614,7 +613,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             let v = c
                 .call(proto::ReqKind::PrList { session: None })
                 .await
-                .unwrap_or(json!([]));
+                .context("registre illisible (démon trop ancien pour pr_list ?)")?;
             let entries = v.as_array().cloned().unwrap_or_default();
             match resolve_in(&entries, &sel)? {
                 Some(e) => {
@@ -649,6 +648,19 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             // Compteur d'échecs du registre : vu live → 0, injoignable
             // → +1 (les updates sont des « vues » — Some(0) en même
             // temps que le statut). Champ ignoré par un vieux démon.
+            let cur_fails = |s: &forgesync::PrSeen| -> u32 {
+                entries
+                    .iter()
+                    .find(|e| entry_matches(e, &PrSel {
+                        pr: s.pr,
+                        change_id: s.change_id.clone(),
+                        forge: Some(s.forge.clone()),
+                        host: Some(s.host.clone()),
+                        repo: Some(s.repo.clone()),
+                    }))
+                    .and_then(|e| e["sync_fails"].as_u64())
+                    .unwrap_or(0) as u32
+            };
             let track_fails = |repo: &str, pr: u64, forge: &str, host: &str,
                               change_id: Option<String>, fails: u32| {
                 proto::ReqKind::PrTrack {
@@ -686,7 +698,9 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                 println!("{}: {} -> {}", update_label(u), u.old_status, u.status);
             }
             // Vues live sans changement de statut (les updates ont déjà
-            // repoussé leur remise à zéro ci-dessus).
+            // repoussé leur remise à zéro ci-dessus). Pas de pr_track
+            // no-op : il bumperait updated_at et réécrirait prs.json
+            // pour chaque entrée à chaque sync.
             for s in &out.seen {
                 if out.updates.iter().any(|u| {
                     u.forge == s.forge && u.host == s.host
@@ -694,23 +708,15 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                 }) {
                     continue;
                 }
+                if cur_fails(s) == 0 {
+                    continue;
+                }
                 let _ = c
                     .call(track_fails(&s.repo, s.pr, &s.forge, &s.host, s.change_id.clone(), 0))
                     .await;
             }
             for s in &out.failed {
-                let cur = entries
-                    .iter()
-                    .find(|e| entry_matches(e, &PrSel {
-                        pr: s.pr,
-                        change_id: s.change_id.clone(),
-                        forge: Some(s.forge.clone()),
-                        host: Some(s.host.clone()),
-                        repo: Some(s.repo.clone()),
-                    }))
-                    .and_then(|e| e["sync_fails"].as_u64())
-                    .unwrap_or(0) as u32;
-                let nf = cur.saturating_add(1);
+                let nf = cur_fails(s).saturating_add(1);
                 let _ = c
                     .call(track_fails(&s.repo, s.pr, &s.forge, &s.host, s.change_id.clone(), nf))
                     .await;

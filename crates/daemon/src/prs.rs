@@ -370,6 +370,14 @@ fn normalize(e: &mut PrEntry) {
 /// Applique les champs `Some` de `t` sur `e` — partagé entre la branche
 /// trouvée de `track` et la fusion de clés.
 fn apply_track(e: &mut PrEntry, t: &TrackIn, forge: &str, host: &str) {
+    // Identité avant mutation : l'URL n'est régénérée que si elle a
+    // changé — `proto::forge_url` force https://, un Gerrit loopback
+    // http:// détecté garderait sinon un lien cassé à chaque track.
+    let identity_changed = e.forge != forge
+        || e.host != host
+        || (!t.repo.is_empty() && e.repo != t.repo)
+        || (t.pr > 0 && e.pr != t.pr)
+        || (t.change_id.is_some() && e.change_id != t.change_id);
     if let Some(s) = t.session.clone() {
         e.session = s;
         e.via = "manual".into();
@@ -385,12 +393,11 @@ fn apply_track(e: &mut PrEntry, t: &TrackIn, forge: &str, host: &str) {
     if let Some(c) = t.change_id.clone() {
         e.change_id = Some(c);
     }
-    e.url = t
-        .url
-        .clone()
-        .unwrap_or_else(|| {
-            proto::forge_url(&e.forge, &e.host, &e.repo, e.pr, e.change_id.as_deref())
-        });
+    if let Some(u) = t.url.clone() {
+        e.url = u;
+    } else if identity_changed || e.url.is_empty() {
+        e.url = proto::forge_url(&e.forge, &e.host, &e.repo, e.pr, e.change_id.as_deref());
+    }
     if let Some(v) = t.branch.clone() {
         e.branch = Some(v);
     }
