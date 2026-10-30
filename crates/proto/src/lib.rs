@@ -512,6 +512,13 @@ pub enum ReqKind {
         /// dégradation douce).
         #[serde(default)]
         origin: Option<String>,
+        /// Groupe d'appartenance posé à la création (même normalisation
+        /// que set_session_group : vide/blank → None) — évite un second
+        /// RPC aux services qui rangent leurs sessions (ex. le watcher
+        /// AgentReviewer groupe ses reviews). Ignoré par les démons
+        /// anciens (dégradation douce : session non groupée).
+        #[serde(default)]
+        group: Option<String>,
     },
     /// Reprend une session existante (respawn agent + session/load).
     /// native_id : reprendre une AUTRE session native de l'agent.
@@ -1187,4 +1194,43 @@ pub fn new_id(prefix: &str) -> String {
     h ^= std::process::id() as u64;
     h = h.wrapping_mul(0x100000001b3);
     format!("{}-{:08x}", prefix, (h & 0xffff_ffff) as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `group` sur `new_session` : présent il traverse le fil, absent il
+    /// désérialise à None (dégradation douce côté vieux clients/démons).
+    #[test]
+    fn new_session_group_wire() {
+        let req = Request {
+            id: 1,
+            req: ReqKind::NewSession {
+                agent: "devin".into(),
+                cwd: "/w".into(),
+                title: None,
+                model: None,
+                mode: None,
+                prompt: None,
+                origin: Some("component:agentreviewer".into()),
+                group: Some("AgentReviewer".into()),
+            },
+        };
+        let txt = serde_json::to_string(&req).unwrap();
+        let back: Request = serde_json::from_str(&txt).unwrap();
+        let ReqKind::NewSession { group, origin, .. } = back.req else {
+            panic!("variant inattendue");
+        };
+        assert_eq!(group.as_deref(), Some("AgentReviewer"));
+        assert_eq!(origin.as_deref(), Some("component:agentreviewer"));
+
+        // Un client ancien n'envoie pas `group` → None, pas d'erreur.
+        let legacy = r#"{"id":2,"req":"new_session","agent":"devin","cwd":"/w"}"#;
+        let back: Request = serde_json::from_str(legacy).unwrap();
+        let ReqKind::NewSession { group, .. } = back.req else {
+            panic!("variant inattendue");
+        };
+        assert!(group.is_none());
+    }
 }

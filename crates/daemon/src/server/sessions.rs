@@ -17,7 +17,7 @@ impl Daemon {
                 Ok(serde_json::to_value(list)?)
     }
 
-    pub(super) async fn h_new_session(self: &Arc<Self>, agent: String, cwd: String, title: Option<String>, model: Option<String>, mode: Option<String>, prompt: Option<String>, origin: Option<String>) -> Result<Value> {
+    pub(super) async fn h_new_session(self: &Arc<Self>, agent: String, cwd: String, title: Option<String>, model: Option<String>, mode: Option<String>, prompt: Option<String>, origin: Option<String>, group: Option<String>) -> Result<Value> {
                 let profile = self
                     .agents
                     .get(&agent)
@@ -47,7 +47,8 @@ impl Daemon {
                     config_options: vec![],
                     pending_config: Default::default(),
                     state: "starting".into(),
-                    group: None,
+                    // Même normalisation que set_group : blank → None.
+                    group: group.filter(|g| !g.trim().is_empty()),
                     spawned_by: None,
                     origin: origin.clone(),
                     context_used: None,

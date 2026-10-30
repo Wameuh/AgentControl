@@ -239,6 +239,11 @@ version, doc) étant récupérées depuis sa source upstream.
   Exemples :
   - `agentbacklog` : `uv tool install git+https://github.com/Wameuh/AgentBacklog`
     (install upstream documentée) + spec `tool`.
+  - `agentreviewer` : `uv tool install git+https://github.com/Wameuh/AgentReviewer`
+    + spec `process` (boucle `sh` autour du watcher one-shot — il reçoit
+    `AGENTCONTROL_SOCK`/`AGENTCONTROL_TCP` injectés et crée ses reviews
+    en sessions `origin=component:agentreviewer`, groupe
+    « AgentReviewer »).
   - `backlog-orchestrator` : le script vit aujourd'hui hors repo dans
     `~/.local/bin` → **recommandation : le versionner** (repo
     `Wameuh/AgentBacklog` ou `contrib/` d'AgentControl) pour que la
@@ -309,7 +314,7 @@ La pièce « vivante » : **graphe des programmes et des sessions**.
 | acctl | `tool` | idem |
 | pr-db | externe/legacy | en fin de transition (feat #59) — déclarable en `external` si encore présent |
 | supervisord / sshd / cron | `external` | infra du conteneur — jamais managés (le démon ne touche pas à son propre superviseur) |
-| review bot | `external` | autre serveur — healthcheck optionnel |
+| agentreviewer | **`process` managé** | watcher du même démon qu'il pilote — env `AGENTCONTROL_*` injectée, reviews en sessions groupées (un watcher d'un autre démon/hôte resterait `external`) |
 | le démon lui-même | nœud racine, pas un composant | le système ne se supervise pas lui-même |
 
 ### 2.9 « Manager » — intendance backlog par workspace

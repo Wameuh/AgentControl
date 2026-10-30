@@ -107,6 +107,94 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 RecipeStep::UpsertSpec,
             ],
         },
+        CatalogEntry {
+            name: "agentreviewer".into(),
+            description: "Watcher GitHub → reviews de PR en sessions du \
+                          démon (détecte les comments trigger, file \
+                          d'attente, spawn groupé « AgentReviewer »)"
+                .into(),
+            repo: Some("Wameuh/AgentReviewer".into()),
+            homepage: Some("https://github.com/Wameuh/AgentReviewer".into()),
+            suggested_spec: ComponentSpec {
+                name: "agentreviewer".into(),
+                kind: ComponentKind::Process,
+                // Le watcher est one-shot par invocation (flock interne)
+                // — la boucle sh le reproduit au rythme du timer
+                // systemd (~1/min) qu'il remplace. AGENTCONTROL_SOCK/TCP
+                // sont injectés au spawn : il trouve le démon sans
+                // config réseau.
+                command: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "while true; do agent-reviewer; sleep 60; done".into(),
+                ],
+                env: HashMap::new(),
+                cwd: None,
+                // Config.toml à éditer avant le 1er run utile → l'auto-
+                // start reste un opt-in explicite, pas un crash-loop.
+                autostart: false,
+                restart: RestartPolicy::OnFailure,
+                restart_sec: 5,
+                // pid vivant = boucle vivante (les erreurs du script
+                // sont visibles dans les logs du composant).
+                healthcheck: Healthcheck::Process,
+                description: Some(
+                    "Watcher GitHub → reviews de PR en sessions du démon"
+                        .into(),
+                ),
+                queries: HashMap::from([
+                    (
+                        "state".into(),
+                        vec![
+                            "cat".into(),
+                            "~/.local/state/agentreviewer/state.json".into(),
+                        ],
+                    ),
+                    (
+                        "log".into(),
+                        vec![
+                            "tail".into(),
+                            "-n".into(),
+                            "80".into(),
+                            "~/.local/state/agentreviewer/watcher.log".into(),
+                        ],
+                    ),
+                ]),
+            },
+            detect: CatalogDetect {
+                bin: Some("agent-reviewer".into()),
+                // Posé par install.sh / uv tool install dans ~/.local/bin.
+                path: Some("~/.local/bin/agent-reviewer".into()),
+            },
+            recipe: vec![
+                RecipeStep::Run {
+                    argv: vec![
+                        "uv".into(),
+                        "tool".into(),
+                        "install".into(),
+                        "git+https://github.com/Wameuh/AgentReviewer".into(),
+                    ],
+                },
+                RecipeStep::RequireFile {
+                    path: "~/.config/agentreviewer/config.toml".into(),
+                    hint: "créez-le depuis config.example.toml du repo \
+                           (repo, repo_dir, worktree_root requis) — \
+                           l'outil installé n'embarque pas l'exemple"
+                        .into(),
+                },
+                RecipeStep::UpsertSpec,
+                RecipeStep::Note {
+                    text: "Éditez ~/.config/agentreviewer/config.toml puis \
+                           démarrez le composant — en `process` managé le \
+                           watcher reçoit AGENTCONTROL_SOCK/TCP injectés \
+                           et crée ses reviews en sessions du démon \
+                           (group « AgentReviewer »). Install manuelle \
+                           alternative : git clone + ./install.sh — la \
+                           détection voit aussi ~/.local/bin/agent-reviewer."
+                        .into(),
+                },
+            ],
+        },
         // NB : l'orchestrateur backlog n'a PAS d'entrée catalogue — il
         // est porté en interne par le démon (server/orch.rs, composant
         // `backlog-orchestrator` opt-in) et non plus comme process
@@ -500,6 +588,35 @@ fn home_dir() -> Result<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .context("HOME absent de l'environnement du démon")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Chaque entrée du catalogue embarque une spec qui passerait la
+    /// validation d'upsert — une entrée cassée (nom invalide, argv0
+    /// superviseur, query malformée…) casse l'intégration dès la seed.
+    #[test]
+    fn les_specs_du_catalogue_sont_upsertables() {
+        for e in CATALOG.iter() {
+            super::super::check_editable(&e.suggested_spec)
+                .unwrap_or_else(|err| panic!("spec catalogue « {} » : {err}", e.name));
+        }
+        let ar = CATALOG
+            .iter()
+            .find(|e| e.name == "agentreviewer")
+            .expect("entrée agentreviewer absente du catalogue");
+        assert_eq!(ar.suggested_spec.kind, ComponentKind::Process);
+        assert!(!ar.suggested_spec.command.is_empty());
+        // Le `process` managé découvre le démon via l'env injectée —
+        // la spec ne doit pas porter d'endpoint dupliqué qui dériverait.
+        assert!(!ar
+            .suggested_spec
+            .env
+            .keys()
+            .any(|k| k.starts_with("AGENTCONTROL_")));
+    }
 }
 
 /// Derniers `STEP_TAIL` octets de stderr (sinon stdout), UTF-8

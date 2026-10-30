@@ -155,6 +155,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             mode: so("mode"),
             prompt: so("prompt"),
             origin: so("origin"),
+            group: so("group"),
         },
         "resume_session" => ReqKind::ResumeSession {
             session: s("session"),
