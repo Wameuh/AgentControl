@@ -47,7 +47,8 @@ pub struct Term {
 const EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
 impl Term {
-    /// Spawn `env SHELL` (ou /bin/sh) dans `cwd` sur un PTY de `cols`×`rows`.
+    /// Spawn le shell résolu (env SHELL → login shell → /bin/sh) dans
+    /// `cwd` sur un PTY de `cols`×`rows`.
     /// `id_hint` = id choisi par le client (anti-orphelin : un term_open
     /// abandonné côté client reste fermable par `term_close` car son id
     /// est connu d'avance) — invalide → id serveur généré.
@@ -68,7 +69,11 @@ impl Term {
             })
             .context("openpty")?;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        // Un démon sous superviseur (systemd/supervisord) n'a pas SHELL
+        // dans son env : le fallback /bin/sh = dash, shell sans édition
+        // de ligne — Tab, flèches et historique morts au terminal.
+        // getpwuid récupère le login shell de l'uid dans /etc/passwd.
+        let shell = resolve_shell(std::env::var("SHELL").ok(), login_shell());
         let mut cmd = CommandBuilder::new(&shell);
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
@@ -170,6 +175,67 @@ impl Drop for Term {
     }
 }
 
+/// Shell du terminal client : env SHELL (choix de session) > login
+/// shell de /etc/passwd > /bin/sh. Les pseudo-shells de service
+/// (nologin, false) n'ouvriraient qu'un term qui meurt aussitôt —
+/// /bin/sh vaut mieux qu'eux.
+fn resolve_shell(env_shell: Option<String>, login: Option<String>) -> String {
+    env_shell
+        .filter(|s| !s.is_empty())
+        .or(login.filter(|s| !s.is_empty() && !s.ends_with("nologin") && !s.ends_with("/false")))
+        .unwrap_or_else(|| "/bin/sh".into())
+}
+
+/// Login shell de l'uid courant — le SHELL du démon n'existe pas sous
+/// un superviseur à environnement minimal. `getpwuid_r` : le statique
+/// interne de getpwuid est réécrit par tout appel NSS non-réentrant
+/// d'un autre thread (deux term_open en vol via spawn_blocking) —
+/// buffer à nous + boucle ERANGE, même patron que `home_of`. Un path
+/// non exécutable (shell désinstallé, entrée distante) rend None :
+/// tomber sur /bin/sh vaut mieux qu'un term_open en échec dur.
+#[cfg(unix)]
+fn login_shell() -> Option<String> {
+    use std::ffi::{CStr, CString};
+    // SAFETY : pwd et buf sont à nous ; getpwuid_r n'écrit que dans
+    // ces tampons et pointe pw_shell dans buf — copié avant la fin.
+    unsafe {
+        let mut pwd: libc::passwd = std::mem::zeroed();
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        let mut buf = vec![0u8; 1024];
+        loop {
+            let rc = libc::getpwuid_r(
+                libc::getuid(),
+                &mut pwd,
+                buf.as_mut_ptr().cast::<libc::c_char>(),
+                buf.len(),
+                &mut result,
+            );
+            if rc == libc::ERANGE {
+                if buf.len() >= 1 << 16 {
+                    return None;
+                }
+                buf.resize(buf.len() * 2, 0);
+                continue;
+            }
+            if rc != 0 || result.is_null() || pwd.pw_shell.is_null() {
+                return None;
+            }
+            break;
+        }
+        let s = CStr::from_ptr(pwd.pw_shell).to_string_lossy().into_owned();
+        if s.is_empty() {
+            return None;
+        }
+        let c = CString::new(s.as_str()).ok()?;
+        (libc::access(c.as_ptr(), libc::X_OK) == 0).then_some(s)
+    }
+}
+
+#[cfg(not(unix))]
+fn login_shell() -> Option<String> {
+    None
+}
+
 /// Réap le process : mort naturelle → code ; encore vivant après
 /// `EXIT_GRACE` (shell qui ignore SIGHUP, stdio détaché) → kill + wait.
 /// Le lock n'est tenu qu'un appel à la fois : `Drop` peut s'intercaler
@@ -200,6 +266,91 @@ fn reap(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Résolution : SHELL > login shell > /bin/sh ; les pseudo-shells
+    /// de service (nologin/false) tombent sur /bin/sh.
+    #[test]
+    fn shell_resolution_order() {
+        assert_eq!(
+            resolve_shell(Some("/bin/zsh".into()), Some("/bin/bash".into())),
+            "/bin/zsh"
+        );
+        assert_eq!(resolve_shell(None, Some("/bin/bash".into())), "/bin/bash");
+        assert_eq!(resolve_shell(Some(String::new()), Some("/bin/bash".into())), "/bin/bash");
+        assert_eq!(resolve_shell(None, Some("/usr/sbin/nologin".into())), "/bin/sh");
+        assert_eq!(resolve_shell(None, Some("/bin/false".into())), "/bin/sh");
+        assert_eq!(resolve_shell(None, Some(String::new())), "/bin/sh");
+        assert_eq!(resolve_shell(None, None), "/bin/sh");
+    }
+
+    /// getpwuid lit le login shell de l'uid — la source du fix (env
+    /// SHELL absent sous superviseur → autrement /bin/sh = dash).
+    #[cfg(unix)]
+    #[test]
+    fn login_shell_from_passwd() {
+        // uid sans entrée passwd (conteneur à uid arbitraire) → skip.
+        let Some(s) = login_shell() else {
+            eprintln!("skip login_shell_from_passwd: pas d'entrée passwd");
+            return;
+        };
+        assert!(s.starts_with('/'), "login shell inattendu: {s}");
+    }
+
+    /// Édition de ligne réelle : flèche haut rappelle la dernière
+    /// commande (readline/libedit). Un shell sans édition (dash) y
+    /// répondait par l'écho littéral ^[[A — le bug remonté.
+    #[tokio::test]
+    async fn spawn_shell_line_editing() {
+        let shell = resolve_shell(std::env::var("SHELL").ok(), login_shell());
+        let base = std::path::Path::new(&shell)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        // Le test n'exige l'édition que des shells à line-discipline
+        // connue — un login shell POSIX nu (dash) reste un choix user.
+        if !matches!(base, "bash" | "zsh" | "fish" | "ksh") {
+            eprintln!("skip spawn_shell_line_editing: shell résolu = {shell}");
+            return;
+        }
+        let (t, mut rx) = Term::spawn("/tmp", 80, 24, &[], None).unwrap();
+        // printf : le marqueur «ac-hist-ok» n'apparaît QUE dans la
+        // sortie réelle — la ligne tapée porte «ac-hist-%s». Attendre
+        // le marqueur = synchronisation stricte sur la fin du 1er run
+        // (avant rappel, sinon la commande n'est pas en historique).
+        t.input(b"printf 'ac-hist-%s\\n' ok\n");
+        let first = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut buf = Vec::new();
+            while let Some(m) = rx.recv().await {
+                if let TermMsg::Data(b) = m {
+                    buf.extend_from_slice(&b);
+                    if buf.windows(10).any(|w| w == b"ac-hist-ok") {
+                        return true;
+                    }
+                }
+            }
+            false
+        })
+        .await;
+        assert!(matches!(first, Ok(true)), "pas de sortie shell : {first:?}");
+        t.input(b"\x1b[A\n"); // flèche haut (rappel) + Entrée
+        let second = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut buf = Vec::new();
+            while let Some(m) = rx.recv().await {
+                if let TermMsg::Data(b) = m {
+                    buf.extend_from_slice(&b);
+                    if buf.windows(10).any(|w| w == b"ac-hist-ok") {
+                        return true;
+                    }
+                }
+            }
+            false
+        })
+        .await;
+        assert!(
+            matches!(second, Ok(true)),
+            "flèche haut sans rappel d'historique — shell sans édition ?"
+        );
+    }
 
     /// fds /dev/ptmx du process — la preuve matérielle de la fuite :
     /// un shell vivant après drop garde le reader (et son fd) bloqué.
