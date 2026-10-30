@@ -48,6 +48,9 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
         // large comme le chemin web (CALL_TIMEOUT 60 s). Au-delà, le run
         // démon se termine quand même en tâche de fond et le registre
         // mis à jour est relu au refresh suivant.
+        // Timeout par conn : 8 s pour les sondes (SILENT_KILL_MS côté
+        // frontend = la fenêtre de « trafic récent » qui excuse un
+        // timeout — pas le même réglage, à ne pas aligner aveuglément).
         let secs = if method == "pr_sync" { 60 } else { 8 };
         let mut set = tokio::task::JoinSet::new();
         for (k, c) in pairs {
@@ -58,22 +61,26 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
                 // silent_ms lu au retour : du trafic entrant récent prouve
                 // le transport vivant même quand la requête a expiré.
                 let silent = c.silent_ms();
+                // kind discrimine l'expiration (lenteur/blackhole, excusable
+                // si le transport vit) de l'erreur de transport (mort
+                // proche, strike direct) — consommé par le watchdog.
+                let kind = if r.is_err() { "timeout" } else { "error" };
                 (k, r.map_err(|_| anyhow::anyhow!("timeout")).and_then(|x| x),
-                    t0.elapsed().as_millis() as u64, silent)
+                    t0.elapsed().as_millis() as u64, silent, kind)
             });
         }
         let mut all = Vec::new();
         let mut out = json!({});
         let mut n_ok = 0u64;
         while let Some(res) = set.join_next().await {
-            let Ok((k, r, rtt, silent)) = res else { continue };
+            let Ok((k, r, rtt, silent, kind)) = res else { continue };
             match r {
                 Ok(v) if merged => {
                     n_ok += 1;
                     // Réponse lente mais arrivée — mesure de la latence
-                    // sous charge (seuil arbitraire, au-dessus on s'en
-                    // approche du timeout de sonde).
-                    if rtt > 4_000 {
+                    // sous charge : warn au-delà de la moitié du timeout
+                    // de la méthode (4 s sonde / 30 s pr_sync).
+                    if rtt > secs * 500 {
                         client_core::log(Level::Warn,
                             format!("{method} {k}: réponse lente {rtt} ms"));
                     }
@@ -93,7 +100,7 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
                     // indistinguables sans silent_ms).
                     client_core::log(Level::Warn,
                         format!("{method} {k}: {e:#} (rtt {rtt} ms, silent {silent} ms)"));
-                    out[k] = json!({"error": format!("{e:#}"),
+                    out[k] = json!({"error": format!("{e:#}"), "kind": kind,
                         "rtt_ms": rtt, "silent_ms": silent});
                 }
                 // Le frontend filtre ce marqueur → conn marquée down et

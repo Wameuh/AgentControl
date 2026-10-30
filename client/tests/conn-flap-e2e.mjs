@@ -52,6 +52,7 @@ const MOCK = `(function () {
       switch (cmd) {
         case "connect":
           window.__connectCalls++;
+          window.__logs.push("evt|connect-call #" + window.__connectCalls);
           if (window.__connectHang)
             return new Promise((res) => window.__pendingConnects.push(res));
           return p.then(() => window.__connectResult);
@@ -124,10 +125,17 @@ await sleep(600);
 // t0 — la conn saved auto-connectée est ok, segment vert.
 check("t0 conn auto ok", (await st()) === "ok", await segCls());
 const calls0 = await connectCalls();
+// connect figé pour TOUTE la suite : un retry qui résoudrait tout seul
+// produit des cycles down→ok↔down cachés et rend les assertions racy —
+// la récupération ne se fait qu'aux drains explicites ci-dessous.
+await p.evaluate(() => { window.__connectHang = true; });
+const drain = async () => p.evaluate(() => {
+  for (const r of window.__pendingConnects.splice(0)) r(window.__connectResult);
+});
 
 // t1 — sonde timeout MAIS transport vivant (silent 400 ms ≪ 8 s) :
 // 5 ticks sans strike, sans kill, sans reconnect — le flap est coupé.
-await setDs({ error: "timeout", rtt_ms: 8010, silent_ms: 400 });
+await setDs({ error: "timeout", kind: "timeout", rtt_ms: 8010, silent_ms: 400 });
 await sleep(1600);
 check("t1 lenteur+trafic → ok", (await st()) === "ok", await segCls());
 check("t1 aucun retry", (await connectCalls()) === calls0,
@@ -136,9 +144,13 @@ check("t1 log transport vivant",
   (await logs("transport vivant")).length >= 1);
 
 // t2 — timeout + SILENCE radio (silent 30 s) : blackhole suspect →
-// strike 1 (encore ok) puis strike 2 → down.
+// strike 1 (encore ok) puis strike 2 → down. Tick sain d'abord :
+// compteurs repartis à zéro (les excusés de t1 ont pu toucher le
+// plafond et léguer un strike).
+await setDs({ version: "9.9.9", sessions: 1 });
+await sleep(400);
 const l2 = await logLen();
-await setDs({ error: "timeout", rtt_ms: 8010, silent_ms: 30000 });
+await setDs({ error: "timeout", kind: "timeout", rtt_ms: 8010, silent_ms: 30000 });
 check("t2 strike1 loggé", await waitLog("sonde ko ×1", l2));
 check("t2 strike1 encore ok", (await st()) === "ok", await segCls());
 check("t2 strike2 loggé", await waitLog("sonde ko ×2", l2));
@@ -147,53 +159,46 @@ check("t2 log raison de mort",
   (await logs("conn local down — sonde: timeout ×2")).length === 1,
   JSON.stringify(await logs("conn local down")));
 
-// t3 — retry planifié (backoff ~2 s) : connect figé → reconnecting,
-// puis sonde guérie + connect relâché → ok + télémétrie de retour.
-await p.evaluate(() => { window.__connectHang = true; });
-await sleep(2800); // backoff 1.5–2.5 s → retry part
+// t3 — retry planifié (backoff ~2 s) : connect figé → reconnecting ;
+// sonde guérie + connect relâché → ok + télémétrie de retour.
+check("t3 retry lancé (reconnecting)", await waitSeg("warn", 8000));
 const calls1 = await connectCalls();
-check("t3 retry lancé", calls1 === calls0 + 1, "calls=" + calls1);
-check("t3 seg reconnecting", (await st()) === "warn", await segCls());
+check("t3 retry = 1 connect", calls1 === calls0 + 1, "calls=" + calls1);
 await setDs({ version: "9.9.9", sessions: 1 }); // démon guéri
-await p.evaluate(() => {
-  window.__connectHang = false;
-  for (const r of window.__pendingConnects.splice(0)) r(window.__connectResult);
-});
-await sleep(600);
-check("t3 reconnect → ok", (await st()) === "ok", await segCls());
+await drain();
+check("t3 reconnect → ok", await waitSeg("ok"));
 check("t3 log reconnect", (await logs("reconnect #")).length >= 1);
 
 // t4 — erreur de transport (« connexion fermée ») : mort réelle →
 // strikes normaux → down en 2 ticks.
 const l4 = await logLen();
-await setDs({ error: "connexion fermée", rtt_ms: 12 });
+await setDs({ error: "connexion fermée", kind: "error", rtt_ms: 12 });
 check("t4 err strike1", await waitLog("connexion fermée", l4));
 check("t4 err strike1 ok", (await st()) === "ok", await segCls());
 check("t4 err strike2", await waitLog("sonde ko ×2", l4));
 check("t4 err strike2 down", (await st()) === "bad", await segCls());
-await p.evaluate(() => {
-  for (const r of window.__pendingConnects.splice(0)) r(window.__connectResult);
-});
+await setDs({ version: "9.9.9", sessions: 1 }); // guérir avant le drain
+const l5 = await logLen(); // avant le drain — « de retour » comptera
+await drain();
 
 // t5 — sonde redevenue saine → markAlive efface les strikes : un err
 // isolé repart à ×1 (compteur reset, pas cumul inter-pannes).
-const l5 = await logLen();
-await setDs({ version: "9.9.9", sessions: 1 });
 check("t5 retour sonde saine", await waitLog("de retour", l5));
 check("t5 sonde saine → ok", (await st()) === "ok", await segCls());
 const l5b = await logLen();
-await setDs({ error: "connexion fermée", rtt_ms: 12 });
+await setDs({ error: "connexion fermée", kind: "error", rtt_ms: 12 });
 check("t5 err isolée repart à ×1", await waitLog("sonde ko ×1", l5b));
 check("t5 err isolée → ok", (await st()) === "ok", await segCls());
 // timeout SANS silent_ms (vieux démon) → conservé en strike (mort non
 // prouvée vivante) : le ×2 ci-dessous doit tomber.
+// Pas de `kind` ici : repli sur le littéral error === "timeout" —
+// couvre les vieux démons / bridges sans champ structuré.
 const l5c = await logLen();
 await setDs({ error: "timeout", rtt_ms: 8000 });
 check("t5 timeout sans silent → ×2", await waitLog("sonde ko ×2", l5c));
 check("t5 strike2 → down", (await st()) === "bad", await segCls());
-await p.evaluate(() => {
-  for (const r of window.__pendingConnects.splice(0)) r(window.__connectResult);
-});
+await setDs({ version: "9.9.9", sessions: 1 }); // guérir avant le drain
+await drain();
 
 // t6 — charge simulée : « démon saturé » (timeout mais trafic vivant)
 // entrecoupé de réponses saines → jamais down, jamais de retry.
@@ -202,19 +207,41 @@ await p.evaluate(() => {
 check("t6 conn revenue ok", await waitSeg("ok"));
 const callsBefore6 = await connectCalls();
 for (let i = 0; i < 4; i++) {
-  await setDs({ error: "timeout", rtt_ms: 8100, silent_ms: 300 });
+  await setDs({ error: "timeout", kind: "timeout", rtt_ms: 8100, silent_ms: 300 });
   await sleep(450);
   await setDs({ version: "9.9.9", sessions: 1 }); // réponse lente mais arrivée
   await sleep(450);
 }
-await setDs({ error: "timeout", rtt_ms: 8100, silent_ms: 500 });
+await setDs({ error: "timeout", kind: "timeout", rtt_ms: 8100, silent_ms: 500 });
 await sleep(900);
 check("t6 charge : jamais down", (await st()) === "ok", await segCls());
 check("t6 charge : aucun reconnect",
   (await connectCalls()) === callsBefore6,
   "calls=" + (await connectCalls()));
+await drain();
+
+// t7 — borne anti-masquage : des timeouts excusés SANS FIN (RPC mort
+// en permanence alors que les pushes passent) finissent par compter —
+// 6 excusés → strike, 6 de plus → down. L'exemption reste bornée.
+// Tick sain d'abord : le compteur « ignoré » repart à zéro (il peut
+// traîner quelques excusés depuis la fin de t6).
+await setDs({ version: "9.9.9", sessions: 1 });
+await sleep(400);
+const l7 = await logLen();
+await setDs({ error: "timeout", kind: "timeout", rtt_ms: 8100, silent_ms: 200 });
+check("t7 excusés ×5", await waitLog("ignoré ×5", l7, 6000));
+check("t7 plafond → strike", await waitLog("durablement", l7, 6000));
+check("t7 strike1 encore ok", (await st()) === "ok", await segCls());
+check("t7 2ᵉ salve → strike2", await waitLog("sonde ko ×2", l7, 9000));
+check("t7 RPC bloqué durable → down", (await st()) === "bad", await segCls());
+await setDs({ version: "9.9.9", sessions: 1 });
+await drain();
 
 console.log(`${pass} PASS, ${fail} FAIL`);
+if (fail) {
+  const all = await p.evaluate(() => window.__logs);
+  console.log("== logs =="); for (const l of all) console.log(l);
+}
 await b.close();
 server.kill();
 process.exit(fail ? 1 : 0);

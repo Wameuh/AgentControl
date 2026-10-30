@@ -245,10 +245,11 @@ class WsClient {
         // Même télémétrie que la fusion Tauri : silent_ms prouve le
         // transport vivant (trafic entrant récent) → le watchdog
         // distingue lenteur démon et blackhole.
+        const isTimeout = e instanceof Error && e.message === "timeout démon";
         return {
           [WEB_CONN]: {
-            error: e instanceof Error && e.message === "timeout démon"
-              ? "timeout" : String(e),
+            error: isTimeout ? "timeout" : String(e),
+            kind: isTimeout ? "timeout" : "error",
             rtt_ms: Date.now() - t0,
             silent_ms: Date.now() - this.lastRxAt,
           },

@@ -1331,16 +1331,21 @@ fn log_conn_close(peer: &str, t0: std::time::Instant, r: &Result<()>) {
 
 /// Wrapper pour accepter des connexions Unix.
 pub async fn accept_unix(daemon: Arc<Daemon>, listener: tokio::net::UnixListener) {
+    // Compteur d'accept — pas de peer addr sur unix : l'id corréle les
+    // lignes open/close entre elles (et avec tcp qui loggue l'addr).
+    let mut n = 0u64;
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
+                n += 1;
+                let id = format!("unix#{n}");
                 let d = Arc::clone(&daemon);
-                info!("conn unix open");
+                info!("conn {id} open");
                 tokio::spawn(async move {
                     let t0 = std::time::Instant::now();
                     let s: UnixStream = stream;
                     let r = d.serve_conn(s).await;
-                    log_conn_close("unix", t0, &r);
+                    log_conn_close(&id, t0, &r);
                 });
             }
             Err(e) => {
