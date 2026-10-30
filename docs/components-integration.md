@@ -161,7 +161,7 @@ avec l'`id` correctement extrait, donc l'appel échoue proprement) :
 
 Capability : `daemon_status.components = true` → le client gate ses
 boutons comme pour `terminal`/`first_post`. Le commit qui ajoute les
-ReqKind porte le mot-clé `(minor)` (nouvelle surface client↔démon).
+ReqKind porte le mot-clé `(sync)` (nouvelle surface client↔démon).
 
 Push : pas de canal d'events daemon-wide (le `Subscribe` actuel est
 par-session) — le client **poll** (`ListComponents` + `ListSessions`,
@@ -201,7 +201,7 @@ pour les arêtes ; si #21 a déjà tranché une forme (`origin`) au moment
 où #24 lande, elle fait foi et le diagramme s'y aligne — sinon c'est
 le choix de #24 (`created_by`) qui fixe le nom consommé par #26.
 À intégrer au modèle dès #24 pour éviter une seconde évolution proto
-(un second cycle `(minor)`).
+(un second cycle `(sync)`).
 
 ### 2.4 acctl
 
@@ -324,7 +324,7 @@ La pièce « vivante » : **graphe des programmes et des sessions**.
    `AGENTCONTROL_HOME` jetable — jamais sur le démon live.
 2. **Compat proto** : nouveaux `ReqKind` = extension sûre (vieux client
    ignore ; vieux démon → `parse:` propre avec id extrait). Le client
-   gate sur `daemon_status.components`. Mot-clé `(minor)` sur la PR
+   gate sur `daemon_status.components`. Mot-clé `(sync)` sur la PR
    proto+daemon (incompat client↔démon = auto-update).
 3. **Sécurité** : le démon ne bind que loopback **par défaut** —
    socket unix 0600 et `bind_http` enforcé loopback ; `bind_tcp` reste

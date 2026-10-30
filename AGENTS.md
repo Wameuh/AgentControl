@@ -194,7 +194,7 @@ job rouge fail-closed, jamais de reset destructif).
 PR ouverte basée sur l'ancien nr → `git fetch && git rebase --onto
 origin/next_release <ancien-tip>` — sinon sa liste de commits
 affiche l'ancien historique nr (le diff reste correct, mais les
-vieux sujets `(minor)`/`(sync)` ré-entreraient dans le body du
+vieux sujets `(sync)`/`(major)` ré-entreraient dans le body du
 squash → sur-bump possible au cycle suivant).
 ⚠️ `release-bump` et `reconcile-next-release` poussent sur
 `next_release` via le secret **`RELEASE_PAT`**, qu'`auto-release-pr`
@@ -243,15 +243,28 @@ nr n'a plus de commit bump, l'historique = celui de `main`) **dernier
 tag semver**, qui est alors ancêtre de nr — borne auto-entretenue dans
 les deux cas :
 
-- `(major)` → **major** ; `(minor)` ou `(sync)` → **minor** ;
-  rien → **patch**
-- `(sync)`/`(minor)` = incompatibilité client↔démon (déclenche
-  l'auto-update) — le plus fort rencontré gagne.
+- `(major)` → **major** (exceptionnel, décision de release majeure) ;
+  `(sync)` → **minor** ; rien → **patch**
+- `(sync)` = **seul déclencheur de minor** : incompatibilité/dépendance
+  bloquante protocole client↔démon — c'est le bump x.y qui déclenche
+  l'auto-update (comparaison `minorOf` ≠ → popup/update du pair). Toute
+  feature sans casse protocole = patch, même grosse.
+- `(minor)` = **déprécié, ne sert plus** : ignoré, traité comme patch —
+  `detect_level` log « note : (minor) déprécié » quand il le rencontre.
+  Utiliser `(sync)` pour la casse proto, `(major)` exceptionnellement,
+  rien sinon.
 - Écrire le mot-clé **parenthésé** dans le sujet du commit qui le
-  motive : `feat: multi-agents (minor)` — un mot nu (`a major bug`)
-  ne doit pas compter. **Au squash, l'élément doit être repris** —
+  motive : `feat: nouveau champ proto (sync)` — un mot nu (`a major
+  bug`) ne doit pas compter. **Au squash, l'élément doit être repris** —
   GitHub inclut par défaut les sujets dans le body du squash : ne pas
   l'éditer hors du message.
+- Pour **citer** un mot-clé en prose sans le déclencher (doc, message
+  parlant de la règle), l'écrire **sans parenthèses** (`«sync»`) —
+  `` `(sync)` `` matche même entre backticks, y compris en body de
+  commit (scanné au squash).
+- La règle vit dans `client/tools/bump_version.py` (`detect_level`,
+  mode `--detect-level`) — source de vérité appelée par `release-bump`
+  (version.yml) et `release_notes.py` ; ne pas la dupliquer ailleurs.
 - La release numérote depuis le **dernier tag semver**, pas depuis
   `package.json` — la version fichier peut dériver entre releases,
   elle est recalée au bump de release.
