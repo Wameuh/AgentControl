@@ -320,12 +320,17 @@ agent-reviewer ≥ 0.3), `trigger` (`/mr review`), `group`
 
 #### 2.5.2 Review locale pré-push — surface agent
 
-Upstream (≥ 0.3) expose un CLI générique de review locale
-(`agent-reviewer review --path <worktree> --base <ref>`) : le diff est
-déjà matérialisé (pas de worktree créé), le verdict + la review
-sortent sur stdout et le code de sortie encode le verdict — aucune PR
-ni commentaire GitHub. Cas d'usage : un worker backlog fait relire son
-diff avant de pousser.
+Upstream ≥ 0.3 expose un CLI générique de review locale :
+`agent-reviewer [--config cfg] review --path <worktree> --base <ref>
+[--out FILE] [--timeout SEC] [--detach]` — le diff `<base>...HEAD` est
+déjà matérialisé (aucun worktree créé), la review complète sort sur
+stdout et l'exit code encode le verdict : `0` APPROVED, `4`
+CONDITIONAL, `5` REJECTED, `3` pas de verdict, `2` usage/infra.
+Backend : session démon (`new_session`, groupe « AgentReviewer »,
+verdict relu via `events`, `kill_session` au timeout, `keep_sessions`
+honoré) quand un endpoint est joignable, agent en foreground sinon —
+aucune PR ni commentaire GitHub. Cas d'usage : un worker backlog fait
+relire son diff avant de pousser.
 
 Surface côté AgentControl — choix tranché : **documentation du chemin
 CLI dans le prompt worker intégré** (`server/orch.rs::PROMPT`,

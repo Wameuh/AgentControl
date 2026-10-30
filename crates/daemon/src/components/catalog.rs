@@ -300,9 +300,10 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                     description: Some(
                         "JSON — liste d'objets {repo, repo_dir, \
                          worktree_root?, trigger?, group?, \
-                         max_parallel?, agent?} : chaque entrée ajoute \
-                         un dépôt surveillé en plus du dépôt principal \
-                         (multi-repo, agent-reviewer ≥ 0.3). Ex. \
+                         max_parallel?, agent?, …} : chaque entrée \
+                         ajoute un dépôt surveillé en plus du dépôt \
+                         principal (multi-repo, agent-reviewer ≥ 0.3 — \
+                         toute clé globale y est overridable). Ex. \
                          [{\"repo\": \"o/r\", \"repo_dir\": \"/chemin/clone\"}]"
                             .into(),
                     ),
