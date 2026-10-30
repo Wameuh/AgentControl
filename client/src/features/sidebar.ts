@@ -339,6 +339,16 @@ export class Sidebar {
     if (this.view === "repos" || this.prTickBusy) return;
     this.prTickBusy = true;
     try {
+      // Le badge suit la forge, pas le registre figé : tant que des PRs
+      // encore « open/draft » sont affichées sur des lignes session, on
+      // sync avant de relire — sinon un merge hors session (web GitHub,
+      // gh externe, automation) laissait le badge collé indéfiniment
+      // (pr_sync ne tournait que sur l'onglet Repos). Pas d'appel quand
+      // rien n'est tracké : zéro trafic forge sans badge. Le démon
+      // throttle (45 s) + déduplique — N clients = 1 round/min. Délai
+      // de disparition après merge : ≤ ~1 tick (pas d'état « merged »
+      // transitoire — le retrait est le comportement choisi/documenté).
+      if (this.prBySess.size > 0) await this.prSyncRequest();
       const r = await call<PrRow[]>("pr_list").then(
         (rows) => ({ rows, failed: false }),
         () => ({ rows: [] as PrRow[], failed: true }),
@@ -448,28 +458,34 @@ export class Sidebar {
     }
   }
 
+  /** Un `pr_sync` borné — partagé par le cycle de l'onglet Repos et le
+   *  tick badge : vieux démon sans la méthode → `prSyncDead` coupe la
+   *  demande (réarmé à l'activation de l'onglet). */
+  private async prSyncRequest() {
+    if (this.prSyncDead) return;
+    try {
+      const r = await call<Record<string, { error?: string }>>("pr_sync");
+      // Fusion multi-conns : les échecs remontent en {conn:{error}} —
+      // 100% « méthode inconnue » = tous les démons sont trop vieux
+      // pour pr_sync → on arrête de demander (une erreur réseau
+      // n'arme pas le flag : la retente passe au prochain tick).
+      const errs = Object.values(r ?? {}).map((x) => String(x?.error ?? ""));
+      if (
+        errs.length > 0 &&
+        errs.every((e) => /inconnue|unknown|variant/i.test(e))
+      ) {
+        this.prSyncDead = true;
+      }
+    } catch (e) {
+      if (/inconnue|unknown|variant/i.test(String(e))) this.prSyncDead = true;
+    }
+  }
+
   /** pr_sync puis refresh : le premier rendu (refresh() immédiat, à
    *  l'ouverture de l'onglet) montre le registre courant ; celui-ci
    *  reflète les états live dès que la forge a répondu. */
   private async prSyncCycle() {
-    if (!this.prSyncDead) {
-      try {
-        const r = await call<Record<string, { error?: string }>>("pr_sync");
-        // Fusion multi-conns : les échecs remontent en {conn:{error}} —
-        // 100% « méthode inconnue » = tous les démons sont trop vieux
-        // pour pr_sync → on arrête de demander (une erreur réseau
-        // n'arme pas le flag : la retente passe au prochain tick).
-        const errs = Object.values(r ?? {}).map((x) => String(x?.error ?? ""));
-        if (
-          errs.length > 0 &&
-          errs.every((e) => /inconnue|unknown|variant/i.test(e))
-        ) {
-          this.prSyncDead = true;
-        }
-      } catch (e) {
-        if (/inconnue|unknown|variant/i.test(String(e))) this.prSyncDead = true;
-      }
-    }
+    await this.prSyncRequest();
     if (this.view === "repos") await this.refresh();
   }
 
