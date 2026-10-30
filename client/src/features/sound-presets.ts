@@ -399,7 +399,9 @@ function noiseBuf(ctx: AudioContext): AudioBuffer {
     const d = b.getChannelData(0);
     let s = 0x2f6e2b1;
     for (let i = 0; i < d.length; i++) {
-      s = (s * 1103515245 + 12345) & 0x7fffffff;
+      // imul = arithmétique int32 exacte (la multiplication double
+      // perdrait les bits de poids faible avant le masque).
+      s = (Math.imul(s, 1103515245) + 12345) & 0x7fffffff;
       d[i] = s / 0x3fffffff - 1;
     }
     noiseBufs.set(ctx, b);

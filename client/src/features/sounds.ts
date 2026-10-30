@@ -166,13 +166,24 @@ class SoundAlerts {
     // Débloqué trop tard : la notification est périmée, on l'écarte
     // plutôt que de jouer en rafale des sons obsolètes.
     if (Date.now() - t0 > STALE_MS) return;
-    // Gain maître par lecture (volume courant) → synthèse du preset. Le
-    // graphe est déconnecté une fois la queue d'extinction passée.
+    // Gain maître par lecture (volume courant) → synthèse du preset, puis
+    // compresseur léger en headroom : les presets denses (accords, voix
+    // doublées) peuvent dépasser la crête unitaire là où les wav étaient
+    // normalisés. Le graphe est déconnecté une fois la queue passée.
     const master = ctx.createGain();
     master.gain.value = sndVolume();
-    master.connect(ctx.destination);
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -18;
+    comp.knee.value = 20;
+    comp.ratio.value = 6;
+    comp.attack.value = 0.002;
+    comp.release.value = 0.15;
+    master.connect(comp).connect(ctx.destination);
     const ttl = playPreset(ctx, master, sndPreset(kind));
-    setTimeout(() => master.disconnect(), ttl * 1000 + 100);
+    setTimeout(() => {
+      master.disconnect();
+      comp.disconnect();
+    }, ttl * 1000 + 100);
   }
 }
 
