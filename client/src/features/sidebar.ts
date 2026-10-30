@@ -25,6 +25,7 @@ import type { NewSessionDialog } from "./new-session";
 import type { SettingsPanel } from "./settings";
 import type { ConnView } from "./conn-view";
 import type { ComponentsPanel } from "./components";
+import type { MapView } from "./map-view";
 
 const DTYPE = "application/x-ac-session";
 
@@ -84,6 +85,7 @@ export class Sidebar {
   private settings!: SettingsPanel;
   private connView!: ConnView;
   private comps!: ComponentsPanel;
+  private map!: MapView;
 
   /** PRs ouvertes par session ("conn\0sid") — rempli par refresh ;
    *  vide si le démon ne connaît pas pr_list (vieux démon → pas de badge). */
@@ -144,7 +146,7 @@ export class Sidebar {
   }
   private ctx = $("sctx");
 
-  bind(conns: ConnectionManager, groups: GroupStore, newSess: NewSessionDialog, chat: ChatView, settings: SettingsPanel, connView: ConnView, comps: ComponentsPanel) {
+  bind(conns: ConnectionManager, groups: GroupStore, newSess: NewSessionDialog, chat: ChatView, settings: SettingsPanel, connView: ConnView, comps: ComponentsPanel, map: MapView) {
     this.conns = conns;
     this.groups = groups;
     this.newSess = newSess;
@@ -152,6 +154,7 @@ export class Sidebar {
     this.settings = settings;
     this.connView = connView;
     this.comps = comps;
+    this.map = map;
     this.prsView.bind({
       openSession: (id) => this.openSession(id),
       connState: (k) => this.conns.state(k),
@@ -162,22 +165,29 @@ export class Sidebar {
       conn: () => this.conns.knownConns()[0] ?? "",
       componentsCapable: (c) => this.conns.cap(c)?.components === true,
       openSession: (id, conn) => {
-        this.settings.close();
-        this.connView.close();
+        this.closeChatOverlays();
         void this.chat.open(id, false, conn);
       },
       hl: (txt) => this.hl(txt),
     });
   }
 
-  /** Ouvrir une session depuis la sidebar = quitter les overlays de
-   *  #chat (options et vue connexion la recouvrent — la session
-   *  s'afficherait dessous, invisible ; close() est un no-op quand
-   *  l'overlay est déjà fermé). */
-  private openSession(id: string): Promise<void> {
+  /** Ferme tous les overlays plein #chat — la navigation vers une
+   *  session prime : rien ne persiste par-dessus la discussion
+   *  demandée (diagramme inclus). close() est un no-op quand
+   *  l'overlay est déjà fermé. */
+  private closeChatOverlays() {
     this.settings.close();
     this.connView.close();
     this.comps.close();
+    this.map.close();
+  }
+
+  /** Ouvrir une session depuis la sidebar = quitter les overlays de
+   *  #chat (options, vue connexion, diagramme la recouvrent — la session
+   *  s'afficherait dessous, invisible). */
+  private openSession(id: string): Promise<void> {
+    this.closeChatOverlays();
     return this.chat.open(id);
   }
 
@@ -1021,9 +1031,12 @@ export class Sidebar {
     const sv = localStorage.getItem("ac-sideview");
     this.view = sv === "repos" || sv === "backlog" ? sv : "agents";
     this.applyView();
-    $("sv-agents").onclick = () => this.setView("agents");
-    $("sv-repos").onclick = () => this.setView("repos");
-    $("sv-backlog").onclick = () => this.setView("backlog");
+    // Sélection d'un autre onglet que « Diagramme » = navigation : la
+    // vue diagramme se ferme, comme le font les clics session (elle ne
+    // persiste pas par-dessus le contenu demandé — no-op si déjà fermée).
+    $("sv-agents").onclick = () => { this.map.close(); this.setView("agents"); };
+    $("sv-repos").onclick = () => { this.map.close(); this.setView("repos"); };
+    $("sv-backlog").onclick = () => { this.map.close(); this.setView("backlog"); };
 
     // Badge « Repos » tenu à jour hors de l'onglet : pr_list = lecture
     // locale du registre (léger — pas de sync forge), cadence 60 s.

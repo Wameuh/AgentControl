@@ -3,7 +3,9 @@
 // démon (spec docs/components-integration.md §2.7). Overlay plein #chat
 // (mécanique settings-view : inert + nav.push), SVG vanilla sans dep, poll
 // ~3 s uniquement tant que la vue est ouverte — pas de canal d'events
-// daemon-wide (le Subscribe proto est par-session).
+// daemon-wide (le Subscribe proto est par-session). Fond transparent : le
+// mesh animé de l'app reste visible (classe .map-open sur #chat — le contenu
+// recouvert est masqué, pas seulement inerte).
 //
 // Layout déterministe = arbre radial sectorisé : chaque racine (composant
 // ou session sans parent) reçoit un secteur angulaire proportionnel à son
@@ -129,6 +131,10 @@ export class MapView {
     const view = $("map-view");
     view.hidden = false;
     this.setChatInert(true);
+    // Fond transparent → masquer le contenu du chat recouvert (le mesh
+    // animé apparaît à travers la vue) — visibility conserve layout et
+    // positions de scroll pour le retour à la discussion.
+    $("chat").classList.add("map-open");
     view.focus({ preventScroll: true });
     nav.push("map");
     this.deps.onToggle(true);
@@ -139,6 +145,7 @@ export class MapView {
   close() {
     const was = this.isOpen();
     $("map-view").hidden = true;
+    $("chat").classList.remove("map-open");
     // Ne lever l'inert que si les autres overlays #chat sont aussi
     // fermés — sinon on ré-expose #input derrière conn-view/settings/
     // components (frappes invisibles, le bug exact que l'inert prévient).
