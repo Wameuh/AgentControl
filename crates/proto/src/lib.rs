@@ -704,6 +704,13 @@ pub enum ReqKind {
     QueueDrop { session: String, index: u64 },
     /// Tête de file + annulation du tour courant = envoi forcé.
     QueuePromote { session: String, index: u64 },
+    /// Retire l'entrée `index` de la file et tente de l'injecter en
+    /// steer dans le tour en cours (session/prompt concurrent, SANS
+    /// annuler le tour — ≠ QueuePromote). Refus ou impossibilité →
+    /// l'entrée est remise à sa position. Réponse {delivered, reason?,
+    /// queue} — delivered : "steer" | "sent" | "requeued" | "held" |
+    /// "gone".
+    QueueSteer { session: String, index: u64 },
     /// Page d'historique : les `limit` événements avant `before_seq`
     /// (before_seq absent ou 0 = depuis la fin), ou — si `after_seq` est
     /// fourni — les `limit` événements après `after_seq` en ordre croissant
@@ -1046,6 +1053,7 @@ impl ReqKind {
             Self::QueueEdit { .. } => "queue_edit",
             Self::QueueDrop { .. } => "queue_drop",
             Self::QueuePromote { .. } => "queue_promote",
+            Self::QueueSteer { .. } => "queue_steer",
             Self::Events { .. } => "events",
             Self::SearchEvents { .. } => "search_events",
             Self::FirstPost { .. } => "first_post",

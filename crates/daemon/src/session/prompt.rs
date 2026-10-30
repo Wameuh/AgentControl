@@ -91,10 +91,32 @@ impl Session {
                         if s.spawn_gen.load(Ordering::SeqCst) != gen {
                             return;
                         }
+                        // /compact armé ci-dessus puis refusé : désarmer —
+                        // sinon la retenue fantôme bloque la file jusqu'au
+                        // timeout (même fix que le drain sur commande en
+                        // échec). « compacting » posé par la sortie du
+                        // dernier prompt en vol doit être redressé : le
+                        // garde-fou vient d'être avorté, plus rien ne le
+                        // corrigerait (state != compacting → un autre
+                        // prompt vole encore, ne pas toucher).
+                        let disarmed = is_compact_cmd(&text) && s.take_compact_hold();
+                        if disarmed && s.meta_snapshot().state == "compacting" {
+                            s.set_state("idle");
+                        }
                         s.emit(EventKind::System {
                             text: format!("steer refusé ({e}) — message en file"),
                         });
-                        if !s.enqueue_prompt(&text, false, PromptSrc::UserJournaled) {
+                        // Remise en file inconditionnelle (la condition
+                        // de drain ne doit pas la sauter — un /compact
+                        // refusé désarmé perdrait le message). La
+                        // retenue laissait busy vrai sans runner (le
+                        // drain s'arrête sur compacting en conservant
+                        // busy) : après désarmement, le « runner déjà
+                        // là » supposé par enqueue_prompt est faux —
+                        // drain explicite pour ne pas orpheliner la file.
+                        let already =
+                            s.enqueue_prompt(&text, false, PromptSrc::UserJournaled);
+                        if disarmed || !already {
                             s.drain_queue().await;
                         }
                     }
@@ -514,6 +536,184 @@ impl Session {
         }
     }
 
+    /// Promotion « steer » d'une entrée de file : la retire puis tente
+    /// un session/prompt concurrent dans le tour en cours — même
+    /// mécanique que le steer de send_prompt, SANS annuler le tour
+    /// (≠ queue_promote + cancel). Refus → l'entrée est remise à sa
+    /// position initiale, jamais perdue ni dupliquée. Les retenues du
+    /// drain s'appliquent : compact en cours = interdit (Held),
+    /// agent pas prêt = Held (le handler décide du réveil), session
+    /// sans tour = remise en tête + drain (livraison normale directe).
+    pub async fn steer_queued(&self, idx: usize) -> SteerOutcome {
+        // Retenue compact prioritaire : un prompt injecté pendant le
+        // compact l'annulerait côté agent — la file reste inchangée.
+        if self.compacting.lock().unwrap().is_some() {
+            return SteerOutcome::Held("compact");
+        }
+        // Agent pas prêt (mort, spawn/réveil en vol, endormie) : un
+        // session/prompt répondrait "Session not found" — même garde
+        // que send_prompt. L'entrée reste en file ; le handler traduit
+        // "asleep" en réveil (spawn_wake livrera la file au retour).
+        if !self.accepting_prompts() {
+            let why = if self.meta_snapshot().state == "asleep" {
+                "asleep"
+            } else if self.is_waking() {
+                "waking"
+            } else if self.is_spawning() {
+                "spawning"
+            } else {
+                "not_ready"
+            };
+            return SteerOutcome::Held(why);
+        }
+        // Pop sous le lock : une entrée retirée ici ne peut pas être
+        // livrée en double par le runner (le drain repart d'un push ou
+        // du re-queue explicite ci-dessous).
+        let (text, src) = {
+            let mut q = self.prompt_queue.lock().unwrap();
+            match q.remove(idx) {
+                Some(e) => e,
+                None => return SteerOutcome::Gone,
+            }
+        };
+        // Session libre (busy faux ⇒ file vide et aucun tour) : le steer
+        // n'a pas d'objet — remise en file et drain relancé = livraison
+        // immédiate par le chemin normal.
+        if !self.busy.load(Ordering::SeqCst) {
+            // Même arm que enqueue_prompt : remise en file pendant un
+            // réveil en vol — l'entrée doit survivre à un réveil raté.
+            if self.is_waking() {
+                self.arm_wake_pending();
+            }
+            {
+                let mut q = self.prompt_queue.lock().unwrap();
+                let at = idx.min(q.len());
+                q.insert(at, (text, src));
+                // Même invariant que enqueue_prompt : file non vide ⇒
+                // busy posé sous le lock de la file.
+                self.busy.store(true, Ordering::SeqCst);
+            }
+            self.spawn_drain();
+            return SteerOutcome::Sent;
+        }
+        // Compact armé entre le premier check et le pop (le runner vient
+        // de livrer un /compact) : la retenue prime — remise à sa place.
+        if self.compacting.lock().unwrap().is_some() {
+            // Parité enqueue_prompt : réveil en vol → arm pour que la
+            // tâche propriétaire enchaîne un réveil si la session
+            // retourne « asleep » avec la file non vide.
+            if self.is_waking() {
+                self.arm_wake_pending();
+            }
+            let mut q = self.prompt_queue.lock().unwrap();
+            let at = idx.min(q.len());
+            q.insert(at, (text, src));
+            return SteerOutcome::Held("compact");
+        }
+        // Génération capturée AVANT le spawn : une tâche schedulée après
+        // un clear est périmée d'emblée (comme le steer de send_prompt).
+        let gen = self.spawn_gen.load(Ordering::SeqCst);
+        let me = self.me.clone();
+        // Verdict rapide remonté au RPC : l'agent répond vite à un steer
+        // refusé → le client reçoit « requeued » sans attendre le refresh.
+        // Un steer accepté, lui, tient le RPC jusqu'à la fin du tour —
+        // au-delà d'un court budget la réponse reste « steer » optimiste
+        // (un refus tardif retombe en file + event système).
+        let (ack_tx, ack_rx) = oneshot::channel::<Option<String>>();
+        tokio::spawn(async move {
+            let Some(s) = me.upgrade() else { return };
+            if s.spawn_gen.load(Ordering::SeqCst) != gen {
+                return;
+            }
+            // Même arme que le drain : un /compact auto en file reste
+            // auto (relance « continue your task » à la fin).
+            if is_compact_cmd(&text) {
+                s.arm_compact(src == PromptSrc::Auto);
+            }
+            s.emit(EventKind::System {
+                text: "message en file promu en steer par l'utilisateur".into(),
+            });
+            // User → user_message steer journalisé à la remise (comme
+            // send_prompt). Peer/Auto : déjà tracés par leur émetteur.
+            if src == PromptSrc::User {
+                s.emit(EventKind::UserMessage {
+                    text: text.clone(),
+                    steer: true,
+                    origin: None,
+                });
+            }
+            match s.prompt_rpc(&text).await {
+                Ok(_) => {
+                    let _ = ack_tx.send(None);
+                }
+                Err(e) => {
+                    // Clear pendant le RPC : pas de ré-enfilement d'un
+                    // message d'un contexte disparu.
+                    if s.spawn_gen.load(Ordering::SeqCst) != gen {
+                        let _ = ack_tx.send(Some(format!("{e}")));
+                        return;
+                    }
+                    // /compact armé ci-dessus puis refusé : désarmer —
+                    // la retenue fantôme bloquerait la file jusqu'au
+                    // timeout et relancerait un « continue your task »
+                    // spurieux pour un auto jamais exécuté (même fix
+                    // que le drain : take_compact_hold sur commande
+                    // en échec). « compacting » posé par la sortie du
+                    // dernier prompt en vol doit être redressé : le
+                    // garde-fou vient d'être avorté, plus rien ne le
+                    // corrigerait (state != compacting → un autre
+                    // prompt vole encore, ne pas toucher).
+                    let disarmed = is_compact_cmd(&text) && s.take_compact_hold();
+                    if disarmed && s.meta_snapshot().state == "compacting" {
+                        s.set_state("idle");
+                    }
+                    s.emit(EventKind::System {
+                        text: format!("steer refusé ({e}) — message remis en file"),
+                    });
+                    // User → UserJournaled : le user_message steer est
+                    // déjà visible, le drain ne doit pas le réémettre.
+                    let src2 = if src == PromptSrc::User {
+                        PromptSrc::UserJournaled
+                    } else {
+                        src
+                    };
+                    // Même arm que enqueue_prompt : remise en file
+                    // pendant un réveil en vol — l'entrée doit survivre
+                    // à un réveil raté.
+                    if s.is_waking() {
+                        s.arm_wake_pending();
+                    }
+                    // Remise à la position initiale — busy.swap sous le
+                    // lock de la file, sérialisé avec le pop du runner.
+                    let was_busy = {
+                        let mut q = s.prompt_queue.lock().unwrap();
+                        let at = idx.min(q.len());
+                        q.insert(at, (text.clone(), src2));
+                        s.busy.swap(true, Ordering::SeqCst)
+                    };
+                    // ack APRÈS la réinsertion : la file renvoyée avec
+                    // « requeued » contient déjà l'entrée restaurée.
+                    let _ = ack_tx.send(Some(format!("{e}")));
+                    // Retenue désarmée : busy vrai peut survivre sans
+                    // runner (le drain s'arrête sur compacting en
+                    // conservant busy) — le « runner déjà là » supposé
+                    // par was_busy est alors faux → drain explicite
+                    // pour ne pas orpheliner l'entrée remise.
+                    if disarmed || !was_busy {
+                        s.drain_queue().await;
+                    }
+                }
+            }
+        });
+        match tokio::time::timeout(std::time::Duration::from_secs(2), ack_rx).await {
+            Ok(Ok(Some(e))) => SteerOutcome::Requeued(e),
+            // Accepté et terminé vite, timeout (toujours en vol) ou
+            // tâche morte : dans tous les cas l'entrée n'est plus en
+            // file — le client la reverrait via un refus tardif.
+            _ => SteerOutcome::Steer,
+        }
+    }
+
     pub async fn cancel(&self) -> Result<()> {
         let res = match self.meta_snapshot().native_session_id {
             Some(sid) => self.write_line(&acp::notification(
@@ -570,4 +770,24 @@ impl Session {
         self.pending_agent.lock().unwrap().keys().cloned().collect()
     }
 
+}
+
+/// Issue d'un `steer_queued` — traduite par le handler en
+/// {delivered, reason} pour le client.
+#[derive(Debug)]
+pub enum SteerOutcome {
+    /// Steer lancé dans le tour courant (ou achevé sous le budget
+    /// d'attente) — un refus tardif retombe en file + event système.
+    Steer,
+    /// Plus de tour en cours : remise en file et drain relancé —
+    /// livraison normale directe.
+    Sent,
+    /// L'agent a refusé rapidement — entrée remise à sa position.
+    Requeued(String),
+    /// Livraison impossible pour l'instant — file inchangée :
+    /// "compact" | "asleep" | "waking" | "spawning" | "not_ready".
+    Held(&'static str),
+    /// Index hors file — entrée déjà livrée ou retirée entre
+    /// l'affichage et le clic.
+    Gone,
 }

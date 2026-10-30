@@ -216,6 +216,9 @@ export class Composer {
    *  variant ») : l'édition y est désactivée (tooltip) — list/promote/
    *  drop sont des ReqKind plus anciens et restent utilisables. */
   private qEditBroken = new Set<string>();
+  /** Capability `queue_steer` du démon (injectée depuis conns.cap) —
+   *  le bouton steer des entrées est masqué sur les vieux démons. */
+  private qSteerCapable: (conn: string | undefined) => boolean = () => false;
   /** Rebuild du panneau en cours : le blur d'une textarea détachée par
    *  innerHTML ne doit ni sauvegarder ni annuler (l'éditeur est recréé
    *  juste après si l'entrée est toujours là). */
@@ -289,6 +292,14 @@ export class Composer {
         if (!this.qOpen) this.toggleQueuePanel();
         else this.renderQueuePanel();
       };
+      // Steer : injection dans le tour en cours SANS l'annuler (≠ ⤒
+      // qui annule) — refus → remise en file par le démon. Masqué sur
+      // les démons ne connaissant pas queue_steer.
+      if (this.qSteerCapable(conn)) {
+        const st = qIco("steer", t("queue_steer"));
+        st.onclick = () => void this.queueSteer(sid, i, conn);
+        d.appendChild(st);
+      }
       // Tête de file + cancel → envoi forcé (reste de file préservée)
       const p = qIco("top", t("queue_send_now"));
       p.onclick = () => this.queueCall("queue_promote", { session: sid, index: i, conn });
@@ -363,6 +374,11 @@ export class Composer {
         };
         acts.append(e, m);
       }
+      if (this.qSteerCapable(conn)) {
+        const st = qIco("steer", t("queue_steer"));
+        st.onclick = () => void this.queueSteer(sid, i, conn);
+        acts.appendChild(st);
+      }
       const p = qIco("top", t("queue_send_now"));
       p.onclick = () => this.queueCall("queue_promote", { session: sid, index: i, conn });
       const x = qIco("close", t("queue_remove"));
@@ -388,6 +404,48 @@ export class Composer {
     void call(method, params)
       .then(() => this.refreshQueue())
       .catch((e) => showErr(String(e)));
+  }
+
+  /** Bouton « steer » d'une entrée : le démon la sort de la file et
+   *  tente un session/prompt concurrent (tour préservé — ≠ promote qui
+   *  annule). `delivered` de la réponse est traduit en toast ; la file
+   *  renvoyée met la vue à jour immédiatement. */
+  private async queueSteer(sid: string, index: number, conn: string | undefined) {
+    try {
+      const r = await call<{
+        delivered: "steer" | "sent" | "requeued" | "held" | "gone";
+        reason?: string | null;
+        queue?: string[];
+      }>("queue_steer", { session: sid, index, conn });
+      if (Array.isArray(r.queue)) this.qSnapshot = r.queue;
+      switch (r.delivered) {
+        case "steer":
+          // Refus tardif possible : l'event système du démon déclenche
+          // déjà un refresh — ce rattrapage couvre les cas sans push.
+          setTimeout(() => void this.refreshQueue(), 2500);
+          break;
+        case "sent":
+          notify("info", t("queue_steer_sent"));
+          break;
+        case "requeued":
+          notify("warn", t("queue_steer_refused"));
+          break;
+        case "held":
+          notify("warn", t(
+            r.reason === "compact" ? "queue_steer_compact"
+            : r.reason === "asleep" ? "queue_steer_asleep"
+            : r.reason === "not_ready" ? "queue_steer_notready"
+            : "queue_steer_wait",
+          ));
+          break;
+        case "gone":
+          notify("warn", t("queue_edit_failed"));
+          break;
+      }
+    } catch (e) {
+      showErr(String(e));
+    }
+    await this.refreshQueue();
   }
 
   /** Item en édition inline : textarea + ✓/✗. Sauvegarde = {mod}+Entrée
@@ -749,6 +807,12 @@ export class Composer {
    *  — le + est masqué si le démon ignore write_file/create_path. */
   bindAttachCapable(capable: (conn: string | undefined) => boolean) {
     this.attach.capable = capable;
+  }
+
+  /** Capacité « steer de file » du démon (injectée depuis conns.cap)
+   *  — bouton steer des entrées masqué si queue_steer est inconnu. */
+  bindQueueSteerCapable(capable: (conn: string | undefined) => boolean) {
+    this.qSteerCapable = capable;
   }
 
   init() {
