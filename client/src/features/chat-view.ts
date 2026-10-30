@@ -101,6 +101,11 @@ export class ChatView {
     /** Bouton « premier post » affiché seulement si le démon de la conn
      *  connaît first_post. */
     firstPostCapable: (_conn: string) => false,
+    /** Bouton « épinglés » + actions pin sur les messages — même gate
+     *  capability (daemon_status.pinned). */
+    pinCapable: (_conn: string) => false,
+    /** Marque l'état épinglé d'un nœud rendu (feature pins). */
+    pinsMark: (_el: HTMLElement) => {},
     /** L'arbre fichiers suit le workspace de la session ouverte. */
     onSessionOpened: () => {},
     /** Session affichée changée ou disparue (suppression, conn coupée,
@@ -627,6 +632,8 @@ export class ChatView {
     $("btn-search").hidden = !app.current;
     $("btn-first").hidden =
       !app.current || !this.deps.firstPostCapable(app.current?.conn ?? "default");
+    $("btn-pins").hidden =
+      !app.current || !this.deps.pinCapable(app.current?.conn ?? "default");
     $("btn-term").hidden =
       !app.current || !this.deps.termCapable(app.current?.conn ?? "default");
     if (!app.current) {
@@ -831,6 +838,7 @@ export class ChatView {
     const nearBottom = this.nearBottom();
     const node = this.renderer.render(ev, live);
     this.eventsEl.appendChild(node);
+    this.deps.pinsMark(node);
     this.renderer.noteText(ev, node);
     this.renderedCount++;
     if (ev.seq < this.minRendered) this.minRendered = ev.seq;
@@ -935,6 +943,7 @@ export class ChatView {
         }
         const node = this.renderer.render(ev, false);
         this.eventsEl.insertBefore(node, anchor);
+        this.deps.pinsMark(node);
         this.renderedCount++;
         if (ev.type === "tool_call") {
           this.renderer.toolBlocks.set(ev.call_id as string, node);

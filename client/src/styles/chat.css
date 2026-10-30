@@ -550,6 +550,75 @@ details.th .ic-thought { width: 12px; height: 12px; }
 .qp-acts button:disabled { opacity: .4; cursor: default; }
 
 
+/* Messages épinglés : indicateur + action au survol, panneau d'accès. */
+.msg { position: relative; }
+.pin-tag {
+  position: absolute; top: -7px; right: -7px; z-index: 3;
+  width: 20px; height: 20px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 50%; border: 1px solid var(--line);
+  background: var(--panel-solid); color: var(--dim);
+  opacity: 0; pointer-events: none; transition: opacity .12s;
+}
+.pin-tag .ic { width: 11px; height: 11px; }
+.msg:hover .pin-tag { opacity: .85; pointer-events: auto; }
+/* L'épingle reste visible (colorée) sur le message épinglé — c'est
+   l'indicateur discret demandé ; clic = désépingler. */
+.ev.pinned .pin-tag {
+  opacity: 1; pointer-events: auto;
+  color: var(--accent); border-color: var(--accent);
+}
+.ev.pinned { outline: 1px solid rgba(var(--accent-rgb), .35); outline-offset: -1px; }
+/* Pas de survol au tactile : l'épingle est toujours à demi visible. */
+body.android .msg .pin-tag { opacity: .45; pointer-events: auto; }
+body.android .ev.pinned .pin-tag { opacity: 1; }
+
+/* Panneau des épinglés : dans le flux comme #queue-panel. */
+#pins-panel {
+  flex-shrink: 0; display: flex; flex-direction: column; max-height: 42%;
+  border-top: 1px solid var(--line);
+  background: rgba(var(--tint-rgb), .02);
+}
+#pp-head {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  padding: 5px 14px; border-bottom: 1px solid var(--line);
+}
+#pp-title { font-size: 12px; font-weight: 500; color: var(--muted); }
+#pp-count { font-size: 10.5px; }
+#pp-close { margin-left: auto; padding: 2px 7px; }
+#pp-close .ic { width: 12px; height: 12px; display: block; }
+#pp-list {
+  flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 6px; padding: 8px 14px;
+}
+.pp-empty { color: var(--dim); font-size: 12.5px; padding: 6px 2px; }
+.pin-row {
+  display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  background: var(--glass); border: 1px solid var(--line);
+  border-radius: 8px; padding: 6px 10px; font-size: 12.5px;
+}
+.pin-row:not(.dead) { cursor: pointer; }
+.pin-row:not(.dead):hover { border-color: var(--accent); }
+/* Épinglé mort : journal vidé/compacté — extrait lisible, saut impossible. */
+.pin-row.dead { opacity: .65; }
+.pin-ico { flex: none; color: var(--accent); display: inline-flex; }
+.pin-ico .ic { width: 12px; height: 12px; }
+.pin-type {
+  flex: none; font-size: 10.5px; color: var(--violet);
+  border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px;
+}
+.pin-ex {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--muted);
+}
+.pin-ts { flex: none; color: var(--dim); font-size: 11px; }
+.pin-dead { flex: none; color: var(--dim); display: inline-flex; }
+.pin-dead .ic { width: 12px; height: 12px; }
+.pin-unpin { flex: none; padding: 2px 6px; }
+.pin-unpin .ic { width: 11px; height: 11px; display: block; }
+.pin-unpin:hover { border-color: var(--accent); color: var(--accent); }
+
+
 /* Selects d'options config dynamiques (thought_level, speed…) */
 #dyn-opts { display: inline-flex; gap: 4px; align-items: center; }
 #dyn-opts select { max-width: 130px; }

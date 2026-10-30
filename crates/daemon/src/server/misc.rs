@@ -33,6 +33,9 @@ impl Daemon {
                     // Idem pour ReqKind::OrchestratorSet (orchestrateur
                     // backlog natif — bascule à chaud).
                     "orchestrator": true,
+                    // Idem pour PinMessage/UnpinMessage/ListPinned
+                    // (messages épinglés par session).
+                    "pinned": true,
                 }))
     }
     /// `UpdateDaemon` : télécharge la release demandée et remplace le

@@ -43,6 +43,9 @@ const SHAPES: Record<string, string> = {
   panel: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9.5 4v16"/>',
   down: '<path d="M12 4v12"/><path d="m6 12 6 6 6-6"/><path d="M5 21h14"/>',
   steer: '<path d="m15 10 5 5-5 5"/><path d="M4 4v7a4 4 0 0 0 4 4h12"/>',
+  pin:
+    '<path d="M12 17v4.5"/>' +
+    '<path d="M9.5 10.5a2 2 0 0 1-1.1 1.8l-1.8.9A2 2 0 0 0 5.5 15v.5a1 1 0 0 0 1 1h11a1 1 0 0 0 1-1V15a2 2 0 0 0-1.1-1.8l-1.8-.9a2 2 0 0 1-1.1-1.8V6.5h1a2 2 0 1 0 0-4h-7a2 2 0 1 0 0 4h1Z"/>',
   // Navigation / disclosure
   back: '<path d="m14.5 5.5-6.5 6.5 6.5 6.5"/>',
   "chev-right": '<path d="m9.5 5.5 6.5 6.5-6.5 6.5"/>',

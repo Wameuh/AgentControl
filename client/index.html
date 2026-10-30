@@ -62,6 +62,7 @@
             </div>
             <button id="btn-search" hidden data-icon="search" data-i18n-title="search_title" title="Search"></button>
             <button id="btn-first" hidden data-icon="top" data-i18n-title="first_post" title="First post"></button>
+            <button id="btn-pins" hidden data-icon="pin" data-i18n-title="pins_title" title="Pinned messages"></button>
             <button id="btn-term" hidden data-icon="terminal" data-i18n-title="term_title" title="Terminal"></button>
             <button id="btn-files" hidden data-icon="folder" data-i18n-title="files_title" title="Files"></button>
             <button id="btn-refresh" data-icon="refresh" data-i18n-title="refresh_title" title="Reload"></button>
@@ -98,6 +99,14 @@
               <button id="qp-close" data-icon="close" data-i18n-title="close" title="Close"></button>
             </header>
             <div id="qp-list"></div>
+          </div>
+          <div id="pins-panel" hidden>
+            <header id="pp-head">
+              <span id="pp-title" data-i18n="pins_title">Pinned messages</span>
+              <span id="pp-count" class="badge"></span>
+              <button id="pp-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <div id="pp-list"></div>
           </div>
           <div id="term-panel" hidden>
             <div id="term-resize" data-i18n-title="term_drag" title="Drag to resize"></div>

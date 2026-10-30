@@ -5,10 +5,12 @@
 //!   prompt.rs  — envois user/peer, file d'attente, réponses perm./questions
 //!   compact.rs — retenue des prompts pendant un /compact agent-side
 //!   config.rs  — mode/modèle/groupe/titre/options de config dynamiques
+//!   pins.rs    — messages épinglés persistés (pinned.json)
 
 mod agent;
 mod compact;
 mod config;
+mod pins;
 mod prompt;
 
 use anyhow::{Context, Result};
@@ -64,6 +66,8 @@ pub struct Session {
     last_text: Mutex<Option<(bool, String)>>,
     /// Titre/kind vus pour chaque tool call (pour les updates ultérieurs).
     tool_calls: Mutex<HashMap<String, (String, String)>>,
+    /// Messages épinglés (persistés pinned.json — pins.rs).
+    pinned: Mutex<Vec<proto::PinEntry>>,
     /// Vrai pendant session/load : les updates d'historique rejoué sont
     /// ignorés (le journal local est déjà la source de vérité).
     loading_replay: std::sync::atomic::AtomicBool,
@@ -164,6 +168,9 @@ impl Session {
         )?;
         let journal = Journal::open(&dir)?;
         let last_text = seed_text_anchor(&journal, &dir);
+        // Chargé avant le struct literal : `dir` y est déplacé en premier
+        // champ — un open_pins(&dir) inline serait un borrow-after-move.
+        let pinned = Self::open_pins(&dir);
         let (events_tx, _) = broadcast::channel(1024);
         Ok(Arc::new_cyclic(|me| Self {
             dir,
@@ -177,6 +184,7 @@ impl Session {
             cur_text: Mutex::new(None),
             last_text: Mutex::new(last_text),
             tool_calls: Mutex::new(HashMap::new()),
+            pinned,
             loading_replay: std::sync::atomic::AtomicBool::new(false),
             busy: std::sync::atomic::AtomicBool::new(false),
             active_prompts: AtomicU64::new(0),
@@ -476,6 +484,70 @@ mod tests {
             kinds(&dir).iter().filter(|k| **k == "agent_thought").count(),
             3
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Épinglés : persistés dans pinned.json, ancrés (seq, ts) — un reset
+    /// de journal les conserve mais les passe `live:false`, et un event
+    /// du nouveau cycle au même seq ne les fait pas revivre (ts différent).
+    #[test]
+    fn pins() {
+        let (s, dir) = tmp_session("pins");
+        s.emit(EventKind::UserMessage {
+            text: "pin moi".into(),
+            steer: false,
+            origin: None,
+        });
+        s.emit(EventKind::AgentText {
+            text: "réponse".into(),
+        });
+        // Pin valide + idempotent (même entrée, pas de doublon).
+        let e = s.pin(1).unwrap();
+        assert_eq!(e.kind, "user_message");
+        assert!(e.text.contains("pin moi"));
+        let e2 = s.pin(1).unwrap();
+        assert_eq!(e2.pinned_at, e.pinned_at);
+        // Hors journal / sans contenu → erreurs.
+        assert!(s.pin(99).is_err());
+        s.emit(EventKind::StatusChanged {
+            state: "working".into(),
+        });
+        assert!(s.pin(3).is_err()); // status_changed : pas de texte
+        let list = s.pins_snapshot();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["live"], true);
+        // Persisté : la réouverture recharge pinned.json.
+        let s2 = Session::open(dir.clone()).unwrap();
+        assert_eq!(s2.pins_snapshot().len(), 1);
+        // Journal vidé (/clear, rebind) : épinglé conservé mais mort.
+        s2.journal.reset(&dir).unwrap();
+        let dead = s2.pins_snapshot();
+        assert_eq!(dead.len(), 1);
+        assert_eq!(dead[0]["live"], false);
+        assert!(dead[0]["text"].as_str().unwrap().contains("pin moi"));
+        // Collision : un event du NOUVEAU cycle prend le seq 1 — le ts
+        // diffère → l'épinglé ne doit pas revenir « live ».
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        s2.emit(EventKind::UserMessage {
+            text: "autre cycle".into(),
+            steer: false,
+            origin: None,
+        });
+        assert_eq!(s2.pins_snapshot()[0]["live"], false);
+        // Re-pin du même seq = nouvel event : l'entrée morte est
+        // REMPLACÉE (pas de no-op silencieux, pas de doublon).
+        let e3 = s2.pin(1).unwrap();
+        assert!(e3.text.contains("autre cycle"));
+        assert_ne!(e3.ts, e.ts);
+        let relist = s2.pins_snapshot();
+        assert_eq!(relist.len(), 1);
+        assert_eq!(relist[0]["live"], true);
+        // Unpin : true puis false (déjà retiré), liste vidée et
+        // suppression persistée à la réouverture.
+        assert!(s2.unpin(1));
+        assert!(!s2.unpin(1));
+        let s3 = Session::open(dir.clone()).unwrap();
+        assert!(s3.pins_snapshot().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

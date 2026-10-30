@@ -189,6 +189,16 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             limit: p.get("limit").and_then(Value::as_u64).unwrap_or(30) as u32,
         },
         "first_post" => ReqKind::FirstPost { session: s("session") },
+        // Épinglés — gate capability daemon_status.pinned côté frontend.
+        "pin_message" => ReqKind::PinMessage {
+            session: s("session"),
+            seq: p.get("seq").and_then(Value::as_u64).unwrap_or(0),
+        },
+        "unpin_message" => ReqKind::UnpinMessage {
+            session: s("session"),
+            seq: p.get("seq").and_then(Value::as_u64).unwrap_or(0),
+        },
+        "list_pinned" => ReqKind::ListPinned { session: s("session") },
         "cancel" => ReqKind::Cancel { session: s("session") },
         "set_mode" => ReqKind::SetMode { session: s("session"), mode: s("mode") },
         "set_model" => ReqKind::SetModel { session: s("session"), model: s("model") },

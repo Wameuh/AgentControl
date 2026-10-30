@@ -403,6 +403,33 @@ fn default_state() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Messages épinglés (pinned.json dans le dossier de session)
+// ---------------------------------------------------------------------------
+
+/// Un message épinglé : référence au seq de l'event + contenu copié au
+/// moment du pin. Le contenu copié survit au vidage du journal (/clear,
+/// /new, rebind, compaction) — l'épinglé reste lisible même quand son
+/// ancre est morte ; le couple (seq, ts) sert de détecteur : un event
+/// retrouvé au même seq avec un autre ts appartient à un cycle plus
+/// récent, pas au message épinglé (`live` recalculé au list).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PinEntry {
+    /// seq de l'event épinglé dans le journal de son cycle.
+    pub seq: u64,
+    /// ts de l'event au moment du pin — discriminant anti-collision de
+    /// seq après un reset du journal (les seqs repartent à 1).
+    pub ts: String,
+    /// Type d'event (type_tag : user_message, agent_text, …).
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Contenu textuel copié (searchable_text borné) — affiché dans le
+    /// panneau même si l'event source a disparu du journal.
+    pub text: String,
+    /// Horodatage ISO du pin.
+    pub pinned_at: String,
+}
+
+// ---------------------------------------------------------------------------
 // Registre PR ↔ session (prs.json à la racine du démon)
 // ---------------------------------------------------------------------------
 
@@ -695,6 +722,27 @@ pub enum ReqKind {
     FirstPost {
         session: String,
     },
+    /// Épingle l'event de `seq` (message user/agent, ou tout event à
+    /// contenu texte) dans la session — persisté dans pinned.json,
+    /// visible de tout client. Idempotent : un seq déjà épinglé rend
+    /// l'entrée existante. Réponse : `{pin: PinEntry, pinned: [..]}` —
+    /// la liste complète recalculée (avec `live`) évite un second appel.
+    PinMessage {
+        session: String,
+        seq: u64,
+    },
+    /// Retire l'épinglé de `seq`. Réponse : `{ok, pinned: [..]}`.
+    UnpinMessage {
+        session: String,
+        seq: u64,
+    },
+    /// Liste les épinglés de la session : `[{seq, ts, type, text,
+    /// pinned_at, live}]` — `live` = l'event source est encore dans le
+    /// journal courant (saut possible) ; faux après /clear ou compaction
+    /// (l'extrait copié reste affiché, l'épinglé n'est pas perdu).
+    ListPinned {
+        session: String,
+    },
     /// Passe la connexion en mode push : tous les events > after_seq.
     Subscribe {
         session: String,
@@ -954,6 +1002,9 @@ impl ReqKind {
             Self::Events { .. } => "events",
             Self::SearchEvents { .. } => "search_events",
             Self::FirstPost { .. } => "first_post",
+            Self::PinMessage { .. } => "pin_message",
+            Self::UnpinMessage { .. } => "unpin_message",
+            Self::ListPinned { .. } => "list_pinned",
             Self::Subscribe { .. } => "subscribe",
             Self::Cancel { .. } => "cancel",
             Self::SessionInfo { .. } => "session_info",
