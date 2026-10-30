@@ -137,7 +137,7 @@ renderer.bind({
   statusChanged: () => void sidebar.refresh(),
   openSession: (id) => void chat.open(id),
 });
-sidebar.bind(conns, groups, newSess, chat, settings, connView, comps);
+sidebar.bind(conns, groups, newSess, chat, settings, connView, comps, map);
 composer.bind(chat);
 composer.refresh = () => sidebar.refresh();
 composer.bindAttachCapable((c) => conns.cap(c ?? "default")?.files === true);
