@@ -61,7 +61,7 @@ pub enum ComponentState {
 }
 
 /// Sonde de santé — `healthcheck = { kind = "…", … }` dans le TOML.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Healthcheck {
     /// Aucune sonde : un process managé vivant est réputé sain.

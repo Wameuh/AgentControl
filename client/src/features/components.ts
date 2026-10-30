@@ -55,6 +55,18 @@ const LINES = (id: string) =>
     .map((l) => l.trim())
     .filter(Boolean);
 
+/** Valeur chaîne d'un param `bool` (params/default sont en forme
+ *  chaîne — mêmes acceptes que la validation démon). */
+function paramBool(v: string): boolean {
+  return ["true", "yes", "on", "1"].includes(v.trim().toLowerCase());
+}
+
+/** Chaîne CSV d'un param `list` → entrées (inverse à la collecte :
+ *  les lignes du textarea repartent jointes par ","). */
+function paramList(v: string): string[] {
+  return v.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
 /** Spec vierge d'un nouveau composant (défauts du démon : on-failure/5 s). */
 function defaultSpec(): ComponentSpec {
   return {
@@ -91,6 +103,14 @@ export class ComponentsPanel {
   private logsName = "";
   /** Nom du composant en édition ("" = nouvelle spec). */
   private editName = "";
+  /** Composant adossé au catalogue (item.catalog du démon) : l'édition
+   *  est bornée aux params déclarés + autostart/description — la spec
+   *  interne est scellée (upsert_edit côté démon) et affichée en
+   *  lecture seule. false → spec custom, éditeur complet legacy. */
+  private editBound = false;
+  /** Spec chargée à l'ouverture de l'éditeur — source des valeurs
+   *  params et du dump internals en mode borné. */
+  private editSpec: ComponentSpec | null = null;
   /** Suppression armée dans l'éditeur (2e tap = ComponentRemove) —
    *  timer de désarmement, même pattern que le danger-armed du ctxmenu. */
   private delArmed = false;
@@ -683,25 +703,49 @@ export class ComponentsPanel {
   // -------------------------------------------------------------------
 
   /** Ouvre le formulaire : édition d'un item existant, nouvelle spec
-   *  (item absent) ou préremplissage catalogue (prefill). */
+   *  (item absent) ou préremplissage catalogue (prefill). Un item
+   *  adossé au catalogue (`item.catalog` du démon) ouvre l'éditeur
+   *  borné — params déclarés + autostart/description, spec interne en
+   *  lecture seule ; tout le reste (custom, préremplissage) garde
+   *  l'éditeur de spec complet. */
   private openEditor(item?: ComponentItem, prefill?: ComponentSpec) {
     const spec = prefill ?? item?.spec ?? defaultSpec();
     this.editName = item?.name ?? "";
+    // Composant adossé au catalogue : flag `item.catalog` (démon ≥0.10,
+    // nom couvert par une entrée) ou `spec.catalog` (nom d'entrée posé
+    // à l'install par le write-path params) — l'un ou l'autre suffit.
+    this.editBound = item?.catalog === true || !!spec.catalog;
+    this.editSpec = spec;
     $("comp-ed-title").textContent = t(this.editName ? "comp_edit_h" : "comp_new_h");
     ($("ce-name") as HTMLInputElement).value = spec.name;
     // Le nom est la clé de la spec — immuable en édition (renommer =
     // supprimer puis recréer, ce que ComponentRemove permet déjà).
     ($("ce-name") as HTMLInputElement).disabled = !!this.editName;
+    ($("ce-desc") as HTMLInputElement).value = spec.description ?? "";
+    ($("ce-autostart") as HTMLInputElement).checked = spec.autostart;
+    ($("ce-del") as HTMLButtonElement).hidden = !this.editName;
+    if (this.editBound) this.fillBoundEditor(item!);
+    else this.fillSpecEditor(spec);
+    this.setMode("edit");
+  }
+
+  /** Éditeur de spec complet — composants customs (sans entrée
+   *  catalogue : le formulaire legacy reste la surface d'édition,
+   *  choix documenté) et préremplissage d'une suggested_spec quand
+   *  ComponentInfo n'a pas pu être relu après install. */
+  private fillSpecEditor(spec: ComponentSpec) {
+    $("ce-spec-fields").hidden = false;
+    $("ce-params").hidden = true;
+    $("ce-internals").hidden = true;
+    $("ce-config-warn").hidden = true;
     ($("ce-kind") as HTMLSelectElement).value = spec.kind === "internal"
       ? "process"
       : spec.kind;
-    ($("ce-desc") as HTMLInputElement).value = spec.description ?? "";
     ($("ce-cmd") as HTMLTextAreaElement).value = spec.command.join("\n");
     ($("ce-env") as HTMLTextAreaElement).value = Object.entries(spec.env)
       .map(([k, v]) => `${k}=${v}`)
       .join("\n");
     ($("ce-cwd") as HTMLInputElement).value = spec.cwd ?? "";
-    ($("ce-autostart") as HTMLInputElement).checked = spec.autostart;
     ($("ce-restart") as HTMLSelectElement).value = spec.restart;
     ($("ce-rsec") as HTMLInputElement).value = String(spec.restart_sec);
     const hc = spec.healthcheck;
@@ -712,9 +756,211 @@ export class ComponentsPanel {
       hc.kind === "http" ? hc.url : "";
     ($("ce-hc-argv") as HTMLTextAreaElement).value =
       hc.kind === "command" ? hc.argv.join("\n") : "";
-    ($("ce-del") as HTMLButtonElement).hidden = !this.editName;
     this.syncEditFields();
-    this.setMode("edit");
+  }
+
+  /** Éditeur borné d'un composant catalogue : seuls les params
+   *  déclarés (`spec.params_schema`), autostart (process) et
+   *  description sont mutables ; la spec interne est reléguée dans le
+   *  panneau « internals » en lecture seule (choix : visible pour le
+   *  debug — le démon la scelle de toute façon via upsert_edit). */
+  private fillBoundEditor(item: ComponentItem) {
+    const spec = item.spec;
+    $("ce-spec-fields").hidden = true;
+    // autostart n'a de sens que pour un `process` managé.
+    document.querySelector<HTMLElement>(".ce-f-autostart")!.style.display =
+      spec.kind === "process" ? "" : "none";
+    const missing = item.status.config_required ?? [];
+    const warn = $("ce-config-warn");
+    warn.hidden = !missing.length;
+    warn.textContent = missing.length
+      ? t("comp_cfg_missing", { l: missing.join(", ") })
+      : "";
+    this.renderParams(spec);
+    $("ce-internals").hidden = false;
+    $("ce-internals-json").textContent = JSON.stringify(
+      {
+        kind: spec.kind,
+        command: spec.command,
+        env: spec.env,
+        cwd: spec.cwd,
+        restart: spec.restart,
+        restart_sec: spec.restart_sec,
+        healthcheck: spec.healthcheck,
+        queries: spec.queries ?? {},
+      },
+      null,
+      2,
+    );
+  }
+
+  /** Rend un champ par param déclaré : string/path/duration → texte,
+   *  int → nombre, bool → case, enum → select `choices`, list →
+   *  textarea (une entrée par ligne — CSV sur le fil), secret →
+   *  password jamais prérempli (vide = conserver la valeur masquée).
+   *  `data-pkey` relie chaque input à sa déclaration pour
+   *  collectParams. `params`/`default` sont en forme chaîne — castés
+   *  selon kind. */
+  private renderParams(spec: ComponentSpec) {
+    const zone = $("ce-params");
+    zone.innerHTML = "";
+    zone.hidden = false;
+    const note = document.createElement("div");
+    note.className = "ce-bound-note";
+    note.textContent = t("comp_bound_note");
+    zone.appendChild(note);
+    for (const p of spec.params_schema ?? []) {
+      const cur = spec.params?.[p.key] ?? p.default ?? "";
+      const label = document.createElement("label");
+      label.className = p.kind === "bool" ? "chk-row" : "ce-p";
+      if (p.description) label.title = p.description;
+      const span = document.createElement("span");
+      span.textContent = (p.label || p.key) + (p.required ? " *" : "");
+      let input: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+      switch (p.kind) {
+        case "bool": {
+          const b = document.createElement("input");
+          b.type = "checkbox";
+          b.checked = paramBool(cur);
+          input = b;
+          label.append(b, span);
+          break;
+        }
+        case "enum": {
+          const sel = document.createElement("select");
+          const set = !!(spec.params?.[p.key] ?? "");
+          // « — » offert : non requis, ou requis encore non positionné
+          // sans défaut (l'utilisateur doit trancher explicitement).
+          if (!p.required || (!set && !p.default)) {
+            const opt = document.createElement("option");
+            opt.value = "";
+            opt.textContent = "—";
+            sel.appendChild(opt);
+          }
+          for (const c of p.choices ?? []) {
+            const opt = document.createElement("option");
+            opt.value = c;
+            opt.textContent = c;
+            sel.appendChild(opt);
+          }
+          // Valeur stockée hors `choices` (schéma évolué) : la voir
+          // plutôt que selectedIndex=-1 → "" (retrait silencieux).
+          if (cur && !(p.choices ?? []).includes(cur)) {
+            const opt = document.createElement("option");
+            opt.value = cur;
+            opt.textContent = `${cur} (?)`;
+            sel.appendChild(opt);
+          }
+          sel.value = cur;
+          input = sel;
+          label.append(span, sel);
+          break;
+        }
+        case "list": {
+          const ta = document.createElement("textarea");
+          ta.rows = 3;
+          ta.spellcheck = false;
+          ta.value = paramList(cur).join("\n");
+          input = ta;
+          label.append(span, ta);
+          break;
+        }
+        default: {
+          const inp = document.createElement("input");
+          inp.autocomplete = "off";
+          inp.spellcheck = false;
+          if (p.secret) {
+            inp.type = "password";
+            inp.placeholder = "••••••";
+          } else {
+            inp.type = p.kind === "int" ? "number" : "text";
+            if (p.kind === "int") inp.step = "1";
+            inp.value = cur;
+            if (p.default) inp.placeholder = p.default;
+          }
+          input = inp;
+          label.append(span, inp);
+        }
+      }
+      input.dataset.pkey = p.key;
+      zone.appendChild(label);
+    }
+  }
+
+  /** Form params → patch {clé: chaîne} des seules clés modifiées
+   *  (`component_set_params` : valeurs en forme chaîne — "" retire la
+   *  clé ; un champ secret vide conserve la valeur masquée, jamais
+   *  renvoyée). Contrôles alignés sur la déclaration (mêmes règles que
+   *  le dialogue params d'install) : required sans défaut non vide,
+   *  int/duration/enum au format, regex `validation` (indicative — le
+   *  démon valide en dernier ressort). */
+  private collectParams(): Record<string, string> {
+    const spec = this.editSpec!;
+    const patch: Record<string, string> = {};
+    for (const p of spec.params_schema ?? []) {
+      const el = $("ce-params").querySelector<HTMLElement>(
+        `[data-pkey="${p.key}"]`,
+      );
+      if (!el) continue;
+      const cur = spec.params?.[p.key] ?? p.default ?? "";
+      const need = () => {
+        // default:"" = pas de défaut effectif — retirer la clé ferait
+        // retomber le param required sur config_required.
+        if (p.required && !p.default)
+          throw new Error(t("comp_param_required", { k: p.label || p.key }));
+      };
+      switch (p.kind) {
+        case "bool": {
+          const v = (el as HTMLInputElement).checked;
+          if (v !== paramBool(cur)) patch[p.key] = v ? "true" : "false";
+          break;
+        }
+        case "enum": {
+          const v = (el as HTMLSelectElement).value;
+          if (v && !(p.choices ?? []).includes(v))
+            throw new Error(t("comp_param_badenum", { k: p.label || p.key }));
+          if (v !== cur) patch[p.key] = v;
+          break;
+        }
+        case "list": {
+          const v = (el as HTMLTextAreaElement).value
+            .split("\n")
+            .map((l) => l.trim())
+            .filter(Boolean);
+          if (!v.length) need();
+          if (v.join(",") !== paramList(cur).join(","))
+            patch[p.key] = v.join(",");
+          break;
+        }
+        default: {
+          const inp = el as HTMLInputElement;
+          if (p.secret) {
+            if (inp.value !== "") patch[p.key] = inp.value;
+            break;
+          }
+          const v = inp.value.trim();
+          if (!v) need();
+          if (v && p.kind === "int" && !/^-?\d+$/.test(v))
+            throw new Error(t("comp_param_badint", { k: p.label || p.key }));
+          if (
+            v &&
+            p.kind === "duration" &&
+            !/^(\d+(ms|min|s|m|h|d|w)\s*)+$/.test(v)
+          )
+            throw new Error(t("comp_param_baddur", { k: p.label || p.key }));
+          if (v && p.validation) {
+            try {
+              if (!new RegExp(p.validation).test(v))
+                throw new Error(t("comp_param_badfmt", { k: p.label || p.key }));
+            } catch (e) {
+              if (!(e instanceof SyntaxError)) throw e; // regex Rust non JS — le démon tranchera
+            }
+          }
+          if (v !== cur) patch[p.key] = v;
+        }
+      }
+    }
+    return patch;
   }
 
   /** Champs conditionnels selon kind : cycle de vie (autostart/restart/
@@ -797,10 +1043,15 @@ export class ComponentsPanel {
         : 5,
       healthcheck,
       description: ($("ce-desc") as HTMLInputElement).value.trim() || null,
+      // queries n'est pas exposé au formulaire — la valeur déclarée à
+      // la main est reprise telle quelle, sinon l'upsert (serde default)
+      // l'effacerait à chaque sauvegarde.
+      queries: this.editSpec?.queries ?? {},
     };
   }
 
   private async saveSpec() {
+    if (this.editBound) return this.saveBound();
     let spec: ComponentSpec;
     try {
       spec = this.collectSpec();
@@ -814,6 +1065,54 @@ export class ComponentsPanel {
         spec,
         conn: this.connParam(),
       });
+      notify("success", t("comp_saved", { name: spec.name }));
+      this.setMode("list");
+      await this.refreshList(true);
+    } catch (e) {
+      dlgErr("comp-err", String(e));
+    }
+  }
+
+  /** Sauvegarde bornée (composant catalogue) : params via
+   *  `component_set_params` — le démon re-rend la config et relance
+   *  si besoin ; autostart/description via `component_upsert` (seuls
+   *  champs utilisateurs acceptés par la spec scellée). Les champs
+   *  params_* sont omis de l'upsert : ils ont leur write-path dédié,
+   *  et renvoyer les valeurs lues écraserait les secrets masqués. */
+  private async saveBound() {
+    const spec = this.editSpec!;
+    let patch: Record<string, string>;
+    try {
+      patch = this.collectParams();
+    } catch (e) {
+      dlgErr("comp-err", String(e));
+      return;
+    }
+    const autostart = ($("ce-autostart") as HTMLInputElement).checked;
+    const description = ($("ce-desc") as HTMLInputElement).value.trim() || null;
+    try {
+      if (Object.keys(patch).length) {
+        await call("component_set_params", {
+          name: spec.name,
+          params: patch,
+          conn: this.connParam(),
+        });
+      }
+      if (
+        autostart !== spec.autostart ||
+        description !== (spec.description ?? null)
+      ) {
+        const upd = { ...spec, autostart, description };
+        delete upd.params;
+        delete upd.params_schema;
+        delete upd.catalog;
+        delete upd.render;
+        await call("component_upsert", {
+          name: spec.name,
+          spec: upd,
+          conn: this.connParam(),
+        });
+      }
       notify("success", t("comp_saved", { name: spec.name }));
       this.setMode("list");
       await this.refreshList(true);

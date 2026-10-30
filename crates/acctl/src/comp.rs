@@ -1,8 +1,8 @@
 //! `acctl comp` (alias `components`) — composants managés du démon
 //! (docs/components-integration.md §2.4) : ls / info / start / stop /
-//! restart / logs / catalog / install / set / add / rm. Miroir terminal
-//! des RPC `Component*` pour agents, scripts et l'orchestrateur
-//! lui-même.
+//! restart / logs / catalog / install / set / add / edit / rm. Miroir
+//! terminal des RPC `Component*` pour agents, scripts et
+//! l'orchestrateur lui-même.
 
 use crate::Conn;
 use anyhow::{bail, Context, Result};
@@ -240,7 +240,13 @@ fn name_arg<'a>(args: &'a [String], usage: &'static str) -> Result<&'a str> {
 /// logs <n> [--tail N] | catalog [--json] [--refresh] |
 /// install <n> [--set K=V …] | set <n> <clé> <val> |
 /// add <n> [--kind K] [--cmd "<argv>"] [--hc S] [--env K=V …]
-/// [--cwd C] [--desc D] [--autostart] | rm <n>`.
+/// [--cwd C] [--desc D] [--autostart] | edit <n> [flags add +
+/// --no-autostart --restart P --rsec N] | rm <n>`.
+///
+/// Édition bornée : un composant adossé au catalogue (`catalog` dans
+/// ComponentInfo) n'accepte que --desc/--autostart — la spec interne
+/// est scellée côté démon (upsert_edit) ; ses params déclarés se
+/// règlent via `comp set`. Un composant custom édite tous les champs.
 pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
     // Un flag à valeur en dernière position est une erreur d'usage —
     // mieux qu'une absorption silencieuse.
@@ -433,6 +439,109 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                 v["state"].as_str().unwrap_or("?"),
             );
         }
+        "edit" => {
+            let name = name_arg(
+                args,
+                "comp edit <name> [--desc D] [--autostart|--no-autostart] \
+                 [--kind K] [--cmd \"<argv>\"] [--hc S] [--env K=V …] \
+                 [--cwd C] [--restart always|on-failure|never] [--rsec N]",
+            )?;
+            let f = &args[3..];
+            const VAL: [&str; 8] = [
+                "--desc", "--kind", "--cmd", "--hc", "--env", "--cwd",
+                "--restart", "--rsec",
+            ];
+            if let Some(x) = f.last().filter(|a| VAL.contains(&a.as_str())) {
+                bail!("{x} sans valeur");
+            }
+            let info = c
+                .call(proto::ReqKind::ComponentInfo { name: name.into() })
+                .await?;
+            let mut spec: proto::ComponentSpec =
+                serde_json::from_value(info["spec"].clone())
+                    .context("comp edit: spec illisible dans component_info")?;
+            if info["catalog"].as_bool().unwrap_or(false) {
+                // Composant catalogue : la spec interne est scellée —
+                // même borne que le formulaire client (params via
+                // `comp set`, internals = propriété de l'entrée). Le
+                // démon refuserait aussi l'upsert ; erreur claire ici.
+                const SEALED: [&str; 7] = [
+                    "--kind", "--cmd", "--hc", "--env", "--cwd",
+                    "--restart", "--rsec",
+                ];
+                let bad: Vec<&String> =
+                    f.iter().filter(|a| SEALED.contains(&a.as_str())).collect();
+                anyhow::ensure!(
+                    bad.is_empty(),
+                    "« {name} » est géré par le catalogue — spec interne \
+                     scellée ({bad:?} refusés) ; params via `comp set`"
+                );
+            } else {
+                if let Some(k) = flag_val(f, "--kind") {
+                    spec.kind = match k {
+                        "process" => proto::ComponentKind::Process,
+                        "external" => proto::ComponentKind::External,
+                        "tool" => proto::ComponentKind::Tool,
+                        other => bail!("--kind process|external|tool (reçu: {other})"),
+                    };
+                }
+                if let Some(s) = flag_val(f, "--cmd") {
+                    spec.command = split_argv(s)?;
+                }
+                if let Some(s) = flag_val(f, "--hc") {
+                    spec.healthcheck = parse_healthcheck(s)?;
+                }
+                // --env présent = remplacement complet (même sémantique
+                // que le champ env du formulaire).
+                let envs = flag_vals(f, "--env");
+                if !envs.is_empty() {
+                    let mut env = std::collections::HashMap::new();
+                    for kv in envs {
+                        let (k, v) =
+                            kv.split_once('=').context("--env K=V attendu")?;
+                        anyhow::ensure!(!k.is_empty(), "--env K=V attendu (clé vide)");
+                        env.insert(k.to_string(), v.to_string());
+                    }
+                    spec.env = env;
+                }
+                if let Some(v) = flag_val(f, "--cwd") {
+                    spec.cwd = (!v.is_empty()).then(|| v.to_string());
+                }
+                if let Some(v) = flag_val(f, "--restart") {
+                    spec.restart = match v {
+                        "always" => proto::RestartPolicy::Always,
+                        "on-failure" => proto::RestartPolicy::OnFailure,
+                        "never" => proto::RestartPolicy::Never,
+                        other => {
+                            bail!("--restart always|on-failure|never (reçu: {other})")
+                        }
+                    };
+                }
+                if let Some(v) = flag_val(f, "--rsec") {
+                    spec.restart_sec = v.parse().context("--rsec N invalide")?;
+                }
+            }
+            if let Some(v) = flag_val(f, "--desc") {
+                spec.description = (!v.is_empty()).then(|| v.to_string());
+            }
+            if f.iter().any(|a| a == "--autostart") {
+                spec.autostart = true;
+            }
+            if f.iter().any(|a| a == "--no-autostart") {
+                spec.autostart = false;
+            }
+            let v = c
+                .call(proto::ReqKind::ComponentUpsert {
+                    name: name.into(),
+                    spec,
+                })
+                .await?;
+            println!(
+                "{} → {}",
+                v["name"].as_str().unwrap_or(name),
+                v["state"].as_str().unwrap_or("?"),
+            );
+        }
         "rm" => {
             let name = name_arg(args, "comp rm <name>")?;
             c.call(proto::ReqKind::ComponentRemove { name: name.into() })
@@ -441,7 +550,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
         }
         other => bail!(
             "comp: sous-commande inconnue: {other} \
-             (ls|info|start|stop|restart|logs|catalog|install|set|add|rm)"
+             (ls|info|start|stop|restart|logs|catalog|install|set|add|edit|rm)"
         ),
     }
     Ok(())

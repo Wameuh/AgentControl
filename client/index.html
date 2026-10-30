@@ -423,42 +423,50 @@
               <div id="comp-editor" hidden>
                 <h4 id="comp-ed-title"></h4>
                 <div id="comp-ed-form">
+                  <div id="ce-config-warn" class="ce-config-warn" hidden></div>
                   <label><span data-i18n="comp_f_name">Name</span> <input id="ce-name" autocomplete="off" spellcheck="false" /></label>
-                  <label><span data-i18n="comp_f_kind">Kind</span>
-                    <select id="ce-kind">
-                      <option value="process">process</option>
-                      <option value="external">external</option>
-                      <option value="tool">tool</option>
-                    </select>
-                  </label>
                   <label><span data-i18n="comp_f_desc">Description</span> <input id="ce-desc" autocomplete="off" /></label>
-                  <label class="ce-f-cmd"><span data-i18n="comp_f_cmd">Command (one arg per line)</span> <textarea id="ce-cmd" rows="3" spellcheck="false"></textarea></label>
-                  <label class="ce-f-env"><span data-i18n="comp_f_env">Environment (KEY=VALUE per line)</span> <textarea id="ce-env" rows="3" spellcheck="false"></textarea></label>
-                  <label class="ce-f-cwd"><span data-i18n="workdir">Working directory</span> <input id="ce-cwd" autocomplete="off" spellcheck="false" /></label>
+                  <div id="ce-params" hidden></div>
+                  <div id="ce-spec-fields">
+                    <label><span data-i18n="comp_f_kind">Kind</span>
+                      <select id="ce-kind">
+                        <option value="process">process</option>
+                        <option value="external">external</option>
+                        <option value="tool">tool</option>
+                      </select>
+                    </label>
+                    <label class="ce-f-cmd"><span data-i18n="comp_f_cmd">Command (one arg per line)</span> <textarea id="ce-cmd" rows="3" spellcheck="false"></textarea></label>
+                    <label class="ce-f-env"><span data-i18n="comp_f_env">Environment (KEY=VALUE per line)</span> <textarea id="ce-env" rows="3" spellcheck="false"></textarea></label>
+                    <label class="ce-f-cwd"><span data-i18n="workdir">Working directory</span> <input id="ce-cwd" autocomplete="off" spellcheck="false" /></label>
+                    <label class="ce-f-restart"><span data-i18n="comp_f_restart">Restart policy</span>
+                      <select id="ce-restart">
+                        <option value="on-failure">on-failure</option>
+                        <option value="always">always</option>
+                        <option value="never">never</option>
+                      </select>
+                    </label>
+                    <label class="ce-f-rsec"><span data-i18n="comp_f_restart_sec">Restart delay (s)</span> <input id="ce-rsec" type="number" min="0" max="60" /></label>
+                    <label><span data-i18n="comp_f_hc">Healthcheck</span>
+                      <select id="ce-hc">
+                        <option value="none">none</option>
+                        <option value="process">process</option>
+                        <option value="tcp">tcp</option>
+                        <option value="http">http</option>
+                        <option value="command">command</option>
+                      </select>
+                    </label>
+                    <label class="ce-f-hc-tcp"><span data-i18n="comp_f_hc_addr">TCP address</span> <input id="ce-hc-addr" placeholder="127.0.0.1:8080" autocomplete="off" spellcheck="false" /></label>
+                    <label class="ce-f-hc-http"><span data-i18n="comp_f_hc_url">HTTP URL</span> <input id="ce-hc-url" placeholder="http://127.0.0.1:8080/health" autocomplete="off" spellcheck="false" /></label>
+                    <label class="ce-f-hc-cmd"><span data-i18n="comp_f_hc_argv">Probe command (one arg per line)</span> <textarea id="ce-hc-argv" rows="2" spellcheck="false"></textarea></label>
+                  </div>
                   <label class="ce-f-autostart chk-row">
                     <input type="checkbox" id="ce-autostart" />
                     <span data-i18n="comp_f_autostart">Start with the daemon</span>
                   </label>
-                  <label class="ce-f-restart"><span data-i18n="comp_f_restart">Restart policy</span>
-                    <select id="ce-restart">
-                      <option value="on-failure">on-failure</option>
-                      <option value="always">always</option>
-                      <option value="never">never</option>
-                    </select>
-                  </label>
-                  <label class="ce-f-rsec"><span data-i18n="comp_f_restart_sec">Restart delay (s)</span> <input id="ce-rsec" type="number" min="0" max="60" /></label>
-                  <label><span data-i18n="comp_f_hc">Healthcheck</span>
-                    <select id="ce-hc">
-                      <option value="none">none</option>
-                      <option value="process">process</option>
-                      <option value="tcp">tcp</option>
-                      <option value="http">http</option>
-                      <option value="command">command</option>
-                    </select>
-                  </label>
-                  <label class="ce-f-hc-tcp"><span data-i18n="comp_f_hc_addr">TCP address</span> <input id="ce-hc-addr" placeholder="127.0.0.1:8080" autocomplete="off" spellcheck="false" /></label>
-                  <label class="ce-f-hc-http"><span data-i18n="comp_f_hc_url">HTTP URL</span> <input id="ce-hc-url" placeholder="http://127.0.0.1:8080/health" autocomplete="off" spellcheck="false" /></label>
-                  <label class="ce-f-hc-cmd"><span data-i18n="comp_f_hc_argv">Probe command (one arg per line)</span> <textarea id="ce-hc-argv" rows="2" spellcheck="false"></textarea></label>
+                  <details id="ce-internals" hidden>
+                    <summary><span data-i18n="comp_internals">Internals (catalog-owned, read-only)</span></summary>
+                    <pre id="ce-internals-json"></pre>
+                  </details>
                   <div class="cv-actions">
                     <button type="button" id="ce-del" class="danger" hidden data-i18n="delete">Delete</button>
                     <button type="button" id="ce-cancel" data-i18n="cancel">Cancel</button>
