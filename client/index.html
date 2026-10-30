@@ -276,6 +276,18 @@
                     <button id="s-doupdate" type="button" hidden data-i18n="update_now">Update now</button>
                     <span id="s-update-status"></span>
                   </div>
+                  <details id="s-logs" class="log-details">
+                    <summary data-i18n="logs">Logs</summary>
+                    <div class="log-bar">
+                      <select id="s-log-level" class="log-level" data-i18n-title="log_level" title="Minimum level">
+                        <option value="debug">DEBUG</option>
+                        <option value="info" selected>INFO</option>
+                        <option value="warn">WARN</option>
+                        <option value="error">ERROR</option>
+                      </select>
+                    </div>
+                    <pre id="s-log-view" class="log-view"></pre>
+                  </details>
                 </div>
               </details>
               <details class="s-sec" id="s-sec-files">
@@ -365,17 +377,17 @@
                   <button id="c-go" data-i18n="connect">Connect</button>
                 </div>
               </section>
-              <details id="cv-logs">
+              <details id="cv-logs" class="log-details">
                 <summary data-i18n="logs">Logs</summary>
-                <div id="log-bar">
-                  <select id="log-level" data-i18n-title="log_level" title="Minimum level">
+                <div class="log-bar">
+                  <select id="log-level" class="log-level" data-i18n-title="log_level" title="Minimum level">
                     <option value="debug">DEBUG</option>
                     <option value="info" selected>INFO</option>
                     <option value="warn">WARN</option>
                     <option value="error">ERROR</option>
                   </select>
                 </div>
-                <pre id="log-view"></pre>
+                <pre id="log-view" class="log-view"></pre>
               </details>
             </div>
           </div>

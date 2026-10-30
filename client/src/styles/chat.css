@@ -797,8 +797,9 @@ body.android #settings-body { padding-bottom: calc(20px + env(safe-area-inset-bo
 }
 .cv-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
 
-/* Logs repliables en bas de vue (détails techniques, pas en travers) */
-#cv-logs { max-width: 560px; }
-#cv-logs summary { cursor: pointer; color: var(--dim); font-size: 12.5px; }
-#cv-logs[open] summary { margin-bottom: 8px; }
+/* Logs repliables en bas de vue (détails techniques, pas en travers) —
+   .log-details partagé : vue connexion + section Updates des paramètres. */
+.log-details { max-width: 560px; }
+.log-details summary { cursor: pointer; color: var(--dim); font-size: 12.5px; }
+.log-details[open] summary { margin-bottom: 8px; }
 body.android #connview-body { padding-bottom: calc(20px + env(safe-area-inset-bottom)); }

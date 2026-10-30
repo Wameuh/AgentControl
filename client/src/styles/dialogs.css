@@ -63,9 +63,11 @@ dialog input[type="checkbox"]:focus-visible {
 }
 
 #native-list { display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow-y: auto; }
-#log-bar { display: flex; justify-content: flex-end; margin-bottom: 4px; }
-#log-bar select { font-size: 11px; padding: 2px 4px; }
-#log-view {
+/* Visionneuse client.log partagée (connexion + paramètres) : .log-details
+   = <details>, .log-bar = sélecteur de niveau, .log-view = <pre> coloré. */
+.log-bar { display: flex; justify-content: flex-end; margin-bottom: 4px; }
+.log-bar select { font-size: 11px; padding: 2px 4px; }
+.log-view {
   max-height: 320px; overflow-y: auto; background: rgba(0, 0, 0, .35);
   border: 1px solid var(--line); border-radius: 10px; padding: 9px;
   font: 11px/1.5 Mono, ui-monospace, monospace; white-space: pre-wrap;
@@ -73,11 +75,11 @@ dialog input[type="checkbox"]:focus-visible {
 }
 /* Puits sombre illisible en mode clair (texte --muted foncé) : voile
    clair comme #comp-logs. */
-:root.light #log-view { background: rgba(var(--tint-rgb), .05); }
-#log-view .ll-debug { color: var(--dim); }
-#log-view .ll-warn { color: var(--warn); }
-#log-view .ll-error { color: var(--err); }
-#log-view .ll-meta { color: var(--dim); }
+:root.light .log-view { background: rgba(var(--tint-rgb), .05); }
+.log-view .ll-debug { color: var(--dim); }
+.log-view .ll-warn { color: var(--warn); }
+.log-view .ll-error { color: var(--err); }
+.log-view .ll-meta { color: var(--dim); }
 
 /* Spinner */
 .spin::after {

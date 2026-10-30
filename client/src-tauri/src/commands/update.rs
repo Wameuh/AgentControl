@@ -8,6 +8,15 @@ use anyhow::Context;
 #[cfg(not(target_os = "android"))]
 use std::path::PathBuf;
 
+/// Journal du chemin update dans client.log — chaque étape (check →
+/// download → verify → install → relaunch) doit y laisser une trace
+/// lisible : une install qui échoue sans log est indiagnostiquable.
+#[cfg(not(target_os = "android"))]
+#[track_caller]
+fn ulog(msg: impl std::fmt::Display) {
+    client_core::log(client_core::Level::Info, format!("update: {msg}"));
+}
+
 #[cfg(not(target_os = "android"))]
 fn gh_get(url: &str) -> Result<serde_json::Value, String> {
     // Timeout global (connect+read) : le front borne déjà ses fetch — un
@@ -104,8 +113,9 @@ fn latest_incl_rc() -> Result<String, String> {
 #[cfg(not(target_os = "android"))]
 #[tauri::command]
 pub(crate) async fn check_update(include_rc: Option<bool>) -> Result<String, String> {
-    tokio::task::spawn_blocking(move || {
-        if include_rc.unwrap_or(false) {
+    let rc = include_rc.unwrap_or(false);
+    let r = tokio::task::spawn_blocking(move || {
+        if rc {
             if let Ok(v) = latest_incl_rc() {
                 return Ok(v);
             }
@@ -123,7 +133,12 @@ pub(crate) async fn check_update(include_rc: Option<bool>) -> Result<String, Str
         Ok(v["version"].as_str().unwrap_or("0.0.0").to_string())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    match &r {
+        Ok(v) => ulog(format!("check → distante v{v} (canal rc={rc})")),
+        Err(e) => ulog(format!("check échoué — {e}")),
+    }
+    r
 }
 
 #[cfg(target_os = "android")]
@@ -136,6 +151,85 @@ pub(crate) async fn check_update(_include_rc: Option<bool>) -> Result<String, St
 #[tauri::command]
 pub(crate) async fn update_client(_tag: String) -> Result<(), String> {
     Err("non supporté sur Android — installez le nouvel APK".into())
+}
+
+/// Garde-fou post-téléchargement : fichier non vide + en-tête attendu
+/// (archive ar pour .deb, MZ pour .exe) — un transfert tronqué ou une
+/// page d'erreur HTTP sauvée comme binaire doit échouer ici avec une
+/// cause claire, pas plus tard dans pkexec/le setup.
+#[cfg(not(target_os = "android"))]
+fn verify_asset(path: &std::path::Path, name: &str) -> Result<(), String> {
+    use std::io::Read;
+    if std::fs::metadata(path).map_err(|e| e.to_string())?.len() == 0 {
+        return Err(format!("{name} téléchargé vide"));
+    }
+    let mut head = [0u8; 8];
+    if std::fs::File::open(path)
+        .map_err(|e| e.to_string())?
+        .read_exact(&mut head)
+        .is_err()
+    {
+        return Err(format!("{name} invalide — fichier trop petit"));
+    }
+    if name.ends_with(".deb") && !head.starts_with(b"!<arch>") {
+        return Err(format!(
+            "{name} invalide — pas une archive deb (téléchargement corrompu ?)"
+        ));
+    }
+    if name.ends_with(".exe") && !head.starts_with(b"MZ") {
+        return Err(format!(
+            "{name} invalide — pas un exécutable (téléchargement corrompu ?)"
+        ));
+    }
+    Ok(())
+}
+
+/// Fichier de statut transmis à l'instance RELANCÉE : le process meurt
+/// avant la fin réelle de l'install (Windows — le setup tourne dans un
+/// .bat après l'exit) ou sitôt l'install validée (Linux/macOS). La
+/// nouvelle instance lit + supprime ce statut au boot → toast succès /
+/// échec — jamais de silence.
+#[cfg(not(target_os = "android"))]
+fn update_status_path() -> PathBuf {
+    std::env::temp_dir()
+        .join("agentcontrol-update")
+        .join("status.txt")
+}
+
+/// Écrit le statut « OK » avant relance (Linux/macOS). Sous Windows le
+/// statut est écrit par le .bat post-exit — pas d'appelant dans le
+/// process, la fonction n'y est pas compilée.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn write_update_status(s: &str) {
+    let p = update_status_path();
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&p, s);
+    ulog(format!("statut post-install écrit : {s}"));
+}
+
+/// Statut laissé par l'instance précédente ("OK <ver>" | "FAIL <cause>"),
+/// consommé une fois (fichier supprimé à la lecture).
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+pub(crate) fn update_last_status() -> Option<String> {
+    let p = update_status_path();
+    let s = std::fs::read_to_string(&p).ok()?.trim().to_string();
+    // Consommé même vide — sinon le fichier traînerait et serait relu
+    // à chaque boot.
+    let _ = std::fs::remove_file(&p);
+    if s.is_empty() {
+        return None;
+    }
+    ulog(format!("statut d'install précédente relevé : {s}"));
+    Some(s)
+}
+
+#[cfg(target_os = "android")]
+#[tauri::command]
+pub(crate) fn update_last_status() -> Option<String> {
+    None
 }
 
 /// Télécharge un asset de la release `tag` vers un dossier temporaire
@@ -179,29 +273,84 @@ fn fetch_release_asset(
     let mut r = resp.into_reader();
     let mut f = std::fs::File::create(&dest).map_err(|e| e.to_string())?;
     std::io::copy(&mut r, &mut f).map_err(|e| e.to_string())?;
+    let size = f.metadata().map_err(|e| e.to_string())?.len();
+    ulog(format!("{name} téléchargé → {} ({size} o)", dest.display()));
+    verify_asset(&dest, name).inspect_err(|e| {
+        ulog(format!("{name} rejeté à la vérif — {e}"));
+    })?;
     Ok(dest)
 }
 
 /// Update en un clic : télécharge le .deb de la release via l'API REST et
 /// l'installe (pkexec demande le mot de passe), puis relance l'app.
+/// Chaque échec dit sa cause et cite le repli manuel — jamais de silence.
 #[cfg(target_os = "linux")]
 #[tauri::command]
 pub(crate) async fn update_client(tag: String) -> Result<(), String> {
-    let deb = tokio::task::spawn_blocking(move || {
-        fetch_release_asset(&tag, "agentcontrol.deb", |n| n.ends_with(".deb"))
+    ulog(format!("install v{tag} demandée"));
+    let deb = tokio::task::spawn_blocking({
+        let tag = tag.clone();
+        move || fetch_release_asset(&tag, "agentcontrol.deb", |n| n.ends_with(".deb"))
     })
     .await
     .map_err(|e| e.to_string())??;
-    let st = tokio::process::Command::new("pkexec")
-        .arg("dpkg")
-        .arg("-i")
-        .arg(&deb)
-        .status()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !st.success() {
-        return Err("dpkg -i a échoué".to_string());
+    // Repli manuel cité dans TOUTES les erreurs ci-dessous : le .deb
+    // reste dans le dossier temp jusqu'à la prochaine tentative.
+    let manual = format!("installez-le à la main : sudo dpkg -i {}", deb.display());
+    // pkexec : sans agent polkit de session l'auth peut ne jamais se
+    // résoudre (hang) → timeout ; binaire absent → NotFound ; refus
+    // utilisateur → 126 ; pkexec incapable de lancer → 127. stderr
+    // capturée pour la cause réelle (dpkg y écrit ses erreurs).
+    // kill_on_drop : au timeout le futur output() est droppé — sans lui
+    // le child fuirait détaché et pourrait installer en arrière-plan
+    // APRÈS le rapport d'échec (install silencieuse, exactement ce que
+    // ce correctif élimine).
+    let mut pkexec = tokio::process::Command::new("pkexec");
+    pkexec.arg("dpkg").arg("-i").arg(&deb).kill_on_drop(true);
+    let run = pkexec.output();
+    let out = match tokio::time::timeout(std::time::Duration::from_secs(300), run).await {
+        Err(_) => {
+            let msg =
+                format!("aucune réponse de l'authentification (agent polkit absent ?) — {manual}");
+            ulog(format!("install v{tag} échouée — {msg}"));
+            return Err(msg);
+        }
+        Ok(Err(e)) => {
+            let msg = if e.kind() == std::io::ErrorKind::NotFound {
+                format!("pkexec introuvable (polkit/policykit non installé) — {manual}")
+            } else {
+                format!("pkexec non lançable : {e} — {manual}")
+            };
+            ulog(format!("install v{tag} échouée — {msg}"));
+            return Err(msg);
+        }
+        Ok(Ok(o)) => o,
+    };
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if !out.status.success() {
+        let detail = |base: &str| {
+            if stderr.is_empty() {
+                base.to_string()
+            } else {
+                format!("{base} : {stderr}")
+            }
+        };
+        let msg = match out.status.code() {
+            Some(126) => detail("autorisation refusée (demande annulée)"),
+            Some(127) => detail(
+                "pkexec n'a pas pu lancer l'installation (agent d'authentification absent ?)",
+            ),
+            code => detail(&format!(
+                "dpkg -i a échoué{}",
+                code.map(|c| format!(" (code {c})")).unwrap_or_default()
+            )),
+        };
+        let msg = format!("{msg} — {manual}");
+        ulog(format!("install v{tag} échouée — {msg}"));
+        return Err(msg);
     }
+    ulog(format!("install v{tag} réussie → relance"));
+    write_update_status(&format!("OK {tag}"));
     if let Ok(exe) = std::env::current_exe() {
         let _ = std::process::Command::new(exe).spawn();
     }
@@ -217,6 +366,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 #[tauri::command]
 pub(crate) async fn update_client(tag: String) -> Result<(), String> {
+    ulog(format!("install v{tag} demandée"));
     // <bundle>.app/Contents/MacOS/<exe> — le bundle courant est la cible.
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let app: PathBuf = exe
@@ -226,6 +376,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
         .to_path_buf();
     tokio::task::spawn_blocking({
         let app = app.clone();
+        let tag = tag.clone();
         move || -> Result<(), String> {
             let arch = if cfg!(target_arch = "aarch64") {
                 "aarch64"
@@ -254,6 +405,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
                 .arg(&mnt)
                 .status();
             std::fs::create_dir_all(&mnt).map_err(|e| e.to_string())?;
+            ulog(format!("montage {}", dmg.display()));
             let attach = run(std::process::Command::new("hdiutil")
                 .args(["attach", "-nobrowse", "-readonly", "-mountpoint"])
                 .arg(&mnt)
@@ -284,6 +436,9 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
                 .arg(&mnt)
                 .status();
             let _ = std::fs::remove_dir_all(dir);
+            if let Err(e) = &res {
+                ulog(format!("install v{tag} échouée — {e}"));
+            }
             res
         }
     })
@@ -295,6 +450,8 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
         .args(["-dr", "com.apple.quarantine"])
         .arg(&app)
         .status();
+    ulog(format!("install v{tag} réussie → relance"));
+    write_update_status(&format!("OK {tag}"));
     // -n force une nouvelle instance : l'actuelle n'est pas encore morte
     // quand open s'exécute (simple `open` ne ferait que l'activer).
     let _ = std::process::Command::new("open")
@@ -311,6 +468,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 #[tauri::command]
 pub(crate) async fn update_client(tag: String) -> Result<(), String> {
+    ulog(format!("install v{tag} demandée"));
     let cur = std::env::current_exe().map_err(|e| e.to_string())?;
     // Installé = exe sous le $INSTDIR NSIS = %LOCALAPPDATA%\<productName>\
     // (installMode currentUser par défaut — RestorePreviousInstallLocation
@@ -329,31 +487,45 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     if local.is_empty() || !cur_l.starts_with(&local) {
         return Err("build portable — update manuelle via la page releases".into());
     }
-    let setup = tokio::task::spawn_blocking(move || {
-        // NSIS : AgentControl_<ver>_x64-setup.exe
-        fetch_release_asset(&tag, "agentcontrol-setup.exe", |n| {
-            n.ends_with("-setup.exe")
-        })
+    let setup = tokio::task::spawn_blocking({
+        let tag = tag.clone();
+        move || {
+            // NSIS : AgentControl_<ver>_x64-setup.exe
+            fetch_release_asset(&tag, "agentcontrol-setup.exe", |n| {
+                n.ends_with("-setup.exe")
+            })
+        }
     })
     .await
     .map_err(|e| e.to_string())??;
     // cmd /C : ping ≈ sleep 1 s sans console (timeout.exe exige un handle
     // d'entrée console → inerte sous CREATE_NO_WINDOW) — laisse au process
     // courant le temps de se fermer et de relâcher ses locks ; /wait attend
-    // la fin du setup (exit code propagé → pas de relance si l'install a
-    // échoué). hide_console → aucune fenêtre cmd parasite. del final : pas
-    // de résidu setup/.bat dans TEMP (sauf chemin d'échec = débogage).
+    // la fin du setup. L'install se produit APRÈS notre exit : son résultat
+    // est versé dans status.txt (OK/FAIL) → l'instance relancée le lit au
+    // boot et l'affiche — un setup raté relance quand même l'ancienne
+    // version pour que l'échec soit visible. hide_console → aucune fenêtre
+    // cmd parasite. del final : pas de résidu setup/.bat dans TEMP (sauf
+    // chemin d'échec = débogage).
+    let status = update_status_path();
     let bat = setup.with_file_name("agentcontrol-update.bat");
     std::fs::write(
         &bat,
         format!(
-            "@echo off\r\nping -n 2 127.0.0.1 >nul\r\nstart \"\" /wait \"{}\" /S\r\nif errorlevel 1 exit /b 1\r\ndel \"{}\"\r\nstart \"\" \"{}\"\r\ndel \"%~f0\"\r\n",
+            "@echo off\r\nping -n 2 127.0.0.1 >nul\r\nstart \"\" /wait \"{}\" /S\r\nif errorlevel 1 goto fail\r\n>\"{}\" echo OK {tag}\r\ndel \"{}\"\r\nstart \"\" \"{}\"\r\ndel \"%~f0\" & exit /b 0\r\n:fail\r\n>\"{}\" echo FAIL installer exited with code %errorlevel%\r\nstart \"\" \"{}\"\r\nexit /b 1\r\n",
             setup.display(),
+            status.display(),
             setup.display(),
+            cur.display(),
+            status.display(),
             cur.display()
         ),
     )
     .map_err(|e| e.to_string())?;
+    ulog(format!(
+        "install v{tag} : lancement du setup (post-exit) → {}",
+        bat.display()
+    ));
     let mut cmd = tokio::process::Command::new("cmd");
     cmd.arg("/C").arg(&bat);
     client_core::hide_console(&mut cmd);

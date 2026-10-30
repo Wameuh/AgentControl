@@ -105,6 +105,8 @@ async function webInvoke<T>(cmd: string, a: Record<string, unknown>): Promise<T>
     case "log_write":
       console.debug("[ui]", a.msg);
       return undefined as T;
+    case "update_last_status":
+      return null as T;
     case "set_app_icon":
       return undefined as T;
     case "plugin:opener|open_url":

@@ -6,6 +6,7 @@
 
 import { getVersion, isWeb } from "../core/bridge";
 import { $ } from "../core/dom";
+import { bindLogView } from "../core/logview";
 import { applyTheme, applyAccent, accentPref, applyBgAnim, bgAnimOn, isAndroid, type Accent } from "../core/chrome";
 import { defaultEncoding } from "../core/encoding";
 import { inlineImages } from "../core/format";
@@ -149,10 +150,13 @@ export class SettingsPanel {
         go.hidden = false;
         go.onclick = async () => {
           go.disabled = true;
+          const prev = go.textContent;
+          go.textContent = t("update_installing", { v: remote });
           try {
             await performClientUpdate(remote);
           } finally {
             go.disabled = false;
+            go.textContent = prev;
           }
         };
       } else {
@@ -260,6 +264,9 @@ export class SettingsPanel {
       this.syncSecStates();
     };
     ($("s-checkupdate") as HTMLButtonElement).onclick = () => this.runUpdateCheck();
+    // « Voir les logs » : la visionneuse client.log partagée — la télémétrie
+    // update (check → install) y est lisible sans quitter les paramètres.
+    bindLogView($("s-logs") as HTMLDetailsElement);
   }
 
   /** Résumé d'état à droite du titre de chaque section — la valeur
