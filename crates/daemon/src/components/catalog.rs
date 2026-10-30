@@ -167,30 +167,40 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 path: Some("~/.local/bin/agent-reviewer".into()),
             },
             recipe: vec![
+                // Pas de packaging Python upstream (ni pyproject ni
+                // setup.py — `uv tool install` échouerait) : fetch du
+                // script auto-suffisant + seed de la config si absente
+                // (jamais d'écrasement). `~` est expansé par le sh.
                 RecipeStep::Run {
                     argv: vec![
-                        "uv".into(),
-                        "tool".into(),
-                        "install".into(),
-                        "git+https://github.com/Wameuh/AgentReviewer".into(),
+                        "sh".into(),
+                        "-c".into(),
+                        "set -e; \
+                         mkdir -p ~/.local/bin ~/.config/agentreviewer; \
+                         curl -fsSL https://raw.githubusercontent.com/Wameuh/AgentReviewer/main/agentreviewer.py \
+                           -o ~/.local/bin/agent-reviewer; \
+                         chmod 755 ~/.local/bin/agent-reviewer; \
+                         test -f ~/.config/agentreviewer/config.toml || \
+                           curl -fsSL https://raw.githubusercontent.com/Wameuh/AgentReviewer/main/config.example.toml \
+                             -o ~/.config/agentreviewer/config.toml; \
+                         chmod 600 ~/.config/agentreviewer/config.toml"
+                            .into(),
                     ],
-                },
-                RecipeStep::RequireFile {
-                    path: "~/.config/agentreviewer/config.toml".into(),
-                    hint: "créez-le depuis config.example.toml du repo \
-                           (repo, repo_dir, worktree_root requis) — \
-                           l'outil installé n'embarque pas l'exemple"
-                        .into(),
                 },
                 RecipeStep::UpsertSpec,
                 RecipeStep::Note {
-                    text: "Éditez ~/.config/agentreviewer/config.toml puis \
-                           démarrez le composant — en `process` managé le \
-                           watcher reçoit AGENTCONTROL_SOCK/TCP injectés \
-                           et crée ses reviews en sessions du démon \
-                           (group « AgentReviewer »). Install manuelle \
-                           alternative : git clone + ./install.sh — la \
-                           détection voit aussi ~/.local/bin/agent-reviewer."
+                    text: "Éditez ~/.config/agentreviewer/config.toml \
+                           (reposée par l'install si absente) puis \
+                           démarrez le composant — en `process` managé \
+                           le watcher reçoit AGENTCONTROL_SOCK/TCP \
+                           injectés et crée ses reviews en sessions du \
+                           démon (group « AgentReviewer »). Si le timer \
+                           systemd upstream était activé, désactivez-le \
+                           (`systemctl --user disable --now \
+                           agentreviewer-watch.timer`) pour éviter un \
+                           double polling — le flock interne les \
+                           sérialiserait mais gaspillerait des appels \
+                           API GitHub."
                         .into(),
                 },
             ],

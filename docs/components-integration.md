@@ -239,7 +239,10 @@ version, doc) étant récupérées depuis sa source upstream.
   Exemples :
   - `agentbacklog` : `uv tool install git+https://github.com/Wameuh/AgentBacklog`
     (install upstream documentée) + spec `tool`.
-  - `agentreviewer` : `uv tool install git+https://github.com/Wameuh/AgentReviewer`
+  - `agentreviewer` : fetch du script upstream
+    (`raw.githubusercontent.com/Wameuh/AgentReviewer` → `~/.local/bin`)
+    + seed `config.toml` si absente — le repo n'est pas packagé
+    (ni `pyproject` ni `setup.py`, `uv tool install` n'y marche pas) —
     + spec `process` (boucle `sh` autour du watcher one-shot — il reçoit
     `AGENTCONTROL_SOCK`/`AGENTCONTROL_TCP` injectés et crée ses reviews
     en sessions `origin=component:agentreviewer`, groupe
