@@ -77,9 +77,9 @@ pub(crate) fn params_schema() -> Vec<ParamSpec> {
     vec![
         ps(
             "enabled",
-            "Activé",
-            "persisté — orchestrateur actif au boot ET dès le set \
-             (`orch on|off` reste la bascule runtime non persistée)",
+            "Activé au boot",
+            "valeur persistée — l'appliquer bascule aussi le runtime ; \
+             `orch on|off` reste la bascule runtime non persistée",
             ParamKind::Bool,
             Some("false"),
         ),
@@ -88,7 +88,9 @@ pub(crate) fn params_schema() -> Vec<ParamSpec> {
             "Surveillance PR",
             "sondes « gh » du cycle : rétention des workers à PR \
              ouverte, recyclage post-merge, release des wip orphelins — \
-             décocher = l'orchestrateur ne regarde que la file",
+             décocher = file seule : aucune sonde forge sur les workers \
+             (la garde release PR relève d'auto_patchnotes) et aucune \
+             récupération d'orphelins",
             ParamKind::Bool,
             Some("true"),
         ),
@@ -133,7 +135,8 @@ pub(crate) fn params_schema() -> Vec<ParamSpec> {
             "Préfixe workers",
             "préfixe de titre des sessions workers (\"Backlog-W\") — \
              le changer en route « perd » les workers en cours (leur \
-             titre ne matche plus) ; vide = défaut",
+             titre ne matche plus), un préfixe trop court adopterait \
+             des sessions étrangères (min 4 car.) ; vide = défaut",
             ParamKind::String,
             Some("Backlog-W"),
         ),
@@ -207,12 +210,14 @@ pub(crate) fn params_schema() -> Vec<ParamSpec> {
 }
 
 /// Valeurs courantes sous forme chaîne — `spec.params` de l'item
-/// `backlog-orchestrator` (formulaire prérempli). `enabled` reflète le
-/// runtime (`is_enabled`) : le formulaire montre l'état réel, pas la
-/// valeur du boot.
-pub(crate) fn params_values(cfg: &super::cfg::OrchCfg, enabled: bool) -> HashMap<String, String> {
+/// `backlog-orchestrator` (formulaire prérempli). `enabled` porte la
+/// valeur *persistée* (`cfg.enabled`), pas le runtime : le formulaire
+/// renvoie toutes les clés au save — préremplir depuis `is_enabled()`
+/// rendrait durable un `orch off` « temporaire » à la première
+/// sauvegarde d'un param sans rapport.
+pub(crate) fn params_values(cfg: &super::cfg::OrchCfg) -> HashMap<String, String> {
     let mut m = HashMap::new();
-    m.insert("enabled".into(), enabled.to_string());
+    m.insert("enabled".into(), cfg.enabled.to_string());
     m.insert("watch_prs".into(), cfg.watch_prs.to_string());
     m.insert("auto_patchnotes".into(), cfg.auto_patchnotes.to_string());
     m.insert("spawn_managers".into(), cfg.spawn_managers.to_string());
@@ -324,6 +329,12 @@ fn val_map(v: &Value) -> Result<BTreeMap<String, String>> {
             }
         }
         Value::String(s) => {
+            // « {} »/« [] » chaîne = map vidée — la seule façon de
+            // vider via le canal chaîne (formulaire/comp set n'émettent
+            // pas d'objet natif) ; « » reste le défaut (apply_patch).
+            if matches!(s.trim(), "{}" | "[]") {
+                return Ok(out);
+            }
             for e in s.split(',') {
                 let e = e.trim();
                 if e.is_empty() {
@@ -349,7 +360,8 @@ fn is_empty(v: &Value) -> bool {
 /// Applique un patch `{clé: valeur}` à `cfg` — validation par champ.
 /// L'appelant travaille sur un clone : une clé fautive laisse la config
 /// vivante intacte (bail avant commit `*guard = next`). Renvoie les
-/// clés appliquées dans l'ordre du patch.
+/// clés appliquées (triées — le patch arrive en `BTreeMap`, l'ordre
+/// d'insertion du JSON est déjà perdu à la désérialisation).
 pub(crate) fn apply_patch(
     cfg: &mut super::cfg::OrchCfg,
     patch: &BTreeMap<String, Value>,
@@ -374,7 +386,14 @@ pub(crate) fn apply_patch(
                 cfg.title_prefix = if is_empty(v) {
                     OrchCfg::default().title_prefix
                 } else {
-                    val_string(v)?
+                    let s = val_string(v)?;
+                    anyhow::ensure!(
+                        s.chars().count() >= 4,
+                        "title_prefix « {s} » trop court (< 4) — il \
+                         identifierait comme workers des sessions \
+                         étrangères (nudge/rm sur des sessions utilisateur)"
+                    );
+                    s
                 }
             }
             "workspace" => {
@@ -429,11 +448,23 @@ pub(crate) fn apply_patch(
 /// Réécrit la section `[backlog_orchestrator]` de `<root>/config.toml`
 /// — `toml_edit` préserve le reste du document (autres sections,
 /// commentaires, clés non déclarées) ; écriture atomique `.part` +
-/// rename. Fichier absent → créé avec la seule section ; fichier
-/// présent mais invalide → erreur (jamais d'écrasement aveugle).
+/// rename. Fichier absent → créé avec la seule section ; TOUTE autre
+/// erreur de lecture (permissions, non-UTF-8, IO) ou un TOML invalide
+/// → erreur : jamais d'écrasement aveugle (`[agents.*.env]` peut porter
+/// des secrets — détruire ces sections serait irréversible). Les
+/// permissions du fichier existant sont recopiées sur le tmp avant le
+/// rename (0600 typique, comme `web.token`), et le chemin est
+/// canonicalisé : un `config.toml` symlink écrit sur sa cible plutôt
+/// que de le remplacer par un fichier régulier.
 pub(crate) fn persist(root: &Path, cfg: &super::cfg::OrchCfg) -> Result<()> {
     let path = root.join("config.toml");
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    // Cible réelle d'un éventuel symlink (absent → tel quel).
+    let path = std::fs::canonicalize(&path).unwrap_or(path);
+    let (text, perms) = match std::fs::read_to_string(&path) {
+        Ok(t) => (t, std::fs::metadata(&path).ok().map(|m| m.permissions())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), None),
+        Err(e) => return Err(e).context("lecture config.toml"),
+    };
     let mut doc = text
         .parse::<toml_edit::DocumentMut>()
         .context("config.toml illisible — [backlog_orchestrator] non réécrite")?;
@@ -446,6 +477,15 @@ pub(crate) fn persist(root: &Path, cfg: &super::cfg::OrchCfg) -> Result<()> {
     doc["backlog_orchestrator"] = toml_edit::Item::Table(sub.as_table().clone());
     let tmp = root.join("config.toml.part");
     std::fs::write(&tmp, doc.to_string()).context("écriture config.toml.part")?;
+    // Le tmp naît en 0666&~umask : recopier les permissions de
+    // l'original (un config 0600 ne doit pas ressortir lisible par
+    // tous) ; fichier neuf → 0600, la même retenue que web.token.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let p = perms.unwrap_or_else(|| std::fs::Permissions::from_mode(0o600));
+        std::fs::set_permissions(&tmp, p).context("permissions config.toml.part")?;
+    }
     std::fs::rename(&tmp, &path).context("rename config.toml")?;
     Ok(())
 }
@@ -538,6 +578,51 @@ mod tests {
     }
 
     #[test]
+    fn map_vide_via_chaine_et_prefixe_trop_court() {
+        let mut c = super::super::cfg::OrchCfg::default();
+        // "{}" et "[]" chaîne = map vidée (canal formulaire/comp set).
+        for s in ["{}", "[]"] {
+            apply_patch(&mut c, &patch(&[("repo_workspaces", json!(s))])).unwrap();
+            assert!(c.repo_workspaces.is_empty(), "chaîne {s} = map vidée");
+            c.repo_workspaces.insert("R".into(), "/r".into());
+        }
+        // title_prefix < 4 caractères → refusé (adoption de sessions
+        // étrangères) ; >= 4 accepté.
+        assert!(apply_patch(&mut c, &patch(&[("title_prefix", json!("s"))])).is_err());
+        assert!(apply_patch(&mut c, &patch(&[("title_prefix", json!("ab "))])).is_err());
+        apply_patch(&mut c, &patch(&[("title_prefix", json!("Work-"))])).unwrap();
+        assert_eq!(c.title_prefix, "Work-");
+    }
+
+    #[test]
+    fn persist_garde_permissions_et_refuse_illisible() {
+        let dir = std::env::temp_dir().join(format!("orchcfg2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        // config 0600 → après réécriture toujours 0600 (pas de fuite
+        // d'un [agents.*.env] secret en 0644).
+        std::fs::write(&path, "[backlog_orchestrator]\nenabled = false\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        persist(&dir, &super::super::cfg::OrchCfg::default()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        // Contenu non-UTF8 → erreur, fichier intact (jamais
+        // d'écrasement aveugle).
+        std::fs::write(&path, b"\xff\xfe\x00[").unwrap();
+        let avant = std::fs::read(&path).unwrap();
+        assert!(persist(&dir, &super::super::cfg::OrchCfg::default()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), avant);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn persist_preserve_le_reste_et_relit() {
         let dir = std::env::temp_dir().join(format!("orchcfg-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -575,7 +660,7 @@ mod tests {
             KEYS.to_vec()
         );
         let c = super::super::cfg::OrchCfg::default();
-        let vals = params_values(&c, false);
+        let vals = params_values(&c);
         for p in &schema {
             assert!(vals.contains_key(&p.key), "valeur manquante: {}", p.key);
         }

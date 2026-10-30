@@ -268,10 +268,7 @@ impl Components {
                 queries: HashMap::new(),
                 catalog: None,
                 params_schema: crate::server::orch_cfg::params_schema(),
-                params: crate::server::orch_cfg::params_values(
-                    &cfg,
-                    self.orch.is_enabled(),
-                ),
+                params: crate::server::orch_cfg::params_values(&cfg),
                 render: None,
             };
             let st = ComponentStatus {

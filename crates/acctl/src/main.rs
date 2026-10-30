@@ -28,8 +28,10 @@
 //!       | install <n> | add <n> [--kind K] [--cmd "<argv>"] [--hc S]
 //!       [--env K=V ...] [--cwd C] [--desc D] [--autostart] | rm <n>
 //!                                     — composants managés du démon
-//!   acctl orch [on|off|status]       — orchestrateur backlog natif
-//!                                     (bascule à chaud, défaut status)
+//!   acctl orch [on|off|status|config|set <clé> <val>…]
+//!                                     — orchestrateur backlog natif
+//!                                     (on|off : bascule runtime ;
+//!                                     config/set : édition persistée)
 //!
 //! Connexion : $AGENTCONTROL_SOCK (défaut ~/.agentcontrol/daemon.sock)
 //!             ou $AGENTCONTROL_TCP host:port

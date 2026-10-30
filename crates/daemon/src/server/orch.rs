@@ -1346,7 +1346,6 @@ impl Daemon {
             "state": self.orch.component_state(),
             "params": orch_cfg::params_values(
                 &self.orch.cfg.read().unwrap(),
-                self.orch.is_enabled(),
             ),
             "config_required": [],
             "rendered": true,   // = section config.toml réécrite
@@ -1356,22 +1355,28 @@ impl Daemon {
 
     /// Champ « set » commun : patch sur un clone → persistance
     /// config.toml → commit de la cfg vivante → réveil de la boucle
-    /// (`set_enabled` si `enabled` posé — bascule durable ET runtime ;
-    /// `kick` sinon — le prochain tick voit la nouvelle cfg sans
-    /// attendre `poll_secs`). Synchrone : le write-lock n'est jamais
-    /// tenu sur un await, et il sérialise les sets concurrents.
+    /// (`set_enabled` si `enabled` posé ET changé — bascule durable ET
+    /// runtime ; `kick` sinon — le prochain tick voit la nouvelle cfg
+    /// sans attendre `poll_secs`). Patch vide → no-op (la section ne
+    /// serait réécrite que pour perdre les clés inconnues/commentaires
+    /// internes). Synchrone : le write-lock n'est jamais tenu sur un
+    /// await, et il sérialise les sets concurrents.
     fn orch_patch(self: &Arc<Self>, patch: BTreeMap<String, Value>) -> Result<Vec<String>> {
-        let (applied, touched_enabled, en) = {
+        if patch.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (applied, flip_enabled, en) = {
             let mut guard = self.orch.cfg.write().unwrap();
             let mut next = guard.clone();
             let applied = orch_cfg::apply_patch(&mut next, &patch)?;
             orch_cfg::persist(&self.root, &next)?;
-            let touched = patch.contains_key("enabled");
+            let flip = patch.contains_key("enabled")
+                && next.enabled != self.orch.is_enabled();
             let en = next.enabled;
             *guard = next;
-            (applied, touched, en)
+            (applied, flip, en)
         };
-        if touched_enabled {
+        if flip_enabled {
             self.orch.set_enabled(en);
         } else {
             self.orch.kick();
