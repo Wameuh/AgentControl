@@ -1,7 +1,8 @@
 //! `acctl comp` (alias `components`) — composants managés du démon
 //! (docs/components-integration.md §2.4) : ls / info / start / stop /
-//! restart / logs / catalog / install / add / rm. Miroir terminal des
-//! RPC `Component*` pour agents, scripts et l'orchestrateur lui-même.
+//! restart / logs / catalog / install / set / add / rm. Miroir terminal
+//! des RPC `Component*` pour agents, scripts et l'orchestrateur
+//! lui-même.
 
 use crate::Conn;
 use anyhow::{bail, Context, Result};
@@ -88,8 +89,19 @@ fn ls(items: &[Value]) {
             Some("internal") => " [internal]",
             _ => "",
         };
+        // Params requis manquants : la raison du blocage doit être
+        // visible dans la ligne (« configuration requise : repo, … »).
+        let missing = st["config_required"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|k| k.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
         println!(
-            "{:<22} {:<8} {:<16} {:>7} {:>8} {:>4}  {}{}",
+            "{:<22} {:<8} {:<16} {:>7} {:>8} {:>4}  {}{}{}",
             it["name"].as_str().unwrap_or(""),
             it["kind"].as_str().unwrap_or("?"),
             state,
@@ -98,6 +110,11 @@ fn ls(items: &[Value]) {
             restarts,
             it["description"].as_str().unwrap_or(""),
             src,
+            if missing.is_empty() {
+                String::new()
+            } else {
+                format!(" — configuration requise : {missing}")
+            },
         );
     }
 }
@@ -204,6 +221,10 @@ fn spec_from_args(name: &str, args: &[String]) -> Result<proto::ComponentSpec> {
         healthcheck,
         description: flag_val(args, "--desc").map(String::from),
         queries: std::collections::HashMap::new(),
+        catalog: None,
+        params_schema: Vec::new(),
+        params: std::collections::HashMap::new(),
+        render: None,
     })
 }
 
@@ -216,14 +237,16 @@ fn name_arg<'a>(args: &'a [String], usage: &'static str) -> Result<&'a str> {
 }
 
 /// `acctl comp [ls] [--json] | info <n> | start|stop|restart <n> |
-/// logs <n> [--tail N] | catalog [--json] [--refresh] | install <n> |
+/// logs <n> [--tail N] | catalog [--json] [--refresh] |
+/// install <n> [--set K=V …] | set <n> <clé> <val> |
 /// add <n> [--kind K] [--cmd "<argv>"] [--hc S] [--env K=V …]
 /// [--cwd C] [--desc D] [--autostart] | rm <n>`.
 pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
     // Un flag à valeur en dernière position est une erreur d'usage —
     // mieux qu'une absorption silencieuse.
-    const VAL_FLAGS: [&str; 7] =
-        ["--kind", "--cmd", "--hc", "--env", "--cwd", "--desc", "--tail"];
+    const VAL_FLAGS: [&str; 8] = [
+        "--kind", "--cmd", "--hc", "--env", "--cwd", "--desc", "--tail", "--set",
+    ];
     if let Some(f) = args.last().filter(|a| VAL_FLAGS.contains(&a.as_str())) {
         bail!("{f} sans valeur");
     }
@@ -311,9 +334,18 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             }
         }
         "install" => {
-            let name = name_arg(args, "comp install <name>")?;
+            let name = name_arg(args, "comp install <name> [--set K=V …]")?;
+            let mut params = std::collections::HashMap::new();
+            for kv in flag_vals(&args[3..], "--set") {
+                let (k, v) = kv.split_once('=').context("--set K=V attendu")?;
+                anyhow::ensure!(!k.is_empty(), "--set K=V attendu (clé vide)");
+                params.insert(k.to_string(), v.to_string());
+            }
             let v = c
-                .call(proto::ReqKind::ComponentInstall { name: name.into() })
+                .call(proto::ReqKind::ComponentInstall {
+                    name: name.into(),
+                    params: (!params.is_empty()).then_some(params),
+                })
                 .await?;
             println!(
                 "{} — installed={} state={}",
@@ -321,11 +353,66 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                 v["installed"].as_bool().unwrap_or(false),
                 v["state"].as_str().unwrap_or("-"),
             );
+            let missing = v["config_required"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            if !missing.is_empty() {
+                println!("configuration requise : {missing}");
+            }
             for n in v["notes"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
                 if let Some(t) = n.as_str() {
                     println!("note: {t}");
                 }
             }
+        }
+        "set" => {
+            let name = name_arg(args, "comp set <name> <clé> <valeur>")?;
+            let key = args.get(3).context("comp set <name> <clé> <valeur>")?;
+            anyhow::ensure!(!key.starts_with("--"), "clé invalide: {key}");
+            let value = args.get(4).context("comp set <name> <clé> <valeur>")?;
+            let v = c
+                .call(proto::ReqKind::ComponentSetParams {
+                    name: name.into(),
+                    params: std::collections::HashMap::from([(
+                        key.clone(),
+                        value.clone(),
+                    )]),
+                })
+                .await?;
+            let missing = v["config_required"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            println!(
+                "{} — {}{}{}",
+                v["name"].as_str().unwrap_or(name),
+                if missing.is_empty() {
+                    format!("state={}", v["state"].as_str().unwrap_or("?"))
+                } else {
+                    format!("configuration requise : {missing}")
+                },
+                if v["rendered"].as_bool().unwrap_or(false) {
+                    " — config rendue"
+                } else {
+                    ""
+                },
+                if v["restarted"].as_bool().unwrap_or(false) {
+                    ", redémarré"
+                } else {
+                    ""
+                },
+            );
         }
         "add" => {
             let name = name_arg(
@@ -354,7 +441,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
         }
         other => bail!(
             "comp: sous-commande inconnue: {other} \
-             (ls|info|start|stop|restart|logs|catalog|install|add|rm)"
+             (ls|info|start|stop|restart|logs|catalog|install|set|add|rm)"
         ),
     }
     Ok(())

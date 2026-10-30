@@ -158,6 +158,29 @@ export type ComponentHealthcheck =
   | { kind: "http"; url: string }
   | { kind: "command"; argv: string[] };
 
+/** Type d'un paramètre déclaré — pilote le widget du formulaire et la
+ *  validation côté démon. */
+export type ParamKind =
+  | "string" | "path" | "int" | "duration" | "bool" | "enum" | "list";
+
+/** Paramètre de config déclaré (catalogue → spec.params_schema) : la
+ *  seule surface éditable d'un composant managé — la spec interne
+ *  (command/restart/healthcheck) reste propriété du catalogue. */
+export interface ParamSpec {
+  key: string;
+  label: string;
+  description?: string | null;
+  required: boolean;
+  kind: ParamKind;
+  /** Forme chaîne — castée selon kind. */
+  default?: string | null;
+  secret?: boolean;
+  /** Regex (string/path). */
+  validation?: string | null;
+  /** Valeurs autorisées (enum). */
+  choices?: string[];
+}
+
 /** Spec [[components]] de components.toml — lue et écrite telle quelle. */
 export interface ComponentSpec {
   name: string;
@@ -170,6 +193,15 @@ export interface ComponentSpec {
   restart_sec: number;
   healthcheck: ComponentHealthcheck;
   description: string | null;
+  /** Entrée catalogue d'origine — non nul = composant managé par
+   *  catalogue : l'édition utilisateur se borne aux `params`. */
+  catalog?: string | null;
+  /** Paramètres éditables déclarés (schéma copié à l'install). */
+  params_schema?: ParamSpec[];
+  /** Valeurs effectives des params — `secret` masqués (« •••••• »). */
+  params?: Record<string, string>;
+  /** Cible de rendu de la config managée (fichier possédé démon). */
+  render?: { path: string; template: string } | null;
 }
 
 export interface ComponentStatus {
@@ -181,6 +213,9 @@ export interface ComponentStatus {
   last_exit?: number;
   /** Version sondée d'un `tool` (1re ligne de sa commande, ≤200 c). */
   version?: string;
+  /** Params required sans valeur — « configuration requise » :
+   *  spawn bloqué tant que la liste n'est pas vide. */
+  config_required?: string[];
 }
 
 /** Item ListComponents / ComponentInfo : spec + état runtime. `source`
@@ -203,6 +238,8 @@ export interface CatalogEntry {
   repo?: string | null;
   homepage?: string | null;
   suggested_spec: ComponentSpec;
+  /** Paramètres éditables déclarés — collectés au dialogue d'install. */
+  params?: ParamSpec[];
   installed: boolean;
   version?: string | null;
   latest_version?: string | null;

@@ -349,7 +349,21 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         "component_catalog" => ReqKind::ComponentCatalog {
             refresh: p.get("refresh").and_then(Value::as_bool),
         },
-        "component_install" => ReqKind::ComponentInstall { name: s("name") },
+        "component_install" => ReqKind::ComponentInstall {
+            name: s("name"),
+            params: p
+                .get("params")
+                .cloned()
+                .and_then(|v| serde_json::from_value(v).ok()),
+        },
+        "component_set_params" => ReqKind::ComponentSetParams {
+            name: s("name"),
+            params: p
+                .get("params")
+                .cloned()
+                .and_then(|v| serde_json::from_value(v).ok())
+                .ok_or("component_set_params: params absents ou invalides")?,
+        },
         "term_open" => ReqKind::TermOpen {
             session: s("session"),
             // Id choisi côté client : un term_open abandonné (timeout,

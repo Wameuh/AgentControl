@@ -31,6 +31,8 @@ flate2 = "1"
 tar = "0.4"
 # Hash Sec-WebSocket-Accept du handshake WS (RFC 6455) — serveur web.
 sha1 = "0.11"
+# Validation `regex` des paramètres de composants (schéma catalogue).
+regex = "1"
 
 [target.'cfg(unix)'.dependencies]
 # SIGTERM/SIGKILL aux composants managés (arrêt gracieux + orphelins).

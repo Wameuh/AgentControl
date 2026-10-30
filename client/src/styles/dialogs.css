@@ -47,6 +47,11 @@ dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 0; pad
 /* Case à cocher dans un dialogue : les labels sont en colonne par
    défaut → la case passait sous son texte ; .chk-row réaligne. */
 dialog label.chk-row { flex-direction: row; align-items: center; gap: 10px; cursor: pointer; }
+
+/* Descriptif de paramètre (#dlg-cparams) — sous le champ. */
+.cp-desc { color: var(--muted); font-size: 11px; }
+#cp-fields { display: flex; flex-direction: column; gap: 10px; max-height: 55vh; overflow: auto; }
+#cp-fields label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
 dialog input[type="checkbox"] {
   width: 15px; height: 15px; flex: none; margin: 0; padding: 0;
   border: 0; background: none; accent-color: var(--accent);
