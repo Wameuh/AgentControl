@@ -137,6 +137,10 @@ pub struct Daemon {
     >,
     /// Registre PR ↔ session (prs.json) — voir prs.rs.
     pub prs: Arc<PrRegistry>,
+    /// File de vérification forge des références détectées — une URL de
+    /// review n'entre au registre qu'après preuve d'existence réelle
+    /// (server/prs.rs `PrVerifier`). Worker unique spawné à l'open.
+    pr_verify: Arc<prs::PrVerifier>,
     /// État du sync des statuts PR (`pr_sync`) — throttle + exclusion
     /// d'un second run pendant qu'un fetch forge est en vol.
     pr_sync: Arc<std::sync::Mutex<prs::PrSyncCtl>>,
@@ -202,6 +206,13 @@ impl Daemon {
                 }
             }
         }
+        let prs = Arc::new(PrRegistry::open(&root));
+        // Set forge figé pour la vérif d'existence (hôtes déclarés +
+        // token_env) — la config ne change pas à chaud.
+        let forge_set = forges.list_json().as_array().cloned().unwrap_or_default();
+        let pr_verify = Arc::new(prs::PrVerifier::new(Arc::clone(&prs), move |t| {
+            forgesync::verify_ref(&forge_set, t)
+        }));
         let d = Arc::new(Self {
             root: root.clone(),
             sessions: RwLock::new(HashMap::new()),
@@ -219,11 +230,13 @@ impl Daemon {
             compact,
             peer_rate: std::sync::Mutex::new(HashMap::new()),
             spawn_rate: std::sync::Mutex::new(HashMap::new()),
-            prs: Arc::new(PrRegistry::open(&root)),
+            prs,
+            pr_verify,
             pr_sync: Arc::new(std::sync::Mutex::new(prs::PrSyncCtl::default())),
             forges,
             web,
         });
+        d.pr_verify.spawn_worker();
         let mut resumable = Vec::new();
         let sdir = root.join("sessions");
         if sdir.exists() {
