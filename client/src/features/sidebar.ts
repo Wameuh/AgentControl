@@ -1143,11 +1143,27 @@ export class Sidebar {
     // Largeur persistée dans localStorage.
     const bar = $("sidebar");
     const grip = $("sidebar-resize");
-    const clamp = (x: number) => Math.min(520, Math.max(180, x));
+    // Pas de plafond arbitraire : la sidebar peut prendre toute la
+    // fenêtre moins un plancher pour le contenu principal (320 = le
+    // min-width des blocs de chat). Sur fenêtre très étroite le cap
+    // reste ≥ le min de la sidebar (elle ne compresse pas sous 180).
+    const clamp = (x: number) =>
+      Math.min(Math.max(180, window.innerWidth - 320), Math.max(180, x));
+    const applyW = (w: number) => {
+      bar.style.width = w + "px";
+      bar.style.minWidth = w + "px";
+    };
     const saved = Number(localStorage.getItem("sidebar-w"));
-    if (saved) {
-      bar.style.width = clamp(saved) + "px";
-      bar.style.minWidth = clamp(saved) + "px";
+    if (saved && !isAndroid()) applyW(clamp(saved));
+    // Fenêtre rétrécie : re-plafonner l'affichage — sinon la poignée
+    // sort de l'écran et la sidebar devient irréductible. localStorage
+    // n'est pas touché : la largeur voulue survit au ré-agrandissement.
+    // Android : la sidebar est un drawer 100vw (grip caché) — un
+    // re-plafonnement au resize le casserait (rotation, clavier).
+    if (!isAndroid()) {
+      window.addEventListener("resize", () => {
+        if (bar.offsetWidth) applyW(clamp(bar.offsetWidth));
+      });
     }
     grip.addEventListener("mousedown", (e) => {
       e.preventDefault();
@@ -1160,9 +1176,7 @@ export class Sidebar {
           up(ev);
           return;
         }
-        const w = clamp(ev.clientX);
-        bar.style.width = w + "px";
-        bar.style.minWidth = w + "px";
+        applyW(clamp(ev.clientX));
       };
       const up = (ev: MouseEvent) => {
         document.removeEventListener("mousemove", move);
