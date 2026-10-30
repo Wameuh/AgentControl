@@ -85,6 +85,14 @@ export interface CompItem {
   /** Spec complète (command, env, healthcheck…), sérialisée telle quelle. */
   spec?: Record<string, unknown>;
   status?: CompStatus;
+  /** Instantané de l'orchestrateur natif — présent sur l'item
+   *  `backlog-orchestrator` (status_json côté démon). `workspaces` =
+   *  routing repo → cwd pour la surface « Manager » (vide si éteint). */
+  orchestrator?: {
+    enabled?: boolean;
+    workspaces?: { repo?: string; cwd?: string }[];
+    [k: string]: unknown;
+  };
 }
 
 export interface ConfigOpt { value: string; name: string; description?: string }

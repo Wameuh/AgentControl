@@ -722,6 +722,7 @@ impl Daemon {
             ReqKind::OrchestratorSet { enabled } => {
                 self.h_orch_set(enabled).await
             }
+            ReqKind::ManagerSpawn { repo } => self.h_manager_spawn(&repo).await,
             ReqKind::Subscribe { session, after_seq } => {
                 self.h_subscribe(session, after_seq).await
             }

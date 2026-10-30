@@ -312,6 +312,25 @@ La pièce « vivante » : **graphe des programmes et des sessions**.
 | review bot | `external` | autre serveur — healthcheck optionnel |
 | le démon lui-même | nœud racine, pas un composant | le système ne se supervise pas lui-même |
 
+### 2.9 « Manager » — intendance backlog par workspace
+
+Quand le composant `agentbacklog` est déclaré **et** l'orchestrateur
+natif actif (`enabled`), le démon expose `orchestrator.workspaces` —
+le routing **repo → cwd** (`[backlog_orchestrator] repo_workspaces`,
+défaut `{"AgentControl": "/workspace"}` hérité du `REPO_WORKSPACES` du
+script) — et la vue Backlog propose un Manager par entrée : bouton
+« Créer » → RPC `manager_spawn{repo}` → session `Manager · <repo>`
+(`origin: feature:backlog-manager`, prompt `MANAGER_PROMPT` intégré
+surchargeable via `manager_prompt`). Le Manager est une intendance —
+transformer des demandes en items structurés (`--add --repo`
+`--depends-on`, découpage ordonné), répondre aux questions d'état,
+ajuster la file — jamais un worker : pas de `--pop`/`--done`, et son
+titre échappe au `title_prefix` (en plus de l'exclusion `origin` du
+filtre workers → jamais nudge/rm/garde PR). Spawn idempotent
+(`manager_lock` + dédupe origin+titre+état vivant) — un Manager
+existant est renvoyé tel quel ; `rename_session` casse la dédup
+(assumé : le titre est le contrat).
+
 ---
 
 ## 3. Risques & contraintes
