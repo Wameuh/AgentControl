@@ -78,7 +78,12 @@ def watcher():
             except OSError: pass
             h, s = held.pop(0)
             chunk(s, "turn done")
-            send({"jsonrpc": "2.0", "id": h, "result": {"stopReason": "end_turn"}})
+            if mode() == "holderr":
+                send({"jsonrpc": "2.0", "id": h, "error": {
+                    "code": -32000, "message": "steer refused"}})
+            else:
+                send({"jsonrpc": "2.0", "id": h,
+                      "result": {"stopReason": "end_turn"}})
         # SAY n'est consommé que s'il porte du contenu — une lecture en
         # vol pendant l'écriture ne doit pas avaler un message vide.
         if os.path.exists(SAY):
@@ -307,18 +312,53 @@ def main():
         check("file purgée pour la phase compact", q,
               str(c.result("queue_list", session=sid)["queue"]))
 
-        # --- 3. Compact hold --------------------------------------------------
-        set_mode("hold")
-        release()                     # fin du tour « first » (release unitaire)
-        q = wait_for(lambda: c.result("queue_list", session=sid)["queue"] == [], 5)
-        check("third drainé après fin du tour 1", q,
-              str(c.result("queue_list", session=sid)["queue"]))
-        # « third » part en tour retenu (mode hold) ; /compact passe en file.
+        # --- 2c. Régression : refus tardif en dernier volant -----------------
+        # /compact steeré retenu côté agent (holderr) pendant que le tour
+        # « first » finit : à l'erreur tardive le steer est le dernier
+        # prompt en vol → prompt_rpc a posé « compacting » sur la retenue
+        # armée. Le désarmement doit redresser l'état ET relancer le drain
+        # — busy est resté vrai sans runner, la seule réinsertion
+        # laisserait l'entrée orpheline indéfiniment.
+        c.result("queue_drop", session=sid, index=0)   # « third » — file vide
+        set_mode("holderr")        # retenir + répondre en erreur au release
         c.result("send", session=sid, text="/compact")
+        q = wait_for(lambda: c.result("queue_list", session=sid)
+                     ["queue"] == ["/compact"], 5)
+        check("/compact en file pour le refus tardif", q,
+              str(c.result("queue_list", session=sid)["queue"]))
+        r = c.result("queue_steer", session=sid, index=0)
+        check("steer retenu côté agent → verdict optimiste",
+              r["delivered"] == "steer", str(r))
+        release()                  # « first » rend la main (erreur, fin quand même)
+        time.sleep(0.5)
+        release()                  # refus tardif du /compact steeré — dernier volant
+        q = wait_for(lambda: c.result("queue_list", session=sid)["queue"] == [], 10)
+        check("refus tardif : /compact re-livré par le drain (pas orphelin)", q,
+              str(c.result("queue_list", session=sid)["queue"]))
+        st = c.result("session_info", session=sid).get("meta", {}).get("state")
+        check("état pas resté « compacting » fantôme", st != "compacting", st)
+        release()                  # /compact re-livré → erreur → désarm drain
+        ok = wait_for(lambda: c.result("session_info", session=sid)
+                      .get("meta", {}).get("state") == "idle", 10)
+        check("session de retour idle après le refus tardif", ok,
+              c.result("session_info", session=sid).get("meta", {}).get("state"))
+        q = c.result("queue_list", session=sid)["queue"]
+        check("file vide en fin de refus tardif", q == [], str(q))
+
+        # --- 3. Compact hold --------------------------------------------------
+        # La phase 2c a terminé le tour « first » et vidé la file —
+        # re-stage un tour retenu pour remettre la session busy.
+        set_mode("hold")
+        c.result("send", session=sid, text="t3")        # livré direct (idle) → retenu
+        ok = wait_for(lambda: c.result("session_info", session=sid)
+                      .get("meta", {}).get("state") == "working", 5)
+        check("tour t3 retenu (session busy)", ok,
+              c.result("session_info", session=sid).get("meta", {}).get("state"))
+        c.result("send", session=sid, text="/compact")  # en file derrière le tour
         q = wait_for(lambda: c.result("queue_list", session=sid)["queue"] == ["/compact"], 5)
         check("/compact en file derrière le tour", q,
               str(c.result("queue_list", session=sid)["queue"]))
-        release()                     # fin du tour « third » → /compact drainé, retenue armée
+        release()                     # fin du tour « t3 » → /compact drainé, retenue armée
         time.sleep(0.6)
         c.result("send", session=sid, text="fourth")       # retenu par le compact
         q = wait_for(lambda: c.result("queue_list", session=sid)["queue"] == ["fourth"], 5)

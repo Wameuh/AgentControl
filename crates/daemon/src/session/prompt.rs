@@ -94,14 +94,26 @@ impl Session {
                         // /compact armé ci-dessus puis refusé : désarmer —
                         // sinon la retenue fantôme bloque la file jusqu'au
                         // timeout (même fix que le drain sur commande en
-                        // échec).
-                        if is_compact_cmd(&text) {
-                            s.take_compact_hold();
+                        // échec). « compacting » posé par la sortie du
+                        // dernier prompt en vol doit être redressé : le
+                        // garde-fou vient d'être avorté, plus rien ne le
+                        // corrigerait (state != compacting → un autre
+                        // prompt vole encore, ne pas toucher).
+                        let disarmed = is_compact_cmd(&text) && s.take_compact_hold();
+                        if disarmed && s.meta_snapshot().state == "compacting" {
+                            s.set_state("idle");
                         }
                         s.emit(EventKind::System {
                             text: format!("steer refusé ({e}) — message en file"),
                         });
-                        if !s.enqueue_prompt(&text, false, PromptSrc::UserJournaled) {
+                        // La retenue laissait busy vrai sans runner (le
+                        // drain s'arrête sur compacting en conservant
+                        // busy) : après désarmement, le « runner déjà
+                        // là » supposé par enqueue_prompt est faux —
+                        // drain explicite pour ne pas orpheliner la file.
+                        if disarmed
+                            || !s.enqueue_prompt(&text, false, PromptSrc::UserJournaled)
+                        {
                             s.drain_queue().await;
                         }
                     }
@@ -584,6 +596,12 @@ impl Session {
         // Compact armé entre le premier check et le pop (le runner vient
         // de livrer un /compact) : la retenue prime — remise à sa place.
         if self.compacting.lock().unwrap().is_some() {
+            // Parité enqueue_prompt : réveil en vol → arm pour que la
+            // tâche propriétaire enchaîne un réveil si la session
+            // retourne « asleep » avec la file non vide.
+            if self.is_waking() {
+                self.arm_wake_pending();
+            }
             let mut q = self.prompt_queue.lock().unwrap();
             let at = idx.min(q.len());
             q.insert(at, (text, src));
@@ -637,9 +655,14 @@ impl Session {
                     // timeout et relancerait un « continue your task »
                     // spurieux pour un auto jamais exécuté (même fix
                     // que le drain : take_compact_hold sur commande
-                    // en échec).
-                    if is_compact_cmd(&text) {
-                        s.take_compact_hold();
+                    // en échec). « compacting » posé par la sortie du
+                    // dernier prompt en vol doit être redressé : le
+                    // garde-fou vient d'être avorté, plus rien ne le
+                    // corrigerait (state != compacting → un autre
+                    // prompt vole encore, ne pas toucher).
+                    let disarmed = is_compact_cmd(&text) && s.take_compact_hold();
+                    if disarmed && s.meta_snapshot().state == "compacting" {
+                        s.set_state("idle");
                     }
                     s.emit(EventKind::System {
                         text: format!("steer refusé ({e}) — message remis en file"),
@@ -668,7 +691,12 @@ impl Session {
                     // ack APRÈS la réinsertion : la file renvoyée avec
                     // « requeued » contient déjà l'entrée restaurée.
                     let _ = ack_tx.send(Some(format!("{e}")));
-                    if !was_busy {
+                    // Retenue désarmée : busy vrai peut survivre sans
+                    // runner (le drain s'arrête sur compacting en
+                    // conservant busy) — le « runner déjà là » supposé
+                    // par was_busy est alors faux → drain explicite
+                    // pour ne pas orpheliner l'entrée remise.
+                    if disarmed || !was_busy {
                         s.drain_queue().await;
                     }
                 }
