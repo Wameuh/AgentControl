@@ -1,12 +1,15 @@
-// Shots des réglages d'apparence : 5 accents × dark/light + fond animé.
-// Vérifie au passage les valeurs calculées de --accent et la persistance
-// (localStorage → classes :root au rechargement).
+// Shots des réglages d'apparence : 5 accents × 2 intensités (douce/forte)
+// × dark/light + fond animé. Vérifie au passage les valeurs calculées de
+// --accent, les contrastes (accent/--bg ≥3:1, bulle user ≥4.5:1, puits de
+// code ≥4.5:1) et la persistance (localStorage → classes :root au
+// rechargement).
 // Usage : npm run build && node tests/accent-shots.mjs
 import puppeteer from "puppeteer-core";
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 
-const server = spawn("npx", ["vite", "preview", "--port", "4173", "--strictPort"], { cwd: process.cwd(), stdio: "ignore" });
+const PORT = Number(process.env.SHOTS_PORT || 4173);
+const server = spawn("npx", ["vite", "preview", "--port", String(PORT), "--strictPort"], { cwd: process.cwd(), stdio: "ignore" });
 await new Promise((r) => setTimeout(r, 1800));
 const b = await puppeteer.launch({
   executablePath: process.env.CHROME || "/usr/bin/chromium",
@@ -37,13 +40,30 @@ const probe = () =>
     const cs = getComputedStyle(document.documentElement);
     const code = document.querySelector(".md .md-code");
     const ccs = code ? getComputedStyle(code) : null;
+    const user = document.querySelector(".msg.user");
+    const ucs = user ? getComputedStyle(user) : null;
+    // Résolution des vars de surface (color-mix non évalué par
+    // getPropertyValue) — même technique de sonde que core/chrome.ts.
+    const el = document.createElement("i");
+    el.style.display = "none";
+    document.body.appendChild(el);
+    const pick = (v) => {
+      el.style.color = `var(${v})`;
+      return getComputedStyle(el).color;
+    };
+    const bg = pick("--bg");
+    const accentRgb = pick("--accent");
+    el.remove();
     return {
       accent: cs.getPropertyValue("--accent").trim(),
+      accentRgb,
+      bg,
       cls: document.documentElement.className,
       anim: window.MeshBackground?.isAnimated?.(),
       mood: window.MeshBackground?.getMood?.(),
       checkbox: document.getElementById("s-bganim")?.checked,
       code: ccs ? { bg: ccs.backgroundColor, fg: ccs.color } : null,
+      user: ucs ? { bg: ucs.backgroundColor, fg: ucs.color } : null,
     };
   });
 const openSettings = async () => {
@@ -52,8 +72,14 @@ const openSettings = async () => {
 };
 
 const EXPECT = {
-  dark: { sage: "#cdb68c", gold: "#e0c996", grey: "#c6cdd5", violet: "#c4a9dc", red: "#f2a79a" },
-  light: { sage: "#8a6f3e", gold: "#8a6a1a", grey: "#5d6b78", violet: "#6b4d8c", red: "#a03d33" },
+  dark: {
+    soft: { sage: "#cdb68c", gold: "#e0c996", grey: "#c6cdd5", violet: "#c4a9dc", red: "#f2a79a" },
+    strong: { sage: "#bed34a", gold: "#f2b01e", grey: "#8fbcef", violet: "#b06ef0", red: "#f95a3c" },
+  },
+  light: {
+    soft: { sage: "#8a6f3e", gold: "#8a6a1a", grey: "#5d6b78", violet: "#6b4d8c", red: "#a03d33" },
+    strong: { sage: "#5f7310", gold: "#986000", grey: "#2f6cb2", violet: "#7d28d4", red: "#cf2a12" },
+  },
 };
 // Teinte « agent » du mesh par mood quand l'accent est le défaut (preset
 // conservé : bicolore sable/sauge = identité). Sous accent choisi, elle
@@ -103,39 +129,57 @@ const check = (label, got, want) => {
 // complémentaire : violet → facettes vertes, c'était le bug #81).
 const visible = (theme, base, c) =>
   theme === "light" ? base.map((b, i) => Math.max(0, b - c[i])) : c;
-const checkAgent = (theme, accent, st) => {
+const checkAgent = (theme, accent, int, st) => {
   const agent = st.mood?.agent?.map(Math.round);
   const base = st.mood?.base?.map(Math.round);
-  if (!agent || !base) { check(`mood agent ${theme}/${accent}`, "absent", "rgb"); return; }
-  if (accent === "sage") {
-    check(`mood agent ${theme}/${accent}`, agent.join(","), AGENT_PRESET[theme].join(","));
+  if (!agent || !base) { check(`mood agent ${theme}/${accent}/${int}`, "absent", "rgb"); return; }
+  if (accent === "sage" && int === "soft") {
+    check(`mood agent ${theme}/${accent}/${int}`, agent.join(","), AGENT_PRESET[theme].join(","));
     return;
   }
   const a = hslOf(parseHex(st.accent)), g = hslOf(visible(theme, base, agent));
   // Famille de teinte : Δhue ≤ 70°, ou quasi-achromatique (gris → gris).
-  check(`mood agent ${theme}/${accent} famille`, hueDist(a.h, g.h) <= 70 || g.s < 20, true);
+  check(`mood agent ${theme}/${accent}/${int} famille`, hueDist(a.h, g.h) <= 70 || g.s < 20, true);
 };
 // Lumière principale : en dark elle *est* l'accent ; en light, son
 // résidu sur le papier doit rester dans sa famille (violet → violet
-// sombre, jamais vert). Accent par défaut : preset non dérivé — skip.
-const checkLight = (theme, accent, st) => {
-  if (accent === "sage") return;
+// sombre, jamais vert). Accent par défaut en douce : preset non dérivé
+// — skip (sauge forte est dérivée comme les autres).
+const checkLight = (theme, accent, int, st) => {
+  if (accent === "sage" && int === "soft") return;
   const light = st.mood?.light?.map(Math.round);
   const base = st.mood?.base?.map(Math.round);
-  if (!light || !base) { check(`mood light ${theme}/${accent}`, "absent", "rgb"); return; }
+  if (!light || !base) { check(`mood light ${theme}/${accent}/${int}`, "absent", "rgb"); return; }
   const a = hslOf(parseHex(st.accent)), g = hslOf(visible(theme, base, light));
-  check(`mood light ${theme}/${accent} famille`, hueDist(a.h, g.h) <= 70 || g.s < 20, true);
+  check(`mood light ${theme}/${accent}/${int} famille`, hueDist(a.h, g.h) <= 70 || g.s < 20, true);
 };
 // Puits de code (.md-code) : le couple fond/texte doit respecter WCAG
 // AA dans CHAQUE combo — --code-bg était un puits sombre jamais remappé
 // en thème clair (texte --ink sombre dessus = illisible, bug #83).
-const checkCode = (theme, accent, st) => {
-  if (!st.code) { check(`code ${theme}/${accent}`, "absent", ".md-code"); return; }
+const checkCode = (theme, accent, int, st) => {
+  if (!st.code) { check(`code ${theme}/${accent}/${int}`, "absent", ".md-code"); return; }
   const r = contrast(parseRgb(st.code.bg), parseRgb(st.code.fg));
-  check(`code ${theme}/${accent} contraste ≥4.5`, r >= 4.5, true);
+  check(`code ${theme}/${accent}/${int} contraste ≥4.5`, r >= 4.5, true);
+};
+// Accent sur --bg : seuil « composant interactif » WCAG (≥3:1) — la
+// version forte doit rester lisible sur les surfaces qu'elle teinte.
+const checkAccentBg = (theme, accent, int, st) => {
+  const r = contrast(parseRgb(st.accentRgb), parseRgb(st.bg));
+  check(`accent/bg ${theme}/${accent}/${int} ≥3`, r >= 3, true);
+};
+// Bulle utilisateur : texte sur fond accent — AA texte (≥4.5:1) exigé
+// pour la variante forte ; un accent flashy peut exiger la bascule
+// clair/foncé de --msg-user-fg. En douce on ne touche pas aux couleurs
+// actuelles (défaut inchangé) : sage/gold clair sont à ~4.2 — plancher
+// de non-régression 4:1.
+const checkUser = (theme, accent, int, st) => {
+  if (!st.user) { check(`user ${theme}/${accent}/${int}`, "absent", ".msg.user"); return; }
+  const r = contrast(parseRgb(st.user.bg), parseRgb(st.user.fg));
+  const min = int === "strong" ? 4.5 : 4;
+  check(`user ${theme}/${accent}/${int} contraste ≥${min}`, r >= min, true);
 };
 
-await p.goto("http://localhost:4173/#desktop", { waitUntil: "networkidle0" });
+await p.goto(`http://localhost:${PORT}/#desktop`, { waitUntil: "networkidle0" });
 await new Promise((r) => setTimeout(r, 400));
 // Connexion mock + ouverture de la 1re session → les shots chat montrent
 // de vraies bulles user (contraste --msg-user-fg sur --msg-user-bg).
@@ -152,21 +196,41 @@ const connectOnce = async () => {
   await p.evaluate(() => document.querySelector(".sess")?.click());
   await new Promise((r) => setTimeout(r, 500));
 };
+// Matrice complète : à chaque (thème, accent), les deux intensités sont
+// testées à la suite — la version forte doit aussi différer de la douce
+// (accent ET surface), c'est le but du réglage.
 for (const theme of ["dark", "light"]) {
   for (const accent of ["sage", "gold", "grey", "violet", "red"]) {
-    // boot() recharge la page → connexion mock à refaire à chaque itération.
-    await boot({ "ac-theme": theme, "ac-accent": accent });
-    await connectOnce();
-    const st = await probe();
-    check(`--accent ${theme}/${accent}`, st.accent, EXPECT[theme][accent]);
-    check(`class ${theme}/${accent}`, st.cls.includes(`theme-${accent}`) || accent === "sage", true);
-    checkAgent(theme, accent, st);
-    checkLight(theme, accent, st);
-    checkCode(theme, accent, st);
-    await openSettings();
-    await shot(`30-${theme}-${accent}-settings`);
-    await p.evaluate(() => document.querySelector("#settings-close")?.click());
-    await shot(`31-${theme}-${accent}-chat`);
+    let soft = null;
+    for (const int of ["soft", "strong"]) {
+      // boot() recharge la page → connexion mock à refaire à chaque itération.
+      await boot({
+        "ac-theme": theme,
+        "ac-accent": accent,
+        "ac-accent-strong": int === "strong" ? "1" : "0",
+      });
+      await connectOnce();
+      const st = await probe();
+      const tag = `${theme}/${accent}/${int}`;
+      check(`--accent ${tag}`, st.accent, EXPECT[theme][int][accent]);
+      check(`class theme- ${tag}`, st.cls.includes(`theme-${accent}`), accent !== "sage");
+      check(`class strong ${tag}`, st.cls.includes("accent-strong"), int === "strong");
+      checkAgent(theme, accent, int, st);
+      checkLight(theme, accent, int, st);
+      checkCode(theme, accent, int, st);
+      checkAccentBg(theme, accent, int, st);
+      checkUser(theme, accent, int, st);
+      if (int === "soft") {
+        soft = st;
+      } else {
+        check(`accent ≠ douce ${theme}/${accent}`, st.accent !== soft.accent, true);
+        check(`bg ≠ douce ${theme}/${accent}`, st.bg !== soft.bg, true);
+      }
+      await openSettings();
+      await shot(`30-${theme}-${accent}-${int}-settings`);
+      await p.evaluate(() => document.querySelector("#settings-close")?.click());
+      await shot(`31-${theme}-${accent}-${int}-chat`);
+    }
   }
 }
 
@@ -178,10 +242,19 @@ await connectOnce();
 await openSettings();
 await p.select("#s-accent", "sage");
 await new Promise((r) => setTimeout(r, 300));
-checkAgent("light", "sage", await probe());
+checkAgent("light", "sage", "soft", await probe());
 await p.select("#s-accent", "red");
 await new Promise((r) => setTimeout(r, 300));
-checkAgent("light", "red", await probe());
+checkAgent("light", "red", "soft", await probe());
+// Bascule d'intensité en session : sauge douce (preset) → sauge forte
+// (teinte dérivée) — la classe accent-strong s'applique sans reload.
+await p.select("#s-accent", "sage");
+await p.select("#s-accent-int", "strong");
+await new Promise((r) => setTimeout(r, 300));
+checkAgent("light", "sage", "strong", await probe());
+await p.select("#s-accent-int", "soft");
+await new Promise((r) => setTimeout(r, 300));
+checkAgent("light", "sage", "soft", await probe());
 await p.evaluate(() => document.querySelector("#settings-close")?.click());
 
 // Fond animé off : rendu statique + case décochée, persistant au reload.

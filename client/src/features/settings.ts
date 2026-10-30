@@ -7,7 +7,7 @@
 import { getVersion, isWeb } from "../core/bridge";
 import { $ } from "../core/dom";
 import { bindLogView } from "../core/logview";
-import { applyTheme, applyAccent, accentPref, applyBgAnim, bgAnimOn, isAndroid, type Accent } from "../core/chrome";
+import { applyTheme, applyAccent, accentPref, applyAccentStrong, accentStrongPref, applyBgAnim, bgAnimOn, isAndroid, type Accent } from "../core/chrome";
 import { defaultEncoding } from "../core/encoding";
 import { inlineImages } from "../core/format";
 import { cmpVer } from "../core/conn";
@@ -66,6 +66,8 @@ export class SettingsPanel {
     ($("s-theme") as HTMLSelectElement).value =
       document.documentElement.classList.contains("light") ? "light" : "dark";
     ($("s-accent") as HTMLSelectElement).value = accentPref();
+    ($("s-accent-int") as HTMLSelectElement).value =
+      accentStrongPref() ? "strong" : "soft";
     ($("s-bganim") as HTMLInputElement).checked = bgAnimOn();
     ($("s-lang") as HTMLSelectElement).value = getLang();
     ($("s-sendmode") as HTMLSelectElement).value = sendPref();
@@ -192,6 +194,11 @@ export class SettingsPanel {
       this.themeChanged();
       this.syncSecStates();
     };
+    ($("s-accent-int") as HTMLSelectElement).onchange = (e) => {
+      applyAccentStrong((e.target as HTMLSelectElement).value === "strong");
+      this.themeChanged();
+      this.syncSecStates();
+    };
     ($("s-bganim") as HTMLInputElement).onchange = (e) =>
       applyBgAnim((e.target as HTMLInputElement).checked);
     ($("s-lang") as HTMLSelectElement).onchange = (e) => {
@@ -293,7 +300,8 @@ export class SettingsPanel {
     const opt = (id: string) =>
       ($(id) as HTMLSelectElement).selectedOptions[0]?.textContent?.trim() ??
       "";
-    $("s-st-appearance").textContent = `${opt("s-theme")} · ${opt("s-accent")}`;
+    $("s-st-appearance").textContent =
+      `${opt("s-theme")} · ${opt("s-accent")} · ${opt("s-accent-int")}`;
     $("s-st-chat").textContent = opt("s-sendmode");
     const sndOn = ($("s-snd") as HTMLInputElement).checked;
     $("s-st-notif").textContent = sndOn

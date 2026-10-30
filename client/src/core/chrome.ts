@@ -120,9 +120,11 @@ function syncMeshAccent() {
     // Accent choisi (classe theme-*) : la teinte des lumières agents suit
     // l'accent — sinon elles resteraient sur le vert des presets et les
     // facettes tourneraient vert sous un accent rouge. Accent par défaut :
-    // le preset bicolore sable/sauge (identité app) est conservé.
+    // le preset bicolore sable/sauge (identité app) est conservé —
+    // sauf en intensité forte (accent-strong), où « sauge » devient une
+    // olive saturée dérivée comme les autres accents.
     const themed = [...document.documentElement.classList]
-      .some((c) => c.startsWith("theme-"));
+      .some((c) => c.startsWith("theme-") || c === "accent-strong");
     if (themed) meshColors.agentTint = meshAgentRgb(light);
     // Thème clair (« paper », mood.dark) : la couleur des lumières est
     // SOUSTRAITE de la base (sgn<0 dans mesh-bg#shade) — envoyer
@@ -170,6 +172,20 @@ export function applyAccent(name: Accent, persist = true) {
   const el = document.documentElement;
   for (const a of ACCENTS) if (a !== "sage") el.classList.toggle(`theme-${a}`, name === a);
   if (persist) localStorage.setItem("ac-accent", name);
+  syncMeshAccent();
+}
+
+// Intensité d'accent — dimension orthogonale (classe :root.accent-strong,
+// cf. base.css) : « douce » = défaut, « forte » = variantes saturées.
+export const accentStrongPref = (): boolean =>
+  localStorage.getItem("ac-accent-strong") === "1";
+
+/** Applique l'intensité ; indépendante de l'accent actif (global ou
+ *  couleur de connexion) — la classe n'est jamais retirée par
+ *  applyAccent. */
+export function applyAccentStrong(on: boolean, persist = true) {
+  document.documentElement.classList.toggle("accent-strong", on);
+  if (persist) localStorage.setItem("ac-accent-strong", on ? "1" : "0");
   syncMeshAccent();
 }
 
