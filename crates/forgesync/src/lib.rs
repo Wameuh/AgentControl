@@ -161,7 +161,10 @@ fn gh_err_code(stderr: &str) -> Option<u16> {
 /// réseau, timeout — jamais un refus définitif).
 fn gh_api(endpoint: &str) -> GhCall {
     let mut child = match Command::new("gh")
-        .args(["api", endpoint])
+        // `--hostname` épingle github.com : sans lui, `GH_HOST` dans
+        // l'env du process orienterait la requête vers une autre
+        // instance (verdict rendu sur la mauvaise forge).
+        .args(["api", "--hostname", "github.com", endpoint])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("GH_PROMPT_DISABLED", "1")
@@ -426,16 +429,32 @@ pub fn verify_ref(set: &[Value], t: &RefTarget) -> Verify {
     }
 }
 
+/// GitHub n'accepte que `[A-Za-z0-9._-]` par segment d'`owner/repo`
+/// — tout autre caractère rend le nom impossible à créer sur la forge.
+/// Le garde est aussi une protection d'injection : injecté brut dans
+/// l'endpoint `gh api`, `?` tronquerait le chemin (seul le repo serait
+/// requêté → faux `Exists`), `{}` déclencherait la substitution depuis
+/// le dépôt du cwd (`{owner}`/`{repo}`).
+fn github_repo_ok(repo: &str) -> bool {
+    repo.split('/').all(|seg| {
+        !seg.is_empty()
+            && seg.chars().any(|c| c != '.')
+            && seg
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    })
+}
+
 /// GitHub : la PR existe si `gh api` la lit. Sans `gh` fonctionnel
 /// (binaire absent ou `gh auth status` KO) aucun verdict n'est possible
 /// — et le sync ne pourrait de toute façon jamais relire l'entrée.
 /// Hôte ≠ github.com : hors périmètre de `gh`, jamais résolvable →
 /// `Missing` direct (l'extracteur ne produit d'ailleurs que github.com).
 fn verify_github(t: &RefTarget) -> Verify {
-    if t.host != "github.com" {
+    if t.host != "github.com" || !github_repo_ok(&t.repo) {
         return Verify::Missing;
     }
-    if !gh_ok(&["auth", "status"]) {
+    if !gh_ok(&["auth", "status", "--hostname", "github.com"]) {
         return Verify::Unreachable;
     }
     match gh_api(&format!("repos/{}/pulls/{}", t.repo, t.pr)) {
@@ -908,6 +927,25 @@ mod tests {
         assert_eq!(gh_err_code(""), None);
         // « HTTP » sans code qui suit → poursuite du scan.
         assert_eq!(gh_err_code("HTTP then gh: Not Found (HTTP 404)"), Some(404));
+    }
+
+    #[test]
+    fn github_repo_ok_charset() {
+        assert!(github_repo_ok("cli/cli"));
+        assert!(github_repo_ok("Wameuh/AgentControl"));
+        assert!(github_repo_ok("my-org/re.po_name-x"));
+        // `?`/`#` tronqueraient l'endpoint `gh api`.
+        assert!(!github_repo_ok("o/r?x"));
+        assert!(!github_repo_ok("o/r#f"));
+        // `{}` → substitution depuis le dépôt du cwd par `gh`.
+        assert!(!github_repo_ok("{owner}/{repo}"));
+        assert!(!github_repo_ok("o/{repo}"));
+        // `%`, espace, segments vides ou tout-points : impossibles.
+        assert!(!github_repo_ok("o/r%2f"));
+        assert!(!github_repo_ok("o/r x"));
+        assert!(!github_repo_ok("o//r"));
+        assert!(!github_repo_ok("o/.."));
+        assert!(!github_repo_ok("./x"));
     }
 
     /// Les hôtes absents de `forge_list` ne doivent jamais être

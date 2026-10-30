@@ -279,7 +279,20 @@ impl PrVerifier {
         if (p.attempts as usize) < self.backoff.len() {
             p.next_try = tokio::time::Instant::now() + self.backoff[p.attempts as usize];
             p.attempts += 1;
-            self.pending.lock().unwrap().insert(key, p);
+            let mut g = self.pending.lock().unwrap();
+            // Re-soumission arrivée pendant l'appel forge : la
+            // détection « forte » la plus récente prime pour
+            // l'attribution (même règle que `submit`), le budget de
+            // retentatives déjà consommé reste celui de `p`.
+            if let Some(newer) = g.get(&key) {
+                if newer.strong {
+                    p.sid = newer.sid.clone();
+                    p.session = newer.session.clone();
+                }
+                p.strong |= newer.strong;
+            }
+            g.insert(key, p);
+            drop(g);
             self.notify.notify_one();
         } else {
             warn!(
