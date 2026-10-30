@@ -919,9 +919,11 @@ export class ComponentsPanel {
         }
         case "enum": {
           const v = (el as HTMLSelectElement).value;
-          if (v && !(p.choices ?? []).includes(v))
-            throw new Error(t("comp_param_badenum", { k: p.label || p.key }));
-          if (v !== cur) patch[p.key] = v;
+          if (v !== cur) {
+            if (v && !(p.choices ?? []).includes(v))
+              throw new Error(t("comp_param_badenum", { k: p.label || p.key }));
+            patch[p.key] = v;
+          }
           break;
         }
         case "list": {
