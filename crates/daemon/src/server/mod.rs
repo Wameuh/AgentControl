@@ -1149,8 +1149,9 @@ fn expand_cwd(raw: &str) -> Result<String> {
 }
 
 /// `$VAR` / `${VAR}` → valeur env, UNE passe : la valeur injectée n'est
-/// jamais rescanée (pas de récursion). Nom inconnu ou forme incomplète
-/// (`$`, `${`, `$(`, `$1`…) → copié tel quel — pas de shell implicite.
+/// jamais rescanée (pas de récursion). Nom inconnu ou forme non-var
+/// (`$`, `$(`, `$1`…) → littéral — pas de shell implicite. `${` non
+/// refermé laisse le `$` littéral et continue le scan après lui.
 fn expand_env(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
@@ -1228,7 +1229,7 @@ fn home_of(_user: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_cwd, expand_env, resolve_cwd};
+    use super::{expand_cwd, expand_env, home_of, resolve_cwd};
 
     #[test]
     fn env_simple_vars() {
@@ -1263,8 +1264,10 @@ mod tests {
     #[cfg(unix)]
     fn tilde_user() {
         // root existe partout ; un user improbable refuse proprement.
-        assert_eq!(expand_cwd("~root").unwrap(), "/root");
-        assert_eq!(expand_cwd("~root/x").unwrap(), "/root/x");
+        // (pas de "/root" en dur : /var/root sur macOS)
+        let root_home = home_of("root").unwrap().to_string_lossy().to_string();
+        assert_eq!(expand_cwd("~root").unwrap(), root_home);
+        assert_eq!(expand_cwd("~root/x").unwrap(), format!("{root_home}/x"));
         assert!(expand_cwd("~user_nope_zz9").is_err());
     }
 
