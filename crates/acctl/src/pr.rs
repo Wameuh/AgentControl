@@ -82,6 +82,7 @@ fn split_repo_arg(arg: &str) -> (String, Option<String>) {
         // repo. Le path est déjà le repo : aucun trim d'URL ici (un
         // groupe « c » gitlab resterait sinon écrêté).
         if h.contains('.') {
+            let p = p.trim_end_matches('/');
             return match p.split_once(':') {
                 Some((port, rest))
                     if !port.is_empty()
@@ -767,6 +768,12 @@ mod tests {
         assert_eq!(
             split_repo_arg("gitlab.com:grp/sub/proj"),
             ("grp/sub/proj".into(), Some("gitlab.com".into()))
+        );
+        // Slash terminal copié + groupe « c » gitlab préservé (le
+        // trim c/ est réservé aux URLs gerrit).
+        assert_eq!(
+            split_repo_arg("gitlab.com:c/foo/"),
+            ("c/foo".into(), Some("gitlab.com".into()))
         );
         // Port conservé dans l'hôte, pas dans le repo.
         assert_eq!(
