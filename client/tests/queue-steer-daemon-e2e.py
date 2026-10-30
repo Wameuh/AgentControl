@@ -26,10 +26,11 @@ STUB = os.environ.get("AC_STUB", "/tmp/acp-steer-stub.py")
 MODE = "/tmp/acp-stub-mode"
 REL = "/tmp/acp-stub-rel"
 SAY = "/tmp/acp-stub-say"
+PROMPTS = "/tmp/acp-stub-prompts"
 
 STUB_SRC = '''#!/usr/bin/env python3
 import sys, json, os, time, threading
-MODE = "%s"; REL = "%s"; SAY = "%s"
+MODE = "%s"; REL = "%s"; SAY = "%s"; PROMPTS = "%s"
 held = []
 out_lock = threading.Lock()
 def send(v):
@@ -54,6 +55,9 @@ def handle(msg):
     elif m == "session/prompt":
         params = msg.get("params", {})
         text = "".join(b.get("text", "") for b in params.get("prompt", []))
+        try:
+            with open(PROMPTS, "a") as f: f.write(text[:60] + "\n")
+        except OSError: pass
         md = mode()
         if md == "accept":
             chunk(params.get("sessionId", ""), "[ok] " + text[:40])
@@ -100,7 +104,7 @@ for line in sys.stdin:
     if not line: continue
     try: handle(json.loads(line))
     except Exception: pass
-''' % (MODE, REL, SAY)
+''' % (MODE, REL, SAY, PROMPTS)
 
 PASS = 0
 FAIL = 0
@@ -126,6 +130,14 @@ def clear_release():
         os.remove(REL)
     except OSError:
         pass
+
+def prompts_count(txt):
+    """Nombre de prompts `txt` réellement livrés à l'agent (journal stub)."""
+    try:
+        with open(PROMPTS) as f:
+            return sum(1 for line in f.read().splitlines() if line.strip() == txt)
+    except OSError:
+        return 0
 
 def say(txt):
     # Écriture atomique : le watcher du stub ne voit que le contenu
@@ -205,10 +217,11 @@ def main():
         os.chmod(STUB, 0o755)
     set_mode("hold")
     clear_release()
-    try:
-        os.remove(SAY)
-    except OSError:
-        pass
+    for stale in (SAY, PROMPTS):
+        try:
+            os.remove(stale)
+        except OSError:
+            pass
 
     home = tempfile.mkdtemp(prefix="ac-steer-home-")
     with socket.socket() as s:
@@ -344,6 +357,35 @@ def main():
               c.result("session_info", session=sid).get("meta", {}).get("state"))
         q = c.result("queue_list", session=sid)["queue"]
         check("file vide en fin de refus tardif", q == [], str(q))
+
+        # --- 2d. Régression : send+steer d'un /compact refusé -----------------
+        # Même scénario via send_prompt (steer d'un send classique) : la
+        # remise en file doit rester inconditionnelle — conditionner le
+        # drain au désarmement par « || » court-circuiterait l'enfilement
+        # et perdrait la commande. Détection : le stub journalise chaque
+        # prompt reçu — un /compact remis puis re-livré compte 2 envois.
+        set_mode("holderr")
+        c.result("send", session=sid, text="t2d")
+        ok = wait_for(lambda: c.result("session_info", session=sid)
+                      .get("meta", {}).get("state") == "working", 5)
+        check("tour t2d retenu (session busy)", ok,
+              c.result("session_info", session=sid).get("meta", {}).get("state"))
+        n_cpt = prompts_count("/compact")
+        c.result("send", session=sid, text="/compact", steer=True)
+        ok = wait_for(lambda: prompts_count("/compact") > n_cpt, 5)
+        check("send+steer : /compact remis à l'agent", ok,
+              f"prompts={prompts_count('/compact')} attendu>{n_cpt}")
+        release()                     # fin du tour t2d (erreur, fin quand même)
+        time.sleep(0.5)
+        release()                     # refus tardif du /compact — dernier volant
+        ok = wait_for(lambda: prompts_count("/compact") >= n_cpt + 2, 10)
+        check("send+steer : /compact remis en file ET re-livré", ok,
+              f"prompts={prompts_count('/compact')} attendu>={n_cpt + 2}")
+        release()                     # /compact re-livré → erreur → désarm drain
+        ok = wait_for(lambda: c.result("session_info", session=sid)
+                      .get("meta", {}).get("state") == "idle", 10)
+        check("session de retour idle après send+steer", ok,
+              c.result("session_info", session=sid).get("meta", {}).get("state"))
 
         # --- 3. Compact hold --------------------------------------------------
         # La phase 2c a terminé le tour « first » et vidé la file —

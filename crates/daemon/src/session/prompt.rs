@@ -106,14 +106,17 @@ impl Session {
                         s.emit(EventKind::System {
                             text: format!("steer refusé ({e}) — message en file"),
                         });
-                        // La retenue laissait busy vrai sans runner (le
+                        // Remise en file inconditionnelle (la condition
+                        // de drain ne doit pas la sauter — un /compact
+                        // refusé désarmé perdrait le message). La
+                        // retenue laissait busy vrai sans runner (le
                         // drain s'arrête sur compacting en conservant
                         // busy) : après désarmement, le « runner déjà
                         // là » supposé par enqueue_prompt est faux —
                         // drain explicite pour ne pas orpheliner la file.
-                        if disarmed
-                            || !s.enqueue_prompt(&text, false, PromptSrc::UserJournaled)
-                        {
+                        let already =
+                            s.enqueue_prompt(&text, false, PromptSrc::UserJournaled);
+                        if disarmed || !already {
                             s.drain_queue().await;
                         }
                     }
