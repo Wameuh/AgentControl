@@ -14,6 +14,10 @@ pub(crate) mod misc;
 /// `OrchProbe` est partagé avec `crate::components` (statut du
 /// composant interne `backlog-orchestrator` dans list_components).
 pub(crate) mod orch;
+/// Surface de config éditable à chaud de l'orchestrateur (schéma
+/// params, validation de patch, persistance config.toml) — partagée
+/// avec `crate::components` (params_schema/params de l'item internal).
+pub(crate) mod orch_cfg;
 mod peers;
 mod prs;
 mod sessions;
@@ -746,6 +750,9 @@ impl Daemon {
             }
             ReqKind::OrchestratorSet { enabled } => {
                 self.h_orch_set(enabled).await
+            }
+            ReqKind::OrchestratorConfig { patch } => {
+                self.h_orch_config(patch).await
             }
             ReqKind::ManagerSpawn { repo } => self.h_manager_spawn(&repo).await,
             ReqKind::Subscribe { session, after_seq } => {

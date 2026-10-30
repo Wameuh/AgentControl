@@ -249,22 +249,26 @@ impl Components {
         if name == orch::COMPONENT_NAME {
             // État déduit de la phase de l'orchestrateur natif + son
             // instantané (ledger workers, gardes) dans `orchestrator`.
+            // params_schema + params : la config éditable à chaud — le
+            // client en tire son formulaire « Configurer » générique et
+            // envoie `component_set_params` (intercepté → orch).
             let i = INTERNALS.iter().find(|i| i.name == name)?;
+            let cfg = self.orch.cfg.read().unwrap().clone();
             let spec = ComponentSpec {
                 name: name.to_string(),
                 kind: ComponentKind::Internal,
                 command: Vec::new(),
                 env: HashMap::new(),
                 cwd: None,
-                autostart: self.orch.cfg.enabled,
+                autostart: cfg.enabled,
                 restart: RestartPolicy::Never,
                 restart_sec: 0,
                 healthcheck: Healthcheck::None,
                 description: Some(i.description.to_string()),
                 queries: HashMap::new(),
                 catalog: None,
-                params_schema: Vec::new(),
-                params: HashMap::new(),
+                params_schema: crate::server::orch_cfg::params_schema(),
+                params: crate::server::orch_cfg::params_values(&cfg),
                 render: None,
             };
             let st = ComponentStatus {

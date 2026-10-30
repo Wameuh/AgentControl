@@ -1007,6 +1007,24 @@ pub enum ReqKind {
     /// `{enabled, status}` — status = instantané exposé aussi dans
     /// `ListComponents`/`ComponentInfo`.
     OrchestratorSet { enabled: bool },
+    /// Lecture/édition à chaud de la config de l'orchestrateur backlog.
+    /// `patch` absent = get → `{config, status}` ; `patch` présent =
+    /// merge partiel validé par champ (clés = celles de
+    /// `[backlog_orchestrator]` ; valeurs en JSON natif ou forme chaîne
+    /// « "60" »/« "on" »/« Repo=/cwd,… » — les deux convergent sur la
+    /// même validation) puis la section config.toml est réécrite
+    /// (survit aux redémarrages) → `{config, applied, persisted,
+    /// status}`. Application : au prochain tick (max_workers, poll_secs,
+    /// nudge_cooldown, flags, group) ou au prochain spawn (agent, mode,
+    /// model, thought_level, prompts, repo_workspaces, workspace) —
+    /// `enabled` posé ici est persisté ET appliqué au runtime (à la
+    /// différence d'`OrchestratorSet`, runtime seul). Extension
+    /// additive : démons anciens → erreur « req inconnue », pas de
+    /// coupure protocole.
+    OrchestratorConfig {
+        #[serde(default)]
+        patch: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+    },
     /// Spawn d'un « Manager » pour le workspace routé `repo` (feature
     /// d'intendance backlog : le client le propose quand le composant
     /// `agentbacklog` + l'orchestrateur sont actifs — cf.
@@ -1096,6 +1114,7 @@ impl ReqKind {
             Self::ComponentSetParams { .. } => "component_set_params",
             Self::ComponentQuery { .. } => "component_query",
             Self::OrchestratorSet { .. } => "orchestrator_set",
+            Self::OrchestratorConfig { .. } => "orchestrator_config",
             Self::ManagerSpawn { .. } => "manager_spawn",
             Self::DaemonStatus => "daemon_status",
             Self::UpdateDaemon { .. } => "update_daemon",

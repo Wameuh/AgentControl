@@ -19,6 +19,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 toml = "0.8"
+# Réécriture chirurgicale de [backlog_orchestrator] dans config.toml
+# (DocumentMut : commentaires et sections voisines préservés).
+toml_edit = "0.22"
 base64 = "0.22"
 # PTY interactif pour le terminal client (shell dans le workspace d'une
 # session) — portable-pty : fork/exec + setsid corrects, resize natif.
