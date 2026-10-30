@@ -16,6 +16,7 @@ const mesh = (window as {
     setMood: (m: string, o: object) => void;
     setAnimated: (on: boolean) => void;
     isAnimated: () => boolean;
+    getMood?: () => { base: number[]; light: number[]; agent: number[] };
   };
 }).MeshBackground;
 export const bgMood = () => (document.documentElement.classList.contains("light") ? "paper" : "sand");
@@ -56,13 +57,50 @@ export function themeRgb(varName: string): string | null {
 // Couleurs du mesh = palette résolue courante (--bg + --accent, dérivés
 // du thème en base.css). Conservées en état : tout appel meshSetMood les
 // repasse — sinon un update « agents » écraserait la teinte d'accent.
-let meshColors: { base?: number[]; light?: number[] } = {};
+let meshColors: { base?: number[]; light?: number[]; agentTint?: number[] } = {};
 // Fond figé (« Fond animé » off) : pas de repaint — mais la cible de mood
 // suit quand même (freeze) pour que la réactivation reparte à jour.
 export const meshSetMood = (o: object) => {
   const freeze = mesh?.isAnimated() === false;
   mesh?.setMood(bgMood(), { ...meshColors, ...(freeze ? { freeze } : {}), ...o });
 };
+/** [r,g,b] 0-255 → [h 0-360, s 0-100, l 0-100]. */
+function rgbToHsl([r, g, b]: number[]): [number, number, number] {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return [0, 0, l * 100];
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  const h = max === r ? ((g - b) / d + (g < b ? 6 : 0))
+    : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return [h * 60, s * 100, l * 100];
+}
+/** [h 0-360, s 0-100, l 0-100] → [r,g,b] 0-255. */
+function hslToRgb([h, s, l]: number[]): number[] {
+  h /= 360; s /= 100; l /= 100;
+  if (s === 0) { const v = Math.round(l * 255); return [v, v, v]; }
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  const chan = (t: number) => {
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
+  };
+  return [chan(h + 1 / 3), chan(h), chan(h - 1 / 3)].map((n) => Math.round(n * 255));
+}
+/** Teinte des lumières « agents » dérivée de l'accent — même pipeline que
+ *  la palette de surfaces (#43) : petite rotation analogue, désaturation
+ *  et assombrissement (deltas proches de ceux des presets, qui décalent
+ *  la lumière principale vers une teinte voisine plus sourde). Reste dans
+ *  la famille de l'accent : rouge → facettes rouges, jamais de vert. */
+function meshAgentRgb(light: number[]): number[] {
+  const [h, s, l] = rgbToHsl(light);
+  return hslToRgb([(h - 30 + 360) % 360, s * 0.55, l * 0.93]);
+}
 /** Re-lit la palette résolue et la pousse au mesh : sa lumière principale
  *  = accent (thème, ou couleur de connexion quand l'instance est liée),
  *  sa base = --bg dérivé. « sauge » retombe pile sur les presets.
@@ -72,7 +110,16 @@ export const meshSetMood = (o: object) => {
 function syncMeshAccent() {
   const base = rgbOf("--bg");
   const light = rgbOf("--accent");
-  if (base && light) meshColors = { base, light };
+  if (base && light) {
+    meshColors = { base, light };
+    // Accent choisi (classe theme-*) : la teinte des lumières agents suit
+    // l'accent — sinon elles resteraient sur le vert des presets et les
+    // facettes tourneraient vert sous un accent rouge. Accent par défaut :
+    // le preset bicolore sable/sauge (identité app) est conservé.
+    const themed = [...document.documentElement.classList]
+      .some((c) => c.startsWith("theme-"));
+    if (themed) meshColors.agentTint = meshAgentRgb(light);
+  }
   mesh?.setMood(bgMood(), { ...meshColors, intensity: 0.55 });
 }
 

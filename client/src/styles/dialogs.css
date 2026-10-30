@@ -66,6 +66,9 @@ dialog input[type="checkbox"]:focus-visible {
   font: 11px/1.5 Mono, ui-monospace, monospace; white-space: pre-wrap;
   word-break: break-all; user-select: text; color: var(--muted);
 }
+/* Puits sombre illisible en mode clair (texte --muted foncé) : voile
+   clair comme #comp-logs. */
+:root.light #log-view { background: rgba(var(--tint-rgb), .05); }
 #log-view .ll-debug { color: var(--dim); }
 #log-view .ll-warn { color: var(--warn); }
 #log-view .ll-error { color: var(--err); }
