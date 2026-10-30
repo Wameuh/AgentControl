@@ -651,10 +651,11 @@ impl Daemon {
                 title,
                 status,
                 note,
+                sync_fails,
             } => {
                 self.h_pr_track(
                     session, repo, pr, forge, host, change_id, url, branch, title,
-                    status, note,
+                    status, note, sync_fails,
                 )
                 .await
             }

@@ -473,11 +473,22 @@ pub struct PrEntry {
     /// "manual" (pr_track) — prioritaire — ou "detected" (scan auto).
     #[serde(default)]
     pub via: String,
+    /// Syncs consécutifs sans lecture live (hôte/repo injoignable,
+    /// référence absente). Au-delà de `PR_UNRESOLVED_AFTER` le client
+    /// affiche l'entrée « non résoluble » ; remis à 0 à la première
+    /// lecture réussie.
+    #[serde(default)]
+    pub sync_fails: u32,
     #[serde(default)]
     pub created_at: String,
     #[serde(default)]
     pub updated_at: String,
 }
+
+/// Seuil d'échecs de sync consécutifs au-delà duquel une entrée est
+/// présentée « non résoluble » (repo fantôme, hôte mort). Réinitialisé
+/// à la première lecture live — un hôte revenu démasque l'entrée.
+pub const PR_UNRESOLVED_AFTER: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Protocole client -> daemon : { "id": n, "req": "...", ... }
@@ -875,6 +886,10 @@ pub enum ReqKind {
         status: Option<String>,
         #[serde(default)]
         note: Option<String>,
+        /// Compteur d'échecs de sync à écrire tel quel (résultat d'un
+        /// `pr sync` côté acctl — 0 = vu live). None = inchangé.
+        #[serde(default)]
+        sync_fails: Option<u32>,
     },
     PrUntrack {
         repo: String,

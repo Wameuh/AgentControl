@@ -38,6 +38,187 @@ fn parse_ref_arg(s: &str) -> Result<(u64, Option<String>)> {
     Ok((s.parse().context("numéro de référence invalide (ou I<Change-Id>)")?, None))
 }
 
+/// Découpe une valeur `--repo` : URL complète → (host, repo) ; forme
+/// `host:path` (le `host:` d'affichage, copiable tel quel — cf.
+/// `repo_label`) → idem ; chemin nu → repo seul. Retourne
+/// (repo, host optionnel).
+fn split_repo_arg(arg: &str) -> (String, Option<String>) {
+    let mut host = None;
+    let mut repo = arg.to_string();
+    if let Some(rest) = arg
+        .strip_prefix("https://")
+        .or_else(|| arg.strip_prefix("http://"))
+    {
+        if let Some((h, p)) = rest.split_once('/') {
+            host = Some(h.to_lowercase());
+            repo = p.to_string();
+        }
+    } else if let Some((h, p)) = arg.split_once(':') {
+        // `host:path` ou `host:port:path` — un hôte ressemble à un
+        // domaine (point) et un 2e segment purement numérique est un
+        // port, pas un repo.
+        if h.contains('.') {
+            match p.split_once(':') {
+                Some((port, rest))
+                    if !port.is_empty()
+                        && port.chars().all(|c| c.is_ascii_digit())
+                        && !rest.is_empty() =>
+                {
+                    host = Some(format!("{h}:{port}").to_lowercase());
+                    repo = rest.to_string();
+                }
+                _ => {
+                    host = Some(h.to_lowercase());
+                    repo = p.to_string();
+                }
+            }
+        }
+    }
+    if host.is_some() {
+        repo = repo
+            .split("/-/merge_requests/")
+            .next()
+            .unwrap_or(&repo)
+            .split("/pull/")
+            .next()
+            .unwrap_or(&repo)
+            .split("/-/issues/")
+            .next()
+            .unwrap_or(&repo)
+            .trim_end_matches('/')
+            .to_string();
+        // Formes gerrit en dernier recours uniquement : une URL GitLab
+        // peut avoir un groupe « c » ou « pull » légitime.
+        if !arg.contains("/-/merge_requests/") && !arg.contains("/pull/") {
+            repo = repo
+                .split("/+/")
+                .next()
+                .unwrap_or(&repo)
+                .trim_start_matches("c/")
+                .to_string();
+        }
+    }
+    (repo, host)
+}
+
+/// Sélecteur explicite d'une entrée du registre pour `rm`/`note` :
+/// chaque champ Some = filtre (forge, hôte, repo insensible à la casse).
+/// À la différence de `detect_target`, rien n'est DEVINÉ ici — le
+/// remote n'intervient qu'en préférence quand le numéro seul matche
+/// plusieurs entrées.
+#[derive(Default)]
+struct PrSel {
+    pr: u64,
+    change_id: Option<String>,
+    forge: Option<String>,
+    host: Option<String>,
+    repo: Option<String>,
+}
+
+/// Lit le sélecteur de `pr rm|note <N|I<cid>> [--forge F] [--host H]
+/// [--repo R]` — les flags sont des filtres, pas une re-clé.
+fn select_ref(args: &[String], from: usize) -> Result<PrSel> {
+    let arg = positional_at(args, from)
+        .map(|i| args[i].clone())
+        .context("pr <rm|note> <N|I<Change-Id>> [--forge F] [--host H] [--repo R]")?;
+    let (pr, change_id) = parse_ref_arg(&arg)?;
+    let (repo, host_from_repo) = flag_val(args, "--repo")
+        .map(split_repo_arg)
+        .map(|(r, h)| (Some(r), h))
+        .unwrap_or_default();
+    Ok(PrSel {
+        pr,
+        change_id,
+        forge: flag_val(args, "--forge").map(|s| s.to_lowercase()),
+        host: flag_val(args, "--host")
+            .map(|s| s.to_lowercase())
+            .or(host_from_repo),
+        repo,
+    })
+}
+
+/// Match des champs d'identité d'une entrée du registre (défauts
+/// legacy : forge « github », hôte de la forge).
+fn entry_matches(e: &Value, sel: &PrSel) -> bool {
+    let e_forge = proto::forge_kind(e["forge"].as_str().unwrap_or(""));
+    let e_host = e["host"]
+        .as_str()
+        .unwrap_or_else(|| proto::forge_default_host(e_forge));
+    let e_repo = e["repo"].as_str().unwrap_or("");
+    if let Some(cid) = sel.change_id.as_deref() {
+        if !e["change_id"]
+            .as_str()
+            .is_some_and(|c| c.eq_ignore_ascii_case(cid))
+        {
+            return false;
+        }
+    } else if e["pr"].as_u64() != Some(sel.pr) {
+        return false;
+    }
+    if let Some(f) = &sel.forge {
+        if !e_forge.eq_ignore_ascii_case(f) {
+            return false;
+        }
+    }
+    if let Some(h) = &sel.host {
+        if !e_host.eq_ignore_ascii_case(h) {
+            return false;
+        }
+    }
+    if let Some(r) = &sel.repo {
+        if !e_repo.eq_ignore_ascii_case(r) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Libellé court d'une entrée candidate (message d'ambiguïté).
+fn entry_label(e: &Value) -> String {
+    format!("{} {} {}", badge_of(e), repo_label(e), e["session"].as_str().unwrap_or(""))
+}
+
+/// Résout le sélecteur dans le registre listé : numéro/Change-Id +
+/// filtres explicites ; sans repo explicite, le remote du cwd sert de
+/// préférence (`rm 42` lancé dans le clone = la PR du clone). Ambigu →
+/// erreur listant les candidates ; aucun candidat → Ok(None).
+fn resolve_in(entries: &[Value], sel: &PrSel) -> Result<Option<Value>> {
+    let mut cands: Vec<&Value> = entries.iter().filter(|e| entry_matches(e, sel)).collect();
+    if cands.len() > 1 && sel.repo.is_none() {
+        // Préférence remote : un `rm <N>` nu dans un clone cible le repo
+        // du clone (comportement historique github).
+        if let Some((rh, rp)) = git_remote() {
+            let pref: Vec<&Value> = cands
+                .iter()
+                .filter(|e| {
+                    e["repo"].as_str().is_some_and(|r| r.eq_ignore_ascii_case(&rp))
+                        && {
+                            let f = proto::forge_kind(e["forge"].as_str().unwrap_or(""));
+                            match f {
+                                "github" => rh == "github.com",
+                                "gitlab" => rh != "github.com",
+                                _ => true,
+                            }
+                        }
+                })
+                .copied()
+                .collect();
+            if !pref.is_empty() {
+                cands = pref;
+            }
+        }
+    }
+    match cands.len() {
+        0 => Ok(None),
+        1 => Ok(Some(cands[0].clone())),
+        _ => anyhow::bail!(
+            "{} entrées correspondent — précisez --forge/--host/--repo :\n  {}",
+            cands.len(),
+            cands.iter().map(|e| entry_label(e)).collect::<Vec<_>>().join("\n  ")
+        ),
+    }
+}
+
 /// Forges actives du démon (`forge_list`) — [] sur un vieux démon sans
 /// le RPC : tout retombe sur les défauts github.
 async fn forge_set(c: &mut Conn) -> Vec<Value> {
@@ -128,54 +309,28 @@ fn positional_at(args: &[String], from: usize) -> Option<usize> {
     None
 }
 
-/// Résout la cible forge/host/repo d'un `pr add|note|rm` :
-/// flags `--forge`/`--host`/`--repo` > remote git matché sur les forges
+/// Résout la cible forge/host/repo d'un `pr add` : flags
+/// `--forge`/`--host`/`--repo` > remote git matché sur les forges
 /// configurées (hostname seul comparé — ssh :29418 ≠ web :8080) >
-/// gh repo view (github) — comportement historique.
+/// gh repo view (github) — comportement historique. `rm`/`note` ne
+/// passent pas par ici : ils résolvent le sélecteur dans le registre
+/// (`select_ref` + `resolve_in`).
 async fn detect_target(args: &[String], c: &mut Conn, from: usize) -> Result<PrTarget> {
     let arg = positional_at(args, from)
         .map(|i| args[i].clone())
-        .context("pr <add|note|rm> <N|I<Change-Id>>")?;
+        .context("pr add <N|I<Change-Id>>")?;
     let (pr, change_id) = parse_ref_arg(&arg)?;
     let forge_flag = flag_val(args, "--forge").map(|s| s.to_lowercase());
     let host_flag = flag_val(args, "--host").map(|s| s.to_lowercase());
     let repo_flag = flag_val(args, "--repo").map(String::from);
     let set = forge_set(c).await;
 
-    // `--repo` en URL complète donne host+path (lien PR/MR/change collé).
-    let mut repo = repo_flag.clone().unwrap_or_default();
-    let mut host_from_url: Option<String> = None;
-    if repo.contains("://") {
-        if let Some(rest) = repo
-            .strip_prefix("https://")
-            .or_else(|| repo.strip_prefix("http://"))
-            .map(String::from)
-        {
-            if let Some((h, p)) = rest.split_once('/') {
-                host_from_url = Some(h.to_lowercase());
-                repo = p
-                    .split("/-/merge_requests/")
-                    .next()
-                    .unwrap_or(p)
-                    .split("/pull/")
-                    .next()
-                    .unwrap_or(p)
-                    .trim_end_matches('/')
-                    .to_string();
-                // Formes gerrit en dernier recours uniquement : une URL
-                // GitLab peut avoir un groupe « c » ou « pull » légitime
-                // (`gitlab.com/c/foo/-/merge_requests/1` → repo c/foo).
-                if !p.contains("/-/merge_requests/") && !p.contains("/pull/") {
-                    repo = repo
-                        .split("/+/")
-                        .next()
-                        .unwrap_or(&repo)
-                        .trim_start_matches("c/")
-                        .to_string();
-                }
-            }
-        }
-    }
+    // `--repo` en URL ou `host:path` donne host+path (lien PR/MR/change
+    // ou libellé d'affichage collé).
+    let (mut repo, host_from_url) = repo_flag
+        .as_deref()
+        .map(split_repo_arg)
+        .unwrap_or_default();
 
     // Match du hostname du remote contre les hôtes configurés →
     // (type, hôte web déclaré). Couvre ssh≠web port.
@@ -328,10 +483,21 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                 if !all && (st == "merged" || st == "closed") {
                     continue;
                 }
+                // Entrée jamais résolue par le sync → état dédié, pas
+                // un « open » trompeur éternel (les statuts finaux
+                // merged/closed gardent leur vérité).
+                let st = if !matches!(st, "merged" | "closed")
+                    && e["sync_fails"].as_u64().unwrap_or(0)
+                        >= proto::PR_UNRESOLVED_AFTER as u64
+                {
+                    "unresolved"
+                } else {
+                    st
+                };
                 let who = session_label(&sessions, e["session"].as_str().unwrap_or(""));
                 let mine = me.as_deref() == e["session"].as_str();
                 println!(
-                    "{:<12} {:<24} [{:<6}] {:<28} {}{}{}",
+                    "{:<12} {:<24} [{:<10}] {:<28} {}{}{}",
                     badge_of(e),
                     repo_label(e),
                     st,
@@ -394,6 +560,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                         .as_ref()
                         .and_then(|i| i["status"].as_str().map(String::from)),
                     note,
+                    sync_fails: None,
                 })
                 .await?;
             println!(
@@ -406,7 +573,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
         }
         "note" => {
             let idx = positional_at(args, 2).context("pr note <N|I<cid>> <txt…>")?;
-            let t = detect_target(args, c, 2).await?;
+            let sel = select_ref(args, 2)?;
             // Le texte suit la référence et s'arrête au premier flag.
             let words: Vec<String> = args[idx + 1..]
                 .iter()
@@ -414,35 +581,59 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                 .cloned()
                 .collect();
             anyhow::ensure!(!words.is_empty(), "pr note <N|I<cid>> <txt…> — texte vide");
+            let v = c
+                .call(proto::ReqKind::PrList { session: None })
+                .await
+                .unwrap_or(json!([]));
+            let entries = v.as_array().cloned().unwrap_or_default();
+            let e = resolve_in(&entries, &sel)?
+                .context("aucune entrée ne correspond (cf. acctl pr ls --all)")?;
             c.call(proto::ReqKind::PrTrack {
                 session: None,
-                repo: t.repo.clone(),
-                pr: t.pr,
-                forge: Some(t.forge.clone()),
-                host: Some(t.host.clone()),
-                change_id: t.change_id.clone(),
+                repo: e["repo"].as_str().unwrap_or("").to_string(),
+                pr: e["pr"].as_u64().unwrap_or(0),
+                forge: e["forge"].as_str().map(String::from),
+                host: e["host"].as_str().map(String::from),
+                change_id: e["change_id"].as_str().map(String::from),
                 url: None,
                 branch: None,
                 title: None,
                 status: None,
                 note: Some(words.join(" ")),
+                sync_fails: None,
             })
             .await?;
-            println!("{}: note maj", badge_of(&json!({"forge": t.forge, "pr": t.pr, "change_id": t.change_id})));
+            println!("{}: note maj", badge_of(&e));
         }
         "rm" => {
-            let t = detect_target(args, c, 2).await?;
-            println!(
-                "{}",
-                c.call(proto::ReqKind::PrUntrack {
-                    repo: t.repo.clone(),
-                    pr: t.pr,
-                    forge: Some(t.forge.clone()),
-                    host: Some(t.host.clone()),
-                    change_id: t.change_id.clone(),
-                })
-                .await?
-            );
+            let sel = select_ref(args, 2)?;
+            // Résolution multi-forges : la cible est cherchée dans le
+            // registre (clé complète forge+host+repo+numéro), pas
+            // reconstruite par défaut github — `rm <N>` trouve les MR
+            // GitLab et changes Gerrit comme les PR GitHub.
+            let v = c
+                .call(proto::ReqKind::PrList { session: None })
+                .await
+                .unwrap_or(json!([]));
+            let entries = v.as_array().cloned().unwrap_or_default();
+            match resolve_in(&entries, &sel)? {
+                Some(e) => {
+                    println!(
+                        "{}",
+                        c.call(proto::ReqKind::PrUntrack {
+                            repo: e["repo"].as_str().unwrap_or("").to_string(),
+                            pr: e["pr"].as_u64().unwrap_or(0),
+                            forge: e["forge"].as_str().map(String::from),
+                            host: e["host"].as_str().map(String::from),
+                            change_id: e["change_id"].as_str().map(String::from),
+                        })
+                        .await?
+                    );
+                }
+                // Vieux démon sans pr_list ou entrée absente : réponse
+                // identique à un untrack qui n'a rien trouvé.
+                None => println!("{}", json!({ "removed": false })),
+            }
         }
         "sync" => {
             // Rafraîchit les statuts par forge (gh pour github,
@@ -455,6 +646,26 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             let entries: Vec<Value> =
                 v.as_array().map(|a| a.clone()).unwrap_or_default();
             let out = forgesync::collect_updates(&set, &entries);
+            // Compteur d'échecs du registre : vu live → 0, injoignable
+            // → +1 (les updates sont des « vues » — Some(0) en même
+            // temps que le statut). Champ ignoré par un vieux démon.
+            let track_fails = |repo: &str, pr: u64, forge: &str, host: &str,
+                              change_id: Option<String>, fails: u32| {
+                proto::ReqKind::PrTrack {
+                    session: None,
+                    repo: repo.to_string(),
+                    pr,
+                    forge: Some(forge.to_string()),
+                    host: Some(host.to_string()),
+                    change_id,
+                    url: None,
+                    branch: None,
+                    title: None,
+                    status: None,
+                    note: None,
+                    sync_fails: Some(fails),
+                }
+            };
             for u in &out.updates {
                 let _ = c
                     .call(proto::ReqKind::PrTrack {
@@ -469,9 +680,51 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                         title: u.title.clone(),
                         status: Some(u.status.clone()),
                         note: None,
+                        sync_fails: Some(0),
                     })
                     .await;
                 println!("{}: {} -> {}", update_label(u), u.old_status, u.status);
+            }
+            // Vues live sans changement de statut (les updates ont déjà
+            // repoussé leur remise à zéro ci-dessus).
+            for s in &out.seen {
+                if out.updates.iter().any(|u| {
+                    u.forge == s.forge && u.host == s.host
+                        && u.repo.eq_ignore_ascii_case(&s.repo) && u.pr == s.pr
+                }) {
+                    continue;
+                }
+                let _ = c
+                    .call(track_fails(&s.repo, s.pr, &s.forge, &s.host, s.change_id.clone(), 0))
+                    .await;
+            }
+            for s in &out.failed {
+                let cur = entries
+                    .iter()
+                    .find(|e| entry_matches(e, &PrSel {
+                        pr: s.pr,
+                        change_id: s.change_id.clone(),
+                        forge: Some(s.forge.clone()),
+                        host: Some(s.host.clone()),
+                        repo: Some(s.repo.clone()),
+                    }))
+                    .and_then(|e| e["sync_fails"].as_u64())
+                    .unwrap_or(0) as u32;
+                let nf = cur.saturating_add(1);
+                let _ = c
+                    .call(track_fails(&s.repo, s.pr, &s.forge, &s.host, s.change_id.clone(), nf))
+                    .await;
+                if nf == proto::PR_UNRESOLVED_AFTER {
+                    let mark = match s.forge.as_str() {
+                        "gitlab" => "!",
+                        "gerrit" => "c#",
+                        _ => "#",
+                    };
+                    println!(
+                        "{}:{}{}{}: non résoluble après {} échecs de sync",
+                        s.host, s.repo, mark, s.pr, nf
+                    );
+                }
             }
             for n in &out.notes {
                 println!("{n}");
@@ -481,4 +734,100 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
         other => anyhow::bail!("pr: sous-commande inconnue: {other} (add|ls|note|rm|sync)"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Entrée de registre factice (champs d'identité seulement).
+    fn ent(forge: &str, host: &str, repo: &str, pr: u64) -> Value {
+        json!({
+            "forge": forge, "host": host, "repo": repo, "pr": pr,
+            "session": "s-x", "status": "open",
+        })
+    }
+
+    fn sel(pr: u64) -> PrSel {
+        PrSel { pr, ..Default::default() }
+    }
+
+    #[test]
+    fn split_repo_arg_forms() {
+        assert_eq!(
+            split_repo_arg("grp/sub/proj"),
+            ("grp/sub/proj".into(), None)
+        );
+        assert_eq!(
+            split_repo_arg("gitlab.com:grp/sub/proj"),
+            ("grp/sub/proj".into(), Some("gitlab.com".into()))
+        );
+        // Port conservé dans l'hôte, pas dans le repo.
+        assert_eq!(
+            split_repo_arg("gerrit.corp:8080:core/app"),
+            ("core/app".into(), Some("gerrit.corp:8080".into()))
+        );
+        // URL complète : suffixe MR/pull/gerrit strippé.
+        assert_eq!(
+            split_repo_arg("https://gitlab.com/g/p/-/merge_requests/42"),
+            ("g/p".into(), Some("gitlab.com".into()))
+        );
+        assert_eq!(
+            split_repo_arg("https://github.com/o/r/pull/9"),
+            ("o/r".into(), Some("github.com".into()))
+        );
+        assert_eq!(
+            split_repo_arg("https://gerrit.corp/c/core/app/+/7"),
+            ("core/app".into(), Some("gerrit.corp".into()))
+        );
+    }
+
+    #[test]
+    fn resolve_gitlab_by_number() {
+        // Le cas rapporté : `rm <N>` nu doit trouver une MR GitLab —
+        // et retourner l'identité complète pour la clé exacte.
+        let entries = vec![
+            ent("gitlab", "gitlab.com", "grp/sub/proj", 42),
+            ent("github", "github.com", "acme/widgets", 9),
+        ];
+        let hit = resolve_in(&entries, &sel(42)).unwrap().unwrap();
+        assert_eq!(hit["forge"], "gitlab");
+        assert_eq!(hit["repo"], "grp/sub/proj");
+        // Absente → None (→ removed:false), pas d'erreur.
+        assert!(resolve_in(&entries, &sel(77)).unwrap().is_none());
+    }
+
+    #[test]
+    fn resolve_ambiguous() {
+        // Deux entrées de même numéro sur des forges distinctes et
+        // aucune préférence remote applicable (repo différent du cwd
+        // de toute façon — git_remote() lit le vrai clone de test).
+        let entries = vec![
+            ent("gitlab", "gitlab.com", "x/one", 42),
+            ent("gitlab", "gitlab.corp", "y/two", 42),
+        ];
+        match resolve_in(&entries, &sel(42)) {
+            Err(e) => assert!(e.to_string().contains("ambigu") || e.to_string().contains("entrées")),
+            _ => panic!("ambiguïté attendue"),
+        }
+        // --forge lève l'ambiguïté.
+        let s = PrSel { pr: 42, forge: Some("gitlab".into()), host: Some("gitlab.corp".into()), ..Default::default() };
+        assert_eq!(resolve_in(&entries, &s).unwrap().unwrap()["host"], "gitlab.corp");
+        // --repo aussi (insensible à la casse).
+        let s = PrSel { pr: 42, repo: Some("Y/TWO".into()), ..Default::default() };
+        assert_eq!(resolve_in(&entries, &s).unwrap().unwrap()["host"], "gitlab.corp");
+        // --repo host:path copié depuis l'affichage.
+        let s = PrSel { pr: 42, repo: Some("two".into()), ..Default::default() };
+        assert!(resolve_in(&entries, &s).unwrap().is_none());
+    }
+
+    #[test]
+    fn resolve_gerrit_by_change_id() {
+        let cid = "Ideadbeefcafe0123456789abcdef0123456789ab";
+        let mut e = ent("gerrit", "gerrit.corp:8080", "", 0);
+        e["change_id"] = json!(cid);
+        let entries = vec![e];
+        let s = PrSel { pr: 0, change_id: Some(cid.to_uppercase()), ..Default::default() };
+        assert!(resolve_in(&entries, &s).unwrap().is_some());
+    }
 }

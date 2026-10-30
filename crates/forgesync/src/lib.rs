@@ -301,14 +301,45 @@ pub struct PrUpdate {
     pub old_status: String,
 }
 
+/// Référence d'une entrée évaluée par un passage de sync — adressage
+/// identique à `PrUpdate`/`PrUntrack`. `seen` = la forge a répondu
+/// pour elle (état lu, changé ou non) ; `failed` = injoignable ce run
+/// (hôte mort/non déclaré, repo ou référence absente).
+pub struct PrSeen {
+    pub forge: String,
+    pub host: String,
+    pub repo: String,
+    pub pr: u64,
+    pub change_id: Option<String>,
+}
+
 /// Résultat d'un passage de sync : `updates` à appliquer au registre +
 /// `notes` de diagnostics non fatals (hôte injoignable, PRs ouvertes
 /// non enregistrées) + `checked` (entrées pour lesquelles un état live
-/// a été lu — les hôtes morts ne comptent pas).
+/// a été lu — les hôtes morts ne comptent pas) + `seen`/`failed` pour
+/// le compteur d'échecs du registre (affichage « non résoluble »).
 pub struct SyncOutcome {
     pub checked: usize,
     pub updates: Vec<PrUpdate>,
+    pub seen: Vec<PrSeen>,
+    pub failed: Vec<PrSeen>,
     pub notes: Vec<String>,
+}
+
+/// `PrSeen` depuis une entrée du registre sérialisée — même défauts
+/// de forge/host que la clé du registre.
+fn seen_of(e: &Value) -> PrSeen {
+    let forge = proto::forge_kind(e["forge"].as_str().unwrap_or("")).to_string();
+    PrSeen {
+        host: e["host"]
+            .as_str()
+            .unwrap_or_else(|| proto::forge_default_host(&forge))
+            .to_string(),
+        forge,
+        repo: e["repo"].as_str().unwrap_or("").to_string(),
+        pr: e["pr"].as_u64().unwrap_or(0),
+        change_id: e["change_id"].as_str().map(String::from),
+    }
 }
 
 /// Interroge les forges live pour chaque entrée du registre et produit
@@ -320,6 +351,8 @@ pub fn collect_updates(set: &[Value], entries: &[Value]) -> SyncOutcome {
     let mut out = SyncOutcome {
         checked: 0,
         updates: Vec::new(),
+        seen: Vec::new(),
+        failed: Vec::new(),
         notes: Vec::new(),
     };
     collect_github(entries, &mut out);
@@ -339,7 +372,11 @@ fn gh_host_ok(e: &Value) -> bool {
 /// GitHub — `gh pr list` groupé par repo connu : les repos comptent
 /// comme « vus » dès que gh répond (un hôte down laisse les entrées
 /// inchangées, sans note — gh absent est le cas nominal d'un démon
-/// minimal).
+/// minimal). Un repo dont le `gh pr list` échoue alors que gh est
+/// prouvé utilisable (`gh auth status` OK) = repo/référence injoignable
+/// → compté en échec ; gh absent ou non authentifié n'est PAS un
+/// échec d'entrée (aucune entrée ne doit passer « non résoluble » sur
+/// une machine sans gh fonctionnel).
 fn collect_github(entries: &[Value], out: &mut SyncOutcome) {
     for e in entries {
         if proto::forge_kind(e["forge"].as_str().unwrap_or("")) == "github" && !gh_host_ok(e) {
@@ -349,6 +386,9 @@ fn collect_github(entries: &[Value], out: &mut SyncOutcome) {
                 e["pr"].as_u64().unwrap_or(0),
                 e["host"].as_str().unwrap_or("?"),
             ));
+            // Jamais résolvable par gh (hôte hors github.com) : le
+            // compteur reflète l'impossibilité, pas une panne passagère.
+            out.failed.push(seen_of(e));
         }
     }
     let mut repos: Vec<String> = entries
@@ -359,6 +399,9 @@ fn collect_github(entries: &[Value], out: &mut SyncOutcome) {
         .collect();
     repos.sort();
     repos.dedup();
+    // Probe unique : `gh auth status` = binaire présent + token valide.
+    // Sans lui impossible de distinguer « repo absent » de « gh KO ».
+    let gh_up = !repos.is_empty() && gh_out(&["auth", "status"]).is_some();
     for repo in repos {
         let live = gh_out(&[
             "pr", "list", "--repo", &repo, "--state", "all",
@@ -369,6 +412,16 @@ fn collect_github(entries: &[Value], out: &mut SyncOutcome) {
         let Some(live) = live else {
             out.notes
                 .push(format!("github {repo}: gh indisponible — statuts inchangés"));
+            if gh_up {
+                // gh sert mais ce repo ne répond pas → fantôme/privé.
+                for e in entries.iter().filter(|e| {
+                    proto::forge_kind(e["forge"].as_str().unwrap_or("")) == "github"
+                        && gh_host_ok(e)
+                        && e["repo"].as_str() == Some(repo.as_str())
+                }) {
+                    out.failed.push(seen_of(e));
+                }
+            }
             continue;
         };
         let tracked: Vec<&Value> = entries
@@ -382,9 +435,13 @@ fn collect_github(entries: &[Value], out: &mut SyncOutcome) {
         for e in &tracked {
             let n = e["pr"].as_u64().unwrap_or(0);
             let Some(p) = live.iter().find(|p| p["number"].as_u64() == Some(n)) else {
+                // Le repo répond mais la référence n'y est plus
+                // (supprimée, jamais existée) → non résoluble en cours.
+                out.failed.push(seen_of(e));
                 continue;
             };
             out.checked += 1;
+            out.seen.push(seen_of(e));
             let st = gh_state(p);
             let old = e["status"].as_str().unwrap_or("");
             if st != old {
@@ -442,6 +499,9 @@ fn collect_gitlab(set: &[Value], entries: &[Value], out: &mut SyncOutcome) {
             out.notes.push(format!(
                 "gitlab {host} {repo}!{n}: hôte non déclaré — statut inchangé"
             ));
+            // Jamais résolvable tant que l'hôte n'est pas déclaré :
+            // le compteur le dit (repo fantôme ou config incomplète).
+            out.failed.push(seen_of(e));
             continue;
         }
         let auth = forge_auth(set, "gitlab", host);
@@ -458,9 +518,11 @@ fn collect_gitlab(set: &[Value], entries: &[Value], out: &mut SyncOutcome) {
             out.notes.push(format!(
                 "gitlab {host} {repo}!{n}: indisponible — statut inchangé"
             ));
+            out.failed.push(seen_of(e));
             continue;
         };
         out.checked += 1;
+        out.seen.push(seen_of(e));
         let st = glab_state(&v);
         let old = e["status"].as_str().unwrap_or("");
         if st != old {
@@ -495,6 +557,9 @@ fn collect_gerrit(set: &[Value], entries: &[Value], out: &mut SyncOutcome) {
         }
         let host = e["host"].as_str().unwrap_or("");
         if host.is_empty() {
+            // Entrée sans hôte : jamais résolvable — comptée en échec
+            // plutôt qu'ignorée silencieusement.
+            out.failed.push(seen_of(e));
             continue;
         }
         let repo = e["repo"].as_str().unwrap_or("");
@@ -506,6 +571,7 @@ fn collect_gerrit(set: &[Value], entries: &[Value], out: &mut SyncOutcome) {
             out.notes.push(format!(
                 "gerrit {host} {q}: hôte non déclaré — statut inchangé"
             ));
+            out.failed.push(seen_of(e));
             continue;
         }
         let base = host_base(host);
@@ -514,9 +580,11 @@ fn collect_gerrit(set: &[Value], entries: &[Value], out: &mut SyncOutcome) {
             out.notes.push(format!(
                 "gerrit {host} {q}: indisponible — statut inchangé"
             ));
+            out.failed.push(seen_of(e));
             continue;
         };
         out.checked += 1;
+        out.seen.push(seen_of(e));
         let st = gerrit_state(&v);
         let resolved = v["_number"].as_u64().unwrap_or(n);
         let old = e["status"].as_str().unwrap_or("");
