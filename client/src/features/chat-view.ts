@@ -48,6 +48,8 @@ interface ConvCache {
   lastText: { thought: boolean; norm: string; el: HTMLElement } | null;
   userMsgs: number;
   headSeen: boolean;
+  /** Seqs des events actuellement rendus — dédup anti-double-push. */
+  renderedSeqs: Set<number>;
   minRendered: number;
   renderedCount: number;
   hasMoreHistory: boolean;
@@ -79,6 +81,9 @@ export class ChatView {
   private minRendered = Number.MAX_SAFE_INTEGER;
   private maxRendered = 0;
   private renderedCount = 0;
+  // Seqs des events présents dans le DOM — dédup anti re-rendu (voir
+  // appendEvent) ; swapé avec ConvCache comme le reste de l'état de vue.
+  private renderedSeqs = new Set<number>();
   private loadingPage = false;
   private hasMoreHistory = true;
   private hasMoreNewer = false;
@@ -252,6 +257,7 @@ export class ChatView {
     this.renderer.lastText = null;
     this.renderer.userMsgs = 0;
     this.renderer.headSeen = false;
+    this.renderedSeqs = new Set();
     this.minRendered = Number.MAX_SAFE_INTEGER;
     this.maxRendered = 0;
     this.renderedCount = 0;
@@ -290,6 +296,7 @@ export class ChatView {
       lastText: this.renderer.lastText,
       userMsgs: this.renderer.userMsgs,
       headSeen: this.renderer.headSeen,
+      renderedSeqs: this.renderedSeqs,
       minRendered: this.minRendered,
       renderedCount: this.renderedCount,
       hasMoreHistory: this.hasMoreHistory,
@@ -329,6 +336,7 @@ export class ChatView {
     this.renderer.lastText = c.lastText;
     this.renderer.userMsgs = c.userMsgs;
     this.renderer.headSeen = c.headSeen;
+    this.renderedSeqs = c.renderedSeqs;
     this.minRendered = c.minRendered;
     this.maxRendered = c.lastSeq; // dernier seq rendu = borne haute du cache
     this.renderedCount = c.renderedCount;
@@ -828,6 +836,14 @@ export class ChatView {
       this.updateBottomBtn();
       return;
     }
+    // Dédup par seq : un event déjà rendu ne se re-rend JAMAIS — quel
+    // que soit le chemin (push reçu pendant un open() en vol,
+    // resubscribe/replay qui chevauche, double subscriber). Les
+    // retraits (trim, remplacement pensée→message) sortent le seq du
+    // set : un event évincé puis re-prépaginé re-rend normalement.
+    // tool_call_update n'a pas de nœud propre → jamais dans le set,
+    // son propre garde (updSeq) dédup les rejouées.
+    if (this.renderedSeqs.has(ev.seq)) return;
     if (ev.seq > this.maxRendered) this.maxRendered = ev.seq;
     // tool_call_update modifie le bloc existant
     if (ev.type === "tool_call_update") {
@@ -846,6 +862,7 @@ export class ChatView {
     const nearBottom = this.nearBottom();
     const node = this.renderer.render(ev, live);
     this.eventsEl.appendChild(node);
+    this.renderedSeqs.add(ev.seq);
     this.deps.pinsMark(node);
     this.renderer.noteText(ev, node);
     this.renderedCount++;
@@ -871,6 +888,7 @@ export class ChatView {
       d.getBoundingClientRect().bottom < this.eventsEl.getBoundingClientRect().top;
     const sh = this.eventsEl.scrollHeight;
     d.remove();
+    this.renderedSeqs.delete(Number(d.dataset.seq ?? 0));
     if (above) this.eventsEl.scrollTop -= sh - this.eventsEl.scrollHeight;
     this.renderedCount--;
     if (Number(d.dataset.seq ?? 0) <= this.minRendered) {
@@ -901,6 +919,7 @@ export class ChatView {
       // Suppression en haut → tout remonterait : compenser pour figer la vue.
       const sh = this.eventsEl.scrollHeight;
       first.remove();
+      this.renderedSeqs.delete(Number(first.dataset.seq ?? 0));
       this.eventsEl.scrollTop -= sh - this.eventsEl.scrollHeight;
       this.renderedCount--;
       this.minRendered = Number(
@@ -944,6 +963,7 @@ export class ChatView {
     this.renderer.inPrepend = true;
     try {
       for (const ev of events) {
+        if (this.renderedSeqs.has(ev.seq)) continue;
         if (ev.seq < this.minRendered) this.minRendered = ev.seq;
         if (ev.type === "tool_call_update") {
           this.renderer.updateToolBlock(ev); // pas de nœud : met à jour le bloc (ou stash)
@@ -951,6 +971,7 @@ export class ChatView {
         }
         const node = this.renderer.render(ev, false);
         this.eventsEl.insertBefore(node, anchor);
+        this.renderedSeqs.add(ev.seq);
         this.deps.pinsMark(node);
         this.renderedCount++;
         if (ev.type === "tool_call") {
