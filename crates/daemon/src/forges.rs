@@ -198,6 +198,43 @@ impl Forges {
     }
 }
 
+/// Libellés génériques utilisés par les docs, specs et tests comme
+/// placeholder de chemin de projet (`o/r`, `owner/repo`, `g/p`,
+/// `grp/sub/proj`, `foo/bar`, `exemple.com/…`). Un chemin n'est refusé
+/// que si TOUS ses segments sont génériques — un segment réel
+/// (`acme/widgets`) suffit à garder la référence.
+const PLACEHOLDER_WORDS: &[&str] = &[
+    "o", "r", "owner", "repo", "repository", "repos", "g", "p", "group",
+    "grp", "sub", "subgroup", "proj", "project", "projects", "a", "b",
+    "x", "y", "foo", "bar", "baz", "qux", "user", "username", "user-name",
+    "name", "org", "organisation", "organization", "myorg", "my-org",
+    "your-org", "your_org", "yourorg", "your-repo", "your_project",
+    "exemple", "example", "placeholder", "sample", "demo", "dummy",
+    "test", "namespace", "path", "votre", "projet", "depot", "repo-name",
+    "owner-name", "project-name", "my-project", "mon-projet",
+];
+
+/// `true` si `repo` est un placeholder documentaire : chaque segment
+/// tient en un caractère ou appartient à `PLACEHOLDER_WORDS` —
+/// `o/r`, `g/p`, `owner/repo`, `grp/sub/proj`, `a/b`, `x/y`, `foo/bar`,
+/// `exemple/truc`… Ne s'applique qu'à la détection automatique : un
+/// `pr add` manuel reste possible (intention explicite).
+pub(crate) fn placeholder_repo(repo: &str) -> bool {
+    let mut seen = false;
+    for seg in repo.split('/') {
+        let s = seg.trim();
+        if s.is_empty() {
+            continue;
+        }
+        seen = true;
+        let ls = s.to_lowercase();
+        if ls.chars().count() > 1 && !PLACEHOLDER_WORDS.contains(&ls.as_str()) {
+            return false;
+        }
+    }
+    seen
+}
+
 /// Ajoute `r` si absent (dédoublonnage sur l'identité complète).
 fn push_ref(out: &mut Vec<PrRef>, r: PrRef) {
     let dup = out.iter().any(|x| {
@@ -251,6 +288,9 @@ fn parse_path(
                 if kind == "pull" && !owner.is_empty() && !repo.is_empty() {
                     if let Some(n) = leading_num(num) {
                         let repo = format!("{owner}/{repo}");
+                        if placeholder_repo(&repo) {
+                            return;
+                        }
                         push_ref(
                             out,
                             PrRef {
@@ -268,7 +308,7 @@ fn parse_path(
         }
         "gitlab" => {
             if let Some((proj, tail)) = path.split_once("/-/merge_requests/") {
-                if !proj.is_empty() {
+                if !proj.is_empty() && !placeholder_repo(proj) {
                     if let Some(n) = leading_num(tail) {
                         push_ref(
                             out,
@@ -310,7 +350,7 @@ fn parse_path(
                 .or_else(|| path.strip_prefix("#/r/"));
             if let Some(rest) = rest {
                 if let Some((proj, tail)) = rest.rsplit_once("/+/") {
-                    if !proj.is_empty() {
+                    if !proj.is_empty() && !placeholder_repo(proj) {
                         if let Some(n) = leading_num(tail) {
                             push_ref(
                                 out,
@@ -432,43 +472,77 @@ mod tests {
         );
         assert_eq!(
             f.extract_refs(
-                "https://github.com/o/r/pull/12#issuecomment-99 puis https://github.com/o/r/pull/7?x=1"
+                "https://github.com/acme/widgets/pull/12#issuecomment-99 puis https://github.com/acme/widgets/pull/7?x=1"
             )
             .len(),
             2
         );
-        assert!(f.extract_refs("https://github.com/o/r/issues/3").is_empty());
+        assert!(f.extract_refs("https://github.com/acme/widgets/issues/3").is_empty());
         // Pas de faux hôte : xgithub.com / github.com.evil non reconnus.
-        assert!(f.extract_refs("https://xgithub.com/o/r/pull/3").is_empty());
-        assert!(f.extract_refs("https://github.com.evil/o/r/pull/3").is_empty());
+        assert!(f.extract_refs("https://xgithub.com/acme/widgets/pull/3").is_empty());
+        assert!(f.extract_refs("https://github.com.evil/acme/widgets/pull/3").is_empty());
+    }
+
+    #[test]
+    fn placeholder_repos_rejected() {
+        // Les sorties outils reproduisent le contenu des fichiers lus
+        // (docs, specs, tests, AGENTS.md) — les URLs placeholder qu'ils
+        // contiennent ne doivent pas créer d'entrées fantômes.
+        let f = forges();
+        for txt in [
+            "https://github.com/o/r/pull/9",
+            "https://github.com/owner/repo/pull/3",
+            "https://github.com/x/y/pull/1",
+            "https://github.com/foo/bar/pull/42",
+            "https://github.com/votre/projet/pull/7",
+            "https://gitlab.com/g/p/-/merge_requests/42",
+            "https://gitlab.com/grp/sub/proj/-/merge_requests/42",
+            "https://gitlab.com/owner/repo/-/merge_requests/1",
+            "https://gitlab.com/a/b/-/merge_requests/2",
+            "https://gerrit.internal:8080/c/p/+/9",
+            "https://gerrit.internal:8080/c/proj/+/9",
+        ] {
+            assert!(f.extract_refs(txt).is_empty(), "refusé attendu : {txt}");
+        }
+        // Un seul segment réel suffit : le placeholder n'est que
+        // partiel → la référence est conservée.
+        for (txt, repo) in [
+            ("https://github.com/acme/widgets/pull/9", "acme/widgets"),
+            ("https://gitlab.com/corp/tools/-/merge_requests/42", "corp/tools"),
+            ("https://gerrit.internal:8080/c/platform/build/+/9", "platform/build"),
+        ] {
+            let r = f.extract_refs(txt);
+            assert_eq!(r.len(), 1, "conservé attendu : {txt}");
+            assert_eq!(r[0].repo, repo);
+        }
     }
 
     #[test]
     fn gitlab_urls() {
         let f = forges();
         // gitlab.com implicite + sous-groupes.
-        let r = f.extract_refs("MR: https://gitlab.com/grp/sub/proj/-/merge_requests/42");
+        let r = f.extract_refs("MR: https://gitlab.com/infra-team/deploy/tool/-/merge_requests/42");
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].forge, "gitlab");
-        assert_eq!(r[0].repo, "grp/sub/proj");
+        assert_eq!(r[0].repo, "infra-team/deploy/tool");
         assert_eq!(r[0].pr, 42);
         assert_eq!(
             r[0].url,
-            "https://gitlab.com/grp/sub/proj/-/merge_requests/42"
+            "https://gitlab.com/infra-team/deploy/tool/-/merge_requests/42"
         );
         // Hôte auto-hébergé déclaré.
-        let r = f.extract_refs("voir https://gitlab.example.com/a/b/-/merge_requests/7/diffs");
+        let r = f.extract_refs("voir https://gitlab.example.com/corp/tools/-/merge_requests/7/diffs");
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].host, "gitlab.example.com");
         assert_eq!(r[0].pr, 7);
         // Hôte gitlab NON déclaré → pas de détection.
-        assert!(f.extract_refs("https://gitlab.inconnu.io/a/b/-/merge_requests/7").is_empty());
+        assert!(f.extract_refs("https://gitlab.inconnu.io/corp/tools/-/merge_requests/7").is_empty());
         // Borne : notgitlab.example.com ne matche pas gitlab.example.com.
         assert!(f
-            .extract_refs("https://notgitlab.example.com/a/b/-/merge_requests/7")
+            .extract_refs("https://notgitlab.example.com/corp/tools/-/merge_requests/7")
             .is_empty());
         // Issue ≠ MR.
-        assert!(f.extract_refs("https://gitlab.com/a/b/-/issues/7").is_empty());
+        assert!(f.extract_refs("https://gitlab.com/corp/tools/-/issues/7").is_empty());
     }
 
     #[test]
@@ -487,16 +561,16 @@ mod tests {
         );
         // Variante /r/ et fragment #/c/.
         assert_eq!(
-            f.extract_refs("https://gerrit.internal:8080/r/proj/+/77")[0].repo,
-            "proj"
+            f.extract_refs("https://gerrit.internal:8080/r/apps/web/+/77")[0].repo,
+            "apps/web"
         );
         assert_eq!(
-            f.extract_refs("https://gerrit.internal:8080/#/c/proj/+/88")[0].pr,
+            f.extract_refs("https://gerrit.internal:8080/#/c/apps/web/+/88")[0].pr,
             88
         );
         // Port dans l'hôte configuré.
         assert_eq!(
-            f.extract_refs("https://gerrit.internal:8080/c/p/+/9")[0].host,
+            f.extract_refs("https://gerrit.internal:8080/c/apps/web/+/9")[0].host,
             "gerrit.internal:8080"
         );
         // URL de recherche d'un Change-Id.
@@ -550,7 +624,7 @@ mod tests {
             },
         ]);
         let r = f.extract_refs(
-            "https://code.corp/a/b/-/merge_requests/1 https://code.corp/c/p/+/2",
+            "https://code.corp/corp/tools/-/merge_requests/1 https://code.corp/c/core/app/+/2",
         );
         assert_eq!(r.len(), 2);
         assert!(r.iter().any(|x| x.forge == "gitlab" && x.pr == 1));

@@ -43,6 +43,9 @@ pub struct TrackIn {
     pub title: Option<String>,
     pub status: Option<String>,
     pub note: Option<String>,
+    /// Compteur d'échecs de sync écrit tel quel (`pr sync` d'acctl) —
+    /// None conserve, Some(0) = l'entrée a été lue live.
+    pub sync_fails: Option<u32>,
 }
 
 impl PrRegistry {
@@ -200,6 +203,7 @@ impl PrRegistry {
                     status: t.status.clone().unwrap_or_else(|| "open".into()),
                     note: t.note.clone(),
                     via: "manual".into(),
+                    sync_fails: t.sync_fails.unwrap_or(0),
                     created_at: tstamp.clone(),
                     updated_at: tstamp,
                 };
@@ -256,6 +260,7 @@ impl PrRegistry {
                         status: "open".into(),
                         note: None,
                         via: "detected".into(),
+                        sync_fails: 0,
                         created_at: t.clone(),
                         updated_at: t,
                     },
@@ -295,29 +300,45 @@ impl PrRegistry {
     /// Retire une entrée — adressage identique à `track` (Change-Id
     /// prioritaire, sinon clé numérique).
     pub fn remove(&self, forge: &str, host: &str, repo: &str, pr: u64, change_id: Option<&str>) -> Result<bool> {
-        let forge = proto::forge_kind(forge);
-        let host = if host.is_empty() {
-            proto::forge_default_host(forge)
-        } else {
-            host
-        };
         let mut g = self.map.lock().unwrap();
-        let k = match change_id.and_then(|c| find_by_cid(&g, forge, host, c)) {
-            Some(k) => k,
-            None if pr == 0 => {
-                match change_id {
-                    Some(c) => cid_key(forge, host, c),
-                    None => num_key(forge, host, repo, pr),
-                }
-            }
-            None => num_key(forge, host, repo, pr),
-        };
+        let k = entry_lookup_key(&g, forge, host, repo, pr, change_id);
         let gone = g.remove(&k).is_some();
         drop(g);
         if gone {
             self.save()?;
         }
         Ok(gone)
+    }
+
+    /// Verdict d'un passage de sync sur une entrée : `ok` = la forge a
+    /// répondu → compteur d'échecs remis à zéro ; `!ok` = injoignable
+    /// (hôte mort, repo absent, référence inconnue) → incrémenté.
+    /// Passé `proto::PR_UNRESOLVED_AFTER` le client l'affiche « non
+    /// résoluble ». No-op sur une entrée absente ou un compteur déjà
+    /// à la bonne valeur.
+    pub fn sync_seen(
+        &self,
+        forge: &str,
+        host: &str,
+        repo: &str,
+        pr: u64,
+        change_id: Option<&str>,
+        ok: bool,
+    ) -> Result<bool> {
+        let mut g = self.map.lock().unwrap();
+        let k = entry_lookup_key(&g, forge, host, repo, pr, change_id);
+        let Some(e) = g.get_mut(&k) else {
+            return Ok(false);
+        };
+        let nf = if ok { 0 } else { e.sync_fails.saturating_add(1) };
+        if e.sync_fails == nf {
+            return Ok(false);
+        }
+        e.sync_fails = nf;
+        e.updated_at = proto::now_iso();
+        drop(g);
+        self.save()?;
+        Ok(true)
     }
 
     /// Rewrite atomique (tmp + rename) — un kill en cours d'écriture ne
@@ -349,6 +370,14 @@ fn normalize(e: &mut PrEntry) {
 /// Applique les champs `Some` de `t` sur `e` — partagé entre la branche
 /// trouvée de `track` et la fusion de clés.
 fn apply_track(e: &mut PrEntry, t: &TrackIn, forge: &str, host: &str) {
+    // Identité avant mutation : l'URL n'est régénérée que si elle a
+    // changé — `proto::forge_url` force https://, un Gerrit loopback
+    // http:// détecté garderait sinon un lien cassé à chaque track.
+    let identity_changed = e.forge != forge
+        || e.host != host
+        || (!t.repo.is_empty() && e.repo != t.repo)
+        || (t.pr > 0 && e.pr != t.pr)
+        || (t.change_id.is_some() && e.change_id != t.change_id);
     if let Some(s) = t.session.clone() {
         e.session = s;
         e.via = "manual".into();
@@ -364,12 +393,11 @@ fn apply_track(e: &mut PrEntry, t: &TrackIn, forge: &str, host: &str) {
     if let Some(c) = t.change_id.clone() {
         e.change_id = Some(c);
     }
-    e.url = t
-        .url
-        .clone()
-        .unwrap_or_else(|| {
-            proto::forge_url(&e.forge, &e.host, &e.repo, e.pr, e.change_id.as_deref())
-        });
+    if let Some(u) = t.url.clone() {
+        e.url = u;
+    } else if identity_changed || e.url.is_empty() {
+        e.url = proto::forge_url(&e.forge, &e.host, &e.repo, e.pr, e.change_id.as_deref());
+    }
     if let Some(v) = t.branch.clone() {
         e.branch = Some(v);
     }
@@ -382,7 +410,38 @@ fn apply_track(e: &mut PrEntry, t: &TrackIn, forge: &str, host: &str) {
     if let Some(v) = t.note.clone() {
         e.note = Some(v);
     }
+    if let Some(v) = t.sync_fails {
+        e.sync_fails = v;
+    }
     e.updated_at = proto::now_iso();
+}
+
+/// Clé de recherche d'une entrée à partir d'un adressage
+/// `forge/host/repo/pr/change_id` — Change-Id prioritaire (la fiche
+/// peut être clée cid ou numérique), sinon clé numérique. Partagé par
+/// `remove` et `sync_seen`. Un host vide prend le défaut de la forge.
+fn entry_lookup_key(
+    g: &BTreeMap<String, PrEntry>,
+    forge: &str,
+    host: &str,
+    repo: &str,
+    pr: u64,
+    change_id: Option<&str>,
+) -> String {
+    let forge = proto::forge_kind(forge);
+    let host = if host.is_empty() {
+        proto::forge_default_host(forge)
+    } else {
+        host
+    };
+    match change_id.and_then(|c| find_by_cid(g, forge, host, c)) {
+        Some(k) => k,
+        None if pr == 0 => match change_id {
+            Some(c) => cid_key(forge, host, c),
+            None => num_key(forge, host, repo, pr),
+        },
+        None => num_key(forge, host, repo, pr),
+    }
 }
 
 /// Clé canonique numérique — insensible à la casse sur forge/host/repo
@@ -457,6 +516,11 @@ fn extract_repo_num_refs(text: &str) -> Vec<(String, u64)> {
             continue;
         };
         if repo.matches('/').count() != 1 || repo.starts_with('/') || repo.ends_with('/') {
+            continue;
+        }
+        // Tokens de doc (`o/r#N`, `owner/repo#7`) — même denylist que
+        // la détection d'URLs : pas de mise à jour d'état fantôme.
+        if crate::forges::placeholder_repo(repo) {
             continue;
         }
         let digits: String = num.chars().take_while(|c| c.is_ascii_digit()).collect();
@@ -637,6 +701,7 @@ mod tests {
             title: None,
             status: None,
             note: None,
+            sync_fails: None,
         })
         .unwrap();
         r.detected("s-3", &gl_ref("g/p", 5), true).unwrap();
@@ -667,6 +732,7 @@ mod tests {
             title: None,
             status: Some("merged".into()),
             note: None,
+            sync_fails: None,
         })
         .unwrap();
         let v = r.list();
@@ -681,6 +747,49 @@ mod tests {
         // Suppression adressée par le Change-Id.
         assert!(r.remove("gerrit", "gerrit.corp:8080", "", 0, Some(cid)).unwrap());
         assert!(r.list().is_empty());
+    }
+
+    #[test]
+    fn remove_multi_forges() {
+        let r = reg();
+        r.detected("s-1", &gl_ref("grp/sub/proj", 42), true).unwrap();
+        r.detected("s-1", &gh("acme/widgets", 42), true).unwrap();
+        // Clé complète forge+host+repo+numéro : la MR GitLab part sans
+        // toucher la PR github de même numéro.
+        assert!(r
+            .remove("gitlab", "gitlab.corp", "grp/sub/proj", 42, None)
+            .unwrap());
+        let v = r.list();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].forge, "github");
+        // Seconde fois : déjà partie → removed:false.
+        assert!(!r
+            .remove("gitlab", "gitlab.corp", "grp/sub/proj", 42, None)
+            .unwrap());
+        // Host omis → défaut de la forge (« gitlab.com » ≠ gitlab.corp).
+        assert!(!r.remove("gitlab", "", "grp/sub/proj", 42, None).unwrap());
+        assert!(r.remove("github", "", "acme/widgets", 42, None).unwrap());
+        assert!(r.list().is_empty());
+    }
+
+    #[test]
+    fn sync_fails_counting() {
+        let r = reg();
+        r.detected("s-1", &gh("acme/widgets", 7), true).unwrap();
+        // Trois syncs sans lecture live → « non résoluble ».
+        for i in 1..=3 {
+            assert!(r.sync_seen("github", "", "acme/widgets", 7, None, false).unwrap());
+            assert_eq!(r.list()[0].sync_fails, i);
+        }
+        // Quatrième échec : le compteur continue (saturé u32).
+        r.sync_seen("github", "", "acme/widgets", 7, None, false).unwrap();
+        assert!(r.list()[0].sync_fails >= proto::PR_UNRESOLVED_AFTER);
+        // Lecture live → remise à zéro ; un second ok est un no-op.
+        assert!(r.sync_seen("github", "", "acme/widgets", 7, None, true).unwrap());
+        assert_eq!(r.list()[0].sync_fails, 0);
+        assert!(!r.sync_seen("github", "", "acme/widgets", 7, None, true).unwrap());
+        // Entrée absente → no-op.
+        assert!(!r.sync_seen("github", "", "acme/widgets", 9, None, false).unwrap());
     }
 
     fn frefs() -> Forges {
@@ -717,44 +826,54 @@ mod tests {
             vec![(gh("Wameuh/AgentControl", 65), "merged")]
         );
         assert_eq!(
-            extract_state_refs("✓ Closed pull request o/r#7.", &f),
-            vec![(gh("o/r", 7), "closed")]
+            extract_state_refs("✓ Closed pull request acme/widgets#7.", &f),
+            vec![(gh("acme/widgets", 7), "closed")]
         );
         assert_eq!(
-            extract_state_refs("✓ Reopened pull request o/r#2", &f),
-            vec![(gh("o/r", 2), "open")]
+            extract_state_refs("✓ Reopened pull request acme/widgets#2", &f),
+            vec![(gh("acme/widgets", 2), "open")]
         );
         // Statut via l'URL quand gh l'affiche plutôt que o/r#N.
         assert_eq!(
-            extract_state_refs("Merged pull request https://github.com/o/r/pull/9", &f),
-            vec![(gh("o/r", 9), "merged")]
+            extract_state_refs("Merged pull request https://github.com/acme/widgets/pull/9", &f),
+            vec![(gh("acme/widgets", 9), "merged")]
         );
+        // Placeholders de doc ignorés — pas d'état fantôme.
+        assert!(extract_state_refs("✓ Merged pull request o/r#9", &f).is_empty());
+        assert!(extract_state_refs(
+            "Merged pull request https://github.com/owner/repo/pull/9",
+            &f
+        )
+        .is_empty());
         // « merged » sans la forme d'action gh + URL github : la forme
         // générique « merged » ne s'applique qu'aux refs gerrit.
-        assert!(extract_state_refs("merged https://github.com/o/r/pull/9", &f).is_empty());
+        assert!(extract_state_refs("merged https://github.com/acme/widgets/pull/9", &f).is_empty());
         // Auto-merge différé : la PR reste ouverte.
         assert!(extract_state_refs(
-            "✓ Pull request o/r#9 will be merged when all requirements are met", &f
+            "✓ Pull request acme/widgets#9 will be merged when all requirements are met", &f
         )
         .is_empty());
         // Titre de merge-commit git ≠ merge effectué (« Merge », pas « Merged »).
-        assert!(extract_state_refs("Merge pull request #65 from x/y", &f).is_empty());
+        assert!(extract_state_refs("Merge pull request #65 from acme/widgets", &f).is_empty());
         // « not mergeable » ne contient pas « merged pull request ».
-        assert!(extract_state_refs("X Pull request o/r#5 is not mergeable", &f).is_empty());
+        assert!(extract_state_refs("X Pull request acme/widgets#5 is not mergeable", &f).is_empty());
         // Négations.
-        assert!(extract_state_refs("o/r#5 was not merged", &f).is_empty());
+        assert!(extract_state_refs("acme/widgets#5 was not merged", &f).is_empty());
         // JSON mono-ligne ignoré.
         assert!(extract_state_refs(
-            r#"{"state":"OPEN","mergedAt":null,"closedAt":null,"url":"https://github.com/o/r/pull/5"}"#,
+            r#"{"state":"OPEN","mergedAt":null,"closedAt":null,"url":"https://github.com/acme/widgets/pull/5"}"#,
             &f
         )
         .is_empty());
         // Dernier statut vu gagne.
         assert_eq!(
-            extract_state_refs("✓ Reopened pull request o/r#5\n✓ Merged pull request o/r#5", &f),
-            vec![(gh("o/r", 5), "merged")]
+            extract_state_refs(
+                "✓ Reopened pull request acme/widgets#5\n✓ Merged pull request acme/widgets#5",
+                &f
+            ),
+            vec![(gh("acme/widgets", 5), "merged")]
         );
-        assert!(extract_state_refs("gh pr view https://github.com/o/r/pull/3", &f).is_empty());
+        assert!(extract_state_refs("gh pr view https://github.com/acme/widgets/pull/3", &f).is_empty());
     }
 
     #[test]
@@ -763,34 +882,34 @@ mod tests {
         let mr = PrRef {
             forge: "gitlab",
             host: "gitlab.com".into(),
-            repo: "g/p".into(),
+            repo: "corp/tools".into(),
             pr: 42,
             change_id: None,
-            url: "https://gitlab.com/g/p/-/merge_requests/42".into(),
+            url: "https://gitlab.com/corp/tools/-/merge_requests/42".into(),
         };
         assert_eq!(
             extract_state_refs(
-                "Merged merge request https://gitlab.com/g/p/-/merge_requests/42",
+                "Merged merge request https://gitlab.com/corp/tools/-/merge_requests/42",
                 &f
             ),
             vec![(mr.clone(), "merged")]
         );
         assert_eq!(
             extract_state_refs(
-                "Closed merge request https://gitlab.com/g/p/-/merge_requests/42",
+                "Closed merge request https://gitlab.com/corp/tools/-/merge_requests/42",
                 &f
             ),
             vec![(mr.clone(), "closed")]
         );
         // « merge request » ne touche pas une URL github de la ligne.
         assert!(extract_state_refs(
-            "Merged merge request https://github.com/o/r/pull/9",
+            "Merged merge request https://github.com/acme/widgets/pull/9",
             &f
         )
         .is_empty());
         // Une URL gitlab dans une ligne « pull request » n'est pas prise.
         assert!(extract_state_refs(
-            "Merged pull request https://gitlab.com/g/p/-/merge_requests/42",
+            "Merged pull request https://gitlab.com/corp/tools/-/merge_requests/42",
             &f
         )
         .is_empty());
@@ -802,25 +921,25 @@ mod tests {
         let ch = PrRef {
             forge: "gerrit",
             host: "gerrit.corp".into(),
-            repo: "p".into(),
+            repo: "core/app".into(),
             pr: 9,
             change_id: None,
-            url: "https://gerrit.corp/c/p/+/9".into(),
+            url: "https://gerrit.corp/c/core/app/+/9".into(),
         };
         assert_eq!(
-            extract_state_refs("remote: Change https://gerrit.corp/c/p/+/9 merged", &f),
+            extract_state_refs("remote: Change https://gerrit.corp/c/core/app/+/9 merged", &f),
             vec![(ch.clone(), "merged")]
         );
         assert_eq!(
-            extract_state_refs("https://gerrit.corp/c/p/+/9 abandoned", &f),
+            extract_state_refs("https://gerrit.corp/c/core/app/+/9 abandoned", &f),
             vec![(ch.clone(), "closed")]
         );
         assert_eq!(
-            extract_state_refs("https://gerrit.corp/c/p/+/9 restored", &f),
+            extract_state_refs("https://gerrit.corp/c/core/app/+/9 restored", &f),
             vec![(ch, "open")]
         );
         // « was not merged » gardé.
-        assert!(extract_state_refs("https://gerrit.corp/c/p/+/9 was not merged", &f)
+        assert!(extract_state_refs("https://gerrit.corp/c/core/app/+/9 was not merged", &f)
             .is_empty());
     }
 }

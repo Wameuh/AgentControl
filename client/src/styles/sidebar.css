@@ -213,6 +213,19 @@ button:disabled { opacity: .5; cursor: default; }
 .pr-repo { text-transform: none; letter-spacing: .2px; }
 .pr-repo .pr-repo-ic { display: inline-flex; flex: none; opacity: .75; }
 .pr-repo .pr-repo-ic .ic { width: 11px; height: 11px; display: block; }
+/* Couleur distincte par forge : github suit l'accent, gitlab sa
+   couleur de marque, gerrit le violet — le tag n'apparaît que hors
+   github (chemin de repo brut sinon ambigu). */
+.pr-repo-ic.fg-github { color: var(--accent); opacity: 1; }
+.pr-repo-ic.fg-gitlab { color: var(--forge-gitlab); opacity: 1; }
+.pr-repo-ic.fg-gerrit { color: var(--violet); opacity: 1; }
+.pr-repo .pr-forge {
+  flex: none; font-size: 8.5px; text-transform: uppercase; letter-spacing: .5px;
+  padding: 0 4px; margin-right: 5px; border-radius: 4px;
+  border: 1px solid currentColor;
+}
+.pr-forge.fg-gitlab { color: var(--forge-gitlab); }
+.pr-forge.fg-gerrit { color: var(--violet); }
 .pr-repo .pr-n {
   margin-left: auto; flex: none; font-size: 10px;
   font-family: Mono, ui-monospace, monospace; color: var(--dim);
@@ -242,6 +255,11 @@ button:disabled { opacity: .5; cursor: default; }
 #pr-list .pr .pr-st.st-conflict { color: var(--err); border-color: rgba(232, 148, 134, .55); }
 #pr-list .pr .pr-st.st-merged { color: var(--violet); border-color: color-mix(in srgb, var(--violet) 55%, transparent); }
 #pr-list .pr .pr-st.st-closed { color: var(--err); border-color: color-mix(in srgb, var(--err) 55%, transparent); }
+/* « non résoluble » : sync jamais abouti (repo fantôme, hôte mort) —
+   ligne estompée comme les terminées, pastille gold pointillée. */
+#pr-list .pr .pr-st.st-unres { color: var(--gold); border-style: dashed; border-color: color-mix(in srgb, var(--gold) 55%, transparent); }
+#pr-list .pr.pr-unres { opacity: .55; }
+#pr-list .pr.pr-unres:hover { opacity: .85; }
 /* Entrées « terminées » (section historique) : estompées pour rester
    lisibles sans rivaliser avec les PR ouvertes. */
 #pr-list .pr.pr-done { opacity: .7; }

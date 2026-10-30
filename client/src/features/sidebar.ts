@@ -14,7 +14,7 @@ import { dotCls, dotIcon, setAppIcon } from "./status";
 import { icon } from "../ui/icons";
 import { bindCtx, hideSessCtx, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
-import { PrListView, prBadge, repoLabel, type PrRow } from "./prs";
+import { PrListView, prBadge, prUnresolved, repoLabel, type PrRow } from "./prs";
 import { BacklogView } from "./backlog";
 import type { ChatView } from "./chat-view";
 import type { ConnectionManager } from "./connections";
@@ -310,6 +310,9 @@ export class Sidebar {
     this.prBySess.clear();
     for (const p of rows) {
       if (!p.session || p.status === "merged" || p.status === "closed") continue;
+      // « Non résoluble » = probable fantôme — visible dans l'onglet
+      // mais pas en badge de session (rien d'actionnable dessus).
+      if (prUnresolved(p)) continue;
       const k = `${p.conn ?? "default"}${p.session}`;
       if (!this.prBySess.has(k)) this.prBySess.set(k, []);
       this.prBySess.get(k)!.push(p);

@@ -282,6 +282,10 @@ async fn main() -> Result<()> {
                         .filter(|p| {
                             p["session"].as_str() == Some(sid)
                                 && !matches!(p["status"].as_str(), Some("merged" | "closed"))
+                                // « non résoluble » = probable fantôme :
+                                // pas de badge de session (onglet seul).
+                                && (p["sync_fails"].as_u64().unwrap_or(0)
+                                    < proto::PR_UNRESOLVED_AFTER as u64)
                         })
                         .map(|p| {
                             let st = p["status"].as_str().unwrap_or("");

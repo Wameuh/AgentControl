@@ -86,6 +86,7 @@ impl Daemon {
         title: Option<String>,
         status: Option<String>,
         note: Option<String>,
+        sync_fails: Option<u32>,
     ) -> Result<Value> {
                 let e = self.prs.track(TrackIn {
                     session,
@@ -99,6 +100,7 @@ impl Daemon {
                     title,
                     status,
                     note,
+                    sync_fails,
                 })?;
                 Ok(serde_json::to_value(e)?)
     }
@@ -174,9 +176,38 @@ impl Daemon {
                     title: u.title.clone(),
                     status: Some(u.status.clone()),
                     note: None,
+                    sync_fails: None,
                 }) {
                     Ok(_) => applied += 1,
                     Err(e) => warn!("pr_sync track {} {}: {e:#}", u.repo, u.pr),
+                }
+            }
+            // Compteur d'échecs par entrée : vues live → 0, injoignables
+            // → +1 (les updates déjà trackées sont des « vues » aussi).
+            // Au-delà de PR_UNRESOLVED_AFTER l'entrée s'affiche
+            // « non résoluble » côté client.
+            for s in &out.seen {
+                if let Err(e) = prs.sync_seen(
+                    &s.forge,
+                    &s.host,
+                    &s.repo,
+                    s.pr,
+                    s.change_id.as_deref(),
+                    true,
+                ) {
+                    warn!("pr_sync seen {} {}: {e:#}", s.repo, s.pr);
+                }
+            }
+            for s in &out.failed {
+                if let Err(e) = prs.sync_seen(
+                    &s.forge,
+                    &s.host,
+                    &s.repo,
+                    s.pr,
+                    s.change_id.as_deref(),
+                    false,
+                ) {
+                    warn!("pr_sync fail {} {}: {e:#}", s.repo, s.pr);
                 }
             }
             // Soldé quoi qu'il arrive : les notes restent dans la
@@ -191,6 +222,7 @@ impl Daemon {
                 "synced": true,
                 "checked": out.checked,
                 "updated": applied,
+                "failed": out.failed.len(),
                 "notes": out.notes,
             })),
             // Panic du worker : l'état reste « en vol » jusqu'à

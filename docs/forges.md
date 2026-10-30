@@ -23,6 +23,15 @@ Le watcher de chaque session scanne les extraits des tool calls :
 Signal fort de (ré)attribution : `gh pr create`, `glab mr create`,
 `git review`, push `refs/for/*` dans le titre du tool call.
 
+Les sorties outils reproduisent aussi le contenu des fichiers lus
+(docs, specs, `AGENTS.md`, tests) — une **denylist de placeholders**
+empêche leurs URLs de créer des entrées fantômes : tout chemin de repo
+dont chaque segment tient en un caractère ou est un libellé générique
+(`o/r`, `g/p`, `owner/repo`, `grp/sub/proj`, `a/b`, `foo/bar`,
+`exemple/truc`…) est ignoré à la détection. Un `pr add` manuel reste
+possible (intention explicite), et GitLab/Gerrit ne matchent de toute
+façon que les hôtes déclarés.
+
 ## Configuration
 
 `config.toml` du démon (`$AGENTCONTROL_HOME/config.toml`) :
@@ -63,9 +72,14 @@ throttle démon ~45 s, un seul run à la fois (`{synced:false,
 running|throttled:true}` sinon). Dans ce cadre `token_env` est lu dans
 l'env du **démon** (dans celui d'acctl pour `acctl pr sync`).
 
-Sans flags, la cible est déduite du remote `origin` (hostname comparé aux
-hôtes configurés — le port ssh `:29418` d'un Gerrit matche l'hôte web
-déclaré) ; sinon GitHub comme avant.
+Sans flags, la cible de `add` est déduite du remote `origin` (hostname
+comparé aux hôtes configurés — le port ssh `:29418` d'un Gerrit matche
+l'hôte web déclaré) ; sinon GitHub comme avant. `rm`/`note` fonctionnent
+autrement : le numéro/Change-Id est **résolu dans le registre** —
+`acctl pr rm 42` trouve une MR GitLab ou un change Gerrit aussi bien
+qu'une PR GitHub (clé complète forge+host+repo+numéro), `--repo` (nu,
+`host:path` ou URL), `--forge` et `--host` agissent comme filtres, et
+une ambiguïté liste les candidates.
 
 ## Sync des statuts
 
@@ -83,6 +97,16 @@ déclaré) ; sinon GitHub comme avant.
   (`forge_list` — gitlab.com implicite pour gitlab, github.com pour
   github) ; une entrée du registre sur un hôte non déclaré est notée
   « hôte non déclaré — statut inchangé », jamais requêtée.
+
+Chaque passage de sync trace aussi les entrées **vues** et
+**injoignables** : `sync_fails` du registre est remis à zéro à la
+première lecture live et incrémenté sinon (hôte mort ou non déclaré,
+repo ou référence absente — pour GitHub, l'échec n'est compté que si
+`gh auth status` répond : un démon sans gh fonctionnel ne pénalise
+rien). Passé **3 échecs consécutifs** l'entrée devient **« non
+résoluble »** : état dédié et ligne estompée dans l'onglet Dépôts, hors
+du compteur et des badges de session (le statut est restauré dès
+qu'une sync la relit — un hôte revenu démasque l'entrée).
 
 Le merge d'une review reste une **permission GitHub-only** : le hook de
 merge des PR (`/mr review`, gates CI) ne s'étend pas à GitLab ni Gerrit —

@@ -30,6 +30,14 @@ export interface PrListDeps {
 }
 
 const CLOSED = new Set(["merged", "closed"]);
+/** Seuil d'échecs de sync → « non résoluble »
+ *  (proto::PR_UNRESOLVED_AFTER — à garder aligné). */
+const UNRESOLVED_AFTER = 3;
+/** Entrée jamais résolue par le sync (repo fantôme, hôte mort) — les
+ *  statuts finaux merged/closed gardent leur vérité. */
+export function prUnresolved(p: PrEntry): boolean {
+  return !CLOSED.has(p.status ?? "open") && (p.sync_fails ?? 0) >= UNRESOLVED_AFTER;
+}
 /** Cap de la section « terminées » — un long historique reste
  *  atteignable via le filtre partagé sans alourdir le DOM. */
 const DONE_CAP = 40;
@@ -89,9 +97,12 @@ export class PrListView {
     this.filter = f;
   }
 
-  /** PRs ouvertes visibles dans le compteur de l'onglet Repos. */
+  /** PRs ouvertes visibles dans le compteur de l'onglet Repos — les
+   *  « non résolubles » n'y comptent pas (rien d'actionnable). */
   openCount() {
-    return this.rows.filter((r) => !r.conn_error && !CLOSED.has(r.status ?? "open")).length;
+    return this.rows.filter(
+      (r) => !r.conn_error && !CLOSED.has(r.status ?? "open") && !prUnresolved(r),
+    ).length;
   }
 
   /** Alimente la vue à chaque refresh de la sidebar : lignes du registre
@@ -149,22 +160,27 @@ export class PrListView {
 
   private prRow(p: PrEntry, unassigned: boolean): HTMLElement {
     const st = p.status || "open";
-    const stTxt =
-      st === "open" ? t("pr_st_open")
+    const unres = prUnresolved(p);
+    const stTxt = unres
+      ? t("pr_st_unresolved")
+      : st === "open" ? t("pr_st_open")
       : st === "draft" ? t("pr_st_draft")
       : st === "conflict" ? t("pr_st_conflict")
       : st === "merged" ? t("pr_st_merged")
       : st === "closed" ? t("pr_st_closed")
       : st;
     const div = document.createElement("div");
-    div.className = "pr" + (CLOSED.has(st) ? " pr-done" : "");
+    div.className = "pr" + (CLOSED.has(st) ? " pr-done" : "") + (unres ? " pr-unres" : "");
+    const openHost = p.host ||
+      ({ github: "GitHub", gitlab: "gitlab.com", gerrit: "Gerrit" } as Record<string, string>)[p.forge || "github"] || "GitHub";
     div.title = `${repoLabel(p)} ${prBadge(p)} — ${stTxt}${p.via ? ` · ${p.via}` : ""}` +
-      `${p.branch ? `\n${p.branch}` : ""}${p.note ? `\n${p.note}` : ""}\n${t("pr_open_title")}`;
+      `${unres ? `\n${t("pr_unres_hint", { n: p.sync_fails ?? 0 })}` : ""}` +
+      `${p.branch ? `\n${p.branch}` : ""}${p.note ? `\n${p.note}` : ""}\n${t("pr_open_title", { host: openHost })}`;
     const top = document.createElement("div");
     top.className = "pr-top";
     top.innerHTML = `<span class="pr-num">${esc(prBadge(p))}</span>` +
       `<span class="pr-t">${this.deps.hl(p.title ?? "")}</span>` +
-      `<span class="pr-st st-${["open", "draft", "conflict", "merged", "closed"].includes(st) ? st : "other"}">${esc(stTxt)}</span>`;
+      `<span class="pr-st st-${unres ? "unres" : ["open", "draft", "conflict", "merged", "closed"].includes(st) ? st : "other"}">${esc(stTxt)}</span>`;
     div.appendChild(top);
     const sub = document.createElement("div");
     sub.className = "pr-sub";
@@ -255,8 +271,13 @@ export class PrListView {
       g.rows.sort((a, b) => b.pr - a.pr);
       const key = `ac-prrepo-${g.label.toLowerCase()}`;
       const closed = this.isClosed(key);
+      // Tag forge explicite hors github (défaut, icône colorée suffit) —
+      // `gitlab`/`gerrit` lèvent l'ambiguïté d'un chemin de repo brut.
+      const f = (g.rows[0].forge || "github").toLowerCase();
+      const tag = f === "github" ? "" : `<span class="pr-forge fg-${esc(f)}">${esc(f)}</span>`;
       el.appendChild(this.groupHead(
-        `<span class="pr-repo-ic">${icon("repo")}</span>${this.deps.hl(g.label)}`, key, g.rows.length));
+        `<span class="pr-repo-ic fg-${esc(f)}">${icon("repo")}</span>${tag}${this.deps.hl(g.label)}`,
+        key, g.rows.length));
       shown += g.rows.length;
       if (!closed) for (const p of g.rows) el.appendChild(this.prRow(p, false));
     }

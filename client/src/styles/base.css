@@ -26,6 +26,8 @@
   --gold: #e0c996;
   --violet: #c4a9dc;
   --red: #e89486;
+  /* Couleur de marque GitLab (onglet Dépôts — tag/icone forge). */
+  --forge-gitlab: #e2893d;
   /* --tint-rgb : canaux rgb des voiles neutres (surfaces de hover, fonds
      d'inputs, badges, chips) — encre crème ici, réassignée sur l'accent
      par les thèmes colorés (règle :root[class*="theme-"] plus bas). */
@@ -75,6 +77,7 @@ body {
   --gold: #93712f;
   --violet: #6b4d8c;
   --red: #b04a3e;
+  --forge-gitlab: #cf6f1e;
   --tint-rgb: 43, 42, 36;
   --line: rgba(var(--tint-rgb), .16);
   --line-strong: rgba(var(--tint-rgb), .32);
