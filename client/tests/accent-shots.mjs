@@ -35,12 +35,15 @@ const boot = async (prefs) => {
 const probe = () =>
   p.evaluate(() => {
     const cs = getComputedStyle(document.documentElement);
+    const code = document.querySelector(".md .md-code");
+    const ccs = code ? getComputedStyle(code) : null;
     return {
       accent: cs.getPropertyValue("--accent").trim(),
       cls: document.documentElement.className,
       anim: window.MeshBackground?.isAnimated?.(),
       mood: window.MeshBackground?.getMood?.(),
       checkbox: document.getElementById("s-bganim")?.checked,
+      code: ccs ? { bg: ccs.backgroundColor, fg: ccs.color } : null,
     };
   });
 const openSettings = async () => {
@@ -69,7 +72,24 @@ const hslOf = ([r, g, b]) => {
   return { h: h * 60, s: s * 100, l: l * 100 };
 };
 const parseHex = (s) => [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16));
+// getComputedStyle sérialise en « rgb(r, g, b) » pour les couleurs
+// littérales mais « color(srgb r g b) » (canaux 0-1) pour les
+// color-mix — parser les deux formes.
+const parseRgb = (s) => {
+  const m = s.match(/color\(srgb ([\d.]+) ([\d.]+) ([\d.]+)/);
+  if (m) return [1, 2, 3].map((i) => Math.round(parseFloat(m[i]) * 255));
+  return (s.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
+};
 const hueDist = (a, b) => Math.min(Math.abs(a - b), 360 - Math.abs(a - b));
+// Ratio de contraste WCAG (luminance relative) — AA texte = 4.5:1.
+const lum = ([r, g, b]) => {
+  const f = (v) => ((v /= 255) <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+  return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+};
+const contrast = (c1, c2) => {
+  const [a, b] = [lum(c1), lum(c2)].sort((x, y) => y - x);
+  return (a + 0.05) / (b + 0.05);
+};
 let fail = 0;
 const check = (label, got, want) => {
   const ok = got === want;
@@ -106,6 +126,14 @@ const checkLight = (theme, accent, st) => {
   const a = hslOf(parseHex(st.accent)), g = hslOf(visible(theme, base, light));
   check(`mood light ${theme}/${accent} famille`, hueDist(a.h, g.h) <= 70 || g.s < 20, true);
 };
+// Puits de code (.md-code) : le couple fond/texte doit respecter WCAG
+// AA dans CHAQUE combo — --code-bg était un puits sombre jamais remappé
+// en thème clair (texte --ink sombre dessus = illisible, bug #83).
+const checkCode = (theme, accent, st) => {
+  if (!st.code) { check(`code ${theme}/${accent}`, "absent", ".md-code"); return; }
+  const r = contrast(parseRgb(st.code.bg), parseRgb(st.code.fg));
+  check(`code ${theme}/${accent} contraste ≥4.5`, r >= 4.5, true);
+};
 
 await p.goto("http://localhost:4173/#desktop", { waitUntil: "networkidle0" });
 await new Promise((r) => setTimeout(r, 400));
@@ -134,6 +162,7 @@ for (const theme of ["dark", "light"]) {
     check(`class ${theme}/${accent}`, st.cls.includes(`theme-${accent}`) || accent === "sage", true);
     checkAgent(theme, accent, st);
     checkLight(theme, accent, st);
+    checkCode(theme, accent, st);
     await openSettings();
     await shot(`30-${theme}-${accent}-settings`);
     await p.evaluate(() => document.querySelector("#settings-close")?.click());
