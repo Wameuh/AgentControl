@@ -616,7 +616,7 @@ impl Session {
                     self.emit(kind);
                 }
                 if compact_done {
-                    self.end_compact("contexte réduit");
+                    self.end_compact("contexte réduit", false);
                 }
                 if let Some((u, s)) = auto_compact {
                     self.request_auto_compact(u, s);

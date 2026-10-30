@@ -347,7 +347,7 @@ impl Session {
                 .as_ref()
                 .is_some_and(|(_, buf)| compact_done_text(buf));
         if compact_done {
-            self.end_compact("signal agent");
+            self.end_compact("signal agent", false);
         }
     }
 
@@ -370,7 +370,7 @@ impl Session {
                 // Un message dédupliqué peut quand même porter le
                 // signal de fin de compact — le traiter avant de sortir.
                 if compact_done {
-                    self.end_compact("signal agent");
+                    self.end_compact("signal agent", false);
                 }
                 return;
             }
@@ -393,7 +393,7 @@ impl Session {
             // L'agent annonce la fin de sa compaction par un message —
             // relâche les prompts retenus.
             if compact_done {
-                self.end_compact("signal agent");
+                self.end_compact("signal agent", false);
             }
         }
     }
@@ -687,7 +687,7 @@ mod tests {
     async fn compact_auto_continue() {
         let (s, dir) = tmp_session("compact-cont");
         s.arm_compact(true);
-        s.end_compact("contexte réduit");
+        s.end_compact("contexte réduit", false);
         {
             let q = s.prompt_queue.lock().unwrap();
             assert_eq!(q.front().unwrap().0, "continue your task");
@@ -696,11 +696,11 @@ mod tests {
         s.prompt_queue.lock().unwrap().clear();
         // Hold manuel → pas de relance.
         s.arm_compact(false);
-        s.end_compact("contexte réduit");
+        s.end_compact("contexte réduit", false);
         assert!(s.prompt_queue.lock().unwrap().is_empty());
         // Hold auto + cancel utilisateur → pas de relance non plus.
         s.arm_compact(true);
-        s.end_compact("annulé");
+        s.end_compact("annulé", true);
         assert!(s.prompt_queue.lock().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -731,6 +731,28 @@ mod tests {
         assert!(s2.set_config_option("ac.compact_enabled", "maybe").await.is_err());
         assert!(s2.set_config_option("ac.compact_at_pct", "1.5").await.is_err());
         assert!(s2.set_config_option("ac.compact_at_tokens", "0").await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Setcfg à chaud : le seuil durci/réarmé alors que l'usage est
+    /// déjà au-dessus déclenche au prochain update — le reset de la
+    /// baseline (usage_seen) empêche `was` de rester vrai indéfiniment.
+    #[tokio::test]
+    async fn compact_setcfg_hot() {
+        let (s, dir) = tmp_session("compact-hot-cfg");
+        let usage = |used: u64| {
+            serde_json::json!({"update": {"sessionUpdate": "usage_update", "used": used, "size": 100_000}})
+        };
+        // Compact coupé pendant le dépassement → rien, mais la baseline
+        // s'est posée sur cette valeur déjà haute.
+        s.set_config_option("ac.compact_enabled", "off").await.unwrap();
+        s.handle_session_update(&usage(95_000)).await;
+        assert!(s.prompt_queue.lock().unwrap().is_empty());
+        // Réarmé à chaud : sans le reset, was(exceeds(95k)) resterait
+        // vrai → le déclencheur serait muet indéfiniment.
+        s.set_config_option("ac.compact_enabled", "on").await.unwrap();
+        s.handle_session_update(&usage(95_500)).await;
+        assert_eq!(s.prompt_queue.lock().unwrap().front().unwrap().0, "/compact");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -340,7 +340,15 @@ impl Session {
             let (next, src) = {
                 let mut q = self.prompt_queue.lock().unwrap();
                 match q.pop_front() {
-                    Some(t) => t,
+                    Some(t) => {
+                        // Un /compact déjà plus loin dans la file
+                        // relancerait un second compact juste après
+                        // celui-ci — le plus ancien suffit.
+                        if is_compact_cmd(&t.0) {
+                            q.retain(|(t2, _)| !is_compact_cmd(t2));
+                        }
+                        t
+                    }
                     None => {
                         self.busy.store(false, Ordering::SeqCst);
                         break;
@@ -515,7 +523,7 @@ impl Session {
         // échoué (agent mort : la retenue ne survivrait qu'au timeout).
         // Le drain relancé livre les messages encore en file (le Stop
         // serveur les a vidés, le promote les garde).
-        self.end_compact("annulé");
+        self.end_compact("annulé", true);
         res
     }
 

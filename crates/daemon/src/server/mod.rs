@@ -186,6 +186,22 @@ impl Daemon {
                 .map(|(id, p)| (id.clone(), p.compact.clone()))
                 .collect(),
         };
+        // at_pct hors [0,1] : règle % traitée « off » à la lecture (le
+        // TOML n'a pas de null, 0 = off documenté) — warn ici pour ne
+        // pas laisser une typo (90 au lieu de 0.90) silencieusement
+        // inerte.
+        if let Some(v) = compact.global.at_pct {
+            if !(0.0..=1.0).contains(&v) {
+                tracing::warn!("[compact] at_pct={v} hors borne (0<p≤1) — règle % ignorée");
+            }
+        }
+        for (id, part) in &compact.by_agent {
+            if let Some(v) = part.at_pct {
+                if !(0.0..=1.0).contains(&v) {
+                    tracing::warn!("[agents.{id}.compact] at_pct={v} hors borne (0<p≤1) — règle % ignorée");
+                }
+            }
+        }
         let d = Arc::new(Self {
             root: root.clone(),
             sessions: RwLock::new(HashMap::new()),

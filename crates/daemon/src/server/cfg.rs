@@ -239,10 +239,13 @@ pub struct CompactCfg {
     #[serde(default = "dtrue")]
     pub enabled: bool,
     /// Seuil absolu en tokens utilisés (défaut : aucun — le % fait foi).
+    /// `0` = règle désactivée (même convention que les overrides).
     #[serde(default)]
     pub at_tokens: Option<u64>,
     /// Seuil relatif used/context_size ∈ ]0,1] (défaut 0.9) — ignoré
     /// tant que l'agent ne rapporte pas de fenêtre (size = 0).
+    /// `0` = règle % désactivée (seule façon d'exprimer « pas de
+    /// règle % » en TOML) ; hors [0,1] → ignoré + warn au démarrage.
     #[serde(default = "dpct09")]
     pub at_pct: Option<f64>,
 }
@@ -265,8 +268,8 @@ impl Default for CompactCfg {
 /// config.toml ET `compact.json` (sidecar session, posé via
 /// `acctl setcfg <sid> ac.compact_<champ>`). Chaque champ Some remplace
 /// le niveau inférieur (session > agent > global) ; tout None = hérité
-/// intégral (on ne peut pas « décocher » un seuil, `enabled` couvre
-/// l'arrêt).
+/// intégral ; `0` (ou hors borne pour le %) = règle retirée — un
+/// override peut donc « décocher » un seuil hérité.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CompactPartial {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -301,15 +304,17 @@ impl CompactPolicy {
 impl CompactPartial {
     /// Applique les champs posés à la politique courante (merge par
     /// champ — un override peut ne toucher qu'une seule règle).
+    /// `0`/hors borne = « off » : la règle héritée est retirée — borne
+    /// un compact.json trafiqué à la main autant qu'un TOML douteux.
     pub fn apply_to(&self, p: &mut CompactPolicy) {
         if let Some(v) = self.enabled {
             p.enabled = v;
         }
         if let Some(v) = self.at_tokens {
-            p.at_tokens = Some(v);
+            p.at_tokens = (v > 0).then_some(v);
         }
         if let Some(v) = self.at_pct {
-            p.at_pct = Some(v);
+            p.at_pct = (v > 0.0 && v <= 1.0).then_some(v);
         }
     }
 }
@@ -325,11 +330,14 @@ pub struct CompactSrc {
 impl CompactSrc {
     /// Politique de base (global → agent) pour une session du profil
     /// `agent` — l'override sidecar s'applique par-dessus ensuite.
+    /// `0`/hors borne au niveau global = « off » (même convention que
+    /// les overrides) — le TOML n'a pas de null, la borne protège
+    /// l'auto-compact d'un seuil toujours-vrai.
     pub fn base_for(&self, agent: &str) -> CompactPolicy {
         let mut p = CompactPolicy {
             enabled: self.global.enabled,
-            at_tokens: self.global.at_tokens,
-            at_pct: self.global.at_pct,
+            at_tokens: self.global.at_tokens.filter(|v| *v > 0),
+            at_pct: self.global.at_pct.filter(|v| *v > 0.0 && *v <= 1.0),
         };
         if let Some(part) = self.by_agent.get(agent) {
             part.apply_to(&mut p);
@@ -395,5 +403,34 @@ mod tests {
         // Override enabled=false → coupe tout pour cet agent.
         let p = src.base_for("codex");
         assert!(!p.enabled && p.at_pct == Some(0.8));
+    }
+
+    /// Bornes : `0`/hors borne = règle « off » — un seuil nul ou un %
+    /// hors ]0,1] (TOML n'a pas de null, compact.json peut être
+    /// trafiqué à la main) ne doit jamais produire un seuil
+    /// toujours-vrai. Le retrait fonctionne aussi en override : un
+    /// `0` décoche la règle héritée.
+    #[test]
+    fn compact_bounds() {
+        // Global : 0 = off, hors borne ignoré.
+        let src = CompactSrc {
+            global: CompactCfg { enabled: true, at_tokens: Some(0), at_pct: Some(0.0) },
+            by_agent: HashMap::new(),
+        };
+        let p = src.base_for("x");
+        assert!(p.enabled && p.at_tokens.is_none() && p.at_pct.is_none());
+        assert!(!p.exceeds(u64::MAX, u64::MAX)); // inerte, jamais de trigger
+        let src = CompactSrc {
+            global: CompactCfg { enabled: true, at_tokens: None, at_pct: Some(1.5) },
+            by_agent: HashMap::new(),
+        };
+        assert!(src.base_for("x").at_pct.is_none());
+        // Override : Some(0)/hors borne retire la règle héritée.
+        let mut p = policy(true, Some(100), Some(0.5));
+        CompactPartial { enabled: None, at_tokens: Some(0), at_pct: Some(1.5) }.apply_to(&mut p);
+        assert!(p.at_tokens.is_none() && p.at_pct.is_none());
+        CompactPartial { enabled: None, at_tokens: Some(50), at_pct: Some(0.4) }.apply_to(&mut p);
+        assert_eq!(p.at_tokens, Some(50));
+        assert_eq!(p.at_pct, Some(0.4));
     }
 }

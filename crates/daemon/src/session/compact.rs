@@ -105,7 +105,7 @@ impl Session {
         let timer = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(COMPACT_TIMEOUT_SECS)).await;
             if let Some(s) = me.upgrade() {
-                s.end_compact("timeout");
+                s.end_compact("timeout", false);
             }
         });
         *c = Some(CompactHold {
@@ -134,19 +134,20 @@ impl Session {
     /// Fin normale du compact : journalise, repasse idle (si l'agent
     /// vit encore) et relance le drain pour livrer les retenus.
     /// Compact auto → « continue your task » repart en tête de file —
-    /// sauf si la fin vient d'un cancel utilisateur (annulé) : relancer
-    /// derrière le dos d'un cancel express serait se battre avec lui.
-    /// Enfilé même agent mort : le drain post-respawn livrera (un
-    /// respawn purge la retenue, pas la file — la reprise survit au
-    /// redémarrage du démon pendant le compact).
-    pub(super) fn end_compact(&self, reason: &str) {
+    /// sauf `cancelled` (cancel utilisateur exprès) : relancer derrière
+    /// son dos serait se battre avec lui. Enfilé même agent mort : le
+    /// drain post-respawn livrera (un respawn purge la retenue, pas la
+    /// file). La file reste volatile : un redémarrage du démon la perd
+    /// — le reset de baseline au spawn re-déclenchera un compact si le
+    /// seuil est toujours dépassé.
+    pub(super) fn end_compact(&self, reason: &str, cancelled: bool) {
         let Some(h) = self.take_hold() else {
             return;
         };
         self.emit(EventKind::System {
             text: format!("compact terminé — {reason}"),
         });
-        if h.auto && reason != "annulé" {
+        if h.auto && !cancelled {
             self.emit(EventKind::System {
                 text: "reprise — envoi « continue your task »".into(),
             });

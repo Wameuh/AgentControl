@@ -257,23 +257,28 @@ impl Session {
     ///   `ac.compact_enabled`   on|off
     ///   `ac.compact_at_tokens` N|off
     ///   `ac.compact_at_pct`    0<p≤1|off
+    /// Écriture disque AVANT la mutation mémoire : une erreur est un
+    /// no-op réel (pas d'override actif non persisté). Puis reset de la
+    /// baseline live : si le seuil franchi était déjà dépassé (compact
+    /// réarmé, seuil durci), le prochain usage_update compte comme un
+    /// franchissement — sinon `was` resterait vrai pour toujours.
     fn set_daemon_option(&self, key: &str, value: &str) -> Result<()> {
-        {
-            let mut o = self.compact_override.lock().unwrap();
-            match key {
-                "compact_enabled" => o.enabled = Some(parse_on_off(value)?),
-                "compact_at_tokens" => o.at_tokens = parse_opt_u64(value)?,
-                "compact_at_pct" => o.at_pct = parse_opt_pct(value)?,
-                _ => anyhow::bail!("option démon inconnue : ac.{key}"),
-            }
+        let mut o = self.compact_override.lock().unwrap().clone();
+        match key {
+            "compact_enabled" => o.enabled = Some(parse_on_off(value)?),
+            "compact_at_tokens" => o.at_tokens = parse_opt_u64(value)?,
+            "compact_at_pct" => o.at_pct = parse_opt_pct(value)?,
+            _ => anyhow::bail!("option démon inconnue : ac.{key}"),
         }
-        let o = self.compact_override.lock().unwrap().clone();
         // .tmp + rename : pas de compact.json tronqué si le démon meurt
         // en pleine écriture (même convention que pinned.json).
         let tmp = self.dir.join("compact.json.tmp");
         std::fs::write(&tmp, serde_json::to_string_pretty(&o)?)
-            .context("compact.json illisable en écriture")?;
+            .context("compact.json illisible en écriture")?;
         std::fs::rename(&tmp, self.dir.join("compact.json"))?;
+        *self.compact_override.lock().unwrap() = o;
+        self.usage_seen
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         let eff = self.compact_policy();
         self.emit(EventKind::System {
             text: format!(
