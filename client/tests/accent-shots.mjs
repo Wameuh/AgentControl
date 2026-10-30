@@ -39,6 +39,7 @@ const probe = () =>
       accent: cs.getPropertyValue("--accent").trim(),
       cls: document.documentElement.className,
       anim: window.MeshBackground?.isAnimated?.(),
+      mood: window.MeshBackground?.getMood?.(),
       checkbox: document.getElementById("s-bganim")?.checked,
     };
   });
@@ -51,11 +52,39 @@ const EXPECT = {
   dark: { sage: "#cdb68c", gold: "#e0c996", grey: "#c6cdd5", violet: "#c4a9dc", red: "#f2a79a" },
   light: { sage: "#8a6f3e", gold: "#8a6a1a", grey: "#5d6b78", violet: "#6b4d8c", red: "#a03d33" },
 };
+// Teinte « agent » du mesh par mood quand l'accent est le défaut (preset
+// conservé : bicolore sable/sauge = identité). Sous accent choisi, elle
+// doit au contraire dériver de l'accent (famille de teinte, jamais vert).
+const AGENT_PRESET = { dark: [147, 173, 140], light: [88, 118, 78] };
+const hslOf = ([r, g, b]) => {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return { h: 0, s: 0, l };
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  const h = max === r ? ((g - b) / d + (g < b ? 6 : 0))
+    : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return { h: h * 60, s, l };
+};
+const parseHex = (s) => [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16));
+const hueDist = (a, b) => Math.min(Math.abs(a - b), 360 - Math.abs(a - b));
 let fail = 0;
 const check = (label, got, want) => {
   const ok = got === want;
   if (!ok) fail++;
   console.log(`${ok ? "ok  " : "FAIL"} ${label}: ${got} (attendu ${want})`);
+};
+const checkAgent = (theme, accent, st) => {
+  const agent = st.mood?.agent?.map(Math.round);
+  if (!agent) { check(`mood agent ${theme}/${accent}`, "absent", "rgb"); return; }
+  if (accent === "sage") {
+    check(`mood agent ${theme}/${accent}`, agent.join(","), AGENT_PRESET[theme].join(","));
+    return;
+  }
+  const a = hslOf(parseHex(st.accent)), g = hslOf(agent);
+  if (a.s < 0.15) check(`mood agent ${theme}/${accent} désaturé`, g.s < 0.2, true);
+  else check(`mood agent ${theme}/${accent} Δhue`, hueDist(a.h, g.h) <= 70, true);
 };
 
 await p.goto("http://localhost:4173/#desktop", { waitUntil: "networkidle0" });
@@ -78,6 +107,7 @@ for (const theme of ["dark", "light"]) {
     const st = await probe();
     check(`--accent ${theme}/${accent}`, st.accent, EXPECT[theme][accent]);
     check(`class ${theme}/${accent}`, st.cls.includes(`theme-${accent}`) || accent === "sage", true);
+    checkAgent(theme, accent, st);
     await openSettings();
     await shot(`30-${theme}-${accent}-settings`);
     await p.click("#settings-close");
