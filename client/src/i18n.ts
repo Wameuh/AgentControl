@@ -363,6 +363,8 @@ const STR = {
     comp_param_baddur: "{k}: duration expected (e.g. 30m, 3h)",
     comp_param_badenum: "{k}: value not in the allowed list",
     comp_param_badfmt: "{k}: invalid format",
+    comp_internals: "Internals (catalog-owned, read-only)",
+    comp_bound_note: "Catalog-managed component — only the declared parameters are editable.",
   },
   fr: {
     connect: "Connecter", new_conn: "Nouvelle connexion",
@@ -717,6 +719,8 @@ const STR = {
     comp_param_baddur: "{k} : durée attendue (ex. 30m, 3h)",
     comp_param_badenum: "{k} : valeur hors liste autorisée",
     comp_param_badfmt: "{k} : format invalide",
+    comp_internals: "Internes (propriété du catalogue, lecture seule)",
+    comp_bound_note: "Composant géré par le catalogue — seuls les paramètres déclarés sont éditables.",
   },
 } as const;
 

@@ -490,6 +490,14 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
     ]
 });
 
+/// Entrée du catalogue portant ce nom, s'il y en a une — l'édition
+/// utilisateur d'un composant adossé au catalogue est bornée aux
+/// params déclarés (+ autostart/description) : la spec interne est
+/// scellée (`upsert_edit` / `sealed_fields_changed`, mod.rs).
+pub(super) fn entry_named(name: &str) -> Option<&'static CatalogEntry> {
+    CATALOG.iter().find(|e| e.name == name)
+}
+
 impl Components {
     /// `ComponentCatalog` : pour chaque entrée — métadonnées +
     /// `installed` (bin sur le PATH du démon / fichier présent) +
@@ -587,9 +595,7 @@ impl Components {
         name: &str,
         params: Option<HashMap<String, String>>,
     ) -> Result<Value> {
-        let entry = CATALOG
-            .iter()
-            .find(|e| e.name == name)
+        let entry = entry_named(name)
             .with_context(|| format!("entrée catalogue inconnue: {name}"))?;
         let mut values: HashMap<String, String> = HashMap::new();
         if let Some(provided) = params {

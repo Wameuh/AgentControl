@@ -385,7 +385,26 @@ impl Components {
     /// `process`, le process vivant est arrêté — un ancien managé ne
     /// doit pas continuer à (re)tourner sous une spec sans cycle de
     /// vie.
-    pub async fn upsert(self: &Arc<Self>, name: &str, mut spec: ComponentSpec) -> Result<ComponentStatus> {
+    ///
+    /// Chemin interne (recette `upsert_spec`, params à venir) — la
+    /// garde « spec scellée » des entrées catalogue n'est appliquée
+    /// que sur la surface d'édition utilisateur (`upsert_edit`).
+    pub async fn upsert(self: &Arc<Self>, name: &str, spec: ComponentSpec) -> Result<ComponentStatus> {
+        self.upsert_inner(name, spec, false).await
+    }
+
+    /// Variante pour `ComponentUpsert` (RPC — surface d'édition
+    /// utilisateur) : sur un composant adossé au catalogue, la spec
+    /// interne (kind/command/env/cwd/restart*/healthcheck/queries) est
+    /// scellée — propriété du catalogue/dev. Seuls `autostart` et
+    /// `description` (et demain les params déclarés) relèvent de
+    /// l'utilisateur ; tout autre champ modifié est refusé avec la
+    /// liste des champs scellés.
+    pub async fn upsert_edit(self: &Arc<Self>, name: &str, spec: ComponentSpec) -> Result<ComponentStatus> {
+        self.upsert_inner(name, spec, true).await
+    }
+
+    async fn upsert_inner(self: &Arc<Self>, name: &str, mut spec: ComponentSpec, edit_bound: bool) -> Result<ComponentStatus> {
         anyhow::ensure!(
             spec.name == name,
             "spec.name « {} » ≠ name « {name} » — la clé d'édition est le nom déclaré",
@@ -393,6 +412,9 @@ impl Components {
         );
         expand_home_fields(&mut spec);
         check_editable(&spec)?;
+        if edit_bound {
+            self.check_edit_bound(&mut spec).await?;
+        }
         // Même borne qu'au chargement : le backoff plafonne à 60 s.
         spec.restart_sec = spec.restart_sec.min(BACKOFF_CAP_SECS);
         let prev_kind = self.specs.read().await.get(name).map(|p| p.kind);
@@ -445,6 +467,37 @@ impl Components {
             return Err(e);
         }
         Ok(self.status_of(&spec).await)
+    }
+
+    /// Garde « spec scellée » des composants catalogue — appelée par
+    /// `upsert_inner` après expansion `~` (valeurs normalisées des deux
+    /// côtés). Refuse aussi la création d'une spec portant le nom
+    /// d'une entrée : il revient à `ComponentInstall` de la poser.
+    /// Sur acceptation, `spec` récupère les métadonnées catalogue de
+    /// la spec courante (`preserve_catalog_meta`).
+    async fn check_edit_bound(&self, spec: &mut ComponentSpec) -> Result<()> {
+        if catalog::entry_named(&spec.name).is_none() {
+            return Ok(());
+        }
+        let cur = self.specs.read().await.get(&spec.name).cloned();
+        let Some(cur) = cur else {
+            anyhow::bail!(
+                "« {} » est une entrée du catalogue — installer via \
+                 ComponentInstall ; la spec interne n'est pas éditable",
+                spec.name
+            );
+        };
+        let sealed = sealed_fields_changed(spec, &cur);
+        anyhow::ensure!(
+            sealed.is_empty(),
+            "« {} » : spec interne scellée par le catalogue — champs \
+             refusés : {} (seuls autostart/description et les params \
+             déclarés sont éditables)",
+            spec.name,
+            sealed.join(", ")
+        );
+        preserve_catalog_meta(&cur, spec)?;
+        Ok(())
     }
 
     /// Retire la spec déclarée `name` : un `process` vivant est arrêté
@@ -798,6 +851,10 @@ fn item_json(spec: &ComponentSpec, st: &ComponentStatus, source: &str) -> Value 
         "autostart": spec.autostart,
         "description": spec.description,
         "source": source,
+        // Nom couvert par une entrée du catalogue → l'édition
+        // utilisateur est bornée (upsert_edit) : le client n'expose
+        // que les params déclarés, la spec interne est scellée.
+        "catalog": catalog::entry_named(&spec.name).is_some(),
         "spec": spec,
         "status": st,
     })
@@ -991,4 +1048,154 @@ fn check_editable(spec: &ComponentSpec) -> Result<()> {
         kind_name(spec.kind)
     );
     Ok(())
+}
+
+/// Champs internes scellés ayant divergé entre la spec envoyée et la
+/// spec courante — helper pur de `check_edit_bound` : tout champ qui
+/// n'est ni `autostart` ni `description` (ni les params déclarés à
+/// venir) appartient au catalogue/dev, pas à l'utilisateur.
+fn sealed_fields_changed(new: &ComponentSpec, cur: &ComponentSpec) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if new.kind != cur.kind {
+        out.push("kind");
+    }
+    if new.command != cur.command {
+        out.push("command");
+    }
+    if new.env != cur.env {
+        out.push("env");
+    }
+    if new.cwd != cur.cwd {
+        out.push("cwd");
+    }
+    if new.restart != cur.restart {
+        out.push("restart");
+    }
+    if new.restart_sec != cur.restart_sec {
+        out.push("restart_sec");
+    }
+    if new.healthcheck != cur.healthcheck {
+        out.push("healthcheck");
+    }
+    if new.queries != cur.queries {
+        out.push("queries");
+    }
+    out
+}
+
+/// Recopie dans `spec` les métadonnées catalogue portées par `cur` —
+/// `params`/`params_schema`/`catalog`/`render` : ces champs (write-path
+/// params dédié, pas la surface d'édition) ne peuvent ni être effacés
+/// par une spec qui les omet, ni forgés par une spec qui les porte.
+/// Copie au niveau JSON — no-op tant que `ComponentSpec` ne sérialise
+/// pas ces clés, donc rétro- et avant-compatible. Une re-désérialisation
+/// en échec est un refus, pas un fallback : la spec entrante, qui peut
+/// porter des métas forgées, ne doit pas passer telle quelle.
+fn preserve_catalog_meta(cur: &ComponentSpec, spec: &mut ComponentSpec) -> Result<()> {
+    const META: [&str; 4] = ["params", "params_schema", "catalog", "render"];
+    let mut new = serde_json::to_value(&*spec).context("spec → json")?;
+    let old = serde_json::to_value(cur).context("spec courante → json")?;
+    let (Some(new), Some(old)) = (new.as_object_mut(), old.as_object()) else {
+        // Une spec sérialise toujours en objet — hors-objet impossible.
+        return Ok(());
+    };
+    for k in META {
+        match old.get(k) {
+            Some(v) => new.insert(k.to_string(), v.clone()),
+            None => new.remove(k),
+        };
+    }
+    *spec = serde_json::from_value(Value::Object(std::mem::take(new)))
+        .context("métadonnées catalogue incohérentes avec la spec")?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_spec() -> ComponentSpec {
+        ComponentSpec {
+            name: "agentreviewer".into(),
+            kind: ComponentKind::Process,
+            command: vec!["agent-reviewer".into(), "--watch".into()],
+            env: HashMap::new(),
+            cwd: None,
+            autostart: false,
+            restart: RestartPolicy::OnFailure,
+            restart_sec: 5,
+            healthcheck: Healthcheck::None,
+            description: Some("desc".into()),
+            queries: HashMap::new(),
+            catalog: Some("agentreviewer".into()),
+            params_schema: Vec::new(),
+            params: HashMap::new(),
+            render: None,
+        }
+    }
+
+    /// La surface utilisateur ne peut toucher qu'autostart/description
+    /// — toute divergence de champ interne est rapportée scellée.
+    #[test]
+    fn champs_scelles_detectes() {
+        let cur = base_spec();
+        // Champs utilisateurs → jamais rapportés.
+        let mut user = cur.clone();
+        user.autostart = !cur.autostart;
+        user.description = Some("autre".into());
+        assert!(sealed_fields_changed(&user, &cur).is_empty());
+        // Chaque champ interne divergé est listé.
+        let mut cmd = cur.clone();
+        cmd.command = vec!["autre".into()];
+        assert_eq!(sealed_fields_changed(&cmd, &cur), ["command"]);
+        let mut k = cur.clone();
+        k.kind = ComponentKind::External;
+        assert_eq!(sealed_fields_changed(&k, &cur), ["kind"]);
+        let mut hc = cur.clone();
+        hc.healthcheck = Healthcheck::Tcp { addr: "127.0.0.1:1".into() };
+        assert_eq!(sealed_fields_changed(&hc, &cur), ["healthcheck"]);
+        let mut env = cur.clone();
+        env.env.insert("FOO".into(), "bar".into());
+        assert_eq!(sealed_fields_changed(&env, &cur), ["env"]);
+        let mut rs = cur.clone();
+        rs.restart = RestartPolicy::Always;
+        rs.restart_sec = 9;
+        assert_eq!(sealed_fields_changed(&rs, &cur), ["restart", "restart_sec"]);
+        let mut q = cur.clone();
+        q.queries.insert("state".into(), vec!["cat".into()]);
+        assert_eq!(sealed_fields_changed(&q, &cur), ["queries"]);
+        // Spec identique → rien.
+        assert!(sealed_fields_changed(&cur, &cur).is_empty());
+        // preserve_catalog_meta : les métas de la spec entrante (omises
+        // ou forgées) sont recopiées de la courante — ni effacées ni
+        // forgées par un upsert.
+        let mut cur = base_spec();
+        cur.params.insert("repo".into(), "Wameuh/AgentReviewer".into());
+        cur.params_schema.push(proto::ParamSpec {
+            key: "repo".into(),
+            label: "Repo".into(),
+            description: None,
+            required: true,
+            kind: proto::ParamKind::String,
+            default: None,
+            secret: false,
+            validation: None,
+            choices: Vec::new(),
+        });
+        cur.render = Some(proto::ConfigRender {
+            path: "~/x.toml".into(),
+            template: "repo={{repo}}".into(),
+        });
+        let mut forged = cur.clone();
+        forged.catalog = Some("autre".into());
+        forged.params.insert("repo".into(), "evil/x".into());
+        forged.render = None;
+        forged.params_schema = Vec::new();
+        preserve_catalog_meta(&cur, &mut forged).unwrap();
+        assert_eq!(forged.catalog.as_deref(), Some("agentreviewer"));
+        assert_eq!(forged.params["repo"], "Wameuh/AgentReviewer");
+        assert!(forged.render.is_some());
+        assert_eq!(forged.params_schema.len(), 1);
+        assert!(sealed_fields_changed(&forged, &cur).is_empty());
+    }
 }

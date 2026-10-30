@@ -154,7 +154,7 @@ avec l'`id` correctement extrait, donc l'appel échoue proprement) :
 | `ComponentInfo {name}` | spec complète + état détaillé |
 | `ComponentStart/Stop/Restart {name}` | `{name, state}` |
 | `ComponentLogs {name, offset?, limit?}` | `{data(b64)|lines, size, truncated}` (tail paginé) |
-| `ComponentUpsert {name, spec}` | réécrit components.toml atomiquement |
+| `ComponentUpsert {name, spec}` | réécrit components.toml atomiquement — surface utilisateur bornée : sur un nom couvert par le catalogue, la spec interne (kind/command/env/cwd/restart*/healthcheck/queries) est scellée, seuls `autostart`/`description` et les params déclarés sont mutables ; création d'un nom catalogue refusée (→ `ComponentInstall`) |
 | `ComponentRemove {name}` | idem (+ stop si process vivant) |
 | `ComponentCatalog {refresh?}` | entrées du catalogue (§2.5) — `params`/`render` déclarés inclus |
 | `ComponentInstall {name, params?}` | exécute la recette + upsert la spec (params validés d'abord) |
@@ -218,6 +218,10 @@ acctl comp catalog [--json] [--refresh]  # + versions upstream
 acctl comp install <name> [--set K=V …] # recette catalogue → spec managée
 acctl comp set <name> <clé> <valeur>    # paramètre déclaré (cf §2.5.1)
 acctl comp add <name> --kind K --cmd "<argv>" [--env K=V …] [--autostart]
+acctl comp edit <name> [--desc D] [--autostart|--no-autostart] [flags add]
+                                  # édition partielle — composant catalogue :
+                                  # seuls desc/autostart (params via comp set) ;
+                                  # custom : tous les champs add + --restart/--rsec
 acctl comp rm <name>
 ```
 
@@ -315,8 +319,20 @@ bouton titlebar/menu ⋮ :
 - **Liste** des composants de la connexion courante : nom, kind badge,
   état animé, uptime, restarts ; actions contextuelles
   start/stop/restart + viewer logs (tail auto-refresh).
-- **Édition** : formulaire sur la spec (command, env, autostart, restart,
-  healthcheck) → `ComponentUpsert`.
+- **Édition** : deux surfaces selon la provenance du composant.
+  - *Composant catalogue* (`item.catalog`) : le formulaire n'expose que
+    les **params déclarés** (`spec.params_schema` — kinds
+    string/path/int/duration/bool/enum/list, `secret` masqué) +
+    `autostart`/`description` ; la spec interne (commande, env,
+    restart, healthcheck, kind) est propriété de l'entrée catalogue —
+    affichée **read-only** dans un panneau « internals » pour le debug,
+    et scellée côté démon (`upsert_edit`). Les valeurs passent par le
+    RPC params dédié ; `status.config_required` liste les clés requises
+    manquantes (bandeau « configuration requise »).
+  - *Composant custom* (pas d'entrée catalogue, ex. spec écrite à la
+    main) : formulaire de spec complet legacy — choix documenté : hors
+    catalogue il n'y a pas de params déclarés, la spec brute reste la
+    seule surface cohérente.
 - **Onglet Catalogue** : cartes des entrées connues (nom, description,
   version upstream fetchée, « installé ? »), bouton « Intégrer » →
   `ComponentInstall` puis formulaire prérempli de la `suggested_spec`.

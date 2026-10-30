@@ -202,6 +202,8 @@ export interface ComponentSpec {
   params?: Record<string, string>;
   /** Cible de rendu de la config managée (fichier possédé démon). */
   render?: { path: string; template: string } | null;
+  /** Requêtes de données déclarées (`component_query` → argv). */
+  queries?: Record<string, string[]>;
 }
 
 export interface ComponentStatus {
@@ -219,13 +221,16 @@ export interface ComponentStatus {
 }
 
 /** Item ListComponents / ComponentInfo : spec + état runtime. `source`
- *  = "internal" (déclaré en code, non éditable) | "components.toml". */
+ *  = "internal" (déclaré en code, non éditable) | "components.toml".
+ *  `catalog` = le nom est couvert par une entrée du catalogue →
+ *  édition bornée aux params déclarés, spec interne scellée. */
 export interface ComponentItem {
   name: string;
   kind: ComponentKind;
   autostart: boolean;
   description?: string | null;
   source?: string;
+  catalog?: boolean;
   spec: ComponentSpec;
   status: ComponentStatus;
 }

@@ -73,12 +73,15 @@ impl Daemon {
     /// (réécriture atomique de components.toml) → {name, state}. Un
     /// `process` vivant garde sa spec courante jusqu'au prochain
     /// (re)start, explicite ou supervisé.
+    /// Surface d'édition utilisateur : sur un composant adossé au
+    /// catalogue, la spec interne est scellée (`upsert_edit`) — seuls
+    /// autostart/description et les params déclarés sont mutables.
     pub(super) async fn h_component_upsert(
         self: &Arc<Self>,
         name: String,
         spec: ComponentSpec,
     ) -> Result<Value> {
-        let st = self.components.upsert(&name, spec).await?;
+        let st = self.components.upsert_edit(&name, spec).await?;
         Ok(json!({ "name": name, "state": st.state }))
     }
 
