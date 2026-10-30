@@ -21,6 +21,7 @@ import type {
   ComponentItem,
   ComponentKind,
   ComponentSpec,
+  ParamSpec,
 } from "../core/types";
 import type { ConnectionManager } from "./connections";
 
@@ -316,6 +317,12 @@ export class ComponentsPanel {
     act("refresh", t("comp_restart"), () => void this.lifecycle(it.name, "restart"),
       managed && alive);
     act("terminal", t("comp_logs"), () => this.openLogs(it.name), managed);
+    // Params déclarés = la seule surface de config utilisateur
+    // (catalogue) — « Configurer » ouvre le formulaire schema-driven,
+    // surtout utile quand config_required bloque le démarrage.
+    act("settings", t("comp_config"),
+      () => void this.configure(it),
+      (it.spec.params_schema?.length ?? 0) > 0);
     // internal : déclaré en code → ni édition ni suppression (le démon
     // refuse ; n'afficher que les actions réellement jouables).
     act("edit", t("comp_edit"), () => this.openEditor(it), it.source !== "internal");
@@ -333,6 +340,8 @@ export class ComponentsPanel {
       meta.push(`↑${fmtUp(st.uptime_s!)}`);
     if ((st.restarts ?? 0) > 0)
       meta.push(`↻${st.restarts} ${t("comp_restarts")}`);
+    if (st.config_required?.length)
+      meta.push(`⚙ ${t("comp_cfg_missing", { l: st.config_required.join(", ") })}`);
     if (st.health) meta.push(st.health === "ok" ? "♥ ok" : "♥ fail");
     if (st.last_exit !== undefined && st.last_exit !== null)
       meta.push(`exit ${st.last_exit}`);
@@ -352,6 +361,7 @@ export class ComponentsPanel {
     return [
       it.name, it.kind, st.state, st.pid, st.restarts, st.health,
       st.last_exit, st.version, it.autostart, it.source, it.description,
+      st.config_required?.join(","),
     ].join("|");
   }
 
@@ -454,31 +464,218 @@ export class ComponentsPanel {
     }
   }
 
-  /** « Intégrer » : exécute la recette catalogue (ComponentInstall),
-   *  puis ouvre l'éditeur prérempli de la spec effectivement posée
-   *  (ComponentInfo — la suggested_spec matérialisée, chemins expansés ;
-   *  repli sur la suggested_spec brute si la spec n'a pas été posée). */
+  /** « Intégrer » : si l'entrée déclare des params, on les collecte
+   *  d'abord dans le dialogue schema-driven (annulé → rien n'est posé) ;
+   *  sans params, comportement historique — recette puis éditeur
+   *  prérempli de la spec posée. */
   private async integrate(e: CatalogEntry, btn: HTMLButtonElement) {
     btn.disabled = true;
     try {
-      const r = await call<{ notes?: string[] }>("component_install", {
+      let params: Record<string, string> | undefined;
+      if (e.params?.length) {
+        const vals = await this.paramsDialog(
+          t("comp_params_install", { name: e.name }),
+          e.params,
+          {},
+        );
+        if (vals === null) return;
+        params = vals;
+      }
+      const r = await call<{
+        notes?: string[];
+        config_required?: string[];
+      }>("component_install", {
         name: e.name,
+        params,
         conn: this.connParam(),
       });
       for (const n of r.notes ?? []) notify("info", n);
-      notify("success", t("comp_cat_done", { name: e.name }));
-      const info = await call<ComponentItem>("component_info", {
-        name: e.name,
-        conn: this.connParam(),
-      }).catch(() => null);
-      if (info) this.openEditor(info);
-      else this.openEditor(undefined, e.suggested_spec);
+      if (r.config_required?.length)
+        notify("warn", t("comp_cfg_missing", { l: r.config_required.join(", ") }));
+      else notify("success", t("comp_cat_done", { name: e.name }));
+      if (!params) {
+        const info = await call<ComponentItem>("component_info", {
+          name: e.name,
+          conn: this.connParam(),
+        }).catch(() => null);
+        if (info) this.openEditor(info);
+        else this.openEditor(undefined, e.suggested_spec);
+      }
       void this.refreshCatalog();
+      this.refresh();
     } catch (err) {
       dlgErr("comp-err", String(err));
     } finally {
       btn.disabled = false;
     }
+  }
+
+  /** Formulaire des params déclarés d'un item managé — envoyé via
+   *  `component_set_params` (le démon merge, valide, re-rend la config
+   *  et redémarre si le process tourne). */
+  private async configure(it: ComponentItem) {
+    const schema = it.spec.params_schema ?? [];
+    if (!schema.length) return;
+    const vals = await this.paramsDialog(
+      t("comp_params_h", { name: it.name }),
+      schema,
+      it.spec.params ?? {},
+    );
+    if (vals === null) return;
+    try {
+      const r = await call<{
+        config_required?: string[];
+        rendered?: boolean;
+        restarted?: boolean;
+      }>("component_set_params", { name: it.name, params: vals, conn: this.connParam() });
+      if (r.config_required?.length)
+        notify("warn", t("comp_cfg_missing", { l: r.config_required.join(", ") }));
+      else notify("success", t("comp_params_done", { name: it.name }));
+      this.refresh();
+    } catch (err) {
+      notify("error", String(err));
+    }
+  }
+
+  /** Dialogue générique piloté par un `ParamSpec[]` — les `secret`
+   *  viennent masqués (« •••••• » en placeholder) : champ laissé vide =
+   *  valeur conservée (on n'envoie pas la clé). Renvoie les saisies
+   *  ({clé: valeur}, vide = retrait) ou null si annulé. */
+  private async paramsDialog(
+    title: string,
+    schema: ParamSpec[],
+    current: Record<string, string>,
+  ): Promise<Record<string, string> | null> {
+    const dlg = $("dlg-cparams") as HTMLDialogElement;
+    const fields = $("cp-fields");
+    fields.innerHTML = "";
+    $("cp-title").textContent = title;
+    dlgErr("cp-err", null);
+    const inputs: {
+      ps: ParamSpec;
+      el: HTMLInputElement | HTMLSelectElement;
+      has: boolean;
+    }[] = [];
+    for (const ps of schema) {
+      const lab = document.createElement("label");
+      const cur = current[ps.key];
+      const set = cur !== undefined && cur !== "";
+      const head = document.createElement("span");
+      head.textContent = ps.label + (ps.required ? " *" : "");
+      let el: HTMLInputElement | HTMLSelectElement;
+      if (ps.kind === "bool") {
+        el = document.createElement("input");
+        el.type = "checkbox";
+        (el as HTMLInputElement).checked =
+          (set ? cur : ps.default) === "true";
+        lab.classList.add("chk-row");
+        lab.appendChild(el);
+        lab.appendChild(head);
+      } else {
+        lab.appendChild(head);
+        if (ps.kind === "enum") {
+          el = document.createElement("select");
+          const opts = ps.choices ?? [];
+          // Valeur à choisir vide : toujours offerte en tête —
+          // requise sans défaut → l'utilisateur doit trancher ; non
+          // requise → « — » = non positionné.
+          if (!ps.required || (!set && !ps.default)) {
+            const o = document.createElement("option");
+            o.value = "";
+            o.textContent = "—";
+            el.appendChild(o);
+          }
+          for (const c of opts) {
+            const o = document.createElement("option");
+            o.value = c;
+            o.textContent = c;
+            el.appendChild(o);
+          }
+          // Valeur stockée hors `choices` (spec éditée à la main) :
+          // la conserver plutôt que la retirer silencieusement.
+          if (set && !opts.includes(cur)) {
+            const o = document.createElement("option");
+            o.value = cur;
+            o.textContent = `${cur} (?)`;
+            el.appendChild(o);
+          }
+          el.value = set ? cur : (ps.default ?? "");
+        } else {
+          el = document.createElement("input");
+          el.type = ps.secret ? "password"
+            : ps.kind === "int" ? "number" : "text";
+          el.autocomplete = "off";
+          el.spellcheck = false;
+          if (ps.secret && set) el.placeholder = "••••••";
+          el.value = ps.secret ? "" : (set ? cur : (ps.default ?? ""));
+          if (ps.kind === "int") (el as HTMLInputElement).step = "1";
+        }
+        lab.appendChild(el);
+      }
+      if (ps.description) {
+        const d = document.createElement("small");
+        d.className = "cp-desc";
+        d.textContent = ps.description;
+        lab.appendChild(d);
+      }
+      fields.appendChild(lab);
+      inputs.push({ ps, el, has: set });
+    }
+    return await new Promise((resolve) => {
+      let decided = false;
+      const close = (v: Record<string, string> | null) => {
+        if (decided) return;
+        decided = true;
+        dlg.close();
+        resolve(v);
+      };
+      ($("cp-cancel") as HTMLButtonElement).onclick = () => close(null);
+      ($("cp-ok") as HTMLButtonElement).onclick = (ev) => {
+        ev.preventDefault();
+        const out: Record<string, string> = {};
+        for (const { ps, el, has } of inputs) {
+          const v = ps.kind === "bool"
+            ? ((el as HTMLInputElement).checked ? "true" : "false")
+            : el.value.trim();
+          // secret posé, non retapé → clé absente = conserver la
+          // valeur ; secret requis jamais posé tombe dans le required.
+          if (!v) {
+            if (ps.secret && has) continue;
+            if (ps.required) {
+              dlgErr("cp-err", t("comp_param_required", { k: ps.label }));
+              return;
+            }
+            out[ps.key] = "";
+            continue;
+          }
+          if (ps.kind === "int" && !/^-?\d+$/.test(v)) {
+            dlgErr("cp-err", t("comp_param_badint", { k: ps.label }));
+            return;
+          }
+          if (ps.kind === "duration"
+              && !/^(\d+(ms|min|s|m|h|d|w)\s*)+$/.test(v)) {
+            dlgErr("cp-err", t("comp_param_baddur", { k: ps.label }));
+            return;
+          }
+          if (ps.kind === "enum" && !(ps.choices ?? []).includes(v)) {
+            dlgErr("cp-err", t("comp_param_badenum", { k: ps.label }));
+            return;
+          }
+          if (ps.validation) {
+            try {
+              if (!new RegExp(ps.validation).test(v)) {
+                dlgErr("cp-err", t("comp_param_badfmt", { k: ps.label }));
+                return;
+              }
+            } catch { /* regex démon-seule : le serveur revalide */ }
+          }
+          out[ps.key] = v;
+        }
+        close(out);
+      };
+      dlg.onclose = () => close(null);
+      dlg.showModal();
+    });
   }
 
   // -------------------------------------------------------------------

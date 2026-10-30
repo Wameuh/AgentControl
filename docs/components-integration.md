@@ -156,8 +156,9 @@ avec l'`id` correctement extrait, donc l'appel échoue proprement) :
 | `ComponentLogs {name, offset?, limit?}` | `{data(b64)|lines, size, truncated}` (tail paginé) |
 | `ComponentUpsert {name, spec}` | réécrit components.toml atomiquement |
 | `ComponentRemove {name}` | idem (+ stop si process vivant) |
-| `ComponentCatalog {refresh?}` | entrées du catalogue (§2.5) |
-| `ComponentInstall {name}` | exécute la recette + upsert la spec |
+| `ComponentCatalog {refresh?}` | entrées du catalogue (§2.5) — `params`/`render` déclarés inclus |
+| `ComponentInstall {name, params?}` | exécute la recette + upsert la spec (params validés d'abord) |
+| `ComponentSetParams {name, params}` | merge + validation, re-rend la config, redémarre si vivant |
 
 Capability : `daemon_status.components = true` → le client gate ses
 boutons comme pour `terminal`/`first_post`. Le commit qui ajoute les
@@ -214,7 +215,8 @@ acctl comp info <name>            # spec + état
 acctl comp start|stop|restart <name>
 acctl comp logs <name> [--tail N]
 acctl comp catalog [--json] [--refresh]  # + versions upstream
-acctl comp install <name>         # recette catalogue → spec managée
+acctl comp install <name> [--set K=V …] # recette catalogue → spec managée
+acctl comp set <name> <clé> <valeur>    # paramètre déclaré (cf §2.5.1)
 acctl comp add <name> --kind K --cmd "<argv>" [--env K=V …] [--autostart]
 acctl comp rm <name>
 ```
@@ -257,6 +259,53 @@ version, doc) étant récupérées depuis sa source upstream.
   trouvée sur le PATH du démon / fichier présent) + version si sondable
   → le client affiche « installé v0.2 — intégrer ? » vs « disponible ».
 - Futurs composants = une entrée catalogue, pas de nouveau code client.
+
+#### 2.5.1 Surface de paramètres — la seule config utilisateur
+
+Un composant installé depuis le catalogue n'expose **que** ses
+paramètres déclarés : la spec interne (`command`, `kind`, `restart`,
+`healthcheck`) reste propriété de l'entrée catalogue et n'est pas de
+la configuration utilisateur.
+
+- **`ParamSpec`** déclaré par entrée (`component_catalog` →
+  `entry.params`) : `{key, label, description?, required, kind,
+  default?, secret?, validation?, choices?}` avec
+  `kind ∈ string | path | int | duration | bool | enum | list`
+  (`validation` = regex pour string/path, `choices` pour enum).
+- **Install** : `ComponentInstall {name, params?}` — les valeurs
+  collectées (dialogue client, `acctl comp install --set K=V`) sont
+  validées **avant** les étapes de la recette ; la spec matérialisée
+  hérite `catalog` (nom de l'entrée), `params_schema`, `params`,
+  `render` — elle est ensuite auto-porteuse.
+- **Édition** : `ComponentSetParams {name, params}` /
+  `acctl comp set <name> <clé> <valeur>` — merge, validation par kind
+  + regex, re-rendu de la config et **redémarrage si le process
+  tourne**. `""` retire la clé ; une clé inconnue est refusée avec la
+  liste des déclarées.
+- **`config_required`** (`status`) : paramètres `required` sans valeur
+  effective (ni valeur posée ni défaut) — tant que la liste n'est pas
+  vide le spawn est refusé (autostart désarmé, `comp start` → erreur
+  explicite) et le rendu gelé ; `comp ls` affiche
+  « configuration requise : repo, repo_dir ».
+- **Rendu** (`spec.render = {path, template}`) : template TOML à
+  placeholders `{{clé}}` — le littéral est typé (string/path/enum/
+  duration → `"…"` échappé, `~` expansé ; int nu ; bool ; list →
+  `["…"]`) et la ligne est **omise** quand le paramètre reste sans
+  valeur (défaut du composant). Écriture bornée sous HOME, atomique,
+  0600 si un `secret` est déclaré.
+- **Secrets** : `params` renvoyé masqué (`"••••••"`) dans les réponses
+  RPC — components.toml garde le clair puisque le fichier rendu le
+  contient de toute façon.
+- **`params` en réponse = valeurs effectives** (défauts ∪ valeurs
+  posées), pas le diff stocké.
+
+Exemple `agentreviewer` : `repo*` + `repo_dir*` requis ;
+`worktree_root` (`~/.local/state/agentreviewer/worktrees`),
+`trigger` (`/mr review`), `group` (`AgentReviewer`), `max_parallel`
+(1), `review_timeout` (3h), `keep_sessions`, `mode` (enum
+daemon|systemd, vide = auto), `daemon`, `agent.command` (`devin`),
+`agent.profile`, `agent.model` — rendus dans
+`~/.config/agentreviewer/config.toml`.
 
 ### 2.6 UI client — panneau « Composants »
 

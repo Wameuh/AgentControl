@@ -9,6 +9,7 @@
 
 mod catalog;
 mod proc;
+mod render;
 
 use anyhow::{Context, Result};
 use proto::{
@@ -239,7 +240,11 @@ impl Components {
     async fn item_of(&self, name: &str) -> Option<Value> {
         if let Some(spec) = self.specs.read().await.get(name).cloned() {
             let st = self.status_of(&spec).await;
-            return Some(item_json(&spec, &st, "components.toml"));
+            return Some(item_json(
+                &render::masked_spec(&spec),
+                &st,
+                "components.toml",
+            ));
         }
         if name == orch::COMPONENT_NAME {
             // État déduit de la phase de l'orchestrateur natif + son
@@ -257,6 +262,10 @@ impl Components {
                 healthcheck: Healthcheck::None,
                 description: Some(i.description.to_string()),
                 queries: HashMap::new(),
+                catalog: None,
+                params_schema: Vec::new(),
+                params: HashMap::new(),
+                render: None,
             };
             let st = ComponentStatus {
                 state: self.orch.component_state(),
@@ -280,6 +289,10 @@ impl Components {
                 healthcheck: Healthcheck::None,
                 description: Some(i.description.to_string()),
                 queries: HashMap::new(),
+                catalog: None,
+                params_schema: Vec::new(),
+                params: HashMap::new(),
+                render: None,
             };
             let st = ComponentStatus {
                 state: if running {
@@ -387,6 +400,23 @@ impl Components {
             prev_kind,
             Some(ComponentKind::Process) if spec.kind != ComponentKind::Process
         );
+        // Champs gérés par le mécanisme de params (catalog installé) :
+        // un upsert brut qui les laisse vides (éditeur spec, acctl add)
+        // ne doit pas les perdre — hérités de la spec précédente.
+        if let Some(prev) = self.specs.read().await.get(name).cloned() {
+            if spec.catalog.is_none() {
+                spec.catalog = prev.catalog;
+            }
+            if spec.params_schema.is_empty() {
+                spec.params_schema = prev.params_schema;
+            }
+            if spec.render.is_none() {
+                spec.render = prev.render;
+            }
+            for (k, v) in prev.params {
+                spec.params.entry(k).or_insert(v);
+            }
+        }
         // Mutation mémoire AVANT le cycle de vie : un `start` concurrent
         // lit la nouvelle spec (kind≠process → require_process refuse) et
         // un respawn planifié sort via la garde kind — la fenêtre où un
@@ -447,6 +477,100 @@ impl Components {
             return Err(e);
         }
         Ok(())
+    }
+
+    /// `ComponentSetParams{name, params}` — fusion dans `spec.params`
+    /// (valeur vide = retrait de la clé) après validation par le schéma
+    /// déclaré (`params_schema` : clé inconnue refusée — filet contre
+    /// les typos ; spec sans schéma = params libres, métadonnées
+    /// seulement). Réécrit components.toml, re-rend la config managée
+    /// quand les `required` sont tous remplis, puis relance le
+    /// `process` s'il tourne pour appliquer.
+    pub async fn set_params(
+        self: &Arc<Self>,
+        name: &str,
+        updates: &HashMap<String, String>,
+    ) -> Result<Value> {
+        let mut spec = self
+            .specs
+            .read()
+            .await
+            .get(name)
+            .cloned()
+            .with_context(|| format!("composant inconnu: {name}"))?;
+        // Validation AVANT toute mutation — une valeur fautive ne doit
+        // pas corrompre la moitié d'une fusion.
+        let mut canon: Vec<(String, String)> = Vec::with_capacity(updates.len());
+        for (k, v) in updates {
+            match spec.params_schema.iter().find(|p| &p.key == k) {
+                Some(ps) => {
+                    if v.is_empty() {
+                        canon.push((k.clone(), String::new()));
+                    } else {
+                        canon.push((
+                            k.clone(),
+                            render::validate_value(ps, v)?,
+                        ));
+                    }
+                }
+                None if spec.params_schema.is_empty() => {
+                    canon.push((k.clone(), v.clone()));
+                }
+                None => anyhow::bail!(
+                    "paramètre « {k} » non déclaré — connus : {}",
+                    spec.params_schema
+                        .iter()
+                        .map(|p| p.key.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }
+        }
+        for (k, v) in canon {
+            if v.is_empty() {
+                spec.params.remove(&k);
+            } else {
+                spec.params.insert(k, v);
+            }
+        }
+        self.specs
+            .write()
+            .await
+            .insert(name.to_string(), spec.clone());
+        if let Err(e) = self.save().await {
+            warn!("composant « {name} » params en mémoire mais save() a échoué: {e:#}");
+            return Err(e);
+        }
+        let rendered = render::render_if_ready(&spec).await?;
+        // « relance si running » : le process vivant recharge sa config.
+        let alive = self
+            .procs
+            .read()
+            .await
+            .get(name)
+            .and_then(|p| p.pid)
+            .is_some();
+        let restarted = if rendered && alive && spec.kind == ComponentKind::Process {
+            match self.restart(name).await {
+                Ok(_) => true,
+                Err(e) => {
+                    warn!("composant « {name} » : restart après set_params en échec: {e:#}");
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        let mut st = self.status_of(&spec).await;
+        st.config_required = render::missing_required(&spec);
+        Ok(json!({
+            "name": name,
+            "state": st.state,
+            "params": render::masked_spec(&spec).params,
+            "config_required": st.config_required,
+            "rendered": rendered,
+            "restarted": restarted,
+        }))
     }
 
     /// Lecture du log `<root>/components/<name>.log` — tail paginé.
@@ -721,6 +845,9 @@ fn expand_home_fields(spec: &mut ComponentSpec) {
             )
         })
         .collect();
+    if let Some(r) = &mut spec.render {
+        r.path = catalog::expand_home_str(&r.path);
+    }
 }
 
 /// Refuse les specs inutilisables : nom invalide ou réservé à un
@@ -760,6 +887,62 @@ fn check_usable(spec: &ComponentSpec) -> Result<()> {
     if let Healthcheck::Command { argv } = &spec.healthcheck {
         if let Some(argv0) = argv.first() {
             check_not_supervisor(argv0)?;
+        }
+    }
+    // Schéma de params : clés uniques et bien formées, enum exige ses
+    // choix, `validation` doit compiler — le schéma est la promesse
+    // faite au formulaire client, une entrée cassée est refusée ici.
+    let mut seen = std::collections::HashSet::new();
+    for p in &spec.params_schema {
+        anyhow::ensure!(
+            !p.key.is_empty()
+                && p.key
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()
+                        || matches!(c, '.' | '_' | '-')),
+            "param « {} » invalide ([a-z0-9_.-]+ attendu)",
+            p.key
+        );
+        anyhow::ensure!(seen.insert(p.key.as_str()), "param « {} » dupliqué", p.key);
+        if p.kind == proto::ParamKind::Enum {
+            anyhow::ensure!(
+                !p.choices.is_empty(),
+                "param « {} » : kind=enum exige `choices`",
+                p.key
+            );
+        }
+        if let Some(re) = &p.validation {
+            regex::Regex::new(re)
+                .with_context(|| format!("param « {} » : validation regex invalide", p.key))?;
+        }
+        // Un défaut invalide se ferait refuser à chaque set/rendu —
+        // valider à l'enregistrement plutôt.
+        if let Some(d) = &p.default {
+            if !d.is_empty() {
+                render::validate_value(p, d).with_context(|| {
+                    format!("param « {} » : défaut invalide", p.key)
+                })?;
+            }
+        }
+        // `secret` sans défaut : le schéma part en clair dans
+        // `component_catalog`/`component_info` — un défaut y fuiterait.
+        anyhow::ensure!(
+            !(p.secret && p.default.as_deref().is_some_and(|d| !d.is_empty())),
+            "param « {} » : un secret ne déclare pas de défaut",
+            p.key
+        );
+    }
+    // Valeurs posées : les clés déclarées doivent valider — un upsert
+    // ou une édition brute du toml peut y injecter du non canonique
+    // (un bool verbatim « bogus » rendrait sinon un TOML syntaxiquement
+    // cassé ; le rendu revalide aussi, en défense en profondeur).
+    for (k, v) in &spec.params {
+        if v.is_empty() {
+            continue; // retrait explicite — effective() retombe au défaut
+        }
+        if let Some(ps) = spec.params_schema.iter().find(|p| &p.key == k) {
+            render::validate_value(ps, v)
+                .with_context(|| format!("param « {k} » : valeur invalide"))?;
         }
     }
     // Queries déclarées : nom [a-z0-9-]+, argv non vide, argv0 jamais

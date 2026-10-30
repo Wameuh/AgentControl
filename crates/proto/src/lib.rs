@@ -966,8 +966,26 @@ pub enum ReqKind {
     },
     /// Exécute la recette d'une entrée catalogue (steps auditées :
     /// `run` argv fixe, `write_file` borné HOME, `upsert_spec`…) →
-    /// {installed, name, state, notes}.
-    ComponentInstall { name: String },
+    /// {installed, name, state, notes, config_required}. `params` porte
+    /// les valeurs collectées côté client (dialogue des params
+    /// déclarés par l'entrée) — validées avant la recette, rendues
+    /// dans la config du composant quand les requis sont remplis.
+    ComponentInstall {
+        name: String,
+        #[serde(default)]
+        params: Option<std::collections::HashMap<String, String>>,
+    },
+    /// Édite les paramètres déclarés d'un composant (la seule surface
+    /// de config utilisateur — cf. `spec.params_schema`) : fusion dans
+    /// `spec.params` (une valeur vide retire la clé), validation par
+    /// type/regex/choix, réécriture de components.toml, re-rendu de la
+    /// config managée puis restart si le `process` tourne. Réponse :
+    /// `{name, state, params(masqués), config_required, rendered,
+    /// restarted}`.
+    ComponentSetParams {
+        name: String,
+        params: std::collections::HashMap<String, String>,
+    },
     /// Exécute une requête de données déclarée sur le composant —
     /// `spec.queries[query]` en argv direct, jamais de shell (le
     /// composant expose ses données auditées : ex.
@@ -1067,6 +1085,7 @@ impl ReqKind {
             Self::ComponentRemove { .. } => "component_remove",
             Self::ComponentCatalog { .. } => "component_catalog",
             Self::ComponentInstall { .. } => "component_install",
+            Self::ComponentSetParams { .. } => "component_set_params",
             Self::ComponentQuery { .. } => "component_query",
             Self::OrchestratorSet { .. } => "orchestrator_set",
             Self::ManagerSpawn { .. } => "manager_spawn",

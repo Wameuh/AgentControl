@@ -112,6 +112,34 @@ impl Components {
     /// supervisée (no-op si désiré arrêté, conserve le backoff).
     async fn spawn_cycle(self: &Arc<Self>, spec: &ComponentSpec, manual: bool) -> Result<()> {
         let name = spec.name.clone();
+        // Params requis manquants → jamais de lancement silencieux :
+        // l'action manuelle échoue avec la liste des clés, l'autostart/
+        // respawn supervisé est désarmé (desired=Stopped, pas de
+        // crash-loop) — `config_required` reste visible dans le statut.
+        let missing = super::render::missing_required(spec);
+        if !missing.is_empty() {
+            let hint = format!(
+                "configuration requise : {} — `acctl comp set {name} <clé> <valeur>`",
+                missing.join(", ")
+            );
+            if manual {
+                anyhow::bail!(hint);
+            }
+            let mut procs = self.procs.write().await;
+            if let Some(p) = procs.get_mut(&name) {
+                p.desired = Desired::Stopped;
+                p.state = ComponentState::Stopped;
+            }
+            warn!("composant « {name} » : {hint} — lancement désarmé");
+            return Ok(());
+        }
+        // Config managée supprimée à la main alors que les params sont
+        // complets → re-rendre avant de lancer (best-effort : un échec
+        // disque n'empêche pas le démarrage, les RPC explicites le
+        // remontent déjà).
+        if let Err(e) = super::render::render_if_ready(spec).await {
+            warn!("composant « {name} » : rendu config impossible: {e:#}");
+        }
         let reserved = {
             let mut procs = self.procs.write().await;
             let p = procs.entry(name.clone()).or_default();
@@ -306,6 +334,7 @@ impl Components {
     /// par on_exit/shutdown_proc (Starting couvre aussi l'attente de
     /// backoff entre deux respawns).
     pub(crate) async fn status_of(&self, spec: &ComponentSpec) -> ComponentStatus {
+        let config_required = super::render::missing_required(spec);
         match spec.kind {
             ComponentKind::Process => {
                 let procs = self.procs.read().await;
@@ -321,9 +350,13 @@ impl Components {
                         },
                         restarts: p.restarts,
                         last_exit: p.last_exit,
+                        config_required,
                         ..Default::default()
                     },
-                    None => ComponentStatus::default(),
+                    None => ComponentStatus {
+                        config_required,
+                        ..Default::default()
+                    },
                 }
             }
             ComponentKind::External => {
@@ -335,6 +368,7 @@ impl Components {
                         None => ComponentState::Stopped,
                     },
                     health: health.map(health_str),
+                    config_required,
                     ..Default::default()
                 }
             }
@@ -364,6 +398,7 @@ impl Components {
                     } else {
                         None
                     },
+                    config_required,
                     ..Default::default()
                 }
             }
@@ -829,6 +864,10 @@ mod tests {
             healthcheck: Healthcheck::None,
             description: None,
             queries: std::collections::HashMap::new(),
+            catalog: None,
+            params_schema: Vec::new(),
+            params: std::collections::HashMap::new(),
+            render: None,
         }
     }
 

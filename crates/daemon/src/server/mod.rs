@@ -719,7 +719,12 @@ impl Daemon {
             ReqKind::ComponentCatalog { refresh } => {
                 self.h_component_catalog(refresh).await
             }
-            ReqKind::ComponentInstall { name } => self.h_component_install(name).await,
+            ReqKind::ComponentInstall { name, params } => {
+                self.h_component_install(name, params).await
+            }
+            ReqKind::ComponentSetParams { name, params } => {
+                self.h_component_set_params(name, params).await
+            }
             ReqKind::ComponentQuery { name, query } => {
                 self.h_component_query(name, query).await
             }
