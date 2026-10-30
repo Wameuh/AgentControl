@@ -303,7 +303,8 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                          max_parallel?, agent?, …} : chaque entrée \
                          ajoute un dépôt surveillé en plus du dépôt \
                          principal (multi-repo, agent-reviewer ≥ 0.3 — \
-                         toute clé globale y est overridable). Ex. \
+                         toute clé globale y est overridable ; `~` est \
+                         expansé par le watcher, pas ici). Ex. \
                          [{\"repo\": \"o/r\", \"repo_dir\": \"/chemin/clone\"}]"
                             .into(),
                     ),

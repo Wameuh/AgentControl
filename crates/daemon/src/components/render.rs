@@ -321,9 +321,10 @@ fn json_to_toml(v: &serde_json::Value) -> Result<String> {
                 let f = n.as_f64().context("nombre JSON illisible")?;
                 anyhow::ensure!(f.is_finite(), "nombre non fini en TOML");
                 // `1.0` s'imprimerait « 1 » → lu int par TOML : forcer
-                // la forme flottante pour garder le type.
+                // la forme flottante pour garder le type (le Display
+                // de f64 n'émet jamais d'exposant ni NaN/inf).
                 let mut s = f.to_string();
-                if !s.contains(['.', 'e', 'E', 'n']) {
+                if !s.contains('.') {
                     s.push_str(".0");
                 }
                 s
@@ -371,7 +372,9 @@ fn toml_str(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\t' => out.push_str("\\t"),
             '\r' => out.push_str("\\r"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c if (c as u32) < 0x20 || c == '\u{7F}' => {
+                out.push_str(&format!("\\u{:04X}", c as u32))
+            }
             c => out.push(c),
         }
     }

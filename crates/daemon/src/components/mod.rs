@@ -988,6 +988,14 @@ fn check_usable(spec: &ComponentSpec) -> Result<()> {
             "param « {} » : un secret ne déclare pas de défaut",
             p.key
         );
+        // `secret` + `json` : le masque « •••••• » n'est pas du JSON —
+        // le formulaire n'a pas de chemin « vide = conserver » pour ce
+        // kind, le combo est refusé tant qu'aucun besoin ne l'exige.
+        anyhow::ensure!(
+            !(p.secret && p.kind == proto::ParamKind::Json),
+            "param « {} » : secret+json non supporté",
+            p.key
+        );
     }
     // Valeurs posées : les clés déclarées doivent valider — un upsert
     // ou une édition brute du toml peut y injecter du non canonique

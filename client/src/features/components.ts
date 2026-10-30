@@ -77,6 +77,29 @@ function paramJson(v: string): string {
   }
 }
 
+/** Tri récursif des clés d'objet — reproduit le canon démon (BTreeMap
+ *  serde_json) : comparer des canons côté client évite un patch sans
+ *  changement réel (un patch = render → restart d'un process vivant). */
+function sortJson(x: unknown): unknown {
+  if (Array.isArray(x)) return x.map(sortJson);
+  if (x !== null && typeof x === "object") {
+    const o = x as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.keys(o).sort().map((k) => [k, sortJson(o[k])]),
+    );
+  }
+  return x;
+}
+
+/** JSON → forme canonique compacte à clés triées ; null si invalide. */
+function canonJson(v: string): string | null {
+  try {
+    return JSON.stringify(sortJson(JSON.parse(v)));
+  } catch {
+    return null;
+  }
+}
+
 /** Spec vierge d'un nouveau composant (défauts du démon : on-failure/5 s). */
 function defaultSpec(): ComponentSpec {
   return {
@@ -971,19 +994,20 @@ export class ComponentsPanel {
         }
         case "json": {
           const v = (el as HTMLTextAreaElement).value.trim();
-          if (!v) need();
-          if (v) {
-            try {
-              // Forme canonique comme le démon : JSON compact — un
-              // pretty-print identique n'envoie pas de patch inutile.
-              const canon = JSON.stringify(JSON.parse(v));
-              if (canon !== cur) patch[p.key] = canon;
-            } catch {
-              throw new Error(
-                t("comp_param_badjson", { k: p.label || p.key }),
-              );
-            }
+          if (!v) {
+            need();
+            // Champ vidé = retrait, comme les autres kinds.
+            if (cur) patch[p.key] = "";
+            break;
           }
+          // Canons comparés (clés triées) : la valeur déjà posée est
+          // stockée en canon démon — une resaisie équivalente (ordre,
+          // indentation) ne doit pas envoyer de patch.
+          const canon = canonJson(v);
+          if (!canon) {
+            throw new Error(t("comp_param_badjson", { k: p.label || p.key }));
+          }
+          if (canon !== canonJson(cur ?? "")) patch[p.key] = canon;
           break;
         }
         default: {
