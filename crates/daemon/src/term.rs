@@ -186,21 +186,48 @@ fn resolve_shell(env_shell: Option<String>, login: Option<String>) -> String {
         .unwrap_or_else(|| "/bin/sh".into())
 }
 
-/// Login shell de l'uid courant via `getpwuid` — le SHELL du démon
-/// n'existe pas sous un superviseur à environnement minimal.
+/// Login shell de l'uid courant — le SHELL du démon n'existe pas sous
+/// un superviseur à environnement minimal. `getpwuid_r` : le statique
+/// interne de getpwuid est réécrit par tout appel NSS non-réentrant
+/// d'un autre thread (deux term_open en vol via spawn_blocking) —
+/// buffer à nous + boucle ERANGE, même patron que `home_of`. Un path
+/// non exécutable (shell désinstallé, entrée distante) rend None :
+/// tomber sur /bin/sh vaut mieux qu'un term_open en échec dur.
 #[cfg(unix)]
 fn login_shell() -> Option<String> {
-    // SAFETY: getpwuid renvoie un statique interne à la libc, jamais
-    // muté ni libéré par nous — lecture seule des champs immédiate.
+    use std::ffi::{CStr, CString};
+    // SAFETY : pwd et buf sont à nous ; getpwuid_r n'écrit que dans
+    // ces tampons et pointe pw_shell dans buf — copié avant la fin.
     unsafe {
-        let pw = libc::getpwuid(libc::getuid());
-        if pw.is_null() || (*pw).pw_shell.is_null() {
+        let mut pwd: libc::passwd = std::mem::zeroed();
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        let mut buf = vec![0u8; 1024];
+        loop {
+            let rc = libc::getpwuid_r(
+                libc::getuid(),
+                &mut pwd,
+                buf.as_mut_ptr().cast::<libc::c_char>(),
+                buf.len(),
+                &mut result,
+            );
+            if rc == libc::ERANGE {
+                if buf.len() >= 1 << 16 {
+                    return None;
+                }
+                buf.resize(buf.len() * 2, 0);
+                continue;
+            }
+            if rc != 0 || result.is_null() || pwd.pw_shell.is_null() {
+                return None;
+            }
+            break;
+        }
+        let s = CStr::from_ptr(pwd.pw_shell).to_string_lossy().into_owned();
+        if s.is_empty() {
             return None;
         }
-        let s = std::ffi::CStr::from_ptr((*pw).pw_shell)
-            .to_string_lossy()
-            .into_owned();
-        (!s.is_empty()).then_some(s)
+        let c = CString::new(s.as_str()).ok()?;
+        (libc::access(c.as_ptr(), libc::X_OK) == 0).then_some(s)
     }
 }
 
@@ -261,7 +288,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn login_shell_from_passwd() {
-        let s = login_shell().expect("passwd lisible");
+        // uid sans entrée passwd (conteneur à uid arbitraire) → skip.
+        let Some(s) = login_shell() else {
+            eprintln!("skip login_shell_from_passwd: pas d'entrée passwd");
+            return;
+        };
         assert!(s.starts_with('/'), "login shell inattendu: {s}");
     }
 
@@ -282,9 +313,11 @@ mod tests {
             return;
         }
         let (t, mut rx) = Term::spawn("/tmp", 80, 24, &[], None).unwrap();
-        t.input(b"echo ac-hist-ok\n");
-        // Attendre la sortie du 1er run avant le rappel : sinon la
-        // commande n'est pas encore en historique → flèche vaine.
+        // printf : le marqueur «ac-hist-ok» n'apparaît QUE dans la
+        // sortie réelle — la ligne tapée porte «ac-hist-%s». Attendre
+        // le marqueur = synchronisation stricte sur la fin du 1er run
+        // (avant rappel, sinon la commande n'est pas en historique).
+        t.input(b"printf 'ac-hist-%s\\n' ok\n");
         let first = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             let mut buf = Vec::new();
             while let Some(m) = rx.recv().await {
