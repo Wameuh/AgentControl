@@ -36,27 +36,25 @@ impl Session {
     }
 
     fn save_pins(&self) {
-        if let Ok(p) = self.pinned.lock() {
-            // .tmp + rename : pas de pinned.json tronqué si le démon
-            // meurt en pleine écriture.
-            let tmp = self.dir.join("pinned.json.tmp");
-            if std::fs::write(&tmp, serde_json::to_string_pretty(&*p).unwrap_or_default()).is_ok() {
-                let _ = std::fs::rename(&tmp, self.dir.join("pinned.json"));
-            }
+        // .unwrap() comme pin/unpin/pins_snapshot : un mutex empoisonné
+        // = panic en amont de toute façon — avaler le lock ici perdrait
+        // la persistance silencieusement.
+        let p = self.pinned.lock().unwrap();
+        // .tmp + rename : pas de pinned.json tronqué si le démon meurt
+        // en pleine écriture.
+        let tmp = self.dir.join("pinned.json.tmp");
+        if std::fs::write(&tmp, serde_json::to_string_pretty(&*p).unwrap_or_default()).is_ok() {
+            let _ = std::fs::rename(&tmp, self.dir.join("pinned.json"));
         }
     }
 
     /// Épingle l'event de `seq` : il doit exister dans le journal et
     /// porter du texte (searchable_text non vide — messages user/agent
-    /// en pratique, mais tout event à contenu est accepté). Idempotent :
-    /// un seq déjà épinglé rend l'entrée existante.
+    /// en pratique, mais tout event à contenu est accepté). Idempotent
+    /// sur (seq, ts) : une entrée MORTE au même seq (ts différent —
+    /// event d'un autre cycle après reset du journal) est remplacée par
+    /// le nouveau pin au lieu de rendre le clic sans effet.
     pub fn pin(&self, seq: u64) -> Result<PinEntry> {
-        {
-            let p = self.pinned.lock().unwrap();
-            if let Some(e) = p.iter().find(|e| e.seq == seq) {
-                return Ok(e.clone());
-            }
-        }
         let ev = self
             .journal
             .get(&self.dir, seq)?
@@ -68,25 +66,30 @@ impl Session {
                 ev.kind.type_tag()
             );
         }
-        let entry = PinEntry {
-            seq,
-            ts: ev.ts,
-            kind: ev.kind.type_tag().into(),
-            text: text.chars().take(PIN_TEXT_MAX).collect(),
-            pinned_at: proto::now_iso(),
-        };
-        {
+        let entry = {
             let mut p = self.pinned.lock().unwrap();
-            // Course entre le check ci-dessus et l'insert (deux clients
-            // qui épinglent le même seq) → l'existant gagne.
-            if let Some(e) = p.iter().find(|e| e.seq == seq) {
+            // Même event déjà épinglé → l'existant gagne (idempotence,
+            // couvre aussi la course de deux pin concurrents).
+            if let Some(e) = p.iter().find(|e| e.seq == seq && e.ts == ev.ts) {
                 return Ok(e.clone());
             }
+            // Épinglé mort au même seq (seq réutilisée par le cycle
+            // courant) : remplacé — sinon il bloquait l'épinglage du
+            // nouvel event sans aucun signal côté client.
+            p.retain(|e| e.seq != seq);
             if p.len() >= PINS_MAX {
                 anyhow::bail!("limite de {PINS_MAX} messages épinglés atteinte");
             }
+            let entry = PinEntry {
+                seq,
+                ts: ev.ts,
+                kind: ev.kind.type_tag().into(),
+                text: text.chars().take(PIN_TEXT_MAX).collect(),
+                pinned_at: proto::now_iso(),
+            };
             p.push(entry.clone());
-        }
+            entry
+        };
         self.save_pins();
         Ok(entry)
     }

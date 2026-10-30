@@ -534,6 +534,14 @@ mod tests {
             origin: None,
         });
         assert_eq!(s2.pins_snapshot()[0]["live"], false);
+        // Re-pin du même seq = nouvel event : l'entrée morte est
+        // REMPLACÉE (pas de no-op silencieux, pas de doublon).
+        let e3 = s2.pin(1).unwrap();
+        assert!(e3.text.contains("autre cycle"));
+        assert_ne!(e3.ts, e.ts);
+        let relist = s2.pins_snapshot();
+        assert_eq!(relist.len(), 1);
+        assert_eq!(relist[0]["live"], true);
         // Unpin : true puis false (déjà retiré), liste vidée et
         // suppression persistée à la réouverture.
         assert!(s2.unpin(1));

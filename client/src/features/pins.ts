@@ -185,6 +185,10 @@ export class Pins {
     el.classList.toggle("pinned", pinned);
     let tag = el.querySelector<HTMLElement>(".pin-tag");
     if (!tag) {
+      // Démon sans la capability : pas d'épingle du tout — elle ne
+      // ferait qu'afficher "non supporté" au clic (sur Android elle
+      // est semi-visible en permanence, le bruit serait maximal).
+      if (!this.deps.capable(app.current?.conn ?? "default")) return;
       tag = document.createElement("button");
       (tag as HTMLButtonElement).type = "button";
       tag.className = "pin-tag";
@@ -239,6 +243,7 @@ export class Pins {
       });
       if (app.current?.id !== s.id) return;
       this.items = r.pinned ?? [];
+      this.sid = s.id;
       this.applyAll();
       this.renderPanel();
     } catch (e) {
