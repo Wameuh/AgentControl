@@ -94,7 +94,10 @@ export class SettingsPanel {
         $("s-version").textContent = `v${v}`;
         this.syncSecStates();
       })
-      .catch(() => ($("s-version").textContent = ""));
+      .catch(() => {
+        $("s-version").textContent = "";
+        this.syncSecStates();
+      });
     this.syncSecStates();
     const view = $("settings-view");
     view.hidden = false;
