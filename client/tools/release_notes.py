@@ -141,7 +141,7 @@ def entries(rev_range):
         if not m or m.group(1) not in types:
             continue
         pr = m.group(3)
-        title = en.get(pr or "")
+        title = (en.get(pr or "") or "").strip() or None
         if title is None:
             title = KEYWORD.sub("", m.group(2)).strip()
             if not title:
