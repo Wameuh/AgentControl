@@ -52,6 +52,11 @@ const CMD_TIMEOUT: Duration = Duration::from_secs(60);
 /// minutes derrière le `gh pr create` (cf. script — 240 s).
 const CLEAN_GRACE_S: f64 = 240.0;
 
+/// Borne (caractères) de la description reprise dans le post « sorti
+/// du backlog » — le post est un résumé de présentation, pas un dump
+/// du cahier des charges.
+const DESC_MAX: usize = 4000;
+
 /// Prompt worker intégré — repris tel quel du script d'origine (le
 /// cahier des charges AgentBacklog des sessions `Backlog-W*`).
 const PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
@@ -656,6 +661,7 @@ impl Daemon {
                 .and_then(Value::as_str)
                 .map(str::to_string);
             let mut posted_wip = wip_id.clone();
+            let mut just_posted = false;
             if wip_id != prev_posted {
                 if let Some(t) = my_wip {
                     let title_line: String = t
@@ -670,29 +676,50 @@ impl Daemon {
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .trim();
-                    let text = if desc.is_empty() {
+                    let mut dc = desc.chars();
+                    let desc_body: String = dc.by_ref().take(DESC_MAX).collect();
+                    let text = if desc_body.is_empty() {
                         format!("[Backlog] item #{} — {title_line}", task_id(t))
                     } else {
-                        format!("[Backlog] item #{} — {title_line}\n\n{desc}", task_id(t))
+                        format!(
+                            "[Backlog] item #{} — {title_line}\n\n{desc_body}{}",
+                            task_id(t),
+                            if dc.next().is_some() { "\n…" } else { "" }
+                        )
                     };
                     match self.get_session(sid).await {
-                        Ok(s) => s.emit(EventKind::UserMessage {
-                            text,
-                            steer: false,
-                            origin: Some(COMPONENT_ORIGIN.to_string()),
-                        }),
+                        Ok(s) => {
+                            s.emit(EventKind::UserMessage {
+                                text,
+                                steer: false,
+                                origin: Some(COMPONENT_ORIGIN.to_string()),
+                            });
+                            just_posted = true;
+                        }
                         Err(_) => posted_wip = prev_posted,
                     }
                 }
             }
-            st.assignments.insert(
-                sid.to_string(),
-                json!({
-                    "title": title, "state": state,
-                    "tasks": my_items, "prs": my_prs,
-                    "posted_wip": posted_wip,
-                }),
-            );
+            let assignment = json!({
+                "title": title, "state": state,
+                "tasks": my_items, "prs": my_prs,
+                "posted_wip": posted_wip,
+            });
+            if just_posted {
+                // Le UserMessage est déjà commité au journal, mais `st`
+                // n'est repersisté qu'en fin de tick : un `orch off` en
+                // vol avant le write-back perdrait le marqueur → repost
+                // en doublon du même wip au prochain cycle. L'entrée
+                // complète est posée dans l'état live tout de suite (le
+                // write-back écrira la même valeur).
+                self.orch
+                    .state
+                    .lock()
+                    .unwrap()
+                    .assignments
+                    .insert(sid.to_string(), assignment.clone());
+            }
+            st.assignments.insert(sid.to_string(), assignment);
             if matches!(state, "working" | "compacting" | "starting") {
                 st.clean_since.remove(sid);
                 continue;

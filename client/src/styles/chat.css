@@ -184,8 +184,10 @@
   mask-image: linear-gradient(#000 55%, transparent 96%);
 }
 /* Prompt de spawn « service » : pill d'une ligne — le boilerplate ne
-   prime pas sur le premier post utile (item backlog…) ; dépliable. */
-.msg.user.um-service .um-body {
+   prime pas sur le premier post utile (item backlog…). Gaté sur
+   um-collapsed : le toggle ne retire que cette classe → sans elle le
+   corps doit s'étendre (max-height + masque retirés). */
+.msg.user.um-collapsed.um-service .um-body {
   max-height: 1.7em; /* 1 ligne */
   -webkit-mask-image: linear-gradient(#000 45%, transparent 92%);
   mask-image: linear-gradient(#000 45%, transparent 92%);

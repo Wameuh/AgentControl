@@ -33,9 +33,15 @@ export class EventRenderer {
    *  — les events intermédiaires (tool_call, status…) n'y coupent pas.
    *  Swapée avec le reste de l'état de rendu. */
   lastText: { thought: boolean; norm: string; el: HTMLElement } | null = null;
-  /** Nb de user_message rendus — le 1er d'une session « service » est le
-   *  prompt de spawn par construction → pill compacte (état swapé). */
+  /** Nb de user_message rendus — combiné à `headSeen` pour identifier
+   *  le 1er user_message DU JOURNAL (état swapé). */
   userMsgs = 0;
+  /** Tête de journal déjà rendue (un event seq 1 est passé). Sans elle,
+   *  le 1er user_message *rendu* est quelconque — la page initiale est
+   *  la queue du journal (≈200 derniers events), un saut de recherche
+   *  ou le replay tailCache rendent une fenêtre arbitraire : un post
+   *  service mid-journal ([Backlog] item #N) ne doit pas être pillé. */
+  headSeen = false;
 
   private deps = {
     /** Meta de la session affichée mutée par un event (mode/model/state…) →
@@ -86,15 +92,20 @@ export class EventRenderer {
   }
 
   render(ev: AcEvent, live: boolean): HTMLElement {
+    if (ev.seq === 1) this.headSeen = true;
     switch (ev.type) {
       case "user_message": {
         const d = mkEv("msg user", ev.seq);
         const txt = ev.text as string;
         // Prompt de spawn d'une session « service » (origin) = le 1er
-        // user_message du journal par construction : pill d'une ligne
+        // user_message DU JOURNAL : identifiable seulement quand la
+        // fenêtre rendue couvre la tête (headSeen — les batches sont
+        // des ranges de seq contigus, donc tout event entre la tête et
+        // lui a été rendu, spawn prompt compris). Pill d'une ligne
         // plutôt que bulle — le boilerplate ne prime pas sur le post
         // de l'item qui suit (badge « via » conservé, dépliable).
-        const servicePrompt = !!ev.origin && this.userMsgs === 0;
+        const servicePrompt =
+          !!ev.origin && this.userMsgs === 0 && this.headSeen;
         this.userMsgs += 1;
         const body = document.createElement("div");
         body.className = "um-body";
