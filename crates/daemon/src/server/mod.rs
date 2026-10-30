@@ -633,6 +633,9 @@ impl Daemon {
             ReqKind::QueuePromote { session, index } => {
                 self.h_queue_promote(session, index).await
             }
+            ReqKind::QueueSteer { session, index } => {
+                self.h_queue_steer(session, index).await
+            }
             ReqKind::Cancel { session } => self.h_cancel(session).await,
             ReqKind::SessionInfo { session } => self.h_session_info(session).await,
             ReqKind::SetMode { session, mode } => self.h_set_mode(session, mode).await,

@@ -296,6 +296,10 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             session: s("session"),
             index: p.get("index").and_then(Value::as_u64).unwrap_or(0),
         },
+        "queue_steer" => ReqKind::QueueSteer {
+            session: s("session"),
+            index: p.get("index").and_then(Value::as_u64).unwrap_or(0),
+        },
         "pr_list" => ReqKind::PrList { session: so("session") },
         "pr_track" => ReqKind::PrTrack {
             session: so("session"),

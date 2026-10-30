@@ -36,6 +36,10 @@ impl Daemon {
                     // Idem pour PinMessage/UnpinMessage/ListPinned
                     // (messages épinglés par session).
                     "pinned": true,
+                    // Idem pour QueueSteer (bouton « steer » par entrée
+                    // de la file de prompts — injecte dans le tour en
+                    // cours sans l'annuler).
+                    "queue_steer": true,
                 }))
     }
     /// `UpdateDaemon` : télécharge la release demandée et remplace le

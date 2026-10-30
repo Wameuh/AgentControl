@@ -151,6 +151,7 @@ sidebar.bind(conns, groups, newSess, chat, settings, connView, comps, map);
 composer.bind(chat);
 composer.refresh = () => sidebar.refresh();
 composer.bindAttachCapable((c) => conns.cap(c ?? "default")?.files === true);
+composer.bindQueueSteerCapable((c) => conns.cap(c ?? "default")?.queue_steer === true);
 conns.bind({
   refresh: () => sidebar.refresh(),
   reopenIfConn: (c) => chat.reopenIfConn(c),
@@ -264,6 +265,13 @@ await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
   }
   if (app.current && session === app.current.id) {
     chat.appendEvent(event, true);
+  }
+  // Les events système « message en file » / « steer refusé — remis
+  // en file » / retenue compact changent la file sans status_changed :
+  // le bandeau de file resterait périmé jusqu'au prochain changement
+  // d'état — refresh immédiat (un queue_list par event, rafale rare).
+  if (event.type === "system" && app.current?.id === session) {
+    void composer.refreshQueue();
   }
   if (event.type === "status_changed") void sidebar.refresh();
 });

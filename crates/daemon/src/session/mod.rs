@@ -13,6 +13,9 @@ mod config;
 mod pins;
 mod prompt;
 
+/// Issue d'un steer_queued — le serveur la traduit en {delivered, reason}.
+pub(crate) use prompt::SteerOutcome;
+
 use anyhow::{Context, Result};
 use proto::{Event, EventKind, SessionMeta};
 use serde_json::Value;

@@ -6,6 +6,7 @@ use super::*;
 use super::cfg::spawn_args;
 use proto::{EventKind, SessionMeta};
 
+use crate::session::SteerOutcome;
 use crate::tui;
 
 impl Daemon {
@@ -764,6 +765,39 @@ impl Daemon {
                     let _ = s.cancel().await;
                 }
                 Ok(json!({"ok": ok}))
+    }
+
+    /// queue_steer : sort l'entrée de la file et tente de l'injecter en
+    /// steer dans le tour en cours — le tour n'est PAS annulé (≠
+    /// promote). `delivered` : "steer" (injection lancée ; un refus
+    /// tardif retombe en file, event système + prochain refresh),
+    /// "sent" (plus de tour → livraison directe par le drain), "requeued"
+    /// (refus rapide → remise à sa position), "held" (retenue — reason :
+    /// compact|asleep|waking|spawning|not_ready), "gone" (index périmé).
+    /// `queue` est renvoyée à jour dans tous les cas.
+    pub(super) async fn h_queue_steer(self: &Arc<Self>, session: String, index: u64) -> Result<Value> {
+                let s = self.get_session(&session).await?;
+                let (delivered, reason) = match s.steer_queued(index as usize).await {
+                    SteerOutcome::Steer => ("steer", None),
+                    SteerOutcome::Sent => ("sent", None),
+                    SteerOutcome::Requeued(e) => ("requeued", Some(e)),
+                    SteerOutcome::Held(r) => {
+                        // Session endormie : la promotion vaut intention
+                        // de livraison — le réveil normal drainera la
+                        // file (spawn_wake dédoublonne).
+                        if r == "asleep" {
+                            self.spawn_wake(&s, &session);
+                        }
+                        ("held", Some(r.to_string()))
+                    }
+                    SteerOutcome::Gone => ("gone", None),
+                };
+                info!("session {session}: queue_steer[{index}] → {delivered}");
+                Ok(json!({
+                    "delivered": delivered,
+                    "reason": reason,
+                    "queue": s.queue_snapshot(),
+                }))
     }
 
     pub(super) async fn h_cancel(self: &Arc<Self>, session: String) -> Result<Value> {
