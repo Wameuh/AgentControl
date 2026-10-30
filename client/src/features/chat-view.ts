@@ -625,6 +625,8 @@ export class ChatView {
         limit: INITIAL_PAGE,
       }).catch(() => null);
       if (page && app.current?.id === sid) {
+        // Des events live du nouveau cycle ont pu arriver pendant le RPC
+        // — renderedSeqs les déduplique à l'arrivée, appel direct.
         for (const ev of page.events) this.appendEvent(ev, false);
         this.scrollBottom();
       }
@@ -923,7 +925,10 @@ export class ChatView {
     // agent précédent (les events intermédiaires n'y coupent pas) n'est
     // pas rendu une seconde fois ; une pensée déjà affichée cède sa
     // place au message identique qui la suit (contenu canonique).
-    if (ev.type === "agent_text" || ev.type === "agent_thought") {
+    // Réservé au flux de queue : pour un trou comblé en milieu de vue,
+    // comparer à lastText (ancré en bas) est hors sujet — la dédup par
+    // seq ci-dessus suffit.
+    if (!insertAt && (ev.type === "agent_text" || ev.type === "agent_thought")) {
       const dup = this.renderer.textDup(ev);
       if (dup === "skip") return;
       if (dup && dup.isConnected) this.dropRendered(dup);
@@ -944,7 +949,10 @@ export class ChatView {
       this.eventsEl.scrollTop += this.eventsEl.scrollHeight - sh;
     }
     this.deps.pinsMark(node);
-    this.renderer.noteText(ev, node);
+    // lastText reste ancré sur le dernier texte de la vue — un nœud
+    // inséré en milieu de vue ne doit pas le ré-ancrer (la dédup texte
+    // des events live suivants comparerait à un contenu hors flux).
+    if (!insertAt) this.renderer.noteText(ev, node);
     this.renderedCount++;
     if (ev.seq < this.minRendered) this.minRendered = ev.seq;
     if (ev.type === "tool_call") {
@@ -1032,7 +1040,9 @@ export class ChatView {
     // dropConv.
     let i = evs.length;
     while (i > 0 && evs[i - 1].seq > ev.seq) i--;
-    if (i < evs.length && evs[i].seq === ev.seq) return;
+    // i pointe après le dernier élément ≤ ev.seq : le doublon éventuel
+    // est en i-1 (evs[i] est le premier strictement > ev.seq).
+    if (i > 0 && evs[i - 1].seq === ev.seq) return;
     evs.splice(i, 0, ev);
     if (evs.length > TAIL_KEEP) evs.splice(0, evs.length - TAIL_KEEP);
   }

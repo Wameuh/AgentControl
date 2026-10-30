@@ -7,9 +7,7 @@
 import puppeteer from "puppeteer-core";
 import { spawn } from "node:child_process";
 
-const CHROMIUM =
-  process.env.CHROMIUM ??
-  "/home/dev/.cache/puppeteer/chrome/linux-156.0.8078.47/chrome-linux64/chrome";
+const CHROMIUM = process.env.CHROMIUM ?? "/usr/bin/chromium";
 
 // Journal + contrôle total des pushes. window.__push(ev) émet un
 // session-event ; __J est le journal servi par events/session_info.
@@ -152,12 +150,10 @@ const st = () => p.evaluate(() => {
     n: evs.length,
     visible: evs.filter((e) => !e.hidden).length,
     first: evs[0]?.dataset.seq, last: evs[evs.length - 1]?.dataset.seq,
-    cur: window.__appDebug ? "?" : undefined,
   };
 });
 const removed = () => p.evaluate(() => window.__removed);
 const added = () => p.evaluate(() => window.__added);
-const ev = (t, extra = {}) => ({ seq: ++window.__lastSeq, ts: "x", type: t, ...extra });
 const push = (session, e) => p.evaluate((s, e) =>
   window.__push(s, e), session, e);
 const trig = (t) => p.evaluate((t) => { window.__trigger = t; }, t);
@@ -229,7 +225,6 @@ check("t4 : session absente liste → vue conservée (markGone)",
 
 // --- Trigger 5 : events live après markGone (current null) ---
 await trig("t5-after-gone");
-const r5a = (await p.evaluate(() => window.__lastSeq));
 await push("s1", await p.evaluate(() => ({ seq: ++window.__lastSeq, ts: "x",
   type: "agent_text", text: "apres gone" })));
 await sleep(300);
@@ -349,6 +344,19 @@ const order11 = await p.evaluate((b) => {
 }, base11);
 check("t11 : trou resync inséré en position (avant le +2)",
   order11.i1 >= 0 && order11.i1 === order11.i2 - 1, JSON.stringify(order11));
+
+// --- Trigger 13 : refresh forcé (#btn-refresh → open(id, force)) —
+// convCache purgé → rejeu depuis tailCache : un seq tamponné puis
+// déversé (t9) ou rejoué (t10) n'y figure qu'une fois — la dédup de
+// pushTail sonde i-1 (premier ≤ ev.seq), pas i.
+await trig("t13-tail-replay");
+await p.evaluate(() => document.querySelector("#btn-refresh")?.click());
+await sleep(1200);
+const dup13 = await p.evaluate((seq) =>
+  document.querySelectorAll(`#events .ev[data-seq="${seq}"]`).length, seq9);
+s = await st();
+check("t13 : refresh → rejeu tail sans doublon",
+  dup13 === 1 && s.n >= 40, JSON.stringify({ dup13, n: s.n }));
 
 // --- Trigger 12 : session_cleared alors que le journal a du contenu —
 // la vue est vidée puis re-peuplée par le filet (jamais laissée vide). ---
