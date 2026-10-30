@@ -16,7 +16,8 @@ name: auto-release-pr
 # La description de la PR est régénérée à chaque run par
 # `client/tools/release_notes.py` : notes de version anglaises orientées
 # utilisateur (New features / Bug fixes / Improvements, catégorisées
-# depuis les sujets de squash `type: titre (#N)` du cycle), version
+# depuis les sujets de squash `type: titre (#N)` du cycle — libellés
+# anglais pris dans `client/tools/release_notes_en.txt`), version
 # projetée = dernier tag + niveau (même règle que release-bump).
 # Le bloc généré vit entre marqueurs `release-notes:start/end` : la
 # régénération ne remplace que cette zone — une annotation manuelle

@@ -4,6 +4,12 @@ lisibles par des utilisateurs (sections New features / Bug fixes /
 Improvements), construites à partir des sujets de squash mergés sur
 next_release dans le cycle courant.
 
+Libellés anglais : le sujet de commit est rédigé en français — chaque PR
+feat/fix/perf doit donc déposer sa note utilisateur anglaise dans
+`client/tools/release_notes_en.txt` (lignes `<PR>: <note>`). À défaut le
+sujet nettoyé est repris et un avertissement est émis sur stderr
+(visible dans les logs du workflow).
+
 Version affichée = prochaine release calculée comme release-bump
 (version.yml) : borne = dernier commit `chore: bump version` dont le tag
 vX.Y.Z existe, sinon dernier tag semver ; niveau = mot-clé parenthésé le
@@ -33,6 +39,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 
 MARK_START = "<!-- release-notes:start -->"
 MARK_END = "<!-- release-notes:end -->"
+
+# Notes anglaises rédigées par PR : lignes `<PR>: <note>` dans
+# release_notes_en.txt (`#` = commentaire, pas de commentaire inline).
+EN_NOTES = os.path.join(ROOT, "client", "tools", "release_notes_en.txt")
+EN_LINE = re.compile(r"\s*(\d+)\s*:\s*(.+?)\s*$")
 
 # type conventional -> section user-facing ; les autres types (docs,
 # test, chore, ci, build, refactor, style, …) sont internes et exclus.
@@ -109,20 +120,38 @@ def next_version(rev_range):
     }[level]
 
 
+def english_notes():
+    """{pr: note anglaise rédigée} depuis EN_NOTES ; {} si absent."""
+    try:
+        raw = open(EN_NOTES, encoding="utf-8").read().splitlines()
+    except OSError:
+        return {}
+    return {m.group(1): m.group(2) for ln in raw
+            if (m := EN_LINE.match(ln))}
+
+
 def entries(rev_range):
     """Sujets du range (chronologique) -> {section: [(titre, pr)]}."""
     out = {name: [] for _, name in CATEGORIES}
     types = {t: name for t, name in CATEGORIES}
+    en = english_notes()
     subjects = git("log", "--format=%s", "--reverse", rev_range).splitlines()
     for s in subjects:
         m = SUBJECT.match(s)
         if not m or m.group(1) not in types:
             continue
-        title = KEYWORD.sub("", m.group(2)).strip()
-        if not title:
-            continue
-        title = title[0].upper() + title[1:]
-        out[types[m.group(1)]].append((title, m.group(3)))
+        pr = m.group(3)
+        title = en.get(pr or "")
+        if title is None:
+            title = KEYWORD.sub("", m.group(2)).strip()
+            if not title:
+                continue
+            title = title[0].upper() + title[1:]
+            if pr:
+                print(f"release_notes: PR #{pr} sans note anglaise dans "
+                      f"{os.path.relpath(EN_NOTES, ROOT)} — sujet brut "
+                      "repris", file=sys.stderr)
+        out[types[m.group(1)]].append((title, pr))
     return out
 
 

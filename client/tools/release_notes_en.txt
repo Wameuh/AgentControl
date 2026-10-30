@@ -1,0 +1,18 @@
+# English user-facing release notes, one line per merged PR:
+#
+#     <PR number>: <english note>
+#
+# Every user-visible feat/fix/perf PR adds its line here (written by the
+# PR author, in English). release_notes.py uses it instead of the commit
+# subject — usually French — and warns in the workflow logs when an
+# entry is missing. `#` lines are comments; no inline comments.
+# Entries for already-released PRs are inert — prune at release time.
+#
+182: Client updates now report progress and surface explicit errors instead of failing silently.
+183: Catalog components can declare configurable parameters, editable from the client.
+184: Component editing now exposes only the parameters declared by the catalog — internals stay read-only.
+185: The sidebar PR registry no longer records non-existent pull request references.
+186: Queued prompts gain a steer button to inject them into the running turn without cancelling it.
+188: Fixed mesh background facets tinted with the accent's complementary color in the light theme.
+189: Session diagram: roots of the same group are now placed contiguously.
+190: Fixed unreadable code blocks in the light theme.
