@@ -9,6 +9,7 @@
 
 import { invoke, getVersion, listen, isWeb } from "../core/bridge";
 import { $, dlgErr, esc, notify, q } from "../core/dom";
+import { bindLogView } from "../core/logview";
 import { call } from "../core/rpc";
 import { cmpVer, connKeyOf, daemonParams, minorOf } from "../core/conn";
 import { accentOf, isAndroid } from "../core/chrome";
@@ -448,35 +449,6 @@ export class ConnView {
     pre.textContent = await invoke<string>("ssh_pubkey").catch((e) => `⚠ ${e}`);
   }
 
-  /** Rang d'un niveau de log — le filtre du sélecteur est un niveau MINIMUM. */
-  private logRank(l: string): number {
-    return ({ debug: 0, info: 1, warn: 2, error: 3 } as Record<string, number>)[l] ?? 1;
-  }
-
-  /** Tail de client.log filtré par niveau et coloré (lignes
-   *  `[iso] [LVL] fichier.rs:NN msg` ; les lignes anciennes sans tag de
-   *  niveau sont traitées en info). */
-  private async renderLog() {
-    const min = this.logRank(($("log-level") as HTMLSelectElement).value);
-    const txt = await invoke<string>("log_tail", { n: 400 }).catch(() => "");
-    const rows: string[] = [];
-    for (const line of txt.split("\n")) {
-      const m = line.match(/^(\[[^\]]*\] \[(DEBUG|INFO|WARN|ERROR)\])(?: (\S+:\d+))?/);
-      if (this.logRank(m?.[2]?.toLowerCase() ?? "info") < min) continue;
-      const cls = m ? ` ll-${m[2].toLowerCase()}` : "";
-      let body = esc(line);
-      if (m) {
-        body = `<span class="ll-meta">${esc(m[1])}</span>`;
-        if (m[3]) body += ` <span class="ll-meta">${esc(m[3])}</span>`;
-        body += esc(line.slice(m[0].length));
-      }
-      rows.push(`<span class="ll${cls}">${body}</span>`);
-    }
-    const v = $("log-view");
-    v.innerHTML = rows.join("\n");
-    v.scrollTop = v.scrollHeight;
-  }
-
   /** Appelé par chat.updateEmptyState quand aucune conv n'est affichée :
    *  aucune conn bound OU toutes down/gone → la vue s'ouvre en accueil
    *  (spec : « pas de conn configurée → vue accueil = cet écran » ; une
@@ -722,10 +694,7 @@ export class ConnView {
     ($("c-kind") as HTMLSelectElement).onchange = () => this.syncSshFields();
     ($("c-native") as HTMLInputElement).onchange = () => this.syncSshFields();
     $("cv-form-reset").onclick = () => this.resetForm();
-    $("cv-logs").addEventListener("toggle", async (e) => {
-      if ((e.target as HTMLDetailsElement).open) await this.renderLog();
-    });
-    ($("log-level") as HTMLSelectElement).onchange = () => this.renderLog();
+    bindLogView($("cv-logs") as HTMLDetailsElement);
 
     // Le bouton vit dans la sidebar — drawer sur Android : le refermer
     // d'abord sinon la vue s'ouvre derrière le tiroir. Toggle : recliquer

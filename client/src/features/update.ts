@@ -5,7 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import { invoke, getVersion, isWeb } from "../core/bridge";
-import { $, esc } from "../core/dom";
+import { $, esc, logUi, notify } from "../core/dom";
 import { icon } from "../ui/icons";
 import { isAndroid, shellOpen } from "../core/chrome";
 import { cmpVer } from "../core/conn";
@@ -82,17 +82,35 @@ async function apkReleaseUrl(tag: string): Promise<string> {
   return "https://github.com/Wameuh/AgentControl/releases/latest";
 }
 
-/// Update du client vers `tag` : desktop = .deb auto (`update_client`,
-/// fallback page releases) ; Android = APK ouvert dans le navigateur —
-/// le gestionnaire de paquets fait la maj in-place (signature identique).
+/// Update du client vers `tag` : desktop = installeur auto
+/// (`update_client`) ; Android = APK ouvert dans le navigateur — le
+/// gestionnaire de paquets fait la maj in-place (signature identique).
+/// Jamais silencieux : étapes versées à client.log, toast info au
+/// départ puis succès / échec AVEC la raison (les erreurs backend
+/// citent le repli manuel — commande ou page releases).
 export async function performClientUpdate(tag: string) {
   if (isAndroid()) {
     shellOpen(await apkReleaseUrl(tag));
     return;
   }
-  await invoke("update_client", { tag }).catch(() => {
-    shellOpen(`https://github.com/Wameuh/AgentControl/releases/tag/v${tag}`);
-  });
+  notify("info", t("update_installing", { v: tag }));
+  logUi("info", `update: install v${tag} demandée`);
+  try {
+    await invoke("update_client", { tag });
+  } catch (e) {
+    const reason = String(e);
+    logUi("error", `update: install v${tag} échouée — ${reason}`);
+    notify("error", t("update_failed_reason", { reason }));
+    // Repli « page releases » quand le backend le désigne (hors bundle
+    // .app, build portable…) — l'erreur affiche déjà la cause exacte.
+    if (reason.includes("page releases")) {
+      shellOpen(`https://github.com/Wameuh/AgentControl/releases/tag/v${tag}`);
+    }
+    return;
+  }
+  // Succès = le backend relance l'app (exit quasi immédiat) — le toast
+  // n'est qu'une brève confirmation avant la coupure.
+  notify("success", t("update_relaunch"));
 }
 
 /** Client plus vieux que le démon (minor) : le démon n'est PAS touché —
@@ -106,8 +124,11 @@ export async function showOutdated(lv: string, dv: string) {
   const btn = $("outdated-update") as HTMLButtonElement;
   btn.onclick = async () => {
     btn.disabled = true;
+    const prev = btn.textContent;
+    btn.textContent = t("update_installing", { v: target });
     await performClientUpdate(target);
     btn.disabled = false;
+    btn.textContent = prev;
     dlg.close();
   };
   dlg.showModal();
@@ -122,6 +143,23 @@ export async function checkUpdate(): Promise<{ local: string; remote: string }> 
   return { local, remote };
 }
 
+/// Résultat laissé par l'instance précédente : l'install tue le process
+/// (relaunch) avant tout affichage — le backend dépose alors un statut
+/// "OK <ver>" / "FAIL <cause>" consommé ici une fois → toast + log.
+async function reportLastUpdateStatus() {
+  const st = await invoke<string | null>("update_last_status").catch(() => null);
+  if (!st) return;
+  if (st.startsWith("FAIL")) {
+    const reason = st.slice(4).trim();
+    notify("error", t("update_failed_reason", { reason }));
+    logUi("error", `update: install précédente échouée — ${reason}`);
+  } else if (st.startsWith("OK")) {
+    const v = st.slice(2).trim();
+    notify("success", t("update_done", { v }));
+    logUi("info", `update: v${v} installée`);
+  }
+}
+
 // Check update au boot : version distante (gh release ou package.json sur
 // main) > locale → chip "⬆ vX" dans la titlebar → clic = update (deb+dpkg)
 // ou ouverture de la page releases si aucun asset.
@@ -130,6 +168,7 @@ export function checkBootUpdate() {
   // démon — sa « version » suit celle du binaire qui la sert.
   if (isWeb) return;
   void (async () => {
+    await reportLastUpdateStatus();
     try {
       const remote = await remoteVersion();
       const local = await getVersion().catch(() => "0.0.0");
@@ -139,8 +178,10 @@ export function checkBootUpdate() {
       b.innerHTML = `${icon("up")} v${esc(remote)}`;
       b.title = `Update v${remote} available — click to install`;
       b.onclick = () => {
-        b.textContent = "…";
+        b.disabled = true;
+        b.textContent = t("update_installing", { v: remote });
         performClientUpdate(remote).finally(() => {
+          b.disabled = false;
           b.innerHTML = `${icon("up")} v${esc(remote)}`;
         });
       };
