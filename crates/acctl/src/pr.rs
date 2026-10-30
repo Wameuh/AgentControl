@@ -43,6 +43,9 @@ fn parse_ref_arg(s: &str) -> Result<(u64, Option<String>)> {
 /// `repo_label`) → idem ; chemin nu → repo seul. Retourne
 /// (repo, host optionnel).
 fn split_repo_arg(arg: &str) -> (String, Option<String>) {
+    // Slash terminal normalisé pour toutes les formes (chemin nu,
+    // host:path, URL) — `--repo grp/proj/` adresse `grp/proj`.
+    let arg = arg.trim_end_matches('/');
     if let Some(rest) = arg
         .strip_prefix("https://")
         .or_else(|| arg.strip_prefix("http://"))
@@ -59,7 +62,6 @@ fn split_repo_arg(arg: &str) -> (String, Option<String>) {
                 .split("/-/issues/")
                 .next()
                 .unwrap_or(p)
-                .trim_end_matches('/')
                 .to_string();
             // Formes gerrit en dernier recours uniquement : une URL
             // GitLab peut avoir un groupe « c » ou « pull » légitime.
@@ -82,7 +84,6 @@ fn split_repo_arg(arg: &str) -> (String, Option<String>) {
         // repo. Le path est déjà le repo : aucun trim d'URL ici (un
         // groupe « c » gitlab resterait sinon écrêté).
         if h.contains('.') {
-            let p = p.trim_end_matches('/');
             return match p.split_once(':') {
                 Some((port, rest))
                     if !port.is_empty()
@@ -763,6 +764,11 @@ mod tests {
     fn split_repo_arg_forms() {
         assert_eq!(
             split_repo_arg("grp/sub/proj"),
+            ("grp/sub/proj".into(), None)
+        );
+        // Slash terminal normalisé sur toutes les formes.
+        assert_eq!(
+            split_repo_arg("grp/sub/proj/"),
             ("grp/sub/proj".into(), None)
         );
         assert_eq!(
