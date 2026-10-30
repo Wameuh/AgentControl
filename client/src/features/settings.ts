@@ -20,8 +20,10 @@ import {
   sndTypeOn,
   sndVolume,
   sndOnlyUnfocused,
+  sndPresetId,
   type SoundKind,
 } from "./sounds";
+import { PRESETS } from "./sound-presets";
 
 /** Préférence d'envoi : "queue" (file FIFO, défaut) | "steer" (injection
  *  mid-turn quand l'agent tourne ; idle → envoi normal côté démon). */
@@ -77,6 +79,7 @@ export class SettingsPanel {
     ($("s-snd") as HTMLInputElement).checked = sndEnabled();
     for (const k of ["done", "question", "error"] as SoundKind[]) {
       ($(`s-snd-${k}`) as HTMLInputElement).checked = sndTypeOn(k);
+      ($(`s-snd-preset-${k}`) as HTMLSelectElement).value = sndPresetId(k);
     }
     ($("s-snd-unfocused") as HTMLInputElement).checked = sndOnlyUnfocused();
     ($("s-snd-vol") as HTMLInputElement).value = String(
@@ -246,6 +249,21 @@ export class SettingsPanel {
           `ac-snd-${k}`,
           (e.target as HTMLInputElement).checked ? "1" : "0",
         );
+      // Options des presets construites depuis la bibliothèque — portent
+      // data-i18n, retraduites par applyStatic au changement de langue.
+      const sel = $(`s-snd-preset-${k}`) as HTMLSelectElement;
+      for (const p of PRESETS[k]) {
+        const opt = document.createElement("option");
+        opt.value = p.id;
+        opt.dataset.i18n = p.label;
+        opt.textContent = t(p.label);
+        sel.append(opt);
+      }
+      // Choisir un preset le joue aussitôt — aperçu immédiat du choix.
+      sel.onchange = () => {
+        localStorage.setItem(`ac-snd-preset-${k}`, sel.value);
+        sounds.test(k);
+      };
       // « Tester » joue même tout désactivé — le geste débloque l'autoplay
       // de la webview (Android) en plus de donner un aperçu volume réel.
       ($(`s-snd-test-${k}`) as HTMLButtonElement).onclick = () =>
@@ -294,9 +312,9 @@ export class SettingsPanel {
   private syncSndOpts() {
     const off = !($("s-snd") as HTMLInputElement).checked;
     $("s-snd-opts").classList.toggle("off", off);
-    for (const el of $("s-snd-opts").querySelectorAll<HTMLInputElement>(
-      "input",
-    )) {
+    for (const el of $("s-snd-opts").querySelectorAll<
+      HTMLInputElement | HTMLSelectElement
+    >("input, select")) {
       el.disabled = off;
     }
   }

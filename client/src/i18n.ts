@@ -221,6 +221,10 @@ const STR = {
     sounds_test: "Test",
     sounds_blocked:
       "Audio blocked until you interact — click anywhere or press Test",
+    sounds_preset: "Sound",
+    sndp_classic: "Classic", sndp_bell: "Bell", sndp_marimba: "Marimba",
+    sndp_arp: "Arpeggio", sndp_chord: "Chord", sndp_pop: "Pop",
+    sndp_thud: "Thud", sndp_pad: "Soft pad", sndp_retro: "Retro 8-bit",
     conflict_msg: "changed on disk since you opened it — reload or overwrite?",
     conflict_reload: "Reload", conflict_overwrite: "Overwrite",
     dirty_h: "Unsaved changes", dirty_msg: "Discard the modified buffer?",
@@ -584,6 +588,10 @@ const STR = {
     sounds_test: "Tester",
     sounds_blocked:
       "Audio bloqué jusqu'à une interaction — cliquez n'importe où ou sur Tester",
+    sounds_preset: "Son",
+    sndp_classic: "Classique", sndp_bell: "Cloche", sndp_marimba: "Marimba",
+    sndp_arp: "Arpège", sndp_chord: "Accord", sndp_pop: "Pop",
+    sndp_thud: "Impact", sndp_pad: "Nappe douce", sndp_retro: "8-bit rétro",
     conflict_msg: "modifié sur le disque depuis l'ouverture — recharger ou écraser ?",
     conflict_reload: "Recharger", conflict_overwrite: "Écraser",
     dirty_h: "Modifications non enregistrées", dirty_msg: "Abandonner le contenu modifié ?",
