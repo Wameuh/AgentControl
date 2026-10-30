@@ -78,7 +78,7 @@ impl Session {
                     return;
                 }
                 if is_compact_cmd(&text) {
-                    s.arm_compact();
+                    s.arm_compact(false);
                 }
                 s.emit(EventKind::UserMessage {
                     text: text.clone(),
@@ -286,7 +286,7 @@ impl Session {
     /// tâche enchaîne un nouveau réveil au lieu de laisser le message
     /// orphelin. L'arm précède aussi le wake_begin raté de spawn_wake →
     /// le take du propriétaire voit forcément le flag.
-    fn enqueue_prompt(&self, text: &str, front: bool, src: PromptSrc) -> bool {
+    pub(super) fn enqueue_prompt(&self, text: &str, front: bool, src: PromptSrc) -> bool {
         if self.is_waking() {
             self.arm_wake_pending();
         }
@@ -356,7 +356,7 @@ impl Session {
             }
             let armed = is_compact_cmd(&next);
             if armed {
-                self.arm_compact();
+                self.arm_compact(src == PromptSrc::Auto);
             }
             if !self.run_turn(&next).await && armed && self.take_compact_hold() {
                 // /compact refusé ou inconnu côté agent : aucune

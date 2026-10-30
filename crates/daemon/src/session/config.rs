@@ -163,7 +163,12 @@ impl Session {
     /// ACP session/set_config_option — le mécanisme de config de Devin
     /// (mode, model, …). Agent mort → la valeur est mémorisée dans
     /// `pending_config` et rejouée au prochain spawn (resume).
+    /// Les clés `ac.*` sont interceptées côté démon (compact auto…) —
+    /// elles ne partent JAMAIS vers l'agent.
     pub async fn set_config_option(&self, config_id: &str, value: &str) -> Result<()> {
+        if let Some(key) = config_id.strip_prefix("ac.") {
+            return self.set_daemon_option(key, value);
+        }
         if !self.is_alive() {
             let opts = {
                 let mut m = self.meta.lock().unwrap();
@@ -246,6 +251,39 @@ impl Session {
         }
     }
 
+    /// Option daemon-side `ac.<key>` (préfixe déjà consommé) — override
+    /// de session persisté en `compact.json`, effectif immédiatement
+    /// (compact_policy relit l'override à chaque usage_update).
+    ///   `ac.compact_enabled`   on|off
+    ///   `ac.compact_at_tokens` N|off
+    ///   `ac.compact_at_pct`    0<p≤1|off
+    fn set_daemon_option(&self, key: &str, value: &str) -> Result<()> {
+        {
+            let mut o = self.compact_override.lock().unwrap();
+            match key {
+                "compact_enabled" => o.enabled = Some(parse_on_off(value)?),
+                "compact_at_tokens" => o.at_tokens = parse_opt_u64(value)?,
+                "compact_at_pct" => o.at_pct = parse_opt_pct(value)?,
+                _ => anyhow::bail!("option démon inconnue : ac.{key}"),
+            }
+        }
+        let o = self.compact_override.lock().unwrap().clone();
+        // .tmp + rename : pas de compact.json tronqué si le démon meurt
+        // en pleine écriture (même convention que pinned.json).
+        let tmp = self.dir.join("compact.json.tmp");
+        std::fs::write(&tmp, serde_json::to_string_pretty(&o)?)
+            .context("compact.json illisable en écriture")?;
+        std::fs::rename(&tmp, self.dir.join("compact.json"))?;
+        let eff = self.compact_policy();
+        self.emit(EventKind::System {
+            text: format!(
+                "ac.{key}={value} — seuil compact effectif : {}",
+                describe_policy(&eff)
+            ),
+        });
+        Ok(())
+    }
+
     /// /clear : journal + blobs vidés, méta recalée pour une session
     /// native neuve (native_id None — si le respawn échoue, un resume
     /// ultérieur ne rechargerait pas l'ancien contexte par surprise).
@@ -275,4 +313,73 @@ impl Session {
         Ok(())
     }
 
+    /// Charge `compact.json` (override session du seuil compact) —
+    /// absent/vide/illisible → CompactPartial vide (héritage intégral),
+    /// un fichier corrompu n'empêche pas l'ouverture. Appelé par
+    /// `Session::open`.
+    pub(super) fn open_compact_override(dir: &std::path::Path) -> Mutex<CompactPartial> {
+        let o: CompactPartial = std::fs::read_to_string(dir.join("compact.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        Mutex::new(o)
+    }
+
+}
+
+/// `on|true|1|yes` → vrai ; `off|false|0|no` → faux.
+fn parse_on_off(v: &str) -> Result<bool> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" | "yes" => Ok(true),
+        "off" | "false" | "0" | "no" => Ok(false),
+        _ => anyhow::bail!("booléen attendu (on|off), reçu « {v} »"),
+    }
+}
+
+/// `off|none|` → None (retour au niveau hérité) ; sinon entier > 0.
+fn parse_opt_u64(v: &str) -> Result<Option<u64>> {
+    let v = v.trim();
+    if matches!(v.to_ascii_lowercase().as_str(), "off" | "none" | "") {
+        return Ok(None);
+    }
+    let n: u64 = v
+        .parse()
+        .with_context(|| format!("entier attendu, reçu « {v} »"))?;
+    if n == 0 {
+        anyhow::bail!("seuil nul interdit — utiliser « off » ou « ac.compact_enabled off »");
+    }
+    Ok(Some(n))
+}
+
+/// `off|none|` → None ; sinon flottant dans ]0,1].
+fn parse_opt_pct(v: &str) -> Result<Option<f64>> {
+    let v = v.trim();
+    if matches!(v.to_ascii_lowercase().as_str(), "off" | "none" | "") {
+        return Ok(None);
+    }
+    let p: f64 = v
+        .parse()
+        .with_context(|| format!("fraction attendue (0<p≤1), reçu « {v} »"))?;
+    if !(0.0 < p && p <= 1.0) {
+        anyhow::bail!("pourcentage hors borne (0<p≤1) : {p}");
+    }
+    Ok(Some(p))
+}
+
+/// Libellé lisible du seuil effectif pour les accusés `ac.*`.
+fn describe_policy(p: &CompactPolicy) -> String {
+    if !p.enabled {
+        return "désactivé".into();
+    }
+    match (p.at_tokens, p.at_pct) {
+        (None, None) => "actif mais aucun seuil posé (inerte)".into(),
+        (t, pct) => [
+            t.map(|n| format!("{n} tokens")),
+            pct.map(|f| format!("{}%", (f * 100.0).round() as u64)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ou "),
+    }
 }

@@ -180,7 +180,7 @@ impl Daemon {
                     context_size: None,
                 };
                 let dir = Session::create_dir(&self.root, &meta)?;
-                let session2 = Session::open(dir)?;
+                let session2 = Session::open(dir, &self.compact)?;
                 let sid2 = meta.id.clone();
                 self.watch_prs(&session2);
                 self.sessions
