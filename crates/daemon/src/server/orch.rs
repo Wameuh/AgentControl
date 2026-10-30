@@ -32,7 +32,7 @@
 
 use super::*;
 use crate::server::misc::command_available;
-use proto::{ComponentKind, SessionMeta};
+use proto::{ComponentKind, EventKind, SessionMeta};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -638,11 +638,59 @@ impl Daemon {
                 }
                 _ => w.title.clone(),
             };
+            // Post « sorti du backlog » : à chaque NOUVEL item wip du
+            // worker, journaliser titre + description en user_message
+            // de service (origin) — JAMAIS livré à l'agent, qui a déjà
+            // l'item via son --pop : le post est purement
+            // présentationnel (premier message ACTIONNABLE du
+            // transcript ; le boilerplate de mission reste replié +
+            // badgé « via »). Un post par pop : --release puis re-pop
+            // reposte (posted_wip repasse à None entre-temps) ;
+            // session disparue entre le snapshot et ici → pas de post,
+            // retry au tick suivant.
+            let wip_id = my_wip.map(|t| task_id(t).to_string());
+            let prev_posted = st
+                .assignments
+                .get(sid)
+                .and_then(|a| a.get("posted_wip"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let mut posted_wip = wip_id.clone();
+            if wip_id != prev_posted {
+                if let Some(t) = my_wip {
+                    let title_line: String = t
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let desc = t
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim();
+                    let text = if desc.is_empty() {
+                        format!("[Backlog] item #{} — {title_line}", task_id(t))
+                    } else {
+                        format!("[Backlog] item #{} — {title_line}\n\n{desc}", task_id(t))
+                    };
+                    match self.get_session(sid).await {
+                        Ok(s) => s.emit(EventKind::UserMessage {
+                            text,
+                            steer: false,
+                            origin: Some(COMPONENT_ORIGIN.to_string()),
+                        }),
+                        Err(_) => posted_wip = prev_posted,
+                    }
+                }
+            }
             st.assignments.insert(
                 sid.to_string(),
                 json!({
                     "title": title, "state": state,
                     "tasks": my_items, "prs": my_prs,
+                    "posted_wip": posted_wip,
                 }),
             );
             if matches!(state, "working" | "compacting" | "starting") {

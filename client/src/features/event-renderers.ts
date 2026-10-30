@@ -33,6 +33,9 @@ export class EventRenderer {
    *  — les events intermédiaires (tool_call, status…) n'y coupent pas.
    *  Swapée avec le reste de l'état de rendu. */
   lastText: { thought: boolean; norm: string; el: HTMLElement } | null = null;
+  /** Nb de user_message rendus — le 1er d'une session « service » est le
+   *  prompt de spawn par construction → pill compacte (état swapé). */
+  userMsgs = 0;
 
   private deps = {
     /** Meta de la session affichée mutée par un event (mode/model/state…) →
@@ -87,6 +90,12 @@ export class EventRenderer {
       case "user_message": {
         const d = mkEv("msg user", ev.seq);
         const txt = ev.text as string;
+        // Prompt de spawn d'une session « service » (origin) = le 1er
+        // user_message du journal par construction : pill d'une ligne
+        // plutôt que bulle — le boilerplate ne prime pas sur le post
+        // de l'item qui suit (badge « via » conservé, dépliable).
+        const servicePrompt = !!ev.origin && this.userMsgs === 0;
+        this.userMsgs += 1;
         const body = document.createElement("div");
         body.className = "um-body";
         body.innerHTML =
@@ -97,8 +106,13 @@ export class EventRenderer {
           linkify(esc(txt));
         d.appendChild(body);
         // Prompt long → replié par défaut, bouton pour déplier/replier.
-        if (txt.length > USER_FOLD_CHARS || txt.split("\n").length > USER_FOLD_LINES) {
+        if (
+          servicePrompt ||
+          txt.length > USER_FOLD_CHARS ||
+          txt.split("\n").length > USER_FOLD_LINES
+        ) {
           d.classList.add("um-collapsed");
+          if (servicePrompt) d.classList.add("um-service");
           const btn = document.createElement("button");
           btn.type = "button";
           btn.className = "um-toggle";
