@@ -726,11 +726,27 @@ mod tests {
         let s2 = Session::open(dir.clone(), &test_compact_src()).unwrap();
         let p = s2.compact_policy();
         assert!(!p.enabled && p.at_tokens == Some(50_000) && p.at_pct == Some(0.9));
-        // Rejets : clé inconnue, booléen, borne %, seuil nul.
+        // Rejets : clé inconnue, booléen, borne %.
         assert!(s2.set_config_option("ac.nope", "1").await.is_err());
         assert!(s2.set_config_option("ac.compact_enabled", "maybe").await.is_err());
         assert!(s2.set_config_option("ac.compact_at_pct", "1.5").await.is_err());
-        assert!(s2.set_config_option("ac.compact_at_tokens", "0").await.is_err());
+        // « 0 » ≠ « off » : 0 décoche la règle héritée (at_tokens Some(0)
+        // → effectif None), off rend None = retour à l'hérité. Source
+        // globale à at_tokens posé pour distinguer les deux.
+        let src = CompactSrc {
+            global: crate::server::CompactCfg {
+                enabled: true,
+                at_tokens: Some(80_000),
+                at_pct: Some(0.9),
+            },
+            by_agent: Default::default(),
+        };
+        let s3 = Session::open(dir.clone(), &src).unwrap();
+        assert_eq!(s3.compact_policy().at_tokens, Some(50_000)); // override persistant
+        s3.set_config_option("ac.compact_at_tokens", "0").await.unwrap();
+        assert!(s3.compact_policy().at_tokens.is_none()); // règle décochée
+        s3.set_config_option("ac.compact_at_tokens", "off").await.unwrap();
+        assert_eq!(s3.compact_policy().at_tokens, Some(80_000)); // hérité global
         let _ = std::fs::remove_dir_all(&dir);
     }
 

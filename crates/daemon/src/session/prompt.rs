@@ -341,11 +341,15 @@ impl Session {
                 let mut q = self.prompt_queue.lock().unwrap();
                 match q.pop_front() {
                     Some(t) => {
-                        // Un /compact déjà plus loin dans la file
-                        // relancerait un second compact juste après
-                        // celui-ci — le plus ancien suffit.
+                        // Un second /compact AUTO en file relancerait
+                        // un compact juste après celui-ci — purgé. Les
+                        // compact manuels (/compact <args>) gardent
+                        // leur intention : l'utilisateur sait ce qu'il
+                        // demande, un drop silencieux l'effacerait.
                         if is_compact_cmd(&t.0) {
-                            q.retain(|(t2, _)| !is_compact_cmd(t2));
+                            q.retain(|(t2, s2)| {
+                                !(is_compact_cmd(t2) && *s2 == PromptSrc::Auto)
+                            });
                         }
                         t
                     }

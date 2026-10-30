@@ -255,15 +255,19 @@ impl Session {
     /// de session persisté en `compact.json`, effectif immédiatement
     /// (compact_policy relit l'override à chaque usage_update).
     ///   `ac.compact_enabled`   on|off
-    ///   `ac.compact_at_tokens` N|off
-    ///   `ac.compact_at_pct`    0<p≤1|off
+    ///   `ac.compact_at_tokens` N|0 (règle off)|off (hérité)
+    ///   `ac.compact_at_pct`    0<p≤1|0 (règle off)|off (hérité)
     /// Écriture disque AVANT la mutation mémoire : une erreur est un
     /// no-op réel (pas d'override actif non persisté). Puis reset de la
     /// baseline live : si le seuil franchi était déjà dépassé (compact
     /// réarmé, seuil durci), le prochain usage_update compte comme un
     /// franchissement — sinon `was` resterait vrai pour toujours.
     fn set_daemon_option(&self, key: &str, value: &str) -> Result<()> {
-        let mut o = self.compact_override.lock().unwrap().clone();
+        // Le guard tient toute l'opération : deux setcfg concurrents ne
+        // peuvent laisser mémoire et compact.json diverger (dernier
+        // swap = dernier rename, dans le même ordre).
+        let mut guard = self.compact_override.lock().unwrap();
+        let mut o = guard.clone();
         match key {
             "compact_enabled" => o.enabled = Some(parse_on_off(value)?),
             "compact_at_tokens" => o.at_tokens = parse_opt_u64(value)?,
@@ -276,7 +280,8 @@ impl Session {
         std::fs::write(&tmp, serde_json::to_string_pretty(&o)?)
             .context("compact.json illisible en écriture")?;
         std::fs::rename(&tmp, self.dir.join("compact.json"))?;
-        *self.compact_override.lock().unwrap() = o;
+        *guard = o;
+        drop(guard);
         self.usage_seen
             .store(false, std::sync::atomic::Ordering::SeqCst);
         let eff = self.compact_policy();
@@ -320,13 +325,23 @@ impl Session {
 
     /// Charge `compact.json` (override session du seuil compact) —
     /// absent/vide/illisible → CompactPartial vide (héritage intégral),
-    /// un fichier corrompu n'empêche pas l'ouverture. Appelé par
+    /// un fichier corrompu n'empêche pas l'ouverture. Les valeurs hors
+    /// borne (édit manuel) sont neutralisées à la lecture via apply_to
+    /// — un warn ici les signale, pareil que pour le TOML. Appelé par
     /// `Session::open`.
     pub(super) fn open_compact_override(dir: &std::path::Path) -> Mutex<CompactPartial> {
         let o: CompactPartial = std::fs::read_to_string(dir.join("compact.json"))
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
+        if let Some(v) = o.at_pct {
+            if !(0.0..=1.0).contains(&v) {
+                tracing::warn!(
+                    "{}: compact.json at_pct={v} hors borne (0<p≤1) — règle % ignorée",
+                    dir.display()
+                );
+            }
+        }
         Mutex::new(o)
     }
 
@@ -341,7 +356,8 @@ fn parse_on_off(v: &str) -> Result<bool> {
     }
 }
 
-/// `off|none|` → None (retour au niveau hérité) ; sinon entier > 0.
+/// `off|none|` → None (retour à l'hérité) ; `0` → Some(0) = règle
+/// désactivée (« décocher » le seuil hérité) ; sinon entier > 0.
 fn parse_opt_u64(v: &str) -> Result<Option<u64>> {
     let v = v.trim();
     if matches!(v.to_ascii_lowercase().as_str(), "off" | "none" | "") {
@@ -350,13 +366,10 @@ fn parse_opt_u64(v: &str) -> Result<Option<u64>> {
     let n: u64 = v
         .parse()
         .with_context(|| format!("entier attendu, reçu « {v} »"))?;
-    if n == 0 {
-        anyhow::bail!("seuil nul interdit — utiliser « off » ou « ac.compact_enabled off »");
-    }
     Ok(Some(n))
 }
 
-/// `off|none|` → None ; sinon flottant dans ]0,1].
+/// `off|none|` → None (hérité) ; `0` → règle % désactivée ; sinon ]0,1].
 fn parse_opt_pct(v: &str) -> Result<Option<f64>> {
     let v = v.trim();
     if matches!(v.to_ascii_lowercase().as_str(), "off" | "none" | "") {
@@ -364,9 +377,9 @@ fn parse_opt_pct(v: &str) -> Result<Option<f64>> {
     }
     let p: f64 = v
         .parse()
-        .with_context(|| format!("fraction attendue (0<p≤1), reçu « {v} »"))?;
-    if !(0.0 < p && p <= 1.0) {
-        anyhow::bail!("pourcentage hors borne (0<p≤1) : {p}");
+        .with_context(|| format!("fraction attendue (0≤p≤1), reçu « {v} »"))?;
+    if !(0.0..=1.0).contains(&p) {
+        anyhow::bail!("pourcentage hors borne (0≤p≤1) : {p}");
     }
     Ok(Some(p))
 }
