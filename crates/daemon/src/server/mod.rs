@@ -541,6 +541,13 @@ impl Daemon {
                     .await
             }
             ReqKind::FirstPost { session } => self.h_first_post(session).await,
+            ReqKind::PinMessage { session, seq } => {
+                self.h_pin_message(session, seq).await
+            }
+            ReqKind::UnpinMessage { session, seq } => {
+                self.h_unpin_message(session, seq).await
+            }
+            ReqKind::ListPinned { session } => self.h_list_pinned(session).await,
             ReqKind::ReadFile {
                 session,
                 path,

@@ -45,6 +45,7 @@ body.android #chat-header,
 body.android #composer,
 body.android #queue-bar,
 body.android #queue-panel,
+body.android #pins-panel,
 body.android .toast {
   background: var(--panel-solid);
 }
@@ -254,7 +255,8 @@ body.android #chat-header #btn-term,
 body.android #chat-header #btn-files,
 body.android #chat-header #btn-refresh,
 body.android #chat-header #btn-resume,
-body.android #chat-header #btn-search { display: none !important; }
+body.android #chat-header #btn-search,
+body.android #chat-header #btn-pins { display: none !important; }
 body.android #chat-more { display: inline-block; font-size: 20px; min-width: 44px; min-height: 44px; }
 body.android #search-bar { padding: 8px 10px; }
 body.android #search-input { font-size: 16px; min-height: 44px; }

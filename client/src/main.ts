@@ -47,6 +47,7 @@ import { TermPanel } from "./features/terminal";
 import { SettingsPanel } from "./features/settings";
 import { ComponentsPanel } from "./features/components";
 import { initFirstPost } from "./features/first-post";
+import { Pins } from "./features/pins";
 import { initLang, t, applyStatic } from "./i18n";
 import type { AcEvent, SavedConn } from "./core/types";
 
@@ -102,6 +103,7 @@ const newSess = new NewSessionDialog();
 const settings = new SettingsPanel();
 const comps = new ComponentsPanel();
 const search = new SessionSearch();
+const pins = new Pins();
 
 // call() a besoin de la conn courante + des états live — injectés pour éviter
 // l'import inverse core → features.
@@ -118,10 +120,12 @@ chat.bind(renderer, {
   onSessionOpened: () => {
     files.onSessionOpened();
     term.onSessionSwitched();
+    pins.sessionOpened();
   },
   onSessionChanged: () => {
     search.onSessionChanged();
     composer.sessionChanged();
+    pins.sessionChanged();
   },
   onSessionGone: (id) => composer.dropSession(id),
   connCount: () => conns.knownConns().length,
@@ -129,8 +133,14 @@ chat.bind(renderer, {
   connHome: () => connView.maybeAutoShow(),
   firstPostCapable: (c) => conns.cap(c)?.first_post === true,
   termCapable: (c) => conns.cap(c)?.terminal === true,
+  pinCapable: (c) => conns.cap(c)?.pinned === true,
+  pinsMark: (el) => pins.markNode(el),
 });
 search.bind({ jumpToSeq: (seq) => chat.jumpToSeq(seq) });
+pins.bind({
+  capable: (c) => conns.cap(c)?.pinned === true,
+  jumpToSeq: (seq) => chat.jumpToSeq(seq),
+});
 renderer.bind({
   metaChanged: () => chat.updateHeader(),
   ctxChanged: () => chat.updateCtx(),
@@ -289,6 +299,8 @@ $("chat-more").onclick = () => {
   if (app.current) items.push({ icon: "search", label: t("search_title"), fn: () => search.open() });
   if (app.current && conns.cap(app.current.conn ?? "default")?.first_post === true)
     items.push({ icon: "top", label: t("first_post"), fn: () => $("btn-first").click() });
+  if (app.current && conns.cap(app.current.conn ?? "default")?.pinned === true)
+    items.push({ icon: "pin", label: t("pins_title"), fn: () => $("btn-pins").click() });
   if (app.current && term.supported())
     items.push({ icon: "terminal", label: t("term_title"), fn: () => $("btn-term").click() });
   if (app.current) items.push({ icon: "folder", label: t("files_title"), fn: () => $("btn-files").click() });
@@ -321,6 +333,7 @@ map.init();
 settings.init();
 comps.init();
 initFirstPost((c) => conns.cap(c)?.first_post === true);
+pins.init();
 initModelBar(openFusion);
 initFusionDialog();
 initStatus();

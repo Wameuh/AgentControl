@@ -158,6 +158,35 @@ impl Journal {
         Self::read_from(dir, start_off, before, n)
     }
 
+    /// L'event de seq EXACTE, ou None s'il n'est plus dans le journal
+    /// (trou de compaction, journal vidé, seq jamais atteint) — lookup
+    /// direct par l'index, utilisé par les épinglés pour vérifier que
+    /// leur ancre est encore vivante.
+    pub fn get(&self, dir: &Path, seq: u64) -> Result<Option<Event>> {
+        let off = {
+            let g = self.inner.lock().unwrap();
+            if g.offsets.is_empty() {
+                // Index vide (défensif — voir read_page) → scan complet.
+                drop(g);
+                return Ok(Self::read_from(dir, 0, u64::MAX, usize::MAX)?
+                    .into_iter()
+                    .find(|e| e.seq == seq));
+            }
+            let i = g.offsets.partition_point(|(s, _)| *s < seq);
+            if i < g.offsets.len() && g.offsets[i].0 == seq {
+                Some(g.offsets[i].1)
+            } else {
+                None
+            }
+        };
+        match off {
+            Some(o) => Ok(Self::read_from(dir, o, seq + 1, 1)?
+                .into_iter()
+                .find(|e| e.seq == seq)),
+            None => Ok(None),
+        }
+    }
+
     /// Page ascendante : les `limit` événements avec seq > `after_seq`,
     /// en ordre croissant — pagination vers le présent depuis une vue
     /// ancrée en plein journal (saut vers un résultat de recherche).

@@ -719,6 +719,27 @@ impl Daemon {
                 Ok(json!({"queue": s.queue_snapshot()}))
     }
 
+    /// Épinglés : pin idempotent + liste complète renvoyée dans chaque
+    /// réponse (le client met à jour sans second appel — la liste est
+    /// bornée à PINS_MAX, pas de pagination).
+    pub(super) async fn h_pin_message(self: &Arc<Self>, session: String, seq: u64) -> Result<Value> {
+                let s = self.get_session(&session).await?;
+                let e = s.pin(seq)?;
+                info!("session {session}: message #{seq} épinglé");
+                Ok(json!({"pin": e, "pinned": s.pins_snapshot()}))
+    }
+
+    pub(super) async fn h_unpin_message(self: &Arc<Self>, session: String, seq: u64) -> Result<Value> {
+                let s = self.get_session(&session).await?;
+                let ok = s.unpin(seq);
+                Ok(json!({"ok": ok, "pinned": s.pins_snapshot()}))
+    }
+
+    pub(super) async fn h_list_pinned(self: &Arc<Self>, session: String) -> Result<Value> {
+                let s = self.get_session(&session).await?;
+                Ok(json!({"pinned": s.pins_snapshot()}))
+    }
+
     pub(super) async fn h_queue_edit(self: &Arc<Self>, session: String, index: u64, text: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
                 Ok(json!({"ok": s.queue_edit(index as usize, &text)}))
