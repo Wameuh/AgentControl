@@ -57,7 +57,7 @@ export function themeRgb(varName: string): string | null {
 // Couleurs du mesh = palette résolue courante (--bg + --accent, dérivés
 // du thème en base.css). Conservées en état : tout appel meshSetMood les
 // repasse — sinon un update « agents » écraserait la teinte d'accent.
-let meshColors: { base?: number[]; light?: number[]; agent?: number[] } = {};
+let meshColors: { base?: number[]; light?: number[]; agentTint?: number[] } = {};
 // Fond figé (« Fond animé » off) : pas de repaint — mais la cible de mood
 // suit quand même (freeze) pour que la réactivation reparte à jour.
 export const meshSetMood = (o: object) => {
@@ -118,7 +118,7 @@ function syncMeshAccent() {
     // le preset bicolore sable/sauge (identité app) est conservé.
     const themed = [...document.documentElement.classList]
       .some((c) => c.startsWith("theme-"));
-    if (themed) meshColors.agent = meshAgentRgb(light);
+    if (themed) meshColors.agentTint = meshAgentRgb(light);
   }
   mesh?.setMood(bgMood(), { ...meshColors, intensity: 0.55 });
 }

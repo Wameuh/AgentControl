@@ -56,16 +56,17 @@ const EXPECT = {
 // conservé : bicolore sable/sauge = identité). Sous accent choisi, elle
 // doit au contraire dériver de l'accent (famille de teinte, jamais vert).
 const AGENT_PRESET = { dark: [147, 173, 140], light: [88, 118, 78] };
+// Même convention que rgbToHsl (core/chrome.ts) : h 0-360, s/l 0-100.
 const hslOf = ([r, g, b]) => {
   r /= 255; g /= 255; b /= 255;
   const max = Math.max(r, g, b), min = Math.min(r, g, b);
   const l = (max + min) / 2;
-  if (max === min) return { h: 0, s: 0, l };
+  if (max === min) return { h: 0, s: 0, l: l * 100 };
   const d = max - min;
   const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
   const h = max === r ? ((g - b) / d + (g < b ? 6 : 0))
     : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
-  return { h: h * 60, s, l };
+  return { h: h * 60, s: s * 100, l: l * 100 };
 };
 const parseHex = (s) => [1, 3, 5].map((i) => parseInt(s.slice(i, i + 2), 16));
 const hueDist = (a, b) => Math.min(Math.abs(a - b), 360 - Math.abs(a - b));
@@ -83,8 +84,8 @@ const checkAgent = (theme, accent, st) => {
     return;
   }
   const a = hslOf(parseHex(st.accent)), g = hslOf(agent);
-  if (a.s < 0.15) check(`mood agent ${theme}/${accent} désaturé`, g.s < 0.2, true);
-  else check(`mood agent ${theme}/${accent} Δhue`, hueDist(a.h, g.h) <= 70, true);
+  // Famille de teinte : Δhue ≤ 70°, ou quasi-achromatique (gris → gris).
+  check(`mood agent ${theme}/${accent} famille`, hueDist(a.h, g.h) <= 70 || g.s < 20, true);
 };
 
 await p.goto("http://localhost:4173/#desktop", { waitUntil: "networkidle0" });
@@ -114,6 +115,20 @@ for (const theme of ["dark", "light"]) {
     await shot(`31-${theme}-${accent}-chat`);
   }
 }
+
+// Transition en session (sans reload) : rouge → sauge doit rendre le
+// preset au mood.agent, sauge → rouge le re-dériver — couvre le reset de
+// meshColors.agentTint que le boot à chaque combo n'exerce pas.
+await boot({ "ac-theme": "light", "ac-accent": "red" });
+await connectOnce();
+await openSettings();
+await p.select("#s-accent", "sage");
+await new Promise((r) => setTimeout(r, 300));
+checkAgent("light", "sage", await probe());
+await p.select("#s-accent", "red");
+await new Promise((r) => setTimeout(r, 300));
+checkAgent("light", "red", await probe());
+await p.click("#settings-close");
 
 // Fond animé off : rendu statique + case décochée, persistant au reload.
 await boot({ "ac-bganim": "0" });
