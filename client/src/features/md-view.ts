@@ -79,6 +79,14 @@ export class MdView {
     return this.on && this.md && !this.editing;
   }
 
+  /** Préférence « rendu par défaut » basculée depuis le panneau
+   *  paramètres — la persistance est faite par l'appelant, ici on
+   *  re-synchronise juste la vue courante. */
+  setRender(on: boolean) {
+    this.on = on;
+    this.sync();
+  }
+
   private schedule() {
     window.clearTimeout(this.timer);
     this.timer = window.setTimeout(() => this.render(), 150);
