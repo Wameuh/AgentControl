@@ -351,10 +351,13 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         },
         "component_install" => ReqKind::ComponentInstall {
             name: s("name"),
-            params: p
-                .get("params")
-                .cloned()
-                .and_then(|v| serde_json::from_value(v).ok()),
+            params: match p.get("params") {
+                None => None,
+                Some(v) => Some(
+                    serde_json::from_value(v.clone())
+                        .map_err(|e| format!("component_install: params invalides: {e}"))?,
+                ),
+            },
         },
         "component_set_params" => ReqKind::ComponentSetParams {
             name: s("name"),

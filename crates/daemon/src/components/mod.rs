@@ -239,8 +239,7 @@ impl Components {
     /// Item `ListComponents` pour une spec (toml) ou un internal.
     async fn item_of(&self, name: &str) -> Option<Value> {
         if let Some(spec) = self.specs.read().await.get(name).cloned() {
-            let mut st = self.status_of(&spec).await;
-            st.config_required = render::missing_required(&spec);
+            let st = self.status_of(&spec).await;
             return Some(item_json(
                 &render::masked_spec(&spec),
                 &st,
@@ -552,7 +551,13 @@ impl Components {
             .and_then(|p| p.pid)
             .is_some();
         let restarted = if rendered && alive && spec.kind == ComponentKind::Process {
-            self.restart(name).await.is_ok()
+            match self.restart(name).await {
+                Ok(_) => true,
+                Err(e) => {
+                    warn!("composant « {name} » : restart après set_params en échec: {e:#}");
+                    false
+                }
+            }
         } else {
             false
         };
@@ -918,6 +923,26 @@ fn check_usable(spec: &ComponentSpec) -> Result<()> {
                     format!("param « {} » : défaut invalide", p.key)
                 })?;
             }
+        }
+        // `secret` sans défaut : le schéma part en clair dans
+        // `component_catalog`/`component_info` — un défaut y fuiterait.
+        anyhow::ensure!(
+            !(p.secret && p.default.as_deref().is_some_and(|d| !d.is_empty())),
+            "param « {} » : un secret ne déclare pas de défaut",
+            p.key
+        );
+    }
+    // Valeurs posées : les clés déclarées doivent valider — un upsert
+    // ou une édition brute du toml peut y injecter du non canonique
+    // (un bool verbatim « bogus » rendrait sinon un TOML syntaxiquement
+    // cassé ; le rendu revalide aussi, en défense en profondeur).
+    for (k, v) in &spec.params {
+        if v.is_empty() {
+            continue; // retrait explicite — effective() retombe au défaut
+        }
+        if let Some(ps) = spec.params_schema.iter().find(|p| &p.key == k) {
+            render::validate_value(ps, v)
+                .with_context(|| format!("param « {k} » : valeur invalide"))?;
         }
     }
     // Queries déclarées : nom [a-z0-9-]+, argv non vide, argv0 jamais

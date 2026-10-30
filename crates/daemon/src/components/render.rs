@@ -39,23 +39,20 @@ fn effective(spec: &ComponentSpec, key: &str) -> Option<String> {
         .filter(|d| !d.is_empty())
 }
 
-/// Valeurs effectives complètes (défauts ∪ valeurs posées — la valeur
-/// explicite prime, vide inclus = retrait explicite).
+/// Valeurs effectives complètes — exactement `effective()` par clé
+/// déclarée (défaut ∪ valeur posée ; `""` stocké retombe au défaut
+/// comme le rendu), plus les params libres hors schéma. Ce qui part
+/// par RPC reflète ainsi fidèlement ce que le rendu écrirait.
 pub(super) fn effective_params(spec: &ComponentSpec) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for p in &spec.params_schema {
-        if let Some(d) = &p.default {
-            if !d.is_empty() {
-                out.insert(p.key.clone(), d.clone());
-            }
+        if let Some(v) = effective(spec, &p.key) {
+            out.insert(p.key.clone(), v);
         }
     }
     for (k, v) in &spec.params {
-        // Les specs sans schéma acceptent des params libres — inclus
-        // tels quels (la boucle schéma ne les connaît pas).
-        if v.is_empty() {
-            out.remove(k);
-        } else {
+        // Specs sans schéma = params libres — inclus tels quels.
+        if !v.is_empty() && !spec.params_schema.iter().any(|p| &p.key == k) {
             out.insert(k.clone(), v.clone());
         }
     }
@@ -231,10 +228,14 @@ fn render_template(tpl: &str, spec: &ComponentSpec) -> Result<String> {
 
 /// Littéral TOML du paramètre — string/path/enum/duration → chaîne
 /// échappée, int → nombre nu, bool → true/false, list → tableau.
+/// La valeur est revalidée (`params` est un champ sérialisé : upsert ou
+/// édition manuelle peuvent y injecter du non canonique — un `Bool`
+/// rendu verbatim écrirait sinon du TOML invalide).
 fn toml_literal(ps: &ParamSpec, value: &str) -> Result<String> {
+    let canon = validate_value(ps, value)?;
     let v = match ps.kind {
-        ParamKind::Path => expand_home_str(value),
-        _ => value.to_string(),
+        ParamKind::Path => expand_home_str(&canon),
+        _ => canon,
     };
     Ok(match ps.kind {
         ParamKind::Int => v

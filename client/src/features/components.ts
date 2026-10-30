@@ -481,13 +481,18 @@ export class ComponentsPanel {
         if (vals === null) return;
         params = vals;
       }
-      const r = await call<{ notes?: string[] }>("component_install", {
+      const r = await call<{
+        notes?: string[];
+        config_required?: string[];
+      }>("component_install", {
         name: e.name,
         params,
         conn: this.connParam(),
       });
       for (const n of r.notes ?? []) notify("info", n);
-      notify("success", t("comp_cat_done", { name: e.name }));
+      if (r.config_required?.length)
+        notify("warn", t("comp_cfg_missing", { l: r.config_required.join(", ") }));
+      else notify("success", t("comp_cat_done", { name: e.name }));
       if (!params) {
         const info = await call<ComponentItem>("component_info", {
           name: e.name,
@@ -570,16 +575,28 @@ export class ComponentsPanel {
         lab.appendChild(head);
         if (ps.kind === "enum") {
           el = document.createElement("select");
-          if (!ps.required) {
+          const opts = ps.choices ?? [];
+          // Valeur à choisir vide : toujours offerte en tête —
+          // requise sans défaut → l'utilisateur doit trancher ; non
+          // requise → « — » = non positionné.
+          if (!ps.required || (!set && !ps.default)) {
             const o = document.createElement("option");
             o.value = "";
             o.textContent = "—";
             el.appendChild(o);
           }
-          for (const c of ps.choices ?? []) {
+          for (const c of opts) {
             const o = document.createElement("option");
             o.value = c;
             o.textContent = c;
+            el.appendChild(o);
+          }
+          // Valeur stockée hors `choices` (spec éditée à la main) :
+          // la conserver plutôt que la retirer silencieusement.
+          if (set && !opts.includes(cur)) {
+            const o = document.createElement("option");
+            o.value = cur;
+            o.textContent = `${cur} (?)`;
             el.appendChild(o);
           }
           el.value = set ? cur : (ps.default ?? "");
@@ -620,10 +637,11 @@ export class ComponentsPanel {
           const v = ps.kind === "bool"
             ? ((el as HTMLInputElement).checked ? "true" : "false")
             : el.value.trim();
-          // secret non retapé → clé absente = conserver la valeur posée
-          if (ps.secret && !v) continue;
+          // secret posé, non retapé → clé absente = conserver la
+          // valeur ; secret requis jamais posé tombe dans le required.
           if (!v) {
-            if (ps.required && !has) {
+            if (ps.secret && has) continue;
+            if (ps.required) {
               dlgErr("cp-err", t("comp_param_required", { k: ps.label }));
               return;
             }
@@ -634,7 +652,8 @@ export class ComponentsPanel {
             dlgErr("cp-err", t("comp_param_badint", { k: ps.label }));
             return;
           }
-          if (ps.kind === "duration" && !/^\d+(ms|s|m|h|d)$/.test(v)) {
+          if (ps.kind === "duration"
+              && !/^(\d+(ms|min|s|m|h|d|w)\s*)+$/.test(v)) {
             dlgErr("cp-err", t("comp_param_baddur", { k: ps.label }));
             return;
           }

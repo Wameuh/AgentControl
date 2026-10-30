@@ -207,13 +207,19 @@ pub struct ParamSpec {
 /// est alors absente du fichier et le composant applique son propre
 /// défaut. Le rendu n'écrit que si tous les params `required` ont une
 /// valeur effective : sinon le fichier garde son dernier état complet.
+///
+/// ⚠️ Un placeholder `{{key}}` tient lieu de **valeur entière** dans la
+/// ligne (`cle = {{key}}`) — le placer au milieu d'une chaîne
+/// (`cle = "x{{key}}y"`) produirait du TOML invalide (le littéral est
+/// déjà quoté) ; le template est audité au catalogue en conséquence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigRender {
     /// Fichier écrit — borné sous le HOME du démon (`~` expansé,
     /// `..` refusé, parent canonicalisé), écriture atomique .part+rename,
     /// mode 0600 si un param `secret` est déclaré.
     pub path: String,
-    /// Template TOML complet — placeholders `{{key}}`.
+    /// Template TOML complet — placeholders `{{key}}` en position de
+    /// valeur entière (jamais à l'intérieur d'un littéral chaîne).
     pub template: String,
 }
 
