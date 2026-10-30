@@ -376,10 +376,12 @@ export class MapView {
     // → pas de saut de layout au repli).
     const GRP_PAD = 34; // R_SESS + label en dessous du nœud
     const byGrp = new Map<string, Pt[]>();
+    const sessGrp = new Map<string, string>(); // session id → groupe
     for (const s of sess) {
       if (!s.group) continue;
       const sp = pos.get(`s:${s.id}`);
       if (!sp) continue;
+      sessGrp.set(s.id, s.group);
       const a = byGrp.get(s.group) ?? [];
       a.push(sp);
       byGrp.set(s.group, a);
@@ -430,6 +432,17 @@ export class MapView {
     // dessus des nœuds, contrairement aux cadres qui restent dessous).
     const grpChips: string[] = [];
     const hiddenIds = new Set<string>();
+    // Position de la chip de chaque groupe replié — les arêtes « spawned »
+    // vers un parent masqué en partent (au lieu du point fantôme).
+    const grpChipPos = new Map<string, Pt>();
+    // Cadre capsule commun : 2 membres, ou hull dégénéré (≥3 membres
+    // colinéaires — chaîne spawned_by linéaire = même angle, rayons
+    // croissants → hull réduit à ses 2 extrémités).
+    const capsule = (x1: number, y1: number, x2: number, y2: number, svg: string) =>
+      `<line class="grp-caps" x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" ` +
+      `x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke-width="${2 * GRP_PAD}"/>` +
+      `<text class="grp-label" x="${((x1 + x2) / 2).toFixed(1)}" ` +
+      `y="${(Math.min(y1, y2) - GRP_PAD - 7).toFixed(1)}">${svg}</text>`;
     for (const [g, pts] of [...byGrp].sort((a, b) =>
       a[0].localeCompare(b[0]),
     )) {
@@ -437,11 +450,12 @@ export class MapView {
       if (this.collapsed.has(g)) {
         for (const s of sess)
           if (s.group === g) hiddenIds.add(s.id);
+        grpChipPos.set(g, [cx, cy]);
         const w = Math.max(86, trunc(g, 16).length * 7.2 + 66);
         grpChips.push(
           `<g class="n n-grp" transform="translate(${cx.toFixed(1)} ${cy.toFixed(1)})" ` +
-            `data-group="${q(g)}" role="button" tabindex="0">` +
-            `<title>${esc(t("map_grp_expand", { n: String(pts.length) }))}</title>` +
+            `data-group="${q(esc(g))}" role="button" tabindex="0">` +
+            `<title>${esc(pts.length === 1 ? t("map_grp_expand_1") : t("map_grp_expand", { n: String(pts.length) }))}</title>` +
             `<rect class="nc" x="${(-w / 2).toFixed(1)}" y="${-CHIP_H / 2}" ` +
             `width="${w.toFixed(1)}" height="${CHIP_H}" rx="9"/>` +
             nest(icon("folder"), -w / 2 + 7, -8, 16) +
@@ -451,34 +465,29 @@ export class MapView {
         continue;
       }
       const lbl = esc(trunc(g, 20));
-      const tip = `<title>${esc(t("map_grp_collapse"))}</title>`;
+      const head = `<g class="grp" data-group="${q(esc(g))}" role="button" tabindex="0">` +
+        `<title>${esc(t("map_grp_collapse"))}</title>`;
       if (pts.length === 1) {
         // Membre unique : cadre circulaire autour du nœud.
         const [x, y] = pts[0];
         groups.push(
-          `<g class="grp" data-group="${q(g)}" role="button" tabindex="0">${tip}` +
-            `<circle class="grp-hull" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${GRP_PAD}"/>` +
+          `${head}<circle class="grp-hull" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${GRP_PAD}"/>` +
             `<text class="grp-label" x="${x.toFixed(1)}" y="${(y - GRP_PAD - 7).toFixed(1)}">${lbl}</text></g>`,
-        );
-      } else if (pts.length === 2) {
-        // Capsule : ligne épaisse à bouts ronds joignant les 2 membres.
-        const [[x1, y1], [x2, y2]] = pts;
-        groups.push(
-          `<g class="grp" data-group="${q(g)}" role="button" tabindex="0">${tip}` +
-            `<line class="grp-caps" x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" ` +
-            `x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke-width="${2 * GRP_PAD}"/>` +
-            `<text class="grp-label" x="${cx.toFixed(1)}" y="${(Math.min(y1, y2) - GRP_PAD - 7).toFixed(1)}">${lbl}</text></g>`,
         );
       } else {
         const h = padded(hull(pts), [cx, cy], GRP_PAD);
-        const d =
-          `M${h.map(([x, y]) => `${x.toFixed(1)} ${y.toFixed(1)}`).join("L")}Z`;
-        const top = h.reduce((m, p) => (p[1] < m[1] ? p : m));
-        groups.push(
-          `<g class="grp" data-group="${q(g)}" role="button" tabindex="0">${tip}` +
-            `<path class="grp-hull" d="${d}"/>` +
-            `<text class="grp-label" x="${top[0].toFixed(1)}" y="${(top[1] - 7).toFixed(1)}">${lbl}</text></g>`,
-        );
+        if (h.length < 3) {
+          const [[x1, y1], [x2, y2]] = h;
+          groups.push(`${head}${capsule(x1, y1, x2, y2, lbl)}</g>`);
+        } else {
+          const d =
+            `M${h.map(([x, y]) => `${x.toFixed(1)} ${y.toFixed(1)}`).join("L")}Z`;
+          const top = h.reduce((m, p) => (p[1] < m[1] ? p : m));
+          groups.push(
+            `${head}<path class="grp-hull" d="${d}"/>` +
+              `<text class="grp-label" x="${top[0].toFixed(1)}" y="${(top[1] - 7).toFixed(1)}">${lbl}</text></g>`,
+          );
+        }
       }
     }
 
@@ -507,7 +516,13 @@ export class MapView {
       // n'ont pas de position — ni arête ni nœud pour eux.
       if (!pp || !sp) return;
       if (hiddenIds.has(s.id)) return; // membre d'un groupe replié
-      const [px, py] = pp;
+      let [px, py] = pp;
+      // Parent masqué (groupe replié) : l'arête part de la chip du
+      // groupe — sinon elle pointerait vers un point vide du graphe.
+      if (pk.startsWith("s:") && hiddenIds.has(pk.slice(2))) {
+        const c = grpChipPos.get(sessGrp.get(pk.slice(2)) ?? "");
+        if (c) [px, py] = c;
+      }
       const [x, y] = sp;
       // Arc quadratique : contrôle = milieu + normale, signe alterné par
       // index → les fratries s'écartent au lieu de se superposer.
@@ -638,7 +653,15 @@ export class MapView {
     if (gn) {
       if (this.collapsed.has(gn)) this.collapsed.delete(gn);
       else this.collapsed.add(gn);
+      // Le rebuild innerHTML détruit l'élément focalisé — capturer puis
+      // refocaliser sa nouvelle incarnation (navigation clavier).
+      const hadFocus =
+        document.activeElement === g || g.contains(document.activeElement);
       this.render();
+      if (hadFocus)
+        $("map-svg")
+          .querySelector<SVGGElement>(`[data-group="${CSS.escape(gn)}"]`)
+          ?.focus();
     }
   }
 

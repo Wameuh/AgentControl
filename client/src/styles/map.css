@@ -80,9 +80,12 @@
 #map-svg .n-grp { color: var(--accent); }
 
 /* --- Nœuds --- */
-#map-svg .n[data-session], #map-svg .n[data-comp] { cursor: pointer; }
+#map-svg .n[data-session], #map-svg .n[data-comp], #map-svg .n[data-group] {
+  cursor: pointer;
+}
 #map-svg .n[data-session]:hover .nc, #map-svg .n[data-session]:focus .nc,
-#map-svg .n[data-comp]:hover .nc, #map-svg .n[data-comp]:focus .nc {
+#map-svg .n[data-comp]:hover .nc, #map-svg .n[data-comp]:focus .nc,
+#map-svg .n[data-group]:hover .nc, #map-svg .n[data-group]:focus .nc {
   stroke-width: 2.6;
 }
 #map-svg .n:focus { outline: none; }
