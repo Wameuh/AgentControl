@@ -197,6 +197,11 @@ pub struct OrchProbe {
     /// Fichier `.lock` ouvert et locké tant que le natif travaille —
     /// libéré sur disable pour laisser la place à une autre instance.
     lock_file: Mutex<Option<std::fs::File>>,
+    /// Sérialise le check-then-spawn de `h_manager_spawn` — deux requêtes
+    /// concurrentes ne doivent pas franchir ensemble la fenêtre entre la
+    /// dédupe et l'insertion de la session (doublon orphelin garanti :
+    /// un Manager échappe au cycle de vie orchestrateur).
+    manager_lock: tokio::sync::Mutex<()>,
     /// Réveille la boucle hors période (bascule enable → cycle immédiat).
     wake: tokio::sync::Notify,
 }
@@ -219,6 +224,7 @@ impl OrchProbe {
             }),
             state: Mutex::new(state),
             lock_file: Mutex::new(None),
+            manager_lock: tokio::sync::Mutex::new(()),
             wake: tokio::sync::Notify::new(),
             cfg,
         }
@@ -294,15 +300,7 @@ impl OrchProbe {
             // du client en propose un par entrée quand l'orchestrateur
             // est actif (vide sinon : pas de proposition sur un orch
             // éteint).
-            "workspaces": if self.is_enabled() {
-                self.cfg
-                    .repo_workspaces
-                    .iter()
-                    .map(|(repo, cwd)| json!({"repo": repo, "cwd": cwd}))
-                    .collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            },
+            "workspaces": workspaces_json(self.is_enabled(), &self.cfg),
         })
     }
 
@@ -477,6 +475,29 @@ async fn run_out(argv: &[&str], cwd: &Path) -> Result<(i64, String, String)> {
     ))
 }
 
+/// `orchestrator.workspaces` du status — routing repo → cwd exposé au
+/// client quand l'orchestrateur est actif (vide sinon : la surface
+/// « Manager » ne se propose pas sur un orch éteint).
+fn workspaces_json(enabled: bool, cfg: &cfg::OrchCfg) -> Vec<Value> {
+    if !enabled {
+        return Vec::new();
+    }
+    cfg.repo_workspaces
+        .iter()
+        .map(|(repo, cwd)| json!({"repo": repo, "cwd": cwd}))
+        .collect()
+}
+
+/// « Ce meta est-il un Manager vivant du workspace `repo` ? » —
+/// identité = provenance + titre (le titre est le contrat : un
+/// `rename_session` casse la dédup — assumé, cf. le spawn).
+fn is_live_manager(m: &SessionMeta, repo: &str) -> bool {
+    m.origin.as_deref() == Some(MANAGER_ORIGIN)
+        && m.title == format!("{MANAGER_TITLE_PREFIX}{repo}")
+        && m.state != "dead"
+        && m.state != "interrupted"
+}
+
 impl Daemon {
     /// Boucle de l'orchestrateur backlog — toujours spawnée (la phase
     /// porte l'activation, la bascule à chaud la réveille sans restart).
@@ -580,9 +601,16 @@ impl Daemon {
             (metas, ids)
         };
         let prs = self.prs.list();
+        // Exclusion `origin` par-dessus le préfixe : même un
+        // title_prefix custom qui matcherait « Manager · » ne doit pas
+        // faire entrer les Managers dans le cycle de vie worker
+        // (nudge/rm/garde PR) — leur rôle n'est pas d'implémenter.
         let mut workers: Vec<SessionMeta> = metas
             .iter()
-            .filter(|m| m.title.starts_with(&cfg.title_prefix))
+            .filter(|m| {
+                m.title.starts_with(&cfg.title_prefix)
+                    && m.origin.as_deref() != Some(MANAGER_ORIGIN)
+            })
             .cloned()
             .collect();
         let mut pending: Vec<Task> = tasks
@@ -1143,6 +1171,11 @@ impl Daemon {
             "orchestrateur désactivé — la surface « Manager » n'est \
              proposée que quand il est actif"
         );
+        anyhow::ensure!(
+            self.orch_agentbacklog_bin().await.is_some(),
+            "agentbacklog non résolvable — un Manager sans file à gérer \
+             ne sert à rien"
+        );
         let cfg = &self.orch.cfg;
         let cwd = cfg.repo_workspaces.get(repo).cloned().with_context(|| {
             format!(
@@ -1151,14 +1184,17 @@ impl Daemon {
             )
         })?;
         let title = format!("{MANAGER_TITLE_PREFIX}{repo}");
+        // Check-then-spawn atomique : le lock couvre la dédupe ET le
+        // spawn (requêtes dispatchées en tâches concurrentes — sinon
+        // deux clics simultanés créent deux Managers orphelins, que le
+        // cycle orchestrateur ne réclame jamais).
+        let _spawn_lock = self.orch.manager_lock.lock().await;
         {
             let sessions = self.sessions.read().await;
-            let live = sessions.values().map(|s| s.meta_snapshot()).find(|m| {
-                m.origin.as_deref() == Some(MANAGER_ORIGIN)
-                    && m.title == title
-                    && m.state != "dead"
-                    && m.state != "interrupted"
-            });
+            let live = sessions
+                .values()
+                .map(|s| s.meta_snapshot())
+                .find(|m| is_live_manager(m, repo));
             if let Some(m) = live {
                 return Ok(json!({
                     "session": m.id, "repo": repo, "cwd": cwd,
@@ -1224,5 +1260,76 @@ impl Daemon {
             "enabled": enabled,
             "status": self.orch.status_json(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta(origin: Option<&str>, title: &str, state: &str) -> SessionMeta {
+        SessionMeta {
+            id: "s-x".into(),
+            agent: "devin".into(),
+            title: title.into(),
+            cwd: "/workspace".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            native_session_id: None,
+            mode: None,
+            model: None,
+            available_modes: Vec::new(),
+            available_commands: Vec::new(),
+            available_models: Vec::new(),
+            config_options: Vec::new(),
+            pending_config: Default::default(),
+            state: state.into(),
+            group: None,
+            spawned_by: None,
+            origin: origin.map(str::to_string),
+            context_used: None,
+            context_size: None,
+        }
+    }
+
+    #[test]
+    fn live_manager_predicat() {
+        // Identité = origin + titre « Manager · <repo> », vivant.
+        assert!(is_live_manager(
+            &meta(Some(MANAGER_ORIGIN), "Manager · AgentControl", "idle"),
+            "AgentControl"
+        ));
+        // Mauvais repo → pas le nôtre.
+        assert!(!is_live_manager(
+            &meta(Some(MANAGER_ORIGIN), "Manager · Autre", "idle"),
+            "AgentControl"
+        ));
+        // États terminaux → respawn proposable.
+        for st in ["dead", "interrupted"] {
+            assert!(!is_live_manager(
+                &meta(Some(MANAGER_ORIGIN), "Manager · AgentControl", st),
+                "AgentControl"
+            ));
+        }
+        // Worker/humain sous le même titre → pas un Manager (origin
+        // est la clé de provenance, pas le titre seul).
+        for o in [None, Some(COMPONENT_ORIGIN)] {
+            assert!(!is_live_manager(
+                &meta(o, "Manager · AgentControl", "running"),
+                "AgentControl"
+            ));
+        }
+    }
+
+    #[test]
+    fn workspaces_gated_enabled() {
+        let mut cfg = cfg::OrchCfg::default();
+        assert!(workspaces_json(false, &cfg).is_empty());
+        let ws = workspaces_json(true, &cfg);
+        assert_eq!(ws.len(), 1);
+        assert_eq!(ws[0]["repo"], "AgentControl");
+        cfg.repo_workspaces.insert("Autre".into(), "/tmp/x".into());
+        assert_eq!(workspaces_json(true, &cfg).len(), 2);
+        cfg.repo_workspaces.clear();
+        assert!(workspaces_json(true, &cfg).is_empty());
     }
 }

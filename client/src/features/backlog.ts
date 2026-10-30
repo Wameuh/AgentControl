@@ -182,6 +182,7 @@ export class BacklogView {
     const conn = this.deps.conn();
     if (!this.deps.componentsCapable(conn)) {
       this.state = { kind: "cap" };
+      this.mgrWs = []; // vieux démon : pas de surface Manager
       this.render();
       return;
     }
@@ -189,6 +190,7 @@ export class BacklogView {
       () => null,
     );
     if (!comps) {
+      this.mgrWs = []; // démon injoignable : boutons « Créer » voués à échouer
       this.state = { kind: "err", msg: t("bl_fetch_err") };
       this.render();
       return;
@@ -453,8 +455,10 @@ export class BacklogView {
    *  interrupted = respawn proposable. */
   private mgrSession(repo: string) {
     const title = `Manager · ${repo}`;
+    const conn = this.deps.conn();
     return app.lastSessions.find(
       (s) =>
+        (s.conn ?? "") === conn && // lastSessions est fusionné multi-démons
         s.origin === MGR_ORIGIN &&
         s.title === title &&
         s.state !== "dead" &&
@@ -527,7 +531,10 @@ export class BacklogView {
       return;
     }
     this.render();
-    if (r.v?.session) this.deps.openSession(r.v.session, conn);
+    if (r.v?.session) {
+      nav.closeDrawer(); // mobile : la drawer laisserait le chat masqué
+      this.deps.openSession(r.v.session, conn);
+    }
   }
 
   /** Titre de la session portant cet agent_id — null si inconnue/absente. */
