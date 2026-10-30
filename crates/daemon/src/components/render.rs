@@ -125,7 +125,40 @@ pub(super) fn validate_value(ps: &ParamSpec, raw: &str) -> Result<String> {
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
             .join(",")),
+        ParamKind::Json => {
+            let j: serde_json::Value = serde_json::from_str(v)
+                .with_context(|| format!("« {} » : JSON invalide « {v} »", ps.key))?;
+            // `null` n'existe pas en TOML : rejeté ici plutôt qu'au
+            // rendu — la valeur refusée n'entre jamais dans params.
+            check_no_null(&j, &ps.key)?;
+            // Forme canonique : JSON compact (clés d'objets triées —
+            // serde_json sans preserve_order). Le détail de saisie
+            // (indentation, ordre) n'a pas vocation à survivre.
+            Ok(j.to_string())
+        }
     }
+}
+
+/// `null` interdit partout dans une valeur `json` — le TOML ne sait
+/// pas l'exprimer et un `null` rendu « vide » changerait le sens.
+fn check_no_null(v: &serde_json::Value, key: &str) -> Result<()> {
+    match v {
+        serde_json::Value::Null => {
+            anyhow::bail!("« {key} » : null non représentable en TOML")
+        }
+        serde_json::Value::Array(a) => {
+            for x in a {
+                check_no_null(x, key)?;
+            }
+        }
+        serde_json::Value::Object(o) => {
+            for x in o.values() {
+                check_no_null(x, key)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Durée humaine minimale : segments `nombre+unité` (ms|s|m|min|h|d|w)
@@ -227,7 +260,8 @@ fn render_template(tpl: &str, spec: &ComponentSpec) -> Result<String> {
 }
 
 /// Littéral TOML du paramètre — string/path/enum/duration → chaîne
-/// échappée, int → nombre nu, bool → true/false, list → tableau.
+/// échappée, int → nombre nu, bool → true/false, list → tableau,
+/// json → littéral TOML équivalent (objet → table inline).
 /// La valeur est revalidée (`params` est un champ sérialisé : upsert ou
 /// édition manuelle peuvent y injecter du non canonique — un `Bool`
 /// rendu verbatim écrirait sinon du TOML invalide).
@@ -252,8 +286,78 @@ fn toml_literal(ps: &ParamSpec, value: &str) -> Result<String> {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        ParamKind::Json => {
+            let j: serde_json::Value = serde_json::from_str(&v)
+                .with_context(|| format!("« {} » : JSON invalide", ps.key))?;
+            json_to_toml(&j)?
+        }
         _ => toml_str(&v),
     })
+}
+
+/// Valeur JSON → littéral TOML : objet → table inline `{ k = v, … }`
+/// (clé bare si `[A-Za-z0-9_-]+`, quotée sinon), tableau → `[…]`,
+/// chaîne/nombre/booléen typés, `null` refusé (déjà bloqué à la
+/// validation — le rejet ici est la ceinture pour un params écrit à
+/// la main). Les clés ressortent triées (BTreeMap de serde_json).
+fn json_to_toml(v: &serde_json::Value) -> Result<String> {
+    Ok(match v {
+        serde_json::Value::Null => {
+            anyhow::bail!("null non représentable en TOML")
+        }
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                i.to_string()
+            } else if let Some(u) = n.as_u64() {
+                // TOML int = i64 : un u64 plus grand n'y tient pas —
+                // mieux une erreur qu'un float silencieusement approché.
+                anyhow::ensure!(
+                    u <= i64::MAX as u64,
+                    "entier {u} hors borne i64 — non représentable en TOML"
+                );
+                (u as i64).to_string()
+            } else {
+                let f = n.as_f64().context("nombre JSON illisible")?;
+                anyhow::ensure!(f.is_finite(), "nombre non fini en TOML");
+                // `1.0` s'imprimerait « 1 » → lu int par TOML : forcer
+                // la forme flottante pour garder le type.
+                let mut s = f.to_string();
+                if !s.contains(['.', 'e', 'E', 'n']) {
+                    s.push_str(".0");
+                }
+                s
+            }
+        }
+        serde_json::Value::String(s) => toml_str(s),
+        serde_json::Value::Array(a) => {
+            let items = a
+                .iter()
+                .map(json_to_toml)
+                .collect::<Result<Vec<_>>>()?;
+            format!("[{}]", items.join(", "))
+        }
+        serde_json::Value::Object(o) => {
+            let items = o
+                .iter()
+                .map(|(k, x)| Ok(format!("{} = {}", toml_key(k), json_to_toml(x)?)))
+                .collect::<Result<Vec<_>>>()?;
+            format!("{{ {} }}", items.join(", "))
+        }
+    })
+}
+
+/// Clé TOML : bare quand `[A-Za-z0-9_-]+`, chaîne quotée sinon —
+/// toujours sûr dans une table inline (`{ "k" = v }` est valide).
+fn toml_key(k: &str) -> String {
+    if !k.is_empty()
+        && k.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        k.to_string()
+    } else {
+        toml_str(k)
+    }
 }
 
 /// Chaîne TOML basique `"…"` — échappe `\`, `"` et les contrôles.
@@ -356,6 +460,15 @@ mod tests {
         assert!(validate_value(&e, "c").is_err());
         let l = ps("l", ParamKind::List, false);
         assert_eq!(validate_value(&l, "a, b ,, c").unwrap(), "a,b,c");
+        let j = ps("j", ParamKind::Json, false);
+        // Canonique : JSON compact, clés triées.
+        assert_eq!(
+            validate_value(&j, "[ { \"b\": 1, \"a\": \"x\" } ]").unwrap(),
+            r#"[{"a":"x","b":1}]"#
+        );
+        assert!(validate_value(&j, "{oops").is_err());
+        assert!(validate_value(&j, r#"[{"a": null}]"#).is_err());
+        assert!(validate_value(&j, "null").is_err());
     }
 
     #[test]
@@ -398,6 +511,40 @@ mod tests {
         let out = render_template("v = {{k}}\n", &spec).unwrap();
         assert_eq!(out, "v = \"a\\\"b\\\\c\"\n");
         assert!(render_template("v = {{inconnu}}\n", &spec).is_err());
+    }
+
+    #[test]
+    fn rendu_json_tables_inline() {
+        let spec = spec_with(
+            vec![ps("repos", ParamKind::Json, false)],
+            &[(
+                "repos",
+                r#"[
+                    {"repo": "a/b", "repo_dir": "/x", "max_parallel": 2,
+                     "agent": {"model": "m"}, "dry": true},
+                    {"repo": "c/d", "repo_dir": "~/y"}
+                ]"#,
+            )],
+        );
+        let out = render_template("repos = {{repos}}\n", &spec).unwrap();
+        assert_eq!(
+            out,
+            "repos = [{ agent = { model = \"m\" }, dry = true, max_parallel = 2, \
+             repo = \"a/b\", repo_dir = \"/x\" }, { repo = \"c/d\", repo_dir = \"~/y\" }]\n"
+        );
+        // null partout rejeté (rendu sur params injecté à la main).
+        let bad = spec_with(
+            vec![ps("repos", ParamKind::Json, false)],
+            &[("repos", r#"[{"repo": null}]"#)],
+        );
+        assert!(render_template("repos = {{repos}}\n", &bad).is_err());
+        // Scalaires : float garde sa forme, clé non-bare quotée.
+        let scal = spec_with(
+            vec![ps("v", ParamKind::Json, false)],
+            &[("v", r#"{"k.1": 2.0, "e": 1e3}"#)],
+        );
+        let out = render_template("v = {{v}}\n", &scal).unwrap();
+        assert_eq!(out, "v = { e = 1000.0, \"k.1\" = 2.0 }\n");
     }
 
     #[test]

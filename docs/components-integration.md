@@ -274,8 +274,12 @@ la configuration utilisateur.
 - **`ParamSpec`** déclaré par entrée (`component_catalog` →
   `entry.params`) : `{key, label, description?, required, kind,
   default?, secret?, validation?, choices?}` avec
-  `kind ∈ string | path | int | duration | bool | enum | list`
+  `kind ∈ string | path | int | duration | bool | enum | list | json`
   (`validation` = regex pour string/path, `choices` pour enum).
+  `json` = valeur JSON libre — validée syntaxiquement (`null` partout
+  interdit, inexprimable en TOML), stockée en forme canonique compacte,
+  rendue en littéral TOML récursif (objet → table inline, clés triées)
+  — le type pour les paramètres structurés (listes de tables).
 - **Install** : `ComponentInstall {name, params?}` — les valeurs
   collectées (dialogue client, `acctl comp install --set K=V`) sont
   validées **avant** les étapes de la recette ; la spec matérialisée
@@ -305,11 +309,35 @@ la configuration utilisateur.
 
 Exemple `agentreviewer` : `repo*` + `repo_dir*` requis ;
 `worktree_root` (`~/.local/state/agentreviewer/worktrees`),
-`trigger` (`/mr review`), `group` (`AgentReviewer`), `max_parallel`
-(1), `review_timeout` (3h), `keep_sessions`, `mode` (enum
-daemon|systemd, vide = auto), `daemon`, `agent.command` (`devin`),
-`agent.profile`, `agent.model` — rendus dans
+`repos` (json — liste d'objets `{repo, repo_dir, worktree_root?,
+trigger?, group?, max_parallel?, agent?}` rendue
+`repos = [ { … } ]`, dépôts supplémentaires du multi-repo
+agent-reviewer ≥ 0.3), `trigger` (`/mr review`), `group`
+(`AgentReviewer`), `max_parallel` (1), `review_timeout` (3h),
+`keep_sessions`, `mode` (enum daemon|systemd, vide = auto), `daemon`,
+`agent.command` (`devin`), `agent.profile`, `agent.model` — rendus dans
 `~/.config/agentreviewer/config.toml`.
+
+#### 2.5.2 Review locale pré-push — surface agent
+
+Upstream (≥ 0.3) expose un CLI générique de review locale
+(`agent-reviewer review --path <worktree> --base <ref>`) : le diff est
+déjà matérialisé (pas de worktree créé), le verdict + la review
+sortent sur stdout et le code de sortie encode le verdict — aucune PR
+ni commentaire GitHub. Cas d'usage : un worker backlog fait relire son
+diff avant de pousser.
+
+Surface côté AgentControl — choix tranché : **documentation du chemin
+CLI dans le prompt worker intégré** (`server/orch.rs::PROMPT`,
+surchargeable via `[backlog_orchestrator] prompt`). Le worker appelle
+le CLI comme un outil ordinaire ; en mode `daemon` la session de
+review upstream apparaît dans le groupe « AgentReviewer » comme les
+reviews PR. Les alternatives ont été écartées : une `queries` auditée
+est un argv fixe synchrone (pas de paramètres, timeout court) — une
+review est longue et paramétrée ; un RPC/action de composant dédié
+ajouterait une surface proto pour un besoin couvert par le binaire
+déjà installé (le composant reste auto-contenu, zéro couplage
+supplémentaire — AgentReviewer garde son interface générique).
 
 ### 2.6 UI client — panneau « Composants »
 

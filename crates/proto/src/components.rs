@@ -162,6 +162,12 @@ pub enum ParamKind {
     Enum,
     /// Liste de chaînes — saisie CSV, rendue `["a", "b"]`.
     List,
+    /// Valeur JSON — saisie JSON brute, rendue en littéral TOML
+    /// équivalent (objet → table inline `{ "k" = v }`, tableau →
+    /// `[…]`, scalaires typés) ; `null` rejeté (inexprimable en TOML).
+    /// Sert aux paramètres structurés — ex. une liste de tables
+    /// `repos = [ { repo = "o/r", … } ]`.
+    Json,
 }
 
 /// Paramètre de configuration déclaré par une entrée catalogue.
@@ -202,7 +208,7 @@ pub struct ParamSpec {
 /// Cible de rendu de la config utilisateur — template TOML dans lequel
 /// `{{key}}` est substitué par le littéral TOML typé du paramètre
 /// (string/enum/path/duration → `"…"` échappé, int → nu, bool →
-/// `true/false`, list → `["…"]`). Une ligne dont un placeholder reste
+/// `true/false`, list → `["…"]`, json → littéral TOML équivalent). Une ligne dont un placeholder reste
 /// sans valeur (param optionnel non positionné) est omise — la clé
 /// est alors absente du fichier et le composant applique son propre
 /// défaut. Le rendu n'écrit que si tous les params `required` ont une

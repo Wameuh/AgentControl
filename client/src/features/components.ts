@@ -67,6 +67,16 @@ function paramList(v: string): string[] {
   return v.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
+/** Chaîne stockée d'un param `json` (forme canonique compacte) → JSON
+ *  pretty-print pour le textarea ; invalide → la chaîne telle quelle. */
+function paramJson(v: string): string {
+  try {
+    return JSON.stringify(JSON.parse(v), null, 2);
+  } catch {
+    return v;
+  }
+}
+
 /** Spec vierge d'un nouveau composant (défauts du démon : on-failure/5 s). */
 function defaultSpec(): ComponentSpec {
   return {
@@ -573,7 +583,7 @@ export class ComponentsPanel {
     dlgErr("cp-err", null);
     const inputs: {
       ps: ParamSpec;
-      el: HTMLInputElement | HTMLSelectElement;
+      el: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
       has: boolean;
     }[] = [];
     for (const ps of schema) {
@@ -582,7 +592,7 @@ export class ComponentsPanel {
       const set = cur !== undefined && cur !== "";
       const head = document.createElement("span");
       head.textContent = ps.label + (ps.required ? " *" : "");
-      let el: HTMLInputElement | HTMLSelectElement;
+      let el: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
       if (ps.kind === "bool") {
         el = document.createElement("input");
         el.type = "checkbox";
@@ -620,6 +630,11 @@ export class ComponentsPanel {
             el.appendChild(o);
           }
           el.value = set ? cur : (ps.default ?? "");
+        } else if (ps.kind === "json") {
+          el = document.createElement("textarea");
+          (el as HTMLTextAreaElement).rows = 4;
+          el.spellcheck = false;
+          el.value = set ? paramJson(cur) : (ps.default ?? "");
         } else {
           el = document.createElement("input");
           el.type = ps.secret ? "password"
@@ -680,6 +695,14 @@ export class ComponentsPanel {
           if (ps.kind === "enum" && !(ps.choices ?? []).includes(v)) {
             dlgErr("cp-err", t("comp_param_badenum", { k: ps.label }));
             return;
+          }
+          if (ps.kind === "json") {
+            try {
+              JSON.parse(v);
+            } catch {
+              dlgErr("cp-err", t("comp_param_badjson", { k: ps.label }));
+              return;
+            }
           }
           if (ps.validation) {
             try {
@@ -798,7 +821,8 @@ export class ComponentsPanel {
 
   /** Rend un champ par param déclaré : string/path/duration → texte,
    *  int → nombre, bool → case, enum → select `choices`, list →
-   *  textarea (une entrée par ligne — CSV sur le fil), secret →
+   *  textarea (une entrée par ligne — CSV sur le fil), json → textarea
+   *  JSON (pretty-printé, re-compacté à la collecte), secret →
    *  password jamais prérempli (vide = conserver la valeur masquée).
    *  `data-pkey` relie chaque input à sa déclaration pour
    *  collectParams. `params`/`default` sont en forme chaîne — castés
@@ -863,6 +887,15 @@ export class ComponentsPanel {
           ta.rows = 3;
           ta.spellcheck = false;
           ta.value = paramList(cur).join("\n");
+          input = ta;
+          label.append(span, ta);
+          break;
+        }
+        case "json": {
+          const ta = document.createElement("textarea");
+          ta.rows = 5;
+          ta.spellcheck = false;
+          ta.value = paramJson(cur);
           input = ta;
           label.append(span, ta);
           break;
@@ -934,6 +967,23 @@ export class ComponentsPanel {
           if (!v.length) need();
           if (v.join(",") !== paramList(cur).join(","))
             patch[p.key] = v.join(",");
+          break;
+        }
+        case "json": {
+          const v = (el as HTMLTextAreaElement).value.trim();
+          if (!v) need();
+          if (v) {
+            try {
+              // Forme canonique comme le démon : JSON compact — un
+              // pretty-print identique n'envoie pas de patch inutile.
+              const canon = JSON.stringify(JSON.parse(v));
+              if (canon !== cur) patch[p.key] = canon;
+            } catch {
+              throw new Error(
+                t("comp_param_badjson", { k: p.label || p.key }),
+              );
+            }
+          }
           break;
         }
         default: {
