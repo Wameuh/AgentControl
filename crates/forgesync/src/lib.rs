@@ -94,11 +94,19 @@ fn host_base(host: &str) -> String {
     format!("{}://{host}", forge_scheme(host))
 }
 
-/// GET JSON avec timeout borné — sync GitLab/Gerrit. Tolérant : toute
-/// erreur (réseau, non-2xx, JSON) → None, l'appelant dégrade proprement.
-/// Le préfixe anti-XSSI `)]}'` de Gerrit est strippé. Redirects refusés :
-/// un en-tête d'auth ne doit jamais suivre vers un autre hôte.
-fn http_json(url: &str, headers: &[(&str, String)]) -> Option<Value> {
+/// Réponse HTTP d'un GET forge — `Code` conserve le statut d'erreur
+/// (404 ≠ panne : la vérification d'existence en a besoin pour trancher
+/// « absent » vs « injoignable ») ; `Down` = transport/timeout/JSON
+/// illisible.
+enum Http {
+    Ok(Value),
+    Code(u16),
+    Down,
+}
+
+/// GET JSON avec statut conservé — même politique que `http_json`
+/// (timeout borné, anti-XSSI Gerrit, redirects refusés).
+fn http_status(url: &str, headers: &[(&str, String)]) -> Http {
     let agent = ureq::AgentBuilder::new()
         .redirects(0)
         .timeout(std::time::Duration::from_secs(8))
@@ -107,11 +115,105 @@ fn http_json(url: &str, headers: &[(&str, String)]) -> Option<Value> {
     for (k, v) in headers {
         req = req.set(k, v.as_str());
     }
-    let body = req.call().ok()?.into_string().ok()?;
-    let body = body.strip_prefix(")]}'").map_or(body.as_str(), |b| {
-        b.trim_start_matches(|c: char| c == '\n' || c == '\'')
+    match req.call() {
+        Ok(resp) => {
+            let Ok(body) = resp.into_string() else {
+                return Http::Down;
+            };
+            let body = body.strip_prefix(")]}'").map_or(body.as_str(), |b| {
+                b.trim_start_matches(|c: char| c == '\n' || c == '\'')
+            });
+            serde_json::from_str(body).map(Http::Ok).unwrap_or(Http::Down)
+        }
+        Err(ureq::Error::Status(code, _)) => Http::Code(code),
+        Err(_) => Http::Down,
+    }
+}
+
+/// GET JSON avec timeout borné — sync GitLab/Gerrit. Tolérant : toute
+/// erreur (réseau, non-2xx, JSON) → None, l'appelant dégrade proprement.
+/// Le préfixe anti-XSSI `)]}'` de Gerrit est strippé. Redirects refusés :
+/// un en-tête d'auth ne doit jamais suivre vers un autre hôte.
+fn http_json(url: &str, headers: &[(&str, String)]) -> Option<Value> {
+    match http_status(url, headers) {
+        Http::Ok(v) => Some(v),
+        _ => None,
+    }
+}
+
+/// Code HTTP rapporté par `gh api` sur stderr (« gh: Not Found (HTTP
+/// 404) », « gh: API rate limit exceeded … (HTTP 403) ») — None quand
+/// l'échec n'est pas une réponse HTTP (DNS, timeout, gh absent).
+fn gh_err_code(stderr: &str) -> Option<u16> {
+    let mut rest = stderr;
+    while let Some(i) = rest.find("HTTP") {
+        rest = rest[i + 4..].trim_start_matches([' ', '/']);
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(code) = digits.parse::<u16>() {
+            return Some(code);
+        }
+    }
+    None
+}
+
+/// `gh api <endpoint>` — sortie classée : `Ok(stdout)` si exit 0,
+/// `Http(code)` sur un échec HTTP identifiable, `Down` sinon (gh absent,
+/// réseau, timeout — jamais un refus définitif).
+fn gh_api(endpoint: &str) -> GhCall {
+    let mut child = match Command::new("gh")
+        .args(["api", endpoint])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("GH_PAGER", "cat")
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return GhCall::Down,
+    };
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let out_drain = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = stdout.read_to_string(&mut buf);
+        buf
     });
-    serde_json::from_str(body).ok()
+    let err_drain = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = stderr.read_to_string(&mut buf);
+        buf
+    });
+    let deadline = Instant::now() + GH_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return GhCall::Down;
+            }
+        }
+    };
+    if status.success() {
+        let _ = out_drain.join();
+        return GhCall::Ok;
+    }
+    let _ = out_drain.join();
+    let err = err_drain.join().unwrap_or_default();
+    match gh_err_code(&err) {
+        Some(code) => GhCall::Http(code),
+        None => GhCall::Down,
+    }
+}
+
+/// Résultat classé d'un `gh api` — voir `gh_api`.
+enum GhCall {
+    Ok,
+    Http(u16),
+    Down,
 }
 
 /// Encodage path-segment (RFC 3986 unreserved) — chemins de projet dans
@@ -290,6 +392,109 @@ pub fn live_ref(set: &[Value], t: &RefTarget) -> Option<Value> {
             })
         }
         _ => None,
+    }
+}
+
+/// Verdict d'une vérification d'existence d'une référence sur sa forge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verify {
+    /// La forge répond et connaît la référence (repo + PR/MR/change).
+    Exists,
+    /// La forge répond et la référence (ou son repo) n'y existe pas —
+    /// ou ne pourra jamais être relue par ce démon : 401/403 sur une
+    /// forge REST = illisible sans droits qu'un sync ne retrouverait
+    /// pas non plus ; hôte non déclaré = jamais requêté.
+    Missing,
+    /// Verdict impossible : panne réseau, 5xx, rate-limit, outil absent
+    /// (`gh` manquant ou non authentifié côté github). À retenter —
+    /// n'est jamais un refus définitif.
+    Unreachable,
+}
+
+/// Existence-check d'une référence avant enregistrement auto (watcher →
+/// file de vérif du démon). Mêmes canaux que le sync : `gh api
+/// repos/{o}/{r}/pulls/{n}` pour github, REST borné aux hôtes déclarés
+/// pour gitlab (`/api/v4/…/merge_requests/<iid>`) et gerrit
+/// (`/changes/<num|Change-Id>`). Bloquant — à appeler hors du chemin
+/// critique (spawn_blocking / worker dédié).
+pub fn verify_ref(set: &[Value], t: &RefTarget) -> Verify {
+    match t.forge.as_str() {
+        "github" => verify_github(t),
+        "gitlab" => verify_gitlab(set, t),
+        "gerrit" => verify_gerrit(set, t),
+        _ => Verify::Unreachable,
+    }
+}
+
+/// GitHub : la PR existe si `gh api` la lit. Sans `gh` fonctionnel
+/// (binaire absent ou `gh auth status` KO) aucun verdict n'est possible
+/// — et le sync ne pourrait de toute façon jamais relire l'entrée.
+/// Hôte ≠ github.com : hors périmètre de `gh`, jamais résolvable →
+/// `Missing` direct (l'extracteur ne produit d'ailleurs que github.com).
+fn verify_github(t: &RefTarget) -> Verify {
+    if t.host != "github.com" {
+        return Verify::Missing;
+    }
+    if !gh_ok(&["auth", "status"]) {
+        return Verify::Unreachable;
+    }
+    match gh_api(&format!("repos/{}/pulls/{}", t.repo, t.pr)) {
+        GhCall::Ok => Verify::Exists,
+        GhCall::Http(404) | GhCall::Http(410) => Verify::Missing,
+        // 403 (rate-limit, SSO non granté), 5xx, échec sans statut →
+        // indécidable : à retenter, pas un refus définitif.
+        _ => Verify::Unreachable,
+    }
+}
+
+/// GitLab : MR lue via REST `merge_requests/<iid>` — borné aux hôtes
+/// déclarés (comme la collecte : le registre ne doit pas devenir un
+/// vecteur de requêtes vers un hôte arbitraire). 401/403 sur un hôte
+/// déclaré = le démon ne pourra jamais la relire → `Missing`.
+fn verify_gitlab(set: &[Value], t: &RefTarget) -> Verify {
+    let declared: Vec<&str> = forge_hosts(set, "gitlab")
+        .iter()
+        .map(|(h, _)| *h)
+        .collect();
+    if !declared.contains(&t.host.as_str()) {
+        return Verify::Missing;
+    }
+    let auth = forge_auth(set, "gitlab", &t.host);
+    let headers: Vec<(&str, String)> = auth
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.clone()))
+        .collect();
+    let base = host_base(&t.host);
+    let url = format!(
+        "{base}/api/v4/projects/{}/merge_requests/{}",
+        urlenc(&t.repo),
+        t.pr
+    );
+    match http_status(&url, &headers) {
+        Http::Ok(_) => Verify::Exists,
+        Http::Code(401) | Http::Code(403) | Http::Code(404) | Http::Code(410) => Verify::Missing,
+        _ => Verify::Unreachable,
+    }
+}
+
+/// Gerrit : `GET /changes/<num|Change-Id>` anonyme, hôtes déclarés
+/// seulement. 404 = change inconnu ; 401/403 = non lisible sans auth
+/// (la collecte est anonyme aussi → non résoluble par construction).
+fn verify_gerrit(set: &[Value], t: &RefTarget) -> Verify {
+    let declared: Vec<&str> = forge_hosts(set, "gerrit")
+        .iter()
+        .map(|(h, _)| *h)
+        .collect();
+    if !declared.contains(&t.host.as_str()) {
+        return Verify::Missing;
+    }
+    let n_str = t.pr.to_string();
+    let q = t.change_id.as_deref().unwrap_or(&n_str);
+    let base = host_base(&t.host);
+    match http_status(&format!("{base}/changes/{q}"), &[]) {
+        Http::Ok(_) => Verify::Exists,
+        Http::Code(401) | Http::Code(403) | Http::Code(404) => Verify::Missing,
+        _ => Verify::Unreachable,
     }
 }
 
@@ -686,6 +891,23 @@ mod tests {
         );
         assert_eq!(gerrit_state(&json!({"status": "MERGED"})), "merged");
         assert_eq!(gerrit_state(&json!({"status": "ABANDONED"})), "closed");
+    }
+
+    /// Le code HTTP est retrouvé dans les formats d'erreur `gh api`
+    /// (« gh: Not Found (HTTP 404) », rate-limit 403) ; une panne sans
+    /// statut → None (Down, jamais un Missing).
+    #[test]
+    fn gh_err_code_parses() {
+        assert_eq!(gh_err_code("gh: Not Found (HTTP 404)"), Some(404));
+        assert_eq!(
+            gh_err_code("gh: API rate limit exceeded for user ID 42. (HTTP 403)"),
+            Some(403)
+        );
+        assert_eq!(gh_err_code("gh: HTTP 502 Bad Gateway"), Some(502));
+        assert_eq!(gh_err_code("error connecting to api.github.com"), None);
+        assert_eq!(gh_err_code(""), None);
+        // « HTTP » sans code qui suit → poursuite du scan.
+        assert_eq!(gh_err_code("HTTP then gh: Not Found (HTTP 404)"), Some(404));
     }
 
     /// Les hôtes absents de `forge_list` ne doivent jamais être

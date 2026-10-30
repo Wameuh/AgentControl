@@ -24,13 +24,55 @@ Signal fort de (ré)attribution : `gh pr create`, `glab mr create`,
 `git review`, push `refs/for/*` dans le titre du tool call.
 
 Les sorties outils reproduisent aussi le contenu des fichiers lus
-(docs, specs, `AGENTS.md`, tests) — une **denylist de placeholders**
-empêche leurs URLs de créer des entrées fantômes : tout chemin de repo
-dont chaque segment tient en un caractère ou est un libellé générique
-(`o/r`, `g/p`, `owner/repo`, `grp/sub/proj`, `a/b`, `foo/bar`,
-`exemple/truc`…) est ignoré à la détection. Un `pr add` manuel reste
-possible (intention explicite), et GitLab/Gerrit ne matchent de toute
-façon que les hôtes déclarés.
+(docs, specs, `AGENTS.md`, tests) — deux barrières empêchent leurs URLs
+de créer des entrées fantômes :
+
+- une **denylist de placeholders** à l'extraction : tout chemin de repo
+  dont chaque segment tient en un caractère ou est un libellé générique
+  (`o/r`, `g/p`, `owner/repo`, `grp/sub/proj`, `a/b`, `foo/bar`,
+  `exemple/truc`…) est ignoré avant même d'être une référence ;
+- une **vérification d'existence sur la forge** pour toute référence
+  *nouvelle* : l'entrée n'est créée que si la forge connaît réellement
+  le repo ET la review — une URL plausible mais inventée (`corp/tools`,
+  `infra-team/deploy/tool`…) n'entre jamais. Un `pr add` manuel reste
+  possible (intention explicite, jamais vérifié), et GitLab/Gerrit ne
+  matchent que les hôtes déclarés.
+
+## Vérification d'existence (détection auto)
+
+Une référence inconnue extraite d'une sortie part en **file de
+vérification** dédiée (worker unique, un appel forge à la fois,
+~300 ms entre appels) — le watcher n'attend jamais le réseau :
+
+- **GitHub** : `gh api repos/{o}/{r}/pulls/{n}` (auth `gh` requise) ;
+- **GitLab** : `GET <host>/api/v4/projects/<enc>/merge_requests/<iid>` —
+  hôtes déclarés seulement, `token_env` honoré ;
+- **Gerrit** : `GET <host>/changes/<num|Change-Id>` anonyme — hôtes
+  déclarés seulement.
+
+Verdicts : **existe** → l'entrée est enregistrée (event « PR détectée »
+comme avant) ; **inexistante** (404/410, ou 401/403 = jamais relisible
+par ce démon ; hôte non déclaré) → rejet + **cache négatif borné**
+(1024 entrées, TTL 30 min) : les ré-occurrences de la même URL sont
+ignorées sans nouvel appel, mais une référence créée *après* sa
+citation redevient enregistrable à expiration ; **forge injoignable**
+(panne, 5xx, rate-limit, `gh` absent/non authentifié) → retentatives
+en backoff sur ~15 min puis **abandon** — la détection reste
+best-effort : une URL réapparaissant plus tard en sortie reprendra le
+cycle (et le backfill du journal au redémarrage rejoue les sorties).
+
+Garde-fous : file dédupliquée par clé de référence (plafond 256 —
+un flood d'URLs distinctes n'emballe ni la forge ni la mémoire) ;
+une référence déjà au registre ne retourne jamais en vérif (la
+détection synchrone reprend : réattribution « forte » éventuelle) ;
+entrée créée entre-temps (`pr add`, autre file) → vérif sauté au
+moment du traitement.
+
+Conséquence sur un démon **sans `gh` fonctionnel** : les URLs github
+ne peuvent pas être vérifiées → pas d'enregistrement auto (les
+retentatives s'épuisent) ; `acctl pr add` reste le recours — choix
+délibéré : une entrée que ce démon ne pourrait jamais relire au sync
+n'aurait de toute façon aucune valeur.
 
 ## Configuration
 
