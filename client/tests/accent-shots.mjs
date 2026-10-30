@@ -44,8 +44,8 @@ const probe = () =>
     };
   });
 const openSettings = async () => {
-  await p.click("#tb-settings");
-  await new Promise((r) => setTimeout(r, 300));
+  await p.evaluate(() => document.querySelector("#tb-settings")?.click());
+  await p.waitForSelector("#settings-close", { visible: true });
 };
 
 const EXPECT = {
@@ -76,16 +76,35 @@ const check = (label, got, want) => {
   if (!ok) fail++;
   console.log(`${ok ? "ok  " : "FAIL"} ${label}: ${got} (attendu ${want})`);
 };
+// En thème clair (« paper ») les couleurs de lumière sont SOUSTRAITES
+// de la base (sgn<0 dans mesh-bg#shade) : la teinte visible des
+// facettes est le résidu `base − light`, pas la lumière elle-même —
+// c'est elle qui doit rester dans la famille de l'accent (sinon
+// complémentaire : violet → facettes vertes, c'était le bug #81).
+const visible = (theme, base, c) =>
+  theme === "light" ? base.map((b, i) => Math.max(0, b - c[i])) : c;
 const checkAgent = (theme, accent, st) => {
   const agent = st.mood?.agent?.map(Math.round);
-  if (!agent) { check(`mood agent ${theme}/${accent}`, "absent", "rgb"); return; }
+  const base = st.mood?.base?.map(Math.round);
+  if (!agent || !base) { check(`mood agent ${theme}/${accent}`, "absent", "rgb"); return; }
   if (accent === "sage") {
     check(`mood agent ${theme}/${accent}`, agent.join(","), AGENT_PRESET[theme].join(","));
     return;
   }
-  const a = hslOf(parseHex(st.accent)), g = hslOf(agent);
+  const a = hslOf(parseHex(st.accent)), g = hslOf(visible(theme, base, agent));
   // Famille de teinte : Δhue ≤ 70°, ou quasi-achromatique (gris → gris).
   check(`mood agent ${theme}/${accent} famille`, hueDist(a.h, g.h) <= 70 || g.s < 20, true);
+};
+// Lumière principale : en dark elle *est* l'accent ; en light, son
+// résidu sur le papier doit rester dans sa famille (violet → violet
+// sombre, jamais vert). Accent par défaut : preset non dérivé — skip.
+const checkLight = (theme, accent, st) => {
+  if (accent === "sage") return;
+  const light = st.mood?.light?.map(Math.round);
+  const base = st.mood?.base?.map(Math.round);
+  if (!light || !base) { check(`mood light ${theme}/${accent}`, "absent", "rgb"); return; }
+  const a = hslOf(parseHex(st.accent)), g = hslOf(visible(theme, base, light));
+  check(`mood light ${theme}/${accent} famille`, hueDist(a.h, g.h) <= 70 || g.s < 20, true);
 };
 
 await p.goto("http://localhost:4173/#desktop", { waitUntil: "networkidle0" });
@@ -93,11 +112,16 @@ await new Promise((r) => setTimeout(r, 400));
 // Connexion mock + ouverture de la 1re session → les shots chat montrent
 // de vraies bulles user (contraste --msg-user-fg sur --msg-user-bg).
 const connectOnce = async () => {
-  await p.click("#btn-connect");
-  await new Promise((r) => setTimeout(r, 300));
-  await p.click("#c-go");
-  await new Promise((r) => setTimeout(r, 700));
-  await p.click(".sess");
+  // La vue connexion peut être déjà auto-ouverte (accueil sans connexion)
+  // — #btn-connect est un toggle : ne cliquer que si elle est cachée.
+  await p.evaluate(() => {
+    if (document.getElementById("conn-view")?.hidden)
+      document.querySelector("#btn-connect")?.click();
+  });
+  await p.waitForSelector("#c-go", { visible: true });
+  await p.evaluate(() => document.querySelector("#c-go")?.click());
+  await p.waitForSelector(".sess", { visible: true });
+  await p.evaluate(() => document.querySelector(".sess")?.click());
   await new Promise((r) => setTimeout(r, 500));
 };
 for (const theme of ["dark", "light"]) {
@@ -109,9 +133,10 @@ for (const theme of ["dark", "light"]) {
     check(`--accent ${theme}/${accent}`, st.accent, EXPECT[theme][accent]);
     check(`class ${theme}/${accent}`, st.cls.includes(`theme-${accent}`) || accent === "sage", true);
     checkAgent(theme, accent, st);
+    checkLight(theme, accent, st);
     await openSettings();
     await shot(`30-${theme}-${accent}-settings`);
-    await p.click("#settings-close");
+    await p.evaluate(() => document.querySelector("#settings-close")?.click());
     await shot(`31-${theme}-${accent}-chat`);
   }
 }
@@ -128,7 +153,7 @@ checkAgent("light", "sage", await probe());
 await p.select("#s-accent", "red");
 await new Promise((r) => setTimeout(r, 300));
 checkAgent("light", "red", await probe());
-await p.click("#settings-close");
+await p.evaluate(() => document.querySelector("#settings-close")?.click());
 
 // Fond animé off : rendu statique + case décochée, persistant au reload.
 await boot({ "ac-bganim": "0" });
@@ -137,7 +162,7 @@ await openSettings();
 check("anim off (checkbox)", (await probe()).checkbox, false);
 await shot("32-bganim-off");
 // Re-cocher via l'UI → setAnimated(true) + pref persistée.
-await p.click("#s-bganim");
+await p.evaluate(() => document.querySelector("#s-bganim")?.click());
 await new Promise((r) => setTimeout(r, 200));
 check("anim on (pref)", await p.evaluate(() => localStorage.getItem("ac-bganim")), "1");
 
