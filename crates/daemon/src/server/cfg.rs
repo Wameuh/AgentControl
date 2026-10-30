@@ -85,12 +85,36 @@ impl Default for RetentionCfg {
 /// Orchestrateur backlog natif (section [backlog_orchestrator] de
 /// config.toml) — port interne du service `backlog-orchestrator.py`
 /// (voir server/orch.rs). **Désactivé par défaut** (opt-in explicite) ;
-/// bascule à chaud possible via `ReqKind::OrchestratorSet`.
-#[derive(Debug, Clone, serde::Deserialize)]
+/// bascule à chaud possible via `ReqKind::OrchestratorSet`, champs
+/// éditables à chaud + persistés via `ReqKind::OrchestratorConfig`
+/// (la section config.toml est réécrite — Serialize sert à ça).
+///
+/// ⚠️ Ordre des champs : `repo_workspaces` (sous-table TOML) doit
+/// rester DERNIER — une clé simple sérialisée après lui partirait
+/// dans sa sous-table.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OrchCfg {
     /// Activé au boot — défaut false : rien ne tourne sans opt-in.
     #[serde(default)]
     pub enabled: bool,
+    /// Surveillance PR des workers : sondes `gh pr view` du cycle,
+    /// rétention d'un worker inactif tant qu'une PR est ouverte
+    /// (recyclage post-merge) et release des wip orphelins.
+    /// `false` = l'orchestrateur ne regarde que la file (pas de sonde
+    /// forge — un worker idle sans item wip est recyclé sans attendre
+    /// ses PR). Défaut true.
+    #[serde(default = "dtrue")]
+    pub watch_prs: bool,
+    /// Cycle release-notes : création de l'item patchnotes + repasse
+    /// ready/draft de la release PR quand la file se vide/se remplit.
+    /// `false` = la garde release PR est inerte. Défaut true.
+    #[serde(default = "dtrue")]
+    pub auto_patchnotes: bool,
+    /// Surface « Manager » : un workspace routé propose une session
+    /// Manager (`h_manager_spawn` + `workspaces` du statut). `false`
+    /// = spawn refusé et proposition masquée au client. Défaut true.
+    #[serde(default = "dtrue")]
+    pub spawn_managers: bool,
     /// Workers `title_prefix*` simultanés max (défaut 5).
     #[serde(default = "d5")]
     pub max_workers: u32,
@@ -124,20 +148,21 @@ pub struct OrchCfg {
     pub nudge_cooldown_secs: u64,
     /// Prompt worker sur mesure — None = le prompt intégré (celui du
     /// script d'origine, adapté au cahier des charges AgentBacklog).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
-    /// Routing workspace repo → cwd : une entrée = un « workspace »
-    /// porté par le backlog (tag `--repo` des items). Sert aujourd'hui
-    /// à définir les Managers proposables (un par entrée) ; défaut
-    /// `{"AgentControl": "/workspace"}` — hérité du script d'origine.
-    #[serde(default = "drw")]
-    pub repo_workspaces: std::collections::BTreeMap<String, String>,
     /// Prompt Manager sur mesure — None = le template intégré (rôle
     /// d'intendance : transformer des demandes en items backlog
     /// structurés, jamais worker). Placeholders `{REPO}`/`{WS}` comme
     /// le template intégré.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manager_prompt: Option<String>,
+    /// Routing workspace repo → cwd : une entrée = un « workspace »
+    /// porté par le backlog (tag `--repo` des items). Sert aujourd'hui
+    /// à définir les Managers proposables (un par entrée) ; défaut
+    /// `{"AgentControl": "/workspace"}` — hérité du script d'origine.
+    /// Dernier champ : sous-table TOML (voir l'avertissement en tête).
+    #[serde(default = "drw")]
+    pub repo_workspaces: std::collections::BTreeMap<String, String>,
 }
 
 fn d5() -> u32 {
@@ -178,6 +203,9 @@ impl Default for OrchCfg {
     fn default() -> Self {
         Self {
             enabled: false,
+            watch_prs: true,
+            auto_patchnotes: true,
+            spawn_managers: true,
             max_workers: 5,
             poll_secs: 60,
             title_prefix: dprefix(),
@@ -189,8 +217,8 @@ impl Default for OrchCfg {
             thought_level: dlevel(),
             nudge_cooldown_secs: 900,
             prompt: None,
-            repo_workspaces: drw(),
             manager_prompt: None,
+            repo_workspaces: drw(),
         }
     }
 }

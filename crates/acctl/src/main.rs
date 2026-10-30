@@ -645,9 +645,11 @@ async fn main() -> Result<()> {
         }
         "pr" => pr::run(&args, &mut c).await?,
         "comp" | "components" => comp::run(&args, &mut c).await?,
-        // `acctl orch` — bascule à chaud de l'orchestrateur backlog
-        // natif (RPC orchestrator_set) ; `status` = component_info de
-        // l'interne (phase, ledger workers, gardes).
+        // `acctl orch` — orchestrateur backlog natif : bascule runtime
+        // on|off (orchestrator_set), `status` = component_info de
+        // l'interne (phase, ledger workers, gardes), `config` = lecture
+        // de la config éditable, `set` = patch persisté
+        // (orchestrator_config).
         "orch" | "orchestrator" => {
             let sub = args.get(1).map(String::as_str).unwrap_or("status");
             match sub {
@@ -662,7 +664,32 @@ async fn main() -> Result<()> {
                         name: "backlog-orchestrator".into(),
                     }).await?);
                 }
-                other => bail!("usage: acctl orch [on|off|status] (inconnu: {other})"),
+                "config" | "get" => {
+                    let v = c.call(proto::ReqKind::OrchestratorConfig { patch: None }).await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                "set" => {
+                    // Paires positionnelles `clé valeur` — une ou
+                    // plusieurs. La valeur passe en JSON natif quand
+                    // elle parse (bool/int/objet repo_workspaces)
+                    // sinon en chaîne — le démon reconvertit selon la
+                    // clé dans les deux cas (même validation).
+                    let pairs = &args[2..];
+                    if pairs.is_empty() || pairs.len() % 2 != 0 {
+                        bail!("usage: acctl orch set <clé> <valeur> [<clé> <valeur>…]");
+                    }
+                    let mut patch = std::collections::BTreeMap::new();
+                    for kv in pairs.chunks_exact(2) {
+                        let v = serde_json::from_str::<Value>(&kv[1])
+                            .unwrap_or_else(|_| Value::String(kv[1].clone()));
+                        patch.insert(kv[0].clone(), v);
+                    }
+                    let v = c.call(proto::ReqKind::OrchestratorConfig {
+                        patch: Some(patch),
+                    }).await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                other => bail!("usage: acctl orch [on|off|status|config|set <clé> <val>…] (inconnu: {other})"),
             }
         }
         other => bail!("commande inconnue: {other}"),

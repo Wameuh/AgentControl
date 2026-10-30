@@ -36,7 +36,7 @@ use proto::{ComponentKind, EventKind, SessionMeta};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use std::time::Duration;
 
 /// Nom du composant interne (et de l'entrée `origin` des sessions
@@ -187,8 +187,15 @@ pub(crate) struct OrchPersist {
 /// courante (lue par `Components` pour `list_components`), état
 /// persisté et flock anti-doublon. Un `Arc<OrchProbe>` vit dans
 /// `Daemon` et dans `Components`.
+///
+/// `cfg` vit sous `RwLock` : éditable à chaud via `OrchestratorConfig`/
+/// `component_set_params` (server/orch_cfg.rs) ; le cycle en fait un
+/// snapshot par tick — un set prend effet au tick suivant, jamais à
+/// mi-cycle. `enabled` (AtomicBool) reste la bascule runtime : la clé
+/// `enabled` de la cfg est la valeur *persistée* (boot/set durable) —
+/// les deux peuvent diverger volontairement (`orch off` temporaire).
 pub struct OrchProbe {
-    pub cfg: cfg::OrchCfg,
+    pub cfg: RwLock<cfg::OrchCfg>,
     /// Bascule demandée (config au boot, puis RPC) — la phase peut
     /// rester « waiting »/« blocked » tant qu'une garde tient.
     enabled: AtomicBool,
@@ -226,7 +233,7 @@ impl OrchProbe {
             lock_file: Mutex::new(None),
             manager_lock: tokio::sync::Mutex::new(()),
             wake: tokio::sync::Notify::new(),
-            cfg,
+            cfg: RwLock::new(cfg),
         }
     }
 
@@ -252,6 +259,13 @@ impl OrchProbe {
 
     pub(crate) fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::SeqCst)
+    }
+
+    /// Réveille la boucle hors période sans toucher `enabled` — un set
+    /// de config s'applique dès le prochain tick plutôt qu'à la fin du
+    /// `poll_secs` en cours.
+    pub(crate) fn kick(&self) {
+        self.wake.notify_one();
     }
 
     /// État composant déduit de la phase : actif → running, gardes
@@ -300,7 +314,10 @@ impl OrchProbe {
             // du client en propose un par entrée quand l'orchestrateur
             // est actif (vide sinon : pas de proposition sur un orch
             // éteint).
-            "workspaces": workspaces_json(self.is_enabled(), &self.cfg),
+            "workspaces": workspaces_json(
+                self.is_enabled(),
+                &self.cfg.read().unwrap(),
+            ),
         })
     }
 
@@ -477,9 +494,10 @@ async fn run_out(argv: &[&str], cwd: &Path) -> Result<(i64, String, String)> {
 
 /// `orchestrator.workspaces` du status — routing repo → cwd exposé au
 /// client quand l'orchestrateur est actif (vide sinon : la surface
-/// « Manager » ne se propose pas sur un orch éteint).
+/// « Manager » ne se propose pas sur un orch éteint — ni quand
+/// `spawn_managers` est coupé).
 fn workspaces_json(enabled: bool, cfg: &cfg::OrchCfg) -> Vec<Value> {
-    if !enabled {
+    if !enabled || !cfg.spawn_managers {
         return Vec::new();
     }
     cfg.repo_workspaces
@@ -509,7 +527,9 @@ impl Daemon {
     async fn orch_loop(self: &Arc<Self>) {
         loop {
             self.orch_tick().await;
-            let secs = self.orch.cfg.poll_secs.max(10);
+            // Relu à chaque itération : un `poll_secs` posé à chaud est
+            // effectif dès la sieste suivante.
+            let secs = self.orch.cfg.read().unwrap().poll_secs.max(10);
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(secs)) => {}
                 _ = self.orch.wake.notified() => {}
@@ -584,7 +604,11 @@ impl Daemon {
     // -------------------------------------------------------------------
 
     async fn orch_cycle(self: &Arc<Self>, bin: &str) -> Result<()> {
-        let cfg = &self.orch.cfg;
+        // Snapshot par tick : un set de config à chaud s'applique au
+        // prochain cycle, jamais à mi-cycle (cohérent avec « effet au
+        // prochain tick » annoncé par le schéma).
+        let cfg = self.orch.cfg.read().unwrap().clone();
+        let cfg = &cfg;
         let ws = Path::new(&cfg.workspace);
         // Pas de liste → pas de cycle : décider sur une DB illisible
         // rm'erait des workers sains (leurs items « absents ») ou créerait
@@ -630,20 +654,23 @@ impl Daemon {
         }
 
         // 1. wip orphelines (agent_id = session disparue) → release.
-        for t in tasks.iter().filter(|t| task_status(t) == "wip") {
-            let aid = task_agent(t);
-            if aid.starts_with("s-") && !session_ids.contains(aid) {
-                info!(
-                    "orchestrateur: tâche #{} orpheline (owner {aid} disparue) → release",
-                    task_id(t)
-                );
-                let _ = run_out(
-                    &[bin, "--release", &task_id(t).to_string(),
-                      "--agent-id", aid],
-                    ws,
-                )
-                .await;
-                pending.push(t.clone());
+        //    Rattaché à `watch_prs` : sans surveillance PR la boucle ne
+        //    recycle pas non plus les items de sessions disparues.
+        if cfg.watch_prs {
+            for t in tasks.iter().filter(|t| task_status(t) == "wip") {
+                let aid = task_agent(t);
+                if aid.starts_with("s-") && !session_ids.contains(aid) {
+                    info!(
+                        "orchestrateur: tâche #{} orpheline (owner {aid} disparue) → release",
+                        task_id(t)
+                    );
+                    let _ = run_out(
+                        &[bin, "--release", &task_id(t).to_string(), "--agent-id", aid],
+                        ws,
+                    )
+                    .await;
+                    pending.push(t.clone());
+                }
             }
         }
 
@@ -677,11 +704,16 @@ impl Daemon {
             // (pr 0) sonderait pour rien. Hors GitHub ou registre déjà
             // terminal : confiance au statut enregistré.
             let mut my_prs: BTreeMap<String, String> = BTreeMap::new();
-            for p in prs.iter().filter(|p| {
-                p.session == sid && !matches!(p.status.as_str(), "closed" | "merged")
-            }) {
-                let st_gh = self.orch_pr_state(p, ws).await;
-                my_prs.insert(p.pr.to_string(), st_gh);
+            // `watch_prs=false` : aucune sonde forge — le ledger reste
+            // vide, un worker idle sans item wip est recyclé sans
+            // attendre ses PR (orchestrateur « file seule »).
+            if cfg.watch_prs {
+                for p in prs.iter().filter(|p| {
+                    p.session == sid && !matches!(p.status.as_str(), "closed" | "merged")
+                }) {
+                    let st_gh = self.orch_pr_state(p, ws).await;
+                    my_prs.insert(p.pr.to_string(), st_gh);
+                }
             }
             let open_prs: Vec<&String> = my_prs
                 .iter()
@@ -865,64 +897,62 @@ impl Daemon {
         // 4. garde release PR : notes+ready quand vide, draft quand du
         //    travail revient (les items notes ne comptent pas comme du
         //    vrai travail : c'est eux qui passent la PR ready).
+        //    `auto_patchnotes=false` → cycle patchnotes entier inerte.
         if !self.orch.is_enabled() {
             return Ok(());
         }
-        let notes_ids: HashSet<u64> = st.notes_items.iter().copied().collect();
-        let active_notes = tasks.iter().any(|t| {
-            notes_ids.contains(&task_id(t))
-                && matches!(task_status(t), "pending" | "wip")
-        });
-        let active_other = tasks.iter().any(|t| {
-            !notes_ids.contains(&task_id(t))
-                && matches!(task_status(t), "pending" | "wip")
-        });
-        let rpr = self.gh_release_pr(ws).await;
-        if active_other {
-            st.notes_cycle_done = false; // nouveau cycle de travail
-            if let Some(r) = rpr {
-                if !r.1 {
-                    info!(
-                        "orchestrateur: release PR #{} ready mais backlog non \
-                         vide → repasse draft",
-                        r.0
-                    );
-                    let _ = run_out(
-                        &["gh", "pr", "ready", &r.0.to_string(), "--undo"],
-                        ws,
-                    )
-                    .await;
-                }
-            }
-        } else if let Some(r) = rpr {
-            if r.1 && !active_notes && !st.notes_cycle_done {
-                // les workers font --done AVANT le merge de leur PR :
-                // backlog vide ne suffit pas — attendre que toute PR du
-                // registre soit soldée, sinon les patchnotes rateraient
-                // un merge tardif.
-                let mut open_any = Vec::new();
-                for p in &prs {
-                    if matches!(p.status.as_str(), "closed" | "merged") {
-                        continue;
-                    }
-                    if self.orch_pr_state(p, ws).await == "OPEN" {
-                        open_any.push(p.pr);
+        if cfg.auto_patchnotes {
+            let notes_ids: HashSet<u64> = st.notes_items.iter().copied().collect();
+            let active_notes = tasks.iter().any(|t| {
+                notes_ids.contains(&task_id(t)) && matches!(task_status(t), "pending" | "wip")
+            });
+            let active_other = tasks.iter().any(|t| {
+                !notes_ids.contains(&task_id(t)) && matches!(task_status(t), "pending" | "wip")
+            });
+            let rpr = self.gh_release_pr(ws).await;
+            if active_other {
+                st.notes_cycle_done = false; // nouveau cycle de travail
+                if let Some(r) = rpr {
+                    if !r.1 {
+                        info!(
+                            "orchestrateur: release PR #{} ready mais backlog non \
+                             vide → repasse draft",
+                            r.0
+                        );
+                        let _ =
+                            run_out(&["gh", "pr", "ready", &r.0.to_string(), "--undo"], ws).await;
                     }
                 }
-                if !open_any.is_empty() {
-                    info!(
-                        "orchestrateur: backlog vide mais PRs encore ouvertes \
-                         {open_any:?} → patchnotes en attente"
-                    );
-                } else {
-                    info!(
-                        "orchestrateur: backlog vide + release PR #{} draft → \
-                         création item patchnotes",
-                        r.0
-                    );
-                    if let Some(nid) = self.orch_add_notes(bin, ws).await {
-                        st.notes_items.push(nid);
-                        st.notes_cycle_done = true;
+            } else if let Some(r) = rpr {
+                if r.1 && !active_notes && !st.notes_cycle_done {
+                    // les workers font --done AVANT le merge de leur PR :
+                    // backlog vide ne suffit pas — attendre que toute PR du
+                    // registre soit soldée, sinon les patchnotes rateraient
+                    // un merge tardif.
+                    let mut open_any = Vec::new();
+                    for p in &prs {
+                        if matches!(p.status.as_str(), "closed" | "merged") {
+                            continue;
+                        }
+                        if self.orch_pr_state(p, ws).await == "OPEN" {
+                            open_any.push(p.pr);
+                        }
+                    }
+                    if !open_any.is_empty() {
+                        info!(
+                            "orchestrateur: backlog vide mais PRs encore ouvertes \
+                             {open_any:?} → patchnotes en attente"
+                        );
+                    } else {
+                        info!(
+                            "orchestrateur: backlog vide + release PR #{} draft → \
+                             création item patchnotes",
+                            r.0
+                        );
+                        if let Some(nid) = self.orch_add_notes(bin, ws).await {
+                            st.notes_items.push(nid);
+                            st.notes_cycle_done = true;
+                        }
                     }
                 }
             }
@@ -1104,7 +1134,8 @@ impl Daemon {
     /// diagramme, groupe posé à la création), puis `thought_level` par
     /// handler. Remplace les `acctl new/setcfg`/RPC socket du script.
     async fn orch_spawn(self: &Arc<Self>, number: u64) -> Option<String> {
-        let cfg = &self.orch.cfg;
+        let cfg = self.orch.cfg.read().unwrap().clone();
+        let cfg = &cfg;
         let title = format!("{}{}", cfg.title_prefix, number);
         let prompt = cfg.prompt.clone().unwrap_or_else(|| PROMPT.to_string());
         let group = (!cfg.group.is_empty()).then(|| cfg.group.clone());
@@ -1138,7 +1169,7 @@ impl Daemon {
     /// loggés sans faire échouer le spawn. (Le groupe sidebar est posé
     /// à la création via le param `group` de `h_new_session`.)
     async fn apply_spawn_cfg(self: &Arc<Self>, sid: &str) {
-        let cfg = &self.orch.cfg;
+        let cfg = self.orch.cfg.read().unwrap().clone();
         if !cfg.thought_level.is_empty() {
             // Posée en pending_config tant que l'agent n'est pas prêt —
             // rejouée au spawn (comme `acctl setcfg` juste après `new`).
@@ -1166,12 +1197,17 @@ impl Daemon {
             "orchestrateur désactivé — la surface « Manager » n'est \
              proposée que quand il est actif"
         );
+        let cfg = self.orch.cfg.read().unwrap().clone();
+        let cfg = &cfg;
+        anyhow::ensure!(
+            cfg.spawn_managers,
+            "spawn_managers désactivé — la surface « Manager » est coupée"
+        );
         anyhow::ensure!(
             self.orch_agentbacklog_bin().await.is_some(),
             "agentbacklog non résolvable — un Manager sans file à gérer \
              ne sert à rien"
         );
-        let cfg = &self.orch.cfg;
         let cwd = cfg.repo_workspaces.get(repo).cloned().with_context(|| {
             format!(
                 "workspace inconnu: {repo} — routés : {}",
@@ -1248,7 +1284,8 @@ impl Daemon {
     }
 
     /// `OrchestratorSet{enabled}` — bascule à chaud (runtime seulement ;
-    /// la config garde la valeur du prochain boot).
+    /// la config garde la valeur du prochain boot — pour une bascule
+    /// *persistée* : `OrchestratorConfig{patch:{enabled:…}}`).
     pub(super) async fn h_orch_set(self: &Arc<Self>, enabled: bool) -> Result<Value> {
         self.orch.set_enabled(enabled);
         info!("orchestrateur: bascule RPC enabled={enabled}");
@@ -1256,6 +1293,90 @@ impl Daemon {
             "enabled": enabled,
             "status": self.orch.status_json(),
         }))
+    }
+
+    /// `OrchestratorConfig{patch}` — `None` : lecture ({config, status}).
+    /// `Some` : patch partiel validé par `orch_cfg::apply_patch`, la
+    /// section `[backlog_orchestrator]` de config.toml est réécrite,
+    /// puis la cfg vivante est commitée — atomique : clé fautive ou
+    /// échec de persistance → rien n'est appliqué.
+    pub(super) async fn h_orch_config(
+        self: &Arc<Self>,
+        patch: Option<BTreeMap<String, Value>>,
+    ) -> Result<Value> {
+        let Some(patch) = patch else {
+            return Ok(json!({
+                "config": orch_cfg::cfg_json(
+                    &self.orch.cfg.read().unwrap(),
+                    self.orch.is_enabled(),
+                ),
+                "status": self.orch.status_json(),
+            }));
+        };
+        let applied = self.orch_patch(patch)?;
+        info!("orchestrateur: config persistée ({applied:?})");
+        Ok(json!({
+            "config": orch_cfg::cfg_json(
+                &self.orch.cfg.read().unwrap(),
+                self.orch.is_enabled(),
+            ),
+            "applied": applied,
+            "persisted": true,
+            "status": self.orch.status_json(),
+        }))
+    }
+
+    /// `ComponentSetParams{name:"backlog-orchestrator"}` — le formulaire
+    /// client (et `acctl comp set`) envoie des valeurs chaînes : mêmes
+    /// clés/mêmes conversions que `OrchestratorConfig` — un seul chemin
+    /// de validation (le champ « patch » des deux handlers converge ici).
+    /// Réponse au format `set_params` attendu par le client.
+    pub(super) async fn h_orch_params_set(
+        self: &Arc<Self>,
+        params: HashMap<String, String>,
+    ) -> Result<Value> {
+        let patch: BTreeMap<String, Value> = params
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect();
+        let applied = self.orch_patch(patch)?;
+        info!("orchestrateur: params persistés ({applied:?})");
+        Ok(json!({
+            "name": COMPONENT_NAME,
+            "state": self.orch.component_state(),
+            "params": orch_cfg::params_values(
+                &self.orch.cfg.read().unwrap(),
+                self.orch.is_enabled(),
+            ),
+            "config_required": [],
+            "rendered": true,   // = section config.toml réécrite
+            "restarted": false, // interne : effet au prochain tick/spawn
+        }))
+    }
+
+    /// Champ « set » commun : patch sur un clone → persistance
+    /// config.toml → commit de la cfg vivante → réveil de la boucle
+    /// (`set_enabled` si `enabled` posé — bascule durable ET runtime ;
+    /// `kick` sinon — le prochain tick voit la nouvelle cfg sans
+    /// attendre `poll_secs`). Synchrone : le write-lock n'est jamais
+    /// tenu sur un await, et il sérialise les sets concurrents.
+    fn orch_patch(self: &Arc<Self>, patch: BTreeMap<String, Value>) -> Result<Vec<String>> {
+        let (applied, touched_enabled, en) = {
+            let mut guard = self.orch.cfg.write().unwrap();
+            let mut next = guard.clone();
+            let applied = orch_cfg::apply_patch(&mut next, &patch)?;
+            orch_cfg::persist(&self.root, &next)?;
+            let touched = patch.contains_key("enabled");
+            let en = next.enabled;
+            *guard = next;
+            (applied, touched, en)
+        };
+        if touched_enabled {
+            self.orch.set_enabled(en);
+        } else {
+            self.orch.kick();
+        }
+        Ok(applied)
     }
 }
 
@@ -1327,5 +1448,13 @@ mod tests {
         assert_eq!(workspaces_json(true, &cfg).len(), 2);
         cfg.repo_workspaces.clear();
         assert!(workspaces_json(true, &cfg).is_empty());
+        // spawn_managers=false masque la surface même activée.
+        let mut cfg = cfg::OrchCfg {
+            spawn_managers: false,
+            ..Default::default()
+        };
+        assert!(workspaces_json(true, &cfg).is_empty());
+        cfg.spawn_managers = true;
+        assert_eq!(workspaces_json(true, &cfg).len(), 1);
     }
 }

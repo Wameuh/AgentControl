@@ -121,12 +121,17 @@ impl Daemon {
     /// déclarés du composant (seule surface de config utilisateur) :
     /// fusion + validation + re-rendu + restart si le process tourne
     /// → {name, state, params(masqués), config_required, rendered,
-    /// restarted}.
+    /// restarted}. Exception `backlog-orchestrator` : l'interne n'a pas
+    /// de spec toml — ses params mappent sur la config orchestrateur
+    /// (orch.rs — même validation que `OrchestratorConfig`).
     pub(super) async fn h_component_set_params(
         self: &Arc<Self>,
         name: String,
         params: std::collections::HashMap<String, String>,
     ) -> Result<Value> {
+        if name == crate::server::orch::COMPONENT_NAME {
+            return self.h_orch_params_set(params).await;
+        }
         self.components.set_params(&name, &params).await
     }
 
