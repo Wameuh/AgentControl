@@ -714,7 +714,9 @@ export class ComponentsPanel {
     // Composant adossé au catalogue : flag `item.catalog` (démon ≥0.10,
     // nom couvert par une entrée) ou `spec.catalog` (nom d'entrée posé
     // à l'install par le write-path params) — l'un ou l'autre suffit.
-    this.editBound = item?.catalog === true || !!spec.catalog;
+    // item requis : un prefill portant spec.catalog sans item garderait
+    // l'éditeur legacy (fillBoundEditor lit item.status).
+    this.editBound = item != null && (item.catalog === true || !!spec.catalog);
     this.editSpec = spec;
     $("comp-ed-title").textContent = t(this.editName ? "comp_edit_h" : "comp_new_h");
     ($("ce-name") as HTMLInputElement).value = spec.name;

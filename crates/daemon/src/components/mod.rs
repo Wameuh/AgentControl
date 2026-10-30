@@ -496,7 +496,7 @@ impl Components {
             spec.name,
             sealed.join(", ")
         );
-        preserve_catalog_meta(&cur, spec);
+        preserve_catalog_meta(&cur, spec)?;
         Ok(())
     }
 
@@ -1088,17 +1088,16 @@ fn sealed_fields_changed(new: &ComponentSpec, cur: &ComponentSpec) -> Vec<&'stat
 /// params dédié, pas la surface d'édition) ne peuvent ni être effacés
 /// par une spec qui les omet, ni forgés par une spec qui les porte.
 /// Copie au niveau JSON — no-op tant que `ComponentSpec` ne sérialise
-/// pas ces clés, donc rétro- et avant-compatible.
-fn preserve_catalog_meta(cur: &ComponentSpec, spec: &mut ComponentSpec) {
+/// pas ces clés, donc rétro- et avant-compatible. Une re-désérialisation
+/// en échec est un refus, pas un fallback : la spec entrante, qui peut
+/// porter des métas forgées, ne doit pas passer telle quelle.
+fn preserve_catalog_meta(cur: &ComponentSpec, spec: &mut ComponentSpec) -> Result<()> {
     const META: [&str; 4] = ["params", "params_schema", "catalog", "render"];
-    let Ok(mut new) = serde_json::to_value(&*spec) else {
-        return;
-    };
-    let Ok(old) = serde_json::to_value(cur) else {
-        return;
-    };
+    let mut new = serde_json::to_value(&*spec).context("spec → json")?;
+    let old = serde_json::to_value(cur).context("spec courante → json")?;
     let (Some(new), Some(old)) = (new.as_object_mut(), old.as_object()) else {
-        return;
+        // Une spec sérialise toujours en objet — hors-objet impossible.
+        return Ok(());
     };
     for k in META {
         match old.get(k) {
@@ -1106,10 +1105,9 @@ fn preserve_catalog_meta(cur: &ComponentSpec, spec: &mut ComponentSpec) {
             None => new.remove(k),
         };
     }
-    let patched = Value::Object(std::mem::take(new));
-    if let Ok(s) = serde_json::from_value(patched) {
-        *spec = s;
-    }
+    *spec = serde_json::from_value(Value::Object(std::mem::take(new)))
+        .context("métadonnées catalogue incohérentes avec la spec")?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1129,6 +1127,10 @@ mod tests {
             healthcheck: Healthcheck::None,
             description: Some("desc".into()),
             queries: HashMap::new(),
+            catalog: Some("agentreviewer".into()),
+            params_schema: Vec::new(),
+            params: HashMap::new(),
+            render: None,
         }
     }
 
@@ -1164,11 +1166,36 @@ mod tests {
         assert_eq!(sealed_fields_changed(&q, &cur), ["queries"]);
         // Spec identique → rien.
         assert!(sealed_fields_changed(&cur, &cur).is_empty());
-        // preserve_catalog_meta : no-op tant que la spec sérialisée ne
-        // porte pas les clés meta — le round-trip JSON la laisse
-        // identique.
-        let mut patched = cur.clone();
-        preserve_catalog_meta(&cur, &mut patched);
-        assert!(sealed_fields_changed(&patched, &cur).is_empty());
+        // preserve_catalog_meta : les métas de la spec entrante (omises
+        // ou forgées) sont recopiées de la courante — ni effacées ni
+        // forgées par un upsert.
+        let mut cur = base_spec();
+        cur.params.insert("repo".into(), "Wameuh/AgentReviewer".into());
+        cur.params_schema.push(proto::ParamSpec {
+            key: "repo".into(),
+            label: "Repo".into(),
+            description: None,
+            required: true,
+            kind: proto::ParamKind::String,
+            default: None,
+            secret: false,
+            validation: None,
+            choices: Vec::new(),
+        });
+        cur.render = Some(proto::ConfigRender {
+            path: "~/x.toml".into(),
+            template: "repo={{repo}}".into(),
+        });
+        let mut forged = cur.clone();
+        forged.catalog = Some("autre".into());
+        forged.params.insert("repo".into(), "evil/x".into());
+        forged.render = None;
+        forged.params_schema = Vec::new();
+        preserve_catalog_meta(&cur, &mut forged).unwrap();
+        assert_eq!(forged.catalog.as_deref(), Some("agentreviewer"));
+        assert_eq!(forged.params["repo"], "Wameuh/AgentReviewer");
+        assert!(forged.render.is_some());
+        assert_eq!(forged.params_schema.len(), 1);
+        assert!(sealed_fields_changed(&forged, &cur).is_empty());
     }
 }

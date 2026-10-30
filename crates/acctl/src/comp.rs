@@ -469,8 +469,17 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                     "--kind", "--cmd", "--hc", "--env", "--cwd",
                     "--restart", "--rsec",
                 ];
-                let bad: Vec<&String> =
-                    f.iter().filter(|a| SEALED.contains(&a.as_str())).collect();
+                // Scan pairwise — un flag à valeur consomme le token
+                // suivant : un `--env` *dans une valeur* (--desc
+                // "--env") n'est pas un refus scellé.
+                let mut i = 0;
+                let mut bad: Vec<&str> = Vec::new();
+                while i < f.len() {
+                    if SEALED.contains(&f[i].as_str()) {
+                        bad.push(&f[i]);
+                    }
+                    i += if VAL.contains(&f[i].as_str()) { 2 } else { 1 };
+                }
                 anyhow::ensure!(
                     bad.is_empty(),
                     "« {name} » est géré par le catalogue — spec interne \
@@ -524,10 +533,16 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             if let Some(v) = flag_val(f, "--desc") {
                 spec.description = (!v.is_empty()).then(|| v.to_string());
             }
-            if f.iter().any(|a| a == "--autostart") {
+            let on = f.iter().any(|a| a == "--autostart");
+            let off = f.iter().any(|a| a == "--no-autostart");
+            anyhow::ensure!(
+                !(on && off),
+                "--autostart et --no-autostart sont exclusifs"
+            );
+            if on {
                 spec.autostart = true;
             }
-            if f.iter().any(|a| a == "--no-autostart") {
+            if off {
                 spec.autostart = false;
             }
             let v = c
