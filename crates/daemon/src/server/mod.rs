@@ -1104,6 +1104,186 @@ impl Daemon {
     }
 }
 
+/// Résolution bornée d'un cwd saisi (tilde + env) : l'expansion se fait
+/// côté démon — c'est lui qui connaît HOME et l'environnement réel où
+/// l'agent tournera, quel que soit le client (Tauri, web, acctl, MCP,
+/// orchestrateur). JAMAIS de shell : pas de substitution de commande,
+/// pas de glob, pas de récursion. L'erreur cite le chemin RÉSOLU — et
+/// la forme saisie quand elle diffère.
+pub(super) fn resolve_cwd(raw: &str) -> Result<String> {
+    let cwd = expand_cwd(raw)?;
+    if !std::path::Path::new(&cwd).is_dir() {
+        let extra = (cwd != raw)
+            .then(|| format!(" (expansé depuis « {raw} »)"))
+            .unwrap_or_default();
+        anyhow::bail!("cwd introuvable : {cwd}{extra}");
+    }
+    Ok(cwd)
+}
+
+/// `~`, `~/…`, `~user[/…]` → home ; `$VAR`/`${VAR}` → env du démon.
+/// Expansion bornée : une passe, littéraux préservés si inconnus.
+fn expand_cwd(raw: &str) -> Result<String> {
+    let mut s = raw.to_string();
+    if let Some(rest) = s.strip_prefix('~') {
+        // POSIX : tout ce qui suit `~` jusqu'au '/' est le nom d'user.
+        let (user, tail) = match rest.find('/') {
+            Some(i) => (&rest[..i], &rest[i..]),
+            None => (rest, ""),
+        };
+        let home = if user.is_empty() {
+            std::env::var_os("HOME").map(PathBuf::from)
+        } else {
+            home_of(user)
+        };
+        let home = home.with_context(|| {
+            if user.is_empty() {
+                "expansion `~` impossible : HOME absent".to_string()
+            } else {
+                format!("expansion `~{user}` impossible : utilisateur inconnu")
+            }
+        })?;
+        s = format!("{}{}", home.to_string_lossy(), tail);
+    }
+    Ok(expand_env(&s))
+}
+
+/// `$VAR` / `${VAR}` → valeur env, UNE passe : la valeur injectée n'est
+/// jamais rescanée (pas de récursion). Nom inconnu ou forme non-var
+/// (`$`, `$(`, `$1`…) → littéral — pas de shell implicite. `${` non
+/// refermé laisse le `$` littéral et continue le scan après lui.
+fn expand_env(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('$') {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        // Forme littérale consommée + nom candidat + queue restante.
+        let (literal, name, tail) = if let Some(inner) = after.strip_prefix('{') {
+            match inner.find('}') {
+                Some(e) => (&rest[i..i + 3 + e], &inner[..e], &inner[e + 1..]),
+                None => ("$", "", after),
+            }
+        } else {
+            let n = after
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .count();
+            (&rest[i..i + 1 + n], &after[..n], &after[n..])
+        };
+        let ok = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        match (ok, std::env::var(name)) {
+            (true, Ok(v)) => out.push_str(&v),
+            _ => out.push_str(literal),
+        }
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `~user` → home via NSS (getpwnam_r : le buffer statique de getpwnam
+/// n'est pas thread-safe dans un démon async).
+#[cfg(unix)]
+fn home_of(user: &str) -> Option<PathBuf> {
+    use std::ffi::{CStr, CString, OsStr};
+    use std::os::unix::ffi::OsStrExt;
+    let name = CString::new(user).ok()?;
+    // SAFETY : pwd et buf sont à nous ; getpwnam_r n'écrit que dans ces
+    // tampons et pointe pw_dir dans buf — copié avant la fin du bloc.
+    unsafe {
+        let mut pwd: libc::passwd = std::mem::zeroed();
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        let mut buf = vec![0u8; 1024];
+        loop {
+            let rc = libc::getpwnam_r(
+                name.as_ptr(),
+                &mut pwd,
+                buf.as_mut_ptr().cast::<libc::c_char>(),
+                buf.len(),
+                &mut result,
+            );
+            if rc == libc::ERANGE {
+                if buf.len() >= 1 << 16 {
+                    return None;
+                }
+                buf.resize(buf.len() * 2, 0);
+                continue;
+            }
+            if rc != 0 || result.is_null() {
+                return None;
+            }
+            break;
+        }
+        Some(PathBuf::from(OsStr::from_bytes(
+            CStr::from_ptr(pwd.pw_dir).to_bytes(),
+        )))
+    }
+}
+
+#[cfg(not(unix))]
+fn home_of(_user: &str) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{expand_cwd, expand_env, home_of, resolve_cwd};
+
+    #[test]
+    fn env_simple_vars() {
+        std::env::set_var("AC_EXPAND_T1", "/v1");
+        assert_eq!(expand_env("$AC_EXPAND_T1/x"), "/v1/x");
+        assert_eq!(expand_env("${AC_EXPAND_T1}/x"), "/v1/x");
+        assert_eq!(expand_env("pre$AC_EXPAND_T1"), "pre/v1");
+    }
+
+    #[test]
+    fn env_bornes() {
+        // Inconnu, formes non-var et `${` non refermé : littéral, jamais
+        // de shell. La valeur injectée n'est pas rescanée (pas de
+        // récursion : T2 vaut "$AC_EXPAND_T1" affiché tel quel).
+        std::env::set_var("AC_EXPAND_T2", "$AC_EXPAND_T1");
+        assert_eq!(expand_env("$NOPE_X_123"), "$NOPE_X_123");
+        assert_eq!(expand_env("$1"), "$1");
+        assert_eq!(expand_env("$(id)"), "$(id)");
+        assert_eq!(expand_env("${"), "${");
+        assert_eq!(expand_env("$AC_EXPAND_T2"), "$AC_EXPAND_T1");
+    }
+
+    #[test]
+    fn tilde_home() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(expand_cwd("~").unwrap(), home);
+        assert_eq!(expand_cwd("~/x").unwrap(), format!("{home}/x"));
+        assert_eq!(expand_cwd("$HOME/x").unwrap(), format!("{home}/x"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn tilde_user() {
+        // root existe partout ; un user improbable refuse proprement.
+        // (pas de "/root" en dur : /var/root sur macOS)
+        let root_home = home_of("root").unwrap().to_string_lossy().to_string();
+        assert_eq!(expand_cwd("~root").unwrap(), root_home);
+        assert_eq!(expand_cwd("~root/x").unwrap(), format!("{root_home}/x"));
+        assert!(expand_cwd("~user_nope_zz9").is_err());
+    }
+
+    #[test]
+    fn resolve_valide_et_erreur_claire() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(resolve_cwd("~").unwrap(), home);
+        let e = resolve_cwd("~/dir_nope_zz9").unwrap_err().to_string();
+        assert!(e.contains("dir_nope_zz9"), "{e}");
+        assert!(e.contains("expansé depuis"), "{e}");
+        // Forme déjà absolue : pas de mention « depuis ».
+        let e2 = resolve_cwd("/dir_nope_zz9").unwrap_err().to_string();
+        assert!(!e2.contains("depuis"), "{e2}");
+    }
+}
+
 /// Wrapper pour accepter des connexions Unix.
 pub async fn accept_unix(daemon: Arc<Daemon>, listener: tokio::net::UnixListener) {
     loop {

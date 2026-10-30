@@ -129,10 +129,20 @@ impl Daemon {
                 // vocabulaire est propre à chaque CLI ("bypass" devin ne
                 // veut rien dire pour claude).
                 let same_agent = agent_id == cm.agent;
-                let cwd = cwd.unwrap_or_else(|| cm.cwd.clone());
-                if !std::path::Path::new(&cwd).is_dir() {
-                    anyhow::bail!("cwd introuvable: {cwd}");
-                }
+                // cwd hérité de la créatrice : déjà résolu — l'expansion
+                // ne porte que sur le paramètre explicite (`~/…` admis) —
+                // mais l'existence se revérifie (dir supprimé depuis, ou
+                // `~/x` littéral persisté avant ce fix).
+                let cwd = match cwd {
+                    Some(c) => resolve_cwd(&c)?,
+                    None => {
+                        let c = cm.cwd.clone();
+                        if !std::path::Path::new(&c).is_dir() {
+                            anyhow::bail!("cwd introuvable : {c}");
+                        }
+                        c
+                    }
+                };
                 let prompt = prompt.filter(|p| !p.trim().is_empty());
                 let title = title
                     .filter(|t| !t.trim().is_empty())

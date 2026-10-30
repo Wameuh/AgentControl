@@ -23,6 +23,9 @@ impl Daemon {
                     .get(&agent)
                     .with_context(|| format!("agent inconnu: {agent}"))?
                     .clone();
+                // `~`/`$VAR` expansés + existence validée ici — sinon le
+                // spawn échouait en tâche de fond bien après la réponse.
+                let cwd = resolve_cwd(&cwd)?;
                 // Provenance externe (service) : forme libre — on normalise
                 // juste (ligne unique, taille bornée) pour rester un badge.
                 let origin = origin
@@ -102,6 +105,7 @@ impl Daemon {
                     .get(&agent)
                     .with_context(|| format!("agent inconnu: {agent}"))?
                     .clone();
+                let cwd = resolve_cwd(&cwd)?;
                 let meta = SessionMeta {
                     id: proto::new_id("s"),
                     agent: agent.clone(),
