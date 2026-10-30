@@ -331,4 +331,18 @@ button:disabled { opacity: .5; cursor: default; }
 .bl-item .bl-agent .ic { width: 11px; height: 11px; flex: none; }
 .bl-item .bl-agent > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bl-item .bl-agent.off { border: 0; color: var(--dim); cursor: default; padding: 1px 2px; font-family: Mono, ui-monospace, monospace; }
+/* Chip repo d'un item (classe générique .badge retaillée) : discret,
+   non cliquable — pure étiquette du workspace cible. */
+.bl-item .bl-repo {
+  flex: none; max-width: 34%; padding: 1px 7px; font-size: 10px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Filtre déroulant par repo — rendu seulement si ≥2 repos/groupes. */
+.bl-repo-filter { padding: 0 8px 5px; }
+.bl-repo-filter select {
+  width: 100%; padding: 3px 6px; font-size: 11px;
+  background: var(--panel-solid); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 7px;
+}
+.bl-repo-filter select:focus { border-color: var(--accent); outline: none; }
 .bl-item .bl-when { color: var(--dim); font-size: 11px; flex: none; white-space: nowrap; }
