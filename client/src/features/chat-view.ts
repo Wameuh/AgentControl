@@ -46,6 +46,8 @@ interface ConvCache {
   pendingToolUpdates: Map<string, AcEvent[]>;
   answered: Set<string>;
   lastText: { thought: boolean; norm: string; el: HTMLElement } | null;
+  userMsgs: number;
+  headSeen: boolean;
   minRendered: number;
   renderedCount: number;
   hasMoreHistory: boolean;
@@ -248,6 +250,8 @@ export class ChatView {
     this.renderer.pendingToolUpdates = new Map();
     this.renderer.answered = new Set();
     this.renderer.lastText = null;
+    this.renderer.userMsgs = 0;
+    this.renderer.headSeen = false;
     this.minRendered = Number.MAX_SAFE_INTEGER;
     this.maxRendered = 0;
     this.renderedCount = 0;
@@ -284,6 +288,8 @@ export class ChatView {
       pendingToolUpdates: this.renderer.pendingToolUpdates,
       answered: this.renderer.answered,
       lastText: this.renderer.lastText,
+      userMsgs: this.renderer.userMsgs,
+      headSeen: this.renderer.headSeen,
       minRendered: this.minRendered,
       renderedCount: this.renderedCount,
       hasMoreHistory: this.hasMoreHistory,
@@ -321,6 +327,8 @@ export class ChatView {
     this.renderer.pendingToolUpdates = c.pendingToolUpdates;
     this.renderer.answered = c.answered;
     this.renderer.lastText = c.lastText;
+    this.renderer.userMsgs = c.userMsgs;
+    this.renderer.headSeen = c.headSeen;
     this.minRendered = c.minRendered;
     this.maxRendered = c.lastSeq; // dernier seq rendu = borne haute du cache
     this.renderedCount = c.renderedCount;

@@ -32,7 +32,7 @@
 
 use super::*;
 use crate::server::misc::command_available;
-use proto::{ComponentKind, SessionMeta};
+use proto::{ComponentKind, EventKind, SessionMeta};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,6 +51,11 @@ const CMD_TIMEOUT: Duration = Duration::from_secs(60);
 /// aucune PR n'est enregistrée : le watcher PR peut laguer quelques
 /// minutes derrière le `gh pr create` (cf. script — 240 s).
 const CLEAN_GRACE_S: f64 = 240.0;
+
+/// Borne (caractères) de la description reprise dans le post « sorti
+/// du backlog » — le post est un résumé de présentation, pas un dump
+/// du cahier des charges.
+const DESC_MAX: usize = 4000;
 
 /// Prompt worker intégré — repris tel quel du script d'origine (le
 /// cahier des charges AgentBacklog des sessions `Backlog-W*`).
@@ -638,13 +643,83 @@ impl Daemon {
                 }
                 _ => w.title.clone(),
             };
-            st.assignments.insert(
-                sid.to_string(),
-                json!({
-                    "title": title, "state": state,
-                    "tasks": my_items, "prs": my_prs,
-                }),
-            );
+            // Post « sorti du backlog » : à chaque NOUVEL item wip du
+            // worker, journaliser titre + description en user_message
+            // de service (origin) — JAMAIS livré à l'agent, qui a déjà
+            // l'item via son --pop : le post est purement
+            // présentationnel (premier message ACTIONNABLE du
+            // transcript ; le boilerplate de mission reste replié +
+            // badgé « via »). Un post par pop : --release puis re-pop
+            // reposte (posted_wip repasse à None entre-temps) ;
+            // session disparue entre le snapshot et ici → pas de post,
+            // retry au tick suivant.
+            let wip_id = my_wip.map(|t| task_id(t).to_string());
+            let prev_posted = st
+                .assignments
+                .get(sid)
+                .and_then(|a| a.get("posted_wip"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let mut posted_wip = wip_id.clone();
+            let mut just_posted = false;
+            if wip_id != prev_posted {
+                if let Some(t) = my_wip {
+                    let title_line: String = t
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let desc = t
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim();
+                    let mut dc = desc.chars();
+                    let desc_body: String = dc.by_ref().take(DESC_MAX).collect();
+                    let text = if desc_body.is_empty() {
+                        format!("[Backlog] item #{} — {title_line}", task_id(t))
+                    } else {
+                        format!(
+                            "[Backlog] item #{} — {title_line}\n\n{desc_body}{}",
+                            task_id(t),
+                            if dc.next().is_some() { "\n…" } else { "" }
+                        )
+                    };
+                    match self.get_session(sid).await {
+                        Ok(s) => {
+                            s.emit(EventKind::UserMessage {
+                                text,
+                                steer: false,
+                                origin: Some(COMPONENT_ORIGIN.to_string()),
+                            });
+                            just_posted = true;
+                        }
+                        Err(_) => posted_wip = prev_posted,
+                    }
+                }
+            }
+            let assignment = json!({
+                "title": title, "state": state,
+                "tasks": my_items, "prs": my_prs,
+                "posted_wip": posted_wip,
+            });
+            if just_posted {
+                // Le UserMessage est déjà commité au journal, mais `st`
+                // n'est repersisté qu'en fin de tick : un `orch off` en
+                // vol avant le write-back perdrait le marqueur → repost
+                // en doublon du même wip au prochain cycle. L'entrée
+                // complète est posée dans l'état live tout de suite (le
+                // write-back écrira la même valeur).
+                self.orch
+                    .state
+                    .lock()
+                    .unwrap()
+                    .assignments
+                    .insert(sid.to_string(), assignment.clone());
+            }
+            st.assignments.insert(sid.to_string(), assignment);
             if matches!(state, "working" | "compacting" | "starting") {
                 st.clean_since.remove(sid);
                 continue;
