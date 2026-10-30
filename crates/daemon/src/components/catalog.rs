@@ -135,9 +135,22 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 autostart: false,
                 restart: RestartPolicy::OnFailure,
                 restart_sec: 5,
-                // pid vivant = boucle vivante (les erreurs du script
-                // sont visibles dans les logs du composant).
-                healthcheck: Healthcheck::Process,
+                // Sonde sentinelle plutôt que pid-vivant : la config
+                // seedée garde ses placeholders (`repo = "owner/repo"`)
+                // qui passent la validation `req()` du watcher — sans
+                // elle un composant « healthy » pollerait un repo
+                // inexistant. Absente ou placeholder → degraded ; le
+                // cycle de vie du process reste suivi par proc.rs.
+                healthcheck: Healthcheck::Command {
+                    argv: vec![
+                        "sh".into(),
+                        "-c".into(),
+                        "test -f ~/.config/agentreviewer/config.toml && \
+                         ! grep -q 'owner/repo' \
+                           ~/.config/agentreviewer/config.toml"
+                            .into(),
+                    ],
+                },
                 description: Some(
                     "Watcher GitHub → reviews de PR en sessions du démon"
                         .into(),
@@ -163,7 +176,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
             },
             detect: CatalogDetect {
                 bin: Some("agent-reviewer".into()),
-                // Posé par install.sh / uv tool install dans ~/.local/bin.
+                // Posé par install.sh ou la recette dans ~/.local/bin.
                 path: Some("~/.local/bin/agent-reviewer".into()),
             },
             recipe: vec![
@@ -176,6 +189,9 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                         "sh".into(),
                         "-c".into(),
                         "set -e; \
+                         python3 -c 'import tomllib' 2>/dev/null || { \
+                           echo 'python3 >= 3.11 requis (tomllib)'; \
+                           exit 1; }; \
                          mkdir -p ~/.local/bin ~/.config/agentreviewer; \
                          curl -fsSL https://raw.githubusercontent.com/Wameuh/AgentReviewer/main/agentreviewer.py \
                            -o ~/.local/bin/agent-reviewer; \
@@ -190,11 +206,18 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 RecipeStep::UpsertSpec,
                 RecipeStep::Note {
                     text: "Éditez ~/.config/agentreviewer/config.toml \
-                           (reposée par l'install si absente) puis \
-                           démarrez le composant — en `process` managé \
-                           le watcher reçoit AGENTCONTROL_SOCK/TCP \
-                           injectés et crée ses reviews en sessions du \
-                           démon (group « AgentReviewer »). Si le timer \
+                           (reposée par l'install si absente — la sonde \
+                           restera « degraded » tant que ses placeholders \
+                           `owner/repo` seront en place) puis démarrez \
+                           le composant — en `process` managé le watcher \
+                           reçoit AGENTCONTROL_SOCK/TCP injectés. \
+                           État transitoire assumé : tant que la \
+                           PHASE 2 n'a pas landé upstream, la version \
+                           fetched spawne ses reviews via systemd-run \
+                           (mode legacy) — une ré-install de la recette \
+                           récupère la version « sessions du démon » \
+                           (origin component:agentreviewer, group \
+                           AgentReviewer) une fois publiée. Si le timer \
                            systemd upstream était activé, désactivez-le \
                            (`systemctl --user disable --now \
                            agentreviewer-watch.timer`) pour éviter un \
