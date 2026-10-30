@@ -169,6 +169,84 @@ body {
   --code-bg:     color-mix(in srgb, var(--accent) 10%, #d6d1bf);
 }
 
+/* Intensité d'accent — seconde dimension orthogonale : la classe
+   :root.accent-strong (réglage « intensité forte », ac-accent-strong)
+   remappe --accent sur une version saturée/flashy de la même famille et
+   augmente les mixes de surfaces ci-dessous — la teinte devient
+   nettement présente. La hiérarchie des blocs suit celle des variantes
+   douces : :root.accent-strong seul = « sauge » forte (qui a ici sa
+   variante saturée olive — l'identité neutre reste le défaut « douce »),
+   les :root(.light).theme-<c>.accent-strong portent les accents saturés,
+   puis les règles de surfaces (même spécificité que les règles douces
+   ci-dessus → placées après pour gagner quand les deux classes sont
+   posées). Contrastes : accent/--bg ≥3:1, texte de bulle ≥4.5:1. */
+:root.accent-strong {
+  /* Sauge forte : olive-lime saturé — la famille khaki passe en flashy. */
+  --accent: #bed34a; --accent-rgb: 190, 211, 74;
+  --msg-user-fg: #1a1d16; --msg-user-link: #3d4d05;
+}
+:root.theme-gold.accent-strong {
+  --accent: #f2b01e; --accent-rgb: 242, 176, 30;
+  --msg-user-fg: #1a1d16; --msg-user-link: #5b3a00;
+}
+:root.theme-grey.accent-strong {
+  /* Ardoise poussée vers l'acier bleu — le « gris flashy » est un bleu. */
+  --accent: #8fbcef; --accent-rgb: 143, 188, 239;
+  --msg-user-fg: #1a1d16; --msg-user-link: #14375c;
+}
+:root.theme-violet.accent-strong {
+  --accent: #b06ef0; --accent-rgb: 176, 110, 240;
+  --msg-user-fg: #1a1d16; --msg-user-link: #2e0a52;
+}
+:root.theme-red.accent-strong {
+  --accent: #f95a3c; --accent-rgb: 249, 90, 60;
+  --msg-user-fg: #1a1d16; --msg-user-link: #4a0d02;
+}
+:root.light.accent-strong {
+  --accent: #5f7310; --accent-rgb: 95, 115, 16;
+  --msg-user-fg: #f5f1e4; --msg-user-link: #e0ecb8;
+}
+:root.light.theme-gold.accent-strong {
+  --accent: #986000; --accent-rgb: 152, 96, 0;
+  --msg-user-fg: #f5f1e4; --msg-user-link: #ffe4b0;
+}
+:root.light.theme-grey.accent-strong {
+  --accent: #2f6cb2; --accent-rgb: 47, 108, 178;
+  --msg-user-fg: #f5f1e4; --msg-user-link: #d5e7ff;
+}
+:root.light.theme-violet.accent-strong {
+  --accent: #7d28d4; --accent-rgb: 125, 40, 212;
+  --msg-user-fg: #f5f1e4; --msg-user-link: #ecd9ff;
+}
+:root.light.theme-red.accent-strong {
+  --accent: #cf2a12; --accent-rgb: 207, 42, 18;
+  --msg-user-fg: #f5f1e4; --msg-user-link: #ffd9d2;
+}
+
+/* Surfaces en intensité forte : ~2× les mixes doux, bordures renforcées
+   — la teinte colore visiblement le fond et les panneaux, pas seulement
+   les éléments interactifs. Sauge forte incluse : :root.accent-strong
+   seul (sans theme-*) prend aussi cette règle. */
+:root.accent-strong {
+  --tint-rgb: var(--accent-rgb);
+  --line: rgba(var(--tint-rgb), .22);
+  --line-strong: rgba(var(--tint-rgb), .42);
+  --bg:          color-mix(in srgb, var(--accent) 18%, #121614);
+  --panel:       color-mix(in srgb, var(--accent) 16%, rgba(13, 19, 15, .82));
+  --panel-solid: color-mix(in srgb, var(--accent) 20%, #161c18);
+  --glass:       color-mix(in srgb, var(--accent) 16%, rgba(15, 20, 17, .72));
+  --code-bg:     color-mix(in srgb, var(--accent) 15%, #0d1310);
+}
+:root.light.accent-strong {
+  --line: rgba(var(--tint-rgb), .2);
+  --line-strong: rgba(var(--tint-rgb), .4);
+  --bg:          color-mix(in srgb, var(--accent) 16%, #e9e5d8);
+  --panel:       color-mix(in srgb, var(--accent) 13%, rgba(240, 237, 228, .85));
+  --panel-solid: color-mix(in srgb, var(--accent) 16%, #efece2);
+  --glass:       color-mix(in srgb, var(--accent) 13%, rgba(233, 229, 216, .72));
+  --code-bg:     color-mix(in srgb, var(--accent) 18%, #d6d1bf);
+}
+
 ::selection { background: var(--accent); color: var(--bg); }
 ::-webkit-scrollbar { width: 9px; }
 ::-webkit-scrollbar-thumb { background: rgba(var(--tint-rgb), .16); border-radius: 5px; }
