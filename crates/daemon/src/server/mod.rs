@@ -510,9 +510,12 @@ impl Daemon {
                 mode,
                 prompt,
                 origin,
+                group,
             } => {
-                self.h_new_session(agent, cwd, title, model, mode, prompt, origin)
-                    .await
+                self.h_new_session(
+                    agent, cwd, title, model, mode, prompt, origin, group,
+                )
+                .await
             }
             ReqKind::AttachSession {
                 agent,

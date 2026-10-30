@@ -1101,12 +1101,13 @@ impl Daemon {
     /// Spawn d'un worker via l'API interne : `h_new_session` (origin
     /// `component:backlog-orchestrator` — le prompt part wrappé service
     /// et la session se raccroche au nœud du composant dans le
-    /// diagramme), puis groupe + `thought_level` par handlers. Remplace
-    /// les `acctl new/setcfg`/RPC socket du script.
+    /// diagramme, groupe posé à la création), puis `thought_level` par
+    /// handler. Remplace les `acctl new/setcfg`/RPC socket du script.
     async fn orch_spawn(self: &Arc<Self>, number: u64) -> Option<String> {
         let cfg = &self.orch.cfg;
         let title = format!("{}{}", cfg.title_prefix, number);
         let prompt = cfg.prompt.clone().unwrap_or_else(|| PROMPT.to_string());
+        let group = (!cfg.group.is_empty()).then(|| cfg.group.clone());
         let v = match self
             .h_new_session(
                 cfg.agent.clone(),
@@ -1116,6 +1117,7 @@ impl Daemon {
                 Some(cfg.mode.clone()),
                 Some(prompt),
                 Some(COMPONENT_ORIGIN.to_string()),
+                group,
             )
             .await
         {
@@ -1132,18 +1134,11 @@ impl Daemon {
     }
 
     /// Queue commune des spawns orchestrés (workers + Managers) :
-    /// groupe sidebar + `thought_level` de la config — best-effort,
-    /// les échecs sont loggés sans faire échouer le spawn.
+    /// `thought_level` de la config — best-effort, les échecs sont
+    /// loggés sans faire échouer le spawn. (Le groupe sidebar est posé
+    /// à la création via le param `group` de `h_new_session`.)
     async fn apply_spawn_cfg(self: &Arc<Self>, sid: &str) {
         let cfg = &self.orch.cfg;
-        if !cfg.group.is_empty() {
-            if let Err(e) = self
-                .h_set_session_group(sid.to_string(), Some(cfg.group.clone()))
-                .await
-            {
-                warn!("orchestrateur: groupe {sid}: {e:#}");
-            }
-        }
         if !cfg.thought_level.is_empty() {
             // Posée en pending_config tant que l'agent n'est pas prêt —
             // rejouée au spawn (comme `acctl setcfg` juste après `new`).
@@ -1213,6 +1208,7 @@ impl Daemon {
                 Some(cfg.mode.clone()),
                 Some(prompt),
                 Some(MANAGER_ORIGIN.to_string()),
+                (!cfg.group.is_empty()).then(|| cfg.group.clone()),
             )
             .await?;
         let sid = v
