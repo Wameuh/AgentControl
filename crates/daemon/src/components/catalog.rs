@@ -118,16 +118,16 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
             suggested_spec: ComponentSpec {
                 name: "agentreviewer".into(),
                 kind: ComponentKind::Process,
-                // Le watcher est one-shot par invocation (flock interne)
-                // — la boucle sh le reproduit au rythme du timer
-                // systemd (~1/min) qu'il remplace. AGENTCONTROL_SOCK/TCP
-                // sont injectés au spawn : il trouve le démon sans
+                // `--watch` = boucle in-process upstream (rythme du
+                // timer systemd qu'il remplace) — argv direct, pas de
+                // sh : un `component stop` SIGTERMe le vrai process et
+                // laisse la passe se finir proprement (pas de fils
+                // orphelin d'une boucle externe). Les installs
+                // antérieures sans `--watch` échouent au start —
+                // relancer la recette les upgrade. AGENTCONTROL_SOCK/
+                // TCP sont injectés au spawn : il trouve le démon sans
                 // config réseau.
-                command: vec![
-                    "sh".into(),
-                    "-c".into(),
-                    "while true; do agent-reviewer; sleep 60; done".into(),
-                ],
+                command: vec!["agent-reviewer".into(), "--watch".into()],
                 env: HashMap::new(),
                 cwd: None,
                 // Config.toml à éditer avant le 1er run utile → l'auto-
@@ -139,14 +139,18 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 // seedée garde ses placeholders (`repo = "owner/repo"`)
                 // qui passent la validation `req()` du watcher — sans
                 // elle un composant « healthy » pollerait un repo
-                // inexistant. Absente ou placeholder → degraded ; le
-                // cycle de vie du process reste suivi par proc.rs.
+                // inexistant. Ancrée sur la ligne *active* : un
+                // `owner/repo` laissé en commentaire ne fige pas le
+                // verdict ; `test -r` évite « healthy » sur un fichier
+                // illisible. Absente/illisible/placeholder → degraded ;
+                // le cycle de vie du process reste suivi par proc.rs.
                 healthcheck: Healthcheck::Command {
                     argv: vec![
                         "sh".into(),
                         "-c".into(),
-                        "test -f ~/.config/agentreviewer/config.toml && \
-                         ! grep -q 'owner/repo' \
+                        "test -r ~/.config/agentreviewer/config.toml && \
+                         ! grep -q \
+                           '^[[:space:]]*repo[[:space:]]*=[[:space:]]*\"owner/repo\"' \
                            ~/.config/agentreviewer/config.toml"
                             .into(),
                     ],
@@ -180,22 +184,24 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 path: Some("~/.local/bin/agent-reviewer".into()),
             },
             recipe: vec![
-                // Pas de packaging Python upstream (ni pyproject ni
-                // setup.py — `uv tool install` échouerait) : fetch du
-                // script auto-suffisant + seed de la config si absente
-                // (jamais d'écrasement). `~` est expansé par le sh.
+                // Packagé upstream (pyproject + console script
+                // `agent-reviewer`, requires-python ≥3.11 géré par uv).
+                RecipeStep::Run {
+                    argv: vec![
+                        "uv".into(),
+                        "tool".into(),
+                        "install".into(),
+                        "git+https://github.com/Wameuh/AgentReviewer".into(),
+                    ],
+                },
+                // Seed de la config si absente — jamais d'écrasement
+                // (`test -f` garde les éditions d'une ré-install).
                 RecipeStep::Run {
                     argv: vec![
                         "sh".into(),
                         "-c".into(),
                         "set -e; \
-                         python3 -c 'import tomllib' 2>/dev/null || { \
-                           echo 'python3 >= 3.11 requis (tomllib)'; \
-                           exit 1; }; \
-                         mkdir -p ~/.local/bin ~/.config/agentreviewer; \
-                         curl -fsSL https://raw.githubusercontent.com/Wameuh/AgentReviewer/main/agentreviewer.py \
-                           -o ~/.local/bin/agent-reviewer; \
-                         chmod 755 ~/.local/bin/agent-reviewer; \
+                         mkdir -p ~/.config/agentreviewer; \
                          test -f ~/.config/agentreviewer/config.toml || \
                            curl -fsSL https://raw.githubusercontent.com/Wameuh/AgentReviewer/main/config.example.toml \
                              -o ~/.config/agentreviewer/config.toml; \
@@ -210,15 +216,11 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                            restera « degraded » tant que ses placeholders \
                            `owner/repo` seront en place) puis démarrez \
                            le composant — en `process` managé le watcher \
-                           reçoit AGENTCONTROL_SOCK/TCP injectés. \
-                           État transitoire assumé : tant que la \
-                           PHASE 2 n'a pas landé upstream, la version \
-                           fetched spawne ses reviews via systemd-run \
-                           (mode legacy) — une ré-install de la recette \
-                           récupère la version « sessions du démon » \
+                           reçoit AGENTCONTROL_SOCK/TCP injectés et \
+                           crée ses reviews en sessions du démon \
                            (origin component:agentreviewer, group \
-                           AgentReviewer) une fois publiée. Si le timer \
-                           systemd upstream était activé, désactivez-le \
+                           AgentReviewer). Si le timer systemd upstream \
+                           était activé, désactivez-le \
                            (`systemctl --user disable --now \
                            agentreviewer-watch.timer`) pour éviter un \
                            double polling — le flock interne les \
