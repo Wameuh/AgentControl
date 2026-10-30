@@ -37,6 +37,9 @@ const POLL_MS = 4000;
 const IDLE_POLL_MS = 60_000;
 const DONE_KEEP_MS = 24 * 3600 * 1000; // « récentes » : done_at < 24 h
 const DONE_MAX = 8;
+/** Sentinelle du filtre déroulant « items sans repo » — une valeur
+ *  qui ne peut pas être un nom de repo taggé. */
+const REPO_UNTAGGED = "__untagged__";
 
 export interface BacklogDeps {
   /** Clé connKey de la connexion liée — "" = démon par défaut. */
@@ -59,6 +62,10 @@ interface BacklogItem {
   done_at?: string | null;
   dep_status?: string | null;
   depends_on?: number | null;
+  /** Tag workspace/repo de l'item (multi-workspaces) — null = non
+   *  taggé (legacy) : pas de badge affiché, un libellé inventé genre
+   *  « défaut » induirait en erreur (aucun défaut n'est connu). */
+  repo?: string | null;
 }
 
 interface QueryResp {
@@ -89,6 +96,9 @@ export class BacklogView {
   private evTimer: number | undefined;
   private installing = false;
   private filter = "";
+  /** Repo sélectionné dans le filtre déroulant — "" = tous,
+   *  REPO_UNTAGGED = seulement les non taggés. */
+  private repoFilter = "";
   /** Signature du dernier rendu — le poll ne rebuild le DOM que si la
    *  file ou la résolution d'agents a réellement changé. */
   private lastSig = "";
@@ -251,17 +261,33 @@ export class BacklogView {
 
   private render() {
     const el = $("backlog-list");
+    const st = this.state;
+    // Le choix du filtre repo peut devenir invalide quand la file
+    // change (repo disparu, plus aucun non taggé) → normalisé avant la
+    // signature pour ne pas figer un filtrage fantôme dans lastSig.
+    if (st.kind === "ok") {
+      const rs = new Set(
+        st.items.map((i) => i.repo).filter((r): r is string => !!r),
+      );
+      if (
+        this.repoFilter === REPO_UNTAGGED
+          ? !st.items.some((i) => !i.repo)
+          : this.repoFilter !== "" && !rs.has(this.repoFilter)
+      ) {
+        this.repoFilter = "";
+      }
+    }
     // La résolution agent → titre dépend d'app.lastSessions : la signature
     // l'inclut (re-rendu si une session connue apparaît/change de titre).
     const sig =
       JSON.stringify(this.state) +
       this.filter +
+      this.repoFilter +
       this.installing +
       JSON.stringify(app.lastSessions.map((s) => [s.id, s.title, s.conn]));
     if (sig === this.lastSig) return;
     this.lastSig = sig;
 
-    const st = this.state;
     const badge = $("sv-bcount");
     if (st.kind === "ok") {
       const n = st.items.filter((i) => i.status !== "done").length;
@@ -295,25 +321,64 @@ export class BacklogView {
     );
 
     const f = this.filter;
+    const rf = this.repoFilter;
     const match = (i: BacklogItem) => {
+      if (rf === REPO_UNTAGGED) {
+        if (i.repo) return false;
+      } else if (rf !== "" && i.repo !== rf) {
+        return false;
+      }
       if (!f) return true;
       const agent = this.agentTitle(i.agent_id) ?? i.agent_id ?? "";
-      const hay = `${i.id ?? ""} ${i.title ?? ""} ${agent}`.toLowerCase();
+      const hay =
+        `${i.id ?? ""} ${i.title ?? ""} ${agent} ${i.repo ?? ""}`.toLowerCase();
       return hay.includes(f);
     };
     const wv = wip.filter(match);
     const pv = pend.filter(match);
     const dv = done.filter(match);
 
-    if (!wv.length && !pv.length && !dv.length) {
-      el.innerHTML = `<div class="sess-none">${esc(t("bl_none_filt"))}</div>`;
-      return;
-    }
+    // Filtre par repo — rendu seulement quand ≥2 « files » coexistent
+    // (repos distincts + les non taggés comptés comme un groupe) :
+    // à un seul repo possible il n'apporte rien et encombre l'onglet.
+    // Posé AVANT les sections : un filtre qui masque tout doit rester
+    // visible au-dessus du « aucun item » pour pouvoir être défait.
+    const repos = [
+      ...new Set(items.map((i) => i.repo).filter((r): r is string => !!r)),
+    ].sort();
+    const untagged = items.some((i) => !i.repo);
     let html = "";
-    if (wv.length) html += this.section("bl_wip", wv, "wip");
-    if (pv.length) html += this.section("bl_pending", pv, "pend");
-    if (dv.length) html += this.section("bl_done", dv, "done");
-    el.innerHTML = html;
+    if (repos.length + (untagged ? 1 : 0) >= 2) {
+      html +=
+        `<div class="bl-repo-filter"><select id="bl-repo-sel" title="${q(esc(t("bl_repo_filter")))}">` +
+        `<option value="">${esc(t("bl_all_repos"))}</option>` +
+        repos
+          .map(
+            (r) =>
+              `<option value="${q(esc(r))}"${r === rf ? " selected" : ""}>${esc(r)}</option>`,
+          )
+          .join("") +
+        (untagged
+          ? `<option value="${REPO_UNTAGGED}"${rf === REPO_UNTAGGED ? " selected" : ""}>${esc(t("bl_repo_none"))}</option>`
+          : "") +
+        `</select></div>`;
+    }
+    if (!wv.length && !pv.length && !dv.length) {
+      el.innerHTML =
+        html + `<div class="sess-none">${esc(t("bl_none_filt"))}</div>`;
+    } else {
+      if (wv.length) html += this.section("bl_wip", wv, "wip");
+      if (pv.length) html += this.section("bl_pending", pv, "pend");
+      if (dv.length) html += this.section("bl_done", dv, "done");
+      el.innerHTML = html;
+    }
+    el.querySelector<HTMLSelectElement>("#bl-repo-sel")?.addEventListener(
+      "change",
+      (e) => {
+        this.repoFilter = (e.target as HTMLSelectElement).value;
+        this.render();
+      },
+    );
     el.querySelectorAll<HTMLElement>(".bl-agent[data-sid]").forEach((b) => {
       b.onclick = () => {
         nav.closeDrawer(); // mobile : la drawer laisserait le chat masqué
@@ -382,6 +447,9 @@ export class BacklogView {
       html +=
         `<div class="bl-item" title="${q(esc(i.title ?? ""))}">` +
         `<span class="bl-id">#${esc(String(id))}</span>` +
+        (i.repo
+          ? `<span class="badge bl-repo" title="${q(esc(i.repo))}">${esc(i.repo)}</span>`
+          : "") +
         `<span class="bl-title">${this.deps.hl(i.title ?? "")}</span>` +
         (blocked
           ? `<span class="bl-blocked" title="${q(esc(t("bl_blocked", { id: String(i.depends_on) })))}">${icon("lock")}</span>`
