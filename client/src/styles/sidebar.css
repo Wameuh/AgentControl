@@ -48,13 +48,15 @@
 #session-list .sess .a { color: var(--dim); font-size: 11px; font-family: Mono, ui-monospace, monospace; }
 #session-list .sess .sess-pr {
   flex: none; font-size: 10px; font-family: Mono, ui-monospace, monospace;
-  padding: 0 5px; border: 1px solid var(--accent); border-radius: 8px;
-  color: var(--accent); opacity: .8;
+  padding: 0 5px; border: 1px solid var(--gold); border-radius: 8px;
+  color: var(--gold); opacity: .8;
 }
 /* Provenance service (meta.origin) : badge « via X » violet — distinct
-   des badges PR (accent) et du vert agent↔agent (peer). */
+   des badges PR (or) et du vert agent↔agent (peer). Cap fixe en em :
+   la provenance reste une info secondaire qui ne doit pas pousser le
+   titre ; le nom complet reste en tooltip (origin_tip). */
 #session-list .sess .sess-origin {
-  flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis;
+  flex: none; max-width: 9em; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; font-size: 10px; font-family: Mono, ui-monospace, monospace;
   padding: 0 5px; border: 1px solid var(--violet); border-radius: 8px;
   color: var(--violet); opacity: .85;
@@ -224,7 +226,7 @@ button:disabled { opacity: .5; cursor: default; }
 #pr-list .pr .pr-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
 #pr-list .pr .pr-num {
   flex: none; font-size: 11px; font-family: Mono, ui-monospace, monospace;
-  color: var(--accent);
+  color: var(--gold);
 }
 #pr-list .pr .pr-t {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
