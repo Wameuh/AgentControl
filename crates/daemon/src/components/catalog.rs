@@ -120,13 +120,11 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 kind: ComponentKind::Process,
                 // `--watch` = boucle in-process upstream (rythme du
                 // timer systemd qu'il remplace) — argv direct, pas de
-                // sh : un `component stop` SIGTERMe le vrai process et
-                // laisse la passe se finir proprement (pas de fils
-                // orphelin d'une boucle externe). Les installs
-                // antérieures sans `--watch` échouent au start —
-                // relancer la recette les upgrade. AGENTCONTROL_SOCK/
-                // TCP sont injectés au spawn : il trouve le démon sans
-                // config réseau.
+                // sh : un `component stop` SIGTERMe le vrai process
+                // (la passe en cours est interrompue, sans handler
+                // upstream — mais aucun fils orphelin de boucle
+                // externe). AGENTCONTROL_SOCK/TCP sont injectés au
+                // spawn : il trouve le démon sans config réseau.
                 command: vec!["agent-reviewer".into(), "--watch".into()],
                 env: HashMap::new(),
                 cwd: None,
@@ -186,11 +184,16 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
             recipe: vec![
                 // Packagé upstream (pyproject + console script
                 // `agent-reviewer`, requires-python ≥3.11 géré par uv).
+                // `--force` est requis : l'install.sh historique posait
+                // le script dans ~/.local/bin hors uv → sans lui uv
+                // refuse d'écraser l'exécutable étranger ; sur un outil
+                // déjà managé il force le reinstall = vrai upgrade.
                 RecipeStep::Run {
                     argv: vec![
                         "uv".into(),
                         "tool".into(),
                         "install".into(),
+                        "--force".into(),
                         "git+https://github.com/Wameuh/AgentReviewer".into(),
                     ],
                 },
@@ -219,7 +222,10 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                            reçoit AGENTCONTROL_SOCK/TCP injectés et \
                            crée ses reviews en sessions du démon \
                            (origin component:agentreviewer, group \
-                           AgentReviewer). Si le timer systemd upstream \
+                           AgentReviewer). La config est chargée au \
+                           démarrage du watcher — après édition, \
+                           `component restart agentreviewer` pour \
+                           l'appliquer. Si le timer systemd upstream \
                            était activé, désactivez-le \
                            (`systemctl --user disable --now \
                            agentreviewer-watch.timer`) pour éviter un \
