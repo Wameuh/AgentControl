@@ -9,7 +9,7 @@
 // ---------------------------------------------------------------------------
 
 import { invoke, listen, isWeb } from "../core/bridge";
-import { $, esc, q, showErr } from "../core/dom";
+import { $, esc, q, showErr, logUi } from "../core/dom";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
 import { connKeyOf, connLabel } from "../core/conn";
@@ -23,6 +23,19 @@ import { hideMenu, menuBtn, placeMenu } from "../ui/ctxmenu";
 // Conns déconnectées volontairement : ni alerte chip ni retry auto — un
 // retry explicite (menu ctx / badge) les ré-active (delete dans retryConn).
 const RETRY_MIN = 2_000, RETRY_MAX = 60_000;
+/** Fenêtre de « trafic entrant récent » : un timeout de sonde avec
+ *  silent_ms sous ce seuil = transport vivant (réponse lente, démon
+ *  sous charge) — excusé. Au-delà = silence radio suspect (blackhole)
+ *  → strike. C'est une fenêtre de fraîcheur, PAS le timeout de sonde :
+ *  il vaut 8 s côté Tauri (`secs` dans session.rs) et CALL_TIMEOUT
+ *  (60 s) côté web — les deux produisent silent_ms, comparé ici. */
+const SILENT_KILL_MS = 8_000;
+/** Timeouts de sonde excusés d'affilée avant de compter un strike
+ *  quand même : borne l'exemption « transport vivant » — si le chemin
+ *  RPC est durablement bloqué alors que les pushes continuent (voies
+ *  différentes), la conn serait sinon injouable sans jamais être
+ *  recyclée. 6 ≈ 1 min de sondes en échec à 10 s d'intervalle. */
+const IGNORED_STRIKE_MAX = 6;
 
 export class ConnectionManager {
   private live = new Map<string, ConnLive>();
@@ -41,6 +54,10 @@ export class ConnectionManager {
    *  ne doit pas déclencher un cycle de reconnexion complet. `conn-dead`
    *  (EOF réel du transport) reste instantané. */
   private strikes = new Map<string, number>();
+  /** Timeouts de sonde excusés d'affilée par conn (transport vivant) —
+   *  plafonnés par IGNORED_STRIKE_MAX : au-delà, le chemin RPC est
+   *  durablement bloqué et l'échec compte malgré le trafic. */
+  private ignored = new Map<string, number>();
   private gone = new Set<string>();
 
   private deps = {
@@ -164,6 +181,8 @@ export class ConnectionManager {
       this.delay.delete(k);
       this.nextAt.delete(k);
       this.attempts.delete(k);
+      this.strikes.delete(k);
+      this.ignored.delete(k);
       this.gone.delete(k);
       this.deps.dropConvsForConn(k);
       this.deps.closeIfConn(k);
@@ -213,28 +232,76 @@ export class ConnectionManager {
     this.nextAt.delete(key);
     this.attempts.delete(key);
     this.strikes.delete(key);
+    this.ignored.delete(key);
     const was = this.live.get(key);
     this.live.set(key, "ok");
-    if (was !== "ok") this.renderState();
+    if (was !== "ok") {
+      // « de retour » n'a de sens que sur une vraie panne — au premier
+      // connect (was undefined) le log serait du bruit.
+      if (was !== undefined)
+        logUi("info", `conn ${key} de retour (était ${was})`);
+      this.renderState();
+    }
   }
 
   /** Échec de sonde (timeout / error dans l'entrée fusionnée) : la conn
    *  n'est déclarée down qu'au 2ᵉ échec consécutif — un hoquet du lien
    *  (flush lent d'un tunnel congestionné) ne coûte plus un cycle
-   *  kill-tunnel/reconnect/replay qui le re-saturait aussitôt. */
-  private probeFailed(key: string) {
-    if (!this.cfg.has(key) || this.gone.has(key)) return;
+   *  kill-tunnel/reconnect/replay qui le re-saturait aussitôt.
+   *  Raffiné : un timeout avec transport vivant (silent_ms < fenêtre de
+   *  sonde → du trafic entrant arrive encore) n'est pas une mort mais
+   *  une lenteur démon — tuer la conn ajouterait reconnect+resubscribe
+   *  à la surcharge causale (flap auto-entretenu). Le blackhole, lui,
+   *  ne produit QUE du silence : ses timeouts comptent normalement.
+   *  Retour : true si l'échec est excusé (transport vivant — la conn
+   *  compte « up » pour l'icône d'état), false sinon. */
+  private probeFailed(key: string, v: {
+    error?: string; kind?: string; silent_ms?: number; rtt_ms?: number;
+  }): boolean {
+    if (!this.cfg.has(key) || this.gone.has(key)) return false;
+    const err = v.error ?? "?";
+    // kind champ structuré (fusion ≥ cette version) ; repli sur le
+    // littéral "timeout" pour les vieux démons / bridges sans kind.
+    const isTimeout = v.kind === "timeout" ||
+      (v.kind == null && err === "timeout");
+    if (isTimeout && (v.silent_ms ?? Infinity) < SILENT_KILL_MS) {
+      const ni = (this.ignored.get(key) ?? 0) + 1;
+      if (ni < IGNORED_STRIKE_MAX) {
+        this.ignored.set(key, ni);
+        logUi("warn",
+          `conn ${key}: sonde timeout mais transport vivant ` +
+          `(silent ${v.silent_ms} ms, rtt ${v.rtt_ms ?? "?"} ms) — ignoré ×${ni}`);
+        return true;
+      }
+      // Plafond : le RPC est durablement bloqué malgré un transport
+      // vivant — l'échec compte, faute de quoi la conn serait
+      // injouable à jamais sans être recyclée.
+      this.ignored.delete(key);
+      logUi("warn",
+        `conn ${key}: ${ni} timeouts d'affilée malgré un transport ` +
+        `vivant — RPC bloqué durablement → strike`);
+    }
     const n = (this.strikes.get(key) ?? 0) + 1;
     this.strikes.set(key, n);
-    if (n >= 2) this.markDead(key);
+    logUi("warn",
+      `conn ${key}: sonde ko ×${n} (${err}` +
+      `${v.silent_ms != null ? `, silent ${v.silent_ms} ms` : ""}` +
+      `${v.rtt_ms != null ? `, rtt ${v.rtt_ms} ms` : ""})`);
+    if (n >= 2) this.markDead(key, `sonde: ${err} ×${n}`);
+    return false;
   }
 
-  markDead(key: string) {
+  markDead(key: string, why = "conn-dead (EOF transport)") {
     // cfg n'est posée qu'à la fin d'un connect réussi — une conn dont
     // le tout premier connect a échoué en route n'est pas suivie (fenêtre
     // minime, pas de config retenue à rejouer de toute façon).
     if (!this.cfg.has(key) || this.gone.has(key)) return;
-    if (this.live.get(key) !== "reconnecting") this.live.set(key, "down");
+    const was = this.live.get(key);
+    if (was !== "reconnecting") this.live.set(key, "down");
+    // La transition est loguée une fois — chaque sonde ko refraîchit
+    // son propre log ×N, re-crier « down » à chaque tick est du spam.
+    if (was !== "down" && was !== "reconnecting")
+      logUi("error", `conn ${key} down — ${why}`);
     this.renderState();
     this.scheduleRetry(key);
   }
@@ -266,6 +333,7 @@ export class ConnectionManager {
     this.attempts.set(key, (this.attempts.get(key) ?? 0) + 1);
     this.live.set(key, "reconnecting");
     this.renderState();
+    const t0 = Date.now();
     try {
       const st = await invoke<Record<string, unknown>>("connect", { cfg });
       // Déconnectée/supprimée pendant le connect en vol → refermer aussitôt :
@@ -277,13 +345,17 @@ export class ConnectionManager {
         return;
       }
       this.markAlive(key);
+      logUi("info",
+        `conn ${key}: reconnect #${this.attempts.get(key) ?? 1} ok (${Date.now() - t0} ms)`);
       // connect retourne déjà daemon_status → capabilities à jour sans RTT.
       if (st && !st.error) this.setCaps(key, st);
       // Réouvrir la session affichée si elle vivait sur cette connexion.
       this.deps.reopenIfConn(key);
       await this.deps.refresh();
-    } catch {
+    } catch (e) {
       if (this.live.get(key) === "reconnecting") this.live.set(key, "down");
+      logUi("warn",
+        `conn ${key}: reconnect #${this.attempts.get(key) ?? "?"} ko (${Date.now() - t0} ms) — ${e}`);
       this.scheduleRetry(key);
       this.renderState();
     }
@@ -366,6 +438,7 @@ export class ConnectionManager {
     this.nextAt.delete(conn);
     this.attempts.delete(conn);
     this.strikes.delete(conn);
+    this.ignored.delete(conn);
     this.caps.delete(conn);
     // La conn sort de cfg : renderState (sb-left/chip) la retire sans
     // attendre une transition d'état ultérieure.
@@ -496,18 +569,28 @@ export class ConnectionManager {
     // Watchdog : sonde fusionnée toutes les 10 s (timeout 8 s/conn côté Rust) —
     // filet de sécurité pour les blackholes réseau (pas d'EOF → pas de
     // conn-dead). Entrées {error} → probeFailed (2 strikes) → backoff.
+    // __acWdMs : intervalle raccourci pour les harnais e2e.
+    const wdMs =
+      (window as unknown as { __acWdMs?: number }).__acWdMs ?? 10_000;
     setInterval(async () => {
       try {
         const st = await call<Record<string, unknown>>("daemon_status");
         let anyOk = false;
         for (const [k, v] of Object.entries(st)) {
           if (k === "servers" || k === "sessions") continue;
-          if ((v as { error?: string }).error) this.probeFailed(k);
-          else {
+          if ((v as { error?: string }).error) {
+            // Échec excusé (timeout, transport vivant) = la conn est
+            // joignable — l'icône ne passe pas grise en même temps
+            // que le segment reste vert.
+            anyOk = this.probeFailed(k, v as {
+              error?: string; kind?: string; silent_ms?: number; rtt_ms?: number;
+            }) || anyOk;
+          } else {
             anyOk = true;
             // Succès = la série d'échecs est rompue, même si la conn
             // n'avait jamais été déclarée down (1 strike effacé).
             this.strikes.delete(k);
+            this.ignored.delete(k);
             this.setCaps(k, v as Record<string, unknown>);
             if ((this.live.get(k) ?? "ok") !== "ok") this.markAlive(k);
           }
@@ -519,6 +602,6 @@ export class ConnectionManager {
         setAppIcon("grey");
       }
       this.deps.refresh().catch(() => {});
-    }, 10_000);
+    }, wdMs);
   }
 }
