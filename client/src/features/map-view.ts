@@ -320,19 +320,87 @@ export class MapView {
         chipW.get(a.key.slice(2))! / 2 + chipW.get(b.key.slice(2))! / 2 + 10;
       return need / (2 * Math.sin(Math.min(Math.PI / 2, ang / 2)));
     };
+
+    // --- Ordre des racines : contiguïté par groupe ---------------------
+    // Les sous-arbres sont contraints par la topologie (un enfant reste
+    // dans le secteur de son parent), mais l'ordre des RACINES sur le
+    // cercle est libre : les arbres portant le même groupe doivent être
+    // adjacents, sinon la zone (hull des positions) s'étire entre des
+    // secteurs opposés — #82 : les agents spawnés par un composant
+    // (origin component:backlog-orchestrator) tombaient à l'opposé des
+    // autres membres de leur groupe. Groupe porteur d'un arbre = groupe
+    // majoritaire parmi ses sessions (récursif — un composant hérite du
+    // groupe de ses descendants, sans membre groupé → pas de porteur).
+    const sessById = new Map(sess.map((s) => [s.id, s]));
+    const carrier = (t: TNode): string | undefined => {
+      const cnt = new Map<string, number>();
+      const walk = (n: TNode) => {
+        if (n.key.startsWith("s:")) {
+          const g = sessById.get(n.key.slice(2))?.group;
+          if (g) cnt.set(g, (cnt.get(g) ?? 0) + 1);
+        }
+        for (const k of n.kids) walk(k);
+      };
+      walk(t);
+      let best: string | undefined;
+      let bn = 0;
+      for (const [g, n] of cnt) {
+        if (n > bn || (n === bn && g < (best ?? g))) {
+          best = g;
+          bn = n;
+        }
+      }
+      return best;
+    };
+    // Une seule séquence de racines : le rayon diffère par arbre (chip
+    // sur l'anneau RC, sessions à RC+STEP) mais l'ordre angulaire est
+    // libre — intercaler permet la contiguïté composant↔sessions d'un
+    // même groupe. Blocs : chaque groupe converge vers la position de
+    // son premier membre dans l'ordre courant, les non-groupés gardent
+    // leur place relative → sans aucun groupe, l'ordre est strictement
+    // inchangé (composants triés par nom, sessions par created_at).
+    const seq = [
+      ...compTrees.map(
+        (t): { t: TNode; u: number; comp: boolean; g?: string } => ({
+          t,
+          u: compU.get(t.key)!,
+          comp: true,
+          g: carrier(t),
+        }),
+      ),
+      ...sessTrees.map(
+        (t): { t: TNode; u: number; comp: boolean; g?: string } => ({
+          t,
+          u: t.leaf,
+          comp: false,
+          g: carrier(t),
+        }),
+      ),
+    ];
+    const firstIdx = new Map<string, number>();
+    seq.forEach((e, i) => {
+      if (e.g !== undefined && !firstIdx.has(e.g)) firstIdx.set(e.g, i);
+    });
+    const ordered = seq
+      .map((e, i) => ({ e, k: e.g === undefined ? i : firstIdx.get(e.g)!, i }))
+      .sort((a, b) => a.k - b.k || a.i - b.i)
+      .map((x) => x.e);
     // La contrainte arc porte sur le rayon des SESSIONS (RC+STEP) — les
     // chips n'ont besoin que de pairNeed ; le −STEP évite ~96 px de rayon
-    // superflu sur les gros graphes.
+    // superflu sur les gros graphes. Paires adjacentes réelles : deux
+    // chips ne se contraignent que si voisines dans la séquence finale.
     let RC = Math.max(
       120,
       (U * PITCH_MIN) / (2 * Math.PI) - STEP_MIN,
     );
-    for (let i = 1; i < compTrees.length; i++) {
-      RC = Math.max(RC, pairNeed(compTrees[i - 1], compTrees[i]));
+    for (let i = 1; i < ordered.length; i++) {
+      if (ordered[i - 1].comp && ordered[i].comp)
+        RC = Math.max(RC, pairNeed(ordered[i - 1].t, ordered[i].t));
     }
-    // Paire de bouclage : adjacente seulement sans sessions entre les deux.
-    if (compTrees.length > 1 && sessTrees.length === 0) {
-      RC = Math.max(RC, pairNeed(compTrees[compTrees.length - 1], compTrees[0]));
+    // Paire de bouclage : adjacente seulement si les deux extrémités de
+    // la séquence sont des chips.
+    if (ordered.length > 1 && ordered[0].comp && ordered[ordered.length - 1].comp) {
+      RC = Math.max(RC, pairNeed(ordered[ordered.length - 1].t, ordered[0].t));
     }
     const STEP = STEP_MIN;
     // Profondeur max en nombre de sessions (la racine composant ne compte
@@ -355,25 +423,21 @@ export class MapView {
       }
     };
     let cur = -Math.PI / 2;
-    for (const t of compTrees) {
-      const s = spanU * compU.get(t.key)!;
-      place(t, RC, cur, s);
-      cur += s;
-    }
-    for (const t of sessTrees) {
-      const s = spanU * t.leaf;
-      place(t, RC + STEP, cur, s);
+    for (const e of ordered) {
+      const s = spanU * e.u;
+      place(e.t, e.comp ? RC : RC + STEP, cur, s);
       cur += s;
     }
 
     // --- Zones de groupe (champ `group` des sessions) ----------------
     // Cadre labellé = hull convexe paddé autour des membres placés :
-    // les secteurs sont topologiques, un groupe peut couvrir plusieurs
-    // arbres — le hull englobe ses membres où qu'ils tombent. Sessions
-    // sans groupe : pas de cadre (zone à part par exclusion). Clic sur
-    // le cadre ou le label → repli en chip « nom · N » (les nœuds et
-    // arêtes des membres sont masqués, l'espace angulaire reste réservé
-    // → pas de saut de layout au repli).
+    // les racines portant le même groupe sont adjacentes (ordre ci-
+    // dessus) → la zone reste compacte ; un groupe couvrant plusieurs
+    // arbres les englobe où qu'ils tombent. Sessions sans groupe : pas
+    // de cadre (zone à part par exclusion). Clic sur le cadre ou le
+    // label → repli en chip « nom · N » (les nœuds et arêtes des
+    // membres sont masqués, l'espace angulaire reste réservé → pas de
+    // saut de layout au repli).
     const GRP_PAD = 34; // R_SESS + label en dessous du nœud
     const byGrp = new Map<string, Pt[]>();
     const sessGrp = new Map<string, string>(); // session id → groupe
