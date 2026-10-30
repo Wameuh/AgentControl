@@ -9,7 +9,7 @@ name: release-on-merge
 #
 #   Le bump lui-même est fait en amont par le job `release-bump` de
 #   version.yml sur la PR de release (niveau = mots-clés `(major)` /
-#   `(minor)` / `(sync)` dans les commits du cycle → cf. version.yml).
+#   `(sync)` dans les commits du cycle → cf. version.yml).
 
 on:
   push:
