@@ -16,3 +16,4 @@
 188: Fixed mesh background facets tinted with the accent's complementary color in the light theme.
 189: Session diagram: roots of the same group are now placed contiguously.
 190: Fixed unreadable code blocks in the light theme.
+192: Sound alerts now offer a choice of presets per event — richer sounds synthesized live, no bundled audio files.

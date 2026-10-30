@@ -701,11 +701,18 @@ body.android .ev.pinned .pin-tag { opacity: 1; }
    grisés sauf les boutons « Tester » (toujours cliquables — preview +
    déblocage autoplay). */
 #s-snd-opts { display: flex; flex-direction: column; gap: 15px; }
-#s-snd-opts.off input, #s-snd-opts.off label, #s-snd-opts.off span { opacity: .45; }
-.s-snd-opt { padding-left: 26px; }
+#s-snd-opts.off input, #s-snd-opts.off label, #s-snd-opts.off span,
+#s-snd-opts.off select { opacity: .45; }
+.s-snd-opt { padding-left: 26px; flex-wrap: wrap; }
 .s-snd-opt > label { flex: 1; cursor: pointer; }
 .s-snd-opt > input[type="checkbox"] {
   accent-color: var(--sand); width: 15px; height: 15px; flex: none;
+}
+/* Sélecteur de preset sonore : plus compact que les selects de section —
+   passe sous le libellé sur les lignes étroites (flex-wrap du parent). */
+.s-preset {
+  min-width: 0; width: 140px; flex: none;
+  padding: 4px 8px; font-size: 12px;
 }
 .s-test { padding: 3px 12px; font-size: 12px; flex: none; }
 #s-snd-vol { accent-color: var(--sand); flex: none; width: 220px; }
