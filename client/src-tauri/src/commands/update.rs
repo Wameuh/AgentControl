@@ -288,8 +288,9 @@ fn fetch_release_asset(
 #[tauri::command]
 pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     ulog(format!("install v{tag} demandée"));
-    let deb = tokio::task::spawn_blocking(move || {
-        fetch_release_asset(&tag, "agentcontrol.deb", |n| n.ends_with(".deb"))
+    let deb = tokio::task::spawn_blocking({
+        let tag = tag.clone();
+        move || fetch_release_asset(&tag, "agentcontrol.deb", |n| n.ends_with(".deb"))
     })
     .await
     .map_err(|e| e.to_string())??;
