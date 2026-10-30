@@ -91,6 +91,13 @@ impl Session {
                         if s.spawn_gen.load(Ordering::SeqCst) != gen {
                             return;
                         }
+                        // /compact armé ci-dessus puis refusé : désarmer —
+                        // sinon la retenue fantôme bloque la file jusqu'au
+                        // timeout (même fix que le drain sur commande en
+                        // échec).
+                        if is_compact_cmd(&text) {
+                            s.take_compact_hold();
+                        }
                         s.emit(EventKind::System {
                             text: format!("steer refusé ({e}) — message en file"),
                         });
@@ -558,6 +565,11 @@ impl Session {
         // n'a pas d'objet — remise en file et drain relancé = livraison
         // immédiate par le chemin normal.
         if !self.busy.load(Ordering::SeqCst) {
+            // Même arm que enqueue_prompt : remise en file pendant un
+            // réveil en vol — l'entrée doit survivre à un réveil raté.
+            if self.is_waking() {
+                self.arm_wake_pending();
+            }
             {
                 let mut q = self.prompt_queue.lock().unwrap();
                 let at = idx.min(q.len());
@@ -620,6 +632,15 @@ impl Session {
                         let _ = ack_tx.send(Some(format!("{e}")));
                         return;
                     }
+                    // /compact armé ci-dessus puis refusé : désarmer —
+                    // la retenue fantôme bloquerait la file jusqu'au
+                    // timeout et relancerait un « continue your task »
+                    // spurieux pour un auto jamais exécuté (même fix
+                    // que le drain : take_compact_hold sur commande
+                    // en échec).
+                    if is_compact_cmd(&text) {
+                        s.take_compact_hold();
+                    }
                     s.emit(EventKind::System {
                         text: format!("steer refusé ({e}) — message remis en file"),
                     });
@@ -630,6 +651,12 @@ impl Session {
                     } else {
                         src
                     };
+                    // Même arm que enqueue_prompt : remise en file
+                    // pendant un réveil en vol — l'entrée doit survivre
+                    // à un réveil raté.
+                    if s.is_waking() {
+                        s.arm_wake_pending();
+                    }
                     // Remise à la position initiale — busy.swap sous le
                     // lock de la file, sérialisé avec le pop du runner.
                     let was_busy = {

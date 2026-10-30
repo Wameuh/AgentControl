@@ -269,8 +269,10 @@ await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
   // Les events système « message en file » / « steer refusé — remis
   // en file » / retenue compact changent la file sans status_changed :
   // le bandeau de file resterait périmé jusqu'au prochain changement
-  // d'état — refresh immédiat (un queue_list par event, rafale rare).
-  if (event.type === "system" && app.current?.id === session) {
+  // d'état — refresh immédiat, restreint aux textes liés à la file
+  // (un queue_list par event sinon, gratuit mais inutile).
+  if (event.type === "system" && app.current?.id === session
+      && /file|steer|compact/i.test((event.text as string) ?? "")) {
     void composer.refreshQueue();
   }
   if (event.type === "status_changed") void sidebar.refresh();

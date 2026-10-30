@@ -340,15 +340,19 @@ impl Session {
         }
         // Fin de compact signalée par le texte agent : détectée dès que
         // le buffer la contient — le flush peut ne jamais venir si c'est
-        // le dernier message du compact.
+        // le dernier message du compact. Le chunk entrant est testé à
+        // part : accumulé sans séparateur, il peut fusionner un
+        // mot-frontière («…done» + «compact…» → «donecompact») et
+        // masquer le signal que le chunk seul portait.
         let compact_done = kind == "agent"
             && self.compacting.lock().unwrap().is_some()
-            && self
-                .cur_text
-                .lock()
-                .unwrap()
-                .as_ref()
-                .is_some_and(|(_, buf)| compact_done_text(buf));
+            && (compact_done_text(text)
+                || self
+                    .cur_text
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|(_, buf)| compact_done_text(buf)));
         if compact_done {
             self.end_compact("signal agent", false);
         }

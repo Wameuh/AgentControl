@@ -79,12 +79,15 @@ def watcher():
             h, s = held.pop(0)
             chunk(s, "turn done")
             send({"jsonrpc": "2.0", "id": h, "result": {"stopReason": "end_turn"}})
+        # SAY n'est consommé que s'il porte du contenu — une lecture en
+        # vol pendant l'écriture ne doit pas avaler un message vide.
         if os.path.exists(SAY):
             try: txt = open(SAY).read().strip()
             except OSError: txt = ""
-            if txt: chunk("native-1", txt)
-            try: os.remove(SAY)
-            except OSError: pass
+            if txt:
+                chunk("native-1", txt)
+                try: os.remove(SAY)
+                except OSError: pass
         time.sleep(0.05)
 threading.Thread(target=watcher, daemon=True).start()
 for line in sys.stdin:
@@ -120,8 +123,11 @@ def clear_release():
         pass
 
 def say(txt):
-    with open(SAY, "w") as f:
+    # Écriture atomique : le watcher du stub ne voit que le contenu
+    # complet, jamais un fichier vide en cours d'écriture.
+    with open(SAY + ".tmp", "w") as f:
         f.write(txt)
+    os.replace(SAY + ".tmp", SAY)
 
 
 class Conn:
@@ -277,6 +283,29 @@ def main():
               any(e["type"] == "system" and "remis en file" in (e.get("text") or "")
                   for e in evs),
               str([e.get("text") for e in evs if e["type"] == "system"]))
+
+        # --- 2b. Régression : steer refusé d'un /compact --------------------
+        # arm_compact tiré par le steer puis prompt refusé → la retenue
+        # doit être désarmée (sinon la file reste bloquée ~180 s).
+        c.result("send", session=sid, text="/compact")
+        q = wait_for(lambda: "/compact" in
+                     c.result("queue_list", session=sid)["queue"], 5)
+        check("/compact en file pour le steer", q,
+              str(c.result("queue_list", session=sid)["queue"]))
+        r = c.result("queue_steer", session=sid, index=1)
+        check("/compact refusé → requeued", r["delivered"] == "requeued", str(r))
+        c.result("send", session=sid, text="after-cmd")
+        r = c.result("queue_steer", session=sid, index=2)
+        check("retenue désarmée : steer suivant pas held/compact",
+              r["delivered"] == "requeued" and r.get("reason") != "compact", str(r))
+        st = c.result("session_info", session=sid).get("meta", {}).get("state")
+        check("état pas resté « compacting »", st != "compacting", st)
+        # Nettoie « after-cmd » (restant en file) — la phase compact suit.
+        c.result("queue_drop", session=sid, index=2)
+        c.result("queue_drop", session=sid, index=1)
+        q = wait_for(lambda: c.result("queue_list", session=sid)["queue"] == ["third"], 5)
+        check("file purgée pour la phase compact", q,
+              str(c.result("queue_list", session=sid)["queue"]))
 
         # --- 3. Compact hold --------------------------------------------------
         set_mode("hold")
