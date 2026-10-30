@@ -140,6 +140,14 @@ La création passe par
 PAT le job échoue rouge (arrivé : run 40210287826, tentatives avant
 l'ajout du scope).
 
+**Notes de version en anglais** : `release_notes.py` catégorise les
+sujets de squash (souvent français) mais prend les libellés dans
+`client/tools/release_notes_en.txt` — **chaque PR `feat`/`fix`/`perf`
+y ajoute une ligne `<N>: <note utilisateur anglaise>`** (sinon le sujet
+brut est repris et le générateur le signale dans les logs du workflow).
+Les lignes des PRs déjà releasées sont inertes — purge possible à
+chaque cycle.
+
 Release = PR `next_release` → `main` passée **ready** →
 le job `release-bump` de `version.yml` calcule `dernier tag + niveau`,
 commit `chore: bump version` poussé sur `next_release` (la PR se met
