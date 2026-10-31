@@ -62,7 +62,7 @@ AGENTCONTROL_TCP=127.0.0.1:7331 acctl status   # → {"sessions":0,...}
 
 ## 3. Usage
 
-- `+ New session` → agent, `cwd` on the server, mode/model.
+- `+ New agent` → agent, `cwd` on the server, mode/model.
 - Close the app → **the agent keeps running** on the server. Reopen →
   full history (paged scrollback), `waiting_input` sessions to resume,
   permissions/questions still answerable.
