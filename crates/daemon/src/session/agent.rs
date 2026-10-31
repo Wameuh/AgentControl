@@ -249,35 +249,22 @@ impl Session {
             bail!("spawn supplanté (kill pendant le spawn)");
         }
 
-        // ACP handshake
-        let init = self
-            .acp_request("initialize", acp::initialize_params())
-            .await
-            .context("initialize")?;
-        let agent_caps = init.get("agentCapabilities").cloned().unwrap_or(json!({}));
-        let supports_load = agent_caps
-            .get("loadSession")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-
-        let resp = if let (Some(native), true) = (resume_native_id.clone(), supports_load) {
-            self.loading_replay.store(skip_replay, Ordering::SeqCst);
-            let r = self
-                .acp_request(
-                    "session/load",
-                    acp::session_load_params(&native, &meta.cwd, mcp_servers.clone()),
-                )
-                .await;
-            self.loading_replay.store(false, Ordering::SeqCst);
-            r
-        } else {
-            self.acp_request(
-                "session/new",
-                acp::session_new_params(&meta.cwd, mcp_servers),
-            )
-            .await
+        // ACP handshake : initialize puis session/new|load. Un échec ne
+        // doit pas laisser le process vivant — sinon is_alive() ment
+        // (agent initialisé mais sans session liée : les envois
+        // répondent « Session not found » et resume_session répond
+        // « already » sans jamais réparer) → kill silencieux, l'état
+        // final est décidé par l'appelant du spawn.
+        let hs = self
+            .acp_handshake(&meta, resume_native_id.clone(), skip_replay, mcp_servers)
+            .await;
+        let (resp, supports_load, fell_back) = match hs {
+            Ok(v) => v,
+            Err(e) => {
+                self.kill_failed_spawn(gen).await;
+                return Err(e);
+            }
         };
-        let resp = resp.context("session/new|load")?;
 
         if let Some(sid) = resp.get("sessionId").and_then(Value::as_str) {
             let mut m = self.meta.lock().unwrap();
@@ -344,10 +331,12 @@ impl Session {
             return Ok(false);
         }
         self.emit(EventKind::System {
-            text: if resume_native_id.is_some() {
-                format!("agent respawned (session/load={}, resumed)", supports_load)
-            } else {
-                "agent started".into()
+            text: match (resume_native_id.is_some(), fell_back) {
+                (_, true) => "agent respawned (session native perdue — contexte neuf)".into(),
+                (true, false) => {
+                    format!("agent respawned (session/load={}, resumed)", supports_load)
+                }
+                (false, _) => "agent started".into(),
             },
         });
         // Config demandée pendant que l'agent était mort : rejouer maintenant
@@ -380,6 +369,120 @@ impl Session {
         Ok(true)
     }
 
+    /// Handshake ACP d'un process frais : `initialize`, puis
+    /// `session/load` quand une session native est à reprendre et que
+    /// l'agent l'annonce, sinon `session/new`.
+    /// Un session/load dont la session n'est plus résolvable côté agent
+    /// (store vidé par un restart, id jamais persisté, erreur interne…)
+    /// dégrade en `session/new` sur le MÊME process : la session démon
+    /// garde son journal, l'agent repart sur un contexte neuf — la ligne
+    /// système émise ici le rend visible au lieu d'une erreur fatale qui
+    /// laissait la session inutilisable à vie. Seules les erreurs qui
+    /// signalent une session encore VERROUILLÉE ailleurs (« already
+    /// open », TUI, autre démon) restent fatales : un repli silencieux
+    /// masquerait un vrai conflit — et la boucle de retry du fork
+    /// compte dessus.
+    /// Retour : (réponse session/new|load, supports_load, fell_back).
+    async fn acp_handshake(
+        &self,
+        meta: &SessionMeta,
+        resume_native_id: Option<String>,
+        skip_replay: bool,
+        mcp_servers: Value,
+    ) -> Result<(Value, bool, bool)> {
+        let init = self
+            .acp_request("initialize", acp::initialize_params())
+            .await
+            .context("initialize")?;
+        let agent_caps = init.get("agentCapabilities").cloned().unwrap_or(json!({}));
+        let supports_load = agent_caps
+            .get("loadSession")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        if let (Some(native), true) = (resume_native_id, supports_load) {
+            self.loading_replay.store(skip_replay, Ordering::SeqCst);
+            let r = self
+                .acp_request(
+                    "session/load",
+                    acp::session_load_params(&native, &meta.cwd, mcp_servers.clone()),
+                )
+                .await;
+            self.loading_replay.store(false, Ordering::SeqCst);
+            match r {
+                Ok(v) => Ok((v, supports_load, false)),
+                Err(e) => {
+                    if load_err_keeps_native(&format!("{e:#}")) {
+                        return Err(e).context("session/load");
+                    }
+                    warn!(
+                        "[{}] session/load impossible ({e:#}) — repli session/new",
+                        meta.id
+                    );
+                    self.emit(EventKind::System {
+                        text: format!(
+                            "session native perdue ({e}) — agent relancé sur un contexte neuf"
+                        ),
+                    });
+                    let v = self
+                        .acp_request(
+                            "session/new",
+                            acp::session_new_params(&meta.cwd, mcp_servers),
+                        )
+                        .await
+                        .context("session/new (repli après session/load)")?;
+                    Ok((v, supports_load, true))
+                }
+            }
+        } else {
+            let v = self
+                .acp_request(
+                    "session/new",
+                    acp::session_new_params(&meta.cwd, mcp_servers),
+                )
+                .await
+                .context("session/new")?;
+            Ok((v, supports_load, false))
+        }
+    }
+
+    /// Tue le process laissé par un handshake raté (initialize ou
+    /// session/new|load en échec). Sans lui, `is_alive()` resterait vrai
+    /// sur un agent sans session liée : les envois tomberaient sur
+    /// « Session not found » en boucle et `resume_session` répondrait
+    /// « already » — la session serait bloquée à vie. L'exit du reader
+    /// est marqué par génération (`suppress_exit_gen`) : ménage fait,
+    /// mais ni « agent process exited » ni dead — l'état final est posé
+    /// par l'appelant du spawn (mark_dead, retour à asleep,
+    /// interrupted…). Pas de bump de génération : ce kill n'est pas un
+    /// supplant, les tentatives de spawn_attempts doivent continuer.
+    async fn kill_failed_spawn(&self, gen: u64) {
+        self.suppress_exit_gen.store(gen, Ordering::SeqCst);
+        *self.stdin_tx.lock().unwrap() = None;
+        {
+            let mut p = self.acp_pending.lock().unwrap();
+            for (_, tx) in p.drain() {
+                let _ = tx.send(Err("spawn failed".into()));
+            }
+        }
+        self.kill().await;
+    }
+
+    /// Tue le process dont la session native a disparu côté agent
+    /// (session/prompt « Session not found » en pleine vie — pas un
+    /// handshake raté). L'exit normal du reader s'applique : dead +
+    /// « agent process exited » — honnête, le process ne peut
+    /// effectivement plus rien pour cette session, et le chemin de
+    /// recours (resume → session/load → repli session/new) redevient
+    /// praticable.
+    pub(super) async fn drop_dead_binding(&self) {
+        *self.stdin_tx.lock().unwrap() = None;
+        let c = { self.child.lock().unwrap().take() };
+        if let Some(mut c) = c {
+            let _ = c.kill().await;
+        }
+    }
+
     async fn on_agent_exit(&self, gen: u64) {
         // Un spawn plus récent a pris le relais (resume/rebind/clear) :
         // la mort du vieux process est attendue — ne pas marquer dead ni
@@ -394,6 +497,22 @@ impl Session {
         let mut p = self.acp_pending.lock().unwrap();
         for (_, tx) in p.drain() {
             let _ = tx.send(Err("agent exited".into()));
+        }
+        // Tué par kill_failed_spawn : le ménage ci-dessus suffit — la
+        // ligne « agent process exited » et l'état dead appartiennent à
+        // une mort subite, pas à un handshake raté (l'appelant du spawn
+        // pose l'état final). CAS : un marqueur posé pour une AUTRE
+        // génération n'éteint pas cet exit.
+        if self
+            .suppress_exit_gen
+            .compare_exchange(gen, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            info!(
+                "[{}] process de handshake raté tué (gen {gen})",
+                self.meta_snapshot().id
+            );
+            return;
         }
         self.set_state("dead");
         info!("[{}] agent process exited", self.meta_snapshot().id);
@@ -841,6 +960,337 @@ impl Session {
             self.emit(EventKind::StatusChanged {
                 state: "interrupted".into(),
             });
+        }
+    }
+}
+
+/// session/load en échec : vrai quand l'erreur signale une session
+/// native encore VERROUILLÉE ou un empêchement transitoire — le repli
+/// session/new serait alors une perte de contexte silencieuse (la
+/// session existe toujours, tenue par un TUI ou un autre démon), et le
+/// retry de spawn_attempts/fork peut la libérer. Tout le reste est
+/// traité comme définitif (« Session not found », store vidé, id
+/// inconnu, erreur interne de l'agent) → repli sur session/new :
+/// une session recréée vaut mieux qu'une session coincée à vie.
+fn load_err_keeps_native(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    [
+        "already open",
+        "in use",
+        "locked",
+        "busy",
+        "temporar",
+        "timeout",
+        "timed out",
+        "unavailable",
+    ]
+    .iter()
+    .any(|k| m.contains(k))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::journal::Journal;
+    use crate::server::CompactSrc;
+    use proto::SessionMeta;
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    fn test_compact_src() -> CompactSrc {
+        CompactSrc {
+            global: crate::server::CompactCfg::default(),
+            by_agent: Default::default(),
+        }
+    }
+
+    fn tmp_session(tag: &str, native_id: &str) -> (Arc<Session>, PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("ac-spawn-test-{}-{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let meta = SessionMeta {
+            id: "s-test".into(),
+            agent: "test".into(),
+            title: "t".into(),
+            cwd: "/tmp".into(),
+            created_at: proto::now_iso(),
+            native_session_id: Some(native_id.to_string()),
+            mode: None,
+            model: None,
+            available_modes: vec![],
+            available_commands: vec![],
+            available_models: vec![],
+            config_options: vec![],
+            pending_config: Default::default(),
+            state: "interrupted".into(),
+            group: None,
+            spawned_by: None,
+            origin: None,
+            context_used: None,
+            context_size: None,
+        };
+        std::fs::write(
+            dir.join("meta.json"),
+            serde_json::to_string_pretty(&meta).unwrap(),
+        )
+        .unwrap();
+        (
+            Session::open(dir.clone(), &test_compact_src()).unwrap(),
+            dir,
+        )
+    }
+
+    /// Faux agent ACP en python : initialize → loadSession annoncé ;
+    /// session/load sur « gone-native » → « Session not found », sinon
+    /// écho de l'id ; session/new → « new-native-1 » (ou l'échec du
+    /// mode `fail_new`)；session/prompt → end_turn, sauf « live-native »
+    /// dont la session a disparu en pleine vie (« Session not found »).
+    /// `fail_new` couvre le cas où le repli lui-même échoue (agent cassé).
+    fn fake_agent(dir: &PathBuf, fail_new: bool) -> PathBuf {
+        let script = dir.join("fake-agent.py");
+        let new_branch = if fail_new {
+            r#"err(mid, "session/new refused")"#
+        } else {
+            r#"ok(mid, {"sessionId": "new-native-1"})"#
+        };
+        std::fs::write(
+            &script,
+            format!(
+                r#"import sys, json
+
+def ok(mid, result):
+    print(json.dumps({{"jsonrpc": "2.0", "id": mid, "result": result}}), flush=True)
+
+def err(mid, message):
+    print(json.dumps({{"jsonrpc": "2.0", "id": mid,
+        "error": {{"code": -32000, "message": message}}}}), flush=True)
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    mid = msg.get("id")
+    method = msg.get("method")
+    params = msg.get("params") or {{}}
+    if mid is None:
+        continue
+    if method == "initialize":
+        ok(mid, {{"protocolVersion": 1,
+                 "agentCapabilities": {{"loadSession": True}}}})
+    elif method == "session/load":
+        if params.get("sessionId") == "gone-native":
+            err(mid, "Session not found")
+        else:
+            ok(mid, {{"sessionId": params.get("sessionId")}})
+    elif method == "session/new":
+        {new_branch}
+    elif method == "session/prompt":
+        if params.get("sessionId") == "live-native":
+            err(mid, "Session not found")
+        else:
+            ok(mid, {{"stopReason": "end_turn"}})
+"#
+            ),
+        )
+        .unwrap();
+        script
+    }
+
+    fn script_texts(dir: &PathBuf) -> Vec<String> {
+        let j = Journal::open(dir).unwrap();
+        j.read_page(dir, None, 200)
+            .unwrap()
+            .iter()
+            .filter_map(|e| match &e.kind {
+                EventKind::System { text } | EventKind::Error { message: text } => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Un python disponible ? Sans lui le faux agent ne peut pas
+    /// tourner — le test s'auto-skip plutôt que d'échouer sur un env.
+    fn python() -> Option<String> {
+        for c in ["python3", "python"] {
+            if std::process::Command::new(c)
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
+                return Some(c.to_string());
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn load_err_classification() {
+        // Session verrouillée/transitoire → pas de repli.
+        for m in [
+            "acp session/load: already open in another process",
+            "resource is busy",
+            "timed out waiting for session lock",
+            "Session LOCKED by tui",
+        ] {
+            assert!(load_err_keeps_native(m), "{m}");
+        }
+        // Session définitivement perdue → repli session/new.
+        for m in [
+            "acp session/load: Session not found",
+            "No such session",
+            "unknown session id",
+            "internal error",
+            "EOF",
+        ] {
+            assert!(!load_err_keeps_native(m), "{m}");
+        }
+    }
+
+    /// Bug remonté : restart démon → session/load « Session not found »
+    /// → session coincée à vie. Le spawn doit dégrader en session/new
+    /// sur le même process : session utilisable, journal conservé,
+    /// ligne système explicative, native_session_id remplacé.
+    #[tokio::test]
+    async fn spawn_load_falls_back_to_new() {
+        let Some(py) = python() else {
+            eprintln!("python absent — test ignoré");
+            return;
+        };
+        let (s, dir) = tmp_session("fallback", "gone-native");
+        let agent = fake_agent(&dir, false);
+        let cmd = vec![py, agent.display().to_string()];
+        let ok = s
+            .spawn_agent(
+                &cmd,
+                &Default::default(),
+                Some("gone-native".into()),
+                true,
+                json!([]),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(ok);
+        assert!(s.is_alive());
+        // L'id natif a été remplacé par celui de la session/new.
+        assert_eq!(
+            s.meta_snapshot().native_session_id.as_deref(),
+            Some("new-native-1")
+        );
+        let texts = script_texts(&dir);
+        assert!(
+            texts.iter().any(|t| t.contains("session native perdue")),
+            "sysline de repli absente: {texts:?}"
+        );
+        // La session reste utilisable : un prompt part, aucun
+        // « prompt failed » ne retombe (le faux agent répond end_turn).
+        s.send_prompt("ping", false, false).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let texts = script_texts(&dir);
+        assert!(
+            !texts.iter().any(|t| t.contains("prompt failed")),
+            "prompt en échec après repli: {texts:?}"
+        );
+        s.kill().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// session/load échoue ET session/new aussi → spawn en échec, mais
+    /// le process ne doit pas rester zombie : is_alive faux (sinon
+    /// « already » au resume et « working » au send, tous deux en
+    /// échec « Session not found » — l'état mensonger remonté).
+    #[tokio::test]
+    async fn failed_handshake_leaves_no_zombie() {
+        let Some(py) = python() else {
+            eprintln!("python absent — test ignoré");
+            return;
+        };
+        let (s, dir) = tmp_session("zombie", "gone-native");
+        let agent = fake_agent(&dir, true);
+        let cmd = vec![py, agent.display().to_string()];
+        let r = s
+            .spawn_agent(
+                &cmd,
+                &Default::default(),
+                Some("gone-native".into()),
+                true,
+                json!([]),
+                None,
+            )
+            .await;
+        assert!(r.is_err());
+        // Pas de process survivant → resume/send pourront retenter.
+        assert!(!s.is_alive());
+        // Laisser le reader digérer l'exit : l'exit du process tué par
+        // le handshake ne doit produire ni « agent process exited » ni
+        // dead — l'état appartient à l'appelant (ici : interrupted).
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert_eq!(s.meta_snapshot().state, "interrupted");
+        let texts = script_texts(&dir);
+        assert!(
+            !texts.iter().any(|t| t.contains("agent process exited")),
+            "exit non supprimé: {texts:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Liaison morte en pleine vie : l'agent était bound (« live-native »
+    /// chargé au spawn) puis session/prompt répond « Session not found »
+    /// — le process ne peut plus rien servir pour cette session. Le
+    /// tuer rend is_alive faux → resume/« already » débloqués ; l'exit
+    /// normal (dead + « agent process exited ») s'applique : honnête.
+    #[tokio::test]
+    async fn lost_binding_kills_process() {
+        let Some(py) = python() else {
+            eprintln!("python absent — test ignoré");
+            return;
+        };
+        let (s, dir) = tmp_session("binding", "live-native");
+        let agent = fake_agent(&dir, false);
+        let cmd = vec![py, agent.display().to_string()];
+        let ok = s
+            .spawn_agent(
+                &cmd,
+                &Default::default(),
+                Some("live-native".into()),
+                true,
+                json!([]),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(ok && s.is_alive());
+        s.send_prompt("ping", false, false).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(!s.is_alive());
+        assert_eq!(s.meta_snapshot().state, "dead");
+        let texts = script_texts(&dir);
+        assert!(
+            texts.iter().any(|t| t.contains("prompt failed")),
+            "échec du prompt non journalisé: {texts:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn binding_lost_classification() {
+        use crate::session::prompt::session_binding_lost;
+        for m in [
+            "acp session/prompt: Session not found",
+            "unknown session",
+            "no such session abc",
+            "la session est introuvable",
+        ] {
+            assert!(session_binding_lost(m), "{m}");
+        }
+        // « not found » hors session → process conservé.
+        for m in ["file not found", "tool call failed", "network error"] {
+            assert!(!session_binding_lost(m), "{m}");
         }
     }
 }
