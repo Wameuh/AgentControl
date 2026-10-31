@@ -95,6 +95,7 @@ pub fn run() {
             commands::saved::save_connection,
             commands::saved::remove_connection,
             commands::saved::ssh_hosts,
+            commands::system::app_version,
             commands::system::platform,
             commands::system::cli_conn,
             commands::system::spawn_instance,

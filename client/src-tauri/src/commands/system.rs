@@ -8,6 +8,24 @@ use tauri::State;
 
 use crate::state::AppState;
 
+/// Version « identité » du client : `X.Y.Z` du manifeste, suffixée
+/// `-rc.K` quand le binaire a été compilé pour un tag rc (env
+/// AGENTCONTROL_RC=K posé par build.yml — l'injection fichier de
+/// bump_version.py est impossible sur Windows/macOS : MSI et
+/// CFBundleVersion exigent du numérique). Linux/Android ont déjà le
+/// suffixe dans Cargo.toml → pas de double suffixe. Sans ce suffixe
+/// l'updater restait « à jour » à vie : « X.Y.Z » local > « -rc.K »
+/// distant (prerelease < stable à X.Y.Z égal). Le gate mineur
+/// démon↔client reste sain : minorOf() masque le suffixe.
+#[tauri::command]
+pub(crate) fn app_version() -> String {
+    const V: &str = env!("CARGO_PKG_VERSION");
+    match option_env!("AGENTCONTROL_RC") {
+        Some(k) if !V.contains('-') => format!("{V}-rc.{k}"),
+        _ => V.to_string(),
+    }
+}
+
 /// "android" | "windows" | "macos" | "linux" — pour les gates frontend.
 #[tauri::command]
 pub(crate) fn platform() -> &'static str {

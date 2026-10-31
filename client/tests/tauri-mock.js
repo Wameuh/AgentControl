@@ -214,7 +214,7 @@
     invoke(cmd, args) {
       const p = Promise.resolve();
       if (cmd === "platform") return p.then(() => (location.hash === "#desktop" ? "linux" : "android"));
-      if (cmd === "plugin:app|version") return p.then(() => "0.2.9");
+      if (cmd === "app_version") return p.then(() => "0.2.9");
       if (cmd === "plugin:event|listen") return p.then(() => ++cbId);
       if (cmd === "plugin:event|unlisten") return p.then(() => null);
       if (cmd.startsWith("plugin:")) return p.then(() => null);

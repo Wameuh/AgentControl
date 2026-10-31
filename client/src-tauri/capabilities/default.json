@@ -15,7 +15,6 @@
     "core:window:allow-is-maximized",
     "core:window:allow-unminimize",
     "core:window:allow-set-focus",
-    "core:app:allow-version",
     "notification:default",
     "opener:allow-open-url",
     "opener:allow-open-path",

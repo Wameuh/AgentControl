@@ -167,9 +167,14 @@ into version files** (not committed — the tag points to a clean
 X.Y.Z commit) → the binary identifies as `X.Y.Z-rc.k`, and the
 final `X.Y.Z` is offered as an update afterwards (semver: rc <
 stable). Windows and macOS are excluded from injection (MSI/NSIS and
-CFBundleVersion require numeric) — consequence: a Windows/macOS rc
-artifact identifies as `X.Y.Z` → no auto-update path to rc.k+1 nor to
-the final, manual reinstall. Linux bundling is limited to `deb`+`appimage`
+CFBundleVersion require numeric) — the bundle version stays `X.Y.Z`
+but the rc identity is **compiled into the binary**: `build.yml`
+exports `AGENTCONTROL_RC=K` (extracted from the tag) → `build.rs`
+emits `cargo:rustc-env` → the `app_version` command reports
+`X.Y.Z-rc.K` to `getVersion()` (updater, ensure_daemon tag,
+about/settings) — the minor daemon↔client gate stays safe,
+`minorOf()` masks the suffix. Result: an rc client on any OS is
+offered rc.k+1 then the final. Linux bundling is limited to `deb`+`appimage`
 (`client/src-tauri/tauri.linux.conf.json`): the rpm isn't distributed
 and its validator refuses `-` in `Version` (semver `-rc.K` —
 RPM convention = `~`, upstream fix tauri-apps/tauri#16336 open). The
