@@ -73,8 +73,13 @@ export interface CompStatus {
   restarts?: number;
   /** Code du dernier exit (128+signal si tué par signal). */
   last_exit?: number;
-  /** Version sondée d'un `tool` (1re ligne de sa commande, ≤200 c). */
+  /** Version sondée de l'outil managé (`version_argv`, ou `command`
+   *  d'un tool) — 1re ligne ≤200 c. */
   version?: string;
+  /** Seuil `min_version` déclaré (spec ou entrée catalogue homonyme). */
+  version_min?: string;
+  /** Version sondée sous `version_min` — badge « mise à jour requise ». */
+  version_outdated?: boolean;
 }
 
 /** Item ListComponents : spec aplatie + état (`item_json` côté démon). */
@@ -186,6 +191,11 @@ export interface ComponentSpec {
   name: string;
   kind: ComponentKind;
   command: string[];
+  /** Sonde de version de l'outil managé (process/external ; remplace
+   *  `command` pour un tool) — déclarée par le catalogue ou à la main. */
+  version_argv?: string[] | null;
+  /** Version minimale exigée de l'outil managé → badge « obsolète ». */
+  min_version?: string | null;
   env: Record<string, string>;
   cwd: string | null;
   autostart: boolean;
@@ -208,13 +218,19 @@ export interface ComponentSpec {
 
 export interface ComponentStatus {
   state: ComponentState;
+  /** "ok" | "fail" | "outdated" — « outdated » = outil sous
+   *  `version_min` (actionnable : mettre à jour l'outil). */
   health?: string;
   pid?: number;
   uptime_s?: number;
   restarts?: number;
   last_exit?: number;
-  /** Version sondée d'un `tool` (1re ligne de sa commande, ≤200 c). */
+  /** Version sondée de l'outil managé (≤200 c). */
   version?: string;
+  /** Seuil `min_version` déclaré (spec ou entrée catalogue homonyme). */
+  version_min?: string;
+  /** Version sondée sous `version_min` — badge « mise à jour requise ». */
+  version_outdated?: boolean;
   /** Params required sans valeur — « configuration requise » :
    *  spawn bloqué tant que la liste n'est pas vide. */
   config_required?: string[];

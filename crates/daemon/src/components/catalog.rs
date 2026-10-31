@@ -117,6 +117,8 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 kind: ComponentKind::Tool,
                 // Un `tool` : sa commande *est* sa sonde présence/version.
                 command: vec!["agentbacklog".into(), "--version".into()],
+                version_argv: None,
+                min_version: None,
                 env: HashMap::new(),
                 cwd: None,
                 autostart: false,
@@ -184,6 +186,15 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 // externe). AGENTCONTROL_SOCK/TCP sont injectés au
                 // spawn : il trouve le démon sans config réseau.
                 command: vec!["agent-reviewer".into(), "--watch".into()],
+                // Version du watcher managé — 0.3 est le premier
+                // multi-repo (param `repos` ci-dessous) : un 0.2
+                // installé doit se voir proposer la mise à jour plutôt
+                // qu'échouer en silence sur la config rendue.
+                version_argv: Some(vec![
+                    "agent-reviewer".into(),
+                    "--version".into(),
+                ]),
+                min_version: Some("0.3".into()),
                 env: HashMap::new(),
                 cwd: None,
                 // Config.toml à éditer avant le 1er run utile → l'auto-
@@ -794,11 +805,13 @@ fn detected(d: &CatalogDetect) -> bool {
         || d.path.as_deref().map(|p| expand_home(p).is_file()).unwrap_or(false)
 }
 
-/// Sonde de version : `detect.bin --version` si déclaré, sinon la
-/// commande de la spec `tool` (qui *est* sa sonde version). Pas de
-/// sonde applicable (process, external) → None.
+/// Sonde de version : `version_argv` de la spec suggérée si déclaré,
+/// sinon `detect.bin --version`, sinon la commande de la spec `tool`
+/// (qui *est* sa sonde version). Pas de sonde applicable → None.
 async fn probe_version(e: &CatalogEntry) -> Option<String> {
-    let argv: Vec<String> = if let Some(bin) = &e.detect.bin {
+    let argv: Vec<String> = if let Some(argv) = &e.suggested_spec.version_argv {
+        argv.clone()
+    } else if let Some(bin) = &e.detect.bin {
         vec![bin.clone(), "--version".into()]
     } else if e.suggested_spec.kind == ComponentKind::Tool {
         e.suggested_spec.command.clone()

@@ -10,6 +10,7 @@
 mod catalog;
 mod proc;
 mod render;
+mod version;
 
 use anyhow::{Context, Result};
 use proto::{
@@ -94,8 +95,9 @@ pub struct Components {
     /// vie : leur « état » n'est qu'une observation périodique — pour
     /// un `tool` absent il n'y a rien à retenir, l'entrée est effacée).
     observed: RwLock<HashMap<String, bool>>,
-    /// Dernière version sondée des `tool` (1re ligne de leur commande
-    /// — absente de la map tant que la sonde n'a rien rapporté).
+    /// Dernière version sondée de l'outil managé par composant
+    /// (`version_argv` pour process/external, `command` pour tool —
+    /// absente de la map tant que la sonde n'a rien rapporté).
     versions: RwLock<HashMap<String, String>>,
     a2a_enabled: bool,
     /// Surface web du démon (partagé avec `Daemon.web`) — l'état du
@@ -266,6 +268,8 @@ impl Components {
                 name: name.to_string(),
                 kind: ComponentKind::Internal,
                 command: Vec::new(),
+                version_argv: None,
+                min_version: None,
                 env: HashMap::new(),
                 cwd: None,
                 autostart: cfg.enabled,
@@ -293,6 +297,8 @@ impl Components {
                 name: name.to_string(),
                 kind: ComponentKind::Internal,
                 command: Vec::new(),
+                version_argv: None,
+                min_version: None,
                 env: HashMap::new(),
                 cwd: None,
                 autostart: true,
@@ -802,14 +808,16 @@ impl Components {
         }
     }
 
-    /// Version sondée courante d'un `tool` (pour status_of).
-    pub(crate) async fn tool_version(&self, name: &str) -> Option<String> {
+    /// Version sondée courante de l'outil d'un composant (pour
+    /// status_of — `tool` comme `process`/`external` avec
+    /// `version_argv`).
+    pub(crate) async fn probed_version(&self, name: &str) -> Option<String> {
         self.versions.read().await.get(name).cloned()
     }
 
-    /// Pose/efface la version rapportée par la sonde d'un `tool` —
-    /// `None` = sonde sans sortie exploitable (ou tool absent).
-    pub(crate) async fn set_tool_version(&self, name: &str, v: Option<String>) {
+    /// Pose/efface la version rapportée par la sonde d'un composant —
+    /// `None` = sonde sans sortie exploitable (ou outil absent).
+    pub(crate) async fn set_probed_version(&self, name: &str, v: Option<String>) {
         let mut m = self.versions.write().await;
         match v {
             Some(v) => {
@@ -819,6 +827,19 @@ impl Components {
                 m.remove(name);
             }
         }
+    }
+
+    /// La version sondée est-elle sous le seuil déclaré
+    /// (`min_version` de la spec, sinon de l'entrée catalogue
+    /// homonyme) ? Version ou seuil absents/indéchiffrables → false.
+    pub(crate) async fn version_outdated(&self, spec: &ComponentSpec) -> bool {
+        let (Some(min), Some(v)) = (
+            version::min_version(spec),
+            self.probed_version(&spec.name).await,
+        ) else {
+            return false;
+        };
+        version::version_below_min(&v, &min)
     }
 
     /// Env injectée au spawn de tout `process` managé — le composant
@@ -904,6 +925,12 @@ fn expand_home_fields(spec: &mut ComponentSpec) {
             .map(|a| catalog::expand_home_str(a))
             .collect();
     }
+    if let Some(argv) = &mut spec.version_argv {
+        *argv = argv
+            .iter()
+            .map(|a| catalog::expand_home_str(a))
+            .collect();
+    }
     spec.queries = spec
         .queries
         .iter()
@@ -957,6 +984,21 @@ fn check_usable(spec: &ComponentSpec) -> Result<()> {
         if let Some(argv0) = argv.first() {
             check_not_supervisor(argv0)?;
         }
+    }
+    // Idem pour la sonde de version — même cadence que le healthcheck.
+    if let Some(argv) = &spec.version_argv {
+        let argv0 = argv
+            .first()
+            .context("version_argv vide — déclarer l'argv de la sonde")?;
+        check_not_supervisor(argv0)?;
+    }
+    // Un seuil sans composante numérique ne pourrait jamais être
+    // comparé — refusé à l'enregistrement plutôt que muet à la sonde.
+    if let Some(min) = &spec.min_version {
+        anyhow::ensure!(
+            version::nums(min).is_some(),
+            "min_version « {min} » sans composante numérique"
+        );
     }
     // Schéma de params : clés uniques et bien formées, enum exige ses
     // choix, `validation` doit compiler — le schéma est la promesse
@@ -1100,6 +1142,12 @@ fn sealed_fields_changed(new: &ComponentSpec, cur: &ComponentSpec) -> Vec<&'stat
     if new.queries != cur.queries {
         out.push("queries");
     }
+    if new.version_argv != cur.version_argv {
+        out.push("version_argv");
+    }
+    if new.min_version != cur.min_version {
+        out.push("min_version");
+    }
     out
 }
 
@@ -1139,6 +1187,8 @@ mod tests {
             name: "agentreviewer".into(),
             kind: ComponentKind::Process,
             command: vec!["agent-reviewer".into(), "--watch".into()],
+            version_argv: Some(vec!["agent-reviewer".into(), "--version".into()]),
+            min_version: Some("0.3".into()),
             env: HashMap::new(),
             cwd: None,
             autostart: false,
@@ -1184,6 +1234,12 @@ mod tests {
         let mut q = cur.clone();
         q.queries.insert("state".into(), vec!["cat".into()]);
         assert_eq!(sealed_fields_changed(&q, &cur), ["queries"]);
+        let mut va = cur.clone();
+        va.version_argv = Some(vec!["autre".into()]);
+        assert_eq!(sealed_fields_changed(&va, &cur), ["version_argv"]);
+        let mut mv = cur.clone();
+        mv.min_version = Some("9.9".into());
+        assert_eq!(sealed_fields_changed(&mv, &cur), ["min_version"]);
         // Spec identique → rien.
         assert!(sealed_fields_changed(&cur, &cur).is_empty());
         // preserve_catalog_meta : les métas de la spec entrante (omises

@@ -406,6 +406,8 @@ mod tests {
             name: "t".into(),
             kind: ComponentKind::Process,
             command: vec!["sh".into()],
+            version_argv: None,
+            min_version: None,
             env: HashMap::new(),
             cwd: None,
             autostart: false,

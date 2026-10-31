@@ -626,6 +626,9 @@ export class MapView {
         c.name,
         `${c.kind} · ${c.status?.state ?? "?"}`,
         c.status?.version ?? "",
+        c.status?.version_outdated
+          ? `⚠ ${t("comp_outdated", { v: c.status.version_min ?? "?" })}`
+          : "",
         c.status?.uptime_s ? `${t("map_uptime")} ${fmtUp(c.status.uptime_s)}` : "",
         c.description ?? "",
       ]

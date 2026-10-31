@@ -395,11 +395,20 @@ export class ComponentsPanel {
       meta.push(`↻${st.restarts} ${t("comp_restarts")}`);
     if (st.config_required?.length)
       meta.push(`⚙ ${t("comp_cfg_missing", { l: st.config_required.join(", ") })}`);
-    if (st.health) meta.push(st.health === "ok" ? "♥ ok" : "♥ fail");
+    if (st.health)
+      meta.push(
+        st.health === "ok" ? "♥ ok"
+        : st.health === "outdated" ? `♥ ${t("comp_health_outdated")}`
+        : "♥ fail",
+      );
     if (st.last_exit !== undefined && st.last_exit !== null)
       meta.push(`exit ${st.last_exit}`);
-    // Version sondée d'un `tool` (status.version, 1re ligne ≤200 c).
+    // Version sondée de l'outil managé (status.version — process,
+    // external ou tool) + badge « mise à jour requise » sous
+    // min_version déclaré (status.version_outdated/version_min).
     if (st.version) meta.push(st.version);
+    if (st.version_outdated)
+      meta.push(`⚠ ${t("comp_outdated", { v: st.version_min ?? "?" })}`);
     if (it.description) meta.push(it.description);
     return meta.join(" · ");
   }
@@ -413,7 +422,8 @@ export class ComponentsPanel {
     const st = it.status;
     return [
       it.name, it.kind, st.state, st.pid, st.restarts, st.health,
-      st.last_exit, st.version, it.autostart, it.source, it.description,
+      st.last_exit, st.version, st.version_min, st.version_outdated,
+      it.autostart, it.source, it.description,
       st.config_required?.join(","),
     ].join("|");
   }
@@ -1121,10 +1131,13 @@ export class ComponentsPanel {
         : 5,
       healthcheck,
       description: ($("ce-desc") as HTMLInputElement).value.trim() || null,
-      // queries n'est pas exposé au formulaire — la valeur déclarée à
-      // la main est reprise telle quelle, sinon l'upsert (serde default)
-      // l'effacerait à chaque sauvegarde.
+      // queries/version_argv/min_version ne sont pas exposés au
+      // formulaire — les valeurs déclarées (catalogue ou à la main)
+      // sont reprises telles quelles, sinon l'upsert les effacerait
+      // à chaque sauvegarde.
       queries: this.editSpec?.queries ?? {},
+      version_argv: this.editSpec?.version_argv ?? null,
+      min_version: this.editSpec?.min_version ?? null,
     };
   }
 
