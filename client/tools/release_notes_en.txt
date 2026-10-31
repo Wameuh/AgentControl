@@ -31,3 +31,4 @@
 205: Backlog metrics — the orchestrator now samples queue activity each tick into a bounded journal, and a new backlog_metrics RPC (acctl orch metrics) serves the series plus lead-time/queue-wait aggregates.
 206: First post now returns the backlog item for service-spawned sessions — the spawn prompt is skipped — and the orchestrator status reports when the legacy Python script holds the lock, making [Backlog] item posts unavailable.
 207: The Backlog tab gains a collapsible "Activity" section — a time-series graph of queue depth and live workers over 24h/7d/30d plus lead-time, queue-wait, throughput and worker-peak cards, fed by the backlog_metrics RPC and gracefully hidden on older daemons.
+208: Release candidates on Windows and macOS now offer the next rc and the final release as updates — the rc identity is compiled into the binary since MSI/plist versions must stay numeric (rc installs used to look "up to date" forever).

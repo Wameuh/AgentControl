@@ -78,7 +78,7 @@ const MOCK = `(function () {
     invoke(cmd, args) {
       const p = Promise.resolve();
       if (cmd === "platform") return p.then(() => "linux");
-      if (cmd === "plugin:app|version") return p.then(() => "9.9.9");
+      if (cmd === "app_version") return p.then(() => "9.9.9");
       if (cmd.startsWith("plugin:")) return p.then(() => null);
       switch (cmd) {
         case "connect": return p.then(() => ({ version: "9.9.9", sessions: 1, servers: 1 }));
