@@ -204,8 +204,15 @@ pub(crate) async fn ensure_daemon(
     // superviseur (systemd, supervisord, lancé à la main). Gardes avant
     // toute mutation : acctl via PATH en plus de ~/.local/bin (un démon
     // installé par image/conteneur rapporte alors sa version), et probe
-    // du port daemon configuré — un démon qui écoute déjà (publié par
-    // Docker, forwardé) n'est jamais écrasé par l'artefact release.
+    // du port daemon configuré — un listener ÉTRANGER sur ce port (démon
+    // publié par Docker, port forwardé, autre service) ne doit jamais
+    // être écrasé par l'artefact release. Le probe ne bloque pas notre
+    // propre démon : `ver` non vide = le nôtre répond en socket unix ;
+    // on re-sonde alors le port avec ce même acctl via AGENTCONTROL_TCP
+    // — une version identique prouve que le listener est le sien (bind
+    // TCP du même process) → l'upgrade continue ; une version différente
+    // (autre démon managé ailleurs) ou aucune réponse (service étranger,
+    // timeout 4 s si `timeout` existe) → busy.
     // `rc=0; cmd || rc=$?` car `set -e` tue le shell sur tout échec de
     // commande — `rc=$?` seul ne s'exécuterait jamais.
     // `echo step:<id> >&2` : marqueurs de progression streamés sur
@@ -223,7 +230,14 @@ pub(crate) async fn ensure_daemon(
             [ \"$(printf '%s\\n%s\\n' \"{t}\" \"$ver\" | sed 's/-rc\\./~rc./g' | sort -V | tail -n1)\" = \"$(echo \"$ver\" | sed 's/-rc\\./~rc./g')\" ]; then \
             echo newer:$ver; exit 0; fi; \
          rc=0; curl -s -o /dev/null --max-time 2 http://127.0.0.1:{p} 2>/dev/null || rc=$?; \
-         if [ \"$rc\" -ne 7 ]; then echo busy:127.0.0.1:{p}; exit 0; fi; \
+         if [ \"$rc\" -ne 7 ]; then \
+         own=\"\"; \
+         if [ -n \"$ver\" ]; then \
+         to=$(command -v timeout >/dev/null 2>&1 && echo \"timeout 4\" || true); \
+         own=$({{ AGENTCONTROL_TCP=127.0.0.1:{p} $to \"$ac\" status 2>/dev/null || true; }} | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4); \
+         fi; \
+         if [ -z \"$own\" ] || [ \"$own\" != \"$ver\" ]; then echo busy:127.0.0.1:{p}; exit 0; fi; \
+         fi; \
          echo step:download >&2; \
          d=$HOME/.cache/agentcontrol-upd; rm -rf \"$d\"; mkdir -p \"$d\"; cd \"$d\" || exit 1; \
          curl -fsSL -o acd.tgz \"{base}/download/v{t}/agentcontrol-server-$arch-linux.tar.gz\" || \
@@ -234,9 +248,10 @@ pub(crate) async fn ensure_daemon(
          install -Dm755 acctl $HOME/.local/bin/acctl; \
          echo step:service >&2; \
          confs=\"/etc/supervisor/conf.d/*.conf /etc/supervisord.d/*.conf $HOME/.supervisor/conf.d/*.conf\"; \
-         prog=$(awk 'FNR==1 {{ p=\"\" }} /^\\[/ {{ p=\"\"; if ($0 ~ /^\\[program:/) {{ p=$0; sub(/.*\\[program:/,\"\",p); sub(/\\].*/,\"\",p) }} }} /^command[[:space:]]*=/ && /agentcontrol-daemon/ && p != \"\" {{ print p; exit }}' $confs 2>/dev/null); \
+         ef=\"\"; for f in $confs; do [ -f \"$f\" ] && ef=\"$ef $f\"; done; \
+         prog=$({{ [ -n \"$ef\" ] && awk 'FNR==1 {{ p=\"\" }} /^\\[/ {{ p=\"\"; if ($0 ~ /^\\[program:/) {{ p=$0; sub(/.*\\[program:/,\"\",p); sub(/\\].*/,\"\",p) }} }} /^command[[:space:]]*=/ && /agentcontrol-daemon/ && p != \"\" {{ print p; exit }}' $ef 2>/dev/null || true; }}); \
          if [ -n \"$prog\" ]; then \
-         svc=$(grep -h '^command[[:space:]]*=' $confs 2>/dev/null | grep agentcontrol-daemon | head -n1 | sed 's/^command[[:space:]]*=[[:space:]]*//' | cut -d' ' -f1); \
+         svc=$(grep -h '^command[[:space:]]*=' $ef 2>/dev/null | grep agentcontrol-daemon | head -n1 | sed 's/^command[[:space:]]*=[[:space:]]*//' | cut -d' ' -f1); \
          svc=$(command -v \"$svc\" 2>/dev/null || echo \"$svc\"); \
          case $svc in /*/agentcontrol-daemon) ;; *) svc=\"\";; esac; \
          if [ -n \"$svc\" ] && [ \"$svc\" != \"$bin\" ] && [ -w \"$(dirname \"$svc\")\" ]; then install -Dm755 agentcontrol-daemon \"$svc\"; fi; \

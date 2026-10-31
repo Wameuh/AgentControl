@@ -335,8 +335,16 @@ export class ConnView {
             else if (res.startsWith("busy:")) {
               this.report(t("dupdate_busy", { host, addr: res.slice(5) }), "warn");
             } else if (res) {
-              if (res.startsWith("installed:") && res.slice(10) !== lv) {
-                this.report(t("dupdate_stale", { host, want: lv, got: res.slice(10) || "?" }));
+              if (res.startsWith("installed:")) {
+                const got = res.slice(10);
+                if (got === lv) {
+                  // Le démon a redémarré sous notre nez : la conn courante
+                  // est morte (conn-dead) — le toast prévient que la
+                  // reconnexion est automatique, pas une panne.
+                  notify("success", t("dupdate_done", { lv, host }));
+                } else {
+                  this.report(t("dupdate_stale", { host, want: lv, got: got || "?" }));
+                }
               }
               this.cStatus(t("connecting_to", { host }));
               status = await invoke("connect", { cfg }).catch(() => status);
