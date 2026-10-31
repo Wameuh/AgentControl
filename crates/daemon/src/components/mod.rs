@@ -134,6 +134,14 @@ impl Components {
         };
         let mut map = BTreeMap::new();
         for mut spec in specs {
+            // Spec adossée au catalogue : la spec persistée est un
+            // snapshot de l'entrée à l'install — les champs catalogue-
+            // owned sont rafraîchis depuis l'entrée courante (le
+            // catalogue évolue avec le binaire), les choix utilisateur
+            // (params/autostart/description) préservés (catalog.rs).
+            if let Some(entry) = catalog::entry_named(&spec.name) {
+                catalog::resync(&mut spec, entry);
+            }
             expand_home_fields(&mut spec);
             if let Err(e) = check_usable(&spec) {
                 warn!("composant « {} » ignoré: {e}", spec.name);
