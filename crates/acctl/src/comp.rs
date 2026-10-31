@@ -35,9 +35,10 @@ fn fmt_uptime(secs: u64) -> String {
     }
 }
 
-/// Découpe `--cmd "<argv>"` en argv : espaces séparateurs, quotes
-/// simples/doubles pour grouper (mini-shell — pas d'expansion $ ni glob).
-fn split_argv(s: &str) -> Result<Vec<String>> {
+/// Découpe `"<argv>"` en argv : espaces séparateurs, quotes
+/// simples/doubles pour grouper (mini-shell — pas d'expansion $ ni
+/// glob). `flag` = le nom du flag pour le message d'erreur.
+fn split_argv(s: &str, flag: &str) -> Result<Vec<String>> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut quote = None;
@@ -64,16 +65,17 @@ fn split_argv(s: &str) -> Result<Vec<String>> {
             }
         }
     }
-    anyhow::ensure!(quote.is_none(), "--cmd : quote non fermée");
+    anyhow::ensure!(quote.is_none(), "{flag} : quote non fermée");
     if touched {
         out.push(cur);
     }
     Ok(out)
 }
 
-/// `comp ls` — une ligne par composant : nom, kind, état, pid, uptime,
-/// restarts (+ `exit=N` sur échec), description en queue — style
-/// `acctl list`. `source` distingue file (components.toml) d'internal.
+/// `comp ls` — une ligne par composant : nom, kind, état, version
+/// sondée, pid, uptime, restarts (+ `exit=N` sur échec), description
+/// en queue — style `acctl list`. `source` distingue file
+/// (components.toml) d'internal.
 fn ls(items: &[Value]) {
     for it in items {
         let st = &it["status"];
@@ -83,18 +85,13 @@ fn ls(items: &[Value]) {
             None => state.to_string(),
         };
         // Version sondée de l'outil (process/external via version_argv,
-        // tool via sa commande) à côté de l'état — tronquée à 24 c,
-        // la valeur brute monte à 200 c.
-        let state = match st["version"].as_str() {
-            Some(v) => {
-                let v: String = if v.chars().count() > 24 {
-                    format!("{}…", v.chars().take(23).collect::<String>())
-                } else {
-                    v.to_string()
-                };
-                format!("{state} {v}")
-            }
-            None => state,
+        // tool via sa commande) — colonne dédiée tronquée à 20 c pour
+        // préserver l'alignement (la valeur brute monte à 200 c).
+        let ver = st["version"].as_str().unwrap_or("");
+        let ver = if ver.chars().count() > 20 {
+            format!("{}…", ver.chars().take(19).collect::<String>())
+        } else {
+            ver.to_string()
         };
         let pid = st["pid"].as_u64().map(|p| p.to_string()).unwrap_or_else(|| "-".into());
         let up = fmt_uptime(st["uptime_s"].as_u64().unwrap_or(0));
@@ -125,10 +122,11 @@ fn ls(items: &[Value]) {
             String::new()
         };
         println!(
-            "{:<22} {:<8} {:<16} {:>7} {:>8} {:>4}  {}{}{}{}",
+            "{:<22} {:<8} {:<16} {:<20} {:>7} {:>8} {:>4}  {}{}{}{}",
             it["name"].as_str().unwrap_or(""),
             it["kind"].as_str().unwrap_or("?"),
             state,
+            ver,
             pid,
             up,
             restarts,
@@ -183,7 +181,7 @@ fn parse_healthcheck(s: &str) -> Result<proto::Healthcheck> {
             proto::Healthcheck::Http { url: s.to_string() }
         }
         _ if s.starts_with("cmd:") => proto::Healthcheck::Command {
-            argv: split_argv(&s["cmd:".len()..])?,
+            argv: split_argv(&s["cmd:".len()..], "healthcheck cmd:")?,
         },
         _ => bail!("--hc none|process|tcp:ADDR|http:URL|cmd:\"<argv>\" (reçu: {s})"),
     })
@@ -199,7 +197,7 @@ fn spec_from_args(name: &str, args: &[String]) -> Result<proto::ComponentSpec> {
         other => bail!("--kind process|external|tool (reçu: {other})"),
     };
     let command = match flag_val(args, "--cmd") {
-        Some(s) => split_argv(s)?,
+        Some(s) => split_argv(s, "--cmd")?,
         None => Vec::new(),
     };
     if matches!(kind, proto::ComponentKind::Process | proto::ComponentKind::Tool)
@@ -235,7 +233,7 @@ fn spec_from_args(name: &str, args: &[String]) -> Result<proto::ComponentSpec> {
         env.insert(k.to_string(), v.to_string());
     }
     let version_argv = match flag_val(args, "--vargv") {
-        Some(s) if !s.trim().is_empty() => Some(split_argv(s)?),
+        Some(s) if !s.trim().is_empty() => Some(split_argv(s, "--vargv")?),
         _ => None,
     };
     Ok(proto::ComponentSpec {
@@ -531,7 +529,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                     };
                 }
                 if let Some(s) = flag_val(f, "--cmd") {
-                    spec.command = split_argv(s)?;
+                    spec.command = split_argv(s, "--cmd")?;
                 }
                 if let Some(s) = flag_val(f, "--hc") {
                     spec.healthcheck = parse_healthcheck(s)?;
@@ -569,7 +567,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                 // que --cwd).
                 if let Some(v) = flag_val(f, "--vargv") {
                     spec.version_argv = (!v.trim().is_empty())
-                        .then(|| split_argv(v))
+                        .then(|| split_argv(v, "--vargv"))
                         .transpose()?;
                 }
                 if let Some(v) = flag_val(f, "--vmin") {

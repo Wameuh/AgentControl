@@ -993,11 +993,16 @@ fn check_usable(spec: &ComponentSpec) -> Result<()> {
         check_not_supervisor(argv0)?;
     }
     // Un seuil sans composante numérique ne pourrait jamais être
-    // comparé — refusé à l'enregistrement plutôt que muet à la sonde.
+    // comparé, et un seuil sans sonde de version applicable ne serait
+    // jamais évalué — refusés à l'enregistrement plutôt que muets.
     if let Some(min) = &spec.min_version {
         anyhow::ensure!(
             version::nums(min).is_some(),
             "min_version « {min} » sans composante numérique"
+        );
+        anyhow::ensure!(
+            version::version_argv(spec).is_some(),
+            "min_version sans sonde de version — déclarer version_argv"
         );
     }
     // Schéma de params : clés uniques et bien formées, enum exige ses

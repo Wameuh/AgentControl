@@ -884,13 +884,14 @@ async fn probe(spec: &ComponentSpec, pid: Option<u32>) -> Option<bool> {
     }
 }
 
-/// argv0 d'un `tool` résolvable — `command_available` (PATH du démon
-/// ou chemin absolu exécutable, même check que la détection du
+/// argv0 de la sonde de version effective d'un `tool` résolvable —
+/// `version_argv` si déclaré (il *remplace* `command` comme sonde,
+/// présence incluse), sinon `command`. `command_available` = PATH du
+/// démon ou chemin absolu exécutable (même check que la détection du
 /// catalogue) après expansion `~`.
 fn tool_present(spec: &ComponentSpec) -> bool {
-    spec.command
-        .first()
-        .map(|a| command_available(&expand_home_str(a)))
+    version::version_argv(spec)
+        .and_then(|a| a.first().map(|a0| command_available(&expand_home_str(a0))))
         .unwrap_or(false)
 }
 
@@ -941,13 +942,23 @@ mod tests {
         }
     }
 
-    /// « installed » = argv0 résolvable sur le PATH du démon — un shell
-    /// système est présent, un nom bidon ne l'est pas, argv vide non plus.
+    /// « installed » = argv0 de la sonde de version effective
+    /// résolvable sur le PATH du démon — `version_argv` prime sur
+    /// `command` quand les deux divergent (il remplace la sonde,
+    /// présence incluse), un nom bidon ne l'est pas, argv vide non plus.
     #[test]
     fn tool_present_detecte_argv0() {
         assert!(tool_present(&tool_spec(&["sh", "-c", "true"])));
         assert!(!tool_present(&tool_spec(&["ac-tool-inexistant-xyz"])));
         assert!(!tool_present(&tool_spec(&[])));
+        // version_argv divergent de command → c'est son argv0 qui
+        // décide de la présence (la sonde réelle).
+        let mut s = tool_spec(&["ac-tool-inexistant-xyz"]);
+        s.version_argv = Some(vec!["sh".into(), "-c".into(), "true".into()]);
+        assert!(tool_present(&s));
+        let mut s = tool_spec(&["sh", "-c", "true"]);
+        s.version_argv = Some(vec!["ac-tool-inexistant-xyz".into()]);
+        assert!(!tool_present(&s));
     }
 
     /// Un `tool` absent n'a ni version ni verdict santé retenus — un
