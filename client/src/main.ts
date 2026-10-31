@@ -44,6 +44,7 @@ import { SessionSearch } from "./features/search";
 import { Sidebar } from "./features/sidebar";
 import { Composer } from "./features/composer";
 import { FileExplorer } from "./features/files";
+import { QuickOpen } from "./features/quickopen";
 import { MapView } from "./features/map-view";
 import { TermPanel } from "./features/terminal";
 import { SettingsPanel } from "./features/settings";
@@ -103,6 +104,7 @@ const chat = new ChatView();
 const sidebar = new Sidebar();
 const composer = new Composer();
 const files = new FileExplorer();
+const quick = new QuickOpen();
 const map = new MapView();
 const term = new TermPanel();
 const connView = new ConnView();
@@ -224,6 +226,10 @@ newSess.openSession = (id, conn) => {
 newSess.knownConns = () => conns.knownConns();
 groups.refresh = () => void sidebar.refresh();
 files.bind({ sysline: (txt, ic) => chat.sysline(txt, ic) });
+quick.bind({
+  openFile: (p) => files.openFilePanel(p),
+  openDir: (rel) => files.revealInTree(rel),
+});
 settings.langChanged = () => {
   // applyStatic a réécrit le placeholder avec input_ph — hints à jour.
   composer.refreshHints();
@@ -339,6 +345,7 @@ $("chat-more").onclick = () => {
   if (app.current && term.supported())
     items.push({ icon: "terminal", label: t("term_title"), fn: () => $("btn-term").click() });
   if (app.current) items.push({ icon: "folder", label: t("files_title"), fn: () => $("btn-files").click() });
+  if (app.current) items.push({ icon: "search", label: t("qo_open_path"), fn: () => quick.open("path") });
   if (app.current && !app.alive && app.current.state !== "starting")
     items.push({ icon: "play", label: t("resume"), fn: () => $("btn-resume").click() });
   if (app.current && app.alive)
@@ -363,6 +370,7 @@ search.init();
 sidebar.init();
 composer.init();
 files.init();
+quick.init();
 term.init();
 map.init();
 settings.init();
