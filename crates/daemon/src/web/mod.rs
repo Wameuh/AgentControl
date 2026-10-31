@@ -65,7 +65,7 @@ const CSP: &str = "default-src 'self'; \
     media-src 'self'; \
     font-src 'self' data:; \
     style-src 'self' 'unsafe-inline'; \
-    script-src 'self'; \
+    script-src 'self' 'wasm-unsafe-eval'; \
     worker-src 'self' blob:";
 
 /// Parse du blob embarqué → index chemin → contenu. `None` = build sans

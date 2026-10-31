@@ -30,6 +30,7 @@ import type { DirEntry } from "../core/types";
 import { t } from "../i18n";
 import { icon, type IconName } from "../ui/icons";
 import { MdView } from "./md-view";
+import { PdfView } from "./pdf-view";
 import { bindCtx, hideMenu, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
 
@@ -92,6 +93,7 @@ export class FileExplorer {
   private cur: CurFile | null = null;
   private editOn = false;
   private dirty = false;
+  private pdf = new PdfView();
   private mdView = new MdView({
     text: () => this.cur?.chunks.join("") ?? "",
     done: () => this.cur?.done ?? true,
@@ -145,6 +147,11 @@ export class FileExplorer {
       n.classList.toggle("sel", n.dataset.rel === path);
     }
     const ext = /\.([a-zA-Z0-9]+)$/.exec(path)?.[1]?.toLowerCase() ?? "";
+    if (ext === "pdf") {
+      // Rendu canvas pdf.js — module dédié (hors pipeline texte/image).
+      await this.pdf.open(path);
+      return;
+    }
     if (VID_MIME[ext]) {
       // Lecteur streamé : le schéma acvideo sert des ranges HTTP
       // (tranches read_file démon) — la webview ne télécharge que ce
@@ -218,6 +225,7 @@ export class FileExplorer {
     this.editOn = false;
     this.dirty = false;
     this.mdView.detach();
+    this.pdf.detach();
     $("file-edwrap").hidden = true;
     $("file-view").hidden = false;
     $("file-view").innerHTML = "";
@@ -1167,6 +1175,7 @@ export class FileExplorer {
     };
 
     this.mdView.init();
+    this.pdf.init();
     $("fv-edit").onclick = () => {
       if (this.editOn) this.exitEdit();
       else this.enterEdit();

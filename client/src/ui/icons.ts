@@ -59,6 +59,10 @@ const SHAPES: Record<string, string> = {
   top: '<path d="M5 3.5h14"/><path d="m6 14.5 6-6 6 6"/><path d="M12 8.5V21"/>',
   "skip-down": '<path d="m5 5 7 7 7-7"/><path d="m5 12 7 7 7-7"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/>',
+  "zoom-in":
+    '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/>' +
+    '<path d="M11 8.5v5M8.5 11h5"/>',
+  "zoom-out": '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/><path d="M8.5 11h5"/>',
   // États / indicateurs
   loader: '<path d="M21 12a9 9 0 1 1-6.2-8.56"/>',
   dot: '<circle cx="12" cy="12" r="5" fill="currentColor" stroke="none"/>',
