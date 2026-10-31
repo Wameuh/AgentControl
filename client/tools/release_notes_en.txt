@@ -20,3 +20,4 @@
 193: AgentReviewer component gains a `repos` parameter (JSON) for multi-repo watching, and a new `json` parameter type renders structured values into managed configs; workers can now request a local pre-push diff review via `agent-reviewer review`.
 194: New accent intensity setting — soft or vivid variants of every accent color.
 195: The backlog orchestrator is now fully configurable at runtime — toggles, worker and spawn settings, prompts, and repo workspaces persist to config.toml.
+196: The MSI installer wizard now shows branded AgentControl artwork instead of the generic WiX default images.
