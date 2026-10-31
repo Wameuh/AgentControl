@@ -123,6 +123,16 @@ def main():
             'repo_dir = "/tmp/clone"\n'
             'zombie = "dead-key"\n'
             'max_parallel = "not-an-int"\n'
+            '\n'
+            # Entrée sans schéma : ses params sont libres (set_params
+            # accepte toute clé) — le resync ne doit pas les purger.
+            '[[components]]\n'
+            'name = "agentbacklog"\n'
+            'kind = "tool"\n'
+            'command = ["agentbacklog", "--version"]\n'
+            '\n'
+            '[components.params]\n'
+            'meta = "free-note"\n'
         )
 
     # HOME isolé : le render borne ses écritures sous HOME — l'écrire
@@ -185,6 +195,12 @@ def main():
               str(spec.get("description")))
         check("autostart utilisateur conservé",
               spec.get("autostart") is False, str(spec.get("autostart")))
+
+        # --- Params libres (entrée sans schéma) préservés --------------
+        bl = c.result("component_info", name="agentbacklog")
+        check("params libres sans schéma préservés (agentbacklog)",
+              bl.get("spec", {}).get("params", {}).get("meta") == "free-note",
+              str(bl.get("spec", {}).get("params")))
 
         # --- Merge en mémoire : components.toml non réécrit au boot ----
         with open(components_toml) as f:

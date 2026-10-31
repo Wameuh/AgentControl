@@ -545,24 +545,30 @@ pub(super) fn entry_named(name: &str) -> Option<&'static CatalogEntry> {
 ///
 /// Hygiène des params, jamais silencieuse (warn) :
 /// - clé retirée du schéma catalogue → valeur purgée : inéditable via
-///   set_params et jamais consommée par le template — un zombie ;
+///   set_params et jamais consommée par le template — un zombie.
+///   La purge ne court que si l'entrée DÉCLARE un schéma : schéma vide
+///   = params libres (même règle que `set_params`, « métadonnées
+///   seulement ») — y purger toute clé supprimerait au chargement ce
+///   que le chemin d'écriture accepte ;
 /// - valeur rejetée par le schéma resserré (validation durcie) →
 ///   retirée : `check_usable` refuserait sinon la spec entière au
 ///   chargement — mieux perdre la valeur que le composant.
 pub(super) fn resync(spec: &mut ComponentSpec, entry: &CatalogEntry) {
     let before = serde_json::to_value(&*spec).ok();
-    let orphans: Vec<String> = spec
-        .params
-        .keys()
-        .filter(|k| !entry.params.iter().any(|p| &p.key == *k))
-        .cloned()
-        .collect();
-    for k in orphans {
-        warn!(
-            "composant « {} » : param « {k} » retiré du catalogue — valeur purgée",
-            spec.name
-        );
-        spec.params.remove(&k);
+    if !entry.params.is_empty() {
+        let orphans: Vec<String> = spec
+            .params
+            .keys()
+            .filter(|k| !entry.params.iter().any(|p| &p.key == *k))
+            .cloned()
+            .collect();
+        for k in orphans {
+            warn!(
+                "composant « {} » : param « {k} » retiré du catalogue — valeur purgée",
+                spec.name
+            );
+            spec.params.remove(&k);
+        }
     }
     for p in &entry.params {
         let bad = spec
@@ -1103,6 +1109,22 @@ mod tests {
         bare.description = None;
         resync(&mut bare, entry);
         assert_eq!(bare.description, entry.suggested_spec.description);
+    }
+
+    /// Entrée sans schéma déclaré (agentbacklog) : les params libres —
+    /// acceptés par `set_params` (« spec sans schéma = params libres »)
+    /// — ne sont pas purgés au resync, sinon le chargement supprimerait
+    /// ce que le chemin d'écriture accepte.
+    #[test]
+    fn resync_preserve_les_params_libres_sans_schema() {
+        let entry = entry_named("agentbacklog").unwrap();
+        assert!(entry.params.is_empty());
+        let mut spec = materialize_spec(
+            entry,
+            &HashMap::from([("meta".to_string(), "libre".to_string())]),
+        );
+        resync(&mut spec, entry);
+        assert_eq!(spec.params["meta"], "libre");
     }
 
     /// Une spec déjà matérialisée depuis l'entrée courante ressort
