@@ -88,78 +88,71 @@ full model in `docs/components-integration.md`. Specs live in
 it via RPC (`component_upsert`/`component_remove`), never by opening it
 live. Annotated example: `packaging/components.example.toml`.
 
-### Typical case: backlog-orchestrator
+### Typical case: backlog-orchestrator (legacy Python → internal)
 
-Currently a service under `~/.supervisor/conf.d/backlog-orchestrator.conf`
-(script `~/.local/bin/backlog-orchestrator.py`, 60 s poll, **singleton
-enforced by flock** `~/.agentbacklog/orchestrator.lock`).
+`backlog-orchestrator` is **no longer a catalog recipe nor a managed
+`process`**: the name is reserved for an *internal* daemon component —
+the orchestration loop (spawn/nudge/release/cleanup) now runs inside
+`agentcontrol-daemon`. A legacy deployment still runs
+`~/.local/bin/backlog-orchestrator.py` under
+`~/.supervisor/conf.d/backlog-orchestrator.conf` and holds the shared
+flock `~/.agentbacklog/orchestrator.lock`. Migrating matters: the
+internal component is the only implementation that journals the
+presentation-only `[Backlog] item …` worker post (what `first_post`
+serves on a worker session) — the Python script can't emit it.
 
-**Switchover** — write the spec, remove the supervisord conf, **start the
-component**. Neither `component_install` nor `component_upsert` launches
-the process: `autostart` only applies at daemon boot — without an
-explicit `component_start`, the orchestrator polls nothing until the next
-restart. The flock makes the transition window safe: as long as the old
-instance runs, any second instance exits cleanly.
+The two implementations never orchestrate together: the flock
+serializes (one holder at a time) and both share
+`~/.agentbacklog/orchestrator-state.json` (worker counter, nudge
+cooldowns, notes items) — the native takes over seamlessly and reposts
+each running worker's current wip once (the Python state carries no
+`posted_wip` marker).
+
+**Switchover** — enable the internal component **persistently**, then
+remove the supervisord program:
 
 ```bash
-# 1. Install the component from the embedded catalog (declarative
-#    recipe: requires the script present, lays down the autostart +
-#    restart=on-failure + healthcheck=process spec — state: stopped)
-acctl comp install backlog-orchestrator   # acctl ≥ item #27
+# 1. Enable the internal component (persisted to config.toml AND
+#    applied now — the loop starts, sees the flock held by the legacy
+#    script and reports phase "blocked" until it exits)
+acctl orch set enabled true
+acctl orch status                     # → phase: blocked, lock_holder: legacy,
+                                      #   item_post: unavailable
 
-#    Without `acctl comp` (earlier version) — raw NDJSON on the socket:
-python3 - <<'EOF'
-import json, os, socket
-s = socket.socket(socket.AF_UNIX)
-s.connect(os.path.expanduser("~/.agentcontrol/daemon.sock"))
-f = s.makefile("rw")
-for req in ({"id":1,"req":"component_catalog"},
-            {"id":2,"req":"component_install","name":"backlog-orchestrator"}):
-    f.write(json.dumps(req)+"\n"); f.flush(); print(f.readline().strip())
-EOF
+#    Runtime-only variants (revert on daemon restart): `acctl orch on`
+#    or `acctl comp start backlog-orchestrator`. Config-only variant:
+#    `[backlog_orchestrator] enabled = true` in config.toml + daemon
+#    restart.
 
-# 2. Remove the legacy supervision — the supervisord instance stops
-#    and releases the flock
+# 2. Remove the legacy supervisord program — the Python script stops
+#    and releases the flock; the native takes it at its next tick
+#    (≤ poll_secs, 60 s default)
 rm ~/.supervisor/conf.d/backlog-orchestrator.conf
 supervisorctl reread && supervisorctl update
-supervisorctl status                      # backlog-orchestrator gone
+supervisorctl status                  # backlog-orchestrator gone
 
-# 3. Start the component — the flock is free, the managed one takes over
-acctl comp start backlog-orchestrator     # or the RPC below
-python3 - <<'EOF'
-import json, os, socket
-s = socket.socket(socket.AF_UNIX)
-s.connect(os.path.expanduser("~/.agentcontrol/daemon.sock"))
-f = s.makefile("rw")
-f.write(json.dumps({"id":1,"req":"component_start","name":"backlog-orchestrator"})+"\n")
-f.flush(); print(f.readline().strip())
-EOF
-
-# 4. Check on the daemon side: running, logs flowing
-acctl comp ls                             # or component_info/list_components RPC
-acctl comp logs backlog-orchestrator
+# 3. Check the takeover — active phase, lock held by the daemon itself
+acctl orch status                     # → phase: active, lock_holder: self,
+                                      #   item_post: available
+acctl comp ls
 ```
 
-"Continuous coverage" variant: start the component **before** removing
-the supervisord conf. The managed instance fails on the flock and
-`restart=on-failure` retries it (backoff ≤ 60 s) until it gets the lock —
-no coverage gap, at the cost of "lock" retries in the log and a non-zero
-`restarts` counter.
+Optionally delete the now-dead script
+`~/.local/bin/backlog-orchestrator.py` (kept for rollback, nothing
+references it any more).
 
-**Rollback**: `component_remove` (stop + spec removed), restore the
-supervisord conf, `supervisorctl reread && supervisorctl update` — no
-duplicate there either thanks to the flock.
+⚠️ Don't merely *stop* the program — remove the conf. A legacy that
+comes back later (restored conf, container rebuild) silently re-steals
+the flock and the `[Backlog] item` posts stop again: `acctl orch
+status` then reports `phase: blocked`, `lock_holder: legacy`,
+`item_post: unavailable`.
 
-⚠️ A managed `process` shares the daemon's fate: SIGTERM when the daemon
-stops, respawn at boot if `autostart` — for a service that must survive
-a daemon restart, declare `kind=external` instead (observation only).
+**Rollback**: `acctl orch set enabled false` (or `orch off` for a
+runtime-only stop), restore the supervisord conf, `supervisorctl
+reread && supervisorctl update` — same flock, no overlap.
 
-### Versioning the script (recommended)
-
-The `backlog-orchestrator` catalog recipe assumes the script is already
-present at `~/.local/bin/` — it isn't versioned anywhere. Dropping it in
-**Wameuh/AgentBacklog** or an AgentControl `contrib/` would provide a
-canonical downloadable source (`run`/`write_file` recipe instead of
-`require_file` + spec-only). Until then, the recipe deliberately stays
-**spec-only when the script is detected**: nothing to install, just the
-spec to lay down.
+⚠️ The orchestration lives inside the daemon: it pauses while the
+daemon is down (workers keep running; spawn/nudge/rm resume on
+restart). Same exposure as the supervisord program dying with the
+container — just not resurrected by `autorestart` while the daemon is
+absent.

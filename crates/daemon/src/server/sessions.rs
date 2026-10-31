@@ -84,6 +84,7 @@ impl Daemon {
                             text: p.clone(),
                             steer: false,
                             origin: Some(o.clone()),
+                            spawn_prompt: true,
                         });
                         let wrapped = format!(
                             "[AgentControl] tu es la session {sid}, créée par \
@@ -710,14 +711,19 @@ impl Daemon {
     /// Premier post du cycle courant : le journal ne contient que le
     /// cycle en cours (vidé à /clear, /new, rebind) → le premier
     /// `user_message` est par construction celui d'après le dernier
-    /// reset. `truncated: true` = la compaction a coupé la tête — le
+    /// reset — SAUF pour une session service : son premier
+    /// `user_message` est le prompt de spawn (boilerplate de mission),
+    /// et le « premier post utile » est le `user_message` suivant (ex.
+    /// le post « [Backlog] item » de l'orchestrateur).
+    /// `truncated: true` = la compaction a coupé la tête — le
     /// vrai premier post n'existe plus.
     pub(super) async fn h_first_post(self: &Arc<Self>, session: String) -> Result<Value> {
                 use crate::journal::FirstPost;
                 let s = self.get_session(&session).await?;
-                Ok(match s.journal.first_post(&s.dir)? {
+                let origin = s.meta_snapshot().origin;
+                Ok(match s.journal.first_post(&s.dir, origin.as_deref())? {
                     FirstPost::Found(ev) => {
-                        let proto::EventKind::UserMessage { text, steer, origin } = ev.kind else {
+                        let proto::EventKind::UserMessage { text, steer, origin, .. } = ev.kind else {
                             unreachable!() // Found ne porte que ce kind
                         };
                         json!({"post": {"seq": ev.seq, "ts": ev.ts, "text": text, "steer": steer, "origin": origin}})

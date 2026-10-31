@@ -84,6 +84,7 @@ impl Session {
                     text: text.clone(),
                     steer: true,
                     origin: None,
+                    spawn_prompt: false,
                 });
                 match s.prompt_rpc(&text).await {
                     Ok(_) => {}
@@ -386,6 +387,7 @@ impl Session {
                     text: next.clone(),
                     steer: false,
                     origin: None,
+                    spawn_prompt: false,
                 });
             }
             let armed = is_compact_cmd(&next);
@@ -654,6 +656,7 @@ impl Session {
                     text: text.clone(),
                     steer: true,
                     origin: None,
+                    spawn_prompt: false,
                 });
             }
             match s.prompt_rpc(&text).await {

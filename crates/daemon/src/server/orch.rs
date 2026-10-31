@@ -289,6 +289,26 @@ impl OrchProbe {
 
     /// Instantané pour `list_components`/`component_info`/`orchestrator_set`.
     pub(crate) fn status_json(&self) -> Value {
+        // Détenteur du flock sondé AVANT de prendre `status`/`state` :
+        // les mutex ne se cumulent pas dans l'autre sens (set_enabled
+        // prend lock_file puis set_status — séquentiels, mais on
+        // conserve l'ordre lock_file → status ici aussi).
+        let self_held = self.lock_file.lock().unwrap().is_some();
+        let holder = if self_held {
+            LockHolder::SelfHeld
+        } else {
+            lock_holder()
+        };
+        let (holder_name, holder_pid) = match holder {
+            LockHolder::SelfHeld => ("self", Some(std::process::id())),
+            LockHolder::Native(p) => ("native", Some(p)),
+            LockHolder::Legacy(p) => ("legacy", Some(p)),
+            LockHolder::Foreign(p) => ("foreign", Some(p)),
+            LockHolder::None => ("none", None),
+            LockHolder::Unknown => ("unknown", None),
+        };
+        let (item_post, item_post_detail) =
+            item_post_state(self.is_enabled(), holder);
         let st = self.status.lock().unwrap();
         let persist = self.state.lock().unwrap();
         let phase = match st.phase {
@@ -310,6 +330,13 @@ impl OrchProbe {
             "assignments": persist.assignments.clone(),
             "notes_cycle_done": persist.notes_cycle_done,
             "state_dir": state_dir().display().to_string(),
+            // Détenteur du flock partagé (sonde /proc/locks,
+            // best-effort) — « legacy » = le script Python : le post
+            // « [Backlog] item » n'existe pas sous lui.
+            "lock_holder": holder_name,
+            "lock_holder_pid": holder_pid,
+            "item_post": item_post,
+            "item_post_detail": item_post_detail,
             // Workspaces routés (repo → cwd) — la surface « Manager »
             // du client en propose un par entrée quand l'orchestrateur
             // est actif (vide sinon : pas de proposition sur un orch
@@ -378,6 +405,171 @@ enum LockState {
     Held,
     Busy,
     Error(String),
+}
+
+/// Détenteur du flock partagé, sondé dans `/proc/locks` (dev:ino du
+/// fichier → pid → `/proc/<pid>/cmdline`). Best-effort : un détenteur
+/// introuvable ou non classifié reste `None`/`Foreign` — le
+/// diagnostic ne doit jamais affirmer « legacy » sur un simple Busy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockHolder {
+    /// C'est nous (pid du démon).
+    SelfHeld,
+    /// Un autre `agentcontrol-daemon` natif — lui aussi émet le post.
+    Native(u32),
+    /// Le script Python `backlog-orchestrator.py` — n'émet PAS le post
+    /// « [Backlog] item » (journalisation interne au natif uniquement).
+    Legacy(u32),
+    /// Un pid détient le lock, cmdline non classifiée.
+    Foreign(u32),
+    /// Aucun détenteur trouvé (fichier absent ou jamais verrouillé).
+    None,
+    /// Sonde impossible (procfs absent/illisible).
+    Unknown,
+}
+
+/// `gnu_dev_major`/`gnu_dev_minor` sans dépendre de `libc::major`
+/// (encodage kernel new_encode_dev — identique pour `os.major()`).
+#[cfg(unix)]
+fn dev_majmin(dev: u64) -> (u64, u64) {
+    (
+        ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff),
+        (dev & 0xff) | ((dev >> 12) & !0xff),
+    )
+}
+
+/// Classe le pid détenteur : legacy Python, démon natif, ou autre.
+#[cfg(unix)]
+fn classify_holder(pid: u32) -> LockHolder {
+    if pid == std::process::id() {
+        return LockHolder::SelfHeld;
+    }
+    let cmd = std::fs::read(format!("/proc/{pid}/cmdline"))
+        .map(|c| String::from_utf8_lossy(&c).into_owned())
+        .unwrap_or_default();
+    if cmd.contains("backlog-orchestrator.py") {
+        LockHolder::Legacy(pid)
+    } else if cmd.contains("agentcontrol-daemon") {
+        LockHolder::Native(pid)
+    } else {
+        LockHolder::Foreign(pid)
+    }
+}
+
+/// Qui détient `orchestrator.lock` ? `/proc/locks` indexe les verrous
+/// par dev:ino (maj:min en hex, inode en décimal) : « 1: FLOCK
+/// ADVISORY WRITE 1234 00:3f:5515305 0 EOF ».
+#[cfg(unix)]
+fn lock_holder() -> LockHolder {
+    use std::os::unix::fs::MetadataExt;
+    let meta = match std::fs::metadata(state_dir().join("orchestrator.lock")) {
+        Ok(m) => m,
+        Err(_) => return LockHolder::None,
+    };
+    let target = dev_majmin(meta.dev());
+    let target = (target.0, target.1, meta.ino());
+    let Ok(locks) = std::fs::read_to_string("/proc/locks") else {
+        return LockHolder::Unknown;
+    };
+    for line in locks.lines() {
+        let mut f = line.split_whitespace();
+        let (Some(_id), Some(ty), Some(_adv), Some(_rw), Some(pid_s), Some(devino)) =
+            (f.next(), f.next(), f.next(), f.next(), f.next(), f.next())
+        else {
+            continue;
+        };
+        // Les verrous POSIX (fcntl) vivent dans un autre espace de noms
+        // et ne causent jamais EWOULDBLOCK pour flock(2) — ne pas les
+        // rapporter comme détenteur. (Pas de filtre sur READ : un
+        // flock READ bloque bien un LOCK_EX demandeur.)
+        if ty != "FLOCK" {
+            continue;
+        }
+        let mut d = devino.split(':');
+        let (Some(maj), Some(min), Some(ino), None) =
+            (d.next(), d.next(), d.next(), d.next())
+        else {
+            continue;
+        };
+        let (Ok(maj), Ok(min), Ok(ino)) = (
+            u64::from_str_radix(maj, 16),
+            u64::from_str_radix(min, 16),
+            ino.parse::<u64>(),
+        ) else {
+            continue;
+        };
+        if (maj, min, ino) != target {
+            continue;
+        }
+        let Ok(pid) = pid_s.parse::<u32>() else {
+            continue;
+        };
+        return classify_holder(pid);
+    }
+    LockHolder::None
+}
+
+#[cfg(not(unix))]
+fn lock_holder() -> LockHolder {
+    LockHolder::Unknown
+}
+
+/// Détail de la phase `Blocked`, enrichi par la sonde : le cas
+/// important est le script legacy — il détient le flock ET rend le
+/// post « [Backlog] item » indisponible (seul le natif le journalise).
+/// Tout autre détenteur ou sonde en échec retombe sur le message
+/// générique (jamais d'affirmation « legacy » sans preuve).
+fn blocked_detail() -> String {
+    let generic = "flock ~/.agentbacklog/orchestrator.lock détenu par une \
+                   autre instance (script Python encore actif ?) — le natif \
+                   prend le relais dès qu'il se libère";
+    match lock_holder() {
+        LockHolder::Legacy(pid) => format!(
+            "flock ~/.agentbacklog/orchestrator.lock détenu par l'orchestrateur \
+             Python legacy (backlog-orchestrator.py, pid {pid}) : post \
+             « [Backlog] item » indisponible, seul le natif le journalise — \
+             retirer le programme supervisord pour qu'il prenne le relais"
+        ),
+        LockHolder::Native(pid) => format!(
+            "flock ~/.agentbacklog/orchestrator.lock détenu par un autre \
+             démon natif (pid {pid}) — c'est lui qui orchestre"
+        ),
+        LockHolder::Foreign(pid) => format!(
+            "flock ~/.agentbacklog/orchestrator.lock détenu par le pid {pid} \
+             (non identifié) — si c'est le script Python legacy, le post \
+             « [Backlog] item » n'est pas émis"
+        ),
+        _ => generic.into(),
+    }
+}
+
+/// Le post « [Backlog] item » n'existe que sous l'orchestrateur natif :
+/// disponible quand un natif détient le flock (ou va le prendre —
+/// enabled sans concurrent), indisponible sous le script legacy,
+/// éteint quand personne n'orchestre, inconnu si le détenteur n'est
+/// pas classifié. Couplé à `lock_holder` pour `status_json`.
+fn item_post_state(enabled: bool, holder: LockHolder) -> (&'static str, Option<String>) {
+    match holder {
+        LockHolder::SelfHeld | LockHolder::Native(_) => ("available", None),
+        LockHolder::Legacy(pid) => (
+            "unavailable",
+            Some(format!(
+                "post « [Backlog] item » indisponible — l'orchestrateur Python \
+                 legacy (backlog-orchestrator.py, pid {pid}) détient le flock \
+                 et ne le journalise pas : retirer le programme supervisord \
+                 pour que le natif prenne le relais"
+            )),
+        ),
+        LockHolder::Foreign(pid) => (
+            "unknown",
+            Some(format!(
+                "détenteur du flock non identifié (pid {pid}) — si c'est le \
+                 script Python legacy, le post « [Backlog] item » n'est pas émis"
+            )),
+        ),
+        LockHolder::Unknown => ("unknown", None),
+        LockHolder::None => (if enabled { "available" } else { "off" }, None),
+    }
 }
 
 /// `~/.agentbacklog` — le dossier d'état partagé avec le script
@@ -552,12 +744,7 @@ impl Daemon {
         match self.orch.ensure_lock() {
             LockState::Held => {}
             LockState::Busy => {
-                self.orch.set_status(
-                    Phase::Blocked,
-                    Some("flock ~/.agentbacklog/orchestrator.lock détenu par une \
-                          autre instance (script Python encore actif ?) — le \
-                          natif prend le relais dès qu'il se libère".into()),
-                );
+                self.orch.set_status(Phase::Blocked, Some(blocked_detail()));
                 return;
             }
             LockState::Error(e) => {
@@ -799,6 +986,7 @@ impl Daemon {
                                 text,
                                 steer: false,
                                 origin: Some(COMPONENT_ORIGIN.to_string()),
+                                spawn_prompt: false,
                             });
                             just_posted = true;
                         }
