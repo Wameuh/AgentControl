@@ -14,7 +14,7 @@
 
 use super::*;
 
-use notify::event::ModifyKind;
+use notify::event::{AccessKind, AccessMode, ModifyKind};
 use notify::{EventKind, RecursiveMode, Watcher};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -84,18 +84,25 @@ fn noisy_name(name: &str) -> bool {
 
 /// L'event peut-il changer le rendu de list_dir ? Les accès purs et les
 /// modifications de métadonnées seules (chmod, utime…) sont invisibles
-/// dans le listing (nom/type/taille) → pas de push pour eux.
+/// dans le listing (nom/type/taille) → pas de push pour eux. Sauf
+/// `Close(Write)` : seule trace d'une écriture mmap, elle compte.
 fn visible_kind(k: &EventKind) -> bool {
-    !matches!(k, EventKind::Access(_))
-        && !matches!(k, EventKind::Modify(ModifyKind::Metadata(_)))
+    match k {
+        EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+        EventKind::Access(_) => false,
+        EventKind::Modify(ModifyKind::Metadata(_)) => false,
+        _ => true,
+    }
 }
 
 /// Marque les dossiers suivis touchés par l'event : leur parent direct
 /// (watch non récursif), ou eux-mêmes (suppression/déplacement du
-/// dossier suivi — le client réconciliera vers la disparition).
+/// dossier suivi — le client réconciliera vers la disparition). Le
+/// match sur le dossier suivi prime le filtre de bruit : un watch sur
+/// un dossier nommé `.git`/`x.tmp` doit apprendre sa propre fin.
 fn mark_pending(
     ev: &notify::Event,
-    subs: &std::sync::Mutex<HashMap<PathBuf, Sub>>,
+    subs: &std::sync::Mutex<HashMap<PathBuf, Vec<Sub>>>,
     pend: &mut HashMap<PathBuf, Pend>,
     now: Instant,
 ) {
@@ -104,14 +111,15 @@ fn mark_pending(
     }
     let subs = subs.lock().unwrap();
     for p in &ev.paths {
-        let name = p.file_name().unwrap_or_default().to_string_lossy();
-        if noisy_name(&name) {
-            continue;
-        }
         let dir = if subs.contains_key(p.as_path()) {
             Some(p.as_path())
         } else {
-            p.parent().filter(|d| subs.contains_key(*d))
+            let name = p.file_name().unwrap_or_default().to_string_lossy();
+            if noisy_name(&name) {
+                None
+            } else {
+                p.parent().filter(|d| subs.contains_key(*d))
+            }
         };
         let Some(dir) = dir else { continue };
         pend.entry(dir.to_path_buf())
@@ -128,7 +136,7 @@ fn mark_pending(
 /// droppé) ou quand l'outbox est mort (conn perdue).
 async fn debounce_run(
     mut rx: mpsc::UnboundedReceiver<notify::Result<notify::Event>>,
-    subs: Arc<std::sync::Mutex<HashMap<PathBuf, Sub>>>,
+    subs: Arc<std::sync::Mutex<HashMap<PathBuf, Vec<Sub>>>>,
     outbox: Outbox,
 ) {
     let mut pend: HashMap<PathBuf, Pend> = HashMap::new();
@@ -145,7 +153,10 @@ async fn debounce_run(
         tokio::select! {
             ev = rx.recv() => {
                 match ev {
-                    Some(Ok(e)) => mark_pending(&e, &subs, &mut pend, now),
+                    // now frais : le `now` d'en-tête date d'avant le park
+                    // — un event arrivé pendant l'attente serait daté
+                    // dans le passé et court-circuiterait le debounce.
+                    Some(Ok(e)) => mark_pending(&e, &subs, &mut pend, Instant::now()),
                     Some(Err(e)) => debug!("watch: {e}"),
                     None => break,
                 }
@@ -164,20 +175,31 @@ async fn debounce_run(
                     .collect();
                 for d in due {
                     pend.remove(&d);
-                    let sub = subs
+                    let list: Vec<(String, String)> = subs
                         .lock()
                         .unwrap()
                         .get(&d)
-                        .map(|s| (s.session.clone(), s.rel.clone()));
+                        .map(|v| {
+                            v.iter()
+                                .map(|s| (s.session.clone(), s.rel.clone()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     // Dossier désabonné entre-temps : la fenêtre de cap
                     // reste enregistrée mais rien n'est poussé.
-                    let Some((session, rel)) = sub else { continue };
+                    if list.is_empty() {
+                        continue;
+                    }
                     last_emit.insert(d, now);
-                    let frame = json!({
-                        "push": "dir_changed", "session": session, "path": rel,
-                    });
-                    if Daemon::send_line(&outbox, &frame).is_err() {
-                        return; // conn morte — la tâche n'a plus lieu d'être
+                    // Un push par (session, rel) abonné à cet abs —
+                    // plusieurs rels (symlink interne) partagent le wd.
+                    for (session, rel) in list {
+                        let frame = json!({
+                            "push": "dir_changed", "session": session, "path": rel,
+                        });
+                        if Daemon::send_line(&outbox, &frame).is_err() {
+                            return; // conn morte — la tâche n'a plus lieu d'être
+                        }
                     }
                 }
                 // GC : fenêtres de cap des dossiers plus suivis (>30 s).
@@ -197,7 +219,10 @@ pub(crate) struct DirWatches {
     /// explorateur ne coûte ni fd ni tâche.
     watcher: Option<notify::RecommendedWatcher>,
     task: Option<tokio::task::JoinHandle<()>>,
-    subs: Arc<std::sync::Mutex<HashMap<PathBuf, Sub>>>,
+    /// abs → les (session, rel) qui le suivent : deux rels canonisant
+    /// vers le même dossier (symlink interne au workspace) partagent le
+    /// wd inotify — un seul slot du plafond, un push par rel.
+    subs: Arc<std::sync::Mutex<HashMap<PathBuf, Vec<Sub>>>>,
     /// Compteur global démon des dossiers surveillés (borne MAX_*).
     count: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -213,7 +238,9 @@ impl DirWatches {
     }
 
     /// Abonne `abs` (dossier canonique déjà borné au workspace) pour
-    /// `session`/`rel`. Idempotent : déjà suivi → re-clé seulement.
+    /// `session`/`rel`. Idempotent : le couple déjà suivi → simple
+    /// re-arm du wd (le noyau l'a peut-être lâché — IN_IGNORED après
+    /// suppression du dossier, la sub survivrait aveugle sinon).
     /// `false` = plafond global atteint (le client garde le refresh
     /// manuel, silencieusement).
     pub fn watch(
@@ -223,10 +250,19 @@ impl DirWatches {
         rel: String,
         outbox: &Outbox,
     ) -> Result<bool> {
-        if let Some(s) = self.subs.lock().unwrap().get_mut(abs) {
-            s.session = session;
-            s.rel = rel;
-            return Ok(true);
+        {
+            let mut subs = self.subs.lock().unwrap();
+            if let Some(list) = subs.get_mut(abs) {
+                if !list.iter().any(|s| s.session == session && s.rel == rel) {
+                    list.push(Sub { session, rel });
+                }
+                // wd toujours ré-armé : watch() sur un wd vivant ne fait
+                // que rafraîchir son masque (idempotent inotify).
+                if let Some(w) = self.watcher.as_mut() {
+                    let _ = w.watch(abs, RecursiveMode::NonRecursive);
+                }
+                return Ok(true);
+            }
         }
         // Réservation atomique sous le plafond : deux conns ne peuvent
         // pas dépasser MAX en se contrôlant l'une l'autre.
@@ -262,41 +298,57 @@ impl DirWatches {
             self.count.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             return Err(e);
         }
-        self.subs.lock().unwrap().insert(
-            abs.to_path_buf(),
-            Sub { session, rel },
-        );
+        self.subs
+            .lock()
+            .unwrap()
+            .insert(abs.to_path_buf(), vec![Sub { session, rel }]);
         Ok(true)
     }
 
     /// Retire les watches de `session` — `rel` absent = tous (panneau
-    /// fermé, session quittée). Renvoie le nombre retiré.
+    /// fermé, session quittée). Renvoie le nombre de couples (session,
+    /// rel) retirés ; le wd inotify d'un abs n'est relâché que quand
+    /// son dernier abonné part. Watcher+tâche démontés à `subs` vide —
+    /// une conn sans dossier déplié ne garde ni fd ni tâche.
     pub fn unwatch(&mut self, session: &str, rel: Option<&str>) -> usize {
-        let gone: Vec<PathBuf> = self
-            .subs
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(_, s)| {
-                s.session == session && rel.is_none_or(|r| s.rel == r)
-            })
-            .map(|(d, _)| d.clone())
-            .collect();
-        let n = gone.len();
-        if n == 0 {
+        let mut removed = 0usize;
+        let mut dead: Vec<PathBuf> = Vec::new();
+        {
+            let mut subs = self.subs.lock().unwrap();
+            subs.retain(|abs, list| {
+                let before = list.len();
+                list.retain(|s| {
+                    !(s.session == session && rel.is_none_or(|r| s.rel == r))
+                });
+                removed += before - list.len();
+                if list.is_empty() {
+                    dead.push(abs.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        if removed == 0 {
             return 0;
         }
-        let mut subs = self.subs.lock().unwrap();
-        for d in gone {
-            subs.remove(&d);
+        let n = dead.len();
+        for d in dead {
             if let Some(w) = self.watcher.as_mut() {
                 let _ = w.unwatch(&d); // déjà parti = sans conséquence
             }
         }
-        drop(subs);
         self.count
             .fetch_sub(n, std::sync::atomic::Ordering::Relaxed);
-        n
+        if self.subs.lock().unwrap().is_empty() {
+            // watcher droppé → le canal FS se ferme → la tâche sort
+            // d'elle-même (abort = sortie immédiate, sans fenêtre).
+            self.watcher = None;
+            if let Some(t) = self.task.take() {
+                t.abort();
+            }
+        }
+        removed
     }
 }
 
@@ -397,6 +449,41 @@ mod tests {
         }
     }
 
+    /// Le dossier suivi à nom « noisy » apprend sa propre fin ; une
+    /// écriture mmap (Close Write) compte, le chmod pur non.
+    #[test]
+    fn mark_self_and_closewrite() {
+        use notify::event::{MetadataKind, RemoveKind};
+        let dir = PathBuf::from("/w/node_modules");
+        let subs: std::sync::Mutex<HashMap<PathBuf, Vec<Sub>>> =
+            std::sync::Mutex::new(HashMap::new());
+        subs.lock().unwrap().insert(
+            dir.clone(),
+            vec![Sub { session: "s".into(), rel: "n".into() }],
+        );
+        let mut pend = HashMap::new();
+        let ev = notify::Event::new(EventKind::Remove(RemoveKind::Folder))
+            .add_path(dir.clone());
+        mark_pending(&ev, &subs, &mut pend, Instant::now());
+        assert!(pend.contains_key(&dir), "fin du dossier suivi ignorée");
+
+        pend.clear();
+        let ev = notify::Event::new(EventKind::Access(AccessKind::Close(
+            AccessMode::Write,
+        )))
+        .add_path(dir.join("f"));
+        mark_pending(&ev, &subs, &mut pend, Instant::now());
+        assert!(pend.contains_key(&dir), "écriture mmap ignorée");
+
+        pend.clear();
+        let ev = notify::Event::new(EventKind::Modify(ModifyKind::Metadata(
+            MetadataKind::Any,
+        )))
+        .add_path(dir.join("f"));
+        mark_pending(&ev, &subs, &mut pend, Instant::now());
+        assert!(pend.is_empty(), "chmod pur a marqué le dossier");
+    }
+
     /// Outbox factice : la voie pushes (`lo`) est lisible par le test
     /// pour constater les frames `dir_changed` émises par le debounce.
     fn test_outbox() -> (Outbox, mpsc::UnboundedReceiver<String>) {
@@ -463,6 +550,52 @@ mod tests {
             );
         }
         // Drop (conn morte) : aucun état résiduel côté compteur.
+        assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), 0);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Deux rels canonisant vers le même abs (symlink interne) partagent
+    /// le wd : un slot au plafond, un push par rel, et l'unwatch d'un
+    /// rel préserve l'autre — ni fuite ni aveuglement.
+    #[tokio::test]
+    async fn multi_rel_same_abs() {
+        let base = std::env::temp_dir().join(format!("ac-dirwatch2-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let abs = base.canonicalize().unwrap();
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (ob, mut lo) = test_outbox();
+        let mut dw = DirWatches::new(Arc::clone(&count));
+        assert!(dw.watch(&abs, "s1".into(), "a".into(), &ob).unwrap());
+        assert!(dw.watch(&abs, "s1".into(), "b".into(), &ob).unwrap());
+        assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        std::fs::write(base.join("x"), b"1").unwrap();
+        let mut paths: Vec<String> = Vec::new();
+        for _ in 0..2 {
+            let line = tokio::time::timeout(Duration::from_secs(5), lo.recv())
+                .await
+                .expect("un push par rel attendu")
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(v["push"], "dir_changed");
+            paths.push(v["path"].as_str().unwrap().into());
+        }
+        paths.sort();
+        assert_eq!(paths, ["a", "b"]);
+
+        // Unwatch d'un rel : l'autre survit, le slot reste pris.
+        assert_eq!(dw.unwatch("s1", Some("a")), 1);
+        assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), 1);
+        std::fs::write(base.join("y"), b"1").unwrap();
+        let line = tokio::time::timeout(Duration::from_secs(5), lo.recv())
+            .await
+            .expect("le rel restant doit encore pousser")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["path"], "b");
+
+        // Dernier rel parti : wd relâché, compteur rendu.
+        assert_eq!(dw.unwatch("s1", Some("b")), 1);
         assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), 0);
         std::fs::remove_dir_all(&base).ok();
     }

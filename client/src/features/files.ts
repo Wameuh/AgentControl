@@ -667,18 +667,25 @@ export class FileExplorer {
     if (this.watchDead.has(ck)) return;
     const key = `${sid}\0${rel}`;
     if (this.watches.has(key)) return;
-    this.watches.set(key, { sid, conn, rel });
+    const entry = { sid, conn, rel };
+    this.watches.set(key, entry);
     void callBg<{ watching?: boolean }>("watch_dir", {
       session: sid, conn, path: rel,
     })
       .then((r) => {
-        if (r.watching === false) this.watches.delete(key);
+        // Réponse tardive : ne retirer que si l'entrée est toujours la
+        // nôtre — un repli→dépliage a pu poster un watch plus récent.
+        if (r.watching === false && this.watches.get(key) === entry) {
+          this.watches.delete(key);
+        }
       })
       .catch((e) => {
-        this.watches.delete(key);
-        // Démon trop vieux pour watch_dir → ne plus jamais tenter
-        // (la variante inconnue revient en « parse: … »).
-        if (/unknown variant|parse:|inconnue/i.test(String(e))) {
+        if (this.watches.get(key) === entry) this.watches.delete(key);
+        // Démon trop vieux pour watch_dir → ne plus jamais tenter.
+        // Motif volontairement étroit (erreur de CAPACITÉ seulement) :
+        // « session inconnue » est transitoire et ne doit pas empoisonner
+        // la conn — même garde que le repli find_files ci-dessous.
+        if (/unknown variant|parse:/i.test(String(e))) {
           this.watchDead.add(ck);
         }
       });
@@ -1295,7 +1302,8 @@ export class FileExplorer {
     const name = (node.dataset.rel?.split("/").pop() ?? "").toLowerCase();
     for (const ch of Array.from(box.children)) {
       const h = ch as HTMLElement;
-      if (!h.classList.contains("fnode")) continue;
+      // .fnew exclu : la saisie de nom reste en tête, sans data-rel.
+      if (!h.classList.contains("fnode") || h.classList.contains("fnew")) continue;
       const hDir = h.classList.contains("is-dir");
       if (!hDir && dir) { box.insertBefore(node, h); return; }
       if (hDir === dir) {
