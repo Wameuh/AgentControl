@@ -39,6 +39,9 @@ const ZOOM_STEP = 1.25;
  *  libérées (un canvas rendu à fort zoom coûte plusieurs Mio). */
 const RENDERED_MAX = 14;
 
+/** Surface max d'un canvas rendu (~16 Mpx, convention viewer pdf.js). */
+const MAX_CANVAS_PX = 16_777_216;
+
 type PdfjsModule = typeof import("pdfjs-dist");
 
 let pdfjs: PdfjsModule | null = null;
@@ -108,7 +111,13 @@ export class PdfView {
     if (!app.current) return;
     const gen = ++this.gen;
     this.rel = rel;
-    this.name = rel.split("/").pop() ?? rel;
+    // Nom assaini pour write_download côté Windows : basename sur les
+    // deux séparateurs, composants vides/./.. rejetés (le « \ » est un
+    // caractère ordinaire sous POSIX — un nom distant peut y injecter
+    // une traversée hors de appDataDir/downloads).
+    this.name =
+      rel.split(/[\\/]/).filter((s) => s && s !== "." && s !== "..").pop()
+      ?? "file.pdf";
     this.sid = app.current.id;
     this.conn = app.current.conn;
     const view = $("file-view");
@@ -130,7 +139,7 @@ export class PdfView {
         .getDocument({ data: b64decode(r.data), ...assetUrls() })
         .promise;
       if (gen !== this.gen) {
-        void doc.loadingTask.destroy();
+        void doc.loadingTask.destroy().catch(() => {});
         return;
       }
       this.doc = doc;
@@ -178,6 +187,7 @@ export class PdfView {
     msg.appendChild(btn);
     view.appendChild(msg);
     $("fv-status").textContent = fmtSize(this.size);
+    $("fv-enc").hidden = true;
   }
 
   /** Construit les conteneurs de page (placeholders aux dims de la page 1,
@@ -265,7 +275,13 @@ export class PdfView {
         pg.h = v.height || pg.h;
       }
       const vp = page.getViewport({ scale: zoom });
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      // Garde-fou mémoire : ~16 Mpx max par canvas (comme le viewer
+      // pdf.js) — zoom 4 × dpr 2 sinon ≈ 31 Mpx ≈ 124 Mio par page,
+      // trop pour une webview mobile. Le dpr effectif réduit au-delà.
+      const dpr = Math.min(
+        window.devicePixelRatio || 1, 2,
+        Math.sqrt(MAX_CANVAS_PX / Math.max(vp.width * vp.height, 1)),
+      );
       const canvas = document.createElement("canvas");
       canvas.width = Math.floor(vp.width * dpr);
       canvas.height = Math.floor(vp.height * dpr);
@@ -348,7 +364,8 @@ export class PdfView {
   private syncStatus() {
     const n = this.doc?.numPages ?? 0;
     $("fv-status").textContent =
-      `${t("pdf_pages", { n })} · ${Math.round(this.zoom * 100)}%`;
+      `${n === 1 ? t("pdf_page1") : t("pdf_pages", { n })} · ` +
+      `${Math.round(this.zoom * 100)}%`;
   }
 
   /** « Ouvrir avec l'appli système » : web → download navigateur ;
@@ -386,6 +403,9 @@ export class PdfView {
         });
         if (offset >= c.total) break;
       }
+      // L'utilisateur a changé de fichier entre-temps : le téléchargé
+      // reste sur disque mais on n'ouvre rien par surprise.
+      if (!btn.isConnected) return;
       await invoke("plugin:opener|open_path", { path: dest });
       btn.textContent = `✓ ${name}`;
     } catch (e) {
