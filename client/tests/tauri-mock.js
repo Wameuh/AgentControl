@@ -227,6 +227,17 @@
         case "spawn_instance": return p.then(() => null);
         case "ssh_hosts": return p.then(() => []);
         case "ssh_pubkey": return p.then(() => "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDemoAgentControlKeyExample agentcontrol");
+        // Appairage QR : l'install distante n'est pas simulée — réponses
+        // d'endpoint seul (resolve ok, begin refuse → mode dégradé/testé
+        // hors Tauri). pair_devices vide = la section reste pliable.
+        case "pair_resolve": return p.then(() => ({ host: args.cfg?.host ?? "demo.local", port: 22, user: "dev" }));
+        case "pair_begin": return p.then(() => { throw new Error("mock: pas de serveur"); });
+        case "pair_devices": return p.then(() => []);
+        case "pair_payload": return p.then(() => "agentcontrol://pair?v=1&host=demo.local&port=22&rport=7331&user=dev&auth=pw&secret=ZGVtbw");
+        case "pair_poll": return p.then(() => "gone");
+        case "pair_cleanup": case "pair_revoke": case "pair_import_key":
+          return p.then(() => null);
+        case "pair_attempt": return p.then(() => "SHA256:DemoFingerprintOfPairedKey");
         case "check_update": return p.then(() => { throw new Error("offline"); });
         case "ensure_daemon": case "save_connection": case "update_client":
           return p.then(() => null);

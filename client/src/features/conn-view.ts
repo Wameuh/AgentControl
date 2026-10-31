@@ -18,6 +18,7 @@ import { t, type Key } from "../i18n";
 import { icon } from "../ui/icons";
 import { nav } from "../ui/nav";
 import { showOutdated } from "./update";
+import { confirmPair, initPairing, scanPair, shareQr } from "./pairing";
 import type { ConnectionManager } from "./connections";
 
 // Étapes du script ensure_daemon — chaque `echo step:<id>` distant est
@@ -262,6 +263,22 @@ export class ConnView {
       // même sans connexions, il ne peut pas servir de pré-vérification.
       status = await invoke("connect", { cfg });
     } catch (e) {
+      // Host key divergée d'un profil appairé : rotation possible, mais
+      // JAMAIS acceptée silencieusement — re-confirmation explicite,
+      // puis le nouveau fp remplace le pinning persisté (la save qui
+      // suit propage la nouvelle empreinte).
+      const m = /hostkey-mismatch:(\S+)/.exec(String(e));
+      if (m && cfg.kind === "ssh") {
+        const ok = await confirmPair(
+          t("hk_h"),
+          t("hk_msg", { where: `${cfg.user ? cfg.user + "@" : ""}${cfg.host}:${cfg.port ?? 22}`, fp: m[1] }),
+          t("hk_go"),
+        );
+        if (!ok) throw e;
+        cfg.host_keys = [m[1]];
+        this.cStatus(t("connecting_to", { host }));
+        status = await invoke("connect", { cfg });
+      } else {
       // SSH : échec → démon absent ou arrêté → bootstrap depuis la release.
       if (cfg.kind !== "ssh" || !cfg.host) throw e;
       const ver = await getVersion().catch(() => "0.0.0");
@@ -285,6 +302,7 @@ export class ConnView {
         if (newerDaemon) showOutdated(ver, newerDaemon);
         throw e2;
       });
+      }
     }
     // Incompatibilité de version mineure (x.y) — jamais à chaque patch.
     const dv = (status as { version?: string }).version || newerDaemon;
@@ -509,6 +527,9 @@ export class ConnView {
         (isAndroid() || isWeb
           ? ""
           : `<button type="button" class="cv-new" title="${q(esc(t("conn_spawn")))}">${icon("external")}</button>`) +
+        (c.kind === "ssh" && !isWeb
+          ? `<button type="button" class="cv-qr" title="${q(esc(t("qr_share")))}">${icon("qr")}</button>`
+          : "") +
         `<button type="button" class="cv-edit" title="${q(esc(t("edit_conn")))}">${icon("edit")}</button>` +
         `<button type="button" class="cv-del danger" title="${q(esc(t("ctx_delete_conn")))}">${icon("close")}</button>` +
         `</span>`;
@@ -523,6 +544,12 @@ export class ConnView {
           } catch (e) {
             this.report(String(e));
           }
+        };
+      }
+      const qrBtn = li.querySelector(".cv-qr") as HTMLButtonElement | null;
+      if (qrBtn) {
+        qrBtn.onclick = () => {
+          void shareQr(c).catch((e) => this.report(String(e)));
         };
       }
       (li.querySelector(".cv-edit") as HTMLButtonElement).onclick = () =>
@@ -703,6 +730,22 @@ export class ConnView {
     ($("c-native") as HTMLInputElement).onchange = () => this.syncSshFields();
     $("cv-form-reset").onclick = () => this.resetForm();
     bindLogView($("cv-logs") as HTMLDetailsElement);
+    initPairing();
+    // Scan QR (B′ v2 / endpoint H / repli A v1) → cfg → connect+save
+    // par le chemin nominal. Hors Tauri (web) pas d'appairage.
+    const scan = $("c-scan") as HTMLButtonElement;
+    if (isWeb) {
+      scan.hidden = true;
+    } else {
+      scan.onclick = async () => {
+        try {
+          const cfg = await scanPair();
+          if (cfg) await this.go(cfg);
+        } catch (e) {
+          dlgErr("c-err", String(e));
+        }
+      };
+    }
 
     // Le bouton vit dans la sidebar — drawer sur Android : le refermer
     // d'abord sinon la vue s'ouvre derrière le tiroir. Toggle : recliquer

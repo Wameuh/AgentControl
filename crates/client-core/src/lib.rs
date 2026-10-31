@@ -304,6 +304,9 @@ pub enum Transport {
         password: Option<String>,
         /// Chemin d'une clé privée OpenSSH ; None = clé générée de l'app.
         key_path: Option<PathBuf>,
+        /// Empreintes `SHA256:…` de host key épinglées (profil appairé —
+        /// persiste le `hk` du QR). `None` = accept-all historique.
+        expected_hk: Option<std::collections::HashSet<String>>,
     },
 }
 
@@ -475,7 +478,12 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
             remote_port,
             password,
             key_path,
+            expected_hk,
         } => {
+            let opts = ssh_native::Opts {
+                expected_hk: expected_hk.clone().map(Arc::new),
+                key: None,
+            };
             let (h, ch) = ssh_native::open_direct_tcpip(
                 host,
                 *port,
@@ -483,6 +491,7 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                 *remote_port,
                 password.as_deref(),
                 key_path.as_deref(),
+                &opts,
             )
             .await?;
             let (r, w) = tokio::io::split(ch);
@@ -702,233 +711,12 @@ impl Client {
 }
 
 // ---------------------------------------------------------------------------
-// SSH natif (russh) — Android + tout hôte sans binaire ssh
+// SSH natif (russh) — Android + tout hôte sans binaire ssh.
+// Implémentation dans ssh_native.rs (séparée : >400 lignes).
 // ---------------------------------------------------------------------------
 
-pub mod ssh_native {
-    use super::{base_dir, log, Level};
-    use anyhow::{bail, Context, Result};
-    use russh::client;
-    use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
-    use std::path::{Path, PathBuf};
-    use std::sync::Arc;
-    use std::time::Duration;
-    use tokio::io::{AsyncRead, AsyncWrite};
+pub mod ssh_native;
 
-    /// Clé ed25519 générée par l'app : <base>/agentcontrol_ed25519{,.pub}
-    pub fn key_path() -> PathBuf {
-        base_dir().join("agentcontrol_ed25519")
-    }
-
-    /// Génère la paire si absente (chmod 600). Retourne le chemin.
-    pub fn ensure_keypair() -> Result<PathBuf> {
-        let p = key_path();
-        if p.exists() {
-            return Ok(p);
-        }
-        let _ = std::fs::create_dir_all(base_dir());
-        // rand 0.10 n'expose plus OsRng ; rand_core 0.10 non plus →
-        // petit RNG adossé à getrandom (CryptoRng vient par blanket impl).
-        struct OsRng;
-        impl rand_core::TryRng for OsRng {
-            type Error = std::convert::Infallible;
-            fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-                let mut b = [0u8; 4];
-                self.try_fill_bytes(&mut b)?;
-                Ok(u32::from_le_bytes(b))
-            }
-            fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
-                let mut b = [0u8; 8];
-                self.try_fill_bytes(&mut b)?;
-                Ok(u64::from_le_bytes(b))
-            }
-            fn try_fill_bytes(&mut self, d: &mut [u8]) -> Result<(), Self::Error> {
-                getrandom::fill(d).expect("os rng");
-                Ok(())
-            }
-        }
-        impl rand_core::TryCryptoRng for OsRng {}
-        let key = ssh_key::PrivateKey::random(&mut OsRng, ssh_key::Algorithm::Ed25519)
-            .context("keygen ed25519")?;
-        let pem = key.to_openssh(ssh_key::LineEnding::LF).context("openssh pem")?;
-        std::fs::write(&p, pem.as_bytes())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
-        }
-        let pub_line = format!("{} agentcontrol", key.public_key().to_openssh().unwrap_or_default());
-        std::fs::write(p.with_extension("pub"), &pub_line)?;
-        log(Level::Info, format!("clé ssh app générée : {}", pub_line));
-        Ok(p)
-    }
-
-    /// Ligne authorized_keys à ajouter côté serveur ("ssh-ed25519 AAAA… agentcontrol").
-    pub fn pubkey_line() -> Result<String> {
-        let p = ensure_keypair()?;
-        let key = russh::keys::load_secret_key(&p, None).context("clé privée")?;
-        Ok(format!(
-            "{} agentcontrol",
-            key.public_key().to_openssh().unwrap_or_default()
-        ))
-    }
-
-    struct Handler;
-
-    impl client::Handler for Handler {
-        type Error = russh::Error;
-        async fn check_server_key(
-            &mut self,
-            key: &PublicKeyOrCertificate,
-        ) -> Result<bool, Self::Error> {
-            // accept-new equivalent : on logge la clé vue (TOFU implicite v1).
-            match key {
-                PublicKeyOrCertificate::PublicKey { key, .. } => log(Level::Info, format!(
-                    "ssh host key: {}",
-                    key.fingerprint(russh::keys::HashAlg::Sha256)
-                )),
-                PublicKeyOrCertificate::Certificate(_) => {
-                    log(Level::Info, "ssh host key: certificate")
-                }
-            }
-            Ok(true)
-        }
-    }
-
-    /// Garde la session SSH vivante ; la fermeture suit le drop du Handle.
-    /// Le champ n'est jamais lu — c'est sa durée de vie qui compte.
-    pub struct NativeGuard(#[allow(dead_code)] client::Handle<Handler>);
-
-    /// Connecte + authentifie (clé, sinon mot de passe) et renvoie le handle.
-    async fn connect_auth(
-        host: &str,
-        port: u16,
-        user: &str,
-        password: Option<&str>,
-        key: Option<&Path>,
-    ) -> Result<client::Handle<Handler>> {
-        let mut cfg = client::Config::default();
-        cfg.inactivity_timeout = None;
-        cfg.keepalive_interval = Some(Duration::from_secs(30));
-        cfg.keepalive_max = 3;
-        let addrs = (host, port);
-        let mut h = tokio::time::timeout(
-            Duration::from_secs(15),
-            client::connect(Arc::new(cfg), addrs, Handler),
-        )
-        .await
-        .context("ssh connect timeout")?
-        .context("ssh connect")?;
-        // Clé d'abord (app-générée ou explicitée), puis mot de passe.
-        let kp = key.map(PathBuf::from).unwrap_or_else(key_path);
-        if kp.exists() {
-            let key = russh::keys::load_secret_key(&kp, None)
-                .with_context(|| format!("clé {}", kp.display()))?;
-            let auth = h
-                .authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), None))
-                .await;
-            match auth {
-                Ok(r) if r.success() => return Ok(h),
-                Ok(_) => log(Level::Warn, "clé refusée (auth partielle) — essai mot de passe"),
-                Err(e) => log(Level::Warn, format!("auth clé: {e} — essai mot de passe")),
-            }
-        }
-        if let Some(pw) = password.filter(|p| !p.is_empty()) {
-            let r = h
-                .authenticate_password(user, pw)
-                .await
-                .context("auth password")?;
-            if r.success() {
-                return Ok(h);
-            }
-            bail!("mot de passe refusé");
-        }
-        bail!("auth impossible — ajoutez la clé publique de l'app dans authorized_keys du serveur");
-    }
-
-    /// Ouvre un canal direct-tcpip vers 127.0.0.1:remote_port dans la
-    /// session SSH — équivalent `ssh -L` sans port local ni process.
-    pub async fn open_direct_tcpip(
-        host: &str,
-        port: u16,
-        user: &str,
-        remote_port: u16,
-        password: Option<&str>,
-        key_path: Option<&Path>,
-    ) -> Result<(NativeGuard, impl AsyncRead + AsyncWrite + Unpin + Send)> {
-        let h = connect_auth(host, port, user, password, key_path).await?;
-        let ch = tokio::time::timeout(
-            Duration::from_secs(10),
-            h.channel_open_direct_tcpip("127.0.0.1", remote_port as u32, "127.0.0.1", 0),
-        )
-        .await
-        .context("direct-tcpip timeout")?
-        .context("direct-tcpip — le démon écoute-t-il sur le port distant ?")?;
-        Ok((NativeGuard(h), ch.into_stream()))
-    }
-
-    /// `ssh host <script>` sans binaire : canal exec → stdout/stderr
-    /// collectés à part. `on_stderr` reçoit chaque ligne stderr complète
-    /// au fil de l'eau (progression `step:*`, erreurs lisibles…) — le
-    /// retour est `(code, stdout, stderr)` : le résultat métier reste
-    /// sur stdout, les messages de diagnostic sur stderr.
-    pub async fn ssh_exec(
-        host: &str,
-        port: u16,
-        user: &str,
-        password: Option<&str>,
-        key_path: Option<&Path>,
-        script: &str,
-        mut on_stderr: Option<&mut (dyn FnMut(&str) + Send)>,
-    ) -> Result<(i32, String, String)> {
-        use russh::ChannelMsg;
-        let h = connect_auth(host, port, user, password, key_path).await?;
-        let mut ch = h.channel_open_session().await.context("channel session")?;
-        ch.exec(true, script.as_bytes().to_vec())
-            .await
-            .context("exec")?;
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        // Lignes stderr complètes → callback (les lignes partielles en
-        // fin de flux sont livrées aussi, via le drain post-boucle).
-        let mut err_rest = Vec::new();
-        let mut feed_err = |data: &[u8]| {
-            err.extend_from_slice(data);
-            if let Some(cb) = on_stderr.as_deref_mut() {
-                err_rest.extend_from_slice(data);
-                while let Some(i) = err_rest.iter().position(|b| *b == b'\n') {
-                    let line = String::from_utf8_lossy(&err_rest[..i]).to_string();
-                    err_rest.drain(..=i);
-                    cb(line.trim_end_matches('\r'));
-                }
-            }
-        };
-        let mut code = -1i32;
-        tokio::time::timeout(Duration::from_secs(120), async {
-            while let Some(msg) = ch.wait().await {
-                match msg {
-                    ChannelMsg::Data { data } => out.extend_from_slice(&data),
-                    ChannelMsg::ExtendedData { data, .. } => feed_err(&data),
-                    ChannelMsg::ExitStatus { exit_status } => code = exit_status as i32,
-                    _ => {}
-                }
-            }
-        })
-        .await
-        .context("exec timeout")?;
-        // Reliquat stderr sans '\n' final → dernière ligne au callback.
-        if !err_rest.is_empty() {
-            if let Some(cb) = on_stderr.as_deref_mut() {
-                cb(&String::from_utf8_lossy(&err_rest).to_string());
-            }
-        }
-        Ok((
-            code,
-            String::from_utf8_lossy(&out).to_string(),
-            String::from_utf8_lossy(&err).to_string(),
-        ))
-    }
-}
 
 #[cfg(test)]
 mod tests {

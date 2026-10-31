@@ -34,3 +34,4 @@
 208: Release candidates on Windows and macOS now offer the next rc and the final release as updates — the rc identity is compiled into the binary since MSI/plist versions must stay numeric (rc installs used to look "up to date" forever).
 209: Quick-open file palette — Ctrl+P searches workspace files by name and opens them, typed paths (relative, absolute or ~) open directly via a new "Open path…" menu entry, and per-session recent files head the empty list.
 210: File explorer now refreshes itself — expanded folders are watched by the daemon (inotify, debounced and capped), so files created or modified by an agent appear without a manual refresh, gracefully falling back on older daemons.
+211: Secure QR pairing for phones and second machines — a one-shot server-side key installs the device's own restricted authorized_keys line with host-key pinning, pair-ok proof and automatic sweep; permanent-credential and endpoint-only fallbacks remain as warned opt-ins.

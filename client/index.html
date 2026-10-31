@@ -419,6 +419,7 @@
                 </div>
                 <div class="cv-actions">
                   <button type="button" id="cv-form-reset" data-i18n="cancel" hidden>Cancel</button>
+                  <button type="button" id="c-scan" data-i18n="qr_scan">Scan QR</button>
                   <button id="c-go" data-i18n="connect">Connect</button>
                 </div>
               </section>
@@ -698,6 +699,57 @@
     </dialog>
 
     <div id="toasts"></div>
+
+    <dialog id="dlg-qr">
+      <form method="dialog">
+        <h3 data-i18n="qr_share_h">Pair a device</h3>
+        <div class="qr-ep">
+          <input id="qr-user" autocomplete="off" spellcheck="false" data-i18n-ph="qr_user_ph" placeholder="user" />
+          <input id="qr-host" autocomplete="off" spellcheck="false" data-i18n-ph="host_ph" placeholder="server" />
+          <input id="qr-port" type="number" min="1" max="65535" value="22" />
+          <button type="button" id="qr-gen" data-i18n="qr_gen">Generate</button>
+        </div>
+        <canvas id="qr-canvas" hidden></canvas>
+        <p id="qr-ttl" class="qr-ttl"></p>
+        <p id="qr-status" class="qr-status" hidden></p>
+        <p id="qr-warn" class="qr-warn" hidden></p>
+        <details class="qr-alt">
+          <summary data-i18n="qr_alt_h">Other methods</summary>
+          <button type="button" id="qr-alt-creds" data-i18n="qr_alt_creds">Permanent credentials (full access)</button>
+          <button type="button" id="qr-alt-ep" data-i18n="qr_alt_ep">Endpoint only (manual key install)</button>
+        </details>
+        <details class="qr-devs">
+          <summary data-i18n="qr_devs_h">Paired devices</summary>
+          <p id="qr-dev-empty" class="qr-hint" data-i18n="qr_devs_none" hidden>no paired device</p>
+          <ul id="qr-dev-list"></ul>
+        </details>
+        <menu>
+          <button value="close" data-i18n="close">Close</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-scan">
+      <form method="dialog">
+        <h3 data-i18n="qr_scan_h">Scan a pairing QR</h3>
+        <video id="scan-video" playsinline muted></video>
+        <p class="qr-hint" data-i18n="qr_scan_hint">Point the camera at the QR shown on the other device.</p>
+        <menu>
+          <button value="cancel" data-i18n="cancel">Cancel</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-pair">
+      <form method="dialog">
+        <h3 data-i18n="pair_h">Pair this server?</h3>
+        <p id="pair-msg"></p>
+        <menu>
+          <button value="cancel" data-i18n="cancel">Cancel</button>
+          <button id="pair-go" type="button" data-i18n="pair_go">Save &amp; connect</button>
+        </menu>
+      </form>
+    </dialog>
 
     <dialog id="dlg-dupdate">
       <form method="dialog">

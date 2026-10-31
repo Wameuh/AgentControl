@@ -114,6 +114,13 @@ const SHAPES: Record<string, string> = {
   repo:
     '<path d="M6.5 3A2.5 2.5 0 0 0 4 5.5v13A2.5 2.5 0 0 0 6.5 21H20V3Z"/>' +
     '<path d="M9 3v4.4l2-1.4 2 1.4V3"/>',
+  // QR code (appairage)
+  qr:
+    '<rect x="4" y="4" width="6" height="6" rx="1"/>' +
+    '<rect x="14" y="4" width="6" height="6" rx="1"/>' +
+    '<rect x="4" y="14" width="6" height="6" rx="1"/>' +
+    '<path d="M14 14h2.5v2.5H14z"/><path d="M20 14v1.5"/>' +
+    '<path d="M14 20h1.5"/><path d="M18.5 18.5H20V20h-1.5z"/>',
 };
 
 export type IconName = keyof typeof SHAPES;

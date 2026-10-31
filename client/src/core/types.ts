@@ -135,6 +135,9 @@ export type SavedConn = {
   password?: string;
   key?: string;
   native?: boolean;
+  /** Empreintes `SHA256:…` de host key épinglées — persistées par
+   *  l'appairage B′ ; toute connexion native du profil les impose. */
+  host_keys?: string[];
   /** Accent propre à la connexion (multi-instances : une couleur par
    *  démon pour identifier l'instance d'un coup d'œil). Nom d'accent
    *  ("sage" | "gold" | …) — absent = accent global des réglages. */

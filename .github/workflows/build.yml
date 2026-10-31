@@ -253,6 +253,12 @@ jobs:
         working-directory: client
         run: |
           npx tauri android init --ci
+          # Caméra pour le scan QR d'appairage — manifest généré, patch
+          # post-init (gen/android non commité). La webview gère le grant
+          # runtime via onPermissionRequest (wry).
+          sed -i 's|</manifest>|    <uses-permission android:name="android.permission.CAMERA"/>\n</manifest>|' \
+            src-tauri/gen/android/app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.CAMERA' src-tauri/gen/android/app/src/main/AndroidManifest.xml
           # Icônes commitées (tauri icon) → projet généré
           cp -r src-tauri/icons/android/* src-tauri/gen/android/app/src/main/res/
           npx tauri android build --apk --debug --target aarch64

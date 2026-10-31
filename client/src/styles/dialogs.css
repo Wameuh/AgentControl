@@ -129,3 +129,40 @@ dialog input[type="checkbox"]:focus-visible {
 
 #g-name { width:100%; box-sizing:border-box; background:rgba(var(--tint-rgb),.05); color:var(--ink);
   border:1px solid var(--line); border-radius:8px; padding:8px 10px; font:inherit; margin:8px 0 }
+
+/* Appairage QR (B′) : la modale d'émission centre le canvas ; le warn
+   rappelle le niveau d'accès offert par le code affiché. */
+#dlg-qr form { align-items: center; }
+.qr-ep { display: flex; gap: 8px; width: 100%; align-items: center; }
+.qr-ep input { flex: 1; min-width: 0; }
+.qr-ep #qr-port { flex: 0 0 5.5em; }
+.qr-ep button { flex: none; }
+#qr-canvas {
+  background: #fff; border-radius: 10px; padding: 10px;
+  max-width: 78vw; height: auto;
+}
+.qr-warn { color: var(--err); font-size: 12.5px; margin: 0; text-align: center; }
+.qr-ttl { color: var(--dim); font-size: 12px; margin: 0; }
+.qr-status { font-size: 12.5px; margin: 0; color: var(--dim); }
+.qr-status.err { color: var(--err); }
+.qr-alt, .qr-devs { width: 100%; font-size: 12.5px; }
+.qr-alt summary, .qr-devs summary { color: var(--dim); cursor: pointer; }
+.qr-alt button { display: block; width: 100%; margin-top: 6px; }
+#qr-dev-list { list-style: none; margin: 8px 0 0; padding: 0; }
+#qr-dev-list li {
+  display: flex; gap: 8px; align-items: baseline;
+  font-size: 12px; padding: 4px 0; border-bottom: 1px solid var(--line);
+}
+.qr-dev-fp { font-family: var(--mono, monospace); color: var(--dim); }
+.qr-dev-label { flex: 1; }
+.qr-dev-ts { color: var(--dim); font-size: 11px; }
+.qr-dev-rev { font-size: 11px; padding: 2px 8px; }
+.qr-dev-rev.armed { background: var(--err); color: #fff; }
+
+/* Scan : la vidéo remplit la modale (caméra arrière en paysage comme
+   en portrait — object-fit conserve le cadrage). */
+#scan-video {
+  width: 100%; max-height: 55vh; border-radius: 10px;
+  background: #000; object-fit: cover;
+}
+.qr-hint { color: var(--dim); font-size: 12.5px; margin: 0; }
