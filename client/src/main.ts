@@ -114,6 +114,7 @@ const pins = new Pins();
 initRpc({
   currentConn: () => app.current?.conn,
   connState: (k) => conns.state(k),
+  connGone: (k) => conns.isGone(k),
 });
 
 chat.bind(renderer, {

@@ -7,7 +7,7 @@
 import { $, esc, notify, showErr } from "../core/dom";
 import { icon, qIco } from "../ui/icons";
 import { nav } from "../ui/nav";
-import { call } from "../core/rpc";
+import { call, callBg, isConnLost } from "../core/rpc";
 import { app } from "../core/state";
 import { isAndroid } from "../core/chrome";
 import type { CmdInfo, SendMode } from "../core/types";
@@ -233,7 +233,7 @@ export class Composer {
     }
     const sid = app.current.id;
     try {
-      const r = await call<{ queue: string[] }>("queue_list", { session: sid });
+      const r = await callBg<{ queue: string[] }>("queue_list", { session: sid });
       // La session affichée a pu changer pendant l'appel → ne pas rendre
       // une file qui n'est plus celle de la vue.
       if (app.current?.id !== sid) return;
@@ -252,7 +252,10 @@ export class Composer {
       }
       this.renderQueueBar(sid);
       this.renderQueuePanel();
-    } catch {
+    } catch (e) {
+      // Transitoire conn : garder le dernier état connu de la file — le
+      // prochain refresh (retour conn, nouvelle action) re-synchronisera.
+      if (isConnLost(e, app.current?.conn ?? "")) return;
       bar.hidden = true;
       this.closeQueuePanel();
     }

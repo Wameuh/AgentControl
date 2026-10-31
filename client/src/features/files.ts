@@ -23,7 +23,7 @@ import {
   sniffBom,
   type Encoding,
 } from "../core/encoding";
-import { call } from "../core/rpc";
+import { call, callBg } from "../core/rpc";
 import { app } from "../core/state";
 import { isAndroid, isWindows } from "../core/chrome";
 import type { DirEntry } from "../core/types";
@@ -173,7 +173,7 @@ export class FileExplorer {
     }
     try {
       if (IMG_MIME[ext]) {
-        const r = await call<{
+        const r = await callBg<{
           data?: string; size?: number; truncated?: boolean;
           content?: string; path: string;
         }>("read_file", { session: app.current.id, path, binary: true });
@@ -251,7 +251,7 @@ export class FileExplorer {
     cur.fetching = true;
     const gen = cur.gen;
     try {
-      const r = await call<{
+      const r = await callBg<{
         path: string; offset: number; size: number; data: string;
         mtime_ms?: number;
       }>("read_file", {
@@ -655,7 +655,7 @@ export class FileExplorer {
     const box = document.createElement("div");
     box.className = "fchildren";
     try {
-      const r = await call<{ dir: string; entries: DirEntry[] }>("list_dir", {
+      const r = await callBg<{ dir: string; entries: DirEntry[] }>("list_dir", {
         session: sid,
         path: rel,
       });
@@ -682,7 +682,7 @@ export class FileExplorer {
     tree.innerHTML = "";
     if (!app.current) return;
     try {
-      const r = await call<{ dir: string; entries: DirEntry[] }>("list_dir", {
+      const r = await callBg<{ dir: string; entries: DirEntry[] }>("list_dir", {
         session: app.current.id,
         path: "",
       });
@@ -752,7 +752,7 @@ export class FileExplorer {
     $("file-tree").hidden = true;
     $("file-hits").hidden = false;
     try {
-      const r = await call<{
+      const r = await callBg<{
         matches: { path: string; dir: boolean; size: number }[];
         truncated: boolean;
       }>("find_files", { session: sid, query: q });

@@ -8,7 +8,7 @@
 import { invoke } from "../core/bridge";
 import { $, esc, showErr } from "../core/dom";
 import { fmtTok } from "../core/format";
-import { call } from "../core/rpc";
+import { bgErr, call, callBg, connOp } from "../core/rpc";
 import { app } from "../core/state";
 import type { AcEvent, SessionMeta } from "../core/types";
 import { gemSVG } from "../crystal";
@@ -455,11 +455,11 @@ export class ChatView {
     }
 
     let lastErr: unknown = null;
-    const info = await call<{
+    const info = await callBg<{
       meta: SessionMeta; pending: string[]; alive: boolean; last_seq: number;
     }>("session_info", { session: id, conn: connHint }).catch((e) => {
       lastErr = e;
-      showErr(`session_info: ${e}`);
+      bgErr("session_info", e, connHint);
       return null;
     });
     if (stale()) return;
@@ -495,9 +495,9 @@ export class ChatView {
       sys.innerHTML = `${icon("loader")} ${esc(t("resume_wait"))}`;
       this.eventsEl.appendChild(sys);
       try {
-        await call("resume_session", { session: id });
+        await callBg("resume_session", { session: id });
         if (stale()) { sys.remove(); return; }
-        const info2 = await call<{ meta: SessionMeta; alive: boolean }>("session_info", {
+        const info2 = await callBg<{ meta: SessionMeta; alive: boolean }>("session_info", {
           session: id,
         });
         if (stale()) { sys.remove(); return; }
@@ -557,12 +557,14 @@ export class ChatView {
       } else {
         let page = { events: [] as AcEvent[], last_seq: 0 };
         try {
-          page = await call<{ events: AcEvent[]; last_seq: number }>("events", {
+          page = await callBg<{ events: AcEvent[]; last_seq: number }>("events", {
             session: id,
             limit: INITIAL_PAGE,
           });
         } catch (e) {
-          showErr(`events: ${e}`);
+          // Transitoire → silence : la page vide rabat afterSeq sur la
+          // fenêtre de fin et le subscribe rejoue le trou.
+          bgErr("events", e, connHint);
         }
         if (stale()) return;
         this.showConvLoading(false);
@@ -578,9 +580,13 @@ export class ChatView {
 
     // Subscribe live à partir du dernier event connu
     if (stale()) return;
-    await invoke("subscribe", { session: id, afterSeq, conn: app.current?.conn ?? connHint }).catch((e) => {
-      // Le flux live est mort (ex. restart démon) → erreur visible
-      showErr(`subscribe: ${e}`);
+    const subConn = app.current?.conn ?? connHint;
+    await connOp(subConn, () =>
+      invoke("subscribe", { session: id, afterSeq, conn: subConn }),
+    ).catch((e) => {
+      // Transitoire → silence (reopenIfConn rejoue l'open au retour) ;
+      // flux live mort (ex. restart démon) → erreur visible.
+      bgErr("subscribe", e, subConn);
     });
     // Journal réinitialisé (native changé) → les résultats de recherche
     // indexent l'ancien journal (seqs reparties à 1) → fermer la recherche.
@@ -604,7 +610,7 @@ export class ChatView {
     this.deps.onSessionChanged(); // les résultats pointent vers l'ancien journal
     if (!app.current) return;
     const sid = app.current.id;
-    const info = await call<{ meta: SessionMeta; last_seq: number }>("session_info", {
+    const info = await callBg<{ meta: SessionMeta; last_seq: number }>("session_info", {
       session: sid,
     }).catch(() => null);
     if (!info || app.current?.id !== sid) return;
@@ -620,7 +626,7 @@ export class ChatView {
       !this.eventsEl.querySelector(".ev") &&
       this.pendingLive.length === 0
     ) {
-      const page = await call<{ events: AcEvent[] }>("events", {
+      const page = await callBg<{ events: AcEvent[] }>("events", {
         session: sid,
         limit: INITIAL_PAGE,
       }).catch(() => null);
@@ -1112,12 +1118,12 @@ export class ChatView {
     const pending = this.pendingLive;
     try {
       const [before, after] = await Promise.all([
-        call<{ events: AcEvent[] }>("events", {
+        callBg<{ events: AcEvent[] }>("events", {
           session: sid,
           before_seq: seq + 1, // exclusif → la page se termine sur le match
           limit: JUMP_BEFORE,
         }),
-        call<{ events: AcEvent[]; last_seq: number }>("events", {
+        callBg<{ events: AcEvent[]; last_seq: number }>("events", {
           session: sid,
           after_seq: seq,
           limit: JUMP_AFTER,
@@ -1150,7 +1156,7 @@ export class ChatView {
       this.hasMoreNewer = wasAnchored;
       if (!this.hasMoreNewer) this.flushPendingLive();
       this.updateBottomBtn();
-      showErr(`events: ${e}`);
+      bgErr("events", e, app.current?.conn ?? "");
       return false;
     }
   }
@@ -1186,7 +1192,7 @@ export class ChatView {
     const ls = ++this.loadSeq;
     this.loadingPage = true;
     try {
-      const page = await call<{ events: AcEvent[]; last_seq: number }>("events", {
+      const page = await callBg<{ events: AcEvent[]; last_seq: number }>("events", {
         session: sid,
         after_seq: this.maxRendered,
         limit: PAGE,
@@ -1197,6 +1203,8 @@ export class ChatView {
         this.hasMoreNewer = false;
         this.flushPendingLive();
       }
+    } catch (e) {
+      bgErr("events", e, app.current?.conn ?? "");
     } finally {
       if (ls === this.loadSeq) this.loadingPage = false;
     }
@@ -1212,7 +1220,7 @@ export class ChatView {
     const js = this.jumpSeq; // post-clearConv : un saut ultérieur invalide ce load
     this.showConvLoading(true);
     try {
-      const page = await call<{ events: AcEvent[]; last_seq: number }>("events", {
+      const page = await callBg<{ events: AcEvent[]; last_seq: number }>("events", {
         session: sid,
         limit: INITIAL_PAGE,
       });
@@ -1230,7 +1238,7 @@ export class ChatView {
       this.pendingLive = [...pending, ...this.pendingLive];
       this.unseenBelow = this.pendingLive.length;
       this.updateBottomBtn();
-      showErr(`events: ${e}`);
+      bgErr("events", e, app.current?.conn ?? "");
     } finally {
       this.showConvLoading(false);
     }
@@ -1277,7 +1285,7 @@ export class ChatView {
     try {
       while (this.hasMoreHistory && this.sentinelVisible()) {
         const prevMin = this.minRendered;
-        const page = await call<{ events: AcEvent[] }>("events", {
+        const page = await callBg<{ events: AcEvent[] }>("events", {
           session: sid,
           before_seq: this.minRendered,
           limit: PAGE,
@@ -1296,7 +1304,7 @@ export class ChatView {
         if (this.minRendered >= prevMin) break;
       }
     } catch (e) {
-      showErr(`events: ${e}`);
+      bgErr("events", e, app.current?.conn ?? "");
     } finally {
       if (ls === this.loadSeq) this.loadingPage = false;
     }
