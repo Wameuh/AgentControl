@@ -28,4 +28,5 @@
 202: Native OS notifications when an agent finishes its turn, awaits your reply, or fails — per-type toggles, click focuses the app and opens the session (Android included, web excluded).
 203: Background loads (pinned messages, conversation, file tree, queue bar, search) no longer pop a raw "connection lost" error on a transient connection drop — they wait for the reconnect or replay once, and reload silently when the link is back.
 204: Managed components now display their tool's probed version next to the state — process included — and a catalog-declared minimum version surfaces an "update required" badge instead of a silent failure.
+205: Backlog metrics — the orchestrator now samples queue activity each tick into a bounded journal, and a new backlog_metrics RPC (acctl orch metrics) serves the series plus lead-time/queue-wait aggregates.
 206: First post now returns the backlog item for service-spawned sessions — the spawn prompt is skipped — and the orchestrator status reports when the legacy Python script holds the lock, making [Backlog] item posts unavailable.
