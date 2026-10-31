@@ -44,11 +44,12 @@
   color: var(--dim); font-size: 11px; padding: 1px 7px; cursor: pointer;
 }
 #fv-loadall:hover { color: var(--ink); border-color: var(--accent); }
-#fv-md, #fv-edit, #fv-save {
+#fv-md, #fv-edit, #fv-save, #fv-zin, #fv-zout {
   display: flex; align-items: center; background: none; border: 0;
   color: var(--muted); cursor: pointer; padding: 3px;
 }
-#fv-md:hover, #fv-edit:hover, #fv-save:hover:not(:disabled) { color: var(--ink); }
+#fv-md:hover, #fv-edit:hover, #fv-save:hover:not(:disabled),
+#fv-zin:hover, #fv-zout:hover { color: var(--ink); }
 #fv-md.on, #fv-edit.on { color: var(--accent); }
 #fv-save:disabled { opacity: .35; cursor: default; }
 /* Bandeau conflit : le fichier a changé sur disque pendant l'édition */
@@ -115,6 +116,25 @@
   margin: auto; border-radius: 6px; background: #000;
 }
 #file-view .fv-msg { color: var(--dim); white-space: pre-wrap; }
+/* Viewer PDF (pdf.js) : pages empilées centrées, scroll continu de
+   #file-view ; chaque page = boîte blanche dimensionnée au zoom. */
+#file-view .fv-pdf { white-space: normal; }
+.fv-pdfpage {
+  margin: 0 auto 14px; background: #fff; border-radius: 3px;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, .4); overflow: hidden;
+}
+.fv-pdfpage canvas { display: block; }
+.fv-pdfpage .fv-pdferr {
+  padding: 18px; color: var(--err); font-size: 11px;
+}
+/* « PDF trop gros » : bouton d'ouverture externe dans le message */
+.fv-pdfext {
+  margin-left: 6px; background: none; border: 1px solid var(--line);
+  border-radius: 4px; color: var(--ink); font-size: 11px;
+  padding: 2px 10px; cursor: pointer; white-space: nowrap;
+}
+.fv-pdfext:hover { border-color: var(--accent); }
+.fv-pdfext:disabled { opacity: .5; cursor: default; }
 
 /* Explorateur de fichiers du workspace (colonne gauche du panneau) :
    barre de recherche au-dessus de l'arbre / de la liste de résultats. */
