@@ -25,4 +25,5 @@
 198: PDF files now open in an embedded viewer — continuous-scroll canvas rendering, zoom controls, and a "open with system app" fallback for large files.
 199: Resuming a session whose native agent was lost (daemon restart/update) now falls back to a fresh context instead of failing forever — the history is kept, a system note explains the relaunch, and dead agents no longer linger as green "working" sessions.
 201: Components installed from the catalog now resynchronize their spec at daemon startup — newly declared parameters (e.g. `repos`), render templates and healthchecks appear on older installs while user values are preserved.
+202: Native OS notifications when an agent finishes its turn, awaits your reply, or fails — per-type toggles, click focuses the app and opens the session (Android included, web excluded).
 203: Background loads (pinned messages, conversation, file tree, queue bar, search) no longer pop a raw "connection lost" error on a transient connection drop — they wait for the reconnect or replay once, and reload silently when the link is back.
