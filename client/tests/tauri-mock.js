@@ -137,6 +137,46 @@
         if (args.name === "agentbacklog") window.__blHide = false;
         return { installed: true, name: args.name, state: "stopped", notes: [] };
       }
+      // Journal métriques backlog — window.__blMetrics pilote le scénario :
+      // "off" → RPC inconnue (vieux démon), [] → journal vide (orch off),
+      // tableau → samples injectés, absent → série synthétique de 60 pts.
+      case "backlog_metrics": {
+        if (window.__blMetrics === "off")
+          return Promise.reject(new Error("req inconnue: backlog_metrics"));
+        const win = { "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400 }[
+          args.window
+        ] ?? 7 * 86400;
+        const now = Date.now() / 1000;
+        const n = 60;
+        const samples = window.__blMetrics ?? Array.from(
+          { length: n },
+          (_, i) => ({
+            ts: now - win + (i / (n - 1)) * win,
+            pending: 3 + Math.round(2 * Math.sin(i / 6)),
+            poppable: 2,
+            wip: 1 + (i % 7 === 0 ? 1 : 0),
+            workers_alive: 2 + (i % 5 === 0 ? 1 : 0),
+            by_repo: { AgentControl: { pending: 3, wip: 1 } },
+          }),
+        );
+        return {
+          window: args.window ?? "7d",
+          since: now - win,
+          generated_at: new Date().toISOString(),
+          journal: "/tmp/metrics.jsonl",
+          sample_count: samples.length,
+          corrupt_lines: 0,
+          samples,
+          aggregates: {
+            items_available: true,
+            items_total: 12, items_done: 6, items_started: 8,
+            done_per_day: 0.86,
+            lead_time_avg_s: 60300, lead_time_median_s: 54000,
+            queue_wait_avg_s: 7400, queue_wait_median_s: 6900,
+            workers_peak: 3,
+          },
+        };
+      }
       case "pr_list": return [
         { conn: "local", repo: "Wameuh/AgentControl", pr: 42,
           session: SESSIONS[0].id, branch: "feat/x", title: "feat: exemple",

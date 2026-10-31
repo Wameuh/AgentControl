@@ -364,3 +364,31 @@ button:disabled { opacity: .5; cursor: default; }
 }
 .bl-repo-filter select:focus { border-color: var(--accent); outline: none; }
 .bl-item .bl-when { color: var(--dim); font-size: 11px; flex: none; white-space: nowrap; }
+/* Section « Activité » dépliable — graphe canvas + cartes stats. */
+.bl-metrics .bl-m-head { cursor: pointer; }
+.bl-m-body { padding: 2px 8px 6px; }
+.bl-m-body select {
+  width: 100%; padding: 3px 6px; font-size: 11px; margin-bottom: 6px;
+  background: var(--panel-solid); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 7px;
+}
+.bl-m-body select:focus { border-color: var(--accent); outline: none; }
+#bl-mcanvas { display: block; width: 100%; }
+.bl-m-legend {
+  display: flex; gap: 10px; padding: 3px 1px 5px;
+  font-size: 11px; color: var(--dim);
+}
+.bl-m-legend .bl-m-dot {
+  display: inline-block; width: 8px; height: 8px;
+  border-radius: 50%; margin-right: 4px;
+}
+.bl-m-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.bl-m-card {
+  padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px;
+  background: rgba(var(--tint-rgb), .04);
+}
+.bl-m-card .bl-m-v { font-size: 13px; font-weight: 600; color: var(--ink); }
+.bl-m-card .bl-m-k {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .4px;
+  color: var(--dim);
+}

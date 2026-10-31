@@ -21,8 +21,9 @@
 
 import { $, esc, q } from "../core/dom";
 import { app } from "../core/state";
-import { call, callBg } from "../core/rpc";
+import { call, callBg, isConnLost } from "../core/rpc";
 import { b64decode } from "../core/encoding";
+import { themeRgb } from "../core/chrome";
 import { icon } from "../ui/icons";
 import { nav } from "../ui/nav";
 import { t, type Key } from "../i18n";
@@ -45,6 +46,36 @@ const DONE_MAX = 8;
 /** Sentinelle du filtre déroulant « items sans repo » — une valeur
  *  qui ne peut pas être un nom de repo taggé. */
 const REPO_UNTAGGED = "__untagged__";
+/** Fenêtres proposées par la RPC `backlog_metrics` (parse démon :
+ *  `<n>h` / `<n>d` / `all`). Libellé affiché neutre fr/en. */
+const M_WINDOWS: [string, string][] = [
+  ["24h", "24 h"],
+  ["7d", "7 j"],
+  ["30d", "30 j"],
+];
+
+/** Sample du journal orch (1 point par tick) — séries du graphe. */
+interface MetricsSample {
+  ts?: number;
+  pending?: number;
+  wip?: number;
+  workers_alive?: number;
+}
+
+/** Réponse `backlog_metrics` — agrégats calculés côté démon ; les
+ *  champs durée sont null quand agentbacklog est indisponible. */
+interface MetricsResp {
+  window?: string;
+  sample_count?: number;
+  samples?: MetricsSample[];
+  aggregates?: {
+    items_available?: boolean;
+    done_per_day?: number | null;
+    lead_time_avg_s?: number | null;
+    queue_wait_avg_s?: number | null;
+    workers_peak?: number | null;
+  };
+}
 
 export interface BacklogDeps {
   /** Clé connKey de la connexion liée — "" = démon par défaut. */
@@ -112,6 +143,16 @@ export class BacklogView {
   /** Signature du dernier rendu — le poll ne rebuild le DOM que si la
    *  file ou la résolution d'agents a réellement changé. */
   private lastSig = "";
+  /** Section « Activité » (RPC backlog_metrics). `avail` retombe à
+   *  false au premier refus applicatif (vieux démon / RPC inconnue) →
+   *  section masquée ; un changement de conn la réarme. Fenêtre et
+   *  ouverture persistées en localStorage (spec #101). */
+  private metrics: MetricsResp | null = null;
+  private metricsAvail = true;
+  private metricsConn: string | null = null;
+  private metricsWin = localStorage.getItem("ac-bl-metrics-win") || "7d";
+  private metricsOpen = localStorage.getItem("ac-bl-metrics-open") !== "0";
+  private metricsRo: ResizeObserver | null = null;
 
   bind(d: Partial<BacklogDeps>) {
     Object.assign(this.deps, d);
@@ -180,6 +221,10 @@ export class BacklogView {
 
   private async refresh() {
     const conn = this.deps.conn();
+    // Métriques : même cadence que le panneau mais en parallèle — une
+    // RPC lente ne retarde jamais le rendu de la file. Onglet inactif
+    // → pas de fetch (la section n'est de toute façon pas affichée).
+    if (this.active) void this.refreshMetrics(conn);
     if (!this.deps.componentsCapable(conn)) {
       this.state = { kind: "cap" };
       this.mgrWs = []; // vieux démon : pas de surface Manager
@@ -256,6 +301,36 @@ export class BacklogView {
     this.render();
   }
 
+  /** Série + agrégats `backlog_metrics` — RPC additive : un démon
+   *  antérieur répond « req inconnue » → rejet → section masquée à
+   *  vie (réarmée au changement de connexion), jamais d'erreur brute
+   *  (spec #101, cohérent avec #96). Les transitoires de coupure sont
+   *  absorbés/rejoués par callBg ; un isConnLost résiduel conserve
+   *  l'état courant plutôt que masquer sur du bruit transport. */
+  private async refreshMetrics(conn: string) {
+    if (conn !== this.metricsConn) {
+      this.metricsConn = conn;
+      this.metrics = null;
+      this.metricsAvail = true;
+    }
+    if (!this.metricsAvail) return;
+    const r = await callBg<MetricsResp>("backlog_metrics", {
+      conn,
+      window: this.metricsWin,
+    }).then(
+      (v) => ({ v, err: null as unknown }),
+      (e: unknown) => ({ v: null, err: e }),
+    );
+    if (r.err) {
+      if (isConnLost(r.err, conn)) return;
+      this.metricsAvail = false;
+      this.render();
+      return;
+    }
+    this.metrics = r.v;
+    this.render();
+  }
+
   /** CTA « Intégrer » : recette catalogue (install + upsert de la spec —
    *  la query `list` vient avec). Utilisé pour les états absent/noquery.
    *  Un échec du démon remonte en état `err` plutôt que de retomber
@@ -311,7 +386,14 @@ export class BacklogView {
       this.mgrErr +
       JSON.stringify(
         app.lastSessions.map((s) => [s.id, s.title, s.conn, s.origin, s.state]),
-      );
+      ) +
+      // Métriques : la série entière serait coûteuse à sérialiser à
+      // chaque poll — count + dernier ts + agrégats suffisent à
+      // détecter un nouveau point ou une nouvelle fenêtre.
+      `${this.metricsAvail}|${this.metricsOpen}|${this.metricsWin}|` +
+      (this.metrics
+        ? `${this.metrics.sample_count}|${this.metrics.samples?.at(-1)?.ts}|${JSON.stringify(this.metrics.aggregates)}`
+        : "null");
     if (sig === this.lastSig) return;
     this.lastSig = sig;
 
@@ -324,7 +406,7 @@ export class BacklogView {
       badge.hidden = true;
     }
 
-    const mgr = this.mgrHtml();
+    const mgr = this.mgrHtml() + this.metricsHtml();
     if (st.kind !== "ok") {
       this.renderState(el, st, mgr);
       return;
@@ -414,6 +496,9 @@ export class BacklogView {
       };
     });
     this.wireMgr(el);
+    this.wireMetrics(el);
+    this.drawMetrics();
+    this.watchMetrics();
   }
 
   /** États sans items : chargement, démon trop vieux (capability
@@ -432,6 +517,9 @@ export class BacklogView {
         `${icon(this.installing ? "loader" : "plus")} ${esc(this.installing ? t("bl_installing") : t("bl_integrate"))}</button>`;
       $("bl-install").onclick = () => void this.install();
       this.wireMgr(el);
+      this.wireMetrics(el);
+      this.drawMetrics();
+      this.watchMetrics();
       return;
     }
     const [ic, txt, warn] =
@@ -446,6 +534,9 @@ export class BacklogView {
       pre +
       `<div class="sess-none${warn ? " warn" : ""}">${icon(ic)} ${esc(txt)}</div>`;
     this.wireMgr(el);
+    this.wireMetrics(el);
+    this.drawMetrics();
+    this.watchMetrics();
   }
 
   // --- Surface « Manager » ---------------------------------------------------
@@ -506,6 +597,199 @@ export class BacklogView {
     el.querySelectorAll<HTMLElement>("[data-mgr-spawn]").forEach((b) => {
       b.onclick = () => void this.spawnManager(b.dataset.mgrSpawn!);
     });
+  }
+
+  // --- Section « Activité » (métriques) --------------------------------------
+
+  /** Section dépliable : sélecteur de fenêtre + courbes + cartes
+   *  stats. Entièrement absente du DOM si le démon ne connaît pas la
+   *  RPC — un bandeau « indisponible » serait du bruit permanent. */
+  private metricsHtml(): string {
+    if (!this.metricsAvail) return "";
+    const open = this.metricsOpen;
+    let body = "";
+    if (open) {
+      const sel =
+        `<select id="bl-mw" title="${q(esc(t("bl_m_window")))}">` +
+        M_WINDOWS.map(
+          ([v, l]) =>
+            `<option value="${v}"${v === this.metricsWin ? " selected" : ""}>${l}</option>`,
+        ).join("") +
+        `</select>`;
+      const m = this.metrics;
+      if (!m) {
+        body = `<div class="sess-none">${icon("loader")} ${esc(t("bl_m_loading"))}</div>`;
+      } else if (m.samples?.length) {
+        body =
+          `<canvas id="bl-mcanvas" height="120"></canvas>` +
+          `<div class="bl-m-legend">` +
+          `<span><i class="bl-m-dot" style="background:var(--warn)"></i>${esc(t("bl_pending"))}</span>` +
+          `<span><i class="bl-m-dot" style="background:var(--accent)"></i>${esc(t("bl_wip"))}</span>` +
+          `<span><i class="bl-m-dot" style="background:var(--ok)"></i>${esc(t("bl_m_workers"))}</span>` +
+          `</div>` +
+          this.cardsHtml(m);
+      } else {
+        // Journal vide (orch off / jamais échantillonné) : les
+        // agrégats items restent utiles — cartes + placeholder discret.
+        body =
+          `<div class="sess-none">${esc(t("bl_m_none"))}</div>` +
+          this.cardsHtml(m);
+      }
+      body = `<div class="bl-m-body">${sel}${body}</div>`;
+    }
+    return (
+      `<div class="bl-sec bl-metrics"><div class="grp-head bl-m-head" id="bl-m-tgl">` +
+      `<span class="grp-arrow">${icon(open ? "chev-down" : "chev-right")}</span> ${esc(t("bl_metrics"))}</div>` +
+      body +
+      `</div>`
+    );
+  }
+
+  /** Cartes stats — valeurs toutes issues des agrégats de la RPC,
+   *  jamais recalculées côté client (spec) ; null → « — ». */
+  private cardsHtml(m: MetricsResp): string {
+    const a = m.aggregates;
+    const card = (k: Key, v: string) =>
+      `<div class="bl-m-card"><div class="bl-m-v">${esc(v)}</div>` +
+      `<div class="bl-m-k">${esc(t(k))}</div></div>`;
+    const dur = (s: number | null | undefined) =>
+      s == null ? "—" : fmtDur(s);
+    const num = (x: number | null | undefined) =>
+      x == null ? "—" : String(Math.round(x * 10) / 10);
+    return (
+      `<div class="bl-m-cards">` +
+      card("bl_m_lead", dur(a?.lead_time_avg_s)) +
+      card("bl_m_wait", dur(a?.queue_wait_avg_s)) +
+      card("bl_m_day", num(a?.done_per_day)) +
+      card("bl_m_peak", a?.workers_peak == null ? "—" : String(a.workers_peak)) +
+      `</div>`
+    );
+  }
+
+  /** Toggle dépliable + sélecteur de fenêtre — rebind après chaque
+   *  innerHTML (comme wireMgr). */
+  private wireMetrics(el: HTMLElement) {
+    el.querySelector<HTMLElement>("#bl-m-tgl")?.addEventListener(
+      "click",
+      () => {
+        this.metricsOpen = !this.metricsOpen;
+        localStorage.setItem(
+          "ac-bl-metrics-open",
+          this.metricsOpen ? "1" : "0",
+        );
+        this.render();
+      },
+    );
+    el.querySelector<HTMLSelectElement>("#bl-mw")?.addEventListener(
+      "change",
+      (e) => {
+        this.metricsWin = (e.target as HTMLSelectElement).value;
+        localStorage.setItem("ac-bl-metrics-win", this.metricsWin);
+        this.metrics = null; // nouvelle fenêtre → refetch immédiat
+        this.render();
+        void this.refreshMetrics(this.deps.conn());
+      },
+    );
+  }
+
+  /** Redessine quand la sidebar change de largeur — le canvas suit
+   *  `width:100%` en CSS, seul le backing store DPR est à recaler. */
+  private watchMetrics() {
+    this.metricsRo?.disconnect();
+    this.metricsRo = null;
+    const c = $("bl-mcanvas");
+    if (!c) return;
+    this.metricsRo = new ResizeObserver(() => this.drawMetrics());
+    this.metricsRo.observe(c);
+  }
+
+  /** Courbes pending / wip / workers_alive — canvas maison (le client
+   *  n'a pas de lib de chart, style mesh-bg : backing store ×DPR,
+   *  couleurs = vars thème résolues → lisible clair et sombre). Les
+   *  samples sont triés par ts et décimés au-delà de ~800 points. */
+  private drawMetrics() {
+    const c = $("bl-mcanvas") as HTMLCanvasElement | null;
+    const samples = this.metrics?.samples;
+    if (!c || !samples?.length) return;
+    const w = c.parentElement?.clientWidth || c.clientWidth || 240;
+    const h = 120;
+    const dpr = window.devicePixelRatio || 1;
+    c.width = Math.round(w * dpr);
+    c.height = Math.round(h * dpr);
+    c.style.width = `${w}px`;
+    c.style.height = `${h}px`;
+    const ctx = c.getContext("2d");
+    if (!ctx) return;
+    ctx.scale(dpr, dpr);
+
+    const pts = [...samples].sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
+    const stride = Math.max(1, Math.ceil(pts.length / 800));
+    const t0 = pts[0].ts ?? 0;
+    const span = Math.max(1e-9, (pts[pts.length - 1].ts ?? t0) - t0);
+    const padL = 24, padR = 8, padT = 8, padB = 15;
+    const iw = w - padL - padR;
+    const ih = h - padT - padB;
+    const maxV = Math.max(
+      1,
+      ...pts.map((s) =>
+        Math.max(s.pending ?? 0, s.wip ?? 0, s.workers_alive ?? 0),
+      ),
+    );
+
+    const dim = themeRgb("--dim") ?? "#888";
+    ctx.font = "9px ui-monospace, SFMono-Regular, monospace";
+    ctx.strokeStyle = dim;
+    ctx.globalAlpha = 0.3;
+    for (const g of [0.5, 1]) {
+      const y = padT + ih * g;
+      ctx.beginPath();
+      ctx.moveTo(padL, y);
+      ctx.lineTo(w - padR, y);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = dim;
+    ctx.textAlign = "left";
+    ctx.fillText(String(maxV), 2, padT + 8);
+    const wl =
+      M_WINDOWS.find(([v]) => v === this.metricsWin)?.[1] ?? this.metricsWin;
+    ctx.fillText(`−${wl}`, padL, h - 4);
+    ctx.textAlign = "right";
+    ctx.fillText(t("bl_now"), w - padR, h - 4);
+
+    const series: [keyof MetricsSample, string][] = [
+      ["pending", "--warn"],
+      ["wip", "--accent"],
+      ["workers_alive", "--ok"],
+    ];
+    for (const [k, varName] of series) {
+      const col = themeRgb(varName) ?? dim;
+      ctx.strokeStyle = col;
+      ctx.fillStyle = col;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      let first = true;
+      pts.forEach((s, i) => {
+        // Décimation régulière + dernier point toujours tracé.
+        if (i % stride && i !== pts.length - 1) return;
+        const x = padL + (((s.ts ?? t0) - t0) / span) * iw;
+        const y = padT + ih - ((s[k] ?? 0) / maxV) * ih;
+        if (first) {
+          ctx.moveTo(x, y);
+          first = false;
+        } else {
+          ctx.lineTo(x, y);
+        }
+      });
+      ctx.stroke();
+      if (pts.length === 1) {
+        // Une seule mesure : pas de ligne — marqueur visible.
+        const y = padT + ih - ((pts[0][k] ?? 0) / maxV) * ih;
+        ctx.beginPath();
+        ctx.arc(padL, y, 2.5, 0, 7);
+        ctx.fill();
+      }
+    }
   }
 
   /** CTA « Créer » : `manager_spawn` démon (idempotent côté démon —
@@ -593,6 +877,17 @@ export class BacklogView {
 /** `s-84f27d4c` → `s-84f27d4…` — agent_id brut non résolu, lisible en 1 ligne. */
 function shortId(id: string): string {
   return id.length > 9 ? `${id.slice(0, 8)}…` : id;
+}
+
+/** Durée en secondes → « 42 s », « 23 m », « 5,5 h », « 3,2 j » —
+ *  compact façon `rel`, une décimale sous 10 unités, entier au-delà. */
+function fmtDur(sec: number): string {
+  const r = (v: number, u: string) =>
+    `${v < 10 ? Math.round(v * 10) / 10 : Math.round(v)} ${u}`;
+  if (sec < 90) return r(sec, "s");
+  if (sec < 5400) return r(sec / 60, "m");
+  if (sec < 129600) return r(sec / 3600, "h");
+  return r(sec / 86400, "j");
 }
 
 /** Temps relatif compact (« 5 m », « 2 h », « 3 j » — neutre fr/en) + date
