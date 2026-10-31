@@ -106,26 +106,32 @@ class OsNotifications {
     if (!this.ready || !notifEnabled() || !notifTypeOn(kind)) return;
     if (notifOnlyUnfocused() && document.hasFocus()) return;
     const key = `${s.conn ?? "default"}:${s.id}:${kind}`;
-    const now = Date.now();
-    if (now - (this.lastSent.get(key) ?? -COOLDOWN_MS) < COOLDOWN_MS) return;
-    this.lastSent.set(key, now);
-    if (this.lastSent.size > 500) {
-      for (const [k, ts] of this.lastSent) {
-        if (now - ts > COOLDOWN_MS) this.lastSent.delete(k);
+    if (Date.now() - (this.lastSent.get(key) ?? -COOLDOWN_MS) < COOLDOWN_MS)
+      return;
+    // Le slot n'est consommé que par un envoi réel — une transition pendant
+    // la permission refusée n'absorbe pas l'alerte du déblocage suivant.
+    void this.send(kind, s).then((sent) => {
+      if (sent) {
+        const now = Date.now();
+        this.lastSent.set(key, now);
+        if (this.lastSent.size > 500) {
+          for (const [k, ts] of this.lastSent) {
+            if (now - ts > COOLDOWN_MS) this.lastSent.delete(k);
+          }
+        }
       }
-    }
-    void this.send(kind, s);
+    });
   }
 
   /** « Tester » des réglages : envoi réel sans les gardes toggles/focus —
-   *  le geste déclenche aussi la demande de permission si nécessaire.
-   *  sid vide → le clic focus seul, pas de session factice à ouvrir. */
+   *  geste explicite → la demande de permission est retentée même après
+   *  un refus. sid vide → le clic focus seul, pas de session factice. */
   test() {
-    void this.send("done", {
-      id: "",
-      title: t("notif_test_title"),
-      state: "idle",
-    } as SessionMeta);
+    void this.send(
+      "done",
+      { id: "", title: t("notif_test_title"), state: "idle" } as SessionMeta,
+      true,
+    );
   }
 
   /** Demande de permission — l'OS montre son prompt si elle n'est pas
@@ -159,8 +165,14 @@ class OsNotifications {
     }
   }
 
-  private async send(kind: AlertKind, s: SessionMeta) {
-    if (!(await this.ensurePermission())) return;
+  /** Envoi effectif — true quand la notif est partie (permission accordée
+   *  et IPC acceptée). */
+  private async send(
+    kind: AlertKind,
+    s: SessionMeta,
+    force = false,
+  ): Promise<boolean> {
+    if (!(await this.ensurePermission(force))) return false;
     const conn = s.conn ?? "";
     const where =
       conn && this.deps.connCount() > 1 ? ` — ${connLabel(conn)}` : "";
@@ -175,9 +187,13 @@ class OsNotifications {
     };
     // invoke direct plutôt que sendNotification() (fire-and-forget via le
     // shim window.Notification) : un échec de livraison remonte ici.
-    await invoke("plugin:notification|notify", { options }).catch((e) =>
-      logUi("error", `notif: envoi impossible: ${e}`),
-    );
+    try {
+      await invoke("plugin:notification|notify", { options });
+      return true;
+    } catch (e) {
+      logUi("error", `notif: envoi impossible: ${e}`);
+      return false;
+    }
   }
 
   /** Tap sur la notif : la fenêtre reprend le focus (dé-minimisée si
