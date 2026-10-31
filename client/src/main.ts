@@ -48,6 +48,9 @@ import { MapView } from "./features/map-view";
 import { TermPanel } from "./features/terminal";
 import { SettingsPanel } from "./features/settings";
 import { ComponentsPanel } from "./features/components";
+import { stateDiff } from "./features/state-diff";
+import { sounds } from "./features/sounds";
+import { notifications } from "./features/notifications";
 import { initFirstPost } from "./features/first-post";
 import { Pins } from "./features/pins";
 import { initLang, t, applyStatic } from "./i18n";
@@ -151,6 +154,22 @@ renderer.bind({
   ctxChanged: () => chat.updateCtx(),
   statusChanged: () => void sidebar.refresh(),
   openSession: (id) => void chat.open(id),
+});
+// Canaux d'alerte branchés sur le diff partagé (state-diff) — sons et
+// notifications OS restent indépendants mais voient les mêmes transitions.
+stateDiff.onTransition((kind) => sounds.alert(kind));
+stateDiff.onTransition((kind, s) => notifications.alert(kind, s));
+notifications.bind({
+  connCount: () => conns.knownConns().length,
+  // Clic sur la notif → même trajet qu'une ouverture depuis la sidebar :
+  // les overlays de #chat doivent d'abord sortir (motif newSess.openSession).
+  openSession: (id, conn) => {
+    settings.close();
+    connView.close();
+    map.close();
+    comps.close();
+    void chat.open(id, false, conn);
+  },
 });
 sidebar.bind(conns, groups, newSess, chat, settings, connView, comps, map);
 composer.bind(chat);
@@ -348,6 +367,7 @@ term.init();
 map.init();
 settings.init();
 comps.init();
+notifications.init();
 initFirstPost((c) => conns.cap(c)?.first_post === true);
 pins.init();
 initModelBar(openFusion);

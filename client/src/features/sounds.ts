@@ -3,25 +3,17 @@
 //   fin de tour   working/compacting/running/waiting_input → idle   "done"
 //   question      → waiting_input                                 "question"
 //   erreur        → dead/interrupted                              "error"
-// Alimenté par le diff d'états de Sidebar.refresh() : list_sessions couvre
-// toutes les connexions, alors que le canal event ne suit que la session
-// ouverte. Le dernier état vu est mémorisé par session — un état déjà
-// connu ne rejoue jamais (première observation = seed silencieux, y
-// compris au démarrage).
+// Branché sur le diff d'états partagé de state-diff.ts (liste fusionnée de
+// Sidebar.refresh() — toutes les connexions, session ouverte ou non) ;
+// chaque transition y est dispatchée vers alert().
 // Réglages localStorage ac-* ; le timbre joué est un preset choisi par
 // événement, synthétisé en WebAudio à la volée (sound-presets.ts).
 // ---------------------------------------------------------------------------
 
 import { logUi } from "../core/dom";
-import type { SessionMeta } from "../core/types";
 import { PRESETS, playPreset, type SoundKind } from "./sound-presets";
 
 export type { SoundKind };
-
-/** États comptant comme « l'agent travaille » pour la transition → idle. */
-const BUSY = new Set(["working", "compacting", "running", "waiting_input"]);
-/** États terminaux anormaux — glisser de l'un à l'autre ne re-sonne pas. */
-const ERR = new Set(["dead", "interrupted"]);
 
 /** Rafale évitée : un même type ne peut pas sonner deux fois en 2 s. */
 const COOLDOWN_MS = 2_000;
@@ -51,38 +43,12 @@ export const sndPresetId = (k: SoundKind) => {
 const sndPreset = (k: SoundKind) =>
   PRESETS[k].find((p) => p.id === sndPresetId(k)) ?? PRESETS[k][0];
 
-/** Transition d'intérêt, null sinon. */
-function classify(prev: string, next: string): SoundKind | null {
-  if (ERR.has(next)) return ERR.has(prev) ? null : "error";
-  if (next === "waiting_input") return "question";
-  if (next === "idle" && BUSY.has(prev)) return "done";
-  return null;
-}
-
 class SoundAlerts {
-  /** Dernier état vu par "conn:id" — la comparaison produit les sons. */
-  private last = new Map<string, string>();
   private lastPlay = new Map<SoundKind, number>();
 
-  /** Diff d'états sur la liste fusionnée du refresh sidebar. Les sessions
-   *  offline gardent leur dernier état connu (stale — ni mise à jour ni
-   *  son : une transition réelle pendant la coupure sonnera au retour) ;
-   *  celles qui disparaissent de la liste sont oubliées. */
-  noteStates(list: SessionMeta[]) {
-    const seen = new Set<string>();
-    for (const s of list) {
-      const key = `${s.conn ?? "default"}:${s.id}`;
-      seen.add(key);
-      if (s.offline) continue;
-      const prev = this.last.get(key);
-      this.last.set(key, s.state);
-      if (prev === undefined || prev === s.state) continue;
-      const kind = classify(prev, s.state);
-      if (kind) this.play(kind);
-    }
-    for (const k of [...this.last.keys()]) {
-      if (!seen.has(k)) this.last.delete(k);
-    }
+  /** Transition signalée par state-diff — gardes réglages puis lecture. */
+  alert(kind: SoundKind) {
+    this.play(kind);
   }
 
   /** Bouton « tester » des paramètres — volontairement sans garde (toggle,

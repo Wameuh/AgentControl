@@ -23,6 +23,13 @@ import {
   sndPresetId,
   type SoundKind,
 } from "./sounds";
+import {
+  notifications,
+  notifEnabled,
+  notifTypeOn,
+  notifOnlyUnfocused,
+} from "./notifications";
+import type { AlertKind } from "./state-diff";
 import { PRESETS } from "./sound-presets";
 
 /** Préférence d'envoi : "queue" (file FIFO, défaut) | "steer" (injection
@@ -89,6 +96,20 @@ export class SettingsPanel {
     );
     $("s-snd-blocked").hidden = !sounds.blocked();
     this.syncSndOpts();
+    // Notifications OS : canal Tauri seulement — bloc masqué en web.
+    $("s-notif-block").hidden = isWeb;
+    ($("s-notif") as HTMLInputElement).checked = notifEnabled();
+    for (const k of ["done", "question", "error"] as AlertKind[]) {
+      ($(`s-notif-${k}`) as HTMLInputElement).checked = notifTypeOn(k);
+    }
+    ($("s-notif-unfocused") as HTMLInputElement).checked = notifOnlyUnfocused();
+    this.syncNotifOpts();
+    void notifications
+      .permBlocked()
+      .then((blocked) => {
+        $("s-notif-denied").hidden = !blocked || !notifEnabled();
+      })
+      .catch(() => {});
     $("s-update-status").textContent = "";
     ($("s-doupdate") as HTMLButtonElement).hidden = true;
     // Web : pas de reconnexion optionnelle (la conn unique est vitale) ni
@@ -281,6 +302,35 @@ export class SettingsPanel {
         "ac-snd-unfocused",
         (e.target as HTMLInputElement).checked ? "1" : "0",
       );
+    // Activation explicite du canal → demande de permission OS immédiate
+    // (geste utilisateur = meilleur contexte pour le prompt natif).
+    ($("s-notif") as HTMLInputElement).onchange = (e) => {
+      const on = (e.target as HTMLInputElement).checked;
+      localStorage.setItem("ac-notif", on ? "1" : "0");
+      if (on) {
+        void notifications.ensurePermission(true).then((ok) => {
+          $("s-notif-denied").hidden = ok;
+        });
+      } else {
+        $("s-notif-denied").hidden = true;
+      }
+      this.syncNotifOpts();
+      this.syncSecStates();
+    };
+    for (const k of ["done", "question", "error"] as AlertKind[]) {
+      ($(`s-notif-${k}`) as HTMLInputElement).onchange = (e) =>
+        localStorage.setItem(
+          `ac-notif-${k}`,
+          (e.target as HTMLInputElement).checked ? "1" : "0",
+        );
+    }
+    ($("s-notif-unfocused") as HTMLInputElement).onchange = (e) =>
+      localStorage.setItem(
+        "ac-notif-unfocused",
+        (e.target as HTMLInputElement).checked ? "1" : "0",
+      );
+    ($("s-notif-test") as HTMLButtonElement).onclick = () =>
+      notifications.test();
     ($("s-snd-vol") as HTMLInputElement).oninput = (e) => {
       localStorage.setItem(
         "ac-snd-vol",
@@ -304,9 +354,11 @@ export class SettingsPanel {
       `${opt("s-theme")} · ${opt("s-accent")} · ${opt("s-accent-int")}`;
     $("s-st-chat").textContent = opt("s-sendmode");
     const sndOn = ($("s-snd") as HTMLInputElement).checked;
-    $("s-st-notif").textContent = sndOn
-      ? `${t("st_on")} · ${($("s-snd-vol") as HTMLInputElement).value}%`
-      : t("st_off");
+    const notifOn = !isWeb && ($("s-notif") as HTMLInputElement).checked;
+    $("s-st-notif").textContent = [
+      sndOn ? `${t("st_on")} · ${($("s-snd-vol") as HTMLInputElement).value}%` : t("st_off"),
+      ...(isWeb ? [] : [`${t("notif_short")} ${notifOn ? t("st_on") : t("st_off")}`]),
+    ].join(" · ");
     $("s-st-conn").textContent = ($("s-autoconn") as HTMLInputElement).checked
       ? t("st_on")
       : t("st_off");
@@ -324,6 +376,18 @@ export class SettingsPanel {
       HTMLInputElement | HTMLSelectElement
     >("input, select")) {
       el.disabled = off;
+    }
+  }
+
+  /** Même grisage pour le bloc notifications — sauf le bouton « Tester »,
+   *  cliquable même canal coupé (le test vérifie permission + rendu OS). */
+  private syncNotifOpts() {
+    const off = !($("s-notif") as HTMLInputElement).checked;
+    $("s-notif-opts").classList.toggle("off", off);
+    for (const el of $("s-notif-opts").querySelectorAll<
+      HTMLInputElement | HTMLButtonElement
+    >("input, button")) {
+      el.disabled = off && el.id !== "s-notif-test";
     }
   }
 }

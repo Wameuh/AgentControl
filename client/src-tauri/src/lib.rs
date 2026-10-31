@@ -52,6 +52,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         // Lecteur vidéo du panneau fichiers : ranges HTTP → tranches
         // read_file RPC (jamais le fichier entier en mémoire).
         .register_asynchronous_uri_scheme_protocol("acvideo", stream::handler)
