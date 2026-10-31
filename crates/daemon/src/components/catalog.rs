@@ -551,8 +551,8 @@ pub(super) fn entry_named(name: &str) -> Option<&'static CatalogEntry> {
 /// nouvellement déclarées prennent leur défaut via `effective()`),
 /// `autostart`, `description` (éditable via upsert_edit — reprise du
 /// catalogue seulement si absente). Remplacés depuis l'entrée :
-/// kind/command/env/cwd/restart*/healthcheck/queries/params_schema/
-/// render/`catalog`.
+/// kind/command/env/cwd/restart*/healthcheck/queries/version_argv/
+/// min_version/params_schema/render/`catalog`.
 ///
 /// Hygiène des params, jamais silencieuse (warn) :
 /// - clé retirée du schéma catalogue → valeur purgée : inéditable via
@@ -604,6 +604,10 @@ pub(super) fn resync(spec: &mut ComponentSpec, entry: &CatalogEntry) {
     spec.restart_sec = cat.restart_sec;
     spec.healthcheck = cat.healthcheck;
     spec.queries = cat.queries;
+    // Sondes de version + seuil : catalogue-owned/scellés comme la
+    // commande — un snapshot figé suivrait sinon un seuil d'époque.
+    spec.version_argv = cat.version_argv;
+    spec.min_version = cat.min_version;
     spec.params_schema = cat.params_schema;
     spec.render = cat.render;
     spec.catalog = cat.catalog;
@@ -1096,6 +1100,10 @@ mod tests {
         spec.params_schema = Vec::new();
         spec.render = None;
         spec.healthcheck = Healthcheck::None;
+        // Sonde/seuil « d'époque » — à rafraîchir comme les autres
+        // champs catalogue-owned.
+        spec.version_argv = None;
+        spec.min_version = Some("9.9".into());
         spec.autostart = true;
         spec.description = Some("ma description".into());
         spec.params = HashMap::from([
@@ -1111,6 +1119,8 @@ mod tests {
         assert!(spec.render.is_some());
         assert_eq!(spec.healthcheck, entry.suggested_spec.healthcheck);
         assert_eq!(spec.command, entry.suggested_spec.command);
+        assert_eq!(spec.version_argv, entry.suggested_spec.version_argv);
+        assert_eq!(spec.min_version, entry.suggested_spec.min_version);
         // Choix utilisateur préservés ; zombie + invalide purgés.
         assert!(spec.autostart);
         assert_eq!(spec.description.as_deref(), Some("ma description"));

@@ -181,7 +181,7 @@ fn parse_healthcheck(s: &str) -> Result<proto::Healthcheck> {
             proto::Healthcheck::Http { url: s.to_string() }
         }
         _ if s.starts_with("cmd:") => proto::Healthcheck::Command {
-            argv: split_argv(&s["cmd:".len()..], "healthcheck cmd:")?,
+            argv: split_argv(&s["cmd:".len()..], "--hc cmd:")?,
         },
         _ => bail!("--hc none|process|tcp:ADDR|http:URL|cmd:\"<argv>\" (reçu: {s})"),
     })
