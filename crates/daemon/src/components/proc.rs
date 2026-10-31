@@ -27,7 +27,7 @@ use tokio::process::{Child, Command};
 use tracing::{info, warn};
 
 use super::catalog::{expand_home_str, run_version_probe};
-use super::{Components, BACKOFF_CAP_SECS, HEALTH_INTERVAL, LOG_MAX, START_GRACE};
+use super::{version, Components, BACKOFF_CAP_SECS, HEALTH_INTERVAL, LOG_MAX, START_GRACE};
 use crate::server::misc::command_available;
 
 /// Uptime au-delà duquel le backoff repart à `restart_sec`.
@@ -332,17 +332,27 @@ impl Components {
     /// État courant d'une spec — runtime `process` (procs) ou
     /// observation sonde (external/tool). L'état est la vérité posée
     /// par on_exit/shutdown_proc (Starting couvre aussi l'attente de
-    /// backoff entre deux respawns).
+    /// backoff entre deux respawns). Version/seuil exposés quand la
+    /// spec a une sonde applicable ; « outdated » = version sous le
+    /// seuil déclaré (badge, et verdict santé « outdated »).
     pub(crate) async fn status_of(&self, spec: &ComponentSpec) -> ComponentStatus {
         let config_required = super::render::missing_required(spec);
+        let outdated = self.version_outdated(spec).await;
+        let version_min = if version::version_argv(spec).is_some() {
+            version::min_version(spec)
+        } else {
+            None
+        };
+        let version_outdated = outdated.then_some(true);
         match spec.kind {
             ComponentKind::Process => {
+                let version = self.probed_version(&spec.name).await;
                 let procs = self.procs.read().await;
                 match procs.get(&spec.name) {
                     Some(p) => ComponentStatus {
                         state: p.state,
                         pid: p.pid,
-                        health: p.health.map(health_str),
+                        health: p.health.map(|ok| health_label(ok, outdated)),
                         uptime_s: if p.pid.is_some() {
                             p.started.map(|t| t.elapsed().as_secs()).unwrap_or(0)
                         } else {
@@ -350,10 +360,16 @@ impl Components {
                         },
                         restarts: p.restarts,
                         last_exit: p.last_exit,
+                        version,
+                        version_min,
+                        version_outdated,
                         config_required,
                         ..Default::default()
                     },
                     None => ComponentStatus {
+                        version,
+                        version_min,
+                        version_outdated,
                         config_required,
                         ..Default::default()
                     },
@@ -367,7 +383,10 @@ impl Components {
                         Some(false) => ComponentState::Degraded,
                         None => ComponentState::Stopped,
                     },
-                    health: health.map(health_str),
+                    health: health.map(|ok| health_label(ok, outdated)),
+                    version: self.probed_version(&spec.name).await,
+                    version_min,
+                    version_outdated,
                     config_required,
                     ..Default::default()
                 }
@@ -389,15 +408,19 @@ impl Components {
                     // de ligne « Santé : fail » qui suggérerait un
                     // composant à réparer.
                     health: if present {
-                        self.observed_health(&spec.name).await.map(health_str)
+                        self.observed_health(&spec.name)
+                            .await
+                            .map(|ok| health_label(ok, outdated))
                     } else {
                         None
                     },
                     version: if present {
-                        self.tool_version(&spec.name).await
+                        self.probed_version(&spec.name).await
                     } else {
                         None
                     },
+                    version_min: if present { version_min } else { None },
+                    version_outdated: if present { version_outdated } else { None },
                     config_required,
                     ..Default::default()
                 }
@@ -416,6 +439,25 @@ impl Components {
             if self.is_down() {
                 return;
             }
+            // Sondes de version des process/external (`version_argv`
+            // déclaré ou hérité du catalogue) — même cadence que les
+            // sondes santé et indépendante du cycle de vie : la version
+            // de l'outil installé vaut aussi pour un process arrêté.
+            // `tool` est sondé dans `probe_tool` (présence + version +
+            // santé d'un coup).
+            let vprobes: Vec<(String, Vec<String>)> = self
+                .specs_all()
+                .await
+                .into_iter()
+                .filter(|s| {
+                    matches!(s.kind, ComponentKind::Process | ComponentKind::External)
+                })
+                .filter_map(|s| version::version_argv(&s).map(|a| (s.name.clone(), a)))
+                .collect();
+            for (name, argv) in vprobes {
+                let v = run_version_probe(&argv).await;
+                self.set_probed_version(&name, v).await;
+            }
             let names: Vec<String> = self.procs.read().await.keys().cloned().collect();
             for name in names {
                 let pid = {
@@ -429,6 +471,11 @@ impl Components {
                 let Some(ok) = probe(&spec, Some(pid)).await else {
                     continue;
                 };
+                // Outil sous `min_version` : la version repliée en
+                // échec donne un degraded « outdated » explicite,
+                // plutôt qu'un process apparemment sain sur un outil
+                // trop vieux pour la config rendue.
+                let ok = ok && !self.version_outdated(&spec).await;
                 let mut procs = self.procs.write().await;
                 if let Some(p) = procs.get_mut(&name) {
                     if p.pid.is_none() || p.desired == Desired::Stopped {
@@ -470,6 +517,7 @@ impl Components {
                     ComponentKind::Tool => self.probe_tool(&spec).await,
                     _ => {
                         if let Some(ok) = probe(&spec, None).await {
+                            let ok = ok && !self.version_outdated(&spec).await;
                             self.set_observed(&spec.name, Some(ok)).await;
                         }
                     }
@@ -480,26 +528,39 @@ impl Components {
     }
 
     /// Sonde d'un `tool` : présence (argv0 résolvable — cheap, pas de
-    /// spawn), version (sa `command` exécutée — typiquement
-    /// `… --version` : timeout 3 s, 1re ligne ≤200 c) et santé =
+    /// spawn), version (sa `command` exécutée — ou `version_argv` s'il
+    /// la remplace : timeout 3 s, 1re ligne ≤200 c) et santé =
     /// healthcheck déclaré s'il y en a un (resonde de présence /
-    /// répondant), sinon la présence elle-même.
+    /// répondant), sinon la présence elle-même. Une version sous
+    /// `min_version` replie le verdict en échec « outdated ».
     /// Absent → version ET verdict santé invalidés : l'état `absent`
     /// se suffit, et un `false` conservé ferait flasher « fail » à la
     /// réinstallation le temps d'une nouvelle passe.
     async fn probe_tool(&self, spec: &ComponentSpec) {
         if !tool_present(spec) {
             self.set_observed(&spec.name, None).await;
-            self.set_tool_version(&spec.name, None).await;
+            self.set_probed_version(&spec.name, None).await;
             return;
         }
-        let version = run_version_probe(&spec.command).await;
-        let health = match spec.healthcheck {
+        let version = match version::version_argv(spec) {
+            Some(argv) => run_version_probe(&argv).await,
+            None => None,
+        };
+        let mut health = match spec.healthcheck {
             Healthcheck::None => Some(true),
             _ => probe(spec, None).await.or(Some(true)),
         };
+        // Fold « outdated » sur la version *fraîche* (le cache n'est
+        // écrit qu'après — version_outdated() lirait la passe d'avant).
+        let outdated = match (version::min_version(spec), version.as_deref()) {
+            (Some(min), Some(v)) => version::version_below_min(v, &min),
+            _ => false,
+        };
+        if health == Some(true) && outdated {
+            health = Some(false);
+        }
         self.set_observed(&spec.name, health).await;
-        self.set_tool_version(&spec.name, version).await;
+        self.set_probed_version(&spec.name, version).await;
     }
 }
 
@@ -655,8 +716,15 @@ fn exit_code(status: Option<&std::process::ExitStatus>) -> i64 {
     -1
 }
 
-fn health_str(ok: bool) -> String {
-    if ok { "ok".into() } else { "fail".into() }
+/// Libellé du verdict de sonde : "ok" | "fail" | "outdated" — le
+/// dernier distingue l'échec « outil sous min_version » (actionnable :
+/// mettre à jour l'outil) d'une sonde réellement KO.
+fn health_label(ok: bool, outdated: bool) -> String {
+    match (ok, outdated) {
+        (true, _) => "ok".into(),
+        (false, true) => "outdated".into(),
+        (false, false) => "fail".into(),
+    }
 }
 
 /// SIGTERM puis SIGKILL si le pid survit à la grâce — utilisé pour
@@ -816,13 +884,14 @@ async fn probe(spec: &ComponentSpec, pid: Option<u32>) -> Option<bool> {
     }
 }
 
-/// argv0 d'un `tool` résolvable — `command_available` (PATH du démon
-/// ou chemin absolu exécutable, même check que la détection du
+/// argv0 de la sonde de version effective d'un `tool` résolvable —
+/// `version_argv` si déclaré (il *remplace* `command` comme sonde,
+/// présence incluse), sinon `command`. `command_available` = PATH du
+/// démon ou chemin absolu exécutable (même check que la détection du
 /// catalogue) après expansion `~`.
 fn tool_present(spec: &ComponentSpec) -> bool {
-    spec.command
-        .first()
-        .map(|a| command_available(&expand_home_str(a)))
+    version::version_argv(spec)
+        .and_then(|a| a.first().map(|a0| command_available(&expand_home_str(a0))))
         .unwrap_or(false)
 }
 
@@ -856,6 +925,8 @@ mod tests {
             name: "t".into(),
             kind: ComponentKind::Tool,
             command: argv.iter().map(|s| s.to_string()).collect(),
+            version_argv: None,
+            min_version: None,
             env: std::collections::HashMap::new(),
             cwd: None,
             autostart: false,
@@ -871,13 +942,23 @@ mod tests {
         }
     }
 
-    /// « installed » = argv0 résolvable sur le PATH du démon — un shell
-    /// système est présent, un nom bidon ne l'est pas, argv vide non plus.
+    /// « installed » = argv0 de la sonde de version effective
+    /// résolvable sur le PATH du démon — `version_argv` prime sur
+    /// `command` quand les deux divergent (il remplace la sonde,
+    /// présence incluse), un nom bidon ne l'est pas, argv vide non plus.
     #[test]
     fn tool_present_detecte_argv0() {
         assert!(tool_present(&tool_spec(&["sh", "-c", "true"])));
         assert!(!tool_present(&tool_spec(&["ac-tool-inexistant-xyz"])));
         assert!(!tool_present(&tool_spec(&[])));
+        // version_argv divergent de command → c'est son argv0 qui
+        // décide de la présence (la sonde réelle).
+        let mut s = tool_spec(&["ac-tool-inexistant-xyz"]);
+        s.version_argv = Some(vec!["sh".into(), "-c".into(), "true".into()]);
+        assert!(tool_present(&s));
+        let mut s = tool_spec(&["sh", "-c", "true"]);
+        s.version_argv = Some(vec!["ac-tool-inexistant-xyz".into()]);
+        assert!(!tool_present(&s));
     }
 
     /// Un `tool` absent n'a ni version ni verdict santé retenus — un
@@ -899,10 +980,10 @@ mod tests {
         let absent = tool_spec(&["ac-tool-inexistant-xyz"]);
         // Verdicts d'une passe antérieure (tool alors installé).
         c.set_observed("t", Some(false)).await;
-        c.set_tool_version("t", Some("1.0".into())).await;
+        c.set_probed_version("t", Some("1.0".into())).await;
         c.probe_tool(&absent).await;
         assert_eq!(c.observed_health("t").await, None);
-        assert_eq!(c.tool_version("t").await, None);
+        assert_eq!(c.probed_version("t").await, None);
 
         // Redevenu installé : pas de « fail » résiduel — health=None
         // jusqu'à la passe qui resonde (ici, immédiate).
@@ -910,7 +991,41 @@ mod tests {
         assert_eq!(c.status_of(&installe).await.health, None);
         c.probe_tool(&installe).await;
         assert_eq!(c.observed_health("t").await, Some(true));
-        assert_eq!(c.tool_version("t").await.as_deref(), Some("1.2.3"));
+        assert_eq!(c.probed_version("t").await.as_deref(), Some("1.2.3"));
+    }
+
+    /// `min_version` déclaré + version sondée sous le seuil → verdict
+    /// « outdated » exposé (process comme tool), au-dessus → ok.
+    #[tokio::test]
+    async fn version_sous_le_seuil_marque_outdated() {
+        let root =
+            std::env::temp_dir().join(format!("ac-outdated-{}", std::process::id()));
+        let web: Arc<tokio::sync::RwLock<Option<serde_json::Value>>> =
+            Arc::new(tokio::sync::RwLock::new(None));
+        let c = Components::open(
+            &root,
+            "127.0.0.1:0".into(),
+            false,
+            web,
+            Arc::new(crate::server::OrchProbe::open(
+                crate::server::OrchCfg::default(),
+            )),
+        );
+        let mut spec = tool_spec(&["sh", "-c", "echo 0.2.0"]);
+        spec.min_version = Some("0.3".into());
+        c.probe_tool(&spec).await;
+        let st = c.status_of(&spec).await;
+        assert_eq!(st.version.as_deref(), Some("0.2.0"));
+        assert_eq!(st.version_min.as_deref(), Some("0.3"));
+        assert_eq!(st.version_outdated, Some(true));
+        assert_eq!(st.health.as_deref(), Some("outdated"));
+
+        spec.min_version = Some("0.2".into());
+        c.probe_tool(&spec).await;
+        let st = c.status_of(&spec).await;
+        assert_eq!(st.version_outdated, None);
+        assert_eq!(st.health.as_deref(), Some("ok"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Upsert `tool → external` : le verdict du tool ne doit pas

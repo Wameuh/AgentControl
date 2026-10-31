@@ -109,6 +109,20 @@ only retained for an `installed` tool: `absent` invalidates both caches
 (the state is self-sufficient — no residual "health: fail" on
 reinstall), just like a spec upsert, until the next pass.
 
+**Managed-tool version** (`process`/`external` too): a spec may declare
+`version_argv = ["agent-reviewer", "--version"]` — the argv probed on
+the same 30 s cadence, lifecycle-independent (an installed version is
+displayed even for a stopped process). For a `tool`, `version_argv`
+overrides `command` as the probe. `min_version = "0.3"` declares a
+floor: a probed version below it is reported `version_outdated` and the
+health verdict becomes `"outdated"` — an explicit degraded signal
+("update the tool"), not a silent failure. The catalog stamps both
+fields on `suggested_spec` (agentreviewer: `version_argv` +
+`min_version = "0.3"`, the first multi-repo release); a catalog-backed
+component whose persisted spec predates the fields inherits them from
+the homonymous entry at read time. Probe failure/absent → no version,
+no error.
+
 ### 2.2 Lifecycle of a managed `process`
 
 - **Spawn**: `tokio::process::Command` at daemon boot if `autostart`,
@@ -151,11 +165,11 @@ variant` with the `id` correctly extracted, so the call fails cleanly):
 
 | ReqKind | Response |
 | --- | --- |
-| `ListComponents` | `[{name, kind, state, pid?, autostart, health, uptime_s?, restarts, last_exit?, version?, description?, source?}]` |
+| `ListComponents` | `[{name, kind, state, pid?, autostart, health, uptime_s?, restarts, last_exit?, version?, version_min?, version_outdated?, description?, source?}]` |
 | `ComponentInfo {name}` | full spec + detailed state |
 | `ComponentStart/Stop/Restart {name}` | `{name, state}` |
 | `ComponentLogs {name, offset?, limit?}` | `{data(b64)|lines, size, truncated}` (paged tail) |
-| `ComponentUpsert {name, spec}` | atomically rewrites components.toml — bounded user surface: on a catalog-covered name, the internal spec (kind/command/env/cwd/restart*/healthcheck/queries) is sealed, only `autostart`/`description` and declared params are mutable; creating a catalog name refused (→ `ComponentInstall`) |
+| `ComponentUpsert {name, spec}` | atomically rewrites components.toml — bounded user surface: on a catalog-covered name, the internal spec (kind/command/env/cwd/restart*/healthcheck/queries/version_argv/min_version) is sealed, only `autostart`/`description` and declared params are mutable; creating a catalog name refused (→ `ComponentInstall`) |
 | `ComponentRemove {name}` | same (+ stop if process alive) |
 | `ComponentCatalog {refresh?}` | catalog entries (§2.5) — declared `params`/`render` included |
 | `ComponentInstall {name, params?}` | runs the recipe + upserts the spec (params validated first) |

@@ -26,7 +26,8 @@
 //!   acctl comp [ls] [--json] | info <n> | start|stop|restart <n>
 //!       | logs <n> [--tail N] | catalog [--json] [--refresh]
 //!       | install <n> | add <n> [--kind K] [--cmd "<argv>"] [--hc S]
-//!       [--env K=V ...] [--cwd C] [--desc D] [--autostart] | rm <n>
+//!       [--env K=V ...] [--cwd C] [--desc D] [--vargv "<argv>"]
+//!       [--vmin V] [--autostart] | rm <n>
 //!                                     — composants managés du démon
 //!   acctl orch [on|off|status|config|set <clé> <val>…]
 //!                                     — orchestrateur backlog natif

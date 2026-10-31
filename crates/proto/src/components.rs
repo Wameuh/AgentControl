@@ -88,6 +88,21 @@ pub struct ComponentSpec {
     /// argv du programme (process : à lancer ; tool : sonde --version).
     #[serde(default)]
     pub command: Vec<String>,
+    /// Sonde de version de l'outil managé — argv exécuté à la cadence
+    /// des sondes santé (~30 s, 1re ligne ≤200 c → `status.version`).
+    /// Pour un `tool` la `command` sert déjà de sonde : `version_argv`
+    /// la remplace si déclaré ; pour un `process`/`external` c'est le
+    /// seul moyen de sonder la version de l'outil piloté. Posé par le
+    /// catalogue à l'install — un composant adossé l'hérite aussi de
+    /// l'entrée homonyme quand la spec persistée n'en porte pas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_argv: Option<Vec<String>>,
+    /// Version minimale exigée de l'outil managé — sous le seuil, la
+    /// version sondée est signalée `version_outdated` et le verdict de
+    /// santé devient « outdated » (degraded explicite, pas un échec
+    /// muet). Comparaison souple par composantes numériques.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_version: Option<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
     /// cwd du process — défaut : le root du démon.
@@ -257,10 +272,20 @@ pub struct ComponentStatus {
     /// Code du dernier exit (128+signal si tué par signal).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_exit: Option<i64>,
-    /// Version rapportée par la sonde d'un `tool` (1re ligne de sa
-    /// commande, typiquement `--version` — bornée à 200 caractères).
+    /// Version sondée de l'outil managé — `version_argv` (process,
+    /// external) ou `command` d'un `tool` (1re ligne, bornée à 200
+    /// caractères). Absente tant que la sonde n'a rien rapporté.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Seuil `min_version` déclaré (spec ou entrée catalogue homonyme)
+    /// — écho pour l'affichage « ≥ N requis » du badge d'obsolescence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_min: Option<String>,
+    /// `Some(true)` quand la version sondée est sous `version_min` —
+    /// badge « mise à jour de l'outil requise », indépendant du cycle
+    /// de vie (affiché même pour un `process` arrêté).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_outdated: Option<bool>,
     /// Paramètres `required` sans valeur effective — « configuration
     /// requise » : le spawn (manuel ou autostart) est bloqué tant que
     /// la liste n'est pas vide, à renseigner via

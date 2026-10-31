@@ -117,6 +117,8 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 kind: ComponentKind::Tool,
                 // Un `tool` : sa commande *est* sa sonde présence/version.
                 command: vec!["agentbacklog".into(), "--version".into()],
+                version_argv: None,
+                min_version: None,
                 env: HashMap::new(),
                 cwd: None,
                 autostart: false,
@@ -184,6 +186,15 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 // externe). AGENTCONTROL_SOCK/TCP sont injectés au
                 // spawn : il trouve le démon sans config réseau.
                 command: vec!["agent-reviewer".into(), "--watch".into()],
+                // Version du watcher managé — 0.3 est le premier
+                // multi-repo (param `repos` ci-dessous) : un 0.2
+                // installé doit se voir proposer la mise à jour plutôt
+                // qu'échouer en silence sur la config rendue.
+                version_argv: Some(vec![
+                    "agent-reviewer".into(),
+                    "--version".into(),
+                ]),
+                min_version: Some("0.3".into()),
                 env: HashMap::new(),
                 cwd: None,
                 // Config.toml à éditer avant le 1er run utile → l'auto-
@@ -540,8 +551,8 @@ pub(super) fn entry_named(name: &str) -> Option<&'static CatalogEntry> {
 /// nouvellement déclarées prennent leur défaut via `effective()`),
 /// `autostart`, `description` (éditable via upsert_edit — reprise du
 /// catalogue seulement si absente). Remplacés depuis l'entrée :
-/// kind/command/env/cwd/restart*/healthcheck/queries/params_schema/
-/// render/`catalog`.
+/// kind/command/env/cwd/restart*/healthcheck/queries/version_argv/
+/// min_version/params_schema/render/`catalog`.
 ///
 /// Hygiène des params, jamais silencieuse (warn) :
 /// - clé retirée du schéma catalogue → valeur purgée : inéditable via
@@ -593,6 +604,10 @@ pub(super) fn resync(spec: &mut ComponentSpec, entry: &CatalogEntry) {
     spec.restart_sec = cat.restart_sec;
     spec.healthcheck = cat.healthcheck;
     spec.queries = cat.queries;
+    // Sondes de version + seuil : catalogue-owned/scellés comme la
+    // commande — un snapshot figé suivrait sinon un seuil d'époque.
+    spec.version_argv = cat.version_argv;
+    spec.min_version = cat.min_version;
     spec.params_schema = cat.params_schema;
     spec.render = cat.render;
     spec.catalog = cat.catalog;
@@ -794,11 +809,13 @@ fn detected(d: &CatalogDetect) -> bool {
         || d.path.as_deref().map(|p| expand_home(p).is_file()).unwrap_or(false)
 }
 
-/// Sonde de version : `detect.bin --version` si déclaré, sinon la
-/// commande de la spec `tool` (qui *est* sa sonde version). Pas de
-/// sonde applicable (process, external) → None.
+/// Sonde de version : `version_argv` de la spec suggérée si déclaré,
+/// sinon `detect.bin --version`, sinon la commande de la spec `tool`
+/// (qui *est* sa sonde version). Pas de sonde applicable → None.
 async fn probe_version(e: &CatalogEntry) -> Option<String> {
-    let argv: Vec<String> = if let Some(bin) = &e.detect.bin {
+    let argv: Vec<String> = if let Some(argv) = &e.suggested_spec.version_argv {
+        argv.clone()
+    } else if let Some(bin) = &e.detect.bin {
         vec![bin.clone(), "--version".into()]
     } else if e.suggested_spec.kind == ComponentKind::Tool {
         e.suggested_spec.command.clone()
@@ -1083,6 +1100,10 @@ mod tests {
         spec.params_schema = Vec::new();
         spec.render = None;
         spec.healthcheck = Healthcheck::None;
+        // Sonde/seuil « d'époque » — à rafraîchir comme les autres
+        // champs catalogue-owned.
+        spec.version_argv = None;
+        spec.min_version = Some("9.9".into());
         spec.autostart = true;
         spec.description = Some("ma description".into());
         spec.params = HashMap::from([
@@ -1098,6 +1119,8 @@ mod tests {
         assert!(spec.render.is_some());
         assert_eq!(spec.healthcheck, entry.suggested_spec.healthcheck);
         assert_eq!(spec.command, entry.suggested_spec.command);
+        assert_eq!(spec.version_argv, entry.suggested_spec.version_argv);
+        assert_eq!(spec.min_version, entry.suggested_spec.min_version);
         // Choix utilisateur préservés ; zombie + invalide purgés.
         assert!(spec.autostart);
         assert_eq!(spec.description.as_deref(), Some("ma description"));
