@@ -520,7 +520,14 @@ impl Daemon {
                 None,
             )
             .await;
-        if r.is_err() && was_asleep && s.generation() == gen0 {
+        // Rendormir seulement si rien d'externe n'a repris la session
+        // pendant le spawn : les tentatives incrémentent spawn_gen à
+        // chaque essai (generation() != gen0 même sans intervention —
+        // comparaison inutilisable ici), mais seul un kill/rebind
+        // EXTERNE (clear, sleep, delete) pose supplant_mark au-delà de
+        // gen0 — le kill interne d'un handshake raté n'en fait pas
+        // partie et ne doit pas empêcher le retour à asleep.
+        if r.is_err() && was_asleep && s.supplant_mark() <= gen0 {
             s.mark_asleep();
         }
         r.map(|_| ())

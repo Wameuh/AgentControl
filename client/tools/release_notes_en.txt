@@ -23,3 +23,4 @@
 196: The MSI installer wizard now shows branded AgentControl artwork instead of the generic WiX default images.
 197: Remote daemon updates no longer abort on the busy guard when the running daemon holds the port — foreign listeners stay protected, and the update dialog now warns that the connection drops and re-establishes.
 198: PDF files now open in an embedded viewer — continuous-scroll canvas rendering, zoom controls, and a "open with system app" fallback for large files.
+199: Resuming a session whose native agent was lost (daemon restart/update) now falls back to a fresh context instead of failing forever — the history is kept, a system note explains the relaunch, and dead agents no longer linger as green "working" sessions.

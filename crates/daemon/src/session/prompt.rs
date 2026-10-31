@@ -438,6 +438,14 @@ impl Session {
         let resp = self
             .acp_request("session/prompt", acp::session_prompt_params(&sid, text))
             .await;
+        // L'agent répond « Session not found » : sa session native a
+        // disparu (store vidé, GC interne) — la liaison est morte pour
+        // de bon et le process restant ne peut plus rien servir pour
+        // cette session. Le tuer plutôt que de laisser un vivant sans
+        // contexte : is_alive() resterait vrai → resume répondrait
+        // « already » et chaque envoi retomberait sur la même erreur,
+        // session coincée à vie (même impasse qu'un handshake raté).
+        let binding_dead = matches!(&resp, Err(e) if session_binding_lost(&format!("{e:#}")));
         if self.spawn_gen.load(Ordering::SeqCst) == gen {
             self.flush_text();
             if self.active_prompts.fetch_sub(1, Ordering::SeqCst) == 1 {
@@ -446,12 +454,18 @@ impl Session {
                     // encore côté agent — l'état reste visible jusqu'au
                     // signal de fin (la retenue garde les envois en file).
                     self.set_state("compacting");
-                } else {
+                } else if !binding_dead {
+                    // Pas de re-départ idle : le kill ci-dessous va
+                    // poser dead via on_agent_exit — un « idle »
+                    // posé ici le recouvrirait selon l'ordre.
                     self.set_state("idle");
                 }
             }
         } else {
             self.active_prompts.fetch_sub(1, Ordering::SeqCst);
+        }
+        if binding_dead {
+            self.drop_dead_binding(gen).await;
         }
         resp
     }
@@ -770,6 +784,36 @@ impl Session {
         self.pending_agent.lock().unwrap().keys().cloned().collect()
     }
 
+}
+
+/// L'agent répond que l'id de session native n'existe plus chez lui
+/// (« Session not found », « unknown session », « no such session »…) :
+/// la liaison démon↔agent est définitivement morte. Phrases complètes
+/// où « session » est le sujet du marqueur — l'erreur arrive wrappée
+/// « acp session/prompt: <msg> » : une conjonction « session » +
+/// marqueur disjoints serait toujours vraie (le préfixe contient
+/// « session ») et un « file not found » / « unknown tool » tuerait un
+/// agent sain.
+pub(super) fn session_binding_lost(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    [
+        "session not found",
+        "session is not found",
+        "session was not found",
+        "no such session",
+        "unknown session",
+        "session does not exist",
+        "session doesn't exist",
+        "session not exist",
+        "cannot find session",
+        "could not find session",
+        "can not find session",
+        "session introuvable",
+        "session est introuvable",
+        "session inexistante",
+    ]
+    .iter()
+    .any(|k| m.contains(k))
 }
 
 /// Issue d'un `steer_queued` — traduite par le handler en

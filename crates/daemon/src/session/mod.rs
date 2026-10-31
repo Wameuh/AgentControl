@@ -116,6 +116,12 @@ pub struct Session {
     /// : > départ = kill/rebind intervenu pendant SON spawn → la session
     /// appartient au nouveau cycle, l'erreur du spawn doit se taire.
     supplant_mark: AtomicU64,
+    /// Génération du process tué par kill_failed_spawn (handshake raté)
+    /// — son on_agent_exit doit faire le ménage sans poser « dead » ni
+    /// journaliser « agent process exited » : l'état final appartient à
+    /// l'appelant du spawn. CAS par génération : un marqueur périmé ne
+    /// peut pas éteindre l'exit d'un autre process.
+    suppress_exit_gen: AtomicU64,
     /// Réveil (respawn auto sur envoi vers une session "asleep") en cours —
     /// déduplique les envois concurrents : les suivants s'enfilent sans
     /// relancer un second spawn.
@@ -226,6 +232,7 @@ impl Session {
             spawn_gen: AtomicU64::new(0),
             usage_seen: std::sync::atomic::AtomicBool::new(false),
             supplant_mark: AtomicU64::new(0),
+            suppress_exit_gen: AtomicU64::new(0),
             waking: std::sync::atomic::AtomicBool::new(false),
             spawning: std::sync::atomic::AtomicBool::new(false),
             runner_active: std::sync::atomic::AtomicBool::new(false),
