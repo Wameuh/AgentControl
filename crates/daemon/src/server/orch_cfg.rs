@@ -39,6 +39,7 @@ const KEYS: &[&str] = &[
     "watch_prs",
     "auto_patchnotes",
     "spawn_managers",
+    "metrics",
     "max_workers",
     "poll_secs",
     "nudge_cooldown_secs",
@@ -106,6 +107,17 @@ pub(crate) fn params_schema() -> Vec<ParamSpec> {
             "spawn_managers",
             "Managers proposables",
             "un Manager par workspace routé (section du panneau backlog)",
+            ParamKind::Bool,
+            Some("true"),
+        ),
+        ps(
+            "metrics",
+            "Métriques (échantillonnage)",
+            "à chaque tick, un sample {ts, pending, wip, workers} est \
+             ajouté au journal ~/.agentbacklog/metrics.jsonl (rétention \
+             30 j / ~100k samples) servi par la RPC backlog_metrics ; \
+             décocher = pas de série (les agrégats items restent \
+             calculés)",
             ParamKind::Bool,
             Some("true"),
         ),
@@ -221,6 +233,7 @@ pub(crate) fn params_values(cfg: &super::cfg::OrchCfg) -> HashMap<String, String
     m.insert("watch_prs".into(), cfg.watch_prs.to_string());
     m.insert("auto_patchnotes".into(), cfg.auto_patchnotes.to_string());
     m.insert("spawn_managers".into(), cfg.spawn_managers.to_string());
+    m.insert("metrics".into(), cfg.metrics.to_string());
     m.insert("max_workers".into(), cfg.max_workers.to_string());
     m.insert("poll_secs".into(), cfg.poll_secs.to_string());
     m.insert(
@@ -374,6 +387,7 @@ pub(crate) fn apply_patch(
             "watch_prs" => cfg.watch_prs = val_bool(v)?,
             "auto_patchnotes" => cfg.auto_patchnotes = val_bool(v)?,
             "spawn_managers" => cfg.spawn_managers = val_bool(v)?,
+            "metrics" => cfg.metrics = val_bool(v)?,
             "max_workers" => {
                 cfg.max_workers =
                     u32::try_from(val_u64(v)?).context("max_workers hors borne u32")?

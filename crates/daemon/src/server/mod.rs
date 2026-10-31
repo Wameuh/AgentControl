@@ -11,6 +11,9 @@ pub(crate) mod files;
 /// (components/catalog.rs) et par la garde AgentBacklog de
 /// l'orchestrateur natif.
 pub(crate) mod misc;
+/// Métriques backlog : journal JSONL échantillonné par le tick
+/// orchestrateur + RPC `backlog_metrics` (série + agrégats).
+pub(crate) mod metrics;
 /// `OrchProbe` est partagé avec `crate::components` (statut du
 /// composant interne `backlog-orchestrator` dans list_components).
 pub(crate) mod orch;
@@ -755,6 +758,9 @@ impl Daemon {
                 self.h_orch_config(patch).await
             }
             ReqKind::ManagerSpawn { repo } => self.h_manager_spawn(&repo).await,
+            ReqKind::BacklogMetrics { window } => {
+                self.h_backlog_metrics(window).await
+            }
             ReqKind::Subscribe { session, after_seq } => {
                 self.h_subscribe(session, after_seq).await
             }

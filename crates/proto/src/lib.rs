@@ -1043,6 +1043,18 @@ pub enum ReqKind {
     /// Manager vivant pour ce repo est renvoyé tel quel. Réponse :
     /// `{session, repo, cwd, title, existing}`.
     ManagerSpawn { repo: String },
+    /// Métriques backlog : série temporelle échantillonnée par le tick
+    /// de l'orchestrateur natif (`~/.agentbacklog/metrics.jsonl`) +
+    /// agrégats calculés à la volée sur les timestamps des items
+    /// AgentBacklog. `window` : "24h"|"7d"|"30d"|"all" (défaut "7d").
+    /// Réponse : `{window, since, generated_at, samples, aggregates}`
+    /// — lead time moyen/médian, attente file, items terminés/jour,
+    /// pic de workers. Extension additive : démons anciens → erreur
+    /// « req inconnue », pas de coupure protocole.
+    BacklogMetrics {
+        #[serde(default)]
+        window: Option<String>,
+    },
     DaemonStatus,
     /// Auto-update du démon vers la release `version` demandée par le
     /// client (ex. "0.5.0" → tag v0.5.0 — jamais « latest » : le démon
@@ -1127,6 +1139,7 @@ impl ReqKind {
             Self::OrchestratorSet { .. } => "orchestrator_set",
             Self::OrchestratorConfig { .. } => "orchestrator_config",
             Self::ManagerSpawn { .. } => "manager_spawn",
+            Self::BacklogMetrics { .. } => "backlog_metrics",
             Self::DaemonStatus => "daemon_status",
             Self::UpdateDaemon { .. } => "update_daemon",
         }

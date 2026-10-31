@@ -35,14 +35,14 @@ use crate::server::misc::command_available;
 use proto::{ComponentKind, EventKind, SessionMeta};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
 use std::time::Duration;
 
 /// Nom du composant interne (et de l'entrée `origin` des sessions
 /// workers — le diagramme les raccroche à son nœud).
 pub(crate) const COMPONENT_NAME: &str = "backlog-orchestrator";
-const COMPONENT_ORIGIN: &str = "component:backlog-orchestrator";
+pub(crate) const COMPONENT_ORIGIN: &str = "component:backlog-orchestrator";
 
 /// Timeout des sous-processus externes (agentbacklog, gh) — identique
 /// au script.
@@ -211,6 +211,9 @@ pub struct OrchProbe {
     manager_lock: tokio::sync::Mutex<()>,
     /// Réveille la boucle hors période (bascule enable → cycle immédiat).
     wake: tokio::sync::Notify,
+    /// Appends au journal métriques depuis la dernière compaction —
+    /// déclencheur périodique de la rotation (server/metrics.rs).
+    pub(crate) metrics_appends: AtomicU64,
 }
 
 impl OrchProbe {
@@ -233,6 +236,7 @@ impl OrchProbe {
             lock_file: Mutex::new(None),
             manager_lock: tokio::sync::Mutex::new(()),
             wake: tokio::sync::Notify::new(),
+            metrics_appends: AtomicU64::new(0),
             cfg: RwLock::new(cfg),
         }
     }
@@ -576,14 +580,14 @@ fn item_post_state(enabled: bool, holder: LockHolder) -> (&'static str, Option<S
 /// (DB sqlite, lock, pause, state.json). HOME du démon comme
 /// `expanduser` : pas de override — le flock doit être au même endroit
 /// pour les deux implémentations quelle que soit `--db`/AGENTBACKLOG_DB.
-fn state_dir() -> PathBuf {
+pub(crate) fn state_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".agentbacklog")
 }
 
-fn now_secs() -> f64 {
+pub(crate) fn now_secs() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -591,12 +595,12 @@ fn now_secs() -> f64 {
 }
 
 /// Item de la file AgentBacklog (projection JSON du `--list --all`).
-type Task = Value;
+pub(crate) type Task = Value;
 
 fn task_id(t: &Task) -> u64 {
     t.get("id").and_then(Value::as_u64).unwrap_or(0)
 }
-fn task_status<'a>(t: &'a Task) -> &'a str {
+pub(crate) fn task_status<'a>(t: &'a Task) -> &'a str {
     t.get("status").and_then(Value::as_str).unwrap_or("")
 }
 fn task_agent<'a>(t: &'a Task) -> &'a str {
@@ -605,7 +609,7 @@ fn task_agent<'a>(t: &'a Task) -> &'a str {
 /// Un item `pending` est « poppable » : sans dépendance ou dépendance
 /// soldée — compter les dep-bloqués ferait spawner des workers qui
 /// trouveraient « queue is empty » (churn spawn/rm du script).
-fn task_poppable(t: &Task) -> bool {
+pub(crate) fn task_poppable(t: &Task) -> bool {
     t.get("depends_on").is_none_or(|d| d.is_null())
         || t.get("dep_status").and_then(Value::as_str) == Some("done")
 }
@@ -772,7 +776,7 @@ impl Daemon {
     /// nom nu sur le PATH du démon, ou argv0 d'un composant `tool`
     /// déclaré et installé (chemin absolu hors PATH accepté — la
     /// garde et l'exécution voient le même binaire).
-    async fn orch_agentbacklog_bin(&self) -> Option<String> {
+    pub(crate) async fn orch_agentbacklog_bin(&self) -> Option<String> {
         if command_available("agentbacklog") {
             return Some("agentbacklog".into());
         }
@@ -1167,12 +1171,17 @@ impl Daemon {
         if self.orch.is_enabled() {
             self.orch.set_status(Phase::Active, None);
         }
+        // Échantillon métriques post-cycle (server/metrics.rs) —
+        // best-effort : un journal inscriptible ne casse jamais le tick.
+        if cfg.metrics {
+            self.orch.metrics_sample(&tasks, &metas);
+        }
         Ok(())
     }
 
     /// `agentbacklog --list --all --json` → items, None si la lecture
     /// a échoué (le cycle avorte : aucune décision sur du flou).
-    async fn orch_tasks(&self, bin: &str, ws: &Path) -> Option<Vec<Task>> {
+    pub(crate) async fn orch_tasks(&self, bin: &str, ws: &Path) -> Option<Vec<Task>> {
         let (rc, out, err) = run_out(
             &[bin, "--list", "--all", "--json"],
             ws,

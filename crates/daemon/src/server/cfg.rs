@@ -146,6 +146,14 @@ pub struct OrchCfg {
     /// Cooldown entre deux nudges à la même session (défaut 900 s).
     #[serde(default = "d900")]
     pub nudge_cooldown_secs: u64,
+    /// Échantillonnage métriques : à chaque tick, un sample
+    /// `{ts, pending, wip, workers_alive, by_repo}` est ajouté au
+    /// journal JSONL `~/.agentbacklog/metrics.jsonl` (rétention bornée,
+    /// server/metrics.rs) servi par `backlog_metrics`. `false` = pas
+    /// de série — les agrégats items de la RPC restent calculés.
+    /// Défaut true.
+    #[serde(default = "dtrue")]
+    pub metrics: bool,
     /// Prompt worker sur mesure — None = le prompt intégré (celui du
     /// script d'origine, adapté au cahier des charges AgentBacklog).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -216,6 +224,7 @@ impl Default for OrchCfg {
             model: dmodel(),
             thought_level: dlevel(),
             nudge_cooldown_secs: 900,
+            metrics: true,
             prompt: None,
             manager_prompt: None,
             repo_workspaces: drw(),
