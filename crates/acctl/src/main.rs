@@ -30,9 +30,11 @@
 //!       [--vmin V] [--autostart] | rm <n>
 //!                                     — composants managés du démon
 //!   acctl orch [on|off|status|config|set <clé> <val>…]
+//!       | metrics [--window 24h|7d|30d|all]
 //!                                     — orchestrateur backlog natif
 //!                                     (on|off : bascule runtime ;
-//!                                     config/set : édition persistée)
+//!                                     config/set : édition persistée ;
+//!                                     metrics : série + agrégats)
 //!
 //! Connexion : $AGENTCONTROL_SOCK (défaut ~/.agentcontrol/daemon.sock)
 //!             ou $AGENTCONTROL_TCP host:port
@@ -652,7 +654,8 @@ async fn main() -> Result<()> {
         // on|off (orchestrator_set), `status` = component_info de
         // l'interne (phase, ledger workers, gardes), `config` = lecture
         // de la config éditable, `set` = patch persisté
-        // (orchestrator_config).
+        // (orchestrator_config), `metrics` = série + agrégats
+        // (backlog_metrics).
         "orch" | "orchestrator" => {
             let sub = args.get(1).map(String::as_str).unwrap_or("status");
             match sub {
@@ -666,6 +669,30 @@ async fn main() -> Result<()> {
                     println!("{}", c.call(proto::ReqKind::ComponentInfo {
                         name: "backlog-orchestrator".into(),
                     }).await?);
+                }
+                // Série + agrégats du journal métriques : fenêtre
+                // positionnelle ou `--window` (défaut 7d).
+                "metrics" => {
+                    let mut window = "7d".to_string();
+                    let mut i = 2;
+                    while i < args.len() {
+                        match args[i].as_str() {
+                            "--window" | "-w" => {
+                                i += 1;
+                                window = args
+                                    .get(i)
+                                    .cloned()
+                                    .context("--window <24h|7d|30d|all>")?;
+                            }
+                            other if !other.starts_with('-') => window = other.into(),
+                            other => bail!("option inconnue: {other}"),
+                        }
+                        i += 1;
+                    }
+                    let v = c
+                        .call(proto::ReqKind::BacklogMetrics { window: Some(window) })
+                        .await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
                 }
                 "config" | "get" => {
                     let v = c.call(proto::ReqKind::OrchestratorConfig { patch: None }).await?;
@@ -692,7 +719,7 @@ async fn main() -> Result<()> {
                     }).await?;
                     println!("{}", serde_json::to_string_pretty(&v)?);
                 }
-                other => bail!("usage: acctl orch [on|off|status|config|set <clé> <val>…] (inconnu: {other})"),
+                other => bail!("usage: acctl orch [on|off|status|config|set <clé> <val>…|metrics [--window W]] (inconnu: {other})"),
             }
         }
         other => bail!("commande inconnue: {other}"),

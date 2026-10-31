@@ -450,6 +450,29 @@ origin+title+live-state dedup) — an existing Manager is returned as-is;
 `rename_session` breaks the dedup (accepted: the title is the
 contract).
 
+### 2.10 Backlog metrics — sampled activity series
+
+The native orchestrator samples the queue at the end of each
+successful tick (`server/metrics.rs`, flag
+`[backlog_orchestrator] metrics = false` to cut the sampler without
+cutting the RPC): one JSONL sample appended to
+`~/.agentbacklog/metrics.jsonl` —
+`{ts, pending, poppable, wip, workers_alive, by_repo}`.
+`workers_alive` counts live sessions with
+`origin: component:backlog-orchestrator`. Retention is bounded (30 d
+and ~100 k samples, atomic `.part`+`rename` compaction, periodic or
+size-triggered). Orchestrator off/paused/blocked → no samples: the
+series lives with the orch — there is no standalone collector.
+
+`backlog_metrics{window}` (`acctl orch metrics [--window 24h|7d|30d|all]`,
+default `7d`) serves the series plus on-the-fly aggregates computed
+from the item timestamps (`agentbacklog --list --all`):
+mean/median lead time (created→done) and queue wait (created→started),
+items done/day, peak workers. A missing/corrupt journal yields an
+empty clean series; an unavailable agentbacklog still serves the
+series (`items_available:false`, item aggregates `null`). Additive
+request — no protocol breakage.
+
 ---
 
 ## 3. Risks & constraints
