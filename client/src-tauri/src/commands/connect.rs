@@ -32,6 +32,7 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
             password,
             key,
             native,
+            host_keys,
         } => {
             let native = native.unwrap_or(false) || cfg!(target_os = "android");
             if native {
@@ -43,6 +44,9 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
                     remote_port: remote_port.unwrap_or(7331),
                     password,
                     key_path: key.map(PathBuf::from),
+                    expected_hk: host_keys
+                        .map(|v| v.into_iter().collect::<std::collections::HashSet<_>>())
+                        .filter(|s| !s.is_empty()),
                 }
             } else {
                 Transport::Ssh {
@@ -205,6 +209,7 @@ pub(crate) async fn ensure_daemon(
     password: Option<String>,
     key: Option<String>,
     native: Option<bool>,
+    host_keys: Option<Vec<String>>,
 ) -> Result<String, String> {
     const BASE: &str = "https://github.com/Wameuh/AgentControl/releases";
     // Script distant POSIX : check version via acctl status, sinon install.
@@ -294,6 +299,14 @@ pub(crate) async fn ensure_daemon(
         let (user, h) = split_user_host(&host, user.as_deref())?;
         let err_acc = std::sync::Mutex::new(String::new());
         let app2 = app.clone();
+        // Profil appairé → la host key est épinglée pour l'exec aussi.
+        let opts = client_core::ssh_native::Opts {
+            expected_hk: host_keys
+                .map(|v| v.into_iter().collect::<std::collections::HashSet<_>>())
+                .filter(|s| !s.is_empty())
+                .map(Arc::new),
+            key: None,
+        };
         let (code, out, _err) = client_core::ssh_native::ssh_exec(
             &h,
             port.unwrap_or(22),
@@ -310,6 +323,7 @@ pub(crate) async fn ensure_daemon(
                     g.push('\n');
                 }
             }),
+            &opts,
         )
         .await
         .map_err(|e| format!("{e:#}"))?;
