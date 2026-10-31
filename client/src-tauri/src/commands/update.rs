@@ -181,6 +181,11 @@ fn verify_asset(path: &std::path::Path, name: &str) -> Result<(), String> {
             "{name} invalide — pas un exécutable (téléchargement corrompu ?)"
         ));
     }
+    if name.ends_with(".msi") && !head.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]) {
+        return Err(format!(
+            "{name} invalide — pas un installeur MSI (téléchargement corrompu ?)"
+        ));
+    }
     Ok(())
 }
 
@@ -461,69 +466,185 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     std::process::exit(0);
 }
 
-/// Update en un clic (Windows) — version INSTALLÉE uniquement : télécharge
-/// le setup NSIS de la release, puis un .bat caché l'installe en silencieux
-/// (/S) et relance l'app — l'exe courant doit être mort pour le remplacer.
-/// Build portable (exe hors des dossiers d'install) → Err → page releases.
+/// Update en un clic (Windows) — trois chemins selon l'exe courant :
+/// - NSIS per-user (sous %LOCALAPPDATA%\AgentControl\ = $INSTDIR NSIS) :
+///   le setup de la release est installé en silencieux (/S) par un .bat
+///   post-exit, puis l'app est relancée ;
+/// - MSI per-machine (sous Program Files / Program Files (x86)) : le
+///   .msi de la release est installé par `msiexec /i /qn /norestart`
+///   lancé ÉLEVÉ via PowerShell `Start-Process -Verb runas` (invite
+///   UAC attendue — per-machine l'exige), puis relance ;
+/// - PORTABLE (ailleurs, dossier user-écrivable) : le plus simple à
+///   updater — le .bat copie le `-portable.exe` téléchargé SUR l'exe
+///   courant, puis relance.
+/// Même squelette ping/status.txt OK-FAIL/relance pour les trois.
+/// Refus résiduel → Err explicite + repli page releases : dossier de
+/// l'exe non inscriptible (portable) ou asset absent de la release.
 #[cfg(target_os = "windows")]
 #[tauri::command]
 pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     ulog(format!("install v{tag} demandée"));
     let cur = std::env::current_exe().map_err(|e| e.to_string())?;
-    // Installé = exe sous le $INSTDIR NSIS = %LOCALAPPDATA%\<productName>\
+    // NSIS = exe sous le $INSTDIR = %LOCALAPPDATA%\<productName>\
     // (installMode currentUser par défaut — RestorePreviousInstallLocation
-    // met alors à jour EN PLACE → relancer cur est correct). Un exe sous
-    // Program Files (MSI per-machine, ou portable déplacé là) → le setup
-    // per-user s'installerait AILLEURS et relancer cur rouvrirait
-    // l'ancien : trompe-l'œil → refus → repli page releases, comme le
-    // portable. "\" final = borne de composant (\AgentControlX\ ne match
-    // pas). Comparaison en minuscules : la casse de current_exe peut
-    // différer de %LOCALAPPDATA%.
+    // met alors à jour EN PLACE → relancer cur est correct). "\" final =
+    // borne de composant (\AgentControlX\ ne match pas). Comparaison en
+    // minuscules : la casse de current_exe peut différer de
+    // %LOCALAPPDATA%.
     let local = std::env::var("LOCALAPPDATA")
         .map(|p| format!("{p}\\AgentControl\\"))
         .unwrap_or_default()
         .to_lowercase();
     let cur_l = cur.to_string_lossy().to_lowercase();
-    if local.is_empty() || !cur_l.starts_with(&local) {
-        return Err("build portable — update manuelle via la page releases".into());
-    }
-    let setup = tokio::task::spawn_blocking({
-        let tag = tag.clone();
-        move || {
-            // NSIS : AgentControl_<ver>_x64-setup.exe
-            fetch_release_asset(&tag, "agentcontrol-setup.exe", |n| {
-                n.ends_with("-setup.exe")
+    // dl = fichier téléchargé (setup/msi/portable) ; action = ligne(s)
+    // du .bat propres au chemin ; ok_dels / fail_dels = dels additionnels
+    // en succès (le .ps1 du chemin msi) et en échec (le .new du portable
+    // — placés APRÈS l'echo FAIL pour préserver %errorlevel% dans le
+    // message) ; cause = libellé du FAIL versé dans status.txt.
+    let (dl, action, ok_dels, fail_dels, cause): (PathBuf, String, String, String, String) =
+        if !local.is_empty() && cur_l.starts_with(&local) {
+            ulog(format!("exe sous {local} → chemin nsis"));
+            let setup = tokio::task::spawn_blocking({
+                let tag = tag.clone();
+                move || {
+                    // NSIS : AgentControl_<ver>_x64-setup.exe
+                    fetch_release_asset(&tag, "agentcontrol-setup.exe", |n| {
+                        n.ends_with("-setup.exe")
+                    })
+                }
             })
-        }
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+            .await
+            .map_err(|e| e.to_string())??;
+            (
+                setup.clone(),
+                format!("start \"\" /wait \"{}\" /S", setup.display()),
+                String::new(),
+                String::new(),
+                "installer exited with code %errorlevel%".into(),
+            )
+        } else if let Some(pf) = program_files_root(&cur_l) {
+            ulog(format!("exe sous {pf} → chemin msi (per-machine, élévation UAC)"));
+            let msi = tokio::task::spawn_blocking({
+                let tag = tag.clone();
+                move || {
+                    // MSI : AgentControl_<ver>_x64_en-US.msi
+                    fetch_release_asset(&tag, "agentcontrol.msi", |n| {
+                        n.ends_with("_en-US.msi")
+                    })
+                }
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| {
+                let msg = format!(
+                    "{e} — prenez l'installateur MSI v{tag} à la main : page releases"
+                );
+                ulog(format!("install v{tag} impossible — {msg}"));
+                msg
+            })?;
+            // L'install per-machine exige l'élévation : msiexec est lancé
+            // via Start-Process -Verb runas (invite UAC) depuis un .ps1
+            // sidecar — injecter la commande dans le .bat poserait des
+            // problèmes de quoting cmd/powershell ; -File les évite et
+            // le fichier reste lisible en cas de FAIL (débogage).
+            // -ErrorAction Stop + catch : le refus UAC est une erreur
+            // non-terminating — sans lui $p resterait $null et exit
+            // renverrait 0 → faux « OK ». 1602 = ERROR_INSTALL_USEREXIT
+            // (refus utilisateur). -Wait + -PassThru → ExitCode réel de
+            // msiexec ; 3010 = succès avec reboot requis, normalisé en 0
+            // (le /norestart rend le reboot optionnel). BOM en tête :
+            // PowerShell 5.1 lit un script sans BOM en ANSI → un chemin
+            // utilisateur accentué (C:\Users\José) serait mal décodé.
+            let ps1 = msi.with_file_name("agentcontrol-update.ps1");
+            std::fs::write(
+                &ps1,
+                format!(
+                    "\u{feff}$msi = '{}'\r\ntry {{ $p = Start-Process msiexec -Verb runas -Wait -PassThru -ErrorAction Stop -ArgumentList \"/i `\"$msi`\" /qn /norestart\" }} catch {{ exit 1602 }}\r\nif ($null -eq $p) {{ exit 1 }}\r\nif ($p.ExitCode -eq 3010) {{ exit 0 }}\r\nexit $p.ExitCode\r\n",
+                    msi.display().to_string().replace('\'', "''")
+                ),
+            )
+            .map_err(|e| e.to_string())?;
+            (
+                msi.clone(),
+                format!(
+                    "powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\"",
+                    ps1.display()
+                ),
+                format!("del \"{}\"\r\n", ps1.display()),
+                String::new(),
+                "msiexec failed with code %errorlevel%".into(),
+            )
+        } else {
+            dir_writable_or_err(&cur, &tag)?;
+            ulog(format!("chemin portable — remplacement en place de {}", cur.display()));
+            let exe = tokio::task::spawn_blocking({
+                let tag = tag.clone();
+                move || {
+                    // Portable : AgentControl_<ver>_x64-portable.exe
+                    fetch_release_asset(&tag, "agentcontrol-portable.exe", |n| {
+                        n.ends_with("-portable.exe")
+                    })
+                }
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| {
+                let msg = format!(
+                    "{e} — prenez le build portable v{tag} à la main : page releases"
+                );
+                ulog(format!("install v{tag} impossible — {msg}"));
+                msg
+            })?;
+            // copy → <cur>.new puis move /Y : un copy /Y direct sur cur
+            // le tronquerait à l'ouverture — une erreur I/O en pleine
+            // copie laisserait un exe corrompu que le :fail relancerait.
+            // Le .new est dans le MÊME dossier → move = rename atomique
+            // (même volume). Retry borné contre la fenêtre de lock
+            // post-exit (indexation AV, handle résiduel) — le dernier
+            // move rejoué avant goto fail préserve le vrai %errorlevel%
+            // (set /a l'aurait remis à 0 → FAIL « code 0 » mensonger) ;
+            // .new supprimé dans la branche d'échec. Labels ac_*
+            // préfixés : pas de collision avec le squelette.
+            let new = format!("{}.new", cur.display());
+            (
+                exe.clone(),
+                format!(
+                    "copy /Y \"{}\" \"{new}\" >nul\r\nif errorlevel 1 goto fail\r\nset /a ac_tries=0\r\n:ac_move\r\nmove /Y \"{new}\" \"{}\" >nul 2>nul\r\nif not errorlevel 1 goto ac_moved\r\nset /a ac_tries+=1\r\nif %ac_tries% lss 5 (ping -n 2 127.0.0.1 >nul & goto ac_move)\r\nmove /Y \"{new}\" \"{}\" >nul 2>nul\r\ngoto fail\r\n:ac_moved",
+                    exe.display(),
+                    cur.display(),
+                    cur.display()
+                ),
+                String::new(),
+                format!("del \"{new}\" 2>nul\r\n"),
+                "replace failed with code %errorlevel%".into(),
+            )
+        };
     // cmd /C : ping ≈ sleep 1 s sans console (timeout.exe exige un handle
     // d'entrée console → inerte sous CREATE_NO_WINDOW) — laisse au process
-    // courant le temps de se fermer et de relâcher ses locks ; /wait attend
-    // la fin du setup. L'install se produit APRÈS notre exit : son résultat
-    // est versé dans status.txt (OK/FAIL) → l'instance relancée le lit au
-    // boot et l'affiche — un setup raté relance quand même l'ancienne
-    // version pour que l'échec soit visible. hide_console → aucune fenêtre
-    // cmd parasite. del final : pas de résidu setup/.bat dans TEMP (sauf
+    // courant le temps de se fermer et de relâcher ses locks ; les actions
+    // attendent elles-mêmes leur install (/wait du setup, -Wait du
+    // msiexec élevé). L'action se produit APRÈS notre exit :
+    // son résultat est versé dans status.txt (OK/FAIL) → l'instance
+    // relancée le lit au boot et l'affiche — un échec relance quand même
+    // l'ancienne version pour qu'il soit visible. hide_console → aucune
+    // fenêtre cmd parasite. del final : pas de résidu dans TEMP (sauf
     // chemin d'échec = débogage).
     let status = update_status_path();
-    let bat = setup.with_file_name("agentcontrol-update.bat");
+    let bat = dl.with_file_name("agentcontrol-update.bat");
+    let (st, dls, curs) = (
+        status.display().to_string(),
+        dl.display().to_string(),
+        cur.display().to_string(),
+    );
     std::fs::write(
         &bat,
         format!(
-            "@echo off\r\nping -n 2 127.0.0.1 >nul\r\nstart \"\" /wait \"{}\" /S\r\nif errorlevel 1 goto fail\r\n>\"{}\" echo OK {tag}\r\ndel \"{}\"\r\nstart \"\" \"{}\"\r\ndel \"%~f0\" & exit /b 0\r\n:fail\r\n>\"{}\" echo FAIL installer exited with code %errorlevel%\r\nstart \"\" \"{}\"\r\nexit /b 1\r\n",
-            setup.display(),
-            status.display(),
-            setup.display(),
-            cur.display(),
-            status.display(),
-            cur.display()
+            "@echo off\r\nping -n 2 127.0.0.1 >nul\r\n{action}\r\nif errorlevel 1 goto fail\r\n>\"{st}\" echo OK {tag}\r\ndel \"{dls}\"\r\n{ok_dels}start \"\" \"{curs}\"\r\ndel \"%~f0\" & exit /b 0\r\n:fail\r\n>\"{st}\" echo FAIL {cause}\r\n{fail_dels}start \"\" \"{curs}\"\r\nexit /b 1\r\n"
         ),
     )
     .map_err(|e| e.to_string())?;
     ulog(format!(
-        "install v{tag} : lancement du setup (post-exit) → {}",
+        "install v{tag} : script post-exit prêt → {}",
         bat.display()
     ));
     let mut cmd = tokio::process::Command::new("cmd");
@@ -531,4 +652,52 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     client_core::hide_console(&mut cmd);
     cmd.spawn().map_err(|e| e.to_string())?;
     std::process::exit(0);
+}
+
+/// `cur_l` (current_exe minuscule) sous `<Program Files*>\AgentControl\`
+/// → install per-machine (MSI, INSTALLDIR WiX par défaut) → le chemin
+/// msi s'applique. Rend le préfixe matché pour le log. Borné au dossier
+/// produit : un portable garé ailleurs sous Program Files retombe sur
+/// la sonde d'écriture → refus explicite, au lieu d'un msiexec qui
+/// installerait sous SON INSTALLDIR et relancerait l'ancien exe (faux
+/// « OK »). Prix : un INSTALLDIR custom sous PF échappe au chemin msi.
+#[cfg(target_os = "windows")]
+fn program_files_root(cur_l: &str) -> Option<String> {
+    ["ProgramFiles", "ProgramFiles(x86)"]
+        .iter()
+        .filter_map(|v| std::env::var(v).ok())
+        .map(|p| format!("{}\\AgentControl\\", p.trim_end_matches('\\')))
+        .find(|pf| cur_l.starts_with(&pf.to_lowercase()))
+}
+
+/// Garde-fou du chemin portable : le dossier de l'exe doit être
+/// inscriptible SANS élévation — sinon le .bat post-exit ne pourrait pas
+/// plus y écrire que nous. Sonde réelle (créer+supprimer un fichier
+/// temporaire) : les ACL Windows ne se devinent pas au read-only bit.
+/// Refus explicite citant le pourquoi + le repli manuel page releases.
+#[cfg(target_os = "windows")]
+fn dir_writable_or_err(cur: &std::path::Path, tag: &str) -> Result<(), String> {
+    let dir = cur
+        .parent()
+        .map(|d| d.display().to_string())
+        .unwrap_or_default();
+    let probe = cur
+        .parent()
+        .unwrap_or(cur)
+        .join(format!("agentcontrol-w{}.tmp", std::process::id()));
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            Ok(())
+        }
+        Err(e) => {
+            let msg = format!(
+                "dossier en lecture seule — {dir} non inscriptible ({e}) : \
+                 l'exe ne peut pas être remplacé ; déplacez-le ou prenez \
+                 le build portable v{tag} sur la page releases"
+            );
+            ulog(format!("chemin portable refusé — {msg}"));
+            Err(msg)
+        }
+    }
 }
