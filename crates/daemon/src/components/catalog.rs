@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
+use tracing::{info, warn};
 
 use super::Components;
 use crate::server::misc::command_available;
@@ -520,6 +521,92 @@ pub(super) fn entry_named(name: &str) -> Option<&'static CatalogEntry> {
     CATALOG.iter().find(|e| e.name == name)
 }
 
+/// Spec persistée adossée à l'entrée `entry` : resynchronise les champs
+/// catalogue-owned depuis l'entrée courante — appelée au chargement
+/// (`Components::open`). La spec posée à l'install est un SNAPSHOT :
+/// sans resync, une entrée enrichie par un nouveau démon
+/// (params_schema, render, healthcheck, queries…) garderait la surface
+/// de l'époque à vie — l'utilisateur voyait « l'ancienne configuration »
+/// littéralement (bug : `repos` invisible sur agentreviewer installé
+/// avant l'ajout du param).
+///
+/// Merge en mémoire seulement — components.toml n'est PAS réécrit au
+/// boot (la prochaine `save()` le réaligne d'elle-même) : le fichier
+/// reste le dernier état matérialisé + les choix utilisateur, jamais
+/// un canal de drift forcé. Le catalogue ne change qu'avec le binaire
+/// → le resync au chargement couvre exactement « démon mis à jour ».
+///
+/// Préservés (choix utilisateur) : `params` clé→valeur (les clés
+/// nouvellement déclarées prennent leur défaut via `effective()`),
+/// `autostart`, `description` (éditable via upsert_edit — reprise du
+/// catalogue seulement si absente). Remplacés depuis l'entrée :
+/// kind/command/env/cwd/restart*/healthcheck/queries/params_schema/
+/// render/`catalog`.
+///
+/// Hygiène des params, jamais silencieuse (warn) :
+/// - clé retirée du schéma catalogue → valeur purgée : inéditable via
+///   set_params et jamais consommée par le template — un zombie.
+///   La purge ne court que si l'entrée DÉCLARE un schéma : schéma vide
+///   = params libres (même règle que `set_params`, « métadonnées
+///   seulement ») — y purger toute clé supprimerait au chargement ce
+///   que le chemin d'écriture accepte ;
+/// - valeur rejetée par le schéma resserré (validation durcie) →
+///   retirée : `check_usable` refuserait sinon la spec entière au
+///   chargement — mieux perdre la valeur que le composant.
+pub(super) fn resync(spec: &mut ComponentSpec, entry: &CatalogEntry) {
+    let before = serde_json::to_value(&*spec).ok();
+    if !entry.params.is_empty() {
+        let orphans: Vec<String> = spec
+            .params
+            .keys()
+            .filter(|k| !entry.params.iter().any(|p| &p.key == *k))
+            .cloned()
+            .collect();
+        for k in orphans {
+            warn!(
+                "composant « {} » : param « {k} » retiré du catalogue — valeur purgée",
+                spec.name
+            );
+            spec.params.remove(&k);
+        }
+    }
+    for p in &entry.params {
+        let bad = spec
+            .params
+            .get(&p.key)
+            .is_some_and(|v| !v.is_empty() && super::render::validate_value(p, v).is_err());
+        if bad {
+            warn!(
+                "composant « {} » : param « {} » rejeté par le schéma \
+                 catalogue — valeur retirée (à ressaisir via comp set)",
+                spec.name, p.key
+            );
+            spec.params.remove(&p.key);
+        }
+    }
+    let cat = materialize_spec(entry, &spec.params);
+    spec.kind = cat.kind;
+    spec.command = cat.command;
+    spec.env = cat.env;
+    spec.cwd = cat.cwd;
+    spec.restart = cat.restart;
+    spec.restart_sec = cat.restart_sec;
+    spec.healthcheck = cat.healthcheck;
+    spec.queries = cat.queries;
+    spec.params_schema = cat.params_schema;
+    spec.render = cat.render;
+    spec.catalog = cat.catalog;
+    if spec.description.is_none() {
+        spec.description = cat.description;
+    }
+    if serde_json::to_value(&*spec).ok() != before {
+        info!(
+            "composant « {} » : spec resynchronisée depuis l'entrée catalogue « {} »",
+            spec.name, entry.name
+        );
+    }
+}
+
 impl Components {
     /// `ComponentCatalog` : pour chaque entrée — métadonnées +
     /// `installed` (bin sur le PATH du démon / fichier présent) +
@@ -979,6 +1066,80 @@ mod tests {
             .env
             .keys()
             .any(|k| k.starts_with("AGENTCONTROL_")));
+    }
+
+    /// Spec persistée figée (snapshot pré-params ou schéma d'une
+    /// vieille entrée) : au chargement les champs catalogue-owned sont
+    /// rafraîchis depuis l'entrée, les choix utilisateur conservés et
+    /// les params devenus inutilisables purgés.
+    #[test]
+    fn resync_spec_depuis_le_catalogue() {
+        let entry = entry_named("agentreviewer").unwrap();
+        // Snapshot d'avant les params : ni catalog/params_schema/render,
+        // healthcheck d'époque — + params posés depuis (valeur user,
+        // clé zombie, valeur invalide sous le schéma courant).
+        let mut spec = entry.suggested_spec.clone();
+        spec.catalog = None;
+        spec.params_schema = Vec::new();
+        spec.render = None;
+        spec.healthcheck = Healthcheck::None;
+        spec.autostart = true;
+        spec.description = Some("ma description".into());
+        spec.params = HashMap::from([
+            ("repo".to_string(), "Wameuh/AgentControl".to_string()),
+            ("zombie".to_string(), "x".to_string()),
+            ("max_parallel".to_string(), "abc".to_string()),
+        ]);
+        resync(&mut spec, entry);
+        // Champs catalogue rafraîchis (dont `repos`, ajouté après).
+        assert_eq!(spec.catalog.as_deref(), Some("agentreviewer"));
+        assert_eq!(spec.params_schema.len(), entry.params.len());
+        assert!(spec.params_schema.iter().any(|p| p.key == "repos"));
+        assert!(spec.render.is_some());
+        assert_eq!(spec.healthcheck, entry.suggested_spec.healthcheck);
+        assert_eq!(spec.command, entry.suggested_spec.command);
+        // Choix utilisateur préservés ; zombie + invalide purgés.
+        assert!(spec.autostart);
+        assert_eq!(spec.description.as_deref(), Some("ma description"));
+        assert_eq!(spec.params["repo"], "Wameuh/AgentControl");
+        assert!(!spec.params.contains_key("zombie"));
+        assert!(!spec.params.contains_key("max_parallel"));
+        // Description absente → reprise du catalogue.
+        let mut bare = entry.suggested_spec.clone();
+        bare.description = None;
+        resync(&mut bare, entry);
+        assert_eq!(bare.description, entry.suggested_spec.description);
+    }
+
+    /// Entrée sans schéma déclaré (agentbacklog) : les params libres —
+    /// acceptés par `set_params` (« spec sans schéma = params libres »)
+    /// — ne sont pas purgés au resync, sinon le chargement supprimerait
+    /// ce que le chemin d'écriture accepte.
+    #[test]
+    fn resync_preserve_les_params_libres_sans_schema() {
+        let entry = entry_named("agentbacklog").unwrap();
+        assert!(entry.params.is_empty());
+        let mut spec = materialize_spec(
+            entry,
+            &HashMap::from([("meta".to_string(), "libre".to_string())]),
+        );
+        resync(&mut spec, entry);
+        assert_eq!(spec.params["meta"], "libre");
+    }
+
+    /// Une spec déjà matérialisée depuis l'entrée courante ressort
+    /// identique — le resync au chargement est idempotent.
+    #[test]
+    fn resync_spec_deja_a_jour_est_idempotent() {
+        let entry = entry_named("agentreviewer").unwrap();
+        let mut spec = materialize_spec(
+            entry,
+            &HashMap::from([("repo".to_string(), "o/r".to_string())]),
+        );
+        let before = serde_json::to_value(&spec).unwrap();
+        resync(&mut spec, entry);
+        assert_eq!(serde_json::to_value(&spec).unwrap(), before);
+        assert_eq!(spec.params["repo"], "o/r");
     }
 
     /// Chaque `{{clé}}` d'un template de rendu doit être déclarée dans
