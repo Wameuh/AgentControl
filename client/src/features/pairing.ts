@@ -147,9 +147,16 @@ async function renderDevices(cfg: SavedConn) {
 
 /** pair_begin → QR v2.1 + polling ; l'endpoint édité est celui mis dans
  *  le payload (l'install elle-même passe par la cfg du profil). */
+/** Champ port borné — un nombre hors plage serait rejeté côté serde
+ *  avec un message peu clair ; on clamp ici (regex host géré par Rust). */
+function epPort(): number {
+  const n = Number(($("qr-port") as HTMLInputElement).value);
+  return Math.min(65535, Math.max(1, Number.isFinite(n) && n > 0 ? Math.floor(n) : 22));
+}
+
 async function beginPair(s: PairSession) {
   const host = ($("qr-host") as HTMLInputElement).value.trim();
-  const port = Number(($("qr-port") as HTMLInputElement).value) || 22;
+  const port = epPort();
   const user = ($("qr-user") as HTMLInputElement).value.trim();
   qrStatus(t("qr_installing"));
   ($("qr-gen") as HTMLButtonElement).disabled = true;
@@ -168,8 +175,12 @@ async function beginPair(s: PairSession) {
     s.left = Math.max(0, r.exp - Math.floor(Date.now() / 1000));
     await drawQr(r.payload);
     const warnEl = $("qr-warn");
-    if (r.warn) {
-      warnEl.textContent = r.warn;
+    // warn: fps ≠ known_hosts (dur) ; sweep inline-only = pas de cron
+    // serveur → une ligne K expirée non consommée n'est balayée qu'au
+    // prochain appairage (hint — l'expiry-time sshd borne déjà la clé).
+    const sweepHint = r.sweep === "inline-only" ? t("qr_sweep_hint") : "";
+    if (r.warn || sweepHint) {
+      warnEl.textContent = [r.warn, sweepHint].filter(Boolean).join(" ");
       warnEl.hidden = false;
     } else {
       warnEl.hidden = true;
@@ -220,11 +231,11 @@ async function credQr(s: PairSession) {
  *  l'utilisateur pose la pubkey de l'appareil à la main. */
 async function endpointQr(s: PairSession) {
   const host = ($("qr-host") as HTMLInputElement).value.trim();
-  const port = Number(($("qr-port") as HTMLInputElement).value) || 22;
   const user = ($("qr-user") as HTMLInputElement).value.trim();
   const rport = s.cfg.remote_port ?? 7331;
   s.mode = "endpoint";
   await killActiveNonce(s);
+  const port = epPort();
   await drawQr(JSON.stringify({ v: 2, host, port, user, rport }));
   $("qr-ttl").textContent = "";
   $("qr-warn").hidden = true;

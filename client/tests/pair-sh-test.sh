@@ -112,6 +112,21 @@ ok $? "sweep : orpheline récente marquée .seen, conservée"
 touch -d '2 days ago' "$D/pair-$NONCE5.seen" 2>/dev/null || touch -t "$(date -v-2d +%Y%m%d%H%M 2>/dev/null || echo 200001010000)" "$D/pair-$NONCE5.seen"
 sh "$PAIR_SH" --sweep >/dev/null 2>&1
 grep -q "agentcontrol-pair-tmp $NONCE5\$" "$AK" && ok 1 "sweep : orpheline >24h retirée" || ok 0 "sweep : orpheline >24h retirée"
+# régression : un .exp vivant + sa ligne K ne doivent JAMAIS être
+# balayés (l'install écrit les deux sous le même verrou — auparavant
+# le sweep opportuniste détruisait le .exp frais, faute de ligne K).
+NONCE6="77777777777777777777777777777777"
+printf 'restrict,command="%s/pair.sh %s %s" ssh-ed25519 AAAA agentcontrol-pair-tmp %s\n' \
+  "$D" "$NONCE6" "$RPORT" "$NONCE6" >> "$AK"
+echo $(( $(date +%s) + 300 )) > "$D/pair-$NONCE6.exp"
+sh "$PAIR_SH" --sweep >/dev/null 2>&1
+[ -f "$D/pair-$NONCE6.exp" ] && grep -q "agentcontrol-pair-tmp $NONCE6\$" "$AK"
+ok $? "sweep : .exp vivant + ligne K préservés"
+# et l'appairage reste consommable après ce sweep
+out=$(SSH_ORIGINAL_COMMAND="agentcontrol-pair ssh-ed25519 $DEV_B64 ac-swept" \
+      sh "$PAIR_SH" "$NONCE6" "$RPORT" 2>/dev/null)
+[ $? -eq 0 ] && case "$out" in pair-ok:*) true;; *) false;; esac
+ok $? "pairing consommable après un sweep"
 
 # --- authorized_keys symlinké → refus net ---
 mv "$AK" "$AK.real"; ln -s "$AK.real" "$AK"

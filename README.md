@@ -80,7 +80,10 @@ the rest:
 - The device scans, confirms `user@host`, authenticates with the
   one-shot key — the server's host key is **pinned by the scanned
   fingerprints** (a MITM can't slip in), and `pair.sh` installs the
-  device's own key restricted to `127.0.0.1:<rport>` port forwarding.
+  device's own key under `restrict,port-forwarding,permitopen`:
+  forwarding is bound to `127.0.0.1:<rport>` (the daemon); shell exec
+  stays available so the device can still install or upgrade the
+  daemon remotely — `restrict` strips PTY, agent and X11 forwarding.
 - The server answers `pair-ok:<fingerprint>` — verified against the
   device key — and the one-shot line disappears.
 - Afterwards, every connection from that profile keeps **pinning the

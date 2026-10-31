@@ -38,6 +38,11 @@ export class ConnView {
    *  sous l'autre (injecté par le bootstrap). */
   onOpening: () => void = () => {};
   private saved: SavedConn[] = [];
+  /** Connexion en cours d'édition — les champs NON exposés par le
+   *  formulaire (key, host_keys) sont fusionnés à la save : une simple
+   *  édition (couleur, user) ne doit jamais faire sauter silencieusement
+   *  le pinning host key ni la clé importée par appairage. */
+  private editing: SavedConn | null = null;
   private stepEls = new Map<string, HTMLElement>();
   /** Clés de conn dont le bouton supprimer est armé (2e tap = suppression) —
    *  survit aux re-renders de la liste. */
@@ -428,6 +433,7 @@ export class ConnView {
   /** Remet le formulaire en mode « nouvelle connexion » (sortie de
    *  l'édition d'une saved conn). */
   private resetForm() {
+    this.editing = null;
     ($("cv-form-title") as HTMLElement).textContent = t("new_conn");
     ($("cv-form-reset") as HTMLButtonElement).hidden = true;
     // Défaut ssh : le cas nominal (démon sur serveur distant).
@@ -445,6 +451,7 @@ export class ConnView {
   /** Passage en édition d'une connexion sauvegardée : form prérempli +
    *  bouton reset pour revenir au mode nouvelle connexion. */
   private editSaved(c: SavedConn) {
+    this.editing = c;
     this.fillForm(c);
     ($("cv-form-title") as HTMLElement).textContent = t("edit_conn");
     ($("cv-form-reset") as HTMLButtonElement).hidden = false;
@@ -692,6 +699,13 @@ export class ConnView {
           : { kind: "local" };
     // Couleur propre à la connexion ("" = accent global des réglages).
     cfg.color = ($("c-accent") as HTMLSelectElement).value || undefined;
+    // Champs hors formulaire : hérités de la saved conn en édition —
+    // clé importée par appairage (repli A) et pinning B′. Sans ça, un
+    // « save » d'édition supprimerait silencieusement la protection.
+    if (kind === "ssh" && this.editing) {
+      if (this.editing.key) cfg.key = this.editing.key;
+      if (this.editing.host_keys?.length) cfg.host_keys = this.editing.host_keys;
+    }
     return cfg;
   }
 

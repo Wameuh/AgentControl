@@ -282,8 +282,6 @@ for fp do echo "hk:$fp"; done
 
 nonce=$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -v -tx1 | tr -d '[:space:]')
 exp=$(( $(date +%s) + @TTL@ ))
-printf '%s\n' "$exp" > "$D/pair-$nonce.exp"
-chmod 600 "$D/pair-$nonce.exp"
 
 expopt=""
 if [ "$has_exp" -eq 1 ]; then
@@ -311,8 +309,13 @@ else
   echo $$ > "$D/pair.lock.d/pid"
   trap 'rm -rf "$D/pair.lock.d"' EXIT
 fi
+# Ligne K + état d'expiration écrits SOUS LE MÊME VERROU — atomique
+# vis-à-vis de tout sweep (cron ou hook install) : un .exp sans ligne
+# K serait balayé, orphelin ; une ligne sans état expirerait aussitôt.
 printf 'restrict%s,command="%s/pair.sh %s %s" ssh-ed25519 %s agentcontrol-pair-tmp %s\n' \
   "$expopt" "$D" "$nonce" "@RPORT@" "@KB64@" "$nonce" >> "$AK"
+printf '%s\n' "$exp" > "$D/pair-$nonce.exp"
+chmod 600 "$D/pair-$nonce.exp"
 
 if command -v crontab >/dev/null 2>&1; then
   (crontab -l 2>/dev/null | grep -v 'agentcontrol/pair.sh --sweep'; \
@@ -329,6 +332,9 @@ echo "nonce:$nonce"
 /// pair.sh est CONSERVÉ (permanent, versionné).
 const CLEANUP_SH: &str = r#"D="$HOME/.agentcontrol"; AK="$HOME/.ssh/authorized_keys"
 umask 077
+# Symlink apparu entre l'install et le cleanup (setup managé) : ne pas
+# remplacer le lien par un fichier régulier — on ne touche à rien.
+if [ -L "$AK" ]; then rm -f "$D/pair-@NONCE@.exp" "$D/pair-@NONCE@.seen"; echo ok; exit 0; fi
 if [ -f "$AK" ]; then
 if command -v flock >/dev/null 2>&1; then
   exec 9>"$D/pair.lock"; flock -w 10 9 || exit 1
@@ -460,7 +466,13 @@ fn check_nonce(n: &str) -> Result<(), String> {
 /// Empreintes des host keys connues du desktop pour `host`
 /// (`ssh-keygen -l -F <host>` — couvre les entrées hashées) : le
 /// cross-check contre les fps collectées serveur est best-effort.
-fn known_hosts_fps(host: &str) -> HashSet<String> {
+async fn known_hosts_fps(host: String) -> HashSet<String> {
+    tokio::task::spawn_blocking(move || known_hosts_fps_sync(&host))
+        .await
+        .unwrap_or_default()
+}
+
+fn known_hosts_fps_sync(host: &str) -> HashSet<String> {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
@@ -558,7 +570,7 @@ pub(crate) async fn pair_begin(
     check_nonce(&nonce)?;
     // Cross-check best-effort : les fps lues côté serveur vs le
     // known_hosts du desktop — divergence = avertissement, pas un refus.
-    let known = known_hosts_fps(&host);
+    let known = known_hosts_fps(host.clone()).await;
     let warn = if !known.is_empty() && !hk.iter().any(|f| known.contains(f)) {
         Some("les empreintes du serveur diffèrent de votre known_hosts — vérifiez hors-bande".to_string())
     } else {

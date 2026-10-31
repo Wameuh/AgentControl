@@ -24,6 +24,7 @@ PATH=/usr/bin:/bin
 export PATH
 IFS=' '
 LC_ALL=C
+export LC_ALL
 umask 077
 
 D="$HOME/.agentcontrol"
