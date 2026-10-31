@@ -25,6 +25,7 @@ import {
 } from "../core/encoding";
 import { call, callBg } from "../core/rpc";
 import { app } from "../core/state";
+import { pushRecentFile, recentsId } from "../core/recent-files";
 import { isAndroid, isWindows } from "../core/chrome";
 import type { DirEntry } from "../core/types";
 import { t } from "../i18n";
@@ -87,6 +88,9 @@ interface CurFile {
 export class FileExplorer {
   private ctx = $("fctx");
   private treeOpen = false;
+  /** Chargement racine en vol (ou résolu) — await par revealInTree avant
+   *  de déplier l'arbre, sinon expandTo tomberait sur un arbre vide. */
+  private treeReady: Promise<void> | null = null;
   /** cwd absolu de la session (rempli par loadTreeRoot) — sert à
    *  reconstruire le chemin absolu des résultats de recherche. */
   private treeRootDir = "";
@@ -123,7 +127,7 @@ export class FileExplorer {
   onSessionOpened() {
     if (this.treeOpen) {
       this.clearSearch();
-      void this.loadTreeRoot();
+      this.treeReady = this.loadTreeRoot();
     }
   }
 
@@ -131,6 +135,9 @@ export class FileExplorer {
     if (!app.current) return;
     if (!(await this.ensureClean())) return;
     this.resetView();
+    // Ouverture réelle (la garde dirty est passée) → tête des récents
+    // de la palette quick-open. Chemins relatifs et absolus enregistrés.
+    pushRecentFile(recentsId(app.current.id, app.current.conn), path);
     if ($("file-panel").hidden) { $("file-panel").hidden = false; nav.push("files"); }
     // Android : le viewer glisse par-dessus la liste (navigation plein écran).
     if (isAndroid()) {
@@ -711,7 +718,18 @@ export class FileExplorer {
     $("ft-side").hidden = !v;
     $("btn-tree-refresh").hidden = !v;
     this.clearSearch();
-    if (v && !$("file-panel").hidden) void this.loadTreeRoot();
+    if (v && !$("file-panel").hidden) this.treeReady = this.loadTreeRoot();
+  }
+
+  /** Palette quick-open : révèle un dossier dans l'arbre — panneau et
+   *  arborescence ouverts, chargement racine attendu avant le dépliage.
+   *  btn-files.click() fait déjà setTreeVisible(true) → pas de second
+   *  loadTreeRoot à chaîner ici. */
+  async revealInTree(rel: string) {
+    if ($("file-panel").hidden) $("btn-files").click();
+    else if (!this.treeOpen) this.setTreeVisible(true);
+    await this.treeReady;
+    void this.revealDir(rel);
   }
 
   // -- Recherche par nom de fichier (find_files démon) -----------------------
@@ -1307,7 +1325,9 @@ export class FileExplorer {
     };
     // 🗂 dans le panneau : bascule juste la colonne arborescence
     $("btn-tree").onclick = () => this.setTreeVisible($("ft-side").hidden);
-    $("btn-tree-refresh").onclick = () => void this.loadTreeRoot();
+    $("btn-tree-refresh").onclick = () => {
+      this.treeReady = this.loadTreeRoot();
+    };
 
     // Recherche par nom : debounce à la frappe, Échap efface (sans
     // déclencher les raccourcis globaux).

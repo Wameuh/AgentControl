@@ -548,6 +548,7 @@
             <span id="file-path"></span>
             <button id="btn-tree" data-icon="panel" data-i18n-title="tree_title" title="File tree"></button>
             <button id="btn-tree-refresh" hidden data-icon="refresh" data-i18n-title="tree_refresh" title="Refresh"></button>
+            <button id="btn-openpath" data-icon="search" data-i18n-title="qo_title" title="Quick open"></button>
             <button id="file-close" data-icon="close"></button>
           </header>
           <div id="file-body">
@@ -718,6 +719,13 @@
           <button id="outdated-update" type="button" data-i18n="update_now">Update now</button>
         </menu>
       </form>
+    </dialog>
+
+    <dialog id="dlg-quick">
+      <input id="qo-input" autocomplete="off" spellcheck="false"
+             role="combobox" aria-expanded="true" aria-controls="qo-list" aria-autocomplete="list" />
+      <div id="qo-list" role="listbox"></div>
+      <div id="qo-foot" data-i18n="qo_hint"></div>
     </dialog>
 
     <dialog id="dlg-about">
