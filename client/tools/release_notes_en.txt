@@ -21,3 +21,4 @@
 194: New accent intensity setting — soft or vivid variants of every accent color.
 195: The backlog orchestrator is now fully configurable at runtime — toggles, worker and spawn settings, prompts, and repo workspaces persist to config.toml.
 196: The MSI installer wizard now shows branded AgentControl artwork instead of the generic WiX default images.
+197: Remote daemon updates no longer abort on the busy guard when the running daemon holds the port — foreign listeners stay protected, and the update dialog now warns that the connection drops and re-establishes.
