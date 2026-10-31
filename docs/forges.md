@@ -30,7 +30,7 @@ from creating phantom entries:
 - a **placeholder denylist** at extraction: any repo path where every
   segment fits in a single character or is a generic label
   (`o/r`, `g/p`, `owner/repo`, `grp/sub/proj`, `a/b`, `foo/bar`,
-  `example/stuff`…) is ignored before it can even become a reference;
+  `example/test`…) is ignored before it can even become a reference;
 - an **existence check on the forge** for every *new* reference: the
   entry is created only if the forge actually knows the repo AND the
   review — a plausible but made-up URL (`corp/tools`,

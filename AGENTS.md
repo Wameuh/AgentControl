@@ -259,7 +259,7 @@ in both cases:
   triggers auto-update (`minorOf` ≠ comparison → peer popup/update).
   Any feature without protocol breakage = patch, even a big one.
 - `(minor)` = **deprecated, no longer used**: ignored, treated as
-  patch — `detect_level` logs "note: (minor) deprecated" when it
+  patch — `detect_level` logs "note : (minor) déprécié" when it
   meets it. Use `(sync)` for protocol breakage, `(major)`
   exceptionally, nothing otherwise.
 - Write the **parenthesized** keyword in the subject of the commit
@@ -339,7 +339,8 @@ Manual off-PR: `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]`.
   splice bounded to the workspace (`resolve_in_cwd_create` — parent
   canonicalized, absent leaf OK, `..`/symlink escaping refused);
   `delete_len` clamped; `if_mtime_ms` ≠ disk mtime → `conflit:` error
-  (the client offers Recharger/Écraser); atomic `.part`+`rename`
+  (the client offers `Reload`/`Overwrite` — `Recharger`/`Écraser` in
+  the fr locale); atomic `.part`+`rename`
   write in `spawn_blocking`, unix mode preserved; `data` cap 16 MiB
   encoded. Response `{path, size, mtime_ms}`.
 - `create_path{path, dir}`: EXCLUSIVE creation of an empty file or
