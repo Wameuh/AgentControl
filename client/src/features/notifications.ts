@@ -106,19 +106,22 @@ class OsNotifications {
     if (!this.ready || !notifEnabled() || !notifTypeOn(kind)) return;
     if (notifOnlyUnfocused() && document.hasFocus()) return;
     const key = `${s.conn ?? "default"}:${s.id}:${kind}`;
-    if (Date.now() - (this.lastSent.get(key) ?? -COOLDOWN_MS) < COOLDOWN_MS)
-      return;
-    // Le slot n'est consommé que par un envoi réel — une transition pendant
-    // la permission refusée n'absorbe pas l'alerte du déblocage suivant.
+    const now = Date.now();
+    if (now - (this.lastSent.get(key) ?? -COOLDOWN_MS) < COOLDOWN_MS) return;
+    // Posé à la tentative : la garde tient pendant l'IPC et le prompt OS
+    // de permission (deux transitions in-flight ne doublonnent pas), puis
+    // relâché si l'envoi n'a pas eu lieu — le slot n'est consommé que par
+    // une notif réellement partie.
+    this.lastSent.set(key, now);
     void this.send(kind, s).then((sent) => {
       if (sent) {
-        const now = Date.now();
-        this.lastSent.set(key, now);
         if (this.lastSent.size > 500) {
           for (const [k, ts] of this.lastSent) {
             if (now - ts > COOLDOWN_MS) this.lastSent.delete(k);
           }
         }
+      } else if (this.lastSent.get(key) === now) {
+        this.lastSent.delete(key);
       }
     });
   }
