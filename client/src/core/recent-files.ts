@@ -18,7 +18,16 @@ type Store = Record<string, string[]>;
 function read(): Store {
   try {
     const v = JSON.parse(localStorage.getItem(STORE_KEY) ?? "{}");
-    return v && typeof v === "object" ? v : {};
+    if (!v || typeof v !== "object" || Array.isArray(v)) return {};
+    // Forme des buckets validée aussi : une valeur non-tableau (clé
+    // corrompue/éditée à la main, drift d'un autre build) ferait jeter
+    // filter() dans pushRecentFile — en plein openFilePanel, plus aucune
+    // ouverture de fichier ne passerait pour cette session.
+    for (const k of Object.keys(v)) {
+      if (!Array.isArray(v[k])) delete v[k];
+      else v[k] = v[k].filter((x: unknown): x is string => typeof x === "string");
+    }
+    return v as Store;
   } catch {
     return {};
   }

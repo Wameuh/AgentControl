@@ -111,19 +111,24 @@ export class QuickOpen {
       }
     });
     // Ctrl/Cmd+P : la palette prend le raccourci partout SAUF terminal
-    // interactif (le PTY en a besoin : previous-history readline) et sauf
-    // sous un autre dialogue modal. Sans session ouverte : rien à ouvrir.
+    // interactif (le PTY en a besoin : previous-history readline). Sous un
+    // autre dialogue modal on mange la touche sans ouvrir — sinon le
+    // navigateur ouvrirait son dialogue d'impression. Sans session
+    // ouverte : non intercepté (print natif conserve son raccourci,
+    // comme le find natif sous Ctrl+F). e.repeat : un combo maintenu
+    // toggle-fermerait en boucle (flicker).
     window.addEventListener("keydown", (e) => {
-      if (!(e.ctrlKey || e.metaKey) || (e.key !== "p" && e.key !== "P")) return;
+      if (!(e.ctrlKey || e.metaKey) || (e.key !== "p" && e.key !== "P") || e.repeat)
+        return;
       if (this.dlg.open) {
         e.preventDefault();
         this.close();
         return;
       }
       if (!app.current) return;
-      if (document.querySelector("dialog[open]")) return;
       if ((e.target as HTMLElement).closest?.("#term-panel")) return;
       e.preventDefault();
+      if (document.querySelector("dialog[open]")) return;
       this.open("search");
     });
   }
@@ -283,7 +288,14 @@ export class QuickOpen {
         matches: { path: string; dir: boolean; size: number }[];
         truncated: boolean;
       }>("find_files", { session: sid, query: q, limit: MAX_SHOWN });
-      if (seq !== this.seq || app.current?.id !== sid) return;
+      if (seq !== this.seq) return;
+      // Session affichée changée pendant le vol : les hits indexent
+      // l'ancien workspace et ouvriraient dans le mauvais cwd — fermer
+      // plutôt que laisser une liste périmée visible.
+      if (app.current?.id !== sid) {
+        this.close();
+        return;
+      }
       const lq = raw.toLowerCase();
       this.hits = r.matches
         .filter((m) => !looksLikePath(raw) || m.path.toLowerCase().includes(lq))
@@ -299,7 +311,11 @@ export class QuickOpen {
         this.note = { text: t("file_search_trunc"), err: false };
       }
     } catch (e) {
-      if (seq !== this.seq || app.current?.id !== sid) return;
+      if (seq !== this.seq) return;
+      if (app.current?.id !== sid) {
+        this.close();
+        return;
+      }
       // Vieux démon sans find_files (même détection que l'explorateur) :
       // la recherche tombe mais la saisie de chemin reste fonctionnelle.
       if (/unknown variant|méthode inconnue/i.test(String(e))) {
