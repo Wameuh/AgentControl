@@ -282,6 +282,11 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             limit: p.get("limit").and_then(Value::as_u64).unwrap_or(0),
             archive: so("archive"),
         },
+        "watch_dir" => ReqKind::WatchDir { session: s("session"), path: s("path") },
+        "unwatch_dir" => ReqKind::UnwatchDir {
+            session: s("session"),
+            path: so("path"),
+        },
         "queue_list" => ReqKind::QueueList { session: s("session") },
         "queue_edit" => ReqKind::QueueEdit {
             session: s("session"),
@@ -293,6 +298,10 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             index: p.get("index").and_then(Value::as_u64).unwrap_or(0),
         },
         "queue_promote" => ReqKind::QueuePromote {
+            session: s("session"),
+            index: p.get("index").and_then(Value::as_u64).unwrap_or(0),
+        },
+        "queue_steer" => ReqKind::QueueSteer {
             session: s("session"),
             index: p.get("index").and_then(Value::as_u64).unwrap_or(0),
         },
@@ -349,7 +358,24 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         "component_catalog" => ReqKind::ComponentCatalog {
             refresh: p.get("refresh").and_then(Value::as_bool),
         },
-        "component_install" => ReqKind::ComponentInstall { name: s("name") },
+        "component_install" => ReqKind::ComponentInstall {
+            name: s("name"),
+            params: match p.get("params") {
+                None => None,
+                Some(v) => Some(
+                    serde_json::from_value(v.clone())
+                        .map_err(|e| format!("component_install: params invalides: {e}"))?,
+                ),
+            },
+        },
+        "component_set_params" => ReqKind::ComponentSetParams {
+            name: s("name"),
+            params: p
+                .get("params")
+                .cloned()
+                .and_then(|v| serde_json::from_value(v).ok())
+                .ok_or("component_set_params: params absents ou invalides")?,
+        },
         "term_open" => ReqKind::TermOpen {
             session: s("session"),
             // Id choisi côté client : un term_open abandonné (timeout,

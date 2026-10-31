@@ -7,7 +7,9 @@
 //
 //   invoke(cmd, args)  → tauri ou webInvoke (table ci-dessous)
 //   listen(ev, cb)     → events Tauri ou pushes WS (mêmes noms/payloads)
-//   getVersion()       → version app Tauri, ou version du démon en web
+//   getVersion()       → app_version (identité compilée, suffixe -rc.K
+//                        inclus sur les builds rc), ou version du démon
+//                        en web
 //
 // Détection synchrone : __TAURI_INTERNALS__ est posé par le runtime Tauri
 // avant tout script — fiable dès l'évaluation du module.
@@ -15,7 +17,6 @@
 
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
-import { getVersion as tauriGetVersion } from "@tauri-apps/api/app";
 import { wsClient, WEB_CONN } from "./wsclient";
 
 export const isWeb = !(window as { __TAURI_INTERNALS__?: unknown })
@@ -48,11 +49,13 @@ export function listen<T>(
   return Promise.resolve(wsClient.on(event, (p) => cb({ payload: p as T })));
 }
 
-/** Version de l'app : Tauri → package ; web → version du démon qui sert
- *  la page (le « client » web est livré par lui — la cohérence de
- *  version affichée suit le serveur). */
+/** Version de l'app : Tauri → `app_version` (identité compilée — le
+ *  suffixe -rc.K des builds rc ne peut pas entrer dans la version
+ *  bundle MSI/plist, il vit dans le binaire) ; web → version du démon
+ *  qui sert la page (le « client » web est livré par lui — la
+ *  cohérence de version affichée suit le serveur). */
 export async function getVersion(): Promise<string> {
-  if (!isWeb) return tauriGetVersion();
+  if (!isWeb) return invoke<string>("app_version");
   const st = await wsClient.call<Record<string, unknown>>("daemon_status", {
     conn: WEB_CONN,
   });
@@ -105,6 +108,8 @@ async function webInvoke<T>(cmd: string, a: Record<string, unknown>): Promise<T>
     case "log_write":
       console.debug("[ui]", a.msg);
       return undefined as T;
+    case "update_last_status":
+      return null as T;
     case "set_app_icon":
       return undefined as T;
     case "plugin:opener|open_url":

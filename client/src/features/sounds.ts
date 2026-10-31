@@ -3,29 +3,17 @@
 //   fin de tour   working/compacting/running/waiting_input → idle   "done"
 //   question      → waiting_input                                 "question"
 //   erreur        → dead/interrupted                              "error"
-// Alimenté par le diff d'états de Sidebar.refresh() : list_sessions couvre
-// toutes les connexions, alors que le canal event ne suit que la session
-// ouverte. Le dernier état vu est mémorisé par session — un état déjà
-// connu ne rejoue jamais (première observation = seed silencieux, y
-// compris au démarrage).
-// Réglages localStorage ac-* + sons synthétisés par tools/gen_sounds.py.
+// Branché sur le diff d'états partagé de state-diff.ts (liste fusionnée de
+// Sidebar.refresh() — toutes les connexions, session ouverte ou non) ;
+// chaque transition y est dispatchée vers alert().
+// Réglages localStorage ac-* ; le timbre joué est un preset choisi par
+// événement, synthétisé en WebAudio à la volée (sound-presets.ts).
 // ---------------------------------------------------------------------------
 
 import { logUi } from "../core/dom";
-import type { SessionMeta } from "../core/types";
+import { PRESETS, playPreset, type SoundKind } from "./sound-presets";
 
-export type SoundKind = "done" | "question" | "error";
-
-const FILES: Record<SoundKind, string> = {
-  done: "/sounds/done.wav",
-  question: "/sounds/question.wav",
-  error: "/sounds/error.wav",
-};
-
-/** États comptant comme « l'agent travaille » pour la transition → idle. */
-const BUSY = new Set(["working", "compacting", "running", "waiting_input"]);
-/** États terminaux anormaux — glisser de l'un à l'autre ne re-sonne pas. */
-const ERR = new Set(["dead", "interrupted"]);
+export type { SoundKind };
 
 /** Rafale évitée : un même type ne peut pas sonner deux fois en 2 s. */
 const COOLDOWN_MS = 2_000;
@@ -46,39 +34,21 @@ export const sndVolume = () => {
 };
 export const sndOnlyUnfocused = () =>
   localStorage.getItem("ac-snd-unfocused") === "1";
-
-/** Transition d'intérêt, null sinon. */
-function classify(prev: string, next: string): SoundKind | null {
-  if (ERR.has(next)) return ERR.has(prev) ? null : "error";
-  if (next === "waiting_input") return "question";
-  if (next === "idle" && BUSY.has(prev)) return "done";
-  return null;
-}
+/** Preset choisi pour un événement — id inconnu ou absent → premier de la
+ *  liste (« classic », équivalent des wav historiques). */
+export const sndPresetId = (k: SoundKind) => {
+  const id = localStorage.getItem(`ac-snd-preset-${k}`) ?? "";
+  return PRESETS[k].some((p) => p.id === id) ? id : PRESETS[k][0].id;
+};
+const sndPreset = (k: SoundKind) =>
+  PRESETS[k].find((p) => p.id === sndPresetId(k)) ?? PRESETS[k][0];
 
 class SoundAlerts {
-  /** Dernier état vu par "conn:id" — la comparaison produit les sons. */
-  private last = new Map<string, string>();
   private lastPlay = new Map<SoundKind, number>();
 
-  /** Diff d'états sur la liste fusionnée du refresh sidebar. Les sessions
-   *  offline gardent leur dernier état connu (stale — ni mise à jour ni
-   *  son : une transition réelle pendant la coupure sonnera au retour) ;
-   *  celles qui disparaissent de la liste sont oubliées. */
-  noteStates(list: SessionMeta[]) {
-    const seen = new Set<string>();
-    for (const s of list) {
-      const key = `${s.conn ?? "default"}:${s.id}`;
-      seen.add(key);
-      if (s.offline) continue;
-      const prev = this.last.get(key);
-      this.last.set(key, s.state);
-      if (prev === undefined || prev === s.state) continue;
-      const kind = classify(prev, s.state);
-      if (kind) this.play(kind);
-    }
-    for (const k of [...this.last.keys()]) {
-      if (!seen.has(k)) this.last.delete(k);
-    }
+  /** Transition signalée par state-diff — gardes réglages puis lecture. */
+  alert(kind: SoundKind) {
+    this.play(kind);
   }
 
   /** Bouton « tester » des paramètres — volontairement sans garde (toggle,
@@ -112,7 +82,6 @@ class SoundAlerts {
 
   private ctx: AudioContext | null = null;
   private ctxFailed = false;
-  private buffers = new Map<SoundKind, Promise<AudioBuffer | null>>();
   private warnedBlocked = false;
 
   private audioCtx(): AudioContext | null {
@@ -140,31 +109,6 @@ class SoundAlerts {
     return this.ctx;
   }
 
-  /** fetch + decode d'un son, mis en cache (null si l'asset est absent). */
-  private buffer(kind: SoundKind): Promise<AudioBuffer | null> {
-    let p = this.buffers.get(kind);
-    if (!p) {
-      const ctx = this.audioCtx();
-      p = ctx
-        ? fetch(FILES[kind])
-            .then((r) => {
-              if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-              return r.arrayBuffer();
-            })
-            .then((ab) => ctx.decodeAudioData(ab))
-            .catch((e) => {
-              logUi("error", `audio: ${FILES[kind]} illisible: ${e}`);
-              // Échec transitoire possible — retry au prochain emit
-              // plutôt que de figer null en cache pour la session.
-              this.buffers.delete(kind);
-              return null;
-            })
-        : Promise.resolve(null);
-      this.buffers.set(kind, p);
-    }
-    return p;
-  }
-
   private async emit(kind: SoundKind) {
     const ctx = this.audioCtx();
     if (!ctx) return;
@@ -188,14 +132,24 @@ class SoundAlerts {
     // Débloqué trop tard : la notification est périmée, on l'écarte
     // plutôt que de jouer en rafale des sons obsolètes.
     if (Date.now() - t0 > STALE_MS) return;
-    const buf = await this.buffer(kind);
-    if (!buf) return;
-    const src = ctx.createBufferSource();
-    const gain = ctx.createGain();
-    gain.gain.value = sndVolume();
-    src.buffer = buf;
-    src.connect(gain).connect(ctx.destination);
-    src.start();
+    // Gain maître par lecture (volume courant) → synthèse du preset, puis
+    // compresseur léger en headroom : les presets denses (accords, voix
+    // doublées) peuvent dépasser la crête unitaire là où les wav étaient
+    // normalisés. Le graphe est déconnecté une fois la queue passée.
+    const master = ctx.createGain();
+    master.gain.value = sndVolume();
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -18;
+    comp.knee.value = 20;
+    comp.ratio.value = 6;
+    comp.attack.value = 0.002;
+    comp.release.value = 0.15;
+    master.connect(comp).connect(ctx.destination);
+    const ttl = playPreset(ctx, master, sndPreset(kind));
+    setTimeout(() => {
+      master.disconnect();
+      comp.disconnect();
+    }, ttl * 1000 + 100);
   }
 }
 

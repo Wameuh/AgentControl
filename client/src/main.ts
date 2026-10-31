@@ -19,6 +19,8 @@ import {
   applyAccent,
   accentPref,
   accentOf,
+  applyAccentStrong,
+  accentStrongPref,
   applyConnChrome,
   initGems,
   initPlatform,
@@ -42,10 +44,14 @@ import { SessionSearch } from "./features/search";
 import { Sidebar } from "./features/sidebar";
 import { Composer } from "./features/composer";
 import { FileExplorer } from "./features/files";
+import { QuickOpen } from "./features/quickopen";
 import { MapView } from "./features/map-view";
 import { TermPanel } from "./features/terminal";
 import { SettingsPanel } from "./features/settings";
 import { ComponentsPanel } from "./features/components";
+import { stateDiff } from "./features/state-diff";
+import { sounds } from "./features/sounds";
+import { notifications } from "./features/notifications";
 import { initFirstPost } from "./features/first-post";
 import { Pins } from "./features/pins";
 import { initLang, t, applyStatic } from "./i18n";
@@ -56,6 +62,8 @@ initLang();
 applyTheme(localStorage.getItem("ac-theme") === "light" ? "light" : "dark");
 // Accent appliqué au boot, avant le premier rendu utile (pas de flash).
 applyAccent(accentPref());
+// Intensité d'accent — dimension orthogonale, classe accent-strong.
+applyAccentStrong(accentStrongPref(), false);
 applyStatic();
 initGems();
 initPlatform();
@@ -96,6 +104,7 @@ const chat = new ChatView();
 const sidebar = new Sidebar();
 const composer = new Composer();
 const files = new FileExplorer();
+const quick = new QuickOpen();
 const map = new MapView();
 const term = new TermPanel();
 const connView = new ConnView();
@@ -110,6 +119,7 @@ const pins = new Pins();
 initRpc({
   currentConn: () => app.current?.conn,
   connState: (k) => conns.state(k),
+  connGone: (k) => conns.isGone(k),
 });
 
 chat.bind(renderer, {
@@ -147,10 +157,27 @@ renderer.bind({
   statusChanged: () => void sidebar.refresh(),
   openSession: (id) => void chat.open(id),
 });
+// Canaux d'alerte branchés sur le diff partagé (state-diff) — sons et
+// notifications OS restent indépendants mais voient les mêmes transitions.
+stateDiff.onTransition((kind) => sounds.alert(kind));
+stateDiff.onTransition((kind, s) => notifications.alert(kind, s));
+notifications.bind({
+  connCount: () => conns.knownConns().length,
+  // Clic sur la notif → même trajet qu'une ouverture depuis la sidebar :
+  // les overlays de #chat doivent d'abord sortir (motif newSess.openSession).
+  openSession: (id, conn) => {
+    settings.close();
+    connView.close();
+    map.close();
+    comps.close();
+    void chat.open(id, false, conn);
+  },
+});
 sidebar.bind(conns, groups, newSess, chat, settings, connView, comps, map);
 composer.bind(chat);
 composer.refresh = () => sidebar.refresh();
 composer.bindAttachCapable((c) => conns.cap(c ?? "default")?.files === true);
+composer.bindQueueSteerCapable((c) => conns.cap(c ?? "default")?.queue_steer === true);
 conns.bind({
   refresh: () => sidebar.refresh(),
   reopenIfConn: (c) => chat.reopenIfConn(c),
@@ -199,6 +226,10 @@ newSess.openSession = (id, conn) => {
 newSess.knownConns = () => conns.knownConns();
 groups.refresh = () => void sidebar.refresh();
 files.bind({ sysline: (txt, ic) => chat.sysline(txt, ic) });
+quick.bind({
+  openFile: (p) => files.openFilePanel(p),
+  openDir: (rel) => files.revealInTree(rel),
+});
 settings.langChanged = () => {
   // applyStatic a réécrit le placeholder avec input_ph — hints à jour.
   composer.refreshHints();
@@ -265,6 +296,15 @@ await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
   if (app.current && session === app.current.id) {
     chat.appendEvent(event, true);
   }
+  // Les events système « message en file » / « steer refusé — remis
+  // en file » / retenue compact changent la file sans status_changed :
+  // le bandeau de file resterait périmé jusqu'au prochain changement
+  // d'état — refresh immédiat, restreint aux textes liés à la file
+  // (un queue_list par event sinon, gratuit mais inutile).
+  if (event.type === "system" && app.current?.id === session
+      && /file|steer|compact/i.test((event.text as string) ?? "")) {
+    void composer.refreshQueue();
+  }
   if (event.type === "status_changed") void sidebar.refresh();
 });
 
@@ -305,6 +345,7 @@ $("chat-more").onclick = () => {
   if (app.current && term.supported())
     items.push({ icon: "terminal", label: t("term_title"), fn: () => $("btn-term").click() });
   if (app.current) items.push({ icon: "folder", label: t("files_title"), fn: () => $("btn-files").click() });
+  if (app.current) items.push({ icon: "search", label: t("qo_open_path"), fn: () => quick.open("path") });
   if (app.current && !app.alive && app.current.state !== "starting")
     items.push({ icon: "play", label: t("resume"), fn: () => $("btn-resume").click() });
   if (app.current && app.alive)
@@ -329,10 +370,12 @@ search.init();
 sidebar.init();
 composer.init();
 files.init();
+quick.init();
 term.init();
 map.init();
 settings.init();
 comps.init();
+notifications.init();
 initFirstPost((c) => conns.cap(c)?.first_post === true);
 pins.init();
 initModelBar(openFusion);

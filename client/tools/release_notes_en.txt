@@ -1,0 +1,37 @@
+# English user-facing release notes, one line per merged PR:
+#
+#     <PR number>: <english note>
+#
+# Every user-visible feat/fix/perf PR adds its line here (written by the
+# PR author, in English). release_notes.py uses it instead of the commit
+# subject — usually French — and warns in the workflow logs when an
+# entry is missing. `#` lines are comments; no inline comments.
+# Entries for already-released PRs are inert — prune at release time.
+#
+182: Client updates now report progress and surface explicit errors instead of failing silently.
+183: Catalog components can declare configurable parameters, editable from the client.
+184: Component editing now exposes only the parameters declared by the catalog — internals stay read-only.
+185: The sidebar PR registry no longer records non-existent pull request references.
+186: Queued prompts gain a steer button to inject them into the running turn without cancelling it.
+188: Fixed mesh background facets tinted with the accent's complementary color in the light theme.
+189: Session diagram: roots of the same group are now placed contiguously.
+190: Fixed unreadable code blocks in the light theme.
+192: Sound alerts now offer a choice of presets per event — richer sounds synthesized live, no bundled audio files.
+193: AgentReviewer component gains a `repos` parameter (JSON) for multi-repo watching, and a new `json` parameter type renders structured values into managed configs; workers can now request a local pre-push diff review via `agent-reviewer review`.
+194: New accent intensity setting — soft or vivid variants of every accent color.
+195: The backlog orchestrator is now fully configurable at runtime — toggles, worker and spawn settings, prompts, and repo workspaces persist to config.toml.
+196: The MSI installer wizard now shows branded AgentControl artwork instead of the generic WiX default images.
+197: Remote daemon updates no longer abort on the busy guard when the running daemon holds the port — foreign listeners stay protected, and the update dialog now warns that the connection drops and re-establishes.
+198: PDF files now open in an embedded viewer — continuous-scroll canvas rendering, zoom controls, and a "open with system app" fallback for large files.
+199: Resuming a session whose native agent was lost (daemon restart/update) now falls back to a fresh context instead of failing forever — the history is kept, a system note explains the relaunch, and dead agents no longer linger as green "working" sessions.
+201: Components installed from the catalog now resynchronize their spec at daemon startup — newly declared parameters (e.g. `repos`), render templates and healthchecks appear on older installs while user values are preserved.
+202: Native OS notifications when an agent finishes its turn, awaits your reply, or fails — per-type toggles, click focuses the app and opens the session (Android included, web excluded).
+203: Background loads (pinned messages, conversation, file tree, queue bar, search) no longer pop a raw "connection lost" error on a transient connection drop — they wait for the reconnect or replay once, and reload silently when the link is back.
+204: Managed components now display their tool's probed version next to the state — process included — and a catalog-declared minimum version surfaces an "update required" badge instead of a silent failure.
+205: Backlog metrics — the orchestrator now samples queue activity each tick into a bounded journal, and a new backlog_metrics RPC (acctl orch metrics) serves the series plus lead-time/queue-wait aggregates.
+206: First post now returns the backlog item for service-spawned sessions — the spawn prompt is skipped — and the orchestrator status reports when the legacy Python script holds the lock, making [Backlog] item posts unavailable.
+207: The Backlog tab gains a collapsible "Activity" section — a time-series graph of queue depth and live workers over 24h/7d/30d plus lead-time, queue-wait, throughput and worker-peak cards, fed by the backlog_metrics RPC and gracefully hidden on older daemons.
+208: Release candidates on Windows and macOS now offer the next rc and the final release as updates — the rc identity is compiled into the binary since MSI/plist versions must stay numeric (rc installs used to look "up to date" forever).
+209: Quick-open file palette — Ctrl+P searches workspace files by name and opens them, typed paths (relative, absolute or ~) open directly via a new "Open path…" menu entry, and per-session recent files head the empty list.
+210: File explorer now refreshes itself — expanded folders are watched by the daemon (inotify, debounced and capped), so files created or modified by an agent appear without a manual refresh, gracefully falling back on older daemons.
+211: Secure QR pairing for phones and second machines — a one-shot server-side key installs the device's own restricted authorized_keys line with host-key pinning, pair-ok proof and automatic sweep; permanent-credential and endpoint-only fallbacks remain as warned opt-ins.

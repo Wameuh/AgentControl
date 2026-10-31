@@ -73,12 +73,15 @@ impl Daemon {
     /// (réécriture atomique de components.toml) → {name, state}. Un
     /// `process` vivant garde sa spec courante jusqu'au prochain
     /// (re)start, explicite ou supervisé.
+    /// Surface d'édition utilisateur : sur un composant adossé au
+    /// catalogue, la spec interne est scellée (`upsert_edit`) — seuls
+    /// autostart/description et les params déclarés sont mutables.
     pub(super) async fn h_component_upsert(
         self: &Arc<Self>,
         name: String,
         spec: ComponentSpec,
     ) -> Result<Value> {
-        let st = self.components.upsert(&name, spec).await?;
+        let st = self.components.upsert_edit(&name, spec).await?;
         Ok(json!({ "name": name, "state": st.state }))
     }
 
@@ -101,11 +104,35 @@ impl Daemon {
         ))
     }
 
-    /// `ComponentInstall{name}` — exécute la recette de l'entrée
-    /// (steps auditées : run argv fixe, write_file borné HOME,
-    /// require_file, upsert_spec) → {installed, name, state, notes}.
-    pub(super) async fn h_component_install(self: &Arc<Self>, name: String) -> Result<Value> {
-        self.components.install(&name).await
+    /// `ComponentInstall{name, params?}` — exécute la recette de
+    /// l'entrée (steps auditées : run argv fixe, write_file borné HOME,
+    /// require_file, upsert_spec) avec les params collectés au
+    /// dialogue client → {installed, name, state, notes, rendered,
+    /// config_required}.
+    pub(super) async fn h_component_install(
+        self: &Arc<Self>,
+        name: String,
+        params: Option<std::collections::HashMap<String, String>>,
+    ) -> Result<Value> {
+        self.components.install(&name, params).await
+    }
+
+    /// `ComponentSetParams{name, params}` — édite les paramètres
+    /// déclarés du composant (seule surface de config utilisateur) :
+    /// fusion + validation + re-rendu + restart si le process tourne
+    /// → {name, state, params(masqués), config_required, rendered,
+    /// restarted}. Exception `backlog-orchestrator` : l'interne n'a pas
+    /// de spec toml — ses params mappent sur la config orchestrateur
+    /// (orch.rs — même validation que `OrchestratorConfig`).
+    pub(super) async fn h_component_set_params(
+        self: &Arc<Self>,
+        name: String,
+        params: std::collections::HashMap<String, String>,
+    ) -> Result<Value> {
+        if name == crate::server::orch::COMPONENT_NAME {
+            return self.h_orch_params_set(params).await;
+        }
+        self.components.set_params(&name, &params).await
     }
 
     /// `ComponentQuery{name, query}` — exécute la requête de données

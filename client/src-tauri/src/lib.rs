@@ -52,6 +52,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         // Lecteur vidéo du panneau fichiers : ranges HTTP → tranches
         // read_file RPC (jamais le fichier entier en mémoire).
         .register_asynchronous_uri_scheme_protocol("acvideo", stream::handler)
@@ -94,6 +95,16 @@ pub fn run() {
             commands::saved::save_connection,
             commands::saved::remove_connection,
             commands::saved::ssh_hosts,
+            commands::pair::pair_payload,
+            commands::pair::pair_import_key,
+            commands::pair::pair_resolve,
+            commands::pair::pair_begin,
+            commands::pair::pair_poll,
+            commands::pair::pair_cleanup,
+            commands::pair::pair_devices,
+            commands::pair::pair_revoke,
+            commands::pair::pair_attempt,
+            commands::system::app_version,
             commands::system::platform,
             commands::system::cli_conn,
             commands::system::spawn_instance,
@@ -104,6 +115,7 @@ pub fn run() {
             commands::system::set_app_icon,
             commands::update::check_update,
             commands::update::update_client,
+            commands::update::update_last_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

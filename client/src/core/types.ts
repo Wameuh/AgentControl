@@ -73,8 +73,13 @@ export interface CompStatus {
   restarts?: number;
   /** Code du dernier exit (128+signal si tué par signal). */
   last_exit?: number;
-  /** Version sondée d'un `tool` (1re ligne de sa commande, ≤200 c). */
+  /** Version sondée de l'outil managé (`version_argv`, ou `command`
+   *  d'un tool) — 1re ligne ≤200 c. */
   version?: string;
+  /** Seuil `min_version` déclaré (spec ou entrée catalogue homonyme). */
+  version_min?: string;
+  /** Version sondée sous `version_min` — badge « mise à jour requise ». */
+  version_outdated?: boolean;
 }
 
 /** Item ListComponents : spec aplatie + état (`item_json` côté démon). */
@@ -130,6 +135,9 @@ export type SavedConn = {
   password?: string;
   key?: string;
   native?: boolean;
+  /** Empreintes `SHA256:…` de host key épinglées — persistées par
+   *  l'appairage B′ ; toute connexion native du profil les impose. */
+  host_keys?: string[];
   /** Accent propre à la connexion (multi-instances : une couleur par
    *  démon pour identifier l'instance d'un coup d'œil). Nom d'accent
    *  ("sage" | "gold" | …) — absent = accent global des réglages. */
@@ -158,11 +166,39 @@ export type ComponentHealthcheck =
   | { kind: "http"; url: string }
   | { kind: "command"; argv: string[] };
 
+/** Type d'un paramètre déclaré — pilote le widget du formulaire et la
+ *  validation côté démon. */
+export type ParamKind =
+  | "string" | "path" | "int" | "duration" | "bool" | "enum" | "list" | "json";
+
+/** Paramètre de config déclaré (catalogue → spec.params_schema) : la
+ *  seule surface éditable d'un composant managé — la spec interne
+ *  (command/restart/healthcheck) reste propriété du catalogue. */
+export interface ParamSpec {
+  key: string;
+  label: string;
+  description?: string | null;
+  required: boolean;
+  kind: ParamKind;
+  /** Forme chaîne — castée selon kind. */
+  default?: string | null;
+  secret?: boolean;
+  /** Regex (string/path). */
+  validation?: string | null;
+  /** Valeurs autorisées (enum). */
+  choices?: string[];
+}
+
 /** Spec [[components]] de components.toml — lue et écrite telle quelle. */
 export interface ComponentSpec {
   name: string;
   kind: ComponentKind;
   command: string[];
+  /** Sonde de version de l'outil managé (process/external ; remplace
+   *  `command` pour un tool) — déclarée par le catalogue ou à la main. */
+  version_argv?: string[] | null;
+  /** Version minimale exigée de l'outil managé → badge « obsolète ». */
+  min_version?: string | null;
   env: Record<string, string>;
   cwd: string | null;
   autostart: boolean;
@@ -170,27 +206,50 @@ export interface ComponentSpec {
   restart_sec: number;
   healthcheck: ComponentHealthcheck;
   description: string | null;
+  /** Entrée catalogue d'origine — non nul = composant managé par
+   *  catalogue : l'édition utilisateur se borne aux `params`. */
+  catalog?: string | null;
+  /** Paramètres éditables déclarés (schéma copié à l'install). */
+  params_schema?: ParamSpec[];
+  /** Valeurs effectives des params — `secret` masqués (« •••••• »). */
+  params?: Record<string, string>;
+  /** Cible de rendu de la config managée (fichier possédé démon). */
+  render?: { path: string; template: string } | null;
+  /** Requêtes de données déclarées (`component_query` → argv). */
+  queries?: Record<string, string[]>;
 }
 
 export interface ComponentStatus {
   state: ComponentState;
+  /** "ok" | "fail" | "outdated" — « outdated » = outil sous
+   *  `version_min` (actionnable : mettre à jour l'outil). */
   health?: string;
   pid?: number;
   uptime_s?: number;
   restarts?: number;
   last_exit?: number;
-  /** Version sondée d'un `tool` (1re ligne de sa commande, ≤200 c). */
+  /** Version sondée de l'outil managé (≤200 c). */
   version?: string;
+  /** Seuil `min_version` déclaré (spec ou entrée catalogue homonyme). */
+  version_min?: string;
+  /** Version sondée sous `version_min` — badge « mise à jour requise ». */
+  version_outdated?: boolean;
+  /** Params required sans valeur — « configuration requise » :
+   *  spawn bloqué tant que la liste n'est pas vide. */
+  config_required?: string[];
 }
 
 /** Item ListComponents / ComponentInfo : spec + état runtime. `source`
- *  = "internal" (déclaré en code, non éditable) | "components.toml". */
+ *  = "internal" (déclaré en code, non éditable) | "components.toml".
+ *  `catalog` = le nom est couvert par une entrée du catalogue →
+ *  édition bornée aux params déclarés, spec interne scellée. */
 export interface ComponentItem {
   name: string;
   kind: ComponentKind;
   autostart: boolean;
   description?: string | null;
   source?: string;
+  catalog?: boolean;
   spec: ComponentSpec;
   status: ComponentStatus;
 }
@@ -203,6 +262,8 @@ export interface CatalogEntry {
   repo?: string | null;
   homepage?: string | null;
   suggested_spec: ComponentSpec;
+  /** Paramètres éditables déclarés — collectés au dialogue d'install. */
+  params?: ParamSpec[];
   installed: boolean;
   version?: string | null;
   latest_version?: string | null;

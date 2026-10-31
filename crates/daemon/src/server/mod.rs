@@ -5,15 +5,25 @@
 
 mod cfg;
 mod components;
+/// Watch FS de l'explorateur (auto-refresh) — cycle de vie borné à la
+/// connexion, debounce+coalesce anti-rafale, jamais journalisé.
+mod dirwatch;
 /// Bornage workspace réutilisé par l'endpoint HTTP /media|/download.
 pub(crate) mod files;
 /// `command_available` est réutilisé par la détection du catalogue
 /// (components/catalog.rs) et par la garde AgentBacklog de
 /// l'orchestrateur natif.
 pub(crate) mod misc;
+/// Métriques backlog : journal JSONL échantillonné par le tick
+/// orchestrateur + RPC `backlog_metrics` (série + agrégats).
+pub(crate) mod metrics;
 /// `OrchProbe` est partagé avec `crate::components` (statut du
 /// composant interne `backlog-orchestrator` dans list_components).
 pub(crate) mod orch;
+/// Surface de config éditable à chaud de l'orchestrateur (schéma
+/// params, validation de patch, persistance config.toml) — partagée
+/// avec `crate::components` (params_schema/params de l'item internal).
+pub(crate) mod orch_cfg;
 mod peers;
 mod prs;
 mod sessions;
@@ -137,6 +147,10 @@ pub struct Daemon {
     >,
     /// Registre PR ↔ session (prs.json) — voir prs.rs.
     pub prs: Arc<PrRegistry>,
+    /// File de vérification forge des références détectées — une URL de
+    /// review n'entre au registre qu'après preuve d'existence réelle
+    /// (server/prs.rs `PrVerifier`). Worker unique spawné à l'open.
+    pr_verify: Arc<prs::PrVerifier>,
     /// État du sync des statuts PR (`pr_sync`) — throttle + exclusion
     /// d'un second run pendant qu'un fetch forge est en vol.
     pr_sync: Arc<std::sync::Mutex<prs::PrSyncCtl>>,
@@ -159,6 +173,9 @@ pub struct Daemon {
     /// overrides `[agents.<id>.compact]` — résolution par session à
     /// l'open (le sidecar `compact.json` complète par-dessus).
     pub compact: CompactSrc,
+    /// Compteur global des dossiers surveillés (watch_dir explorateur,
+    /// toutes conns confondues) — borne le plafond de dirwatch.rs.
+    dir_watch_n: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 
@@ -202,6 +219,13 @@ impl Daemon {
                 }
             }
         }
+        let prs = Arc::new(PrRegistry::open(&root));
+        // Set forge figé pour la vérif d'existence (hôtes déclarés +
+        // token_env) — la config ne change pas à chaud.
+        let forge_set = forges.list_json().as_array().cloned().unwrap_or_default();
+        let pr_verify = Arc::new(prs::PrVerifier::new(Arc::clone(&prs), move |t| {
+            forgesync::verify_ref(&forge_set, t)
+        }));
         let d = Arc::new(Self {
             root: root.clone(),
             sessions: RwLock::new(HashMap::new()),
@@ -219,11 +243,14 @@ impl Daemon {
             compact,
             peer_rate: std::sync::Mutex::new(HashMap::new()),
             spawn_rate: std::sync::Mutex::new(HashMap::new()),
-            prs: Arc::new(PrRegistry::open(&root)),
+            prs,
+            pr_verify,
             pr_sync: Arc::new(std::sync::Mutex::new(prs::PrSyncCtl::default())),
             forges,
             web,
+            dir_watch_n: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         });
+        d.pr_verify.spawn_worker();
         let mut resumable = Vec::new();
         let sdir = root.join("sessions");
         if sdir.exists() {
@@ -633,6 +660,9 @@ impl Daemon {
             ReqKind::QueuePromote { session, index } => {
                 self.h_queue_promote(session, index).await
             }
+            ReqKind::QueueSteer { session, index } => {
+                self.h_queue_steer(session, index).await
+            }
             ReqKind::Cancel { session } => self.h_cancel(session).await,
             ReqKind::SessionInfo { session } => self.h_session_info(session).await,
             ReqKind::SetMode { session, mode } => self.h_set_mode(session, mode).await,
@@ -719,14 +749,25 @@ impl Daemon {
             ReqKind::ComponentCatalog { refresh } => {
                 self.h_component_catalog(refresh).await
             }
-            ReqKind::ComponentInstall { name } => self.h_component_install(name).await,
+            ReqKind::ComponentInstall { name, params } => {
+                self.h_component_install(name, params).await
+            }
+            ReqKind::ComponentSetParams { name, params } => {
+                self.h_component_set_params(name, params).await
+            }
             ReqKind::ComponentQuery { name, query } => {
                 self.h_component_query(name, query).await
             }
             ReqKind::OrchestratorSet { enabled } => {
                 self.h_orch_set(enabled).await
             }
+            ReqKind::OrchestratorConfig { patch } => {
+                self.h_orch_config(patch).await
+            }
             ReqKind::ManagerSpawn { repo } => self.h_manager_spawn(&repo).await,
+            ReqKind::BacklogMetrics { window } => {
+                self.h_backlog_metrics(window).await
+            }
             ReqKind::Subscribe { session, after_seq } => {
                 self.h_subscribe(session, after_seq).await
             }
@@ -735,8 +776,10 @@ impl Daemon {
             ReqKind::TermOpen { .. }
             | ReqKind::TermInput { .. }
             | ReqKind::TermResize { .. }
-            | ReqKind::TermClose { .. } => {
-                anyhow::bail!("requête terminal hors couche connexion")
+            | ReqKind::TermClose { .. }
+            | ReqKind::WatchDir { .. }
+            | ReqKind::UnwatchDir { .. } => {
+                anyhow::bail!("requête bornée à la connexion hors serve_conn")
             }
         }
     }
@@ -812,6 +855,9 @@ impl Daemon {
         // Terminaux ouverts par CETTE connexion — bornés à sa durée de vie :
         // déconnexion → la map est droppée → master fermé → shells SIGHUP.
         let mut terms = term::Terms::new();
+        // Watches FS de l'explorateur ouverts par CETTE connexion — même
+        // cycle de vie que les terminaux : la mort de la conn les démonte.
+        let mut dir_watches = dirwatch::DirWatches::new(Arc::clone(&self.dir_watch_n));
         // Retour des spawns dispatchés (TermEvt::Spawned) + fins de flux
         // PTY (TermEvt::Done) — un seul canal préserve l'ordre relatif.
         let (term_evt_tx, mut term_evt_rx) =
@@ -926,6 +972,16 @@ impl Daemon {
                                 Self::send_resp(&outbox, &Response::err(req.id, format!("{e:#}")))?;
                             }
                         }
+                        continue;
+                    }
+                    // Watch FS explorateur : inline comme le terminal —
+                    // l'état vit dans `dir_watches` et les pushes sortent
+                    // par l'outbox de cette connexion (jamais de dispatch
+                    // concurrent, jamais de journalisation).
+                    if let Some(resp) =
+                        self.h_dir_watch(&mut dir_watches, &req, &outbox).await
+                    {
+                        Self::send_resp(&outbox, &resp)?;
                         continue;
                     }
                     // Terminal : input/resize/close inline (l'ordre des

@@ -28,6 +28,7 @@ async fn main() -> anyhow::Result<()> {
         remote_port: 7331,
         password: None,
         key_path: None,
+        expected_hk: None,
     })
     .await?;
     let r = c.call(ReqKind::DaemonStatus).await?;
@@ -41,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
         None,
         "echo native-exec-ok && uname -m && echo warn >&2",
         Some(&mut |l: &str| eprintln!("[stderr] {l}")),
+        &ssh_native::Opts::default(),
     )
     .await?;
     println!("exec[{code}]: {out} (stderr: {err})");

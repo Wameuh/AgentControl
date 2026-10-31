@@ -6,7 +6,8 @@
 
 import { getVersion, isWeb } from "../core/bridge";
 import { $ } from "../core/dom";
-import { applyTheme, applyAccent, accentPref, applyBgAnim, bgAnimOn, isAndroid, type Accent } from "../core/chrome";
+import { bindLogView } from "../core/logview";
+import { applyTheme, applyAccent, accentPref, applyAccentStrong, accentStrongPref, applyBgAnim, bgAnimOn, isAndroid, type Accent } from "../core/chrome";
 import { defaultEncoding } from "../core/encoding";
 import { inlineImages } from "../core/format";
 import { cmpVer } from "../core/conn";
@@ -19,8 +20,17 @@ import {
   sndTypeOn,
   sndVolume,
   sndOnlyUnfocused,
+  sndPresetId,
   type SoundKind,
 } from "./sounds";
+import {
+  notifications,
+  notifEnabled,
+  notifTypeOn,
+  notifOnlyUnfocused,
+} from "./notifications";
+import type { AlertKind } from "./state-diff";
+import { PRESETS } from "./sound-presets";
 
 /** Préférence d'envoi : "queue" (file FIFO, défaut) | "steer" (injection
  *  mid-turn quand l'agent tourne ; idle → envoi normal côté démon). */
@@ -63,6 +73,8 @@ export class SettingsPanel {
     ($("s-theme") as HTMLSelectElement).value =
       document.documentElement.classList.contains("light") ? "light" : "dark";
     ($("s-accent") as HTMLSelectElement).value = accentPref();
+    ($("s-accent-int") as HTMLSelectElement).value =
+      accentStrongPref() ? "strong" : "soft";
     ($("s-bganim") as HTMLInputElement).checked = bgAnimOn();
     ($("s-lang") as HTMLSelectElement).value = getLang();
     ($("s-sendmode") as HTMLSelectElement).value = sendPref();
@@ -76,6 +88,7 @@ export class SettingsPanel {
     ($("s-snd") as HTMLInputElement).checked = sndEnabled();
     for (const k of ["done", "question", "error"] as SoundKind[]) {
       ($(`s-snd-${k}`) as HTMLInputElement).checked = sndTypeOn(k);
+      ($(`s-snd-preset-${k}`) as HTMLSelectElement).value = sndPresetId(k);
     }
     ($("s-snd-unfocused") as HTMLInputElement).checked = sndOnlyUnfocused();
     ($("s-snd-vol") as HTMLInputElement).value = String(
@@ -83,6 +96,20 @@ export class SettingsPanel {
     );
     $("s-snd-blocked").hidden = !sounds.blocked();
     this.syncSndOpts();
+    // Notifications OS : canal Tauri seulement — bloc masqué en web.
+    $("s-notif-block").hidden = isWeb;
+    ($("s-notif") as HTMLInputElement).checked = notifEnabled();
+    for (const k of ["done", "question", "error"] as AlertKind[]) {
+      ($(`s-notif-${k}`) as HTMLInputElement).checked = notifTypeOn(k);
+    }
+    ($("s-notif-unfocused") as HTMLInputElement).checked = notifOnlyUnfocused();
+    this.syncNotifOpts();
+    void notifications
+      .permBlocked()
+      .then((blocked) => {
+        $("s-notif-denied").hidden = !blocked || !notifEnabled();
+      })
+      .catch(() => {});
     $("s-update-status").textContent = "";
     ($("s-doupdate") as HTMLButtonElement).hidden = true;
     // Web : pas de reconnexion optionnelle (la conn unique est vitale) ni
@@ -149,10 +176,13 @@ export class SettingsPanel {
         go.hidden = false;
         go.onclick = async () => {
           go.disabled = true;
+          const prev = go.textContent;
+          go.textContent = t("update_installing", { v: remote });
           try {
             await performClientUpdate(remote);
           } finally {
             go.disabled = false;
+            go.textContent = prev;
           }
         };
       } else {
@@ -182,6 +212,11 @@ export class SettingsPanel {
     };
     ($("s-accent") as HTMLSelectElement).onchange = (e) => {
       applyAccent((e.target as HTMLSelectElement).value as Accent);
+      this.themeChanged();
+      this.syncSecStates();
+    };
+    ($("s-accent-int") as HTMLSelectElement).onchange = (e) => {
+      applyAccentStrong((e.target as HTMLSelectElement).value === "strong");
       this.themeChanged();
       this.syncSecStates();
     };
@@ -242,6 +277,21 @@ export class SettingsPanel {
           `ac-snd-${k}`,
           (e.target as HTMLInputElement).checked ? "1" : "0",
         );
+      // Options des presets construites depuis la bibliothèque — portent
+      // data-i18n, retraduites par applyStatic au changement de langue.
+      const sel = $(`s-snd-preset-${k}`) as HTMLSelectElement;
+      for (const p of PRESETS[k]) {
+        const opt = document.createElement("option");
+        opt.value = p.id;
+        opt.dataset.i18n = p.label;
+        opt.textContent = t(p.label);
+        sel.append(opt);
+      }
+      // Choisir un preset le joue aussitôt — aperçu immédiat du choix.
+      sel.onchange = () => {
+        localStorage.setItem(`ac-snd-preset-${k}`, sel.value);
+        sounds.test(k);
+      };
       // « Tester » joue même tout désactivé — le geste débloque l'autoplay
       // de la webview (Android) en plus de donner un aperçu volume réel.
       ($(`s-snd-test-${k}`) as HTMLButtonElement).onclick = () =>
@@ -252,6 +302,35 @@ export class SettingsPanel {
         "ac-snd-unfocused",
         (e.target as HTMLInputElement).checked ? "1" : "0",
       );
+    // Activation explicite du canal → demande de permission OS immédiate
+    // (geste utilisateur = meilleur contexte pour le prompt natif).
+    ($("s-notif") as HTMLInputElement).onchange = (e) => {
+      const on = (e.target as HTMLInputElement).checked;
+      localStorage.setItem("ac-notif", on ? "1" : "0");
+      if (on) {
+        void notifications.ensurePermission(true).then((ok) => {
+          $("s-notif-denied").hidden = ok;
+        });
+      } else {
+        $("s-notif-denied").hidden = true;
+      }
+      this.syncNotifOpts();
+      this.syncSecStates();
+    };
+    for (const k of ["done", "question", "error"] as AlertKind[]) {
+      ($(`s-notif-${k}`) as HTMLInputElement).onchange = (e) =>
+        localStorage.setItem(
+          `ac-notif-${k}`,
+          (e.target as HTMLInputElement).checked ? "1" : "0",
+        );
+    }
+    ($("s-notif-unfocused") as HTMLInputElement).onchange = (e) =>
+      localStorage.setItem(
+        "ac-notif-unfocused",
+        (e.target as HTMLInputElement).checked ? "1" : "0",
+      );
+    ($("s-notif-test") as HTMLButtonElement).onclick = () =>
+      notifications.test();
     ($("s-snd-vol") as HTMLInputElement).oninput = (e) => {
       localStorage.setItem(
         "ac-snd-vol",
@@ -260,6 +339,9 @@ export class SettingsPanel {
       this.syncSecStates();
     };
     ($("s-checkupdate") as HTMLButtonElement).onclick = () => this.runUpdateCheck();
+    // « Voir les logs » : la visionneuse client.log partagée — la télémétrie
+    // update (check → install) y est lisible sans quitter les paramètres.
+    bindLogView($("s-logs") as HTMLDetailsElement);
   }
 
   /** Résumé d'état à droite du titre de chaque section — la valeur
@@ -268,12 +350,15 @@ export class SettingsPanel {
     const opt = (id: string) =>
       ($(id) as HTMLSelectElement).selectedOptions[0]?.textContent?.trim() ??
       "";
-    $("s-st-appearance").textContent = `${opt("s-theme")} · ${opt("s-accent")}`;
+    $("s-st-appearance").textContent =
+      `${opt("s-theme")} · ${opt("s-accent")} · ${opt("s-accent-int")}`;
     $("s-st-chat").textContent = opt("s-sendmode");
     const sndOn = ($("s-snd") as HTMLInputElement).checked;
-    $("s-st-notif").textContent = sndOn
-      ? `${t("st_on")} · ${($("s-snd-vol") as HTMLInputElement).value}%`
-      : t("st_off");
+    const notifOn = !isWeb && ($("s-notif") as HTMLInputElement).checked;
+    $("s-st-notif").textContent = [
+      sndOn ? `${t("st_on")} · ${($("s-snd-vol") as HTMLInputElement).value}%` : t("st_off"),
+      ...(isWeb ? [] : [`${t("notif_short")} ${notifOn ? t("st_on") : t("st_off")}`]),
+    ].join(" · ");
     $("s-st-conn").textContent = ($("s-autoconn") as HTMLInputElement).checked
       ? t("st_on")
       : t("st_off");
@@ -287,10 +372,22 @@ export class SettingsPanel {
   private syncSndOpts() {
     const off = !($("s-snd") as HTMLInputElement).checked;
     $("s-snd-opts").classList.toggle("off", off);
-    for (const el of $("s-snd-opts").querySelectorAll<HTMLInputElement>(
-      "input",
-    )) {
+    for (const el of $("s-snd-opts").querySelectorAll<
+      HTMLInputElement | HTMLSelectElement
+    >("input, select")) {
       el.disabled = off;
+    }
+  }
+
+  /** Même grisage pour le bloc notifications — sauf le bouton « Tester »,
+   *  cliquable même canal coupé (le test vérifie permission + rendu OS). */
+  private syncNotifOpts() {
+    const off = !($("s-notif") as HTMLInputElement).checked;
+    $("s-notif-opts").classList.toggle("off", off);
+    for (const el of $("s-notif-opts").querySelectorAll<
+      HTMLInputElement | HTMLButtonElement
+    >("input, button")) {
+      el.disabled = off && el.id !== "s-notif-test";
     }
   }
 }

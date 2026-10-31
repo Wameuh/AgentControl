@@ -1,6 +1,6 @@
 [package]
 name = "agentcontrol"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 build = "build.rs"
 
@@ -20,6 +20,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-notification = "~2.7.0"
 base64 = "0.22"
 client-core = { path = "../../crates/client-core" }
 proto = { path = "../../crates/proto" }
