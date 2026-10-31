@@ -4,7 +4,8 @@
 // proposer rc.K+1, puis la finale X.Y.Z — avant, l'artefact rapportait
 // « X.Y.Z » et remoteVersion() « X.Y.Z-rc.K' » ne dépassait jamais la
 // locale (prerelease < stable à X.Y.Z égal) → « à jour » à vie.
-// Usage : node tests/cmpver-test.mjs
+// Usage : node tests/cmpver-test.mjs   — Node ≥ 22.18 requis (type
+// stripping : conn.ts est importé sans transpilation).
 import { cmpVer } from "../src/core/conn.ts";
 
 let fails = 0;

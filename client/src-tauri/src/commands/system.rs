@@ -20,8 +20,13 @@ use crate::state::AppState;
 #[tauri::command]
 pub(crate) fn app_version() -> String {
     const V: &str = env!("CARGO_PKG_VERSION");
+    // Re-validation ici et pas seulement à l'émission (build.rs) :
+    // option_env! lit aussi l'env AMBIANTE de rustc — un
+    // `AGENTCONTROL_RC=abc cargo build` passerait sinon tel quel.
     match option_env!("AGENTCONTROL_RC") {
-        Some(k) if !V.contains('-') => format!("{V}-rc.{k}"),
+        Some(k) if !V.contains('-') && k.bytes().all(|b| b.is_ascii_digit()) => {
+            format!("{V}-rc.{k}")
+        }
         _ => V.to_string(),
     }
 }
