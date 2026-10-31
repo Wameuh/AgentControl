@@ -394,6 +394,7 @@ impl Session {
                     text: buf,
                     steer: false,
                     origin: None,
+                    spawn_prompt: false,
                 },
                 _ => EventKind::AgentText { text: buf },
             };
@@ -519,6 +520,7 @@ mod tests {
             text: "autre".into(),
             steer: false,
             origin: None,
+            spawn_prompt: false,
         });
         s.emit(EventKind::AgentText { text: "autre".into() });
         assert_eq!(kinds(&dir).len(), 5);
@@ -558,6 +560,7 @@ mod tests {
             text: "pin moi".into(),
             steer: false,
             origin: None,
+            spawn_prompt: false,
         });
         s.emit(EventKind::AgentText {
             text: "réponse".into(),
@@ -593,6 +596,7 @@ mod tests {
             text: "autre cycle".into(),
             steer: false,
             origin: None,
+            spawn_prompt: false,
         });
         assert_eq!(s2.pins_snapshot()[0]["live"], false);
         // Re-pin du même seq = nouvel event : l'entrée morte est

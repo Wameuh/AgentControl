@@ -67,15 +67,15 @@ all).
 #  rewritten by the editing RPCs)
 
 [[components]]
-name = "backlog-orchestrator"
+name = "agentreviewer"
 kind = "process"                 # internal | process | external | tool
-command = ["/usr/bin/python3", "/home/dev/.local/bin/backlog-orchestrator.py"]
+command = ["/home/dev/.local/bin/agent-reviewer", "--watch"]
 cwd = "/home/dev"
 autostart = true
 restart = "on-failure"           # always | on-failure | never
 restart_sec = 5                  # base backoff (exponential ×2, 60 s cap)
 healthcheck = { kind = "process" }  # none | process | tcp | http | command
-description = "Spawns the AgentBacklog workers"
+description = "Auto-review watcher driving this daemon"
 
 [components.env]
 AGENTCONTROL_TCP = "127.0.0.1:7331"
@@ -90,7 +90,7 @@ description = "FIFO feature queue (SQLite ~/.agentbacklog/backlog.db)"
 | `kind` | Meaning | Lifecycle | Examples |
 | --- | --- | --- | --- |
 | `internal` | feature compiled into the daemon | no process; state derived from config (web active if `bind_http`, a2a if enabled…) | mcp-serve, prs, web, janitor |
-| `process` | long-running program managed by the daemon | spawn/stop/restart/healthcheck/logs | backlog-orchestrator, future MCPs/scripts |
+| `process` | long-running program managed by the daemon | spawn/stop/restart/healthcheck/logs | agentreviewer, future MCPs/scripts |
 | `external` | declared, managed elsewhere | observed via healthcheck only — the daemon never touches its lifecycle | supervisord, sshd, cron, review-bot, systemd unit |
 | `tool` | stateless CLI/install | presence + version (`command --version` probe); no long process — `installed`/`absent` states | agentbacklog, acctl, graphify |
 
@@ -265,12 +265,14 @@ upstream source.
     and creates its reviews as `origin=component:agentreviewer`
     sessions, "AgentReviewer" group; SIGTERM from `component stop`
     reaches the real process, no external loop orphan).
-  - `backlog-orchestrator`: the script currently lives outside any repo
-    in `~/.local/bin` → **recommendation: version it** (repo
-    `Wameuh/AgentBacklog` or an AgentControl `contrib/`) so the recipe
-    has a canonical source (`raw.githubusercontent.com`); until then,
-    the recipe installs the `process` spec pointing at the existing
-    path when detected.
+  - `backlog-orchestrator` (**superseded — no catalog entry**): the
+    name is reserved for the *internal* component (item #29 ported the
+    loop into the daemon); `component_install`/`component_upsert` on it
+    now fails `reserved component name`. The Python script it replaces
+    stays unversioned — deprecated, kept on hosts only for rollback;
+    migration procedure in `packaging/INSTALL.md` §5 (native component
+    enabled persistently + supervisord conf removed; the shared flock
+    serializes the handover).
 - **Detection**: the catalog marks each entry `installed` (command
   found on the daemon PATH / file present) + version if probeable → the
   client shows "installed v0.2 — integrate?" vs "available".
@@ -420,7 +422,7 @@ The "living" piece: **graph of programs and sessions**.
 | PR registry | `internal` | already in the daemon |
 | web UI | `internal` | `bind_http` feature — state = active/inactive |
 | janitor | `internal` | internal task |
-| backlog-orchestrator | **managed `process`** | typical use case: migrates from supervisord to the daemon (lifecycle + logs + visibility) |
+| backlog-orchestrator | **`internal`** (overturned — see below) | the managed-`process` plan was superseded in #29: the loop was ported into the daemon (better: direct session calls, `AGENTCONTROL_*` env unnecessary, no process to lose) — supervisord conf removal remains a user action (`INSTALL.md` §5) |
 | agentbacklog | `tool` | stateless CLI — passive node + version + catalog install |
 | acctl | `tool` | same |
 | pr-db | external/legacy | end of transition (feat #59) — declarable as `external` if still present |

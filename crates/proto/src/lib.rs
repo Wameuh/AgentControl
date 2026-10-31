@@ -33,6 +33,13 @@ pub enum EventKind {
         /// ordinaires (jamais sérialisé quand None).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin: Option<String>,
+        /// Prompt de spawn d'une session service (journalisé à la
+        /// création avec `origin`) — boilerplate de mission, pas un
+        /// « post » utile : `first_post` le saute pour servir le premier
+        /// vrai message. `false` partout ailleurs ; absent des journaux
+        /// antérieurs (dégradation douce : repli détection `origin`).
+        #[serde(default)]
+        spawn_prompt: bool,
     },
     AgentText {
         text: String,
@@ -739,7 +746,11 @@ pub enum ReqKind {
     /// Premier post du cycle courant : le premier `user_message` du
     /// journal. Le journal est vidé à /clear, /new et au rebind —
     /// « premier » suit donc automatiquement le dernier reset.
-    /// Réponse : `{post: {seq, ts, text, steer}}` ou `{post: null}`
+    /// Session créée par un service (`origin`) : son premier
+    /// `user_message` est le prompt de spawn (`spawn_prompt: true` —
+    /// boilerplate de mission, pas un post) et est sauté en faveur du
+    /// `user_message` suivant (ex. le post « [Backlog] item »).
+    /// Réponse : `{post: {seq, ts, text, steer, origin}}` ou `{post: null}`
     /// (aucun message utilisateur dans le cycle — ex. juste après
     /// un /clear) ; `{post: null, truncated: true}` quand la
     /// compaction du journal a supprimé la tête — le vrai premier
