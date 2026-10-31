@@ -705,6 +705,27 @@ pub enum ReqKind {
         #[serde(default)]
         archive: Option<String>,
     },
+    /// Surveille le dossier `path` (relatif au cwd, borné workspace,
+    /// non récursif) pour l'auto-refresh de l'explorateur : le démon
+    /// pousse `{push:"dir_changed", session, path}` après debounce+coalesce
+    /// — trafic éphémère, JAMAIS journalisé. Le watch vit et meurt avec
+    /// la connexion qui l'a demandé (une session affichée = un client) ;
+    /// ré-émettre sur un dossier déjà suivi est idempotent. Réponse
+    /// `{watching, dir}` — `watching:false` = plafond global atteint,
+    /// le client retombe alors sur le refresh manuel.
+    WatchDir {
+        session: String,
+        #[serde(default)]
+        path: String,
+    },
+    /// Retire le watch `path` de `session` — ou tous ses watches quand
+    /// `path` est absent (panneau fermé, session quittée). Réponse
+    /// `{unwatched}` = nombre de watches réellement retirés.
+    UnwatchDir {
+        session: String,
+        #[serde(default)]
+        path: Option<String>,
+    },
     /// Gestion de la file de prompts (index = position dans la file).
     QueueList { session: String },
     QueueEdit { session: String, index: u64, text: String },
@@ -1090,6 +1111,8 @@ impl ReqKind {
             Self::CreatePath { .. } => "create_path",
             Self::FindFiles { .. } => "find_files",
             Self::DownloadPath { .. } => "download_path",
+            Self::WatchDir { .. } => "watch_dir",
+            Self::UnwatchDir { .. } => "unwatch_dir",
             Self::QueueList { .. } => "queue_list",
             Self::QueueEdit { .. } => "queue_edit",
             Self::QueueDrop { .. } => "queue_drop",

@@ -282,6 +282,11 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             limit: p.get("limit").and_then(Value::as_u64).unwrap_or(0),
             archive: so("archive"),
         },
+        "watch_dir" => ReqKind::WatchDir { session: s("session"), path: s("path") },
+        "unwatch_dir" => ReqKind::UnwatchDir {
+            session: s("session"),
+            path: so("path"),
+        },
         "queue_list" => ReqKind::QueueList { session: s("session") },
         "queue_edit" => ReqKind::QueueEdit {
             session: s("session"),

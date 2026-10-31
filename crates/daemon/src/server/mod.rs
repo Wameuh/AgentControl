@@ -5,6 +5,9 @@
 
 mod cfg;
 mod components;
+/// Watch FS de l'explorateur (auto-refresh) — cycle de vie borné à la
+/// connexion, debounce+coalesce anti-rafale, jamais journalisé.
+mod dirwatch;
 /// Bornage workspace réutilisé par l'endpoint HTTP /media|/download.
 pub(crate) mod files;
 /// `command_available` est réutilisé par la détection du catalogue
@@ -170,6 +173,9 @@ pub struct Daemon {
     /// overrides `[agents.<id>.compact]` — résolution par session à
     /// l'open (le sidecar `compact.json` complète par-dessus).
     pub compact: CompactSrc,
+    /// Compteur global des dossiers surveillés (watch_dir explorateur,
+    /// toutes conns confondues) — borne le plafond de dirwatch.rs.
+    dir_watch_n: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 
@@ -242,6 +248,7 @@ impl Daemon {
             pr_sync: Arc::new(std::sync::Mutex::new(prs::PrSyncCtl::default())),
             forges,
             web,
+            dir_watch_n: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         });
         d.pr_verify.spawn_worker();
         let mut resumable = Vec::new();
@@ -769,8 +776,10 @@ impl Daemon {
             ReqKind::TermOpen { .. }
             | ReqKind::TermInput { .. }
             | ReqKind::TermResize { .. }
-            | ReqKind::TermClose { .. } => {
-                anyhow::bail!("requête terminal hors couche connexion")
+            | ReqKind::TermClose { .. }
+            | ReqKind::WatchDir { .. }
+            | ReqKind::UnwatchDir { .. } => {
+                anyhow::bail!("requête bornée à la connexion hors serve_conn")
             }
         }
     }
@@ -846,6 +855,9 @@ impl Daemon {
         // Terminaux ouverts par CETTE connexion — bornés à sa durée de vie :
         // déconnexion → la map est droppée → master fermé → shells SIGHUP.
         let mut terms = term::Terms::new();
+        // Watches FS de l'explorateur ouverts par CETTE connexion — même
+        // cycle de vie que les terminaux : la mort de la conn les démonte.
+        let mut dir_watches = dirwatch::DirWatches::new(Arc::clone(&self.dir_watch_n));
         // Retour des spawns dispatchés (TermEvt::Spawned) + fins de flux
         // PTY (TermEvt::Done) — un seul canal préserve l'ordre relatif.
         let (term_evt_tx, mut term_evt_rx) =
@@ -960,6 +972,16 @@ impl Daemon {
                                 Self::send_resp(&outbox, &Response::err(req.id, format!("{e:#}")))?;
                             }
                         }
+                        continue;
+                    }
+                    // Watch FS explorateur : inline comme le terminal —
+                    // l'état vit dans `dir_watches` et les pushes sortent
+                    // par l'outbox de cette connexion (jamais de dispatch
+                    // concurrent, jamais de journalisation).
+                    if let Some(resp) =
+                        self.h_dir_watch(&mut dir_watches, &req, &outbox).await
+                    {
+                        Self::send_resp(&outbox, &resp)?;
                         continue;
                     }
                     // Terminal : input/resize/close inline (l'ordre des

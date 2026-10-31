@@ -6,7 +6,7 @@
 // menu contextuel et téléchargement par tranches.
 // ---------------------------------------------------------------------------
 
-import { invoke, isWeb } from "../core/bridge";
+import { invoke, isWeb, listen } from "../core/bridge";
 import { wsClient } from "../core/wsclient";
 import { save } from "@tauri-apps/plugin-dialog";
 import { appDataDir, downloadDir } from "@tauri-apps/api/path";
@@ -91,6 +91,14 @@ export class FileExplorer {
   /** Chargement racine en vol (ou résolu) — await par revealInTree avant
    *  de déplier l'arbre, sinon expandTo tomberait sur un arbre vide. */
   private treeReady: Promise<void> | null = null;
+  /** Watch FS actifs côté démon, clé `${sid}\0${rel}` — posés au
+   *  dépliage d'un dossier affiché, retirés au repli/fermeture/switch.
+   *  session+conn épinglés : l'unwatch vise toujours le bon démon même
+   *  après un switch de session. */
+  private watches = new Map<string, { sid: string; conn?: string; rel: string }>();
+  /** Conns dont le démon ne connaît pas watch_dir (vieux) : plus de
+   *  tentatives — le refresh manuel reste le recours (compat). */
+  private watchDead = new Set<string>();
   /** cwd absolu de la session (rempli par loadTreeRoot) — sert à
    *  reconstruire le chemin absolu des résultats de recherche. */
   private treeRootDir = "";
@@ -125,6 +133,10 @@ export class FileExplorer {
 
   /** L'arbre suit le workspace de la session nouvellement ouverte. */
   onSessionOpened() {
+    // Les watches épinglent l'ancienne session — les lâcher même si le
+    // panneau est masqué (reconnexion : ils sont morts côté démon de
+    // toute façon, l'unwatch tombe alors à 0, sans effet).
+    this.unwatchAll();
     if (this.treeOpen) {
       this.clearSearch();
       this.treeReady = this.loadTreeRoot();
@@ -138,7 +150,13 @@ export class FileExplorer {
     // Ouverture réelle (la garde dirty est passée) → tête des récents
     // de la palette quick-open. Chemins relatifs et absolus enregistrés.
     pushRecentFile(recentsId(app.current.id, app.current.conn), path);
-    if ($("file-panel").hidden) { $("file-panel").hidden = false; nav.push("files"); }
+    if ($("file-panel").hidden) {
+      $("file-panel").hidden = false;
+      nav.push("files");
+      // Ré-ouverture : les watches ont été lâchés à la fermeture et
+      // l'arbre affiché peut être périmé — reload si la colonne est on.
+      if (this.treeOpen) this.treeReady = this.loadTreeRoot();
+    }
     // Android : le viewer glisse par-dessus la liste (navigation plein écran).
     if (isAndroid()) {
       $("file-viewer").classList.add("open");
@@ -611,6 +629,8 @@ export class FileExplorer {
       nav.close("files");
       $("file-panel").hidden = true;
       this.clearSearch();
+      // Panneau fermé : aucun dossier affiché → zéro watch.
+      this.unwatchAll();
     })();
   }
 
@@ -636,13 +656,186 @@ export class FileExplorer {
     return d;
   }
 
+  // ------------------------------------------------------------------
+  // Auto-refresh via watch FS démon (watch_dir → push dir-changed)
+  // ------------------------------------------------------------------
+
+  /** Abonne un dossier affiché — fire-and-forget : plafond démon
+   *  atteint ou vieux démon sans watch_dir → non suivi, silencieux. */
+  private watchDir(sid: string, conn: string | undefined, rel: string) {
+    const ck = conn ?? "";
+    if (this.watchDead.has(ck)) return;
+    const key = `${sid}\0${rel}`;
+    if (this.watches.has(key)) return;
+    const entry = { sid, conn, rel };
+    this.watches.set(key, entry);
+    void callBg<{ watching?: boolean }>("watch_dir", {
+      session: sid, conn, path: rel,
+    })
+      .then((r) => {
+        // Réponse tardive : ne retirer que si l'entrée est toujours la
+        // nôtre — un repli→dépliage a pu poster un watch plus récent.
+        if (r.watching === false && this.watches.get(key) === entry) {
+          this.watches.delete(key);
+        }
+      })
+      .catch((e) => {
+        if (this.watches.get(key) === entry) this.watches.delete(key);
+        // Démon trop vieux pour watch_dir → ne plus jamais tenter.
+        // Motif volontairement étroit (erreur de CAPACITÉ seulement) :
+        // « session inconnue » est transitoire et ne doit pas empoisonner
+        // la conn — même garde que le repli find_files ci-dessous.
+        if (/unknown variant|parse:/i.test(String(e))) {
+          this.watchDead.add(ck);
+        }
+      });
+  }
+
+  /** Désabonne un dossier — fire-and-forget. */
+  private unwatchDir(sid: string, conn: string | undefined, rel: string) {
+    if (!this.watches.delete(`${sid}\0${rel}`)) return;
+    void callBg("unwatch_dir", { session: sid, conn, path: rel }).catch(() => {});
+  }
+
+  /** Boîte d'enfants retirée de l'affichage : tous les dossiers dépliés
+   *  qu'elle contient ne sont plus montrés → unwatch du sous-arbre. */
+  private unwatchBox(box: HTMLElement, sid: string, conn: string | undefined) {
+    for (const n of box.querySelectorAll<HTMLElement>(".fnode.is-dir")) {
+      const nx = n.nextElementSibling;
+      if (nx?.classList.contains("fchildren") && n.dataset.rel != null) {
+        this.unwatchDir(sid, conn, n.dataset.rel);
+      }
+    }
+  }
+
+  /** Tous les watches (fermeture/masquage/switch) — un appel par
+   *  session, `path` absent = tous ses watches côté démon. */
+  private unwatchAll() {
+    const bySid = new Map<string, string | undefined>();
+    for (const [k, w] of this.watches) {
+      bySid.set(w.sid, w.conn);
+      this.watches.delete(k);
+    }
+    for (const [sid, conn] of bySid) {
+      void callBg("unwatch_dir", { session: sid, conn }).catch(() => {});
+    }
+  }
+
+  /** `.fchildren` déplié du dossier `rel`, null si replié ou absent. */
+  private expandedBox(rel: string): HTMLElement | null {
+    for (const n of $("file-tree").querySelectorAll<HTMLElement>(".fnode")) {
+      if (n.dataset.rel === rel) {
+        const nx = n.nextElementSibling;
+        return nx?.classList.contains("fchildren") ? (nx as HTMLElement) : null;
+      }
+    }
+    return null;
+  }
+
+  /** Push dir_changed : recharge chirurgicalement le dossier déplié —
+   *  scroll, sélection et sous-arbres dépliés préservés (leurs watches
+   *  propres les rafraîchiront), contenu inchangé = zéro retouche DOM.
+   *  Panneau/arbre masqué ou autre session : ignoré — le rechargement
+   *  à l'affichage couvre la staleness (dirty sans travail pour rien). */
+  private onDirChanged(m: { session?: string; path?: string }) {
+    if (!app.current || m.session !== app.current.id) return;
+    if (!this.treeOpen || $("file-panel").hidden) return;
+    const rel = m.path ?? "";
+    const box = rel === "" ? $("file-tree") : this.expandedBox(rel);
+    if (!box) return;
+    void this.refreshBox(box, rel);
+  }
+
+  /** Reconcile des entrées directes de `box` avec le list_dir courant :
+   *  ajouts insérés triés, disparitions retirées (+ leur sous-arbre et
+   *  ses watches), tailles rafraîchies — rien d'autre n'est touché. */
+  private async refreshBox(box: HTMLElement, rel: string) {
+    const sid = app.current?.id;
+    if (!sid) return;
+    let r: { dir: string; entries: DirEntry[] };
+    try {
+      r = await callBg<{ dir: string; entries: DirEntry[] }>("list_dir", {
+        session: sid, path: rel,
+      });
+    } catch {
+      return; // dossier parti/perms — le watch du parent fera le ménage
+    }
+    // Arbre reconstruit ou session changée pendant l'appel → la boîte
+    // détachée n'est plus la cible.
+    if (!box.isConnected || app.current?.id !== sid) return;
+    const depth = rel ? rel.split("/").length : 0;
+    const conn = app.current.conn;
+    const cur = new Map<string, HTMLElement>();
+    for (const ch of Array.from(box.children)) {
+      const h = ch as HTMLElement;
+      // .fnew = saisie de nom en cours : pas de data-rel, hors listing —
+      // le reconcile ne doit pas tuer la frappe de l'utilisateur.
+      if (h.classList.contains("fnode") && !h.classList.contains("fnew")) {
+        cur.set(h.dataset.rel ?? "", h);
+      }
+    }
+    for (const en of r.entries) {
+      const childRel = rel ? `${rel}/${en.name}` : en.name;
+      const el = cur.get(childRel);
+      if (el) {
+        cur.delete(childRel);
+        if (el.classList.contains("is-dir") !== en.dir) {
+          // fichier ↔ dossier : le nœud est recréé (classe + handler
+          // distincts), sa boîte d'enfants et ses watches partent —
+          // le sien inclus s'il était déplié.
+          const nx = el.nextElementSibling;
+          if (nx?.classList.contains("fchildren")) {
+            this.unwatchBox(nx as HTMLElement, sid, conn);
+            nx.remove();
+            this.unwatchDir(sid, conn, childRel);
+          }
+          const node = this.treeNode(childRel, en.name, en, depth, `${r.dir}/${en.name}`);
+          if (el.classList.contains("sel")) node.classList.add("sel");
+          el.replaceWith(node);
+        } else if (!en.dir) {
+          const sz = el.querySelector(".fsize");
+          if (sz) sz.textContent = fmtSize(en.size);
+        }
+        continue;
+      }
+      this.insertSorted(box, this.treeNode(childRel, en.name, en, depth, `${r.dir}/${en.name}`));
+    }
+    // Entrées disparues : nœud + boîte d'enfants + watches (sous-arbre
+    // déplié ET le dossier lui-même, sinon fuite de watch démon).
+    for (const el of cur.values()) {
+      const nx = el.nextElementSibling;
+      if (nx?.classList.contains("fchildren")) {
+        this.unwatchBox(nx as HTMLElement, sid, conn);
+        nx.remove();
+        const rel = el.dataset.rel;
+        if (rel != null) this.unwatchDir(sid, conn, rel);
+      }
+      el.remove();
+    }
+    box.querySelector(":scope > .fempty")?.remove();
+    box.querySelector(":scope > .ferr")?.remove();
+    if (!box.querySelector(":scope > .fnode")) {
+      box.insertAdjacentHTML("beforeend", `<div class="fempty">${t("tree_empty")}</div>`);
+    }
+  }
+
   /** Ouvre/replie un dossier — chargement paresseux à chaque expansion
    *  (le contenu change pendant que l'agent travaille, pas de cache). */
   private async toggleDir(el: HTMLElement) {
     const arrow = el.querySelector<HTMLElement>(".farrow")!;
     const next = el.nextElementSibling;
     if (next?.classList.contains("fchildren")) {
-      next.remove();
+      // Repli : le dossier et tout son sous-arbre déplié quittent
+      // l'affichage → unwatch (descendants d'abord, puis le dossier).
+      const box = next as HTMLElement;
+      const sid = app.current?.id;
+      const conn = app.current?.conn;
+      if (sid) {
+        this.unwatchBox(box, sid, conn);
+        const rel = el.dataset.rel;
+        if (rel != null) this.unwatchDir(sid, conn, rel);
+      }
+      box.remove();
       arrow.textContent = "\u25b8";
       return;
     }
@@ -657,6 +850,7 @@ export class FileExplorer {
     const arrow = el.querySelector<HTMLElement>(".farrow")!;
     const rel = el.dataset.rel ?? "";
     const sid = app.current?.id;
+    const conn = app.current?.conn;
     if (!sid) { arrow.textContent = "\u25b8"; return null; }
     arrow.textContent = "…";
     const box = document.createElement("div");
@@ -680,12 +874,17 @@ export class FileExplorer {
     if (!el.isConnected) return null;
     el.after(box);
     arrow.textContent = "\u25be";
+    // Dossier désormais affiché → watch FS (silencieux si non suivi).
+    this.watchDir(sid, conn, rel);
     return box;
   }
 
   /** Racine = cwd canonique de la session (renvoyé par list_dir ""). */
   private async loadTreeRoot() {
     const tree = $("file-tree");
+    // Reconstruction complète : les dossiers dépliés affichés changent
+    // → tous les watches repartent (le re-watch de "" suit juste après).
+    this.unwatchAll();
     tree.innerHTML = "";
     if (!app.current) return;
     try {
@@ -708,6 +907,8 @@ export class FileExplorer {
       if (!r.entries.length) {
         tree.insertAdjacentHTML("beforeend", `<div class="fempty">${t("tree_empty")}</div>`);
       }
+      // La racine est toujours affichée quand l'arbre l'est → watchée.
+      this.watchDir(app.current.id, app.current.conn, "");
     } catch (e) {
       tree.innerHTML = `<div class="ferr">${esc(String(e))}</div>`;
     }
@@ -719,6 +920,9 @@ export class FileExplorer {
     $("btn-tree-refresh").hidden = !v;
     this.clearSearch();
     if (v && !$("file-panel").hidden) this.treeReady = this.loadTreeRoot();
+    // Arbre masqué : plus aucun dossier affiché → zéro watch (dirty
+    // sans travail ; le re-affichage recharge de toute façon).
+    if (!v) this.unwatchAll();
   }
 
   /** Palette quick-open : révèle un dossier dans l'arbre — panneau et
@@ -1059,10 +1263,18 @@ export class FileExplorer {
       // Boîte remplacée ou session changée pendant l'appel : l'entrée
       // existe mais l'arbre visible n'est plus le bon — rien à insérer.
       if (app.current?.id !== sid || !box.isConnected) return;
-      const en: DirEntry = { name, dir, size: 0 };
-      const node = this.treeNode(rel, name, en, depth,
-        this.treeRootDir ? `${this.treeRootDir}/${rel}` : rel);
-      this.insertSorted(box, node);
+      // Un push dir_changed a pu insérer l'entrée pendant le RPC :
+      // réutiliser le nœud présent plutôt que la doubler.
+      let node: HTMLElement | undefined;
+      for (const n of box.querySelectorAll<HTMLElement>(":scope > .fnode")) {
+        if (n.dataset.rel === rel) { node = n; break; }
+      }
+      if (!node) {
+        const en: DirEntry = { name, dir, size: 0 };
+        node = this.treeNode(rel, name, en, depth,
+          this.treeRootDir ? `${this.treeRootDir}/${rel}` : rel);
+        this.insertSorted(box, node);
+      }
       for (const n of $("file-tree").querySelectorAll<HTMLElement>(".fnode.sel")) {
         n.classList.remove("sel");
       }
@@ -1090,7 +1302,8 @@ export class FileExplorer {
     const name = (node.dataset.rel?.split("/").pop() ?? "").toLowerCase();
     for (const ch of Array.from(box.children)) {
       const h = ch as HTMLElement;
-      if (!h.classList.contains("fnode")) continue;
+      // .fnew exclu : la saisie de nom reste en tête, sans data-rel.
+      if (!h.classList.contains("fnode") || h.classList.contains("fnew")) continue;
       const hDir = h.classList.contains("is-dir");
       if (!hDir && dir) { box.insertBefore(node, h); return; }
       if (hDir === dir) {
@@ -1171,6 +1384,12 @@ export class FileExplorer {
   }
 
   init() {
+    // Push FS du démon : rafraîchit le dossier déplié concerné (reconcile
+    // sans clobber — un event par watch, debouncé côté démon).
+    void listen<{ session?: string; path?: string }>("dir-changed", (m) =>
+      this.onDirChanged(m.payload),
+    );
+
     // État initial du select d'encodage (options i18n-free, fixes).
     const encSel = $("fv-enc") as HTMLSelectElement;
     encSel.innerHTML = ENCODINGS.map(

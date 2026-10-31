@@ -310,7 +310,8 @@ class WsClient {
     }
     if (v.push) {
       // Push démon → nom d'event Tauri équivalent (le payload conserve
-      // la forme brute : {session, event} / {term, data} / {term, code}).
+      // la forme brute : {session, event} / {term, data} / {term, code}
+      // / {session, path}).
       const ev =
         v.push === "event"
           ? "session-event"
@@ -318,7 +319,9 @@ class WsClient {
             ? "term-data"
             : v.push === "term_exit"
               ? "term-exit"
-              : null;
+              : v.push === "dir_changed"
+                ? "dir-changed"
+                : null;
       if (ev) this.emit(ev, v);
       return;
     }
