@@ -700,9 +700,11 @@ body.android .ev.pinned .pin-tag { opacity: 1; }
 /* Alertes sonores : sous-options indentées ; master off = contrôles
    grisés sauf les boutons « Tester » (toujours cliquables — preview +
    déblocage autoplay). */
-#s-snd-opts { display: flex; flex-direction: column; gap: 15px; }
+#s-snd-opts, #s-notif-opts { display: flex; flex-direction: column; gap: 15px; }
+#s-notif-block { margin-top: 18px; display: flex; flex-direction: column; gap: 15px; }
 #s-snd-opts.off input, #s-snd-opts.off label, #s-snd-opts.off span,
-#s-snd-opts.off select { opacity: .45; }
+#s-snd-opts.off select,
+#s-notif-opts.off input, #s-notif-opts.off label, #s-notif-opts.off span { opacity: .45; }
 .s-snd-opt { padding-left: 26px; flex-wrap: wrap; }
 .s-snd-opt > label { flex: 1; cursor: pointer; }
 .s-snd-opt > input[type="checkbox"] {
@@ -716,7 +718,7 @@ body.android .ev.pinned .pin-tag { opacity: 1; }
 }
 .s-test { padding: 3px 12px; font-size: 12px; flex: none; }
 #s-snd-vol { accent-color: var(--sand); flex: none; width: 220px; }
-#s-snd-blocked span { color: var(--dim); font-size: 12px; }
+#s-snd-blocked span, #s-notif-denied > span { color: var(--dim); font-size: 12px; }
 body.android #settings-body { padding-bottom: calc(20px + env(safe-area-inset-bottom)); }
 
 /* Vue connexion : panneau plein dans la zone de discussion (même mécanisme
