@@ -373,7 +373,7 @@ button:disabled { opacity: .5; cursor: default; }
   border: 1px solid var(--line); border-radius: 7px;
 }
 .bl-m-body select:focus { border-color: var(--accent); outline: none; }
-#bl-mcanvas { display: block; width: 100%; }
+#bl-mcanvas { display: block; width: 100%; height: 120px; }
 .bl-m-legend {
   display: flex; gap: 10px; padding: 3px 1px 5px;
   font-size: 11px; color: var(--dim);

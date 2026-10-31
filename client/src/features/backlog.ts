@@ -223,8 +223,9 @@ export class BacklogView {
     const conn = this.deps.conn();
     // Métriques : même cadence que le panneau mais en parallèle — une
     // RPC lente ne retarde jamais le rendu de la file. Onglet inactif
-    // → pas de fetch (la section n'est de toute façon pas affichée).
-    if (this.active) void this.refreshMetrics(conn);
+    // ou section repliée → pas de fetch (la série 30 j peut peser
+    // ~15 Mo JSON, inutile quand elle n'est pas affichée).
+    if (this.active && this.metricsOpen) void this.refreshMetrics(conn);
     if (!this.deps.componentsCapable(conn)) {
       this.state = { kind: "cap" };
       this.mgrWs = []; // vieux démon : pas de surface Manager
@@ -314,13 +315,19 @@ export class BacklogView {
       this.metricsAvail = true;
     }
     if (!this.metricsAvail) return;
+    const win = this.metricsWin;
     const r = await callBg<MetricsResp>("backlog_metrics", {
       conn,
-      window: this.metricsWin,
+      window: win,
     }).then(
       (v) => ({ v, err: null as unknown }),
       (e: unknown) => ({ v: null, err: e }),
     );
+    // Réponse périmée : la conn a basculé ou la fenêtre a changé
+    // pendant le vol (callBg peut retenir ~120 s en reconnexion) —
+    // un refus applicatif de l'ancien contexte (vieux démon A)
+    // masquerait à tort la section sur le nouveau (conn B).
+    if (conn !== this.metricsConn || win !== this.metricsWin) return;
     if (r.err) {
       if (isConnLost(r.err, conn)) return;
       this.metricsAvail = false;
@@ -621,7 +628,7 @@ export class BacklogView {
         body = `<div class="sess-none">${icon("loader")} ${esc(t("bl_m_loading"))}</div>`;
       } else if (m.samples?.length) {
         body =
-          `<canvas id="bl-mcanvas" height="120"></canvas>` +
+          `<canvas id="bl-mcanvas"></canvas>` +
           `<div class="bl-m-legend">` +
           `<span><i class="bl-m-dot" style="background:var(--warn)"></i>${esc(t("bl_pending"))}</span>` +
           `<span><i class="bl-m-dot" style="background:var(--accent)"></i>${esc(t("bl_wip"))}</span>` +
@@ -677,6 +684,8 @@ export class BacklogView {
           "ac-bl-metrics-open",
           this.metricsOpen ? "1" : "0",
         );
+        // Dépliée → fetch immédiat (le poll ne fetch que si ouverte).
+        if (this.metricsOpen) void this.refreshMetrics(this.deps.conn());
         this.render();
       },
     );
@@ -711,13 +720,13 @@ export class BacklogView {
     const c = $("bl-mcanvas") as HTMLCanvasElement | null;
     const samples = this.metrics?.samples;
     if (!c || !samples?.length) return;
-    const w = c.parentElement?.clientWidth || c.clientWidth || 240;
-    const h = 120;
+    // Taille affichée = CSS (width:100% du content-box parent — le
+    // padding de .bl-m-body ne déborde pas), backing store ×DPR.
+    const w = c.clientWidth || 240;
+    const h = c.clientHeight || 120;
     const dpr = window.devicePixelRatio || 1;
     c.width = Math.round(w * dpr);
     c.height = Math.round(h * dpr);
-    c.style.width = `${w}px`;
-    c.style.height = `${h}px`;
     const ctx = c.getContext("2d");
     if (!ctx) return;
     ctx.scale(dpr, dpr);
@@ -729,12 +738,17 @@ export class BacklogView {
     const padL = 24, padR = 8, padT = 8, padB = 15;
     const iw = w - padL - padR;
     const ih = h - padT - padB;
-    const maxV = Math.max(
-      1,
-      ...pts.map((s) =>
-        Math.max(s.pending ?? 0, s.wip ?? 0, s.workers_alive ?? 0),
-      ),
-    );
+    // Pas de spread : ~100 k samples possibles (30 j à tick 10 s) —
+    // Math.max(...pts) dépasserait la limite d'arguments de JSC.
+    let maxV = 1;
+    for (const s of pts) {
+      maxV = Math.max(
+        maxV,
+        s.pending ?? 0,
+        s.wip ?? 0,
+        s.workers_alive ?? 0,
+      );
+    }
 
     const dim = themeRgb("--dim") ?? "#888";
     ctx.font = "9px ui-monospace, SFMono-Regular, monospace";
