@@ -108,6 +108,11 @@ impl OrchProbe {
     /// total : aucune erreur n'est propagée — le journal métriques ne
     /// doit jamais pouvoir casser la boucle d'orchestration.
     ///
+    /// Le snapshot est celui capturé en DÉBUT de cycle (items + métas
+    /// figés au lancement du tick) : un worker spawné ou un item poppé
+    /// en cours de tick n'apparaît qu'au point suivant — voulu, la
+    /// série décrit ce sur quoi l'orch a statué.
+    ///
     /// Concurrence : appelé depuis la tâche `orch_loop` seule →
     /// l'append est séquentiel et la compaction (read→rewrite→rename)
     /// ne peut pas perdre un append concurrent.
@@ -200,13 +205,17 @@ fn window_secs(w: Option<&str>) -> Result<(Option<f64>, String)> {
     if w == "all" {
         return Ok((None, w));
     }
-    let (num, unit) = w.split_at(w.len().saturating_sub(1));
+    // Découpe par char, pas par octet : `split_at(len - 1)` paniquerait
+    // sur une unité multi-octets (« café » → frontière au milieu de « é »)
+    // — l'input vient du client, un parseur ne doit jamais paniquer.
+    let unit = w.chars().last().unwrap_or(' ');
+    let num = &w[..w.len().saturating_sub(unit.len_utf8())];
     let n: f64 = num
         .parse()
         .with_context(|| format!("fenêtre « {w} » invalide (ex. 24h, 7d, 30d, all)"))?;
     let secs = match unit {
-        "h" => n * 3_600.0,
-        "d" => n * 86_400.0,
+        'h' => n * 3_600.0,
+        'd' => n * 86_400.0,
         _ => anyhow::bail!("fenêtre « {w} » invalide (ex. 24h, 7d, 30d, all)"),
     };
     anyhow::ensure!(
@@ -229,12 +238,13 @@ fn read_samples(since: Option<f64>) -> (Vec<Value>, u64) {
             continue;
         }
         match serde_json::from_str::<Value>(line) {
-            Ok(v) => {
-                let ts = v.get("ts").and_then(Value::as_f64).unwrap_or(0.0);
-                if since.is_none_or(|s| ts >= s) {
-                    out.push(v);
-                }
-            }
+            Ok(v) => match v.get("ts").and_then(Value::as_f64) {
+                // Pas de `ts` exploitable → inutilisable : comptée
+                // corrompue, symétrique de `compact` qui la droppe.
+                None => corrupt += 1,
+                Some(ts) if since.is_none_or(|s| ts >= s) => out.push(v),
+                Some(_) => {}
+            },
             Err(_) => corrupt += 1,
         }
     }
@@ -283,6 +293,7 @@ fn aggregates(
     let mut lead: Vec<f64> = Vec::new();
     let mut wait: Vec<f64> = Vec::new();
     let mut done_ts: Vec<f64> = Vec::new();
+    let mut started_n = 0usize;
     if let Some(items) = items {
         for t in items {
             let created = t
@@ -294,15 +305,23 @@ fn aggregates(
                 .and_then(Value::as_str)
                 .and_then(iso_epoch);
             let done = t.get("done_at").and_then(Value::as_str).and_then(iso_epoch);
-            if let (Some(c), Some(d)) = (created, done) {
+            // L'événement (done/started) compte sur son propre timestamp
+            // dans la fenêtre ; `created_at` ne conditionne que la durée
+            // — un item sans created_at compte toujours au throughput.
+            if let Some(d) = done {
                 if since.is_none_or(|s| d >= s) {
-                    lead.push(d - c);
                     done_ts.push(d);
+                    if let Some(c) = created {
+                        lead.push(d - c);
+                    }
                 }
             }
-            if let (Some(c), Some(s0)) = (created, started) {
+            if let Some(s0) = started {
                 if since.is_none_or(|s| s0 >= s) {
-                    wait.push(s0 - c);
+                    started_n += 1;
+                    if let Some(c) = created {
+                        wait.push(s0 - c);
+                    }
                 }
             }
         }
@@ -329,7 +348,7 @@ fn aggregates(
         "items_available": items.is_some(),
         "items_total": items.map_or(0, |i| i.len()),
         "items_done": done_ts.len(),
-        "items_started": wait.len(),
+        "items_started": started_n,
         "done_per_day": done_per_day,
         "lead_time_avg_s": mean(&lead),
         "lead_time_median_s": median(&mut lead),
@@ -423,6 +442,12 @@ mod tests {
         assert!(window_secs(Some("h")).is_err());
         assert!(window_secs(Some("0d")).is_err());
         assert!(window_secs(Some("-5d")).is_err());
+        // Multi-octets : `split_at(len - 1)` paniquait sur la
+        // frontière interne de « é » — la découpe par char dégrade
+        // proprement en erreur, jamais en panic.
+        assert!(window_secs(Some("café")).is_err());
+        assert!(window_secs(Some("7é")).is_err());
+        assert!(window_secs(Some("€")).is_err());
     }
 
     #[test]
