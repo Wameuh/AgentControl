@@ -6,9 +6,9 @@
 // l'event (ChatView.jumpToSeq → fenêtre de contexte, mode ancré).
 // ---------------------------------------------------------------------------
 
-import { $, esc, showErr } from "../core/dom";
+import { $, esc } from "../core/dom";
 import { app } from "../core/state";
-import { call } from "../core/rpc";
+import { bgErr, callBg } from "../core/rpc";
 import { t } from "../i18n";
 
 interface SearchMatch {
@@ -183,7 +183,7 @@ export class SessionSearch {
     const sid = app.current.id;
     this.count.textContent = "…";
     try {
-      const page = await call<SearchPage>("search_events", {
+      const page = await callBg<SearchPage>("search_events", {
         session: sid,
         query,
         limit: PAGE_LIMIT,
@@ -204,7 +204,7 @@ export class SessionSearch {
     } catch (e) {
       if (my === this.reqSeq) {
         this.count.textContent = "";
-        showErr(`search_events: ${e}`);
+        bgErr("search_events", e, app.current?.conn ?? "");
       }
     }
   }
@@ -216,7 +216,7 @@ export class SessionSearch {
     const sid = app.current.id;
     this.loading = true;
     try {
-      const page = await call<SearchPage>("search_events", {
+      const page = await callBg<SearchPage>("search_events", {
         session: sid,
         query: this.input.value.trim(),
         before_seq: this.nextBefore,
@@ -228,6 +228,8 @@ export class SessionSearch {
       this.nextBefore = page.next_before;
       this.showCount();
       this.renderList();
+    } catch (e) {
+      bgErr("search_events", e, app.current?.conn ?? "");
     } finally {
       this.loading = false;
     }

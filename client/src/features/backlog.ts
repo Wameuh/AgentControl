@@ -21,7 +21,7 @@
 
 import { $, esc, q } from "../core/dom";
 import { app } from "../core/state";
-import { call } from "../core/rpc";
+import { call, callBg } from "../core/rpc";
 import { b64decode } from "../core/encoding";
 import { icon } from "../ui/icons";
 import { nav } from "../ui/nav";
@@ -186,7 +186,7 @@ export class BacklogView {
       this.render();
       return;
     }
-    const comps = await call<CompItem[]>("list_components", { conn }).catch(
+    const comps = await callBg<CompItem[]>("list_components", { conn }).catch(
       () => null,
     );
     if (!comps) {
@@ -217,7 +217,7 @@ export class BacklogView {
       this.render();
       return;
     }
-    const r = await call<QueryResp>("component_query", {
+    const r = await callBg<QueryResp>("component_query", {
       conn,
       name: COMP,
       query: QUERY,

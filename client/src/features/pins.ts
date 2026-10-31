@@ -10,7 +10,7 @@
 // ---------------------------------------------------------------------------
 
 import { $, esc, q, showErr } from "../core/dom";
-import { call } from "../core/rpc";
+import { bgErr, call, callBg } from "../core/rpc";
 import { app } from "../core/state";
 import { t } from "../i18n";
 import { icon } from "../ui/icons";
@@ -137,7 +137,7 @@ export class Pins {
     if (this.loading === s.id) return;
     this.loading = s.id;
     try {
-      const r = await call<{ pinned?: PinEntry[] }>("list_pinned", {
+      const r = await callBg<{ pinned?: PinEntry[] }>("list_pinned", {
         session: s.id,
       });
       if (app.current?.id !== s.id) return; // session changée entre-temps
@@ -146,7 +146,9 @@ export class Pins {
       this.applyAll();
       this.renderPanel();
     } catch (e) {
-      if (app.current?.id === s.id) showErr(`list_pinned: ${e}`);
+      // Load de fond : coupure transitoire → silence (sessionOpened au
+      // retour de la conn rejouera) ; échec applicatif → toast.
+      if (app.current?.id === s.id) bgErr("list_pinned", e, s.conn ?? "");
     } finally {
       if (this.loading === s.id) this.loading = "";
     }
