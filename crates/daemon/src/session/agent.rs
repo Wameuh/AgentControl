@@ -456,7 +456,14 @@ impl Session {
     /// par l'appelant du spawn (mark_dead, retour à asleep,
     /// interrupted…). Pas de bump de génération : ce kill n'est pas un
     /// supplant, les tentatives de spawn_attempts doivent continuer.
+    /// Garde de génération : un kill_for_respawn externe a pu supplanter
+    /// pendant le handshake — stdin_tx/acp_pending/child appartiennent
+    /// alors au cycle nouveau (notre vieux process a déjà été pris) ;
+    /// y toucher casserait le spawn frais en vol.
     async fn kill_failed_spawn(&self, gen: u64) {
+        if self.spawn_gen.load(Ordering::SeqCst) != gen {
+            return;
+        }
         self.suppress_exit_gen.store(gen, Ordering::SeqCst);
         *self.stdin_tx.lock().unwrap() = None;
         {
@@ -475,7 +482,15 @@ impl Session {
     /// effectivement plus rien pour cette session, et le chemin de
     /// recours (resume → session/load → repli session/new) redevient
     /// praticable.
-    pub(super) async fn drop_dead_binding(&self) {
+    /// Garde de génération : la réponse classée vient du process de la
+    /// génération `gen` — un supplant entre-temps (kill_for_respawn,
+    /// rebind) a déjà pris le vieux child ; stdin_tx/child visibles
+    /// appartiendraient au process neuf en plein handshake → ne pas y
+    /// toucher.
+    pub(super) async fn drop_dead_binding(&self, gen: u64) {
+        if self.spawn_gen.load(Ordering::SeqCst) != gen {
+            return;
+        }
         *self.stdin_tx.lock().unwrap() = None;
         let c = { self.child.lock().unwrap().take() };
         if let Some(mut c) = c {
@@ -1282,14 +1297,25 @@ for line in sys.stdin:
         use crate::session::prompt::session_binding_lost;
         for m in [
             "acp session/prompt: Session not found",
-            "unknown session",
+            "acp session/load: unknown session",
             "no such session abc",
             "la session est introuvable",
+            "acp session/prompt: session does not exist",
+            "Session not found",
         ] {
             assert!(session_binding_lost(m), "{m}");
         }
-        // « not found » hors session → process conservé.
-        for m in ["file not found", "tool call failed", "network error"] {
+        // Erreurs non-liaison — y compris wrappées sous le préfixe
+        // « acp session/prompt: » (qui contient « session » : il ne doit
+        // pas activer la classification à lui seul).
+        for m in [
+            "file not found",
+            "acp session/prompt: file not found",
+            "acp session/prompt: unknown tool",
+            "acp session/prompt: model does not exist",
+            "acp session/prompt: tool call failed",
+            "network error",
+        ] {
             assert!(!session_binding_lost(m), "{m}");
         }
     }

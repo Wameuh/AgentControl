@@ -465,7 +465,7 @@ impl Session {
             self.active_prompts.fetch_sub(1, Ordering::SeqCst);
         }
         if binding_dead {
-            self.drop_dead_binding().await;
+            self.drop_dead_binding(gen).await;
         }
         resp
     }
@@ -788,18 +788,32 @@ impl Session {
 
 /// L'agent répond que l'id de session native n'existe plus chez lui
 /// (« Session not found », « unknown session », « no such session »…) :
-/// la liaison démon↔agent est définitivement morte. Conjonction sur
-/// « session » + marqueur de disparition — un « not found » portant
-/// sur autre chose (fichier, outil) ne doit pas tuer le process.
+/// la liaison démon↔agent est définitivement morte. Phrases complètes
+/// où « session » est le sujet du marqueur — l'erreur arrive wrappée
+/// « acp session/prompt: <msg> » : une conjonction « session » +
+/// marqueur disjoints serait toujours vraie (le préfixe contient
+/// « session ») et un « file not found » / « unknown tool » tuerait un
+/// agent sain.
 pub(super) fn session_binding_lost(msg: &str) -> bool {
     let m = msg.to_lowercase();
-    m.contains("session")
-        && (m.contains("not found")
-            || m.contains("no such")
-            || m.contains("unknown")
-            || m.contains("does not exist")
-            || m.contains("doesn't exist")
-            || m.contains("introuvable"))
+    [
+        "session not found",
+        "session is not found",
+        "session was not found",
+        "no such session",
+        "unknown session",
+        "session does not exist",
+        "session doesn't exist",
+        "session not exist",
+        "cannot find session",
+        "could not find session",
+        "can not find session",
+        "session introuvable",
+        "session est introuvable",
+        "session inexistante",
+    ]
+    .iter()
+    .any(|k| m.contains(k))
 }
 
 /// Issue d'un `steer_queued` — traduite par le handler en
