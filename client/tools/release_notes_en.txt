@@ -30,3 +30,4 @@
 204: Managed components now display their tool's probed version next to the state — process included — and a catalog-declared minimum version surfaces an "update required" badge instead of a silent failure.
 205: Backlog metrics — the orchestrator now samples queue activity each tick into a bounded journal, and a new backlog_metrics RPC (acctl orch metrics) serves the series plus lead-time/queue-wait aggregates.
 206: First post now returns the backlog item for service-spawned sessions — the spawn prompt is skipped — and the orchestrator status reports when the legacy Python script holds the lock, making [Backlog] item posts unavailable.
+207: The Backlog tab gains a collapsible "Activity" section — a time-series graph of queue depth and live workers over 24h/7d/30d plus lead-time, queue-wait, throughput and worker-peak cards, fed by the backlog_metrics RPC and gracefully hidden on older daemons.
