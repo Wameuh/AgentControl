@@ -158,10 +158,18 @@ pub(crate) async fn subscribe(
                 }
                 Err(_) => break, // Closed : client droppé/déconnecté
             };
-            // Seuls les events de session partent en session-event — les
-            // pushes term_* ont leur pompe dédiée (spawnée par term_open).
-            if v.get("push").and_then(Value::as_str) != Some("event") {
-                continue;
+            // Les pushes term_* ont leur pompe dédiée (spawnée par
+            // term_open) ; les events de session partent en
+            // session-event, les dir_changed de l'explorateur en
+            // dir-changed (push éphémère du watch FS — pas de seq à
+            // suivre pour le resync).
+            match v.get("push").and_then(Value::as_str) {
+                Some("dir_changed") => {
+                    let _ = app.emit("dir-changed", v);
+                    continue;
+                }
+                Some("event") => {}
+                _ => continue,
             }
             // seq assigné (pas max) : après SessionCleared les seqs
             // repartent à 1 — last_seq doit suivre le cycle courant.

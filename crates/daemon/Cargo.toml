@@ -36,6 +36,10 @@ tar = "0.4"
 sha1 = "0.11"
 # Validation `regex` des paramètres de composants (schéma catalogue).
 regex = "1"
+# Watch FS de l'explorateur (auto-refresh) — inotify non récursif, un
+# watcher par connexion cliente. Pin exact : 8.2.1 a <7 jours au moment
+# de l'ajout (garde supply-chain du repo).
+notify = "=8.2.0"
 
 [target.'cfg(unix)'.dependencies]
 # SIGTERM/SIGKILL aux composants managés (arrêt gracieux + orphelins).
