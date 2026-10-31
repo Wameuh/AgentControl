@@ -9,6 +9,7 @@
 //   erreur        → dead/interrupted                              "error"
 // ---------------------------------------------------------------------------
 
+import { logUi } from "../core/dom";
 import type { SessionMeta } from "../core/types";
 
 /** Type d'événement d'attention — commun à tous les canaux d'alerte. */
@@ -56,7 +57,15 @@ class StateDiff {
       if (prev === undefined || prev === s.state) continue;
       const kind = classify(prev, s.state);
       if (kind) {
-        for (const cb of this.listeners) cb(kind, s);
+        // Un canal en panne ne doit pas couper les autres ni la purge des
+        // sessions disparues (entrées « last » obsolètes → re-diff).
+        for (const cb of this.listeners) {
+          try {
+            cb(kind, s);
+          } catch (e) {
+            logUi("error", `state-diff: canal d'alerte en échec: ${e}`);
+          }
+        }
       }
     }
     for (const k of [...this.last.keys()]) {

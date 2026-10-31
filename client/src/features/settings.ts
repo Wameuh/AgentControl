@@ -308,7 +308,7 @@ export class SettingsPanel {
       const on = (e.target as HTMLInputElement).checked;
       localStorage.setItem("ac-notif", on ? "1" : "0");
       if (on) {
-        void notifications.ensurePermission().then((ok) => {
+        void notifications.ensurePermission(true).then((ok) => {
           $("s-notif-denied").hidden = ok;
         });
       } else {

@@ -10,7 +10,7 @@
 // masquée côté settings.ts.
 // ---------------------------------------------------------------------------
 
-import { isWeb } from "../core/bridge";
+import { invoke, isWeb } from "../core/bridge";
 import { isAndroid } from "../core/chrome";
 import { connLabel } from "../core/conn";
 import { logUi } from "../core/dom";
@@ -24,12 +24,15 @@ import {
   isPermissionGranted,
   onAction,
   requestPermission,
-  sendNotification,
   type ActionPerformed,
+  type Options,
 } from "@tauri-apps/plugin-notification";
 
 /** Canal Android (créé au boot, importance heads-up) — ignoré ailleurs. */
 const CHANNEL_ID = "agent-status";
+/** Anti-empilement : une session ne produit pas deux alertes du même type
+ *  en moins de 10 s (boucle working↔idle, restart — le shade se remplirait). */
+const COOLDOWN_MS = 10_000;
 
 // --- Réglages (localStorage) ------------------------------------------------
 
@@ -59,6 +62,8 @@ class OsNotifications {
   private channelOk = false;
   /** État de permission connu : undefined = pas encore sondé. */
   private granted: boolean | undefined;
+  /** Dernier envoi par "conn:sid:kind" — borne l'empilement en rafale. */
+  private lastSent = new Map<string, number>();
 
   bind(deps: Partial<typeof this.deps>) {
     Object.assign(this.deps, deps);
@@ -100,6 +105,15 @@ class OsNotifications {
   alert(kind: AlertKind, s: SessionMeta) {
     if (!this.ready || !notifEnabled() || !notifTypeOn(kind)) return;
     if (notifOnlyUnfocused() && document.hasFocus()) return;
+    const key = `${s.conn ?? "default"}:${s.id}:${kind}`;
+    const now = Date.now();
+    if (now - (this.lastSent.get(key) ?? -COOLDOWN_MS) < COOLDOWN_MS) return;
+    this.lastSent.set(key, now);
+    if (this.lastSent.size > 500) {
+      for (const [k, ts] of this.lastSent) {
+        if (now - ts > COOLDOWN_MS) this.lastSent.delete(k);
+      }
+    }
     void this.send(kind, s);
   }
 
@@ -114,15 +128,18 @@ class OsNotifications {
     } as SessionMeta);
   }
 
-  /** Demande explicite (toggle maître activé, premier envoi) — l'OS montre
-   *  son prompt si la permission n'est pas encore tranchée. */
-  async ensurePermission(): Promise<boolean> {
+  /** Demande de permission — l'OS montre son prompt si elle n'est pas
+   *  encore tranchée. Après un refus, seul un geste explicite (force)
+   *  retente requestPermission : les alertes se contentent de re-sonder
+   *  l'état (un déblocage côté OS est ainsi rattrapé sans re-prompt). */
+  async ensurePermission(force = false): Promise<boolean> {
     if (this.granted === true) return true;
     try {
       if (await isPermissionGranted()) {
         this.granted = true;
         return true;
       }
+      if (!force && this.granted === false) return false;
       this.granted = (await requestPermission()) === "granted";
     } catch (e) {
       logUi("warn", `notif: permission illisible: ${e}`);
@@ -147,19 +164,20 @@ class OsNotifications {
     const conn = s.conn ?? "";
     const where =
       conn && this.deps.connCount() > 1 ? ` — ${connLabel(conn)}` : "";
-    try {
-      sendNotification({
-        title: "AgentControl",
-        body: t(EV_KEY[kind], { title: s.title || s.id }) + where,
-        // Payload relue au clic pour rouvrir la bonne session.
-        extra: { sid: s.id, conn },
-        autoCancel: true,
-        group: `agentcontrol:${conn || "default"}`,
-        ...(isAndroid() && this.channelOk ? { channelId: CHANNEL_ID } : {}),
-      });
-    } catch (e) {
-      logUi("error", `notif: envoi impossible: ${e}`);
-    }
+    const options: Options = {
+      title: "AgentControl",
+      body: t(EV_KEY[kind], { title: s.title || s.id }) + where,
+      // Payload relue au clic pour rouvrir la bonne session.
+      extra: { sid: s.id, conn },
+      autoCancel: true,
+      group: `agentcontrol:${conn || "default"}`,
+      ...(isAndroid() && this.channelOk ? { channelId: CHANNEL_ID } : {}),
+    };
+    // invoke direct plutôt que sendNotification() (fire-and-forget via le
+    // shim window.Notification) : un échec de livraison remonte ici.
+    await invoke("plugin:notification|notify", { options }).catch((e) =>
+      logUi("error", `notif: envoi impossible: ${e}`),
+    );
   }
 
   /** Tap sur la notif : la fenêtre reprend le focus (dé-minimisée si
