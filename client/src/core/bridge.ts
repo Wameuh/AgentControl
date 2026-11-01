@@ -139,12 +139,14 @@ async function webInvoke<T>(cmd: string, a: Record<string, unknown>): Promise<T>
         platform: "web", model_dir: "", model_present: false,
         model_loaded: false, recording: false,
         permission: "unavailable", language: "auto",
+        engine: "sherpa", system_available: false,
       } as T;
     case "plugin:ac-stt|stt_start":
       return { started: false, reason: "unsupported_platform" } as T;
     case "plugin:ac-stt|stt_stop":
       return { text: "", lang: null } as T;
     case "plugin:ac-stt|stt_set_language":
+    case "plugin:ac-stt|stt_set_engine":
       return undefined as T;
     default:
       // check_update / update_client / ensure_daemon / write_download :

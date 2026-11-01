@@ -46,6 +46,8 @@ impl<R: Runtime> Stt<R> {
             recording: false,
             permission: "unavailable".into(),
             language: "auto".into(),
+            engine: "sherpa".into(),
+            system_available: false,
         })
     }
 
@@ -64,6 +66,10 @@ impl<R: Runtime> Stt<R> {
     }
 
     pub fn set_language(&self, _lang: &str) -> crate::Result<()> {
+        Ok(())
+    }
+
+    pub fn set_engine(&self, _engine: &str) -> crate::Result<()> {
         Ok(())
     }
 }

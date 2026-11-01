@@ -2,7 +2,8 @@
 
 Plugin STT : diagnostic `stt_ping`, gestion des modèles téléchargeables
 (`stt_dl_*` — download à la demande depuis les settings, Android only),
-cycle de dictée (`stt_state`/`stt_start`/`stt_stop`/`stt_set_language`)
+cycle de dictée (`stt_state`/`stt_start`/`stt_stop`/`stt_set_language`),
+choix du moteur (`stt_set_engine` — sherpa / SpeechRecognizer système)
 et abonnement aux events stt_* (register/remove_listener — héritées de
 la base Kotlin du plugin).
 
@@ -17,6 +18,7 @@ la base Kotlin du plugin).
 - `allow-stt-start`
 - `allow-stt-stop`
 - `allow-stt-set-language`
+- `allow-stt-set-engine`
 - `allow-register-listener`
 - `allow-remove-listener`
 
@@ -207,6 +209,32 @@ Enables the stt_ping command without any pre-configured scope.
 <td>
 
 Denies the stt_ping command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:allow-stt-set-engine`
+
+</td>
+<td>
+
+Enables the stt_set_engine command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:deny-stt-set-engine`
+
+</td>
+<td>
+
+Denies the stt_set_engine command without any pre-configured scope.
 
 </td>
 </tr>

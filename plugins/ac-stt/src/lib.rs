@@ -34,6 +34,7 @@ pub fn init<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
             commands::stt_start,
             commands::stt_stop,
             commands::stt_set_language,
+            commands::stt_set_engine,
         ])
         .setup(|app, api| {
             #[cfg(mobile)]
