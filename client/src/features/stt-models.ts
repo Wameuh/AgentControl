@@ -203,9 +203,9 @@ export class SttModelsPanel {
     return row;
   }
 
-  /** Résumé à droite du titre de section — l'état le plus « actionnable »
-   *  des modèles déclarés (error > downloading > partial > absent >
-   *  present) reste lisible section repliée. */
+  /** Résumé à droite du titre de section — le plus informatif des états
+   *  déclarés (downloading live > error > partial > absent > present)
+   *  reste lisible section repliée. */
   private syncSecState() {
     const el = $("s-st-stt");
     const ms = this.models;
