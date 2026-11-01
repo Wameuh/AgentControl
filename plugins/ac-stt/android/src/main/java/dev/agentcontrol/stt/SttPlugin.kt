@@ -12,9 +12,9 @@ import app.tauri.annotation.Command
 import app.tauri.annotation.Permission
 import app.tauri.annotation.PermissionCallback
 import app.tauri.annotation.TauriPlugin
+import app.tauri.PermissionState
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
-import app.tauri.plugin.PermissionState
 import app.tauri.plugin.Plugin
 import com.k2fsa.sherpa.onnx.FeatureConfig
 import com.k2fsa.sherpa.onnx.OnlineModelConfig
@@ -55,6 +55,7 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
   @Volatile private var stream: OnlineStream? = null
   @Volatile private var recorder: AudioRecord? = null
   @Volatile private var recording = false
+  @Volatile private var permissionPending = false
   private var recordThread: Thread? = null
   private var trimCallbacks: ComponentCallbacks2? = null
 
@@ -155,7 +156,11 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
     if (!modelPresent()) { invoke.resolve(startResult(false, "model_missing")); return }
     if (getPermissionState("microphone") != PermissionState.GRANTED) {
       // Le callback est rappelé avec le même invoke une fois le grant
-      // système décidé (dialog OS affiché par PermissionHelper).
+      // système décidé (dialog OS affiché par PermissionHelper). Le
+      // slot de callback est unique → un 2e appel pendant le prompt
+      // écraserait le 1er invoke : on l'écarte proprement.
+      if (permissionPending) { invoke.resolve(startResult(false, "perm_pending")); return }
+      permissionPending = true
       requestPermissionForAlias("microphone", invoke, "micPermCallback")
       return
     }
@@ -164,6 +169,7 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
 
   @PermissionCallback
   private fun micPermCallback(invoke: Invoke) {
+    permissionPending = false
     if (getPermissionState("microphone") == PermissionState.GRANTED) doStart(invoke)
     else invoke.resolve(startResult(false, "mic_denied"))
   }
@@ -173,10 +179,22 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
     var text = ""
     synchronized(this) {
       recording = false
-      // Le join avant tout release garantit que la boucle n'utilise
-      // plus ni stream ni recorder (pas de race JNI).
-      recordThread?.join(2000)
-      recordThread = null
+      // Si le join échoue (read bloqué), on laisse la boucle sortir
+      // seule — elle meurt en une itération puisque recording=false —
+      // et on ne release rien : un release pendant que la boucle
+      // utilise encore les ptr natifs serait un JNI crash.
+      if (recordThread != null) {
+        recordThread!!.join(2000)
+        if (recordThread!!.isAlive) {
+          recordThread = null
+          val early = JSObject()
+          early.put("text", "")
+          early.put("lang", language)
+          invoke.resolve(early)
+          return
+        }
+        recordThread = null
+      }
       val s = stream
       stream = null
       recorder?.let {
@@ -202,51 +220,66 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
 
   @Command
   fun sttSetLanguage(invoke: Invoke) {
-    val lang = invoke.getArgs().getString("lang", "auto") ?: "auto"
+    val lang = invoke.getArgs().getString("lang") ?: "auto"
     language = lang
-    // Effet immédiat si une dictée est en cours (option par stream).
-    stream?.setOption("language", lang)
+    synchronized(this) {
+      // Effet immédiat si une dictée est en cours (option par stream) —
+      // sous le même moniteur que les release pour ne pas toucher un
+      // ptr natif libéré par un stop/unload concurrent.
+      stream?.setOption("language", lang)
+    }
     invoke.resolve()
   }
 
   // ── Capture + décode ────────────────────────────────────────────────
 
   private fun doStart(invoke: Invoke) {
+    // Le load du modèle (~700 Mo, des secondes) reste HORS du moniteur :
+    // onTrimMemory → unloadModel() tourne sur le main thread et ne doit
+    // pas geler l'app en attendant la fin du chargement.
+    try {
+      ensureRecognizer()
+    } catch (e: Exception) {
+      invoke.resolve(startResult(false, "engine_error"))
+      return
+    }
     synchronized(this) {
       if (recording) { invoke.resolve(startResult(true)); return }
+      var rec: AudioRecord? = null
+      var s: OnlineStream? = null
       try {
-        ensureRecognizer()
-      } catch (e: Exception) {
-        invoke.resolve(startResult(false, "engine_error"))
-        return
-      }
-      val minBuf = AudioRecord.getMinBufferSize(
-        SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
-      )
-      val rec = try {
-        AudioRecord(
+        val minBuf = AudioRecord.getMinBufferSize(
+          SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
+        )
+        rec = AudioRecord(
           MediaRecorder.AudioSource.VOICE_RECOGNITION,
           SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO,
           AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf, SAMPLE_RATE / 5)
         )
+        if (rec.state != AudioRecord.STATE_INITIALIZED) {
+          throw IllegalStateException("AudioRecord not initialized")
+        }
+        s = recognizer!!.createStream()
+        if (language != "auto") s.setOption("language", language)
+        // Tout est alloué : publish puis capture. startRecording()
+        // lève IllegalStateException si le micro est indisponible —
+        // couverte par le catch.
+        stream = s
+        recorder = rec
+        lastPartial = ""
+        rec.startRecording()
+        recording = true
+        recordThread = thread(name = "stt-capture") { captureLoop(s!!) }
+        invoke.resolve(startResult(true))
       } catch (e: SecurityException) {
+        s?.release(); rec?.release()
+        stream = null; recorder = null
         invoke.resolve(startResult(false, "mic_denied"))
-        return
-      }
-      if (rec.state != AudioRecord.STATE_INITIALIZED) {
-        rec.release()
+      } catch (e: Exception) {
+        s?.release(); rec?.release()
+        stream = null; recorder = null
         invoke.resolve(startResult(false, "audio_init"))
-        return
       }
-      val s = recognizer!!.createStream()
-      if (language != "auto") s.setOption("language", language)
-      stream = s
-      recorder = rec
-      lastPartial = ""
-      rec.startRecording()
-      recording = true
-      recordThread = thread(name = "stt-capture") { captureLoop(s) }
-      invoke.resolve(startResult(true))
     }
   }
 
@@ -254,27 +287,33 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
   // Le chunk décode interne du modèle est 560 ms (choix du doc §7).
   private fun captureLoop(s: OnlineStream) {
     val buf = ShortArray(SAMPLE_RATE / 10)
-    while (true) {
-      val rec = recorder ?: break
-      if (!recording) break
-      val n = try { rec.read(buf, 0, buf.size) } catch (e: Exception) { break }
-      if (n <= 0) continue
-      emitLevel(buf, n)
-      val samples = FloatArray(n) { buf[it] / 32768.0f }
-      s.acceptWaveform(samples, SAMPLE_RATE)
-      val r = recognizer ?: break
-      while (r.isReady(s)) r.decode(s)
-      if (r.isEndpoint(s)) {
-        val text = r.getResult(s).text
-        r.reset(s)
-        if (text.isNotBlank()) emitResult(text)
-        lastPartial = ""
+    try {
+      while (true) {
+        val rec = recorder ?: break
+        if (!recording) break
+        val n = try { rec.read(buf, 0, buf.size) } catch (e: Exception) { break }
+        if (n <= 0) continue
+        emitLevel(buf, n)
+        val samples = FloatArray(n) { buf[it] / 32768.0f }
+        s.acceptWaveform(samples, SAMPLE_RATE)
+        val r = recognizer ?: break
+        while (r.isReady(s)) r.decode(s)
+        if (r.isEndpoint(s)) {
+          val text = r.getResult(s).text
+          r.reset(s)
+          if (text.isNotBlank()) emitResult(text)
+          lastPartial = ""
+        }
+        val partial = r.getResult(s).text
+        if (partial != lastPartial) {
+          lastPartial = partial
+          emitPartial(partial)
+        }
       }
-      val partial = r.getResult(s).text
-      if (partial != lastPartial) {
-        lastPartial = partial
-        emitPartial(partial)
-      }
+    } finally {
+      // Toute sortie anormale (read cassé, recognizer perdu) doit rendre
+      // l'état cohérent — sinon stt_state mentirait (« recording »).
+      recording = false
     }
   }
 
@@ -302,6 +341,10 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
   private fun stopCapture() {
     recording = false
     recordThread?.join(2000)
+    // Thread encore vivant (read bloqué) : on ne release rien — la
+    // boucle meurt seule à l'itération suivante (recording=false) et
+    // libère ses ptr natifs au finalize.
+    if (recordThread?.isAlive == true) { recordThread = null; return }
     recordThread = null
     recorder?.let {
       try { it.stop() } catch (_: Exception) {}
@@ -314,8 +357,10 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
 
   private fun ensureRecognizer() {
     if (recognizer != null) return
+    // Construction hors moniteur (charge ~700 Mo) : publication sous
+    // lock — un concurrent aurait fait de même, on libère le doublon.
     val dir = modelDir()
-    recognizer = OnlineRecognizer(
+    val r = OnlineRecognizer(
       config = OnlineRecognizerConfig(
         featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80),
         modelConfig = OnlineModelConfig(
@@ -331,6 +376,9 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
         ),
       )
     )
+    synchronized(this) {
+      if (recognizer == null) recognizer = r else r.release()
+    }
   }
 
   private fun unloadModel() {
@@ -347,12 +395,10 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
 
   private fun modelPresent() = MODEL_FILES.all { File(modelDir(), it).isFile }
 
-  private fun permissionLabel(): String = when (getPermissionState("microphone")) {
-    PermissionState.GRANTED -> "granted"
-    PermissionState.DENIED -> "denied"
-    PermissionState.PROMPT, PermissionState.PROMPT_WITH_RATIONALE -> "prompt"
-    else -> "unknown"
-  }
+  // PermissionState.toString() rend déjà le label ("granted", "denied",
+  // "prompt", "prompt-with-rationale") ; null = alias inconnu.
+  private fun permissionLabel(): String =
+    getPermissionState("microphone")?.toString() ?: "unknown"
 
   private fun startResult(started: Boolean, reason: String? = null): JSObject {
     val ret = JSObject()
