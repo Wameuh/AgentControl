@@ -26,6 +26,7 @@ import {
   initPlatform,
   isAndroid,
   initWindowChrome,
+  initExternalLinks,
   shellOpen,
 } from "./core/chrome";
 import { nav, type SheetItem } from "./ui/nav";
@@ -68,6 +69,7 @@ applyStatic();
 initGems();
 initPlatform();
 initWindowChrome();
+initExternalLinks();
 // Log open/close des modals + watchdog anti-gel (dialog invisible, inert
 // résiduel) — avant tout showModal pour tracer aussi les dialogs du boot.
 initModalGuard();
