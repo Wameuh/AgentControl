@@ -183,13 +183,15 @@ export class SettingsPanel {
     const sel = $("s-pair-conn") as HTMLSelectElement;
     sel.innerHTML = "";
     const active = this.activeConnKey();
+    const android = isAndroid();
     let def = -1;
     this.pairConns.forEach((c, i) => {
       const o = document.createElement("option");
       o.value = String(i);
-      o.textContent = connLabel(connKeyOf(c, isAndroid()));
+      const k = connKeyOf(c, android);
+      o.textContent = connLabel(k);
       sel.append(o);
-      if (connKeyOf(c, isAndroid()) === active) def = i;
+      if (k === active) def = i;
     });
     // Défaut : conn liée, sinon la première (la dernière utilisée —
     // connections.json garde la plus récente en tête, cf. autoConnect).
