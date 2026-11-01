@@ -393,9 +393,11 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
     // boucle meurt seule à l'itération suivante (recording=false),
     // captureActive reste levé et garde les ressources.
     if (t?.isAlive == true) return
-    recordThread = null
-    if (captureActive) return
     synchronized(this) {
+      // Null sous moniteur : un doStart concurrent publierait sinon un
+      // handle que cette ligne écraserait.
+      recordThread = null
+      if (captureActive) return
       recorder?.let {
         try { it.stop() } catch (_: Exception) {}
         it.release()
