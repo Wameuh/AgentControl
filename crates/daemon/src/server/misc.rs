@@ -5,6 +5,10 @@ use super::*;
 impl Daemon {
     pub(super) async fn h_daemon_status(self: &Arc<Self>) -> Result<Value> {
                 let sessions = self.sessions.read().await;
+                // Métriques de l'hôte où tourne le démon — champ additif :
+                // les vieux clients l'ignorent, les nouveaux sur un vieux
+                // démon voient le bloc absent (pas de (sync)).
+                let host = self.host_stats();
                 Ok(json!({
                     "version": env!("CARGO_PKG_VERSION"),
                     "sessions": sessions.len(),
@@ -40,7 +44,41 @@ impl Daemon {
                     // de la file de prompts — injecte dans le tour en
                     // cours sans l'annuler).
                     "queue_steer": true,
+                    "host": host,
                 }))
+    }
+
+    /// Bloc `"host"` de daemon_status : cpu % (f64 arrondi à 1 décimale
+    /// — un arrondi f32 s'élargirait en f64 avec du bruit binaire, cf.
+    /// #122), mem used/total Mo, load1 (unix seulement — l'API renvoie
+    /// 0 sur Windows) et rss_mb du process démon (distingue charge hôte
+    /// vs démon). Le `System` persistant rend le delta CPU significatif
+    /// entre deux appels ; le poll client (~10 s) dépasse l'intervalle
+    /// minimal interne de sysinfo — refresh direct à chaque appel.
+    fn host_stats(&self) -> Value {
+        // Mutex empoisonné (panic d'un précédent appel) : récupérer le
+        // guard plutôt que faire paniquer chaque daemon_status — une
+        // métrique légèrement stale vaut mieux qu'une conn passée morte.
+        let mut sys = self.host_sys.lock().unwrap_or_else(|e| e.into_inner());
+        sys.refresh_cpu_usage();
+        sys.refresh_memory();
+        let mut host = json!({
+            "cpu": ((sys.global_cpu_usage() as f64) * 10.0).round() / 10.0,
+            "mem_used_mb": sys.used_memory() / 1_048_576,
+            "mem_total_mb": sys.total_memory() / 1_048_576,
+        });
+        #[cfg(unix)]
+        {
+            let load = sysinfo::System::load_average();
+            host["load1"] = json!((load.one * 100.0).round() / 100.0);
+        }
+        if let Ok(pid) = sysinfo::get_current_pid() {
+            sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+            if let Some(p) = sys.process(pid) {
+                host["rss_mb"] = json!(p.memory() / 1_048_576);
+            }
+        }
+        host
     }
     /// `UpdateDaemon` : télécharge la release demandée et remplace le
     /// binaire courant — le démon sort ensuite sous son superviseur

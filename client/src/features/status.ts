@@ -6,6 +6,7 @@
 import { invoke, isWeb } from "../core/bridge";
 import { gemSVG } from "../crystal";
 import { $ } from "../core/dom";
+import { t } from "../i18n";
 
 /** Gemme d'état : dorée working, violette compacting, rouge question/failed,
  *  verte idle, grise dead. */
@@ -37,6 +38,47 @@ export function setAppIcon(state: string) {
   invoke("set_app_icon", { state }).catch(() => {});
 }
 
+/** Bloc `host` du daemon_status de la conn active — absent sur un vieux
+ *  démon → la section reste masquée silencieusement. */
+export interface HostStats {
+  cpu?: number;
+  mem_used_mb?: number;
+  mem_total_mb?: number;
+  load1?: number;
+  rss_mb?: number;
+}
+
+/** Résout le bloc `host` à afficher (injecté par main.ts — la sonde
+ *  daemon_status du watchdog l'alimente déjà, zéro polling ajouté). */
+let hostStats: (() => HostStats | undefined) | undefined;
+
+/** "3.1/8 GB" dès que le total dépasse 1024 Mo, sinon "128/512 MB" —
+ *  1 décimale max, ".0" élagué (même famille de bug que #122). */
+function fmtMemPair(usedMb: number, totalMb: number): string {
+  const gb = totalMb >= 1024;
+  const f = (v: number) => (gb ? Math.round(v / 102.4) / 10 : Math.round(v));
+  return `${f(usedMb)}/${f(totalMb)} ${gb ? "GB" : "MB"}`;
+}
+
+/** Segment « srv » de la barre : cpu + mem de l'hôte démon (+ load unix
+ *  et RSS du process démon — distingue charge hôte vs démon). */
+function hostPart(): string {
+  const h = hostStats?.();
+  if (!h || typeof h.cpu !== "number" ||
+      typeof h.mem_used_mb !== "number" || typeof h.mem_total_mb !== "number") {
+    return "";
+  }
+  // toFixed : ne pas faire confiance à la précision démon (même piège
+  // d'élargissement f32→f64 que #122 côté local).
+  let s = t("sb_srv", {
+    cpu: h.cpu.toFixed(1),
+    mem: fmtMemPair(h.mem_used_mb, h.mem_total_mb),
+  });
+  if (typeof h.load1 === "number") s += ` · ${t("sb_srv_load", { v: h.load1 })}`;
+  if (typeof h.rss_mb === "number") s += ` · ${t("sb_srv_dmn", { v: h.rss_mb })}`;
+  return ` · ${s}`;
+}
+
 // Barre d'état : mémoire + CPU du client, toutes les 3 s
 async function updateStatusbar() {
   try {
@@ -44,13 +86,15 @@ async function updateStatusbar() {
     const fmt = (b: number) => b >= 1_048_576 ? `${(b / 1_048_576).toFixed(1)} MB/s` : b >= 1024 ? `${(b / 1024).toFixed(0)} kB/s` : `${Math.round(b)} B/s`;
     // Web : rss/cpu = métriques du process Tauri (0 en navigateur) — on
     // n'affiche que le trafic de la WebSocket vers le démon.
-    $("sb-stats").textContent = isWeb
+    $("sb-stats").textContent = (isWeb
       ? `↓${fmt(s.rx_bps)} ↑${fmt(s.tx_bps)}`
-      : `mem ${Math.round(s.rss_mb)} MB · cpu ${s.cpu.toFixed(1)}% · ↓${fmt(s.rx_bps)} ↑${fmt(s.tx_bps)}`;
+      : `mem ${Math.round(s.rss_mb)} MB · cpu ${s.cpu.toFixed(1)}% · ↓${fmt(s.rx_bps)} ↑${fmt(s.tx_bps)}`)
+      + hostPart();
   } catch { /* silencieux */ }
 }
 
-export function initStatus() {
+export function initStatus(host?: () => HostStats | undefined) {
+  hostStats = host;
   setInterval(updateStatusbar, 3000);
   updateStatusbar();
 }

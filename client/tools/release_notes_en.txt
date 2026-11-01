@@ -40,3 +40,4 @@
 214: Windows taskbar pins now survive updates — the app declares a stable AppUserModelID (the bundle identifier) at startup, matching the ID the MSI/NSIS installers already stamp on their shortcuts, so the pinned icon no longer goes blank when the exe is replaced (existing installs need a one-time re-pin).
 215: Spanish and German join the interface languages — the whole UI (menus, dialogs, toasts, tooltips) is now offered in English, French, Español and Deutsch, applied immediately and persisted across launches.
 216: Status bar CPU percentage no longer shows a trail of decimals (e.g. 33.29999923706055%) — it now displays a single digit after the decimal point.
+217: The status bar now shows the host machine's metrics next to the client's — the daemon reports its server's CPU, memory and load average (Linux) through daemon_status, displayed as a compact "srv" segment that stays hidden on older daemons.
