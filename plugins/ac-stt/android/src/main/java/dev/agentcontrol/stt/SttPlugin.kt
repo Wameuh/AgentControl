@@ -23,6 +23,7 @@ import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OnlineStream
 import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import kotlin.math.sqrt
 
@@ -55,7 +56,11 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
   @Volatile private var stream: OnlineStream? = null
   @Volatile private var recorder: AudioRecord? = null
   @Volatile private var recording = false
-  @Volatile private var permissionPending = false
+  // Thread de capture encore vivant alors que recording=false (join
+  // timeout sur un read bloqué) : interdit tout release de stream/
+  // recorder/recognizer tant qu'il est levé — sinon UAF JNI.
+  @Volatile private var captureActive = false
+  private val permissionPending = AtomicBoolean(false)
   private var recordThread: Thread? = null
   private var trimCallbacks: ComponentCallbacks2? = null
 
@@ -158,10 +163,17 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
       // Le callback est rappelé avec le même invoke une fois le grant
       // système décidé (dialog OS affiché par PermissionHelper). Le
       // slot de callback est unique → un 2e appel pendant le prompt
-      // écraserait le 1er invoke : on l'écarte proprement.
-      if (permissionPending) { invoke.resolve(startResult(false, "perm_pending")); return }
-      permissionPending = true
-      requestPermissionForAlias("microphone", invoke, "micPermCallback")
+      // écraserait le 1er invoke : on l'écarte proprement (check+set
+      // atomique — deux invokes peuvent arriver dans le même tick).
+      if (!permissionPending.compareAndSet(false, true)) {
+        invoke.resolve(startResult(false, "perm_pending")); return
+      }
+      try {
+        requestPermissionForAlias("microphone", invoke, "micPermCallback")
+      } catch (e: Exception) {
+        permissionPending.set(false)
+        invoke.resolve(startResult(false, "perm_error"))
+      }
       return
     }
     doStart(invoke)
@@ -169,7 +181,7 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
 
   @PermissionCallback
   private fun micPermCallback(invoke: Invoke) {
-    permissionPending = false
+    permissionPending.set(false)
     if (getPermissionState("microphone") == PermissionState.GRANTED) doStart(invoke)
     else invoke.resolve(startResult(false, "mic_denied"))
   }
@@ -182,11 +194,14 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
       // Si le join échoue (read bloqué), on laisse la boucle sortir
       // seule — elle meurt en une itération puisque recording=false —
       // et on ne release rien : un release pendant que la boucle
-      // utilise encore les ptr natifs serait un JNI crash.
-      if (recordThread != null) {
-        recordThread!!.join(2000)
-        if (recordThread!!.isAlive) {
-          recordThread = null
+      // utilise encore les ptr natifs serait un JNI crash. On garde
+      // recordThread (handle de re-join) et captureActive reste levé
+      // → unloadModel/stopCapture/doStart refusent de toucher les
+      // ressources tant que le zombie vit.
+      val t = recordThread
+      if (t != null) {
+        t.join(2000)
+        if (t.isAlive) {
           val early = JSObject()
           early.put("text", "")
           early.put("lang", language)
@@ -194,6 +209,13 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
           return
         }
         recordThread = null
+      } else if (captureActive) {
+        // Zombie d'un stop précédent : mêmes raisons, mêmes refus.
+        val early = JSObject()
+        early.put("text", "")
+        early.put("lang", language)
+        invoke.resolve(early)
+        return
       }
       val s = stream
       stream = null
@@ -220,7 +242,9 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
 
   @Command
   fun sttSetLanguage(invoke: Invoke) {
-    val lang = invoke.getArgs().getString("lang") ?: "auto"
+    // optString rend "" (pas null) pour une clé absente → ifEmpty
+    // garde le repli "auto" quelle que soit la forme d'appel.
+    val lang = invoke.getArgs().optString("lang").ifEmpty { "auto" }
     language = lang
     synchronized(this) {
       // Effet immédiat si une dictée est en cours (option par stream) —
@@ -245,8 +269,21 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
     }
     synchronized(this) {
       if (recording) { invoke.resolve(startResult(true)); return }
+      // Zombie d'un ancien stop : son recorder tient encore le micro,
+      // republier stream/recorder écraserait ses ptr natifs sous lui.
+      if (captureActive) { invoke.resolve(startResult(false, "busy")); return }
+      // Reliquat d'un stop arrivé à timeout (zombie depuis mort) :
+      // ptr natifs valides mais orphelins — on les release avant de
+      // republier, sinon fuite jusqu'au prochain unloadModel.
+      stream?.release()
+      recorder?.let {
+        try { it.stop() } catch (_: Exception) {}
+        it.release()
+      }
+      stream = null; recorder = null
       var rec: AudioRecord? = null
       var s: OnlineStream? = null
+      var started = false
       try {
         val minBuf = AudioRecord.getMinBufferSize(
           SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
@@ -263,23 +300,28 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
         if (language != "auto") s.setOption("language", language)
         // Tout est alloué : publish puis capture. startRecording()
         // lève IllegalStateException si le micro est indisponible —
-        // couverte par le catch.
+        // couverte par le catch (le thread n'est pas encore né →
+        // release sûr).
         stream = s
         recorder = rec
         lastPartial = ""
         rec.startRecording()
         recording = true
+        captureActive = true
         recordThread = thread(name = "stt-capture") { captureLoop(s!!) }
-        invoke.resolve(startResult(true))
+        started = true
       } catch (e: SecurityException) {
         s?.release(); rec?.release()
         stream = null; recorder = null
+        recording = false; captureActive = false
         invoke.resolve(startResult(false, "mic_denied"))
       } catch (e: Exception) {
         s?.release(); rec?.release()
         stream = null; recorder = null
+        recording = false; captureActive = false
         invoke.resolve(startResult(false, "audio_init"))
       }
+      if (started) invoke.resolve(startResult(true))
     }
   }
 
@@ -312,8 +354,10 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
       }
     } finally {
       // Toute sortie anormale (read cassé, recognizer perdu) doit rendre
-      // l'état cohérent — sinon stt_state mentirait (« recording »).
+      // l'état cohérent — sinon stt_state mentirait (« recording ») et
+      // les ressources resteraient gelées pour unloadModel/doStart.
       recording = false
+      captureActive = false
     }
   }
 
@@ -340,19 +384,26 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
 
   private fun stopCapture() {
     recording = false
-    recordThread?.join(2000)
+    // Join HORS moniteur (appelé depuis onDestroy/main thread : ne pas
+    // bloquer les commandes JNI), release SOUS moniteur — mêmes
+    // règles que sttStop/sttSetLanguage.
+    val t = recordThread
+    t?.join(2000)
     // Thread encore vivant (read bloqué) : on ne release rien — la
-    // boucle meurt seule à l'itération suivante (recording=false) et
-    // libère ses ptr natifs au finalize.
-    if (recordThread?.isAlive == true) { recordThread = null; return }
+    // boucle meurt seule à l'itération suivante (recording=false),
+    // captureActive reste levé et garde les ressources.
+    if (t?.isAlive == true) return
     recordThread = null
-    recorder?.let {
-      try { it.stop() } catch (_: Exception) {}
-      it.release()
+    if (captureActive) return
+    synchronized(this) {
+      recorder?.let {
+        try { it.stop() } catch (_: Exception) {}
+        it.release()
+      }
+      recorder = null
+      stream?.release()
+      stream = null
     }
-    recorder = null
-    stream?.release()
-    stream = null
   }
 
   private fun ensureRecognizer() {
@@ -383,7 +434,9 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
 
   private fun unloadModel() {
     synchronized(this) {
-      if (recording) return  // jamais pendant une dictée
+      // jamais pendant une dictée, ni sous un thread zombie (join
+      // timeout) dont le read bloqué peut se réveiller sur un ptr mort.
+      if (recording || captureActive) return
       stream?.release()
       stream = null
       recognizer?.release()
