@@ -12,6 +12,13 @@ import { isAndroid } from "../core/chrome";
 import { $, notify } from "../core/dom";
 import { fmtSize } from "../core/format";
 import { t, type Key } from "../i18n";
+import {
+  sttEngine,
+  sttLang,
+  setSttEngine,
+  setSttLang,
+  type SttLang,
+} from "./stt-prefs";
 
 interface SttFileState {
   name: string;
@@ -37,6 +44,13 @@ interface SttDlState {
   models: SttModelState[];
 }
 
+/** `stt_state` — champs utiles au panneau (le mic garde sa propre vue). */
+interface SttEngineState {
+  engine: string;
+  language: string;
+  system_available: boolean;
+}
+
 const CMD = (c: string) => `plugin:ac-stt|${c}`;
 
 const STATE_KEY: Record<SttModelStatus, Key> = {
@@ -56,6 +70,24 @@ export class SttModelsPanel {
    *  sont des no-op sans listener, garder le canal vivant est sans coût. */
   init() {
     if (!supported()) return;
+    // Selects moteur/langue : le localStorage fait foi (le Kotlin perd
+    // son état volatile au reload webview) — un changement est poussé au
+    // plugin immédiatement, sinon les prefs sont ré-appliquées avant
+    // chaque dictée par le mic.
+    const engSel = $("s-stt-engine") as HTMLSelectElement;
+    const langSel = $("s-stt-lang") as HTMLSelectElement;
+    engSel.value = sttEngine();
+    langSel.value = sttLang();
+    engSel.onchange = () => {
+      const e = engSel.value === "system" ? "system" : "sherpa";
+      setSttEngine(e);
+      void invoke(CMD("stt_set_engine"), { engine: e }).catch(() => {});
+    };
+    langSel.onchange = () => {
+      const l = langSel.value as SttLang;
+      setSttLang(l);
+      void invoke(CMD("stt_set_language"), { lang: l }).catch(() => {});
+    };
     void listenPlugin<{ model: string; bytes: number; total: number }>(
       "ac-stt",
       "stt_dl_progress",
@@ -77,6 +109,25 @@ export class SttModelsPanel {
     );
     this.models = st?.models ?? [];
     this.render();
+    void this.syncEngine();
+  }
+
+  /** Le SpeechRecognizer on-device (API 31+, appareil dépendant) gate
+   *  l'option « system » : absente → option grisée (elle reste lisible —
+   *  la raison est dans le desc, pas cachée). La préférence persistée
+   *  fait foi pour la valeur affichée. */
+  private async syncEngine() {
+    const st = await invoke<SttEngineState>(CMD("stt_state")).catch(
+      () => null,
+    );
+    const engSel = $("s-stt-engine") as HTMLSelectElement;
+    engSel.value = sttEngine();
+    ($("s-stt-lang") as HTMLSelectElement).value = sttLang();
+    if (!st) return;
+    const sysOpt = engSel.querySelector<HTMLOptionElement>(
+      'option[value="system"]',
+    );
+    if (sysOpt) sysOpt.disabled = !st.system_available;
   }
 
   private onProgress(p: { model: string; bytes: number; total: number }) {

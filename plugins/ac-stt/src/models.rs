@@ -59,6 +59,12 @@ pub struct SttState {
     pub permission: String,
     /// `"auto"` ou locale forcée (`stt_set_language`).
     pub language: String,
+    /// Moteur actif : `"sherpa"` (modèle téléchargé) ou `"system"`
+    /// (SpeechRecognizer on-device Android, zéro modèle requis).
+    pub engine: String,
+    /// `SpeechRecognizer` on-device disponible (API 31+) — le setting
+    /// moteur `system` n'est proposé que si vrai.
+    pub system_available: bool,
 }
 
 /// `stt_start` — `reason` identifie pourquoi ça n'a pas démarré :
@@ -85,4 +91,11 @@ pub struct SttStop {
 #[derive(Debug, serde::Serialize)]
 pub struct SetLanguageArgs<'a> {
     pub lang: &'a str,
+}
+
+/// Payload forwardé au Kotlin par `stt_set_engine`.
+#[cfg(mobile)]
+#[derive(Debug, serde::Serialize)]
+pub struct SetEngineArgs<'a> {
+    pub engine: &'a str,
 }

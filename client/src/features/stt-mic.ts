@@ -15,6 +15,7 @@ import { isAndroid } from "../core/chrome";
 import { $, notify } from "../core/dom";
 import { icon } from "../ui/icons";
 import { t, type Key } from "../i18n";
+import { sttEngine, sttLang } from "./stt-prefs";
 
 const CMD = (c: string) => `plugin:ac-stt|${c}`;
 
@@ -149,6 +150,13 @@ export class SttMic {
       void this.probe(); // permission accordée entre-temps → bouton libéré
       return;
     }
+    // Prefs par dictée (spec : langue forcée par stream) — le Kotlin
+    // perd ses volatiles au reload webview ; best-effort : un plugin
+    // plus vieux que stt_set_engine ne doit pas bloquer la dictée.
+    await Promise.all([
+      invoke(CMD("stt_set_engine"), { engine: sttEngine() }).catch(() => {}),
+      invoke(CMD("stt_set_language"), { lang: sttLang() }).catch(() => {}),
+    ]);
     const r = await invoke<SttStart>(CMD("stt_start")).catch((e) => {
       notify("error", String(e));
       return null;

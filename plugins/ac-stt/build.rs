@@ -12,6 +12,7 @@ const COMMANDS: &[&str] = &[
     "stt_start",
     "stt_stop",
     "stt_set_language",
+    "stt_set_engine",
     "register_listener",
     "remove_listener",
 ];

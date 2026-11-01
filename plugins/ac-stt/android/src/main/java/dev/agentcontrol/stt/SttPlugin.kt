@@ -1,12 +1,21 @@
 package dev.agentcontrol.stt
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.ComponentCallbacks2
+import android.content.Intent
 import android.content.res.Configuration
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.webkit.WebView
 import app.tauri.annotation.Command
 import app.tauri.annotation.Permission
@@ -28,6 +37,10 @@ import kotlin.concurrent.thread
 import kotlin.math.sqrt
 
 private const val SAMPLE_RATE = 16000
+// Unload différé du recognizer (~700 Mo) : le modèle survit entre deux
+// dictées proches (rechargement = des secondes) mais est rendu si plus
+// rien ne l'utilise — doc §7.5/§9 (webview + 700 Mo sur entrée de gamme).
+private const val IDLE_UNLOAD_MS = 120_000L
 
 // Modèle téléchargé à la demande par le chantier « download » (item
 // parallèle) dans app_data/models/stt/ = filesDir/models/stt — le core
@@ -67,7 +80,19 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
   // "auto" = auto-détect 40 locales du modèle ; forcée via stt_set_language
   // (énoncés courts, cf. doc §6.3/§9).
   @Volatile private var language: String = "auto"
+  // "sherpa" = modèle téléchargé + OnlineRecognizer ; "system" =
+  // SpeechRecognizer on-device (API 31+, repli zéro-modèle du doc §D —
+  // qualité variable hors Pixel, opt-in settings uniquement).
+  @Volatile private var engine: String = "sherpa"
+  // Moteur qui possède la dictée en cours — sttStop/sttState routent
+  // dessus : un changement de réglage en cours de dictée ne doit pas
+  // envoyer le stop au mauvais moteur (capture sherpa laissée vivante).
+  @Volatile private var activeEngine: String? = null
+  private val systemStt = SystemStt()
   private var lastPartial: String = ""
+
+  private val idleHandler = Handler(Looper.getMainLooper())
+  private val idleUnload = Runnable { unloadModel() }
 
   override fun load(webView: WebView) {
     downloader = ModelDownloader(activity.filesDir) { ev, payload ->
@@ -90,6 +115,10 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
   @Deprecated("Deprecated in base Plugin")
   override fun onDestroy() {
     trimCallbacks?.let { activity.unregisterComponentCallbacks(it) }
+    idleHandler.removeCallbacks(idleUnload)
+    // release() exige le main thread (SpeechRecognizer) — no-op si aucune
+    // dictée système n'a tourné.
+    activity.runOnUiThread { systemStt.release() }
     stopCapture()
     unloadModel()
   }
@@ -124,7 +153,22 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
     ret.put("recording", recording)
     ret.put("permission", permissionLabel())
     ret.put("language", language)
+    ret.put("engine", engine)
+    ret.put("system_available", systemStt.available())
     invoke.resolve(ret)
+  }
+
+  @Command
+  fun sttSetEngine(invoke: Invoke) {
+    // Pris en compte à la prochaine dictée (une dictée en cours n'est
+    // pas basculée — les ressources diffèrent trop pour un swap live).
+    val e = invoke.getArgs().optString("engine").ifEmpty { "sherpa" }
+    if (e != "sherpa" && e != "system") {
+      invoke.reject("moteur inconnu: $e")
+      return
+    }
+    engine = e
+    invoke.resolve()
   }
 
   @Command
@@ -158,36 +202,58 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
   @Command
   fun sttStart(invoke: Invoke) {
     if (recording) { invoke.resolve(startResult(true)); return }
+    // Moteur système : zéro modèle requis — le check modèle ne s'applique
+    // qu'au chemin sherpa.
+    if (engine == "system") {
+      if (getPermissionState("microphone") != PermissionState.GRANTED) {
+        requestMicThen(invoke)
+        return
+      }
+      doStartSystem(invoke)
+      return
+    }
     if (!modelPresent()) { invoke.resolve(startResult(false, "model_missing")); return }
     if (getPermissionState("microphone") != PermissionState.GRANTED) {
-      // Le callback est rappelé avec le même invoke une fois le grant
-      // système décidé (dialog OS affiché par PermissionHelper). Le
-      // slot de callback est unique → un 2e appel pendant le prompt
-      // écraserait le 1er invoke : on l'écarte proprement (check+set
-      // atomique — deux invokes peuvent arriver dans le même tick).
-      if (!permissionPending.compareAndSet(false, true)) {
-        invoke.resolve(startResult(false, "perm_pending")); return
-      }
-      try {
-        requestPermissionForAlias("microphone", invoke, "micPermCallback")
-      } catch (e: Exception) {
-        permissionPending.set(false)
-        invoke.resolve(startResult(false, "perm_error"))
-      }
+      requestMicThen(invoke)
       return
     }
     doStart(invoke)
   }
 
+  /** Grant `RECORD_AUDIO` puis re-dispatch vers le start du moteur
+   *  choisi. Le callback est rappelé avec le même invoke une fois le
+   *  grant système décidé (dialog OS affiché par PermissionHelper). Le
+   *  slot de callback est unique → un 2e appel pendant le prompt
+   *  écraserait le 1er invoke : on l'écarte proprement (check+set
+   *  atomique — deux invokes peuvent arriver dans le même tick). */
+  private fun requestMicThen(invoke: Invoke) {
+    if (!permissionPending.compareAndSet(false, true)) {
+      invoke.resolve(startResult(false, "perm_pending")); return
+    }
+    try {
+      requestPermissionForAlias("microphone", invoke, "micPermCallback")
+    } catch (e: Exception) {
+      permissionPending.set(false)
+      invoke.resolve(startResult(false, "perm_error"))
+    }
+  }
+
   @PermissionCallback
   private fun micPermCallback(invoke: Invoke) {
     permissionPending.set(false)
-    if (getPermissionState("microphone") == PermissionState.GRANTED) doStart(invoke)
-    else invoke.resolve(startResult(false, "mic_denied"))
+    if (getPermissionState("microphone") == PermissionState.GRANTED) {
+      if (engine == "system") doStartSystem(invoke) else doStart(invoke)
+    } else {
+      invoke.resolve(startResult(false, "mic_denied"))
+    }
   }
 
   @Command
   fun sttStop(invoke: Invoke) {
+    // Route sur le moteur de la dictée réellement active — pas sur le
+    // réglage courant (modifiable en cours de dictée via les settings).
+    val active = activeEngine ?: engine
+    if (active == "system") { systemStt.stop(invoke); return }
     var text = ""
     synchronized(this) {
       recording = false
@@ -238,6 +304,12 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
     ret.put("text", text)
     ret.put("lang", language)
     invoke.resolve(ret)
+    activeEngine = null
+    // Dictée terminée : le recognizer (~700 Mo) est rendu après un délai
+    // — une dictée suivante proche le réutilise encore chaud (doStart
+    // annule le timer), l'idle le libère sinon (trimMemory reste la
+    // pression d'urgence).
+    idleHandler.postDelayed(idleUnload, IDLE_UNLOAD_MS)
   }
 
   @Command
@@ -258,6 +330,9 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
   // ── Capture + décode ────────────────────────────────────────────────
 
   private fun doStart(invoke: Invoke) {
+    // Nouvelle dictée sherpa : l'unload idle post-stop ne doit pas libérer
+    // le modèle sous elle.
+    idleHandler.removeCallbacks(idleUnload)
     // Le load du modèle (~700 Mo, des secondes) reste HORS du moniteur :
     // onTrimMemory → unloadModel() tourne sur le main thread et ne doit
     // pas geler l'app en attendant la fin du chargement.
@@ -308,6 +383,7 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
         rec.startRecording()
         recording = true
         captureActive = true
+        activeEngine = "sherpa"
         recordThread = thread(name = "stt-capture") { captureLoop(s!!) }
         started = true
       } catch (e: SecurityException) {
@@ -384,6 +460,7 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
 
   private fun stopCapture() {
     recording = false
+    activeEngine = null
     // Join HORS moniteur (appelé depuis onDestroy/main thread : ne pas
     // bloquer les commandes JNI), release SOUS moniteur — mêmes
     // règles que sttStop/sttSetLanguage.
@@ -460,5 +537,141 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
     ret.put("started", started)
     if (reason != null) ret.put("reason", reason)
     return ret
+  }
+
+  // ── Moteur système (repli zéro-modèle, doc §D/§7.5) ─────────────────
+  //
+  // SpeechRecognizer on-device (API 31+, Android System Intelligence) :
+  // partials natifs via EXTRA_PARTIAL_RESULTS, dictée continue par
+  // relance à chaque onResults. Tout l'objet vit sur le main thread —
+  // SpeechRecognizer l'exige (Looper), les @Command y sont relayées via
+  // runOnUiThread. Pas d'AudioRecord : le niveau vient de onRmsChanged.
+
+  private fun doStartSystem(invoke: Invoke) {
+    if (!systemStt.available()) {
+      invoke.resolve(startResult(false, "engine_error"))
+      return
+    }
+    // Le Kotlin command-thread n'est pas le main thread : tout l'objet
+    // SpeechRecognizer doit vivre sur la boucle UI.
+    activity.runOnUiThread {
+      val reason = systemStt.start()
+      if (reason == null) {
+        recording = true // @Volatile — pas de moniteur sur le main thread
+        activeEngine = "system"
+        invoke.resolve(startResult(true))
+      } else {
+        invoke.resolve(startResult(false, reason))
+      }
+    }
+  }
+
+  @SuppressLint("NewApi") // createOnDeviceSpeechRecognizer : API 31+, gaté par available()
+  private inner class SystemStt {
+    private var sr: SpeechRecognizer? = null
+    // Dernier partial émis — stt_stop le renvoie comme « dernier
+    // segment » (même sémantique que le getResult final du chemin sherpa).
+    @Volatile private var lastText: String = ""
+
+    fun available(): Boolean =
+      Build.VERSION.SDK_INT >= 31 &&
+        try { SpeechRecognizer.isOnDeviceRecognitionAvailable(activity) }
+        catch (e: Exception) { false }
+
+    /** Main thread uniquement. null = démarré, sinon reason d'échec. */
+    fun start(): String? {
+      if (sr != null) return null // déjà en cours
+      val r = try {
+        SpeechRecognizer.createOnDeviceSpeechRecognizer(activity)
+      } catch (e: Exception) { return "engine_error" }
+      r.setRecognitionListener(Listener())
+      sr = r
+      try {
+        r.startListening(intentOf())
+      } catch (e: Exception) {
+        r.destroy()
+        sr = null
+        return "audio_init"
+      }
+      lastText = ""
+      return null
+    }
+
+    fun stop(invoke: Invoke) {
+      recording = false
+      activeEngine = null
+      val text = lastText
+      activity.runOnUiThread { release() }
+      val ret = JSObject()
+      ret.put("text", text)
+      ret.put("lang", language)
+      invoke.resolve(ret)
+    }
+
+    /** Main thread. */
+    fun release() {
+      try { sr?.stopListening() } catch (_: Exception) {}
+      try { sr?.destroy() } catch (_: Exception) {}
+      sr = null
+    }
+
+    private fun firstResult(b: Bundle?): String? =
+      b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+        ?.firstOrNull { it.isNotBlank() }
+
+    private inner class Listener : RecognitionListener {
+      override fun onReadyForSpeech(p: Bundle?) {}
+      override fun onBeginningOfSpeech() {}
+      override fun onRmsChanged(rmsdB: Float) {
+        // ~[-2..10] dB → [0..1], même échelle que emitLevel sherpa.
+        val obj = JSObject()
+        obj.put("level", minOf(1f, maxOf(0f, (rmsdB + 2f) / 12f)))
+        trigger("stt_level", obj)
+      }
+      override fun onBufferReceived(b: ByteArray?) {}
+      override fun onEndOfSpeech() {}
+      override fun onPartialResults(p: Bundle?) {
+        val t = firstResult(p) ?: return
+        lastText = t
+        emitPartial(t)
+      }
+      override fun onResults(p: Bundle?) {
+        val t = firstResult(p)
+        if (t != null) {
+          lastText = t
+          emitResult(t)
+        }
+        // Le recognizer système est one-shot par startListening : on le
+        // relance tant que la dictée n'a pas été stoppée.
+        if (recording) sr?.let { try { it.startListening(intentOf()) } catch (_: Exception) {} }
+      }
+      override fun onError(code: Int) {
+        when (code) {
+          // Erreurs transitoires usuelles en dictée : la boucle reprend.
+          SpeechRecognizer.ERROR_NO_MATCH,
+          SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
+            if (recording) sr?.let { try { it.startListening(intentOf()) } catch (_: Exception) {} }
+          }
+          else -> {
+            // Fatale : la dictée meurt — stt_state verra recording=false
+            // au prochain probe (le resync UI de l'UX composer le couvre).
+            recording = false
+            activeEngine = null
+            release()
+          }
+        }
+      }
+      override fun onEvent(t: Int, b: Bundle?) {}
+    }
+
+    private fun intentOf(): Intent {
+      val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+        .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+        .putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        .putExtra("android.speech.extra.DICTATION_MODE", true)
+      if (language != "auto") i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
+      return i
+    }
   }
 }

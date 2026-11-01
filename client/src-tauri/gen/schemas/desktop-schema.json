@@ -345,10 +345,10 @@
       "description": "Permission identifier",
       "oneOf": [
         {
-          "description": "Plugin STT : diagnostic `stt_ping`, gestion des modèles téléchargeables\n(`stt_dl_*` — download à la demande depuis les settings, Android only),\ncycle de dictée (`stt_state`/`stt_start`/`stt_stop`/`stt_set_language`)\net abonnement aux events stt_* (register/remove_listener — héritées de\nla base Kotlin du plugin).\n\n#### This default permission set includes:\n\n- `allow-stt-ping`\n- `allow-stt-dl-state`\n- `allow-stt-dl-start`\n- `allow-stt-dl-cancel`\n- `allow-stt-dl-delete`\n- `allow-stt-state`\n- `allow-stt-start`\n- `allow-stt-stop`\n- `allow-stt-set-language`\n- `allow-register-listener`\n- `allow-remove-listener`",
+          "description": "Plugin STT : diagnostic `stt_ping`, gestion des modèles téléchargeables\n(`stt_dl_*` — download à la demande depuis les settings, Android only),\ncycle de dictée (`stt_state`/`stt_start`/`stt_stop`/`stt_set_language`),\nchoix du moteur (`stt_set_engine` — sherpa / SpeechRecognizer système)\net abonnement aux events stt_* (register/remove_listener — héritées de\nla base Kotlin du plugin).\n\n#### This default permission set includes:\n\n- `allow-stt-ping`\n- `allow-stt-dl-state`\n- `allow-stt-dl-start`\n- `allow-stt-dl-cancel`\n- `allow-stt-dl-delete`\n- `allow-stt-state`\n- `allow-stt-start`\n- `allow-stt-stop`\n- `allow-stt-set-language`\n- `allow-stt-set-engine`\n- `allow-register-listener`\n- `allow-remove-listener`",
           "type": "string",
           "const": "ac-stt:default",
-          "markdownDescription": "Plugin STT : diagnostic `stt_ping`, gestion des modèles téléchargeables\n(`stt_dl_*` — download à la demande depuis les settings, Android only),\ncycle de dictée (`stt_state`/`stt_start`/`stt_stop`/`stt_set_language`)\net abonnement aux events stt_* (register/remove_listener — héritées de\nla base Kotlin du plugin).\n\n#### This default permission set includes:\n\n- `allow-stt-ping`\n- `allow-stt-dl-state`\n- `allow-stt-dl-start`\n- `allow-stt-dl-cancel`\n- `allow-stt-dl-delete`\n- `allow-stt-state`\n- `allow-stt-start`\n- `allow-stt-stop`\n- `allow-stt-set-language`\n- `allow-register-listener`\n- `allow-remove-listener`"
+          "markdownDescription": "Plugin STT : diagnostic `stt_ping`, gestion des modèles téléchargeables\n(`stt_dl_*` — download à la demande depuis les settings, Android only),\ncycle de dictée (`stt_state`/`stt_start`/`stt_stop`/`stt_set_language`),\nchoix du moteur (`stt_set_engine` — sherpa / SpeechRecognizer système)\net abonnement aux events stt_* (register/remove_listener — héritées de\nla base Kotlin du plugin).\n\n#### This default permission set includes:\n\n- `allow-stt-ping`\n- `allow-stt-dl-state`\n- `allow-stt-dl-start`\n- `allow-stt-dl-cancel`\n- `allow-stt-dl-delete`\n- `allow-stt-state`\n- `allow-stt-start`\n- `allow-stt-stop`\n- `allow-stt-set-language`\n- `allow-stt-set-engine`\n- `allow-register-listener`\n- `allow-remove-listener`"
         },
         {
           "description": "Enables the register_listener command without any pre-configured scope.",
@@ -391,6 +391,12 @@
           "type": "string",
           "const": "ac-stt:allow-stt-ping",
           "markdownDescription": "Enables the stt_ping command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the stt_set_engine command without any pre-configured scope.",
+          "type": "string",
+          "const": "ac-stt:allow-stt-set-engine",
+          "markdownDescription": "Enables the stt_set_engine command without any pre-configured scope."
         },
         {
           "description": "Enables the stt_set_language command without any pre-configured scope.",
@@ -457,6 +463,12 @@
           "type": "string",
           "const": "ac-stt:deny-stt-ping",
           "markdownDescription": "Denies the stt_ping command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stt_set_engine command without any pre-configured scope.",
+          "type": "string",
+          "const": "ac-stt:deny-stt-set-engine",
+          "markdownDescription": "Denies the stt_set_engine command without any pre-configured scope."
         },
         {
           "description": "Denies the stt_set_language command without any pre-configured scope.",

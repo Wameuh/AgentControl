@@ -3,7 +3,8 @@
 description = """
 Plugin STT : diagnostic `stt_ping`, gestion des modèles téléchargeables
 (`stt_dl_*` — download à la demande depuis les settings, Android only),
-cycle de dictée (`stt_state`/`stt_start`/`stt_stop`/`stt_set_language`)
+cycle de dictée (`stt_state`/`stt_start`/`stt_stop`/`stt_set_language`),
+choix du moteur (`stt_set_engine` — sherpa / SpeechRecognizer système)
 et abonnement aux events stt_* (register/remove_listener — héritées de
 la base Kotlin du plugin).
 """
@@ -18,6 +19,7 @@ permissions = [
   "allow-stt-start",
   "allow-stt-stop",
   "allow-stt-set-language",
+  "allow-stt-set-engine",
   "allow-register-listener",
   "allow-remove-listener",
 ]

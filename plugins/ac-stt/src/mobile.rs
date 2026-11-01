@@ -5,7 +5,8 @@ use tauri::{
 };
 
 use crate::models::{
-    PingResponse, SetLanguageArgs, SttDlState, SttStart, SttState, SttStop,
+    PingResponse, SetEngineArgs, SetLanguageArgs, SttDlState, SttStart,
+    SttState, SttStop,
 };
 
 /// Accès au plugin natif depuis le Rust : chaque commande `stt_*` de la
@@ -83,6 +84,17 @@ impl<R: Runtime> Stt<R> {
             .run_mobile_plugin::<serde_json::Value>(
                 "sttSetLanguage",
                 SetLanguageArgs { lang },
+            )
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
+    /// Moteur `"sherpa"` | `"system"` — `@Command sttSetEngine` Kotlin.
+    pub fn set_engine(&self, engine: &str) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin::<serde_json::Value>(
+                "sttSetEngine",
+                SetEngineArgs { engine },
             )
             .map(|_| ())
             .map_err(Into::into)

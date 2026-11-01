@@ -85,3 +85,13 @@ pub(crate) async fn stt_set_language(
 ) -> crate::Result<()> {
     stt.set_language(&lang)
 }
+
+/// Choix du moteur de dictée (`"sherpa"` | `"system"`) — pris en compte
+/// à la prochaine dictée (pas de swap live côté Kotlin).
+#[tauri::command]
+pub(crate) async fn stt_set_engine(
+    stt: State<'_, crate::Stt<tauri::Wry>>,
+    engine: String,
+) -> crate::Result<()> {
+    stt.set_engine(&engine)
+}
