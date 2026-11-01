@@ -1,9 +1,19 @@
+// `register_listener`/`remove_listener` sont les @Command héritées de la
+// base Kotlin `Plugin` (events stt_* → addPluginListener JS) — elles ne
+// passent pas par l'invoke_handler Rust (fallthrough mobile) mais les
+// perms doivent exister pour la webview.
 const COMMANDS: &[&str] = &[
     "stt_ping",
     "stt_dl_state",
     "stt_dl_start",
     "stt_dl_cancel",
     "stt_dl_delete",
+    "stt_state",
+    "stt_start",
+    "stt_stop",
+    "stt_set_language",
+    "register_listener",
+    "remove_listener",
 ];
 
 fn main() {

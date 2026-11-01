@@ -5,6 +5,12 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// JitPack pour l'AAR sherpa-onnx — le projet racine n'a pas de
+// repositoriesMode restrictif, les repos du module restent autorisés.
+repositories {
+    maven { url = uri("https://jitpack.io") }
+}
+
 android {
     namespace = "dev.agentcontrol.stt"
     compileSdk = 36
@@ -27,4 +33,6 @@ kotlin {
 
 dependencies {
     implementation(project(":tauri-android"))
+    // Moteur ASR on-device (jniLibs arm64 packagés avec l'APK).
+    implementation("com.github.k2-fsa.sherpa-onnx:sherpa-onnx:v1.13.5")
 }

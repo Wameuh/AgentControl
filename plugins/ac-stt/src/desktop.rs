@@ -1,17 +1,15 @@
 use serde::de::DeserializeOwned;
 use tauri::{AppHandle, Runtime, plugin::PluginApi};
 
-use crate::models::{PingResponse, SttDlState};
+use crate::models::{PingResponse, SttDlState, SttStart, SttState, SttStop};
 
-/// Stub desktop : la reco et le download de modèles n'existent que côté
-/// Kotlin (Android) — la struct garde une surface Rust homogène entre
-/// plateformes (manage() dans lib.rs). La section settings est masquée
-/// hors Android : ces commandes ne devraient jamais être appelées ici.
+/// Stub desktop : reco et download n'existent que côté Kotlin (Android)
+/// — la surface Rust reste homogène et les réponses gardent la même
+/// forme (le webview ne les appelle que sur Android, mais les commandes
+/// ne doivent pas paniquer si on les atteint ailleurs).
 pub struct Stt<R: Runtime>(#[allow(dead_code)] AppHandle<R>);
 
 impl<R: Runtime> Stt<R> {
-    /// Réponse bidon hors Android — `platform: "rust"` distingue ce stub
-    /// de la réponse Kotlin (`"android"`).
     pub fn ping(&self) -> crate::Result<PingResponse> {
         Ok(PingResponse {
             pong: true,
@@ -37,6 +35,36 @@ impl<R: Runtime> Stt<R> {
 
     pub fn dl_delete(&self, _model: &str) -> crate::Result<()> {
         Err(crate::Error::AndroidOnly)
+    }
+
+    pub fn state(&self) -> crate::Result<SttState> {
+        Ok(SttState {
+            platform: "rust".into(),
+            model_dir: String::new(),
+            model_present: false,
+            model_loaded: false,
+            recording: false,
+            permission: "unavailable".into(),
+            language: "auto".into(),
+        })
+    }
+
+    pub fn start(&self) -> crate::Result<SttStart> {
+        Ok(SttStart {
+            started: false,
+            reason: Some("unsupported_platform".into()),
+        })
+    }
+
+    pub fn stop(&self) -> crate::Result<SttStop> {
+        Ok(SttStop {
+            text: String::new(),
+            lang: None,
+        })
+    }
+
+    pub fn set_language(&self, _lang: &str) -> crate::Result<()> {
+        Ok(())
     }
 }
 

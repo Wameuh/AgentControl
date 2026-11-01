@@ -1,8 +1,10 @@
 ## Default Permission
 
-Plugin STT : diagnostic `stt_ping` + gestion des modèles
-téléchargeables (`stt_dl_*` — download à la demande depuis les
-settings, Android only).
+Plugin STT : diagnostic `stt_ping`, gestion des modèles téléchargeables
+(`stt_dl_*` — download à la demande depuis les settings, Android only),
+cycle de dictée (`stt_state`/`stt_start`/`stt_stop`/`stt_set_language`)
+et abonnement aux events stt_* (register/remove_listener — héritées de
+la base Kotlin du plugin).
 
 #### This default permission set includes the following:
 
@@ -11,6 +13,12 @@ settings, Android only).
 - `allow-stt-dl-start`
 - `allow-stt-dl-cancel`
 - `allow-stt-dl-delete`
+- `allow-stt-state`
+- `allow-stt-start`
+- `allow-stt-stop`
+- `allow-stt-set-language`
+- `allow-register-listener`
+- `allow-remove-listener`
 
 ## Permission Table
 
@@ -20,6 +28,58 @@ settings, Android only).
 <th>Description</th>
 </tr>
 
+
+<tr>
+<td>
+
+`ac-stt:allow-register-listener`
+
+</td>
+<td>
+
+Enables the register_listener command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:deny-register-listener`
+
+</td>
+<td>
+
+Denies the register_listener command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:allow-remove-listener`
+
+</td>
+<td>
+
+Enables the remove_listener command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:deny-remove-listener`
+
+</td>
+<td>
+
+Denies the remove_listener command without any pre-configured scope.
+
+</td>
+</tr>
 
 <tr>
 <td>
@@ -147,6 +207,110 @@ Enables the stt_ping command without any pre-configured scope.
 <td>
 
 Denies the stt_ping command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:allow-stt-set-language`
+
+</td>
+<td>
+
+Enables the stt_set_language command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:deny-stt-set-language`
+
+</td>
+<td>
+
+Denies the stt_set_language command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:allow-stt-start`
+
+</td>
+<td>
+
+Enables the stt_start command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:deny-stt-start`
+
+</td>
+<td>
+
+Denies the stt_start command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:allow-stt-state`
+
+</td>
+<td>
+
+Enables the stt_state command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:deny-stt-state`
+
+</td>
+<td>
+
+Denies the stt_state command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:allow-stt-stop`
+
+</td>
+<td>
+
+Enables the stt_stop command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:deny-stt-stop`
+
+</td>
+<td>
+
+Denies the stt_stop command without any pre-configured scope.
 
 </td>
 </tr>

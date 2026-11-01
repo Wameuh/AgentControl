@@ -2,13 +2,42 @@ package dev.agentcontrol.stt
 
 import android.Manifest
 import android.app.Activity
+import android.content.ComponentCallbacks2
+import android.content.res.Configuration
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.webkit.WebView
 import app.tauri.annotation.Command
 import app.tauri.annotation.Permission
+import app.tauri.annotation.PermissionCallback
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
+import app.tauri.plugin.PermissionState
 import app.tauri.plugin.Plugin
+import com.k2fsa.sherpa.onnx.FeatureConfig
+import com.k2fsa.sherpa.onnx.OnlineModelConfig
+import com.k2fsa.sherpa.onnx.OnlineRecognizer
+import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig
+import com.k2fsa.sherpa.onnx.OnlineStream
+import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
+import java.io.File
+import kotlin.concurrent.thread
+import kotlin.math.sqrt
+
+private const val SAMPLE_RATE = 16000
+
+// Modèle téléchargé à la demande par le chantier « download » (item
+// parallèle) dans app_data/models/stt/ = filesDir/models/stt — le core
+// ne fait qu'attendre ces fichiers (4 GET HF du doc §6.1).
+private const val MODEL_SUBDIR = "models/stt"
+private val MODEL_FILES = arrayOf(
+  "encoder.int8.onnx",
+  "decoder.int8.onnx",
+  "joiner.int8.onnx",
+  "tokens.txt",
+)
 
 @TauriPlugin(
   permissions = [
@@ -22,14 +51,45 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
   // côté JS : stt_dl_progress / stt_dl_state).
   private lateinit var downloader: ModelDownloader
 
+  @Volatile private var recognizer: OnlineRecognizer? = null
+  @Volatile private var stream: OnlineStream? = null
+  @Volatile private var recorder: AudioRecord? = null
+  @Volatile private var recording = false
+  private var recordThread: Thread? = null
+  private var trimCallbacks: ComponentCallbacks2? = null
+
+  // "auto" = auto-détect 40 locales du modèle ; forcée via stt_set_language
+  // (énoncés courts, cf. doc §6.3/§9).
+  @Volatile private var language: String = "auto"
+  private var lastPartial: String = ""
+
   override fun load(webView: WebView) {
     downloader = ModelDownloader(activity.filesDir) { ev, payload ->
       trigger(ev, payload)
     }
+    // Le recognizer pèse ~700 Mo de RAM — il ne vit que du 1er start à
+    // un trimMemory (le chantier UX appellera stt_stop à la sortie du
+    // chat ; l'unload RAM définitif est le chantier « polish »).
+    val cb = object : ComponentCallbacks2 {
+      override fun onConfigurationChanged(c: Configuration) {}
+      override fun onLowMemory() { unloadModel() }
+      override fun onTrimMemory(level: Int) {
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) unloadModel()
+      }
+    }
+    activity.registerComponentCallbacks(cb)
+    trimCallbacks = cb
   }
 
-  // Répond au forward Rust `run_mobile_plugin("sttPing")` de la commande
-  // `stt_ping` — platform="android" prouve que l'appel aboutit ici.
+  @Deprecated("Deprecated in base Plugin")
+  override fun onDestroy() {
+    trimCallbacks?.let { activity.unregisterComponentCallbacks(it) }
+    stopCapture()
+    unloadModel()
+  }
+
+  // ── Commandes ──────────────────────────────────────────────────────
+
   @Command
   fun sttPing(invoke: Invoke) {
     val ret = JSObject()
@@ -45,6 +105,19 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
     val ret = JSObject()
     ret.put("platform", "android")
     ret.put("models", downloader.modelsJson())
+    invoke.resolve(ret)
+  }
+
+  @Command
+  fun sttState(invoke: Invoke) {
+    val ret = JSObject()
+    ret.put("platform", "android")
+    ret.put("model_dir", modelDir().absolutePath)
+    ret.put("model_present", modelPresent())
+    ret.put("model_loaded", recognizer != null)
+    ret.put("recording", recording)
+    ret.put("permission", permissionLabel())
+    ret.put("language", language)
     invoke.resolve(ret)
   }
 
@@ -74,5 +147,217 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
     val m = downloader.findModel(id)
     if (m == null) invoke.reject("modèle inconnu: $id")
     return m
+  }
+
+  @Command
+  fun sttStart(invoke: Invoke) {
+    if (recording) { invoke.resolve(startResult(true)); return }
+    if (!modelPresent()) { invoke.resolve(startResult(false, "model_missing")); return }
+    if (getPermissionState("microphone") != PermissionState.GRANTED) {
+      // Le callback est rappelé avec le même invoke une fois le grant
+      // système décidé (dialog OS affiché par PermissionHelper).
+      requestPermissionForAlias("microphone", invoke, "micPermCallback")
+      return
+    }
+    doStart(invoke)
+  }
+
+  @PermissionCallback
+  private fun micPermCallback(invoke: Invoke) {
+    if (getPermissionState("microphone") == PermissionState.GRANTED) doStart(invoke)
+    else invoke.resolve(startResult(false, "mic_denied"))
+  }
+
+  @Command
+  fun sttStop(invoke: Invoke) {
+    var text = ""
+    synchronized(this) {
+      recording = false
+      // Le join avant tout release garantit que la boucle n'utilise
+      // plus ni stream ni recorder (pas de race JNI).
+      recordThread?.join(2000)
+      recordThread = null
+      val s = stream
+      stream = null
+      recorder?.let {
+        try { it.stop() } catch (_: Exception) {}
+        it.release()
+      }
+      recorder = null
+      if (s != null) {
+        s.inputFinished()
+        val r = recognizer
+        if (r != null) {
+          while (r.isReady(s)) r.decode(s)
+          text = r.getResult(s).text
+        }
+        s.release()
+      }
+    }
+    val ret = JSObject()
+    ret.put("text", text)
+    ret.put("lang", language)
+    invoke.resolve(ret)
+  }
+
+  @Command
+  fun sttSetLanguage(invoke: Invoke) {
+    val lang = invoke.getArgs().getString("lang", "auto") ?: "auto"
+    language = lang
+    // Effet immédiat si une dictée est en cours (option par stream).
+    stream?.setOption("language", lang)
+    invoke.resolve()
+  }
+
+  // ── Capture + décode ────────────────────────────────────────────────
+
+  private fun doStart(invoke: Invoke) {
+    synchronized(this) {
+      if (recording) { invoke.resolve(startResult(true)); return }
+      try {
+        ensureRecognizer()
+      } catch (e: Exception) {
+        invoke.resolve(startResult(false, "engine_error"))
+        return
+      }
+      val minBuf = AudioRecord.getMinBufferSize(
+        SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
+      )
+      val rec = try {
+        AudioRecord(
+          MediaRecorder.AudioSource.VOICE_RECOGNITION,
+          SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO,
+          AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf, SAMPLE_RATE / 5)
+        )
+      } catch (e: SecurityException) {
+        invoke.resolve(startResult(false, "mic_denied"))
+        return
+      }
+      if (rec.state != AudioRecord.STATE_INITIALIZED) {
+        rec.release()
+        invoke.resolve(startResult(false, "audio_init"))
+        return
+      }
+      val s = recognizer!!.createStream()
+      if (language != "auto") s.setOption("language", language)
+      stream = s
+      recorder = rec
+      lastPartial = ""
+      rec.startRecording()
+      recording = true
+      recordThread = thread(name = "stt-capture") { captureLoop(s) }
+      invoke.resolve(startResult(true))
+    }
+  }
+
+  // Lecture ~100 ms par itération : vu-mètre fluide + partials denses.
+  // Le chunk décode interne du modèle est 560 ms (choix du doc §7).
+  private fun captureLoop(s: OnlineStream) {
+    val buf = ShortArray(SAMPLE_RATE / 10)
+    while (true) {
+      val rec = recorder ?: break
+      if (!recording) break
+      val n = try { rec.read(buf, 0, buf.size) } catch (e: Exception) { break }
+      if (n <= 0) continue
+      emitLevel(buf, n)
+      val samples = FloatArray(n) { buf[it] / 32768.0f }
+      s.acceptWaveform(samples, SAMPLE_RATE)
+      val r = recognizer ?: break
+      while (r.isReady(s)) r.decode(s)
+      if (r.isEndpoint(s)) {
+        val text = r.getResult(s).text
+        r.reset(s)
+        if (text.isNotBlank()) emitResult(text)
+        lastPartial = ""
+      }
+      val partial = r.getResult(s).text
+      if (partial != lastPartial) {
+        lastPartial = partial
+        emitPartial(partial)
+      }
+    }
+  }
+
+  private fun emitLevel(buf: ShortArray, n: Int) {
+    var sum = 0.0
+    for (i in 0 until n) { val v = buf[i].toDouble(); sum += v * v }
+    val obj = JSObject()
+    obj.put("level", minOf(1.0, sqrt(sum / n) / 4096.0))
+    trigger("stt_level", obj)
+  }
+
+  private fun emitPartial(text: String) {
+    val obj = JSObject()
+    obj.put("text", text)
+    trigger("stt_partial", obj)
+  }
+
+  private fun emitResult(text: String) {
+    val obj = JSObject()
+    obj.put("text", text)
+    obj.put("lang", language)
+    trigger("stt_result", obj)
+  }
+
+  private fun stopCapture() {
+    recording = false
+    recordThread?.join(2000)
+    recordThread = null
+    recorder?.let {
+      try { it.stop() } catch (_: Exception) {}
+      it.release()
+    }
+    recorder = null
+    stream?.release()
+    stream = null
+  }
+
+  private fun ensureRecognizer() {
+    if (recognizer != null) return
+    val dir = modelDir()
+    recognizer = OnlineRecognizer(
+      config = OnlineRecognizerConfig(
+        featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80),
+        modelConfig = OnlineModelConfig(
+          transducer = OnlineTransducerModelConfig(
+            encoder = "$dir/encoder.int8.onnx",
+            decoder = "$dir/decoder.int8.onnx",
+            joiner = "$dir/joiner.int8.onnx",
+          ),
+          tokens = "$dir/tokens.txt",
+          numThreads = 2,
+          provider = "cpu",
+          modelType = "nemo_transducer",
+        ),
+      )
+    )
+  }
+
+  private fun unloadModel() {
+    synchronized(this) {
+      if (recording) return  // jamais pendant une dictée
+      stream?.release()
+      stream = null
+      recognizer?.release()
+      recognizer = null
+    }
+  }
+
+  private fun modelDir() = File(activity.filesDir, MODEL_SUBDIR)
+
+  private fun modelPresent() = MODEL_FILES.all { File(modelDir(), it).isFile }
+
+  private fun permissionLabel(): String = when (getPermissionState("microphone")) {
+    PermissionState.GRANTED -> "granted"
+    PermissionState.DENIED -> "denied"
+    PermissionState.PROMPT, PermissionState.PROMPT_WITH_RATIONALE -> "prompt"
+    else -> "unknown"
+  }
+
+  private fun startResult(started: Boolean, reason: String? = null): JSObject {
+    val ret = JSObject()
+    ret.put("started", started)
+    if (reason != null) ret.put("reason", reason)
+    return ret
   }
 }

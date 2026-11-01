@@ -4,14 +4,19 @@ use tauri::{
     plugin::{PluginApi, PluginHandle},
 };
 
-use crate::models::{PingResponse, SttDlState};
+use crate::models::{
+    PingResponse, SetLanguageArgs, SttDlState, SttStart, SttState, SttStop,
+};
 
-/// Accès au plugin natif depuis le Rust (commandes stt_*).
+/// Accès au plugin natif depuis le Rust : chaque commande `stt_*` de la
+/// webview est forwardée ici puis poussée au Kotlin via
+/// `run_mobile_plugin` (le dispatch mobile natif ne sert que pour les
+/// commandes héritées de la base, ex. register_listener).
 pub struct Stt<R: Runtime>(PluginHandle<R>);
 
 impl<R: Runtime> Stt<R> {
-    /// Forward vers `@Command sttPing` du module Kotlin — c'est la
-    /// jonction que le spike doit prouver (réponse `platform: "android"`).
+    /// Forward vers `@Command sttPing` du module Kotlin — la jonction
+    /// prouvée par le spike (réponse `platform: "android"`).
     pub fn ping(&self) -> crate::Result<PingResponse> {
         self.0
             .run_mobile_plugin("sttPing", ())
@@ -54,6 +59,34 @@ impl<R: Runtime> Stt<R> {
             )
             .map_err(Into::into)
     }
+
+    pub fn state(&self) -> crate::Result<SttState> {
+        self.0
+            .run_mobile_plugin("sttState", ())
+            .map_err(Into::into)
+    }
+
+    pub fn start(&self) -> crate::Result<SttStart> {
+        self.0
+            .run_mobile_plugin("sttStart", ())
+            .map_err(Into::into)
+    }
+
+    pub fn stop(&self) -> crate::Result<SttStop> {
+        self.0
+            .run_mobile_plugin("sttStop", ())
+            .map_err(Into::into)
+    }
+
+    pub fn set_language(&self, lang: &str) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin::<serde_json::Value>(
+                "sttSetLanguage",
+                SetLanguageArgs { lang },
+            )
+            .map(|_| ())
+            .map_err(Into::into)
+    }
 }
 
 /// Enregistre la classe Kotlin auprès du runtime Android — c'est ce lien
@@ -67,12 +100,12 @@ pub fn init<R: Runtime, C: DeserializeOwned>(
     Ok(Stt(handle))
 }
 
-/// Pas d'implémentation iOS au stade du spike : un build iOS doit échouer
-/// à la compilation plutôt que paniquer au lancement de l'app.
+/// Pas d'implémentation iOS : un build iOS doit échouer à la compilation
+/// plutôt que paniquer au lancement de l'app.
 #[cfg(not(target_os = "android"))]
 pub fn init<R: Runtime, C: DeserializeOwned>(
     _app: &AppHandle<R>,
     _api: PluginApi<R, C>,
 ) -> crate::Result<Stt<R>> {
-    compile_error!("ac-stt : seul Android est supporté (spike)")
+    compile_error!("ac-stt : seul Android est supporté")
 }

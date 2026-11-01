@@ -345,10 +345,22 @@
       "description": "Permission identifier",
       "oneOf": [
         {
-          "description": "Plugin STT : diagnostic `stt_ping` + gestion des modèles\ntéléchargeables (`stt_dl_*` — download à la demande depuis les\nsettings, Android only).\n\n#### This default permission set includes:\n\n- `allow-stt-ping`\n- `allow-stt-dl-state`\n- `allow-stt-dl-start`\n- `allow-stt-dl-cancel`\n- `allow-stt-dl-delete`",
+          "description": "Plugin STT : diagnostic `stt_ping`, gestion des modèles téléchargeables\n(`stt_dl_*` — download à la demande depuis les settings, Android only),\ncycle de dictée (`stt_state`/`stt_start`/`stt_stop`/`stt_set_language`)\net abonnement aux events stt_* (register/remove_listener — héritées de\nla base Kotlin du plugin).\n\n#### This default permission set includes:\n\n- `allow-stt-ping`\n- `allow-stt-dl-state`\n- `allow-stt-dl-start`\n- `allow-stt-dl-cancel`\n- `allow-stt-dl-delete`\n- `allow-stt-state`\n- `allow-stt-start`\n- `allow-stt-stop`\n- `allow-stt-set-language`\n- `allow-register-listener`\n- `allow-remove-listener`",
           "type": "string",
           "const": "ac-stt:default",
-          "markdownDescription": "Plugin STT : diagnostic `stt_ping` + gestion des modèles\ntéléchargeables (`stt_dl_*` — download à la demande depuis les\nsettings, Android only).\n\n#### This default permission set includes:\n\n- `allow-stt-ping`\n- `allow-stt-dl-state`\n- `allow-stt-dl-start`\n- `allow-stt-dl-cancel`\n- `allow-stt-dl-delete`"
+          "markdownDescription": "Plugin STT : diagnostic `stt_ping`, gestion des modèles téléchargeables\n(`stt_dl_*` — download à la demande depuis les settings, Android only),\ncycle de dictée (`stt_state`/`stt_start`/`stt_stop`/`stt_set_language`)\net abonnement aux events stt_* (register/remove_listener — héritées de\nla base Kotlin du plugin).\n\n#### This default permission set includes:\n\n- `allow-stt-ping`\n- `allow-stt-dl-state`\n- `allow-stt-dl-start`\n- `allow-stt-dl-cancel`\n- `allow-stt-dl-delete`\n- `allow-stt-state`\n- `allow-stt-start`\n- `allow-stt-stop`\n- `allow-stt-set-language`\n- `allow-register-listener`\n- `allow-remove-listener`"
+        },
+        {
+          "description": "Enables the register_listener command without any pre-configured scope.",
+          "type": "string",
+          "const": "ac-stt:allow-register-listener",
+          "markdownDescription": "Enables the register_listener command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the remove_listener command without any pre-configured scope.",
+          "type": "string",
+          "const": "ac-stt:allow-remove-listener",
+          "markdownDescription": "Enables the remove_listener command without any pre-configured scope."
         },
         {
           "description": "Enables the stt_dl_cancel command without any pre-configured scope.",
@@ -381,6 +393,42 @@
           "markdownDescription": "Enables the stt_ping command without any pre-configured scope."
         },
         {
+          "description": "Enables the stt_set_language command without any pre-configured scope.",
+          "type": "string",
+          "const": "ac-stt:allow-stt-set-language",
+          "markdownDescription": "Enables the stt_set_language command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the stt_start command without any pre-configured scope.",
+          "type": "string",
+          "const": "ac-stt:allow-stt-start",
+          "markdownDescription": "Enables the stt_start command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the stt_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "ac-stt:allow-stt-state",
+          "markdownDescription": "Enables the stt_state command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the stt_stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "ac-stt:allow-stt-stop",
+          "markdownDescription": "Enables the stt_stop command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the register_listener command without any pre-configured scope.",
+          "type": "string",
+          "const": "ac-stt:deny-register-listener",
+          "markdownDescription": "Denies the register_listener command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the remove_listener command without any pre-configured scope.",
+          "type": "string",
+          "const": "ac-stt:deny-remove-listener",
+          "markdownDescription": "Denies the remove_listener command without any pre-configured scope."
+        },
+        {
           "description": "Denies the stt_dl_cancel command without any pre-configured scope.",
           "type": "string",
           "const": "ac-stt:deny-stt-dl-cancel",
@@ -409,6 +457,30 @@
           "type": "string",
           "const": "ac-stt:deny-stt-ping",
           "markdownDescription": "Denies the stt_ping command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stt_set_language command without any pre-configured scope.",
+          "type": "string",
+          "const": "ac-stt:deny-stt-set-language",
+          "markdownDescription": "Denies the stt_set_language command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stt_start command without any pre-configured scope.",
+          "type": "string",
+          "const": "ac-stt:deny-stt-start",
+          "markdownDescription": "Denies the stt_start command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stt_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "ac-stt:deny-stt-state",
+          "markdownDescription": "Denies the stt_state command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stt_stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "ac-stt:deny-stt-stop",
+          "markdownDescription": "Denies the stt_stop command without any pre-configured scope."
         },
         {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",

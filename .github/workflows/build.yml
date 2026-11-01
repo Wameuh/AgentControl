@@ -275,6 +275,9 @@ jobs:
           find src-tauri/gen/android/app/build/intermediates \
             -name "AndroidManifest.xml" -path "*merged*" \
             -exec grep -l "RECORD_AUDIO" {} \; | grep -q .
+          # L'AAR sherpa-onnx doit être lié : jniLibs arm64 dans l'APK.
+          find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" \
+            -exec sh -c 'unzip -l "$1" | grep -q "arm64-v8a/libsherpa-onnx-jni.so"' _ {} \;
       - name: Renommer l'APK avec la version
         working-directory: client
         run: |
