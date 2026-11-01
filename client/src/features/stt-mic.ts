@@ -48,7 +48,10 @@ export class SttMic {
    *  ré-écrire `.value` committerait la composition à chaque lettre —
    *  le ré-ancrage est sauté, les partials sont différés au commit. */
   private composing = false;
-  private deferredSeg: { text: string; final: boolean } | null = null;
+  /** Events texte différés pendant une composition — file ordonnée : un
+   *  endpoint suivi d'un partial dans la même fenêtre ne doit pas perdre
+   *  le segment figé (un slot unique l'écraserait silencieusement). */
+  private deferredSeg: { text: string; final: boolean }[] = [];
   /** Ré-écrit #input via le composer (value + fit + autocomplete). */
   private writeInput: (v: string) => void = () => {};
   /** Ouvre les settings sur la section modèles STT (injecté par main). */
@@ -93,9 +96,10 @@ export class SttMic {
     inp.addEventListener("compositionend", () => {
       this.composing = false;
       this.onUserInput();
-      const d = this.deferredSeg;
-      this.deferredSeg = null;
-      if (d && this.listening) {
+      const queue = this.deferredSeg;
+      this.deferredSeg = [];
+      for (const d of queue) {
+        if (!this.listening) break;
         if (d.final) this.commit(d.text);
         else this.spliceSeg(d.text, false);
       }
@@ -183,6 +187,7 @@ export class SttMic {
     this.seg = "";
     this.anchor = s;
     this.lastFinal = "";
+    this.deferredSeg = []; // résidu d'une dictée précédente non rejoué
     if (e > s) this.write(inp.value.slice(0, s) + inp.value.slice(e), s);
   }
 
@@ -192,6 +197,9 @@ export class SttMic {
       return null;
     });
     this.setListening(false);
+    // Le stop consomme la file différée : le dernier segment est couvert
+    // par la réponse — rejouer les events l'injecterait en double.
+    this.deferredSeg = [];
     // La réponse répète le dernier endpoint déjà émis en stt_result → ne
     // l'insérer que si ce n'est pas un doublon (partial resté en l'air).
     const fin = r?.text ?? "";
@@ -228,7 +236,7 @@ export class SttMic {
   private onPartial(text: string) {
     if (!this.listening) return;
     if (this.composing) {
-      this.deferredSeg = { text, final: false };
+      this.deferredSeg.push({ text, final: false });
       return;
     }
     this.spliceSeg(text, false);
@@ -239,7 +247,7 @@ export class SttMic {
   private onResult(text: string) {
     if (!this.listening) return;
     if (this.composing) {
-      this.deferredSeg = { text, final: true };
+      this.deferredSeg.push({ text, final: true });
       return;
     }
     this.commit(text);
