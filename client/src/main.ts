@@ -188,6 +188,14 @@ notifications.bind({
 sidebar.bind(conns, groups, newSess, chat, settings, connView, comps, map);
 composer.bind(chat);
 composer.refresh = () => sidebar.refresh();
+// Hint « modèle absent » du bouton mic → ouvre les settings directement
+// sur la section de téléchargement STT (details dépliée + scroll).
+composer.mic.openSttSettings = () => {
+  settings.open();
+  const sec = $("s-sec-stt") as HTMLDetailsElement;
+  sec.open = true;
+  sec.scrollIntoView({ block: "start" });
+};
 composer.bindAttachCapable((c) => conns.cap(c ?? "default")?.files === true);
 composer.bindQueueSteerCapable((c) => conns.cap(c ?? "default")?.queue_steer === true);
 conns.bind({

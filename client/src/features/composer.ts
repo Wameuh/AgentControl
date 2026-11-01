@@ -15,6 +15,7 @@ import { t } from "../i18n";
 import { cmdDesc, cmdHint, cmdName } from "./modelbar";
 import { sendPref } from "./settings";
 import { Attachments } from "./attachments";
+import { SttMic } from "./stt-mic";
 import type { ChatView } from "./chat-view";
 
 // ---- Commandes built-in (toujours dispo, exécutées côté client) ----
@@ -46,6 +47,9 @@ export class Composer {
   private drafts = new Map<string, string>();
   /** Session propriétaire du texte actuellement dans #input. */
   private draftSid: string | null = null;
+  /** Dictée vocale on-device : bouton mic + injection live des partials
+   *  dans #input (Android only, no-op ailleurs). */
+  readonly mic = new SttMic();
 
   bind(chat: ChatView) {
     this.chat = chat;
@@ -821,6 +825,7 @@ export class Composer {
   init() {
     this.attach.init();
     this.draftSid = app.current?.id ?? null;
+    this.mic.init({ setInput: (v) => this.setInput(v) });
     this.refreshHints();
     $("btn-send").onclick = () => this.sendInput(this.defaultMode());
     $("btn-alt").onclick = () => this.sendInput(this.altMode());
@@ -861,7 +866,11 @@ export class Composer {
         this.sendInput(this.defaultMode());
       }
     });
-    $("input").addEventListener("input", () => {
+    $("input").addEventListener("input", (e) => {
+      // En dictée : la frappe ne doit pas être écrasée par le prochain
+      // partial — le segment live se ré-ancre au curseur (hors
+      // composition IME, sinon chaque lettre committerait l'autocorrect).
+      this.mic.onUserInput(e as InputEvent);
       this.refreshAc();
       this.fitInput();
     });
