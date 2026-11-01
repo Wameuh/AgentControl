@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-stt-dl-delete"
+description = "Enables the stt_dl_delete command without any pre-configured scope."
+commands.allow = ["stt_dl_delete"]
+
+[[permission]]
+identifier = "deny-stt-dl-delete"
+description = "Denies the stt_dl_delete command without any pre-configured scope."
+commands.deny = ["stt_dl_delete"]

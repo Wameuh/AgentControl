@@ -33,6 +33,7 @@ import {
 } from "./notifications";
 import type { AlertKind } from "./state-diff";
 import { PRESETS } from "./sound-presets";
+import { SttModelsPanel } from "./stt-models";
 
 /** Préférence d'envoi : "queue" (file FIFO, défaut) | "steer" (injection
  *  mid-turn quand l'agent tourne ; idle → envoi normal côté démon). */
@@ -62,6 +63,10 @@ export class SettingsPanel {
   /** Conns SSH du select « Appairer » — snapshot du dernier refresh ;
    *  la valeur de l'option choisie est son index dedans. */
   private pairConns: SavedConn[] = [];
+
+  /** Modèles STT téléchargeables (Android only — le panneau interne
+   *  no-op sur les autres plateformes). */
+  private stt = new SttModelsPanel();
 
   private isOpen() {
     return !$("settings-view").hidden;
@@ -126,6 +131,11 @@ export class SettingsPanel {
     // d'update client (la SPA suit le binaire démon) → sections masquées.
     $("s-sec-conn").hidden = isWeb;
     $("s-sec-update").hidden = isWeb;
+    // Reconnaissance vocale : Android natif uniquement (modèles dans
+    // filesDir de l'app — ni desktop ni web SPA).
+    const sttOk = isAndroid() && !isWeb;
+    $("s-sec-stt").hidden = !sttOk;
+    if (sttOk) void this.stt.refresh();
     void getVersion()
       .then((v) => {
         $("s-version").textContent = `v${v}`;
@@ -251,6 +261,7 @@ export class SettingsPanel {
   }
 
   init() {
+    this.stt.init();
     $("tb-settings").onclick = () => this.toggle();
     $("settings-close").onclick = () => this.close();
     // Échap ferme le panneau (les <dialog> l'avaient nativement, pas un div)

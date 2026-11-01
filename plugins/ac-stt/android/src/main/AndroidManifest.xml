@@ -3,4 +3,8 @@
          par le manifest merger gradle. Le grant runtime passe par
          @TauriPlugin(permissions = …) dans SttPlugin.kt. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Download des modèles (settings « Reconnaissance vocale ») —
+         INTERNET vient déjà du manifest de l'app générée ; le déclarer
+         ici rend la dépendance explicite (le merger déduplique). -->
+    <uses-permission android:name="android.permission.INTERNET" />
 </manifest>

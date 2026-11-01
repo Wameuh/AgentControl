@@ -345,16 +345,64 @@
       "description": "Permission identifier",
       "oneOf": [
         {
-          "description": "Autorise la commande de diagnostic `stt_ping`\n(squelette du plugin STT — spike d'intégration).\n\n#### This default permission set includes:\n\n- `allow-stt-ping`",
+          "description": "Plugin STT : diagnostic `stt_ping` + gestion des modèles\ntéléchargeables (`stt_dl_*` — download à la demande depuis les\nsettings, Android only).\n\n#### This default permission set includes:\n\n- `allow-stt-ping`\n- `allow-stt-dl-state`\n- `allow-stt-dl-start`\n- `allow-stt-dl-cancel`\n- `allow-stt-dl-delete`",
           "type": "string",
           "const": "ac-stt:default",
-          "markdownDescription": "Autorise la commande de diagnostic `stt_ping`\n(squelette du plugin STT — spike d'intégration).\n\n#### This default permission set includes:\n\n- `allow-stt-ping`"
+          "markdownDescription": "Plugin STT : diagnostic `stt_ping` + gestion des modèles\ntéléchargeables (`stt_dl_*` — download à la demande depuis les\nsettings, Android only).\n\n#### This default permission set includes:\n\n- `allow-stt-ping`\n- `allow-stt-dl-state`\n- `allow-stt-dl-start`\n- `allow-stt-dl-cancel`\n- `allow-stt-dl-delete`"
+        },
+        {
+          "description": "Enables the stt_dl_cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "ac-stt:allow-stt-dl-cancel",
+          "markdownDescription": "Enables the stt_dl_cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the stt_dl_delete command without any pre-configured scope.",
+          "type": "string",
+          "const": "ac-stt:allow-stt-dl-delete",
+          "markdownDescription": "Enables the stt_dl_delete command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the stt_dl_start command without any pre-configured scope.",
+          "type": "string",
+          "const": "ac-stt:allow-stt-dl-start",
+          "markdownDescription": "Enables the stt_dl_start command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the stt_dl_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "ac-stt:allow-stt-dl-state",
+          "markdownDescription": "Enables the stt_dl_state command without any pre-configured scope."
         },
         {
           "description": "Enables the stt_ping command without any pre-configured scope.",
           "type": "string",
           "const": "ac-stt:allow-stt-ping",
           "markdownDescription": "Enables the stt_ping command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stt_dl_cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "ac-stt:deny-stt-dl-cancel",
+          "markdownDescription": "Denies the stt_dl_cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stt_dl_delete command without any pre-configured scope.",
+          "type": "string",
+          "const": "ac-stt:deny-stt-dl-delete",
+          "markdownDescription": "Denies the stt_dl_delete command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stt_dl_start command without any pre-configured scope.",
+          "type": "string",
+          "const": "ac-stt:deny-stt-dl-start",
+          "markdownDescription": "Denies the stt_dl_start command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stt_dl_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "ac-stt:deny-stt-dl-state",
+          "markdownDescription": "Denies the stt_dl_state command without any pre-configured scope."
         },
         {
           "description": "Denies the stt_ping command without any pre-configured scope.",

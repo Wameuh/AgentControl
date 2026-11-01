@@ -24,7 +24,13 @@ pub use mobile::Stt;
 /// Initializes the plugin.
 pub fn init<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
     tauri::plugin::Builder::new("ac-stt")
-        .invoke_handler(tauri::generate_handler![commands::stt_ping])
+        .invoke_handler(tauri::generate_handler![
+            commands::stt_ping,
+            commands::stt_dl_state,
+            commands::stt_dl_start,
+            commands::stt_dl_cancel,
+            commands::stt_dl_delete,
+        ])
         .setup(|app, api| {
             #[cfg(mobile)]
             let stt = mobile::init(app, api)?;

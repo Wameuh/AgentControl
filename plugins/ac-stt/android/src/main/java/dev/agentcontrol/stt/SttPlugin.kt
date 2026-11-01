@@ -15,10 +15,17 @@ import app.tauri.plugin.Plugin
     Permission(strings = [Manifest.permission.RECORD_AUDIO], alias = "microphone")
   ]
 )
-class SttPlugin(activity: Activity): Plugin(activity) {
+class SttPlugin(private val activity: Activity): Plugin(activity) {
+
+  // Download des modèles à la demande (backlog #133) — events relayés à
+  // la webview via le mécanisme listeners du plugin (addPluginListener
+  // côté JS : stt_dl_progress / stt_dl_state).
+  private lateinit var downloader: ModelDownloader
 
   override fun load(webView: WebView) {
-    // Spike squelette : rien à initialiser — la capture arrive après.
+    downloader = ModelDownloader(activity.filesDir) { ev, payload ->
+      trigger(ev, payload)
+    }
   }
 
   // Répond au forward Rust `run_mobile_plugin("sttPing")` de la commande
@@ -29,5 +36,43 @@ class SttPlugin(activity: Activity): Plugin(activity) {
     ret.put("pong", true)
     ret.put("platform", "android")
     invoke.resolve(ret)
+  }
+
+  // ── Download manager modèles (settings « Reconnaissance vocale ») ────
+
+  @Command
+  fun sttDlState(invoke: Invoke) {
+    val ret = JSObject()
+    ret.put("platform", "android")
+    ret.put("models", downloader.modelsJson())
+    invoke.resolve(ret)
+  }
+
+  @Command
+  fun sttDlStart(invoke: Invoke) {
+    val m = modelArg(invoke) ?: return
+    downloader.start(m)
+    invoke.resolve()
+  }
+
+  @Command
+  fun sttDlCancel(invoke: Invoke) {
+    val m = modelArg(invoke) ?: return
+    downloader.cancel(m.id)
+    invoke.resolve()
+  }
+
+  @Command
+  fun sttDlDelete(invoke: Invoke) {
+    val m = modelArg(invoke) ?: return
+    downloader.delete(m)
+    invoke.resolve()
+  }
+
+  private fun modelArg(invoke: Invoke): SttModel? {
+    val id = invoke.getArgs().getString("model", "") ?: ""
+    val m = downloader.findModel(id)
+    if (m == null) invoke.reject("modèle inconnu: $id")
+    return m
   }
 }
