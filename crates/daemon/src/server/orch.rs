@@ -615,10 +615,15 @@ fn task_agent<'a>(t: &'a Task) -> &'a str {
 /// absent (vieille version d'agentbacklog encore déployée).
 pub(crate) fn task_poppable(t: &Task) -> bool {
     if let Some(deps) = t.get("dependencies") {
-        return deps.as_array().is_none_or(|a| {
-            a.iter()
-                .all(|d| d.get("status").and_then(Value::as_str) == Some("done"))
-        });
+        return match deps.as_array() {
+            Some(a) => a
+                .iter()
+                .all(|d| d.get("status").and_then(Value::as_str) == Some("done")),
+            // `null` = pas de deps → poppable ; un non-tableau non-null
+            // est un champ malformé → bloqué (fail-closed) plutôt que le
+            // « absent → poppable » qui causait le churn.
+            None => deps.is_null(),
+        };
     }
     t.get("depends_on").is_none_or(|d| d.is_null())
         || t.get("dep_status").and_then(Value::as_str) == Some("done")
@@ -870,7 +875,12 @@ impl Daemon {
                         ws,
                     )
                     .await;
-                    pending.push(t.clone());
+                    // Un orphelin dep-bloqué ne compte pas pour un spawn
+                    // à ce tick — il redeviendra éligible au suivant,
+                    // une fois `pending` et refiltré.
+                    if task_poppable(t) {
+                        pending.push(t.clone());
+                    }
                 }
             }
         }
@@ -1679,6 +1689,19 @@ mod tests {
                 {"id": 6, "status": "pending"}
             ]
         })));
+
+        // `dependencies` présent mais malformé : `null` = pas de deps
+        // → poppable ; non-tableau non-null → fail-closed (bloqué).
+        assert!(task_poppable(
+            &json!({"status": "pending", "dependencies": null})
+        ));
+        for bad in ["\"x\"", "5", "{\"id\": 1}"] {
+            let t: Task = serde_json::from_str(&format!(
+                "{{\"status\": \"pending\", \"dependencies\": {bad}}}"
+            ))
+            .unwrap();
+            assert!(!task_poppable(&t), "dependencies={bad}");
+        }
 
         // Champ absent → fallback ancien schéma
         // `depends_on`/`dep_status` (vieille version agentbacklog).
