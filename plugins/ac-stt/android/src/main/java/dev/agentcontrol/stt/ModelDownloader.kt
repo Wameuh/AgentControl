@@ -97,7 +97,9 @@ class ModelDownloader(
   private fun dstFile(m: SttModel, f: SttModelFile) = File(modelDir(m), f.name)
   private fun partFile(m: SttModel, f: SttModelFile) =
     File(modelDir(m), "${f.name}.part")
-  private fun errFile(m: SttModel) = File(modelDir(m), ".dlerr")
+  /** Erreur persistée par modèle — deux modèles déclarés dans le même
+   *  `subdir` (ex. à plat) ne partagent pas leur fichier d'erreur. */
+  private fun errFile(m: SttModel) = File(modelDir(m), ".${m.id}.dlerr")
 
   fun findModel(id: String): SttModel? = STT_MODELS.find { it.id == id }
 
@@ -232,6 +234,19 @@ class ModelDownloader(
     var attempt = 0
     while (true) {
       checkCancelled(job)
+      // `.part` déjà complet (kill/cancel entre le dernier octet et la
+      // vérif, ou IOException en toute fin de stream) : PAS de GET —
+      // `Range: bytes=<size>-` renverrait 416 en boucle. On vérifie le
+      // sha directement ; corrompu → re-départ à zéro.
+      if (resumeAt == f.size && part.isFile) {
+        if (sha256Of(part) == f.sha256) {
+          dst.delete()
+          if (!part.renameTo(dst)) { part.copyTo(dst, true); part.delete() }
+          return
+        }
+        part.delete()
+        resumeAt = 0
+      }
       try {
         val conn = URL("${m.baseUrl}/${f.name}").openConnection()
           as HttpURLConnection
@@ -242,10 +257,10 @@ class ModelDownloader(
         val code = conn.responseCode
         if (code != HttpURLConnection.HTTP_OK &&
             code != HttpURLConnection.HTTP_PARTIAL) {
-          if (code == 429 || code >= 500) {
+          if (code == 429 || code == 416 || code >= 500) {
             throw IOException("${f.name}: http $code")
           }
-          // 4xx hors 429 = faute côté client — retrier ne sert à rien.
+          // 4xx hors 429/416 = faute côté client — retrier ne sert à rien.
           throw Fatal("${f.name}: http $code")
         }
         // 200 sur un resume = Range ignoré → on repart de zéro.
@@ -253,6 +268,9 @@ class ModelDownloader(
         var have = if (append) resumeAt else 0L
         var lastEmit = System.nanoTime()
         conn.inputStream.use { inp ->
+          // Le cancel peut avoir été demandé pendant responseCode
+          // (connect timeout) — vérifié avant de rouvrir le .part.
+          checkCancelled(job)
           FileOutputStream(part, append).use { out ->
             val buf = ByteArray(256 * 1024)
             while (true) {

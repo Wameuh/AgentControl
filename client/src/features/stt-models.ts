@@ -203,18 +203,24 @@ export class SttModelsPanel {
     return row;
   }
 
-  /** Résumé à droite du titre de section — l'état reste lisible replié. */
+  /** Résumé à droite du titre de section — l'état le plus « actionnable »
+   *  des modèles déclarés (error > downloading > partial > absent >
+   *  present) reste lisible section repliée. */
   private syncSecState() {
     const el = $("s-st-stt");
-    if (this.models.length === 0) {
-      el.textContent = "";
-      return;
-    }
-    const m = this.models[0];
-    el.textContent =
-      m.state === "downloading"
-        ? `${Math.round((100 * m.downloaded) / Math.max(1, m.size_bytes))}%`
-        : t(STATE_KEY[m.state]);
+    const ms = this.models;
+    const dl = ms.find((m) => m.state === "downloading");
+    el.textContent = dl
+      ? `${Math.round((100 * dl.downloaded) / Math.max(1, dl.size_bytes))}%`
+      : ms.some((m) => m.state === "error")
+        ? t("stt_st_error")
+        : ms.some((m) => m.state === "partial")
+          ? t("stt_st_partial")
+          : ms.some((m) => m.state === "absent")
+            ? t("stt_st_absent")
+            : ms.length
+              ? t("stt_st_present")
+              : "";
   }
 }
 

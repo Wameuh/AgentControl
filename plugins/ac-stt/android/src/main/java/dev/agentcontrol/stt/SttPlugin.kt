@@ -57,8 +57,8 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
 
   @Command
   fun sttDlCancel(invoke: Invoke) {
-    val id = invoke.getArgs().getString("model", "") ?: ""
-    downloader.cancel(id)
+    val m = modelArg(invoke) ?: return
+    downloader.cancel(m.id)
     invoke.resolve()
   }
 
