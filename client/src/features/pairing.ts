@@ -110,20 +110,112 @@ function startPolling(s: PairSession) {
   }, 2000);
 }
 
-/** Liste + révocation des appareils appairés (section repliable). */
-async function renderDevices(cfg: SavedConn) {
-  const ul = $("qr-dev-list");
+// ---------------------------------------------------------------------------
+// Accès managés (authorized_keys) — surface partagée entre la modale QR,
+// l'éditeur de connexion et la section Connections des paramètres.
+// pair_devices relit le fichier serveur : pas d'état dupliqué côté client
+// (authorized_keys reste la source de vérité, révocable hors app).
+// ---------------------------------------------------------------------------
+
+/** Accès managé lu côté serveur : appareil appairé (dev), clé jetable K
+ *  survivante (tmp — exp = epoch serveur ou "-"), clé de l'app (app). */
+export interface PairAccess {
+  kind: "dev" | "tmp" | "app";
+  fp: string;
+  label?: string;
+  ts?: string;
+  nonce?: string;
+  exp?: string;
+}
+
+/** Cibles d'une liste d'accès : `status` affiche « aucun » /
+ *  « indisponible » (échec ssh — silencieux, jamais de showErr brut). */
+export interface AccessEls {
+  ul: HTMLElement;
+  status?: HTMLElement | null;
+}
+
+let ownFpCache: string | null | undefined;
+
+/** fp SHA256 de la clé de l'app — recalculé depuis la ligne
+ *  authorized_keys exposée par ssh_pubkey (blob → sha256 → base64
+ *  OpenSSH). Permet de marquer « cette app » dans les entrées `app`. */
+async function ownKeyFp(): Promise<string | null> {
+  if (ownFpCache !== undefined) return ownFpCache;
+  try {
+    const line = await invoke<string>("ssh_pubkey");
+    const b64 = line.trim().split(/\s+/)[1];
+    if (!b64) return (ownFpCache = null);
+    const raw = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    const d = new Uint8Array(await crypto.subtle.digest("SHA-256", raw));
+    let s = "";
+    for (const b of d) s += String.fromCharCode(b);
+    ownFpCache = `SHA256:${btoa(s).replace(/=+$/, "")}`;
+  } catch {
+    ownFpCache = null;
+  }
+  return ownFpCache;
+}
+
+/** Liste + révocation des accès managés — générique : toute surface qui
+ *  fournit un <ul> (+ ligne d'état optionnelle) l'utilise ; le rechargement
+ *  après revoke et à l'ouverture est inclus. `onErr` reçoit les erreurs de
+ *  révocation (la modale QR les affiche dans son bandeau ; ailleurs, la
+ *  ligne d'état fait foi). */
+export async function renderAccesses(
+  cfg: SavedConn,
+  els: AccessEls,
+  onErr?: (msg: string) => void,
+): Promise<void> {
+  const { ul, status } = els;
   ul.innerHTML = "";
-  const devs = await invoke<{ fp: string; label: string; ts: string }[]>(
-    "pair_devices", { cfg }).catch(() => [] as { fp: string; label: string; ts: string }[]);
-  $("qr-dev-empty").hidden = devs.length > 0;
+  const setStatus = (msg: string | null) => {
+    if (!status) return;
+    if (msg == null) {
+      status.hidden = true;
+      return;
+    }
+    status.textContent = msg;
+    status.hidden = false;
+  };
+  const report = onErr ?? ((m: string) => setStatus(m));
+  const [devs, ownFp] = await Promise.all([
+    invoke<PairAccess[]>("pair_devices", { cfg }).catch(() => null),
+    ownKeyFp(),
+  ]);
+  if (devs == null) {
+    setStatus(t("pair_acc_unavail"));
+    return;
+  }
+  if (devs.length === 0) {
+    setStatus(t("pair_acc_none"));
+    return;
+  }
+  setStatus(null);
+  const now = Math.floor(Date.now() / 1000);
   for (const d of devs) {
     const li = document.createElement("li");
-    li.innerHTML =
-      `<span class="qr-dev-fp" title="${esc(d.fp)}">${esc(d.fp.slice(0, 20))}…</span>` +
-      `<span class="qr-dev-label">${esc(d.label)}</span>` +
-      `<span class="qr-dev-ts">${esc(d.ts)}</span>` +
-      `<button type="button" class="qr-dev-rev danger">${esc(t("qr_revoke"))}</button>`;
+    const fpEl =
+      `<span class="qr-dev-fp" title="${esc(d.fp)}">${esc(d.fp.slice(0, 20))}…</span>`;
+    if (d.kind === "tmp") {
+      // Clé K survivante : exp encore future = appairage en cours ailleurs,
+      // sinon orpheline — les deux se révoquent pareil.
+      const alive = Number(d.exp) > now;
+      li.innerHTML = fpEl +
+        `<span class="qr-dev-label">${esc(t("pair_acc_tmp"))}</span>` +
+        `<span class="qr-dev-badge">${esc(t(alive ? "pair_acc_live" : "pair_acc_expired"))}</span>`;
+    } else if (d.kind === "app") {
+      const own = ownFp != null && d.fp === ownFp;
+      li.innerHTML = fpEl +
+        `<span class="qr-dev-label">${esc(t("pair_acc_app"))}</span>` +
+        (own ? `<span class="qr-dev-badge">${esc(t("pair_acc_self"))}</span>` : "");
+    } else {
+      li.innerHTML = fpEl +
+        `<span class="qr-dev-label">${esc(d.label ?? "?")}</span>` +
+        `<span class="qr-dev-ts">${esc(d.ts ?? "")}</span>`;
+    }
+    li.insertAdjacentHTML("beforeend",
+      `<button type="button" class="qr-dev-rev danger">${esc(t("qr_revoke"))}</button>`);
     const btn = li.querySelector(".qr-dev-rev") as HTMLButtonElement;
     // Révocation en 2 taps (arme/désarme — motif du bouton supprimer).
     btn.onclick = () => {
@@ -138,8 +230,11 @@ async function renderDevices(cfg: SavedConn) {
       }
       btn.disabled = true;
       invoke("pair_revoke", { cfg, fp: d.fp })
-        .then(() => void renderDevices(cfg))
-        .catch((e) => qrStatus(String(e), true));
+        .then(() => void renderAccesses(cfg, els, onErr))
+        .catch((e) => {
+          btn.disabled = false;
+          report(String(e));
+        });
     };
     ul.appendChild(li);
   }
@@ -261,7 +356,10 @@ export async function shareQr(c: SavedConn) {
   ($("qr-host") as HTMLInputElement).value = ep.host;
   ($("qr-port") as HTMLInputElement).value = String(ep.port);
   ($("qr-user") as HTMLInputElement).value = ep.user;
-  void renderDevices(c).catch(() => {});
+  void renderAccesses(c, {
+    ul: $("qr-dev-list"),
+    status: $("qr-dev-empty"),
+  }, (e) => qrStatus(e, true)).catch(() => {});
   dlg.showModal();
 }
 

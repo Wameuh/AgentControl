@@ -148,14 +148,18 @@ dialog input[type="checkbox"]:focus-visible {
 .qr-alt, .qr-devs { width: 100%; font-size: 12.5px; }
 .qr-alt summary, .qr-devs summary { color: var(--dim); cursor: pointer; }
 .qr-alt button { display: block; width: 100%; margin-top: 6px; }
-#qr-dev-list { list-style: none; margin: 8px 0 0; padding: 0; }
-#qr-dev-list li {
+.pair-acc-list { list-style: none; margin: 8px 0 0; padding: 0; }
+.pair-acc-list li {
   display: flex; gap: 8px; align-items: baseline;
   font-size: 12px; padding: 4px 0; border-bottom: 1px solid var(--line);
 }
 .qr-dev-fp { font-family: var(--mono, monospace); color: var(--dim); }
 .qr-dev-label { flex: 1; }
 .qr-dev-ts { color: var(--dim); font-size: 11px; }
+.qr-dev-badge {
+  color: var(--dim); font-size: 10.5px; flex: none;
+  border: 1px solid var(--line); border-radius: 6px; padding: 0 5px;
+}
 .qr-dev-rev { font-size: 11px; padding: 2px 8px; }
 .qr-dev-rev.armed { background: var(--err); color: #fff; }
 

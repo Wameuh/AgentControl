@@ -376,21 +376,41 @@ else
 fi
 "#;
 
-/// Liste des appareils appairés : les lignes `agentcontrol-pair ` sont
-/// relues (fp réel via ssh-keygen -lf, label + ts du commentaire serveur).
+/// Lignes authorized_keys managées par l'app — toutes marquées d'un
+/// commentaire `agentcontrol*` que le scan positionnel distingue :
+///   agentcontrol-pair <label> <ts>  → dev:<fp>\t<label>\t<ts>   (appareil appairé)
+///   agentcontrol-pair-tmp <nonce>   → tmp:<fp>\t<nonce>\t<exp>  (clé K survivante ;
+///                                     exp = borne serveur lue dans pair-<nonce>.exp, "-" sinon)
+///   agentcontrol                    → app:<fp>                  (clé de l'app posée à la main)
+/// Le fp réel est toujours recalculé via ssh-keygen -lf (le commentaire
+/// n'est pas une preuve). $D peut manquer sur un serveur jamais appairé.
 const DEVICES_SH: &str = r#"AK="$HOME/.ssh/authorized_keys"; D="$HOME/.agentcontrol"
 [ -f "$AK" ] || exit 0
-grep ' agentcontrol-pair ' "$AK" 2>/dev/null | while IFS= read -r line; do
+mkdir -p "$D" 2>/dev/null
+grep ' agentcontrol' "$AK" 2>/dev/null | while IFS= read -r line; do
   set -- $line
   while [ $# -gt 0 ]; do
-    if [ "${3:-}" = "agentcontrol-pair" ]; then
-      ty=$1; b64=$2; shift 3
-      printf '%s %s\n' "$ty" "$b64" > "$D/.pairdev.$$"
-      fp=$(ssh-keygen -lf "$D/.pairdev.$$" 2>/dev/null | awk '{print $2}')
-      rm -f "$D/.pairdev.$$"
-      [ -n "$fp" ] && printf 'dev:%s\t%s\t%s\n' "$fp" "${1:-?}" "${2:-?}"
-      break
-    fi
+    case "${3:-}" in
+      agentcontrol-pair|agentcontrol-pair-tmp|agentcontrol)
+        ty=$1; b64=$2; marker=$3
+        printf '%s %s\n' "$ty" "$b64" > "$D/.pairdev.$$"
+        fp=$(ssh-keygen -lf "$D/.pairdev.$$" 2>/dev/null | awk '{print $2}')
+        rm -f "$D/.pairdev.$$"
+        shift 3
+        case "$marker" in
+          agentcontrol-pair)
+            [ -n "$fp" ] && printf 'dev:%s\t%s\t%s\n' "$fp" "${1:-?}" "${2:-?}" ;;
+          agentcontrol-pair-tmp)
+            exp="-"
+            case "${1:-}" in ''|*[!0-9a-f]*) ;; *)
+              [ -f "$D/pair-$1.exp" ] && exp=$(cat "$D/pair-$1.exp" 2>/dev/null || echo "-") ;;
+            esac
+            [ -n "$fp" ] && printf 'tmp:%s\t%s\t%s\n' "$fp" "${1:-?}" "$exp" ;;
+          agentcontrol)
+            [ -n "$fp" ] && printf 'app:%s\n' "$fp" ;;
+        esac
+        break ;;
+    esac
     shift
   done
 done
@@ -398,7 +418,10 @@ exit 0
 "#;
 
 /// Révocation par fingerprint exact — même procédure verrouillée
-/// (temp+mv + .bak 600), match -xF de la ligne entière.
+/// (temp+mv + .bak 600), sur les trois marqueurs `agentcontrol*`
+/// (appareil, ligne K survivante — ses états sont purgés —, clé de
+/// l'app). Le commentaire n'est qu'un pré-filtre : le match se fait sur
+/// l'empreinte recalculée par ssh-keygen -lf.
 const REVOKE_SH: &str = r#"AK="$HOME/.ssh/authorized_keys"; D="$HOME/.agentcontrol"
 umask 077
 [ -f "$AK" ] || { echo "err:none"; exit 0; }
@@ -417,16 +440,26 @@ tmp="$AK.tmp.$$"; : > "$tmp"; found=""
 while IFS= read -r line; do
   keep=1
   case "$line" in
-    *" agentcontrol-pair "*)
+    *" agentcontrol"*)
       set -- $line
       while [ $# -gt 0 ]; do
-        if [ "${3:-}" = "agentcontrol-pair" ]; then
-          printf '%s %s\n' "$1" "$2" > "$D/.pk.$$"
-          fp=$(ssh-keygen -lf "$D/.pk.$$" 2>/dev/null | awk '{print $2}')
-          rm -f "$D/.pk.$$"
-          [ "$fp" = "@FP@" ] && keep=0
-          break
-        fi
+        case "${3:-}" in
+          agentcontrol-pair|agentcontrol-pair-tmp|agentcontrol)
+            printf '%s %s\n' "$1" "$2" > "$D/.pk.$$"
+            fp=$(ssh-keygen -lf "$D/.pk.$$" 2>/dev/null | awk '{print $2}')
+            rm -f "$D/.pk.$$"
+            if [ "$fp" = "@FP@" ]; then
+              keep=0
+              # Ligne K révoquée : ses fichiers d'état mourraient orphelins
+              # (le sweep les purge, autant le faire tout de suite).
+              if [ "$3" = "agentcontrol-pair-tmp" ]; then
+                case "${4:-}" in ''|*[!0-9a-f]*) ;; *)
+                  rm -f "$D/pair-$4.exp" "$D/pair-$4.seen" ;;
+                esac
+              fi
+            fi
+            break ;;
+        esac
         shift
       done ;;
   esac
@@ -630,20 +663,29 @@ pub(crate) async fn pair_cleanup(cfg: Value, nonce: String) -> Result<(), String
     Ok(())
 }
 
-/// Appareils appairés (lignes `agentcontrol-pair `) : [{fp,label,ts}].
+/// Accès managés par l'app (lignes `agentcontrol*` d'authorized_keys) :
+/// [{kind,fp,…}] — dev (appareil appairé : label,ts), tmp (clé K
+/// survivante : nonce,exp — "-" si état absent), app (clé de l'app).
 #[tauri::command]
 pub(crate) async fn pair_devices(cfg: Value) -> Result<Value, String> {
     let (_code, out, _err) = exec_via_cfg(&cfg, DEVICES_SH).await?;
     let devs: Vec<Value> = out
         .lines()
-        .filter_map(|l| l.strip_prefix("dev:"))
         .filter_map(|l| {
-            let mut it = l.split('\t');
-            Some(json!({
-                "fp": it.next()?,
-                "label": it.next()?,
-                "ts": it.next()?,
-            }))
+            let (tag, rest) = l.split_once(':')?;
+            let mut it = rest.split('\t');
+            match tag {
+                "dev" => Some(json!({
+                    "kind": "dev", "fp": it.next()?,
+                    "label": it.next()?, "ts": it.next()?,
+                })),
+                "tmp" => Some(json!({
+                    "kind": "tmp", "fp": it.next()?,
+                    "nonce": it.next()?, "exp": it.next()?,
+                })),
+                "app" => Some(json!({ "kind": "app", "fp": it.next()? })),
+                _ => None,
+            }
         })
         .collect();
     Ok(Value::Array(devs))
