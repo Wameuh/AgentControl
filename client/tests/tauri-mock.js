@@ -151,6 +151,7 @@
     self_update: true, first_post: true, terminal: true, files: true,
     components: true, orchestrator: true, pinned: true, queue_steer: true,
     web: null,
+    host: { cpu: 12.3, mem_used_mb: 3174, mem_total_mb: 8192, load1: 0.42, rss_mb: 96 },
   };
   const FILE = { content: "export async function apiCall(url, opts) {\n  return withRetry(() => fetch(url, opts), 3);\n}\n\nasync function withRetry(fn, n) {\n  try { return await fn(); }\n  catch (e) { if (n > 0) { await sleep(500); return withRetry(fn, n - 1); } throw e; }\n}", truncated: false, path: "/home/agent/api/src/client.ts" };
 
@@ -183,7 +184,12 @@
         if (s) s.group = args.group;
         return { group: args.group };
       }
-      case "daemon_status": return CAPS;
+      case "daemon_status":
+        // Sans args.conn c'est la forme fusionnée du watchdog (map par
+        // conn) — host se range sous la clé "local" pour alimenter
+        // cap("local").host comme un vrai démon.
+        return args.conn ? CAPS
+          : { local: CAPS, servers: 1, sessions: SESSIONS.length };
       case "list_components":
         return COMPONENTS.filter((c) => c.name !== "agentbacklog" || !window.__blHide);
       case "component_query": {

@@ -30,7 +30,7 @@ import {
 } from "./core/chrome";
 import { nav, type SheetItem } from "./ui/nav";
 import { hydrateIcons } from "./ui/icons";
-import { initStatus } from "./features/status";
+import { initStatus, type HostStats } from "./features/status";
 import { checkBootUpdate } from "./features/update";
 import { initModelBar } from "./features/modelbar";
 import { initFusionDialog, openFusion } from "./features/fusion-dialog";
@@ -382,6 +382,12 @@ initFirstPost((c) => conns.cap(c)?.first_post === true);
 pins.init();
 initModelBar(openFusion);
 initFusionDialog();
-initStatus();
+initStatus(() =>
+  // Bloc host du démon de la conn affichée (session ouverte), sinon de
+  // la conn liée — absent sur vieux démon → segment masqué.
+  conns.cap(
+    app.current?.conn ?? conns.knownConns()[0] ?? "default",
+  )?.host as HostStats | undefined,
+);
 checkBootUpdate();
 connView.autoConnect(savedConns, cliConn ?? undefined);

@@ -392,6 +392,8 @@ export const es: Record<Key, string> = {
   conv_load_fail: "No se pudo cargar esta sesión",
   retry_in: "reintento automático en ~{s} s",
   conns_down: "{n} conexiones perdidas",
+  sb_srv: "srv cpu {cpu}% · {mem}",
+  sb_srv_load: "carga {v}",
   connecting_to: "conectando a {host}…",
   daemon_detected: "daemon v{v} detectado",
   agents_loading: "cargando agentes…",

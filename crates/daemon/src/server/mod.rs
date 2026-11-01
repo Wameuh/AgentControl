@@ -176,6 +176,10 @@ pub struct Daemon {
     /// Compteur global des dossiers surveillés (watch_dir explorateur,
     /// toutes conns confondues) — borne le plafond de dirwatch.rs.
     dir_watch_n: Arc<std::sync::atomic::AtomicUsize>,
+    /// sysinfo persisté → delta CPU entre deux appels (même rôle que
+    /// AppState.sys côté client ; l'horodatage interne à System garde
+    /// l'intervalle minimal) ; alimente le bloc "host" de daemon_status.
+    host_sys: std::sync::Mutex<sysinfo::System>,
 }
 
 
@@ -249,6 +253,7 @@ impl Daemon {
             forges,
             web,
             dir_watch_n: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            host_sys: std::sync::Mutex::new(sysinfo::System::new()),
         });
         d.pr_verify.spawn_worker();
         let mut resumable = Vec::new();

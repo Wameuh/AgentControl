@@ -389,6 +389,8 @@ export const fr: Record<Key, string> = {
   conv_load_fail: "Impossible de charger cette session",
   retry_in: "réessai auto dans ~{s} s",
   conns_down: "{n} connexions perdues",
+  sb_srv: "srv cpu {cpu}% · {mem}",
+  sb_srv_load: "charge {v}",
   connecting_to: "connexion à {host}…",
   daemon_detected: "démon v{v} détecté",
   agents_loading: "chargement des agents…",

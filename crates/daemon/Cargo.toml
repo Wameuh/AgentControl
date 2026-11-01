@@ -36,6 +36,11 @@ tar = "0.4"
 sha1 = "0.11"
 # Validation `regex` des paramètres de composants (schéma catalogue).
 regex = "1"
+# Métriques hôte (cpu/mem/load + RSS propre) dans daemon_status — même
+# crate/version que le client Tauri ; feature "system" seule suffit
+# (refresh_processes/get_current_pid inclus ; pas de feature "process"
+# en 0.32).
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 # Watch FS de l'explorateur (auto-refresh) — inotify non récursif, un
 # watcher par connexion cliente. Pin exact : 8.2.1 a <7 jours au moment
 # de l'ajout (garde supply-chain du repo).
