@@ -16,6 +16,7 @@
     "core:window:allow-unminimize",
     "core:window:allow-set-focus",
     "notification:default",
+    "ac-stt:default",
     "opener:allow-open-url",
     "opener:allow-open-path",
     "dialog:allow-save"

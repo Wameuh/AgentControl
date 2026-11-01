@@ -70,6 +70,11 @@ initGems();
 initPlatform();
 initWindowChrome();
 initExternalLinks();
+// Spike ac-stt : prouve la jonction webview → plugin (Kotlin `SttPlugin`
+// sur Android, stub Rust sur desktop, stub bridge en web).
+invoke("plugin:ac-stt|stt_ping")
+  .then((r) => console.debug("[stt] ping:", r))
+  .catch((e) => console.warn("[stt] ping failed:", e));
 // Log open/close des modals + watchdog anti-gel (dialog invisible, inert
 // résiduel) — avant tout showModal pour tracer aussi les dialogs du boot.
 initModalGuard();
