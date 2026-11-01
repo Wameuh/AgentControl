@@ -126,7 +126,7 @@ async fn exec_via_cfg(cfg: &Value, script: &str) -> Result<(i32, String, String)
                 })
                 .filter(|s| !s.is_empty())
                 .map(Arc::new),
-            key: None,
+            ..Default::default()
         };
         let key_path = cfg
             .get("key")

@@ -563,8 +563,15 @@ export class ConnectionManager {
       const k = seg?.dataset.conn;
       if (k && (this.gone.has(k) || this.live.get(k) === "down")) this.retry(k);
     });
-    // Mort instantanée du transport (EOF reader côté Rust).
-    listen<string>("conn-dead", (e) => this.markDead(e.payload));
+    // Mort instantanée du transport (reader côté Rust). Payload {conn,
+    // why} — la cause post-mortem (RST, keepalive-timeout, canal fermé…)
+    // remplace le « EOF transport » générique dans le log « down » ;
+    // la forme string reste tolérée (pushes web legacy).
+    listen<{ conn: string; why?: string } | string>("conn-dead", (e) => {
+      const p = e.payload;
+      if (typeof p === "string") return this.markDead(p);
+      this.markDead(p.conn, p.why ?? "conn-dead (EOF transport)");
+    });
 
     // Watchdog : sonde fusionnée toutes les 10 s (timeout 8 s/conn côté Rust) —
     // filet de sécurité pour les blackholes réseau (pas d'EOF → pas de

@@ -28,12 +28,13 @@ const MOCK = `(function () {
   window.__ds = { local: OK, servers: 1, sessions: 1 };
   window.__connectResult = OK;
   // Tue la conn du point de vue client : rejette les call() en vol (le
-  // drain Rust fait pareil en vrai) puis émet conn-dead.
+  // drain Rust fait pareil en vrai) puis émet conn-dead {conn, why} —
+  // même forme que le payload Tauri post-#128.
   window.__dead = () => {
     for (const p of window.__pendingCalls.splice(0)) p(new Error("connexion fermée"), true);
     window.__ds = { local: DEAD, servers: 1, sessions: 0 };
     const id = window.__acListeners["conn-dead"];
-    if (id != null) window.__TAURI_INTERNALS__.runCallback(id, { payload: "local" });
+    if (id != null) window.__TAURI_INTERNALS__.runCallback(id, { payload: { conn: "local", why: "eof test" } });
   };
   window.__heal = () => { window.__ds = { local: OK, servers: 1, sessions: 1 }; };
   function rpc(method, args) {

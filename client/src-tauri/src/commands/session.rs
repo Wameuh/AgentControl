@@ -134,9 +134,15 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
     ) {
         // Relais term_id → events Tauri `term-data` / `term-exit`. Vit
         // indépendamment du pump subscribe (rechargements de session).
+        // dead → sortie : sans lui la tâche retenait un Arc<Client> à
+        // vie — conn fermée/remplacée fuyait le transport ssh.
         tauri::async_runtime::spawn(async move {
+            let mut dead = c.dead.clone();
             loop {
-                let v = match rx.recv().await {
+                let v = match tokio::select! {
+                    v = rx.recv() => v,
+                    _ = dead.wait_for(|d| *d) => break,
+                } {
                     Ok(v) => v,
                     // Trou de broadcast (bursts) : le flux PTY a sauté —
                     // tracer le gap dans le terminal plutôt que rien.

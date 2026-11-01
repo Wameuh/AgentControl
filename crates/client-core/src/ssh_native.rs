@@ -167,6 +167,11 @@ pub struct Opts {
     /// Clé privée en mémoire (K jetable du pairing — jamais écrite
     /// sur disque). Prioritaire sur `key_path` quand présente.
     pub key: Option<Arc<russh::keys::PrivateKey>>,
+    /// Slot rempli par le handler à la déconnexion — la raison russh
+    /// (disconnect serveur, keepalive-timeout, erreur io) alimente le
+    /// post-mortem du transport. Interne à open_direct_tcpip.
+    #[doc(hidden)]
+    pub disc: Option<Arc<std::sync::Mutex<Option<String>>>>,
 }
 
 struct Handler {
@@ -176,6 +181,9 @@ struct Handler {
     /// pas remonter la clé vue). Partagée Arc<Mutex> : le Handler
     /// est consommé par client::connect.
     seen_fp: Arc<std::sync::Mutex<Option<String>>>,
+    /// Raison de déconnexion capturée par `disconnected` — lue au
+    /// post-mortem par le guard pour classer la mort du transport.
+    disc: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl client::Handler for Handler {
@@ -222,11 +230,63 @@ impl client::Handler for Handler {
             }
         }
     }
+
+    /// Fin de session : journalise et mémorise la cause réelle — un
+    /// « EOF » de canal seul ne dit rien ; le Disconnect du serveur
+    /// (message + code), le keepalive-timeout local et l'erreur io
+    /// (RST…) sont des morts de nature différente.
+    async fn disconnected(
+        &mut self,
+        reason: client::DisconnectReason<Self::Error>,
+    ) -> Result<(), Self::Error> {
+        use client::DisconnectReason;
+        let desc = match &reason {
+            DisconnectReason::ReceivedDisconnect(d) => format!(
+                "déconnexion annoncée par le serveur ({:?} : {})",
+                d.reason_code, d.message
+            ),
+            DisconnectReason::Error(russh::Error::KeepaliveTimeout) => {
+                "keepalive-timeout local (serveur muet aux keepalives)".into()
+            }
+            DisconnectReason::Error(russh::Error::IO(e)) => {
+                format!("erreur réseau locale ({e})")
+            }
+            DisconnectReason::Error(e) => format!("erreur session ({e})"),
+        };
+        log(Level::Warn, format!("ssh natif : {desc}"));
+        if let Ok(mut g) = self.disc.lock() {
+            *g = Some(desc);
+        }
+        match reason {
+            DisconnectReason::ReceivedDisconnect(_) => Ok(()),
+            DisconnectReason::Error(e) => Err(e),
+        }
+    }
 }
 
 /// Garde la session SSH vivante ; la fermeture suit le drop du Handle.
-/// Le champ n'est jamais lu — c'est sa durée de vie qui compte.
-pub struct NativeGuard(#[allow(dead_code)] client::Handle<Handler>);
+pub struct NativeGuard {
+    /// Pas d'appels dessus — sa durée de vie est ce qui compte ;
+    /// `is_closed` est lu au post-mortem (mort de session vs canal seul).
+    h: client::Handle<Handler>,
+    /// Raison de déconnexion capturée par le handler (partagé).
+    disc: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl NativeGuard {
+    /// Note post-mortem : la raison russh capturée si la session est
+    /// morte, sinon la distinction canal-seul-fermé vs session morte.
+    pub fn death_note(&self) -> String {
+        if let Some(r) = self.disc.lock().ok().and_then(|d| d.clone()) {
+            return r;
+        }
+        if self.h.is_closed() {
+            "session ssh morte (sans raison capturée)".into()
+        } else {
+            "canal direct-tcpip fermé — session ssh encore vivante".into()
+        }
+    }
+}
 
 /// Connecte + authentifie (clé, sinon mot de passe) et renvoie le handle.
 async fn connect_auth(
@@ -246,6 +306,7 @@ async fn connect_auth(
     let handler = Handler {
         expected_hk: opts.expected_hk.clone().filter(|s| !s.is_empty()),
         seen_fp: seen_fp.clone(),
+        disc: opts.disc.clone().unwrap_or_default(),
     };
     let mut h = match tokio::time::timeout(
         Duration::from_secs(15),
@@ -389,7 +450,12 @@ pub async fn open_direct_tcpip(
     key_path: Option<&Path>,
     opts: &Opts,
 ) -> Result<(NativeGuard, impl AsyncRead + AsyncWrite + Unpin + Send)> {
-    let h = connect_auth(host, port, user, password, key_path, opts).await?;
+    // Slot de la raison de déconnexion — le handler russh l'écrit à la
+    // mort de la session, le guard le lit au post-mortem du transport.
+    let disc = Arc::new(std::sync::Mutex::new(None));
+    let mut opts = opts.clone();
+    opts.disc = Some(disc.clone());
+    let h = connect_auth(host, port, user, password, key_path, &opts).await?;
     let ch = tokio::time::timeout(
         Duration::from_secs(10),
         h.channel_open_direct_tcpip("127.0.0.1", remote_port as u32, "127.0.0.1", 0),
@@ -397,7 +463,7 @@ pub async fn open_direct_tcpip(
     .await
     .context("direct-tcpip timeout")?
     .context("direct-tcpip — le démon écoute-t-il sur le port distant ?")?;
-    Ok((NativeGuard(h), ch.into_stream()))
+    Ok((NativeGuard { h, disc }, ch.into_stream()))
 }
 
 /// Appairage B′ — côté appareil qui scanne le QR : ouvre une session
@@ -432,6 +498,7 @@ pub async fn pair_attempt(
     let opts = Opts {
         expected_hk: Some(Arc::new(hk)),
         key: Some(Arc::new(key)),
+        ..Default::default()
     };
     let h = connect_auth(host, port, user, None, None, &opts)
         .await
