@@ -171,7 +171,7 @@ export function checkBootUpdate() {
       const b = document.createElement("button");
       b.className = "tb-update";
       b.innerHTML = `${icon("up")} v${esc(remote)}`;
-      b.title = `Update v${remote} available — click to install`;
+      b.title = t("update_badge_title", { v: remote });
       b.onclick = () => {
         b.disabled = true;
         b.textContent = t("update_installing", { v: remote });

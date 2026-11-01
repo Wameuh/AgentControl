@@ -11,7 +11,7 @@ import { applyTheme, applyAccent, accentPref, applyAccentStrong, accentStrongPre
 import { defaultEncoding } from "../core/encoding";
 import { inlineImages } from "../core/format";
 import { cmpVer, connKeyOf, connLabel } from "../core/conn";
-import { setLang, getLang, t, type Lang } from "../i18n";
+import { setLang, getLang, t, LANGS, type Lang } from "../i18n";
 import { nav } from "../ui/nav";
 import type { SavedConn } from "../core/types";
 import { shareQr } from "./pairing";
@@ -263,7 +263,17 @@ export class SettingsPanel {
     };
     ($("s-bganim") as HTMLInputElement).onchange = (e) =>
       applyBgAnim((e.target as HTMLInputElement).checked);
-    ($("s-lang") as HTMLSelectElement).onchange = (e) => {
+    // Options du select langue construites depuis LANGS (un bloc de
+    // dictionnaire = une entrée) — libellés natifs, pas de data-i18n :
+    // chaque langue se nomme dans sa propre langue.
+    const langSel = $("s-lang") as HTMLSelectElement;
+    for (const l of LANGS) {
+      const opt = document.createElement("option");
+      opt.value = l.id;
+      opt.textContent = l.label;
+      langSel.append(opt);
+    }
+    langSel.onchange = (e) => {
       setLang((e.target as HTMLSelectElement).value as Lang);
       this.langChanged();
       // setLang → applyStatic a retraduit les options → lire leurs
