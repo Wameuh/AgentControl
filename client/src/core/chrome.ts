@@ -272,6 +272,26 @@ export function shellOpen(url: string) {
   invoke("plugin:opener|open_url", { url }).catch(() => {});
 }
 
+/// Délégation globale des liens externes : les <a href> produits par le
+/// rendu (format.ts : ulink, liens md, images cliquables) portent
+/// target="_blank" — dans la webview wry sans newWindow handler, le clic
+/// est mort (voire navigue la webview et perd l'app). Un listener document
+/// en bubbling : les handlers d'élément tournent avant (flink, about-gh,
+/// pin-tag…) et marquent e.defaultPrevented → skip ; sinon allowlist
+/// http(s) stricte sur l'attribut brut — jamais file:, javascript:,
+/// agentcontrol:, mailto: ni les relatifs — puis opener. En mode web le
+/// même invoke aboutit à window.open (bridge) : un seul chemin.
+export function initExternalLinks() {
+  document.addEventListener("click", (e) => {
+    if (e.defaultPrevented) return;
+    const a = (e.target as HTMLElement).closest?.("a[href]");
+    const href = a?.getAttribute("href")?.trim() ?? "";
+    if (!/^https?:\/\//i.test(href)) return;
+    e.preventDefault();
+    shellOpen(href);
+  });
+}
+
 // Fenêtre custom (decorations: false) : drag natif via startDragging()
 // explicite — pas de data-tauri-drag-region : son handler WRY n'est pas
 // gardé par e.detail et relancerait un move-drag au double-clic (grab

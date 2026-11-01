@@ -1521,7 +1521,11 @@ export class FileExplorer {
     // Chemins de fichiers cliquables dans les messages → panneau latéral.
     $("events").addEventListener("click", (e) => {
       const el = (e.target as HTMLElement).closest<HTMLElement>(".flink");
-      if (el?.dataset.path) void this.openFilePanel(el.dataset.path);
+      if (!el?.dataset.path) return;
+      // Traité ici : la délégation globale des <a> (initExternalLinks)
+      // lit defaultPrevented et laisse ce clic tranquille.
+      e.preventDefault();
+      void this.openFilePanel(el.dataset.path);
     });
 
     // 📁 dans le header : ouvre le panneau complet (arbre + viewer)
