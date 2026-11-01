@@ -139,7 +139,9 @@ let ownFpCache: string | null | undefined;
 
 /** fp SHA256 de la clé de l'app — recalculé depuis la ligne
  *  authorized_keys exposée par ssh_pubkey (blob → sha256 → base64
- *  OpenSSH). Permet de marquer « cette app » dans les entrées `app`. */
+ *  OpenSSH). Permet de marquer « cette app » dans les entrées `app`.
+ *  Mis en cache : une régénération de la clé en cours de session ne
+ *  serait pas revue avant le prochain lancement (cas marginal). */
 async function ownKeyFp(): Promise<string | null> {
   if (ownFpCache !== undefined) return ownFpCache;
   try {
@@ -157,6 +159,11 @@ async function ownKeyFp(): Promise<string | null> {
   return ownFpCache;
 }
 
+/** Compteur de génération par <ul> — deux appels concurrents sur la
+ *  même liste (changements rapides du select, double refresh) ne doivent
+ *  pas se mélanger : le plus lent abandonne après son await. */
+const accGen = new WeakMap<HTMLElement, number>();
+
 /** Liste + révocation des accès managés — générique : toute surface qui
  *  fournit un <ul> (+ ligne d'état optionnelle) l'utilise ; le rechargement
  *  après revoke et à l'ouverture est inclus. `onErr` reçoit les erreurs de
@@ -168,6 +175,8 @@ export async function renderAccesses(
   onErr?: (msg: string) => void,
 ): Promise<void> {
   const { ul, status } = els;
+  const gen = (accGen.get(ul) ?? 0) + 1;
+  accGen.set(ul, gen);
   ul.innerHTML = "";
   const setStatus = (msg: string | null) => {
     if (!status) return;
@@ -183,6 +192,7 @@ export async function renderAccesses(
     invoke<PairAccess[]>("pair_devices", { cfg }).catch(() => null),
     ownKeyFp(),
   ]);
+  if (accGen.get(ul) !== gen) return; // rendu périmé — un appel plus récent a pris la main
   if (devs == null) {
     setStatus(t("pair_acc_unavail"));
     return;
@@ -197,6 +207,9 @@ export async function renderAccesses(
     const li = document.createElement("li");
     const fpEl =
       `<span class="qr-dev-fp" title="${esc(d.fp)}">${esc(d.fp.slice(0, 20))}…</span>`;
+    // Clé de CETTE app : révocable, mais la confirmation le dit —
+    // la révoquer coupe l'accès SSH de l'app au serveur.
+    const isOwn = d.kind === "app" && ownFp != null && d.fp === ownFp;
     if (d.kind === "tmp") {
       // Clé K survivante : exp encore future = appairage en cours ailleurs,
       // sinon orpheline — les deux se révoquent pareil.
@@ -205,10 +218,9 @@ export async function renderAccesses(
         `<span class="qr-dev-label">${esc(t("pair_acc_tmp"))}</span>` +
         `<span class="qr-dev-badge">${esc(t(alive ? "pair_acc_live" : "pair_acc_expired"))}</span>`;
     } else if (d.kind === "app") {
-      const own = ownFp != null && d.fp === ownFp;
       li.innerHTML = fpEl +
         `<span class="qr-dev-label">${esc(t("pair_acc_app"))}</span>` +
-        (own ? `<span class="qr-dev-badge">${esc(t("pair_acc_self"))}</span>` : "");
+        (isOwn ? `<span class="qr-dev-badge">${esc(t("pair_acc_self"))}</span>` : "");
     } else {
       li.innerHTML = fpEl +
         `<span class="qr-dev-label">${esc(d.label ?? "?")}</span>` +
@@ -221,7 +233,7 @@ export async function renderAccesses(
     btn.onclick = () => {
       if (!btn.classList.contains("armed")) {
         btn.classList.add("armed");
-        btn.textContent = t("qr_revoke_sure");
+        btn.textContent = t(isOwn ? "pair_acc_sure_self" : "qr_revoke_sure");
         setTimeout(() => {
           btn.classList.remove("armed");
           btn.textContent = t("qr_revoke");

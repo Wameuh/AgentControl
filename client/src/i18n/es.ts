@@ -99,6 +99,7 @@ export const es: Record<Key, string> = {
   pair_acc_live: "en curso",
   pair_acc_expired: "caducada",
   pair_acc_app: "clave de app", pair_acc_self: "esta app",
+  pair_acc_sure_self: "¿Revocar el acceso de ESTA app?",
   qr_revoke: "Revocar", qr_revoke_sure: "¿Confirmar?",
   qr_scan_h: "Escanear un QR de vinculación",
   qr_scan_hint: "Apunte la cámara al QR mostrado en el otro dispositivo.",

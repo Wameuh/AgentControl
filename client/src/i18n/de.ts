@@ -99,6 +99,7 @@ export const de: Record<Key, string> = {
   pair_acc_live: "läuft",
   pair_acc_expired: "abgelaufen",
   pair_acc_app: "App-Schlüssel", pair_acc_self: "diese App",
+  pair_acc_sure_self: "Zugriff DIESER App widerrufen?",
   qr_revoke: "Widerrufen", qr_revoke_sure: "Bestätigen?",
   qr_scan_h: "Kopplungs-QR scannen",
   qr_scan_hint: "Richten Sie die Kamera auf den QR des anderen Geräts.",

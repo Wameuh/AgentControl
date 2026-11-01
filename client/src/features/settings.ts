@@ -318,13 +318,18 @@ export class SettingsPanel {
           Number(($("s-pair-conn") as HTMLSelectElement).value)
         ];
       if (!c) return;
-      // La modale peut ajouter un appareil → liste rechargée à sa fermeture.
-      ($("dlg-qr") as HTMLDialogElement).addEventListener(
-        "close",
-        () => void this.refreshPairAccess(),
-        { once: true },
-      );
-      void shareQr(c).catch((e) => notify("error", String(e)));
+      void shareQr(c)
+        .then(() => {
+          // La modale est ouverte — un appairage peut ajouter un
+          // appareil : liste rechargée à sa fermeture. (Branché après
+          // showModal : si shareQr échoue avant, pas de listener armé.)
+          ($("dlg-qr") as HTMLDialogElement).addEventListener(
+            "close",
+            () => void this.refreshPairAccess(),
+            { once: true },
+          );
+        })
+        .catch((e) => notify("error", String(e)));
     };
     ($("s-pair-conn") as HTMLSelectElement).onchange = () =>
       void this.refreshPairAccess();

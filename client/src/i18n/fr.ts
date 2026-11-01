@@ -97,6 +97,7 @@ export const fr: Record<Key, string> = {
   pair_acc_live: "en cours",
   pair_acc_expired: "expirée",
   pair_acc_app: "clé d'app", pair_acc_self: "cette app",
+  pair_acc_sure_self: "Révoquer l'accès de CETTE app ?",
   qr_revoke: "Révoquer", qr_revoke_sure: "Confirmer ?",
   qr_scan_h: "Scanner un QR d'appairage",
   qr_scan_hint: "Visez le QR affiché sur l'autre appareil.",

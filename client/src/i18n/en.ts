@@ -96,6 +96,7 @@ export const en = {
   pair_acc_live: "in progress",
   pair_acc_expired: "expired",
   pair_acc_app: "app key", pair_acc_self: "this app",
+  pair_acc_sure_self: "Revoke THIS app's access?",
   qr_revoke: "Revoke", qr_revoke_sure: "Confirm?",
   qr_scan_h: "Scan a pairing QR",
   qr_scan_hint: "Point the camera at the QR shown on the other device.",

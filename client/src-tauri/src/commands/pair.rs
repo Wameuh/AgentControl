@@ -383,11 +383,16 @@ fi
 ///                                     exp = borne serveur lue dans pair-<nonce>.exp, "-" sinon)
 ///   agentcontrol                    → app:<fp>                  (clé de l'app posée à la main)
 /// Le fp réel est toujours recalculé via ssh-keygen -lf (le commentaire
-/// n'est pas une preuve). $D peut manquer sur un serveur jamais appairé.
+/// n'est pas une preuve). Lignes `#` exclues (sshd les ignore — une
+/// clé désactivée n'est pas un accès) ; `set -f` : un `*` dans un
+/// commentaire ne doit pas s'expanser en noms de fichiers (fuite +
+/// décalage de champs). $D peut manquer sur un serveur jamais appairé.
 const DEVICES_SH: &str = r#"AK="$HOME/.ssh/authorized_keys"; D="$HOME/.agentcontrol"
+umask 077
+set -f
 [ -f "$AK" ] || exit 0
 mkdir -p "$D" 2>/dev/null
-grep ' agentcontrol' "$AK" 2>/dev/null | while IFS= read -r line; do
+grep ' agentcontrol' "$AK" 2>/dev/null | grep -v '^[[:space:]]*#' | while IFS= read -r line; do
   set -- $line
   while [ $# -gt 0 ]; do
     case "${3:-}" in
@@ -424,7 +429,11 @@ exit 0
 /// l'empreinte recalculée par ssh-keygen -lf.
 const REVOKE_SH: &str = r#"AK="$HOME/.ssh/authorized_keys"; D="$HOME/.agentcontrol"
 umask 077
+set -f
 [ -f "$AK" ] || { echo "err:none"; exit 0; }
+# $D peut manquer (jamais appairé, clé posée à la main) — le verrou
+# flock en a besoin ; umask 077 → mode 700 à la création.
+mkdir -p "$D" 2>/dev/null
 if command -v flock >/dev/null 2>&1; then
   exec 9>"$D/pair.lock"; flock -w 10 9 || { echo "err:lock"; exit 1; }
 else
@@ -442,26 +451,30 @@ while IFS= read -r line; do
   case "$line" in
     *" agentcontrol"*)
       set -- $line
-      while [ $# -gt 0 ]; do
-        case "${3:-}" in
-          agentcontrol-pair|agentcontrol-pair-tmp|agentcontrol)
-            printf '%s %s\n' "$1" "$2" > "$D/.pk.$$"
-            fp=$(ssh-keygen -lf "$D/.pk.$$" 2>/dev/null | awk '{print $2}')
-            rm -f "$D/.pk.$$"
-            if [ "$fp" = "@FP@" ]; then
-              keep=0
-              # Ligne K révoquée : ses fichiers d'état mourraient orphelins
-              # (le sweep les purge, autant le faire tout de suite).
-              if [ "$3" = "agentcontrol-pair-tmp" ]; then
-                case "${4:-}" in ''|*[!0-9a-f]*) ;; *)
-                  rm -f "$D/pair-$4.exp" "$D/pair-$4.seen" ;;
-                esac
+      # $1 = premier champ (blancs de tête absorbés) : « #… » = ligne
+      # commentée — sshd l'ignore déjà, on n'y touche pas.
+      case "$1" in '#'*) ;; *)
+        while [ $# -gt 0 ]; do
+          case "${3:-}" in
+            agentcontrol-pair|agentcontrol-pair-tmp|agentcontrol)
+              printf '%s %s\n' "$1" "$2" > "$D/.pk.$$"
+              fp=$(ssh-keygen -lf "$D/.pk.$$" 2>/dev/null | awk '{print $2}')
+              rm -f "$D/.pk.$$"
+              if [ "$fp" = "@FP@" ]; then
+                keep=0
+                # Ligne K révoquée : ses états mourraient orphelins (le
+                # sweep les purge, autant le faire tout de suite).
+                if [ "$3" = "agentcontrol-pair-tmp" ]; then
+                  case "${4:-}" in ''|*[!0-9a-f]*) ;; *)
+                    rm -f "$D/pair-$4.exp" "$D/pair-$4.seen" ;;
+                  esac
+                fi
               fi
-            fi
-            break ;;
-        esac
-        shift
-      done ;;
+              break ;;
+          esac
+          shift
+        done ;;
+      esac ;;
   esac
   if [ $keep -eq 1 ]; then printf '%s\n' "$line" >> "$tmp"; else found=1; fi
 done < "$AK"
@@ -704,13 +717,22 @@ pub(crate) async fn pair_revoke(cfg: Value, fp: String) -> Result<(), String> {
         return Err("empreinte invalide".into());
     }
     let script = REVOKE_SH.replace("@FP@", &fp);
-    let (_code, out, err) = exec_via_cfg(&cfg, &script).await?;
+    let (code, out, err) = exec_via_cfg(&cfg, &script).await?;
     if let Some(e) = out.lines().find_map(|l| l.strip_prefix("err:")) {
         return Err(match e {
             "notfound" => "appareil introuvable (déjà révoqué ?)".into(),
             "lock" => "verrou authorized_keys indisponible".into(),
             other => format!("révocation refusée ({other})"),
         });
+    }
+    // Mort silencieuse du script (verrou impossible, AK perdu entre-
+    // temps…) : sans « ok » terminal, rien n'a été retiré — l'UI ne doit
+    // pas afficher une révocation réussie qui n'a pas eu lieu.
+    if code != 0 || !out.lines().any(|l| l.trim() == "ok") {
+        return Err(format!(
+            "révocation échouée (code {code}){}",
+            if err.trim().is_empty() { String::new() } else { format!(" : {}", err.trim()) }
+        ));
     }
     client_core::log(Level::Info, format!("pair_revoke {fp}: {} {}", out.trim(), err.trim()));
     Ok(())
