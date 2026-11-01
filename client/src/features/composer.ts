@@ -866,10 +866,11 @@ export class Composer {
         this.sendInput(this.defaultMode());
       }
     });
-    $("input").addEventListener("input", () => {
+    $("input").addEventListener("input", (e) => {
       // En dictée : la frappe ne doit pas être écrasée par le prochain
-      // partial — le segment live se ré-ancre au curseur.
-      this.mic.onUserInput();
+      // partial — le segment live se ré-ancre au curseur (hors
+      // composition IME, sinon chaque lettre committerait l'autocorrect).
+      this.mic.onUserInput(e as InputEvent);
       this.refreshAc();
       this.fitInput();
     });

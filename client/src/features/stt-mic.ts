@@ -40,9 +40,15 @@ export class SttMic {
   /** Dernier texte figé via stt_result — la réponse de stt_stop répète le
    *  dernier segment : sans ce garde il serait inséré une seconde fois. */
   private lastFinal = "";
-  /** Écriture programmatique en cours — l'event `input` qui suit n'est pas
-   *  une frappe utilisateur (les ré-ancrages passent par ce flag). */
+  /** Écriture programmatique en cours — purement défensif : assigner
+   *  `.value` ne dispatche pas d'event `input`, aucun self-write ne
+   *  passe réellement par onUserInput. */
   private selfWrite = false;
+  /** Composition IME en cours (autocorrect, glide typing Android) :
+   *  ré-écrire `.value` committerait la composition à chaque lettre —
+   *  le ré-ancrage est sauté, les partials sont différés au commit. */
+  private composing = false;
+  private deferredSeg: { text: string; final: boolean } | null = null;
   /** Ré-écrit #input via le composer (value + fit + autocomplete). */
   private writeInput: (v: string) => void = () => {};
   /** Ouvre les settings sur la section modèles STT (injecté par main). */
@@ -77,6 +83,23 @@ export class SttMic {
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") void this.probe();
     });
+    // IME : pendant une composition (glide/autocorrect), aucune écriture
+    // programmatique — au commit, la frappe est traitée puis le dernier
+    // partial différé est rejoué.
+    const inp = this.inp();
+    inp.addEventListener("compositionstart", () => {
+      this.composing = true;
+    });
+    inp.addEventListener("compositionend", () => {
+      this.composing = false;
+      this.onUserInput();
+      const d = this.deferredSeg;
+      this.deferredSeg = null;
+      if (d && this.listening) {
+        if (d.final) this.commit(d.text);
+        else this.spliceSeg(d.text, false);
+      }
+    });
     void this.probe();
   }
 
@@ -97,6 +120,14 @@ export class SttMic {
       this.seg = "";
       this.anchor = this.inp().value.length;
       this.setListening(true);
+    } else if (!st.recording && this.listening) {
+      // Capture morte côté natif (read cassé, unload, perte de focus
+      // audio) : sans ce resync l'anneau pulserait indéfiniment alors
+      // qu'aucun event n'arrive plus.
+      this.seg = "";
+      this.setListening(false);
+    } else {
+      b.setAttribute("aria-pressed", String(this.listening));
     }
     this.setDenied(st.permission === "denied" && !st.recording);
   }
@@ -133,6 +164,10 @@ export class SttMic {
       case "mic_denied":
         this.setDenied(true);
         this.showHint("stt_hint_denied", false);
+        break;
+      case "perm_pending":
+        // Dialogue système de permission déjà affiché (double-tap) —
+        // laisser l'utilisateur répondre, aucun message.
         break;
       default:
         notify("error", t("stt_err"));
@@ -192,6 +227,10 @@ export class SttMic {
   /** stt_partial : le segment courant est REMPLACÉ (pas concaténé). */
   private onPartial(text: string) {
     if (!this.listening) return;
+    if (this.composing) {
+      this.deferredSeg = { text, final: false };
+      return;
+    }
     this.spliceSeg(text, false);
   }
 
@@ -199,6 +238,10 @@ export class SttMic {
    *  prochain partial ouvrira un segment neuf juste après. */
   private onResult(text: string) {
     if (!this.listening) return;
+    if (this.composing) {
+      this.deferredSeg = { text, final: true };
+      return;
+    }
     this.commit(text);
   }
 
@@ -239,10 +282,13 @@ export class SttMic {
 
   /** Frappe clavier pendant l'écoute (event `input` hors selfWrite) :
    *  ne pas écraser la saisie — le segment se ré-ancre au curseur,
-   *  le texte tapé est gardé (spec §7.4). */
-  onUserInput() {
+   *  le texte tapé est gardé (spec §7.4). Pas de ré-écriture pendant
+   *  `isComposing` : ça committerait la composition IME à chaque lettre
+   *  (glide typing fragmenté, autocorrect perdu) — le ré-ancrage attend
+   *  le `compositionend`. */
+  onUserInput(e?: InputEvent) {
     const inp = this.inp();
-    if (this.selfWrite || !this.listening) return;
+    if (this.selfWrite || !this.listening || e?.isComposing) return;
     const v = inp.value;
     const cur = inp.selectionStart ?? v.length;
     if (this.seg) {
