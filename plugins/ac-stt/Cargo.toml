@@ -14,7 +14,7 @@ description = "Plugin Kotlin de reconnaissance vocale on-device (spike d'intégr
 name = "tauri_plugin_ac_stt"
 
 [build-dependencies]
-tauri-plugin = "2"
+tauri-plugin = { version = "2", features = ["build"] }
 
 [dependencies]
 tauri = "2"
