@@ -208,6 +208,8 @@ connView.connecting = (hosts) => chat.setConnecting(hosts);
 // les autres (sinon : empilement opaque + inert, écran "figé").
 connView.onOpening = () => { settings.close(); map.close(); comps.close(); };
 settings.onOpening = () => { connView.close(); map.close(); comps.close(); };
+// Select « Appairer » des settings : pré-sélection sur la conn liée.
+settings.activeConnKey = () => conns.knownConns()[0] ?? null;
 comps.bind(conns);
 comps.onOpening = () => { settings.close(); connView.close(); map.close(); };
 newSess.bind(groups);

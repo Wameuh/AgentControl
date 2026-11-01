@@ -695,7 +695,7 @@ body.android .ev.pinned .pin-tag { opacity: 1; }
 .s-row select:focus { border-color: var(--accent); outline: none; }
 .s-row.chk { cursor: pointer; }
 .s-row.chk input { accent-color: var(--accent); width: 15px; height: 15px; flex: none; }
-#s-update-row { flex-wrap: wrap; }
+#s-update-row, #s-pair-row { flex-wrap: wrap; }
 #s-update-status { color: var(--dim); flex: none; }
 /* Alertes sonores : sous-options indentées ; master off = contrôles
    grisés sauf les boutons « Tester » (toujours cliquables — preview +

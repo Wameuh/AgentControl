@@ -4,15 +4,17 @@
 // vérification manuelle des mises à jour.
 // ---------------------------------------------------------------------------
 
-import { getVersion, isWeb } from "../core/bridge";
-import { $ } from "../core/dom";
+import { invoke, getVersion, isWeb } from "../core/bridge";
+import { $, notify } from "../core/dom";
 import { bindLogView } from "../core/logview";
 import { applyTheme, applyAccent, accentPref, applyAccentStrong, accentStrongPref, applyBgAnim, bgAnimOn, isAndroid, type Accent } from "../core/chrome";
 import { defaultEncoding } from "../core/encoding";
 import { inlineImages } from "../core/format";
-import { cmpVer } from "../core/conn";
+import { cmpVer, connKeyOf, connLabel } from "../core/conn";
 import { setLang, getLang, t, type Lang } from "../i18n";
 import { nav } from "../ui/nav";
+import type { SavedConn } from "../core/types";
+import { shareQr } from "./pairing";
 import { checkUpdate, performClientUpdate, rcChannel } from "./update";
 import {
   sounds,
@@ -53,6 +55,13 @@ export class SettingsPanel {
    *  empilés seraient inertes l'un sous l'autre (injecté par le
    *  bootstrap). */
   onOpening: () => void = () => {};
+  /** Clé connKey de la connexion actuellement liée — pré-sélectionne le
+   *  serveur dans le select « Appairer » (injecté par le bootstrap). */
+  activeConnKey: () => string | null = () => null;
+
+  /** Conns SSH du select « Appairer » — snapshot du dernier refresh ;
+   *  la valeur de l'option choisie est son index dedans. */
+  private pairConns: SavedConn[] = [];
 
   private isOpen() {
     return !$("settings-view").hidden;
@@ -80,6 +89,7 @@ export class SettingsPanel {
     ($("s-sendmode") as HTMLSelectElement).value = sendPref();
     ($("s-autoconn") as HTMLInputElement).checked =
       localStorage.getItem("ac-autoconnect") !== "0";
+    if (!isWeb) void this.refreshPairConns();
     ($("s-images") as HTMLInputElement).checked = inlineImages();
     ($("s-rcchan") as HTMLInputElement).checked = rcChannel();
     ($("s-encoding") as HTMLSelectElement).value = defaultEncoding();
@@ -159,6 +169,37 @@ export class SettingsPanel {
   toggle() {
     if (this.isOpen()) this.close();
     else this.open();
+  }
+
+  /** Select « Appairer un appareil » : les conns sauvegardées ont pu
+   *  changer depuis la dernière ouverture → refetch à chaque open().
+   *  Seules les SSH sont listées (pair_resolve refuse les autres kinds). */
+  private async refreshPairConns() {
+    this.pairConns = (
+      await invoke<SavedConn[]>("saved_connections").catch(
+        () => [] as SavedConn[],
+      )
+    ).filter((c) => c.kind === "ssh");
+    const sel = $("s-pair-conn") as HTMLSelectElement;
+    sel.innerHTML = "";
+    const active = this.activeConnKey();
+    const android = isAndroid();
+    let def = -1;
+    this.pairConns.forEach((c, i) => {
+      const o = document.createElement("option");
+      o.value = String(i);
+      const k = connKeyOf(c, android);
+      o.textContent = connLabel(k);
+      sel.append(o);
+      if (k === active) def = i;
+    });
+    // Défaut : conn liée, sinon la première (la dernière utilisée —
+    // connections.json garde la plus récente en tête, cf. autoConnect).
+    sel.selectedIndex = def >= 0 ? def : 0;
+    const none = this.pairConns.length === 0;
+    sel.disabled = none;
+    ($("s-pair-go") as HTMLButtonElement).disabled = none;
+    $("s-pair-none").hidden = !none;
   }
 
   /** "Vérifier les mises à jour" : remote vs local → statut + bouton maj. */
@@ -243,6 +284,16 @@ export class SettingsPanel {
         (e.target as HTMLInputElement).checked ? "1" : "0",
       );
       this.syncSecStates();
+    };
+    // « Pair… » : même modale que l'icône QR de la vue connexions —
+    // shareQr pré-remplit l'endpoint (pair_resolve) et liste les
+    // appareils déjà appairés au serveur choisi.
+    ($("s-pair-go") as HTMLButtonElement).onclick = () => {
+      const c =
+        this.pairConns[
+          Number(($("s-pair-conn") as HTMLSelectElement).value)
+        ];
+      if (c) void shareQr(c).catch((e) => notify("error", String(e)));
     };
     ($("s-images") as HTMLInputElement).onchange = (e) =>
       localStorage.setItem(
