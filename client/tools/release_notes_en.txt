@@ -41,3 +41,4 @@
 215: Spanish and German join the interface languages — the whole UI (menus, dialogs, toasts, tooltips) is now offered in English, French, Español and Deutsch, applied immediately and persisted across launches.
 216: Status bar CPU percentage no longer shows a trail of decimals (e.g. 33.29999923706055%) — it now displays a single digit after the decimal point.
 217: The status bar now shows the host machine's metrics next to the client's — the daemon reports its server's CPU, memory and load average (Linux) through daemon_status, displayed as a compact "srv" segment that stays hidden on older daemons.
+219: Group frames on the map view are now smooth ovoids — the angular convex-hull polygon around 3+ member sessions is replaced by an oriented ellipse that encloses the whole group, with the label on top.
