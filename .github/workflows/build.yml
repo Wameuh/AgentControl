@@ -274,7 +274,7 @@ jobs:
           # dans l'app par le manifest merger gradle.
           find src-tauri/gen/android/app/build/intermediates \
             -name "AndroidManifest.xml" -path "*merged*" \
-            -exec grep -lq "RECORD_AUDIO" {} \; | head -1 | grep -q .
+            -exec grep -l "RECORD_AUDIO" {} \; | grep -q .
       - name: Renommer l'APK avec la version
         working-directory: client
         run: |

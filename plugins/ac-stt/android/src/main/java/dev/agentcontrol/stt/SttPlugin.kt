@@ -15,14 +15,14 @@ import app.tauri.plugin.Plugin
     Permission(strings = [Manifest.permission.RECORD_AUDIO], alias = "microphone")
   ]
 )
-class SttPlugin(private val activity: Activity): Plugin(activity) {
+class SttPlugin(activity: Activity): Plugin(activity) {
 
   override fun load(webView: WebView) {
     // Spike squelette : rien à initialiser — la capture arrive après.
   }
 
-  // Répond à `plugin:ac-stt|stt_ping` (snake_case → camelCase). Le
-  // platform="android" prouve que l'appel aboutit dans le Kotlin.
+  // Répond au forward Rust `run_mobile_plugin("sttPing")` de la commande
+  // `stt_ping` — platform="android" prouve que l'appel aboutit ici.
   @Command
   fun sttPing(invoke: Invoke) {
     val ret = JSObject()

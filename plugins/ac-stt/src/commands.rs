@@ -1,12 +1,14 @@
+use tauri::State;
+
 use crate::models::PingResponse;
 
-/// Commande bidon du spike : sert à prouver que `plugin:ac-stt|stt_ping`
-/// est routée (Rust ici ; sur Android c'est le `@Command` Kotlin qui
-/// répond — même nom en camelCase).
+/// Ping bout-en-bout du spike : la webview appelle cette commande, qui
+/// forward à `Stt::ping` — `run_mobile_plugin("sttPing")` sur Android
+/// (le `@Command` Kotlin répond `platform: "android"`), stub Rust
+/// ailleurs. Le `platform` de la réponse prouve la jonction.
 #[tauri::command]
-pub(crate) fn stt_ping() -> PingResponse {
-    PingResponse {
-        pong: true,
-        platform: "rust",
-    }
+pub(crate) async fn stt_ping(
+    stt: State<'_, crate::Stt<tauri::Wry>>,
+) -> crate::Result<PingResponse> {
+    stt.ping()
 }
