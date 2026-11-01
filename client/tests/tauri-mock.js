@@ -1,8 +1,13 @@
 // Mock window.__TAURI_INTERNALS__ pour tester la WebView hors Tauri.
 // Répond aux invoke() du frontend avec des données réalistes.
 (function () {
+  // Clé de la connexion simulée — doit correspondre à connKeyOf(cfg) de la
+  // saved_connections plus bas (ssh → ssh-native forcé sous Android) pour
+  // que les capabilities du daemon_status s'appliquent aux sessions.
+  const CONN = /Android/i.test(navigator.userAgent)
+    ? "ssh-native:pi5.local:22" : "ssh:pi5.local:22";
   const SESSIONS = [
-    { id: "s1", conn: "local", agent: "devin", title: "Refactor API client",
+    { id: "s1", conn: CONN, agent: "devin", title: "Refactor API client",
       cwd: "/home/agent/api", created_at: "2026-10-20T10:00:00Z",
       available_modes: ["normal", "auto"], available_models: ["devin-latest", "opus"],
       available_commands: [{ name: "compact", description: "Compacter le contexte" }],
@@ -13,14 +18,14 @@
           currentValue: "devin-latest", options: [{ value: "devin-latest", name: "devin-latest" }, { value: "opus", name: "opus" }] },
       ],
       state: "working" },
-    { id: "s2", conn: "local", agent: "mock", title: "Fix login crash",
+    { id: "s2", conn: CONN, agent: "mock", title: "Fix login crash",
       cwd: "/home/agent/app", created_at: "2026-10-19T09:00:00Z", group: "Serveur pi",
       spawned_by: "s1",
       available_modes: [], available_models: [], available_commands: [], state: "idle" },
-    { id: "s3", conn: "local", agent: "devin", title: "Write unit tests",
+    { id: "s3", conn: CONN, agent: "devin", title: "Write unit tests",
       cwd: "/home/agent/tests", created_at: "2026-10-18T08:00:00Z", group: "Serveur pi",
       available_modes: [], available_models: [], available_commands: [], state: "dead" },
-    { id: "s4", conn: "local", agent: "mock", title: "Reduce context usage",
+    { id: "s4", conn: CONN, agent: "mock", title: "Reduce context usage",
       cwd: "/home/agent/infra", created_at: "2026-10-21T07:30:00Z",
       origin: "component:backlog-orchestrator",
       available_modes: [], available_models: [], available_commands: [], state: "compacting" },
@@ -87,18 +92,65 @@
     { seq: 11, ts: "10:09", type: "agent_text",
       text: "Le build tourne ici : https://github.com/Wameuh/AgentControl/actions/runs/39909340620 — je surveille." },
   ];
-  const DIR = {
-    dir: "/home/agent/api",
-    entries: [
-      { name: "src", dir: true, size: 0 },
-      { name: "tests", dir: true, size: 0 },
-      { name: ".git", dir: true, size: 0 },
-      { name: "Cargo.toml", dir: false, size: 1240 },
-      { name: "package.json", dir: false, size: 980 },
-      { name: "README.md", dir: false, size: 4321 },
-      { name: "logo.png", dir: false, size: 68 },
-      { name: ".env", dir: false, size: 120 },
-    ],
+  const DIRS = {
+    "": {
+      dir: "/home/agent/api",
+      entries: [
+        { name: "src", dir: true, size: 0 },
+        { name: "tests", dir: true, size: 0 },
+        { name: ".git", dir: true, size: 0 },
+        { name: "Cargo.toml", dir: false, size: 1240 },
+        { name: "package.json", dir: false, size: 980 },
+        { name: "README.md", dir: false, size: 4321 },
+        { name: "rapport.pdf", dir: false, size: 797 },
+        { name: "logo.png", dir: false, size: 68 },
+        { name: ".env", dir: false, size: 120 },
+      ],
+    },
+    "src": {
+      dir: "/home/agent/api/src",
+      entries: [
+        { name: "api", dir: true, size: 0 },
+        { name: "client.ts", dir: false, size: 2890 },
+        { name: "retry.ts", dir: false, size: 1154 },
+        { name: "types.ts", dir: false, size: 640 },
+      ],
+    },
+    "src/api": {
+      dir: "/home/agent/api/src/api",
+      entries: [
+        { name: "client.ts", dir: false, size: 3120 },
+        { name: "fetch.ts", dir: false, size: 845 },
+      ],
+    },
+    "tests": {
+      dir: "/home/agent/api/tests",
+      entries: [
+        { name: "client.test.ts", dir: false, size: 2034 },
+      ],
+    },
+  };
+  // PDF minimal valide (2 pages, repris de pdf-view-e2e.mjs) — sert la
+  // preview du viewer PDF dans les captures.
+  const PDF_B64 =
+    "JVBERi0xLjQKMSAwIG9iago8PC9UeXBlL0NhdGFsb2cvUGFnZXMgMiAwIFI+PgplbmRvYmoKMiAwIG9iago8PC9UeXBlL1BhZ2VzL0tpZHNbMyAwIFIgNCAwIFJdL0NvdW50IDI+PgplbmRvYmoKMyAwIG9iago8PC9UeXBlL1BhZ2UvUGFyZW50IDIgMCBSL01lZGlhQm94WzAgMCA2MTIgNzkyXS9SZXNvdXJjZXM8PC9Gb250PDwvRjEgNSAwIFI+Pj4+L0NvbnRlbnRzIDYgMCBSPj4KZW5kb2JqCjQgMCBvYmoKPDwvVHlwZS9QYWdlL1BhcmVudCAyIDAgUi9NZWRpYUJveFswIDAgNjEyIDc5Ml0vUmVzb3VyY2VzPDwvRm9udDw8L0YxIDUgMCBSPj4+Pi9Db250ZW50cyA3IDAgUj4+CmVuZG9iago1IDAgb2JqCjw8L1R5cGUvRm9udC9TdWJ0eXBlL1R5cGUxL0Jhc2VGb250L0hlbHZldGljYT4+CmVuZG9iago2IDAgb2JqCjw8L0xlbmd0aCA0Mz4+CnN0cmVhbQpCVCAvRjEgMjQgVGYgNzIgNzIwIFRkIChIZWxsbyBwYWdlIDEpIFRqIEVUCmVuZHN0cmVhbQplbmRvYmoKNyAwIG9iago8PC9MZW5ndGggNDA+PgpzdHJlYW0KQlQgL0YxIDI0IFRmIDcyIDYyMCBUZCAoUGFnZSBkZXV4KSBUaiBFVAplbmRzdHJlYW0KZW5kb2JqCnhyZWYKMCA4CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAwOSAwMDAwMCBuIAowMDAwMDAwMDU0IDAwMDAwIG4gCjAwMDAwMDAxMTEgMDAwMDAgbiAKMDAwMDAwMDIyMyAwMDAwMCBuIAowMDAwMDAwMzM1IDAwMDAwIG4gCjAwMDAwMDAzOTggMDAwMDAgbiAKMDAwMDAwMDQ4OSAwMDAwMCBuIAp0cmFpbGVyCjw8L1NpemUgOC9Sb290IDEgMCBSPj4Kc3RhcnR4cmVmCjU3NwolJUVPRgo=";
+  // Épinglés (pinned.json) : un « live » (seq+ts correspondent au
+  // journal EVENTS) + un « dead » (icône d'avertissement — son event a
+  // disparu après /clear). Couvre les deux états du panneau.
+  const PINNED = [
+    { seq: 5, ts: "10:04", type: "agent_text",
+      text: "J'ai refactoré le client API : withRetry encapsule les appels fetch avec backoff exponentiel (3 tentatives, 500ms de base).",
+      pinned_at: "2026-10-21T10:20:00Z", live: true },
+    { seq: 3, ts: "09:58", type: "user_message",
+      text: "Ajoute un coverage du chemin d'erreur réseau.",
+      pinned_at: "2026-10-20T18:02:00Z", live: false },
+  ];
+  const CAPS = {
+    version: "0.10.0", sessions: SESSIONS.length,
+    agents: ["devin", "mock"],
+    self_update: true, first_post: true, terminal: true, files: true,
+    components: true, orchestrator: true, pinned: true, queue_steer: true,
+    web: null,
   };
   const FILE = { content: "export async function apiCall(url, opts) {\n  return withRetry(() => fetch(url, opts), 3);\n}\n\nasync function withRetry(fn, n) {\n  try { return await fn(); }\n  catch (e) { if (n > 0) { await sleep(500); return withRetry(fn, n - 1); } throw e; }\n}", truncated: false, path: "/home/agent/api/src/client.ts" };
 
@@ -112,17 +164,26 @@
       }
       case "events": return { events: EVENTS, last_seq: EVENTS.length };
       case "queue_list": return { queue: ["Compile aussi la doc quand tu as fini"] };
-      case "list_dir": return DIR;
-      case "read_file": return args.binary ? {
-        path: "/home/agent/api/logo.png", size: 68, truncated: false,
-        data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
-      } : FILE;
+      case "list_dir":
+        return DIRS[args.path ?? ""] ??
+          { dir: `/home/agent/api/${args.path ?? ""}`, entries: [] };
+      case "read_file":
+        if (args.binary && String(args.path).endsWith("rapport.pdf")) {
+          return { path: "/home/agent/api/rapport.pdf", size: 797,
+                   truncated: false, data: PDF_B64 };
+        }
+        return args.binary ? {
+          path: "/home/agent/api/logo.png", size: 68, truncated: false,
+          data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        } : FILE;
+      case "list_pinned": return { pinned: PINNED };
+      case "pin_message": case "unpin_message": return { pinned: PINNED };
       case "set_session_group": {
         const s = SESSIONS.find((x) => x.id === args.session);
         if (s) s.group = args.group;
         return { group: args.group };
       }
-      case "daemon_status": return { version: "0.2.9", sessions: SESSIONS.length, components: true };
+      case "daemon_status": return CAPS;
       case "list_components":
         return COMPONENTS.filter((c) => c.name !== "agentbacklog" || !window.__blHide);
       case "component_query": {
@@ -178,22 +239,22 @@
         };
       }
       case "pr_list": return [
-        { conn: "local", repo: "Wameuh/AgentControl", pr: 42,
+        { conn: CONN, repo: "Wameuh/AgentControl", pr: 42,
           session: SESSIONS[0].id, branch: "feat/x", title: "feat: exemple",
           status: "open", via: "detected" },
-        { conn: "local", repo: "Wameuh/AgentControl", pr: 95,
+        { conn: CONN, repo: "Wameuh/AgentControl", pr: 95,
           session: SESSIONS[1].id, branch: "feat/sous-agents",
           title: "feat: sous-agents dans l'arbre", status: "draft",
           via: "manual" },
-        { conn: "local", repo: "Wameuh/AgentControl", pr: 88,
+        { conn: CONN, repo: "Wameuh/AgentControl", pr: 88,
           session: SESSIONS[3].id, branch: "fix/scroll",
           title: "fix: scroll ancré au bas", status: "open",
           via: "detected" },
-        { conn: "local", repo: "cli/cli", pr: 1204,
+        { conn: CONN, repo: "cli/cli", pr: 1204,
           session: "agent-externe-qui-n-existe-plus", branch: "patch-1",
           title: "fix: token refresh retry", status: "conflict",
           via: "manual" },
-        { conn: "local", repo: "cli/cli", pr: 1190,
+        { conn: CONN, repo: "cli/cli", pr: 1190,
           session: "", branch: "docs/readme",
           title: "docs: contribution guide", status: "open", via: "manual" },
       ];
@@ -214,24 +275,35 @@
     invoke(cmd, args) {
       const p = Promise.resolve();
       if (cmd === "platform") return p.then(() => (location.hash === "#desktop" ? "linux" : "android"));
-      if (cmd === "app_version") return p.then(() => "0.2.9");
+      if (cmd === "app_version") return p.then(() => "0.10.0");
       if (cmd === "plugin:event|listen") return p.then(() => ++cbId);
       if (cmd === "plugin:event|unlisten") return p.then(() => null);
       if (cmd.startsWith("plugin:")) return p.then(() => null);
       switch (cmd) {
-        case "connect": return p.then(() => ({ version: "0.2.9", sessions: SESSIONS.length, servers: 1, components: true }));
+        case "connect": return p.then(() => ({ ...CAPS, servers: 1 }));
         case "call": return p.then(() => rpc(args.method, args.params ?? args));
         case "subscribe": return p.then(() => null);
-        case "saved_connections": return p.then(() => []);
+        case "saved_connections": return p.then(() => [
+          { kind: "ssh", host: "pi5.local", user: "me", port: 22, remote_port: 7331 },
+        ]);
         case "cli_conn": return p.then(() => null);
         case "spawn_instance": return p.then(() => null);
         case "ssh_hosts": return p.then(() => []);
         case "ssh_pubkey": return p.then(() => "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDemoAgentControlKeyExample agentcontrol");
-        // Appairage QR : l'install distante n'est pas simulée — réponses
-        // d'endpoint seul (resolve ok, begin refuse → mode dégradé/testé
-        // hors Tauri). pair_devices vide = la section reste pliable.
+        // Appairage QR : pair_begin réussit avec un payload v2 démo (clé
+        // jetable factice — captures README) ; le poll renvoie « gone »
+        // (le dialogue affiche l'état sans dépendre d'un serveur réel).
         case "pair_resolve": return p.then(() => ({ host: args.cfg?.host ?? "demo.local", port: 22, user: "dev" }));
-        case "pair_begin": return p.then(() => { throw new Error("mock: pas de serveur"); });
+        case "pair_begin": return p.then(() => ({
+          payload: JSON.stringify({
+            v: 2, host: "pi5.local", port: 22, user: "me", rport: 7331,
+            exp: Math.floor(Date.now() / 1000) + 290,
+            k: "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAAEC1tb2NrLWRlbW8ta2V5LWZvci1zY3JlZW5zaG90\n-----END OPENSSH PRIVATE KEY-----",
+            hk: ["SHA256:DemoHostKeyFingerprintForScreenshot"],
+          }),
+          exp: Math.floor(Date.now() / 1000) + 290,
+          nonce: "demo-nonce-0001", warn: null, sweep: "cron",
+        }));
         case "pair_devices": return p.then(() => []);
         case "pair_payload": return p.then(() => "agentcontrol://pair?v=1&host=demo.local&port=22&rport=7331&user=dev&auth=pw&secret=ZGVtbw");
         case "pair_poll": return p.then(() => "gone");
