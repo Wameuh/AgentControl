@@ -15,15 +15,24 @@ whole fleet from your desk or your couch.
 
 ## Screenshots
 
-Markdown chat with expandable tool calls, session groups, prompt queue,
-pull-request tracking — desktop:
+Markdown chat with expandable tool calls, pending permissions, session
+groups, a prompt queue and pull-request tracking — desktop:
 
 ![AgentControl desktop — agent chat](docs/screenshots/desktop-chat.png)
 
-Browse the remote workspace: file tree, in-app editing, image and video
-preview:
+Browse the remote workspace: file tree, in-app editing, image, video and
+PDF preview:
 
 ![AgentControl desktop — remote file explorer](docs/screenshots/desktop-files.png)
+
+Pair a phone (or a second machine) by QR — a one-shot key on the server,
+the device keeps its own:
+
+![AgentControl — pair a device by QR](docs/screenshots/desktop-pair.png)
+
+| Watch the shared backlog — queue, in-flight work, throughput | Tune the feel — themes, accents, sounds, notifications, updates |
+|:-:|:-:|
+| ![AgentControl — backlog panel](docs/screenshots/desktop-backlog.png) | ![AgentControl — settings](docs/screenshots/desktop-settings.png) |
 
 Same sessions, same agents — native mobile UI on Android:
 
