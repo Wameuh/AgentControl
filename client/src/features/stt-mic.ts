@@ -23,6 +23,7 @@ interface SttState {
   model_present: boolean;
   recording: boolean;
   permission: string;
+  system_available?: boolean;
 }
 
 interface SttStart {
@@ -57,6 +58,10 @@ export class SttMic {
   private writeInput: (v: string) => void = () => {};
   /** Ouvre les settings sur la section modèles STT (injecté par main). */
   openSttSettings: () => void = () => {};
+  /** SpeechRecognizer on-device présent (dernier probe) — la pref
+   *  « system » dégrade vers sherpa quand l'appareil ne l'a pas
+   *  (évite un engine_error répété à chaque dictée). */
+  private systemOk = false;
 
   private inp(): HTMLTextAreaElement {
     return $("input") as HTMLTextAreaElement;
@@ -119,6 +124,7 @@ export class SttMic {
     }
     b.hidden = false;
     b.setAttribute("aria-label", b.title || t("stt_mic"));
+    this.systemOk = st.system_available === true;
     if (st.recording && !this.listening) {
       // Dictée encore active côté Kotlin (ex. après un reload webview) —
       // les partials repartent d'un segment neuf en fin de champ.
@@ -153,8 +159,11 @@ export class SttMic {
     // Prefs par dictée (spec : langue forcée par stream) — le Kotlin
     // perd ses volatiles au reload webview ; best-effort : un plugin
     // plus vieux que stt_set_engine ne doit pas bloquer la dictée.
+    // « system » sur un appareil sans recognizer on-device → repli
+    // sherpa (qui remontera model_missing et son hint le cas échéant).
+    const eng = sttEngine() === "system" && !this.systemOk ? "sherpa" : sttEngine();
     await Promise.all([
-      invoke(CMD("stt_set_engine"), { engine: sttEngine() }).catch(() => {}),
+      invoke(CMD("stt_set_engine"), { engine: eng }).catch(() => {}),
       invoke(CMD("stt_set_language"), { lang: sttLang() }).catch(() => {}),
     ]);
     const r = await invoke<SttStart>(CMD("stt_start")).catch((e) => {

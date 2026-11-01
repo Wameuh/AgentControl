@@ -242,7 +242,11 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
   private fun micPermCallback(invoke: Invoke) {
     permissionPending.set(false)
     if (getPermissionState("microphone") == PermissionState.GRANTED) {
-      if (engine == "system") doStartSystem(invoke) else doStart(invoke)
+      // Même validation qu'à l'entrée de sttStart — l'utilisateur a pu
+      // changer de moteur pendant le dialog (sherpa : model check).
+      if (engine == "system") doStartSystem(invoke)
+      else if (!modelPresent()) invoke.resolve(startResult(false, "model_missing"))
+      else doStart(invoke)
     } else {
       invoke.resolve(startResult(false, "mic_denied"))
     }
@@ -513,9 +517,12 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
 
   private fun unloadModel() {
     synchronized(this) {
-      // jamais pendant une dictée, ni sous un thread zombie (join
-      // timeout) dont le read bloqué peut se réveiller sur un ptr mort.
-      if (recording || captureActive) return
+      // Jamais sous un thread de capture zombie (join timeout) dont le
+      // read bloqué peut se réveiller sur un ptr mort. Le garde est
+      // engine-aware : pendant une dictée SYSTÈME (recording=true sans
+      // capture sherpa), les ressources sherpa ne sont pas en usage —
+      // le trim doit pouvoir libérer les ~700 Mo quand même.
+      if (captureActive) return
       stream?.release()
       stream = null
       recognizer?.release()
@@ -552,15 +559,24 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
       invoke.resolve(startResult(false, "engine_error"))
       return
     }
-    // Le Kotlin command-thread n'est pas le main thread : tout l'objet
-    // SpeechRecognizer doit vivre sur la boucle UI.
+    idleHandler.removeCallbacks(idleUnload)
+    // recording/activeEngine avancés AVANT le post : un stt_stop qui
+    // passerait entre le dispatch et l'exécution du runnable se route
+    // déjà « system » — et le runnable le détecte (activeEngine effacé
+    // par le stop) → release immédiat au lieu de ressusciter l'état.
+    recording = true
+    activeEngine = "system"
     activity.runOnUiThread {
       val reason = systemStt.start()
       if (reason == null) {
-        recording = true // @Volatile — pas de moniteur sur le main thread
-        activeEngine = "system"
-        invoke.resolve(startResult(true))
+        if (activeEngine == "system") invoke.resolve(startResult(true))
+        else {
+          systemStt.release()
+          invoke.resolve(startResult(false, "busy"))
+        }
       } else {
+        recording = false
+        activeEngine = null
         invoke.resolve(startResult(false, reason))
       }
     }
@@ -568,7 +584,9 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
 
   @SuppressLint("NewApi") // createOnDeviceSpeechRecognizer : API 31+, gaté par available()
   private inner class SystemStt {
-    private var sr: SpeechRecognizer? = null
+    // @Volatile : lu par stt_stop depuis le command-thread (dictée
+    // réellement active ?) — écrit exclusivement sur le main thread.
+    @Volatile private var sr: SpeechRecognizer? = null
     // Dernier partial émis — stt_stop le renvoie comme « dernier
     // segment » (même sémantique que le getResult final du chemin sherpa).
     @Volatile private var lastText: String = ""
@@ -600,12 +618,19 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
     fun stop(invoke: Invoke) {
       recording = false
       activeEngine = null
-      val text = lastText
+      // « Dernier segment » seulement si une dictée tournait vraiment —
+      // sinon le dernier partial périmé (dictée morte via un onError
+      // fatal, ou jamais lancée) serait inséré en fantôme, là où le
+      // chemin sherpa renvoie "" (stream == null → texte vide).
+      val text = if (sr != null) lastText else ""
       activity.runOnUiThread { release() }
       val ret = JSObject()
       ret.put("text", text)
       ret.put("lang", language)
       invoke.resolve(ret)
+      // Même politique qu'au stop sherpa : le modèle éventuellement
+      // résident est rendu après délai — l'idle couvre les deux moteurs.
+      idleHandler.postDelayed(idleUnload, IDLE_UNLOAD_MS)
     }
 
     /** Main thread. */
@@ -613,6 +638,7 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
       try { sr?.stopListening() } catch (_: Exception) {}
       try { sr?.destroy() } catch (_: Exception) {}
       sr = null
+      lastText = ""
     }
 
     private fun firstResult(b: Bundle?): String? =
@@ -647,9 +673,11 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
       }
       override fun onError(code: Int) {
         when (code) {
-          // Erreurs transitoires usuelles en dictée : la boucle reprend.
+          // Erreurs transitoires usuelles en dictée : la boucle reprend
+          // (BUSY = cas typique stop→start rapide, le recognizer reprend).
           SpeechRecognizer.ERROR_NO_MATCH,
-          SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
+          SpeechRecognizer.ERROR_SPEECH_TIMEOUT,
+          SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
             if (recording) sr?.let { try { it.startListening(intentOf()) } catch (_: Exception) {} }
           }
           else -> {
@@ -658,6 +686,7 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
             recording = false
             activeEngine = null
             release()
+            idleHandler.postDelayed(idleUnload, IDLE_UNLOAD_MS)
           }
         }
       }
