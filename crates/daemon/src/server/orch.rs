@@ -606,10 +606,25 @@ pub(crate) fn task_status<'a>(t: &'a Task) -> &'a str {
 fn task_agent<'a>(t: &'a Task) -> &'a str {
     t.get("agent_id").and_then(Value::as_str).unwrap_or("")
 }
-/// Un item `pending` est « poppable » : sans dépendance ou dépendance
-/// soldée — compter les dep-bloqués ferait spawner des workers qui
-/// trouveraient « queue is empty » (churn spawn/rm du script).
+/// Un item `pending` est « poppable » : sans dépendance ou dépendances
+/// toutes soldées — compter les dep-bloqués ferait spawner des workers
+/// qui trouveraient « queue is empty » (churn spawn/rm du script).
+/// Schéma courant : `dependencies: [{id, status}]` (table
+/// `feature_deps` — toujours émis par `--list --json`). Fallback
+/// ancien schéma `depends_on`/`dep_status` quand `dependencies` est
+/// absent (vieille version d'agentbacklog encore déployée).
 pub(crate) fn task_poppable(t: &Task) -> bool {
+    if let Some(deps) = t.get("dependencies") {
+        return match deps.as_array() {
+            Some(a) => a
+                .iter()
+                .all(|d| d.get("status").and_then(Value::as_str) == Some("done")),
+            // `null` = pas de deps → poppable ; un non-tableau non-null
+            // est un champ malformé → bloqué (fail-closed) plutôt que le
+            // « absent → poppable » qui causait le churn.
+            None => deps.is_null(),
+        };
+    }
     t.get("depends_on").is_none_or(|d| d.is_null())
         || t.get("dep_status").and_then(Value::as_str) == Some("done")
 }
@@ -860,7 +875,12 @@ impl Daemon {
                         ws,
                     )
                     .await;
-                    pending.push(t.clone());
+                    // Un orphelin dep-bloqué ne compte pas pour un spawn
+                    // à ce tick — il redeviendra éligible au suivant,
+                    // une fois `pending` et refiltré.
+                    if task_poppable(t) {
+                        pending.push(t.clone());
+                    }
                 }
             }
         }
@@ -1637,6 +1657,63 @@ mod tests {
                 "AgentControl"
             ));
         }
+    }
+
+    #[test]
+    fn poppable_selon_schema_deps() {
+        // Schéma courant : `dependencies: [{id, status}]` — poppable
+        // iff absent/vide ou toutes les deps `done`.
+        assert!(task_poppable(&json!({"status": "pending"})));
+        assert!(task_poppable(
+            &json!({"status": "pending", "dependencies": []})
+        ));
+        assert!(task_poppable(&json!({
+            "status": "pending",
+            "dependencies": [
+                {"id": 5, "status": "done"},
+                {"id": 6, "status": "done"}
+            ]
+        })));
+        // Une seule dep non soldée bloque, quel que soit son état
+        // non-terminal.
+        for st in ["pending", "wip"] {
+            assert!(!task_poppable(&json!({
+                "status": "pending",
+                "dependencies": [{"id": 5, "status": st}]
+            })));
+        }
+        assert!(!task_poppable(&json!({
+            "status": "pending",
+            "dependencies": [
+                {"id": 5, "status": "done"},
+                {"id": 6, "status": "pending"}
+            ]
+        })));
+
+        // `dependencies` présent mais malformé : `null` = pas de deps
+        // → poppable ; non-tableau non-null → fail-closed (bloqué).
+        assert!(task_poppable(
+            &json!({"status": "pending", "dependencies": null})
+        ));
+        for bad in ["\"x\"", "5", "{\"id\": 1}"] {
+            let t: Task = serde_json::from_str(&format!(
+                "{{\"status\": \"pending\", \"dependencies\": {bad}}}"
+            ))
+            .unwrap();
+            assert!(!task_poppable(&t), "dependencies={bad}");
+        }
+
+        // Champ absent → fallback ancien schéma
+        // `depends_on`/`dep_status` (vieille version agentbacklog).
+        assert!(task_poppable(
+            &json!({"status": "pending", "depends_on": null})
+        ));
+        assert!(task_poppable(&json!({
+            "status": "pending", "depends_on": 5, "dep_status": "done"
+        })));
+        assert!(!task_poppable(&json!({
+            "status": "pending", "depends_on": 5, "dep_status": "pending"
+        })));
     }
 
     #[test]
