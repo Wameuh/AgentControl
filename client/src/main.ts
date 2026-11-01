@@ -263,9 +263,13 @@ map.bind({
   onToggle: (open) => sidebar.setMapOpen(open),
 });
 
-// Conn perdue (EOF transport) : les PTY du démon meurent avec → bannière
+// Conn perdue (transport mort) : les PTY du démon meurent avec → bannière
 // dans les terminaux concernés (reopen possible via ↻ au retour).
-void listen<string>("conn-dead", (e) => term.markConnDead(e.payload));
+// Payload {conn, why} ; la forme string reste tolérée (web legacy).
+void listen<{ conn: string } | string>("conn-dead", (e) => {
+  const p = e.payload;
+  term.markConnDead(typeof p === "string" ? p : p.conn);
+});
 
 // --- Events sessions (push du démon via le bridge Tauri) ---------------------
 
