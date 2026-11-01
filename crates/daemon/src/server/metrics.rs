@@ -424,8 +424,10 @@ mod tests {
     fn task(status: &str, repo: Option<&str>, dep_status: Option<&str>) -> Value {
         json!({
             "id": 1, "status": status, "repo": repo,
-            "depends_on": dep_status.map(|_| 1),
-            "dep_status": dep_status,
+            "dependencies": match dep_status {
+                Some(s) => json!([{ "id": 2, "status": s }]),
+                None => json!([]),
+            },
         })
     }
 

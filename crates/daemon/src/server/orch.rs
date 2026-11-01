@@ -606,10 +606,20 @@ pub(crate) fn task_status<'a>(t: &'a Task) -> &'a str {
 fn task_agent<'a>(t: &'a Task) -> &'a str {
     t.get("agent_id").and_then(Value::as_str).unwrap_or("")
 }
-/// Un item `pending` est « poppable » : sans dépendance ou dépendance
-/// soldée — compter les dep-bloqués ferait spawner des workers qui
-/// trouveraient « queue is empty » (churn spawn/rm du script).
+/// Un item `pending` est « poppable » : sans dépendance ou dépendances
+/// toutes soldées — compter les dep-bloqués ferait spawner des workers
+/// qui trouveraient « queue is empty » (churn spawn/rm du script).
+/// Schéma courant : `dependencies: [{id, status}]` (table
+/// `feature_deps` — toujours émis par `--list --json`). Fallback
+/// ancien schéma `depends_on`/`dep_status` quand `dependencies` est
+/// absent (vieille version d'agentbacklog encore déployée).
 pub(crate) fn task_poppable(t: &Task) -> bool {
+    if let Some(deps) = t.get("dependencies") {
+        return deps.as_array().is_none_or(|a| {
+            a.iter()
+                .all(|d| d.get("status").and_then(Value::as_str) == Some("done"))
+        });
+    }
     t.get("depends_on").is_none_or(|d| d.is_null())
         || t.get("dep_status").and_then(Value::as_str) == Some("done")
 }
@@ -1637,6 +1647,50 @@ mod tests {
                 "AgentControl"
             ));
         }
+    }
+
+    #[test]
+    fn poppable_selon_schema_deps() {
+        // Schéma courant : `dependencies: [{id, status}]` — poppable
+        // iff absent/vide ou toutes les deps `done`.
+        assert!(task_poppable(&json!({"status": "pending"})));
+        assert!(task_poppable(
+            &json!({"status": "pending", "dependencies": []})
+        ));
+        assert!(task_poppable(&json!({
+            "status": "pending",
+            "dependencies": [
+                {"id": 5, "status": "done"},
+                {"id": 6, "status": "done"}
+            ]
+        })));
+        // Une seule dep non soldée bloque, quel que soit son état
+        // non-terminal.
+        for st in ["pending", "wip"] {
+            assert!(!task_poppable(&json!({
+                "status": "pending",
+                "dependencies": [{"id": 5, "status": st}]
+            })));
+        }
+        assert!(!task_poppable(&json!({
+            "status": "pending",
+            "dependencies": [
+                {"id": 5, "status": "done"},
+                {"id": 6, "status": "pending"}
+            ]
+        })));
+
+        // Champ absent → fallback ancien schéma
+        // `depends_on`/`dep_status` (vieille version agentbacklog).
+        assert!(task_poppable(
+            &json!({"status": "pending", "depends_on": null})
+        ));
+        assert!(task_poppable(&json!({
+            "status": "pending", "depends_on": 5, "dep_status": "done"
+        })));
+        assert!(!task_poppable(&json!({
+            "status": "pending", "depends_on": 5, "dep_status": "pending"
+        })));
     }
 
     #[test]
