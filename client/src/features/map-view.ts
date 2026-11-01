@@ -542,14 +542,66 @@ export class MapView {
         const h = padded(hull(pts), [cx, cy], GRP_PAD);
         if (h.length < 3) {
           const [[x1, y1], [x2, y2]] = h;
-          groups.push(`${head}${capsule(x1, y1, x2, y2, lbl)}</g>`);
-        } else {
-          const d =
-            `M${h.map(([x, y]) => `${x.toFixed(1)} ${y.toFixed(1)}`).join("L")}Z`;
-          const top = h.reduce((m, p) => (p[1] < m[1] ? p : m));
+          // Tous les membres confondus → ligne nulle = rien de rendu :
+          // fallback cercle, même gabarit que le membre unique.
           groups.push(
-            `${head}<path class="grp-hull" d="${d}"/>` +
-              `<text class="grp-label" x="${top[0].toFixed(1)}" y="${(top[1] - 7).toFixed(1)}">${lbl}</text></g>`,
+            `${head}${x1 === x2 && y1 === y2
+              ? `<circle class="grp-hull" cx="${x1.toFixed(1)}" cy="${y1.toFixed(1)}" ` +
+                `r="${GRP_PAD}"/><text class="grp-label" x="${x1.toFixed(1)}" ` +
+                `y="${(y1 - GRP_PAD - 7).toFixed(1)}">${lbl}</text>`
+              : capsule(x1, y1, x2, y2, lbl)}</g>`,
+          );
+        } else {
+          // Cadre ovoïde : ellipse orientée sur l'axe principal de la
+          // covariance 2×2 des positions (direction propre de λmax —
+          // atan2(0,0)=0 → cas isotrope : axe arbitraire). Demi-axes =
+          // étendue projetée + GRP_PAD, puis scale uniforme jusqu'à
+          // containment de tous les membres (un fit naïf peut exclure
+          // un point excentrique).
+          let sxx = 0;
+          let sxy = 0;
+          let syy = 0;
+          for (const [x, y] of pts) {
+            const dx = x - cx;
+            const dy = y - cy;
+            sxx += dx * dx;
+            sxy += dx * dy;
+            syy += dy * dy;
+          }
+          const tr = (sxx + syy) / 2;
+          const rt = Math.sqrt(Math.max(0, tr * tr - (sxx * syy - sxy * sxy)));
+          const th = Math.atan2(tr + rt - sxx, sxy);
+          const ca = Math.cos(th);
+          const sa = Math.sin(th);
+          const prj: Pt[] = pts.map(([x, y]) => {
+            const dx = x - cx;
+            const dy = y - cy;
+            return [dx * ca + dy * sa, -dx * sa + dy * ca];
+          });
+          let ea = GRP_PAD;
+          let eb = GRP_PAD;
+          for (const [u, v] of prj) {
+            ea = Math.max(ea, Math.abs(u) + GRP_PAD);
+            eb = Math.max(eb, Math.abs(v) + GRP_PAD);
+          }
+          let k = 0;
+          for (const [u, v] of prj)
+            k = Math.max(k, (u * u) / (ea * ea) + (v * v) / (eb * eb));
+          if (k > 1) {
+            const f = Math.sqrt(k) + 1e-3;
+            ea *= f;
+            eb *= f;
+          }
+          // Label en haut de la bounding box de l'ellipse orientée :
+          // demi-hauteur = √((a·sinθ)² + (b·cosθ)²).
+          const hb = Math.hypot(ea * sa, eb * ca);
+          const deg = (th * 180) / Math.PI;
+          groups.push(
+            `${head}<ellipse class="grp-hull" cx="${cx.toFixed(1)}" ` +
+              `cy="${cy.toFixed(1)}" rx="${ea.toFixed(1)}" ry="${eb.toFixed(1)}" ` +
+              `transform="rotate(${deg.toFixed(1)} ${cx.toFixed(1)} ${cy.toFixed(1)})"/>` +
+              `<text class="grp-label" x="${cx.toFixed(1)}" ` +
+              `y="${(cy - hb - 7).toFixed(1)}">${lbl}</text></g>`,
           );
         }
       }
