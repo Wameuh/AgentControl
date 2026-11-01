@@ -391,6 +391,7 @@ export const en = {
   conns_down: "{n} connections lost",
   sb_srv: "srv cpu {cpu}% · {mem}",
   sb_srv_load: "load {v}",
+  sb_srv_dmn: "dmn {v} MB",
   connecting_to: "connecting to {host}…",
   daemon_detected: "daemon v{v} detected",
   agents_loading: "loading agents…",

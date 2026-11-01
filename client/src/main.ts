@@ -382,12 +382,14 @@ initFirstPost((c) => conns.cap(c)?.first_post === true);
 pins.init();
 initModelBar(openFusion);
 initFusionDialog();
-initStatus(() =>
+initStatus(() => {
   // Bloc host du démon de la conn affichée (session ouverte), sinon de
   // la conn liée — absent sur vieux démon → segment masqué.
-  conns.cap(
-    app.current?.conn ?? conns.knownConns()[0] ?? "default",
-  )?.host as HostStats | undefined,
-);
+  const k = app.current?.conn ?? conns.knownConns()[0] ?? "default";
+  // Conn down/en essai : les caps gardent la dernière valeur connue —
+  // masquer plutôt qu'afficher des chiffres périmés sous icône grise.
+  if ((conns.state(k) ?? "ok") !== "ok") return undefined;
+  return conns.cap(k)?.host as HostStats | undefined;
+});
 checkBootUpdate();
 connView.autoConnect(savedConns, cliConn ?? undefined);

@@ -394,6 +394,7 @@ export const de: Record<Key, string> = {
   conns_down: "{n} Verbindungen verloren",
   sb_srv: "srv cpu {cpu}% · {mem}",
   sb_srv_load: "Last {v}",
+  sb_srv_dmn: "dmn {v} MB",
   connecting_to: "verbinde mit {host}…",
   daemon_detected: "Daemon v{v} erkannt",
   agents_loading: "Agenten laden…",

@@ -56,7 +56,10 @@ impl Daemon {
     /// entre deux appels ; le poll client (~10 s) dépasse l'intervalle
     /// minimal interne de sysinfo — refresh direct à chaque appel.
     fn host_stats(&self) -> Value {
-        let mut sys = self.host_sys.lock().unwrap();
+        // Mutex empoisonné (panic d'un précédent appel) : récupérer le
+        // guard plutôt que faire paniquer chaque daemon_status — une
+        // métrique légèrement stale vaut mieux qu'une conn passée morte.
+        let mut sys = self.host_sys.lock().unwrap_or_else(|e| e.into_inner());
         sys.refresh_cpu_usage();
         sys.refresh_memory();
         let mut host = json!({

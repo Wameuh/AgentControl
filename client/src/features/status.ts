@@ -60,18 +60,22 @@ function fmtMemPair(usedMb: number, totalMb: number): string {
   return `${f(usedMb)}/${f(totalMb)} ${gb ? "GB" : "MB"}`;
 }
 
-/** Segment « srv » de la barre : cpu + mem de l'hôte démon (+ load unix). */
+/** Segment « srv » de la barre : cpu + mem de l'hôte démon (+ load unix
+ *  et RSS du process démon — distingue charge hôte vs démon). */
 function hostPart(): string {
   const h = hostStats?.();
   if (!h || typeof h.cpu !== "number" ||
       typeof h.mem_used_mb !== "number" || typeof h.mem_total_mb !== "number") {
     return "";
   }
+  // toFixed : ne pas faire confiance à la précision démon (même piège
+  // d'élargissement f32→f64 que #122 côté local).
   let s = t("sb_srv", {
-    cpu: h.cpu,
+    cpu: h.cpu.toFixed(1),
     mem: fmtMemPair(h.mem_used_mb, h.mem_total_mb),
   });
   if (typeof h.load1 === "number") s += ` · ${t("sb_srv_load", { v: h.load1 })}`;
+  if (typeof h.rss_mb === "number") s += ` · ${t("sb_srv_dmn", { v: h.rss_mb })}`;
   return ` · ${s}`;
 }
 

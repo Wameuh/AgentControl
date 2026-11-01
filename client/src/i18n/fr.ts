@@ -391,6 +391,7 @@ export const fr: Record<Key, string> = {
   conns_down: "{n} connexions perdues",
   sb_srv: "srv cpu {cpu}% · {mem}",
   sb_srv_load: "charge {v}",
+  sb_srv_dmn: "dmn {v} MB",
   connecting_to: "connexion à {host}…",
   daemon_detected: "démon v{v} détecté",
   agents_loading: "chargement des agents…",
