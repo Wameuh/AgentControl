@@ -47,3 +47,4 @@
 222: Links in chat messages and markdown previews (linkified URLs, [text](url) links, inline images) now open in the system browser — they were previously dead clicks in the desktop webview.
 223: Internal groundwork for on-device speech-to-text on Android: a Kotlin Tauri plugin skeleton (ac-stt) is now bundled in the APK through the standard plugin pipeline, with the microphone permission declared — the actual dictation feature lands in a follow-up.
 224: Backlog orchestrator no longer spawns workers for dependency-blocked items — the poppability check read a removed AgentBacklog schema field, so every blocked pending item churned through spawn/exit cycles each tick.
+226: Android speech recognition models now download on demand from Settings → Speech recognition — a ~685 MB Nemotron ASR model can be fetched with resumable downloads, live progress and integrity checks, then deleted or re-downloaded at will; nothing is bundled in the APK.
