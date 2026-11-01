@@ -65,9 +65,44 @@ fn ssh_diag(cfg: &ConnectCfg) -> Result<Option<SshDiag>, String> {
     } else {
         Ok(Some(SshDiag::OpenSsh {
             host: host.clone(),
-            args: args.clone().unwrap_or_default(),
+            args: sanitize_ssh_args(&args.clone().unwrap_or_default()),
         }))
     }
+}
+
+/// Les args de la cfg servent la joignabilité (`-p`, `-i`, `-o`,
+/// `-J`…) — ceux qui changent le mode de ssh sont retirés pour l'exec
+/// diag : `-N`/`-f`/`-T`/`-n` (pas de commande / pas de terminal /
+/// fond) et les forwards `-L`/`-R`/`-D` avec leur argument (un
+/// `-L…` glué seul suffirait à casser l'exec de toute façon, mais
+/// autant ne pas le passer). Tout autre token est conservé.
+fn sanitize_ssh_args(args: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut skip_next = false;
+    for a in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match a.as_str() {
+            "-L" | "-R" | "-D" => {
+                skip_next = true;
+                continue;
+            }
+            s if s.starts_with("-L") || s.starts_with("-R") || s.starts_with("-D") => continue,
+            s => {
+                // Bundles de flags sans argument (-N, -f, -T, -n, -t
+                // et leurs combinaisons -NT, -tt…) — retirés : pas de
+                // commande, détachement ou tty forcé casseraient l'exec.
+                let f = s.strip_prefix('-').unwrap_or("");
+                if !f.is_empty() && f.chars().all(|c| "NfTnt".contains(c)) {
+                    continue;
+                }
+                out.push(a.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Configure la connexion au démon.
@@ -126,8 +161,14 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
         // elle était MORTE spontanément (pas une fermeture demandée),
         // c'est un reconnect post-panne → snapshot diag du serveur.
         if let Some(old) = prev {
-            let was_dead = *old.client.dead.borrow();
             let why = old.client.death_reason();
+            // Mort spontanée = dead signalé OU une raison déjà posée :
+            // le reader en cours de mort écrit dead_info avant
+            // dead_tx — la fenêtre synchrone entre les deux classait
+            // le cas en « remplacement propre » et sautait le
+            // post-mortem. Un client fermé n'est jamais dans conns,
+            // donc un why présent ici ne peut pas être un close().
+            let was_dead = *old.client.dead.borrow() || why.is_some();
             old.client.close();
             if was_dead {
                 if let Some(d) = diag {
