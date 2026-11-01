@@ -262,6 +262,19 @@ jobs:
           # Icônes commitées (tauri icon) → projet généré
           cp -r src-tauri/icons/android/* src-tauri/gen/android/app/src/main/res/
           npx tauri android build --apk --debug --target aarch64
+          # ── Spike ac-stt : le plugin local plugins/ac-stt doit être
+          # inclus sans patch — son build.rs émet
+          # cargo:android_library_path qui remonte en
+          # DEP_TAURI_PLUGIN_AC_STT_ANDROID_LIBRARY_PATH dans le build.rs
+          # de l'app, lequel écrit tauri.settings.gradle. Fail-closed.
+          grep -q ":tauri-plugin-ac-stt" src-tauri/gen/android/tauri.settings.gradle
+          grep -q 'implementation(project(":tauri-plugin-ac-stt"))' \
+            src-tauri/gen/android/app/tauri.build.gradle.kts
+          # RECORD_AUDIO provient du manifest du module plugin, mergé
+          # dans l'app par le manifest merger gradle.
+          find src-tauri/gen/android/app/build/intermediates \
+            -name "AndroidManifest.xml" -path "*merged*" \
+            -exec grep -l "RECORD_AUDIO" {} \; | grep -q .
       - name: Renommer l'APK avec la version
         working-directory: client
         run: |

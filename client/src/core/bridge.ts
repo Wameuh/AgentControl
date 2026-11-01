@@ -115,6 +115,10 @@ async function webInvoke<T>(cmd: string, a: Record<string, unknown>): Promise<T>
     case "plugin:opener|open_url":
       window.open(String(a.url), "_blank", "noopener");
       return undefined as T;
+    case "plugin:ac-stt|stt_ping":
+      // Spike ac-stt : le ping du squelette — pas de plugin Kotlin en
+      // web, la forme de la réponse reste celle du plugin.
+      return { pong: true, platform: "web" } as T;
     default:
       // check_update / update_client / ensure_daemon / write_download :
       // absents du monde navigateur — la surface UI qui les invoque est

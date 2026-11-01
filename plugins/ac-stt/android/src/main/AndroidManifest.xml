@@ -1,0 +1,6 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Micro pour la dictée vocale — mergé dans le manifest de l'app
+         par le manifest merger gradle. Le grant runtime passe par
+         @TauriPlugin(permissions = …) dans SttPlugin.kt. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+</manifest>

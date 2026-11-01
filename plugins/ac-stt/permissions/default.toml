@@ -1,0 +1,10 @@
+"$schema" = "schemas/schema.json"
+[default]
+description = """
+Autorise la commande de diagnostic `stt_ping`
+(squelette du plugin STT — spike d'intégration).
+"""
+
+permissions = [
+  "allow-stt-ping",
+]

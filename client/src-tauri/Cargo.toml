@@ -21,6 +21,7 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "~2.7.0"
+tauri-plugin-ac-stt = { path = "../../plugins/ac-stt" }
 base64 = "0.22"
 client-core = { path = "../../crates/client-core" }
 proto = { path = "../../crates/proto" }
