@@ -111,7 +111,7 @@ pub(crate) async fn sys_stats(state: State<'_, AppState>) -> Result<Value, Strin
     let dt = now.duration_since(t0).as_secs_f64().max(0.001);
     Ok(json!({
         "rss_mb": (p.memory() as f64 / 1_048_576.0).round(),
-        "cpu": (p.cpu_usage() * 10.0).round() / 10.0,
+        "cpu": ((p.cpu_usage() as f64) * 10.0).round() / 10.0,
         "rx_bps": ((rx - rx0) as f64 / dt).round(),
         "tx_bps": ((tx - tx0) as f64 / dt).round(),
     }))
@@ -155,5 +155,24 @@ pub(crate) fn set_app_icon(window: tauri::WebviewWindow, state: &str) -> Result<
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    /// `sysinfo::cpu_usage()` est f32 : si l'arrondi reste en f32,
+    /// l'élargissement f32→f64 de serde_json expose la queue binaire
+    /// (`33.3_f32` → `33.29999923706055`). Le cast AVANT l'arrondi
+    /// produit un f64 propre que ryu imprime « 33.3 ».
+    #[test]
+    fn cpu_rounds_in_f64_not_f32() {
+        let cpu_f32: f32 = 33.3;
+        let v = json!({ "cpu": ((cpu_f32 as f64) * 10.0).round() / 10.0 });
+        assert_eq!(v["cpu"].to_string(), "33.3");
+        // Contre-exemple : la version f32 sérialise la queue binaire.
+        let bad = json!({ "cpu": (cpu_f32 * 10.0).round() / 10.0 });
+        assert_ne!(bad["cpu"].to_string(), "33.3");
+    }
 }
 

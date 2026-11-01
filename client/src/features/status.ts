@@ -46,7 +46,7 @@ async function updateStatusbar() {
     // n'affiche que le trafic de la WebSocket vers le démon.
     $("sb-stats").textContent = isWeb
       ? `↓${fmt(s.rx_bps)} ↑${fmt(s.tx_bps)}`
-      : `mem ${Math.round(s.rss_mb)} MB · cpu ${s.cpu}% · ↓${fmt(s.rx_bps)} ↑${fmt(s.tx_bps)}`;
+      : `mem ${Math.round(s.rss_mb)} MB · cpu ${s.cpu.toFixed(1)}% · ↓${fmt(s.rx_bps)} ↑${fmt(s.tx_bps)}`;
   } catch { /* silencieux */ }
 }
 
