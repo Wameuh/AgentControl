@@ -41,3 +41,48 @@ pub struct SttDlState {
     pub platform: String,
     pub models: Vec<SttModelState>,
 }
+
+/// État du moteur STT — `stt_state`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct SttState {
+    pub platform: String,
+    /// Chemin absolu `files/models/stt/` inspecté (diagnostic).
+    pub model_dir: String,
+    /// Les 4 fichiers du modèle sont présents sur disque.
+    pub model_present: bool,
+    /// Le recognizer (~700 Mo) est alloué en RAM.
+    pub model_loaded: bool,
+    /// Une dictée est en cours.
+    pub recording: bool,
+    /// Kotlin : `"granted" | "denied" | "prompt" | "prompt-with-rationale" | "unknown"` ;
+    /// stubs desktop/web : `"unavailable"`.
+    pub permission: String,
+    /// `"auto"` ou locale forcée (`stt_set_language`).
+    pub language: String,
+}
+
+/// `stt_start` — `reason` identifie pourquoi ça n'a pas démarré :
+/// Kotlin `"model_missing"` | `"mic_denied"` | `"perm_pending"` |
+/// `"perm_error"` | `"engine_error"` | `"audio_init"` | `"busy"` ;
+/// stubs : `"unsupported_platform"`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct SttStart {
+    pub started: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// `stt_stop` — texte final de la dictée + langue effective.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct SttStop {
+    pub text: String,
+    #[serde(default)]
+    pub lang: Option<String>,
+}
+
+/// Payload forwardé au Kotlin par `stt_set_language`.
+#[cfg(mobile)]
+#[derive(Debug, serde::Serialize)]
+pub struct SetLanguageArgs<'a> {
+    pub lang: &'a str,
+}

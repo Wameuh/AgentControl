@@ -75,6 +75,11 @@ initExternalLinks();
 invoke("plugin:ac-stt|stt_ping")
   .then((r) => console.debug("[stt] ping:", r))
   .catch((e) => console.warn("[stt] ping failed:", e));
+// Core : état moteur/modèle/permission au boot — diagnostic logcat du
+// chantier core (le bouton mic arrive avec l'item UX).
+invoke("plugin:ac-stt|stt_state")
+  .then((r) => console.debug("[stt] state:", r))
+  .catch((e) => console.warn("[stt] state failed:", e));
 // Log open/close des modals + watchdog anti-gel (dialog invisible, inert
 // résiduel) — avant tout showModal pour tracer aussi les dialogs du boot.
 initModalGuard();

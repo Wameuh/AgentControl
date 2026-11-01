@@ -133,6 +133,19 @@ async function webInvoke<T>(cmd: string, a: Record<string, unknown>): Promise<T>
       // Spike ac-stt : le ping du squelette — pas de plugin Kotlin en
       // web, la forme de la réponse reste celle du plugin.
       return { pong: true, platform: "web" } as T;
+    case "plugin:ac-stt|stt_state":
+      // Pas de moteur ASR en web — état vide homogène à la forme Kotlin.
+      return {
+        platform: "web", model_dir: "", model_present: false,
+        model_loaded: false, recording: false,
+        permission: "unavailable", language: "auto",
+      } as T;
+    case "plugin:ac-stt|stt_start":
+      return { started: false, reason: "unsupported_platform" } as T;
+    case "plugin:ac-stt|stt_stop":
+      return { text: "", lang: null } as T;
+    case "plugin:ac-stt|stt_set_language":
+      return undefined as T;
     default:
       // check_update / update_client / ensure_daemon / write_download :
       // absents du monde navigateur — la surface UI qui les invoque est
