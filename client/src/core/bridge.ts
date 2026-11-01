@@ -15,7 +15,7 @@
 // avant tout script — fiable dès l'évaluation du module.
 // ---------------------------------------------------------------------------
 
-import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke, addPluginListener } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 import { wsClient, WEB_CONN } from "./wsclient";
 
@@ -47,6 +47,20 @@ export function listen<T>(
 ): Promise<() => void> {
   if (!isWeb) return tauriListen<T>(event, cb) as Promise<() => void>;
   return Promise.resolve(wsClient.on(event, (p) => cb({ payload: p as T })));
+}
+
+/** `listenPlugin` : events d'un plugin mobile (Kotlin `trigger` →
+ *  addPluginListener/channel). En web : pas de plugin → unlisten no-op
+ *  (les surfaces concernées sont masquées de toute façon). */
+export function listenPlugin<T>(
+  plugin: string,
+  event: string,
+  cb: (payload: T) => void,
+): Promise<() => void> {
+  if (isWeb) return Promise.resolve(() => {});
+  return addPluginListener<T>(plugin, event, cb)
+    .then((l) => () => void l.unregister())
+    .catch(() => () => {});
 }
 
 /** Version de l'app : Tauri → `app_version` (identité compilée — le

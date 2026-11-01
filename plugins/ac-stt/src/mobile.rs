@@ -4,9 +4,9 @@ use tauri::{
     plugin::{PluginApi, PluginHandle},
 };
 
-use crate::models::PingResponse;
+use crate::models::{PingResponse, SttDlState};
 
-/// Accès au plugin natif depuis le Rust (futures commandes stt_*).
+/// Accès au plugin natif depuis le Rust (commandes stt_*).
 pub struct Stt<R: Runtime>(PluginHandle<R>);
 
 impl<R: Runtime> Stt<R> {
@@ -15,6 +15,43 @@ impl<R: Runtime> Stt<R> {
     pub fn ping(&self) -> crate::Result<PingResponse> {
         self.0
             .run_mobile_plugin("sttPing", ())
+            .map_err(Into::into)
+    }
+
+    /// État des modèles téléchargeables — `@Command sttDlState` Kotlin.
+    pub fn dl_state(&self) -> crate::Result<SttDlState> {
+        self.0
+            .run_mobile_plugin("sttDlState", ())
+            .map_err(Into::into)
+    }
+
+    /// Démarre (ou reprend) le téléchargement du modèle `model`.
+    pub fn dl_start(&self, model: &str) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin(
+                "sttDlStart",
+                serde_json::json!({ "model": model }),
+            )
+            .map_err(Into::into)
+    }
+
+    /// Annule le téléchargement en cours (les `.part` restent reprénables).
+    pub fn dl_cancel(&self, model: &str) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin(
+                "sttDlCancel",
+                serde_json::json!({ "model": model }),
+            )
+            .map_err(Into::into)
+    }
+
+    /// Supprime tous les fichiers du modèle.
+    pub fn dl_delete(&self, model: &str) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin(
+                "sttDlDelete",
+                serde_json::json!({ "model": model }),
+            )
             .map_err(Into::into)
     }
 }

@@ -1,10 +1,15 @@
 "$schema" = "schemas/schema.json"
 [default]
 description = """
-Autorise la commande de diagnostic `stt_ping`
-(squelette du plugin STT — spike d'intégration).
+Plugin STT : diagnostic `stt_ping` + gestion des modèles
+téléchargeables (`stt_dl_*` — download à la demande depuis les
+settings, Android only).
 """
 
 permissions = [
   "allow-stt-ping",
+  "allow-stt-dl-state",
+  "allow-stt-dl-start",
+  "allow-stt-dl-cancel",
+  "allow-stt-dl-delete",
 ]

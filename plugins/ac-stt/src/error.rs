@@ -10,6 +10,10 @@ pub enum Error {
     #[cfg(mobile)]
     #[error(transparent)]
     PluginInvoke(#[from] tauri::plugin::mobile::PluginInvokeError),
+    /// Commande réservée à Android appelée sur une autre plateforme —
+    /// défensif : l'UI qui l'invoque est masquée hors Android.
+    #[error("ac-stt : commande disponible uniquement sur Android")]
+    AndroidOnly,
 }
 
 impl Serialize for Error {
