@@ -87,8 +87,8 @@ export class SttMic {
       if (document.visibilityState === "visible") void this.probe();
     });
     // IME : pendant une composition (glide/autocorrect), aucune écriture
-    // programmatique — au commit, la frappe est traitée puis le dernier
-    // partial différé est rejoué.
+    // programmatique — au commit, la frappe est traitée puis la file
+    // d'events différés est rejouée dans l'ordre.
     const inp = this.inp();
     inp.addEventListener("compositionstart", () => {
       this.composing = true;
@@ -197,8 +197,15 @@ export class SttMic {
       return null;
     });
     this.setListening(false);
-    // Le stop consomme la file différée : le dernier segment est couvert
-    // par la réponse — rejouer les events l'injecterait en double.
+    // Drainer la file différée : un endpoint non rejoué n'est PAS couvert
+    // par la réponse (dernier segment seulement) — le replay dans l'ordre
+    // fige tout ce qui est resté en l'air, la dédup lastFinal gère la
+    // suite. Le compositionend ultérieur ne rejoue rien (listening faux
+    // + file vidée).
+    for (const d of this.deferredSeg) {
+      if (d.final) this.commit(d.text);
+      else this.spliceSeg(d.text, false);
+    }
     this.deferredSeg = [];
     // La réponse répète le dernier endpoint déjà émis en stt_result → ne
     // l'insérer que si ce n'est pas un doublon (partial resté en l'air).
@@ -236,7 +243,12 @@ export class SttMic {
   private onPartial(text: string) {
     if (!this.listening) return;
     if (this.composing) {
-      this.deferredSeg.push({ text, final: false });
+      // Partials consécutifs non figés coalescés au push : chacun remplace
+      // le segment — seul le dernier compte (borne la file si le
+      // compositionend ne venait jamais).
+      const last = this.deferredSeg[this.deferredSeg.length - 1];
+      if (last && !last.final) last.text = text;
+      else this.deferredSeg.push({ text, final: false });
       return;
     }
     this.spliceSeg(text, false);
