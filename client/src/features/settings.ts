@@ -14,7 +14,7 @@ import { cmpVer, connKeyOf, connLabel } from "../core/conn";
 import { setLang, getLang, t, LANGS, type Lang } from "../i18n";
 import { nav } from "../ui/nav";
 import type { SavedConn } from "../core/types";
-import { shareQr } from "./pairing";
+import { renderAccesses, shareQr } from "./pairing";
 import { checkUpdate, performClientUpdate, rcChannel } from "./update";
 import {
   sounds,
@@ -200,6 +200,20 @@ export class SettingsPanel {
     sel.disabled = none;
     ($("s-pair-go") as HTMLButtonElement).disabled = none;
     $("s-pair-none").hidden = !none;
+    $("s-pacc").hidden = none;
+    void this.refreshPairAccess();
+  }
+
+  /** Liste « Accès appairés » du serveur choisi dans le select — relue à
+   *  chaque changement ; erreurs ssh → état « indisponible » silencieux. */
+  private async refreshPairAccess() {
+    const c =
+      this.pairConns[Number(($("s-pair-conn") as HTMLSelectElement).value)];
+    if (!c) return;
+    await renderAccesses(c, {
+      ul: $("s-pacc-list"),
+      status: $("s-pacc-state"),
+    });
   }
 
   /** "Vérifier les mises à jour" : remote vs local → statut + bouton maj. */
@@ -303,8 +317,24 @@ export class SettingsPanel {
         this.pairConns[
           Number(($("s-pair-conn") as HTMLSelectElement).value)
         ];
-      if (c) void shareQr(c).catch((e) => notify("error", String(e)));
+      if (!c) return;
+      void shareQr(c)
+        .then(() => {
+          // La modale est ouverte — un appairage peut ajouter un
+          // appareil : liste rechargée à sa fermeture. (Branché après
+          // showModal : si shareQr échoue avant, pas de listener armé.)
+          ($("dlg-qr") as HTMLDialogElement).addEventListener(
+            "close",
+            () => void this.refreshPairAccess(),
+            { once: true },
+          );
+        })
+        .catch((e) => notify("error", String(e)));
     };
+    ($("s-pair-conn") as HTMLSelectElement).onchange = () =>
+      void this.refreshPairAccess();
+    ($("s-pacc-ref") as HTMLButtonElement).onclick = () =>
+      void this.refreshPairAccess();
     ($("s-images") as HTMLInputElement).onchange = (e) =>
       localStorage.setItem(
         "ac-inline-images",

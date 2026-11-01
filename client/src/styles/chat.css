@@ -719,6 +719,13 @@ body.android .ev.pinned .pin-tag { opacity: 1; }
 .s-test { padding: 3px 12px; font-size: 12px; flex: none; }
 #s-snd-vol { accent-color: var(--sand); flex: none; width: 220px; }
 #s-snd-blocked span, #s-notif-denied > span { color: var(--dim); font-size: 12px; }
+/* Accès appairés (paramètres) : liste sous la ligne « Appairer »,
+   même largeur que les réglages. */
+#s-pacc { max-width: 560px; }
+#s-pacc .s-row { margin-bottom: 4px; }
+#s-pacc-state { margin: 0; }
+#cv-pacc { margin-top: 8px; }
+#cv-pacc-state { margin: 0; }
 body.android #settings-body { padding-bottom: calc(20px + env(safe-area-inset-bottom)); }
 
 /* Vue connexion : panneau plein dans la zone de discussion (même mécanisme

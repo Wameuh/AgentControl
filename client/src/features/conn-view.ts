@@ -18,7 +18,7 @@ import { t, type Key } from "../i18n";
 import { icon } from "../ui/icons";
 import { nav } from "../ui/nav";
 import { showOutdated } from "./update";
-import { confirmPair, initPairing, scanPair, shareQr } from "./pairing";
+import { confirmPair, initPairing, renderAccesses, scanPair, shareQr } from "./pairing";
 import type { ConnectionManager } from "./connections";
 
 // Étapes du script ensure_daemon — chaque `echo step:<id>` distant est
@@ -445,16 +445,26 @@ export class ConnView {
     ($("c-sport") as HTMLInputElement).value = "22";
     ($("c-native") as HTMLInputElement).checked = isAndroid();
     ($("c-accent") as HTMLSelectElement).value = "";
+    $("cv-pacc").hidden = true;
     this.syncSshFields();
   }
 
   /** Passage en édition d'une connexion sauvegardée : form prérempli +
-   *  bouton reset pour revenir au mode nouvelle connexion. */
+   *  bouton reset pour revenir au mode nouvelle connexion. SSH : la liste
+   *  « Accès appairés » du serveur s'affiche sous le formulaire. */
   private editSaved(c: SavedConn) {
     this.editing = c;
     this.fillForm(c);
     ($("cv-form-title") as HTMLElement).textContent = t("edit_conn");
     ($("cv-form-reset") as HTMLButtonElement).hidden = false;
+    const pacc = $("cv-pacc");
+    pacc.hidden = c.kind !== "ssh" || isWeb;
+    if (!pacc.hidden) {
+      void renderAccesses(c, {
+        ul: $("cv-pacc-list"),
+        status: $("cv-pacc-state"),
+      });
+    }
     $("cv-form-sec").scrollIntoView({ block: "nearest" });
   }
 
