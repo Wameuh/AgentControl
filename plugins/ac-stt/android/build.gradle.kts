@@ -5,10 +5,15 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// JitPack pour l'AAR sherpa-onnx — le projet racine n'a pas de
-// repositoriesMode restrictif, les repos du module restent autorisés.
-repositories {
-    maven { url = uri("https://jitpack.io") }
+// JitPack pour l'AAR sherpa-onnx : la résolution du graphe de
+// dépendances de l'app utilise les repositories de :app (allprojects
+// du build racine généré par Tauri), pas ceux déclarés dans ce module
+// — on l'ajoute donc à tous les projets depuis ici. À retirer si le
+// build racine déclare un jour JitPack.
+rootProject.allprojects {
+    repositories {
+        maven { url = uri("https://jitpack.io") }
+    }
 }
 
 android {
