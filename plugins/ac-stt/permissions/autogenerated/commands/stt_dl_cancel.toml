@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-stt-dl-cancel"
+description = "Enables the stt_dl_cancel command without any pre-configured scope."
+commands.allow = ["stt_dl_cancel"]
+
+[[permission]]
+identifier = "deny-stt-dl-cancel"
+description = "Denies the stt_dl_cancel command without any pre-configured scope."
+commands.deny = ["stt_dl_cancel"]

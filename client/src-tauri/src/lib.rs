@@ -35,6 +35,30 @@ fn cli_conn_arg() -> Option<String> {
         .or_else(|| std::env::var("AGENTCONTROL_CONN").ok().filter(|v| !v.is_empty()))
 }
 
+/// Windows : AppUserModelID explicite = identifier du bundle. Sans cet
+/// appel, Windows dérive l'AUMID du processus depuis le chemin/ressources
+/// de l'exe — différent de celui posé par les installateurs sur leurs
+/// raccourcis (NSIS `SetLnkAppUserModelId`, WiX `ShortcutProperty
+/// System.AppUserModel.ID`, tous deux = `{{bundle_id}}`) → le pin
+/// taskbar ne groupe pas avec la fenêtre et l'icône épinglée se perd
+/// quand l'exe est remplacé/déplacé par une update. À poser avant toute
+/// création de fenêtre.
+#[cfg(target_os = "windows")]
+fn set_app_user_model_id(id: &str) {
+    let aumid: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
+    let hr = unsafe {
+        windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(
+            aumid.as_ptr(),
+        )
+    };
+    if hr != 0 {
+        client_core::log(
+            client_core::Level::Warn,
+            format!("SetCurrentProcessExplicitAppUserModelID a échoué (HRESULT {hr:#010x})"),
+        );
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Workaround WebKitGTK : webview blanche/noire après unfocus ou au boot
@@ -49,9 +73,19 @@ pub fn run() {
             unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
         }
     }
+    let context = tauri::generate_context!();
+    // AUMID posé avant le Builder (donc avant toute fenêtre) : la valeur
+    // suit `identifier` de tauri.conf.json — source unique partagée avec
+    // les raccourcis des installateurs.
+    #[cfg(target_os = "windows")]
+    set_app_user_model_id(context.config().identifier.as_str());
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        // Spike STT : squelette Kotlin — commande bidon `stt_ping`,
+        // RECORD_AUDIO mergé depuis le manifest du module (backlog #131).
+        .plugin(tauri_plugin_ac_stt::init())
         // Lecteur vidéo du panneau fichiers : ranges HTTP → tranches
         // read_file RPC (jamais le fichier entier en mémoire).
         .register_asynchronous_uri_scheme_protocol("acvideo", stream::handler)
@@ -94,6 +128,16 @@ pub fn run() {
             commands::saved::save_connection,
             commands::saved::remove_connection,
             commands::saved::ssh_hosts,
+            commands::pair::pair_payload,
+            commands::pair::pair_import_key,
+            commands::pair::pair_resolve,
+            commands::pair::pair_begin,
+            commands::pair::pair_poll,
+            commands::pair::pair_cleanup,
+            commands::pair::pair_devices,
+            commands::pair::pair_revoke,
+            commands::pair::pair_attempt,
+            commands::system::app_version,
             commands::system::platform,
             commands::system::cli_conn,
             commands::system::spawn_instance,
@@ -104,7 +148,8 @@ pub fn run() {
             commands::system::set_app_icon,
             commands::update::check_update,
             commands::update::update_client,
+            commands::update::update_last_status,
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }

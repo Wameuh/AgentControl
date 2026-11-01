@@ -112,8 +112,9 @@ export class OverlayNav {
       $("file-viewer").classList.remove("open");
       stopVideos($("file-viewer"));
     } else if (id === "files") {
-      $("file-panel").hidden = true;
-      stopVideos($("file-panel"));
+      // Passe par le ✕ : closeFilePanel porte le close complet
+      // (vidéo, vue, recherche — et les watches FS de l'explorateur).
+      $("file-close").click();
     } else if (id === "term") {
       // Passe par le handler de ✕ : wantOpen retombe + nav.close.
       $("btn-term-hide").click();

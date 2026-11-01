@@ -1,68 +1,68 @@
-# AgentControl — règles de travail
+# AgentControl — working rules
 
-## Workflow : `next_release` → `main`
+## Workflow: `next_release` → `main`
 
-Deux branches protégées (**push direct impossible**, PR obligatoire,
-checks CI : `daemon-linux` ×2, `client` ×2, `client-macos`,
-`client-android` — 6 runs dont 5 requis par le ruleset,
-`client-macos` restant à y inclure) :
+Two protected branches (**no direct push**, PR required,
+CI checks: `daemon-linux` ×2, `client` ×2, `client-macos`,
+`client-android` — 6 runs, 5 of them required by the ruleset,
+`client-macos` still to be included):
 
-- **`next_release`** = branche d'intégration. **Toutes les PR de
-  feature/fix visent `next_release`** (`gh pr create --base next_release`)
-  et s'y accumulent.
-- **`main`** = branche de release. Uniquement alimentée par le merge de
-  `next_release` quand l'utilisateur décide de releaser.
+- **`next_release`** = integration branch. **Every feature/fix PR
+  targets `next_release`** (`gh pr create --base next_release`)
+  and accumulates there.
+- **`main`** = release branch. Only fed by merging
+  `next_release` when the user decides to release.
 
-Workflow : créer une branche depuis `next_release` → push →
-`gh pr create --base next_release --draft` → finir le travail →
-`/mr review` **sur la draft** → traiter la review (fix → push →
-relancer, toujours en draft) → review soldée → `gh pr ready`
-(≥30 s après le dernier push) → attendre les checks CI verts → merge.
-**Merge** : vers `main`, toujours l'utilisateur. Vers `next_release`,
-**l'agent peut merger** via `gh pr merge <N>` quand la dernière review
-auto porte un verdict **`Verdict: APPROVED` en titre** postérieur au
-push du head courant (fraîcheur vérifiée via les PushEvents du repo,
-fallback feed `activity` — les events peuvent lagger des heures) —
-sinon le hook `.devin/` bloque (`git merge`, API, GraphQL, `--admin`,
-`main` : toujours interdits). Tripwire : un commentaire `Verdict:
-APPROVED` auto-posté passerait — la règle reste de ne merger que sur
-review réelle. PR déjà mergée ?
-`git checkout next_release && git pull` pour resynchroniser.
-Le CI build tous les artefacts sur les PR (APK suffixé `-<sha>`).
+Workflow: create a branch from `next_release` → push →
+`gh pr create --base next_release --draft` → finish the work →
+`/mr review` **on the draft** → handle the review (fix → push →
+re-run, still in draft) → review settled → `gh pr ready`
+(≥30 s after the last push) → wait for green CI checks → merge.
+**Merge**: to `main`, always the user. To `next_release`,
+**the agent may merge** via `gh pr merge <N>` when the latest auto
+review carries a **`Verdict: APPROVED` title** posted after the push
+of the current head (freshness verified via the repo's PushEvents,
+`activity` feed fallback — events can lag by hours) —
+otherwise the `.devin/` hook blocks (`git merge`, API, GraphQL,
+`--admin`, `main`: always forbidden). Tripwire: an auto-posted
+`Verdict: APPROVED` comment would pass — the rule remains to only
+merge on a real review. PR already merged?
+`git checkout next_release && git pull` to resync.
+CI builds all artifacts on PRs (APK suffixed `-<sha>`).
 
-**Worktrees** : travailler dans un **git worktree séparé par tâche**
+**Worktrees**: work in a **dedicated git worktree per task**
 (`git worktree add ~/worktrees/ac-<feat> -b <br> origin/next_release`)
-— le checkout principal reste propre et plusieurs tâches peuvent
-avancer en parallèle sans se marcher dessus. Nettoyer à la fin :
-`git worktree remove ~/worktrees/ac-<feat>`. **Le checkout principal
-est verrouillé** : le hook `.devin/hooks/guard-main-worktree.py`
-bloque les outils fichiers (`write`/`edit`/…) sur tout chemin qui s'y
-résout et les commandes git mutantes qui le ciblent (`commit`, `add`,
-`checkout`/`switch` hors `next_release`, `stash`, `clean`, `rebase`,
-`update-ref`…) ; un `Stop`-hook refuse de terminer tant qu'il est sale
-ou hors `next_release`, et `SessionStart` signale l'état. `fetch` /
-`pull` / `reset` / `restore` / `checkout -- <paths>` restent permis
-(resync et retour-au-propre). Tripwire assumé : les écrits shell (`>`,
-`sed -i`) ne sont pas interceptés — le `Stop`-hook est le filet.
+— the main checkout stays clean and several tasks can progress in
+parallel without stepping on each other. Clean up at the end:
+`git worktree remove ~/worktrees/ac-<feat>`. **The main checkout
+is locked**: the `.devin/hooks/guard-main-worktree.py` hook
+blocks file tools (`write`/`edit`/…) on any path resolving into it
+and mutating git commands targeting it (`commit`, `add`,
+`checkout`/`switch` off `next_release`, `stash`, `clean`, `rebase`,
+`update-ref`…); a `Stop` hook refuses to end while it's dirty
+or off `next_release`, and `SessionStart` reports the state.
+`fetch` / `pull` / `reset` / `restore` / `checkout -- <paths>` stay
+allowed (resync and back-to-clean). Accepted tripwire: shell writes
+(`>`, `sed -i`) aren't intercepted — the `Stop` hook is the safety net.
 
-**Drafts** : une PR reste en **draft tout le cycle travail + review**
-— les pipelines ne se lancent qu'**après** la review (`gh pr ready` =
-feu vert final : event `ready_for_review` → les checks CI). **La
-review se demande sur la draft** : `/mr review` lance la session même
-sans ready (le trigger ne gate pas `isDraft`) → itérer (corriger →
-push → relancer `/mr review`) autant de rounds que nécessaire en
-restant draft → **un seul run CI complet par PR**, pas un par round.
-Tout changement sur une PR non-draft → repasser en draft **avant**
-d'y toucher : `gh pr ready --undo`, puis `gh pr ready` quand c'est
-fini. **Le CI ne tourne pas sur les drafts** (tous les jobs sont
-skippés). **Laisser ~30 s entre le dernier push et `gh pr ready`** —
-sinon le dispatch `synchronize` draft (tout skip) peut se
-matérialiser après le run ready et l'annuler (même groupe de
-concurrency) → head sans CI (arrivé en live, merge bloqué).
-⚠️ `gh pr checks <N> --watch` sort vert sur des runs skippés ou
-cancelled → gater sur les **check runs du head**, pas sur les
-métadonnées de runs (`workflow_run.event` ne rapporte jamais
-`ready_for_review`, et `createdAt` est une course) :
+**Drafts**: a PR stays **draft through the whole work + review
+cycle** — pipelines only run **after** the review (`gh pr ready` =
+final green light: `ready_for_review` event → CI checks). **The
+review is requested on the draft**: `/mr review` launches the session
+even without ready (the trigger doesn't gate on `isDraft`) → iterate
+(fix → push → re-run `/mr review`) for as many rounds as needed while
+staying draft → **one full CI run per PR**, not one per round.
+Any change on a non-draft PR → switch it back to draft **before**
+touching it: `gh pr ready --undo`, then `gh pr ready` when done.
+**CI doesn't run on drafts** (all jobs are skipped). **Leave ~30 s
+between the last push and `gh pr ready`** — otherwise the draft
+`synchronize` dispatch (all skipped) may materialize after the ready
+run and cancel it (same concurrency group) → head with no CI
+(happened live, merge blocked).
+⚠️ `gh pr checks <N> --watch` exits green on skipped or
+cancelled runs → gate on the head's **check runs**, not on run
+metadata (`workflow_run.event` never reports `ready_for_review`,
+and `createdAt` is a race):
 
 ```bash
 SHA=$(gh pr view <N> --json headRefOid -q .headRefOid)
@@ -80,302 +80,318 @@ else
 fi
 ```
 
-À lancer depuis la racine du clone (`{owner}/{repo}` = repo du cwd) ;
-le filtre de noms doit suivre les jobs required de `build.yml`. Sans
-la branche d'échec, un head tout-skippé ressortirait vert après ~5
-min — le cas exact que le gate détecte.
+Run from the clone root (`{owner}/{repo}` = repo of the cwd);
+the name filter must track `build.yml`'s required jobs. Without
+the failure branch, an all-skipped head would come out green after
+~5 min — the exact case the gate detects.
 
-**Rebase avant review** : si `origin/next_release` a avancé depuis la
-branche — `git merge-base --is-ancestor origin/next_release HEAD` faux
-**après `git fetch`**, ou `gh pr view <N> --json mergeable` →
-`CONFLICTING` (`UNKNOWN` = calcul async GitHub → retry, pas « ok ») —
-rebase/merge **avant** de lancer la review. Le verdict est ancré au SHA
-du head : tout push ultérieur l'invalide → le verdict est perdu et un
-round de plus est obligatoire (arrivé : #35 approved sur une base
-stale → rebase → re-review). Perdu ≠ ignoré : si la review a déjà
-posté des constats, ils restent valables — **traiter les retours en
-même temps que le rebase** (fix + rebase dans le même push), puis
-relancer la review. Une base à jour évite aussi de faire
-reviewer un diff que le merge réécrira. Si `next_release` avance entre
-l'APPROVED et le merge, le verdict reste valide mais GitHub peut
-refuser le merge sur conflit → rebase + re-review.
+**Rebase before review**: if `origin/next_release` moved since the
+branch — `git merge-base --is-ancestor origin/next_release HEAD` false
+**after `git fetch`**, or `gh pr view <N> --json mergeable` →
+`CONFLICTING` (`UNKNOWN` = async GitHub computation → retry, not "ok") —
+rebase/merge **before** launching the review. The verdict is anchored
+to the head SHA: any later push invalidates it → the verdict is lost
+and one more round is mandatory (happened: #35 approved on a stale
+base → rebase → re-review). Lost ≠ ignored: if the review already
+posted findings, they still stand — **handle the feedback at the
+same time as the rebase** (fix + rebase in the same push), then
+re-run the review. An up-to-date base also avoids having a diff
+reviewed that the merge would rewrite. If `next_release` moves between
+the APPROVED and the merge, the verdict stays valid but GitHub may
+refuse the merge on conflict → rebase + re-review.
 
-**Review auto** : quand le travail semble fini **(PR encore draft)**,
-**noter `TS=$(date -u +%FT%TZ)`**, commenter `/mr review`
+**Auto review**: when the work looks done **(PR still draft)**,
+**note `TS=$(date -u +%FT%TZ)`**, comment `/mr review`
 (`gh pr comment <N> --body "/mr review"`),
-puis **poller les commentaires** jusqu'à la review — l'automation
-poste d'abord un ack (`Launching a review…`) et la review peut
-sortir sous **le compte user OU le bot** → ne pas filtrer l'auteur :
-matcher le marqueur **postérieur à `$TS`** (`--paginate`
-requis — les commentaires récents sont sur la dernière page ;
-`Review|Verdict` car le format varie : `## Review` / `## Verdict: …`) :
+then **poll the comments** until the review — the automation
+first posts an ack (`Launching a review…`) and the review may
+come out under **the user account OR the bot** → don't filter the
+author: match the marker **posted after `$TS`** (`--paginate`
+required — recent comments are on the last page;
+`Review|Verdict` since the format varies: `## Review` / `## Verdict: …`):
 `gh api --paginate 'repos/{owner}/{repo}/issues/<N>/comments?per_page=100' --jq '.[] | select(.body | test("^[*#]+ ?(Review|Verdict)")) | select(.created_at > "'"$TS"'") | .body'`.
-Dès qu'elle est postée, l'addresser, pas d'attente fixe
-(abandon ~10 min si rien).
-Des changements à faire → corriger et pousser **en restant draft**,
-puis relancer `/mr review` ; `gh pr ready` seulement quand la review
-est soldée (voir **Drafts**). NB : une review
-lancée juste après un push peut lire un diff périmé → ancrer la
-lecture sur `headRefOid` — mais `headRefOid`/`isDraft` peuvent
-eux-mêmes lagger ~1 min post-push → recouper avec le tip de branche
-(`gh api repos/{owner}/{repo}/branches/<br>`) ou attendre ~60 s.
-La commande se poste **seule** dans son commentaire : le trigger
-matche `contains` sur le body → toute citation de `/mr review` dans
-un autre commentaire relance une session (pour la citer :
+As soon as it's posted, address it — no fixed wait
+(give up after ~10 min if nothing).
+Changes to make → fix and push **staying draft**,
+then re-run `/mr review`; `gh pr ready` only once the review
+is settled (see **Drafts**). NB: a review
+launched right after a push may read a stale diff → anchor the
+reading on `headRefOid` — but `headRefOid`/`isDraft` can
+themselves lag ~1 min post-push → cross-check with the branch tip
+(`gh api repos/{owner}/{repo}/branches/<br>`) or wait ~60 s.
+The command is posted **alone** in its comment: the trigger
+matches `contains` on the body → any quote of `/mr review` in
+another comment relaunches a session (to quote it:
 `/mr&#32;review`).
 
 ## Releases
 
-**Pas de tag `v*` ni de release sans demande explicite de l'utilisateur.**
-Pousser les commits et bumper la version, oui — tagguer/publier, non.
+**No `v*` tag or release without an explicit user request.**
+Pushing commits and bumping the version, yes — tagging/publishing, no.
 
-La **release PR est auto-créée** par `auto-release-pr.yml` : à chaque
-push sur `next_release`, une PR draft `next_release` → `main` est
-ouverte si absente — pour releaser il suffit de la passer **ready**
-(le passage non-draft est le déclencheur, pas de label requis).
-La création passe par
-**`RELEASE_PAT`** (fallback `GITHUB_TOKEN`) : le réglage repo
-« Allow GitHub Actions to create and approve pull requests » interdit
-`createPullRequest` au `GITHUB_TOKEN` ; sans `Pull requests: RW` sur le
-PAT le job échoue rouge (arrivé : run 40210287826, tentatives avant
-l'ajout du scope).
+The **release PR is auto-created** by `auto-release-pr.yml`: on every
+push to `next_release`, a `next_release` → `main` draft PR is
+opened if absent — to release you just switch it **ready**
+(going non-draft is the trigger, no label required).
+Creation goes through
+**`RELEASE_PAT`** (fallback `GITHUB_TOKEN`): the repo setting
+"Allow GitHub Actions to create and approve pull requests" forbids
+`createPullRequest` to `GITHUB_TOKEN`; without `Pull requests: RW` on
+the PAT the job fails red (happened: run 40210287826, attempts before
+the scope was added).
 
-Release = PR `next_release` → `main` passée **ready** →
-le job `release-bump` de `version.yml` calcule `dernier tag + niveau`,
-commit `chore: bump version` poussé sur `next_release` (la PR se met
-à jour, les checks CI tournent sur le head bumpé) → au merge (par
-l'utilisateur), `release-on-merge.yml` tague `v<version>` (lu depuis
-`client/package.json`) et dispatche `build.yml` sur le tag (le push
-de tag via GITHUB_TOKEN ne déclenche pas les workflows d'où le
-dispatch). Idempotent : tag existant → skip, package.json déjà à
-NEXT → pas de re-bump. Tant que la PR reste draft, rien ne bump.
+**Release notes in English**: `release_notes.py` categorizes the
+squash subjects (often French) but takes its labels from
+`client/tools/release_notes_en.txt` — **every `feat`/`fix`/`perf`
+PR adds a line `<N>: <english user note>`** (otherwise the raw
+subject is reused and the generator flags it in the workflow logs).
+Lines from already-released PRs are inert — can be purged each
+cycle.
 
-**Release candidate** : quand la release PR passe ready, `release-bump`
-pousse aussi un tag `v<NEXT>-rc.<k>` (k incrémental, un rc par état de
-head — un synchronize post-ready produit rc.k+1) → le push du tag via
-PAT déclenche `build.yml` qui publie une **prerelease GitHub** (jamais
-marquée `latest`). Le build rc **injecte le suffixe `-rc.k` dans les
-fichiers de version** (non commité — le tag pointe le commit propre
-X.Y.Z) → le binaire s'identifie `X.Y.Z-rc.k`, et la finale `X.Y.Z` est
-proposée en update ensuite (semver : rc < stable). Windows et macOS
-exclus de l'injection (MSI/NSIS et CFBundleVersion exigent du
-numérique) — conséquence : un artefact rc Windows/macOS s'identifie
-`X.Y.Z` → pas de chemin auto-update vers rc.k+1 ni vers la finale,
-réinstall manuelle. Le bundling Linux est limité à `deb`+`appimage`
-(`client/src-tauri/tauri.linux.conf.json`) : le rpm n'est pas distribué
-et son validateur refuse `-` dans `Version` (semver `-rc.K` —
-convention RPM = `~`, fix upstream tauri-apps/tauri#16336 ouvert). Le
-.deb `X.Y.Z-rc.K` est accepté par dpkg et `update_client` installe via
-`pkexec dpkg -i` (pas de dépôt apt → l'ordre Debian ne joue pas). Pour
-installer la rc depuis
-l'app : canal rc opt-in dans les paramètres → la sonde passe de
-`releases/latest` (qui exclut les prereleases) à la liste `/releases`
-+ max semver. Au merge, `release-on-merge` nettoie les releases+tags
-`v<NEXT>-rc.*` du cycle — et une release PR fermée sans merge déclenche
-le même cleanup (`rc-cleanup` de version.yml).
+Release = `next_release` → `main` PR switched **ready** →
+`version.yml`'s `release-bump` job computes `last tag + level`,
+commit `chore: bump version` pushed to `next_release` (the PR
+updates, CI checks run on the bumped head) → at merge (by the
+user), `release-on-merge.yml` tags `v<version>` (read from
+`client/package.json`) and dispatches `build.yml` on the tag (a tag
+push via GITHUB_TOKEN doesn't trigger workflows, hence the
+dispatch). Idempotent: existing tag → skip, package.json already at
+NEXT → no re-bump. While the PR stays draft, nothing bumps.
 
-**Reconcile** : tout merge nr→main est un squash → le commit `main`
-n'est jamais ancêtre des commits nr : sans reconcile la release
-suivante reconflicterait sur toute zone retouchée (arrivé : #23, #29),
-et la release PR listerait TOUT l'historique nr (#39 : 25 commits
-remontant à #11, injectés par GitHub dans le message de squash —
-réglage `COMMIT_MESSAGES`). Le job `reconcile-next-release` (push sur
-`main`) refait le lien, en deux modes : **arbres identiques** (cas
-nominal post-release — nr n'a plus de contenu hors `main`) →
-**reset** `next_release` = tip `main` en `--force-with-lease` : les
-commits du cycle écoulé quittent nr → la prochaine release PR ne
-liste que le cycle courant, merge-base = tip `main` ; **arbres
-différents** (feature mergée dans la fenêtre du reconcile,
-résolutions de conflit côté `main`, hotfix direct en cours de cycle)
-→ **merge** classique (vrai merge récursif, hotfix propagé, conflit =
-job rouge fail-closed, jamais de reset destructif).
-⚠️ Après un reset, nr est réécrite : clones locaux →
-`git fetch && git reset --hard origin/next_release` (pas `pull`) ;
-PR ouverte basée sur l'ancien nr → `git fetch && git rebase --onto
-origin/next_release <ancien-tip>` — sinon sa liste de commits
-affiche l'ancien historique nr (le diff reste correct, mais les
-vieux sujets `(sync)`/`(major)` ré-entreraient dans le body du
-squash → sur-bump possible au cycle suivant).
-⚠️ `release-bump` et `reconcile-next-release` poussent sur
-`next_release` via le secret **`RELEASE_PAT`**, qu'`auto-release-pr`
-utilise aussi pour créer la release PR. PAT fine-grained du repo,
-scopes requis : **Contents RW** (les deux pushes), **Workflows RW**
-(reconcile : le merge importe des squashs `main` touchant
-`.github/workflows`, un PAT sans ce scope est refusé indépendamment du
-bypass ruleset), **Pull requests RW** (auto-release-pr :
-`createPullRequest`) :
-`github-actions[bot]` ne peut pas être bypass actor d'un ruleset
-(app first-party → 422), et un push `GITHUB_TOKEN` ne déclencherait
-pas les checks sur le head poussé (anti-récursion). Le ruleset
-`next_release` a le rôle **`Repository admin`** en bypass actor
-(Settings → Rules → Rulesets). Sans `RELEASE_PAT` : le guard de
-`release-bump` tire dès que `next` est connu (le tag rc pousse
-toujours, même bump sauté) → fail-fast « secret RELEASE_PAT manquant »
-sur tout run non-draft ; `reconcile` lui reste skip-clean sans push.
-Les fine-grained PAT expirent → renouveler le secret à l'échéance
-(sinon échec opaque au checkout).
+**Release candidate**: when the release PR goes ready, `release-bump`
+also pushes a `v<NEXT>-rc.<k>` tag (incremental k, one rc per head
+state — a post-ready synchronize produces rc.k+1) → the tag push via
+PAT triggers `build.yml` which publishes a **GitHub prerelease**
+(never marked `latest`). The rc build **injects the `-rc.k` suffix
+into version files** (not committed — the tag points to a clean
+X.Y.Z commit) → the binary identifies as `X.Y.Z-rc.k`, and the
+final `X.Y.Z` is offered as an update afterwards (semver: rc <
+stable). Windows and macOS are excluded from injection (MSI/NSIS and
+CFBundleVersion require numeric) — the bundle version stays `X.Y.Z`
+but the rc identity is **compiled into the binary**: `build.yml`
+exports `AGENTCONTROL_RC=K` (extracted from the tag) → `build.rs`
+emits `cargo:rustc-env` → the `app_version` command reports
+`X.Y.Z-rc.K` to `getVersion()` (updater, ensure_daemon tag,
+about/settings) — the minor daemon↔client gate stays safe,
+`minorOf()` masks the suffix. Result: an rc client on any OS is
+offered rc.k+1 then the final. Linux bundling is limited to `deb`+`appimage`
+(`client/src-tauri/tauri.linux.conf.json`): the rpm isn't distributed
+and its validator refuses `-` in `Version` (semver `-rc.K` —
+RPM convention = `~`, upstream fix tauri-apps/tauri#16336 open). The
+.deb `X.Y.Z-rc.K` is accepted by dpkg and `update_client` installs via
+`pkexec dpkg -i` (no apt repo → Debian ordering doesn't apply). To
+install the rc from
+the app: opt-in rc channel in settings → the probe switches from
+`releases/latest` (which excludes prereleases) to the `/releases`
+list + max semver. At merge, `release-on-merge` cleans up the cycle's
+`v<NEXT>-rc.*` releases+tags — and a release PR closed without merge
+triggers the same cleanup (`rc-cleanup` in version.yml).
 
-## Après chaque push : vérifier le CI
+**Reconcile**: every nr→main merge is a squash → the `main` commit
+is never an ancestor of nr commits: without reconcile the next
+release would re-conflict on every retouched zone (happened: #23, #29),
+and the release PR would list ALL of nr's history (#39: 25 commits
+going back to #11, injected by GitHub into the squash message —
+`COMMIT_MESSAGES` setting). The `reconcile-next-release` job (push to
+`main`) re-establishes the link, in two modes: **identical trees**
+(nominal case post-release — nr has no content outside `main`) →
+**reset** `next_release` = `main` tip with `--force-with-lease`: the
+past cycle's commits leave nr → the next release PR only lists the
+current cycle, merge-base = `main` tip; **different trees** (feature
+merged inside the reconcile window, conflict resolutions on `main`,
+direct hotfix mid-cycle)
+→ classic **merge** (real recursive merge, hotfix propagated, conflict
+= red job fail-closed, never a destructive reset).
+⚠️ After a reset, nr is rewritten: local clones →
+`git fetch && git reset --hard origin/next_release` (not `pull`);
+an open PR based on the old nr → `git fetch && git rebase --onto
+origin/next_release <old-tip>` — otherwise its commit list
+shows the old nr history (the diff stays correct, but the old
+`(sync)`/`(major)` subjects would re-enter the squash body → possible
+over-bump on the next cycle).
+⚠️ `release-bump` and `reconcile-next-release` push to
+`next_release` via the **`RELEASE_PAT`** secret, which
+`auto-release-pr` also uses to create the release PR. Fine-grained PAT
+for the repo, required scopes: **Contents RW** (both pushes),
+**Workflows RW** (reconcile: the merge imports `main` squashes touching
+`.github/workflows`, a PAT without that scope is refused regardless of
+ruleset bypass), **Pull requests RW** (auto-release-pr:
+`createPullRequest`):
+`github-actions[bot]` can't be a ruleset bypass actor
+(first-party app → 422), and a `GITHUB_TOKEN` push wouldn't trigger
+checks on the pushed head (anti-recursion). The `next_release`
+ruleset has the **`Repository admin`** role as bypass actor
+(Settings → Rules → Rulesets). Without `RELEASE_PAT`: the
+`release-bump` guard fires as soon as `next` is known (the rc tag
+still pushes, even with the bump skipped) → fail-fast "missing
+RELEASE_PAT secret" on any non-draft run; `reconcile` stays
+skip-clean with no push.
+Fine-grained PATs expire → renew the secret at expiry
+(otherwise opaque failure at checkout).
 
-Obligatoire, ne pas oublier :
+## After each push: check CI
+
+Mandatory, don't forget:
 
 ```bash
 gh run list --limit 3 --json databaseId,conclusion,name
-gh run view <id> --log-failed   # si failure
+gh run view <id> --log-failed   # if failure
 ```
 
-Le workflow `.github/workflows/build.yml` build : daemon x86_64+aarch64,
-client Tauri Ubuntu+Windows+macOS (dmg arm64), APK Android, et publie
-une release sur les tags `v*`.
+The `.github/workflows/build.yml` workflow builds: daemon x86_64+aarch64,
+Tauri client Ubuntu+Windows+macOS (arm64 dmg), Android APK, and
+publishes a release on `v*` tags.
 
-## Version automatique (mots-clés de commit)
+## Automatic versioning (commit keywords)
 
-PR → **`next_release`** (pas `main` directement). Checks CI
+PR → **`next_release`** (not `main` directly). CI checks
 (`daemon-linux` ×2, `client` ×2, `client-android`, `client-macos` —
-5 requis au ruleset, `client-macos` à y inclure). Le CI build les
-artefacts sur les PR (APK et dmg suffixés `-<sha>`).
+5 required by the ruleset, `client-macos` to be included). CI builds
+artifacts on PRs (APK and dmg suffixed `-<sha>`).
 
-**Pas de bump par PR** — la version ne bouge qu'à la release. Le niveau
-est décidé par des **mots-clés parenthésés dans les sujets de commit**
-balayés sur le cycle. Borne du scan = dernier `chore: bump version`
-**dont le tag `vX.Y.Z` existe** sur `next_release`, sinon (post-reset :
-nr n'a plus de commit bump, l'historique = celui de `main`) **dernier
-tag semver**, qui est alors ancêtre de nr — borne auto-entretenue dans
-les deux cas :
+**No per-PR bump** — the version only moves at release. The level
+is decided by **parenthesized keywords in commit subjects**
+scanned over the cycle. Scan bound = last `chore: bump version`
+**whose `vX.Y.Z` tag exists** on `next_release`, otherwise (post-reset:
+nr no longer has a bump commit, its history = `main`'s) **last
+semver tag**, which is then an ancestor of nr — self-maintained bound
+in both cases:
 
-- `(major)` → **major** (exceptionnel, décision de release majeure) ;
-  `(sync)` → **minor** ; rien → **patch**
-- `(sync)` = **seul déclencheur de minor** : incompatibilité/dépendance
-  bloquante protocole client↔démon — c'est le bump x.y qui déclenche
-  l'auto-update (comparaison `minorOf` ≠ → popup/update du pair). Toute
-  feature sans casse protocole = patch, même grosse.
-- `(minor)` = **déprécié, ne sert plus** : ignoré, traité comme patch —
-  `detect_level` log « note : (minor) déprécié » quand il le rencontre.
-  Utiliser `(sync)` pour la casse proto, `(major)` exceptionnellement,
-  rien sinon.
-- Écrire le mot-clé **parenthésé** dans le sujet du commit qui le
-  motive : `feat: nouveau champ proto (sync)` — un mot nu (`a major
-  bug`) ne doit pas compter. **Au squash, l'élément doit être repris** —
-  GitHub inclut par défaut les sujets dans le body du squash : ne pas
-  l'éditer hors du message.
-- Pour **citer** un mot-clé en prose sans le déclencher (doc, message
-  parlant de la règle), l'écrire **sans parenthèses** (`«sync»`) —
-  `` `(sync)` `` matche même entre backticks, y compris en body de
-  commit (scanné au squash).
-- La règle vit dans `client/tools/bump_version.py` (`detect_level`,
-  mode `--detect-level`) — source de vérité appelée par `release-bump`
-  (version.yml) et `release_notes.py` ; ne pas la dupliquer ailleurs.
-- La release numérote depuis le **dernier tag semver**, pas depuis
-  `package.json` — la version fichier peut dériver entre releases,
-  elle est recalée au bump de release.
+- `(major)` → **major** (exceptional, major release decision);
+  `(sync)` → **minor**; nothing → **patch**
+- `(sync)` = **the only minor trigger**: blocking client↔daemon
+  protocol incompatibility/dependency — it's the x.y bump that
+  triggers auto-update (`minorOf` ≠ comparison → peer popup/update).
+  Any feature without protocol breakage = patch, even a big one.
+- `(minor)` = **deprecated, no longer used**: ignored, treated as
+  patch — `detect_level` logs "note : (minor) déprécié" when it
+  meets it. Use `(sync)` for protocol breakage, `(major)`
+  exceptionally, nothing otherwise.
+- Write the **parenthesized** keyword in the subject of the commit
+  that motivates it: `feat: nouveau champ proto (sync)` — a bare
+  word (`a major bug`) must not count. **At squash, the element must
+  be kept** — GitHub includes subjects in the squash body by default:
+  don't edit it out of the message.
+- To **quote** a keyword in prose without triggering it (docs, a
+  message talking about the rule), write it **without parentheses**
+  ("sync") — `` `(sync)` `` matches even inside backticks, including
+  in commit bodies (scanned at squash).
+- The rule lives in `client/tools/bump_version.py` (`detect_level`,
+  `--detect-level` mode) — source of truth called by `release-bump`
+  (version.yml) and `release_notes.py`; don't duplicate it elsewhere.
+- Releases number from the **last semver tag**, not from
+  `package.json` — the file version can drift between releases,
+  it's realigned at the release bump.
 
-Manuel hors-PR : `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]`.
+Manual off-PR: `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]`.
 
-## Avant chaque push (branche de PR)
+## Before each push (PR branch)
 
-- **Frontend** : `cd client && npm run build` (tsc + vite).
-- **Rust client (src-tauri)** : pas de webkit sur le Pi → typecheck via
-  la cible Windows :
+- **Frontend**: `cd client && npm run build` (tsc + vite).
+- **Rust client (src-tauri)**: no webkit on the Pi → typecheck via
+  the Windows target:
   `cd client/src-tauri && PATH="/tmp/zig-shim:$PATH" cargo check --target x86_64-pc-windows-gnu`
-  (stub `windres` dans /tmp/zig-shim nécessaire).
-- **Daemon** : `cargo build --release -p agentcontrol-daemon` (build
-  seulement). **Interdit de toucher au daemon en direct** : pas de
-  restart/stop/redéploiement par un agent (`systemctl`, `supervisorctl`,
-  kill, remplacement du binaire) — `agentcontrol-daemon` orchestre les
-  sessions agents (dont la nôtre) : le redémarrer tue tous les agents
-  en cours (sessions → interrupted). Le redéploiement est une action
-  de l'utilisateur uniquement.
-- **Suppression d'un crate/binaire** : penser au workflow CI
-  (`-p <crate>` dans build.yml) et à `CRATES` dans `tools/bump_version.py`
-  (le bump de la PR exécute le script de la **base** → éditer `CRATES`
-  n'aide que les bumps post-merge ; crate retiré = job rouge
-  fail-closed, non bloquant).
+  (`windres` stub in /tmp/zig-shim required).
+- **Daemon**: `cargo build --release -p agentcontrol-daemon` (build
+  only). **Forbidden to touch the live daemon**: no
+  restart/stop/redeploy by an agent (`systemctl`, `supervisorctl`,
+  kill, binary replacement) — `agentcontrol-daemon` orchestrates the
+  agent sessions (including ours): restarting it kills all running
+  agents (sessions → interrupted). Redeployment is a user-only
+  action.
+- **Removing a crate/binary**: think of the CI workflow
+  (`-p <crate>` in build.yml) and `CRATES` in `tools/bump_version.py`
+  (the PR's bump runs the **base**'s script → editing `CRATES`
+  only helps post-merge bumps; removed crate = fail-closed red job,
+  non-blocking).
 
 ## Android
 
-- `gen/android` NON commité — généré par `npx tauri android init --ci` dans le
-  job `client-android` (le manifest généré inclut déjà `INTERNET`).
-- SSH : pas de binaire ssh → transport `Transport::SshNative` (russh) forcé
-  sur Android, disponible en opt-in sur desktop (`native: true` dans la cfg).
-  `direct-tcpip` remplace `ssh -L` ; `ssh_native::ssh_exec` remplace `ssh host`.
-- Clé ed25519 générée par l'app : `<base>/agentcontrol_ed25519` — sur Android
-  `client_core::init_paths(app_data_dir)` car HOME est absent.
-- `ureq`, `tauri-plugin-shell` : desktop-only (target cfg dans src-tauri/
-  Cargo.toml) ; `check_update`/`update_client` renvoient Err sur Android.
-- APK CI : aarch64 debug-signé (artifact + release). `--target` pour ajouter
-  d'autres ABI.
+- `gen/android` NOT committed — generated by `npx tauri android init --ci`
+  in the `client-android` job (the generated manifest already includes
+  `INTERNET`).
+- SSH: no ssh binary → `Transport::SshNative` transport (russh) forced
+  on Android, opt-in on desktop (`native: true` in the cfg).
+  `direct-tcpip` replaces `ssh -L`; `ssh_native::ssh_exec` replaces
+  `ssh host`.
+- App-generated ed25519 key: `<base>/agentcontrol_ed25519` — on Android
+  `client_core::init_paths(app_data_dir)` since HOME is absent.
+- `ureq`, `tauri-plugin-shell`: desktop-only (target cfg in src-tauri/
+  Cargo.toml); `check_update`/`update_client` return Err on Android.
+- CI APK: aarch64 debug-signed (artifact + release). `--target` to add
+  other ABIs.
 
-## Conventions de code
+## Code conventions
 
-- **Qualité et évolutivité d'abord** : tout développement se fait avec
-  une idée de qualité de code et d'évolution facile — privilégier des
-  abstractions claires, un découplage propre et du code lisible plutôt
-  qu'une solution rapide qui deviendra difficile à modifier.
-- **Fichiers ≤ 1000 lignes** : éviter les fichiers dépassant 1000
-  lignes ; si un fichier approche ou dépasse cette taille, voir pour
-  le découper en modules/composants cohérents.
-- **Tests** : pas de tests unitaires nécessaires — privilégier les
-  tests d'intégration qui valident les flux réels (daemon ↔ client,
-  appels ACP, SSH, …).
+- **Quality and evolvability first**: all development is done with
+  code quality and easy evolution in mind — favor clear abstractions,
+  clean decoupling and readable code over a quick solution that will
+  become hard to modify.
+- **Files ≤ 1000 lines**: avoid files exceeding 1000 lines; if a
+  file approaches or exceeds that size, consider splitting it into
+  coherent modules/components.
+- **Tests**: no unit tests required — favor integration tests that
+  validate real flows (daemon ↔ client, ACP calls, SSH, …).
 
-## Protocole fichiers (viewer/éditeur)
+## Files protocol (viewer/editor)
 
-- `read_file{path, offset, limit}` : avec `limit` → réponse paginée
-  `{path, offset, size, data(base64), mtime_ms}` (octets bruts — le
-  client décode, pas le démon ; supporte fichiers de toute taille et
-  le streaming vidéo acvideo). Sans `limit` → réponse legacy
-  `{content, truncated}` UTF-8 512 Kio.
-- `write_file{path, offset, delete_len, data(base64), if_mtime_ms?}` :
-  splice borné au workspace (`resolve_in_cwd_create` — parent
-  canonicalisé, feuille absente OK, `..`/symlink sortant refusé) ;
-  `delete_len` clampé ; `if_mtime_ms` ≠ mtime disque → erreur
-  `conflit:` (le client propose Recharger/Écraser) ; écriture atomique
-  `.part`+`rename` en `spawn_blocking`, mode unix préservé ; cap
-  `data` 16 Mio encodé. Réponse `{path, size, mtime_ms}`.
-- `create_path{path, dir}` : création EXCLUSIVE d'un fichier vide ou
-  d'un dossier (clic droit « nouveau » de l'explorateur) — même borne
-  `resolve_in_cwd_create`, racine refusée, cible déjà présente
-  (toute forme, symlink suivi) → « existe déjà » ; O_EXCL = pas
-  d'écrasement même en course. Réponse `{path, dir}`. CLI :
-  `acctl create <session> <path> [--dir]`.
-- Le client envoie `offset:0, delete_len:loaded` (buffer = préfixe du
-  disque → sauver sans avoir tout chargé) ; CRLF et BOM ré-écrits ;
-  encodages : utf-8, windows-1252, utf-16 le/be — décodage
-  `TextDecoder` streamé, encodage maison (`core/encoding.ts`).
-- `acctl write <session> <path> [src|-]` = remplacement complet
-  (`delete_len: u64::MAX`, sans garde mtime).
+- `read_file{path, offset, limit}`: with `limit` → paged response
+  `{path, offset, size, data(base64), mtime_ms}` (raw bytes — the
+  client decodes, not the daemon; supports files of any size and
+  acvideo video streaming). Without `limit` → legacy response
+  `{content, truncated}` UTF-8 512 KiB.
+- `write_file{path, offset, delete_len, data(base64), if_mtime_ms?}`:
+  splice bounded to the workspace (`resolve_in_cwd_create` — parent
+  canonicalized, absent leaf OK, `..`/symlink escaping refused);
+  `delete_len` clamped; `if_mtime_ms` ≠ disk mtime → `conflit:` error
+  (the client offers `Reload`/`Overwrite` — `Recharger`/`Écraser` in
+  the fr locale); atomic `.part`+`rename`
+  write in `spawn_blocking`, unix mode preserved; `data` cap 16 MiB
+  encoded. Response `{path, size, mtime_ms}`.
+- `create_path{path, dir}`: EXCLUSIVE creation of an empty file or
+  directory (explorer right-click "new") — same `resolve_in_cwd_create`
+  bound, root refused, target already present (any form, symlink
+  followed) → "already exists"; O_EXCL = no overwrite even in a race.
+  Response `{path, dir}`. CLI: `acctl create <session> <path> [--dir]`.
+- The client sends `offset:0, delete_len:loaded` (buffer = disk
+  prefix → save without having loaded everything); CRLF and BOM
+  rewritten; encodings: utf-8, windows-1252, utf-16 le/be — decoding
+  via streamed `TextDecoder`, homemade encoding (`core/encoding.ts`).
+- `acctl write <session> <path> [src|-]` = full replacement
+  (`delete_len: u64::MAX`, no mtime guard).
 
-## Pièges rencontrés
+## Known pitfalls
 
-- `anyhow::bail!` dans une fonction `Result<_, String>` → E0308.
-- `ureq` : feature `native-tls` (pas rustls/ring → pas de compilateur C
-  requis pour le check Windows) ; `libssl-dev`/`pkg-config` nécessaires
-  sur Ubuntu (CI). NB : russh **exige** ring (C) — le check Windows passe
-  via les shims zig `/tmp/zig-shim/x86_64-w64-mingw32-gcc{,++}`
-  (`zig cc -target x86_64-windows-gnu`, filtrent `--target=` de cc-rs).
-- `flex-shrink:0` requis sur les items d'un flex-column scrollable.
-- Tauri 2 : `set_var` est `unsafe` ; `get_webview_window` exige
-  `use tauri::Manager` ; `Image::new_owned` prend du RGBA brut.
-- `cursor-agent acp` : sous-commande **cachée** (absente de --help),
-  aucun argument — pas de placeholder {mode}/{model} possible, le mode/
-  modèle demandé à la création est appliqué via set_config_option post-spawn.
-- Codex : pas d'ACP natif → adaptateur `@agentclientprotocol/codex-acp`
-  (Node ; zed-industries/codex-acp archivé). `CODEX_PATH` **absolu** exigé
-  vers le binaire codex standalone : sinon l'adaptateur prend son
-  `@openai/codex` npm embarqué (optional dep manquante sur arm64), et via
-  npx `codex` dans PATH est le wrapper npm, pas le vrai CLI.
-- Claude : `@agentclientprotocol/claude-agent-acp` embarque le Claude
-  Agent SDK → CLI `claude` inutile. Auth : ANTHROPIC_API_KEY ou
+- `anyhow::bail!` in a `Result<_, String>` function → E0308.
+- `ureq`: `native-tls` feature (not rustls/ring → no C compiler
+  required for the Windows check); `libssl-dev`/`pkg-config` needed
+  on Ubuntu (CI). NB: russh **requires** ring (C) — the Windows check
+  passes via the zig shims `/tmp/zig-shim/x86_64-w64-mingw32-gcc{,++}`
+  (`zig cc -target x86_64-windows-gnu`, filter cc-rs's `--target=`).
+- `flex-shrink:0` required on items of a scrollable flex-column.
+- Tauri 2: `set_var` is `unsafe`; `get_webview_window` requires
+  `use tauri::Manager`; `Image::new_owned` takes raw RGBA.
+- `cursor-agent acp`: **hidden** subcommand (absent from --help),
+  no arguments — no {mode}/{model} placeholder possible, the mode/
+  model requested at creation is applied via set_config_option
+  post-spawn.
+- Codex: no native ACP → `@agentclientprotocol/codex-acp` adapter
+  (Node; zed-industries/codex-acp archived). **Absolute** `CODEX_PATH`
+  required to the standalone codex binary: otherwise the adapter takes
+  its bundled `@openai/codex` npm (optional dep missing on arm64), and
+  via npx `codex` in PATH is the npm wrapper, not the real CLI.
+- Claude: `@agentclientprotocol/claude-agent-acp` bundles the Claude
+  Agent SDK → `claude` CLI unneeded. Auth: ANTHROPIC_API_KEY or
   CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`, headless OK).
-- PATH systemd minimal : `ensure_agent_path` (main.rs) injecte dir du
-  binaire + ~/.local/bin + nvm (`$NVM_BIN`, sinon dernier
-  `~/.nvm/versions/node/*/bin`) — requis pour les agents npm-globaux
-  (shebang `#!/usr/bin/env node`).
-- **Drag interrompu → curseur "grabbing" collé** (WebKitGTK/Wayland,
-  bug toolkit sans recours côté web) : ne JAMAIS détacher un élément
-  pouvant être source de drag (rebuild de liste, `.remove()`) tant
-  qu'un drag est en vol — cf. compteur `dragging` + diffère-rebuild
-  dans `sidebar.ts`. `startDragging()` uniquement sur `e.detail===1`
-  (un 2e mousedown pendant toggleMaximize tue le grab WM pareil).
-  `<a>`/`<img>` désarmés via `-webkit-user-drag:none` (base.css) ;
-  garder `draggable` uniquement sur les vraies sources de DnD.
+- Minimal systemd PATH: `ensure_agent_path` (main.rs) injects the
+  binary's dir + ~/.local/bin + nvm (`$NVM_BIN`, else latest
+  `~/.nvm/versions/node/*/bin`) — required for npm-global agents
+  (`#!/usr/bin/env node` shebang).
+- **Interrupted drag → stuck "grabbing" cursor** (WebKitGTK/Wayland,
+  toolkit bug with no web-side remedy): NEVER detach an element that
+  can be a drag source (list rebuild, `.remove()`) while a drag is in
+  flight — cf. `dragging` counter + deferred rebuild in `sidebar.ts`.
+  `startDragging()` only on `e.detail===1` (a 2nd mousedown during
+  toggleMaximize kills the WM grab the same way). `<a>`/`<img>`
+  disarmed via `-webkit-user-drag:none` (base.css); keep `draggable`
+  only on real DnD sources.

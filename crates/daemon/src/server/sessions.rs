@@ -6,6 +6,7 @@ use super::*;
 use super::cfg::spawn_args;
 use proto::{EventKind, SessionMeta};
 
+use crate::session::SteerOutcome;
 use crate::tui;
 
 impl Daemon {
@@ -83,6 +84,7 @@ impl Daemon {
                             text: p.clone(),
                             steer: false,
                             origin: Some(o.clone()),
+                            spawn_prompt: true,
                         });
                         let wrapped = format!(
                             "[AgentControl] tu es la session {sid}, créée par \
@@ -519,7 +521,14 @@ impl Daemon {
                 None,
             )
             .await;
-        if r.is_err() && was_asleep && s.generation() == gen0 {
+        // Rendormir seulement si rien d'externe n'a repris la session
+        // pendant le spawn : les tentatives incrémentent spawn_gen à
+        // chaque essai (generation() != gen0 même sans intervention —
+        // comparaison inutilisable ici), mais seul un kill/rebind
+        // EXTERNE (clear, sleep, delete) pose supplant_mark au-delà de
+        // gen0 — le kill interne d'un handshake raté n'en fait pas
+        // partie et ne doit pas empêcher le retour à asleep.
+        if r.is_err() && was_asleep && s.supplant_mark() <= gen0 {
             s.mark_asleep();
         }
         r.map(|_| ())
@@ -702,14 +711,19 @@ impl Daemon {
     /// Premier post du cycle courant : le journal ne contient que le
     /// cycle en cours (vidé à /clear, /new, rebind) → le premier
     /// `user_message` est par construction celui d'après le dernier
-    /// reset. `truncated: true` = la compaction a coupé la tête — le
+    /// reset — SAUF pour une session service : son premier
+    /// `user_message` est le prompt de spawn (boilerplate de mission),
+    /// et le « premier post utile » est le `user_message` suivant (ex.
+    /// le post « [Backlog] item » de l'orchestrateur).
+    /// `truncated: true` = la compaction a coupé la tête — le
     /// vrai premier post n'existe plus.
     pub(super) async fn h_first_post(self: &Arc<Self>, session: String) -> Result<Value> {
                 use crate::journal::FirstPost;
                 let s = self.get_session(&session).await?;
-                Ok(match s.journal.first_post(&s.dir)? {
+                let origin = s.meta_snapshot().origin;
+                Ok(match s.journal.first_post(&s.dir, origin.as_deref())? {
                     FirstPost::Found(ev) => {
-                        let proto::EventKind::UserMessage { text, steer, origin } = ev.kind else {
+                        let proto::EventKind::UserMessage { text, steer, origin, .. } = ev.kind else {
                             unreachable!() // Found ne porte que ce kind
                         };
                         json!({"post": {"seq": ev.seq, "ts": ev.ts, "text": text, "steer": steer, "origin": origin}})
@@ -764,6 +778,39 @@ impl Daemon {
                     let _ = s.cancel().await;
                 }
                 Ok(json!({"ok": ok}))
+    }
+
+    /// queue_steer : sort l'entrée de la file et tente de l'injecter en
+    /// steer dans le tour en cours — le tour n'est PAS annulé (≠
+    /// promote). `delivered` : "steer" (injection lancée ; un refus
+    /// tardif retombe en file, event système + prochain refresh),
+    /// "sent" (plus de tour → livraison directe par le drain), "requeued"
+    /// (refus rapide → remise à sa position), "held" (retenue — reason :
+    /// compact|asleep|waking|spawning|not_ready), "gone" (index périmé).
+    /// `queue` est renvoyée à jour dans tous les cas.
+    pub(super) async fn h_queue_steer(self: &Arc<Self>, session: String, index: u64) -> Result<Value> {
+                let s = self.get_session(&session).await?;
+                let (delivered, reason) = match s.steer_queued(index as usize).await {
+                    SteerOutcome::Steer => ("steer", None),
+                    SteerOutcome::Sent => ("sent", None),
+                    SteerOutcome::Requeued(e) => ("requeued", Some(e)),
+                    SteerOutcome::Held(r) => {
+                        // Session endormie : la promotion vaut intention
+                        // de livraison — le réveil normal drainera la
+                        // file (spawn_wake dédoublonne).
+                        if r == "asleep" {
+                            self.spawn_wake(&s, &session);
+                        }
+                        ("held", Some(r.to_string()))
+                    }
+                    SteerOutcome::Gone => ("gone", None),
+                };
+                info!("session {session}: queue_steer[{index}] → {delivered}");
+                Ok(json!({
+                    "delivered": delivered,
+                    "reason": reason,
+                    "queue": s.queue_snapshot(),
+                }))
     }
 
     pub(super) async fn h_cancel(self: &Arc<Self>, session: String) -> Result<Value> {

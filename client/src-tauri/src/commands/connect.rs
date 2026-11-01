@@ -13,10 +13,103 @@ use crate::state::{
     conn_key, get_conn, split_user_host, AppState, ConnCtx, ConnectCfg,
 };
 
+/// Paramètres pour rejouer un exec ssh de diagnostic post-mortem au
+/// reconnect — la cfg d'origine est consommée par le transport, cette
+/// forme aplatie ne garde que ce qu'il faut pour `ssh host script` ou
+/// `ssh_exec` natif.
+enum SshDiag {
+    /// Transport `ssh -L` : exec via le binaire ssh (mêmes args/host).
+    OpenSsh { host: String, args: Vec<String> },
+    /// Transport russh : exec via ssh_native::ssh_exec.
+    Native {
+        host: String,
+        port: u16,
+        user: String,
+        password: Option<String>,
+        key: Option<PathBuf>,
+        expected_hk: Option<Arc<std::collections::HashSet<String>>>,
+    },
+}
+
+/// Extrait ce qu'il faut pour le diag post-mortem — `None` pour les
+/// transports non-ssh (pas de serveur ssh à interroger).
+fn ssh_diag(cfg: &ConnectCfg) -> Result<Option<SshDiag>, String> {
+    let ConnectCfg::Ssh {
+        host,
+        args,
+        port,
+        user,
+        password,
+        key,
+        native,
+        host_keys,
+        ..
+    } = cfg
+    else {
+        return Ok(None);
+    };
+    if native.unwrap_or(false) || cfg!(target_os = "android") {
+        let (user, h) = split_user_host(host, user.as_deref())?;
+        Ok(Some(SshDiag::Native {
+            host: h,
+            port: port.unwrap_or(22),
+            user,
+            password: password.clone(),
+            key: key.as_deref().map(PathBuf::from),
+            expected_hk: host_keys
+                .clone()
+                .map(|v| v.into_iter().collect::<std::collections::HashSet<_>>())
+                .filter(|s| !s.is_empty())
+                .map(Arc::new),
+        }))
+    } else {
+        Ok(Some(SshDiag::OpenSsh {
+            host: host.clone(),
+            args: sanitize_ssh_args(&args.clone().unwrap_or_default()),
+        }))
+    }
+}
+
+/// Les args de la cfg servent la joignabilité (`-p`, `-i`, `-o`,
+/// `-J`…) — ceux qui changent le mode de ssh sont retirés pour l'exec
+/// diag : `-N`/`-f`/`-T`/`-n` (pas de commande / pas de terminal /
+/// fond) et les forwards `-L`/`-R`/`-D` avec leur argument (un
+/// `-L…` glué seul suffirait à casser l'exec de toute façon, mais
+/// autant ne pas le passer). Tout autre token est conservé.
+fn sanitize_ssh_args(args: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut skip_next = false;
+    for a in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match a.as_str() {
+            "-L" | "-R" | "-D" => {
+                skip_next = true;
+                continue;
+            }
+            s if s.starts_with("-L") || s.starts_with("-R") || s.starts_with("-D") => continue,
+            s => {
+                // Bundles de flags sans argument (-N, -f, -T, -n, -t
+                // et leurs combinaisons -NT, -tt…) — retirés : pas de
+                // commande, détachement ou tty forcé casseraient l'exec.
+                let f = s.strip_prefix('-').unwrap_or("");
+                if !f.is_empty() && f.chars().all(|c| "NfTnt".contains(c)) {
+                    continue;
+                }
+                out.push(a.clone());
+            }
+        }
+    }
+    out
+}
+
 /// Configure la connexion au démon.
 #[tauri::command]
 pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: ConnectCfg) -> Result<Value, String> {
     let key = conn_key(&cfg);
+    let diag = ssh_diag(&cfg)?;
     let t = match cfg {
         ConnectCfg::Local {} => {
             let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
@@ -32,6 +125,7 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
             password,
             key,
             native,
+            host_keys,
         } => {
             let native = native.unwrap_or(false) || cfg!(target_os = "android");
             if native {
@@ -43,6 +137,9 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
                     remote_port: remote_port.unwrap_or(7331),
                     password,
                     key_path: key.map(PathBuf::from),
+                    expected_hk: host_keys
+                        .map(|v| v.into_iter().collect::<std::collections::HashSet<_>>())
+                        .filter(|s| !s.is_empty()),
                 }
             } else {
                 Transport::Ssh {
@@ -57,7 +154,35 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
     let status = c.call(ReqKind::DaemonStatus).await.map_err(|e| format!("{e:#}"))?;
     {
         let mut map = state.conns.lock().await;
-        map.insert(key.clone(), ConnCtx { client: c.clone() });
+        let prev = map.insert(key.clone(), ConnCtx { client: c.clone() });
+        // La conn remplacée : close() arrête son reader — sinon la
+        // boucle gardait une Arc vivante et le tunnel ssh orphelin
+        // fuyait (jamais tué tant que le reader tient le client). Si
+        // elle était MORTE spontanément (pas une fermeture demandée),
+        // c'est un reconnect post-panne → snapshot diag du serveur.
+        if let Some(old) = prev {
+            let why = old.client.death_reason();
+            // Mort spontanée = dead signalé OU une raison déjà posée :
+            // le reader en cours de mort écrit dead_info avant
+            // dead_tx — la fenêtre synchrone entre les deux classait
+            // le cas en « remplacement propre » et sautait le
+            // post-mortem. Un client fermé n'est jamais dans conns,
+            // donc un why présent ici ne peut pas être un close().
+            let was_dead = *old.client.dead.borrow() || why.is_some();
+            old.client.close();
+            if was_dead {
+                if let Some(d) = diag {
+                    let k = key.clone();
+                    tauri::async_runtime::spawn(async move {
+                        ssh_postmortem(&k, d).await;
+                    });
+                }
+                client_core::log(
+                    Level::Info,
+                    format!("conn {key}: remplacée après mort ({})", why.unwrap_or_else(|| "?".into())),
+                );
+            }
+        }
         // Le défaut ne se repositionne que s'il est vide ou pointe une conn
         // supprimée — une reconnexion en arrière-plan (backoff) ne doit pas
         // détourner les appels qui routent sans conn explicite.
@@ -66,9 +191,10 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
             *d = Some(key.clone());
         }
     }
-    // Mort de la boucle de lecture (EOF transport) → event `conn-dead`
-    // pour l'UI. Le Weak évite de retenir le client si la connexion est
-    // remplacée/fermée entre-temps.
+    // Mort de la boucle de lecture → event `conn-dead` {conn, why} pour
+    // l'UI : la cause réelle (post-mortem transport) remonte dans le
+    // libellé « down » au lieu du « EOF transport » générique. Le Weak
+    // évite de retenir le client si la connexion est remplacée/fermée.
     {
         let weak = Arc::downgrade(&c);
         let mut dead = c.dead.clone();
@@ -86,7 +212,10 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
                 m.get(&k).is_some_and(|x| Arc::ptr_eq(&x.client, &c2))
             };
             if still {
-                let _ = app.emit("conn-dead", k);
+                let why = c2
+                    .death_reason()
+                    .unwrap_or_else(|| "EOF transport".into());
+                let _ = app.emit("conn-dead", serde_json::json!({"conn": k, "why": why}));
             }
         });
     }
@@ -96,11 +225,101 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
 /// Déconnecte proprement une connexion (tue le tunnel/process ssh).
 #[tauri::command]
 pub(crate) async fn disconnect(state: State<'_, AppState>, conn: String) -> Result<(), String> {
-    state.conns.lock().await.remove(&conn);
+    // close() stoppe le reader : sans lui l'Arc<Client> survivait dans
+    // la boucle de lecture et le tunnel/process ssh fuyait au lieu
+    // d'être tué au drop.
+    if let Some(ctx) = state.conns.lock().await.remove(&conn) {
+        ctx.client.close();
+    }
     if state.default_conn.lock().await.as_deref() == Some(&conn) {
         *state.default_conn.lock().await = None;
     }
     Ok(())
+}
+
+/// Snapshot diag côté serveur après une mort de transport ssh — exécuté
+/// au reconnect via un exec ssh dédié : charge, mémoire, âge sshd/pid1
+/// (un sshd relancé ou un conteneur rebooté saute aux yeux), compteur
+/// OOM cgroup, logs supervisord/auth s'ils existent. Tout best-effort :
+/// chaque sonde tolère l'absence de la commande ou du fichier.
+/// Résultat journalisé « post-mortem <conn>: … » — corroboration
+/// serveur de la cause classée côté client (item #128).
+async fn ssh_postmortem(conn: &str, d: SshDiag) {
+    const SCRIPT: &str = "{ \
+        echo \"ts=$(date -u +%FT%TZ 2>/dev/null || date -u)\"; \
+        echo \"uptime_s=$(cut -d' ' -f1 /proc/uptime 2>/dev/null) load=$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null) ncpu=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null)\"; \
+        free -m 2>/dev/null | awk 'NR==2{print \"mem_used=\"$3\"M/\"$2\"M avail=\"$7\"M\"}'; \
+        o=$(pgrep -xo sshd 2>/dev/null); \
+        echo \"sshd_count=$(pgrep -c sshd 2>/dev/null) sshd_age=$(ps -o etime= -p ${o:-1} 2>/dev/null | tr -d ' ') pid1_age=$(ps -o etime= -p 1 2>/dev/null | tr -d ' ')\"; \
+        for f in /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory/memory.oom_control; do \
+        [ -r \"$f\" ] && echo \"$f: $(grep -iE 'oom|under_oom' \"$f\" 2>/dev/null | tr '\\n' ' ')\"; \
+        done; \
+        command -v supervisorctl >/dev/null 2>&1 && supervisorctl status 2>/dev/null | head -6; \
+        dmesg 2>/dev/null | grep -iE 'out of memory|oom.kill|killed process' | tail -3; \
+        for f in /var/log/supervisor/sshd*.log /var/log/auth.log; do \
+        [ -r \"$f\" ] && { echo \"-- $f\"; tail -4 \"$f\" 2>/dev/null; }; done; \
+        } 2>/dev/null";
+    let run = async {
+        match d {
+            SshDiag::OpenSsh { host, args } => {
+                let mut cmd = tokio::process::Command::new("ssh");
+                cmd.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
+                    .args(&args)
+                    .arg(&host)
+                    .arg(SCRIPT)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true);
+                client_core::hide_console(&mut cmd);
+                let out = cmd.spawn().map_err(|e| format!("ssh: {e}"))?
+                    .wait_with_output()
+                    .await
+                    .map_err(|e| format!("ssh: {e}"))?;
+                let mut s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let err = String::from_utf8_lossy(&out.stderr);
+                // Le code de sortie est ignoré : le script est best-effort
+                // et son dernier test renvoie 1 quand aucun log n'existe —
+                // seul un stdout vide signale un vrai échec.
+                if s.is_empty() {
+                    s = format!("(ssh: {} : {})", out.status, err.trim());
+                }
+                Ok::<_, String>(s)
+            }
+            SshDiag::Native {
+                host,
+                port,
+                user,
+                password,
+                key,
+                expected_hk,
+            } => {
+                let opts = client_core::ssh_native::Opts {
+                    expected_hk,
+                    ..Default::default()
+                };
+                client_core::ssh_native::ssh_exec(
+                    &host,
+                    port,
+                    &user,
+                    password.as_deref(),
+                    key.as_deref(),
+                    SCRIPT,
+                    None,
+                    &opts,
+                )
+                .await
+                .map(|(_, out, _)| out.trim().to_string())
+                .map_err(|e| format!("{e:#}"))
+            }
+        }
+    };
+    let out = tokio::time::timeout(std::time::Duration::from_secs(25), run)
+        .await
+        .map_err(|_| "timeout diag".to_string())
+        .and_then(|r| r)
+        .unwrap_or_else(|e| format!("(diag indisponible : {e})"));
+    client_core::log(Level::Info, format!("post-mortem {conn}: {out}"));
 }
 
 /// Subscribe sur la connexion principale et re-émet les push
@@ -128,10 +347,16 @@ pub(crate) async fn subscribe(
     let c2 = c.clone();
     let task = tauri::async_runtime::spawn(async move {
         let mut rx = rx;
+        // Conn morte → sortie : sans ce watch la tâche retenait un
+        // Arc<Client> à vie (tunnel ssh orphelin + pompe fantôme).
+        let mut dead = c2.dead.clone();
         // Dernier seq d'event émis — base du resync après un Lagged.
         let mut last_seq = after_seq;
         loop {
-            let v = match rx.recv().await {
+            let v = match tokio::select! {
+                v = rx.recv() => v,
+                _ = dead.wait_for(|d| *d) => break,
+            } {
                 Ok(v) => v,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     // Les pushes term_data partagent le broadcast : une
@@ -158,10 +383,18 @@ pub(crate) async fn subscribe(
                 }
                 Err(_) => break, // Closed : client droppé/déconnecté
             };
-            // Seuls les events de session partent en session-event — les
-            // pushes term_* ont leur pompe dédiée (spawnée par term_open).
-            if v.get("push").and_then(Value::as_str) != Some("event") {
-                continue;
+            // Les pushes term_* ont leur pompe dédiée (spawnée par
+            // term_open) ; les events de session partent en
+            // session-event, les dir_changed de l'explorateur en
+            // dir-changed (push éphémère du watch FS — pas de seq à
+            // suivre pour le resync).
+            match v.get("push").and_then(Value::as_str) {
+                Some("dir_changed") => {
+                    let _ = app.emit("dir-changed", v);
+                    continue;
+                }
+                Some("event") => {}
+                _ => continue,
             }
             // seq assigné (pas max) : après SessionCleared les seqs
             // repartent à 1 — last_seq doit suivre le cycle courant.
@@ -197,6 +430,7 @@ pub(crate) async fn ensure_daemon(
     password: Option<String>,
     key: Option<String>,
     native: Option<bool>,
+    host_keys: Option<Vec<String>>,
 ) -> Result<String, String> {
     const BASE: &str = "https://github.com/Wameuh/AgentControl/releases";
     // Script distant POSIX : check version via acctl status, sinon install.
@@ -204,8 +438,15 @@ pub(crate) async fn ensure_daemon(
     // superviseur (systemd, supervisord, lancé à la main). Gardes avant
     // toute mutation : acctl via PATH en plus de ~/.local/bin (un démon
     // installé par image/conteneur rapporte alors sa version), et probe
-    // du port daemon configuré — un démon qui écoute déjà (publié par
-    // Docker, forwardé) n'est jamais écrasé par l'artefact release.
+    // du port daemon configuré — un listener ÉTRANGER sur ce port (démon
+    // publié par Docker, port forwardé, autre service) ne doit jamais
+    // être écrasé par l'artefact release. Le probe ne bloque pas notre
+    // propre démon : `ver` non vide = le nôtre répond en socket unix ;
+    // on re-sonde alors le port avec ce même acctl via AGENTCONTROL_TCP
+    // — une version identique prouve que le listener est le sien (bind
+    // TCP du même process) → l'upgrade continue ; une version différente
+    // (autre démon managé ailleurs) ou aucune réponse (service étranger,
+    // timeout 4 s si `timeout` existe) → busy.
     // `rc=0; cmd || rc=$?` car `set -e` tue le shell sur tout échec de
     // commande — `rc=$?` seul ne s'exécuterait jamais.
     // `echo step:<id> >&2` : marqueurs de progression streamés sur
@@ -223,7 +464,14 @@ pub(crate) async fn ensure_daemon(
             [ \"$(printf '%s\\n%s\\n' \"{t}\" \"$ver\" | sed 's/-rc\\./~rc./g' | sort -V | tail -n1)\" = \"$(echo \"$ver\" | sed 's/-rc\\./~rc./g')\" ]; then \
             echo newer:$ver; exit 0; fi; \
          rc=0; curl -s -o /dev/null --max-time 2 http://127.0.0.1:{p} 2>/dev/null || rc=$?; \
-         if [ \"$rc\" -ne 7 ]; then echo busy:127.0.0.1:{p}; exit 0; fi; \
+         if [ \"$rc\" -ne 7 ]; then \
+         own=\"\"; \
+         if [ -n \"$ver\" ]; then \
+         to=$(command -v timeout >/dev/null 2>&1 && echo \"timeout 4\" || true); \
+         own=$({{ AGENTCONTROL_TCP=127.0.0.1:{p} $to \"$ac\" status 2>/dev/null || true; }} | grep -o '\"version\":\"[^\"]*\"' | cut -d'\"' -f4); \
+         fi; \
+         if [ -z \"$own\" ] || [ \"$own\" != \"$ver\" ]; then echo busy:127.0.0.1:{p}; exit 0; fi; \
+         fi; \
          echo step:download >&2; \
          d=$HOME/.cache/agentcontrol-upd; rm -rf \"$d\"; mkdir -p \"$d\"; cd \"$d\" || exit 1; \
          curl -fsSL -o acd.tgz \"{base}/download/v{t}/agentcontrol-server-$arch-linux.tar.gz\" || \
@@ -234,9 +482,10 @@ pub(crate) async fn ensure_daemon(
          install -Dm755 acctl $HOME/.local/bin/acctl; \
          echo step:service >&2; \
          confs=\"/etc/supervisor/conf.d/*.conf /etc/supervisord.d/*.conf $HOME/.supervisor/conf.d/*.conf\"; \
-         prog=$(awk 'FNR==1 {{ p=\"\" }} /^\\[/ {{ p=\"\"; if ($0 ~ /^\\[program:/) {{ p=$0; sub(/.*\\[program:/,\"\",p); sub(/\\].*/,\"\",p) }} }} /^command[[:space:]]*=/ && /agentcontrol-daemon/ && p != \"\" {{ print p; exit }}' $confs 2>/dev/null); \
+         ef=\"\"; for f in $confs; do [ -f \"$f\" ] && ef=\"$ef $f\"; done; \
+         prog=$({{ [ -n \"$ef\" ] && awk 'FNR==1 {{ p=\"\" }} /^\\[/ {{ p=\"\"; if ($0 ~ /^\\[program:/) {{ p=$0; sub(/.*\\[program:/,\"\",p); sub(/\\].*/,\"\",p) }} }} /^command[[:space:]]*=/ && /agentcontrol-daemon/ && p != \"\" {{ print p; exit }}' $ef 2>/dev/null || true; }}); \
          if [ -n \"$prog\" ]; then \
-         svc=$(grep -h '^command[[:space:]]*=' $confs 2>/dev/null | grep agentcontrol-daemon | head -n1 | sed 's/^command[[:space:]]*=[[:space:]]*//' | cut -d' ' -f1); \
+         svc=$(grep -h '^command[[:space:]]*=' $ef 2>/dev/null | grep agentcontrol-daemon | head -n1 | sed 's/^command[[:space:]]*=[[:space:]]*//' | cut -d' ' -f1); \
          svc=$(command -v \"$svc\" 2>/dev/null || echo \"$svc\"); \
          case $svc in /*/agentcontrol-daemon) ;; *) svc=\"\";; esac; \
          if [ -n \"$svc\" ] && [ \"$svc\" != \"$bin\" ] && [ -w \"$(dirname \"$svc\")\" ]; then install -Dm755 agentcontrol-daemon \"$svc\"; fi; \
@@ -271,6 +520,14 @@ pub(crate) async fn ensure_daemon(
         let (user, h) = split_user_host(&host, user.as_deref())?;
         let err_acc = std::sync::Mutex::new(String::new());
         let app2 = app.clone();
+        // Profil appairé → la host key est épinglée pour l'exec aussi.
+        let opts = client_core::ssh_native::Opts {
+            expected_hk: host_keys
+                .map(|v| v.into_iter().collect::<std::collections::HashSet<_>>())
+                .filter(|s| !s.is_empty())
+                .map(Arc::new),
+            ..Default::default()
+        };
         let (code, out, _err) = client_core::ssh_native::ssh_exec(
             &h,
             port.unwrap_or(22),
@@ -287,6 +544,7 @@ pub(crate) async fn ensure_daemon(
                     g.push('\n');
                 }
             }),
+            &opts,
         )
         .await
         .map_err(|e| format!("{e:#}"))?;

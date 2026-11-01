@@ -101,6 +101,11 @@ function meshAgentRgb(light: number[]): number[] {
   const [h, s, l] = rgbToHsl(light);
   return hslToRgb([(h - 30 + 360) % 360, s * 0.55, l * 0.93]);
 }
+/** Profondeur du résidu en lumière « négative » (thème clair) : la
+ *  facette converge vers `base×(1−k) + accent×DEPTH×k` — DEPTH 0.6
+ *  garde un voile accentué sobre, jamais saturé. */
+const PAPER_DEPTH = 0.6;
+
 /** Re-lit la palette résolue et la pousse au mesh : sa lumière principale
  *  = accent (thème, ou couleur de connexion quand l'instance est liée),
  *  sa base = --bg dérivé. « sauge » retombe pile sur les presets.
@@ -115,10 +120,26 @@ function syncMeshAccent() {
     // Accent choisi (classe theme-*) : la teinte des lumières agents suit
     // l'accent — sinon elles resteraient sur le vert des presets et les
     // facettes tourneraient vert sous un accent rouge. Accent par défaut :
-    // le preset bicolore sable/sauge (identité app) est conservé.
+    // le preset bicolore sable/sauge (identité app) est conservé —
+    // sauf en intensité forte (accent-strong), où « sauge » devient une
+    // olive saturée dérivée comme les autres accents.
     const themed = [...document.documentElement.classList]
-      .some((c) => c.startsWith("theme-"));
+      .some((c) => c.startsWith("theme-") || c === "accent-strong");
     if (themed) meshColors.agentTint = meshAgentRgb(light);
+    // Thème clair (« paper », mood.dark) : la couleur des lumières est
+    // SOUSTRAITE de la base (sgn<0 dans mesh-bg#shade) — envoyer
+    // l'accent brut fait tourner le résidu vers sa complémentaire
+    // (violet → facettes VERTES, rouge → cyan…). On envoie la couleur
+    // à soustraire pour que le résidu reste dans la famille de
+    // l'accent : light = base − accent×DEPTH → facet ≈ base(1−k) +
+    // accent×DEPTH×k. Accent par défaut non touché : le preset paper
+    // (sepia → résidu gris-bleu) est son rendu voulu.
+    if (themed && bgMood() === "paper") {
+      const neg = (c: number[]) =>
+        base.map((b, i) => Math.max(0, Math.round(b - c[i] * PAPER_DEPTH)));
+      meshColors.light = neg(light);
+      if (meshColors.agentTint) meshColors.agentTint = neg(meshColors.agentTint);
+    }
   }
   mesh?.setMood(bgMood(), { ...meshColors, intensity: 0.55 });
 }
@@ -151,6 +172,20 @@ export function applyAccent(name: Accent, persist = true) {
   const el = document.documentElement;
   for (const a of ACCENTS) if (a !== "sage") el.classList.toggle(`theme-${a}`, name === a);
   if (persist) localStorage.setItem("ac-accent", name);
+  syncMeshAccent();
+}
+
+// Intensité d'accent — dimension orthogonale (classe :root.accent-strong,
+// cf. base.css) : « douce » = défaut, « forte » = variantes saturées.
+export const accentStrongPref = (): boolean =>
+  localStorage.getItem("ac-accent-strong") === "1";
+
+/** Applique l'intensité ; indépendante de l'accent actif (global ou
+ *  couleur de connexion) — la classe n'est jamais retirée par
+ *  applyAccent. */
+export function applyAccentStrong(on: boolean, persist = true) {
+  document.documentElement.classList.toggle("accent-strong", on);
+  if (persist) localStorage.setItem("ac-accent-strong", on ? "1" : "0");
   syncMeshAccent();
 }
 
@@ -235,6 +270,26 @@ export function initPlatform() {
 /// Ouvre une URL externe (plugin opener — navigateur système sur Android).
 export function shellOpen(url: string) {
   invoke("plugin:opener|open_url", { url }).catch(() => {});
+}
+
+/// Délégation globale des liens externes : les <a href> produits par le
+/// rendu (format.ts : ulink, liens md, images cliquables) portent
+/// target="_blank" — dans la webview wry sans newWindow handler, le clic
+/// est mort (voire navigue la webview et perd l'app). Un listener document
+/// en bubbling : les handlers d'élément tournent avant (flink, about-gh,
+/// pin-tag…) et marquent e.defaultPrevented → skip ; sinon allowlist
+/// http(s) stricte sur l'attribut brut — jamais file:, javascript:,
+/// agentcontrol:, mailto: ni les relatifs — puis opener. En mode web le
+/// même invoke aboutit à window.open (bridge) : un seul chemin.
+export function initExternalLinks() {
+  document.addEventListener("click", (e) => {
+    if (e.defaultPrevented) return;
+    const a = (e.target as HTMLElement).closest?.("a[href]");
+    const href = a?.getAttribute("href")?.trim() ?? "";
+    if (!/^https?:\/\//i.test(href)) return;
+    e.preventDefault();
+    shellOpen(href);
+  });
 }
 
 // Fenêtre custom (decorations: false) : drag natif via startDragging()

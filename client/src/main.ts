@@ -19,16 +19,19 @@ import {
   applyAccent,
   accentPref,
   accentOf,
+  applyAccentStrong,
+  accentStrongPref,
   applyConnChrome,
   initGems,
   initPlatform,
   isAndroid,
   initWindowChrome,
+  initExternalLinks,
   shellOpen,
 } from "./core/chrome";
 import { nav, type SheetItem } from "./ui/nav";
 import { hydrateIcons } from "./ui/icons";
-import { initStatus } from "./features/status";
+import { initStatus, type HostStats } from "./features/status";
 import { checkBootUpdate } from "./features/update";
 import { initModelBar } from "./features/modelbar";
 import { initFusionDialog, openFusion } from "./features/fusion-dialog";
@@ -42,10 +45,14 @@ import { SessionSearch } from "./features/search";
 import { Sidebar } from "./features/sidebar";
 import { Composer } from "./features/composer";
 import { FileExplorer } from "./features/files";
+import { QuickOpen } from "./features/quickopen";
 import { MapView } from "./features/map-view";
 import { TermPanel } from "./features/terminal";
 import { SettingsPanel } from "./features/settings";
 import { ComponentsPanel } from "./features/components";
+import { stateDiff } from "./features/state-diff";
+import { sounds } from "./features/sounds";
+import { notifications } from "./features/notifications";
 import { initFirstPost } from "./features/first-post";
 import { Pins } from "./features/pins";
 import { initLang, t, applyStatic } from "./i18n";
@@ -56,10 +63,23 @@ initLang();
 applyTheme(localStorage.getItem("ac-theme") === "light" ? "light" : "dark");
 // Accent appliqué au boot, avant le premier rendu utile (pas de flash).
 applyAccent(accentPref());
+// Intensité d'accent — dimension orthogonale, classe accent-strong.
+applyAccentStrong(accentStrongPref(), false);
 applyStatic();
 initGems();
 initPlatform();
 initWindowChrome();
+initExternalLinks();
+// Spike ac-stt : prouve la jonction webview → plugin (Kotlin `SttPlugin`
+// sur Android, stub Rust sur desktop, stub bridge en web).
+invoke("plugin:ac-stt|stt_ping")
+  .then((r) => console.debug("[stt] ping:", r))
+  .catch((e) => console.warn("[stt] ping failed:", e));
+// Core : état moteur/modèle/permission au boot — diagnostic logcat du
+// chantier core (le bouton mic arrive avec l'item UX).
+invoke("plugin:ac-stt|stt_state")
+  .then((r) => console.debug("[stt] state:", r))
+  .catch((e) => console.warn("[stt] state failed:", e));
 // Log open/close des modals + watchdog anti-gel (dialog invisible, inert
 // résiduel) — avant tout showModal pour tracer aussi les dialogs du boot.
 initModalGuard();
@@ -96,6 +116,7 @@ const chat = new ChatView();
 const sidebar = new Sidebar();
 const composer = new Composer();
 const files = new FileExplorer();
+const quick = new QuickOpen();
 const map = new MapView();
 const term = new TermPanel();
 const connView = new ConnView();
@@ -110,6 +131,7 @@ const pins = new Pins();
 initRpc({
   currentConn: () => app.current?.conn,
   connState: (k) => conns.state(k),
+  connGone: (k) => conns.isGone(k),
 });
 
 chat.bind(renderer, {
@@ -147,10 +169,35 @@ renderer.bind({
   statusChanged: () => void sidebar.refresh(),
   openSession: (id) => void chat.open(id),
 });
+// Canaux d'alerte branchés sur le diff partagé (state-diff) — sons et
+// notifications OS restent indépendants mais voient les mêmes transitions.
+stateDiff.onTransition((kind) => sounds.alert(kind));
+stateDiff.onTransition((kind, s) => notifications.alert(kind, s));
+notifications.bind({
+  connCount: () => conns.knownConns().length,
+  // Clic sur la notif → même trajet qu'une ouverture depuis la sidebar :
+  // les overlays de #chat doivent d'abord sortir (motif newSess.openSession).
+  openSession: (id, conn) => {
+    settings.close();
+    connView.close();
+    map.close();
+    comps.close();
+    void chat.open(id, false, conn);
+  },
+});
 sidebar.bind(conns, groups, newSess, chat, settings, connView, comps, map);
 composer.bind(chat);
 composer.refresh = () => sidebar.refresh();
+// Hint « modèle absent » du bouton mic → ouvre les settings directement
+// sur la section de téléchargement STT (details dépliée + scroll).
+composer.mic.openSttSettings = () => {
+  settings.open();
+  const sec = $("s-sec-stt") as HTMLDetailsElement;
+  sec.open = true;
+  sec.scrollIntoView({ block: "start" });
+};
 composer.bindAttachCapable((c) => conns.cap(c ?? "default")?.files === true);
+composer.bindQueueSteerCapable((c) => conns.cap(c ?? "default")?.queue_steer === true);
 conns.bind({
   refresh: () => sidebar.refresh(),
   reopenIfConn: (c) => chat.reopenIfConn(c),
@@ -181,6 +228,8 @@ connView.connecting = (hosts) => chat.setConnecting(hosts);
 // les autres (sinon : empilement opaque + inert, écran "figé").
 connView.onOpening = () => { settings.close(); map.close(); comps.close(); };
 settings.onOpening = () => { connView.close(); map.close(); comps.close(); };
+// Select « Appairer » des settings : pré-sélection sur la conn liée.
+settings.activeConnKey = () => conns.knownConns()[0] ?? null;
 comps.bind(conns);
 comps.onOpening = () => { settings.close(); connView.close(); map.close(); };
 newSess.bind(groups);
@@ -199,6 +248,10 @@ newSess.openSession = (id, conn) => {
 newSess.knownConns = () => conns.knownConns();
 groups.refresh = () => void sidebar.refresh();
 files.bind({ sysline: (txt, ic) => chat.sysline(txt, ic) });
+quick.bind({
+  openFile: (p) => files.openFilePanel(p),
+  openDir: (rel) => files.revealInTree(rel),
+});
 settings.langChanged = () => {
   // applyStatic a réécrit le placeholder avec input_ph — hints à jour.
   composer.refreshHints();
@@ -230,9 +283,13 @@ map.bind({
   onToggle: (open) => sidebar.setMapOpen(open),
 });
 
-// Conn perdue (EOF transport) : les PTY du démon meurent avec → bannière
+// Conn perdue (transport mort) : les PTY du démon meurent avec → bannière
 // dans les terminaux concernés (reopen possible via ↻ au retour).
-void listen<string>("conn-dead", (e) => term.markConnDead(e.payload));
+// Payload {conn, why} ; la forme string reste tolérée (web legacy).
+void listen<{ conn: string } | string>("conn-dead", (e) => {
+  const p = e.payload;
+  term.markConnDead(typeof p === "string" ? p : p.conn);
+});
 
 // --- Events sessions (push du démon via le bridge Tauri) ---------------------
 
@@ -264,6 +321,15 @@ await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
   }
   if (app.current && session === app.current.id) {
     chat.appendEvent(event, true);
+  }
+  // Les events système « message en file » / « steer refusé — remis
+  // en file » / retenue compact changent la file sans status_changed :
+  // le bandeau de file resterait périmé jusqu'au prochain changement
+  // d'état — refresh immédiat, restreint aux textes liés à la file
+  // (un queue_list par event sinon, gratuit mais inutile).
+  if (event.type === "system" && app.current?.id === session
+      && /file|steer|compact/i.test((event.text as string) ?? "")) {
+    void composer.refreshQueue();
   }
   if (event.type === "status_changed") void sidebar.refresh();
 });
@@ -305,6 +371,7 @@ $("chat-more").onclick = () => {
   if (app.current && term.supported())
     items.push({ icon: "terminal", label: t("term_title"), fn: () => $("btn-term").click() });
   if (app.current) items.push({ icon: "folder", label: t("files_title"), fn: () => $("btn-files").click() });
+  if (app.current) items.push({ icon: "search", label: t("qo_open_path"), fn: () => quick.open("path") });
   if (app.current && !app.alive && app.current.state !== "starting")
     items.push({ icon: "play", label: t("resume"), fn: () => $("btn-resume").click() });
   if (app.current && app.alive)
@@ -329,14 +396,24 @@ search.init();
 sidebar.init();
 composer.init();
 files.init();
+quick.init();
 term.init();
 map.init();
 settings.init();
 comps.init();
+notifications.init();
 initFirstPost((c) => conns.cap(c)?.first_post === true);
 pins.init();
 initModelBar(openFusion);
 initFusionDialog();
-initStatus();
+initStatus(() => {
+  // Bloc host du démon de la conn affichée (session ouverte), sinon de
+  // la conn liée — absent sur vieux démon → segment masqué.
+  const k = app.current?.conn ?? conns.knownConns()[0] ?? "default";
+  // Conn down/en essai : les caps gardent la dernière valeur connue —
+  // masquer plutôt qu'afficher des chiffres périmés sous icône grise.
+  if ((conns.state(k) ?? "ok") !== "ok") return undefined;
+  return conns.cap(k)?.host as HostStats | undefined;
+});
 checkBootUpdate();
 connView.autoConnect(savedConns, cliConn ?? undefined);

@@ -13,6 +13,14 @@ impl Daemon {
                 let p = PathBuf::from(&path);
                 let full = if p.is_absolute() {
                     p
+                } else if path.starts_with('~') {
+                    // `~`/`~user` ne sont pas relatifs au workspace :
+                    // même expansion que resolve_cwd (HOME, NSS), appliquée
+                    // au seul préfixe `~` — un `$VAR` seul reste relatif au
+                    // cwd (fichier littéral préservé). read_file n'étant
+                    // pas borné au cwd, un chemin ~ se résout comme un
+                    // absolu saisi directement.
+                    PathBuf::from(expand_cwd(&path)?)
                 } else {
                     PathBuf::from(&s.meta_snapshot().cwd).join(p)
                 };

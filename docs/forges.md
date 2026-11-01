@@ -1,113 +1,153 @@
-# Registre de review multi-forges (GitHub, GitLab, Gerrit)
+# Multi-forge review registry (GitHub, GitLab, Gerrit)
 
-Le démon maintient un registre *référence de review ↔ session*
-(`prs.json` à sa racine) : quand un agent crée une PR/MR/change dans une
-session, la référence lui est attribuée automatiquement et le badge
-s'affiche dans la sidebar (`acctl list`, `acctl pr ls`).
+The daemon maintains a *review reference ↔ session* registry
+(`prs.json` at its root): when an agent creates a PR/MR/change in a
+session, the reference is automatically attributed to it and the badge
+shows up in the sidebar (`acctl list`, `acctl pr ls`).
 
-## Détection automatique
+## Automatic detection
 
-Le watcher de chaque session scanne les extraits des tool calls :
+Each session's watcher scans tool call excerpts:
 
-- **GitHub** : `github.com/<o>/<r>/pull/<N>` — toujours actif.
-- **GitLab** : `<host>/<groupe>/<projet>/-/merge_requests/<N>` — `gitlab.com`
-  implicite, hôtes auto-hébergés via `[[forges]]`.
-- **Gerrit** : `<host>/c/<projet>/+/<N>`, variantes `/r/` et `#/c/`, URL
-  de recherche `/q/I<sha>` — uniquement sur hôtes déclarés (rien ne
-  distingue un path Gerrit d'un autre service sans déclaration).
-- **`Change-Id: I<40 hex>`** (trailer de commit dans un `git log`,
-  `git show`, `git review`) : enregistré comme change Gerrit non résolu
-  (`pr` = 0, badge `c#I<8>`) ; le numéro est résolu au prochain
-  `acctl pr sync` et l'entrée re-clée, le Change-Id conservé.
+- **GitHub**: `github.com/<o>/<r>/pull/<N>` — always on.
+- **GitLab**: `<host>/<group>/<project>/-/merge_requests/<N>` — `gitlab.com`
+  implicit, self-hosted hosts via `[[forges]]`.
+- **Gerrit**: `<host>/c/<project>/+/<N>`, `/r/` and `#/c/` variants,
+  `/q/I<sha>` search URLs — declared hosts only (nothing tells a Gerrit
+  path from another service without a declaration).
+- **`Change-Id: I<40 hex>`** (commit trailer in a `git log`,
+  `git show`, `git review`): recorded as an unresolved Gerrit change
+  (`pr` = 0, badge `c#I<8>`); the number is resolved at the next
+  `acctl pr sync` and the entry re-keyed, keeping the Change-Id.
 
-Signal fort de (ré)attribution : `gh pr create`, `glab mr create`,
-`git review`, push `refs/for/*` dans le titre du tool call.
+Strong (re)attribution signal: `gh pr create`, `glab mr create`,
+`git review`, push `refs/for/*` in the tool call title.
 
-Les sorties outils reproduisent aussi le contenu des fichiers lus
-(docs, specs, `AGENTS.md`, tests) — une **denylist de placeholders**
-empêche leurs URLs de créer des entrées fantômes : tout chemin de repo
-dont chaque segment tient en un caractère ou est un libellé générique
-(`o/r`, `g/p`, `owner/repo`, `grp/sub/proj`, `a/b`, `foo/bar`,
-`exemple/truc`…) est ignoré à la détection. Un `pr add` manuel reste
-possible (intention explicite), et GitLab/Gerrit ne matchent de toute
-façon que les hôtes déclarés.
+Tool outputs also reproduce the content of files being read
+(docs, specs, `AGENTS.md`, tests) — two barriers keep their URLs
+from creating phantom entries:
+
+- a **placeholder denylist** at extraction: any repo path where every
+  segment fits in a single character or is a generic label
+  (`o/r`, `g/p`, `owner/repo`, `grp/sub/proj`, `a/b`, `foo/bar`,
+  `example/test`…) is ignored before it can even become a reference;
+- an **existence check on the forge** for every *new* reference: the
+  entry is created only if the forge actually knows the repo AND the
+  review — a plausible but made-up URL (`corp/tools`,
+  `infra-team/deploy/tool`…) never gets in. A manual `pr add` stays
+  possible (explicit intent, never verified), and GitLab/Gerrit only
+  match declared hosts.
+
+## Existence check (auto detection)
+
+An unknown reference extracted from an output goes into a dedicated
+**verification queue** (single worker, one forge call at a time,
+~300 ms between calls) — the watcher never waits on the network:
+
+- **GitHub**: `gh api repos/{o}/{r}/pulls/{n}` (`gh` auth required);
+- **GitLab**: `GET <host>/api/v4/projects/<enc>/merge_requests/<iid>` —
+  declared hosts only, `token_env` honored;
+- **Gerrit**: `GET <host>/changes/<num|Change-Id>` anonymous — declared
+  hosts only.
+
+Verdicts: **exists** → the entry is recorded ("PR detected" event as
+before); **nonexistent** (404/410, or 401/403 = never readable by this
+daemon; undeclared host) → rejection + **bounded negative cache**
+(1024 entries, 30 min TTL): re-occurrences of the same URL are ignored
+without a new call, but a reference created *after* being quoted becomes
+recordable again on expiry; **forge unreachable** (outage, 5xx,
+rate-limit, `gh` missing/unauthenticated) → retries in backoff over
+~15 min then **give up** — detection stays best-effort: a URL
+reappearing later in output restarts the cycle (and journal backfill
+at restart replays outputs).
+
+Safeguards: queue deduplicated by reference key (cap 256 — a flood of
+distinct URLs overworks neither the forge nor memory); a reference
+already in the registry never goes back to verification (synchronous
+detection takes over: possible "strong" reattribution); entry created
+in the meantime (`pr add`, other queue) → verification skipped at
+processing time.
+
+Consequence on a daemon **without working `gh`**: GitHub URLs cannot be
+verified → no auto-recording (retries run out); `acctl pr add` remains
+the fallback — a deliberate choice: an entry this daemon could never
+re-read at sync time would have no value anyway.
 
 ## Configuration
 
-`config.toml` du démon (`$AGENTCONTROL_HOME/config.toml`) :
+Daemon `config.toml` (`$AGENTCONTROL_HOME/config.toml`):
 
 ```toml
 [[forges]]
 type = "gitlab"                    # "gitlab" | "gerrit"
-hosts = ["gitlab.example.com"]     # host[:port][/prefix] sans schéma
-token_env = "GITLAB_TOKEN"         # optionnel — NOM d'une var d'env
-                                   # contenant le token (jamais le
-                                   # token en clair dans la config)
+hosts = ["gitlab.example.com"]     # host[:port][/prefix] without scheme
+token_env = "GITLAB_TOKEN"         # optional — NAME of an env var
+                                   # holding the token (never the
+                                   # token itself in the config)
 
 [[forges]]
 type = "gerrit"
-hosts = ["gerrit.corp:8080", "example.com/gerrit"]  # port et préfixe
-                                                    # de chemin OK
+hosts = ["gerrit.corp:8080", "example.com/gerrit"]  # port and path
+                                                    # prefix OK
 ```
 
-- `github.com` et `gitlab.com` sont implicites — pas besoin de les déclarer.
-- Un même hôte peut servir plusieurs forges : le path de l'URL discrimine.
-- Le set effectif est exposé via le RPC `forge_list`.
+- `github.com` and `gitlab.com` are implicit — no need to declare them.
+- The same host may serve several forges: the URL path discriminates.
+- The effective set is exposed via the `forge_list` RPC.
 
 ## `acctl pr`
 
 ```bash
-acctl pr ls [--all]                     # badges : #N github, !N gitlab,
+acctl pr ls [--all]                     # badges: #N github, !N gitlab,
                                         # c#N / c#I<8> gerrit
 acctl pr add <N|I<cid>> [--session S] [--repo R]
            [--forge github|gitlab|gerrit] [--host H[:port]] [--note t]
-acctl pr note <N|I<cid>> <texte…> | acctl pr rm <N|I<cid>>
-acctl pr sync                           # rafraîchit les statuts
+acctl pr note <N|I<cid>> <text…> | acctl pr rm <N|I<cid>>
+acctl pr sync                           # refreshes statuses
 ```
 
-La même collecte tourne côté démon via le RPC `pr_sync` (crate
-`forgesync` partagée) : l'onglet « Dépôts » du client le demande à
-l'ouverture puis toutes les 60 s tant que l'onglet est actif —
-throttle démon ~45 s, un seul run à la fois (`{synced:false,
-running|throttled:true}` sinon). Dans ce cadre `token_env` est lu dans
-l'env du **démon** (dans celui d'acctl pour `acctl pr sync`).
+The same collection runs daemon-side via the `pr_sync` RPC (shared
+`forgesync` crate): the client's "Repos" tab requests it on open then
+every 60 s while the tab is active — daemon throttle ~45 s, one run at
+a time (`{synced:false, running|throttled:true}` otherwise). In that
+context `token_env` is read from the **daemon** env (from acctl's env
+for `acctl pr sync`).
 
-Sans flags, la cible de `add` est déduite du remote `origin` (hostname
-comparé aux hôtes configurés — le port ssh `:29418` d'un Gerrit matche
-l'hôte web déclaré) ; sinon GitHub comme avant. `rm`/`note` fonctionnent
-autrement : le numéro/Change-Id est **résolu dans le registre** —
-`acctl pr rm 42` trouve une MR GitLab ou un change Gerrit aussi bien
-qu'une PR GitHub (clé complète forge+host+repo+numéro), `--repo` (nu,
-`host:path` ou URL), `--forge` et `--host` agissent comme filtres, et
-une ambiguïté liste les candidates.
+Without flags, `add`'s target is inferred from the `origin` remote
+(hostname compared to configured hosts — a Gerrit's ssh `:29418` port
+matches the declared web host); otherwise GitHub as before.
+`rm`/`note` work differently: the number/Change-Id is **resolved in the
+registry** — `acctl pr rm 42` finds a GitLab MR or a Gerrit change just
+as well as a GitHub PR (full key forge+host+repo+number), `--repo`
+(bare, `host:path` or URL), `--forge` and `--host` act as filters, and
+an ambiguity lists the candidates.
 
-## Sync des statuts
+## Status sync
 
-- **GitHub** : `gh pr view|list` (inchangé).
-- **GitLab** : `GET /api/v4/projects/<p%2Fenc>/merge_requests/<iid>` —
-  anonyme sur les projets publics ; pour une instance privée, déclarer
-  `token_env` et exporter la variable dans l'env d'`acctl`
-  (`PRIVATE-TOKEN`). Un 401/403 ou une panne laisse le statut inchangé
-  avec un warning.
-- **Gerrit** : `GET /changes/<ref>` anonyme — marche sur les instances
-  publiques (vérifié sur `gerrit-review.googlesource.com`). `status`
-  NEW → open (+ `work_in_progress` → draft), MERGED → merged,
-  ABANDONED → closed.
-- **Portée des hôtes** : la collecte n'interroge que les hôtes déclarés
-  (`forge_list` — gitlab.com implicite pour gitlab, github.com pour
-  github) ; une entrée du registre sur un hôte non déclaré est notée
-  « hôte non déclaré — statut inchangé », jamais requêtée.
+- **GitHub**: `gh pr view|list` (unchanged).
+- **GitLab**: `GET /api/v4/projects/<p%2Fenc>/merge_requests/<iid>` —
+  anonymous on public projects; for a private instance, declare
+  `token_env` and export the variable in `acctl`'s env
+  (`PRIVATE-TOKEN`). A 401/403 or an outage leaves the status unchanged
+  with a warning.
+- **Gerrit**: `GET /changes/<ref>` anonymous — works on public instances
+  (verified on `gerrit-review.googlesource.com`). `status` NEW → open
+  (+ `work_in_progress` → draft), MERGED → merged, ABANDONED → closed.
+- **Host scope**: collection only queries declared hosts (`forge_list`
+  — gitlab.com implicit for gitlab, github.com for github); a registry
+  entry on an undeclared host is noted "undeclared host — status
+  unchanged", never queried.
 
-Chaque passage de sync trace aussi les entrées **vues** et
-**injoignables** : `sync_fails` du registre est remis à zéro à la
-première lecture live et incrémenté sinon (hôte mort ou non déclaré,
-repo ou référence absente — pour GitHub, l'échec n'est compté que si
-`gh auth status` répond : un démon sans gh fonctionnel ne pénalise
-rien). Passé **3 échecs consécutifs** l'entrée devient **« non
-résoluble »** : état dédié et ligne estompée dans l'onglet Dépôts, hors
-du compteur et des badges de session (le statut est restauré dès
-qu'une sync la relit — un hôte revenu démasque l'entrée).
+Each sync pass also tracks **seen** and **unreachable** entries: the
+registry's `sync_fails` is reset to zero on the first live read and
+incremented otherwise (dead or undeclared host, missing repo or
+reference — for GitHub the failure only counts if `gh auth status`
+answers: a daemon without working gh penalizes nothing). Past **3
+consecutive failures** the entry becomes **"unresolvable"**: dedicated
+state and dimmed line in the Repos tab, out of the counter and session
+badges (status restored as soon as a sync re-reads it — a host coming
+back unmasks the entry).
 
-Le merge d'une review reste une **permission GitHub-only** : le hook de
-merge des PR (`/mr review`, gates CI) ne s'étend pas à GitLab ni Gerrit —
-le registre y est consultatif (visibilité, attribution, statut).
+Merging a review stays a **GitHub-only permission**: the PR merge hook
+(`/mr review`, CI gates) does not extend to GitLab or Gerrit — the
+registry there is advisory (visibility, attribution, status).

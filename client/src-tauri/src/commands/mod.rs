@@ -4,6 +4,7 @@
 
 pub mod connect;
 pub mod files;
+pub mod pair;
 pub mod saved;
 pub mod session;
 pub mod system;

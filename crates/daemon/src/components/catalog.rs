@@ -6,8 +6,8 @@
 
 use anyhow::{Context, Result};
 use proto::{
-    CatalogDetect, CatalogEntry, ComponentKind, ComponentSpec, Healthcheck, RecipeStep,
-    RestartPolicy,
+    CatalogDetect, CatalogEntry, ComponentKind, ComponentSpec, ConfigRender, Healthcheck,
+    ParamKind, ParamSpec, RecipeStep, RestartPolicy,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
+use tracing::{info, warn};
 
 use super::Components;
 use crate::server::misc::command_available;
@@ -40,6 +41,55 @@ const STEP_TAIL: usize = 4 * 1024;
 const VERSION_MAX: usize = 200;
 /// Corps de release notes remonté au client (tronqué au-delà).
 const NOTES_MAX: usize = 4 * 1024;
+
+/// Template de la config agentreviewer — toutes les clés upstream
+/// (config.example.toml) ; `{{clé}}` = param déclaré rendu en littéral
+/// TOML, ligne omise si le param est sans valeur (défaut du watcher).
+const AGENTREVIEWER_CONFIG_TEMPLATE: &str = "\
+# AgentReviewer — configuration managée par agentcontrol-daemon.
+# Régénérée depuis les paramètres du composant à chaque
+# `acctl comp set agentreviewer <clé> <valeur>` : les éditions manuelles
+# des clés gérées sont écrasées au prochain rendu.
+
+# --- Dépôt surveillé ----------------------------------------------------
+repo = {{repo}}
+repo_dir = {{repo_dir}}
+worktree_root = {{worktree_root}}
+repos = {{repos}}
+
+# --- Trigger ------------------------------------------------------------
+trigger = {{trigger}}
+
+# --- Backend de spawn ---------------------------------------------------
+mode = {{mode}}
+daemon = {{daemon}}
+group = {{group}}
+session_title = \"review {repo} #{pr}\"
+keep_sessions = {{keep_sessions}}
+
+# --- File / ordonnancement ----------------------------------------------
+max_parallel = {{max_parallel}}
+review_timeout = {{review_timeout}}
+max_attempts = 5
+since_overlap_sec = 600
+unit_prefix = \"agentreviewer\"
+marker = \"agentreviewer\"
+post_acks = true
+# state_dir = \"~/.local/state/agentreviewer\"
+
+# --- Agent de review ----------------------------------------------------
+[agent]
+command = {{agent.command}}
+profile = {{agent.profile}}
+model = {{agent.model}}
+args = [
+  \"--model\", \"{model}\",
+  \"--permission-mode\", \"dangerous\",
+  \"--respect-workspace-trust\", \"false\",
+  \"--prompt-file\", \"{prompt_file}\",
+  \"--print\",
+]
+";
 
 /// Résultat (éventuellement vide) d'une sonde upstream — caché par
 /// repo : les échecs le sont autant que les succès pour ne pas
@@ -67,6 +117,8 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 kind: ComponentKind::Tool,
                 // Un `tool` : sa commande *est* sa sonde présence/version.
                 command: vec!["agentbacklog".into(), "--version".into()],
+                version_argv: None,
+                min_version: None,
                 env: HashMap::new(),
                 cwd: None,
                 autostart: false,
@@ -86,6 +138,10 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                         "--json".into(),
                     ],
                 )]),
+                catalog: None,
+                params_schema: Vec::new(),
+                params: HashMap::new(),
+                render: None,
             },
             detect: CatalogDetect {
                 bin: Some("agentbacklog".into()),
@@ -95,6 +151,10 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 // superviseur du démon (systemd minimal…).
                 path: Some("~/.local/bin/agentbacklog".into()),
             },
+            // Aucun paramètre — le schéma existe pour les futurs
+            // composants qui en ont besoin (agentreviewer ci-dessous).
+            params: Vec::new(),
+            render: None,
             recipe: vec![
                 RecipeStep::Run {
                     argv: vec![
@@ -126,6 +186,15 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 // externe). AGENTCONTROL_SOCK/TCP sont injectés au
                 // spawn : il trouve le démon sans config réseau.
                 command: vec!["agent-reviewer".into(), "--watch".into()],
+                // Version du watcher managé — 0.3 est le premier
+                // multi-repo (param `repos` ci-dessous) : un 0.2
+                // installé doit se voir proposer la mise à jour plutôt
+                // qu'échouer en silence sur la config rendue.
+                version_argv: Some(vec![
+                    "agent-reviewer".into(),
+                    "--version".into(),
+                ]),
+                min_version: Some("0.3".into()),
                 env: HashMap::new(),
                 cwd: None,
                 // Config.toml à éditer avant le 1er run utile → l'auto-
@@ -175,12 +244,230 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                         ],
                     ),
                 ]),
+                catalog: None,
+                params_schema: Vec::new(),
+                params: HashMap::new(),
+                render: None,
             },
             detect: CatalogDetect {
                 bin: Some("agent-reviewer".into()),
                 // Posé par install.sh ou la recette dans ~/.local/bin.
                 path: Some("~/.local/bin/agent-reviewer".into()),
             },
+            // Surface de configuration utilisateur — collectée à
+            // l'install (dialogue client), éditable ensuite via
+            // `acctl comp set agentreviewer <clé> <valeur>` ou la carte
+            // du panneau Composants. Les requis manquants bloquent le
+            // démarrage (« configuration requise ») et gèlent le rendu.
+            params: vec![
+                ParamSpec {
+                    key: "repo".into(),
+                    label: "Dépôt GitHub".into(),
+                    description: Some(
+                        "« owner/name » surveillé pour les commentaires \
+                         trigger".into(),
+                    ),
+                    required: true,
+                    kind: ParamKind::String,
+                    default: None,
+                    secret: false,
+                    validation: Some(
+                        r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$".into(),
+                    ),
+                    choices: Vec::new(),
+                },
+                ParamSpec {
+                    key: "repo_dir".into(),
+                    label: "Clone local".into(),
+                    description: Some(
+                        "clone du dépôt — les worktrees de review y \
+                         sont créés (origin → GitHub)".into(),
+                    ),
+                    required: true,
+                    kind: ParamKind::Path,
+                    default: None,
+                    secret: false,
+                    validation: None,
+                    choices: Vec::new(),
+                },
+                ParamSpec {
+                    key: "worktree_root".into(),
+                    label: "Racine des worktrees".into(),
+                    description: Some(
+                        "un worktree frais par review, retiré en fin \
+                         de passe".into(),
+                    ),
+                    required: false,
+                    kind: ParamKind::Path,
+                    default: Some(
+                        "~/.local/state/agentreviewer/worktrees".into(),
+                    ),
+                    secret: false,
+                    validation: None,
+                    choices: Vec::new(),
+                },
+                ParamSpec {
+                    key: "repos".into(),
+                    label: "Dépôts supplémentaires".into(),
+                    description: Some(
+                        "JSON — liste d'objets {repo, repo_dir, \
+                         worktree_root?, trigger?, group?, \
+                         max_parallel?, agent?, …} : chaque entrée \
+                         ajoute un dépôt surveillé en plus du dépôt \
+                         principal (multi-repo, agent-reviewer ≥ 0.3 — \
+                         toute clé globale y est overridable ; `~` est \
+                         expansé par le watcher, pas ici). Ex. \
+                         [{\"repo\": \"o/r\", \"repo_dir\": \"/chemin/clone\"}]"
+                            .into(),
+                    ),
+                    required: false,
+                    kind: ParamKind::Json,
+                    default: None,
+                    secret: false,
+                    validation: None,
+                    choices: Vec::new(),
+                },
+                ParamSpec {
+                    key: "trigger".into(),
+                    label: "Commentaire trigger".into(),
+                    description: Some(
+                        "commentaire nu demandant une review".into(),
+                    ),
+                    required: false,
+                    kind: ParamKind::String,
+                    default: Some("/mr review".into()),
+                    secret: false,
+                    validation: None,
+                    choices: Vec::new(),
+                },
+                ParamSpec {
+                    key: "group".into(),
+                    label: "Groupe des sessions".into(),
+                    description: Some(
+                        "groupe sidebar affecté aux reviews".into(),
+                    ),
+                    required: false,
+                    kind: ParamKind::String,
+                    default: Some("AgentReviewer".into()),
+                    secret: false,
+                    validation: None,
+                    choices: Vec::new(),
+                },
+                ParamSpec {
+                    key: "max_parallel".into(),
+                    label: "Reviews en parallèle".into(),
+                    description: None,
+                    required: false,
+                    kind: ParamKind::Int,
+                    default: Some("1".into()),
+                    secret: false,
+                    validation: None,
+                    choices: Vec::new(),
+                },
+                ParamSpec {
+                    key: "review_timeout".into(),
+                    label: "Timeout par review".into(),
+                    description: Some(
+                        "durée max d'une review (« 3h », « 90min »…)"
+                            .into(),
+                    ),
+                    required: false,
+                    kind: ParamKind::Duration,
+                    default: Some("3h".into()),
+                    secret: false,
+                    validation: None,
+                    choices: Vec::new(),
+                },
+                ParamSpec {
+                    key: "keep_sessions".into(),
+                    label: "Conserver les sessions".into(),
+                    description: Some(
+                        "garde le journal après la review — sinon \
+                         supprimé (le verdict vit sur GitHub)".into(),
+                    ),
+                    required: false,
+                    kind: ParamKind::Bool,
+                    default: Some("false".into()),
+                    secret: false,
+                    validation: None,
+                    choices: Vec::new(),
+                },
+                ParamSpec {
+                    key: "mode".into(),
+                    label: "Backend de spawn".into(),
+                    description: Some(
+                        "vide = auto (démon si un endpoint est \
+                         configuré, systemd sinon)".into(),
+                    ),
+                    required: false,
+                    kind: ParamKind::Enum,
+                    default: None,
+                    secret: false,
+                    validation: None,
+                    choices: vec!["daemon".into(), "systemd".into()],
+                },
+                ParamSpec {
+                    key: "daemon".into(),
+                    label: "Endpoint démon".into(),
+                    description: Some(
+                        "« unix », « unix:/path », « tcp:host:port » — \
+                         vide = env AGENTCONTROL_* injectée".into(),
+                    ),
+                    required: false,
+                    kind: ParamKind::String,
+                    default: None,
+                    secret: false,
+                    validation: None,
+                    choices: Vec::new(),
+                },
+                ParamSpec {
+                    key: "agent.command".into(),
+                    label: "Agent de review".into(),
+                    description: Some(
+                        "exécutable/agent lancé pour la review".into(),
+                    ),
+                    required: false,
+                    kind: ParamKind::String,
+                    default: Some("devin".into()),
+                    secret: false,
+                    validation: None,
+                    choices: Vec::new(),
+                },
+                ParamSpec {
+                    key: "agent.profile".into(),
+                    label: "Profil agent".into(),
+                    description: Some(
+                        "profil du démon — vide = basename de \
+                         agent.command".into(),
+                    ),
+                    required: false,
+                    kind: ParamKind::String,
+                    default: None,
+                    secret: false,
+                    validation: None,
+                    choices: Vec::new(),
+                },
+                ParamSpec {
+                    key: "agent.model".into(),
+                    label: "Modèle".into(),
+                    description: Some(
+                        "champ libre — modèle passé à l'agent".into(),
+                    ),
+                    required: false,
+                    kind: ParamKind::String,
+                    default: Some("swe-2-max".into()),
+                    secret: false,
+                    validation: None,
+                    choices: Vec::new(),
+                },
+            ],
+            // Config utilisateur rendue depuis les params — couvre
+            // toutes les clés upstream ; les lignes à placeholder non
+            // renseigné sont omises (défaut du watcher).
+            render: Some(ConfigRender {
+                path: "~/.config/agentreviewer/config.toml".into(),
+                template: AGENTREVIEWER_CONFIG_TEMPLATE.into(),
+            }),
             recipe: vec![
                 // Packagé upstream (pyproject + console script
                 // `agent-reviewer`, requires-python ≥3.11 géré par uv).
@@ -197,35 +484,27 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                         "git+https://github.com/Wameuh/AgentReviewer".into(),
                     ],
                 },
-                // Seed de la config si absente — jamais d'écrasement
-                // (`test -f` garde les éditions d'une ré-install).
-                RecipeStep::Run {
-                    argv: vec![
-                        "sh".into(),
-                        "-c".into(),
-                        "set -e; \
-                         mkdir -p ~/.config/agentreviewer; \
-                         test -f ~/.config/agentreviewer/config.toml || \
-                           curl -fsSL https://raw.githubusercontent.com/Wameuh/AgentReviewer/main/config.example.toml \
-                             -o ~/.config/agentreviewer/config.toml; \
-                         chmod 600 ~/.config/agentreviewer/config.toml"
-                            .into(),
-                    ],
-                },
+                // La config n'est plus seedée depuis upstream : elle
+                // est rendue depuis les params après upsert_spec
+                // (`render_if_ready`) — sans `repo`/`repo_dir` le
+                // fichier n'est pas écrit et la sonde sentinelle garde
+                // le composant « degraded ».
                 RecipeStep::UpsertSpec,
                 RecipeStep::Note {
-                    text: "Éditez ~/.config/agentreviewer/config.toml \
-                           (reposée par l'install si absente — la sonde \
-                           restera « degraded » tant que ses placeholders \
-                           `owner/repo` seront en place) puis démarrez \
-                           le composant — en `process` managé le watcher \
+                    text: "Renseignez les paramètres du composant \
+                           (`acctl comp set agentreviewer <clé> \
+                           <valeur>`, ou la carte du panneau \
+                           Composants) : `repo` et `repo_dir` sont \
+                           requis — tant qu'ils manquent le statut \
+                           affiche « configuration requise » et le \
+                           démarrage est bloqué. La config \
+                           ~/.config/agentreviewer/config.toml est \
+                           rendue par le démon — inutile de l'éditer à \
+                           la main. En `process` managé le watcher \
                            reçoit AGENTCONTROL_SOCK/TCP injectés et \
                            crée ses reviews en sessions du démon \
                            (origin component:agentreviewer, group \
-                           AgentReviewer). La config est chargée au \
-                           démarrage du watcher — après édition, \
-                           `component restart agentreviewer` pour \
-                           l'appliquer. Si le timer systemd upstream \
+                           AgentReviewer). Si le timer systemd upstream \
                            était activé, désactivez-le \
                            (`systemctl --user disable --now \
                            agentreviewer-watch.timer`) pour éviter un \
@@ -244,6 +523,104 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
         // refusée à l'upsert.
     ]
 });
+
+/// Entrée du catalogue portant ce nom, s'il y en a une — l'édition
+/// utilisateur d'un composant adossé au catalogue est bornée aux
+/// params déclarés (+ autostart/description) : la spec interne est
+/// scellée (`upsert_edit` / `sealed_fields_changed`, mod.rs).
+pub(super) fn entry_named(name: &str) -> Option<&'static CatalogEntry> {
+    CATALOG.iter().find(|e| e.name == name)
+}
+
+/// Spec persistée adossée à l'entrée `entry` : resynchronise les champs
+/// catalogue-owned depuis l'entrée courante — appelée au chargement
+/// (`Components::open`). La spec posée à l'install est un SNAPSHOT :
+/// sans resync, une entrée enrichie par un nouveau démon
+/// (params_schema, render, healthcheck, queries…) garderait la surface
+/// de l'époque à vie — l'utilisateur voyait « l'ancienne configuration »
+/// littéralement (bug : `repos` invisible sur agentreviewer installé
+/// avant l'ajout du param).
+///
+/// Merge en mémoire seulement — components.toml n'est PAS réécrit au
+/// boot (la prochaine `save()` le réaligne d'elle-même) : le fichier
+/// reste le dernier état matérialisé + les choix utilisateur, jamais
+/// un canal de drift forcé. Le catalogue ne change qu'avec le binaire
+/// → le resync au chargement couvre exactement « démon mis à jour ».
+///
+/// Préservés (choix utilisateur) : `params` clé→valeur (les clés
+/// nouvellement déclarées prennent leur défaut via `effective()`),
+/// `autostart`, `description` (éditable via upsert_edit — reprise du
+/// catalogue seulement si absente). Remplacés depuis l'entrée :
+/// kind/command/env/cwd/restart*/healthcheck/queries/version_argv/
+/// min_version/params_schema/render/`catalog`.
+///
+/// Hygiène des params, jamais silencieuse (warn) :
+/// - clé retirée du schéma catalogue → valeur purgée : inéditable via
+///   set_params et jamais consommée par le template — un zombie.
+///   La purge ne court que si l'entrée DÉCLARE un schéma : schéma vide
+///   = params libres (même règle que `set_params`, « métadonnées
+///   seulement ») — y purger toute clé supprimerait au chargement ce
+///   que le chemin d'écriture accepte ;
+/// - valeur rejetée par le schéma resserré (validation durcie) →
+///   retirée : `check_usable` refuserait sinon la spec entière au
+///   chargement — mieux perdre la valeur que le composant.
+pub(super) fn resync(spec: &mut ComponentSpec, entry: &CatalogEntry) {
+    let before = serde_json::to_value(&*spec).ok();
+    if !entry.params.is_empty() {
+        let orphans: Vec<String> = spec
+            .params
+            .keys()
+            .filter(|k| !entry.params.iter().any(|p| &p.key == *k))
+            .cloned()
+            .collect();
+        for k in orphans {
+            warn!(
+                "composant « {} » : param « {k} » retiré du catalogue — valeur purgée",
+                spec.name
+            );
+            spec.params.remove(&k);
+        }
+    }
+    for p in &entry.params {
+        let bad = spec
+            .params
+            .get(&p.key)
+            .is_some_and(|v| !v.is_empty() && super::render::validate_value(p, v).is_err());
+        if bad {
+            warn!(
+                "composant « {} » : param « {} » rejeté par le schéma \
+                 catalogue — valeur retirée (à ressaisir via comp set)",
+                spec.name, p.key
+            );
+            spec.params.remove(&p.key);
+        }
+    }
+    let cat = materialize_spec(entry, &spec.params);
+    spec.kind = cat.kind;
+    spec.command = cat.command;
+    spec.env = cat.env;
+    spec.cwd = cat.cwd;
+    spec.restart = cat.restart;
+    spec.restart_sec = cat.restart_sec;
+    spec.healthcheck = cat.healthcheck;
+    spec.queries = cat.queries;
+    // Sondes de version + seuil : catalogue-owned/scellés comme la
+    // commande — un snapshot figé suivrait sinon un seuil d'époque.
+    spec.version_argv = cat.version_argv;
+    spec.min_version = cat.min_version;
+    spec.params_schema = cat.params_schema;
+    spec.render = cat.render;
+    spec.catalog = cat.catalog;
+    if spec.description.is_none() {
+        spec.description = cat.description;
+    }
+    if serde_json::to_value(&*spec).ok() != before {
+        info!(
+            "composant « {} » : spec resynchronisée depuis l'entrée catalogue « {} »",
+            spec.name, entry.name
+        );
+    }
+}
 
 impl Components {
     /// `ComponentCatalog` : pour chaque entrée — métadonnées +
@@ -273,6 +650,8 @@ impl Components {
                 "repo": e.repo,
                 "homepage": e.homepage,
                 "suggested_spec": e.suggested_spec,
+                "params": e.params,
+                "render": e.render,
                 "recipe": e.recipe,
                 "installed": installed,
                 "version": version,
@@ -325,16 +704,38 @@ impl Components {
         out
     }
 
-    /// `ComponentInstall` : exécute les steps de la recette dans
-    /// l'ordre — `run` argv fixe (pas de shell), `write_file` borné
-    /// HOME, `require_file` (sinon l'étape documentée fait échouer),
-    /// `upsert_spec`, `note` (collectée pour l'utilisateur). L'échec
-    /// d'une étape interrompt la recette avec contexte.
-    pub async fn install(self: &Arc<Self>, name: &str) -> Result<Value> {
-        let entry = CATALOG
-            .iter()
-            .find(|e| e.name == name)
+    /// `ComponentInstall{name, params?}` : exécute les steps de la
+    /// recette dans l'ordre — `run` argv fixe (pas de shell),
+    /// `write_file` borné HOME, `require_file` (sinon l'étape
+    /// documentée fait échouer), `upsert_spec`, `note` (collectée pour
+    /// l'utilisateur). `params` = valeurs collectées par le client
+    /// (dialogue des params déclarés) — validées AVANT la recette :
+    /// une valeur fautive ne doit pas laisser une install à moitié
+    /// faite. La config managée est rendue après la recette quand les
+    /// `required` sont remplis. L'échec d'une étape interrompt la
+    /// recette avec contexte.
+    pub async fn install(
+        self: &Arc<Self>,
+        name: &str,
+        params: Option<HashMap<String, String>>,
+    ) -> Result<Value> {
+        let entry = entry_named(name)
             .with_context(|| format!("entrée catalogue inconnue: {name}"))?;
+        let mut values: HashMap<String, String> = HashMap::new();
+        if let Some(provided) = params {
+            for (k, v) in provided {
+                let ps = entry
+                    .params
+                    .iter()
+                    .find(|p| p.key == k)
+                    .with_context(|| {
+                        format!("paramètre « {k} » non déclaré pour « {name} »")
+                    })?;
+                if !v.is_empty() {
+                    values.insert(k, super::render::validate_value(ps, &v)?);
+                }
+            }
+        }
         let mut notes: Vec<String> = Vec::new();
         for (i, step) in entry.recipe.iter().enumerate() {
             let step_ctx = format!("recette « {name} » étape {}/{}", i + 1, entry.recipe.len());
@@ -356,7 +757,7 @@ impl Components {
                     );
                 }
                 RecipeStep::UpsertSpec => {
-                    let spec = materialize_spec(entry);
+                    let spec = materialize_spec(entry, &values);
                     self.upsert(&entry.name, spec)
                         .await
                         .with_context(|| step_ctx.clone())?;
@@ -364,16 +765,28 @@ impl Components {
                 RecipeStep::Note { text } => notes.push(text.clone()),
             }
         }
+        // Rendu de la config managée — seulement si les `required` sont
+        // remplis (sinon le composant reste « configuration requise »
+        // et la sonde sentinelle le marque degraded).
+        let rendered = match self.spec_of(name).await {
+            Some(spec) => super::render::render_if_ready(&spec).await?,
+            None => false,
+        };
         let installed = detected(&entry.detect);
-        let state = match self.spec_of(name).await {
-            Some(spec) => Some(self.status_of(&spec).await.state),
-            None => None,
+        let (state, missing) = match self.spec_of(name).await {
+            Some(spec) => (
+                Some(self.status_of(&spec).await.state),
+                super::render::missing_required(&spec),
+            ),
+            None => (None, Vec::new()),
         };
         Ok(json!({
             "name": name,
             "installed": installed,
             "state": state,
             "notes": notes,
+            "rendered": rendered,
+            "config_required": missing,
         }))
     }
 }
@@ -396,11 +809,13 @@ fn detected(d: &CatalogDetect) -> bool {
         || d.path.as_deref().map(|p| expand_home(p).is_file()).unwrap_or(false)
 }
 
-/// Sonde de version : `detect.bin --version` si déclaré, sinon la
-/// commande de la spec `tool` (qui *est* sa sonde version). Pas de
-/// sonde applicable (process, external) → None.
+/// Sonde de version : `version_argv` de la spec suggérée si déclaré,
+/// sinon `detect.bin --version`, sinon la commande de la spec `tool`
+/// (qui *est* sa sonde version). Pas de sonde applicable → None.
 async fn probe_version(e: &CatalogEntry) -> Option<String> {
-    let argv: Vec<String> = if let Some(bin) = &e.detect.bin {
+    let argv: Vec<String> = if let Some(argv) = &e.suggested_spec.version_argv {
+        argv.clone()
+    } else if let Some(bin) = &e.detect.bin {
         vec![bin.clone(), "--version".into()]
     } else if e.suggested_spec.kind == ComponentKind::Tool {
         e.suggested_spec.command.clone()
@@ -545,7 +960,8 @@ async fn run_step(argv: &[String]) -> Result<()> {
 /// doit pas créer de répertoires dehors), puis parent canonicalisé
 /// (sortie par symlink refusée) — même garde que
 /// `resolve_in_cwd_create`. Écriture atomique `.part` + rename.
-async fn write_home_file(path: &str, content: &str) -> Result<()> {
+/// `pub(super)` : réutilisée par le rendu de config (`render.rs`).
+pub(super) async fn write_home_file(path: &str, content: &str) -> Result<()> {
     let home = home_dir().context("HOME du démon absent")?;
     let home = std::fs::canonicalize(&home).unwrap_or(home);
     // `~`/relatif ancré sur le HOME *canonicalisé* — sinon un HOME
@@ -597,9 +1013,19 @@ async fn write_home_file(path: &str, content: &str) -> Result<()> {
 /// Spec effective posée par `upsert_spec` : `suggested_spec` avec `~`
 /// expansé sous HOME partout où un chemin peut figurer — le toml
 /// écrit porte des chemins absolus (même normalisation qu'au
-/// chargement/upsert, cf `expand_home_fields`).
-fn materialize_spec(e: &CatalogEntry) -> ComponentSpec {
+/// chargement/upsert, cf `expand_home_fields`). La spec hérite du
+/// schéma de params, de la cible de rendu et de l'origine catalogue
+/// de l'entrée — elle est alors auto-porteuse (validation `comp set`,
+/// re-rendu) sans reconsulter l'entrée.
+fn materialize_spec(
+    e: &CatalogEntry,
+    params: &HashMap<String, String>,
+) -> ComponentSpec {
     let mut s = e.suggested_spec.clone();
+    s.catalog = Some(e.name.clone());
+    s.params_schema = e.params.clone();
+    s.render = e.render.clone();
+    s.params = params.clone();
     super::expand_home_fields(&mut s);
     s
 }
@@ -657,6 +1083,109 @@ mod tests {
             .env
             .keys()
             .any(|k| k.starts_with("AGENTCONTROL_")));
+    }
+
+    /// Spec persistée figée (snapshot pré-params ou schéma d'une
+    /// vieille entrée) : au chargement les champs catalogue-owned sont
+    /// rafraîchis depuis l'entrée, les choix utilisateur conservés et
+    /// les params devenus inutilisables purgés.
+    #[test]
+    fn resync_spec_depuis_le_catalogue() {
+        let entry = entry_named("agentreviewer").unwrap();
+        // Snapshot d'avant les params : ni catalog/params_schema/render,
+        // healthcheck d'époque — + params posés depuis (valeur user,
+        // clé zombie, valeur invalide sous le schéma courant).
+        let mut spec = entry.suggested_spec.clone();
+        spec.catalog = None;
+        spec.params_schema = Vec::new();
+        spec.render = None;
+        spec.healthcheck = Healthcheck::None;
+        // Sonde/seuil « d'époque » — à rafraîchir comme les autres
+        // champs catalogue-owned.
+        spec.version_argv = None;
+        spec.min_version = Some("9.9".into());
+        spec.autostart = true;
+        spec.description = Some("ma description".into());
+        spec.params = HashMap::from([
+            ("repo".to_string(), "Wameuh/AgentControl".to_string()),
+            ("zombie".to_string(), "x".to_string()),
+            ("max_parallel".to_string(), "abc".to_string()),
+        ]);
+        resync(&mut spec, entry);
+        // Champs catalogue rafraîchis (dont `repos`, ajouté après).
+        assert_eq!(spec.catalog.as_deref(), Some("agentreviewer"));
+        assert_eq!(spec.params_schema.len(), entry.params.len());
+        assert!(spec.params_schema.iter().any(|p| p.key == "repos"));
+        assert!(spec.render.is_some());
+        assert_eq!(spec.healthcheck, entry.suggested_spec.healthcheck);
+        assert_eq!(spec.command, entry.suggested_spec.command);
+        assert_eq!(spec.version_argv, entry.suggested_spec.version_argv);
+        assert_eq!(spec.min_version, entry.suggested_spec.min_version);
+        // Choix utilisateur préservés ; zombie + invalide purgés.
+        assert!(spec.autostart);
+        assert_eq!(spec.description.as_deref(), Some("ma description"));
+        assert_eq!(spec.params["repo"], "Wameuh/AgentControl");
+        assert!(!spec.params.contains_key("zombie"));
+        assert!(!spec.params.contains_key("max_parallel"));
+        // Description absente → reprise du catalogue.
+        let mut bare = entry.suggested_spec.clone();
+        bare.description = None;
+        resync(&mut bare, entry);
+        assert_eq!(bare.description, entry.suggested_spec.description);
+    }
+
+    /// Entrée sans schéma déclaré (agentbacklog) : les params libres —
+    /// acceptés par `set_params` (« spec sans schéma = params libres »)
+    /// — ne sont pas purgés au resync, sinon le chargement supprimerait
+    /// ce que le chemin d'écriture accepte.
+    #[test]
+    fn resync_preserve_les_params_libres_sans_schema() {
+        let entry = entry_named("agentbacklog").unwrap();
+        assert!(entry.params.is_empty());
+        let mut spec = materialize_spec(
+            entry,
+            &HashMap::from([("meta".to_string(), "libre".to_string())]),
+        );
+        resync(&mut spec, entry);
+        assert_eq!(spec.params["meta"], "libre");
+    }
+
+    /// Une spec déjà matérialisée depuis l'entrée courante ressort
+    /// identique — le resync au chargement est idempotent.
+    #[test]
+    fn resync_spec_deja_a_jour_est_idempotent() {
+        let entry = entry_named("agentreviewer").unwrap();
+        let mut spec = materialize_spec(
+            entry,
+            &HashMap::from([("repo".to_string(), "o/r".to_string())]),
+        );
+        let before = serde_json::to_value(&spec).unwrap();
+        resync(&mut spec, entry);
+        assert_eq!(serde_json::to_value(&spec).unwrap(), before);
+        assert_eq!(spec.params["repo"], "o/r");
+    }
+
+    /// Chaque `{{clé}}` d'un template de rendu doit être déclarée dans
+    /// les `params` de l'entrée — un placeholder hors schéma ferait
+    /// échouer le rendu au premier `comp set` (`render_template` le
+    /// rejette) : autant le casser au test.
+    #[test]
+    fn les_placeholders_des_templates_sont_declares() {
+        for e in CATALOG.iter() {
+            let Some(render) = &e.render else { continue };
+            let mut rest = render.template.as_str();
+            while let Some(s) = rest.find("{{") {
+                let after = &rest[s + 2..];
+                let end = after.find("}}").expect("placeholder {{ non fermé");
+                let key = after[..end].trim();
+                assert!(
+                    e.params.iter().any(|p| p.key == key),
+                    "entrée « {} » : placeholder {{{{{key}}}}} hors schéma",
+                    e.name
+                );
+                rest = &after[end + 2..];
+            }
+        }
     }
 }
 

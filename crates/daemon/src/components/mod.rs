@@ -9,6 +9,8 @@
 
 mod catalog;
 mod proc;
+mod render;
+mod version;
 
 use anyhow::{Context, Result};
 use proto::{
@@ -93,8 +95,9 @@ pub struct Components {
     /// vie : leur « état » n'est qu'une observation périodique — pour
     /// un `tool` absent il n'y a rien à retenir, l'entrée est effacée).
     observed: RwLock<HashMap<String, bool>>,
-    /// Dernière version sondée des `tool` (1re ligne de leur commande
-    /// — absente de la map tant que la sonde n'a rien rapporté).
+    /// Dernière version sondée de l'outil managé par composant
+    /// (`version_argv` pour process/external, `command` pour tool —
+    /// absente de la map tant que la sonde n'a rien rapporté).
     versions: RwLock<HashMap<String, String>>,
     a2a_enabled: bool,
     /// Surface web du démon (partagé avec `Daemon.web`) — l'état du
@@ -133,6 +136,14 @@ impl Components {
         };
         let mut map = BTreeMap::new();
         for mut spec in specs {
+            // Spec adossée au catalogue : la spec persistée est un
+            // snapshot de l'entrée à l'install — les champs catalogue-
+            // owned sont rafraîchis depuis l'entrée courante (le
+            // catalogue évolue avec le binaire), les choix utilisateur
+            // (params/autostart/description) préservés (catalog.rs).
+            if let Some(entry) = catalog::entry_named(&spec.name) {
+                catalog::resync(&mut spec, entry);
+            }
             expand_home_fields(&mut spec);
             if let Err(e) = check_usable(&spec) {
                 warn!("composant « {} » ignoré: {e}", spec.name);
@@ -239,24 +250,38 @@ impl Components {
     async fn item_of(&self, name: &str) -> Option<Value> {
         if let Some(spec) = self.specs.read().await.get(name).cloned() {
             let st = self.status_of(&spec).await;
-            return Some(item_json(&spec, &st, "components.toml"));
+            return Some(item_json(
+                &render::masked_spec(&spec),
+                &st,
+                "components.toml",
+            ));
         }
         if name == orch::COMPONENT_NAME {
             // État déduit de la phase de l'orchestrateur natif + son
             // instantané (ledger workers, gardes) dans `orchestrator`.
+            // params_schema + params : la config éditable à chaud — le
+            // client en tire son formulaire « Configurer » générique et
+            // envoie `component_set_params` (intercepté → orch).
             let i = INTERNALS.iter().find(|i| i.name == name)?;
+            let cfg = self.orch.cfg.read().unwrap().clone();
             let spec = ComponentSpec {
                 name: name.to_string(),
                 kind: ComponentKind::Internal,
                 command: Vec::new(),
+                version_argv: None,
+                min_version: None,
                 env: HashMap::new(),
                 cwd: None,
-                autostart: self.orch.cfg.enabled,
+                autostart: cfg.enabled,
                 restart: RestartPolicy::Never,
                 restart_sec: 0,
                 healthcheck: Healthcheck::None,
                 description: Some(i.description.to_string()),
                 queries: HashMap::new(),
+                catalog: None,
+                params_schema: crate::server::orch_cfg::params_schema(),
+                params: crate::server::orch_cfg::params_values(&cfg),
+                render: None,
             };
             let st = ComponentStatus {
                 state: self.orch.component_state(),
@@ -272,6 +297,8 @@ impl Components {
                 name: name.to_string(),
                 kind: ComponentKind::Internal,
                 command: Vec::new(),
+                version_argv: None,
+                min_version: None,
                 env: HashMap::new(),
                 cwd: None,
                 autostart: true,
@@ -280,6 +307,10 @@ impl Components {
                 healthcheck: Healthcheck::None,
                 description: Some(i.description.to_string()),
                 queries: HashMap::new(),
+                catalog: None,
+                params_schema: Vec::new(),
+                params: HashMap::new(),
+                render: None,
             };
             let st = ComponentStatus {
                 state: if running {
@@ -372,7 +403,26 @@ impl Components {
     /// `process`, le process vivant est arrêté — un ancien managé ne
     /// doit pas continuer à (re)tourner sous une spec sans cycle de
     /// vie.
-    pub async fn upsert(self: &Arc<Self>, name: &str, mut spec: ComponentSpec) -> Result<ComponentStatus> {
+    ///
+    /// Chemin interne (recette `upsert_spec`, params à venir) — la
+    /// garde « spec scellée » des entrées catalogue n'est appliquée
+    /// que sur la surface d'édition utilisateur (`upsert_edit`).
+    pub async fn upsert(self: &Arc<Self>, name: &str, spec: ComponentSpec) -> Result<ComponentStatus> {
+        self.upsert_inner(name, spec, false).await
+    }
+
+    /// Variante pour `ComponentUpsert` (RPC — surface d'édition
+    /// utilisateur) : sur un composant adossé au catalogue, la spec
+    /// interne (kind/command/env/cwd/restart*/healthcheck/queries) est
+    /// scellée — propriété du catalogue/dev. Seuls `autostart` et
+    /// `description` (et demain les params déclarés) relèvent de
+    /// l'utilisateur ; tout autre champ modifié est refusé avec la
+    /// liste des champs scellés.
+    pub async fn upsert_edit(self: &Arc<Self>, name: &str, spec: ComponentSpec) -> Result<ComponentStatus> {
+        self.upsert_inner(name, spec, true).await
+    }
+
+    async fn upsert_inner(self: &Arc<Self>, name: &str, mut spec: ComponentSpec, edit_bound: bool) -> Result<ComponentStatus> {
         anyhow::ensure!(
             spec.name == name,
             "spec.name « {} » ≠ name « {name} » — la clé d'édition est le nom déclaré",
@@ -380,6 +430,9 @@ impl Components {
         );
         expand_home_fields(&mut spec);
         check_editable(&spec)?;
+        if edit_bound {
+            self.check_edit_bound(&mut spec).await?;
+        }
         // Même borne qu'au chargement : le backoff plafonne à 60 s.
         spec.restart_sec = spec.restart_sec.min(BACKOFF_CAP_SECS);
         let prev_kind = self.specs.read().await.get(name).map(|p| p.kind);
@@ -387,6 +440,23 @@ impl Components {
             prev_kind,
             Some(ComponentKind::Process) if spec.kind != ComponentKind::Process
         );
+        // Champs gérés par le mécanisme de params (catalog installé) :
+        // un upsert brut qui les laisse vides (éditeur spec, acctl add)
+        // ne doit pas les perdre — hérités de la spec précédente.
+        if let Some(prev) = self.specs.read().await.get(name).cloned() {
+            if spec.catalog.is_none() {
+                spec.catalog = prev.catalog;
+            }
+            if spec.params_schema.is_empty() {
+                spec.params_schema = prev.params_schema;
+            }
+            if spec.render.is_none() {
+                spec.render = prev.render;
+            }
+            for (k, v) in prev.params {
+                spec.params.entry(k).or_insert(v);
+            }
+        }
         // Mutation mémoire AVANT le cycle de vie : un `start` concurrent
         // lit la nouvelle spec (kind≠process → require_process refuse) et
         // un respawn planifié sort via la garde kind — la fenêtre où un
@@ -415,6 +485,37 @@ impl Components {
             return Err(e);
         }
         Ok(self.status_of(&spec).await)
+    }
+
+    /// Garde « spec scellée » des composants catalogue — appelée par
+    /// `upsert_inner` après expansion `~` (valeurs normalisées des deux
+    /// côtés). Refuse aussi la création d'une spec portant le nom
+    /// d'une entrée : il revient à `ComponentInstall` de la poser.
+    /// Sur acceptation, `spec` récupère les métadonnées catalogue de
+    /// la spec courante (`preserve_catalog_meta`).
+    async fn check_edit_bound(&self, spec: &mut ComponentSpec) -> Result<()> {
+        if catalog::entry_named(&spec.name).is_none() {
+            return Ok(());
+        }
+        let cur = self.specs.read().await.get(&spec.name).cloned();
+        let Some(cur) = cur else {
+            anyhow::bail!(
+                "« {} » est une entrée du catalogue — installer via \
+                 ComponentInstall ; la spec interne n'est pas éditable",
+                spec.name
+            );
+        };
+        let sealed = sealed_fields_changed(spec, &cur);
+        anyhow::ensure!(
+            sealed.is_empty(),
+            "« {} » : spec interne scellée par le catalogue — champs \
+             refusés : {} (seuls autostart/description et les params \
+             déclarés sont éditables)",
+            spec.name,
+            sealed.join(", ")
+        );
+        preserve_catalog_meta(&cur, spec)?;
+        Ok(())
     }
 
     /// Retire la spec déclarée `name` : un `process` vivant est arrêté
@@ -447,6 +548,100 @@ impl Components {
             return Err(e);
         }
         Ok(())
+    }
+
+    /// `ComponentSetParams{name, params}` — fusion dans `spec.params`
+    /// (valeur vide = retrait de la clé) après validation par le schéma
+    /// déclaré (`params_schema` : clé inconnue refusée — filet contre
+    /// les typos ; spec sans schéma = params libres, métadonnées
+    /// seulement). Réécrit components.toml, re-rend la config managée
+    /// quand les `required` sont tous remplis, puis relance le
+    /// `process` s'il tourne pour appliquer.
+    pub async fn set_params(
+        self: &Arc<Self>,
+        name: &str,
+        updates: &HashMap<String, String>,
+    ) -> Result<Value> {
+        let mut spec = self
+            .specs
+            .read()
+            .await
+            .get(name)
+            .cloned()
+            .with_context(|| format!("composant inconnu: {name}"))?;
+        // Validation AVANT toute mutation — une valeur fautive ne doit
+        // pas corrompre la moitié d'une fusion.
+        let mut canon: Vec<(String, String)> = Vec::with_capacity(updates.len());
+        for (k, v) in updates {
+            match spec.params_schema.iter().find(|p| &p.key == k) {
+                Some(ps) => {
+                    if v.is_empty() {
+                        canon.push((k.clone(), String::new()));
+                    } else {
+                        canon.push((
+                            k.clone(),
+                            render::validate_value(ps, v)?,
+                        ));
+                    }
+                }
+                None if spec.params_schema.is_empty() => {
+                    canon.push((k.clone(), v.clone()));
+                }
+                None => anyhow::bail!(
+                    "paramètre « {k} » non déclaré — connus : {}",
+                    spec.params_schema
+                        .iter()
+                        .map(|p| p.key.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }
+        }
+        for (k, v) in canon {
+            if v.is_empty() {
+                spec.params.remove(&k);
+            } else {
+                spec.params.insert(k, v);
+            }
+        }
+        self.specs
+            .write()
+            .await
+            .insert(name.to_string(), spec.clone());
+        if let Err(e) = self.save().await {
+            warn!("composant « {name} » params en mémoire mais save() a échoué: {e:#}");
+            return Err(e);
+        }
+        let rendered = render::render_if_ready(&spec).await?;
+        // « relance si running » : le process vivant recharge sa config.
+        let alive = self
+            .procs
+            .read()
+            .await
+            .get(name)
+            .and_then(|p| p.pid)
+            .is_some();
+        let restarted = if rendered && alive && spec.kind == ComponentKind::Process {
+            match self.restart(name).await {
+                Ok(_) => true,
+                Err(e) => {
+                    warn!("composant « {name} » : restart après set_params en échec: {e:#}");
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        let mut st = self.status_of(&spec).await;
+        st.config_required = render::missing_required(&spec);
+        Ok(json!({
+            "name": name,
+            "state": st.state,
+            "params": render::masked_spec(&spec).params,
+            "config_required": st.config_required,
+            "rendered": rendered,
+            "restarted": restarted,
+        }))
     }
 
     /// Lecture du log `<root>/components/<name>.log` — tail paginé.
@@ -613,14 +808,16 @@ impl Components {
         }
     }
 
-    /// Version sondée courante d'un `tool` (pour status_of).
-    pub(crate) async fn tool_version(&self, name: &str) -> Option<String> {
+    /// Version sondée courante de l'outil d'un composant (pour
+    /// status_of — `tool` comme `process`/`external` avec
+    /// `version_argv`).
+    pub(crate) async fn probed_version(&self, name: &str) -> Option<String> {
         self.versions.read().await.get(name).cloned()
     }
 
-    /// Pose/efface la version rapportée par la sonde d'un `tool` —
-    /// `None` = sonde sans sortie exploitable (ou tool absent).
-    pub(crate) async fn set_tool_version(&self, name: &str, v: Option<String>) {
+    /// Pose/efface la version rapportée par la sonde d'un composant —
+    /// `None` = sonde sans sortie exploitable (ou outil absent).
+    pub(crate) async fn set_probed_version(&self, name: &str, v: Option<String>) {
         let mut m = self.versions.write().await;
         match v {
             Some(v) => {
@@ -630,6 +827,19 @@ impl Components {
                 m.remove(name);
             }
         }
+    }
+
+    /// La version sondée est-elle sous le seuil déclaré
+    /// (`min_version` de la spec, sinon de l'entrée catalogue
+    /// homonyme) ? Version ou seuil absents/indéchiffrables → false.
+    pub(crate) async fn version_outdated(&self, spec: &ComponentSpec) -> bool {
+        let (Some(min), Some(v)) = (
+            version::min_version(spec),
+            self.probed_version(&spec.name).await,
+        ) else {
+            return false;
+        };
+        version::version_below_min(&v, &min)
     }
 
     /// Env injectée au spawn de tout `process` managé — le composant
@@ -674,6 +884,10 @@ fn item_json(spec: &ComponentSpec, st: &ComponentStatus, source: &str) -> Value 
         "autostart": spec.autostart,
         "description": spec.description,
         "source": source,
+        // Nom couvert par une entrée du catalogue → l'édition
+        // utilisateur est bornée (upsert_edit) : le client n'expose
+        // que les params déclarés, la spec interne est scellée.
+        "catalog": catalog::entry_named(&spec.name).is_some(),
         "spec": spec,
         "status": st,
     })
@@ -711,6 +925,12 @@ fn expand_home_fields(spec: &mut ComponentSpec) {
             .map(|a| catalog::expand_home_str(a))
             .collect();
     }
+    if let Some(argv) = &mut spec.version_argv {
+        *argv = argv
+            .iter()
+            .map(|a| catalog::expand_home_str(a))
+            .collect();
+    }
     spec.queries = spec
         .queries
         .iter()
@@ -721,6 +941,9 @@ fn expand_home_fields(spec: &mut ComponentSpec) {
             )
         })
         .collect();
+    if let Some(r) = &mut spec.render {
+        r.path = catalog::expand_home_str(&r.path);
+    }
 }
 
 /// Refuse les specs inutilisables : nom invalide ou réservé à un
@@ -760,6 +983,90 @@ fn check_usable(spec: &ComponentSpec) -> Result<()> {
     if let Healthcheck::Command { argv } = &spec.healthcheck {
         if let Some(argv0) = argv.first() {
             check_not_supervisor(argv0)?;
+        }
+    }
+    // Idem pour la sonde de version — même cadence que le healthcheck.
+    if let Some(argv) = &spec.version_argv {
+        let argv0 = argv
+            .first()
+            .context("version_argv vide — déclarer l'argv de la sonde")?;
+        check_not_supervisor(argv0)?;
+    }
+    // Un seuil sans composante numérique ne pourrait jamais être
+    // comparé, et un seuil sans sonde de version applicable ne serait
+    // jamais évalué — refusés à l'enregistrement plutôt que muets.
+    if let Some(min) = &spec.min_version {
+        anyhow::ensure!(
+            version::nums(min).is_some(),
+            "min_version « {min} » sans composante numérique"
+        );
+        anyhow::ensure!(
+            version::version_argv(spec).is_some(),
+            "min_version sans sonde de version — déclarer version_argv"
+        );
+    }
+    // Schéma de params : clés uniques et bien formées, enum exige ses
+    // choix, `validation` doit compiler — le schéma est la promesse
+    // faite au formulaire client, une entrée cassée est refusée ici.
+    let mut seen = std::collections::HashSet::new();
+    for p in &spec.params_schema {
+        anyhow::ensure!(
+            !p.key.is_empty()
+                && p.key
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()
+                        || matches!(c, '.' | '_' | '-')),
+            "param « {} » invalide ([a-z0-9_.-]+ attendu)",
+            p.key
+        );
+        anyhow::ensure!(seen.insert(p.key.as_str()), "param « {} » dupliqué", p.key);
+        if p.kind == proto::ParamKind::Enum {
+            anyhow::ensure!(
+                !p.choices.is_empty(),
+                "param « {} » : kind=enum exige `choices`",
+                p.key
+            );
+        }
+        if let Some(re) = &p.validation {
+            regex::Regex::new(re)
+                .with_context(|| format!("param « {} » : validation regex invalide", p.key))?;
+        }
+        // Un défaut invalide se ferait refuser à chaque set/rendu —
+        // valider à l'enregistrement plutôt.
+        if let Some(d) = &p.default {
+            if !d.is_empty() {
+                render::validate_value(p, d).with_context(|| {
+                    format!("param « {} » : défaut invalide", p.key)
+                })?;
+            }
+        }
+        // `secret` sans défaut : le schéma part en clair dans
+        // `component_catalog`/`component_info` — un défaut y fuiterait.
+        anyhow::ensure!(
+            !(p.secret && p.default.as_deref().is_some_and(|d| !d.is_empty())),
+            "param « {} » : un secret ne déclare pas de défaut",
+            p.key
+        );
+        // `secret` + `json` : le masque « •••••• » n'est pas du JSON —
+        // le formulaire n'a pas de chemin « vide = conserver » pour ce
+        // kind, le combo est refusé tant qu'aucun besoin ne l'exige.
+        anyhow::ensure!(
+            !(p.secret && p.kind == proto::ParamKind::Json),
+            "param « {} » : secret+json non supporté",
+            p.key
+        );
+    }
+    // Valeurs posées : les clés déclarées doivent valider — un upsert
+    // ou une édition brute du toml peut y injecter du non canonique
+    // (un bool verbatim « bogus » rendrait sinon un TOML syntaxiquement
+    // cassé ; le rendu revalide aussi, en défense en profondeur).
+    for (k, v) in &spec.params {
+        if v.is_empty() {
+            continue; // retrait explicite — effective() retombe au défaut
+        }
+        if let Some(ps) = spec.params_schema.iter().find(|p| &p.key == k) {
+            render::validate_value(ps, v)
+                .with_context(|| format!("param « {k} » : valeur invalide"))?;
         }
     }
     // Queries déclarées : nom [a-z0-9-]+, argv non vide, argv0 jamais
@@ -808,4 +1115,168 @@ fn check_editable(spec: &ComponentSpec) -> Result<()> {
         kind_name(spec.kind)
     );
     Ok(())
+}
+
+/// Champs internes scellés ayant divergé entre la spec envoyée et la
+/// spec courante — helper pur de `check_edit_bound` : tout champ qui
+/// n'est ni `autostart` ni `description` (ni les params déclarés à
+/// venir) appartient au catalogue/dev, pas à l'utilisateur.
+fn sealed_fields_changed(new: &ComponentSpec, cur: &ComponentSpec) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if new.kind != cur.kind {
+        out.push("kind");
+    }
+    if new.command != cur.command {
+        out.push("command");
+    }
+    if new.env != cur.env {
+        out.push("env");
+    }
+    if new.cwd != cur.cwd {
+        out.push("cwd");
+    }
+    if new.restart != cur.restart {
+        out.push("restart");
+    }
+    if new.restart_sec != cur.restart_sec {
+        out.push("restart_sec");
+    }
+    if new.healthcheck != cur.healthcheck {
+        out.push("healthcheck");
+    }
+    if new.queries != cur.queries {
+        out.push("queries");
+    }
+    if new.version_argv != cur.version_argv {
+        out.push("version_argv");
+    }
+    if new.min_version != cur.min_version {
+        out.push("min_version");
+    }
+    out
+}
+
+/// Recopie dans `spec` les métadonnées catalogue portées par `cur` —
+/// `params`/`params_schema`/`catalog`/`render` : ces champs (write-path
+/// params dédié, pas la surface d'édition) ne peuvent ni être effacés
+/// par une spec qui les omet, ni forgés par une spec qui les porte.
+/// Copie au niveau JSON — no-op tant que `ComponentSpec` ne sérialise
+/// pas ces clés, donc rétro- et avant-compatible. Une re-désérialisation
+/// en échec est un refus, pas un fallback : la spec entrante, qui peut
+/// porter des métas forgées, ne doit pas passer telle quelle.
+fn preserve_catalog_meta(cur: &ComponentSpec, spec: &mut ComponentSpec) -> Result<()> {
+    const META: [&str; 4] = ["params", "params_schema", "catalog", "render"];
+    let mut new = serde_json::to_value(&*spec).context("spec → json")?;
+    let old = serde_json::to_value(cur).context("spec courante → json")?;
+    let (Some(new), Some(old)) = (new.as_object_mut(), old.as_object()) else {
+        // Une spec sérialise toujours en objet — hors-objet impossible.
+        return Ok(());
+    };
+    for k in META {
+        match old.get(k) {
+            Some(v) => new.insert(k.to_string(), v.clone()),
+            None => new.remove(k),
+        };
+    }
+    *spec = serde_json::from_value(Value::Object(std::mem::take(new)))
+        .context("métadonnées catalogue incohérentes avec la spec")?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_spec() -> ComponentSpec {
+        ComponentSpec {
+            name: "agentreviewer".into(),
+            kind: ComponentKind::Process,
+            command: vec!["agent-reviewer".into(), "--watch".into()],
+            version_argv: Some(vec!["agent-reviewer".into(), "--version".into()]),
+            min_version: Some("0.3".into()),
+            env: HashMap::new(),
+            cwd: None,
+            autostart: false,
+            restart: RestartPolicy::OnFailure,
+            restart_sec: 5,
+            healthcheck: Healthcheck::None,
+            description: Some("desc".into()),
+            queries: HashMap::new(),
+            catalog: Some("agentreviewer".into()),
+            params_schema: Vec::new(),
+            params: HashMap::new(),
+            render: None,
+        }
+    }
+
+    /// La surface utilisateur ne peut toucher qu'autostart/description
+    /// — toute divergence de champ interne est rapportée scellée.
+    #[test]
+    fn champs_scelles_detectes() {
+        let cur = base_spec();
+        // Champs utilisateurs → jamais rapportés.
+        let mut user = cur.clone();
+        user.autostart = !cur.autostart;
+        user.description = Some("autre".into());
+        assert!(sealed_fields_changed(&user, &cur).is_empty());
+        // Chaque champ interne divergé est listé.
+        let mut cmd = cur.clone();
+        cmd.command = vec!["autre".into()];
+        assert_eq!(sealed_fields_changed(&cmd, &cur), ["command"]);
+        let mut k = cur.clone();
+        k.kind = ComponentKind::External;
+        assert_eq!(sealed_fields_changed(&k, &cur), ["kind"]);
+        let mut hc = cur.clone();
+        hc.healthcheck = Healthcheck::Tcp { addr: "127.0.0.1:1".into() };
+        assert_eq!(sealed_fields_changed(&hc, &cur), ["healthcheck"]);
+        let mut env = cur.clone();
+        env.env.insert("FOO".into(), "bar".into());
+        assert_eq!(sealed_fields_changed(&env, &cur), ["env"]);
+        let mut rs = cur.clone();
+        rs.restart = RestartPolicy::Always;
+        rs.restart_sec = 9;
+        assert_eq!(sealed_fields_changed(&rs, &cur), ["restart", "restart_sec"]);
+        let mut q = cur.clone();
+        q.queries.insert("state".into(), vec!["cat".into()]);
+        assert_eq!(sealed_fields_changed(&q, &cur), ["queries"]);
+        let mut va = cur.clone();
+        va.version_argv = Some(vec!["autre".into()]);
+        assert_eq!(sealed_fields_changed(&va, &cur), ["version_argv"]);
+        let mut mv = cur.clone();
+        mv.min_version = Some("9.9".into());
+        assert_eq!(sealed_fields_changed(&mv, &cur), ["min_version"]);
+        // Spec identique → rien.
+        assert!(sealed_fields_changed(&cur, &cur).is_empty());
+        // preserve_catalog_meta : les métas de la spec entrante (omises
+        // ou forgées) sont recopiées de la courante — ni effacées ni
+        // forgées par un upsert.
+        let mut cur = base_spec();
+        cur.params.insert("repo".into(), "Wameuh/AgentReviewer".into());
+        cur.params_schema.push(proto::ParamSpec {
+            key: "repo".into(),
+            label: "Repo".into(),
+            description: None,
+            required: true,
+            kind: proto::ParamKind::String,
+            default: None,
+            secret: false,
+            validation: None,
+            choices: Vec::new(),
+        });
+        cur.render = Some(proto::ConfigRender {
+            path: "~/x.toml".into(),
+            template: "repo={{repo}}".into(),
+        });
+        let mut forged = cur.clone();
+        forged.catalog = Some("autre".into());
+        forged.params.insert("repo".into(), "evil/x".into());
+        forged.render = None;
+        forged.params_schema = Vec::new();
+        preserve_catalog_meta(&cur, &mut forged).unwrap();
+        assert_eq!(forged.catalog.as_deref(), Some("agentreviewer"));
+        assert_eq!(forged.params["repo"], "Wameuh/AgentReviewer");
+        assert!(forged.render.is_some());
+        assert_eq!(forged.params_schema.len(), 1);
+        assert!(sealed_fields_changed(&forged, &cur).is_empty());
+    }
 }

@@ -8,7 +8,7 @@ use proto::{ReqKind, Request, Response};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
@@ -304,46 +304,136 @@ pub enum Transport {
         password: Option<String>,
         /// Chemin d'une clé privée OpenSSH ; None = clé générée de l'app.
         key_path: Option<PathBuf>,
+        /// Empreintes `SHA256:…` de host key épinglées (profil appairé —
+        /// persiste le `hk` du QR). `None` = accept-all historique.
+        expected_hk: Option<std::collections::HashSet<String>>,
     },
 }
 
 /// Garde un process ssh (CLI) ou une session russh vivante tant que le
 /// client existe.
 pub enum SshGuard {
-    Process(tokio::sync::Mutex<Child>),
+    Process {
+        child: Mutex<Child>,
+        /// Fin du stderr ssh, drainé en tâche de fond — sa lecture au
+        /// post-mortem distingue les causes de mort (« Timeout, server
+        /// not responding » = keepalive local ; « Connection reset » =
+        /// RST ; « closed by remote » = EOF distant), et un lecteur
+        /// permanent évite que ssh ne se bloque sur un pipe plein ou
+        /// sans lecteur.
+        stderr_tail: Arc<std::sync::Mutex<String>>,
+        /// Positionné par Drop : un exit ssh postérieur est un kill
+        /// local (remplacement/déconnexion), pas une mort spontanée.
+        killed: Arc<AtomicBool>,
+    },
     Native(ssh_native::NativeGuard),
 }
 impl SshGuard {
-    fn process(c: Child) -> Self {
-        Self::Process(tokio::sync::Mutex::new(c))
+    fn process(c: Child, stderr_tail: Arc<std::sync::Mutex<String>>) -> Self {
+        Self::Process {
+            child: Mutex::new(c),
+            stderr_tail,
+            killed: Arc::new(AtomicBool::new(false)),
+        }
     }
     fn native(g: ssh_native::NativeGuard) -> Self {
         Self::Native(g)
     }
+
+    /// Cause de mort du transport SSH, lue au post-mortem par la boucle
+    /// de lecture : exit status + stderr (openssh), raison capturée par
+    /// le handler (russh), ou vivacité résiduelle (canal seul fermé).
+    fn death_note(&self) -> String {
+        match self {
+            Self::Process {
+                child,
+                stderr_tail,
+                killed,
+            } => {
+                if killed.load(Ordering::SeqCst) {
+                    return "ssh tué localement (déconnexion/remplacement)".into();
+                }
+                let st = child
+                    .try_lock()
+                    .ok()
+                    .and_then(|mut c| c.try_wait().ok().flatten());
+                let tail = stderr_tail
+                    .lock()
+                    .map(|t| t.trim().to_string())
+                    .unwrap_or_default();
+                let Some(status) = st else {
+                    // ssh tourne encore mais notre canal forwardé est
+                    // mort : le serveur a fermé ce seul canal (sshd a
+                    // lâché la session ou le forward refusé côté distant).
+                    return format!(
+                        "canal forwardé fermé — process ssh encore vivant{}",
+                        tail_suffix(&tail)
+                    );
+                };
+                let cls = if tail.contains("Timeout, server")
+                    && tail.contains("not responding")
+                {
+                    "keepalive-timeout local (serveur/réseau muet ~90-120 s)"
+                } else if tail.contains("Connection reset")
+                    || tail.contains("reset by peer")
+                {
+                    "RST distant (connexion réinitialisée)"
+                } else if tail.contains("closed by remote")
+                    || tail.contains("Connection to ")
+                {
+                    "EOF distant (le serveur a fermé la session)"
+                } else {
+                    "ssh quitté"
+                };
+                format!("{cls} [{status}]{}", tail_suffix(&tail))
+            }
+            Self::Native(g) => g.death_note(),
+        }
+    }
 }
 impl Drop for SshGuard {
     fn drop(&mut self) {
-        if let Self::Process(c) = self {
-            if let Ok(mut c) = c.try_lock() {
+        if let Self::Process { child, killed, .. } = self {
+            killed.store(true, Ordering::SeqCst);
+            if let Ok(mut c) = child.try_lock() {
                 let _ = c.start_kill();
             }
         }
     }
 }
 
-/// Lit le stderr de ssh (borné à 500 ms pour ne pas bloquer).
-async fn drain_err(s: &mut Option<tokio::process::ChildStderr>) -> String {
-    if let Some(mut e) = s.take() {
-        let mut buf = String::new();
-        use tokio::io::AsyncReadExt;
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            e.read_to_string(&mut buf),
-        )
-        .await;
-        buf.trim().to_string()
-    } else {
-        String::new()
+/// « : <dernières lignes stderr> » — suffixe diag borné (400 c.) pour
+/// les notes de mort ; vide si rien n'a été capté. Les warnings
+/// hostkey « Permanently added » sont écartés — du bruit connect-time
+/// qui noyait la cause réelle dans la fenêtre de 400 caractères.
+fn tail_suffix(tail: &str) -> String {
+    let cleaned: Vec<&str> = tail
+        .lines()
+        .filter(|l| !l.contains("Permanently added"))
+        .collect();
+    if cleaned.is_empty() {
+        return String::new();
+    }
+    let t: String = cleaned
+        .join("\n")
+        .chars()
+        .rev()
+        .take(400)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!(" : {t}")
+}
+
+/// Contenu brut du stderr ssh accumulé (erreurs de connexion au boot).
+fn guard_err_tail(g: &SshGuard) -> String {
+    match g {
+        SshGuard::Process { stderr_tail, .. } => stderr_tail
+            .lock()
+            .map(|t| t.trim().to_string())
+            .unwrap_or_default(),
+        SshGuard::Native(_) => String::new(),
     }
 }
 
@@ -409,9 +499,11 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                 "ServerAliveInterval=30",
                 "-o",
                 // Lien mort (NAT/firewall qui droppe l'idle, blackhole) :
-                // ssh meurt au bout de ~60-75 s au lieu de ~90+ — le reader
-                // EOF déclenche la reconnexion au lieu d'attendre en zombie.
-                "ServerAliveCountMax=2",
+                // ssh meurt au bout de ~90-120 s de silence — aligné sur
+                // le budget russh (keepalive 30 s × 3). 2 tuait à 60-90 s
+                // pile dans la fenêtre des stalls serveur observés (#128 :
+                // mort à ~89 s de silence, service rendu 9 s après).
+                "ServerAliveCountMax=3",
                 "-o",
                 // keepalive TCP en plus des sondes applicatives — détecte
                 // la mort du pair même sans trafic sur le canal forwardé.
@@ -430,8 +522,33 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
             .kill_on_drop(true);
             hide_console(&mut cmd);
             let mut child = cmd.spawn().context("spawn ssh — openssh installé ?")?;
-            let mut stderr = child.stderr.take();
-            let guard = Arc::new(SshGuard::process(child));
+            let stderr_tail = Arc::new(std::sync::Mutex::new(String::new()));
+            // stderr drainé en continu, borné aux ~4 Kio finaux : lu au
+            // post-mortem (cause de mort) et le lecteur permanent évite
+            // que ssh ne se bloque sur un pipe plein (messages « channel
+            // open failed » répétés quand le forward distant refuse).
+            if let Some(err) = child.stderr.take() {
+                let tail = Arc::clone(&stderr_tail);
+                tokio::spawn(async move {
+                    let mut lines = BufReader::new(err).lines();
+                    while let Ok(Some(l)) = lines.next_line().await {
+                        if let Ok(mut t) = tail.lock() {
+                            if t.len() > 4096 {
+                                let mut cut = t.len() - 2048;
+                                while !t.is_char_boundary(cut) {
+                                    cut += 1;
+                                }
+                                t.drain(..cut);
+                            }
+                            if !t.is_empty() {
+                                t.push('\n');
+                            }
+                            t.push_str(&l);
+                        }
+                    }
+                });
+            }
+            let guard = Arc::new(SshGuard::process(child, stderr_tail));
             // Attendre que le tunnel soit prêt (~26 s > ConnectTimeout=10
             // pour laisser ssh mourir avec sa vraie erreur dans stderr)
             let addr = format!("127.0.0.1:{local}");
@@ -444,14 +561,14 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                     Err(_) => {
                         // ssh déjà mort → erreur réelle, pas timeout muet
                         let dead = match &*guard {
-                            SshGuard::Process(c) => c
+                            SshGuard::Process { child, .. } => child
                                 .try_lock()
                                 .ok()
                                 .and_then(|mut c| c.try_wait().ok().flatten()),
                             SshGuard::Native(_) => None,
                         };
                         if let Some(st) = dead {
-                            let e = drain_err(&mut stderr).await;
+                            let e = guard_err_tail(&guard);
                             log(Level::Error, format!("ssh mort ({st}): {e}"));
                             bail!("ssh a quitté ({st}){}", if e.is_empty() { String::new() } else { format!(" : {e}") });
                         }
@@ -459,12 +576,13 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                     }
                 }
             }
-            if let SshGuard::Process(c) = &*guard {
-                if let Ok(mut c) = c.try_lock() {
+            if let SshGuard::Process { child, killed, .. } = &*guard {
+                killed.store(true, Ordering::SeqCst);
+                if let Ok(mut c) = child.try_lock() {
                     let _ = c.start_kill();
                 }
             }
-            let e = drain_err(&mut stderr).await;
+            let e = guard_err_tail(&guard);
             log(Level::Error, format!("tunnel ssh {host} timeout (stderr: {e})"));
             bail!("tunnel ssh {host} timeout{}", if e.is_empty() { String::new() } else { format!(" : {e}") })
         }
@@ -475,7 +593,12 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
             remote_port,
             password,
             key_path,
+            expected_hk,
         } => {
+            let opts = ssh_native::Opts {
+                expected_hk: expected_hk.clone().map(Arc::new),
+                ..Default::default()
+            };
             let (h, ch) = ssh_native::open_direct_tcpip(
                 host,
                 *port,
@@ -483,6 +606,7 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                 *remote_port,
                 password.as_deref(),
                 key_path.as_deref(),
+                &opts,
             )
             .await?;
             let (r, w) = tokio::io::split(ch);
@@ -531,7 +655,20 @@ pub struct Client {
     /// (lien vivant, réponse lente) d'un blackhole (silence total). La
     /// sonde fusionnée s'en sert pour ne pas tuer une conn vivante.
     last_rx_ms: AtomicU64,
-    _guard: Option<Arc<SshGuard>>,
+    /// Libellé court du transport (sans secrets) pour le log de mort.
+    desc: String,
+    /// Positionné par `close()` — distingue une fermeture demandée
+    /// (déconnexion/remplacement) d'une mort spontanée du transport.
+    closed: AtomicBool,
+    /// Abort de la tâche reader — posé juste après son spawn ; close()
+    /// l'arrête pour libérer le transport (sinon reader + tunnel ssh
+    /// survivaient indéfiniment à la sortie de la conn de `conns`).
+    reader_abort: std::sync::OnceLock<tokio::task::AbortHandle>,
+    /// Cause de mort renseignée par le reader (post-mortem) ou close() —
+    /// remontée dans l'event `conn-dead` à la place du « EOF transport »
+    /// générique, et journalisée.
+    dead_info: std::sync::Mutex<Option<String>>,
+    guard: Option<Arc<SshGuard>>,
 }
 
 fn now_ms() -> u64 {
@@ -539,6 +676,19 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+/// Libellé court du transport pour les logs — jamais de `{:?}` brut :
+/// SshNative porte le mot de passe en clair dans ses champs.
+fn transport_desc(t: &Transport) -> String {
+    match t {
+        Transport::Unix(p) => format!("unix:{}", p.display()),
+        Transport::Tcp(a) => format!("tcp:{a}"),
+        Transport::Ssh { host, .. } => format!("ssh:{host}"),
+        Transport::SshNative {
+            host, port, user, ..
+        } => format!("ssh-native:{user}@{host}:{port}"),
+    }
 }
 
 impl Client {
@@ -570,38 +720,68 @@ impl Client {
             dead,
             dead_tx,
             last_rx_ms: AtomicU64::new(now_ms()),
-            _guard: guard,
+            desc: transport_desc(t),
+            closed: AtomicBool::new(false),
+            reader_abort: std::sync::OnceLock::new(),
+            dead_info: std::sync::Mutex::new(None),
+            guard,
         });
         // Reader task : dispatch responses / pushes
         {
             let c = Arc::clone(&client);
-            tokio::spawn(async move {
+            let jh = tokio::spawn(async move {
                 let mut lines = BufReader::new(r).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    RX_TOTAL.fetch_add(line.len() as u64 + 1, Ordering::Relaxed);
-                    c.last_rx_ms.store(now_ms(), Ordering::Relaxed);
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    let v: Value = match serde_json::from_str(&line) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-                    if v.get("push").is_some() {
-                        let _ = c.pushes.send(v);
-                        continue;
-                    }
-                    if let Ok(resp) = serde_json::from_value::<Response>(v) {
-                        if let Some(tx) = c.pending.lock().await.remove(&resp.id) {
-                            let _ = tx.send(if resp.ok {
-                                Ok(resp.result.unwrap_or(Value::Null))
-                            } else {
-                                Err(resp.error.unwrap_or_else(|| "?".into()))
-                            });
+                // Ok(None) = EOF propre ; Err = erreur de lecture (RST…).
+                let mut read_err: Option<std::io::Error> = None;
+                loop {
+                    match lines.next_line().await {
+                        Ok(Some(line)) => {
+                            RX_TOTAL.fetch_add(line.len() as u64 + 1, Ordering::Relaxed);
+                            c.last_rx_ms.store(now_ms(), Ordering::Relaxed);
+                            if line.trim().is_empty() {
+                                continue;
+                            }
+                            let v: Value = match serde_json::from_str(&line) {
+                                Ok(v) => v,
+                                Err(_) => continue,
+                            };
+                            if v.get("push").is_some() {
+                                let _ = c.pushes.send(v);
+                                continue;
+                            }
+                            if let Ok(resp) = serde_json::from_value::<Response>(v) {
+                                if let Some(tx) = c.pending.lock().await.remove(&resp.id) {
+                                    let _ = tx.send(if resp.ok {
+                                        Ok(resp.result.unwrap_or(Value::Null))
+                                    } else {
+                                        Err(resp.error.unwrap_or_else(|| "?".into()))
+                                    });
+                                }
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            read_err = Some(e);
+                            break;
                         }
                     }
                 }
                 // Fin de boucle = transport mort (EOF ou erreur de lecture).
+                // Post-mortem : cause réelle journalisée + exposée à
+                // l'event conn-dead — « EOF transport » couvrait tout
+                // (remote EOF, RST, keepalive local, canal seul fermé).
+                // dead_info avant dead : le watcher lit la raison à
+                // réception du signal.
+                let silent = c.silent_ms();
+                let cause = match &read_err {
+                    Some(e) => format!("erreur lecture ({e})"),
+                    None => match &c.guard {
+                        Some(g) => g.death_note(),
+                        None => "eof distant (le pair a fermé)".to_string(),
+                    },
+                };
+                c.set_death_reason(format!("{cause}, silent {silent} ms"));
+                log(Level::Warn, format!("conn {}: transport mort — {cause} (silent {silent} ms)", c.desc));
                 // dead D'ABORD : un call() qui vérifie entre le drain et
                 // le signal s'insérerait après lui → timeout 60 s, la
                 // classe de bug corrigée ici.
@@ -618,6 +798,7 @@ impl Client {
                     }
                 }
             });
+            let _ = client.reader_abort.set(jh.abort_handle());
         }
         Ok(client)
     }
@@ -628,6 +809,53 @@ impl Client {
     /// alors imputable au démon, pas au lien).
     pub fn silent_ms(&self) -> u64 {
         now_ms().saturating_sub(self.last_rx_ms.load(Ordering::Relaxed))
+    }
+
+    /// Cause de mort du transport, posée par le reader (post-mortem) ou
+    /// close() — `None` tant que la connexion est vivante.
+    pub fn death_reason(&self) -> Option<String> {
+        self.dead_info.lock().ok().and_then(|d| d.clone())
+    }
+
+    fn set_death_reason(&self, reason: String) {
+        if let Ok(mut d) = self.dead_info.lock() {
+            if d.is_none() {
+                *d = Some(reason);
+            }
+        }
+    }
+
+    /// Fermeture demandée (déconnexion / remplacement par une connexion
+    /// neuve) : signale dead, stoppe le reader et solde les appels en
+    /// vol. Sans elle le reader gardait une Arc<Client> — et donc le
+    /// tunnel ssh / la session russh — vivants jusqu'à une mort
+    /// spontanée ou la fin du process (fuite à chaque déconnexion ou
+    /// flap de reconnexion). Idempotent ; le kill propre du transport
+    /// a lieu au drop du guard quand la dernière référence part.
+    pub fn close(&self) {
+        if self.closed.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.set_death_reason("fermeture demandée (déconnexion/remplacement)".into());
+        let _ = self.dead_tx.send(true);
+        if let Some(h) = self.reader_abort.get() {
+            h.abort();
+        }
+        // Drain borné sans .await : le lock n'est disputé que par des
+        // insert/remove microscopiques — quelques yields suffisent. Si
+        // vraiment il reste pris, les appels en vol expirent sur leur
+        // timeout propre (60 s) comme avant.
+        for _ in 0..20 {
+            match self.pending.try_lock() {
+                Ok(mut m) => {
+                    for (_, tx) in m.drain() {
+                        let _ = tx.send(Err("connexion fermée".into()));
+                    }
+                    return;
+                }
+                Err(_) => std::thread::yield_now(),
+            }
+        }
     }
 
     /// Appel RPC. Réponse ou erreur du démon.
@@ -702,233 +930,12 @@ impl Client {
 }
 
 // ---------------------------------------------------------------------------
-// SSH natif (russh) — Android + tout hôte sans binaire ssh
+// SSH natif (russh) — Android + tout hôte sans binaire ssh.
+// Implémentation dans ssh_native.rs (séparée : >400 lignes).
 // ---------------------------------------------------------------------------
 
-pub mod ssh_native {
-    use super::{base_dir, log, Level};
-    use anyhow::{bail, Context, Result};
-    use russh::client;
-    use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
-    use std::path::{Path, PathBuf};
-    use std::sync::Arc;
-    use std::time::Duration;
-    use tokio::io::{AsyncRead, AsyncWrite};
+pub mod ssh_native;
 
-    /// Clé ed25519 générée par l'app : <base>/agentcontrol_ed25519{,.pub}
-    pub fn key_path() -> PathBuf {
-        base_dir().join("agentcontrol_ed25519")
-    }
-
-    /// Génère la paire si absente (chmod 600). Retourne le chemin.
-    pub fn ensure_keypair() -> Result<PathBuf> {
-        let p = key_path();
-        if p.exists() {
-            return Ok(p);
-        }
-        let _ = std::fs::create_dir_all(base_dir());
-        // rand 0.10 n'expose plus OsRng ; rand_core 0.10 non plus →
-        // petit RNG adossé à getrandom (CryptoRng vient par blanket impl).
-        struct OsRng;
-        impl rand_core::TryRng for OsRng {
-            type Error = std::convert::Infallible;
-            fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-                let mut b = [0u8; 4];
-                self.try_fill_bytes(&mut b)?;
-                Ok(u32::from_le_bytes(b))
-            }
-            fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
-                let mut b = [0u8; 8];
-                self.try_fill_bytes(&mut b)?;
-                Ok(u64::from_le_bytes(b))
-            }
-            fn try_fill_bytes(&mut self, d: &mut [u8]) -> Result<(), Self::Error> {
-                getrandom::fill(d).expect("os rng");
-                Ok(())
-            }
-        }
-        impl rand_core::TryCryptoRng for OsRng {}
-        let key = ssh_key::PrivateKey::random(&mut OsRng, ssh_key::Algorithm::Ed25519)
-            .context("keygen ed25519")?;
-        let pem = key.to_openssh(ssh_key::LineEnding::LF).context("openssh pem")?;
-        std::fs::write(&p, pem.as_bytes())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
-        }
-        let pub_line = format!("{} agentcontrol", key.public_key().to_openssh().unwrap_or_default());
-        std::fs::write(p.with_extension("pub"), &pub_line)?;
-        log(Level::Info, format!("clé ssh app générée : {}", pub_line));
-        Ok(p)
-    }
-
-    /// Ligne authorized_keys à ajouter côté serveur ("ssh-ed25519 AAAA… agentcontrol").
-    pub fn pubkey_line() -> Result<String> {
-        let p = ensure_keypair()?;
-        let key = russh::keys::load_secret_key(&p, None).context("clé privée")?;
-        Ok(format!(
-            "{} agentcontrol",
-            key.public_key().to_openssh().unwrap_or_default()
-        ))
-    }
-
-    struct Handler;
-
-    impl client::Handler for Handler {
-        type Error = russh::Error;
-        async fn check_server_key(
-            &mut self,
-            key: &PublicKeyOrCertificate,
-        ) -> Result<bool, Self::Error> {
-            // accept-new equivalent : on logge la clé vue (TOFU implicite v1).
-            match key {
-                PublicKeyOrCertificate::PublicKey { key, .. } => log(Level::Info, format!(
-                    "ssh host key: {}",
-                    key.fingerprint(russh::keys::HashAlg::Sha256)
-                )),
-                PublicKeyOrCertificate::Certificate(_) => {
-                    log(Level::Info, "ssh host key: certificate")
-                }
-            }
-            Ok(true)
-        }
-    }
-
-    /// Garde la session SSH vivante ; la fermeture suit le drop du Handle.
-    /// Le champ n'est jamais lu — c'est sa durée de vie qui compte.
-    pub struct NativeGuard(#[allow(dead_code)] client::Handle<Handler>);
-
-    /// Connecte + authentifie (clé, sinon mot de passe) et renvoie le handle.
-    async fn connect_auth(
-        host: &str,
-        port: u16,
-        user: &str,
-        password: Option<&str>,
-        key: Option<&Path>,
-    ) -> Result<client::Handle<Handler>> {
-        let mut cfg = client::Config::default();
-        cfg.inactivity_timeout = None;
-        cfg.keepalive_interval = Some(Duration::from_secs(30));
-        cfg.keepalive_max = 3;
-        let addrs = (host, port);
-        let mut h = tokio::time::timeout(
-            Duration::from_secs(15),
-            client::connect(Arc::new(cfg), addrs, Handler),
-        )
-        .await
-        .context("ssh connect timeout")?
-        .context("ssh connect")?;
-        // Clé d'abord (app-générée ou explicitée), puis mot de passe.
-        let kp = key.map(PathBuf::from).unwrap_or_else(key_path);
-        if kp.exists() {
-            let key = russh::keys::load_secret_key(&kp, None)
-                .with_context(|| format!("clé {}", kp.display()))?;
-            let auth = h
-                .authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), None))
-                .await;
-            match auth {
-                Ok(r) if r.success() => return Ok(h),
-                Ok(_) => log(Level::Warn, "clé refusée (auth partielle) — essai mot de passe"),
-                Err(e) => log(Level::Warn, format!("auth clé: {e} — essai mot de passe")),
-            }
-        }
-        if let Some(pw) = password.filter(|p| !p.is_empty()) {
-            let r = h
-                .authenticate_password(user, pw)
-                .await
-                .context("auth password")?;
-            if r.success() {
-                return Ok(h);
-            }
-            bail!("mot de passe refusé");
-        }
-        bail!("auth impossible — ajoutez la clé publique de l'app dans authorized_keys du serveur");
-    }
-
-    /// Ouvre un canal direct-tcpip vers 127.0.0.1:remote_port dans la
-    /// session SSH — équivalent `ssh -L` sans port local ni process.
-    pub async fn open_direct_tcpip(
-        host: &str,
-        port: u16,
-        user: &str,
-        remote_port: u16,
-        password: Option<&str>,
-        key_path: Option<&Path>,
-    ) -> Result<(NativeGuard, impl AsyncRead + AsyncWrite + Unpin + Send)> {
-        let h = connect_auth(host, port, user, password, key_path).await?;
-        let ch = tokio::time::timeout(
-            Duration::from_secs(10),
-            h.channel_open_direct_tcpip("127.0.0.1", remote_port as u32, "127.0.0.1", 0),
-        )
-        .await
-        .context("direct-tcpip timeout")?
-        .context("direct-tcpip — le démon écoute-t-il sur le port distant ?")?;
-        Ok((NativeGuard(h), ch.into_stream()))
-    }
-
-    /// `ssh host <script>` sans binaire : canal exec → stdout/stderr
-    /// collectés à part. `on_stderr` reçoit chaque ligne stderr complète
-    /// au fil de l'eau (progression `step:*`, erreurs lisibles…) — le
-    /// retour est `(code, stdout, stderr)` : le résultat métier reste
-    /// sur stdout, les messages de diagnostic sur stderr.
-    pub async fn ssh_exec(
-        host: &str,
-        port: u16,
-        user: &str,
-        password: Option<&str>,
-        key_path: Option<&Path>,
-        script: &str,
-        mut on_stderr: Option<&mut (dyn FnMut(&str) + Send)>,
-    ) -> Result<(i32, String, String)> {
-        use russh::ChannelMsg;
-        let h = connect_auth(host, port, user, password, key_path).await?;
-        let mut ch = h.channel_open_session().await.context("channel session")?;
-        ch.exec(true, script.as_bytes().to_vec())
-            .await
-            .context("exec")?;
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        // Lignes stderr complètes → callback (les lignes partielles en
-        // fin de flux sont livrées aussi, via le drain post-boucle).
-        let mut err_rest = Vec::new();
-        let mut feed_err = |data: &[u8]| {
-            err.extend_from_slice(data);
-            if let Some(cb) = on_stderr.as_deref_mut() {
-                err_rest.extend_from_slice(data);
-                while let Some(i) = err_rest.iter().position(|b| *b == b'\n') {
-                    let line = String::from_utf8_lossy(&err_rest[..i]).to_string();
-                    err_rest.drain(..=i);
-                    cb(line.trim_end_matches('\r'));
-                }
-            }
-        };
-        let mut code = -1i32;
-        tokio::time::timeout(Duration::from_secs(120), async {
-            while let Some(msg) = ch.wait().await {
-                match msg {
-                    ChannelMsg::Data { data } => out.extend_from_slice(&data),
-                    ChannelMsg::ExtendedData { data, .. } => feed_err(&data),
-                    ChannelMsg::ExitStatus { exit_status } => code = exit_status as i32,
-                    _ => {}
-                }
-            }
-        })
-        .await
-        .context("exec timeout")?;
-        // Reliquat stderr sans '\n' final → dernière ligne au callback.
-        if !err_rest.is_empty() {
-            if let Some(cb) = on_stderr.as_deref_mut() {
-                cb(&String::from_utf8_lossy(&err_rest).to_string());
-            }
-        }
-        Ok((
-            code,
-            String::from_utf8_lossy(&out).to_string(),
-            String::from_utf8_lossy(&err).to_string(),
-        ))
-    }
-}
 
 #[cfg(test)]
 mod tests {

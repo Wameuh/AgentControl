@@ -33,6 +33,13 @@ pub enum EventKind {
         /// ordinaires (jamais sérialisé quand None).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin: Option<String>,
+        /// Prompt de spawn d'une session service (journalisé à la
+        /// création avec `origin`) — boilerplate de mission, pas un
+        /// « post » utile : `first_post` le saute pour servir le premier
+        /// vrai message. `false` partout ailleurs ; absent des journaux
+        /// antérieurs (dégradation douce : repli détection `origin`).
+        #[serde(default)]
+        spawn_prompt: bool,
     },
     AgentText {
         text: String,
@@ -698,12 +705,40 @@ pub enum ReqKind {
         #[serde(default)]
         archive: Option<String>,
     },
+    /// Surveille le dossier `path` (relatif au cwd, borné workspace,
+    /// non récursif) pour l'auto-refresh de l'explorateur : le démon
+    /// pousse `{push:"dir_changed", session, path}` après debounce+coalesce
+    /// — trafic éphémère, JAMAIS journalisé. Le watch vit et meurt avec
+    /// la connexion qui l'a demandé (une session affichée = un client) ;
+    /// ré-émettre sur un dossier déjà suivi est idempotent. Réponse
+    /// `{watching, dir}` — `watching:false` = plafond global atteint,
+    /// le client retombe alors sur le refresh manuel.
+    WatchDir {
+        session: String,
+        #[serde(default)]
+        path: String,
+    },
+    /// Retire le watch `path` de `session` — ou tous ses watches quand
+    /// `path` est absent (panneau fermé, session quittée). Réponse
+    /// `{unwatched}` = nombre de watches réellement retirés.
+    UnwatchDir {
+        session: String,
+        #[serde(default)]
+        path: Option<String>,
+    },
     /// Gestion de la file de prompts (index = position dans la file).
     QueueList { session: String },
     QueueEdit { session: String, index: u64, text: String },
     QueueDrop { session: String, index: u64 },
     /// Tête de file + annulation du tour courant = envoi forcé.
     QueuePromote { session: String, index: u64 },
+    /// Retire l'entrée `index` de la file et tente de l'injecter en
+    /// steer dans le tour en cours (session/prompt concurrent, SANS
+    /// annuler le tour — ≠ QueuePromote). Refus ou impossibilité →
+    /// l'entrée est remise à sa position. Réponse {delivered, reason?,
+    /// queue} — delivered : "steer" | "sent" | "requeued" | "held" |
+    /// "gone".
+    QueueSteer { session: String, index: u64 },
     /// Page d'historique : les `limit` événements avant `before_seq`
     /// (before_seq absent ou 0 = depuis la fin), ou — si `after_seq` est
     /// fourni — les `limit` événements après `after_seq` en ordre croissant
@@ -732,7 +767,11 @@ pub enum ReqKind {
     /// Premier post du cycle courant : le premier `user_message` du
     /// journal. Le journal est vidé à /clear, /new et au rebind —
     /// « premier » suit donc automatiquement le dernier reset.
-    /// Réponse : `{post: {seq, ts, text, steer}}` ou `{post: null}`
+    /// Session créée par un service (`origin`) : son premier
+    /// `user_message` est le prompt de spawn (`spawn_prompt: true` —
+    /// boilerplate de mission, pas un post) et est sauté en faveur du
+    /// `user_message` suivant (ex. le post « [Backlog] item »).
+    /// Réponse : `{post: {seq, ts, text, steer, origin}}` ou `{post: null}`
     /// (aucun message utilisateur dans le cycle — ex. juste après
     /// un /clear) ; `{post: null, truncated: true}` quand la
     /// compaction du journal a supprimé la tête — le vrai premier
@@ -966,8 +1005,26 @@ pub enum ReqKind {
     },
     /// Exécute la recette d'une entrée catalogue (steps auditées :
     /// `run` argv fixe, `write_file` borné HOME, `upsert_spec`…) →
-    /// {installed, name, state, notes}.
-    ComponentInstall { name: String },
+    /// {installed, name, state, notes, config_required}. `params` porte
+    /// les valeurs collectées côté client (dialogue des params
+    /// déclarés par l'entrée) — validées avant la recette, rendues
+    /// dans la config du composant quand les requis sont remplis.
+    ComponentInstall {
+        name: String,
+        #[serde(default)]
+        params: Option<std::collections::HashMap<String, String>>,
+    },
+    /// Édite les paramètres déclarés d'un composant (la seule surface
+    /// de config utilisateur — cf. `spec.params_schema`) : fusion dans
+    /// `spec.params` (une valeur vide retire la clé), validation par
+    /// type/regex/choix, réécriture de components.toml, re-rendu de la
+    /// config managée puis restart si le `process` tourne. Réponse :
+    /// `{name, state, params(masqués), config_required, rendered,
+    /// restarted}`.
+    ComponentSetParams {
+        name: String,
+        params: std::collections::HashMap<String, String>,
+    },
     /// Exécute une requête de données déclarée sur le composant —
     /// `spec.queries[query]` en argv direct, jamais de shell (le
     /// composant expose ses données auditées : ex.
@@ -982,6 +1039,24 @@ pub enum ReqKind {
     /// `{enabled, status}` — status = instantané exposé aussi dans
     /// `ListComponents`/`ComponentInfo`.
     OrchestratorSet { enabled: bool },
+    /// Lecture/édition à chaud de la config de l'orchestrateur backlog.
+    /// `patch` absent = get → `{config, status}` ; `patch` présent =
+    /// merge partiel validé par champ (clés = celles de
+    /// `[backlog_orchestrator]` ; valeurs en JSON natif ou forme chaîne
+    /// « "60" »/« "on" »/« Repo=/cwd,… » — les deux convergent sur la
+    /// même validation) puis la section config.toml est réécrite
+    /// (survit aux redémarrages) → `{config, applied, persisted,
+    /// status}`. Application : au prochain tick (max_workers, poll_secs,
+    /// nudge_cooldown, flags, group) ou au prochain spawn (agent, mode,
+    /// model, thought_level, prompts, repo_workspaces, workspace) —
+    /// `enabled` posé ici est persisté ET appliqué au runtime (à la
+    /// différence d'`OrchestratorSet`, runtime seul). Extension
+    /// additive : démons anciens → erreur « req inconnue », pas de
+    /// coupure protocole.
+    OrchestratorConfig {
+        #[serde(default)]
+        patch: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+    },
     /// Spawn d'un « Manager » pour le workspace routé `repo` (feature
     /// d'intendance backlog : le client le propose quand le composant
     /// `agentbacklog` + l'orchestrateur sont actifs — cf.
@@ -989,6 +1064,18 @@ pub enum ReqKind {
     /// Manager vivant pour ce repo est renvoyé tel quel. Réponse :
     /// `{session, repo, cwd, title, existing}`.
     ManagerSpawn { repo: String },
+    /// Métriques backlog : série temporelle échantillonnée par le tick
+    /// de l'orchestrateur natif (`~/.agentbacklog/metrics.jsonl`) +
+    /// agrégats calculés à la volée sur les timestamps des items
+    /// AgentBacklog. `window` : "24h"|"7d"|"30d"|"all" (défaut "7d").
+    /// Réponse : `{window, since, generated_at, samples, aggregates}`
+    /// — lead time moyen/médian, attente file, items terminés/jour,
+    /// pic de workers. Extension additive : démons anciens → erreur
+    /// « req inconnue », pas de coupure protocole.
+    BacklogMetrics {
+        #[serde(default)]
+        window: Option<String>,
+    },
     DaemonStatus,
     /// Auto-update du démon vers la release `version` demandée par le
     /// client (ex. "0.5.0" → tag v0.5.0 — jamais « latest » : le démon
@@ -1024,10 +1111,13 @@ impl ReqKind {
             Self::CreatePath { .. } => "create_path",
             Self::FindFiles { .. } => "find_files",
             Self::DownloadPath { .. } => "download_path",
+            Self::WatchDir { .. } => "watch_dir",
+            Self::UnwatchDir { .. } => "unwatch_dir",
             Self::QueueList { .. } => "queue_list",
             Self::QueueEdit { .. } => "queue_edit",
             Self::QueueDrop { .. } => "queue_drop",
             Self::QueuePromote { .. } => "queue_promote",
+            Self::QueueSteer { .. } => "queue_steer",
             Self::Events { .. } => "events",
             Self::SearchEvents { .. } => "search_events",
             Self::FirstPost { .. } => "first_post",
@@ -1067,9 +1157,12 @@ impl ReqKind {
             Self::ComponentRemove { .. } => "component_remove",
             Self::ComponentCatalog { .. } => "component_catalog",
             Self::ComponentInstall { .. } => "component_install",
+            Self::ComponentSetParams { .. } => "component_set_params",
             Self::ComponentQuery { .. } => "component_query",
             Self::OrchestratorSet { .. } => "orchestrator_set",
+            Self::OrchestratorConfig { .. } => "orchestrator_config",
             Self::ManagerSpawn { .. } => "manager_spawn",
+            Self::BacklogMetrics { .. } => "backlog_metrics",
             Self::DaemonStatus => "daemon_status",
             Self::UpdateDaemon { .. } => "update_daemon",
         }

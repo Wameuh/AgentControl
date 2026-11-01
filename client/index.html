@@ -124,11 +124,13 @@
             <div id="drop-hint" data-i18n="att_drop" hidden>Drop files to attach</div>
             <button id="btn-attach" hidden data-icon="plus" data-i18n-title="att_add" title="Attach file"></button>
             <input id="attach-pick" type="file" multiple hidden>
+            <div id="mic-hint" hidden></div>
             <div id="input-wrap">
               <textarea id="input" data-i18n-ph="input_ph" placeholder="Message… (Enter = send)" rows="2"></textarea>
               <button id="btn-expand" type="button" hidden></button>
             </div>
             <button id="btn-alt" hidden data-icon="steer" data-i18n-title="steer_title" title="Steer"></button>
+            <button id="btn-mic" type="button" hidden data-icon="mic" data-i18n-title="stt_mic" title="Dictation"></button>
             <button id="btn-send" data-i18n="send">Send</button>
           </footer>
           <div id="settings-view" tabindex="-1" hidden>
@@ -162,6 +164,13 @@
                       <option value="red" data-i18n="accent_red">Red</option>
                     </select>
                   </label>
+                  <label class="s-row"><span class="s-txt"><span data-i18n="s-accent-int">Accent intensity</span>
+                      <small class="s-desc" data-i18n="accent_int_desc">Saturated, vivid variant of the accent palette</small></span>
+                    <select id="s-accent-int">
+                      <option value="soft" data-i18n="accent_int_soft">Soft</option>
+                      <option value="strong" data-i18n="accent_int_strong">Strong</option>
+                    </select>
+                  </label>
                   <label class="s-row chk" id="s-bganim-row">
                     <input type="checkbox" id="s-bganim" checked />
                     <span class="s-txt"><span data-i18n="s-bg-anim">Animated background</span>
@@ -169,10 +178,7 @@
                   </label>
                   <label class="s-row"><span class="s-txt"><span data-i18n="lang_label">Language</span>
                       <small class="s-desc" data-i18n="lang_desc">Applied immediately to the whole interface</small></span>
-                    <select id="s-lang">
-                      <option value="en">English</option>
-                      <option value="fr">Français</option>
-                    </select>
+                    <select id="s-lang"><!-- options injectées depuis LANGS (i18n) --></select>
                   </label>
                 </div>
               </details>
@@ -214,18 +220,21 @@
                       <input type="checkbox" id="s-snd-done" checked />
                       <label class="s-txt" for="s-snd-done"><span data-i18n="sounds_done">Turn finished</span>
                         <small class="s-desc" data-i18n="snd_done_desc">An agent completed its turn</small></label>
+                      <select class="s-preset" id="s-snd-preset-done" data-i18n-title="sounds_preset" title="Sound"></select>
                       <button type="button" class="s-test" id="s-snd-test-done" data-i18n="sounds_test">Test</button>
                     </div>
                     <div class="s-row s-snd-opt">
                       <input type="checkbox" id="s-snd-question" checked />
                       <label class="s-txt" for="s-snd-question"><span data-i18n="sounds_question">Question / permission</span>
                         <small class="s-desc" data-i18n="snd_question_desc">An agent waits for an answer or an approval</small></label>
+                      <select class="s-preset" id="s-snd-preset-question" data-i18n-title="sounds_preset" title="Sound"></select>
                       <button type="button" class="s-test" id="s-snd-test-question" data-i18n="sounds_test">Test</button>
                     </div>
                     <div class="s-row s-snd-opt">
                       <input type="checkbox" id="s-snd-error" checked />
                       <label class="s-txt" for="s-snd-error"><span data-i18n="sounds_error">Error / dead session</span>
                         <small class="s-desc" data-i18n="snd_error_desc">A session failed or stopped</small></label>
+                      <select class="s-preset" id="s-snd-preset-error" data-i18n-title="sounds_preset" title="Sound"></select>
                       <button type="button" class="s-test" id="s-snd-test-error" data-i18n="sounds_test">Test</button>
                     </div>
                     <label class="s-row chk s-snd-opt">
@@ -239,6 +248,41 @@
                     </div>
                     <div class="s-row s-snd-opt" id="s-snd-blocked" hidden>
                       <span data-i18n="sounds_blocked">Audio blocked until you interact — click anywhere or press Test</span>
+                    </div>
+                  </div>
+                  <div id="s-notif-block">
+                    <label class="s-row chk">
+                      <input type="checkbox" id="s-notif" checked />
+                      <span class="s-txt"><span data-i18n="notif_label">System notifications</span>
+                        <small class="s-desc" data-i18n="notif_desc">Native OS notification when a session needs your attention</small></span>
+                    </label>
+                    <div id="s-notif-opts">
+                      <label class="s-row chk s-snd-opt">
+                        <input type="checkbox" id="s-notif-done" checked />
+                        <span class="s-txt"><span data-i18n="sounds_done">Turn finished</span>
+                          <small class="s-desc" data-i18n="snd_done_desc">An agent completed its turn</small></span>
+                      </label>
+                      <label class="s-row chk s-snd-opt">
+                        <input type="checkbox" id="s-notif-question" checked />
+                        <span class="s-txt"><span data-i18n="sounds_question">Question / permission</span>
+                          <small class="s-desc" data-i18n="snd_question_desc">An agent waits for an answer or an approval</small></span>
+                      </label>
+                      <label class="s-row chk s-snd-opt">
+                        <input type="checkbox" id="s-notif-error" checked />
+                        <span class="s-txt"><span data-i18n="sounds_error">Error / dead session</span>
+                          <small class="s-desc" data-i18n="snd_error_desc">A session failed or stopped</small></span>
+                      </label>
+                      <label class="s-row chk s-snd-opt">
+                        <input type="checkbox" id="s-notif-unfocused" />
+                        <span class="s-txt"><span data-i18n="sounds_unfocused">Only when the window is not focused</span>
+                          <small class="s-desc" data-i18n="snd_unfocused_desc">Stay silent while you are already looking at the app</small></span>
+                      </label>
+                      <div class="s-row s-snd-opt">
+                        <button type="button" class="s-test" id="s-notif-test" data-i18n="notif_test">Send a test notification</button>
+                      </div>
+                      <div class="s-row s-snd-opt" id="s-notif-denied" hidden>
+                        <span data-i18n="notif_denied">Notifications are blocked — allow AgentControl in the OS notification settings</span>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -255,6 +299,24 @@
                     <span class="s-txt"><span data-i18n="autoconnect_label">Reconnect on launch</span>
                       <small class="s-desc" data-i18n="autoconnect_desc">Restores the last server connection when the app starts</small></span>
                   </label>
+                  <div class="s-row" id="s-pair-row">
+                    <span class="s-txt"><span data-i18n="qr_share">Pair a device</span>
+                      <small class="s-desc" data-i18n="pair_desc">Show the pairing QR of a saved server</small></span>
+                    <select id="s-pair-conn" disabled></select>
+                    <button type="button" class="s-test" id="s-pair-go" disabled data-i18n="pair_btn">Pair…</button>
+                  </div>
+                  <div class="s-row" id="s-pair-none" hidden>
+                    <span class="s-desc" data-i18n="pair_none">No saved SSH connection — add one from the connections view</span>
+                  </div>
+                  <div id="s-pacc" hidden>
+                    <div class="s-row">
+                      <span class="s-txt"><span data-i18n="pair_acc_h">Paired access</span>
+                        <small class="s-desc" data-i18n="pair_acc_desc">Keys this app manages on the selected server</small></span>
+                      <button type="button" class="s-test" id="s-pacc-ref" data-i18n="pair_acc_ref">Refresh</button>
+                    </div>
+                    <p id="s-pacc-state" class="s-desc" hidden></p>
+                    <ul id="s-pacc-list" class="pair-acc-list"></ul>
+                  </div>
                 </div>
               </details>
               <details class="s-sec" id="s-sec-update" open>
@@ -276,6 +338,18 @@
                     <button id="s-doupdate" type="button" hidden data-i18n="update_now">Update now</button>
                     <span id="s-update-status"></span>
                   </div>
+                  <details id="s-logs" class="log-details">
+                    <summary data-i18n="logs">Logs</summary>
+                    <div class="log-bar">
+                      <select id="s-log-level" class="log-level" data-i18n-title="log_level" title="Minimum level">
+                        <option value="debug">DEBUG</option>
+                        <option value="info" selected>INFO</option>
+                        <option value="warn">WARN</option>
+                        <option value="error">ERROR</option>
+                      </select>
+                    </div>
+                    <pre id="s-log-view" class="log-view"></pre>
+                  </details>
                 </div>
               </details>
               <details class="s-sec" id="s-sec-files">
@@ -299,6 +373,35 @@
                     <span class="s-txt"><span data-i18n="mdrender_label">Markdown preview</span>
                       <small class="s-desc" data-i18n="mdrender_desc">Open .md files rendered — the viewer button flips the same default</small></span>
                   </label>
+                </div>
+              </details>
+              <details class="s-sec" id="s-sec-stt" hidden>
+                <summary>
+                  <span class="s-chev" data-icon="chev-down"></span>
+                  <span class="s-sec-title" data-i18n="sec_stt">Speech recognition</span>
+                  <span class="s-sec-state" id="s-st-stt"></span>
+                </summary>
+                <div class="s-sec-body">
+                  <div class="s-row"><span class="s-txt"><span class="s-desc" data-i18n="stt_sec_desc">On-device voice dictation — models download on demand, prefer Wi-Fi</span></span>
+                  </div>
+                  <label class="s-row"><span class="s-txt"><span data-i18n="stt_engine">Engine</span>
+                      <small class="s-desc" data-i18n="stt_engine_desc">Recognizer used for dictation</small></span>
+                    <select id="s-stt-engine">
+                      <option value="sherpa" data-i18n="stt_engine_sherpa">Downloaded model</option>
+                      <option value="system" data-i18n="stt_engine_system">System recognizer</option>
+                    </select>
+                  </label>
+                  <label class="s-row"><span class="s-txt"><span data-i18n="stt_lang">Dictation language</span>
+                      <small class="s-desc" data-i18n="stt_lang_desc">Forced per dictation, or auto-detected</small></span>
+                    <select id="s-stt-lang">
+                      <option value="auto" data-i18n="stt_lang_auto">Auto</option>
+                      <option value="en">English</option>
+                      <option value="fr">Français</option>
+                      <option value="es">Español</option>
+                      <option value="de">Deutsch</option>
+                    </select>
+                  </label>
+                  <div id="s-stt-models"></div>
                 </div>
               </details>
             </div>
@@ -362,20 +465,26 @@
                 </div>
                 <div class="cv-actions">
                   <button type="button" id="cv-form-reset" data-i18n="cancel" hidden>Cancel</button>
+                  <button type="button" id="c-scan" data-i18n="qr_scan">Scan QR</button>
                   <button id="c-go" data-i18n="connect">Connect</button>
                 </div>
+                <div id="cv-pacc" hidden>
+                  <h4 data-i18n="pair_acc_h">Paired access</h4>
+                  <p id="cv-pacc-state" class="qr-hint" hidden></p>
+                  <ul id="cv-pacc-list" class="pair-acc-list"></ul>
+                </div>
               </section>
-              <details id="cv-logs">
+              <details id="cv-logs" class="log-details">
                 <summary data-i18n="logs">Logs</summary>
-                <div id="log-bar">
-                  <select id="log-level" data-i18n-title="log_level" title="Minimum level">
+                <div class="log-bar">
+                  <select id="log-level" class="log-level" data-i18n-title="log_level" title="Minimum level">
                     <option value="debug">DEBUG</option>
                     <option value="info" selected>INFO</option>
                     <option value="warn">WARN</option>
                     <option value="error">ERROR</option>
                   </select>
                 </div>
-                <pre id="log-view"></pre>
+                <pre id="log-view" class="log-view"></pre>
               </details>
             </div>
           </div>
@@ -423,42 +532,50 @@
               <div id="comp-editor" hidden>
                 <h4 id="comp-ed-title"></h4>
                 <div id="comp-ed-form">
+                  <div id="ce-config-warn" class="ce-config-warn" hidden></div>
                   <label><span data-i18n="comp_f_name">Name</span> <input id="ce-name" autocomplete="off" spellcheck="false" /></label>
-                  <label><span data-i18n="comp_f_kind">Kind</span>
-                    <select id="ce-kind">
-                      <option value="process">process</option>
-                      <option value="external">external</option>
-                      <option value="tool">tool</option>
-                    </select>
-                  </label>
                   <label><span data-i18n="comp_f_desc">Description</span> <input id="ce-desc" autocomplete="off" /></label>
-                  <label class="ce-f-cmd"><span data-i18n="comp_f_cmd">Command (one arg per line)</span> <textarea id="ce-cmd" rows="3" spellcheck="false"></textarea></label>
-                  <label class="ce-f-env"><span data-i18n="comp_f_env">Environment (KEY=VALUE per line)</span> <textarea id="ce-env" rows="3" spellcheck="false"></textarea></label>
-                  <label class="ce-f-cwd"><span data-i18n="workdir">Working directory</span> <input id="ce-cwd" autocomplete="off" spellcheck="false" /></label>
+                  <div id="ce-params" hidden></div>
+                  <div id="ce-spec-fields">
+                    <label><span data-i18n="comp_f_kind">Kind</span>
+                      <select id="ce-kind">
+                        <option value="process">process</option>
+                        <option value="external">external</option>
+                        <option value="tool">tool</option>
+                      </select>
+                    </label>
+                    <label class="ce-f-cmd"><span data-i18n="comp_f_cmd">Command (one arg per line)</span> <textarea id="ce-cmd" rows="3" spellcheck="false"></textarea></label>
+                    <label class="ce-f-env"><span data-i18n="comp_f_env">Environment (KEY=VALUE per line)</span> <textarea id="ce-env" rows="3" spellcheck="false"></textarea></label>
+                    <label class="ce-f-cwd"><span data-i18n="workdir">Working directory</span> <input id="ce-cwd" autocomplete="off" spellcheck="false" /></label>
+                    <label class="ce-f-restart"><span data-i18n="comp_f_restart">Restart policy</span>
+                      <select id="ce-restart">
+                        <option value="on-failure">on-failure</option>
+                        <option value="always">always</option>
+                        <option value="never">never</option>
+                      </select>
+                    </label>
+                    <label class="ce-f-rsec"><span data-i18n="comp_f_restart_sec">Restart delay (s)</span> <input id="ce-rsec" type="number" min="0" max="60" /></label>
+                    <label><span data-i18n="comp_f_hc">Healthcheck</span>
+                      <select id="ce-hc">
+                        <option value="none">none</option>
+                        <option value="process">process</option>
+                        <option value="tcp">tcp</option>
+                        <option value="http">http</option>
+                        <option value="command">command</option>
+                      </select>
+                    </label>
+                    <label class="ce-f-hc-tcp"><span data-i18n="comp_f_hc_addr">TCP address</span> <input id="ce-hc-addr" placeholder="127.0.0.1:8080" autocomplete="off" spellcheck="false" /></label>
+                    <label class="ce-f-hc-http"><span data-i18n="comp_f_hc_url">HTTP URL</span> <input id="ce-hc-url" placeholder="http://127.0.0.1:8080/health" autocomplete="off" spellcheck="false" /></label>
+                    <label class="ce-f-hc-cmd"><span data-i18n="comp_f_hc_argv">Probe command (one arg per line)</span> <textarea id="ce-hc-argv" rows="2" spellcheck="false"></textarea></label>
+                  </div>
                   <label class="ce-f-autostart chk-row">
                     <input type="checkbox" id="ce-autostart" />
                     <span data-i18n="comp_f_autostart">Start with the daemon</span>
                   </label>
-                  <label class="ce-f-restart"><span data-i18n="comp_f_restart">Restart policy</span>
-                    <select id="ce-restart">
-                      <option value="on-failure">on-failure</option>
-                      <option value="always">always</option>
-                      <option value="never">never</option>
-                    </select>
-                  </label>
-                  <label class="ce-f-rsec"><span data-i18n="comp_f_restart_sec">Restart delay (s)</span> <input id="ce-rsec" type="number" min="0" max="60" /></label>
-                  <label><span data-i18n="comp_f_hc">Healthcheck</span>
-                    <select id="ce-hc">
-                      <option value="none">none</option>
-                      <option value="process">process</option>
-                      <option value="tcp">tcp</option>
-                      <option value="http">http</option>
-                      <option value="command">command</option>
-                    </select>
-                  </label>
-                  <label class="ce-f-hc-tcp"><span data-i18n="comp_f_hc_addr">TCP address</span> <input id="ce-hc-addr" placeholder="127.0.0.1:8080" autocomplete="off" spellcheck="false" /></label>
-                  <label class="ce-f-hc-http"><span data-i18n="comp_f_hc_url">HTTP URL</span> <input id="ce-hc-url" placeholder="http://127.0.0.1:8080/health" autocomplete="off" spellcheck="false" /></label>
-                  <label class="ce-f-hc-cmd"><span data-i18n="comp_f_hc_argv">Probe command (one arg per line)</span> <textarea id="ce-hc-argv" rows="2" spellcheck="false"></textarea></label>
+                  <details id="ce-internals" hidden>
+                    <summary><span data-i18n="comp_internals">Internals (catalog-owned, read-only)</span></summary>
+                    <pre id="ce-internals-json"></pre>
+                  </details>
                   <div class="cv-actions">
                     <button type="button" id="ce-del" class="danger" hidden data-i18n="delete">Delete</button>
                     <button type="button" id="ce-cancel" data-i18n="cancel">Cancel</button>
@@ -483,6 +600,7 @@
             <span id="file-path"></span>
             <button id="btn-tree" data-icon="panel" data-i18n-title="tree_title" title="File tree"></button>
             <button id="btn-tree-refresh" hidden data-icon="refresh" data-i18n-title="tree_refresh" title="Refresh"></button>
+            <button id="btn-openpath" data-icon="search" data-i18n-title="qo_title" title="Quick open"></button>
             <button id="file-close" data-icon="close"></button>
           </header>
           <div id="file-body">
@@ -500,6 +618,8 @@
                 <span id="fv-name"></span>
                 <span id="fv-status"></span>
                 <span class="fv-spacer"></span>
+                <button id="fv-zout" hidden data-icon="zoom-out" data-i18n-title="pdf_zoom_out" title="Zoom out"></button>
+                <button id="fv-zin" hidden data-icon="zoom-in" data-i18n-title="pdf_zoom_in" title="Zoom in"></button>
                 <button id="fv-loadall" hidden data-i18n="fv_loadall">load all</button>
                 <select id="fv-enc" title="Encoding"></select>
                 <button id="fv-md" hidden data-icon="code" data-i18n-title="md_view" title="Rendered"></button>
@@ -617,7 +737,70 @@
       </form>
     </dialog>
 
+    <dialog id="dlg-cparams">
+      <form method="dialog">
+        <h3 id="cp-title"></h3>
+        <div id="cp-fields"></div>
+        <div id="cp-err" class="dlg-err" role="alert" hidden></div>
+        <menu>
+          <button type="button" id="cp-cancel" data-i18n="cancel">Cancel</button>
+          <button id="cp-ok" value="default" data-i18n="apply">Apply</button>
+        </menu>
+      </form>
+    </dialog>
+
     <div id="toasts"></div>
+
+    <dialog id="dlg-qr">
+      <form method="dialog">
+        <h3 data-i18n="qr_share_h">Pair a device</h3>
+        <div class="qr-ep">
+          <input id="qr-user" autocomplete="off" spellcheck="false" data-i18n-ph="qr_user_ph" placeholder="user" />
+          <input id="qr-host" autocomplete="off" spellcheck="false" data-i18n-ph="host_ph" placeholder="server" />
+          <input id="qr-port" type="number" min="1" max="65535" value="22" />
+          <button type="button" id="qr-gen" data-i18n="qr_gen">Generate</button>
+        </div>
+        <canvas id="qr-canvas" hidden></canvas>
+        <p id="qr-ttl" class="qr-ttl"></p>
+        <p id="qr-status" class="qr-status" hidden></p>
+        <p id="qr-warn" class="qr-warn" hidden></p>
+        <details class="qr-alt">
+          <summary data-i18n="qr_alt_h">Other methods</summary>
+          <button type="button" id="qr-alt-creds" data-i18n="qr_alt_creds">Permanent credentials (full access)</button>
+          <button type="button" id="qr-alt-ep" data-i18n="qr_alt_ep">Endpoint only (manual key install)</button>
+        </details>
+        <details class="qr-devs">
+          <summary data-i18n="qr_devs_h">Paired devices</summary>
+          <p id="qr-dev-empty" class="qr-hint" data-i18n="pair_acc_none" hidden>no managed access</p>
+          <ul id="qr-dev-list" class="pair-acc-list"></ul>
+        </details>
+        <menu>
+          <button value="close" data-i18n="close">Close</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-scan">
+      <form method="dialog">
+        <h3 data-i18n="qr_scan_h">Scan a pairing QR</h3>
+        <video id="scan-video" playsinline muted></video>
+        <p class="qr-hint" data-i18n="qr_scan_hint">Point the camera at the QR shown on the other device.</p>
+        <menu>
+          <button value="cancel" data-i18n="cancel">Cancel</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-pair">
+      <form method="dialog">
+        <h3 data-i18n="pair_h">Pair this server?</h3>
+        <p id="pair-msg"></p>
+        <menu>
+          <button value="cancel" data-i18n="cancel">Cancel</button>
+          <button id="pair-go" type="button" data-i18n="pair_go">Save &amp; connect</button>
+        </menu>
+      </form>
+    </dialog>
 
     <dialog id="dlg-dupdate">
       <form method="dialog">
@@ -639,6 +822,13 @@
           <button id="outdated-update" type="button" data-i18n="update_now">Update now</button>
         </menu>
       </form>
+    </dialog>
+
+    <dialog id="dlg-quick">
+      <input id="qo-input" autocomplete="off" spellcheck="false"
+             role="combobox" aria-expanded="true" aria-controls="qo-list" aria-autocomplete="list" />
+      <div id="qo-list" role="listbox"></div>
+      <div id="qo-foot" data-i18n="qo_hint"></div>
     </dialog>
 
     <dialog id="dlg-about">

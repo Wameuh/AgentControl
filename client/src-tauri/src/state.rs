@@ -85,6 +85,10 @@ pub(crate) enum ConnectCfg {
         key: Option<String>,
         /// Forcer russh (défaut : auto — toujours natif sur Android).
         native: Option<bool>,
+        /// Empreintes `SHA256:…` de host key épinglées — persistées par
+        /// l'appairage B′ ; la connexion native refuse toute autre clé
+        /// (TOFU : la divergence est re-confirmée explicitement).
+        host_keys: Option<Vec<String>>,
     },
 }
 

@@ -1,0 +1,23 @@
+[package]
+name = "tauri-plugin-ac-stt"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+links = "tauri-plugin-ac-stt"
+description = "Plugin Kotlin de reconnaissance vocale on-device (spike d'intégration)."
+
+# Crate indépendante du workspace racine — dépendance par path de
+# client/src-tauri, à l'image de client/src-tauri lui-même.
+[workspace]
+
+[lib]
+name = "tauri_plugin_ac_stt"
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }
+
+[dependencies]
+tauri = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"

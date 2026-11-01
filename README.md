@@ -15,15 +15,24 @@ whole fleet from your desk or your couch.
 
 ## Screenshots
 
-Markdown chat with expandable tool calls, session groups, prompt queue,
-pull-request tracking — desktop:
+Markdown chat with expandable tool calls, pending permissions, session
+groups, a prompt queue and pull-request tracking — desktop:
 
 ![AgentControl desktop — agent chat](docs/screenshots/desktop-chat.png)
 
-Browse the remote workspace: file tree, in-app editing, image and video
-preview:
+Browse the remote workspace: file tree, in-app editing, image, video and
+PDF preview:
 
 ![AgentControl desktop — remote file explorer](docs/screenshots/desktop-files.png)
+
+Pair a phone (or a second machine) by QR — a one-shot key on the server,
+the device keeps its own:
+
+![AgentControl — pair a device by QR](docs/screenshots/desktop-pair.png)
+
+| Watch the shared backlog — queue, in-flight work, throughput | Tune the feel — themes, accents, sounds, notifications, updates |
+|:-:|:-:|
+| ![AgentControl — backlog panel](docs/screenshots/desktop-backlog.png) | ![AgentControl — settings](docs/screenshots/desktop-settings.png) |
 
 Same sessions, same agents — native mobile UI on Android:
 
@@ -65,6 +74,44 @@ Same sessions, same agents — native mobile UI on Android:
 SSH uses your existing keys and `~/.ssh/config`. No keys on that server?
 The built-in SSH transport takes a password, or generates a dedicated
 app key for you to authorize.
+
+### Pairing a phone (or a second machine) by QR code
+
+On a saved SSH connection, hit the **QR button** to pair a device in
+seconds — on the other side, **Scan QR** in the connection form does
+the rest:
+
+- The desktop installs a **one-shot, short-lived key** on the server
+  (a `restrict`-ed `authorized_keys` line bound to
+  `~/.agentcontrol/pair.sh <nonce> <rport>`, ≤ 5 min, self-destructing
+  on use) and shows a QR carrying that key plus the server's host-key
+  fingerprints.
+- The device scans, confirms `user@host`, authenticates with the
+  one-shot key — the server's host key is **pinned by the scanned
+  fingerprints** (a MITM can't slip in), and `pair.sh` installs the
+  device's own key under `restrict,port-forwarding,permitopen`:
+  forwarding is bound to `127.0.0.1:<rport>` (the daemon); shell exec
+  stays available so the device can still install or upgrade the
+  daemon remotely — `restrict` strips PTY, agent and X11 forwarding.
+- The server answers `pair-ok:<fingerprint>` — verified against the
+  device key — and the one-shot line disappears.
+- Afterwards, every connection from that profile keeps **pinning the
+  server host keys**: a divergence (rotation, MITM attempt) is flagged
+  and requires explicit reconfirmation.
+
+Two fallbacks stay available under *Other methods* in the pairing
+dialog: **endpoint-only** (scan the address, install the device's
+public key yourself) and **permanent credentials** (the profile's own
+key/password — opt-in only, with a warning, for servers where the
+hardened pairing can't run).
+
+Housekeeping on the server: `~/.agentcontrol/pair.sh --sweep` removes
+expired or orphaned one-shot lines and stale state files (orphans are
+kept 24 h). A user `crontab` entry every 15 min is installed
+automatically at the first pairing; pairings also trigger a sweep.
+`~/.agentcontrol/pair.log` records timestamps, nonces, statuses and
+fingerprints — never secrets — and paired devices can be revoked from
+the dialog's *Paired devices* list.
 
 ## What you can do
 

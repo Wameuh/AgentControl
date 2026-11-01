@@ -1,6 +1,6 @@
 [package]
 name = "agentcontrol-daemon"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 
 [[bin]]
@@ -19,6 +19,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 toml = "0.8"
+# Réécriture chirurgicale de [backlog_orchestrator] dans config.toml
+# (DocumentMut : commentaires et sections voisines préservés).
+toml_edit = "0.22"
 base64 = "0.22"
 # PTY interactif pour le terminal client (shell dans le workspace d'une
 # session) — portable-pty : fork/exec + setsid corrects, resize natif.
@@ -31,6 +34,17 @@ flate2 = "1"
 tar = "0.4"
 # Hash Sec-WebSocket-Accept du handshake WS (RFC 6455) — serveur web.
 sha1 = "0.11"
+# Validation `regex` des paramètres de composants (schéma catalogue).
+regex = "1"
+# Métriques hôte (cpu/mem/load + RSS propre) dans daemon_status — même
+# crate/version que le client Tauri ; feature "system" seule suffit
+# (refresh_processes/get_current_pid inclus ; pas de feature "process"
+# en 0.32).
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+# Watch FS de l'explorateur (auto-refresh) — inotify non récursif, un
+# watcher par connexion cliente. Pin exact : 8.2.1 a <7 jours au moment
+# de l'ajout (garde supply-chain du repo).
+notify = "=8.2.0"
 
 [target.'cfg(unix)'.dependencies]
 # SIGTERM/SIGKILL aux composants managés (arrêt gracieux + orphelins).

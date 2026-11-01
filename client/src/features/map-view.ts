@@ -320,19 +320,87 @@ export class MapView {
         chipW.get(a.key.slice(2))! / 2 + chipW.get(b.key.slice(2))! / 2 + 10;
       return need / (2 * Math.sin(Math.min(Math.PI / 2, ang / 2)));
     };
+
+    // --- Ordre des racines : contiguïté par groupe ---------------------
+    // Les sous-arbres sont contraints par la topologie (un enfant reste
+    // dans le secteur de son parent), mais l'ordre des RACINES sur le
+    // cercle est libre : les arbres portant le même groupe doivent être
+    // adjacents, sinon la zone (hull des positions) s'étire entre des
+    // secteurs opposés — #82 : les agents spawnés par un composant
+    // (origin component:backlog-orchestrator) tombaient à l'opposé des
+    // autres membres de leur groupe. Groupe porteur d'un arbre = groupe
+    // majoritaire parmi ses sessions (récursif — un composant hérite du
+    // groupe de ses descendants, sans membre groupé → pas de porteur).
+    const sessById = new Map(sess.map((s) => [s.id, s]));
+    const carrier = (t: TNode): string | undefined => {
+      const cnt = new Map<string, number>();
+      const walk = (n: TNode) => {
+        if (n.key.startsWith("s:")) {
+          const g = sessById.get(n.key.slice(2))?.group;
+          if (g) cnt.set(g, (cnt.get(g) ?? 0) + 1);
+        }
+        for (const k of n.kids) walk(k);
+      };
+      walk(t);
+      let best: string | undefined;
+      let bn = 0;
+      for (const [g, n] of cnt) {
+        if (n > bn || (n === bn && g < (best ?? g))) {
+          best = g;
+          bn = n;
+        }
+      }
+      return best;
+    };
+    // Une seule séquence de racines : le rayon diffère par arbre (chip
+    // sur l'anneau RC, sessions à RC+STEP) mais l'ordre angulaire est
+    // libre — intercaler permet la contiguïté composant↔sessions d'un
+    // même groupe. Blocs : chaque groupe converge vers la position de
+    // son premier membre dans l'ordre courant, les non-groupés gardent
+    // leur place relative → sans aucun groupe, l'ordre est strictement
+    // inchangé (composants triés par nom, sessions par created_at).
+    const seq = [
+      ...compTrees.map(
+        (t): { t: TNode; u: number; comp: boolean; g?: string } => ({
+          t,
+          u: compU.get(t.key)!,
+          comp: true,
+          g: carrier(t),
+        }),
+      ),
+      ...sessTrees.map(
+        (t): { t: TNode; u: number; comp: boolean; g?: string } => ({
+          t,
+          u: t.leaf,
+          comp: false,
+          g: carrier(t),
+        }),
+      ),
+    ];
+    const firstIdx = new Map<string, number>();
+    seq.forEach((e, i) => {
+      if (e.g !== undefined && !firstIdx.has(e.g)) firstIdx.set(e.g, i);
+    });
+    const ordered = seq
+      .map((e, i) => ({ e, k: e.g === undefined ? i : firstIdx.get(e.g)!, i }))
+      .sort((a, b) => a.k - b.k || a.i - b.i)
+      .map((x) => x.e);
     // La contrainte arc porte sur le rayon des SESSIONS (RC+STEP) — les
     // chips n'ont besoin que de pairNeed ; le −STEP évite ~96 px de rayon
-    // superflu sur les gros graphes.
+    // superflu sur les gros graphes. Paires adjacentes réelles : deux
+    // chips ne se contraignent que si voisines dans la séquence finale.
     let RC = Math.max(
       120,
       (U * PITCH_MIN) / (2 * Math.PI) - STEP_MIN,
     );
-    for (let i = 1; i < compTrees.length; i++) {
-      RC = Math.max(RC, pairNeed(compTrees[i - 1], compTrees[i]));
+    for (let i = 1; i < ordered.length; i++) {
+      if (ordered[i - 1].comp && ordered[i].comp)
+        RC = Math.max(RC, pairNeed(ordered[i - 1].t, ordered[i].t));
     }
-    // Paire de bouclage : adjacente seulement sans sessions entre les deux.
-    if (compTrees.length > 1 && sessTrees.length === 0) {
-      RC = Math.max(RC, pairNeed(compTrees[compTrees.length - 1], compTrees[0]));
+    // Paire de bouclage : adjacente seulement si les deux extrémités de
+    // la séquence sont des chips.
+    if (ordered.length > 1 && ordered[0].comp && ordered[ordered.length - 1].comp) {
+      RC = Math.max(RC, pairNeed(ordered[ordered.length - 1].t, ordered[0].t));
     }
     const STEP = STEP_MIN;
     // Profondeur max en nombre de sessions (la racine composant ne compte
@@ -355,25 +423,21 @@ export class MapView {
       }
     };
     let cur = -Math.PI / 2;
-    for (const t of compTrees) {
-      const s = spanU * compU.get(t.key)!;
-      place(t, RC, cur, s);
-      cur += s;
-    }
-    for (const t of sessTrees) {
-      const s = spanU * t.leaf;
-      place(t, RC + STEP, cur, s);
+    for (const e of ordered) {
+      const s = spanU * e.u;
+      place(e.t, e.comp ? RC : RC + STEP, cur, s);
       cur += s;
     }
 
     // --- Zones de groupe (champ `group` des sessions) ----------------
     // Cadre labellé = hull convexe paddé autour des membres placés :
-    // les secteurs sont topologiques, un groupe peut couvrir plusieurs
-    // arbres — le hull englobe ses membres où qu'ils tombent. Sessions
-    // sans groupe : pas de cadre (zone à part par exclusion). Clic sur
-    // le cadre ou le label → repli en chip « nom · N » (les nœuds et
-    // arêtes des membres sont masqués, l'espace angulaire reste réservé
-    // → pas de saut de layout au repli).
+    // les racines portant le même groupe sont adjacentes (ordre ci-
+    // dessus) → la zone reste compacte ; un groupe couvrant plusieurs
+    // arbres les englobe où qu'ils tombent. Sessions sans groupe : pas
+    // de cadre (zone à part par exclusion). Clic sur le cadre ou le
+    // label → repli en chip « nom · N » (les nœuds et arêtes des
+    // membres sont masqués, l'espace angulaire reste réservé → pas de
+    // saut de layout au repli).
     const GRP_PAD = 34; // R_SESS + label en dessous du nœud
     const byGrp = new Map<string, Pt[]>();
     const sessGrp = new Map<string, string>(); // session id → groupe
@@ -478,14 +542,66 @@ export class MapView {
         const h = padded(hull(pts), [cx, cy], GRP_PAD);
         if (h.length < 3) {
           const [[x1, y1], [x2, y2]] = h;
-          groups.push(`${head}${capsule(x1, y1, x2, y2, lbl)}</g>`);
-        } else {
-          const d =
-            `M${h.map(([x, y]) => `${x.toFixed(1)} ${y.toFixed(1)}`).join("L")}Z`;
-          const top = h.reduce((m, p) => (p[1] < m[1] ? p : m));
+          // Tous les membres confondus → ligne nulle = rien de rendu :
+          // fallback cercle, même gabarit que le membre unique.
           groups.push(
-            `${head}<path class="grp-hull" d="${d}"/>` +
-              `<text class="grp-label" x="${top[0].toFixed(1)}" y="${(top[1] - 7).toFixed(1)}">${lbl}</text></g>`,
+            `${head}${x1 === x2 && y1 === y2
+              ? `<circle class="grp-hull" cx="${x1.toFixed(1)}" cy="${y1.toFixed(1)}" ` +
+                `r="${GRP_PAD}"/><text class="grp-label" x="${x1.toFixed(1)}" ` +
+                `y="${(y1 - GRP_PAD - 7).toFixed(1)}">${lbl}</text>`
+              : capsule(x1, y1, x2, y2, lbl)}</g>`,
+          );
+        } else {
+          // Cadre ovoïde : ellipse orientée sur l'axe principal de la
+          // covariance 2×2 des positions (direction propre de λmax —
+          // atan2(0,0)=0 → cas isotrope : axe arbitraire). Demi-axes =
+          // étendue projetée + GRP_PAD, puis scale uniforme jusqu'à
+          // containment de tous les membres (un fit naïf peut exclure
+          // un point excentrique).
+          let sxx = 0;
+          let sxy = 0;
+          let syy = 0;
+          for (const [x, y] of pts) {
+            const dx = x - cx;
+            const dy = y - cy;
+            sxx += dx * dx;
+            sxy += dx * dy;
+            syy += dy * dy;
+          }
+          const tr = (sxx + syy) / 2;
+          const rt = Math.sqrt(Math.max(0, tr * tr - (sxx * syy - sxy * sxy)));
+          const th = Math.atan2(tr + rt - sxx, sxy);
+          const ca = Math.cos(th);
+          const sa = Math.sin(th);
+          const prj: Pt[] = pts.map(([x, y]) => {
+            const dx = x - cx;
+            const dy = y - cy;
+            return [dx * ca + dy * sa, -dx * sa + dy * ca];
+          });
+          let ea = GRP_PAD;
+          let eb = GRP_PAD;
+          for (const [u, v] of prj) {
+            ea = Math.max(ea, Math.abs(u) + GRP_PAD);
+            eb = Math.max(eb, Math.abs(v) + GRP_PAD);
+          }
+          let k = 0;
+          for (const [u, v] of prj)
+            k = Math.max(k, (u * u) / (ea * ea) + (v * v) / (eb * eb));
+          if (k > 1) {
+            const f = Math.sqrt(k) + 1e-3;
+            ea *= f;
+            eb *= f;
+          }
+          // Label en haut de la bounding box de l'ellipse orientée :
+          // demi-hauteur = √((a·sinθ)² + (b·cosθ)²).
+          const hb = Math.hypot(ea * sa, eb * ca);
+          const deg = (th * 180) / Math.PI;
+          groups.push(
+            `${head}<ellipse class="grp-hull" cx="${cx.toFixed(1)}" ` +
+              `cy="${cy.toFixed(1)}" rx="${ea.toFixed(1)}" ry="${eb.toFixed(1)}" ` +
+              `transform="rotate(${deg.toFixed(1)} ${cx.toFixed(1)} ${cy.toFixed(1)})"/>` +
+              `<text class="grp-label" x="${cx.toFixed(1)}" ` +
+              `y="${(cy - hb - 7).toFixed(1)}">${lbl}</text></g>`,
           );
         }
       }
@@ -562,6 +678,9 @@ export class MapView {
         c.name,
         `${c.kind} · ${c.status?.state ?? "?"}`,
         c.status?.version ?? "",
+        c.status?.version_outdated
+          ? `⚠ ${t("comp_outdated", { v: c.status.version_min ?? "?" })}`
+          : "",
         c.status?.uptime_s ? `${t("map_uptime")} ${fmtUp(c.status.uptime_s)}` : "",
         c.description ?? "",
       ]

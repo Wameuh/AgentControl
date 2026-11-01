@@ -13,6 +13,9 @@ mod config;
 mod pins;
 mod prompt;
 
+/// Issue d'un steer_queued — le serveur la traduit en {delivered, reason}.
+pub(crate) use prompt::SteerOutcome;
+
 use anyhow::{Context, Result};
 use proto::{Event, EventKind, SessionMeta};
 use serde_json::Value;
@@ -113,6 +116,12 @@ pub struct Session {
     /// : > départ = kill/rebind intervenu pendant SON spawn → la session
     /// appartient au nouveau cycle, l'erreur du spawn doit se taire.
     supplant_mark: AtomicU64,
+    /// Génération du process tué par kill_failed_spawn (handshake raté)
+    /// — son on_agent_exit doit faire le ménage sans poser « dead » ni
+    /// journaliser « agent process exited » : l'état final appartient à
+    /// l'appelant du spawn. CAS par génération : un marqueur périmé ne
+    /// peut pas éteindre l'exit d'un autre process.
+    suppress_exit_gen: AtomicU64,
     /// Réveil (respawn auto sur envoi vers une session "asleep") en cours —
     /// déduplique les envois concurrents : les suivants s'enfilent sans
     /// relancer un second spawn.
@@ -223,6 +232,7 @@ impl Session {
             spawn_gen: AtomicU64::new(0),
             usage_seen: std::sync::atomic::AtomicBool::new(false),
             supplant_mark: AtomicU64::new(0),
+            suppress_exit_gen: AtomicU64::new(0),
             waking: std::sync::atomic::AtomicBool::new(false),
             spawning: std::sync::atomic::AtomicBool::new(false),
             runner_active: std::sync::atomic::AtomicBool::new(false),
@@ -337,15 +347,19 @@ impl Session {
         }
         // Fin de compact signalée par le texte agent : détectée dès que
         // le buffer la contient — le flush peut ne jamais venir si c'est
-        // le dernier message du compact.
+        // le dernier message du compact. Le chunk entrant est testé à
+        // part : accumulé sans séparateur, il peut fusionner un
+        // mot-frontière («…done» + «compact…» → «donecompact») et
+        // masquer le signal que le chunk seul portait.
         let compact_done = kind == "agent"
             && self.compacting.lock().unwrap().is_some()
-            && self
-                .cur_text
-                .lock()
-                .unwrap()
-                .as_ref()
-                .is_some_and(|(_, buf)| compact_done_text(buf));
+            && (compact_done_text(text)
+                || self
+                    .cur_text
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|(_, buf)| compact_done_text(buf)));
         if compact_done {
             self.end_compact("signal agent", false);
         }
@@ -380,6 +394,7 @@ impl Session {
                     text: buf,
                     steer: false,
                     origin: None,
+                    spawn_prompt: false,
                 },
                 _ => EventKind::AgentText { text: buf },
             };
@@ -505,6 +520,7 @@ mod tests {
             text: "autre".into(),
             steer: false,
             origin: None,
+            spawn_prompt: false,
         });
         s.emit(EventKind::AgentText { text: "autre".into() });
         assert_eq!(kinds(&dir).len(), 5);
@@ -544,6 +560,7 @@ mod tests {
             text: "pin moi".into(),
             steer: false,
             origin: None,
+            spawn_prompt: false,
         });
         s.emit(EventKind::AgentText {
             text: "réponse".into(),
@@ -579,6 +596,7 @@ mod tests {
             text: "autre cycle".into(),
             steer: false,
             origin: None,
+            spawn_prompt: false,
         });
         assert_eq!(s2.pins_snapshot()[0]["live"], false);
         // Re-pin du même seq = nouvel event : l'entrée morte est
