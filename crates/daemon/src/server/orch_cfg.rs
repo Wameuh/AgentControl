@@ -52,6 +52,11 @@ const KEYS: &[&str] = &[
     "thought_level",
     "prompt",
     "manager_prompt",
+    "plan_review",
+    "planner_mode",
+    "reviewer_mode",
+    "implement_mode",
+    "max_review_rounds",
     "repo_workspaces",
 ];
 
@@ -210,6 +215,47 @@ pub(crate) fn params_schema() -> Vec<ParamSpec> {
             None,
         ),
         ps(
+            "plan_review",
+            "Pipeline plan→review",
+            "chaque item no_plan=0 est planifié (Backlog-P*, mode \
+             planner_mode), relu par un reviewer éphémère (Backlog-R*, \
+             verdict relayé au planner), puis implémenté par le même \
+             planner après compact + implement_mode — nécessite \
+             agentbacklog ≥ 0.7 ; off = dispatch worker direct",
+            ParamKind::Bool,
+            Some("false"),
+        ),
+        ps(
+            "planner_mode",
+            "Mode planner",
+            "mode demandé au spawn des Backlog-P* ; vide = défaut",
+            ParamKind::String,
+            Some("plan"),
+        ),
+        ps(
+            "reviewer_mode",
+            "Mode reviewer",
+            "mode demandé au spawn des Backlog-R* ; vide = défaut",
+            ParamKind::String,
+            Some("smart"),
+        ),
+        ps(
+            "implement_mode",
+            "Mode implémentation",
+            "mode des workers d'items no_plan et des implémenteurs \
+             (planner approuvé ou nouvelle session) ; vide = défaut",
+            ParamKind::String,
+            Some("bypass"),
+        ),
+        ps(
+            "max_review_rounds",
+            "Rounds de revue max",
+            "au-delà, un verdict denied/conditional gèle l'item en \
+             plan_review « stalled — revue humaine requise »",
+            ParamKind::Int,
+            Some("5"),
+        ),
+        ps(
             "repo_workspaces",
             "Workspaces routés",
             "entrées « repo=/cwd » séparées par des virgules — la liste \
@@ -251,6 +297,14 @@ pub(crate) fn params_values(cfg: &super::cfg::OrchCfg) -> HashMap<String, String
     m.insert(
         "manager_prompt".into(),
         cfg.manager_prompt.clone().unwrap_or_default(),
+    );
+    m.insert("plan_review".into(), cfg.plan_review.to_string());
+    m.insert("planner_mode".into(), cfg.planner_mode.clone());
+    m.insert("reviewer_mode".into(), cfg.reviewer_mode.clone());
+    m.insert("implement_mode".into(), cfg.implement_mode.clone());
+    m.insert(
+        "max_review_rounds".into(),
+        cfg.max_review_rounds.to_string(),
     );
     m.insert(
         "repo_workspaces".into(),
@@ -444,6 +498,33 @@ pub(crate) fn apply_patch(
             // Prompts : vide → None = template intégré.
             "prompt" => cfg.prompt = Some(val_string(v)?).filter(|s| !s.is_empty()),
             "manager_prompt" => cfg.manager_prompt = Some(val_string(v)?).filter(|s| !s.is_empty()),
+            "plan_review" => cfg.plan_review = val_bool(v)?,
+            "planner_mode" => {
+                cfg.planner_mode = if is_empty(v) {
+                    OrchCfg::default().planner_mode
+                } else {
+                    val_string(v)?
+                }
+            }
+            "reviewer_mode" => {
+                cfg.reviewer_mode = if is_empty(v) {
+                    OrchCfg::default().reviewer_mode
+                } else {
+                    val_string(v)?
+                }
+            }
+            "implement_mode" => {
+                cfg.implement_mode = if is_empty(v) {
+                    OrchCfg::default().implement_mode
+                } else {
+                    val_string(v)?
+                }
+            }
+            "max_review_rounds" => {
+                cfg.max_review_rounds = u32::try_from(val_u64(v)?)
+                    .context("max_review_rounds hors borne u32")?
+                    .max(1)
+            }
             // Vide → défaut ; `{}`/`[]` explicite = map vidée.
             "repo_workspaces" => {
                 cfg.repo_workspaces = if is_empty(v) {
@@ -531,6 +612,41 @@ mod tests {
         assert!(c.enabled && !c.watch_prs && !c.spawn_managers && c.auto_patchnotes);
         assert_eq!(c.max_workers, 7);
         assert_eq!(c.poll_secs, 30);
+    }
+
+    #[test]
+    fn patch_pipeline_plan_review() {
+        let mut c = super::super::cfg::OrchCfg::default();
+        // Défauts : pipeline off, modes pipeline nommés.
+        assert!(!c.plan_review);
+        assert_eq!(c.planner_mode, "plan");
+        assert_eq!(c.reviewer_mode, "smart");
+        assert_eq!(c.implement_mode, "bypass");
+        assert_eq!(c.max_review_rounds, 5);
+        apply_patch(
+            &mut c,
+            &patch(&[
+                ("plan_review", json!("on")),
+                ("planner_mode", json!("plan")),
+                ("reviewer_mode", json!("smart")),
+                ("implement_mode", json!("bypass")),
+                ("max_review_rounds", json!("3")),
+            ]),
+        )
+        .unwrap();
+        assert!(c.plan_review);
+        assert_eq!(c.max_review_rounds, 3);
+        // Vide → retour au défaut (modes cassants), round min 1.
+        apply_patch(
+            &mut c,
+            &patch(&[
+                ("reviewer_mode", json!("")),
+                ("max_review_rounds", json!(0)),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(c.reviewer_mode, "smart");
+        assert_eq!(c.max_review_rounds, 1);
     }
 
     #[test]

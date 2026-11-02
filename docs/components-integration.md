@@ -473,6 +473,53 @@ empty clean series; an unavailable agentbacklog still serves the
 series (`items_available:false`, item aggregates `null`). Additive
 request — no protocol breakage.
 
+### 2.11 Plan→review→implementation pipeline — `plan_review` opt-in
+
+`[backlog_orchestrator] plan_review = true` (default **false**, legacy
+dispatch unchanged) switches the native orchestrator to a gated
+pipeline, still on the same tick/persist/lock substrate (item #139,
+`server/orch_plan.rs`):
+
+- **Roles** — three session prefixes instead of one: `Backlog-P<N>`
+  planners (`planner_mode`, default `plan`), `Backlog-R<N>` ephemeral
+  reviewers (`reviewer_mode`, default `smart` — one review per session,
+  deleted afterwards) and the usual `Backlog-W<N>` workers which now
+  only take `no_plan=1` items and the patchnotes item (created with
+  `--no-plan`), in `implement_mode` (default `bypass`).
+- **Flow** — `pending → wip → plan_review → reviewing → wip → done`
+  (agentbacklog ≥ 0.7: `--claim`, `--submit-plan`, `--claim-review`,
+  `--unclaim-review`, `--verdict`, `--reassign`). The item is claimed
+  **by the orchestrator** after spawn (no more self-`--pop`) — a failed
+  claim deletes the fresh session. The planner's submission is read
+  from its internal journal — `PLAN_FILE: <path>` marker or a pending
+  exit-plan `PermissionRequest` — never via fork/exec.
+- **Verdicts** — a `wip` whose `review_round` advanced is a fresh
+  verdict (journal marker is only a fallback when the reviewer forgot
+  `--verdict`): relayed to the planner via PeerMessage if the reviewer
+  didn't; `denied`/`conditional` → revision loop bounded by
+  `max_review_rounds` (default 5 — beyond: item parked `plan_review`
+  "stalled — human review required"); `approved` → `/compact` +
+  implementation prompt + `set_mode(implement_mode)` on the **same**
+  planner session, or a fresh implementer + `--reassign` when the
+  planner is gone (`denied` + gone planner → release).
+- **Priorities & guards** — reviewers dispatch before planners;
+  whenever a `plan_review` item waits unclaimed, planner/worker spawns
+  require ≥2 free slots (a reviewer slot stays reserved). Reviewer
+  timeout → one nudge, then `--unclaim-review` + 5 min respawn
+  cooldown; dead reviewer → same unclaim. Dead planner with its item
+  still `wip` → release (same orphan rule as legacy). A stale
+  `PermissionRequest`/`QuestionRequest` (≠ exit-plan) is auto-answered
+  after `nudge_cooldown_secs` so a blocked planner can't freeze the
+  loop; 3 plan-phase nudges without submission → rm + release. The CLI
+  capability is probed once per tick (`--claim-review` in `--help`) —
+  a too-old agentbacklog parks the component in `waiting`, not in a
+  spawn-fail loop.
+- **Adoption** — pre-existing `wip` items and `Backlog-W*` sessions
+  keep the old protocol untouched (they finish as before, no
+  retro-planning); the release-PR guard counts `plan_review`/`reviewing`
+  as in-flight work, and `status.workers` now covers all three roles
+  (`planners`/`reviewers` counters added).
+
 ---
 
 ## 3. Risks & constraints

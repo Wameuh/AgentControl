@@ -164,6 +164,36 @@ pub struct OrchCfg {
     /// le template intégré.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manager_prompt: Option<String>,
+    /// Pipeline plan→review→implémentation : chaque item `no_plan=0`
+    /// est planifié par une session `Backlog-P*` (mode `planner_mode`),
+    /// relu par un reviewer éphémère `Backlog-R*` (verdict relayé au
+    /// planificateur, boucle de révision bornée par `max_review_rounds`),
+    /// puis implémenté par le même planificateur après `/compact` +
+    /// passage en `implement_mode`. Les items `no_plan=1` (et l'item
+    /// patchnotes auto) gardent le dispatch direct `Backlog-W*`.
+    /// **Défaut false** : dispatch worker direct, comportement inchangé.
+    /// Nécessite agentbacklog ≥ 0.7 (--claim, --submit-plan,
+    /// --claim-review, --verdict, --reassign).
+    #[serde(default)]
+    pub plan_review: bool,
+    /// Mode demandé au spawn des planificateurs `Backlog-P*` (défaut
+    /// "plan"). Vocabulaire propre à l'agent (`agent`), d'où un param.
+    #[serde(default = "dplan")]
+    pub planner_mode: String,
+    /// Mode demandé au spawn des reviewers `Backlog-R*` (défaut "smart").
+    #[serde(default = "dsmart")]
+    pub reviewer_mode: String,
+    /// Mode des implémentations : workers `Backlog-W*` des items
+    /// `no_plan=1` et implémenteurs (planificateur approuvé passé en
+    /// ce mode, ou nouvelle session d'implémentation quand le
+    /// planificateur a disparu avant le verdict). Défaut "bypass".
+    #[serde(default = "dmode")]
+    pub implement_mode: String,
+    /// Nombre maximal de rounds de revue par item : au-delà, un verdict
+    /// denied/conditional gèle l'item en `plan_review` « stalled —
+    /// revue humaine requise » au lieu d'une nouvelle boucle. Défaut 5.
+    #[serde(default = "drounds")]
+    pub max_review_rounds: u32,
     /// Routing workspace repo → cwd : une entrée = un « workspace »
     /// porté par le backlog (tag `--repo` des items). Sert aujourd'hui
     /// à définir les Managers proposables (un par entrée) ; défaut
@@ -203,6 +233,15 @@ fn dmodel() -> String {
 fn dlevel() -> String {
     "max".into()
 }
+fn dplan() -> String {
+    "plan".into()
+}
+fn dsmart() -> String {
+    "smart".into()
+}
+fn drounds() -> u32 {
+    5
+}
 fn drw() -> std::collections::BTreeMap<String, String> {
     [("AgentControl".to_string(), dws())].into_iter().collect()
 }
@@ -227,6 +266,11 @@ impl Default for OrchCfg {
             metrics: true,
             prompt: None,
             manager_prompt: None,
+            plan_review: false,
+            planner_mode: dplan(),
+            reviewer_mode: dsmart(),
+            implement_mode: dmode(),
+            max_review_rounds: drounds(),
             repo_workspaces: drw(),
         }
     }
