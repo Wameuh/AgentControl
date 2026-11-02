@@ -769,12 +769,15 @@ impl Daemon {
         // le même agent : un `--reassign --force` humain vers un autre
         // owner le dégèle (réintégré au dispatch reviewer au prochain
         // tick — nouveau round de revue possible, l'approbation sort
-        // l'item du blocage).
+        // l'item du blocage). `wip`/`reviewing` tolérés : le snapshot
+        // est antérieur au `--submit-plan` du stall (transition en vol
+        // ce tick) — sans quoi l'entrée fraîche serait évacuée ici même
+        // et l'item re-dispatché à chaque cycle.
         st.stalled_plans.retain(|id, owner| {
             by_id
                 .get(&id.parse().unwrap_or(0))
                 .is_some_and(|t| {
-                    task_status(t) == "plan_review"
+                    matches!(task_status(t), "plan_review" | "wip" | "reviewing")
                         && (owner.is_empty() || task_agent(t) == owner)
                 })
         });
