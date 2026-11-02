@@ -365,6 +365,12 @@ impl Daemon {
     /// puis un watcher sur le broadcast des events. Le watcher meurt tout
     /// seul quand la session est droppée (sender fermé / Weak épuisé).
     pub(super) fn watch_prs(&self, s: &Arc<Session>) {
+        // Les reviewers PR citent la PR dans leur sortie — jamais
+        // d'attribution registre sur leur compte (implémenté ici, une
+        // seule fois : couvre backfill, create, resume, peers).
+        if s.meta_snapshot().origin.as_deref() == Some(orch_review::PR_REVIEW_ORIGIN) {
+            return;
+        }
         let sid = s.meta_snapshot().id;
         if let Ok(evs) = s.journal.read_page(&s.dir, None, 2000) {
             let mut titles = HashMap::new();

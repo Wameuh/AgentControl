@@ -57,6 +57,12 @@ const KEYS: &[&str] = &[
     "reviewer_mode",
     "implement_mode",
     "max_review_rounds",
+    "pr_review",
+    "pr_review_trigger",
+    "pr_reviewer_mode",
+    "pr_reviewer_model",
+    "pr_review_max_parallel",
+    "pr_review_timeout",
     "repo_workspaces",
 ];
 
@@ -256,6 +262,56 @@ pub(crate) fn params_schema() -> Vec<ParamSpec> {
             Some("5"),
         ),
         ps(
+            "pr_review",
+            "Review de PR par le démon",
+            "commentaire déclencheur sur une PR ouverte → session \
+             reviewer fraîche sur le head exact, « ## Verdict: … » \
+             posté par le démon — opt-in (remplace l'automatisation \
+             externe absente/morte)",
+            ParamKind::Bool,
+            Some("false"),
+        ),
+        ps(
+            "pr_review_trigger",
+            "Trigger review PR",
+            "commentaire nu déclencheur (corps exact) ; auteur \
+             OWNER/MEMBER/COLLABORATOR requis",
+            ParamKind::String,
+            Some("/mr review"),
+        ),
+        ps(
+            "pr_reviewer_mode",
+            "Mode reviewer PR",
+            "mode demandé au spawn des sessions PRReview-<N> ; \
+             vide = défaut",
+            ParamKind::String,
+            Some("smart"),
+        ),
+        ps(
+            "pr_reviewer_model",
+            "Modèle reviewer PR",
+            "modèle demandé au spawn des sessions PRReview-<N> ; \
+             vide = le param model global",
+            ParamKind::String,
+            None,
+        ),
+        ps(
+            "pr_review_max_parallel",
+            "Reviews PR en parallèle",
+            "pool séparé de max_workers — des workers qui attendent \
+             une review ne doivent pas affamer les reviews",
+            ParamKind::Int,
+            Some("2"),
+        ),
+        ps(
+            "pr_review_timeout",
+            "Timeout review PR (s)",
+            "durée max d'une session reviewer PR : kill + post \
+             « review failed » au-delà",
+            ParamKind::Int,
+            Some("2700"),
+        ),
+        ps(
             "repo_workspaces",
             "Workspaces routés",
             "entrées « repo=/cwd » séparées par des virgules — la liste \
@@ -305,6 +361,27 @@ pub(crate) fn params_values(cfg: &super::cfg::OrchCfg) -> HashMap<String, String
     m.insert(
         "max_review_rounds".into(),
         cfg.max_review_rounds.to_string(),
+    );
+    m.insert("pr_review".into(), cfg.pr_review.to_string());
+    m.insert(
+        "pr_review_trigger".into(),
+        cfg.pr_review_trigger.clone(),
+    );
+    m.insert(
+        "pr_reviewer_mode".into(),
+        cfg.pr_reviewer_mode.clone(),
+    );
+    m.insert(
+        "pr_reviewer_model".into(),
+        cfg.pr_reviewer_model.clone(),
+    );
+    m.insert(
+        "pr_review_max_parallel".into(),
+        cfg.pr_review_max_parallel.to_string(),
+    );
+    m.insert(
+        "pr_review_timeout".into(),
+        cfg.pr_review_timeout.to_string(),
     );
     m.insert(
         "repo_workspaces".into(),
@@ -524,6 +601,39 @@ pub(crate) fn apply_patch(
                 cfg.max_review_rounds = u32::try_from(val_u64(v)?)
                     .context("max_review_rounds hors borne u32")?
                     .max(1)
+            }
+            "pr_review" => cfg.pr_review = val_bool(v)?,
+            "pr_review_trigger" => {
+                cfg.pr_review_trigger = if is_empty(v) {
+                    OrchCfg::default().pr_review_trigger
+                } else {
+                    // Le corps du commentaire est comparé après trim —
+                    // un trigger avec espaces (« /mr review ») est
+                    // légitime.
+                    val_string(v)?
+                }
+            }
+            "pr_reviewer_mode" => {
+                cfg.pr_reviewer_mode = if is_empty(v) {
+                    OrchCfg::default().pr_reviewer_mode
+                } else {
+                    val_string(v)?
+                }
+            }
+            "pr_reviewer_model" => {
+                cfg.pr_reviewer_model = if is_empty(v) {
+                    OrchCfg::default().pr_reviewer_model
+                } else {
+                    val_string(v)?
+                }
+            }
+            "pr_review_max_parallel" => {
+                cfg.pr_review_max_parallel = u32::try_from(val_u64(v)?)
+                    .context("pr_review_max_parallel hors borne u32")?
+                    .max(1)
+            }
+            "pr_review_timeout" => {
+                cfg.pr_review_timeout = val_u64(v)?.max(60)
             }
             // Vide → défaut ; `{}`/`[]` explicite = map vidée.
             "repo_workspaces" => {
