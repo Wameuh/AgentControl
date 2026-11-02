@@ -78,6 +78,8 @@ const PLAN_INLINE_MAX: usize = 30_000;
 const DESC_INLINE_MAX: usize = 16_000;
 /// Idle-nudges d'un planificateur en phase plan avant kill+release.
 const PLAN_MAX_NUDGES: u32 = 3;
+/// Reviewers actifs simultanés (une seule revue à la fois).
+const MAX_REVIEWERS: usize = 1;
 /// Rétention des request_id observés (timeout de la réponse auto) —
 /// borne la map persistée, sans effet métier.
 const REQ_SEEN_KEEP_S: f64 = 86_400.0;
@@ -464,7 +466,8 @@ impl Daemon {
                 self.plan_rm_session(&rsid, st).await;
                 continue;
             }
-            // Timeout : nudge une fois, puis unclaim + rm + cooldown.
+            // Sans verdict : nudge à chaque cooldown tant que le reviewer
+            // est idle — jamais d'unclaim ni de rm automatique.
             let started = *st.review_started.entry(key.clone()).or_insert(now);
             // État du reviewer capturé (pas juste busy) : le nudge part
             // en force sauf sur waiting_input — cf. force_safe_state ;
@@ -478,25 +481,18 @@ impl Daemon {
             if busy || now - started < cfg.nudge_cooldown_secs as f64 {
                 continue;
             }
-            match st.nudges.get(&rsid) {
-                Some(n) if now - *n >= cfg.nudge_cooldown_secs as f64 => {
-                    info!(
-                        "orchestrateur: reviewer {rsid} sans verdict après \
-                         nudge → --unclaim-review #{id}"
-                    );
-                    let _ = run_out(&[bin, "--unclaim-review", &key], ws).await;
-                    self.plan_rm_session(&rsid, st).await;
-                    st.review_retry.insert(key.clone(), now);
-                    st.review_started.remove(&key);
-                }
-                _ => {
-                    if self
-                        .plan_reviewer_nudge(&rsid, &t, force_safe_state(rstate.unwrap_or("")))
-                        .await
-                    {
-                        st.nudges.insert(rsid.clone(), now);
-                    }
-                }
+            if st
+                .nudges
+                .get(&rsid)
+                .is_some_and(|n| now - *n < cfg.nudge_cooldown_secs as f64)
+            {
+                continue;
+            }
+            if self
+                .plan_reviewer_nudge(&rsid, &t, force_safe_state(rstate.unwrap_or("")))
+                .await
+            {
+                st.nudges.insert(rsid.clone(), now);
             }
         }
 
@@ -582,6 +578,11 @@ impl Daemon {
         // puis planners/workers sous réserve anti-deadlock.
         let alive = metas.iter().filter(|m| is_backlog(m, cfg)).count();
         let mut free = (cfg.max_workers as usize).saturating_sub(alive);
+        let reviewers_alive = metas
+            .iter()
+            .filter(|m| is_backlog(m, cfg) && role_of(&m.title, cfg) == Some(Role::Reviewer))
+            .count();
+        let mut reviewers_free = MAX_REVIEWERS.saturating_sub(reviewers_alive);
         // Items plan_review éligibles à un reviewer : ni stalled, ni en
         // cooldown après unclaim pour timeout. Ceux servis ce tick sont
         // retranchés — le reliquat arme la réserve de slot ci-dessous.
@@ -603,7 +604,7 @@ impl Daemon {
             .map(|t| task_id(t))
             .collect();
         for t in tasks.iter().filter(|t| eligible_ids.contains(&task_id(t))) {
-            if free == 0 {
+            if free == 0 || reviewers_free == 0 {
                 break;
             }
             let id = task_id(t);
@@ -656,6 +657,7 @@ impl Daemon {
                         // tick où l'item est réellement `reviewing`.
                         claimed_now.insert(id);
                         free -= 1;
+                        reviewers_free -= 1;
                     } else {
                         warn!("orchestrateur: claim-review #{id} rc={rc} {e} → rm {rsid}");
                         self.plan_rm_session(&rsid, st).await;
@@ -667,7 +669,7 @@ impl Daemon {
         // Revues éligibles restées sans reviewer ce tick → réserve de
         // slot : tout spawn planner/worker exige free ≥ 2 tant qu'il en
         // reste (priorité globale reviewers > planners).
-        let unclaimed = eligible_ids.len() - claimed_now.len();
+        let unclaimed = (eligible_ids.len() - claimed_now.len()).min(reviewers_free);
 
         for t in tasks
             .iter()
