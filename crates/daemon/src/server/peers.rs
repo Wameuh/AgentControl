@@ -304,7 +304,7 @@ impl Daemon {
     /// livraison du message. Si un réveil déclenché par l'utilisateur est
     /// déjà en vol, on s'enfile simplement (drain post-spawn) plutôt que
     /// de lancer un second spawn.
-    async fn resume_and_deliver(self: &Arc<Self>, session: &str, wrapped: String, steer: bool) -> Result<()> {
+    pub(super) async fn resume_and_deliver(self: &Arc<Self>, session: &str, wrapped: String, steer: bool) -> Result<()> {
         let s = self.get_session(session).await?;
         if !s.wake_begin() {
             // Un autre réveil est en vol : enfiler seulement. Ok(true) =

@@ -50,12 +50,12 @@ const CMD_TIMEOUT: Duration = Duration::from_secs(60);
 /// Grâce avant rm d'un worker dont les items sont `done` mais dont
 /// aucune PR n'est enregistrée : le watcher PR peut laguer quelques
 /// minutes derrière le `gh pr create` (cf. script — 240 s).
-const CLEAN_GRACE_S: f64 = 240.0;
+pub(crate) const CLEAN_GRACE_S: f64 = 240.0;
 
 /// Borne (caractères) de la description reprise dans le post « sorti
 /// du backlog » — le post est un résumé de présentation, pas un dump
 /// du cahier des charges.
-const DESC_MAX: usize = 4000;
+pub(crate) const DESC_MAX: usize = 4000;
 
 /// Prompt worker intégré — repris tel quel du script d'origine (le
 /// cahier des charges AgentBacklog des sessions `Backlog-W*`).
@@ -97,7 +97,7 @@ MISSION :
 /// par le client (un par workspace routé), distinct des workers : le
 /// préfixe `title_prefix` ne le matche pas → le cycle de vie
 /// orchestrateur (nudge/rm/garde PR) ne s'y applique pas.
-const MANAGER_ORIGIN: &str = "feature:backlog-manager";
+pub(crate) const MANAGER_ORIGIN: &str = "feature:backlog-manager";
 
 /// Titre d'une session Manager : `Manager · <repo>` — le repo est
 /// relu depuis le titre pour le statut exposé au client.
@@ -154,6 +154,9 @@ pub(crate) struct OrchStatus {
     pub workers: usize,
     pub pending: usize,
     pub wip: usize,
+    /// Compteurs du pipeline plan_review (0 en mode legacy).
+    pub planners: usize,
+    pub reviewers: usize,
 }
 
 /// État persisté — schéma identique à `orchestrator-state.json` du
@@ -181,6 +184,67 @@ pub(crate) struct OrchPersist {
     /// travail (réarmé dès que du travail réel revient).
     #[serde(default)]
     pub notes_cycle_done: bool,
+    // — pipeline plan_review (server/orch_plan.rs) —
+    /// item → epoch du début du cooldown anti-boucle après unclaim de
+    /// reviewer pour timeout (REVIEW_RETRY_S avant respawn).
+    #[serde(default)]
+    pub review_retry: HashMap<String, f64>,
+    /// item → epoch du `--claim-review` courant (base du timeout
+    /// reviewer : nudge puis unclaim).
+    #[serde(default)]
+    pub review_started: HashMap<String, f64>,
+    /// item → `review_round` du dernier verdict traité — détection des
+    /// verdicts frais sans marqueur dans le journal (reviewer qui a
+    /// posté `--verdict` lui-même, ou verdict arrivé pendant une
+    /// coupure du démon).
+    #[serde(default)]
+    pub verdict_seen: HashMap<String, u64>,
+    /// item → seq journal du dernier marqueur `PLAN_FILE:` soumis —
+    /// anti re-submit du même marqueur. Les seqs sont propres à la
+    /// session (repartent à 1 sur un nouveau planner) : l'entrée est
+    /// réinitialisée au `--claim` et sur chaque release/reassign.
+    #[serde(default)]
+    pub plan_marker_seq: HashMap<String, u64>,
+    /// sid → nudges consécutifs d'un planner en phase plan (kill +
+    /// release au plafond PLAN_MAX_NUDGES).
+    #[serde(default)]
+    pub plan_nudges: HashMap<String, u32>,
+    /// item → session planner possédant l'item au gel : `plan_review`
+    /// « revue humaine requise » (round max atteint), exclus du
+    /// dispatch reviewer tant que l'owner n'a pas changé — le dégel
+    /// humain est `--reassign --force` vers un autre agent (la CLI
+    /// l'accepte sur plan_review ; `--release` n'existe pas hors wip).
+    /// Owner "" = gelé avant le suivi d'owner : jamais dégelé auto.
+    #[serde(default, deserialize_with = "stalled_plans_de")]
+    pub stalled_plans: HashMap<String, String>,
+    /// request_id → première observation (timeout de l'auto-réponse
+    /// aux requêtes pendantes du planner).
+    #[serde(default)]
+    pub pending_req_seen: HashMap<String, f64>,
+    /// item → phase pipeline : "planning" | "implementing" — figée au
+    /// verdict approved, réinitialisée au claim/release.
+    #[serde(default)]
+    pub item_phase: HashMap<String, String>,
+}
+
+/// `stalled_plans` a été une `Vec<u64>` (r1 de la feature) avant le
+/// suivi d'owner — tolérer l'ancien format à la relu de l'état
+/// persisté (les ids gelés d'avant ont owner "", jamais dégelés auto).
+fn stalled_plans_de<'de, D>(d: D) -> Result<HashMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match <Value as serde::Deserialize>::deserialize(d).unwrap_or_default() {
+        Value::Object(m) => Ok(m
+            .into_iter()
+            .map(|(k, v)| (k, v.as_str().unwrap_or("").to_string()))
+            .collect()),
+        Value::Array(a) => Ok(a
+            .into_iter()
+            .filter_map(|x| x.as_u64().map(|i| (i.to_string(), String::new())))
+            .collect()),
+        _ => Ok(HashMap::new()),
+    }
 }
 
 /// État partagé de l'orchestrateur : config, bascule runtime, phase
@@ -231,6 +295,8 @@ impl OrchProbe {
                 workers: 0,
                 pending: 0,
                 wip: 0,
+                planners: 0,
+                reviewers: 0,
             }),
             state: Mutex::new(state),
             lock_file: Mutex::new(None),
@@ -291,6 +357,19 @@ impl OrchProbe {
         }
     }
 
+    /// Pose immédiate d'une entrée ledger dans l'état live — utilisée
+    /// par le post « sorti du backlog » (le write-back de fin de tick
+    /// n'arriverait qu'après : un `orch off` entre-temps perdrait le
+    /// marqueur `posted_wip` → repost en doublon). Partagé avec le
+    /// pipeline plan_review (server/orch_plan.rs).
+    pub(crate) fn state_assign_now(&self, sid: &str, assignment: Value) {
+        self.state
+            .lock()
+            .unwrap()
+            .assignments
+            .insert(sid.to_string(), assignment);
+    }
+
     /// Instantané pour `list_components`/`component_info`/`orchestrator_set`.
     pub(crate) fn status_json(&self) -> Value {
         // Détenteur du flock sondé AVANT de prendre `status`/`state` :
@@ -331,6 +410,9 @@ impl OrchProbe {
             "workers": st.workers,
             "pending": st.pending,
             "wip": st.wip,
+            "planners": st.planners,
+            "reviewers": st.reviewers,
+            "stalled_plans": persist.stalled_plans.clone(),
             "assignments": persist.assignments.clone(),
             "notes_cycle_done": persist.notes_cycle_done,
             "state_dir": state_dir().display().to_string(),
@@ -597,13 +679,13 @@ pub(crate) fn now_secs() -> f64 {
 /// Item de la file AgentBacklog (projection JSON du `--list --all`).
 pub(crate) type Task = Value;
 
-fn task_id(t: &Task) -> u64 {
+pub(crate) fn task_id(t: &Task) -> u64 {
     t.get("id").and_then(Value::as_u64).unwrap_or(0)
 }
 pub(crate) fn task_status<'a>(t: &'a Task) -> &'a str {
     t.get("status").and_then(Value::as_str).unwrap_or("")
 }
-fn task_agent<'a>(t: &'a Task) -> &'a str {
+pub(crate) fn task_agent<'a>(t: &'a Task) -> &'a str {
     t.get("agent_id").and_then(Value::as_str).unwrap_or("")
 }
 /// Un item `pending` est « poppable » : sans dépendance ou dépendances
@@ -668,7 +750,7 @@ fn clean_task_title(t: &Task) -> String {
 /// natif (et inverse) ne déclenche aucun ping-pong de renommages.
 /// `None` = base `<préfixe><N>` introuvable dans le titre courant
 /// (session renommée à la main → on n'y touche plus).
-fn orch_desired_title(prefix: &str, current: &str, wip: Option<&Task>) -> Option<String> {
+pub(crate) fn orch_desired_title(prefix: &str, current: &str, wip: Option<&Task>) -> Option<String> {
     let digits = current
         .strip_prefix(prefix)?
         .bytes()
@@ -686,7 +768,7 @@ fn orch_desired_title(prefix: &str, current: &str, wip: Option<&Task>) -> Option
 
 /// argv → (code, stdout, stderr tronqués) — sous-processus bornés :
 /// `agentbacklog` (état partagé) et `gh` (forge) uniquement.
-async fn run_out(argv: &[&str], cwd: &Path) -> Result<(i64, String, String)> {
+pub(crate) async fn run_out(argv: &[&str], cwd: &Path) -> Result<(i64, String, String)> {
     let mut cmd = tokio::process::Command::new(argv[0]);
     cmd.args(&argv[1..])
         .current_dir(cwd)
@@ -781,6 +863,24 @@ impl Daemon {
                 return;
             }
         };
+        // plan_review exige la surface CLI 0.7 (--claim-review…) : sans
+        // elle le dispatch spawnerait des sessions vouées à échouer sur
+        // --claim — Waiting explicite plutôt qu'un cycle de churn.
+        let (plan_review, plan_ws) = {
+            let cfg = self.orch.cfg.read().unwrap();
+            (cfg.plan_review, PathBuf::from(&cfg.workspace))
+        };
+        if plan_review && !orch_plan::cli_plan_capable(&bin, &plan_ws).await {
+            self.orch.set_status(
+                Phase::Waiting,
+                Some(
+                    "waiting: plan_review nécessite agentbacklog ≥ 0.7 \
+                     (--claim-review absent du CLI résolu)"
+                        .into(),
+                ),
+            );
+            return;
+        }
         if let Err(e) = self.orch_cycle(&bin).await {
             warn!("orchestrateur: cycle échoué: {e:#}");
             self.orch.set_status(Phase::Error, Some(format!("{e:#}")));
@@ -859,252 +959,268 @@ impl Daemon {
             return Ok(());
         }
 
-        // 1. wip orphelines (agent_id = session disparue) → release.
-        //    Rattaché à `watch_prs` : sans surveillance PR la boucle ne
-        //    recycle pas non plus les items de sessions disparues.
-        if cfg.watch_prs {
-            for t in tasks.iter().filter(|t| task_status(t) == "wip") {
-                let aid = task_agent(t);
-                if aid.starts_with("s-") && !session_ids.contains(aid) {
-                    info!(
-                        "orchestrateur: tâche #{} orpheline (owner {aid} disparue) → release",
-                        task_id(t)
-                    );
-                    let _ = run_out(
-                        &[bin, "--release", &task_id(t).to_string(), "--agent-id", aid],
-                        ws,
-                    )
-                    .await;
-                    // Un orphelin dep-bloqué ne compte pas pour un spawn
-                    // à ce tick — il redeviendra éligible au suivant,
-                    // une fois `pending` et refiltré.
-                    if task_poppable(t) {
-                        pending.push(t.clone());
+        // plan_review (opt-in) : pipeline plan→review→implémentation
+        // dédié (server/orch_plan.rs — même snapshot, même état
+        // persisté partagé) ; l'autre branche est le dispatch worker
+        // direct historique, inchangé.
+        let (n_workers, n_pending, n_planners, n_reviewers) = if cfg.plan_review {
+            let oc = self
+                .orch_plan_tick(
+                    bin, cfg, ws, &tasks, &metas, &session_ids, &prs, &mut st,
+                )
+                .await?;
+            (oc.workers, oc.pending, oc.planners, oc.reviewers)
+        } else {
+
+            // 1. wip orphelines (agent_id = session disparue) → release.
+            //    Rattaché à `watch_prs` : sans surveillance PR la boucle ne
+            //    recycle pas non plus les items de sessions disparues.
+            if cfg.watch_prs {
+                for t in tasks.iter().filter(|t| task_status(t) == "wip") {
+                    let aid = task_agent(t);
+                    if aid.starts_with("s-") && !session_ids.contains(aid) {
+                        info!(
+                            "orchestrateur: tâche #{} orpheline (owner {aid} disparue) → release",
+                            task_id(t)
+                        );
+                        let _ = run_out(
+                            &[bin, "--release", &task_id(t).to_string(), "--agent-id", aid],
+                            ws,
+                        )
+                        .await;
+                        // Un orphelin dep-bloqué ne compte pas pour un spawn
+                        // à ce tick — il redeviendra éligible au suivant,
+                        // une fois `pending` et refiltré.
+                        if task_poppable(t) {
+                            pending.push(t.clone());
+                        }
                     }
                 }
             }
-        }
 
-        // 2. ledger worker → {items, prs} + gestion des inactifs.
-        for w in workers.clone() {
+            // 2. ledger worker → {items, prs} + gestion des inactifs.
+            for w in workers.clone() {
+                if !self.orch.is_enabled() {
+                    return Ok(());
+                }
+                let sid = w.id.as_str();
+                let state = w.state.as_str();
+                // items possédés par ce worker (agent_id persiste après done)
+                let my_items: BTreeMap<String, String> = tasks
+                    .iter()
+                    .filter(|t| task_agent(t) == sid)
+                    .map(|t| (task_id(t).to_string(), task_status(t).to_string()))
+                    .collect();
+                let my_open: Vec<&String> = my_items
+                    .iter()
+                    .filter(|(_, s)| s.as_str() == "wip")
+                    .map(|(i, _)| i)
+                    .collect();
+                let my_done: Vec<&String> = my_items
+                    .iter()
+                    .filter(|(_, s)| s.as_str() == "done")
+                    .map(|(i, _)| i)
+                    .collect();
+                // PRs du registre attribuées à ce worker, état forge réel —
+                // `gh pr view` n'a de sens que pour GitHub : une MR GitLab
+                // `!N` rapporterait l'état de la PR GitHub #N du workspace
+                // (fausse attribution), et un Change-Id Gerrit non résolu
+                // (pr 0) sonderait pour rien. Hors GitHub ou registre déjà
+                // terminal : confiance au statut enregistré.
+                let mut my_prs: BTreeMap<String, String> = BTreeMap::new();
+                // `watch_prs=false` : aucune sonde forge — le ledger reste
+                // vide, un worker idle sans item wip est recyclé sans
+                // attendre ses PR (orchestrateur « file seule »).
+                if cfg.watch_prs {
+                    for p in prs.iter().filter(|p| {
+                        p.session == sid && !matches!(p.status.as_str(), "closed" | "merged")
+                    }) {
+                        let st_gh = self.orch_pr_state(p, ws).await;
+                        my_prs.insert(p.pr.to_string(), st_gh);
+                    }
+                }
+                let open_prs: Vec<&String> = my_prs
+                    .iter()
+                    .filter(|(_, s)| s.as_str() == "OPEN")
+                    .map(|(n, _)| n)
+                    .collect();
+                // Identité : le titre de la session suit l'item wip courant
+                // (« <préfixe><N> #<id> · <titre> » — l'item, pas le
+                // boilerplate de mission). Renommage détaché :
+                // session/rename ACP peut rester sans réponse sur un agent
+                // occupé — le tick n'attend pas. Pas de renommage pour un
+                // worker sur le point d'être supprimé (inactif, tout soldé :
+                // le revert-to-base serait un rewrite meta + ACP pour rien).
+                let about_to_delete = !matches!(state, "working" | "compacting" | "starting")
+                    && open_prs.is_empty()
+                    && my_open.is_empty();
+                let my_wip = tasks
+                    .iter()
+                    .find(|t| task_agent(t) == sid && task_status(t) == "wip");
+                let title = match orch_desired_title(&cfg.title_prefix, &w.title, my_wip)
+                    .filter(|_| !about_to_delete)
+                {
+                    Some(want) if want != w.title => {
+                        info!("orchestrateur: rename {sid} : {:?} → {want:?}", w.title);
+                        let d = Arc::clone(self);
+                        let (sid2, want2) = (sid.to_string(), want.clone());
+                        tokio::spawn(async move {
+                            if let Err(e) = d.h_rename_session(sid2, want2).await {
+                                warn!("orchestrateur: rename: {e:#}");
+                            }
+                        });
+                        want
+                    }
+                    _ => w.title.clone(),
+                };
+                // Post « sorti du backlog » : à chaque NOUVEL item wip du
+                // worker, journaliser titre + description en user_message
+                // de service (origin) — JAMAIS livré à l'agent, qui a déjà
+                // l'item via son --pop : le post est purement
+                // présentationnel (premier message ACTIONNABLE du
+                // transcript ; le boilerplate de mission reste replié +
+                // badgé « via »). Un post par pop : --release puis re-pop
+                // reposte (posted_wip repasse à None entre-temps) ;
+                // session disparue entre le snapshot et ici → pas de post,
+                // retry au tick suivant.
+                let wip_id = my_wip.map(|t| task_id(t).to_string());
+                let prev_posted = st
+                    .assignments
+                    .get(sid)
+                    .and_then(|a| a.get("posted_wip"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let mut posted_wip = wip_id.clone();
+                let mut just_posted = false;
+                if wip_id != prev_posted {
+                    if let Some(t) = my_wip {
+                        let title_line: String = t
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let desc = t
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .trim();
+                        let mut dc = desc.chars();
+                        let desc_body: String = dc.by_ref().take(DESC_MAX).collect();
+                        let text = if desc_body.is_empty() {
+                            format!("[Backlog] item #{} — {title_line}", task_id(t))
+                        } else {
+                            format!(
+                                "[Backlog] item #{} — {title_line}\n\n{desc_body}{}",
+                                task_id(t),
+                                if dc.next().is_some() { "\n…" } else { "" }
+                            )
+                        };
+                        match self.get_session(sid).await {
+                            Ok(s) => {
+                                s.emit(EventKind::UserMessage {
+                                    text,
+                                    steer: false,
+                                    origin: Some(COMPONENT_ORIGIN.to_string()),
+                                    spawn_prompt: false,
+                                });
+                                just_posted = true;
+                            }
+                            Err(_) => posted_wip = prev_posted,
+                        }
+                    }
+                }
+                let assignment = json!({
+                    "title": title, "state": state,
+                    "tasks": my_items, "prs": my_prs,
+                    "posted_wip": posted_wip,
+                });
+                if just_posted {
+                    // Le UserMessage est déjà commité au journal, mais `st`
+                    // n'est repersisté qu'en fin de tick : un `orch off` en
+                    // vol avant le write-back perdrait le marqueur → repost
+                    // en doublon du même wip au prochain cycle. L'entrée
+                    // complète est posée dans l'état live tout de suite (le
+                    // write-back écrira la même valeur).
+                    self.orch
+                        .state
+                        .lock()
+                        .unwrap()
+                        .assignments
+                        .insert(sid.to_string(), assignment.clone());
+                }
+                st.assignments.insert(sid.to_string(), assignment);
+                if matches!(state, "working" | "compacting" | "starting") {
+                    st.clean_since.remove(sid);
+                    continue;
+                }
+                // inactif : suppression seulement si TOUT est soldé.
+                if open_prs.is_empty() && my_open.is_empty() {
+                    // items done mais aucune PR enregistrée : le watcher peut
+                    // laguer — grâce CLEAN_GRACE_S avant de conclure au rm.
+                    let unresolved = !my_done.is_empty() && my_prs.is_empty();
+                    let since = *st.clean_since.entry(sid.to_string()).or_insert(now);
+                    if unresolved && now - since < CLEAN_GRACE_S {
+                        info!(
+                            "orchestrateur: {sid} propre sauf PR non enregistrées \
+                             (done={my_done:?}) — grâce {}s",
+                            (now - since) as i64
+                        );
+                        continue;
+                    }
+                    info!(
+                        "orchestrateur: {sid} inactive, items soldés \
+                         (done={my_done:?}), prs={my_prs:?} → rm"
+                    );
+                    if let Err(e) = self.h_delete_session(sid.to_string()).await {
+                        warn!("orchestrateur: rm {sid}: {e:#}");
+                    }
+                    st.nudges.remove(sid);
+                    st.clean_since.remove(sid);
+                    st.assignments.remove(sid);
+                    workers.retain(|x| x.id != sid);
+                    continue;
+                }
+                st.clean_since.remove(sid);
+                if now - st.nudges.get(sid).copied().unwrap_or(0.0)
+                    >= cfg.nudge_cooldown_secs as f64
+                {
+                    info!(
+                        "orchestrateur: {sid} idle (open_prs={open_prs:?} \
+                         wip={my_open:?}) → nudge"
+                    );
+                    if self.orch_nudge(sid, &open_prs, &my_open).await {
+                        st.nudges.insert(sid.to_string(), now);
+                    }
+                }
+            }
+
+            // 3. spawn pour les pending poppables.
             if !self.orch.is_enabled() {
                 return Ok(());
             }
-            let sid = w.id.as_str();
-            let state = w.state.as_str();
-            // items possédés par ce worker (agent_id persiste après done)
-            let my_items: BTreeMap<String, String> = tasks
-                .iter()
-                .filter(|t| task_agent(t) == sid)
-                .map(|t| (task_id(t).to_string(), task_status(t).to_string()))
-                .collect();
-            let my_open: Vec<&String> = my_items
-                .iter()
-                .filter(|(_, s)| s.as_str() == "wip")
-                .map(|(i, _)| i)
-                .collect();
-            let my_done: Vec<&String> = my_items
-                .iter()
-                .filter(|(_, s)| s.as_str() == "done")
-                .map(|(i, _)| i)
-                .collect();
-            // PRs du registre attribuées à ce worker, état forge réel —
-            // `gh pr view` n'a de sens que pour GitHub : une MR GitLab
-            // `!N` rapporterait l'état de la PR GitHub #N du workspace
-            // (fausse attribution), et un Change-Id Gerrit non résolu
-            // (pr 0) sonderait pour rien. Hors GitHub ou registre déjà
-            // terminal : confiance au statut enregistré.
-            let mut my_prs: BTreeMap<String, String> = BTreeMap::new();
-            // `watch_prs=false` : aucune sonde forge — le ledger reste
-            // vide, un worker idle sans item wip est recyclé sans
-            // attendre ses PR (orchestrateur « file seule »).
-            if cfg.watch_prs {
-                for p in prs.iter().filter(|p| {
-                    p.session == sid && !matches!(p.status.as_str(), "closed" | "merged")
-                }) {
-                    let st_gh = self.orch_pr_state(p, ws).await;
-                    my_prs.insert(p.pr.to_string(), st_gh);
-                }
-            }
-            let open_prs: Vec<&String> = my_prs
-                .iter()
-                .filter(|(_, s)| s.as_str() == "OPEN")
-                .map(|(n, _)| n)
-                .collect();
-            // Identité : le titre de la session suit l'item wip courant
-            // (« <préfixe><N> #<id> · <titre> » — l'item, pas le
-            // boilerplate de mission). Renommage détaché :
-            // session/rename ACP peut rester sans réponse sur un agent
-            // occupé — le tick n'attend pas. Pas de renommage pour un
-            // worker sur le point d'être supprimé (inactif, tout soldé :
-            // le revert-to-base serait un rewrite meta + ACP pour rien).
-            let about_to_delete = !matches!(state, "working" | "compacting" | "starting")
-                && open_prs.is_empty()
-                && my_open.is_empty();
-            let my_wip = tasks
-                .iter()
-                .find(|t| task_agent(t) == sid && task_status(t) == "wip");
-            let title = match orch_desired_title(&cfg.title_prefix, &w.title, my_wip)
-                .filter(|_| !about_to_delete)
-            {
-                Some(want) if want != w.title => {
-                    info!("orchestrateur: rename {sid} : {:?} → {want:?}", w.title);
-                    let d = Arc::clone(self);
-                    let (sid2, want2) = (sid.to_string(), want.clone());
-                    tokio::spawn(async move {
-                        if let Err(e) = d.h_rename_session(sid2, want2).await {
-                            warn!("orchestrateur: rename: {e:#}");
-                        }
-                    });
-                    want
-                }
-                _ => w.title.clone(),
-            };
-            // Post « sorti du backlog » : à chaque NOUVEL item wip du
-            // worker, journaliser titre + description en user_message
-            // de service (origin) — JAMAIS livré à l'agent, qui a déjà
-            // l'item via son --pop : le post est purement
-            // présentationnel (premier message ACTIONNABLE du
-            // transcript ; le boilerplate de mission reste replié +
-            // badgé « via »). Un post par pop : --release puis re-pop
-            // reposte (posted_wip repasse à None entre-temps) ;
-            // session disparue entre le snapshot et ici → pas de post,
-            // retry au tick suivant.
-            let wip_id = my_wip.map(|t| task_id(t).to_string());
-            let prev_posted = st
-                .assignments
-                .get(sid)
-                .and_then(|a| a.get("posted_wip"))
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            let mut posted_wip = wip_id.clone();
-            let mut just_posted = false;
-            if wip_id != prev_posted {
-                if let Some(t) = my_wip {
-                    let title_line: String = t
-                        .get("title")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    let desc = t
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .trim();
-                    let mut dc = desc.chars();
-                    let desc_body: String = dc.by_ref().take(DESC_MAX).collect();
-                    let text = if desc_body.is_empty() {
-                        format!("[Backlog] item #{} — {title_line}", task_id(t))
-                    } else {
-                        format!(
-                            "[Backlog] item #{} — {title_line}\n\n{desc_body}{}",
-                            task_id(t),
-                            if dc.next().is_some() { "\n…" } else { "" }
-                        )
-                    };
-                    match self.get_session(sid).await {
-                        Ok(s) => {
-                            s.emit(EventKind::UserMessage {
-                                text,
-                                steer: false,
-                                origin: Some(COMPONENT_ORIGIN.to_string()),
-                                spawn_prompt: false,
-                            });
-                            just_posted = true;
-                        }
-                        Err(_) => posted_wip = prev_posted,
+            let slots = (cfg.max_workers as usize).saturating_sub(workers.len());
+            let to_spawn = pending.len().min(slots);
+            for _ in 0..to_spawn {
+                st.counter += 1;
+                info!(
+                    "orchestrateur: pending={} active={} → spawn {}{}",
+                    pending.len(),
+                    workers.len(),
+                    cfg.title_prefix,
+                    st.counter
+                );
+                if let Some(sid) = self.orch_spawn(st.counter).await {
+                    // Session fraîche = worker actif pour le comptage du tick.
+                    if let Ok(s) = self.get_session(&sid).await {
+                        workers.push(s.meta_snapshot());
                     }
                 }
             }
-            let assignment = json!({
-                "title": title, "state": state,
-                "tasks": my_items, "prs": my_prs,
-                "posted_wip": posted_wip,
-            });
-            if just_posted {
-                // Le UserMessage est déjà commité au journal, mais `st`
-                // n'est repersisté qu'en fin de tick : un `orch off` en
-                // vol avant le write-back perdrait le marqueur → repost
-                // en doublon du même wip au prochain cycle. L'entrée
-                // complète est posée dans l'état live tout de suite (le
-                // write-back écrira la même valeur).
-                self.orch
-                    .state
-                    .lock()
-                    .unwrap()
-                    .assignments
-                    .insert(sid.to_string(), assignment.clone());
-            }
-            st.assignments.insert(sid.to_string(), assignment);
-            if matches!(state, "working" | "compacting" | "starting") {
-                st.clean_since.remove(sid);
-                continue;
-            }
-            // inactif : suppression seulement si TOUT est soldé.
-            if open_prs.is_empty() && my_open.is_empty() {
-                // items done mais aucune PR enregistrée : le watcher peut
-                // laguer — grâce CLEAN_GRACE_S avant de conclure au rm.
-                let unresolved = !my_done.is_empty() && my_prs.is_empty();
-                let since = *st.clean_since.entry(sid.to_string()).or_insert(now);
-                if unresolved && now - since < CLEAN_GRACE_S {
-                    info!(
-                        "orchestrateur: {sid} propre sauf PR non enregistrées \
-                         (done={my_done:?}) — grâce {}s",
-                        (now - since) as i64
-                    );
-                    continue;
-                }
-                info!(
-                    "orchestrateur: {sid} inactive, items soldés \
-                     (done={my_done:?}), prs={my_prs:?} → rm"
-                );
-                if let Err(e) = self.h_delete_session(sid.to_string()).await {
-                    warn!("orchestrateur: rm {sid}: {e:#}");
-                }
-                st.nudges.remove(sid);
-                st.clean_since.remove(sid);
-                st.assignments.remove(sid);
-                workers.retain(|x| x.id != sid);
-                continue;
-            }
-            st.clean_since.remove(sid);
-            if now - st.nudges.get(sid).copied().unwrap_or(0.0)
-                >= cfg.nudge_cooldown_secs as f64
-            {
-                info!(
-                    "orchestrateur: {sid} idle (open_prs={open_prs:?} \
-                     wip={my_open:?}) → nudge"
-                );
-                if self.orch_nudge(sid, &open_prs, &my_open).await {
-                    st.nudges.insert(sid.to_string(), now);
-                }
-            }
-        }
 
-        // 3. spawn pour les pending poppables.
-        if !self.orch.is_enabled() {
-            return Ok(());
-        }
-        let slots = (cfg.max_workers as usize).saturating_sub(workers.len());
-        let to_spawn = pending.len().min(slots);
-        for _ in 0..to_spawn {
-            st.counter += 1;
-            info!(
-                "orchestrateur: pending={} active={} → spawn {}{}",
-                pending.len(),
-                workers.len(),
-                cfg.title_prefix,
-                st.counter
-            );
-            if let Some(sid) = self.orch_spawn(st.counter).await {
-                // Session fraîche = worker actif pour le comptage du tick.
-                if let Ok(s) = self.get_session(&sid).await {
-                    workers.push(s.meta_snapshot());
-                }
-            }
-        }
+            (workers.len(), pending.len(), 0usize, 0usize)
+        };
 
         // 4. garde release PR : notes+ready quand vide, draft quand du
         //    travail revient (les items notes ne comptent pas comme du
@@ -1115,11 +1231,20 @@ impl Daemon {
         }
         if cfg.auto_patchnotes {
             let notes_ids: HashSet<u64> = st.notes_items.iter().copied().collect();
+            // « Travail en vol » = tout item non soldé — plan_review
+            // ajoute les deux statuts intermédiaires de son pipeline :
+            // une revue en cours est du vrai travail (la PR release ne
+            // doit pas passer ready pendant qu'elle tourne).
+            let in_flight = |t: &Task| {
+                matches!(task_status(t), "pending" | "wip")
+                    || (cfg.plan_review
+                        && matches!(task_status(t), "plan_review" | "reviewing"))
+            };
             let active_notes = tasks.iter().any(|t| {
-                notes_ids.contains(&task_id(t)) && matches!(task_status(t), "pending" | "wip")
+                notes_ids.contains(&task_id(t)) && in_flight(t)
             });
             let active_other = tasks.iter().any(|t| {
-                !notes_ids.contains(&task_id(t)) && matches!(task_status(t), "pending" | "wip")
+                !notes_ids.contains(&task_id(t)) && in_flight(t)
             });
             let rpr = self.gh_release_pr(ws).await;
             if active_other {
@@ -1161,7 +1286,7 @@ impl Daemon {
                              création item patchnotes",
                             r.0
                         );
-                        if let Some(nid) = self.orch_add_notes(bin, ws).await {
+                        if let Some(nid) = self.orch_add_notes(bin, ws, cfg.plan_review).await {
                             st.notes_items.push(nid);
                             st.notes_cycle_done = true;
                         }
@@ -1180,9 +1305,11 @@ impl Daemon {
         st.assignments.retain(|sid, _| session_ids.contains(sid));
         {
             let mut stg = self.orch.status.lock().unwrap();
-            stg.workers = workers.len();
-            stg.pending = pending.len();
+            stg.workers = n_workers;
+            stg.pending = n_pending;
             stg.wip = tasks.iter().filter(|t| task_status(t) == "wip").count();
+            stg.planners = n_planners;
+            stg.reviewers = n_reviewers;
         }
         *self.orch.state.lock().unwrap() = st.clone();
         self.orch_save(&st);
@@ -1220,7 +1347,7 @@ impl Daemon {
     /// github/github.com à la charge) ; GitLab/Gerrit, Change-Id non
     /// résolu (pr 0) ou statut exotique → statut enregistré mappé sur
     /// l'échelle de gh ("open"/"draft" → OPEN).
-    async fn orch_pr_state(&self, p: &proto::PrEntry, ws: &Path) -> String {
+    pub(crate) async fn orch_pr_state(&self, p: &proto::PrEntry, ws: &Path) -> String {
         if p.forge == "github" && p.pr > 0 {
             return self.gh_pr_state(p.pr, ws).await;
         }
@@ -1275,13 +1402,15 @@ impl Daemon {
     /// blablement créé quand même — le cycle doit le compter pour ne
     /// pas en ajouter un second au tick suivant (0 n'est jamais un id
     /// réel, l'entrée notes_items est inerte).
-    async fn orch_add_notes(&self, bin: &str, ws: &Path) -> Option<u64> {
-        let (rc, out, _) = run_out(
-            &[bin, "--add", NOTES_TITLE, "--desc", NOTES_DESC, "--json"],
-            ws,
-        )
-        .await
-        .ok()?;
+    async fn orch_add_notes(&self, bin: &str, ws: &Path, no_plan: bool) -> Option<u64> {
+        // plan_review : l'item notes est un pur travail d'implémentation —
+        // `--no-plan` le dispatche en worker direct, sans boucle de revue.
+        let mut argv = vec![bin, "--add", NOTES_TITLE, "--desc", NOTES_DESC];
+        if no_plan {
+            argv.push("--no-plan");
+        }
+        argv.push("--json");
+        let (rc, out, _) = run_out(&argv, ws).await.ok()?;
         if rc != 0 {
             warn!("orchestrateur: notes item add rc={rc} out={out}");
             return None;
@@ -1385,7 +1514,7 @@ impl Daemon {
     /// `thought_level` de la config — best-effort, les échecs sont
     /// loggés sans faire échouer le spawn. (Le groupe sidebar est posé
     /// à la création via le param `group` de `h_new_session`.)
-    async fn apply_spawn_cfg(self: &Arc<Self>, sid: &str) {
+    pub(crate) async fn apply_spawn_cfg(self: &Arc<Self>, sid: &str) {
         let cfg = self.orch.cfg.read().unwrap().clone();
         if !cfg.thought_level.is_empty() {
             // Posée en pending_config tant que l'agent n'est pas prêt —
