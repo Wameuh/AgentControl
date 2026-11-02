@@ -138,6 +138,9 @@ export class ChatView {
     connHome: () => {},
     /** ⌨ affiché seulement si le démon de la conn connaît term_open. */
     termCapable: (_conn: string) => false,
+    /** agent_text live réellement rendu en queue (ni trou comblé ni
+     *  replay) → candidat à la lecture auto TTS (#138). */
+    onAgentText: (_ev: AcEvent) => {},
   };
 
   bind(renderer: EventRenderer, d: Partial<typeof this.deps>) {
@@ -959,6 +962,12 @@ export class ChatView {
     // inséré en milieu de vue ne doit pas le ré-ancrer (la dédup texte
     // des events live suivants comparerait à un contenu hors flux).
     if (!insertAt) this.renderer.noteText(ev, node);
+    // Message agent live en queue de fil (ni replay ni trou comblé ni
+    // flush de tampon) → lecture auto TTS si le setting est actif
+    // (no-op sinon/hors Android).
+    if (live && !insertAt && ev.type === "agent_text" && !this.suppressAutoRead) {
+      this.deps.onAgentText(ev);
+    }
     this.renderedCount++;
     if (ev.seq < this.minRendered) this.minRendered = ev.seq;
     if (ev.type === "tool_call") {
@@ -1245,11 +1254,20 @@ export class ChatView {
   }
 
   /** Déverse les events tamponnés en vue ancrée — ceux déjà recouverts
-   *  par la fenêtre sont filtrés par seq (live append les rend en bas). */
+   *  par la fenêtre sont filtrés par seq (live append les rend en bas).
+   *  Ce sont du replay/rattrapage (trou de subscribe, sortie d'ancre,
+   *  fin d'open) : JAMAIS de lecture auto TTS dessus — seule la poussée
+   *  live immédiate est candidate (suppressAutoRead). */
+  private suppressAutoRead = false;
   private flushPendingLive() {
     const rest = this.pendingLive.filter((e) => e.seq > this.maxRendered);
     this.pendingLive = [];
-    for (const ev of rest) this.appendEvent(ev, true);
+    this.suppressAutoRead = true;
+    try {
+      for (const ev of rest) this.appendEvent(ev, true);
+    } finally {
+      this.suppressAutoRead = false;
+    }
   }
 
   /** Ligne système dans le fil (retourne l'élément pour mises à jour). */

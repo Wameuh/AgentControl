@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-tts-dl-start"
+description = "Enables the tts_dl_start command without any pre-configured scope."
+commands.allow = ["tts_dl_start"]
+
+[[permission]]
+identifier = "deny-tts-dl-start"
+description = "Denies the tts_dl_start command without any pre-configured scope."
+commands.deny = ["tts_dl_start"]

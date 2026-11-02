@@ -35,6 +35,13 @@ pub fn init<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
             commands::stt_stop,
             commands::stt_set_language,
             commands::stt_set_engine,
+            commands::tts_state,
+            commands::tts_speak,
+            commands::tts_stop,
+            commands::tts_dl_state,
+            commands::tts_dl_start,
+            commands::tts_dl_cancel,
+            commands::tts_dl_delete,
         ])
         .setup(|app, api| {
             #[cfg(mobile)]

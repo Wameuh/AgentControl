@@ -49,6 +49,7 @@ import { QuickOpen } from "./features/quickopen";
 import { MapView } from "./features/map-view";
 import { TermPanel } from "./features/terminal";
 import { SettingsPanel } from "./features/settings";
+import { Tts } from "./features/tts";
 import { ComponentsPanel } from "./features/components";
 import { stateDiff } from "./features/state-diff";
 import { sounds } from "./features/sounds";
@@ -122,6 +123,7 @@ const term = new TermPanel();
 const connView = new ConnView();
 const newSess = new NewSessionDialog();
 const settings = new SettingsPanel();
+const tts = new Tts();
 const comps = new ComponentsPanel();
 const search = new SessionSearch();
 const pins = new Pins();
@@ -148,7 +150,10 @@ chat.bind(renderer, {
     search.onSessionChanged();
     composer.sessionChanged();
     pins.sessionChanged();
+    // Une voix qui commente un journal qu'on a quitté = bug UX → stop.
+    tts.sessionChanged();
   },
+  onAgentText: (ev) => tts.onAgentText(ev),
   onSessionGone: (id) => composer.dropSession(id),
   connCount: () => conns.knownConns().length,
   connsDownOrNone: () => !conns.anyUp(),
@@ -168,6 +173,7 @@ renderer.bind({
   ctxChanged: () => chat.updateCtx(),
   statusChanged: () => void sidebar.refresh(),
   openSession: (id) => void chat.open(id),
+  agentText: (el, ev) => tts.attachMsg(el, ev),
 });
 // Canaux d'alerte branchés sur le diff partagé (state-diff) — sons et
 // notifications OS restent indépendants mais voient les mêmes transitions.
@@ -196,6 +202,15 @@ composer.mic.openSttSettings = () => {
   sec.open = true;
   sec.scrollIntoView({ block: "start" });
 };
+// « modèle absent » d'un clic haut-parleur → settings sur la section
+// TTS (même motif que le hint mic → section STT).
+tts.openSettings = () => {
+  settings.open();
+  const sec = $("s-sec-tts") as HTMLDetailsElement;
+  sec.open = true;
+  sec.scrollIntoView({ block: "start" });
+};
+settings.tts = tts;
 composer.bindAttachCapable((c) => conns.cap(c ?? "default")?.files === true);
 composer.bindQueueSteerCapable((c) => conns.cap(c ?? "default")?.queue_steer === true);
 conns.bind({
@@ -400,6 +415,7 @@ quick.init();
 term.init();
 map.init();
 settings.init();
+tts.init();
 comps.init();
 notifications.init();
 initFirstPost((c) => conns.cap(c)?.first_post === true);

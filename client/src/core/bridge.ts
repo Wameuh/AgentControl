@@ -148,6 +148,19 @@ async function webInvoke<T>(cmd: string, a: Record<string, unknown>): Promise<T>
     case "plugin:ac-stt|stt_set_language":
     case "plugin:ac-stt|stt_set_engine":
       return undefined as T;
+    case "plugin:ac-stt|tts_state":
+      // Pas de moteur TTS en web — état vide homogène à la forme Kotlin.
+      return {
+        platform: "web", sherpa_ready: false, model_loaded: false,
+        system_ready: false, speaking: false, voices: [],
+      } as T;
+    case "plugin:ac-stt|tts_speak":
+      return { started: false, reason: "unsupported_platform" } as T;
+    case "plugin:ac-stt|tts_stop":
+      return undefined as T;
+    case "plugin:ac-stt|stt_dl_state":
+    case "plugin:ac-stt|tts_dl_state":
+      return { platform: "web", models: [] } as T;
     default:
       // check_update / update_client / ensure_daemon / write_download :
       // absents du monde navigateur — la surface UI qui les invoque est

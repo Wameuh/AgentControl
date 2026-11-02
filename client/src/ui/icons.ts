@@ -94,6 +94,11 @@ const SHAPES: Record<string, string> = {
     '<rect x="9" y="2.5" width="6" height="11" rx="3"/>' +
     '<path d="M5.5 11.5a6.5 6.5 0 0 0 13 0"/><path d="M12 18v3.5"/>',
   stop: '<rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor" stroke="none"/>',
+  // Lecture vocale d'un message agent (TTS)
+  speaker:
+    '<path d="M11 5 6.5 9H3v6h3.5L11 19.5V5Z"/>' +
+    '<path d="M15.5 9.3a4.2 4.2 0 0 1 0 5.4"/>' +
+    '<path d="M18.5 6.8a8.4 8.4 0 0 1 0 10.4"/>',
   // Graphe hub-and-spoke (vue diagramme)
   map:
     '<circle cx="12" cy="12" r="2.6"/>' +

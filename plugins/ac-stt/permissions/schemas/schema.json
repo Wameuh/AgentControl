@@ -439,10 +439,94 @@
           "markdownDescription": "Denies the stt_stop command without any pre-configured scope."
         },
         {
-          "description": "Plugin STT : diagnostic `stt_ping`, gestion des modèles téléchargeables\n(`stt_dl_*` — download à la demande depuis les settings, Android only),\ncycle de dictée (`stt_state`/`stt_start`/`stt_stop`/`stt_set_language`),\nchoix du moteur (`stt_set_engine` — sherpa / SpeechRecognizer système)\net abonnement aux events stt_* (register/remove_listener — héritées de\nla base Kotlin du plugin).\n\n#### This default permission set includes:\n\n- `allow-stt-ping`\n- `allow-stt-dl-state`\n- `allow-stt-dl-start`\n- `allow-stt-dl-cancel`\n- `allow-stt-dl-delete`\n- `allow-stt-state`\n- `allow-stt-start`\n- `allow-stt-stop`\n- `allow-stt-set-language`\n- `allow-stt-set-engine`\n- `allow-register-listener`\n- `allow-remove-listener`",
+          "description": "Enables the tts_dl_cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-tts-dl-cancel",
+          "markdownDescription": "Enables the tts_dl_cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_dl_cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-tts-dl-cancel",
+          "markdownDescription": "Denies the tts_dl_cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the tts_dl_delete command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-tts-dl-delete",
+          "markdownDescription": "Enables the tts_dl_delete command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_dl_delete command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-tts-dl-delete",
+          "markdownDescription": "Denies the tts_dl_delete command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the tts_dl_start command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-tts-dl-start",
+          "markdownDescription": "Enables the tts_dl_start command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_dl_start command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-tts-dl-start",
+          "markdownDescription": "Denies the tts_dl_start command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the tts_dl_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-tts-dl-state",
+          "markdownDescription": "Enables the tts_dl_state command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_dl_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-tts-dl-state",
+          "markdownDescription": "Denies the tts_dl_state command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the tts_speak command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-tts-speak",
+          "markdownDescription": "Enables the tts_speak command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_speak command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-tts-speak",
+          "markdownDescription": "Denies the tts_speak command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the tts_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-tts-state",
+          "markdownDescription": "Enables the tts_state command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-tts-state",
+          "markdownDescription": "Denies the tts_state command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the tts_stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-tts-stop",
+          "markdownDescription": "Enables the tts_stop command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-tts-stop",
+          "markdownDescription": "Denies the tts_stop command without any pre-configured scope."
+        },
+        {
+          "description": "Plugin voix : diagnostic `stt_ping`, gestion des modèles téléchargeables\n(`stt_dl_*`/`tts_dl_*` — download à la demande depuis les settings,\nAndroid only), cycle de dictée (`stt_state`/`stt_start`/`stt_stop`/\n`stt_set_language`), choix du moteur (`stt_set_engine` — sherpa /\nSpeechRecognizer système), synthèse vocale on-device (`tts_state`/\n`tts_speak`/`tts_stop` — sherpa OfflineTts / TextToSpeech système) et\nabonnement aux events stt_*/tts_* (register/remove_listener — héritées\nde la base Kotlin du plugin).\n\n#### This default permission set includes:\n\n- `allow-stt-ping`\n- `allow-stt-dl-state`\n- `allow-stt-dl-start`\n- `allow-stt-dl-cancel`\n- `allow-stt-dl-delete`\n- `allow-stt-state`\n- `allow-stt-start`\n- `allow-stt-stop`\n- `allow-stt-set-language`\n- `allow-stt-set-engine`\n- `allow-tts-state`\n- `allow-tts-speak`\n- `allow-tts-stop`\n- `allow-tts-dl-state`\n- `allow-tts-dl-start`\n- `allow-tts-dl-cancel`\n- `allow-tts-dl-delete`\n- `allow-register-listener`\n- `allow-remove-listener`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Plugin STT : diagnostic `stt_ping`, gestion des modèles téléchargeables\n(`stt_dl_*` — download à la demande depuis les settings, Android only),\ncycle de dictée (`stt_state`/`stt_start`/`stt_stop`/`stt_set_language`),\nchoix du moteur (`stt_set_engine` — sherpa / SpeechRecognizer système)\net abonnement aux events stt_* (register/remove_listener — héritées de\nla base Kotlin du plugin).\n\n#### This default permission set includes:\n\n- `allow-stt-ping`\n- `allow-stt-dl-state`\n- `allow-stt-dl-start`\n- `allow-stt-dl-cancel`\n- `allow-stt-dl-delete`\n- `allow-stt-state`\n- `allow-stt-start`\n- `allow-stt-stop`\n- `allow-stt-set-language`\n- `allow-stt-set-engine`\n- `allow-register-listener`\n- `allow-remove-listener`"
+          "markdownDescription": "Plugin voix : diagnostic `stt_ping`, gestion des modèles téléchargeables\n(`stt_dl_*`/`tts_dl_*` — download à la demande depuis les settings,\nAndroid only), cycle de dictée (`stt_state`/`stt_start`/`stt_stop`/\n`stt_set_language`), choix du moteur (`stt_set_engine` — sherpa /\nSpeechRecognizer système), synthèse vocale on-device (`tts_state`/\n`tts_speak`/`tts_stop` — sherpa OfflineTts / TextToSpeech système) et\nabonnement aux events stt_*/tts_* (register/remove_listener — héritées\nde la base Kotlin du plugin).\n\n#### This default permission set includes:\n\n- `allow-stt-ping`\n- `allow-stt-dl-state`\n- `allow-stt-dl-start`\n- `allow-stt-dl-cancel`\n- `allow-stt-dl-delete`\n- `allow-stt-state`\n- `allow-stt-start`\n- `allow-stt-stop`\n- `allow-stt-set-language`\n- `allow-stt-set-engine`\n- `allow-tts-state`\n- `allow-tts-speak`\n- `allow-tts-stop`\n- `allow-tts-dl-state`\n- `allow-tts-dl-start`\n- `allow-tts-dl-cancel`\n- `allow-tts-dl-delete`\n- `allow-register-listener`\n- `allow-remove-listener`"
         }
       ]
     }

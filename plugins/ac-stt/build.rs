@@ -13,6 +13,13 @@ const COMMANDS: &[&str] = &[
     "stt_stop",
     "stt_set_language",
     "stt_set_engine",
+    "tts_state",
+    "tts_speak",
+    "tts_stop",
+    "tts_dl_state",
+    "tts_dl_start",
+    "tts_dl_cancel",
+    "tts_dl_delete",
     "register_listener",
     "remove_listener",
 ];

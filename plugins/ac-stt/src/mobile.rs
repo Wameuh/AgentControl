@@ -6,7 +6,7 @@ use tauri::{
 
 use crate::models::{
     PingResponse, SetEngineArgs, SetLanguageArgs, SttDlState, SttStart,
-    SttState, SttStop,
+    SttState, SttStop, TtsSpeak, TtsSpeakArgs, TtsState,
 };
 
 /// Accès au plugin natif depuis le Rust : chaque commande `stt_*` de la
@@ -97,6 +97,88 @@ impl<R: Runtime> Stt<R> {
                 SetEngineArgs { engine },
             )
             .map(|_| ())
+            .map_err(Into::into)
+    }
+
+    // ── TTS (backlog #138) — forwards vers les @Command tts* du même
+    //    plugin Kotlin (pas de 2e plugin). ────────────────────────────
+
+    /// `@Command ttsState` Kotlin : moteur sherpa/système + voix
+    /// installées + utterance en cours.
+    pub fn tts_state(&self) -> crate::Result<TtsState> {
+        self.0
+            .run_mobile_plugin("ttsState", ())
+            .map_err(Into::into)
+    }
+
+    /// `@Command ttsSpeak` Kotlin : synthèse + lecture, préempte
+    /// l'utterance courante (une seule lecture à la fois).
+    #[allow(clippy::too_many_arguments)]
+    pub fn tts_speak(
+        &self,
+        text: &str,
+        tag: &str,
+        engine: &str,
+        model: &str,
+        voice: &str,
+        lang: &str,
+        speed: f32,
+    ) -> crate::Result<TtsSpeak> {
+        self.0
+            .run_mobile_plugin(
+                "ttsSpeak",
+                TtsSpeakArgs {
+                    text,
+                    tag,
+                    engine,
+                    model,
+                    voice,
+                    lang,
+                    speed,
+                },
+            )
+            .map_err(Into::into)
+    }
+
+    /// `@Command ttsStop` Kotlin.
+    pub fn tts_stop(&self) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin::<serde_json::Value>("ttsStop", ())
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
+    /// `@Command ttsDlState` Kotlin — modèles TTS (archives tar.bz2).
+    pub fn tts_dl_state(&self) -> crate::Result<SttDlState> {
+        self.0
+            .run_mobile_plugin("ttsDlState", ())
+            .map_err(Into::into)
+    }
+
+    pub fn tts_dl_start(&self, model: &str) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin(
+                "ttsDlStart",
+                serde_json::json!({ "model": model }),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn tts_dl_cancel(&self, model: &str) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin(
+                "ttsDlCancel",
+                serde_json::json!({ "model": model }),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn tts_dl_delete(&self, model: &str) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin(
+                "ttsDlDelete",
+                serde_json::json!({ "model": model }),
+            )
             .map_err(Into::into)
     }
 }

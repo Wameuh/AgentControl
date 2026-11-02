@@ -10,38 +10,55 @@ import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
+import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
 import org.json.JSONArray
 
-// ── Download manager des modèles STT (backlog #133, doc §6.1/§7.3) ──────────
+// ── Download manager des modèles voix (STT #133 + TTS #138, doc §6.1) ───────
 //
-// Rien n'est embarqué dans l'APK (~685 Mo) : les modèles sont récupérés à la
-// demande depuis les settings par GET HTTPS directs sur HuggingFace
-// `resolve/main/<fichier>` — pas d'archive à décompresser. Reprise sur
-// interruption (Range sur le `.part`), retry, vérif taille + sha256 avant de
-// promouvoir le fichier. Source alternative documentée : la release GitHub
-// k2-fsa/sherpa-onnx tag `asr-models` (tar.bz2 — exigerait bzip2, non retenu).
+// Rien n'est embarqué dans l'APK : les modèles sont récupérés à la demande
+// depuis les settings. Deux formes de descripteur data-driven :
+//  - fichiers individuels (STT) : GET HTTPS directs sur HuggingFace
+//    `resolve/main/<fichier>` — pas d'archive à décompresser ;
+//  - archive tar.bz2 unique (TTS) : la release GitHub k2-fsa/sherpa-onnx tag
+//    `tts-models` — un seul GET (~130-150 Mo) puis extraction (espeak-ng-data
+//    compte ~350 petits fichiers, un GET chacun serait lent et fragile).
+// Commun : reprise sur interruption (Range sur le `.part`), retry, vérif
+// taille + sha256 avant de promouvoir, erreur persistée dans `.dlerr`.
 
-/** Un fichier du modèle : nom, taille exacte, sha256 du contenu. */
+/** Un fichier du modèle : nom, taille exacte, sha256 du contenu. Pour un
+ *  modèle `archive`, l'unique entrée est le .tar.bz2 à extraire. */
 data class SttModelFile(val name: String, val size: Long, val sha256: String)
 
-/** Descripteur data-driven d'un modèle téléchargeable — ajouter
- *  parakeet-tdt-0.6b-v3-int8 (2e modèle du doc §7) = une entrée de plus. */
+/** Descripteur data-driven d'un modèle téléchargeable — ajouter un modèle =
+ *  une entrée de liste de plus (parakeet 2e STT, autre voix TTS…). */
 data class SttModel(
   val id: String,
   val label: String,
+  /** "stt" | "tts" — dossier racine filesDir/models/<kind> et préfixe des
+   *  events de progression (`<kind>_dl_progress` / `<kind>_dl_state`). */
+  val kind: String,
   val baseUrl: String,
-  /** Sous-dossier sous filesDir/models/stt ; "" = fichiers à plat — le
-   *  layout que le core (#132) attend pour charger le recognizer. */
+  /** Sous-dossier sous filesDir/models/<kind> ; "" = fichiers à plat à la
+   *  racine du kind (layout STT du core recognizer). */
   val subdir: String,
+  /** true → `files` décrit une archive .tar.bz2 extraite sous modelDir à la
+   *  fin du téléchargement (premier composant de chemin ignoré, `.ok`
+   *  marqueur de complétion). */
+  val archive: Boolean = false,
   val files: List<SttModelFile>,
 ) {
   val totalBytes: Long get() = files.sumOf { it.size }
 }
 
+private const val GH_TTS_RELEASE =
+  "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models"
+
 val STT_MODELS = listOf(
   SttModel(
     id = "nemotron-3.5-asr-streaming-0.6b-int8-560ms",
     label = "Nemotron 3.5 ASR streaming 0.6B int8 (560 ms)",
+    kind = "stt",
     baseUrl = "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11/resolve/main",
     subdir = "",
     files = listOf(
@@ -53,6 +70,38 @@ val STT_MODELS = listOf(
         "4101c7c679a0bc30483794b27a059e34e79232aa2068d78d51231a22c8b0d7ce"),
       SttModelFile("tokens.txt", 131_440,
         "729cc103155bafa785f9cd45746cd41cabe97eab7182fc04d594129587958f8a"),
+    ),
+  ),
+)
+
+// Voix TTS on-device (backlog #138) : kokoro multi-lang v1_0 en priorité —
+// voix neuronales naturelles, 53 speakers dont le français `ff_siwis`
+// (sid 30). NB : la v1_1 n'embarque QUE zh+en (103 speakers zf/zm/af/bf) —
+// c'est bien la v1_0 qui couvre fr/es/it/pt/ja/hi. Repli léger : piper
+// fr_FR siwis medium (voix plus robotique mais ~21 Mo contre ~132).
+val TTS_MODELS = listOf(
+  SttModel(
+    id = "kokoro-int8-multi-lang-v1_0",
+    label = "Kokoro 82M multi-lang int8 — voix naturelles (fr/es/it/pt/ja/en…)",
+    kind = "tts",
+    baseUrl = GH_TTS_RELEASE,
+    subdir = "kokoro-int8-multi-lang-v1_0",
+    archive = true,
+    files = listOf(
+      SttModelFile("kokoro-int8-multi-lang-v1_0.tar.bz2", 132_353_410,
+        "72c347230107ef8a31098ec4d468a605244beef5f1ed00db97efa13518800653"),
+    ),
+  ),
+  SttModel(
+    id = "vits-piper-fr_FR-siwis-medium-int8",
+    label = "Piper fr_FR siwis medium int8 — léger, français uniquement",
+    kind = "tts",
+    baseUrl = GH_TTS_RELEASE,
+    subdir = "vits-piper-fr_FR-siwis-medium-int8",
+    archive = true,
+    files = listOf(
+      SttModelFile("vits-piper-fr_FR-siwis-medium-int8.tar.bz2", 20_914_888,
+        "3909cff9b3cfd4820c66aa13bf554315c82e34899c161f0b446ece372bc4b5ec"),
     ),
   ),
 )
@@ -89,10 +138,10 @@ class ModelDownloader(
 
   // ── Chemins ──────────────────────────────────────────────────────────
 
-  private fun modelRoot() = File(filesDir, "models/stt")
+  private fun modelRoot(m: SttModel) = File(filesDir, "models/${m.kind}")
 
   fun modelDir(m: SttModel): File =
-    if (m.subdir.isEmpty()) modelRoot() else File(modelRoot(), m.subdir)
+    if (m.subdir.isEmpty()) modelRoot(m) else File(modelRoot(m), m.subdir)
 
   private fun dstFile(m: SttModel, f: SttModelFile) = File(modelDir(m), f.name)
   private fun partFile(m: SttModel, f: SttModelFile) =
@@ -100,36 +149,59 @@ class ModelDownloader(
   /** Erreur persistée par modèle — deux modèles déclarés dans le même
    *  `subdir` (ex. à plat) ne partagent pas leur fichier d'erreur. */
   private fun errFile(m: SttModel) = File(modelDir(m), ".${m.id}.dlerr")
+  /** Marqueur posé une fois l'archive intégralement extraite — seul
+   *  témoin fiable de « present » pour un modèle `archive` (l'archive
+   *  elle-même est supprimée après extraction). */
+  private fun okFile(m: SttModel) = File(modelDir(m), ".ok")
+  /** Extraction en cours dans un dir à part, renommé en fin — une
+   *  extraction interrompue ne laisse pas un demi-arbre dans modelDir. */
+  private fun stagingDir(m: SttModel) = File(modelRoot(m), ".${m.id}.x")
 
-  fun findModel(id: String): SttModel? = STT_MODELS.find { it.id == id }
+  /** `kind` restreint la recherche à une famille ("stt"/"tts") ; null =
+   *  les deux (diagnostic). */
+  fun findModel(id: String, kind: String? = null): SttModel? =
+    (STT_MODELS + TTS_MODELS).find { it.id == id && (kind == null || it.kind == kind) }
 
   // ── État ─────────────────────────────────────────────────────────────
 
   /** Octets téléchargés du modèle : fichiers finis (taille conforme)
-   *  + `.part` en cours. */
-  private fun downloadedBytes(m: SttModel): Long =
-    m.files.sumOf { f ->
+   *  + `.part` en cours ; modèle installé = total affiché. */
+  private fun downloadedBytes(m: SttModel): Long {
+    if (m.archive && okFile(m).isFile) return m.totalBytes
+    return m.files.sumOf { f ->
       val dst = dstFile(m, f)
       if (dst.isFile && dst.length() == f.size) f.size
       else partFile(m, f).takeIf { it.isFile }?.length() ?: 0L
     }
+  }
+
+  private fun filesPresent(m: SttModel): Boolean {
+    if (m.archive) return okFile(m).isFile
+    return m.files.all { dstFile(m, it).let { d -> d.isFile && d.length() == it.size } }
+  }
+
+  private fun hasLeftovers(m: SttModel): Boolean {
+    if (m.archive) {
+      return modelDir(m).isDirectory || stagingDir(m).isDirectory ||
+        m.files.any { partFile(m, it).isFile || dstFile(m, it).isFile }
+    }
+    return m.files.any { dstFile(m, it).isFile || partFile(m, it).isFile }
+  }
 
   fun stateOf(m: SttModel): String = when {
     jobs.containsKey(m.id) -> "downloading"
-    m.files.all { dstFile(m, it).let { d -> d.isFile && d.length() == it.size } } ->
-      "present"
+    filesPresent(m) -> "present"
     errFile(m).isFile -> "error"
-    m.files.any {
-      dstFile(m, it).isFile || partFile(m, it).isFile
-    } -> "partial"
+    hasLeftovers(m) -> "partial"
     else -> "absent"
   }
 
-  /** Réponse de `stt_dl_state` : descripteur + état disque + job actif,
-   *  auto-descriptif (le front n'a rien à deviner). */
-  fun modelsJson(): JSONArray {
+  /** Réponse de `<kind>_dl_state` : descripteurs + état disque + jobs
+   *  actifs, auto-descriptif (le front n'a rien à deviner). */
+  fun modelsJson(kind: String): JSONArray {
     val arr = JSONArray()
-    for (m in STT_MODELS) {
+    for (m in STT_MODELS + TTS_MODELS) {
+      if (m.kind != kind) continue
       val o = JSObject()
       o.put("id", m.id)
       o.put("label", m.label)
@@ -163,7 +235,7 @@ class ModelDownloader(
     val job = Job(m)
     if (jobs.putIfAbsent(m.id, job) != null) return
     emitState(m)
-    job.thread = thread(name = "stt-dl-${m.id.take(16)}") { runJob(job) }
+    job.thread = thread(name = "${m.kind}-dl-${m.id.take(16)}") { runJob(job) }
   }
 
   fun cancel(id: String) {
@@ -173,8 +245,9 @@ class ModelDownloader(
     }
   }
 
-  /** Supprime les fichiers du modèle (finaux + .part + .dlerr) — jamais
-   *  le dossier entier : d'autres modèles peuvent partager le parent. */
+  /** Supprime les fichiers du modèle : finaux + .part + .dlerr pour un
+   *  modèle fichiers (le parent peut être partagé) ; dossier entier
+   *  (extraction comprise) pour un modèle archive — son subdir est privé. */
   fun delete(m: SttModel) {
     val job = jobs[m.id]
     if (job != null) {
@@ -183,11 +256,16 @@ class ModelDownloader(
       job.thread?.join(3_000)
       jobs.remove(m.id)
     }
-    for (f in m.files) {
-      dstFile(m, f).delete()
-      partFile(m, f).delete()
+    if (m.archive) {
+      stagingDir(m).deleteRecursively()
+      modelDir(m).deleteRecursively()
+    } else {
+      for (f in m.files) {
+        dstFile(m, f).delete()
+        partFile(m, f).delete()
+      }
+      errFile(m).delete()
     }
-    errFile(m).delete()
     emitState(m)
   }
 
@@ -203,7 +281,11 @@ class ModelDownloader(
     val m = job.model
     try {
       modelDir(m).mkdirs()
-      for (f in m.files) downloadFile(job, f)
+      for (f in m.files) {
+        downloadFile(job, f)
+        checkCancelled(job)
+      }
+      if (m.archive) extractArchives(job)
     } catch (_: Cancelled) {
       // Les .part restent — stateOf relira "partial"/"absent" au finally.
     } catch (e: Exception) {
@@ -219,6 +301,51 @@ class ModelDownloader(
       emitProgress(m)
       emitState(m)
     }
+  }
+
+  /** Extraction des archives téléchargées (chaque `files` d'un modèle
+   *  archive = un .tar.bz2) : stream dans le staging dir, premier
+   *  composant de chemin ignoré (dir racine du tarball), garde anti
+   *  zip-slip, marqueur `.ok` puis bascule atomique par renommage. */
+  private fun extractArchives(job: Job) {
+    val m = job.model
+    val staging = stagingDir(m)
+    staging.deleteRecursively()
+    staging.mkdirs()
+    for (f in m.files) {
+      val archive = dstFile(m, f)
+      if (!archive.isFile) throw IOException("${f.name}: archive absente")
+      BZip2CompressorInputStream(archive.inputStream().buffered()).use { bz ->
+        TarArchiveInputStream(bz).use { tar ->
+          var e = tar.nextEntry
+          while (e != null) {
+            checkCancelled(job)
+            val rel = e.name.substringAfter('/', "")
+            if (rel.isNotEmpty() && !e.isDirectory) {
+              val out = File(staging, rel)
+              // startsWith(path + separator) : sans séparateur,
+              // `staging.evil/…` passerait pour un chemin interne.
+              if (!out.canonicalPath.startsWith(staging.canonicalPath + File.separator)) {
+                throw Fatal("archive: chemin refusé ${e.name}")
+              }
+              out.parentFile?.mkdirs()
+              out.outputStream().use { o -> tar.copyTo(o) }
+            }
+            e = tar.nextEntry
+          }
+        }
+      }
+    }
+    // Complétion AVANT la bascule : un .ok présent garantit un arbre
+    // intégral, même si le process meurt entre rename et fin de job.
+    File(staging, ".ok").writeText("ok\n")
+    modelDir(m).deleteRecursively()
+    if (!staging.renameTo(modelDir(m))) {
+      staging.copyRecursively(modelDir(m), true)
+      staging.deleteRecursively()
+    }
+    // L'archive extraite ne sert plus — on libère les ~150 Mo.
+    for (f in m.files) dstFile(m, f).delete()
   }
 
   private fun downloadFile(job: Job, f: SttModelFile) {
@@ -322,14 +449,14 @@ class ModelDownloader(
     o.put("model", m.id)
     o.put("bytes", downloadedBytes(m))
     o.put("total", m.totalBytes)
-    emit("stt_dl_progress", o)
+    emit("${m.kind}_dl_progress", o)
   }
 
   private fun emitState(m: SttModel) {
     val o = JSObject()
     o.put("model", m.id)
     o.put("state", stateOf(m))
-    emit("stt_dl_state", o)
+    emit("${m.kind}_dl_state", o)
   }
 
   private fun sha256Of(f: File): String {

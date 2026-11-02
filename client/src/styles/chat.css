@@ -628,6 +628,23 @@ details.th .ic-thought { width: 12px; height: 12px; }
 body.android .msg .pin-tag { opacity: .45; pointer-events: auto; }
 body.android .ev.pinned .pin-tag { opacity: 1; }
 
+/* Bouton haut-parleur TTS : sous le message agent, discret au repos,
+   accent + ondes quand c'est lui qui parle. */
+.msg-tts {
+  display: flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; margin: 2px 0 -4px auto; padding: 0;
+  background: none; border: none; border-radius: 6px;
+  color: var(--dim); cursor: pointer; opacity: .55;
+}
+.msg-tts .ic { width: 15px; height: 15px; display: block; }
+.msg-tts:hover { color: var(--ink); opacity: 1; }
+.msg-tts.tts-on { color: var(--accent); opacity: 1; }
+.msg-tts.tts-on .ic { animation: tts-wave 1.6s ease-in-out infinite; }
+@keyframes tts-wave {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .55; }
+}
+
 /* Panneau des épinglés : dans le flux comme #queue-panel. */
 #pins-panel {
   flex-shrink: 0; display: flex; flex-direction: column; max-height: 42%;
@@ -772,9 +789,9 @@ body.android .ev.pinned .pin-tag { opacity: 1; }
 #s-pacc-state { margin: 0; }
 #cv-pacc { margin-top: 8px; }
 #cv-pacc-state { margin: 0; }
-/* Modèles STT téléchargeables (settings Android) : ligne descriptive +
+/* Modèles STT/TTS téléchargeables (settings Android) : ligne descriptive +
    actions, barre de progression live sous la ligne. */
-#s-stt-models { display: flex; flex-direction: column; gap: 14px; }
+#s-stt-models, #s-tts-models { display: flex; flex-direction: column; gap: 14px; }
 .stt-model { display: flex; flex-direction: column; gap: 6px; max-width: 560px; }
 .stt-head { max-width: none; }
 .stt-actions { flex: none; display: flex; gap: 8px; }

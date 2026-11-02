@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-tts-state"
+description = "Enables the tts_state command without any pre-configured scope."
+commands.allow = ["tts_state"]
+
+[[permission]]
+identifier = "deny-tts-state"
+description = "Denies the tts_state command without any pre-configured scope."
+commands.deny = ["tts_state"]

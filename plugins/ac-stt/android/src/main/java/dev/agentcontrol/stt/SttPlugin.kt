@@ -60,10 +60,12 @@ private val MODEL_FILES = arrayOf(
 )
 class SttPlugin(private val activity: Activity): Plugin(activity) {
 
-  // Download des modèles à la demande (backlog #133) — events relayés à
-  // la webview via le mécanisme listeners du plugin (addPluginListener
-  // côté JS : stt_dl_progress / stt_dl_state).
+  // Download des modèles à la demande (backlog #133 + #138) — events
+  // relayés à la webview via le mécanisme listeners du plugin
+  // (addPluginListener côté JS : stt_dl_* / tts_dl_*).
   private lateinit var downloader: ModelDownloader
+  // TTS on-device (backlog #138) : sherpa OfflineTts + repli système.
+  private lateinit var ttsEngine: TtsEngine
 
   @Volatile private var recognizer: OnlineRecognizer? = null
   @Volatile private var stream: OnlineStream? = null
@@ -98,14 +100,20 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
     downloader = ModelDownloader(activity.filesDir) { ev, payload ->
       trigger(ev, payload)
     }
+    ttsEngine = TtsEngine(activity) { ev, payload ->
+      trigger(ev, payload)
+    }
     // Le recognizer pèse ~700 Mo de RAM — il ne vit que du 1er start à
     // un trimMemory (le chantier UX appellera stt_stop à la sortie du
     // chat ; l'unload RAM définitif est le chantier « polish »).
     val cb = object : ComponentCallbacks2 {
       override fun onConfigurationChanged(c: Configuration) {}
-      override fun onLowMemory() { unloadModel() }
+      override fun onLowMemory() { unloadModel(); ttsEngine.unload() }
       override fun onTrimMemory(level: Int) {
-        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) unloadModel()
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+          unloadModel()
+          ttsEngine.unload()
+        }
       }
     }
     activity.registerComponentCallbacks(cb)
@@ -121,6 +129,8 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
     activity.runOnUiThread { systemStt.release() }
     stopCapture()
     unloadModel()
+    ttsEngine.stop()
+    ttsEngine.unload()
   }
 
   // ── Commandes ──────────────────────────────────────────────────────
@@ -139,7 +149,7 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
   fun sttDlState(invoke: Invoke) {
     val ret = JSObject()
     ret.put("platform", "android")
-    ret.put("models", downloader.modelsJson())
+    ret.put("models", downloader.modelsJson("stt"))
     invoke.resolve(ret)
   }
 
@@ -192,11 +202,79 @@ class SttPlugin(private val activity: Activity): Plugin(activity) {
     invoke.resolve()
   }
 
-  private fun modelArg(invoke: Invoke): SttModel? {
-    val id = invoke.getArgs().getString("model", "") ?: ""
-    val m = downloader.findModel(id)
+  private fun modelArg(invoke: Invoke, kind: String = "stt"): SttModel? {
+    val id = invoke.getArgs().optString("model", "")
+    val m = downloader.findModel(id, kind)
     if (m == null) invoke.reject("modèle inconnu: $id")
     return m
+  }
+
+  // ── TTS on-device (backlog #138) ────────────────────────────────────
+  //
+  // Mêmes events de download que le STT (`tts_dl_progress/state`), mêmes
+  // descripteurs data-driven — la différence : les modèles TTS sont des
+  // archives tar.bz2 extraites après vérif sha256 (ModelDownloader).
+
+  @Command
+  fun ttsState(invoke: Invoke) {
+    invoke.resolve(ttsEngine.state(downloader))
+  }
+
+  @Command
+  fun ttsSpeak(invoke: Invoke) {
+    val a = invoke.getArgs()
+    val text = a.optString("text", "")
+    val tag = a.optString("tag", "")
+    val eng = a.optString("engine", "auto")
+    val model = a.optString("model", "")
+    val voice = a.optString("voice", "")
+    val lang = a.optString("lang", "")
+    val speed = a.optDouble("speed", 1.0).toFloat()
+    if (eng != "auto" && eng != "sherpa" && eng != "system") {
+      invoke.reject("moteur inconnu: $eng")
+      return
+    }
+    invoke.resolve(
+      ttsEngine.speak(downloader, text, tag, eng, model, voice, lang, speed)
+    )
+  }
+
+  @Command
+  fun ttsStop(invoke: Invoke) {
+    ttsEngine.stop()
+    invoke.resolve()
+  }
+
+  @Command
+  fun ttsDlState(invoke: Invoke) {
+    val ret = JSObject()
+    ret.put("platform", "android")
+    ret.put("models", downloader.modelsJson("tts"))
+    invoke.resolve(ret)
+  }
+
+  @Command
+  fun ttsDlStart(invoke: Invoke) {
+    val m = modelArg(invoke, "tts") ?: return
+    downloader.start(m)
+    invoke.resolve()
+  }
+
+  @Command
+  fun ttsDlCancel(invoke: Invoke) {
+    val m = modelArg(invoke, "tts") ?: return
+    downloader.cancel(m.id)
+    invoke.resolve()
+  }
+
+  @Command
+  fun ttsDlDelete(invoke: Invoke) {
+    val m = modelArg(invoke, "tts") ?: return
+    // Modèle en cours de chargement ou chargé : le moteur le recharge à
+    // la prochaine lecture — la suppression doit libérer son instance.
+    ttsEngine.unload()
+    downloader.delete(m)
+    invoke.resolve()
   }
 
   @Command
