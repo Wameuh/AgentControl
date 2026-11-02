@@ -955,6 +955,16 @@ impl Daemon {
                             .unwrap_or((-1, String::new(), "spawn impossible".into()));
                     if rc == 0 {
                         info!("orchestrateur: reviewer {rsid} → #{id} (claim-review)");
+                        // Reuse coupée : l'ancien reviewer mappé ne
+                        // sera jamais réutilisé — le supprimer au lieu
+                        // de l'orpheliner en écrasant le mapping.
+                        if !cfg.reviewer_reuse {
+                            if let Some(old) =
+                                st.reviewers.get(&key).cloned().filter(|o| *o != rsid)
+                            {
+                                self.plan_rm_session(&old, st).await;
+                            }
+                        }
                         st.reviewers.insert(key.clone(), rsid.clone());
                         self.reviewer_claim_reset(&rsid, planner, &key, st).await;
                         // Pas d'insert `review_started` ici : le retain
@@ -2263,14 +2273,19 @@ impl Daemon {
     }
 
     /// Dégel à la désactivation en vol : `plan_review` repassé à
-    /// `false` avec des items encore `plan_review`/`reviewing` les
-    /// laisserait figés hors de toute file (le pipeline dédié ne
-    /// tourne plus). Seul chemin CLI 0.7 qui ramène l'item dans la
-    /// file : `--claim-review` (plan_review→reviewing, claim
-    /// technique par « orchestrator ») → `--verdict approved` (→wip)
-    /// → `--release` (→pending) — l'item repart en implémentation
-    /// directe par un worker. Maps du pipeline purgées et sessions
-    /// reviewer dédiées supprimées.
+    /// `false` avec des items encore dans le pipeline les laisserait
+    /// figés hors de toute file (le pipeline dédié ne tourne plus) —
+    /// `plan_review`/`reviewing`, MAIS AUSSI `wip` en phase
+    /// `planning` (planner en rédaction initiale ou en révision : la
+    /// détection PLAN_FILE ne tourne plus et la release orpheline
+    /// exige un owner disparu — l'item resterait wip indéfiniment).
+    /// Chemin CLI 0.7 qui ramène l'item dans la file :
+    /// `--claim-review` (plan_review→reviewing, claim technique par
+    /// « orchestrator ») → `--verdict approved` (→wip) → `--release`
+    /// (→pending) ; un `wip` planning est déjà wip → release directe.
+    /// L'item repart en implémentation directe par un worker. Maps du
+    /// pipeline purgées et sessions reviewer dédiées supprimées (le
+    /// planner de l'item est conservé — son contexte peut resservir).
     pub(crate) async fn orch_plan_disabled_unblock(
         self: &Arc<Self>,
         bin: &str,
@@ -2280,12 +2295,31 @@ impl Daemon {
     ) {
         for t in tasks
             .iter()
-            .filter(|t| matches!(task_status(t), "plan_review" | "reviewing"))
+            .filter(|t| {
+                matches!(task_status(t), "plan_review" | "reviewing")
+                    || (task_status(t) == "wip"
+                        && ItemPhase::of(st.item_phase.get(&task_id(t).to_string()))
+                            == ItemPhase::Planning)
+            })
             .cloned()
             .collect::<Vec<_>>()
         {
             let key = task_id(&t).to_string();
             let owner = task_agent(&t).to_string();
+            // Session reviewer de l'item — collectée AVANT la purge du
+            // mapping pour être supprimée ensuite (sinon orpheline :
+            // rien hors pipeline ne gère les Backlog-R*).
+            let mut reviewer_sids: Vec<String> = Vec::new();
+            if let Some(s) = st.reviewers.get(&key) {
+                reviewer_sids.push(s.clone());
+            }
+            let task_rv = task_reviewer(&t);
+            if !task_rv.is_empty()
+                && task_rv.starts_with("s-")
+                && !reviewer_sids.iter().any(|s| s == task_rv)
+            {
+                reviewer_sids.push(task_rv.to_string());
+            }
             if task_status(&t) == "plan_review" {
                 let (rc, _o, e) = run_out(
                     &[bin, "--claim-review", &key, "--reviewer", "orchestrator"],
@@ -2298,33 +2332,39 @@ impl Daemon {
                     continue;
                 }
             }
-            let rv = {
-                let r = task_reviewer(&t);
-                if r.is_empty() {
+            if task_status(&t) != "wip" {
+                let rv = if task_rv.is_empty() {
                     "orchestrator"
                 } else {
-                    r
+                    task_rv
+                };
+                let (rc, _o, e) = run_out(
+                    &[
+                        bin,
+                        "--verdict",
+                        &key,
+                        "--reviewer",
+                        rv,
+                        "--outcome",
+                        "approved",
+                        "--comment",
+                        "plan_review désactivé — passage direct en implémentation",
+                        "--force",
+                    ],
+                    ws,
+                )
+                .await
+                .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                if rc != 0 {
+                    warn!("orchestrateur: dégel #{key}: --verdict rc={rc} {e}");
+                    continue;
                 }
-            };
-            let (rc, _o, e) = run_out(
-                &[
-                    bin,
-                    "--verdict",
-                    &key,
-                    "--reviewer",
-                    rv,
-                    "--outcome",
-                    "approved",
-                    "--comment",
-                    "plan_review désactivé — passage direct en implémentation",
-                ],
-                ws,
-            )
-            .await
-            .unwrap_or((-1, String::new(), "spawn impossible".into()));
-            if rc != 0 {
-                warn!("orchestrateur: dégel #{key}: --verdict rc={rc} {e}");
-                continue;
+                // Le verdict technique a bumpé review_round en base :
+                // sans ce watermark, un off→on retraiterait ce verdict
+                // (passe B) contre le nouvel owner — compact/brief
+                // spurieux.
+                st.verdict_seen
+                    .insert(key.clone(), task_review_round(&t) + 1);
             }
             let _ = run_out(
                 &[bin, "--release", &key, "--agent-id", &owner, "--force"],
@@ -2332,11 +2372,13 @@ impl Daemon {
             )
             .await;
             info!("orchestrateur: #{key} dégelé (plan_review off) → pending");
+            for sid in reviewer_sids {
+                self.plan_rm_session(&sid, st).await;
+            }
             st.reviewers.remove(&key);
             st.reviewer_seq.remove(&key);
             st.planner_seq.remove(&key);
             st.review_started.remove(&key);
-            st.verdict_seen.remove(&key);
             st.stalled_plans.remove(&key);
             st.item_phase.remove(&key);
             st.plan_marker_seq.remove(&key);

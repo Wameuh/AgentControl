@@ -275,6 +275,16 @@ impl Daemon {
         let cfg = self.orch.cfg.read().unwrap().clone();
         let now = now_secs();
         let mut st = self.orch.state.lock().unwrap().clone();
+        // Sortie rapide : mécanisme coupé et rien en vol → pas même le
+        // scan des sessions à payer à chaque tick.
+        if !cfg.pr_review
+            && !st
+                .pr_reviews
+                .values()
+                .any(|v| EntryState::of(v) == EntryState::Running)
+        {
+            return Ok(());
+        }
         let (metas, session_ids): (Vec<SessionMeta>, HashSet<String>) = {
             let sessions = self.sessions.read().await;
             let metas: Vec<SessionMeta> = sessions.values().map(|s| s.meta_snapshot()).collect();
