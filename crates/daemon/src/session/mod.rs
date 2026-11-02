@@ -747,12 +747,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Retenue compact active : un envoi non forcé est retenu en file,
-    /// un envoi forcé la contourne en tête. Sur session non prête la
-    /// retenue n'est PAS désarmée (take_compact_hold exige
-    /// accepting_prompts) — l'ordre en file reste garanti.
+    /// Retenue compact armée sur session non prête : le non forcé est
+    /// retenu en file, le forcé s'enfile en tête. Couvre l'ORDRE de
+    /// file seulement — la branche « pas prêt » ne consulte pas la
+    /// retenue (ni désarmement ni cancel : take_compact_hold n'est
+    /// atteint que si accepting_prompts).
     #[tokio::test]
-    async fn compact_force_bypasses_hold() {
+    async fn compact_force_front_with_hold() {
         let (s, dir) = tmp_session("compact-hold");
         s.arm_compact(false);
         s.send_prompt("retenu", false, false).await.unwrap();

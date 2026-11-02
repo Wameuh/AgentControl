@@ -29,8 +29,9 @@
 //!   pour compacter avant les messages en attente) + message
 //!   d'implémentation (file classique, livré après la compaction) +
 //!   `set_mode(implement_mode)` — le même planificateur implémente.
-//!   Les nudges planner/worker/reviewer partent aussi en force sauf
-//!   `waiting_input` (cf. `force_safe_state`).
+//!   Le `/compact` et les nudges planner/worker/reviewer partent en
+//!   force sauf `waiting_input` (cf. `force_safe_state` — file
+//!   classique alors, pour ne pas orpheliner la requête pendante).
 //!   Planificateur disparu au verdict : `approved` → nouvel
 //!   implémenteur `Backlog-P<N>` + `--reassign` ; `denied`/`conditional`
 //!   → release → pending.
@@ -862,12 +863,19 @@ impl Daemon {
                     info!("orchestrateur: plan #{id} approuvé → implémentation par {planner_sid}");
                     // /compact en force (tête de file) : la compaction
                     // s'arme AVANT les messages déjà en attente, pour
-                    // implémenter sur contexte frais. Le cancel peut
-                    // orpheliner une requête waiting_input pendante —
-                    // effet --force assumé ici : l'interruption est
-                    // voulue et le plan est déjà persisté (--submit-plan
-                    // avant le verdict).
-                    self.plan_send(&planner_sid, "/compact".into(), true).await;
+                    // implémenter sur contexte frais — interrompre un
+                    // tour en cours est voulu (plan déjà persisté via
+                    // --submit-plan). Sauf waiting_input (cf.
+                    // force_safe_state) : le cancel orphelinerait la
+                    // requête pendante → repli en file classique ; le
+                    // brief reste derrière le /compact, seuls les
+                    // messages déjà en attente le précèdent (accepté).
+                    let pstate = match self.get_session(&planner_sid).await {
+                        Ok(s) => s.meta_snapshot().state,
+                        Err(_) => String::new(),
+                    };
+                    self.plan_send(&planner_sid, "/compact".into(), force_safe_state(&pstate))
+                        .await;
                     let msg = format!(
                         "Ton plan de l'item #{id} a été approuvé (round {}){cmt}. \
                          Tu passes en implémentation : suis-le en appliquant \
@@ -1690,8 +1698,7 @@ impl Daemon {
     /// la retenue compact (sur session non prête, h_send le réutilise
     /// comme flag front au wake/spawn) — réservé aux messages de
     /// contrôle de l'orchestrateur, et seulement quand l'état de
-    /// session rend le cancel inoffensif (cf. force_safe_state) ou que
-    /// l'interruption est voulue (/compact post-approbation). Propagé
+    /// session n'est pas waiting_input (cf. force_safe_state). Propagé
     /// aux deux h_send pour que le retry post-resume garde la même
     /// sémantique.
     async fn plan_send(self: &Arc<Self>, sid: &str, msg: String, force: bool) -> bool {
