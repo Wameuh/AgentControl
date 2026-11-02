@@ -149,6 +149,23 @@ fn ack_comment(model: &str, sid: &str) -> String {
     )
 }
 
+/// Texte final du commentaire de verdict — reconstruit à chaque
+/// tentative : `APPROVED`/`CHANGES_REQUESTED` seulement si le head
+/// courant est EXACTEMENT celui reviewé, sinon titre `stale` (jamais
+/// de `APPROVED` si le head a bougé ou est illisible).
+fn verdict_comment(body: &str, sha: &str, head: Option<&str>) -> String {
+    if head == Some(sha) {
+        format!("{body}\n\nReviewed head: {sha}")
+    } else {
+        format!(
+            "## Verdict: stale — head changed, re-run \
+             {TRIGGER_ESCAPED}\n\n(review rendue pour \
+             {sha}, head courant {})",
+            head.unwrap_or("inconnu")
+        )
+    }
+}
+
 /// Choisit le trigger à traiter parmi les commentaires
 /// `(id, author_association, body)` d'une PR : le plus récent dont
 /// l'auteur est habilité et `id > last_trigger`. Un ack
@@ -292,40 +309,16 @@ impl Daemon {
             };
             let wt = pr_review_dir(pr_n, sha);
             // Verdict extrait mais post échoué au tick précédent →
-            // retry borné (le texte est persisté, pas besoin de la
-            // session — déjà libérée).
-            if let Some(pending) = entry
-                .get("pending_post")
+            // retry borné. Le body brut est persisté : le texte final
+            // est RECONSTRUIT à chaque tentative (head re-vérifié —
+            // un APPROVED sur head déplacé devient stale, jamais posté).
+            if entry
+                .get("pending_body")
                 .and_then(Value::as_str)
-                .map(str::to_string)
+                .is_some()
             {
-                let tries = entry.get("post_tries").and_then(Value::as_u64).unwrap_or(0);
-                if self.gh_comment(&repo, pr_n, &pending, &cfg).await {
-                    info!("orchestrateur: verdict review PR {key} posté");
-                    self.pr_review_finish(
-                        &key,
-                        EntryState::Done,
-                        &mut st,
-                        &wt,
-                        Path::new(ws_of(&cfg, repo)),
-                    )
+                self.pr_review_post_attempt(&key, repo, pr_n, sha, &mut st, &cfg, &wt)
                     .await;
-                    self.orch_save(&st);
-                } else if tries >= 3 {
-                    warn!("orchestrateur: verdict PR {key} impossible à poster → failed");
-                    self.pr_review_finish(
-                        &key,
-                        EntryState::Failed,
-                        &mut st,
-                        &wt,
-                        Path::new(ws_of(&cfg, repo)),
-                    )
-                    .await;
-                    self.orch_save(&st);
-                } else if let Some(e) = st.pr_reviews.get_mut(&key) {
-                    e["post_tries"] = json!(tries + 1);
-                }
-                self.orch_save(&st);
                 continue;
             }
             // Session disparue → échec explicite (le worker ne poll pas
@@ -412,25 +405,13 @@ impl Daemon {
                 .and_then(|ev| extract_verdict_block(&ev));
             match block {
                 Some(body) if verdict_body_ok(&body) => {
-                    // Fraîcheur du head juste avant le post — un
-                    // verdict sur un head déplacé ne doit jamais passer
-                    // le hook (pas de APPROVED en titre si stale).
-                    let head = self.gh_pr_head(repo, pr_n, &cfg).await;
-                    let text = if head.as_deref() == Some(sha) {
-                        format!("{body}\n\nReviewed head: {sha}")
-                    } else {
-                        format!(
-                            "## Verdict: stale — head changed, re-run \
-                             {TRIGGER_ESCAPED}\n\n(review rendue pour \
-                             {sha}, head courant {})",
-                            head.as_deref().unwrap_or("inconnu")
-                        )
-                    };
-                    // Le verdict est persisté AVANT le post — si le
-                    // commentaire échoue il est reposté au tick
-                    // suivant (jamais perdu silencieusement).
+                    // Le body brut du bloc est persisté AVANT le post
+                    // — si le commentaire échoue il est reposté au
+                    // tick suivant (jamais perdu silencieusement). Le
+                    // head est re-vérifié à CHAQUE tentative : un
+                    // APPROVED sur head déplacé devient stale.
                     if let Some(e) = st.pr_reviews.get_mut(&key) {
-                        e["pending_post"] = json!(text.clone());
+                        e["pending_body"] = json!(body);
                         e["sid"] = json!("");
                     }
                     self.orch_save(&st);
@@ -438,18 +419,8 @@ impl Daemon {
                     // post n'a besoin ni de la session ni du worktree.
                     let _ = self.h_delete_session(sid.to_string()).await;
                     remove_review_worktree(Path::new(ws_of(&cfg, repo)), &wt);
-                    if self.gh_comment(&repo, pr_n, &text, &cfg).await {
-                        info!("orchestrateur: verdict review PR {key} posté");
-                        self.pr_review_finish(
-                            &key,
-                            EntryState::Done,
-                            &mut st,
-                            &wt,
-                            Path::new(ws_of(&cfg, repo)),
-                        )
+                    self.pr_review_post_attempt(&key, repo, pr_n, sha, &mut st, &cfg, &wt)
                         .await;
-                        self.orch_save(&st);
-                    }
                 }
                 Some(_) => {
                     warn!("orchestrateur: review PR {key} bloc verdict malformé → failed");
@@ -599,13 +570,77 @@ impl Daemon {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        if let Some(e) = st.pr_reviews.get_mut(key) {
-            e["state"] = json!(end.as_str());
+        if let Some(e) = st.pr_reviews.get_mut(key).and_then(Value::as_object_mut) {
+            e.insert("state".into(), json!(end.as_str()));
+            e.remove("pending_body");
+            e.remove("post_tries");
         }
         if !sid.is_empty() {
             let _ = self.h_delete_session(sid).await;
         }
         remove_review_worktree(ws, wt);
+    }
+
+    /// Une tentative de post du verdict persisté (`pending_body`) :
+    /// texte reconstruit contre le head COURANT (jamais d'APPROVED
+    /// stale), retry borné à 4 — abandon → `Failed` + tentative de
+    /// commentaire d'échec.
+    async fn pr_review_post_attempt(
+        self: &Arc<Self>,
+        key: &str,
+        repo: &str,
+        pr_n: u64,
+        sha: &str,
+        st: &mut OrchPersist,
+        cfg: &cfg::OrchCfg,
+        wt: &Path,
+    ) {
+        let Some(body) = st
+            .pr_reviews
+            .get(key)
+            .and_then(|e| e.get("pending_body"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            return;
+        };
+        let head = self.gh_pr_head(repo, pr_n, cfg).await;
+        let text = verdict_comment(&body, sha, head.as_deref());
+        if self.gh_comment(repo, pr_n, &text, cfg).await {
+            info!("orchestrateur: verdict review PR {key} posté");
+            self.pr_review_finish(
+                key,
+                EntryState::Done,
+                st,
+                wt,
+                Path::new(ws_of(cfg, repo)),
+            )
+            .await;
+        } else {
+            let tries = st
+                .pr_reviews
+                .get(key)
+                .and_then(|e| e.get("post_tries"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if tries >= 3 {
+                warn!("orchestrateur: verdict PR {key} impossible à poster → failed");
+                let _ = self
+                    .gh_comment(repo, pr_n, &fail_comment("verdict post failed"), cfg)
+                    .await;
+                self.pr_review_finish(
+                    key,
+                    EntryState::Failed,
+                    st,
+                    wt,
+                    Path::new(ws_of(cfg, repo)),
+                )
+                .await;
+            } else if let Some(e) = st.pr_reviews.get_mut(key) {
+                e["post_tries"] = json!(tries + 1);
+            }
+        }
+        self.orch_save(st);
     }
 
     /// PR ouvertes à reviewer : `gh pr list --base next_release` par
@@ -1137,6 +1172,21 @@ mod tests {
             remote_nwo("https://github.com/Wameuh/Agent.git"),
             Some("Wameuh/AgentControl".to_string())
         );
+    }
+
+    #[test]
+    fn verdict_comment_head() {
+        let body = "## Verdict: APPROVED\n\nok";
+        // Head inchangé → verdict posté avec l'ancre.
+        let t = verdict_comment(body, "abc123", Some("abc123"));
+        assert!(t.starts_with("## Verdict: APPROVED"));
+        assert!(t.contains("Reviewed head: abc123"));
+        // Head déplacé → stale, JAMAIS APPROVED dans le texte.
+        for h in [Some("def456"), None] {
+            let s = verdict_comment(body, "abc123", h);
+            assert!(s.starts_with("## Verdict: stale"));
+            assert!(!s.contains("APPROVED"));
+        }
     }
 
     #[test]
