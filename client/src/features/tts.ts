@@ -148,12 +148,16 @@ export class Tts {
     text: string,
     btn: HTMLButtonElement | null,
   ) {
+    const voice = ttsVoicePref();
+    // Le modèle de la voix préférée : sans lui resolveModel("") prend le
+    // premier installé (kokoro) et la voix vits choisie serait ignorée.
+    const model = this.voices.find((v) => v.id === voice)?.model ?? "";
     const r = await invoke<TtsSpeak>(CMD("tts_speak"), {
       text,
       tag,
       engine: ttsEnginePref(),
-      model: "",
-      voice: ttsVoicePref(),
+      model,
+      voice,
       lang: "",
       speed: ttsSpeedPref(),
     }).catch((e) => ({ started: false, reason: String(e) }) as TtsSpeak);
@@ -215,23 +219,25 @@ export class Tts {
   }
 
   private onEnded(tag: string) {
-    this.clearIf(tag);
-    this.dequeue();
+    // Le Kotlin émet tts_done même pour une utterance abortée : ne
+    // dépiler QUE si c'était la lecture courante — sinon un done
+    // tardif d'un tag périmé préempterait la lecture en cours.
+    if (this.clearIf(tag)) this.dequeue();
   }
 
   private onErr(tag: string, err?: string) {
-    const was = this.playing?.tag === tag;
-    this.clearIf(tag);
+    const was = this.clearIf(tag);
+    if (was) this.dequeue();
     if (was || !err?.includes("model_missing"))
       notify("error", `${t("tts_err")}${err ? ` — ${err}` : ""}`);
-    this.dequeue();
   }
 
-  private clearIf(tag: string) {
-    if (this.playing?.tag !== tag) return;
+  private clearIf(tag: string): boolean {
+    if (this.playing?.tag !== tag) return false;
     const b = this.playing.btn;
     if (b?.isConnected) this.renderBtn(b, false);
     this.playing = null;
+    return true;
   }
 
   private dequeue() {

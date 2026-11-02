@@ -84,7 +84,7 @@ val TTS_MODELS = listOf(
     id = "kokoro-int8-multi-lang-v1_0",
     label = "Kokoro 82M multi-lang int8 — voix naturelles (fr/es/it/pt/ja/en…)",
     kind = "tts",
-    baseUrl = "$GH_TTS_RELEASE/kokoro-int8-multi-lang-v1_0.tar.bz2",
+    baseUrl = GH_TTS_RELEASE,
     subdir = "kokoro-int8-multi-lang-v1_0",
     archive = true,
     files = listOf(
@@ -96,7 +96,7 @@ val TTS_MODELS = listOf(
     id = "vits-piper-fr_FR-siwis-medium-int8",
     label = "Piper fr_FR siwis medium int8 — léger, français uniquement",
     kind = "tts",
-    baseUrl = "$GH_TTS_RELEASE/vits-piper-fr_FR-siwis-medium-int8.tar.bz2",
+    baseUrl = GH_TTS_RELEASE,
     subdir = "vits-piper-fr_FR-siwis-medium-int8",
     archive = true,
     files = listOf(
@@ -323,7 +323,9 @@ class ModelDownloader(
             val rel = e.name.substringAfter('/', "")
             if (rel.isNotEmpty() && !e.isDirectory) {
               val out = File(staging, rel)
-              if (!out.canonicalPath.startsWith(staging.canonicalPath)) {
+              // startsWith(path + separator) : sans séparateur,
+              // `staging.evil/…` passerait pour un chemin interne.
+              if (!out.canonicalPath.startsWith(staging.canonicalPath + File.separator)) {
                 throw Fatal("archive: chemin refusé ${e.name}")
               }
               out.parentFile?.mkdirs()

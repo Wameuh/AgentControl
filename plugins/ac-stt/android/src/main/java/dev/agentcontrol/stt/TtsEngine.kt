@@ -96,7 +96,15 @@ class TtsEngine(
   @Volatile private var sysTtsOk: Boolean? = null
   @Volatile private var speaking = false
   @Volatile private var currentTag = ""
-  private var speakThread: Thread? = null
+  @Volatile private var speakThread: Thread? = null
+  /** Sérialise la section critique de speak() (stop → publication du ctl
+   *  → lancement du thread) : sans elle deux tts_speak concurrents
+   *  peuvent publier deux ctl et rendre le premier in-abortable. */
+  private val speakLock = Any()
+  /** Sérialise l'init du TextToSpeech système — deux runSystem
+   *  concurrents (zombie + courant) créeraient sinon deux instances
+   *  dont l'une fuirait sans shutdown(). */
+  private val sysLock = Any()
   /** Abort PAR lecture : un flag partagé serait réarmé par le speak
    *  suivant et un zombie survivrait. stop() lève le ctl courant ;
    *  speak() en publie un neuf. */
@@ -188,27 +196,32 @@ class TtsEngine(
 
     // Une lecture à la fois : préemption propre de l'utterance courante —
     // APRÈS toutes les validations (un speak refusé ne tue pas l'écoute).
-    stop()
-    speaking = true
-    currentTag = tag
-    val ctl = SpeakCtl()
-    speakCtl = ctl
-    // Les DEUX moteurs partent sur le speakThread : le chemin system
-    // bloque aussi (init TextToSpeech par latch) — jamais sur le
-    // thread de la commande (peut être le main thread → ANR/deadlock).
-    val dir = m?.let { downloader.modelDir(it) }
-    speakThread = thread(name = "tts-speak") {
-      activeSpeaks.incrementAndGet()
-      try {
-        if (eng == "sherpa") {
-          runSherpa(m!!, dir!!, v!!, useLang, clamped, text, tag, ctl)
-        } else {
-          runSystem(useLang, clamped, text, tag, ctl)
+    // stop() + publication + lancement dans la même section critique :
+    // deux speak concurrents ne peuvent plus s'entrelacer (le premier
+    // ctl publié resterait sinon éjecté → lecture in-abortable).
+    synchronized(speakLock) {
+      stop()
+      speaking = true
+      currentTag = tag
+      val ctl = SpeakCtl()
+      speakCtl = ctl
+      // Les DEUX moteurs partent sur le speakThread : le chemin system
+      // bloque aussi (init TextToSpeech par latch) — jamais sur le
+      // thread de la commande (peut être le main thread → ANR/deadlock).
+      val dir = m?.let { downloader.modelDir(it) }
+      speakThread = thread(name = "tts-speak") {
+        activeSpeaks.incrementAndGet()
+        try {
+          if (eng == "sherpa") {
+            runSherpa(m!!, dir!!, v!!, useLang, clamped, text, tag, ctl)
+          } else {
+            runSystem(useLang, clamped, text, tag, ctl)
+          }
+        } finally {
+          activeSpeaks.decrementAndGet()
+          if (speakThread === Thread.currentThread()) speakThread = null
+          sweepRetired()
         }
-      } finally {
-        activeSpeaks.decrementAndGet()
-        if (speakThread === Thread.currentThread()) speakThread = null
-        sweepRetired()
       }
     }
     val ret = speakResult(true, null)
@@ -217,7 +230,8 @@ class TtsEngine(
   }
 
   fun stop() {
-    speakCtl.abort.set(true)
+    val ctl = speakCtl
+    ctl.abort.set(true)
     val t = speakThread
     if (t?.isAlive == true && t !== Thread.currentThread()) t.join(2_000)
     // Le handle est conservé (pas de null) : un thread encore vivant
@@ -230,11 +244,16 @@ class TtsEngine(
       }
       track = null
     }
-    sysTts?.stop()
+    synchronized(sysLock) { sysTts?.stop() }
     audioManager.abandonAudioFocus(focusListener)
     sweepRetired()
-    speaking = false
-    currentTag = ""
+    // Ne pas effacer l'état d'un speak plus récent : si un nouveau ctl a
+    // été publié pendant le join, `speaking`/`currentTag` lui
+    // appartiennent désormais.
+    if (speakCtl === ctl) {
+      speaking = false
+      currentTag = ""
+    }
   }
 
   /** Libération RAM (trimMemory/onDestroy/ttsDlDelete) : le moteur
@@ -250,9 +269,11 @@ class TtsEngine(
       tts?.release()
       tts = null
       ttsModel = null
-      sysTts?.shutdown()
-      sysTts = null
-      sysTtsOk = null
+      synchronized(sysLock) {
+        sysTts?.shutdown()
+        sysTts = null
+        sysTtsOk = null
+      }
     }
   }
 
@@ -269,8 +290,12 @@ class TtsEngine(
           voices = "$dir/voices.bin",
           tokens = "$dir/tokens.txt",
           dataDir = "$dir/espeak-ng-data",
+          // dict/ = hétéronymes anglais ; *-zh.fst = normalisation zh
+          // (dates/nombres) — tous embarqués dans l'archive v1_0.
+          dictDir = "$dir/dict",
           lexicon =
             "$dir/lexicon-us-en.txt,$dir/lexicon-gb-en.txt,$dir/lexicon-zh.txt",
+          ruleFsts = "$dir/date-zh.fst,$dir/phone-zh.fst,$dir/number-zh.fst",
         ),
         numThreads = 4, // défaut upstream kokoro (latence synthèse)
         provider = "cpu",
@@ -430,21 +455,25 @@ class TtsEngine(
   // ── Android system TTS ───────────────────────────────────────────────
 
   private fun ensureSysTts(): Boolean {
-    sysTts?.let { return sysTtsOk == true }
-    var created: TextToSpeech? = null
-    val latch = CountDownLatch(1)
-    val mk = Runnable {
-      created = TextToSpeech(activity) { status ->
-        sysTtsOk = status == TextToSpeech.SUCCESS
-        created?.setOnUtteranceProgressListener(utterListener)
-        latch.countDown()
+    // sysLock : deux runSystem concurrents (zombie + courant) ne
+    // créent qu'une instance — le perdant n'a plus de fuite à gérer.
+    synchronized(sysLock) {
+      sysTts?.let { return sysTtsOk == true }
+      var created: TextToSpeech? = null
+      val latch = CountDownLatch(1)
+      val mk = Runnable {
+        created = TextToSpeech(activity) { status ->
+          sysTtsOk = status == TextToSpeech.SUCCESS
+          created?.setOnUtteranceProgressListener(utterListener)
+          latch.countDown()
+        }
       }
+      if (Looper.myLooper() == Looper.getMainLooper()) mk.run()
+      else activity.runOnUiThread(mk)
+      latch.await(10, TimeUnit.SECONDS)
+      sysTts = created
+      return sysTtsOk == true && sysTts != null
     }
-    if (Looper.myLooper() == Looper.getMainLooper()) mk.run()
-    else activity.runOnUiThread(mk)
-    latch.await(10, TimeUnit.SECONDS)
-    sysTts = created
-    return sysTtsOk == true && sysTts != null
   }
 
   private val utterListener = object : UtteranceProgressListener() {
@@ -476,23 +505,33 @@ class TtsEngine(
     lang: String, speed: Float, text: String, tag: String, ctl: SpeakCtl,
   ) {
     val t = if (ensureSysTts()) sysTts else null
-    if (t == null) { errorSystem(tag); return }
+    if (t == null) { if (currentTag == tag) errorSystem(tag); return }
     if (ctl.abort.get()) return
     if (lang.isNotEmpty()) {
       val avail = t.setLanguage(Locale.forLanguageTag(lang))
       if (avail == TextToSpeech.LANG_MISSING_DATA ||
           avail == TextToSpeech.LANG_NOT_SUPPORTED) {
-        val o = JSObject()
-        o.put("tag", tag)
-        o.put("error", "lang_unavailable")
-        emit("tts_error", o)
-        speaking = false
-        currentTag = ""
+        if (currentTag == tag) {
+          val o = JSObject()
+          o.put("tag", tag)
+          o.put("error", "lang_unavailable")
+          emit("tts_error", o)
+          speaking = false
+          currentTag = ""
+        }
         return
       }
     }
     t.setSpeechRate(speed)
-    t.speak(text, TextToSpeech.QUEUE_FLUSH, Bundle(), tag)
+    // Check + enqueue atomiques sous sysLock (stop() y fait son
+    // sysTts.stop()) : un stop pendant setLanguage/setSpeechRate ne peut
+    // plus laisser passer une utterance fantôme — soit le zombie voit
+    // l'abort avant d'enqueuer, soit son utterance est flushée par le
+    // stop() qui prend le verrou ensuite.
+    synchronized(sysLock) {
+      if (ctl.abort.get()) return
+      t.speak(text, TextToSpeech.QUEUE_FLUSH, Bundle(), tag)
+    }
     // tts_started/done viennent des callbacks utterance.
   }
 
