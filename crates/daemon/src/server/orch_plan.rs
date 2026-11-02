@@ -276,15 +276,31 @@ enum ReviewerChoice {
 }
 
 /// Reuse si le reviewer mémorisé est encore là et pas mort ; Spawn
-/// sinon (session absente, dead, ou jamais mappée).
+/// sinon (session absente, dead, jamais mappée — ou `reviewer_reuse`
+/// coupé : comportement éphémère, une session neuve par round).
 fn reviewer_choice(
     mapped: Option<&String>,
     meta_state: Option<&str>,
     in_session_ids: bool,
+    reuse: bool,
 ) -> ReviewerChoice {
+    if !reuse {
+        return ReviewerChoice::Spawn;
+    }
     match (mapped, in_session_ids, meta_state) {
         (Some(sid), true, Some(state)) if state != "dead" => ReviewerChoice::Reuse(sid.clone()),
         _ => ReviewerChoice::Spawn,
+    }
+}
+
+/// Borne effective des rounds de revue : `plan_rereview` coupé équivaut
+/// à `max_review_rounds = 1` — la première review tranche, un verdict
+/// denied/conditional gèle directement en « stalled ».
+fn review_round_cap(cfg: &cfg::OrchCfg) -> u64 {
+    if cfg.plan_rereview {
+        u64::from(cfg.max_review_rounds)
+    } else {
+        1
     }
 }
 
@@ -357,6 +373,7 @@ fn reviewer_sweep(
     implementing: bool,
     reviewer_alive: bool,
     reviewer_idle: bool,
+    reuse: bool,
 ) -> SweepAction {
     if !reviewer_alive {
         return SweepAction::Rm;
@@ -366,6 +383,9 @@ fn reviewer_sweep(
         // Garde-fou : jamais de rm/sleep sur une review en vol.
         Some("reviewing") => SweepAction::Keep,
         _ if implementing => SweepAction::Rm,
+        // Reuse coupé : le reviewer ne sera jamais réutilisé — le
+        // endormir le laisserait zombie, on le supprime.
+        _ if reviewer_idle && !reuse => SweepAction::Rm,
         _ if reviewer_idle => SweepAction::Sleep,
         _ => SweepAction::Keep,
     }
@@ -610,11 +630,12 @@ impl Daemon {
                     )
                     .await;
                     st.verdict_seen.insert(key.clone(), post_round);
-                    // Reviewer persistant : supprimé seulement sur
-                    // verdict approved — denied/conditional le gardent
-                    // mappé pour le round suivant (la sweep l'endort
-                    // dès qu'il est idle).
-                    if outcome == "approved" {
+                    // Reviewer persistant : supprimé sur verdict
+                    // approved OU quand `reviewer_reuse` est coupé —
+                    // sinon denied/conditional le gardent mappé pour
+                    // le round suivant (la sweep l'endort dès qu'il
+                    // est idle).
+                    if outcome == "approved" || !cfg.reviewer_reuse {
                         self.plan_rm_session(&rsid, st).await;
                         st.reviewers.remove(&key);
                         st.reviewer_seq.remove(&key);
@@ -711,9 +732,10 @@ impl Daemon {
                 st,
             )
             .await;
-            if outcome == "approved" {
-                // Verdict final : le reviewer a rempli son office → rm
-                // + retrait de la map persistante et des watermarks.
+            if outcome == "approved" || !cfg.reviewer_reuse {
+                // Verdict final (ou réutilisation coupée) : le
+                // reviewer a rempli son office → rm + retrait de la
+                // map persistante et des watermarks.
                 if session_ids.contains(&rsid) {
                     self.plan_rm_session(&rsid, st).await;
                 }
@@ -833,6 +855,7 @@ impl Daemon {
                 mapped,
                 mstate,
                 mapped.is_some_and(|s| session_ids.contains(s)),
+                cfg.reviewer_reuse,
             );
             let mut spawn_new = true;
             if let ReviewerChoice::Reuse(rsid) = choice {
@@ -932,6 +955,16 @@ impl Daemon {
                             .unwrap_or((-1, String::new(), "spawn impossible".into()));
                     if rc == 0 {
                         info!("orchestrateur: reviewer {rsid} → #{id} (claim-review)");
+                        // Reuse coupée : l'ancien reviewer mappé ne
+                        // sera jamais réutilisé — le supprimer au lieu
+                        // de l'orpheliner en écrasant le mapping.
+                        if !cfg.reviewer_reuse {
+                            if let Some(old) =
+                                st.reviewers.get(&key).cloned().filter(|o| *o != rsid)
+                            {
+                                self.plan_rm_session(&old, st).await;
+                            }
+                        }
                         st.reviewers.insert(key.clone(), rsid.clone());
                         self.reviewer_claim_reset(&rsid, planner, &key, st).await;
                         // Pas d'insert `review_started` ici : le retain
@@ -1142,6 +1175,7 @@ impl Daemon {
                 implementing,
                 session_ids.contains(&rsid),
                 rstate == Some("idle"),
+                cfg.reviewer_reuse,
             ) {
                 SweepAction::Rm => {
                     info!("orchestrateur: reviewer {rsid} soldé → rm (item {key})");
@@ -1309,7 +1343,7 @@ impl Daemon {
                 }
             }
             _ => {
-                if round >= u64::from(cfg.max_review_rounds) {
+                if round >= review_round_cap(cfg) {
                     // STALL : parquer l'item en plan_review (hors dispatch
                     // tant que reviewer_id NULL + stalled) — dégel humain
                     // via `--reassign --force` vers un autre owner (le
@@ -1336,7 +1370,7 @@ impl Daemon {
                         info!(
                             "orchestrateur: plan_review stalled #{id} (round \
                              {round} ≥ {}) — revue humaine requise",
-                            cfg.max_review_rounds
+                            review_round_cap(cfg)
                         );
                         // Le planner n'a plus rien à faire : la passe
                         // stalled de la sweep l'ENDORT dès qu'il
@@ -2237,6 +2271,131 @@ impl Daemon {
         self.plan_write(&format!("stalled-{}", task_id(t)), content)
             .await
     }
+
+    /// Dégel à la désactivation en vol : `plan_review` repassé à
+    /// `false` avec des items encore dans le pipeline les laisserait
+    /// figés hors de toute file (le pipeline dédié ne tourne plus) —
+    /// `plan_review`/`reviewing`, MAIS AUSSI `wip` en phase
+    /// `planning` (planner en rédaction initiale ou en révision : la
+    /// détection PLAN_FILE ne tourne plus et la release orpheline
+    /// exige un owner disparu — l'item resterait wip indéfiniment).
+    /// Chemin CLI 0.7 qui ramène l'item dans la file :
+    /// `--claim-review` (plan_review→reviewing, claim technique par
+    /// « orchestrator ») → `--verdict approved` (→wip) → `--release`
+    /// (→pending) ; un `wip` planning est déjà wip → release directe.
+    /// L'item repart en implémentation directe par un worker. Maps du
+    /// pipeline purgées et sessions reviewer dédiées supprimées (le
+    /// planner de l'item est conservé — son contexte peut resservir).
+    pub(crate) async fn orch_plan_disabled_unblock(
+        self: &Arc<Self>,
+        bin: &str,
+        ws: &Path,
+        tasks: &[Task],
+        st: &mut OrchPersist,
+    ) {
+        for t in tasks
+            .iter()
+            .filter(|t| {
+                matches!(task_status(t), "plan_review" | "reviewing")
+                    || (task_status(t) == "wip"
+                        && ItemPhase::of(st.item_phase.get(&task_id(t).to_string()))
+                            == ItemPhase::Planning)
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            let key = task_id(&t).to_string();
+            let owner = task_agent(&t).to_string();
+            // Session reviewer de l'item — collectée AVANT la purge du
+            // mapping pour être supprimée ensuite (sinon orpheline :
+            // rien hors pipeline ne gère les Backlog-R*).
+            let mut reviewer_sids: Vec<String> = Vec::new();
+            if let Some(s) = st.reviewers.get(&key) {
+                reviewer_sids.push(s.clone());
+            }
+            let task_rv = task_reviewer(&t);
+            if !task_rv.is_empty()
+                && task_rv.starts_with("s-")
+                && !reviewer_sids.iter().any(|s| s == task_rv)
+            {
+                reviewer_sids.push(task_rv.to_string());
+            }
+            if task_status(&t) == "plan_review" {
+                let (rc, _o, e) = run_out(
+                    &[bin, "--claim-review", &key, "--reviewer", "orchestrator"],
+                    ws,
+                )
+                .await
+                .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                if rc != 0 {
+                    warn!("orchestrateur: dégel #{key}: --claim-review rc={rc} {e}");
+                    continue;
+                }
+            }
+            if task_status(&t) != "wip" {
+                let rv = if task_rv.is_empty() {
+                    "orchestrator"
+                } else {
+                    task_rv
+                };
+                let (rc, _o, e) = run_out(
+                    &[
+                        bin,
+                        "--verdict",
+                        &key,
+                        "--reviewer",
+                        rv,
+                        "--outcome",
+                        "approved",
+                        "--comment",
+                        "plan_review désactivé — passage direct en implémentation",
+                        "--force",
+                    ],
+                    ws,
+                )
+                .await
+                .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                if rc != 0 {
+                    warn!("orchestrateur: dégel #{key}: --verdict rc={rc} {e}");
+                    continue;
+                }
+                // Le verdict technique a bumpé review_round en base :
+                // sans ce watermark, un off→on retraiterait ce verdict
+                // (passe B) contre le nouvel owner — compact/brief
+                // spurieux.
+                st.verdict_seen
+                    .insert(key.clone(), task_review_round(&t) + 1);
+            }
+            let _ = run_out(
+                &[bin, "--release", &key, "--agent-id", &owner, "--force"],
+                ws,
+            )
+            .await;
+            info!("orchestrateur: #{key} dégelé (plan_review off) → pending");
+            for sid in reviewer_sids {
+                self.plan_rm_session(&sid, st).await;
+            }
+            st.reviewers.remove(&key);
+            st.reviewer_seq.remove(&key);
+            st.planner_seq.remove(&key);
+            st.review_started.remove(&key);
+            st.stalled_plans.remove(&key);
+            st.item_phase.remove(&key);
+            st.plan_marker_seq.remove(&key);
+        }
+        // Sessions reviewer dédiées encore mappées : le pipeline est
+        // arrêté, elles ne serviront plus — suppression (leur item a
+        // été dégelé ci-dessus ou n'existe plus).
+        let mapped: Vec<String> = st.reviewers.values().cloned().collect();
+        for sid in mapped {
+            self.plan_rm_session(&sid, st).await;
+        }
+        st.reviewers.clear();
+        st.reviewer_seq.clear();
+        st.planner_seq.clear();
+        st.review_started.clear();
+        st.stalled_plans.clear();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2395,26 +2554,26 @@ mod tests {
         // Mappé + vivant (idle/asleep/working/waiting_input) → Reuse.
         for st in ["idle", "asleep", "working", "waiting_input"] {
             assert_eq!(
-                reviewer_choice(Some(&sid), Some(st), true),
+                reviewer_choice(Some(&sid), Some(st), true, true),
                 ReviewerChoice::Reuse(sid.clone()),
                 "state={st}"
             );
         }
         // Mappé mais mort / absent des sessions / sans meta → Spawn.
         assert_eq!(
-            reviewer_choice(Some(&sid), Some("dead"), true),
+            reviewer_choice(Some(&sid), Some("dead"), true, true),
             ReviewerChoice::Spawn
         );
         assert_eq!(
-            reviewer_choice(Some(&sid), Some("idle"), false),
+            reviewer_choice(Some(&sid), Some("idle"), false, true),
             ReviewerChoice::Spawn
         );
         assert_eq!(
-            reviewer_choice(Some(&sid), None, true),
+            reviewer_choice(Some(&sid), None, true, true),
             ReviewerChoice::Spawn
         );
         // Jamais mappé → Spawn.
-        assert_eq!(reviewer_choice(None, None, false), ReviewerChoice::Spawn);
+        assert_eq!(reviewer_choice(None, None, false, true), ReviewerChoice::Spawn);
     }
 
     #[test]
@@ -2484,36 +2643,71 @@ mod tests {
     #[test]
     fn sweep_decisions() {
         // Item absent / done / pending / implementing → Rm.
-        assert_eq!(reviewer_sweep(None, false, true, false), SweepAction::Rm);
+        assert_eq!(reviewer_sweep(None, false, true, false, true), SweepAction::Rm);
         for st in ["done", "pending"] {
-            assert_eq!(reviewer_sweep(Some(st), false, true, true), SweepAction::Rm);
+            assert_eq!(reviewer_sweep(Some(st), false, true, true, true), SweepAction::Rm);
         }
         assert_eq!(
-            reviewer_sweep(Some("wip"), true, true, true),
+            reviewer_sweep(Some("wip"), true, true, true, true),
             SweepAction::Rm
         );
         // Review en vol → Keep même idle (garde-fou).
         assert_eq!(
-            reviewer_sweep(Some("reviewing"), false, true, true),
+            reviewer_sweep(Some("reviewing"), false, true, true, true),
             SweepAction::Keep
         );
         // Hors reviewing + idle → Sleep (stalled compris).
         for st in ["plan_review", "wip"] {
             assert_eq!(
-                reviewer_sweep(Some(st), false, true, true),
+                reviewer_sweep(Some(st), false, true, true, true),
                 SweepAction::Sleep
             );
         }
         // Hors reviewing + non idle → Keep, retenté au tick suivant.
         assert_eq!(
-            reviewer_sweep(Some("plan_review"), false, true, false),
+            reviewer_sweep(Some("plan_review"), false, true, false, true),
             SweepAction::Keep
         );
         // Reviewer disparu → Rm quel que soit l'item.
         assert_eq!(
-            reviewer_sweep(Some("reviewing"), false, false, false),
+            reviewer_sweep(Some("reviewing"), false, false, false, true),
             SweepAction::Rm
         );
+    }
+
+    #[test]
+    fn flags_rereview_reuse() {
+        // `reviewer_reuse` coupé : jamais de Reuse — Spawn même si le
+        // reviewer mappé est vivant.
+        let sid = "s-r1".to_string();
+        assert_eq!(
+            reviewer_choice(Some(&sid), Some("idle"), true, false),
+            ReviewerChoice::Spawn
+        );
+        // Et la sweep le supprime au lieu de l'endormir (Sleep→Rm).
+        assert_eq!(
+            reviewer_sweep(Some("plan_review"), false, true, true, false),
+            SweepAction::Rm
+        );
+        // Garde-fou conservé : review en vol → Keep même sans reuse.
+        assert_eq!(
+            reviewer_sweep(Some("reviewing"), false, true, true, false),
+            SweepAction::Keep
+        );
+    }
+
+    #[test]
+    fn cap_rereview() {
+        let mut c = cfg::OrchCfg::default();
+        // plan_rereview on : borne = max_review_rounds.
+        assert_eq!(review_round_cap(&c), 5);
+        c.max_review_rounds = 3;
+        assert_eq!(review_round_cap(&c), 3);
+        // off : borne 1 — le premier verdict non-approved gèle.
+        c.plan_rereview = false;
+        assert_eq!(review_round_cap(&c), 1);
+        c.max_review_rounds = 9;
+        assert_eq!(review_round_cap(&c), 1);
     }
 
     #[test]

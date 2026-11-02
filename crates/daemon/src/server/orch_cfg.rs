@@ -57,7 +57,10 @@ const KEYS: &[&str] = &[
     "reviewer_mode",
     "implement_mode",
     "max_review_rounds",
+    "plan_rereview",
+    "reviewer_reuse",
     "pr_review",
+    "pr_rereview",
     "pr_review_trigger",
     "pr_reviewer_mode",
     "pr_reviewer_model",
@@ -262,6 +265,23 @@ pub(crate) fn params_schema() -> Vec<ParamSpec> {
             Some("5"),
         ),
         ps(
+            "plan_rereview",
+            "Re-revue de plan",
+            "off : un seul round de revue par item — un verdict \
+             denied/conditional du round 1 gèle directement \
+             « stalled » (équivaut à max_review_rounds=1)",
+            ParamKind::Bool,
+            Some("true"),
+        ),
+        ps(
+            "reviewer_reuse",
+            "Reviewer persistant",
+            "off : session Backlog-R* neuve à chaque round, supprimée \
+             après le verdict (comportement pré-réutilisation)",
+            ParamKind::Bool,
+            Some("true"),
+        ),
+        ps(
             "pr_review",
             "Review de PR par le démon",
             "commentaire déclencheur sur une PR ouverte → session \
@@ -270,6 +290,15 @@ pub(crate) fn params_schema() -> Vec<ParamSpec> {
              externe absente/morte)",
             ParamKind::Bool,
             Some("false"),
+        ),
+        ps(
+            "pr_rereview",
+            "Re-revue de PR",
+            "off : une seule review par PR — les triggers postérieurs \
+             à une review soldée done sont ignorés (failed reste \
+             rejouable)",
+            ParamKind::Bool,
+            Some("true"),
         ),
         ps(
             "pr_review_trigger",
@@ -362,7 +391,10 @@ pub(crate) fn params_values(cfg: &super::cfg::OrchCfg) -> HashMap<String, String
         "max_review_rounds".into(),
         cfg.max_review_rounds.to_string(),
     );
+    m.insert("plan_rereview".into(), cfg.plan_rereview.to_string());
+    m.insert("reviewer_reuse".into(), cfg.reviewer_reuse.to_string());
     m.insert("pr_review".into(), cfg.pr_review.to_string());
+    m.insert("pr_rereview".into(), cfg.pr_rereview.to_string());
     m.insert(
         "pr_review_trigger".into(),
         cfg.pr_review_trigger.clone(),
@@ -602,7 +634,10 @@ pub(crate) fn apply_patch(
                     .context("max_review_rounds hors borne u32")?
                     .max(1)
             }
+            "plan_rereview" => cfg.plan_rereview = val_bool(v)?,
+            "reviewer_reuse" => cfg.reviewer_reuse = val_bool(v)?,
             "pr_review" => cfg.pr_review = val_bool(v)?,
+            "pr_rereview" => cfg.pr_rereview = val_bool(v)?,
             "pr_review_trigger" => {
                 cfg.pr_review_trigger = if is_empty(v) {
                     OrchCfg::default().pr_review_trigger
@@ -746,6 +781,28 @@ mod tests {
         .unwrap();
         assert!(c.plan_review);
         assert_eq!(c.max_review_rounds, 3);
+        // Flags on/off indépendants (#150) : défaut true → off posable.
+        assert!(c.plan_rereview && c.pr_rereview && c.reviewer_reuse);
+        apply_patch(
+            &mut c,
+            &patch(&[
+                ("plan_rereview", json!("off")),
+                ("pr_rereview", json!("false")),
+                ("reviewer_reuse", json!("0")),
+            ]),
+        )
+        .unwrap();
+        assert!(!c.plan_rereview && !c.pr_rereview && !c.reviewer_reuse);
+        apply_patch(
+            &mut c,
+            &patch(&[
+                ("plan_rereview", json!("on")),
+                ("pr_rereview", json!("true")),
+                ("reviewer_reuse", json!("1")),
+            ]),
+        )
+        .unwrap();
+        assert!(c.plan_rereview && c.pr_rereview && c.reviewer_reuse);
         // Vide → retour au défaut (modes cassants), round min 1.
         apply_patch(
             &mut c,

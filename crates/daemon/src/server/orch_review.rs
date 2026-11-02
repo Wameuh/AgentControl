@@ -275,12 +275,61 @@ impl Daemon {
         let cfg = self.orch.cfg.read().unwrap().clone();
         let now = now_secs();
         let mut st = self.orch.state.lock().unwrap().clone();
+        // Sortie rapide : mécanisme coupé et rien en vol → pas même le
+        // scan des sessions à payer à chaque tick.
+        if !cfg.pr_review
+            && !st
+                .pr_reviews
+                .values()
+                .any(|v| EntryState::of(v) == EntryState::Running)
+        {
+            return Ok(());
+        }
         let (metas, session_ids): (Vec<SessionMeta>, HashSet<String>) = {
             let sessions = self.sessions.read().await;
             let metas: Vec<SessionMeta> = sessions.values().map(|s| s.meta_snapshot()).collect();
             let ids = metas.iter().map(|m| m.id.clone()).collect();
             (metas, ids)
         };
+
+        // Bascule en vol : `pr_review` repassé à false — les entrées
+        // Running sont soldées (session supprimée, worktree retiré,
+        // échec posté pour débloquer le worker qui poll), puis retour
+        // : aucune nouvelle détection.
+        if !cfg.pr_review {
+            let running: Vec<(String, Value)> = st
+                .pr_reviews
+                .iter()
+                .filter(|(_, v)| EntryState::of(v) == EntryState::Running)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            for (key, entry) in running {
+                let sid = entry.get("sid").and_then(Value::as_str).unwrap_or("");
+                let sha = entry.get("sha").and_then(Value::as_str).unwrap_or("");
+                let Some((repo, pr)) = key.split_once('#') else {
+                    continue;
+                };
+                let Ok(pr_n) = pr.parse::<u64>() else {
+                    continue;
+                };
+                if !sid.is_empty() {
+                    let _ = self.h_delete_session(sid.to_string()).await;
+                }
+                remove_review_worktree(
+                    Path::new(ws_of(&cfg, repo)),
+                    &pr_review_dir(pr_n, sha),
+                );
+                self.gh_comment(repo, pr_n, &fail_comment("disabled"), &cfg)
+                    .await;
+                if let Some(e) = st.pr_reviews.get_mut(&key) {
+                    e["state"] = json!(EntryState::Failed.as_str());
+                }
+                info!("orchestrateur: review PR {key} soldée (pr_review off)");
+            }
+            self.orch_save(&st);
+            *self.orch.state.lock().unwrap() = st;
+            return Ok(());
+        }
 
         // Balayage des worktrees orphelins — une fois par process
         // (crash du démon ou rm manuel : le dossier pr-reviews/* d'une
@@ -482,6 +531,17 @@ impl Daemon {
                 .pr_reviews
                 .get(&key)
                 .is_some_and(|v| EntryState::of(v) == EntryState::Running)
+            {
+                continue;
+            }
+            // `pr_rereview` coupé : une seule review par PR — les
+            // triggers postérieurs à une review soldée `done` sont
+            // ignorés (un `failed` reste rejouable).
+            if !cfg.pr_rereview
+                && st
+                    .pr_reviews
+                    .get(&key)
+                    .is_some_and(|v| EntryState::of(v) == EntryState::Done)
             {
                 continue;
             }
