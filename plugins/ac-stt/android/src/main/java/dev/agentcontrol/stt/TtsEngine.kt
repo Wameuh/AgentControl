@@ -283,19 +283,16 @@ class TtsEngine(
     if (tts != null && ttsModel?.id == m.id) return
     val meta = TTS_META[m.id] ?: throw IllegalStateException("modèle inconnu")
     // API Kotlin de l'AAR : data classes (pas les builders Java).
-    val modelCfg = when (meta.engine) {
-      "kokoro" -> OfflineTtsModelConfig(
+    val isKokoro = meta.engine == "kokoro"
+    val modelCfg = when {
+      isKokoro -> OfflineTtsModelConfig(
         kokoro = OfflineTtsKokoroModelConfig(
           model = "$dir/model.int8.onnx",
           voices = "$dir/voices.bin",
           tokens = "$dir/tokens.txt",
           dataDir = "$dir/espeak-ng-data",
-          // dict/ = hétéronymes anglais ; *-zh.fst = normalisation zh
-          // (dates/nombres) — tous embarqués dans l'archive v1_0.
-          dictDir = "$dir/dict",
           lexicon =
             "$dir/lexicon-us-en.txt,$dir/lexicon-gb-en.txt,$dir/lexicon-zh.txt",
-          ruleFsts = "$dir/date-zh.fst,$dir/phone-zh.fst,$dir/number-zh.fst",
         ),
         numThreads = 4, // défaut upstream kokoro (latence synthèse)
         provider = "cpu",
@@ -310,7 +307,16 @@ class TtsEngine(
         provider = "cpu",
       )
     }
-    val engine = OfflineTts(config = OfflineTtsConfig(model = modelCfg))
+    // ruleFsts vit sur OfflineTtsConfig (top-level — pas sur le
+    // KokoroModelConfig) : normalisation zh dates/nombres via les
+    // *-zh.fst embarqués dans l'archive.
+    val engine = OfflineTts(
+      config = OfflineTtsConfig(
+        model = modelCfg,
+        ruleFsts = if (isKokoro)
+          "$dir/date-zh.fst,$dir/phone-zh.fst,$dir/number-zh.fst" else "",
+      ),
+    )
     synchronized(this) {
       if (tts != null && ttsModel?.id == m.id) { engine.release(); return }
       // Release différée : un speakThread zombie peut encore utiliser
