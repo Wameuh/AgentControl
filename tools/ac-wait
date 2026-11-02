@@ -284,6 +284,9 @@ case $action in
   spawn)  do_spawn;;
   list)   do_list;;
   worker|cancel|log)
-    case $action_arg in (w-*) ;; (*) die "id invalide: $action_arg";; esac
-    "do_$action" "$action_arg";;
+    case $action_arg in
+      (*/*|*..*) die "id invalide: $action_arg";;
+      (w-*)      "do_$action" "$action_arg";;
+      (*)        die "id invalide: $action_arg";;
+    esac;;
 esac
