@@ -1,0 +1,292 @@
+#!/usr/bin/env bash
+# ac-wait — delegated waiters: spawn a low-noise background poller that pings
+# an AgentControl session via `acctl send` when a condition fires (or on
+# timeout/cancel). The agent gets its turn back immediately after spawning.
+#
+# Usage:
+#   ac-wait [--session SID] [--name TXT] [--interval N] [--timeout SEC]
+#           -- <cmd...>
+#   ac-wait [opts] --until-pid <pid>        (fires when the process dies)
+#   ac-wait [opts] --until-file <path>      (fires when the path exists)
+#   ac-wait [opts] --until-port <h:p>       (fires when TCP connect succeeds)
+#   ac-wait [opts] --until-pid-file <path>  (fires when the pid stored in the
+#                                          file is dead; waits for the file
+#                                          to appear first)
+#   ac-wait --list [--session SID]          (live waiters)
+#   ac-wait --cancel <id>                   (kill + notify "annulé")
+#   ac-wait --log <id>                      (tail the waiter log)
+#
+# Defaults: session = $AGENTCONTROL_SESSION, interval = 30 s, timeout = 2 h.
+# State: ${XDG_STATE_HOME:-~/.local/state}/ac-wait/<id>.{meta,pid,log,out,done,cancel}
+# Deps: bash + acctl (AGENTCONTROL_TCP honoured by acctl itself).
+
+set -u
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/ac-wait"
+DEF_INTERVAL=30
+DEF_TIMEOUT=7200
+TAIL_CAP=1700        # bytes of last-poll output embedded in the notification
+LABEL_CAP=160
+
+die()  { echo "ac-wait: $*" >&2; exit 2; }
+now()  { date +%s; }
+logf() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG"; }
+
+fmt_dur() { # seconds -> "45s" | "3m12s" | "2h05m"
+  local s=$1
+  if   [ "$s" -lt 60 ];   then printf '%ds' "$s"
+  elif [ "$s" -lt 3600 ]; then printf '%dm%02ds' $((s/60)) $((s%60))
+  else printf '%dh%02dm' $((s/3600)) $((s%3600/60)); fi
+}
+
+usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; }
+
+# ---------------------------------------------------------------- parse ----
+
+session="${AGENTCONTROL_SESSION:-}"; session_given=0
+name=""; interval=$DEF_INTERVAL; timeout=$DEF_TIMEOUT
+mode=""; target=""; cmd=""
+action="spawn"; action_arg=""
+
+need_val() {
+  [ $# -ge 2 ] || die "$1 requiert une valeur"
+  case $2 in (--*) die "$1 requiert une valeur (trouvé $2)";; esac
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session)        need_val "$@"; session=$2; session_given=1; shift 2;;
+    --name)           need_val "$@"; name=$2; shift 2;;
+    --interval)       need_val "$@"; interval=$2; shift 2;;
+    --timeout)        need_val "$@"; timeout=$2; shift 2;;
+    --until-pid)      need_val "$@"; mode=pid;     target=$2; shift 2;;
+    --until-file)     need_val "$@"; mode=file;    target=$2; shift 2;;
+    --until-port)     need_val "$@"; mode=port;    target=$2; shift 2;;
+    --until-pid-file) need_val "$@"; mode=pidfile; target=$2; shift 2;;
+    --list)           action=list;   shift;;
+    --cancel)         need_val "$@"; action=cancel; action_arg=$2; shift 2;;
+    --log)            need_val "$@"; action=log;    action_arg=$2; shift 2;;
+    --worker)         need_val "$@"; action=worker; action_arg=$2; shift 2;;
+    -h|--help)        usage; exit 0;;
+    --)               shift; cmd=$(printf '%q ' "$@"); cmd=${cmd% }; break;;
+    *)                die "argument inconnu: $1 (cf. --help)";;
+  esac
+done
+
+paths() { # sets META PIDF LOG OUT DONE CANC for id=$1
+  META="$STATE_DIR/$1.meta"; PIDF="$STATE_DIR/$1.pid"
+  LOG="$STATE_DIR/$1.log";   OUT="$STATE_DIR/$1.out"
+  DONE="$STATE_DIR/$1.done"; CANC="$STATE_DIR/$1.cancel"
+}
+
+cond_desc() { # short human description of the condition (needs meta vars)
+  case "$mode" in
+    cmd)     printf '%s' "$cmd";;
+    pid)     printf 'pid %s terminé' "$target";;
+    file)    printf '%s présent' "$target";;
+    port)    printf '%s joignable en TCP' "$target";;
+    pidfile) printf 'pid de %s terminé' "$target";;
+  esac
+}
+
+mklabel() { # name if given, else truncated condition description
+  local l
+  if [ -n "$name" ]; then l=$name; else l=$(cond_desc); fi
+  if [ "${#l}" -gt "$LABEL_CAP" ]; then printf '%s…' "${l:0:$((LABEL_CAP-1))}"
+  else printf '%s' "$l"; fi
+}
+
+# -------------------------------------------------------------- actions ----
+
+do_spawn() {
+  [ -n "$session" ] || die "aucune session cible (--session ou \$AGENTCONTROL_SESSION)"
+  case $interval in (*[!0-9]*|'') die "--interval doit être un entier (secondes)";; esac
+  case $timeout  in (*[!0-9]*|'') die "--timeout doit être un entier (secondes)";; esac
+  [ "$interval" -ge 1 ] || die "--interval >= 1"
+  [ "$timeout" -ge 1 ]  || die "--timeout >= 1"
+  if [ -z "$mode" ]; then
+    [ -n "$cmd" ] && mode=cmd || die "aucune condition : -- <cmd> ou --until-*"
+  elif [ -n "$cmd" ]; then
+    die "mode --until-* et -- <cmd> sont mutuellement exclusifs"
+  fi
+  if [ "$mode" = pid ]; then
+    case $target in (*[!0-9]*|'') die "--until-pid attend un pid numérique";; esac
+  fi
+  if [ "$mode" = port ]; then
+    local _h=${target%%:*} _p=${target##*:}
+    [ -n "$_h" ] && [ "$_h" != "$target" ] || die "--until-port attend hôte:port"
+    case $_p in (*[!0-9]*|'') die "--until-port attend hôte:port (port numérique)";; esac
+  fi
+
+  local acctl_bin id self
+  acctl_bin=$(command -v acctl 2>/dev/null) || die "acctl introuvable dans PATH"
+  self=$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")
+
+  install -d -m 700 "$STATE_DIR"
+  # prune des waiters terminés il y a >7 j (meta/log/out/pid/done/cancel)
+  find "$STATE_DIR" -name '*.done' -mtime +7 -print 2>/dev/null | \
+    while read -r d; do
+      b=${d%.done}; rm -f "$b".{meta,pid,log,out,done,cancel}
+    done
+  id="w-$(now)-$RANDOM"
+  paths "$id"
+
+  # Config consommée par le worker (sourcée). Le log n'embarque que rc + tail ;
+  # si <cmd> contient des secrets, c'est l'appelant qui gère (cf. SKILL.md).
+  {
+    printf 'session=%q\n' "$session"
+    printf 'name=%q\n'    "$name"
+    printf 'mode=%q\n'    "$mode"
+    printf 'target=%q\n'  "$target"
+    printf 'cmd=%q\n'     "$cmd"
+    printf 'interval=%q\n' "$interval"
+    printf 'timeout=%q\n'  "$timeout"
+    printf 'acctl=%q\n'   "$acctl_bin"
+    printf 'started=%q\n' "$(now)"
+  } >"$META"
+
+  setsid nohup "$self" --worker "$id" </dev/null >>"$LOG" 2>&1 &
+  printf '%s\n' "$id"
+}
+
+cond_ok() { # 0 = condition remplie (needs meta vars + OUT for cmd mode)
+  case "$mode" in
+    cmd)     bash -c "$cmd" >"$OUT" 2>&1;;
+    pid)     ! ps -p "$target" >/dev/null 2>&1;;
+    file)    [ -e "$target" ];;
+    port)    (exec 3<>"/dev/tcp/${target%%:*}/${target##*:}") 2>/dev/null;;
+    pidfile)
+      [ -f "$target" ] || return 1
+      local p; p=$(head -n1 "$target" 2>/dev/null | tr -d '[:space:]')
+      case $p in (*[!0-9]*|'') return 1;; esac
+      ! ps -p "$p" >/dev/null 2>&1;;
+    *)       return 1;;
+  esac
+}
+
+cond_diag() { # one-line diagnostic for non-cmd modes (embedded as tail)
+  case "$mode" in
+    pid)     printf 'pid %s terminé\n' "$target";;
+    file)    printf '%s existe\n' "$target";;
+    port)    printf '%s accepte une connexion TCP\n' "$target";;
+    pidfile) printf 'pid %s terminé\n' "$(head -n1 "$target" 2>/dev/null | tr -d '[:space:]')";;
+    cmd)     :;;
+  esac
+}
+
+notify() { # $1 = "OK"|"TIMEOUT"|"annulé"; uses meta vars
+  local status=$1 el=$(( $(now) - started )) label tailtxt msg
+  label=$(mklabel)
+  tailtxt=$(tail -c "$TAIL_CAP" "$OUT" 2>/dev/null)
+  if [ -z "$tailtxt" ] && [ "$status" = OK ]; then tailtxt=$(cond_diag); fi
+  msg="[ac-wait] $label : $status après $(fmt_dur "$el")"
+  [ -n "$tailtxt" ] && msg="$msg"$'\n'"$tailtxt"
+  local send_out
+  send_out=$("$acctl" send "$session" --steer "$msg" 2>&1)
+  if [ $? -eq 0 ]; then
+    logf "notif envoyée ($status)"
+  else
+    logf "échec acctl send ($status): $send_out"
+  fi
+}
+
+do_worker() {
+  local id=$1
+  paths "$id"
+  [ -f "$META" ] || { echo "ac-wait worker: meta absente pour $id" >&2; exit 1; }
+  # shellcheck disable=SC1090
+  . "$META"
+  echo $$ >"$PIDF"
+  logf "worker démarré (pid $$, mode $mode, interval ${interval}s, timeout ${timeout}s)"
+  local rc el
+  while :; do
+    if [ -f "$CANC" ]; then
+      logf "annulé (fichier cancel)"
+      echo "cancelled $(now)" >"$DONE"
+      exit 0
+    fi
+    cond_ok
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+      if [ -f "$CANC" ]; then
+        logf "annulé (fichier cancel)"
+        echo "cancelled $(now)" >"$DONE"
+        exit 0
+      fi
+      notify "OK"
+      echo "ok $(now)" >"$DONE"
+      exit 0
+    fi
+    el=$(( $(now) - started ))
+    logf "poll rc=$rc elapsed=${el}s"
+    if [ "$el" -ge "$timeout" ]; then
+      notify "TIMEOUT"
+      echo "timeout $(now)" >"$DONE"
+      exit 0
+    fi
+    sleep "$interval"
+  done
+}
+
+do_list() {
+  local f base id pid state el filter=""
+  [ "$session_given" = 1 ] && filter=$session
+  shopt -s nullglob
+  for f in "$STATE_DIR"/*.meta; do
+    base=${f%.meta}; id=${base##*/}
+    [ -f "$base.done" ] && continue
+    if [ -f "$base.pid" ]; then
+      pid=$(cat "$base.pid" 2>/dev/null)
+      if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then state=running
+      else continue; fi           # pid mort sans .done -> mort subite, on saute
+    else
+      state=starting
+    fi
+    (
+      . "$f"
+      [ -n "$filter" ] && [ "$session" != "$filter" ] && exit 0
+      el=$(( $(now) - started ))
+      printf '%-20s %-14s %-8s %-8s %s\n' "$id" "$session" "$state" \
+        "$(fmt_dur "$el")" "$(mklabel)"
+    )
+  done
+  shopt -u nullglob
+}
+
+do_cancel() {
+  local id=$1 base="$STATE_DIR/$1"
+  [ -f "$base.meta" ] || die "waiter inconnu: $id"
+  [ -f "$base.done" ] && { echo "ac-wait: $id déjà terminé ($(cut -d' ' -f1 "$base.done"))"; return 0; }
+  touch "$base.cancel"
+  local pid=""
+  [ -f "$base.pid" ] && pid=$(cat "$base.pid" 2>/dev/null)
+  if [ -n "$pid" ]; then
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+  fi
+  (
+    . "$base.meta"
+    OUT="$base.out"; LOG="$base.log"
+    notify "annulé"
+    echo "cancelled $(now)" >"$base.done"
+  )
+  echo "ac-wait: $id annulé"
+}
+
+do_log() {
+  local f="$STATE_DIR/$1.log"
+  [ -f "$f" ] || die "pas de log pour $1"
+  tail -n 50 "$f"
+}
+
+# -------------------------------------------------------------- dispatch ---
+
+case $action in
+  spawn)  do_spawn;;
+  list)   do_list;;
+  worker|cancel|log)
+    case $action_arg in
+      (*/*|*..*) die "id invalide: $action_arg";;
+      (w-*)      "do_$action" "$action_arg";;
+      (*)        die "id invalide: $action_arg";;
+    esac;;
+esac
