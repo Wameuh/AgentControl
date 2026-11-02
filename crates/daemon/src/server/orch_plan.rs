@@ -25,8 +25,15 @@
 //!   reviewer ne l'a pas fait (PeerSend d'appoint) :
 //!   `denied`/`conditional` → le planificateur révise et resoumet
 //!   (jusqu'à `max_review_rounds`, sinon gel « stalled — revue humaine
-//!   requise ») ; `approved` → `/compact` + message d'implémentation +
+//!   requise ») ; `approved` → `/compact` (en force — tête de file,
+//!   pour compacter avant les messages en attente) + message
+//!   d'implémentation (file classique, livré après la compaction) +
 //!   `set_mode(implement_mode)` — le même planificateur implémente.
+//!   Le `/compact` et les nudges planner/worker/reviewer partent en
+//!   force sauf `waiting_input` (cf. `force_safe_state` — file
+//!   classique alors, pour ne pas orpheliner la requête pendante) ;
+//!   le `/compact` ne force pas non plus sur `compacting` (garde
+//!   locale : ne pas annuler une compaction en vol).
 //!   Planificateur disparu au verdict : `approved` → nouvel
 //!   implémenteur `Backlog-P<N>` + `--reassign` ; `denied`/`conditional`
 //!   → release → pending.
@@ -226,6 +233,19 @@ fn is_exit_plan_req(title: &str, kind: &str, detail: &str) -> bool {
 /// slot, la priorité revue doit primer sur tout spawn.
 fn spawn_slot_ok(free: usize, unclaimed_review: bool) -> bool {
     free >= if unclaimed_review { 2 } else { 1 }
+}
+
+/// Force sûr pour un message de contrôle orchestrateur : faux si la
+/// session est `waiting_input` — tour vivant bloqué sur une requête
+/// permission/question (`pending_agent` retient request_id → acp_id) ;
+/// le `cancel()` d'un envoi forcé y orphelinerait la requête. Pour les
+/// nudges, les états busy {working|compacting|starting} sont déjà
+/// exclus en amont par les gardes des call sites ; le `/compact`
+/// post-approbation (sans garde busy : interrompre un tour est voulu)
+/// exclut `compacting` localement. Sur idle/asleep/dead le cancel est
+/// un no-op et force ne fait que push_front.
+fn force_safe_state(state: &str) -> bool {
+    state != "waiting_input"
 }
 
 /// Phase pipeline d'un item — persistée (`st.item_phase`) plutôt que
@@ -446,10 +466,15 @@ impl Daemon {
             }
             // Timeout : nudge une fois, puis unclaim + rm + cooldown.
             let started = *st.review_started.entry(key.clone()).or_insert(now);
-            let busy = metas
+            // État du reviewer capturé (pas juste busy) : le nudge part
+            // en force sauf sur waiting_input — cf. force_safe_state ;
+            // absent des metas → force, le fallback resume de plan_send
+            // couvre.
+            let rstate = metas
                 .iter()
                 .find(|m| m.id == rsid)
-                .is_some_and(|m| matches!(m.state.as_str(), "working" | "compacting" | "starting"));
+                .map(|m| m.state.as_str());
+            let busy = rstate.is_some_and(|s| matches!(s, "working" | "compacting" | "starting"));
             if busy || now - started < cfg.nudge_cooldown_secs as f64 {
                 continue;
             }
@@ -465,7 +490,10 @@ impl Daemon {
                     st.review_started.remove(&key);
                 }
                 _ => {
-                    if self.plan_reviewer_nudge(&rsid, &t).await {
+                    if self
+                        .plan_reviewer_nudge(&rsid, &t, force_safe_state(rstate.unwrap_or("")))
+                        .await
+                    {
                         st.nudges.insert(rsid.clone(), now);
                     }
                 }
@@ -837,7 +865,25 @@ impl Daemon {
                     .insert(key.clone(), ItemPhase::Implementing.as_str().into());
                 if planner_alive {
                     info!("orchestrateur: plan #{id} approuvé → implémentation par {planner_sid}");
-                    self.plan_send(&planner_sid, "/compact".into()).await;
+                    // /compact en force (tête de file) : la compaction
+                    // s'arme AVANT les messages déjà en attente, pour
+                    // implémenter sur contexte frais — interrompre un
+                    // tour en cours est voulu (plan déjà persisté via
+                    // --submit-plan). Sauf waiting_input (cf.
+                    // force_safe_state) : le cancel orphelinerait la
+                    // requête pendante → repli en file classique ; le
+                    // brief reste derrière le /compact, seuls les
+                    // messages déjà en attente le précèdent (accepté).
+                    // Pas de force non plus sur compacting : force
+                    // désarmerait et annulerait la compaction (auto)
+                    // en vol — elle fait déjà le travail, le /compact
+                    // et le brief attendent sa fin dans la retenue.
+                    let pstate = match self.get_session(&planner_sid).await {
+                        Ok(s) => s.meta_snapshot().state,
+                        Err(_) => String::new(),
+                    };
+                    let force = force_safe_state(&pstate) && pstate != "compacting";
+                    self.plan_send(&planner_sid, "/compact".into(), force).await;
                     let msg = format!(
                         "Ton plan de l'item #{id} a été approuvé (round {}){cmt}. \
                          Tu passes en implémentation : suis-le en appliquant \
@@ -858,7 +904,10 @@ impl Daemon {
                             )
                         },
                     );
-                    self.plan_send(&planner_sid, msg).await;
+                    // Brief en file classique : la retenue compact le
+                    // retient pendant la compaction, le drain le livre
+                    // après — ordre « compact → brief » garanti.
+                    self.plan_send(&planner_sid, msg, false).await;
                     if let Err(e) = self
                         .h_set_mode(planner_sid.clone(), cfg.implement_mode.clone())
                         .await
@@ -1144,7 +1193,11 @@ impl Daemon {
                      sans plan, la tâche est release.",
                     PLAN_MAX_NUDGES
                 );
-                if self.plan_send(sid, msg).await {
+                // Nudge de contrôle en force (tête de file) — précède
+                // les prompts en attente ; force_safe_state : sur
+                // waiting_input il part en file pour ne pas orpheliner
+                // la requête pendante.
+                if self.plan_send(sid, msg, force_safe_state(state)).await {
                     st.nudges.insert(sid.to_string(), now);
                     st.plan_nudges.insert(sid.to_string(), n + 1);
                 }
@@ -1177,7 +1230,12 @@ impl Daemon {
                             .join(", ")
                     ));
                 }
-                if self.plan_send(sid, parts.join(" ")).await {
+                // Même traitement que le nudge planner : force sauf
+                // waiting_input (cf. force_safe_state).
+                if self
+                    .plan_send(sid, parts.join(" "), force_safe_state(state))
+                    .await
+                {
                     st.nudges.insert(sid.to_string(), now);
                 }
             }
@@ -1291,6 +1349,10 @@ impl Daemon {
                         // planner est prévenu et corrigera le chemin.
                         st.plan_marker_seq.insert(key.clone(), seq);
                         warn!("orchestrateur: PLAN_FILE #{id} illisible ({e})");
+                        // Pas de force : cette section n'est pas gardée
+                        // par l'état — le feedback peut partir pendant
+                        // un tour et cancel() l'annulerait ; la file
+                        // classique sert le correctif sans interrompre.
                         self.plan_send(
                             &sid,
                             format!(
@@ -1299,6 +1361,7 @@ impl Daemon {
                                  « PLAN_FILE: <chemin> ».",
                                 path.display()
                             ),
+                            false,
                         )
                         .await;
                     }
@@ -1638,10 +1701,17 @@ impl Daemon {
     }
 
     /// Envoi tolérant : h_send puis resume+send si l'agent ne tourne
-    /// plus (même mécanique que `orch_nudge`).
-    async fn plan_send(self: &Arc<Self>, sid: &str, msg: String) -> bool {
+    /// plus (même mécanique que `orch_nudge`). `force` = sémantique
+    /// `send --force` : tête de file + annule le tour en cours + désarme
+    /// la retenue compact (sur session non prête, h_send le réutilise
+    /// comme flag front au wake/spawn) — réservé aux messages de
+    /// contrôle de l'orchestrateur, et seulement quand l'état de
+    /// session n'est pas waiting_input (cf. force_safe_state). Propagé
+    /// aux deux h_send pour que le retry post-resume garde la même
+    /// sémantique.
+    async fn plan_send(self: &Arc<Self>, sid: &str, msg: String, force: bool) -> bool {
         if self
-            .h_send(sid.to_string(), msg.clone(), false, false)
+            .h_send(sid.to_string(), msg.clone(), force, false)
             .await
             .is_ok()
         {
@@ -1649,7 +1719,7 @@ impl Daemon {
         }
         if self.h_resume_session(sid.to_string(), None).await.is_ok() {
             return self
-                .h_send(sid.to_string(), msg, false, false)
+                .h_send(sid.to_string(), msg, force, false)
                 .await
                 .is_ok();
         }
@@ -1657,7 +1727,8 @@ impl Daemon {
     }
 
     /// Nudge d'un reviewer en timeout (une seule fois avant unclaim).
-    async fn plan_reviewer_nudge(self: &Arc<Self>, rsid: &str, t: &Task) -> bool {
+    /// `force` vient du call site (force_safe_state sur l'état capturé).
+    async fn plan_reviewer_nudge(self: &Arc<Self>, rsid: &str, t: &Task, force: bool) -> bool {
         let id = task_id(t);
         let planner = task_agent(t);
         let msg = format!(
@@ -1668,7 +1739,7 @@ impl Daemon {
              {planner} \"<verdict>\") et termine par « VERDICT: … ». \
              Sans verdict, la revue sera réattribuée."
         );
-        self.plan_send(rsid, msg).await
+        self.plan_send(rsid, msg, force).await
     }
 
     /// rm tolérant d'une session pipeline + nettoyage des marqueurs
