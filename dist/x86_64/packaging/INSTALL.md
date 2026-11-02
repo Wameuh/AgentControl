@@ -143,6 +143,10 @@ orchestrator into the plan→review→implementation pipeline
 legacy direct-worker dispatch; a deployment without the pipeline code
 silently ignores the flag.
 
+Pause/resume is unchanged from the legacy script: `touch
+~/.agentbacklog/orchestrator.pause` parks the loop (`acctl orch status`
+→ `phase: paused`), removing the file resumes it.
+
 Optionally delete the now-dead script
 `~/.local/bin/backlog-orchestrator.py` (kept for rollback, nothing
 references it any more).

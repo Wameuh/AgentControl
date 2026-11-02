@@ -527,7 +527,9 @@ pipeline, still on the same tick/persist/lock substrate (item #139,
 - **Rollout** — the dev container's switchover (#140) staged
   `enabled = true` + `plan_review = true` in `config.toml`: the
   internal component runs legacy dispatch until the first deployed
-  daemon build carrying #139, where the flag takes effect at boot.
+  daemon build carrying #139, where the flag takes effect at boot —
+  caveat: any `acctl orch set`/`comp set` on a pre-#139 daemon rewrites
+  the section from the old schema and silently drops the staged key.
 
 ---
 
