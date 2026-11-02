@@ -713,6 +713,20 @@ body.android .ev.pinned .pin-tag { opacity: 1; }
   flex: 1; overflow-y: auto; padding: 20px 22px;
   display: flex; flex-direction: column; gap: 14px;
 }
+/* Vue large : les sections passent sur 2 colonnes — auto-fit replie tout
+   seul en 1 colonne sous le seuil (~1 018 px de vue), min(480px,100%)
+   évite l'overflow sous 480px. max-width borne à 2 colonnes : liée au
+   minmax(480px) — baisser le min permettrait une 3e colonne
+   (2×620 + gap 14 + padding 2×22 = 1 298). .s-sec garde son cap 620 :
+   1 colonne inchangée, la section remplit sa cellule en 2 colonnes.
+   Android exclu : toujours 1 colonne (drawer, tablettes). */
+body:not(.android) #settings-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(480px, 100%), 1fr));
+  align-items: start;
+  align-content: start;
+  max-width: 1298px;
+}
 /* Sections nommées repliables : le résumé d'état à droite du titre garde
    la valeur courante visible quand la section est fermée. */
 .s-sec {
