@@ -108,6 +108,25 @@ session on a detached worktree at the exact head, and posts the
 `## Verdict:` comment itself (ack `Launching a review — AgentControl
 orchestrator`). Same comment-level protocol — workers change nothing.
 
+**Review flags** (`backlog_orchestrator` params, all hot-settable via
+`acctl comp set` and shown in the config UI): each review mechanism
+has an independent on/off switch — `plan_review` (plan → review →
+implementation pipeline, off = direct worker dispatch),
+`pr_review` (native `/mr review` serving), `plan_rereview` (off =
+a single plan-review round per item: a denied/conditional verdict on
+round 1 stalls directly, as if `max_review_rounds=1`),
+`pr_rereview` (off = one review per PR: triggers after a `done`
+review are ignored, a `failed` one stays replayable) and
+`reviewer_reuse` (off = a fresh `Backlog-R*` session per round,
+deleted after each verdict — pre-persistence behavior).
+**In-flight disable**: flipping `plan_review` off with items still
+`plan_review`/`reviewing` unfreezes them — the daemon posts a
+technical `approved` verdict and releases them to `pending`
+(direct implementation by a worker), and removes the mapped
+reviewer sessions. Flipping `pr_review` off settles running reviews:
+reviewer session deleted, worktree removed, `review failed:
+disabled` posted so polling workers aren't left waiting.
+
 **Auto review**: when the work looks done **(PR still draft)**,
 **note `TS=$(date -u +%FT%TZ)`**, comment `/mr review`
 (`gh pr comment <N> --body "/mr review"`),

@@ -209,6 +209,23 @@ pub struct OrchCfg {
     /// revue humaine requise » au lieu d'une nouvelle boucle. Défaut 5.
     #[serde(default = "drounds")]
     pub max_review_rounds: u32,
+    /// Rounds de re-revue de plan : `false` borne la revue à UN seul
+    /// round par item (un denied/conditional du round 1 gèle
+    /// directement « stalled — revue humaine requise », comme si
+    /// `max_review_rounds = 1`). Défaut true.
+    #[serde(default = "dtrue")]
+    pub plan_rereview: bool,
+    /// Rounds de re-revue de PR : `false` ne sert qu'UNE review par PR
+    /// — les triggers postérieurs à une review soldée `done` sont
+    /// ignorés (un `failed` reste rejouable). Défaut true.
+    #[serde(default = "dtrue")]
+    pub pr_rereview: bool,
+    /// Réutilisation du reviewer persistant entre les rounds (#149) :
+    /// `false` revient au comportement éphemère — une session
+    /// `Backlog-R*` neuve par round, supprimée après chaque verdict.
+    /// Défaut true.
+    #[serde(default = "dtrue")]
+    pub reviewer_reuse: bool,
     /// Review de PR servie par le démon : un commentaire déclencheur
     /// (`pr_review_trigger`) sur une PR ouverte → session reviewer
     /// fraîche sur le head exact, verdict `## Verdict: …` posté par le
@@ -323,6 +340,9 @@ impl Default for OrchCfg {
             reviewer_mode: dsmart(),
             implement_mode: dmode(),
             max_review_rounds: drounds(),
+            plan_rereview: true,
+            pr_rereview: true,
+            reviewer_reuse: true,
             pr_review: false,
             pr_review_trigger: dtrigger(),
             pr_reviewer_mode: dsmart(),

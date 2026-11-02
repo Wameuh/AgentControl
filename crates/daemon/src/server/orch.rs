@@ -879,10 +879,10 @@ impl Daemon {
         // Passe review de PR : sous les mêmes gardes enable/pause/lock
         // mais indépendante d'agentbacklog et du cycle — un agentbacklog
         // absent ou un cycle en erreur ne doit pas couper les reviews.
-        if self.orch.cfg.read().unwrap().pr_review {
-            if let Err(e) = self.orch_pr_review_tick().await {
-                warn!("orchestrateur: review PR: {e:#}");
-            }
+        // Appelée même `pr_review=false` : une bascule en vol laisse des
+        // entrées Running à solder (session + worktree à libérer).
+        if let Err(e) = self.orch_pr_review_tick().await {
+            warn!("orchestrateur: review PR: {e:#}");
         }
         let bin = match self.orch_agentbacklog_bin().await {
             Some(b) => b,
@@ -1002,6 +1002,12 @@ impl Daemon {
                 .await?;
             (oc.workers, oc.pending, oc.planners, oc.reviewers)
         } else {
+            // 0. Désactivation en vol : items encore plan_review/
+            //    reviewing → dégel en pending (claim-review + verdict
+            //    technique + release) — sinon ils restent figés hors
+            //    de toute file.
+            self.orch_plan_disabled_unblock(&bin, ws, &tasks, &mut st)
+                .await;
 
             // 1. wip orphelines (agent_id = session disparue) → release.
             //    Rattaché à `watch_prs` : sans surveillance PR la boucle ne
