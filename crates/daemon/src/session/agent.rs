@@ -341,6 +341,18 @@ impl Session {
         });
         // Config demandée pendant que l'agent était mort : rejouer maintenant
         // (modèle/mode choisis hors-ligne appliqués au resume).
+        // Un mode ACP-only omis de l'env par env_mode n'a jamais été posé
+        // par le spawn : sans re-stage, le respawn (session/new fallback,
+        // ou session/load qui ne restaure pas le mode) le perdrait —
+        // pending_config le rejoue par session/set_mode ci-dessous.
+        {
+            let mut m = self.meta.lock().unwrap();
+            if let Some(md) = m.mode.clone() {
+                if crate::server::env_mode(&md) != md {
+                    m.pending_config.entry("mode".into()).or_insert(md);
+                }
+            }
+        }
         let pending: Vec<(String, String)> = {
             self.meta.lock().unwrap().pending_config.drain().collect()
         };

@@ -23,7 +23,7 @@ pub struct AgentProfile {
 /// `meta.mode`. Le mode demandé arrive par `session/set_mode` post-
 /// handshake (apply_spawn_config, ou le replay pending_config au
 /// respawn) — l'agent tourne sur son défaut pendant la fenêtre de spawn.
-pub(crate) fn env_mode(mode: &str) -> &str {
+pub fn env_mode(mode: &str) -> &str {
     match mode {
         "plan" | "smart" | "ask" => "",
         m => m,
