@@ -723,6 +723,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Ordre « /compact forcé → brief en file » du verdict approved
+    /// (orch_plan::plan_apply_verdict) : le /compact envoyé en force
+    /// passe devant les prompts déjà en attente, le brief normal reste
+    /// derrière — miroir de plan_send sur session non prête (h_send →
+    /// enqueue_prompt(force) quand !accepting_prompts).
+    #[tokio::test]
+    async fn compact_force_front() {
+        let (s, dir) = tmp_session("compact-force");
+        s.send_prompt("m1", false, false).await.unwrap();
+        s.send_prompt("m2", false, false).await.unwrap();
+        s.send_prompt("/compact", true, false).await.unwrap();
+        s.send_prompt("brief", false, false).await.unwrap();
+        {
+            let q = s.prompt_queue.lock().unwrap();
+            let texts: Vec<&str> = q.iter().map(|(t, _)| t.as_str()).collect();
+            assert_eq!(texts, ["/compact", "m1", "m2", "brief"]);
+            // Le /compact forcé garde PromptSrc::User → arm_compact
+            // (auto=false) au drain → pas de « continue your task » en
+            // double du brief.
+            assert_eq!(q.front().unwrap().1, PromptSrc::User);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Retenue compact active : un envoi non forcé est retenu en file,
+    /// un envoi forcé la contourne en tête. Sur session non prête la
+    /// retenue n'est PAS désarmée (take_compact_hold exige
+    /// accepting_prompts) — l'ordre en file reste garanti.
+    #[tokio::test]
+    async fn compact_force_bypasses_hold() {
+        let (s, dir) = tmp_session("compact-hold");
+        s.arm_compact(false);
+        s.send_prompt("retenu", false, false).await.unwrap();
+        s.send_prompt("/compact", true, false).await.unwrap();
+        {
+            let q = s.prompt_queue.lock().unwrap();
+            let texts: Vec<&str> = q.iter().map(|(t, _)| t.as_str()).collect();
+            assert_eq!(texts, ["/compact", "retenu"]);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// setcfg `ac.compact_*` : override session effectif immédiatement
     /// et persisté en compact.json (réouverture → toujours actif) ;
     /// « off » sur un seuil = retour à la valeur héritée ; clés et
