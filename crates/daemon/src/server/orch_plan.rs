@@ -31,7 +31,9 @@
 //!   `set_mode(implement_mode)` — le même planificateur implémente.
 //!   Le `/compact` et les nudges planner/worker/reviewer partent en
 //!   force sauf `waiting_input` (cf. `force_safe_state` — file
-//!   classique alors, pour ne pas orpheliner la requête pendante).
+//!   classique alors, pour ne pas orpheliner la requête pendante) ;
+//!   le `/compact` ne force pas non plus sur `compacting` (garde
+//!   locale : ne pas annuler une compaction en vol).
 //!   Planificateur disparu au verdict : `approved` → nouvel
 //!   implémenteur `Backlog-P<N>` + `--reassign` ; `denied`/`conditional`
 //!   → release → pending.
@@ -236,10 +238,12 @@ fn spawn_slot_ok(free: usize, unclaimed_review: bool) -> bool {
 /// Force sûr pour un message de contrôle orchestrateur : faux si la
 /// session est `waiting_input` — tour vivant bloqué sur une requête
 /// permission/question (`pending_agent` retient request_id → acp_id) ;
-/// le `cancel()` d'un envoi forcé y orphelinerait la requête. Les états
-/// busy {working|compacting|starting} sont déjà exclus en amont par les
-/// gardes des call sites ; sur idle/asleep/dead le cancel est un no-op
-/// et force ne fait que push_front.
+/// le `cancel()` d'un envoi forcé y orphelinerait la requête. Pour les
+/// nudges, les états busy {working|compacting|starting} sont déjà
+/// exclus en amont par les gardes des call sites ; le `/compact`
+/// post-approbation (sans garde busy : interrompre un tour est voulu)
+/// exclut `compacting` localement. Sur idle/asleep/dead le cancel est
+/// un no-op et force ne fait que push_front.
 fn force_safe_state(state: &str) -> bool {
     state != "waiting_input"
 }
