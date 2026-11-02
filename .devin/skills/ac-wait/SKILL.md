@@ -80,10 +80,11 @@ ac-wait --log w-1730000000-12345      # tail du log (polls, notif)
   que pending).
 - **Un seul waiter par condition** : ne pas enchaîner/doubler les waiters
   sur la même cible — cancel l'ancien ou attends son ping.
-- **Delivery** : le ping est un `acctl send` classique → il arrive en file ;
-  si la session est en plein tour il est délivré au prochain point de
-  livraison (il n'interrompt pas le tour — pas de `--steer` côté waiter) ;
-  session endormie → réveil auto.
+- **Delivery** : le ping part en `acctl send --steer` → il s'injecte **en
+  plein tour** (le steer est conçu pour ça : réveil réel, pas d'empilement
+  en file derrière un long tour) ; session endormie → réveil auto.
+  Le waiter n'utilise pas `--force` (tête de file = réservé aux urgences
+  utilisateur).
 - **Secrets** : le log local n'embarque que rc + tail de sortie, mais le
   `meta` contient la commande et le message ping affiche name|cmd — passe
   `--name` et évite les secrets en clair dans `<cmd>`.

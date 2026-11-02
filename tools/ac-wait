@@ -182,7 +182,7 @@ notify() { # $1 = "OK"|"TIMEOUT"|"annulé"; uses meta vars
   msg="[ac-wait] $label : $status après $(fmt_dur "$el")"
   [ -n "$tailtxt" ] && msg="$msg"$'\n'"$tailtxt"
   local send_out
-  send_out=$("$acctl" send "$session" "$msg" 2>&1)
+  send_out=$("$acctl" send "$session" --steer "$msg" 2>&1)
   if [ $? -eq 0 ]; then
     logf "notif envoyée ($status)"
   else
