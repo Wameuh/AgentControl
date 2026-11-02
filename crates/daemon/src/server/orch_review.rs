@@ -136,9 +136,7 @@ fn verdict_body_ok(body: &str) -> bool {
 /// contient pas le mot Verdict — le hook de merge ne doit jamais le
 /// lire comme une review.
 fn fail_comment(kind: &str) -> String {
-    format!(
-        "review failed: {kind} — reposter le déclencheur ({TRIGGER_ESCAPED}) pour relancer"
-    )
+    format!("review failed: {kind} — reposter le déclencheur ({TRIGGER_ESCAPED}) pour relancer")
 }
 
 /// Le commentaire d'ack — commence par « Launching… » : jamais pris
@@ -149,6 +147,41 @@ fn ack_comment(model: &str, sid: &str) -> String {
          spawned as `{sid}`. The review will be posted as a comment \
          on this PR."
     )
+}
+
+/// Choisit le trigger à traiter parmi les commentaires
+/// `(id, author_association, body)` d'une PR : le plus récent dont
+/// l'auteur est habilité et `id > last_trigger`. Un ack
+/// d'automatisation externe (`Launching a review…`) ne dispense QUE
+/// s'il est postérieur à ce trigger candidat — un ack plus ancien
+/// (review d'un round précédent, automate mort depuis) n'étouffe pas
+/// les nouveaux triggers.
+fn pick_trigger(comments: &[(u64, String, String)], trigger: &str, last: u64) -> Option<u64> {
+    let tid = comments
+        .iter()
+        .filter(|(id, assoc, body)| {
+            *id > last && trigger_author_ok(assoc) && is_trigger(body, trigger)
+        })
+        .map(|c| c.0)
+        .max()?;
+    if comments
+        .iter()
+        .any(|(id, _, body)| *id > tid && body.contains(EXTERNAL_ACK))
+    {
+        return None;
+    }
+    Some(tid)
+}
+
+/// `owner/repo` normalisé d'une URL remote (`git@h:o/r.git`,
+/// `https://h/o/r`, …) — comparaison exacte, pas un `contains`.
+fn remote_nwo(url: &str) -> Option<String> {
+    let p = url.trim().trim_end_matches(".git");
+    let path = p.rsplit_once(':').map(|(_, r)| r).unwrap_or(p);
+    let mut it = path.trim_matches('/').rsplit('/');
+    let name = it.next()?;
+    let owner = it.next()?;
+    (!name.is_empty() && !owner.is_empty()).then(|| format!("{owner}/{name}"))
 }
 
 /// Nom de repo court (`owner/<name>` → `<name>`) — clé de
@@ -188,10 +221,14 @@ Verdicts : APPROVED si la PR est mergeable en l'etat ; CHANGES_REQUESTED s'il y 
 Termine ton tour par exactement ce bloc (rien apres) :
 
 REVIEW_RESULT_BEGIN
-## Verdict: APPROVED|CHANGES_REQUESTED
+## Verdict: APPROVED
 
 <corps du commentaire de review — findings, points verifies, non-bloquants>
 REVIEW_RESULT_END
+
+La premiere ligne du bloc est exactement l'une de ces deux lignes :
+`## Verdict: APPROVED` ou `## Verdict: CHANGES_REQUESTED` — jamais
+l'alternance litterale ni un autre titre.
 
 Reponds en francais dans le corps du verdict."#;
 
@@ -223,8 +260,7 @@ impl Daemon {
         let mut st = self.orch.state.lock().unwrap().clone();
         let (metas, session_ids): (Vec<SessionMeta>, HashSet<String>) = {
             let sessions = self.sessions.read().await;
-            let metas: Vec<SessionMeta> =
-                sessions.values().map(|s| s.meta_snapshot()).collect();
+            let metas: Vec<SessionMeta> = sessions.values().map(|s| s.meta_snapshot()).collect();
             let ids = metas.iter().map(|m| m.id.clone()).collect();
             (metas, ids)
         };
@@ -255,6 +291,43 @@ impl Daemon {
                 continue;
             };
             let wt = pr_review_dir(pr_n, sha);
+            // Verdict extrait mais post échoué au tick précédent →
+            // retry borné (le texte est persisté, pas besoin de la
+            // session — déjà libérée).
+            if let Some(pending) = entry
+                .get("pending_post")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            {
+                let tries = entry.get("post_tries").and_then(Value::as_u64).unwrap_or(0);
+                if self.gh_comment(&repo, pr_n, &pending, &cfg).await {
+                    info!("orchestrateur: verdict review PR {key} posté");
+                    self.pr_review_finish(
+                        &key,
+                        EntryState::Done,
+                        &mut st,
+                        &wt,
+                        Path::new(ws_of(&cfg, repo)),
+                    )
+                    .await;
+                    self.orch_save(&st);
+                } else if tries >= 3 {
+                    warn!("orchestrateur: verdict PR {key} impossible à poster → failed");
+                    self.pr_review_finish(
+                        &key,
+                        EntryState::Failed,
+                        &mut st,
+                        &wt,
+                        Path::new(ws_of(&cfg, repo)),
+                    )
+                    .await;
+                    self.orch_save(&st);
+                } else if let Some(e) = st.pr_reviews.get_mut(&key) {
+                    e["post_tries"] = json!(tries + 1);
+                }
+                self.orch_save(&st);
+                continue;
+            }
             // Session disparue → échec explicite (le worker ne poll pas
             // 10 min pour rien) plutôt qu'une entrée running éternelle.
             if !session_ids.contains(sid) {
@@ -265,18 +338,31 @@ impl Daemon {
                     &cfg,
                 )
                 .await;
-                self.pr_review_finish(&key, EntryState::Failed, &mut st, &wt, Path::new(ws_of(&cfg, repo)))
-                    .await;
+                self.pr_review_finish(
+                    &key,
+                    EntryState::Failed,
+                    &mut st,
+                    &wt,
+                    Path::new(ws_of(&cfg, repo)),
+                )
+                .await;
+                self.orch_save(&st);
                 continue;
             }
             // Timeout → kill + échec (pas de boucle silencieuse).
             if now - started > cfg.pr_review_timeout as f64 {
                 warn!("orchestrateur: review PR {key} timeout → failed");
-                let _ = self.h_delete_session(sid.to_string()).await;
                 self.gh_comment(&repo, pr_n, &fail_comment("timeout"), &cfg)
                     .await;
-                self.pr_review_finish(&key, EntryState::Failed, &mut st, &wt, Path::new(ws_of(&cfg, repo)))
-                    .await;
+                self.pr_review_finish(
+                    &key,
+                    EntryState::Failed,
+                    &mut st,
+                    &wt,
+                    Path::new(ws_of(&cfg, repo)),
+                )
+                .await;
+                self.orch_save(&st);
                 continue;
             }
             let Some(meta) = metas.iter().find(|m| m.id == sid) else {
@@ -291,16 +377,17 @@ impl Daemon {
                 if !pending.is_empty() {
                     if denied >= 2 {
                         warn!("orchestrateur: review PR {key} bloquée sur requête → failed");
-                        let _ = self.h_delete_session(sid.to_string()).await;
-                        self.gh_comment(
-                            repo,
-                            pr_n,
-                            &fail_comment("blocked on request"),
-                            &cfg,
+                        self.gh_comment(repo, pr_n, &fail_comment("blocked on request"), &cfg)
+                            .await;
+                        self.pr_review_finish(
+                            &key,
+                            EntryState::Failed,
+                            &mut st,
+                            &wt,
+                            Path::new(ws_of(&cfg, repo)),
                         )
                         .await;
-                        self.pr_review_finish(&key, EntryState::Failed, &mut st, &wt, Path::new(ws_of(&cfg, repo)))
-                            .await;
+                        self.orch_save(&st);
                         continue;
                     }
                     for rid in pending {
@@ -321,11 +408,7 @@ impl Daemon {
                 .get_session(sid)
                 .await
                 .ok()
-                .and_then(|s| {
-                    s.journal
-                        .read_page(&s.dir, None, REVIEW_JOURNAL_SCAN)
-                        .ok()
-                })
+                .and_then(|s| s.journal.read_page(&s.dir, None, REVIEW_JOURNAL_SCAN).ok())
                 .and_then(|ev| extract_verdict_block(&ev));
             match block {
                 Some(body) if verdict_body_ok(&body) => {
@@ -343,36 +426,58 @@ impl Daemon {
                             head.as_deref().unwrap_or("inconnu")
                         )
                     };
-                    self.gh_comment(&repo, pr_n, &text, &cfg).await;
-                    info!("orchestrateur: verdict review PR {key} posté");
-                    self.pr_review_finish(&key, EntryState::Done, &mut st, &wt, Path::new(ws_of(&cfg, repo)))
+                    // Le verdict est persisté AVANT le post — si le
+                    // commentaire échoue il est reposté au tick
+                    // suivant (jamais perdu silencieusement).
+                    if let Some(e) = st.pr_reviews.get_mut(&key) {
+                        e["pending_post"] = json!(text.clone());
+                        e["sid"] = json!("");
+                    }
+                    self.orch_save(&st);
+                    // Ressources libérées tout de suite — le retry de
+                    // post n'a besoin ni de la session ni du worktree.
+                    let _ = self.h_delete_session(sid.to_string()).await;
+                    remove_review_worktree(Path::new(ws_of(&cfg, repo)), &wt);
+                    if self.gh_comment(&repo, pr_n, &text, &cfg).await {
+                        info!("orchestrateur: verdict review PR {key} posté");
+                        self.pr_review_finish(
+                            &key,
+                            EntryState::Done,
+                            &mut st,
+                            &wt,
+                            Path::new(ws_of(&cfg, repo)),
+                        )
                         .await;
+                        self.orch_save(&st);
+                    }
                 }
                 Some(_) => {
                     warn!("orchestrateur: review PR {key} bloc verdict malformé → failed");
-                    let _ = self.h_delete_session(sid.to_string()).await;
-                    self.gh_comment(
-                        &repo,
-                        pr_n,
-                        &fail_comment("malformed verdict block"),
-                        &cfg,
+                    self.gh_comment(&repo, pr_n, &fail_comment("malformed verdict block"), &cfg)
+                        .await;
+                    self.pr_review_finish(
+                        &key,
+                        EntryState::Failed,
+                        &mut st,
+                        &wt,
+                        Path::new(ws_of(&cfg, repo)),
                     )
                     .await;
-                    self.pr_review_finish(&key, EntryState::Failed, &mut st, &wt, Path::new(ws_of(&cfg, repo)))
-                        .await;
+                    self.orch_save(&st);
                 }
                 None => {
                     info!("orchestrateur: review PR {key} idle sans bloc verdict → failed");
-                    let _ = self.h_delete_session(sid.to_string()).await;
-                    self.gh_comment(
-                        &repo,
-                        pr_n,
-                        &fail_comment("no verdict block"),
-                        &cfg,
+                    self.gh_comment(&repo, pr_n, &fail_comment("no verdict block"), &cfg)
+                        .await;
+                    self.pr_review_finish(
+                        &key,
+                        EntryState::Failed,
+                        &mut st,
+                        &wt,
+                        Path::new(ws_of(&cfg, repo)),
                     )
                     .await;
-                    self.pr_review_finish(&key, EntryState::Failed, &mut st, &wt, Path::new(ws_of(&cfg, repo)))
-                        .await;
+                    self.orch_save(&st);
                 }
             }
         }
@@ -409,8 +514,9 @@ impl Daemon {
             {
                 continue;
             }
-            let Some((trigger_id, head_sha)) =
-                self.pr_review_find_trigger(&repo, pr_n, &cfg, last_trigger).await
+            let Some((trigger_id, head_sha)) = self
+                .pr_review_find_trigger(&repo, pr_n, &cfg, last_trigger)
+                .await
             else {
                 continue;
             };
@@ -428,7 +534,10 @@ impl Daemon {
                 }),
             );
             self.orch_save(&st);
-            match self.pr_review_launch(&repo, pr_n, &head_sha, &key, &cfg).await {
+            match self
+                .pr_review_launch(&repo, pr_n, &head_sha, &key, &cfg)
+                .await
+            {
                 Ok(sid) => {
                     if let Some(e) = st.pr_reviews.get_mut(&key) {
                         e["sid"] = json!(sid.clone());
@@ -452,6 +561,13 @@ impl Daemon {
                 }
                 Err(e) => {
                     warn!("orchestrateur: launch review {key}: {e:#}");
+                    // Worktree éventuellement créé avant l'échec (ex.
+                    // h_new_session KO) — sinon « already exists » au
+                    // retry sur le même sha jusqu'au sweep.
+                    remove_review_worktree(
+                        Path::new(ws_of(&cfg, &repo)),
+                        &pr_review_dir(pr_n, &head_sha),
+                    );
                     self.gh_comment(&repo, pr_n, &fail_comment("spawn failed"), &cfg)
                         .await;
                     if let Some(e2) = st.pr_reviews.get_mut(&key) {
@@ -466,7 +582,8 @@ impl Daemon {
     }
 
     /// Fin de passe d'une entrée : état terminal + session supprimée
-    /// (si encore là) + worktree retiré.
+    /// (si encore là) + worktree retiré — succès comme échec (une
+    /// review terminée ne laisse ni zombie idle ni cwd supprimé).
     async fn pr_review_finish(
         self: &Arc<Self>,
         key: &str,
@@ -475,23 +592,20 @@ impl Daemon {
         wt: &Path,
         ws: &Path,
     ) {
+        let sid = st
+            .pr_reviews
+            .get(key)
+            .and_then(|e| e.get("sid"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         if let Some(e) = st.pr_reviews.get_mut(key) {
             e["state"] = json!(end.as_str());
         }
-        // `worktree remove|prune` se lance depuis un clone lié (le
-        // workspace où le worktree a été créé), pas depuis le worktree.
-        let _ = std::process::Command::new("git")
-            .arg("-C")
-            .arg(ws)
-            .args(["worktree", "remove", "--force"])
-            .arg(wt)
-            .output();
-        let _ = std::process::Command::new("git")
-            .arg("-C")
-            .arg(ws)
-            .args(["worktree", "prune"])
-            .output();
-        let _ = std::fs::remove_dir_all(wt);
+        if !sid.is_empty() {
+            let _ = self.h_delete_session(sid).await;
+        }
+        remove_review_worktree(ws, wt);
     }
 
     /// PR ouvertes à reviewer : `gh pr list --base next_release` par
@@ -506,7 +620,15 @@ impl Daemon {
             .map(|p| p.repo.clone())
             .collect();
         let (rc, out, _e) = run_out(
-            &["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+            &[
+                "gh",
+                "repo",
+                "view",
+                "--json",
+                "nameWithOwner",
+                "-q",
+                ".nameWithOwner",
+            ],
             Path::new(&cfg.workspace),
         )
         .await
@@ -521,8 +643,17 @@ impl Daemon {
         for repo in repos {
             let (rc, out, _e) = run_out(
                 &[
-                    "gh", "pr", "list", "-R", &repo, "--state", "open", "--base",
-                    ALLOWED_BASE, "--json", "number,headRefOid",
+                    "gh",
+                    "pr",
+                    "list",
+                    "-R",
+                    &repo,
+                    "--state",
+                    "open",
+                    "--base",
+                    ALLOWED_BASE,
+                    "--json",
+                    "number,headRefOid",
                 ],
                 Path::new(&cfg.workspace),
             )
@@ -562,7 +693,11 @@ impl Daemon {
         let ep = format!("repos/{repo}/issues/{pr_n}/comments?per_page=100");
         let (rc, out, _e) = run_out(
             &[
-                "gh", "api", "--paginate", &ep, "--jq",
+                "gh",
+                "api",
+                "--paginate",
+                &ep,
+                "--jq",
                 ".[] | [.id, .created_at, .author_association, (.body | @base64)] | @tsv",
             ],
             Path::new(&cfg.workspace),
@@ -572,36 +707,19 @@ impl Daemon {
         if rc != 0 {
             return None;
         }
-        let mut trigger: Option<(u64, String)> = None;
-        let mut external = false;
+        let mut comments: Vec<(u64, String, String)> = Vec::new();
         for line in out.lines() {
             let mut f = line.splitn(4, '\t');
-            let (Some(id), Some(ts), Some(assoc), Some(b64)) =
+            let (Some(id), Some(_ts), Some(assoc), Some(b64)) =
                 (f.next(), f.next(), f.next(), f.next())
             else {
                 continue;
             };
             let Ok(id) = id.parse::<u64>() else { continue };
-            let body = String::from_utf8(
-                base64_decode(b64.trim()),
-            )
-            .unwrap_or_default();
-            if body.contains(EXTERNAL_ACK) && trigger.is_some() {
-                external = true;
-                let _ = ts;
-                break;
-            }
-            if is_trigger(&body, &cfg.pr_review_trigger)
-                && trigger_author_ok(assoc.trim())
-                && id > last_trigger
-            {
-                trigger = Some((id, ts.to_string()));
-            }
+            let body = String::from_utf8(base64_decode(b64.trim())).unwrap_or_default();
+            comments.push((id, assoc.trim().to_string(), body));
         }
-        if external {
-            return None;
-        }
-        let (tid, _ts) = trigger?;
+        let tid = pick_trigger(&comments, &cfg.pr_review_trigger, last_trigger)?;
         // Head courant — lu frais (la liste batch peut être pire).
         self.gh_pr_head(repo, pr_n, cfg).await.map(|h| (tid, h))
     }
@@ -610,8 +728,16 @@ impl Daemon {
     async fn gh_pr_head(&self, repo: &str, pr_n: u64, cfg: &cfg::OrchCfg) -> Option<String> {
         let (rc, out, _e) = run_out(
             &[
-                "gh", "pr", "view", &pr_n.to_string(), "-R", repo, "--json",
-                "headRefOid,baseRefName", "-q", ".headRefOid",
+                "gh",
+                "pr",
+                "view",
+                &pr_n.to_string(),
+                "-R",
+                repo,
+                "--json",
+                "headRefOid,baseRefName",
+                "-q",
+                ".headRefOid",
             ],
             Path::new(&cfg.workspace),
         )
@@ -624,11 +750,19 @@ impl Daemon {
         (!h.is_empty()).then_some(h)
     }
 
-    /// Commentaire sur la PR via gh (compte local = OWNER pour le hook).
-    async fn gh_comment(&self, repo: &str, pr_n: u64, body: &str, cfg: &cfg::OrchCfg) {
+    /// Commentaire sur la PR via gh (compte local = OWNER pour le
+    /// hook) → posté ?
+    async fn gh_comment(&self, repo: &str, pr_n: u64, body: &str, cfg: &cfg::OrchCfg) -> bool {
         let (rc, _o, e) = run_out(
             &[
-                "gh", "pr", "comment", &pr_n.to_string(), "-R", repo, "--body", body,
+                "gh",
+                "pr",
+                "comment",
+                &pr_n.to_string(),
+                "-R",
+                repo,
+                "--body",
+                body,
             ],
             Path::new(&cfg.workspace),
         )
@@ -637,6 +771,7 @@ impl Daemon {
         if rc != 0 {
             warn!("orchestrateur: comment {repo}#{pr_n} rc={rc} {e}");
         }
+        rc == 0
     }
 
     /// Worktree frais au SHA + spawn `PRReview-<N>` → sid.
@@ -652,21 +787,25 @@ impl Daemon {
         let ws_path = Path::new(ws);
         // Remote du clone = repo de la PR, sinon review sur le mauvais
         // dépôt (skip silencieux, pas de boucle).
-        let (rc, out, _e) = run_out(
-            &["git", "-C", ws, "remote", "get-url", "origin"],
-            ws_path,
-        )
-        .await
-        .context("git remote get-url")?;
+        let (rc, out, _e) = run_out(&["git", "-C", ws, "remote", "get-url", "origin"], ws_path)
+            .await
+            .context("git remote get-url")?;
         anyhow::ensure!(
-            rc == 0 && out.contains(repo_short(repo)),
+            rc == 0 && remote_nwo(&out).is_some_and(|nwo| nwo.eq_ignore_ascii_case(repo)),
             "workspace {ws} : remote origin ≠ {repo}"
         );
         // Ref de la PR fetchée puis worktree détaché au SHA exact.
         let wt = pr_review_dir(pr_n, sha);
         let _ = std::fs::create_dir_all(pr_reviews_root());
         let (rc, _o, e) = run_out(
-            &["git", "-C", ws, "fetch", "origin", &format!("pull/{pr_n}/head")],
+            &[
+                "git",
+                "-C",
+                ws,
+                "fetch",
+                "origin",
+                &format!("pull/{pr_n}/head"),
+            ],
             ws_path,
         )
         .await
@@ -674,8 +813,14 @@ impl Daemon {
         anyhow::ensure!(rc == 0, "git fetch pull/{pr_n}/head: {e}");
         let (rc, _o, e) = run_out(
             &[
-                "git", "-C", ws, "worktree", "add", "--detach",
-                &wt.display().to_string(), sha,
+                "git",
+                "-C",
+                ws,
+                "worktree",
+                "add",
+                "--detach",
+                &wt.display().to_string(),
+                sha,
             ],
             ws_path,
         )
@@ -685,8 +830,16 @@ impl Daemon {
         // Métadonnées de la PR pour le prompt.
         let (_rc, meta, _e) = run_out(
             &[
-                "gh", "pr", "view", &pr_n.to_string(), "-R", repo, "--json",
-                "title,body", "-q", ".title + \"\\n\\n\" + .body",
+                "gh",
+                "pr",
+                "view",
+                &pr_n.to_string(),
+                "-R",
+                repo,
+                "--json",
+                "title,body",
+                "-q",
+                ".title + \"\\n\\n\" + .body",
             ],
             ws_path,
         )
@@ -731,7 +884,10 @@ impl Daemon {
             .and_then(Value::as_str)
             .context("spawn sans session")?
             .to_string();
-        info!("orchestrateur: review PR {key} → {sid} (sha {})", &sha[..7.min(sha.len())]);
+        info!(
+            "orchestrateur: review PR {key} → {sid} (sha {})",
+            &sha[..7.min(sha.len())]
+        );
         Ok(sid)
     }
 
@@ -748,13 +904,7 @@ impl Daemon {
             if !p.is_dir() {
                 continue;
             }
-            let _ = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&cfg.workspace)
-                .args(["worktree", "remove", "--force"])
-                .arg(&p)
-                .output();
-            let _ = std::fs::remove_dir_all(&p);
+            remove_review_worktree(Path::new(&cfg.workspace), &p);
         }
         let _ = std::process::Command::new("git")
             .arg("-C")
@@ -762,6 +912,23 @@ impl Daemon {
             .args(["worktree", "prune"])
             .output();
     }
+}
+
+/// Retire un worktree de review — `worktree remove|prune` lancés
+/// depuis un clone lié (`ws`), puis suppression du répertoire restant.
+fn remove_review_worktree(ws: &Path, wt: &Path) {
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(ws)
+        .args(["worktree", "remove", "--force"])
+        .arg(wt)
+        .output();
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(ws)
+        .args(["worktree", "prune"])
+        .output();
+    let _ = std::fs::remove_dir_all(wt);
 }
 
 /// Racine des worktrees de review (hors checkout — `state_dir`).
@@ -778,7 +945,10 @@ fn pr_review_dir(pr_n: u64, sha: &str) -> PathBuf {
 /// Numéro de titre dérivé du numéro de PR (stable, pas de compteur
 /// global à partager avec les autres rôles).
 fn st_counter(key: &str) -> u64 {
-    key.rsplit('#').next().and_then(|n| n.parse().ok()).unwrap_or(0)
+    key.rsplit('#')
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0)
 }
 
 /// Décodage base64 minimal (std seul — pas de dépendance suppl.).
@@ -832,9 +1002,7 @@ mod tests {
         proto::Event {
             seq,
             ts: "2026-01-01T00:00:00Z".into(),
-            kind: EventKind::AgentText {
-                text: text.into(),
-            },
+            kind: EventKind::AgentText { text: text.into() },
         }
     }
 
@@ -862,9 +1030,15 @@ mod tests {
     fn verdict_bloc() {
         // Dernier AgentText contenant le bloc gagne.
         let events = vec![
-            ev(1, "notes\nREVIEW_RESULT_BEGIN\n## Verdict: CHANGES_REQUESTED\n\nX\nREVIEW_RESULT_END"),
+            ev(
+                1,
+                "notes\nREVIEW_RESULT_BEGIN\n## Verdict: CHANGES_REQUESTED\n\nX\nREVIEW_RESULT_END",
+            ),
             ev(2, "bruit"),
-            ev(3, "REVIEW_RESULT_BEGIN\n## Verdict: APPROVED\n\nOK\nREVIEW_RESULT_END"),
+            ev(
+                3,
+                "REVIEW_RESULT_BEGIN\n## Verdict: APPROVED\n\nOK\nREVIEW_RESULT_END",
+            ),
         ];
         let b = extract_verdict_block(&events).unwrap();
         assert!(b.starts_with("## Verdict: APPROVED"));
@@ -896,6 +1070,73 @@ mod tests {
         // Stale : titre Verdict mais jamais APPROVED dans le texte.
         let stale = "## Verdict: stale — head changed, re-run /mr&#32;review";
         assert!(!stale.contains("APPROVED"));
+    }
+
+    fn cm(id: u64, assoc: &str, body: &str) -> (u64, String, String) {
+        (id, assoc.to_string(), body.to_string())
+    }
+
+    #[test]
+    fn pick_trigger_choix() {
+        let t = "/mr review";
+        // Dernier trigger valide retenu ; tiers ignorés.
+        let cs = vec![
+            cm(1, "MEMBER", t),
+            cm(2, "NONE", t),
+            cm(3, "OWNER", "  /mr review \n"),
+            cm(4, "MEMBER", "utilise /mr review"),
+        ];
+        assert_eq!(pick_trigger(&cs, t, 0), Some(3));
+        // Watermark : trigger ≤ last ignoré.
+        assert_eq!(pick_trigger(&cs, t, 3), None);
+        assert_eq!(pick_trigger(&cs, t, 1), Some(3));
+    }
+
+    #[test]
+    fn pick_trigger_ack_externe() {
+        let t = "/mr review";
+        // Ack postérieur au trigger candidat → dispensé.
+        let cs = vec![
+            cm(1, "MEMBER", t),
+            cm(2, "MEMBER", "Launching a review — external bot"),
+        ];
+        assert_eq!(pick_trigger(&cs, t, 0), None);
+        // Ack plus ancien qu'un NOUVEAU trigger → n'étouffe pas.
+        let cs2 = vec![
+            cm(1, "MEMBER", t),
+            cm(2, "MEMBER", "Launching a review — external bot"),
+            cm(3, "OWNER", t),
+        ];
+        assert_eq!(pick_trigger(&cs2, t, 0), Some(3));
+        // Ack intercalé entre deux triggers → seul le dernier compte.
+        let cs3 = vec![
+            cm(1, "MEMBER", t),
+            cm(2, "MEMBER", "Launching a review — external bot"),
+            cm(3, "OWNER", t),
+            cm(4, "MEMBER", "Launching a review — external bot"),
+        ];
+        assert_eq!(pick_trigger(&cs3, t, 0), None);
+    }
+
+    #[test]
+    fn remote_nwo_urls() {
+        assert_eq!(
+            remote_nwo("git@github.com:Wameuh/AgentControl.git\n"),
+            Some("Wameuh/AgentControl".to_string())
+        );
+        assert_eq!(
+            remote_nwo("https://github.com/Wameuh/AgentControl"),
+            Some("Wameuh/AgentControl".to_string())
+        );
+        assert_eq!(
+            remote_nwo("ssh://git@github.com/Wameuh/AgentControl.git"),
+            Some("Wameuh/AgentControl".to_string())
+        );
+        // Pas de match souple : « Agent » ≠ « Wameuh/AgentControl ».
+        assert_ne!(
+            remote_nwo("https://github.com/Wameuh/Agent.git"),
+            Some("Wameuh/AgentControl".to_string())
+        );
     }
 
     #[test]

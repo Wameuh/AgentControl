@@ -607,14 +607,10 @@ pub(crate) fn apply_patch(
                 cfg.pr_review_trigger = if is_empty(v) {
                     OrchCfg::default().pr_review_trigger
                 } else {
-                    let s = val_string(v)?;
-                    anyhow::ensure!(
-                        !s.contains(char::is_whitespace),
-                        "pr_review_trigger « {s} » : un seul mot/commande \
-                         attendue (le corps du commentaire est comparé \
-                         après trim)"
-                    );
-                    s
+                    // Le corps du commentaire est comparé après trim —
+                    // un trigger avec espaces (« /mr review ») est
+                    // légitime.
+                    val_string(v)?
                 }
             }
             "pr_reviewer_mode" => {
