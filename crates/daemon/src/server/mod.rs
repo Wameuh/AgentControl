@@ -23,6 +23,9 @@ pub(crate) mod orch;
 /// Pipeline plan→review→implémentation de l'orchestrateur
 /// (`plan_review=true`) — sessions planner/reviewer, verdicts, stall.
 pub(crate) mod orch_plan;
+/// Review de PR servie par le démon (`pr_review`) — passe séparée
+/// d'`orch_plan`, garde-fous propres (allowlist base, pool dédié).
+pub(crate) mod orch_review;
 /// Surface de config éditable à chaud de l'orchestrateur (schéma
 /// params, validation de patch, persistance config.toml) — partagée
 /// avec `crate::components` (params_schema/params de l'item internal).

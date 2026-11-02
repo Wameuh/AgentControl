@@ -242,6 +242,12 @@ pub(crate) struct OrchPersist {
     /// — un message du round N-1 ne vaut pas livraison du round N.
     #[serde(default)]
     pub planner_seq: HashMap<String, u64>,
+    /// `repo#N` → état de la review de PR servie par le démon
+    /// (`orch_review.rs`) : `{last_trigger_id, sid, sha, started,
+    /// state}` — idempotent aux redémarrages (un trigger traité n'est
+    /// jamais relu, une entrée running orpheline → « interrupted »).
+    #[serde(default)]
+    pub pr_reviews: HashMap<String, Value>,
 }
 
 /// `stalled_plans` a été une `Vec<u64>` (r1 de la feature) avant le
@@ -281,7 +287,7 @@ pub struct OrchProbe {
     /// rester « waiting »/« blocked » tant qu'une garde tient.
     enabled: AtomicBool,
     status: Mutex<OrchStatus>,
-    state: Mutex<OrchPersist>,
+    pub(crate) state: Mutex<OrchPersist>,
     /// Fichier `.lock` ouvert et locké tant que le natif travaille —
     /// libéré sur disable pour laisser la place à une autre instance.
     lock_file: Mutex<Option<std::fs::File>>,
@@ -868,6 +874,14 @@ impl Daemon {
             LockState::Error(e) => {
                 self.orch.set_status(Phase::Error, Some(format!("lock: {e}")));
                 return;
+            }
+        }
+        // Passe review de PR : sous les mêmes gardes enable/pause/lock
+        // mais indépendante d'agentbacklog et du cycle — un agentbacklog
+        // absent ou un cycle en erreur ne doit pas couper les reviews.
+        if self.orch.cfg.read().unwrap().pr_review {
+            if let Err(e) = self.orch_pr_review_tick().await {
+                warn!("orchestrateur: review PR: {e:#}");
             }
         }
         let bin = match self.orch_agentbacklog_bin().await {
@@ -1626,7 +1640,7 @@ impl Daemon {
     /// Réécriture de `orchestrator-state.json` — atomique `.part` +
     /// rename (le fichier est lu par le script en cas de reprise
     /// hybride : pas de troncation visible).
-    fn orch_save(&self, st: &OrchPersist) {
+    pub(crate) fn orch_save(&self, st: &OrchPersist) {
         let dir = state_dir();
         if let Err(e) = std::fs::create_dir_all(&dir) {
             warn!("orchestrateur: mkdir {}: {e}", dir.display());

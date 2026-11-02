@@ -100,6 +100,14 @@ reviewed that the merge would rewrite. If `next_release` moves between
 the APPROVED and the merge, the verdict stays valid but GitHub may
 refuse the merge on conflict → rebase + re-review.
 
+The `/mr review` trigger can be served by the native orchestrator
+itself (`pr_review=true` in `backlog_orchestrator` params —
+`crates/daemon/src/server/orch_review.rs`): the daemon watches open
+`next_release` PRs for a bare trigger comment, spawns a `PRReview-<N>`
+session on a detached worktree at the exact head, and posts the
+`## Verdict:` comment itself (ack `Launching a review — AgentControl
+orchestrator`). Same comment-level protocol — workers change nothing.
+
 **Auto review**: when the work looks done **(PR still draft)**,
 **note `TS=$(date -u +%FT%TZ)`**, comment `/mr review`
 (`gh pr comment <N> --body "/mr review"`),

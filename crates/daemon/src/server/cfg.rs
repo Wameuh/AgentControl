@@ -209,6 +209,34 @@ pub struct OrchCfg {
     /// revue humaine requise » au lieu d'une nouvelle boucle. Défaut 5.
     #[serde(default = "drounds")]
     pub max_review_rounds: u32,
+    /// Review de PR servie par le démon : un commentaire déclencheur
+    /// (`pr_review_trigger`) sur une PR ouverte → session reviewer
+    /// fraîche sur le head exact, verdict `## Verdict: …` posté par le
+    /// démon. **Défaut false** : opt-in (remplace l'automatisation
+    /// externe quand elle est absente/morte).
+    #[serde(default)]
+    pub pr_review: bool,
+    /// Commentaire nu déclencheur de review (défaut `/mr review`) —
+    /// corps exact après trim ; un auteur OWNER/MEMBER/COLLABORATOR
+    /// est requis.
+    #[serde(default = "dtrigger")]
+    pub pr_review_trigger: String,
+    /// Mode demandé au spawn des reviewers `PRReview-<N>` (défaut
+    /// "smart").
+    #[serde(default = "dsmart")]
+    pub pr_reviewer_mode: String,
+    /// Modèle demandé au spawn des reviewers PR — vide = `model`.
+    #[serde(default)]
+    pub pr_reviewer_model: String,
+    /// Reviews PR simultanées max — pool SÉPARÉ de `max_workers` (les
+    /// workers en attente d'une review ne doivent jamais affamer les
+    /// reviews qu'ils attendent). Défaut 2.
+    #[serde(default = "d2")]
+    pub pr_review_max_parallel: u32,
+    /// Timeout d'une session reviewer PR en secondes : kill + post
+    /// « review failed » au-delà. Défaut 2700 s (45 min).
+    #[serde(default = "d2700")]
+    pub pr_review_timeout: u64,
     /// Routing workspace repo → cwd : une entrée = un « workspace »
     /// porté par le backlog (tag `--repo` des items). Sert aujourd'hui
     /// à définir les Managers proposables (un par entrée) ; défaut
@@ -257,6 +285,15 @@ fn dsmart() -> String {
 fn drounds() -> u32 {
     5
 }
+fn dtrigger() -> String {
+    "/mr review".into()
+}
+fn d2() -> u32 {
+    2
+}
+fn d2700() -> u64 {
+    2700
+}
 fn drw() -> std::collections::BTreeMap<String, String> {
     [("AgentControl".to_string(), dws())].into_iter().collect()
 }
@@ -286,6 +323,12 @@ impl Default for OrchCfg {
             reviewer_mode: dsmart(),
             implement_mode: dmode(),
             max_review_rounds: drounds(),
+            pr_review: false,
+            pr_review_trigger: dtrigger(),
+            pr_reviewer_mode: dsmart(),
+            pr_reviewer_model: String::new(),
+            pr_review_max_parallel: d2(),
+            pr_review_timeout: d2700(),
             repo_workspaces: drw(),
         }
     }
