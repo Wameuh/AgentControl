@@ -117,7 +117,10 @@ fn task_review_round(t: &Task) -> u64 {
     t.get("review_round").and_then(Value::as_u64).unwrap_or(0)
 }
 fn task_no_plan(t: &Task) -> bool {
-    t.get("no_plan").and_then(Value::as_i64).unwrap_or(0) != 0
+    // SQLite sérialise INTEGER (0/1) — booléen toléré au cas où une
+    // version exposerait `true`.
+    t.get("no_plan")
+        .is_some_and(|v| v.as_i64().is_some_and(|i| i != 0) || v.as_bool() == Some(true))
 }
 fn task_plan_content<'a>(t: &'a Task) -> &'a str {
     t.get("plan_content").and_then(Value::as_str).unwrap_or("")
@@ -229,34 +232,38 @@ fn spawn_slot_ok(free: usize, unclaimed_review: bool) -> bool {
 /// dérivée : un verdict `approved` fige « implementing » même si un
 /// marqueur PLAN_FILE traîne encore dans le journal (le planner ne
 /// resoumet jamais après approbation).
+/// (`ItemPhase` plutôt que `Phase` : ce dernier nom est déjà la phase
+/// du composant dans `orch.rs`, importée ici via `super::orch::*`.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Phase {
+enum ItemPhase {
     Planning,
     Implementing,
 }
 
-impl Phase {
+impl ItemPhase {
     fn as_str(self) -> &'static str {
         match self {
-            Phase::Planning => "planning",
-            Phase::Implementing => "implementing",
+            ItemPhase::Planning => "planning",
+            ItemPhase::Implementing => "implementing",
         }
     }
     fn of(s: Option<&String>) -> Self {
         match s.map(String::as_str) {
-            Some("implementing") => Phase::Implementing,
-            _ => Phase::Planning,
+            Some("implementing") => ItemPhase::Implementing,
+            _ => ItemPhase::Planning,
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Prompts pipeline — {ID} {ITEM} {WS} {REPO} {SID} {PLANNER} {PLAN} {ROUND}
+// Prompts pipeline — {ID} {ITEM} {WS} {PLANNER} {PLAN} {ROUND}
+// (l'id de session propre s'y lit via $AGENTCONTROL_SESSION, injecté au
+// spawn quand a2a est actif — pas de placeholder dédié).
 // ---------------------------------------------------------------------------
 
 const PLANNER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
 
-Tu es le PLANIFICATEUR de l'item backlog ci-dessous (session {SID}, cwd {WS}). Un reviewer ephemere relira ton plan ; si le verdict est APPROVED tu passeras en implementation toi-meme.
+Tu es le PLANIFICATEUR de l'item backlog ci-dessous (session $AGENTCONTROL_SESSION, cwd {WS}). Un reviewer ephemere relira ton plan ; si le verdict est APPROVED tu passeras en implementation toi-meme.
 
 ## ITEM
 {ITEM}
@@ -390,6 +397,9 @@ impl Daemon {
                 info!("orchestrateur: reviewer {rsid} disparu → --unclaim-review #{id}");
                 let _ = run_out(&[bin, "--unclaim-review", &key], ws).await;
                 st.review_started.remove(&key);
+                // Cooldown comme pour le timeout : un item qui tue ses
+                // reviewers en boucle ne doit pas brûler un spawn/tick.
+                st.review_retry.insert(key.clone(), now);
                 continue;
             }
             // Fallback marqueur : le reviewer n'a pas fait --verdict lui-
@@ -528,6 +538,7 @@ impl Daemon {
                     )
                     .await;
                     st.item_phase.remove(&task_id(t).to_string());
+                    st.plan_marker_seq.remove(&task_id(t).to_string());
                 }
             }
         }
@@ -603,7 +614,11 @@ impl Daemon {
                             .unwrap_or((-1, String::new(), "spawn impossible".into()));
                     if rc == 0 {
                         info!("orchestrateur: reviewer {rsid} → #{id} (claim-review)");
-                        st.review_started.insert(key.clone(), now);
+                        // Pas d'insert `review_started` ici : le retain
+                        // de fin de tick le verrait encore plan_review
+                        // (snapshot pré-claim) et l'effacerait — l'entry
+                        // or_insert de la section A le pose au premier
+                        // tick où l'item est réellement `reviewing`.
                         claimed_now.insert(id);
                         free -= 1;
                     } else {
@@ -673,8 +688,11 @@ impl Daemon {
                 );
                 if !no_plan {
                     st.item_phase
-                        .insert(key.clone(), Phase::Planning.as_str().into());
+                        .insert(key.clone(), ItemPhase::Planning.as_str().into());
                 }
+                // Journal neuf → seqs repartent à 1 : le watermark d'un
+                // précédent planner rendrait ses marqueurs invisibles.
+                st.plan_marker_seq.remove(&key);
                 free -= 1;
             } else {
                 warn!("orchestrateur: claim #{id} rc={rc} {e} → rm {sid}");
@@ -798,7 +816,7 @@ impl Daemon {
         match outcome {
             "approved" => {
                 st.item_phase
-                    .insert(key.clone(), Phase::Implementing.as_str().into());
+                    .insert(key.clone(), ItemPhase::Implementing.as_str().into());
                 if planner_alive {
                     info!("orchestrateur: plan #{id} approuvé → implémentation par {planner_sid}");
                     self.plan_send(&planner_sid, "/compact".into()).await;
@@ -851,6 +869,7 @@ impl Daemon {
                                 .unwrap_or((-1, String::new(), "spawn impossible".into()));
                         if rc == 0 {
                             info!("orchestrateur: #{id} réassigné à l'implémenteur {nsid}");
+                            st.plan_marker_seq.remove(&key);
                         } else {
                             warn!("orchestrateur: reassign #{id} rc={rc} {e} → rm {nsid}");
                             self.plan_rm_session(&nsid, st).await;
@@ -887,13 +906,20 @@ impl Daemon {
                              {round} ≥ {}) — revue humaine requise",
                             cfg.max_review_rounds
                         );
+                        // Le planner n'a plus rien à faire : garder la
+                        // session consommerait un slot et lui vaudrait
+                        // des nudges « release-la » qui relanceraient le
+                        // pipeline en pending au lieu d'attendre l'humain.
+                        if planner_alive {
+                            self.plan_rm_session(&planner_sid, st).await;
+                        }
                     } else if rc != 0 {
                         warn!("orchestrateur: stall re-submit #{id} rc={rc} {e}");
                     }
                     return;
                 }
                 st.item_phase
-                    .insert(key.clone(), Phase::Planning.as_str().into());
+                    .insert(key.clone(), ItemPhase::Planning.as_str().into());
                 if !planner_alive {
                     info!(
                         "orchestrateur: verdict {outcome} #{id} + planner \
@@ -902,6 +928,7 @@ impl Daemon {
                     let _ =
                         run_out(&[bin, "--release", &key, "--agent-id", &planner_sid], ws).await;
                     st.item_phase.remove(&key);
+                    st.plan_marker_seq.remove(&key);
                 }
                 // planner vivant : le verdict relayé le fait réviser et
                 // resoumettre (détection PLAN_FILE en E).
@@ -1082,6 +1109,7 @@ impl Daemon {
                         ws,
                     )
                     .await;
+                    st.plan_marker_seq.remove(&item_id.to_string());
                     return false;
                 }
                 let msg = format!(
@@ -1154,11 +1182,11 @@ impl Daemon {
         let key = my_item.as_ref().map(|t| task_id(t).to_string());
         let phase = key
             .as_ref()
-            .map(|k| Phase::of(st.item_phase.get(k)))
-            .unwrap_or(Phase::Planning);
+            .map(|k| ItemPhase::of(st.item_phase.get(k)))
+            .unwrap_or(ItemPhase::Planning);
         let planning = my_item
             .as_ref()
-            .is_some_and(|t| task_status(t) == "wip" && phase == Phase::Planning);
+            .is_some_and(|t| task_status(t) == "wip" && phase == ItemPhase::Planning);
         let plan_nudge = if planning {
             Some(task_id(my_item.as_ref().unwrap()))
         } else {
@@ -1741,6 +1769,10 @@ mod tests {
         assert_eq!(task_review_round(&n), 0);
         assert!(!task_no_plan(&n));
         assert!(task_reviewer(&n).is_empty());
+        // booléen toléré (sérialisation alternative) — 0/false restent off.
+        assert!(task_no_plan(&json!({"no_plan": true})));
+        assert!(!task_no_plan(&json!({"no_plan": false})));
+        assert!(!task_no_plan(&json!({"no_plan": 0})));
     }
 
     #[test]

@@ -200,7 +200,9 @@ pub(crate) struct OrchPersist {
     #[serde(default)]
     pub verdict_seen: HashMap<String, u64>,
     /// item → seq journal du dernier marqueur `PLAN_FILE:` soumis —
-    /// anti re-submit du même marqueur.
+    /// anti re-submit du même marqueur. Les seqs sont propres à la
+    /// session (repartent à 1 sur un nouveau planner) : l'entrée est
+    /// réinitialisée au `--claim` et sur chaque release/reassign.
     #[serde(default)]
     pub plan_marker_seq: HashMap<String, u64>,
     /// sid → nudges consécutifs d'un planner en phase plan (kill +
