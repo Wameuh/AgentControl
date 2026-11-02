@@ -137,6 +137,16 @@ acctl orch status                     # → phase: active, lock_holder: self,
 acctl comp ls
 ```
 
+`[backlog_orchestrator] plan_review = true` additionally opts the
+orchestrator into the plan→review→implementation pipeline
+(`docs/components-integration.md` §2.11) — default `false` keeps the
+legacy direct-worker dispatch; a deployment without the pipeline code
+silently ignores the flag.
+
+Pause/resume is unchanged from the legacy script: `touch
+~/.agentbacklog/orchestrator.pause` parks the loop (`acctl orch status`
+→ `phase: paused`), removing the file resumes it.
+
 Optionally delete the now-dead script
 `~/.local/bin/backlog-orchestrator.py` (kept for rollback, nothing
 references it any more).
