@@ -261,30 +261,36 @@ impl Session {
             // Résolution tolérante : la valeur demandée à la création
             // ("swe-2", "SWE-2"…) est acceptée si elle désigne une seule
             // option annoncée. Liste vide (agent sans annonce) → pas de
-            // tentative ni de bruit ; ambigu/inconnu → System explicite
-            // plutôt que le skip silencieux (valeur du domaine env type
-            // "normal" non-ACP).
+            // tentative ni de bruit. Non résolu : warning explicite pour
+            // `model` seulement — `mode` reste un skip silencieux (la
+            // valeur arrive souvent du domaine env, ex. "normal" via
+            // DEVIN_PERMISSION_MODE, qui n'est pas un id ACP : avertir à
+            // chaque spawn serait du bruit régressif).
             let want2 = if known.is_empty() {
                 continue;
             } else {
                 match resolve_config_value(&known, want) {
                     Resolve::Hit(v) => v,
                     Resolve::Ambiguous(c) => {
-                        self.emit(EventKind::System {
-                            text: format!(
-                                "{id}={want} (demandé à la création) ambigu — candidats : {}",
-                                c.join(", ")
-                            ),
-                        });
+                        if id == "model" {
+                            self.emit(EventKind::System {
+                                text: format!(
+                                    "model={want} (demandé à la création) ambigu — candidats : {}",
+                                    c.join(", ")
+                                ),
+                            });
+                        }
                         continue;
                     }
                     Resolve::Unknown => {
-                        self.emit(EventKind::System {
-                            text: format!(
-                                "{id}={want} (demandé à la création) absent des options annoncées — valeurs : {}",
-                                join_known(&known)
-                            ),
-                        });
+                        if id == "model" {
+                            self.emit(EventKind::System {
+                                text: format!(
+                                    "model={want} (demandé à la création) absent des options annoncées — valeurs : {}",
+                                    join_known(&known)
+                                ),
+                            });
+                        }
                         continue;
                     }
                 }
