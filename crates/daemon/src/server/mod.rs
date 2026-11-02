@@ -459,7 +459,7 @@ impl Daemon {
         mode: Option<&str>,
         session_id: &str,
     ) -> (Vec<String>, HashMap<String, String>) {
-        let (m, md) = (model.unwrap_or(""), mode.unwrap_or(""));
+        let (m, md) = (model.unwrap_or(""), cfg::env_mode(mode.unwrap_or("")));
         let cmd: Vec<String> = profile
             .command
             .iter()
