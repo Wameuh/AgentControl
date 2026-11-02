@@ -344,12 +344,16 @@ impl Session {
         // Un mode ACP-only omis de l'env par env_mode n'a jamais été posé
         // par le spawn : sans re-stage, le respawn (session/new fallback,
         // ou session/load qui ne restaure pas le mode) le perdrait —
-        // pending_config le rejoue par session/set_mode ci-dessous.
-        {
-            let mut m = self.meta.lock().unwrap();
-            if let Some(md) = m.mode.clone() {
-                if crate::server::env_mode(&md) != md {
-                    m.pending_config.entry("mode".into()).or_insert(md);
+        // pending_config le rejoue par session/set_mode ci-dessous. Le
+        // mode souhaité est lu sur le snapshot pré-spawn : meta.mode a
+        // déjà été aligné sur ce que le handshake rapporte (défaut
+        // agent en session/new) ; le skip évite le set_mode redondant
+        // quand session/load l'avait restauré.
+        if let Some(want) = meta.mode.clone() {
+            if crate::server::env_mode(&want) != want {
+                let mut m = self.meta.lock().unwrap();
+                if m.mode.as_deref() != Some(want.as_str()) {
+                    m.pending_config.entry("mode".into()).or_insert(want);
                 }
             }
         }

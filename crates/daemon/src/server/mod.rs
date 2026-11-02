@@ -32,7 +32,8 @@ mod prs;
 mod sessions;
 mod term;
 
-pub use cfg::{env_mode, A2aCfg, AgentProfile, CompactCfg, CompactPartial, CompactPolicy, CompactSrc, OrchCfg, RetentionCfg};
+pub use cfg::{A2aCfg, AgentProfile, CompactCfg, CompactPartial, CompactPolicy, CompactSrc, OrchCfg, RetentionCfg};
+pub(crate) use cfg::env_mode;
 pub(crate) use orch::OrchProbe;
 
 use anyhow::{Context, Result};
