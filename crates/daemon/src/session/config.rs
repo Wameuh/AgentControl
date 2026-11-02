@@ -63,17 +63,36 @@ impl Session {
         out
     }
 
-    /// Résout `want` contre les valeurs connues de `config_id` (exact,
-    /// casse, préfixe univoque) puis applique `set_config_option` — pour
-    /// "model"/"mode" les fallbacks ACP enchaînent. `Ok(Some(v))` valeur
-    /// résolue (peut différer de `want`), `Ok(None)` liste inconnue → à
-    /// traiter dehors (passthrough permissif), `Err` rien n'a été émis.
+    /// Options annoncées pour `config_id` (`config_options` uniquement —
+    /// `id` ou `category` matchant). Vide = l'agent n'a pas déclaré ce
+    /// configId : `session/set_config_option` est alors interdit par la
+    /// spec (le champ ACP `models` implique `session/set_model`, pas un
+    /// configId « model » inventé).
+    fn option_values(&self, config_id: &str) -> Vec<(String, String)> {
+        let m = self.meta.lock().unwrap();
+        m.config_options
+            .iter()
+            .find(|o| o.id == config_id || o.category == config_id)
+            .map(|o| {
+                o.options
+                    .iter()
+                    .map(|x| (x.value.clone(), x.name.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Résout `want` contre les valeurs annoncées de `config_id` (exact,
+    /// casse, préfixe univoque) puis applique `set_config_option`.
+    /// `Ok(Some(v))` valeur résolue (peut différer de `want`), `Ok(None)`
+    /// configId non annoncé → à router ailleurs (session/set_model…),
+    /// `Err` rien n'a été émis.
     async fn resolve_then_set(
         self: &Arc<Self>,
         config_id: &str,
         want: &str,
     ) -> Result<Option<String>> {
-        let known = self.known_config_values(config_id);
+        let known = self.option_values(config_id);
         if known.is_empty() {
             return Ok(None);
         }
@@ -96,16 +115,29 @@ impl Session {
         Ok(Some(v))
     }
 
-    /// Change de modèle : ACP session/set_model, sinon fallback sur la
-    /// slash command "/model <m>" envoyée comme prompt.
-    /// Agent mort → mémorisé dans pending_config["model"], rejoué au resume
-    /// (le replay passe par set_config_option → même garde de résolution ;
-    ///  la mémorisation elle-même reste permissive, la liste pouvant être
-    ///  périmée tant que l'agent n'a pas re-annoncé ses options).
+    /// Accusé de changement de modèle — mentionne la résolution quand la
+    /// valeur appliquée diffère de la demande.
+    fn emit_model_applied(&self, applied: &str, wanted: &str) {
+        let text = if applied == wanted {
+            format!("model → {applied}")
+        } else {
+            format!("model → {applied} (résolu depuis « {wanted} »)")
+        };
+        self.emit(EventKind::System { text });
+    }
+
+    /// Change de modèle. Route ACP selon ce que l'agent expose :
+    /// config_option "model" annoncée → `session/set_config_option`
+    /// (Devin) ; sinon `session/set_model` (champ ACP `models`), avec
+    /// fallback sur la slash command "/model <m>".
     /// La valeur est résolue contre la liste annoncée AVANT envoi :
     /// préfixe/nom univoque accepté ("swe-2" → "swe-2-high"), ambigu →
     /// candidats listés, inconnu → erreur avec les valeurs valides —
-    /// jamais de Invalid params ACP brut.
+    /// jamais de valeur hors liste ni de Invalid params ACP brut.
+    /// Agent mort → mémorisé brut dans pending_config["model"], rejoué
+    /// au resume (le replay repasse par ce même chemin gardé ; la
+    /// mémorisation reste permissive, la liste pouvant être périmée
+    /// tant que l'agent n'a pas re-annoncé ses options).
     pub async fn set_model(self: &Arc<Self>, model: &str) -> Result<()> {
         if !self.is_alive() {
             let mut m = self.meta.lock().unwrap();
@@ -118,25 +150,57 @@ impl Session {
             });
             return Ok(());
         }
-        // Garde-fou : résolution contre la liste annoncée ; si elle est
-        // vide (agent sans config_options), passthrough — l'agent fait foi.
-        match self.resolve_then_set("model", model).await {
-            Ok(Some(v)) => {
-                if v != model {
-                    self.emit(EventKind::System {
-                        text: format!("model → {v} (résolu depuis « {model} »)"),
-                    });
+        // Garde-fou + routage. Une config_option "model" annoncée impose
+        // set_config_option ; available_models seuls → chaîne legacy
+        // (un configId non annoncé est interdit par la spec). Liste vide
+        // (agent sans annonce) → passthrough, l'agent fait foi.
+        let wanted = model;
+        let has_opt = !self.option_values("model").is_empty();
+        let model = if has_opt {
+            match self.resolve_then_set("model", model).await {
+                Ok(Some(v)) => {
+                    self.emit_model_applied(&v, model);
+                    return Ok(());
                 }
-                return Ok(());
+                Ok(None) => unreachable!("option non vide"),
+                Err(e) => {
+                    self.emit(EventKind::Error {
+                        message: format!("{e:#}"),
+                    });
+                    return Err(e);
+                }
             }
-            Ok(None) => {}
-            Err(e) => {
-                self.emit(EventKind::Error {
-                    message: format!("{e:#}"),
-                });
-                return Err(e);
+        } else {
+            let known = self.known_config_values("model");
+            if known.is_empty() {
+                model.to_string()
+            } else {
+                match resolve_config_value(&known, model) {
+                    Resolve::Hit(v) => v,
+                    Resolve::Ambiguous(c) => {
+                        let msg = format!(
+                            "model ambigu « {model} » — candidats : {}",
+                            c.join(", ")
+                        );
+                        self.emit(EventKind::Error {
+                            message: msg.clone(),
+                        });
+                        anyhow::bail!("{msg}")
+                    }
+                    Resolve::Unknown => {
+                        let msg = format!(
+                            "model inconnu « {model} » — valeurs : {}",
+                            join_known(&known)
+                        );
+                        self.emit(EventKind::Error {
+                            message: msg.clone(),
+                        });
+                        anyhow::bail!("{msg}")
+                    }
+                }
             }
-        }
+        };
+        let model = model.as_str();
         let sid = self
             .meta_snapshot()
             .native_session_id
@@ -148,9 +212,7 @@ impl Session {
             Ok(_) => {
                 self.meta.lock().unwrap().model = Some(model.into());
                 self.save_meta();
-                self.emit(EventKind::System {
-                    text: format!("model → {model}"),
-                });
+                self.emit_model_applied(model, wanted);
                 Ok(())
             }
             Err(_) => {
@@ -228,6 +290,11 @@ impl Session {
                 }
             };
             let want = want2.as_str();
+            // La demande résolue peut déjà être la valeur courante
+            // ("swe-2" demandé alors que swe-2-high est actif).
+            if cur.as_deref() == Some(want) {
+                continue;
+            }
             let r = match self.set_config_option(id, want).await {
                 Ok(()) => Ok(()),
                 Err(e) => {
@@ -310,13 +377,14 @@ impl Session {
             .meta_snapshot()
             .native_session_id
             .context("no native session id")?;
-        // Garde-fou : si l'option est annoncée avec une liste, la valeur
-        // est résolue contre elle (exact, casse, préfixe univoque) —
-        // jamais de valeur absente de la liste envoyée à l'agent.
-        // Option inconnue/liste vide → passthrough : la liste persistée
-        // peut être périmée après une maj de l'agent, l'agent fait foi
-        // (les valeurs connues enrichissent alors un éventuel refus).
-        let known = self.known_config_values(config_id);
+        // Garde-fou : si le configId est annoncé dans config_options avec
+        // une liste, la valeur est résolue contre elle (exact, casse,
+        // préfixe univoque) — jamais de valeur absente de la liste envoyée
+        // à l'agent. ConfigId non annoncé/liste vide → passthrough : la
+        // spec interdit un configId inventé, la liste persistée peut être
+        // périmée après une maj de l'agent — l'agent fait foi (les
+        // valeurs connues enrichissent alors un éventuel refus).
+        let known = self.option_values(config_id);
         let value = if known.is_empty() {
             value.to_string()
         } else {

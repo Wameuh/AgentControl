@@ -114,9 +114,14 @@ export class Composer {
           const opt = app.current.config_options?.find(
             (o) => o.id === "model" || o.category === "model",
           );
-          const items = opt
-            ? opt.options.map((o) => ({ v: o.value, label: o.name || o.value }))
-            : app.current.available_models.map((v) => ({ v, label: v }));
+          const items = (opt?.options ?? []).map((o) => ({
+            v: o.value,
+            label: o.name || o.value,
+          }));
+          // Merge : available_models complète les options déjà annoncées.
+          for (const v of app.current.available_models) {
+            if (!items.some((i) => i.v === v)) items.push({ v, label: v });
+          }
           const cur = opt?.currentValue || app.current.model || "";
           this.chat.sysline(
             items.length
