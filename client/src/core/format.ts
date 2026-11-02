@@ -213,6 +213,32 @@ export function mdRender(src: string): string {
   }
 }
 
+/** Markdown → texte prononçable (TTS #138) : blocs de code, markup et
+ *  URLs exclus — la voix lit la prose, ni la syntaxe ni le code. */
+export function speechText(src: string): string {
+  return src
+    .replace(/```[\s\S]*?(?:```|$)/g, " ")
+    .replace(/`([^`\n]+)`/g, "$1")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s*(?:\*{3,}|-{3,}|_{3,})$/gm, " ")
+    .replace(/^\s*>\s?/gm, "")
+    .replace(/^\s*(?:[-*+]|\d+[.)])\s+/gm, "")
+    .replace(/^\s*\|?[\s:|-]+\|[\s:|-]*$/gm, " ")
+    .replace(/\|/g, " ")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\b__([^_]+)__\b/g, "$1")
+    .replace(/\*([^*\n]+)\*/g, "$1")
+    .replace(/(^|[^\w])_([^_\n]+)_(?=[^\w]|$)/g, "$1$2")
+    .replace(/~~([^~]+)~~/g, "$1")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 /** Extensions affichées en aperçu image (data URL — pas de script dans <img>). */
 export const IMG_MIME: Record<string, string> = {
   png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",

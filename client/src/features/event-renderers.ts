@@ -52,6 +52,9 @@ export class EventRenderer {
     statusChanged: () => {},
     /** Clic sur un en-tête de message peer → ouvrir la session cible. */
     openSession: (_id: string) => {},
+    /** Message agent rendu → le TTS y attache son bouton haut-parleur
+     *  (no-op hors Android). */
+    agentText: (_el: HTMLElement, _ev: AcEvent) => {},
   };
 
   bind(d: Partial<typeof this.deps>) {
@@ -141,6 +144,7 @@ export class EventRenderer {
       case "agent_text": {
         const d = mkEv("msg agent", ev.seq);
         d.innerHTML = `<div class="md">${mdRender(ev.text as string)}</div>`;
+        this.deps.agentText(d, ev);
         return d;
       }
       case "peer_message": {

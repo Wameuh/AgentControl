@@ -86,6 +86,51 @@ pub struct SttStop {
     pub lang: Option<String>,
 }
 
+/// Voix sherpa d'un modèle TTS installé, rapportée par `tts_state` —
+/// catalogue data-driven du Kotlin (`TTS_META`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TtsVoice {
+    /// Id passé à `tts_speak` (`"ff_siwis"`, …).
+    pub id: String,
+    pub label: String,
+    /// Modèle téléchargé qui fournit la voix.
+    pub model: String,
+    /// Voice espeak-ng de phonémisation (`"fr"`, `"en-us"`, …).
+    pub lang: String,
+}
+
+/// État du moteur TTS — `tts_state`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct TtsState {
+    pub platform: String,
+    /// Au moins un modèle TTS est téléchargé → sherpa utilisable.
+    #[serde(default)]
+    pub sherpa_ready: bool,
+    /// OfflineTts est instancié en RAM (~150-200 Mo selon le modèle).
+    #[serde(default)]
+    pub model_loaded: bool,
+    /// android.speech.tts utilisable (false = init système échouée).
+    #[serde(default)]
+    pub system_ready: bool,
+    /// Une utterance est en cours.
+    #[serde(default)]
+    pub speaking: bool,
+    #[serde(default)]
+    pub voices: Vec<TtsVoice>,
+}
+
+/// `tts_speak` — `reason` identifie l'échec non fatal :
+/// `"model_missing"` | `"empty"` | `"engine_error"` | `"lang_unavailable"`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct TtsSpeak {
+    pub started: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Moteur réellement choisi : `"sherpa"` | `"system"`.
+    #[serde(default)]
+    pub engine: Option<String>,
+}
+
 /// Payload forwardé au Kotlin par `stt_set_language`.
 #[cfg(mobile)]
 #[derive(Debug, serde::Serialize)]
@@ -98,4 +143,19 @@ pub struct SetLanguageArgs<'a> {
 #[derive(Debug, serde::Serialize)]
 pub struct SetEngineArgs<'a> {
     pub engine: &'a str,
+}
+
+/// Payload forwardé au Kotlin par `tts_speak`. `engine`/`model`/`voice`/
+/// `lang` vides = auto (moteur sherpa si un modèle est installé, voix par
+/// défaut du modèle, langue de la voix).
+#[cfg(mobile)]
+#[derive(Debug, serde::Serialize)]
+pub struct TtsSpeakArgs<'a> {
+    pub text: &'a str,
+    pub tag: &'a str,
+    pub engine: &'a str,
+    pub model: &'a str,
+    pub voice: &'a str,
+    pub lang: &'a str,
+    pub speed: f32,
 }

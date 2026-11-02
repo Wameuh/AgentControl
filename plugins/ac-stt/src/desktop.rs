@@ -1,7 +1,10 @@
 use serde::de::DeserializeOwned;
 use tauri::{AppHandle, Runtime, plugin::PluginApi};
 
-use crate::models::{PingResponse, SttDlState, SttStart, SttState, SttStop};
+use crate::models::{
+    PingResponse, SttDlState, SttStart, SttState, SttStop, TtsSpeak,
+    TtsState,
+};
 
 /// Stub desktop : reco et download n'existent que côté Kotlin (Android)
 /// — la surface Rust reste homogène et les réponses gardent la même
@@ -71,6 +74,61 @@ impl<R: Runtime> Stt<R> {
 
     pub fn set_engine(&self, _engine: &str) -> crate::Result<()> {
         Ok(())
+    }
+
+    // ── TTS : mêmes stubs sans effet que le STT — la webview ne les
+    //    appelle que sur Android (le front se gate sur tts_state). ──
+
+    pub fn tts_state(&self) -> crate::Result<TtsState> {
+        Ok(TtsState {
+            platform: "rust".into(),
+            sherpa_ready: false,
+            model_loaded: false,
+            system_ready: false,
+            speaking: false,
+            voices: vec![],
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn tts_speak(
+        &self,
+        _text: &str,
+        _tag: &str,
+        _engine: &str,
+        _model: &str,
+        _voice: &str,
+        _lang: &str,
+        _speed: f32,
+    ) -> crate::Result<TtsSpeak> {
+        Ok(TtsSpeak {
+            started: false,
+            reason: Some("unsupported_platform".into()),
+            engine: None,
+        })
+    }
+
+    pub fn tts_stop(&self) -> crate::Result<()> {
+        Ok(())
+    }
+
+    pub fn tts_dl_state(&self) -> crate::Result<SttDlState> {
+        Ok(SttDlState {
+            platform: "rust".into(),
+            models: vec![],
+        })
+    }
+
+    pub fn tts_dl_start(&self, _model: &str) -> crate::Result<()> {
+        Err(crate::Error::AndroidOnly)
+    }
+
+    pub fn tts_dl_cancel(&self, _model: &str) -> crate::Result<()> {
+        Err(crate::Error::AndroidOnly)
+    }
+
+    pub fn tts_dl_delete(&self, _model: &str) -> crate::Result<()> {
+        Err(crate::Error::AndroidOnly)
     }
 }
 

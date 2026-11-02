@@ -1,6 +1,9 @@
 use tauri::State;
 
-use crate::models::{PingResponse, SttDlState, SttStart, SttState, SttStop};
+use crate::models::{
+    PingResponse, SttDlState, SttStart, SttState, SttStop, TtsSpeak,
+    TtsState,
+};
 
 /// Ping bout-en-bout du spike : webview → commande → `Stt::ping` →
 /// `run_mobile_plugin` (Kotlin `sttPing` sur Android, stub ailleurs).
@@ -94,4 +97,71 @@ pub(crate) async fn stt_set_engine(
     engine: String,
 ) -> crate::Result<()> {
     stt.set_engine(&engine)
+}
+
+// ── TTS on-device (backlog #138) ─────────────────────────────────────
+
+/// État moteur/voix/modèles TTS installés — forward au TtsEngine Kotlin.
+#[tauri::command]
+pub(crate) async fn tts_state(
+    stt: State<'_, crate::Stt<tauri::Wry>>,
+) -> crate::Result<TtsState> {
+    stt.tts_state()
+}
+
+/// Lit un texte déjà prêt (markdown strippé côté client) — une lecture à
+/// la fois : préempte l'utterance en cours. `engine` `"auto"` = sherpa si
+/// modèle installé, système sinon ; `model`/`voice`/`lang` vides = auto.
+#[tauri::command]
+pub(crate) async fn tts_speak(
+    stt: State<'_, crate::Stt<tauri::Wry>>,
+    text: String,
+    tag: String,
+    engine: String,
+    model: String,
+    voice: String,
+    lang: String,
+    speed: f32,
+) -> crate::Result<TtsSpeak> {
+    stt.tts_speak(&text, &tag, &engine, &model, &voice, &lang, speed)
+}
+
+/// Stoppe l'utterance courante (navigation, nouveau speak, settings).
+#[tauri::command]
+pub(crate) async fn tts_stop(
+    stt: State<'_, crate::Stt<tauri::Wry>>,
+) -> crate::Result<()> {
+    stt.tts_stop()
+}
+
+/// État des modèles TTS téléchargeables (settings « Synthèse vocale »).
+#[tauri::command]
+pub(crate) async fn tts_dl_state(
+    stt: State<'_, crate::Stt<tauri::Wry>>,
+) -> crate::Result<SttDlState> {
+    stt.tts_dl_state()
+}
+
+#[tauri::command]
+pub(crate) async fn tts_dl_start(
+    stt: State<'_, crate::Stt<tauri::Wry>>,
+    model: String,
+) -> crate::Result<()> {
+    stt.tts_dl_start(&model)
+}
+
+#[tauri::command]
+pub(crate) async fn tts_dl_cancel(
+    stt: State<'_, crate::Stt<tauri::Wry>>,
+    model: String,
+) -> crate::Result<()> {
+    stt.tts_dl_cancel(&model)
+}
+
+#[tauri::command]
+pub(crate) async fn tts_dl_delete(
+    stt: State<'_, crate::Stt<tauri::Wry>>,
+    model: String,
+) -> crate::Result<()> {
+    stt.tts_dl_delete(&model)
 }

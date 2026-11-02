@@ -38,6 +38,9 @@ kotlin {
 
 dependencies {
     implementation(project(":tauri-android"))
-    // Moteur ASR on-device (jniLibs arm64 packagés avec l'APK).
+    // Moteur ASR/TTS on-device (jniLibs arm64 packagés avec l'APK).
     implementation("com.github.k2-fsa.sherpa-onnx:sherpa-onnx:v1.13.5")
+    // Extraction des archives de modèles TTS (.tar.bz2 — release GitHub
+    // k2-fsa/sherpa-onnx tts-models). Pure Java, ~700 Ko.
+    implementation("org.apache.commons:commons-compress:1.27.1")
 }

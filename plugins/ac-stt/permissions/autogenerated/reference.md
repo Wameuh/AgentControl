@@ -1,11 +1,13 @@
 ## Default Permission
 
-Plugin STT : diagnostic `stt_ping`, gestion des modèles téléchargeables
-(`stt_dl_*` — download à la demande depuis les settings, Android only),
-cycle de dictée (`stt_state`/`stt_start`/`stt_stop`/`stt_set_language`),
-choix du moteur (`stt_set_engine` — sherpa / SpeechRecognizer système)
-et abonnement aux events stt_* (register/remove_listener — héritées de
-la base Kotlin du plugin).
+Plugin voix : diagnostic `stt_ping`, gestion des modèles téléchargeables
+(`stt_dl_*`/`tts_dl_*` — download à la demande depuis les settings,
+Android only), cycle de dictée (`stt_state`/`stt_start`/`stt_stop`/
+`stt_set_language`), choix du moteur (`stt_set_engine` — sherpa /
+SpeechRecognizer système), synthèse vocale on-device (`tts_state`/
+`tts_speak`/`tts_stop` — sherpa OfflineTts / TextToSpeech système) et
+abonnement aux events stt_*/tts_* (register/remove_listener — héritées
+de la base Kotlin du plugin).
 
 #### This default permission set includes the following:
 
@@ -19,6 +21,13 @@ la base Kotlin du plugin).
 - `allow-stt-stop`
 - `allow-stt-set-language`
 - `allow-stt-set-engine`
+- `allow-tts-state`
+- `allow-tts-speak`
+- `allow-tts-stop`
+- `allow-tts-dl-state`
+- `allow-tts-dl-start`
+- `allow-tts-dl-cancel`
+- `allow-tts-dl-delete`
 - `allow-register-listener`
 - `allow-remove-listener`
 
@@ -339,6 +348,188 @@ Enables the stt_stop command without any pre-configured scope.
 <td>
 
 Denies the stt_stop command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:allow-tts-dl-cancel`
+
+</td>
+<td>
+
+Enables the tts_dl_cancel command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:deny-tts-dl-cancel`
+
+</td>
+<td>
+
+Denies the tts_dl_cancel command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:allow-tts-dl-delete`
+
+</td>
+<td>
+
+Enables the tts_dl_delete command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:deny-tts-dl-delete`
+
+</td>
+<td>
+
+Denies the tts_dl_delete command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:allow-tts-dl-start`
+
+</td>
+<td>
+
+Enables the tts_dl_start command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:deny-tts-dl-start`
+
+</td>
+<td>
+
+Denies the tts_dl_start command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:allow-tts-dl-state`
+
+</td>
+<td>
+
+Enables the tts_dl_state command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:deny-tts-dl-state`
+
+</td>
+<td>
+
+Denies the tts_dl_state command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:allow-tts-speak`
+
+</td>
+<td>
+
+Enables the tts_speak command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:deny-tts-speak`
+
+</td>
+<td>
+
+Denies the tts_speak command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:allow-tts-state`
+
+</td>
+<td>
+
+Enables the tts_state command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:deny-tts-state`
+
+</td>
+<td>
+
+Denies the tts_state command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:allow-tts-stop`
+
+</td>
+<td>
+
+Enables the tts_stop command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`ac-stt:deny-tts-stop`
+
+</td>
+<td>
+
+Denies the tts_stop command without any pre-configured scope.
 
 </td>
 </tr>
