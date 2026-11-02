@@ -58,3 +58,4 @@
 236: Choosing a model with a single effort level (e.g. gpt-6-luna) no longer fails with "Invalid params" — the full model id is now sent, and the effort is picked from the options the agent announces.
 237: Keep the same reviewer across plan-review rounds (slept between rounds instead of deleted) and sleep the planner at stall so both keep their context
 239: Changing models is now forgiving — "/model" lists the advertised models, and values like "swe-2" or "SWE-2" resolve to the right announced entry; ambiguous or unknown values return the valid list instead of a raw "Invalid params" error.
+240: PR reviews (/mr review) can now be served natively by the daemon — it watches open next_release PRs for the trigger comment, spawns a read-only reviewer session on the exact head, and posts the ## Verdict comment itself (opt-in pr_review)
