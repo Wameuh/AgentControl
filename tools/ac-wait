@@ -48,7 +48,10 @@ name=""; interval=$DEF_INTERVAL; timeout=$DEF_TIMEOUT
 mode=""; target=""; cmd=""
 action="spawn"; action_arg=""
 
-need_val() { [ $# -ge 2 ] || die "$1 requiert une valeur"; }
+need_val() {
+  [ $# -ge 2 ] || die "$1 requiert une valeur"
+  case $2 in (--*) die "$1 requiert une valeur (trouvé $2)";; esac
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -100,18 +103,31 @@ do_spawn() {
   case $interval in (*[!0-9]*|'') die "--interval doit être un entier (secondes)";; esac
   case $timeout  in (*[!0-9]*|'') die "--timeout doit être un entier (secondes)";; esac
   [ "$interval" -ge 1 ] || die "--interval >= 1"
+  [ "$timeout" -ge 1 ]  || die "--timeout >= 1"
   if [ -z "$mode" ]; then
     [ -n "$cmd" ] && mode=cmd || die "aucune condition : -- <cmd> ou --until-*"
   elif [ -n "$cmd" ]; then
     die "mode --until-* et -- <cmd> sont mutuellement exclusifs"
   fi
-  [ "$mode" = port ] && case $target in (*:*) ;; (*) die "--until-port attend hôte:port";; esac
+  if [ "$mode" = pid ]; then
+    case $target in (*[!0-9]*|'') die "--until-pid attend un pid numérique";; esac
+  fi
+  if [ "$mode" = port ]; then
+    local _h=${target%%:*} _p=${target##*:}
+    [ -n "$_h" ] && [ "$_h" != "$target" ] || die "--until-port attend hôte:port"
+    case $_p in (*[!0-9]*|'') die "--until-port attend hôte:port (port numérique)";; esac
+  fi
 
   local acctl_bin id self
   acctl_bin=$(command -v acctl 2>/dev/null) || die "acctl introuvable dans PATH"
   self=$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")
 
-  mkdir -p "$STATE_DIR"
+  install -d -m 700 "$STATE_DIR"
+  # prune des waiters terminés il y a >7 j (meta/log/out/pid/done/cancel)
+  find "$STATE_DIR" -name '*.done' -mtime +7 -print 2>/dev/null | \
+    while read -r d; do
+      b=${d%.done}; rm -f "$b".{meta,pid,log,out,done,cancel}
+    done
   id="w-$(now)-$RANDOM"
   paths "$id"
 
@@ -136,14 +152,14 @@ do_spawn() {
 cond_ok() { # 0 = condition remplie (needs meta vars + OUT for cmd mode)
   case "$mode" in
     cmd)     bash -c "$cmd" >"$OUT" 2>&1;;
-    pid)     ! kill -0 "$target" 2>/dev/null;;
+    pid)     ! ps -p "$target" >/dev/null 2>&1;;
     file)    [ -e "$target" ];;
     port)    (exec 3<>"/dev/tcp/${target%%:*}/${target##*:}") 2>/dev/null;;
     pidfile)
       [ -f "$target" ] || return 1
       local p; p=$(head -n1 "$target" 2>/dev/null | tr -d '[:space:]')
       case $p in (*[!0-9]*|'') return 1;; esac
-      ! kill -0 "$p" 2>/dev/null;;
+      ! ps -p "$p" >/dev/null 2>&1;;
     *)       return 1;;
   esac
 }
@@ -192,6 +208,11 @@ do_worker() {
     cond_ok
     rc=$?
     if [ "$rc" -eq 0 ]; then
+      if [ -f "$CANC" ]; then
+        logf "annulé (fichier cancel)"
+        echo "cancelled $(now)" >"$DONE"
+        exit 0
+      fi
       notify "OK"
       echo "ok $(now)" >"$DONE"
       exit 0
@@ -225,7 +246,7 @@ do_list() {
       . "$f"
       [ -n "$filter" ] && [ "$session" != "$filter" ] && exit 0
       el=$(( $(now) - started ))
-      printf '%-16s %-14s %-8s %-8s %s\n' "$id" "$session" "$state" \
+      printf '%-20s %-14s %-8s %-8s %s\n' "$id" "$session" "$state" \
         "$(fmt_dur "$el")" "$(mklabel)"
     )
   done
@@ -261,8 +282,8 @@ do_log() {
 
 case $action in
   spawn)  do_spawn;;
-  worker) do_worker "$action_arg";;
   list)   do_list;;
-  cancel) do_cancel "$action_arg";;
-  log)    do_log "$action_arg";;
+  worker|cancel|log)
+    case $action_arg in (w-*) ;; (*) die "id invalide: $action_arg";; esac
+    "do_$action" "$action_arg";;
 esac
