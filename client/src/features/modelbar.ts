@@ -38,24 +38,31 @@ export function fusionParts(v: string): [string, string, string, string] | null 
   return [pb, pe, sb, se];
 }
 
+const modelOpts = (): { v: string }[] => JSON.parse(($("model-select") as HTMLSelectElement).dataset.opts || "[]");
+
 /** Remplit le select d'effort pour une base de modèle donnée. */
 export function effortsFor(base: string): string[] {
-  const opts: { v: string }[] = JSON.parse(($("model-select") as HTMLSelectElement).dataset.opts || "[]");
   const effs = new Set<string>();
-  for (const o of opts) {
-    if (o.v === base || o.v.startsWith(base + "-") || o.v.startsWith(base + "[")) {
-      const e = splitModel(o.v)[1];
-      if (e) effs.add(e);
-    }
+  for (const o of modelOpts()) {
+    const [b, e] = splitModel(o.v);
+    if (b === base && e) effs.add(e);
   }
   return [...effs];
+}
+
+/** Valeur complète à envoyer pour `base` : seulement une option annoncée par l'agent
+ *  (l'agent refuse une base nue quand elle n'existe qu'avec un suffixe d'effort). */
+export function resolveModel(base: string, eff: string): string {
+  const effs = effortsFor(base);
+  if (eff && effs.includes(eff)) return joinModel(base, eff);
+  if (modelOpts().some((o) => o.v === base)) return base;
+  return effs.length ? joinModel(base, effs[0]) : base;
 }
 
 export function fillEfforts(base: string, cur: string) {
   const es = $("effort-select") as HTMLSelectElement;
   const effs = effortsFor(base);
   es.innerHTML = "";
-  if (effs.length <= 1) return;
   for (const e of effs) {
     const o = document.createElement("option");
     o.value = e;
@@ -129,14 +136,13 @@ export function initModelBar(openFusion: () => void) {
       return;
     }
     fillEfforts(sel.value, "");
-    const eff = ($("effort-select") as HTMLSelectElement).value;
-    applyModelValue(joinModel(sel.value, eff));
+    applyModelValue(resolveModel(sel.value, ($("effort-select") as HTMLSelectElement).value));
   };
 
   ($("effort-select") as HTMLSelectElement).onchange = (e) => {
     const base = ($("model-select") as HTMLSelectElement).value;
     const eff = (e.target as HTMLSelectElement).value;
-    if (base && base !== "__fusion") applyModelValue(joinModel(base, eff));
+    if (base && base !== "__fusion") applyModelValue(resolveModel(base, eff));
   };
 
   ($("model-free") as HTMLInputElement).addEventListener("keydown", async (e) => {
