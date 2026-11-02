@@ -731,6 +731,12 @@ mod tests {
             resolve_config_value(&k, "swe-2"),
             Resolve::Ambiguous(vec!["swe-2-high".into(), "swe-2-medium".into()])
         );
+        // Ambiguïté possible aussi via le préfixe sur le nom affiché.
+        let k2 = known(&[("m-a", "SWE Max"), ("m-b", "SWE Medium")]);
+        assert_eq!(
+            resolve_config_value(&k2, "swe"),
+            Resolve::Ambiguous(vec!["m-a".into(), "m-b".into()])
+        );
     }
 
     #[test]
