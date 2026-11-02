@@ -870,12 +870,16 @@ impl Daemon {
                     // requête pendante → repli en file classique ; le
                     // brief reste derrière le /compact, seuls les
                     // messages déjà en attente le précèdent (accepté).
+                    // Pas de force non plus sur compacting : force
+                    // désarmerait et annulerait la compaction (auto)
+                    // en vol — elle fait déjà le travail, le /compact
+                    // et le brief attendent sa fin dans la retenue.
                     let pstate = match self.get_session(&planner_sid).await {
                         Ok(s) => s.meta_snapshot().state,
                         Err(_) => String::new(),
                     };
-                    self.plan_send(&planner_sid, "/compact".into(), force_safe_state(&pstate))
-                        .await;
+                    let force = force_safe_state(&pstate) && pstate != "compacting";
+                    self.plan_send(&planner_sid, "/compact".into(), force).await;
                     let msg = format!(
                         "Ton plan de l'item #{id} a été approuvé (round {}){cmt}. \
                          Tu passes en implémentation : suis-le en appliquant \
