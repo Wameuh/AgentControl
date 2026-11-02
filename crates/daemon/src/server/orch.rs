@@ -225,6 +225,23 @@ pub(crate) struct OrchPersist {
     /// verdict approved, réinitialisée au claim/release.
     #[serde(default)]
     pub item_phase: HashMap<String, String>,
+    /// item → sid du reviewer persistant : après son verdict le
+    /// reviewer est endormi (pas supprimé) et réutilisé au round
+    /// suivant — la mémoire de ses points précédents fait converger
+    /// la boucle plan→review. Retirée au verdict approved, au timeout
+    /// ou à la disparition du reviewer.
+    #[serde(default)]
+    pub reviewers: HashMap<String, String>,
+    /// item → seq du journal reviewer au `--claim-review` : watermark
+    /// des marqueurs VERDICT — ceux des rounds précédents (seq ≤
+    /// watermark) ne doivent pas être relus au round courant.
+    #[serde(default)]
+    pub reviewer_seq: HashMap<String, u64>,
+    /// item → seq du journal planner au `--claim-review` : watermark
+    /// du test « le reviewer a déjà relayé son verdict » (PeerMessage)
+    /// — un message du round N-1 ne vaut pas livraison du round N.
+    #[serde(default)]
+    pub planner_seq: HashMap<String, u64>,
 }
 
 /// `stalled_plans` a été une `Vec<u64>` (r1 de la feature) avant le

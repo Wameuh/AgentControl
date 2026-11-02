@@ -181,7 +181,7 @@ pub struct OrchCfg {
     pub manager_prompt: Option<String>,
     /// Pipeline plan→review→implémentation : chaque item `no_plan=0`
     /// est planifié par une session `Backlog-P*` (mode `planner_mode`),
-    /// relu par un reviewer éphémère `Backlog-R*` (verdict relayé au
+    /// relu par un reviewer persistant `Backlog-R*` (verdict relayé au
     /// planificateur, boucle de révision bornée par `max_review_rounds`),
     /// puis implémenté par le même planificateur après `/compact` +
     /// passage en `implement_mode`. Les items `no_plan=1` (et l'item

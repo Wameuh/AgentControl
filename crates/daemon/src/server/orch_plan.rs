@@ -17,10 +17,16 @@
 //!   `exit_plan_mode`). Le démon lit le fichier et fait le
 //!   `--submit-plan`.
 //! - Chaque item `plan_review` non claimé obtient un **reviewer**
-//!   éphémère `Backlog-R<N>` (mode `reviewer_mode`, une revue par
-//!   session) : `--claim-review` au spawn, `--unclaim-review` si le
-//!   reviewer meurt ou timeout (nudge une fois, puis unclaim —
-//!   cooldown `REVIEW_RETRY_S` avant respawn anti-boucle).
+//!   persistant `Backlog-R<N>` (mode `reviewer_mode`, mémorisé par
+//!   item dans `OrchPersist.reviewers`) : `--claim-review` au spawn,
+//!   endormi après son verdict et **réveillé pour les rounds
+//!   suivants** (il vérifie d'abord ses propres points — convergence
+//!   de la boucle) ; supprimé au verdict approved ou à sa mort
+//!   (`--unclaim-review`, cooldown `REVIEW_RETRY_S` avant respawn
+//!   anti-boucle). Sans verdict : nudge répété à chaque cooldown tant
+//!   qu'il est idle — jamais d'unclaim ni de rm automatique. Un seul
+//!   reviewer actif à la fois (`MAX_REVIEWERS`, les endormis ne
+//!   comptent pas).
 //! - Le verdict (`reviewing → wip`) est relayé au planificateur si le
 //!   reviewer ne l'a pas fait (PeerSend d'appoint) :
 //!   `denied`/`conditional` → le planificateur révise et resoumet
@@ -50,7 +56,7 @@
 
 use super::orch::*;
 use super::*;
-use proto::{EventKind, SessionMeta};
+use proto::{Event, EventKind, SessionMeta};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -250,6 +256,121 @@ fn force_safe_state(state: &str) -> bool {
     state != "waiting_input"
 }
 
+/// Sessions Backlog-* qui consomment réellement un slot : une session
+/// `asleep` n'a plus de process agent — elle ne compte pas dans
+/// `alive` (son réveil consommera un slot au moment du dispatch).
+fn backlog_alive(metas: &[SessionMeta], cfg: &cfg::OrchCfg) -> usize {
+    metas
+        .iter()
+        .filter(|m| is_backlog(m, cfg) && m.state != "asleep")
+        .count()
+}
+
+/// Choix au dispatch `plan_review` : réutiliser le reviewer mémorisé
+/// (il garde la mémoire de ses rounds précédents → convergence) ou
+/// spawner une session neuve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReviewerChoice {
+    Reuse(String),
+    Spawn,
+}
+
+/// Reuse si le reviewer mémorisé est encore là et pas mort ; Spawn
+/// sinon (session absente, dead, ou jamais mappée).
+fn reviewer_choice(
+    mapped: Option<&String>,
+    meta_state: Option<&str>,
+    in_session_ids: bool,
+) -> ReviewerChoice {
+    match (mapped, in_session_ids, meta_state) {
+        (Some(sid), true, Some(state)) if state != "dead" => ReviewerChoice::Reuse(sid.clone()),
+        _ => ReviewerChoice::Spawn,
+    }
+}
+
+/// Dernier marqueur `VERDICT:` postérieur au watermark (seq posée au
+/// claim-review) — ignore les verdicts des rounds précédents restés
+/// dans le journal du reviewer persistant.
+fn verdict_markers_after(events: &[Event], watermark: u64) -> Option<(String, String)> {
+    for ev in events.iter().rev() {
+        if ev.seq <= watermark {
+            continue;
+        }
+        let EventKind::AgentText { text } = &ev.kind else {
+            continue;
+        };
+        if let Some(v) = parse_verdict_marker(text) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Le planner a-t-il reçu un PeerMessage du reviewer APRÈS le
+/// watermark (seq posée au claim-review du round courant) ? Borne le
+/// relais d'appoint : un message du round N-1 ne vaut pas livraison
+/// du verdict du round N.
+fn peer_message_after(events: &[Event], rsid: &str, watermark: u64) -> bool {
+    events.iter().any(|ev| {
+        ev.seq > watermark
+            && matches!(
+                &ev.kind,
+                EventKind::PeerMessage { from_session, .. } if from_session == rsid
+            )
+    })
+}
+
+/// Nudge autorisé : faux tant que l'owner est stalled (planner gelé
+/// « revue humaine requise » — aucun envoi tant que l'humain n'a pas
+/// dégelé via --reassign --force). Un endormi non gelé reste
+/// nudgeable : le send le réveille, c'est le mécanisme de dégel.
+fn nudge_allowed(is_stalled: bool) -> bool {
+    !is_stalled
+}
+
+/// Endormissable : uniquement `idle` — `working`/`compacting`/
+/// `starting`/`waiting_input`/`asleep`/`dead`/`interrupted` sont soit
+/// en vol (sleep différé au prochain tick), soit déjà terminal.
+/// `waiting_input` = permission/question pendante, jamais idle.
+fn reviewer_sleep_ok(state: &str) -> bool {
+    state == "idle"
+}
+
+/// Décision de la sweep de fin de tick pour un reviewer mémorisé.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SweepAction {
+    /// Session à supprimer + entrée de map à retirer.
+    Rm,
+    /// Session à endormir (idle, item hors review en vol).
+    Sleep,
+    /// Rien ce tick (review en vol ou session non idle — retenté au
+    /// tick suivant).
+    Keep,
+}
+
+/// Rm si le reviewer a disparu, si l'item est sorti du pipeline de
+/// revue (absent/done/pending) ou passé en implémentation ; Keep tant
+/// qu'une review est en vol (`reviewing`) ou que le reviewer n'est
+/// pas idle ; Sleep sinon — y compris sur item stalled.
+fn reviewer_sweep(
+    status: Option<&str>,
+    implementing: bool,
+    reviewer_alive: bool,
+    reviewer_idle: bool,
+) -> SweepAction {
+    if !reviewer_alive {
+        return SweepAction::Rm;
+    }
+    match status {
+        None | Some("done") | Some("pending") => SweepAction::Rm,
+        // Garde-fou : jamais de rm/sleep sur une review en vol.
+        Some("reviewing") => SweepAction::Keep,
+        _ if implementing => SweepAction::Rm,
+        _ if reviewer_idle => SweepAction::Sleep,
+        _ => SweepAction::Keep,
+    }
+}
+
 /// Phase pipeline d'un item — persistée (`st.item_phase`) plutôt que
 /// dérivée : un verdict `approved` fige « implementing » même si un
 /// marqueur PLAN_FILE traîne encore dans le journal (le planner ne
@@ -285,7 +406,7 @@ impl ItemPhase {
 
 const PLANNER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
 
-Tu es le PLANIFICATEUR de l'item backlog ci-dessous (session $AGENTCONTROL_SESSION, cwd {WS}). Un reviewer ephemere relira ton plan ; si le verdict est APPROVED tu passeras en implementation toi-meme.
+Tu es le PLANIFICATEUR de l'item backlog ci-dessous (session $AGENTCONTROL_SESSION, cwd {WS}). Un reviewer relira ton plan ; si le verdict est APPROVED tu passeras en implementation toi-meme.
 
 ## ITEM
 {ITEM}
@@ -306,17 +427,22 @@ Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-da
 
 const REVIEWER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
 
-Tu es le REVIEWER ephemere du plan de l'item backlog ci-dessous (session $AGENTCONTROL_SESSION, cwd {WS}) — une seule revue, puis tu es supprime.
+Tu es le REVIEWER du plan de l'item backlog ci-dessous (session $AGENTCONTROL_SESSION, cwd {WS}) — tu es PERSISTANT : apres ton verdict tu es endormi (pas supprime), et reveille a chaque plan resoumis pour un nouveau round.
 
 ## ITEM
 {ITEM}
 
-## PLAN SOUMIS (par {PLANNER})
+## PLAN SOUMIS — round {ROUND} (par {PLANNER})
 {PLAN}
+
+## REVUES PRECEDENTES
+{HISTORY}
 
 ## ROLE
 
 Verifie la faisabilite, la completude et les risques du plan EN REGARDANT LE CODE dans {WS} (les chemins/API du plan peuvent etre inexacts — c'est a toi de trancher). Verdicts : APPROVED si le plan est implementable tel quel ; CONDITIONAL s'il l'est moyennant des ajustements precis ; DENIED s'il est faux, incomplet ou dangereux.
+
+Aux rounds successifs : verifie d'abord que TES points du round precedent sont traites ; ne souleve de nouveaux points que s'ils sont bloquants ; APPROVED si tes points bloquants sont resolus et rien de nouveau bloquant.
 
 Tu NE modifies RIEN : aucune edition, aucune commande mutante — lecture seule — SAUF ces deux commandes, dans l'ordre, quand ton verdict est pret :
 
@@ -324,6 +450,18 @@ Tu NE modifies RIEN : aucune edition, aucune commande mutante — lecture seule 
   b) acctl msg "$AGENTCONTROL_SESSION" {PLANNER} "<verdict + commentaire>"
 
 Termine ton tour par une ligne exactement « VERDICT: APPROVED|DENIED|CONDITIONAL ». Reponds en francais."#;
+
+/// Message de réveil du reviewer persistant au round N — il a déjà
+/// l'item en contexte : plan resoumis + consigne de round.
+const REVIEWER_ROUND_MSG: &str = r#"Plan resoumis pour l'item #{ID} — round {ROUND}. Verifie d'abord que TES points du round precedent sont traites ; ne souleve de nouveaux points que s'ils sont bloquants ; APPROVED si tes points bloquants sont resolus et rien de nouveau bloquant.
+
+## PLAN — round {ROUND}
+{PLAN}
+
+Quand ton verdict est pret, dans l'ordre :
+  a) agentbacklog --verdict {ID} --reviewer "$AGENTCONTROL_SESSION" --outcome APPROVED|DENIED|CONDITIONAL --comment "<ton commentaire>"
+  b) acctl msg "$AGENTCONTROL_SESSION" {PLANNER} "<verdict + commentaire>"
+Termine ton tour par une ligne exactement « VERDICT: APPROVED|DENIED|CONDITIONAL »."#;
 
 const IMPLEMENTER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
 
@@ -419,6 +557,9 @@ impl Daemon {
                 info!("orchestrateur: reviewer {rsid} disparu → --unclaim-review #{id}");
                 let _ = run_out(&[bin, "--unclaim-review", &key], ws).await;
                 st.review_started.remove(&key);
+                st.reviewers.remove(&key);
+                st.reviewer_seq.remove(&key);
+                st.planner_seq.remove(&key);
                 // Cooldown comme pour le timeout : un item qui tue ses
                 // reviewers en boucle ne doit pas brûler un spawn/tick.
                 st.review_retry.insert(key.clone(), now);
@@ -426,7 +567,10 @@ impl Daemon {
             }
             // Fallback marqueur : le reviewer n'a pas fait --verdict lui-
             // même mais a signé son tour — l'orchestrateur poste à sa place.
-            if let Some((outcome, comment)) = self.reviewer_marker(&rsid).await {
+            // Le watermark ignore les VERDICT des rounds précédents restés
+            // dans le journal du reviewer persistant.
+            let wm = st.reviewer_seq.get(&key).copied().unwrap_or(0);
+            if let Some((outcome, comment)) = self.reviewer_marker(&rsid, wm).await {
                 let (rc, _o, e) = run_out(
                     &[
                         bin,
@@ -453,17 +597,38 @@ impl Daemon {
                     // B ne re-traitera pas ce verdict au prochain tick).
                     let post_round = task_review_round(&t) + 1;
                     self.plan_apply_verdict(
-                        bin, cfg, ws, &t, &outcome, &comment, &rsid, post_round,
-                        session_ids, st,
+                        bin,
+                        cfg,
+                        ws,
+                        &t,
+                        &outcome,
+                        &comment,
+                        &rsid,
+                        post_round,
+                        session_ids,
+                        st,
                     )
                     .await;
                     st.verdict_seen.insert(key.clone(), post_round);
+                    // Reviewer persistant : supprimé seulement sur
+                    // verdict approved — denied/conditional le gardent
+                    // mappé pour le round suivant (la sweep l'endort
+                    // dès qu'il est idle).
+                    if outcome == "approved" {
+                        self.plan_rm_session(&rsid, st).await;
+                        st.reviewers.remove(&key);
+                        st.reviewer_seq.remove(&key);
+                        st.planner_seq.remove(&key);
+                    } else {
+                        // denied/conditional : gardé pour le round
+                        // suivant (sweep l'endort dès qu'il est idle).
+                        st.reviewers.entry(key.clone()).or_insert(rsid.clone());
+                    }
                 } else {
                     // Le reviewer a sans doute posté entre-temps — le
                     // chemin « verdict frais » (B) traitera au prochain tick.
                     warn!("orchestrateur: --verdict #{id} (marqueur) rc={rc} {e}");
                 }
-                self.plan_rm_session(&rsid, st).await;
                 continue;
             }
             // Sans verdict : nudge à chaque cooldown tant que le reviewer
@@ -534,11 +699,32 @@ impl Daemon {
             // plan_apply_verdict relaie le verdict au planner si le
             // reviewer ne l'a pas fait (PeerMessage dans son journal).
             self.plan_apply_verdict(
-                bin, cfg, ws, &t, &outcome, &comment, &rsid, round, session_ids, st,
+                bin,
+                cfg,
+                ws,
+                &t,
+                &outcome,
+                &comment,
+                &rsid,
+                round,
+                session_ids,
+                st,
             )
             .await;
-            if session_ids.contains(&rsid) {
-                self.plan_rm_session(&rsid, st).await;
+            if outcome == "approved" {
+                // Verdict final : le reviewer a rempli son office → rm
+                // + retrait de la map persistante et des watermarks.
+                if session_ids.contains(&rsid) {
+                    self.plan_rm_session(&rsid, st).await;
+                }
+                st.reviewers.remove(&key);
+                st.reviewer_seq.remove(&key);
+                st.planner_seq.remove(&key);
+            } else if !rsid.is_empty() && session_ids.contains(&rsid) {
+                // denied/conditional : le reviewer reste mappé pour le
+                // round suivant (endormi par la sweep dès qu'il est
+                // idle — jamais de sleep ici, il peut être working).
+                st.reviewers.insert(key.clone(), rsid);
             }
             st.verdict_seen.insert(key, round);
         }
@@ -576,11 +762,17 @@ impl Daemon {
 
         // ---- D. Dispatch : reviewers d'abord (débloque l'in-flight),
         // puis planners/workers sous réserve anti-deadlock.
-        let alive = metas.iter().filter(|m| is_backlog(m, cfg)).count();
+        let alive = backlog_alive(metas, cfg);
         let mut free = (cfg.max_workers as usize).saturating_sub(alive);
+        // Un reviewer persistant endormi ne tient pas le slot : il ne
+        // consomme rien et se réveille au prochain claim-review.
         let reviewers_alive = metas
             .iter()
-            .filter(|m| is_backlog(m, cfg) && role_of(&m.title, cfg) == Some(Role::Reviewer))
+            .filter(|m| {
+                is_backlog(m, cfg)
+                    && role_of(&m.title, cfg) == Some(Role::Reviewer)
+                    && m.state != "asleep"
+            })
             .count();
         let mut reviewers_free = MAX_REVIEWERS.saturating_sub(reviewers_alive);
         // Items plan_review éligibles à un reviewer : ni stalled, ni en
@@ -609,8 +801,12 @@ impl Daemon {
             }
             let id = task_id(t);
             let key = id.to_string();
-            st.counter += 1;
             let planner = task_agent(t);
+            let planner_label = if planner.is_empty() {
+                "le planner (inconnu)".to_string()
+            } else {
+                planner.to_string()
+            };
             let plan_inline = {
                 let p = task_plan_content(t);
                 if p.is_empty() {
@@ -622,21 +818,107 @@ impl Daemon {
                     clip_inline(p, PLAN_INLINE_MAX)
                 }
             };
+            let round = task_review_round(t) + 1;
+
+            // Réutilisation du reviewer persistant mémorisé : même
+            // session → il retrouve ses points du round précédent.
+            let mapped = st.reviewers.get(&key);
+            let mstate = mapped.and_then(|sid| {
+                metas
+                    .iter()
+                    .find(|m| &m.id == sid)
+                    .map(|m| m.state.as_str())
+            });
+            let choice = reviewer_choice(
+                mapped,
+                mstate,
+                mapped.is_some_and(|s| session_ids.contains(s)),
+            );
+            let mut spawn_new = true;
+            if let ReviewerChoice::Reuse(rsid) = choice {
+                // Reviewer encore en fin de tour : poser le watermark
+                // avant la fin de son écriture relirait un VERDICT du
+                // round N-1 (seq > wm) comme verdict du round N — on
+                // diffère au prochain tick (ni claim ni spawn).
+                if matches!(mstate, Some("working" | "compacting" | "starting")) {
+                    continue;
+                }
+                let (rc, _o, e) = run_out(&[bin, "--claim-review", &key, "--reviewer", &rsid], ws)
+                    .await
+                    .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                if rc == 0 {
+                    info!("orchestrateur: reviewer {rsid} réutilisé → #{id} (round {round})");
+                    self.reviewer_claim_reset(&rsid, planner, &key, st).await;
+                    let msg = fill(
+                        REVIEWER_ROUND_MSG,
+                        &[
+                            ("ID", key.clone()),
+                            ("ROUND", round.to_string()),
+                            ("PLANNER", planner_label.clone()),
+                            ("PLAN", plan_inline.clone()),
+                        ],
+                    );
+                    // Message de contrôle → force sauf waiting_input
+                    // (mstate capturé pré-claim, cf. force_safe_state).
+                    if self
+                        .plan_send(&rsid, msg, force_safe_state(mstate.unwrap_or("")))
+                        .await
+                    {
+                        claimed_now.insert(id);
+                        // Un reviewer éveillé compte déjà dans `alive`
+                        // et `reviewers_alive` — seul un réveil (asleep)
+                        // consomme un nouveau slot des deux budgets.
+                        if mstate.is_none() || mstate == Some("asleep") {
+                            free -= 1;
+                            reviewers_free -= 1;
+                        }
+                        spawn_new = false;
+                    } else {
+                        // Réveil impossible : session morte entre le
+                        // snapshot et le send → unclaim (l'item est déjà
+                        // `reviewing`) + rm + spawn de secours.
+                        warn!("orchestrateur: send reviewer réutilisé {rsid} KO → unclaim + rm");
+                        let _ = run_out(&[bin, "--unclaim-review", &key], ws).await;
+                        self.plan_rm_session(&rsid, st).await;
+                        st.reviewers.remove(&key);
+                        st.reviewer_seq.remove(&key);
+                        st.planner_seq.remove(&key);
+                    }
+                } else {
+                    // Claim KO sur une session existante : elle reste
+                    // endormie/mappée — retry au prochain tick, pas de rm.
+                    warn!("orchestrateur: claim-review #{id} reuse {rsid} rc={rc} {e}");
+                    spawn_new = false;
+                }
+            }
+            if !spawn_new {
+                continue;
+            }
+
+            // Spawn : le prompt inline l'historique des revues (seul
+            // cas où le reviewer n'a pas vécu les rounds précédents).
+            st.counter += 1;
+            let history = {
+                let (rc, out, _e) = run_out(&[bin, "--reviews", &key, "--json"], ws)
+                    .await
+                    .unwrap_or((-1, String::new(), String::new()));
+                let out = out.trim();
+                if rc == 0 && !out.is_empty() && out != "[]" {
+                    clip_inline(out, 8000)
+                } else {
+                    "(aucune)".to_string()
+                }
+            };
             let prompt = fill(
                 REVIEWER_PROMPT,
                 &[
                     ("ID", key.clone()),
                     ("ITEM", item_body(t)),
                     ("WS", cfg.workspace.clone()),
-                    (
-                        "PLANNER",
-                        if planner.is_empty() {
-                            "le planner (inconnu)".to_string()
-                        } else {
-                            planner.to_string()
-                        },
-                    ),
+                    ("PLANNER", planner_label),
                     ("PLAN", plan_inline),
+                    ("ROUND", round.to_string()),
+                    ("HISTORY", history),
                 ],
             );
             match self
@@ -650,6 +932,8 @@ impl Daemon {
                             .unwrap_or((-1, String::new(), "spawn impossible".into()));
                     if rc == 0 {
                         info!("orchestrateur: reviewer {rsid} → #{id} (claim-review)");
+                        st.reviewers.insert(key.clone(), rsid.clone());
+                        self.reviewer_claim_reset(&rsid, planner, &key, st).await;
                         // Pas d'insert `review_started` ici : le retain
                         // de fin de tick le verrait encore plan_review
                         // (snapshot pré-claim) et l'effacerait — l'entry
@@ -748,6 +1032,13 @@ impl Daemon {
                 Some(Role::Reviewer) => {
                     outcome.reviewers += 1;
                     self.reviewer_title(&m, tasks).await;
+                    // Un reviewer `waiting_input` n'est jamais idle →
+                    // la sweep ne l'endort pas : répondre à ses
+                    // requêtes pendantes expirées le débloque (même
+                    // timeout que le planner).
+                    if let Ok(s) = self.get_session(&m.id).await {
+                        self.answer_stale_requests(&s, &m.id, cfg, st, now).await;
+                    }
                     outcome.workers += 1;
                 }
                 Some(Role::Planner) => {
@@ -804,12 +1095,10 @@ impl Daemon {
         // ce tick) — sans quoi l'entrée fraîche serait évacuée ici même
         // et l'item re-dispatché à chaque cycle.
         st.stalled_plans.retain(|id, owner| {
-            by_id
-                .get(&id.parse().unwrap_or(0))
-                .is_some_and(|t| {
-                    matches!(task_status(t), "plan_review" | "wip" | "reviewing")
-                        && (owner.is_empty() || task_agent(t) == owner)
-                })
+            by_id.get(&id.parse().unwrap_or(0)).is_some_and(|t| {
+                matches!(task_status(t), "plan_review" | "wip" | "reviewing")
+                    && (owner.is_empty() || task_agent(t) == owner)
+            })
         });
         st.pending_req_seen
             .retain(|_, ts| now - *ts < REQ_SEEN_KEEP_S);
@@ -818,6 +1107,76 @@ impl Daemon {
                 .ok()
                 .is_some_and(|i| by_id.get(&i).is_some_and(|t| task_status(t) != "done"))
         });
+        st.reviewer_seq
+            .retain(|id, _| id.parse::<u64>().ok().is_some_and(|i| live_item(&i)));
+        st.planner_seq
+            .retain(|id, _| id.parse::<u64>().ok().is_some_and(|i| live_item(&i)));
+
+        // ---- F. Sweep : reviewers mémorisés → sleep/rm selon l'item,
+        // puis planners gelés (stalled) → sleep dès qu'ils sont idle.
+        // Un item claimé ce tick est exclu : le meta du reviewer est
+        // encore pré-réveil (« idle »/« asleep ») et le sleep tirerait
+        // le tapis sous une revue qui vient de repartir.
+        let mapped_reviewers: Vec<(String, String)> = st
+            .reviewers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (key, rsid) in mapped_reviewers {
+            if key
+                .parse::<u64>()
+                .ok()
+                .is_some_and(|i| claimed_now.contains(&i))
+            {
+                continue;
+            }
+            let item = key.parse::<u64>().ok().and_then(|i| by_id.get(&i).copied());
+            let status = item.map(task_status);
+            let implementing = item
+                .map(|_| ItemPhase::of(st.item_phase.get(&key)) == ItemPhase::Implementing)
+                .unwrap_or(false);
+            let rmeta = metas.iter().find(|m| m.id == rsid);
+            let rstate = rmeta.map(|m| m.state.as_str());
+            match reviewer_sweep(
+                status,
+                implementing,
+                session_ids.contains(&rsid),
+                rstate == Some("idle"),
+            ) {
+                SweepAction::Rm => {
+                    info!("orchestrateur: reviewer {rsid} soldé → rm (item {key})");
+                    self.plan_rm_session(&rsid, st).await;
+                    st.reviewers.remove(&key);
+                    st.reviewer_seq.remove(&key);
+                    st.planner_seq.remove(&key);
+                }
+                SweepAction::Sleep => {
+                    self.plan_sleep_session(&rsid, rstate.unwrap_or(""), st)
+                        .await;
+                }
+                SweepAction::Keep => {}
+            }
+        }
+        // Passe stalled : le planner gelé est endormi dès qu'il repasse
+        // idle (plan_apply_verdict ne sleep pas : le relais de verdict
+        // peut le laisser working — retenté à chaque tick). Owner ""
+        // (gel d'avant le suivi) : rien à endormir.
+        for (key, owner) in st.stalled_plans.clone() {
+            if owner.is_empty() || !session_ids.contains(&owner) {
+                continue;
+            }
+            let ostate = metas
+                .iter()
+                .find(|m| m.id == owner)
+                .map(|m| m.state.as_str())
+                .unwrap_or("");
+            if reviewer_sleep_ok(ostate) {
+                match self.h_sleep_session(owner.clone()).await {
+                    Ok(_) => info!("orchestrateur: planner gelé {owner} endormi (#{key})"),
+                    Err(e) => warn!("orchestrateur: sleep planner gelé {owner}: {e:#}"),
+                }
+            }
+        }
         Ok(outcome)
     }
 
@@ -849,7 +1208,10 @@ impl Daemon {
         let key = id.to_string();
         let planner_sid = task_agent(t).to_string();
         let planner_alive = !planner_sid.is_empty() && session_ids.contains(&planner_sid);
-        if planner_alive && !rsid.is_empty() && !self.peer_relayed(&planner_sid, rsid).await {
+        // Watermark posé au claim-review du round courant : un
+        // PeerMessage du round N-1 ne vaut pas livraison du verdict N.
+        let pwm = st.planner_seq.get(&key).copied().unwrap_or(0);
+        if planner_alive && !rsid.is_empty() && !self.peer_relayed(&planner_sid, rsid, pwm).await {
             self.orch_peer_relay(
                 rsid,
                 &planner_sid,
@@ -976,13 +1338,15 @@ impl Daemon {
                              {round} ≥ {}) — revue humaine requise",
                             cfg.max_review_rounds
                         );
-                        // Le planner n'a plus rien à faire : garder la
-                        // session consommerait un slot et lui vaudrait
-                        // des nudges « release-la » qui relanceraient le
-                        // pipeline en pending au lieu d'attendre l'humain.
-                        if planner_alive {
-                            self.plan_rm_session(&planner_sid, st).await;
-                        }
+                        // Le planner n'a plus rien à faire : la passe
+                        // stalled de la sweep l'ENDORT dès qu'il
+                        // repasse idle (pas de rm — son contexte sert
+                        // au dégel --reassign --force). Un endormi ne
+                        // consomme pas de slot et les nudges sont
+                        // bloqués par nudge_allowed tant qu'il est
+                        // stalled. Pas de sleep ici : le relais de
+                        // verdict ci-dessus peut l'avoir laissé
+                        // working.
                     } else if rc != 0 {
                         warn!("orchestrateur: stall re-submit #{id} rc={rc} {e}");
                         // Re-submit impossible : retirer le gel posé par
@@ -1166,6 +1530,15 @@ impl Daemon {
             return false;
         }
         st.clean_since.remove(sid);
+        // Planner gelé « revue humaine requise » : aucun envoi tant que
+        // l'humain n'a pas dégelé (--reassign --force change l'owner,
+        // le retain de stalled_plans lève alors le gel). Un endormi non
+        // gelé reste nudgeable : le send le réveille, c'est le dégel
+        // normal. Le skip est placé après le rm « tout soldé » : un
+        // planner orphelin post-reassign reste nettoyé.
+        if !nudge_allowed(my_items.keys().any(|i| st.stalled_plans.contains_key(i))) {
+            return true;
+        }
         let idle_long =
             now - st.nudges.get(sid).copied().unwrap_or(0.0) >= cfg.nudge_cooldown_secs as f64;
         if !idle_long {
@@ -1459,19 +1832,81 @@ impl Daemon {
         None
     }
 
-    /// Dernière ligne `VERDICT:` du journal reviewer → (outcome, comment).
-    async fn reviewer_marker(&self, rsid: &str) -> Option<(String, String)> {
+    /// Dernière ligne `VERDICT:` du journal reviewer postérieure au
+    /// watermark (seq au claim-review) → (outcome, comment).
+    async fn reviewer_marker(&self, rsid: &str, watermark: u64) -> Option<(String, String)> {
         let s = self.get_session(rsid).await.ok()?;
         let events = s.journal.read_page(&s.dir, None, JOURNAL_SCAN).ok()?;
-        for ev in events.iter().rev() {
-            let EventKind::AgentText { text } = &ev.kind else {
-                continue;
-            };
-            if let Some(v) = parse_verdict_marker(text) {
-                return Some(v);
+        verdict_markers_after(&events, watermark)
+    }
+
+    /// Seq la plus récente du journal d'une session (0 si
+    /// inaccessible/vide) — base des watermarks reviewer/planner posés
+    /// au claim-review : les marqueurs antérieurs sont d'un round
+    /// passé et ne doivent pas compter.
+    async fn journal_seq(&self, sid: &str) -> u64 {
+        let Ok(s) = self.get_session(sid).await else {
+            return 0;
+        };
+        s.journal
+            .read_page(&s.dir, None, 1)
+            .ok()
+            .and_then(|e| e.last().map(|ev| ev.seq))
+            .unwrap_or(0)
+    }
+
+    /// Posé à chaque `--claim-review` réussi (spawn ou réveil) :
+    /// watermarks des journaux reviewer/planner + purge de l'état de
+    /// timeout/nudge du round précédent — sans cet effacement, le
+    /// timeout du round N-1 déclencherait un unclaim immédiat au
+    /// round N et un nudge périmé court-circuiterait le cooldown.
+    async fn reviewer_claim_reset(
+        &self,
+        rsid: &str,
+        planner_sid: &str,
+        key: &str,
+        st: &mut OrchPersist,
+    ) {
+        st.reviewer_seq
+            .insert(key.to_string(), self.journal_seq(rsid).await);
+        st.planner_seq.insert(
+            key.to_string(),
+            if planner_sid.is_empty() {
+                0
+            } else {
+                self.journal_seq(planner_sid).await
+            },
+        );
+        st.nudges.remove(rsid);
+        st.plan_nudges.remove(rsid);
+        st.review_started.remove(key);
+    }
+
+    /// Endort une session pipeline si son état le permet
+    /// (`reviewer_sleep_ok` — idle seulement) : échec ou état terminal
+    /// → rm (une session dead/not-running ne doit pas rester mappée,
+    /// elle serait auto-réveillable au prochain send). État en vol →
+    /// false : la sweep retentera au prochain tick.
+    async fn plan_sleep_session(
+        self: &Arc<Self>,
+        sid: &str,
+        state: &str,
+        st: &mut OrchPersist,
+    ) -> bool {
+        if !reviewer_sleep_ok(state) {
+            return false;
+        }
+        match self.h_sleep_session(sid.to_string()).await {
+            Ok(_) => {
+                info!("orchestrateur: {sid} endormi");
+                true
+            }
+            Err(e) => {
+                warn!("orchestrateur: sleep {sid}: {e:#} → rm");
+                self.plan_rm_session(sid, st).await;
+                true
             }
         }
-        None
     }
 
     /// PermissionRequest pendante de type exit-plan → (request_id,
@@ -1587,19 +2022,14 @@ impl Daemon {
 
     /// Le planner a-t-il déjà le PeerMessage du reviewer ? (relais à ne
     /// pas doubler — le reviewer fait `acctl msg` de son côté).
-    async fn peer_relayed(&self, planner_sid: &str, rsid: &str) -> bool {
+    async fn peer_relayed(&self, planner_sid: &str, rsid: &str, watermark: u64) -> bool {
         let Ok(s) = self.get_session(planner_sid).await else {
             return false;
         };
         let Ok(events) = s.journal.read_page(&s.dir, None, RELAY_SCAN) else {
             return false;
         };
-        events.iter().any(|ev| {
-            matches!(
-                &ev.kind,
-                EventKind::PeerMessage { from_session, .. } if from_session == rsid
-            )
-        })
+        peer_message_after(&events, rsid, watermark)
     }
 
     /// PeerSend d'appoint orchestrateur — même livraison que
@@ -1938,5 +2368,183 @@ mod tests {
         assert!(
             item_body(&json!({"id": 3, "title": "T", "description": "d"})).starts_with("#3 — T")
         );
+    }
+
+    // --- Reviewer persistant : helpers purs (plan #149) ---
+
+    fn ev(seq: u64, kind: EventKind) -> Event {
+        Event {
+            seq,
+            ts: "2026-01-01T00:00:00Z".into(),
+            kind,
+        }
+    }
+
+    fn agent_text(seq: u64, text: &str) -> Event {
+        ev(
+            seq,
+            EventKind::AgentText {
+                text: text.to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn reviewer_choice_reuse_ou_spawn() {
+        let sid = "s-r1".to_string();
+        // Mappé + vivant (idle/asleep/working/waiting_input) → Reuse.
+        for st in ["idle", "asleep", "working", "waiting_input"] {
+            assert_eq!(
+                reviewer_choice(Some(&sid), Some(st), true),
+                ReviewerChoice::Reuse(sid.clone()),
+                "state={st}"
+            );
+        }
+        // Mappé mais mort / absent des sessions / sans meta → Spawn.
+        assert_eq!(
+            reviewer_choice(Some(&sid), Some("dead"), true),
+            ReviewerChoice::Spawn
+        );
+        assert_eq!(
+            reviewer_choice(Some(&sid), Some("idle"), false),
+            ReviewerChoice::Spawn
+        );
+        assert_eq!(
+            reviewer_choice(Some(&sid), None, true),
+            ReviewerChoice::Spawn
+        );
+        // Jamais mappé → Spawn.
+        assert_eq!(reviewer_choice(None, None, false), ReviewerChoice::Spawn);
+    }
+
+    #[test]
+    fn verdict_markers_watermark() {
+        // Le VERDICT du round N-1 (seq ≤ watermark) est ignoré ; celui
+        // du round N (seq > watermark) est retenu.
+        let events = vec![
+            agent_text(10, "VERDICT: CONDITIONAL corrige X"),
+            agent_text(20, "blabla"),
+            agent_text(30, "VERDICT: APPROVED"),
+        ];
+        assert_eq!(verdict_markers_after(&events, 15).unwrap().0, "approved");
+        assert_eq!(verdict_markers_after(&events, 30), None);
+        assert_eq!(verdict_markers_after(&events, 0).unwrap().0, "approved");
+        // Watermark au-dessus du verdict N-1 mais sans nouveau verdict.
+        let old_only = vec![agent_text(10, "VERDICT: DENIED non")];
+        assert_eq!(verdict_markers_after(&old_only, 15), None);
+    }
+
+    #[test]
+    fn peer_message_watermark() {
+        let pm = |seq: u64, from: &str| {
+            ev(
+                seq,
+                EventKind::PeerMessage {
+                    from_session: from.to_string(),
+                    from_title: String::new(),
+                    to_session: "s-p".into(),
+                    to_title: String::new(),
+                    text: "verdict".into(),
+                },
+            )
+        };
+        // Message du round N-1 (seq ≤ watermark) → pas de relais sauté.
+        assert!(!peer_message_after(&[pm(10, "s-r")], "s-r", 15));
+        // Message du round N → relais déjà fait.
+        assert!(peer_message_after(&[pm(20, "s-r")], "s-r", 15));
+        // Message d'un AUTRE reviewer → ignoré.
+        assert!(!peer_message_after(&[pm(20, "s-autre")], "s-r", 15));
+    }
+
+    #[test]
+    fn nudge_allowed_gel() {
+        // Stalled → aucun nudge (planner gelé, endormi inclus).
+        assert!(!nudge_allowed(true));
+        // Non stalled → nudgeable, endormi compris (le send réveille).
+        assert!(nudge_allowed(false));
+    }
+
+    #[test]
+    fn sleep_ok_idle_seul() {
+        assert!(reviewer_sleep_ok("idle"));
+        for st in [
+            "working",
+            "compacting",
+            "starting",
+            "running",
+            "waiting_input",
+            "asleep",
+            "dead",
+            "interrupted",
+        ] {
+            assert!(!reviewer_sleep_ok(st), "state={st}");
+        }
+    }
+
+    #[test]
+    fn sweep_decisions() {
+        // Item absent / done / pending / implementing → Rm.
+        assert_eq!(reviewer_sweep(None, false, true, false), SweepAction::Rm);
+        for st in ["done", "pending"] {
+            assert_eq!(reviewer_sweep(Some(st), false, true, true), SweepAction::Rm);
+        }
+        assert_eq!(
+            reviewer_sweep(Some("wip"), true, true, true),
+            SweepAction::Rm
+        );
+        // Review en vol → Keep même idle (garde-fou).
+        assert_eq!(
+            reviewer_sweep(Some("reviewing"), false, true, true),
+            SweepAction::Keep
+        );
+        // Hors reviewing + idle → Sleep (stalled compris).
+        for st in ["plan_review", "wip"] {
+            assert_eq!(
+                reviewer_sweep(Some(st), false, true, true),
+                SweepAction::Sleep
+            );
+        }
+        // Hors reviewing + non idle → Keep, retenté au tick suivant.
+        assert_eq!(
+            reviewer_sweep(Some("plan_review"), false, true, false),
+            SweepAction::Keep
+        );
+        // Reviewer disparu → Rm quel que soit l'item.
+        assert_eq!(
+            reviewer_sweep(Some("reviewing"), false, false, false),
+            SweepAction::Rm
+        );
+    }
+
+    #[test]
+    fn alive_exclut_asleep() {
+        let mk = |title: &str, state: &str| SessionMeta {
+            id: "s-x".into(),
+            agent: "devin".into(),
+            title: title.into(),
+            cwd: "/workspace".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            native_session_id: None,
+            mode: None,
+            model: None,
+            available_modes: Vec::new(),
+            available_commands: Vec::new(),
+            available_models: Vec::new(),
+            config_options: Vec::new(),
+            pending_config: Default::default(),
+            state: state.into(),
+            group: None,
+            spawned_by: None,
+            origin: Some(COMPONENT_ORIGIN.to_string()),
+            context_used: None,
+            context_size: None,
+        };
+        let c = cfg_default();
+        let metas = vec![
+            mk("Backlog-P1", "idle"),
+            mk("Backlog-R2", "asleep"),
+            mk("Backlog-W3", "working"),
+        ];
+        assert_eq!(backlog_alive(&metas, &c), 2);
     }
 }
