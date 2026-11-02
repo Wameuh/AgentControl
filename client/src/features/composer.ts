@@ -108,7 +108,29 @@ export class Composer {
     if (!app.current) return false;
     switch (name) {
       case "model":
-        if (!arg) return false;
+        if (!arg) {
+          // /model nu : liste les modèles annoncés par l'agent
+          // (config_options, fallback available_models) + le courant.
+          const opt = app.current.config_options?.find(
+            (o) => o.id === "model" || o.category === "model",
+          );
+          const items = opt
+            ? opt.options.map((o) => ({ v: o.value, label: o.name || o.value }))
+            : app.current.available_models.map((v) => ({ v, label: v }));
+          const cur = opt?.currentValue || app.current.model || "";
+          this.chat.sysline(
+            items.length
+              ? t("model_list", {
+                  models: items
+                    .map((i) => (i.v === cur ? `${i.label} (${t("model_current")})` : i.label))
+                    .join(", "),
+                })
+              : t("model_none"),
+          );
+          return true;
+        }
+        // Le démon résout tolérant (préfixe/nom univoque) et refuse les
+        // valeurs hors liste annoncée — erreur avec candidats en retour.
         await call("set_model", { session: app.current.id, model: arg });
         return true;
       case "resume":

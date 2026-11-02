@@ -249,6 +249,7 @@ export const es: Record<Key, string> = {
   dissolve_group: "Disolver el grupo", drop_to_group: "suelte aquí para agrupar",
   cmd_sent_hint: "/{cmd} enviado — el agente lo aplica en el próximo turno",
   cmd_unknown: "/{cmd} no está expuesto por este agente — no enviado (ver autocompletado para los comandos soportados)",
+  model_list: "Modelos anunciados: {models}", model_current: "actual", model_none: "El agente no anunció ninguna lista de modelos",
   installing_daemon: "instalando el daemon en el servidor…",
   updating_daemon: "actualizando el daemon {dv} → {lv}…",
   dinstall_h: "Instalar el daemon",

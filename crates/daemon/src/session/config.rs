@@ -33,9 +33,79 @@ impl Session {
         Ok(())
     }
 
+    /// Valeurs connues d'un config_id : options ACP (`config_options`,
+    /// value + name affiché) complétées par `available_models` /
+    /// `available_modes`. Vide = l'agent n'a rien annoncé → les appelants
+    /// restent permissifs (pas de garde sur information absente).
+    fn known_config_values(&self, config_id: &str) -> Vec<(String, String)> {
+        let m = self.meta.lock().unwrap();
+        let mut out: Vec<(String, String)> = m
+            .config_options
+            .iter()
+            .find(|o| o.id == config_id || o.category == config_id)
+            .map(|o| {
+                o.options
+                    .iter()
+                    .map(|x| (x.value.clone(), x.name.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let extra: &[String] = match config_id {
+            "model" => &m.available_models,
+            "mode" => &m.available_modes,
+            _ => &[],
+        };
+        for v in extra {
+            if !out.iter().any(|(x, _)| x == v) {
+                out.push((v.clone(), v.clone()));
+            }
+        }
+        out
+    }
+
+    /// Résout `want` contre les valeurs connues de `config_id` (exact,
+    /// casse, préfixe univoque) puis applique `set_config_option` — pour
+    /// "model"/"mode" les fallbacks ACP enchaînent. `Ok(Some(v))` valeur
+    /// résolue (peut différer de `want`), `Ok(None)` liste inconnue → à
+    /// traiter dehors (passthrough permissif), `Err` rien n'a été émis.
+    async fn resolve_then_set(
+        self: &Arc<Self>,
+        config_id: &str,
+        want: &str,
+    ) -> Result<Option<String>> {
+        let known = self.known_config_values(config_id);
+        if known.is_empty() {
+            return Ok(None);
+        }
+        let v = match resolve_config_value(&known, want) {
+            Resolve::Hit(v) => v,
+            Resolve::Ambiguous(c) => {
+                anyhow::bail!(
+                    "{config_id} ambigu « {want} » — candidats : {}",
+                    c.join(", ")
+                )
+            }
+            Resolve::Unknown => {
+                anyhow::bail!(
+                    "{config_id} inconnu « {want} » — valeurs : {}",
+                    join_known(&known)
+                )
+            }
+        };
+        self.set_config_option(config_id, &v).await?;
+        Ok(Some(v))
+    }
+
     /// Change de modèle : ACP session/set_model, sinon fallback sur la
     /// slash command "/model <m>" envoyée comme prompt.
-    /// Agent mort → mémorisé dans pending_config["model"], rejoué au resume.
+    /// Agent mort → mémorisé dans pending_config["model"], rejoué au resume
+    /// (le replay passe par set_config_option → même garde de résolution ;
+    ///  la mémorisation elle-même reste permissive, la liste pouvant être
+    ///  périmée tant que l'agent n'a pas re-annoncé ses options).
+    /// La valeur est résolue contre la liste annoncée AVANT envoi :
+    /// préfixe/nom univoque accepté ("swe-2" → "swe-2-high"), ambigu →
+    /// candidats listés, inconnu → erreur avec les valeurs valides —
+    /// jamais de Invalid params ACP brut.
     pub async fn set_model(self: &Arc<Self>, model: &str) -> Result<()> {
         if !self.is_alive() {
             let mut m = self.meta.lock().unwrap();
@@ -47,6 +117,25 @@ impl Session {
                 text: format!("model={model} mémorisé — appliqué à la reprise"),
             });
             return Ok(());
+        }
+        // Garde-fou : résolution contre la liste annoncée ; si elle est
+        // vide (agent sans config_options), passthrough — l'agent fait foi.
+        match self.resolve_then_set("model", model).await {
+            Ok(Some(v)) => {
+                if v != model {
+                    self.emit(EventKind::System {
+                        text: format!("model → {v} (résolu depuis « {model} »)"),
+                    });
+                }
+                return Ok(());
+            }
+            Ok(None) => {}
+            Err(e) => {
+                self.emit(EventKind::Error {
+                    message: format!("{e:#}"),
+                });
+                return Err(e);
+            }
         }
         let sid = self
             .meta_snapshot()
@@ -65,7 +154,11 @@ impl Session {
                 Ok(())
             }
             Err(_) => {
-                // Fallback : beaucoup d'agents exposent /model en slash command
+                // Fallback : beaucoup d'agents exposent /model en slash command.
+                // meta.model écrit AVANT l'envoi : la valeur relue par
+                // h_set_model reflète la demande même si le prompt part en file.
+                self.meta.lock().unwrap().model = Some(model.into());
+                self.save_meta();
                 self.send_prompt(&format!("/model {model}"), false, false)
                     .await
                     .map(|_| ())
@@ -91,27 +184,50 @@ impl Session {
             if want.is_empty() {
                 continue;
             }
-            let (cur, known): (Option<String>, Vec<String>) = {
+            let cur: Option<String> = {
                 let m = self.meta.lock().unwrap();
-                let known = m
-                    .config_options
-                    .iter()
-                    .find(|o| o.id == id)
-                    .map(|o| o.options.iter().map(|x| x.value.clone()).collect())
-                    .unwrap_or_else(|| match id {
-                        "mode" => m.available_modes.clone(),
-                        "model" => m.available_models.clone(),
-                        _ => vec![],
-                    });
-                let cur = match id {
+                match id {
                     "mode" => m.mode.clone(),
                     _ => m.model.clone(),
-                };
-                (cur, known)
+                }
             };
-            if !known.iter().any(|v| v == want) || cur.as_deref() == Some(want) {
+            let known = self.known_config_values(id);
+            // Déjà la valeur courante → rien à faire.
+            if cur.as_deref() == Some(want) {
                 continue;
             }
+            // Résolution tolérante : la valeur demandée à la création
+            // ("swe-2", "SWE-2"…) est acceptée si elle désigne une seule
+            // option annoncée. Liste vide (agent sans annonce) → pas de
+            // tentative ni de bruit ; ambigu/inconnu → System explicite
+            // plutôt que le skip silencieux (valeur du domaine env type
+            // "normal" non-ACP).
+            let want2 = if known.is_empty() {
+                continue;
+            } else {
+                match resolve_config_value(&known, want) {
+                    Resolve::Hit(v) => v,
+                    Resolve::Ambiguous(c) => {
+                        self.emit(EventKind::System {
+                            text: format!(
+                                "{id}={want} (demandé à la création) ambigu — candidats : {}",
+                                c.join(", ")
+                            ),
+                        });
+                        continue;
+                    }
+                    Resolve::Unknown => {
+                        self.emit(EventKind::System {
+                            text: format!(
+                                "{id}={want} (demandé à la création) absent des options annoncées — valeurs : {}",
+                                join_known(&known)
+                            ),
+                        });
+                        continue;
+                    }
+                }
+            };
+            let want = want2.as_str();
             let r = match self.set_config_option(id, want).await {
                 Ok(()) => Ok(()),
                 Err(e) => {
@@ -194,17 +310,42 @@ impl Session {
             .meta_snapshot()
             .native_session_id
             .context("no native session id")?;
-        // Valeurs connues pour enrichir un éventuel refus de l'agent.
-        // Pas de rejet local : la liste persistée peut être périmée après
-        // une maj de l'agent (nouveaux modèles), l'agent fait foi.
-        let known: Vec<String> = {
-            let m = self.meta.lock().unwrap();
-            m.config_options
-                .iter()
-                .find(|o| o.id == config_id)
-                .map(|o| o.options.iter().map(|x| x.value.clone()).collect())
-                .unwrap_or_default()
+        // Garde-fou : si l'option est annoncée avec une liste, la valeur
+        // est résolue contre elle (exact, casse, préfixe univoque) —
+        // jamais de valeur absente de la liste envoyée à l'agent.
+        // Option inconnue/liste vide → passthrough : la liste persistée
+        // peut être périmée après une maj de l'agent, l'agent fait foi
+        // (les valeurs connues enrichissent alors un éventuel refus).
+        let known = self.known_config_values(config_id);
+        let value = if known.is_empty() {
+            value.to_string()
+        } else {
+            match resolve_config_value(&known, value) {
+                Resolve::Hit(v) => v,
+                Resolve::Ambiguous(c) => {
+                    let msg = format!(
+                        "set_config_option {config_id} ambigu « {value} » — candidats : {}",
+                        c.join(", ")
+                    );
+                    self.emit(EventKind::Error {
+                        message: msg.clone(),
+                    });
+                    anyhow::bail!("{msg}")
+                }
+                Resolve::Unknown => {
+                    let msg = format!(
+                        "set_config_option {config_id} inconnu « {value} » — valeurs : {}",
+                        join_known(&known)
+                    );
+                    self.emit(EventKind::Error {
+                        message: msg.clone(),
+                    });
+                    anyhow::bail!("{msg}")
+                }
+            }
         };
+        let value = value.as_str();
+        let known: Vec<String> = known.into_iter().map(|(v, _)| v).collect();
         match self
             .acp_request(
                 "session/set_config_option",
@@ -347,6 +488,58 @@ impl Session {
 
 }
 
+/// Résolution tolérante d'une valeur de config contre la liste annoncée
+/// par l'agent (`(value, name affiché)`). Ordre : exact sur `value` →
+/// égalité insensible à la casse sur `value`/`name` → préfixe insensible
+/// à la casse (Hit si un seul candidat, Ambiguous sinon) → Unknown.
+#[derive(Debug, PartialEq)]
+enum Resolve {
+    Hit(String),
+    Ambiguous(Vec<String>),
+    Unknown,
+}
+
+fn resolve_config_value(known: &[(String, String)], want: &str) -> Resolve {
+    if let Some((v, _)) = known.iter().find(|(v, _)| v == want) {
+        return Resolve::Hit(v.clone());
+    }
+    let w = want.to_ascii_lowercase();
+    let eq: Vec<String> = known
+        .iter()
+        .filter(|(v, n)| v.to_ascii_lowercase() == w || n.to_ascii_lowercase() == w)
+        .map(|(v, _)| v.clone())
+        .collect();
+    if eq.len() == 1 {
+        return Resolve::Hit(eq[0].clone());
+    }
+    if !eq.is_empty() {
+        return Resolve::Ambiguous(eq);
+    }
+    let pre: Vec<String> = known
+        .iter()
+        .filter(|(v, n)| {
+            v.to_ascii_lowercase().starts_with(&w) || n.to_ascii_lowercase().starts_with(&w)
+        })
+        .map(|(v, _)| v.clone())
+        .collect();
+    match pre.len() {
+        0 => Resolve::Unknown,
+        1 => Resolve::Hit(pre[0].clone()),
+        _ => Resolve::Ambiguous(pre),
+    }
+}
+
+/// « a, b, c, … » — tronqué à 8 entrées pour les messages d'erreur.
+fn join_known(known: &[(String, String)]) -> String {
+    let mut vals: Vec<&str> = known.iter().map(|(v, _)| v.as_str()).collect();
+    vals.dedup();
+    let mut s = vals.iter().take(8).cloned().collect::<Vec<_>>().join(", ");
+    if vals.len() > 8 {
+        s.push_str(", …");
+    }
+    s
+}
+
 /// `on|true|1|yes` → vrai ; `off|false|0|no` → faux.
 fn parse_on_off(v: &str) -> Result<bool> {
     match v.trim().to_ascii_lowercase().as_str() {
@@ -399,5 +592,137 @@ fn describe_policy(p: &CompactPolicy) -> String {
         .flatten()
         .collect::<Vec<_>>()
         .join(" ou "),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{join_known, resolve_config_value, Resolve};
+
+    fn known(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(v, n)| (v.to_string(), n.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn resolve_exact() {
+        let k = known(&[("swe-2-high", "SWE-2 High"), ("adaptive", "Adaptive")]);
+        assert_eq!(
+            resolve_config_value(&k, "adaptive"),
+            Resolve::Hit("adaptive".into())
+        );
+        // L'exact prime même si c'est aussi un préfixe d'une autre valeur.
+        let k2 = known(&[("swe-2", ""), ("swe-2-high", "")]);
+        assert_eq!(
+            resolve_config_value(&k2, "swe-2"),
+            Resolve::Hit("swe-2".into())
+        );
+    }
+
+    #[test]
+    fn resolve_case_insensitive() {
+        let k = known(&[("swe-2-high", "SWE-2 High"), ("adaptive", "")]);
+        assert_eq!(
+            resolve_config_value(&k, "SWE-2-High"),
+            Resolve::Hit("swe-2-high".into())
+        );
+        // Égalité sur le nom affiché.
+        assert_eq!(
+            resolve_config_value(&k, "swe-2 high"),
+            Resolve::Hit("swe-2-high".into())
+        );
+    }
+
+    #[test]
+    fn resolve_prefix() {
+        // Préfixe univoque → résolu ("swe-2" → "swe-2-high" quand la liste
+        // ACP n'annonce que cette variante).
+        let k = known(&[("swe-2-high", ""), ("adaptive", ""), ("claude-fable-5-1-medium", "")]);
+        assert_eq!(
+            resolve_config_value(&k, "swe-2"),
+            Resolve::Hit("swe-2-high".into())
+        );
+        assert_eq!(
+            resolve_config_value(&k, "SWE-2"),
+            Resolve::Hit("swe-2-high".into())
+        );
+        // Préfixe univoque sur le nom affiché.
+        let k2 = known(&[("gpt-6[medium]", "GPT 6 medium"), ("gpt-6[high]", "GPT 6 high")]);
+        assert_eq!(
+            resolve_config_value(&k2, "gpt 6 m"),
+            Resolve::Hit("gpt-6[medium]".into())
+        );
+    }
+
+    #[test]
+    fn resolve_ambiguous() {
+        let k = known(&[("swe-2-high", ""), ("swe-2-medium", ""), ("adaptive", "")]);
+        assert_eq!(
+            resolve_config_value(&k, "swe-2"),
+            Resolve::Ambiguous(vec!["swe-2-high".into(), "swe-2-medium".into()])
+        );
+    }
+
+    #[test]
+    fn resolve_unknown() {
+        let k = known(&[("swe-2-high", ""), ("adaptive", "")]);
+        assert_eq!(resolve_config_value(&k, "gpt-9"), Resolve::Unknown);
+        // Liste vide = pas de résolution possible (passthrough côté appelant).
+        assert_eq!(resolve_config_value(&[], "x"), Resolve::Unknown);
+    }
+
+    /// Garde héritée au replay : une session morte dont l'agent avait
+    /// annoncé ses options résout la valeur mémorisée ("swe-2" →
+    /// "swe-2-high") ; inconnu → erreur explicite, rien n'est rejoué
+    /// tel quel vers l'agent (chemins agent-mort : la mémorisation
+    /// brute reste permissive, la résolution intervient au replay).
+    #[tokio::test]
+    async fn dead_session_pending_replay_guard() {
+        let (s, _dir) = crate::session::tests::tmp_session("resolve-pending");
+        {
+            let mut m = s.meta.lock().unwrap();
+            m.config_options = vec![proto::ConfigOption {
+                id: "model".into(),
+                current_value: "adaptive".into(),
+                options: vec![
+                    proto::ConfigOpt {
+                        value: "adaptive".into(),
+                        ..Default::default()
+                    },
+                    proto::ConfigOpt {
+                        value: "swe-2-high".into(),
+                        name: "SWE-2 High".into(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }];
+        }
+        let r = s.resolve_then_set("model", "swe-2").await.unwrap();
+        assert_eq!(r.as_deref(), Some("swe-2-high"));
+        let m = s.meta_snapshot();
+        assert_eq!(m.model.as_deref(), Some("swe-2-high"));
+        assert_eq!(
+            m.pending_config.get("model").map(|x| x.as_str()),
+            Some("swe-2-high")
+        );
+        assert!(s.resolve_then_set("model", "gpt-9").await.is_err());
+        let m = s.meta_snapshot();
+        assert_eq!(
+            m.pending_config.get("model").map(|x| x.as_str()),
+            Some("swe-2-high")
+        );
+    }
+
+    #[test]
+    fn join_known_truncates() {
+        let k = known(&[
+            ("a", ""), ("b", ""), ("c", ""), ("d", ""), ("e", ""),
+            ("f", ""), ("g", ""), ("h", ""), ("i", ""),
+        ]);
+        assert_eq!(join_known(&k), "a, b, c, d, e, f, g, h, …");
+        assert_eq!(join_known(&k[..2]), "a, b");
     }
 }

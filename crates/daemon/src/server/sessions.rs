@@ -840,7 +840,10 @@ impl Daemon {
     pub(super) async fn h_set_model(self: &Arc<Self>, session: String, model: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
                 s.set_model(&model).await?;
-                Ok(json!({"model": model}))
+                // Valeur effective post-résolution (peut différer de la
+                // demande : "swe-2" → "swe-2-high").
+                let applied = s.meta_snapshot().model.unwrap_or(model);
+                Ok(json!({"model": applied}))
     }
 
     pub(super) async fn h_set_config_option(self: &Arc<Self>, session: String, config_id: String, value: String) -> Result<Value> {

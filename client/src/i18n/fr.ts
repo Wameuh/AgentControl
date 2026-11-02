@@ -246,6 +246,7 @@ export const fr: Record<Key, string> = {
   dissolve_group: "Dissoudre le groupe", drop_to_group: "déposer ici pour grouper",
   cmd_sent_hint: "/{cmd} envoyée — l'agent l'applique au prochain tour",
   cmd_unknown: "/{cmd} n'est pas exposée par cet agent — non envoyée (voir l'autocomplétion pour les commandes supportées)",
+  model_list: "Modèles annoncés : {models}", model_current: "courant", model_none: "Aucune liste de modèles annoncée par l'agent",
   installing_daemon: "installation du démon sur le serveur…",
   updating_daemon: "mise à jour du démon {dv} → {lv}…",
   dinstall_h: "Installer le démon",

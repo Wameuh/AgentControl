@@ -246,6 +246,7 @@ export const en = {
   dissolve_group: "Dissolve group", drop_to_group: "drop here to group",
   cmd_sent_hint: "/{cmd} sent — the agent applies it on the next turn",
   cmd_unknown: "/{cmd} is not exposed by this agent — not sent (see autocomplete for supported commands)",
+  model_list: "Advertised models: {models}", model_current: "current", model_none: "No model list advertised by the agent",
   installing_daemon: "installing daemon on server…",
   updating_daemon: "updating daemon {dv} → {lv}…",
   dinstall_h: "Install daemon",
