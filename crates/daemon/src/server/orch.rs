@@ -209,11 +209,14 @@ pub(crate) struct OrchPersist {
     /// release au plafond PLAN_MAX_NUDGES).
     #[serde(default)]
     pub plan_nudges: HashMap<String, u32>,
-    /// Items gelés en `plan_review` « revue humaine requise » (round
-    /// max atteint) — exclus du dispatch reviewer tant qu'ils n'ont
-    /// pas été dégelés (release).
-    #[serde(default)]
-    pub stalled_plans: Vec<u64>,
+    /// item → session planner possédant l'item au gel : `plan_review`
+    /// « revue humaine requise » (round max atteint), exclus du
+    /// dispatch reviewer tant que l'owner n'a pas changé — le dégel
+    /// humain est `--reassign --force` vers un autre agent (la CLI
+    /// l'accepte sur plan_review ; `--release` n'existe pas hors wip).
+    /// Owner "" = gelé avant le suivi d'owner : jamais dégelé auto.
+    #[serde(default, deserialize_with = "stalled_plans_de")]
+    pub stalled_plans: HashMap<String, String>,
     /// request_id → première observation (timeout de l'auto-réponse
     /// aux requêtes pendantes du planner).
     #[serde(default)]
@@ -222,6 +225,26 @@ pub(crate) struct OrchPersist {
     /// verdict approved, réinitialisée au claim/release.
     #[serde(default)]
     pub item_phase: HashMap<String, String>,
+}
+
+/// `stalled_plans` a été une `Vec<u64>` (r1 de la feature) avant le
+/// suivi d'owner — tolérer l'ancien format à la relu de l'état
+/// persisté (les ids gelés d'avant ont owner "", jamais dégelés auto).
+fn stalled_plans_de<'de, D>(d: D) -> Result<HashMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match <Value as serde::Deserialize>::deserialize(d).unwrap_or_default() {
+        Value::Object(m) => Ok(m
+            .into_iter()
+            .map(|(k, v)| (k, v.as_str().unwrap_or("").to_string()))
+            .collect()),
+        Value::Array(a) => Ok(a
+            .into_iter()
+            .filter_map(|x| x.as_u64().map(|i| (i.to_string(), String::new())))
+            .collect()),
+        _ => Ok(HashMap::new()),
+    }
 }
 
 /// État partagé de l'orchestrateur : config, bascule runtime, phase
@@ -389,6 +412,7 @@ impl OrchProbe {
             "wip": st.wip,
             "planners": st.planners,
             "reviewers": st.reviewers,
+            "stalled_plans": persist.stalled_plans.clone(),
             "assignments": persist.assignments.clone(),
             "notes_cycle_done": persist.notes_cycle_done,
             "state_dir": state_dir().display().to_string(),

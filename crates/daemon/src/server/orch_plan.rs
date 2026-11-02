@@ -426,14 +426,16 @@ impl Daemon {
                         "orchestrateur: verdict {outcome} #{id} posté d'après \
                          le marqueur de {rsid}"
                     );
+                    // Snapshot pré-verdict : round + 1 = la valeur
+                    // post-bump (borne stall ET watermark verdict_seen —
+                    // B ne re-traitera pas ce verdict au prochain tick).
+                    let post_round = task_review_round(&t) + 1;
                     self.plan_apply_verdict(
-                        bin, cfg, ws, &t, &outcome, &comment, &rsid, session_ids, st,
+                        bin, cfg, ws, &t, &outcome, &comment, &rsid, post_round,
+                        session_ids, st,
                     )
                     .await;
-                    // round post-verdict = round courant + 1 — marquer pour
-                    // que « verdict frais » (B) ne re-traite pas ce verdict.
-                    st.verdict_seen
-                        .insert(key.clone(), task_review_round(&t) + 1);
+                    st.verdict_seen.insert(key.clone(), post_round);
                 } else {
                     // Le reviewer a sans doute posté entre-temps — le
                     // chemin « verdict frais » (B) traitera au prochain tick.
@@ -508,7 +510,7 @@ impl Daemon {
             // plan_apply_verdict relaie le verdict au planner si le
             // reviewer ne l'a pas fait (PeerMessage dans son journal).
             self.plan_apply_verdict(
-                bin, cfg, ws, &t, &outcome, &comment, &rsid, session_ids, st,
+                bin, cfg, ws, &t, &outcome, &comment, &rsid, round, session_ids, st,
             )
             .await;
             if session_ids.contains(&rsid) {
@@ -525,6 +527,11 @@ impl Daemon {
         // le plan survit, le verdict les traitera.
         if cfg.watch_prs {
             for t in tasks.iter().filter(|t| task_status(t) == "wip") {
+                // Item tout juste stallé ce tick : snapshot encore wip
+                // → la release échouerait sur « not wip » (log inutile).
+                if st.stalled_plans.contains_key(&task_id(t).to_string()) {
+                    continue;
+                }
                 let aid = task_agent(t);
                 if aid.starts_with("s-") && !session_ids.contains(aid) {
                     info!(
@@ -559,7 +566,7 @@ impl Daemon {
                 let id = task_id(t);
                 task_status(t) == "plan_review"
                     && task_reviewer(t).is_empty()
-                    && !st.stalled_plans.contains(&id)
+                    && !st.stalled_plans.contains_key(&id.to_string())
                     && !st
                         .review_retry
                         .get(&id.to_string())
@@ -758,10 +765,18 @@ impl Daemon {
         st.plan_marker_seq
             .retain(|id, _| id.parse::<u64>().ok().is_some_and(|i| live_item(&i)));
         st.plan_nudges.retain(|sid, _| session_ids.contains(sid));
-        st.stalled_plans.retain(|id| {
+        // Un stall tient tant que l'item est plan_review ET possédé par
+        // le même agent : un `--reassign --force` humain vers un autre
+        // owner le dégèle (réintégré au dispatch reviewer au prochain
+        // tick — nouveau round de revue possible, l'approbation sort
+        // l'item du blocage).
+        st.stalled_plans.retain(|id, owner| {
             by_id
-                .get(id)
-                .is_some_and(|t| task_status(t) == "plan_review")
+                .get(&id.parse().unwrap_or(0))
+                .is_some_and(|t| {
+                    task_status(t) == "plan_review"
+                        && (owner.is_empty() || task_agent(t) == owner)
+                })
         });
         st.pending_req_seen
             .retain(|_, ts| now - *ts < REQ_SEEN_KEEP_S);
@@ -793,6 +808,7 @@ impl Daemon {
         outcome: &str,
         comment: &str,
         rsid: &str,
+        round: u64,
         session_ids: &HashSet<String>,
         st: &mut OrchPersist,
     ) {
@@ -812,7 +828,6 @@ impl Daemon {
             )
             .await;
         }
-        let round = task_review_round(t);
         match outcome {
             "approved" => {
                 st.item_phase
@@ -880,8 +895,9 @@ impl Daemon {
             _ => {
                 if round >= u64::from(cfg.max_review_rounds) {
                     // STALL : parquer l'item en plan_review (hors dispatch
-                    // tant que reviewer_id NULL + stalled) — un humain le
-                    // dégelera via release.
+                    // tant que reviewer_id NULL + stalled) — dégel humain
+                    // via `--reassign --force` vers un autre owner (le
+                    // retain détecte le changement d'agent).
                     let path = self.plan_store_plan(t).await;
                     let (rc, _o, e) = run_out(
                         &[
@@ -899,8 +915,8 @@ impl Daemon {
                     )
                     .await
                     .unwrap_or((-1, String::new(), "spawn impossible".into()));
-                    if rc == 0 && !st.stalled_plans.contains(&id) {
-                        st.stalled_plans.push(id);
+                    if rc == 0 && !st.stalled_plans.contains_key(&key) {
+                        st.stalled_plans.insert(key.clone(), planner_sid.clone());
                         info!(
                             "orchestrateur: plan_review stalled #{id} (round \
                              {round} ≥ {}) — revue humaine requise",

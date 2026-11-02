@@ -498,7 +498,10 @@ pipeline, still on the same tick/persist/lock substrate (item #139,
   `--verdict`): relayed to the planner via PeerMessage if the reviewer
   didn't; `denied`/`conditional` → revision loop bounded by
   `max_review_rounds` (default 5 — beyond: item parked `plan_review`
-  "stalled — human review required"); `approved` → `/compact` +
+  "stalled — human review required", planner session removed; human
+  un-stall = `agentbacklog --reassign <id> --agent-id <other> --force`
+  — the daemon drops the stall when the owner changes); `approved` →
+  `/compact` +
   implementation prompt + `set_mode(implement_mode)` on the **same**
   planner session, or a fresh implementer + `--reassign` when the
   planner is gone (`denied` + gone planner → release).
