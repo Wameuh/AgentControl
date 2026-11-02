@@ -487,7 +487,12 @@ pipeline, still on the same tick/persist/lock substrate (item #139,
   reviewers (`reviewer_mode`, default `smart` — one review per session,
   deleted afterwards) and the usual `Backlog-W<N>` workers which now
   only take `no_plan=1` items and the patchnotes item (created with
-  `--no-plan`), in `implement_mode` (default `bypass`).
+  `--no-plan`), in `implement_mode` (default `bypass`). Role modes are
+  **ACP session modes** (`session/set_mode`, applied post-handshake):
+  ids that aren't agent CLI/env values (`plan`/`smart`/`ask` — devin's
+  `DEVIN_PERMISSION_MODE` only knows normal/accept-edits/dangerous/
+  autonomous) are omitted from the spawn env rather than killing the
+  process at boot, and on respawn.
 - **Flow** — `pending → wip → plan_review → reviewing → wip → done`
   (agentbacklog ≥ 0.7: `--claim`, `--submit-plan`, `--claim-review`,
   `--unclaim-review`, `--verdict`, `--reassign`). The item is claimed

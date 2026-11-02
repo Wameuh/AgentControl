@@ -15,12 +15,27 @@ pub struct AgentProfile {
     pub compact: CompactPartial,
 }
 
+/// Valeur de {mode} pour la ligne de commande/env de l'agent : les ids de
+/// modes de **session ACP** qui n'existent pas côté CLI (`plan`, `smart`,
+/// `ask` — chez devin, DEVIN_PERMISSION_MODE n'accepte que
+/// normal/accept-edits/dangerous/autonomous) sont omis plutôt qu'injectés :
+/// passés en env ils tuent le process au boot, et au respawn via
+/// `meta.mode`. Le mode demandé arrive par `session/set_mode` post-
+/// handshake (apply_spawn_config, ou le replay pending_config au
+/// respawn) — l'agent tourne sur son défaut pendant la fenêtre de spawn.
+pub(crate) fn env_mode(mode: &str) -> &str {
+    match mode {
+        "plan" | "smart" | "ask" => "",
+        m => m,
+    }
+}
+
 /// Substitution {model}/{mode} du profil avec les valeurs courantes de la
 /// session (mêmes règles que new_session/resume : entrée vide → omise).
 pub(super) fn spawn_args(profile: &AgentProfile, meta: &SessionMeta) -> (Vec<String>, HashMap<String, String>) {
     let (m, mo) = (
         meta.model.as_deref().unwrap_or(""),
-        meta.mode.as_deref().unwrap_or(""),
+        env_mode(meta.mode.as_deref().unwrap_or("")),
     );
     let cmd = profile
         .command
@@ -530,5 +545,20 @@ mod tests {
         CompactPartial { enabled: None, at_tokens: Some(50), at_pct: Some(0.4) }.apply_to(&mut p);
         assert_eq!(p.at_tokens, Some(50));
         assert_eq!(p.at_pct, Some(0.4));
+    }
+
+    /// env_mode : les ids de session ACP incompatibles env/CLI sont omis
+    /// (le boot CLI les refuserait) ; les valeurs du domaine env passent.
+    #[test]
+    fn env_mode_acp_vs_cli() {
+        for acp_only in ["plan", "smart", "ask"] {
+            assert_eq!(env_mode(acp_only), "", "{acp_only} doit être omis de l'env");
+        }
+        for cli_ok in ["bypass", "dangerous", "normal", "accept-edits", "autonomous", "yolo", ""] {
+            assert_eq!(env_mode(cli_ok), cli_ok, "{cli_ok} doit passer tel quel");
+        }
+        // Valeur arbitraire (autre agent, autre vocab) : conservée — le
+        // filtre ne touche que les ids ACP connus pour casser le boot.
+        assert_eq!(env_mode("custom-mode"), "custom-mode");
     }
 }
