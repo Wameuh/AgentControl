@@ -249,6 +249,7 @@ export const de: Record<Key, string> = {
   dissolve_group: "Gruppe auflösen", drop_to_group: "hier ablegen zum Gruppieren",
   cmd_sent_hint: "/{cmd} gesendet — der Agent wendet es im nächsten Turn an",
   cmd_unknown: "/{cmd} wird von diesem Agenten nicht angeboten — nicht gesendet (siehe Autovervollständigung für unterstützte Befehle)",
+  model_list: "Verfügbare Modelle: {models}", model_current: "aktuell", model_none: "Keine Modellliste vom Agenten gemeldet",
   installing_daemon: "Daemon wird auf dem Server installiert…",
   updating_daemon: "Daemon {dv} → {lv} wird aktualisiert…",
   dinstall_h: "Daemon installieren",

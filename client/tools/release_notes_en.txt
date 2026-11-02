@@ -56,3 +56,4 @@
 234: Settings now lays out its sections in two columns on wide windows instead of a single capped column — narrow windows and Android keep the stacked layout.
 235: Orchestrator control messages (post-approval /compact, planner/worker/reviewer nudges) now force their way to the head of the agent's prompt queue — compaction and control flow run before pending messages instead of waiting behind them.
 236: Choosing a model with a single effort level (e.g. gpt-6-luna) no longer fails with "Invalid params" — the full model id is now sent, and the effort is picked from the options the agent announces.
+239: Changing models is now forgiving — "/model" lists the advertised models, and values like "swe-2" or "SWE-2" resolve to the right announced entry; ambiguous or unknown values return the valid list instead of a raw "Invalid params" error.

@@ -445,14 +445,14 @@ mod tests {
     use super::*;
 
     /// CompactSrc de test : défauts globaux, aucun override agent.
-    fn test_compact_src() -> CompactSrc {
+    pub(super) fn test_compact_src() -> CompactSrc {
         CompactSrc {
             global: crate::server::CompactCfg::default(),
             by_agent: Default::default(),
         }
     }
 
-    fn tmp_session(tag: &str) -> (Arc<Session>, PathBuf) {
+    pub(super) fn tmp_session(tag: &str) -> (Arc<Session>, PathBuf) {
         let dir = std::env::temp_dir().join(format!(
             "ac-dedup-test-{}-{}",
             std::process::id(),
