@@ -934,6 +934,12 @@ impl Daemon {
                         }
                     } else if rc != 0 {
                         warn!("orchestrateur: stall re-submit #{id} rc={rc} {e}");
+                        // Re-submit impossible : retirer le gel posé par
+                        // un précédent stall — sinon l'item (wip + owner
+                        // peut-être mort) est figé hors de tout
+                        // traitement (verdict_seen déjà marqué, orphelin
+                        // skippé). Le prochain traitement normal reprend.
+                        st.stalled_plans.remove(&key);
                     }
                     return;
                 }
