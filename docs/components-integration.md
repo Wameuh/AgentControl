@@ -31,12 +31,12 @@ all).
 
 | Program | Role | Current supervision | State/log |
 | --- | --- | --- | --- |
-| `backlog-orchestrator.py` | 60 s poll: spawns `Backlog-W*` workers (acctl spawn, devin/bypass/swe-2-high, AgentControl group), nudges idle workers with open PR/wip task, deletes settled sessions, releases orphaned wips; worker→{tasks,PRs} ledger in its state; the title tracks the wip item and the native orchestrator journals the popped item's content as a `user_message` `origin` (presentational post, never delivered to the agent; tracked via `posted_wip` in the state — a resume from the Python script, which doesn't preserve this field in `assignments`, reposts each worker's current wip once) | `~/.supervisor/conf.d/backlog-orchestrator.conf` (autostart+autorestart, env `AGENTCONTROL_TCP=127.0.0.1:7331`) | `~/.agentbacklog/orchestrator-{state.json,log,stdout.log,stderr.log}`; flock lock `orchestrator.lock`; pause via `orchestrator.pause`; CLI `--status/--once/--dry-run` |
+| `backlog-orchestrator.py` | **retired on the dev container (#140)** — former 60 s poller (`Backlog-W*` spawns, nudges, orphan releases) superseded by the `internal` `backlog-orchestrator` component (§2), which adopted live workers and the shared `orchestrator-state.json` at switchover; the Python state carries no `posted_wip`, so the native reposts each adopted worker's current wip once as the presentational `[Backlog] item …` `user_message` `origin` (never delivered) | supervisord conf kept **stopped + `autostart=false`** for rollback — removed once the pipeline canary passes | `~/.agentbacklog/orchestrator-{state.json,log,stdout.log,stderr.log}` (frozen at stop); flock `orchestrator.lock` now held by the daemon itself |
 | `agentbacklog` (CLI) | FIFO feature queue in SQLite — atomic transactions, **no daemon** | `uv tool` in `~/.local/bin` (repo `github.com/Wameuh/AgentBacklog`) | `~/.agentbacklog/backlog.db` |
 | `pr-db` | local sqlite PR registry — **legacy**, replaced by the built-in registry (feat #59) | `~/.local/bin` | `~/.agentcontrol/prs.db` |
 | `graphify`, `graphify-mcp` | external uv tools | `~/.local/bin` | — |
 | `acp-mock-agent` | fake test ACP agent | release tarball binary | — |
-| `supervisord` | **PID 1 of the dev container**: sshd + cron + agentcontrol-daemon + backlog-orchestrator | conf `/etc/supervisor/conf.d/` + `~/.supervisor/conf.d/` | — |
+| `supervisord` | **PID 1 of the dev container**: sshd + cron + agentcontrol-daemon (the backlog orchestrator moved inside the daemon — #140) | conf `/etc/supervisor/conf.d/` + `~/.supervisor/conf.d/` | — |
 | `cron`/`crontab` | scheduled jobs | supervised (`cron-spool` volume) | — |
 | Review automation | `/mr review` → review session | **another server**, out of local scope | — |
 | systemd `agentcontrol-daemon.service` | daemon supervisor in prod (`Restart=always`) | `packaging/` | — |
@@ -272,7 +272,9 @@ upstream source.
     stays unversioned — deprecated, kept on hosts only for rollback;
     migration procedure in `packaging/INSTALL.md` §5 (native component
     enabled persistently + supervisord conf removed; the shared flock
-    serializes the handover).
+    serializes the handover). The dev container ran that migration in
+    #140 — service stopped + `autostart=false`, internal component
+    active.
 - **Detection**: the catalog marks each entry `installed` (command
   found on the daemon PATH / file present) + version if probeable → the
   client shows "installed v0.2 — integrate?" vs "available".
@@ -422,7 +424,7 @@ The "living" piece: **graph of programs and sessions**.
 | PR registry | `internal` | already in the daemon |
 | web UI | `internal` | `bind_http` feature — state = active/inactive |
 | janitor | `internal` | internal task |
-| backlog-orchestrator | **`internal`** (overturned — see below) | the managed-`process` plan was superseded in #29: the loop was ported into the daemon (better: direct session calls, `AGENTCONTROL_*` env unnecessary, no process to lose) — supervisord conf removal remains a user action (`INSTALL.md` §5) |
+| backlog-orchestrator | **`internal`** (overturned — see below) | the managed-`process` plan was superseded in #29: the loop was ported into the daemon (better: direct session calls, `AGENTCONTROL_*` env unnecessary, no process to lose) — dev container migrated in #140, supervisord conf disabled pending removal (`INSTALL.md` §5) |
 | agentbacklog | `tool` | stateless CLI — passive node + version + catalog install |
 | acctl | `tool` | same |
 | pr-db | external/legacy | end of transition (feat #59) — declarable as `external` if still present |
@@ -522,6 +524,10 @@ pipeline, still on the same tick/persist/lock substrate (item #139,
   retro-planning); the release-PR guard counts `plan_review`/`reviewing`
   as in-flight work, and `status.workers` now covers all three roles
   (`planners`/`reviewers` counters added).
+- **Rollout** — the dev container's switchover (#140) staged
+  `enabled = true` + `plan_review = true` in `config.toml`: the
+  internal component runs legacy dispatch until the first deployed
+  daemon build carrying #139, where the flag takes effect at boot.
 
 ---
 
