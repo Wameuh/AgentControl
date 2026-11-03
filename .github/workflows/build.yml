@@ -259,6 +259,13 @@ jobs:
           sed -i 's|</manifest>|    <uses-permission android:name="android.permission.CAMERA"/>\n</manifest>|' \
             src-tauri/gen/android/app/src/main/AndroidManifest.xml
           grep -q 'android.permission.CAMERA' src-tauri/gen/android/app/src/main/AndroidManifest.xml
+          # Pas de backup adb/cloud : app_data contient la clé privée
+          # ed25519 et connections.json (secrets en clair) — le template
+          # Tauri n'a pas d'allowBackup (défaut true). Patch post-init.
+          sed -i 's|<application|<application\n        android:allowBackup="false"|' \
+            src-tauri/gen/android/app/src/main/AndroidManifest.xml
+          grep -q 'android:allowBackup="false"' \
+            src-tauri/gen/android/app/src/main/AndroidManifest.xml
           # Icônes commitées (tauri icon) → projet généré
           cp -r src-tauri/icons/android/* src-tauri/gen/android/app/src/main/res/
           npx tauri android build --apk --debug --target aarch64
@@ -275,6 +282,10 @@ jobs:
           find src-tauri/gen/android/app/build/intermediates \
             -name "AndroidManifest.xml" -path "*merged*" \
             -exec grep -l "RECORD_AUDIO" {} \; | grep -q .
+          # allowBackup="false" doit survivre au manifest merger.
+          find src-tauri/gen/android/app/build/intermediates \
+            -name "AndroidManifest.xml" -path "*merged*" \
+            -exec grep -l 'allowBackup="false"' {} \; | grep -q .
           # L'AAR sherpa-onnx doit être lié : jniLibs arm64 dans l'APK.
           find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" \
             -exec sh -c 'unzip -l "$1" | grep -q "arm64-v8a/libsherpa-onnx-jni.so"' _ {} \;
