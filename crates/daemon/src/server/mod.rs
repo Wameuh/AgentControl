@@ -347,7 +347,7 @@ impl Daemon {
             return;
         };
         if !s.is_alive() {
-            if let Err(e) = self.check_agent_capacity(&meta.agent).await {
+            if let Err(e) = self.ensure_agent_slot(&meta.agent).await {
                 warn!("{sid}: reprise auto refusée: {e:#}");
                 s.emit(proto::EventKind::Error {
                     message: format!("reprise auto: {e:#}"),
@@ -457,28 +457,50 @@ impl Daemon {
             .with_context(|| format!("session inconnue: {id}"))
     }
 
-    /// Plafond d'instances du profil `agent` : compte les sessions de ce
-    /// profil vivantes ou en cours de démarrage, refuse si `max_instances`
-    /// est atteint. Appelé avant tout spawn — la session refusée n'est pas
-    /// créée (ou reste endormie / dead selon le chemin).
-    pub(crate) async fn check_agent_capacity(&self, agent: &str) -> Result<()> {
+    /// Réserve une place d'instance pour le profil `agent` avant un spawn.
+    /// Plafond `max_instances` atteint → endort les sessions inactives de
+    /// ce profil (idle, file vide), la moins récemment active d'abord :
+    /// le journal est conservé, la session se réveille au prochain envoi.
+    /// Aucune inactive pour faire de la place → refus. 0 = illimité.
+    pub(crate) async fn ensure_agent_slot(&self, agent: &str) -> Result<()> {
         let Some(max) = self.agents.get(agent).map(|p| p.max_instances) else {
             return Ok(());
         };
         if max == 0 {
             return Ok(());
         }
-        let live = self
+        let live: Vec<Arc<Session>> = self
             .sessions
             .read()
             .await
             .values()
             .filter(|s| s.meta_snapshot().agent == agent && (s.is_alive() || s.is_spawning()))
-            .count();
+            .cloned()
+            .collect();
+        let excess = (live.len() + 1).saturating_sub(max as usize);
+        if excess == 0 {
+            return Ok(());
+        }
+        let mut idle: Vec<Arc<Session>> = live
+            .iter()
+            .filter(|s| {
+                s.meta_snapshot().state == "idle"
+                    && !s.has_queued()
+                    && !s.is_spawning()
+                    && !s.is_waking()
+            })
+            .cloned()
+            .collect();
+        idle.sort_by_key(|s| s.journal.last_seq());
         anyhow::ensure!(
-            (live as u64) < max as u64,
-            "limite d'instances atteinte pour « {agent} » ({live}/{max}) — fermez une session ou relevez max_instances"
+            idle.len() >= excess,
+            "limite d'instances atteinte pour « {agent} » ({}/{max}) — aucune session inactive à endormir",
+            live.len()
         );
+        for s in idle.into_iter().take(excess) {
+            info!("plafond {agent} ({max}) : endormie {}", s.meta_snapshot().id);
+            s.sleep().await;
+        }
         Ok(())
     }
 
