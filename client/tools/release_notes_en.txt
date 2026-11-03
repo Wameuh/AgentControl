@@ -1,13 +1,13 @@
-# English user-facing release notes, one line per merged PR:
+#
+#
 #
 #     <PR number>: <english note>
-#
+# English user-facing release notes, one line per merged PR:
+# Entries for already-released PRs are inert — prune at release time.
 # Every user-visible feat/fix/perf PR adds its line here (written by the
 # PR author, in English). release_notes.py uses it instead of the commit
-# subject — usually French — and warns in the workflow logs when an
 # entry is missing. `#` lines are comments; no inline comments.
-# Entries for already-released PRs are inert — prune at release time.
-#
+# subject — usually French — and warns in the workflow logs when an
 182: Client updates now report progress and surface explicit errors instead of failing silently.
 183: Catalog components can declare configurable parameters, editable from the client.
 184: Component editing now exposes only the parameters declared by the catalog — internals stay read-only.
@@ -52,17 +52,17 @@
 227: Android users can now dictate agent commands from the composer — a microphone button (Android only) streams on-device speech recognition and injects the live transcription into the message field, where typed edits stay untouched; nothing is sent until the user reviews and sends it.
 228: Speech recognition settings gain a dictation language selector (auto/en/fr/es/de, defaults to the app locale) applied per dictation, plus an opt-in system-recognizer engine that needs no downloaded model (on-device SpeechRecognizer, API 31+) — the ~700 MB model is now also released from memory two minutes after each dictation ends.
 229: Android users can now listen to agent replies out loud — a speaker button on each reply triggers on-device text-to-speech through sherpa-onnx (natural Kokoro voices including French ff_siwis, downloaded on demand, plus the Android system voice as fallback), an optional auto-read setting speaks new replies as they arrive, and a new Settings → Speech section picks the engine, voice and speed.
+230: Backlog orchestrator gains an opt-in plan→review→implementation pipeline — a planner drafts a plan, a reviewer validates it, and a worker implements it, all driven by the daemon.
 233: Agents can now delegate waits to "ac-wait" — a background poller (command, pid, file, port or pid-file modes) that pings the session via acctl send when the condition fires, on timeout or on cancel — shipped as a repo skill so agents stop burning turns polling CI checks, merges or locks.
 234: Settings now lays out its sections in two columns on wide windows instead of a single capped column — narrow windows and Android keep the stacked layout.
 235: Orchestrator control messages (post-approval /compact, planner/worker/reviewer nudges) now force their way to the head of the agent's prompt queue — compaction and control flow run before pending messages instead of waiting behind them.
 236: Choosing a model with a single effort level (e.g. gpt-6-luna) no longer fails with "Invalid params" — the full model id is now sent, and the effort is picked from the options the agent announces.
 237: Keep the same reviewer across plan-review rounds (slept between rounds instead of deleted) and sleep the planner at stall so both keep their context
+238: Backlog orchestrator keeps a single reviewer session at a time and retries its nudge without releasing the item, instead of spawning competing reviewers.
 239: Changing models is now forgiving — "/model" lists the advertised models, and values like "swe-2" or "SWE-2" resolve to the right announced entry; ambiguous or unknown values return the valid list instead of a raw "Invalid params" error.
 240: PR reviews (/mr review) can now be served natively by the daemon — it watches open next_release PRs for the trigger comment, spawns a read-only reviewer session on the exact head, and posts the ## Verdict comment itself (opt-in pr_review)
 241: Orchestrator: independent on/off toggles for each review mechanism (plan re-review, PR re-review, reviewer reuse) — disabling mid-flight unfreezes in-flight items
 242: Orchestrator settings: the model/mode/thought-level fields are now dropdowns listing the values actually advertised by the configured agent — a custom value stays allowed (shown "(?)" with a spawn-time warning) instead of a silent typo failing at spawn.
 243: Sessions now show an error state (rate limit, model, auth) instead of silently idling; the orchestrator backs off instead of re-prompting in a loop.
-230: Backlog orchestrator gains an opt-in plan→review→implementation pipeline — a planner drafts a plan, a reviewer validates it, and a worker implements it, all driven by the daemon.
-238: Backlog orchestrator keeps a single reviewer session at a time and retries its nudge without releasing the item, instead of spawning competing reviewers.
 247: Backlog worker prompt no longer asks the auto-patchnotes worker to wait for a merge it never owns — the item now spells out that 'release PR ready + body up to date' is its completion criterion, and documents the re-draft/re-item behavior if new work arrives.
-248: Backlog orchestrator no longer releases and re-claims in-progress items every cycle when plan review is off — the unfreeze path now only targets items that actually came through the plan pipeline.
+249: Backlog orchestrator no longer releases and re-claims in-progress items every cycle when plan review is off — the unfreeze path now only targets items that actually came through the plan pipeline.
