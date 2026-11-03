@@ -822,6 +822,15 @@ fn workspaces_json(enabled: bool, cfg: &cfg::OrchCfg) -> Vec<Value> {
         .collect()
 }
 
+/// L'entrée registre désigne-t-elle la release PR du workspace ?
+/// Vrai si son numéro est celui de la PR `next_release → main`
+/// courante, ou si sa branche head est `next_release` (re-registrement
+/// via le watcher — le numéro seul couvre déjà le cas nominal, la
+/// branche attrape les entrées dont la fiche a été enrichie par sync).
+fn release_pr_entry(p: &proto::PrEntry, release_pr: u64) -> bool {
+    p.pr == release_pr || p.branch.as_deref() == Some("next_release")
+}
+
 /// « Ce meta est-il un Manager vivant du workspace `repo` ? » —
 /// identité = provenance + titre (le titre est le contrat : un
 /// `rename_session` casse la dédup — assumé, cf. le spawn).
@@ -1328,6 +1337,12 @@ impl Daemon {
                     let mut open_any = Vec::new();
                     for p in &prs {
                         if matches!(p.status.as_str(), "closed" | "merged") {
+                            continue;
+                        }
+                        // La release PR reste OPEN par construction
+                        // (c'est l'item patchnotes qui la passe ready)
+                        // — la compter bloquerait sa propre création.
+                        if release_pr_entry(p, r.0) {
                             continue;
                         }
                         if self.orch_pr_state(p, ws).await == "OPEN" {
@@ -1946,6 +1961,37 @@ mod tests {
         assert!(!task_poppable(&json!({
             "status": "pending", "depends_on": 5, "dep_status": "pending"
         })));
+    }
+
+    /// La release PR enregistrée (open) ne compte pas dans `open_any`
+    /// — sans l'exclusion, le registre [#release] bloquerait la
+    /// création de l'item patchnotes indéfiniment.
+    #[test]
+    fn release_pr_entry_exclue() {
+        let entry = |pr: u64, branch: Option<&str>| proto::PrEntry {
+            repo: "o/r".into(),
+            pr,
+            forge: "github".into(),
+            host: "github.com".into(),
+            url: String::new(),
+            change_id: None,
+            session: "s-x".into(),
+            branch: branch.map(str::to_string),
+            title: None,
+            status: "open".into(),
+            note: None,
+            via: "detected".into(),
+            sync_fails: 0,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+        };
+        // Numéro de la release PR courante → exclue.
+        assert!(release_pr_entry(&entry(187, None), 187));
+        // Entrée d'un autre numéro mais head=next_release → exclue.
+        assert!(release_pr_entry(&entry(9, Some("next_release")), 187));
+        // PR de feature ordinaire → comptée.
+        assert!(!release_pr_entry(&entry(9, Some("feat/x")), 187));
+        assert!(!release_pr_entry(&entry(9, None), 187));
     }
 
     #[test]

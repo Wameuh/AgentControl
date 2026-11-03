@@ -245,6 +245,19 @@ impl PrVerifier {
         let verdict = tokio::task::spawn_blocking(move || check(&t)).await;
         match verdict {
             Ok(forgesync::Verify::Exists) => self.apply(&p),
+            // PR de release (next_release → main) : existe mais reste
+            // hors registre — cache négatif comme un « inexistant »
+            // pour ne pas revérifier à chaque occurrence.
+            Ok(forgesync::Verify::Release) => {
+                self.negative_add(key);
+                self.emit(
+                    &p,
+                    format!(
+                        "PR {} ignorée — PR de release (hors registre)",
+                        p.r.display()
+                    ),
+                );
+            }
             Ok(forgesync::Verify::Missing) => {
                 self.negative_add(key);
                 self.emit(
@@ -879,6 +892,32 @@ mod tests {
         // 1 essai + 2 retries = 3 appels, puis file vidée (abandon).
         assert!(until(5000, || calls.load(Ordering::SeqCst) >= 3).await);
         assert!(until(5000, || v.pending.lock().unwrap().is_empty()).await);
+        assert!(r.list().is_empty());
+    }
+
+    /// La release PR (verdict `Verify::Release`) existe mais n'entre
+    /// jamais au registre — et le cache négatif absorbe les occurrences
+    /// suivantes sans nouvel appel forge.
+    #[tokio::test]
+    async fn release_pr_rejected_and_cached() {
+        let r = reg();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = Arc::clone(&calls);
+        let v = verifier(&r, move |_| {
+            c.fetch_add(1, Ordering::SeqCst);
+            forgesync::Verify::Release
+        });
+        v.spawn_worker();
+        let s = sess("rel");
+        v.submit(&s, "s-x", gh("corp/tools", 187), false).unwrap();
+        assert!(until(5000, || calls.load(Ordering::SeqCst) >= 1).await);
+        assert!(until(5000, || v.pending.lock().unwrap().is_empty()).await);
+        assert!(r.list().is_empty());
+        // Occurrence suivante dans le TTL du cache négatif : rejetée
+        // sans second appel forge.
+        v.submit(&s, "s-x", gh("corp/tools", 187), false).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(r.list().is_empty());
     }
 
