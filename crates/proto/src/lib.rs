@@ -1105,7 +1105,10 @@ pub enum ReqKind {
     /// son superviseur — le marqueur pid conservé déclenche la reprise
     /// auto des sessions au boot. Réponse : `{updated, path,
     /// restarting}` — `restarting:false` = binaire remplacé mais aucun
-    /// superviseur détecté (restart manuel requis).
+    /// superviseur détecté (restart manuel requis). `"latest"`/`""`
+    /// (acctl sans arg) résout la dernière release publiée ; si elle
+    /// n'est pas plus récente que le binaire courant, réponse
+    /// `{noop: true, version, current, restarting:false}` sans update.
     UpdateDaemon { version: String },
 }
 

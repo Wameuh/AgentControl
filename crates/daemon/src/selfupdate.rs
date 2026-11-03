@@ -43,9 +43,11 @@ pub fn self_update(version: &str) -> Result<Value> {
     // "latest" (ou absence de version côté acctl) = dernière release
     // publiée — la version du binaire local n'existe souvent pas en
     // release (build de branche, stable pas encore taguée) → 404.
-    let ver = match version.trim().trim_start_matches('v') {
-        "" | "latest" => latest_release()?,
-        v => v.to_string(),
+    let arg = version.trim().trim_start_matches('v');
+    let (ver, latest) = if arg.is_empty() || arg.eq_ignore_ascii_case("latest") {
+        (latest_release()?, true)
+    } else {
+        (arg.to_string(), false)
     };
     // La version part en segment d'URL : whitelist semver stricte —
     // `../` traverserait vers un asset arbitraire (tout client du
@@ -53,12 +55,17 @@ pub fn self_update(version: &str) -> Result<Value> {
     if !valid_version(&ver) {
         bail!("version cible invalide (semver attendu, ex. \"0.5.0\")");
     }
-    // No-op explicite : remplacer le binaire par la même version serait
-    // un téléchargement + un restart pour rien.
-    if ver == env!("CARGO_PKG_VERSION") {
+    // No-op sur le chemin `latest` quand la cible n'est pas plus
+    // récente que le binaire courant : un branch build (ex. 0.10.0
+    // alors que la dernière stable publiée est 0.9.0) ne doit pas
+    // être rétrogradé en silence. Un tag explicite reste toujours
+    // appliqué — il sert à réinstaller/converger vers l'artefact
+    // publié même à version égale.
+    if latest && semver_cmp(env!("CARGO_PKG_VERSION"), &ver) != std::cmp::Ordering::Less {
         return Ok(json!({
             "noop": true,
             "version": ver,
+            "current": env!("CARGO_PKG_VERSION"),
             "restarting": false,
         }));
     }
@@ -206,33 +213,56 @@ fn gh_api(path: &str) -> Result<Value> {
         .context("décodage JSON GitHub")
 }
 
-/// Dernière release publiée (max semver sur `/releases`, drafts exclus) :
-/// stable d'abord, prerelease (canal rc) seulement si aucune stable
-/// n'existe — le rc s'obtient en passant son tag explicitement.
+/// Dernière release publiée : `releases/latest` d'abord — la release
+/// marquée latest (posée par le workflow sur chaque tag non-rc) est
+/// authoritative et jamais paginée ; les rc en accumulent sans la
+/// déplacer. Fallback : scan paginé de `/releases` (stable préférée,
+/// prerelease seulement si aucune stable n'existe — le rc s'obtient
+/// en passant son tag explicitement).
 fn latest_release() -> Result<String> {
-    let rels = gh_api("releases?per_page=20")?;
-    let arr = rels.as_array().context("réponse releases inattendue")?;
+    if let Ok(v) = gh_api("releases/latest") {
+        if let Some(t) = v["tag_name"].as_str().map(|t| t.trim().trim_start_matches('v'))
+        {
+            if valid_version(t) {
+                return Ok(t.to_string());
+            }
+        }
+    }
+    // Fallback « aucune stable » (ou API latest en échec) : max semver
+    // sur les releases, stable préférée — paginé, le repo accumule
+    // des dizaines de releases par cycle.
     let mut best_any = String::new();
     let mut best_stable = String::new();
-    for r in arr {
-        if r["draft"].as_bool().unwrap_or(false) {
-            continue;
+    for page in 1..=3 {
+        let rels = gh_api(&format!("releases?per_page=100&page={page}"))?;
+        let arr = rels.as_array().context("réponse releases inattendue")?;
+        if arr.is_empty() {
+            break;
         }
-        let Some(tag) = r["tag_name"].as_str() else {
-            continue;
-        };
-        let v = tag.trim().trim_start_matches('v');
-        if !valid_version(v) {
-            continue;
+        for r in arr {
+            if r["draft"].as_bool().unwrap_or(false) {
+                continue;
+            }
+            let Some(tag) = r["tag_name"].as_str() else {
+                continue;
+            };
+            let v = tag.trim().trim_start_matches('v');
+            if !valid_version(v) {
+                continue;
+            }
+            if best_any.is_empty() || semver_cmp(v, &best_any) == std::cmp::Ordering::Greater
+            {
+                best_any = v.to_string();
+            }
+            if !r["prerelease"].as_bool().unwrap_or(false)
+                && (best_stable.is_empty()
+                    || semver_cmp(v, &best_stable) == std::cmp::Ordering::Greater)
+            {
+                best_stable = v.to_string();
+            }
         }
-        if best_any.is_empty() || semver_cmp(v, &best_any) == std::cmp::Ordering::Greater {
-            best_any = v.to_string();
-        }
-        if !r["prerelease"].as_bool().unwrap_or(false)
-            && (best_stable.is_empty()
-                || semver_cmp(v, &best_stable) == std::cmp::Ordering::Greater)
-        {
-            best_stable = v.to_string();
+        if arr.len() < 100 {
+            break;
         }
     }
     let best = if best_stable.is_empty() {
@@ -250,11 +280,16 @@ fn latest_release() -> Result<String> {
 /// n'existe pas — suggère un tag existant et liste les récents.
 fn release_not_found(ver: &str) -> String {
     let hint = "préciser un tag existant, ex. acctl daemon-update vX.Y.Z";
-    match gh_api("releases?per_page=10") {
+    match gh_api("releases?per_page=100") {
         Ok(rels) => {
             let tags: Vec<&str> = rels
                 .as_array()
-                .map(|a| a.iter().filter_map(|r| r["tag_name"].as_str()).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|r| r["tag_name"].as_str())
+                        .take(15)
+                        .collect()
+                })
                 .unwrap_or_default();
             if tags.is_empty() {
                 format!("release v{ver} introuvable — {hint}")
@@ -371,4 +406,28 @@ fn stage_executable(src: &Path, dir: &Path, name: &str) -> Result<PathBuf> {
     }
     std::fs::File::open(&staged)?.sync_data()?;
     Ok(staged)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cmp::Ordering::*;
+
+    #[test]
+    fn semver_cmp_orders_core_and_prerelease() {
+        assert_eq!(semver_cmp("0.9.0", "0.10.0"), Less);
+        assert_eq!(semver_cmp("0.10.0-rc.17", "0.10.0-rc.2"), Greater);
+        assert_eq!(semver_cmp("0.10.0-rc.2", "0.10.0"), Less); // stable > rc
+        assert_eq!(semver_cmp("1.0.0", "1.0.0"), Equal);
+        assert_eq!(semver_cmp("1.0.0-rc.1+meta", "1.0.0-rc.1"), Equal);
+        assert_eq!(semver_cmp("0.10.0-beta", "0.10.0-rc"), Less); // alphanum
+    }
+
+    #[test]
+    fn valid_version_accepts_rc_and_rejects_traversal() {
+        assert!(valid_version("0.10.0-rc.17"));
+        assert!(!valid_version("../x"));
+        assert!(!valid_version("latest"));
+        assert!(!valid_version("0.10"));
+    }
 }
