@@ -313,11 +313,21 @@ async fn main() -> Result<()> {
                     } else {
                         format!("{}↳ ", "  ".repeat((depth - 1).min(4)))
                     };
+                    // État affiché — « error » porte le kind en
+                    // suffixe (error:rate_limit…) pour distinguer un
+                    // retry programmé d'une panne à réparer.
+                    let state = match s["state"].as_str().unwrap_or("") {
+                        "error" => match s["last_error"]["kind"].as_str() {
+                            Some(k) => format!("error:{k}"),
+                            None => "error".to_string(),
+                        },
+                        st => st.to_string(),
+                    };
                     let line = format!(
                         "{}{}  {:<12} {:<14} {}  {}{}{}",
                         indent,
                         sid,
-                        s["state"].as_str().unwrap_or(""),
+                        state,
                         s["agent"].as_str().unwrap_or(""),
                         s["created_at"].as_str().unwrap_or("").get(..16).unwrap_or(""),
                         s["title"].as_str().unwrap_or(""),

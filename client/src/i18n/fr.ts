@@ -205,7 +205,7 @@ export const fr: Record<Key, string> = {
   map_last_exit: "Dernier exit", map_source: "Source",
   map_autostart: "Démarrage auto", map_version: "Version",
   map_leg_working: "actif", map_leg_wait: "en attente",
-  map_leg_idle: "idle", map_leg_dead: "mort",
+  map_leg_idle: "idle", map_leg_error: "erreur", map_leg_dead: "mort",
   map_leg_flow: "flux actif",
   map_leg_prog: "programme", map_leg_agent: "agent",
   map_leg_manage: "supervise", map_leg_know: "observé",

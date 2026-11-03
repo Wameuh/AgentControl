@@ -288,7 +288,11 @@ fn reviewer_choice(
         return ReviewerChoice::Spawn;
     }
     match (mapped, in_session_ids, meta_state) {
-        (Some(sid), true, Some(state)) if state != "dead" => ReviewerChoice::Reuse(sid.clone()),
+        // « error » hors rate_limit = en panne (model/auth/other) —
+        // inutile de le réveiller, il ne répondra qu'au même échec.
+        (Some(sid), true, Some(state)) if state != "dead" && state != "error" => {
+            ReviewerChoice::Reuse(sid.clone())
+        }
         _ => ReviewerChoice::Spawn,
     }
 }
@@ -2176,6 +2180,17 @@ impl Daemon {
     /// aux deux h_send pour que le retry post-resume garde la même
     /// sémantique.
     async fn plan_send(self: &Arc<Self>, sid: &str, msg: String, force: bool) -> bool {
+        // Retenue d'erreur active : un nudge s'enfilerait derrière
+        // sans être livré — le retry rate_limit ou l'action utilisateur
+        // lèvera le hold et le tick suivant retentera. Gate sur le hold
+        // vivant, pas l'état persisté : « error » avec hold parti (levée
+        // explicite, retry échue) reste livrable.
+        if let Ok(s) = self.get_session(sid).await {
+            if s.error_held() {
+                info!("orchestrateur: {sid} en retenue d'erreur — nudge abandonné");
+                return false;
+            }
+        }
         if self
             .h_send(sid.to_string(), msg.clone(), force, false)
             .await
@@ -2564,6 +2579,11 @@ mod tests {
             reviewer_choice(Some(&sid), Some("dead"), true, true),
             ReviewerChoice::Spawn
         );
+        // « error » = en panne — réveiller ne sert à rien, session neuve.
+        assert_eq!(
+            reviewer_choice(Some(&sid), Some("error"), true, true),
+            ReviewerChoice::Spawn
+        );
         assert_eq!(
             reviewer_choice(Some(&sid), Some("idle"), false, true),
             ReviewerChoice::Spawn
@@ -2732,6 +2752,7 @@ mod tests {
             origin: Some(COMPONENT_ORIGIN.to_string()),
             context_used: None,
             context_size: None,
+            last_error: None,
         };
         let c = cfg_default();
         let metas = vec![

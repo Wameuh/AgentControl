@@ -18,7 +18,7 @@ export type AlertKind = "done" | "question" | "error";
 /** États comptant comme « l'agent travaille » pour la transition → idle. */
 const BUSY = new Set(["working", "compacting", "running", "waiting_input"]);
 /** États terminaux anormaux — glisser de l'un à l'autre ne re-signale pas. */
-const ERR = new Set(["dead", "interrupted"]);
+const ERR = new Set(["dead", "interrupted", "error"]);
 
 /** Transition d'intérêt, null sinon. */
 function classify(prev: string, next: string): AlertKind | null {

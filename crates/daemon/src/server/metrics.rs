@@ -418,6 +418,7 @@ mod tests {
             origin: origin.map(str::to_string),
             context_used: None,
             context_size: None,
+            last_error: None,
         }
     }
 

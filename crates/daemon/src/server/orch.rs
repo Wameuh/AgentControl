@@ -1237,8 +1237,30 @@ impl Daemon {
             if !self.orch.is_enabled() {
                 return Ok(());
             }
+            // Une session du composant en rate_limit sur le même agent
+            // (ou même modèle si configuré) : spawner derrière partagerait
+            // la même limite — suspendre les spawns ce cycle-ci.
+            let rl = metas.iter().filter(|m| {
+                m.origin.as_deref() == Some(COMPONENT_ORIGIN)
+                    && m.state == "error"
+                    && m.last_error
+                        .as_ref()
+                        .is_some_and(|le| le.kind == "rate_limit")
+                    && m.agent == cfg.agent
+                    && (cfg.model.is_empty() || m.model.as_deref() == Some(cfg.model.as_str()))
+            }).count();
             let slots = (cfg.max_workers as usize).saturating_sub(workers.len());
-            let to_spawn = pending.len().min(slots);
+            let to_spawn = if rl > 0 {
+                info!(
+                    "orchestrateur: {rl} session(s) en rate_limit — spawns suspendus"
+                );
+                self.orch.status.lock().unwrap().detail = Some(format!(
+                    "{rl} session(s) en rate_limit — spawns suspendus"
+                ));
+                0
+            } else {
+                pending.len().min(slots)
+            };
             for _ in 0..to_spawn {
                 st.counter += 1;
                 info!(
@@ -1353,7 +1375,18 @@ impl Daemon {
         // off pendant le cycle : ne pas écraser le Disabled posé par
         // set_enabled (le composant remonterait « running » à tort).
         if self.orch.is_enabled() {
-            self.orch.set_status(Phase::Active, None);
+            // Détail : sessions du composant en erreur (compte + kinds)
+            // — visible via `acctl status` / comp info.
+            let errs: Vec<&str> = metas
+                .iter()
+                .filter(|m| {
+                    m.origin.as_deref() == Some(COMPONENT_ORIGIN) && m.state == "error"
+                })
+                .filter_map(|m| m.last_error.as_ref().map(|le| le.kind.as_str()))
+                .collect();
+            let detail = (!errs.is_empty())
+                .then(|| format!("{} session(s) en erreur : {}", errs.len(), errs.join(", ")));
+            self.orch.set_status(Phase::Active, detail);
         }
         // Échantillon métriques post-cycle (server/metrics.rs) —
         // best-effort : un journal inscriptible ne casse jamais le tick.
@@ -1825,6 +1858,7 @@ mod tests {
             origin: origin.map(str::to_string),
             context_used: None,
             context_size: None,
+            last_error: None,
         }
     }
 
