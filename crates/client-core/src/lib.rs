@@ -236,9 +236,25 @@ pub fn conn_key_json(cfg: &serde_json::Value) -> String {
     }
 }
 
+/// Liste des connexions pour une écriture : `None` si le fichier existe
+/// mais n'est ni lisible ni déchiffrable/parsable — refus d'écraser,
+/// sinon une invalidation de la clé keystore ferait perdre toutes les
+/// connexions sauvegardées à la première écriture.
+fn load_connections_for_write() -> Option<Vec<serde_json::Value>> {
+    let p = config_path();
+    if !p.exists() {
+        return Some(vec![]);
+    }
+    let b = secrets::read_secret_file(&p).ok()?;
+    serde_json::from_slice(&b).ok()
+}
+
 /// Ajoute une connexion en tête (dédupliquée par conn_key), max 10.
 pub fn save_connection(cfg: &serde_json::Value) {
-    let mut list = load_connections();
+    let Some(mut list) = load_connections_for_write() else {
+        log(Level::Warn, "connections.json illisible — sauvegarde refusée");
+        return;
+    };
     let key = conn_key_json(cfg);
     list.retain(|c| conn_key_json(c) != key);
     list.insert(0, cfg.clone());
@@ -251,7 +267,10 @@ pub fn save_connection(cfg: &serde_json::Value) {
 
 /// Retire une connexion de la liste (même clé de dédup que save).
 pub fn remove_connection(cfg: &serde_json::Value) {
-    let mut list = load_connections();
+    let Some(mut list) = load_connections_for_write() else {
+        log(Level::Warn, "connections.json illisible — suppression refusée");
+        return;
+    };
     let key = conn_key_json(cfg);
     list.retain(|c| conn_key_json(c) != key);
     let _ = secrets::write_secret_file(
