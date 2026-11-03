@@ -35,7 +35,7 @@ mod prs;
 mod sessions;
 mod term;
 
-pub use cfg::{A2aCfg, AgentProfile, CompactCfg, CompactPartial, CompactPolicy, CompactSrc, OrchCfg, RetentionCfg};
+pub use cfg::{A2aCfg, AgentProfile, CompactCfg, CompactPartial, CompactPolicy, CompactSrc, OrchCfg, RetentionCfg, DEFAULT_MAX_INSTANCES};
 pub(crate) use cfg::env_mode;
 pub(crate) use orch::OrchProbe;
 
@@ -346,6 +346,15 @@ impl Daemon {
             warn!("{sid}: agent « {} » inconnu — reprise ignorée", meta.agent);
             return;
         };
+        if !s.is_alive() {
+            if let Err(e) = self.check_agent_capacity(&meta.agent).await {
+                warn!("{sid}: reprise auto refusée: {e:#}");
+                s.emit(proto::EventKind::Error {
+                    message: format!("reprise auto: {e:#}"),
+                });
+                return;
+            }
+        }
         let (cmd, envs) = self.agent_parts(
             &profile,
             meta.model.as_deref(),
@@ -446,6 +455,31 @@ impl Daemon {
             .get(id)
             .cloned()
             .with_context(|| format!("session inconnue: {id}"))
+    }
+
+    /// Plafond d'instances du profil `agent` : compte les sessions de ce
+    /// profil vivantes ou en cours de démarrage, refuse si `max_instances`
+    /// est atteint. Appelé avant tout spawn — la session refusée n'est pas
+    /// créée (ou reste endormie / dead selon le chemin).
+    pub(crate) async fn check_agent_capacity(&self, agent: &str) -> Result<()> {
+        let Some(max) = self.agents.get(agent).map(|p| p.max_instances) else {
+            return Ok(());
+        };
+        if max == 0 {
+            return Ok(());
+        }
+        let live = self
+            .sessions
+            .read()
+            .await
+            .values()
+            .filter(|s| s.meta_snapshot().agent == agent && (s.is_alive() || s.is_spawning()))
+            .count();
+        anyhow::ensure!(
+            (live as u64) < max as u64,
+            "limite d'instances atteinte pour « {agent} » ({live}/{max}) — fermez une session ou relevez max_instances"
+        );
+        Ok(())
     }
 
 
