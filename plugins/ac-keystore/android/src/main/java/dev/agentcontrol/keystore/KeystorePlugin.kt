@@ -53,11 +53,11 @@ class KeystorePlugin(activity: Activity): Plugin(activity) {
   fun seal(invoke: Invoke) {
     try {
       val data = Base64.decode(
-        invoke.getArgs().optString("data", ""), Base64.DEFAULT)
+        invoke.getArgs().optString("data", ""), Base64.NO_WRAP)
       val c = cipherFor(Cipher.ENCRYPT_MODE)
       val ct = c.doFinal(data)
       val ret = JSObject()
-      ret.put("data", Base64.encodeToString(c.iv + ct, Base64.DEFAULT))
+      ret.put("data", Base64.encodeToString(c.iv + ct, Base64.NO_WRAP))
       invoke.resolve(ret)
     } catch (e: Exception) {
       invoke.reject("seal: ${e.message}")
@@ -68,7 +68,7 @@ class KeystorePlugin(activity: Activity): Plugin(activity) {
   fun open(invoke: Invoke) {
     try {
       val blob = Base64.decode(
-        invoke.getArgs().optString("data", ""), Base64.DEFAULT)
+        invoke.getArgs().optString("data", ""), Base64.NO_WRAP)
       if (blob.size <= ivLen) {
         invoke.reject("open: blob trop court")
         return
@@ -77,7 +77,7 @@ class KeystorePlugin(activity: Activity): Plugin(activity) {
       val ret = JSObject()
       ret.put("data",
         Base64.encodeToString(c.doFinal(blob, ivLen, blob.size - ivLen),
-          Base64.DEFAULT))
+          Base64.NO_WRAP))
       invoke.resolve(ret)
     } catch (e: Exception) {
       invoke.reject("open: ${e.message}")
