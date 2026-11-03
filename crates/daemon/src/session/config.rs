@@ -39,28 +39,7 @@ impl Session {
     /// restent permissifs (pas de garde sur information absente).
     fn known_config_values(&self, config_id: &str) -> Vec<(String, String)> {
         let m = self.meta.lock().unwrap();
-        let mut out: Vec<(String, String)> = m
-            .config_options
-            .iter()
-            .find(|o| o.id == config_id || o.category == config_id)
-            .map(|o| {
-                o.options
-                    .iter()
-                    .map(|x| (x.value.clone(), x.name.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let extra: &[String] = match config_id {
-            "model" => &m.available_models,
-            "mode" => &m.available_modes,
-            _ => &[],
-        };
-        for v in extra {
-            if !out.iter().any(|(x, _)| x == v) {
-                out.push((v.clone(), v.clone()));
-            }
-        }
-        out
+        crate::server::orch_cfg::meta_config_values(&m, config_id)
     }
 
     /// Options annoncées pour `config_id` (`config_options` uniquement —

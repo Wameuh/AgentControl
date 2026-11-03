@@ -80,7 +80,123 @@ fn ps(key: &str, label: &str, desc: &str, kind: ParamKind, default: Option<&str>
         secret: false,
         validation: None,
         choices: Vec::new(),
+        choice_labels: Vec::new(),
+        open_enum: false,
     }
+}
+
+/// Listes de valeurs annoncées par un profil d'agent — couples
+/// `(valeur, libellé)` par config_id, collectées dans les meta.json
+/// des sessions. Vide = l'agent n'a rien annoncé (ou jamais vu) →
+/// les params correspondants restent en texte libre.
+#[derive(Default)]
+pub(crate) struct DynChoices {
+    pub models: Vec<(String, String)>,
+    pub modes: Vec<(String, String)>,
+    pub thought_levels: Vec<(String, String)>,
+}
+
+/// Valeurs connues d'un config_id sur une métadonnée de session :
+/// options ACP (`config_options`, match `id` ou `category`, en
+/// couples valeur/libellé) complétées par `available_models` /
+/// `available_modes`. Vide = l'agent n'a rien annoncé → les appelants
+/// restent permissifs (pas de garde sur information absente).
+pub(crate) fn meta_config_values(m: &proto::SessionMeta, config_id: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = m
+        .config_options
+        .iter()
+        .find(|o| o.id == config_id || o.category == config_id)
+        .map(|o| {
+            o.options
+                .iter()
+                .map(|x| (x.value.clone(), x.name.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let extra: &[String] = match config_id {
+        "model" => &m.available_models,
+        "mode" => &m.available_modes,
+        _ => &[],
+    };
+    for v in extra {
+        if !out.iter().any(|(x, _)| x == v) {
+            out.push((v.clone(), v.clone()));
+        }
+    }
+    out
+}
+
+/// Scan `<root>/sessions/*/meta.json`, du plus récent (mtime) au plus
+/// ancien, en ne retenant que les métas du profil `agent` : pour
+/// chaque config_id, la première méta qui annonce une liste non vide
+/// fait foi — une méta récente muette ne masque pas une plus ancienne
+/// bavarde. Early-exit dès que les trois listes sont remplies.
+pub(crate) fn dyn_choices(root: &Path, agent: &str) -> DynChoices {
+    let mut out = DynChoices::default();
+    if agent.is_empty() {
+        return out;
+    }
+    let mut metas: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(root.join("sessions")) {
+        for e in rd.flatten() {
+            let p = e.path().join("meta.json");
+            if p.is_file() {
+                metas.push(p);
+            }
+        }
+    }
+    metas.sort_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+    for p in metas.into_iter().rev() {
+        let Ok(s) = std::fs::read_to_string(&p) else {
+            continue;
+        };
+        let Ok(m) = serde_json::from_str::<proto::SessionMeta>(&s) else {
+            continue;
+        };
+        if m.agent != agent {
+            continue;
+        }
+        if out.models.is_empty() {
+            out.models = meta_config_values(&m, "model");
+        }
+        if out.modes.is_empty() {
+            out.modes = meta_config_values(&m, "mode");
+        }
+        if out.thought_levels.is_empty() {
+            out.thought_levels = meta_config_values(&m, "thought_level");
+        }
+        if !out.models.is_empty() && !out.modes.is_empty() && !out.thought_levels.is_empty() {
+            break;
+        }
+    }
+    out
+}
+
+/// Param à liste dynamique : `known` non vide → enum ouverte (la
+/// valeur stockée hors liste est conservée, signalée « (?) » par le
+/// client) ; vide → texte libre comme avant.
+fn dyn_ps(
+    key: &str,
+    label: &str,
+    desc: &str,
+    default: Option<&str>,
+    known: &[(String, String)],
+) -> ParamSpec {
+    let mut p = ps(key, label, desc, ParamKind::String, default);
+    if !known.is_empty() {
+        p.kind = ParamKind::Enum;
+        p.choices = known.iter().map(|(v, _)| v.clone()).collect();
+        if known.iter().any(|(v, n)| v != n) {
+            p.choice_labels = known.iter().map(|(_, n)| n.clone()).collect();
+        }
+        p.open_enum = true;
+        p.description = Some(format!(
+            "{desc} — liste annoncée par l'agent ; une valeur hors \
+             liste est conservée (« (?) ») mais peut être refusée au \
+             spawn"
+        ));
+    }
+    p
 }
 
 /// Schéma déclaratif des paramètres orchestrateur — posé dans
@@ -88,7 +204,10 @@ fn ps(key: &str, label: &str, desc: &str, kind: ParamKind, default: Option<&str>
 /// affiche alors son formulaire générique et envoie
 /// `component_set_params` (intercepté côté démon — aucun code client
 /// spécifique). Labels/aides en français, comme le catalogue.
-pub(crate) fn params_schema() -> Vec<ParamSpec> {
+/// `dyn_` porte les listes annoncées par l'agent configuré (modèles,
+/// modes, thought levels) — les params correspondants deviennent des
+/// menus déroulants ouverts au lieu de champs texte libres.
+pub(crate) fn params_schema(dyn_: &DynChoices) -> Vec<ParamSpec> {
     vec![
         ps(
             "enabled",
@@ -187,26 +306,26 @@ pub(crate) fn params_schema() -> Vec<ParamSpec> {
             ParamKind::String,
             Some("devin"),
         ),
-        ps(
+        dyn_ps(
             "mode",
             "Mode au spawn",
             "mode demandé aux sessions spawnées ; vide = défaut",
-            ParamKind::String,
             Some("bypass"),
+            &dyn_.modes,
         ),
-        ps(
+        dyn_ps(
             "model",
             "Modèle au spawn",
             "modèle demandé aux sessions spawnées ; vide = défaut",
-            ParamKind::String,
             Some("swe-2-high"),
+            &dyn_.models,
         ),
-        ps(
+        dyn_ps(
             "thought_level",
             "Thought level",
             "posé après chaque spawn — vide = ne rien poser",
-            ParamKind::String,
             Some("max"),
+            &dyn_.thought_levels,
         ),
         ps(
             "prompt",
@@ -234,27 +353,27 @@ pub(crate) fn params_schema() -> Vec<ParamSpec> {
             ParamKind::Bool,
             Some("false"),
         ),
-        ps(
+        dyn_ps(
             "planner_mode",
             "Mode planner",
             "mode demandé au spawn des Backlog-P* ; vide = défaut",
-            ParamKind::String,
             Some("plan"),
+            &dyn_.modes,
         ),
-        ps(
+        dyn_ps(
             "reviewer_mode",
             "Mode reviewer",
             "mode demandé au spawn des Backlog-R* ; vide = défaut",
-            ParamKind::String,
             Some("smart"),
+            &dyn_.modes,
         ),
-        ps(
+        dyn_ps(
             "implement_mode",
             "Mode implémentation",
             "mode des workers d'items no_plan et des implémenteurs \
              (planner approuvé ou nouvelle session) ; vide = défaut",
-            ParamKind::String,
             Some("bypass"),
+            &dyn_.modes,
         ),
         ps(
             "max_review_rounds",
@@ -308,21 +427,21 @@ pub(crate) fn params_schema() -> Vec<ParamSpec> {
             ParamKind::String,
             Some("/mr review"),
         ),
-        ps(
+        dyn_ps(
             "pr_reviewer_mode",
             "Mode reviewer PR",
             "mode demandé au spawn des sessions PRReview-<N> ; \
              vide = défaut",
-            ParamKind::String,
             Some("smart"),
+            &dyn_.modes,
         ),
-        ps(
+        dyn_ps(
             "pr_reviewer_model",
             "Modèle reviewer PR",
             "modèle demandé au spawn des sessions PRReview-<N> ; \
              vide = le param model global",
-            ParamKind::String,
             None,
+            &dyn_.models,
         ),
         ps(
             "pr_review_max_parallel",
@@ -951,7 +1070,7 @@ mod tests {
 
     #[test]
     fn schema_couvre_les_cles_et_valeurs() {
-        let schema = params_schema();
+        let schema = params_schema(&DynChoices::default());
         assert_eq!(
             schema.iter().map(|p| p.key.as_str()).collect::<Vec<_>>(),
             KEYS.to_vec()
@@ -961,5 +1080,176 @@ mod tests {
         for p in &schema {
             assert!(vals.contains_key(&p.key), "valeur manquante: {}", p.key);
         }
+    }
+
+    #[test]
+    fn schema_sans_liste_reste_en_texte_libre() {
+        let schema = params_schema(&DynChoices::default());
+        for key in [
+            "mode",
+            "model",
+            "thought_level",
+            "planner_mode",
+            "reviewer_mode",
+            "implement_mode",
+            "pr_reviewer_mode",
+            "pr_reviewer_model",
+        ] {
+            let p = schema.iter().find(|p| p.key == key).unwrap();
+            assert_eq!(p.kind, ParamKind::String, "{key} doit rester String");
+            assert!(!p.open_enum && p.choices.is_empty());
+        }
+    }
+
+    #[test]
+    fn schema_avec_listes_devient_enum_ouverte() {
+        let dyn_ = DynChoices {
+            models: vec![
+                ("swe-2".into(), "SWE 2".into()),
+                ("swe-2-high".into(), "swe-2-high".into()),
+            ],
+            modes: vec![("bypass".into(), "Bypass".into())],
+            thought_levels: vec![("max".into(), "max".into())],
+        };
+        let schema = params_schema(&dyn_);
+        let m = schema.iter().find(|p| p.key == "model").unwrap();
+        assert_eq!(m.kind, ParamKind::Enum);
+        assert!(m.open_enum);
+        assert_eq!(m.choices, vec!["swe-2", "swe-2-high"]);
+        // Labels posés seulement si un libellé diffère de la valeur.
+        assert_eq!(m.choice_labels, vec!["SWE 2", "swe-2-high"]);
+        let tl = schema.iter().find(|p| p.key == "thought_level").unwrap();
+        assert_eq!(tl.kind, ParamKind::Enum);
+        assert!(
+            tl.choice_labels.is_empty(),
+            "label == valeur → pas de labels"
+        );
+        for key in [
+            "planner_mode",
+            "reviewer_mode",
+            "implement_mode",
+            "pr_reviewer_mode",
+        ] {
+            let p = schema.iter().find(|p| p.key == key).unwrap();
+            assert_eq!(p.kind, ParamKind::Enum, "{key} doit devenir Enum");
+            assert_eq!(p.choices, vec!["bypass"]);
+        }
+        let prm = schema
+            .iter()
+            .find(|p| p.key == "pr_reviewer_model")
+            .unwrap();
+        assert_eq!(prm.kind, ParamKind::Enum);
+        // agent reste en texte libre.
+        let a = schema.iter().find(|p| p.key == "agent").unwrap();
+        assert_eq!(a.kind, ParamKind::String);
+    }
+
+    fn meta(agent: &str) -> proto::SessionMeta {
+        proto::SessionMeta {
+            id: "s".into(),
+            agent: agent.into(),
+            title: "t".into(),
+            cwd: "/tmp".into(),
+            created_at: proto::now_iso(),
+            native_session_id: None,
+            mode: None,
+            model: None,
+            available_modes: vec![],
+            available_commands: vec![],
+            available_models: vec![],
+            config_options: vec![],
+            pending_config: Default::default(),
+            state: "idle".into(),
+            group: None,
+            spawned_by: None,
+            origin: None,
+            context_used: None,
+            context_size: None,
+        }
+    }
+
+    #[test]
+    fn meta_config_values_fusionne_options_et_availables() {
+        let mut m = meta("devin");
+        m.config_options = vec![proto::ConfigOption {
+            id: "model".into(),
+            options: vec![
+                proto::ConfigOpt {
+                    value: "a".into(),
+                    name: "Modèle A".into(),
+                    ..Default::default()
+                },
+                proto::ConfigOpt {
+                    value: "b".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }];
+        m.available_models = vec!["b".into(), "c".into()];
+        let v = meta_config_values(&m, "model");
+        assert_eq!(
+            v,
+            vec![
+                ("a".to_string(), "Modèle A".to_string()),
+                ("b".to_string(), String::new()),
+                ("c".to_string(), "c".to_string()),
+            ]
+        );
+        // match par category aussi.
+        m.config_options[0].id = "x".into();
+        m.config_options[0].category = "model".into();
+        assert_eq!(meta_config_values(&m, "model").len(), 3);
+        // Rien annoncé pour thought_level → vide.
+        assert!(meta_config_values(&m, "thought_level").is_empty());
+    }
+
+    #[test]
+    fn dyn_choices_scanne_les_metas_du_profil() {
+        let dir = std::env::temp_dir().join(format!("orchdyn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let sdir = dir.join("sessions");
+        let write_meta = |id: &str, agent: &str, f: &dyn Fn(&mut proto::SessionMeta)| {
+            let d = sdir.join(id);
+            std::fs::create_dir_all(&d).unwrap();
+            let mut m = meta(agent);
+            m.id = id.into();
+            f(&mut m);
+            std::fs::write(d.join("meta.json"), serde_json::to_string(&m).unwrap()).unwrap();
+        };
+        // Méta ancienne de l'agent cible : annonce modèles + modes.
+        write_meta("s-old", "devin", &|m| {
+            m.available_models = vec!["m1".into()];
+            m.available_modes = vec!["plan".into()];
+        });
+        // Méta d'un autre profil — ignorée même plus récente.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_meta("s-other", "codex", &|m| {
+            m.available_models = vec!["gpt".into()];
+        });
+        // Méta récente muette pour model mais qui annonce thought_level.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_meta("s-new", "devin", &|m| {
+            m.config_options = vec![proto::ConfigOption {
+                id: "thought_level".into(),
+                options: vec![proto::ConfigOpt {
+                    value: "high".into(),
+                    name: "High".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }];
+        });
+        let d = dyn_choices(&dir, "devin");
+        assert_eq!(d.models, vec![("m1".to_string(), "m1".to_string())]);
+        assert_eq!(d.modes, vec![("plan".to_string(), "plan".to_string())]);
+        assert_eq!(
+            d.thought_levels,
+            vec![("high".to_string(), "High".to_string())]
+        );
+        // Profil inconnu → rien.
+        assert!(dyn_choices(&dir, "nope").models.is_empty());
+        assert!(dyn_choices(&dir, "").models.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

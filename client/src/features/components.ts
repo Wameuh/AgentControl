@@ -648,14 +648,15 @@ export class ComponentsPanel {
             o.textContent = "—";
             el.appendChild(o);
           }
-          for (const c of opts) {
+          opts.forEach((c, i) => {
             const o = document.createElement("option");
             o.value = c;
-            o.textContent = c;
+            o.textContent = ps.choice_labels?.[i] || c;
             el.appendChild(o);
-          }
-          // Valeur stockée hors `choices` (spec éditée à la main) :
-          // la conserver plutôt que la retirer silencieusement.
+          });
+          // Valeur stockée hors `choices` (spec éditée à la main ou
+          // liste dynamique périmée) : la conserver plutôt que la
+          // retirer silencieusement.
           if (set && !opts.includes(cur)) {
             const o = document.createElement("option");
             o.value = cur;
@@ -725,7 +726,8 @@ export class ComponentsPanel {
             dlgErr("cp-err", t("comp_param_baddur", { k: ps.label }));
             return;
           }
-          if (ps.kind === "enum" && !(ps.choices ?? []).includes(v)) {
+          if (ps.kind === "enum" && !ps.open_enum
+              && !(ps.choices ?? []).includes(v)) {
             dlgErr("cp-err", t("comp_param_badenum", { k: ps.label }));
             return;
           }
@@ -896,12 +898,12 @@ export class ComponentsPanel {
             opt.textContent = "—";
             sel.appendChild(opt);
           }
-          for (const c of p.choices ?? []) {
+          (p.choices ?? []).forEach((c, i) => {
             const opt = document.createElement("option");
             opt.value = c;
-            opt.textContent = c;
+            opt.textContent = p.choice_labels?.[i] || c;
             sel.appendChild(opt);
-          }
+          });
           // Valeur stockée hors `choices` (schéma évolué) : la voir
           // plutôt que selectedIndex=-1 → "" (retrait silencieux).
           if (cur && !(p.choices ?? []).includes(cur)) {
@@ -986,7 +988,7 @@ export class ComponentsPanel {
         case "enum": {
           const v = (el as HTMLSelectElement).value;
           if (v !== cur) {
-            if (v && !(p.choices ?? []).includes(v))
+            if (v && !p.open_enum && !(p.choices ?? []).includes(v))
               throw new Error(t("comp_param_badenum", { k: p.label || p.key }));
             patch[p.key] = v;
           }

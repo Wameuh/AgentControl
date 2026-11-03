@@ -264,6 +264,15 @@ impl Components {
             // envoie `component_set_params` (intercepté → orch).
             let i = INTERNALS.iter().find(|i| i.name == name)?;
             let cfg = self.orch.cfg.read().unwrap().clone();
+            // Listes modèles/modes/thought_level annoncées par le
+            // profil `agent` configuré (meta.json des sessions) → les
+            // params correspondants deviennent des menus déroulants.
+            let agent = if cfg.agent.is_empty() {
+                crate::server::OrchCfg::default().agent
+            } else {
+                cfg.agent.clone()
+            };
+            let dyn_ = crate::server::orch_cfg::dyn_choices(&self.root, &agent);
             let spec = ComponentSpec {
                 name: name.to_string(),
                 kind: ComponentKind::Internal,
@@ -279,7 +288,7 @@ impl Components {
                 description: Some(i.description.to_string()),
                 queries: HashMap::new(),
                 catalog: None,
-                params_schema: crate::server::orch_cfg::params_schema(),
+                params_schema: crate::server::orch_cfg::params_schema(&dyn_),
                 params: crate::server::orch_cfg::params_values(&cfg),
                 render: None,
             };
@@ -1262,6 +1271,8 @@ mod tests {
             secret: false,
             validation: None,
             choices: Vec::new(),
+            choice_labels: Vec::new(),
+            open_enum: false,
         });
         cur.render = Some(proto::ConfigRender {
             path: "~/x.toml".into(),

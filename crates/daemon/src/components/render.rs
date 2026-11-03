@@ -398,6 +398,8 @@ mod tests {
             secret: false,
             validation: None,
             choices: vec![],
+            choice_labels: Vec::new(),
+            open_enum: false,
         }
     }
 
