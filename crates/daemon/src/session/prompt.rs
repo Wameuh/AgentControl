@@ -130,7 +130,7 @@ impl Session {
                 });
                 return Ok(false);
             }
-            self.clear_error();
+            let _ = self.clear_error();
             self.enqueue_prompt(text, false, PromptSrc::User);
             self.spawn_drain();
             return Ok(false);

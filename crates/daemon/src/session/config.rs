@@ -195,7 +195,11 @@ impl Session {
                 // Action explicite de réparation : un changement de
                 // modèle lève la retenue d'erreur (kind model/auth —
                 // c'est précisément le geste attendu pour débloquer).
-                self.clear_error();
+                // Hold levé → drain : busy conservé vrai sans runner
+                // figerait la file (garnie du prompt fautif re-enfilé).
+                if self.clear_error() && self.has_queued() {
+                    self.spawn_drain();
+                }
                 Ok(())
             }
             Err(_) => {
@@ -428,6 +432,12 @@ impl Session {
                 };
                 self.save_meta();
                 self.emit(EventKind::ConfigOptions { options: opts });
+                // Symétrie avec set_model : changer de modèle via
+                // config_option est la même réparation — lève la
+                // retenue d'erreur et relance la file si un hold tombait.
+                if config_id == "model" && self.clear_error() && self.has_queued() {
+                    self.spawn_drain();
+                }
                 Ok(())
             }
             Err(e) => {

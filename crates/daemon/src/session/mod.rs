@@ -573,12 +573,16 @@ impl Session {
     /// Sortie complète de l'état d'erreur (action explicite : force,
     /// set_model, respawn, /clear) — lève la retenue, efface la trace
     /// et repasse « idle » si l'état était « error » et l'agent vivant.
-    pub(super) fn clear_error(&self) {
-        self.take_error_hold();
+    /// Retourne vrai si une retenue a été levée — l'appelant peut alors
+    /// relancer le drain (busy conservé vrai sans runner coincerait la
+    /// file, désormais toujours garnie du prompt fautif re-enfilé).
+    pub(super) fn clear_error(&self) -> bool {
+        let held = self.take_error_hold();
         self.clear_last_error();
         if self.meta_snapshot().state == "error" && self.is_alive() {
             self.set_state("idle");
         }
+        held
     }
 
 }
