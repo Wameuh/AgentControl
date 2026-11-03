@@ -288,7 +288,11 @@ fn reviewer_choice(
         return ReviewerChoice::Spawn;
     }
     match (mapped, in_session_ids, meta_state) {
-        (Some(sid), true, Some(state)) if state != "dead" => ReviewerChoice::Reuse(sid.clone()),
+        // « error » hors rate_limit = en panne (model/auth/other) —
+        // inutile de le réveiller, il ne répondra qu'au même échec.
+        (Some(sid), true, Some(state)) if state != "dead" && state != "error" => {
+            ReviewerChoice::Reuse(sid.clone())
+        }
         _ => ReviewerChoice::Spawn,
     }
 }
@@ -2176,6 +2180,16 @@ impl Daemon {
     /// aux deux h_send pour que le retry post-resume garde la même
     /// sémantique.
     async fn plan_send(self: &Arc<Self>, sid: &str, msg: String, force: bool) -> bool {
+        // Session en erreur : le dernier tour a échoué — un nudge
+        // s'enfilerait derrière la retenue sans être livré. Le retry
+        // rate_limit ou l'action utilisateur la débloquera ; le tick
+        // suivant retentera.
+        if let Ok(s) = self.get_session(sid).await {
+            if s.meta_snapshot().state == "error" {
+                info!("orchestrateur: {sid} en erreur — nudge abandonné");
+                return false;
+            }
+        }
         if self
             .h_send(sid.to_string(), msg.clone(), force, false)
             .await
@@ -2564,6 +2578,11 @@ mod tests {
             reviewer_choice(Some(&sid), Some("dead"), true, true),
             ReviewerChoice::Spawn
         );
+        // « error » = en panne — réveiller ne sert à rien, session neuve.
+        assert_eq!(
+            reviewer_choice(Some(&sid), Some("error"), true, true),
+            ReviewerChoice::Spawn
+        );
         assert_eq!(
             reviewer_choice(Some(&sid), Some("idle"), false, true),
             ReviewerChoice::Spawn
@@ -2732,6 +2751,7 @@ mod tests {
             origin: Some(COMPONENT_ORIGIN.to_string()),
             context_used: None,
             context_size: None,
+            last_error: None,
         };
         let c = cfg_default();
         let metas = vec![

@@ -981,7 +981,11 @@ export class Sidebar {
     const originHtml = s.origin
       ? `<span class="sess-origin" title="${q(esc(t("origin_tip", { origin: s.origin })))}">${t("via")} ${this.hl(s.origin.replace(/^component:/, "") || s.origin)}</span>`
       : "";
-    div.innerHTML = `<span class="dot st-${dotCls(s.state)}" title="${q(esc(s.state))}">${dotIcon(s.state)}</span><span class="t">${this.hl(s.title)}</span>${originHtml}${prHtml}<span class="a">${this.hl(s.agent)}</span><button class="sess-del" title="Supprimer">${icon("close")}</button>`;
+    const dotTip =
+      s.state === "error" && s.last_error
+        ? `error: ${s.last_error.kind} · ${s.last_error.message} · x${s.last_error.count} · ${s.last_error.at}`
+        : s.state;
+    div.innerHTML = `<span class="dot st-${dotCls(s.state)}" title="${q(esc(dotTip))}">${dotIcon(s.state)}</span><span class="t">${this.hl(s.title)}</span>${originHtml}${prHtml}<span class="a">${this.hl(s.agent)}</span><button class="sess-del" title="Supprimer">${icon("close")}</button>`;
     div.onclick = () => {
       void this.openSession(s.id);
       // Mobile : fermer le drawer après sélection.

@@ -111,7 +111,7 @@
   stroke: var(--gold); animation: mpulse 1.6s ease-in-out infinite;
 }
 .n.st-starting .nc { stroke: var(--gold); animation: mpulse 1.2s ease-in-out infinite; }
-.n.st-waiting_input .nc, .n.st-failed .nc {
+.n.st-waiting_input .nc, .n.st-failed .nc, .n.st-error .nc {
   stroke: var(--red); animation: mpulse 1.1s ease-in-out infinite;
 }
 .n.st-compacting .nc { stroke: var(--violet); animation: mpulse 1.4s ease-in-out infinite; }
@@ -152,6 +152,7 @@
 .lg-dot.st-working { background: var(--gold); }
 .lg-dot.st-waiting_input { background: var(--red); }
 .lg-dot.st-idle { background: var(--sage); }
+.lg-dot.st-error { background: var(--red); }
 .lg-dot.st-dead { background: var(--dim); }
 .lg-flow { width: 16px; height: 0; border-top: 2px dashed var(--accent); }
 /* Échantillons de nœuds — mêmes formes que dans le graphe :

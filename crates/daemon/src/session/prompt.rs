@@ -10,6 +10,65 @@ use std::sync::atomic::Ordering;
 
 use crate::acp;
 
+/// Issue d'un tour `session/prompt` pour le runner.
+pub(super) enum TurnOutcome {
+    /// Réponse OK (ou stopReason `cancelled` — annulation volontaire,
+    /// jamais une erreur).
+    Ok,
+    /// RPC ou stopReason en échec : kind = classification, msg brut.
+    Failed { kind: &'static str, msg: String },
+    /// Génération périmée pendant le tour (clear/kill) : ni erreur ni
+    /// action — le nouveau cycle décide.
+    Cancelled,
+}
+
+/// Classification d'une erreur `session/prompt` — pilote le retry :
+/// `rate_limit` = backoff automatique borné, `model`/`auth`/`other` =
+/// jamais de retry sans action explicite (changer de modèle/réparer
+/// l'auth est une décision humaine).
+/// Ordre des tests : auth > rate_limit > model — un « 403 » est auth
+/// même avec « quota » dans le texte, un « rate limit » ne contient
+/// quasiment jamais « model ».
+pub(super) fn classify_error(msg: &str) -> &'static str {
+    let m = msg.to_lowercase();
+    if m.contains("unauthorized")
+        || m.contains("401")
+        || m.contains("403")
+        || m.contains("authentication")
+        || m.contains("credentials")
+        || m.contains("login")
+        || m.contains("api key")
+    {
+        return "auth";
+    }
+    if m.contains("rate limit")
+        || m.contains("ratelimit")
+        || m.contains("429")
+        || m.contains("quota")
+        || m.contains("upgrade")
+        || m.contains("too many requests")
+        || m.contains("resource exhausted")
+    {
+        return "rate_limit";
+    }
+    if (m.contains("invalid params") && m.contains("model"))
+        || m.contains("model not found")
+        || m.contains("unknown model")
+        || m.contains("model unavailable")
+        || (m.contains("does not exist") && m.contains("model"))
+    {
+        return "model";
+    }
+    "other"
+}
+
+/// Backoff du retry `rate_limit` : 60 s au premier échec, doublé à
+/// chaque échec consécutif du même kind, plafonné à 1 h.
+pub(super) fn backoff_for(count: u32) -> std::time::Duration {
+    let secs = 60u64.saturating_mul(1u64 << count.saturating_sub(1).min(6));
+    std::time::Duration::from_secs(secs.min(3600))
+}
+
 impl Session {
     // -----------------------------------------------------------------------
     // API publique (dispatchée par le serveur)
@@ -43,6 +102,31 @@ impl Session {
                 });
                 return Ok(false);
             }
+        }
+        // Retenue d'erreur : le runner a breaké en gardant `busy` —
+        // plus aucun tour ne part. `rate_limit` : le message attend le
+        // retry programmé en file. Autres kinds : un envoi utilisateur
+        // explicite est l'action de déblocage — le hold tombe et la
+        // livraison repart tout de suite (drain explicite, comme au
+        // désarmement compact : busy vrai ne garantit plus un runner).
+        if !force && self.error_held() {
+            let kind = self
+                .meta_snapshot()
+                .last_error
+                .map(|le| le.kind)
+                .unwrap_or_default();
+            if kind == "rate_limit" {
+                self.enqueue_prompt(text, false, PromptSrc::User);
+                self.emit(EventKind::System {
+                    text: "session en erreur (rate limit) — message en file,                            retry programmé"
+                        .into(),
+                });
+                return Ok(false);
+            }
+            self.clear_error();
+            self.enqueue_prompt(text, false, PromptSrc::User);
+            self.spawn_drain();
+            return Ok(false);
         }
         // Agent pas prêt à recevoir (mort, ou spawn/handshake en vol :
         // le stdin existe avant la fin du session/load) — enfiler : un
@@ -126,14 +210,18 @@ impl Session {
             return Ok(false);
         }
         if force {
-            // bypass volontaire : sort de la retenue compact le cas
-            // échéant, annule le tour courant, livre en priorité.
+            // bypass volontaire : sort des retenues compact/erreur le
+            // cas échéant, annule le tour courant, livre en priorité.
             let held = self.take_compact_hold();
             if held {
                 self.emit(EventKind::System {
                     text: "compact interrompu — envoi forcé".into(),
                 });
             }
+            // La retenue d'erreur tombe aussi — la trace last_error
+            // survit jusqu'au prochain résultat de tour (un succès
+            // l'efface, un échec la ré-écrit).
+            self.take_error_hold();
             let _ = self.cancel().await;
             let already = self.enqueue_prompt(text, true, PromptSrc::User);
             if held || !already {
@@ -170,6 +258,13 @@ impl Session {
                 });
                 return Ok(false);
             }
+        }
+        // Retenue d'erreur : un peer ne peut pas « réparer » — le
+        // message attend la sortie du hold (retry rate_limit ou action
+        // utilisateur), sans lever la retenue.
+        if self.error_held() {
+            self.enqueue_prompt(wrapped, false, PromptSrc::Peer);
+            return Ok(false);
         }
         // Même garde que send_prompt : mort ou spawn en vol → enfiler,
         // le drain post-spawn livrera. Endormie entre le check du
@@ -360,6 +455,12 @@ impl Session {
             if self.compacting.lock().unwrap().is_some() {
                 break;
             }
+            // Même retenue que compact : un tour en échec a suspendu la
+            // livraison — sortie en conservant `busy`, le timer de
+            // retry (rate_limit) ou l'action explicite relancera.
+            if self.error_hold.lock().unwrap().is_some() {
+                break;
+            }
             let (next, src) = {
                 let mut q = self.prompt_queue.lock().unwrap();
                 match q.pop_front() {
@@ -394,16 +495,36 @@ impl Session {
             if armed {
                 self.arm_compact(src == PromptSrc::Auto);
             }
-            if !self.run_turn(&next).await && armed && self.take_compact_hold() {
-                // /compact refusé ou inconnu côté agent : aucune
-                // compaction ne tourne — désarmer plutôt que retenir
-                // les envois jusqu'au timeout. Pas de spawn_drain :
-                // cette boucle poursuit la livraison elle-même.
-                self.emit(EventKind::System {
-                    text: "compact terminé — échec de la commande".into(),
-                });
-                if self.is_alive() {
-                    self.set_state("idle");
+            match self.run_turn(&next).await {
+                TurnOutcome::Ok | TurnOutcome::Cancelled => {}
+                TurnOutcome::Failed { kind, msg } => {
+                    if armed && self.take_compact_hold() {
+                        // /compact refusé ou inconnu côté agent : aucune
+                        // compaction ne tourne — désarmer plutôt que
+                        // retenir les envois jusqu'au timeout.
+                        self.emit(EventKind::System {
+                            text: "compact terminé — échec de la commande".into(),
+                        });
+                    }
+                    // Retenue d'erreur : suspendre la livraison (busy
+                    // conservé comme pour compact) plutôt qu'enchaîner
+                    // la file sur le même échec — c'est le mécanisme
+                    // qui cassait la boucle de relance orchestrateur.
+                    // Le timer rate_limit ou une action explicite la
+                    // lèvera. Agent mort pendant le tour (binding
+                    // perdu, kill) → pas de hold : on_agent_exit pose
+                    // dead, un état « error » écrasé par-dessus serait
+                    // un mensonge transitoire devenu permanent.
+                    if self.is_alive() {
+                        self.hold_error(kind, &msg);
+                    } else if self.meta_snapshot().state != "dead" {
+                        // Mort détectée mais l'exit pas encore propagé :
+                        // laisser dead arriver plutôt qu'un « error »
+                        // fantôme — et libérer busy pour ne pas figer
+                        // la file si le drain post-respawn repart.
+                        self.busy.store(false, Ordering::SeqCst);
+                    }
+                    break;
                 }
             }
         }
@@ -416,6 +537,7 @@ impl Session {
         // post-spawn.
         if self.accepting_prompts()
             && self.compacting.lock().unwrap().is_none()
+            && self.error_hold.lock().unwrap().is_none()
             && !self.prompt_queue.lock().unwrap().is_empty()
         {
             self.spawn_drain();
@@ -473,29 +595,51 @@ impl Session {
     }
 
     /// Un tour session/prompt : working → réponse → idle.
-    /// Retourne faux si le `session/prompt` RPC a échoué.
-    async fn run_turn(&self, text: &str) -> bool {
+    /// Issue typée pour le runner : Ok (end_turn ou cancelled), Failed
+    /// (kind classifié → retenue d'erreur), Cancelled (génération
+    /// périmée — silence total, le nouveau cycle décide).
+    async fn run_turn(&self, text: &str) -> TurnOutcome {
         // Un tour de l'ancien contexte tué par un clear n'émet pas son
         // "prompt failed" dans le journal frais.
         let gen = self.spawn_gen.load(Ordering::SeqCst);
         match self.prompt_rpc(text).await {
             Ok(v) => {
-                if let Some(sr) = v.get("stopReason").and_then(Value::as_str) {
-                    if sr != "end_turn" && self.spawn_gen.load(Ordering::SeqCst) == gen {
+                let sr = v.get("stopReason").and_then(Value::as_str);
+                if self.spawn_gen.load(Ordering::SeqCst) != gen {
+                    return TurnOutcome::Cancelled;
+                }
+                match sr {
+                    // Annulation volontaire (cancel utilisateur) : pas
+                    // une erreur — la file poursuit normalement.
+                    Some("cancelled") | Some("end_turn") | None => {
+                        // Succès : la trace d'erreur d'un éventuel retry
+                        // rate_limit s'efface (no-op sinon).
+                        self.clear_last_error();
+                        TurnOutcome::Ok
+                    }
+                    Some(sr) => {
                         self.emit(EventKind::System {
                             text: format!("turn ended: {sr}"),
                         });
+                        TurnOutcome::Failed {
+                            kind: "other",
+                            msg: format!("stopReason: {sr}"),
+                        }
                     }
                 }
-                true
             }
             Err(e) => {
-                if self.spawn_gen.load(Ordering::SeqCst) == gen {
-                    self.emit(EventKind::Error {
-                        message: format!("prompt failed: {e}"),
-                    });
+                if self.spawn_gen.load(Ordering::SeqCst) != gen {
+                    return TurnOutcome::Cancelled;
                 }
-                false
+                let msg = format!("{e}");
+                self.emit(EventKind::Error {
+                    message: format!("prompt failed: {msg}"),
+                });
+                TurnOutcome::Failed {
+                    kind: classify_error(&msg),
+                    msg,
+                }
             }
         }
     }
@@ -565,6 +709,11 @@ impl Session {
         // compact l'annulerait côté agent — la file reste inchangée.
         if self.compacting.lock().unwrap().is_some() {
             return SteerOutcome::Held("compact");
+        }
+        // Retenue d'erreur : pas de tour en cours à « steer » — le
+        // steer injecterait un session/prompt direct malgré le hold.
+        if self.error_held() {
+            return SteerOutcome::Held("error");
         }
         // Agent pas prêt (mort, spawn/réveil en vol, endormie) : un
         // session/prompt répondrait "Session not found" — même garde

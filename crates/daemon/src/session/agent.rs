@@ -381,6 +381,11 @@ impl Session {
                 });
             }
         }
+        // Reset de cycle : un spawn réussi solde la trace d'erreur
+        // d'un éventuel cycle précédent (respawn, /clear, réveil) et
+        // lève la retenue — le drain post-spawn livrera la file.
+        self.take_error_hold();
+        self.clear_last_error();
         self.set_state("idle");
         Ok(true)
     }
@@ -876,6 +881,10 @@ impl Session {
         // libellés d'erreur remontés par les pending soldés).
         let g = self.spawn_gen.fetch_add(1, Ordering::SeqCst) + 1;
         self.supplant_mark.store(g, Ordering::SeqCst);
+        // Abort du timer de retry erreur : le nouveau cycle décidera —
+        // laisser le timer survivre relancerait un drain sur l'agent
+        // frais sans rapport avec l'échec soldé.
+        self.take_error_hold();
         *self.stdin_tx.lock().unwrap() = None;
         {
             let mut p = self.acp_pending.lock().unwrap();
@@ -889,6 +898,9 @@ impl Session {
     /// Marque la session morte — chemin d'erreur d'un respawn post-clear
     /// (set_state est privé, le handler serveur en a besoin ici).
     pub fn mark_dead(&self) {
+        // Abort du timer de retry : une session morte ne doit pas se
+        // relancer toute seule — le hold tombe avec l'agent.
+        self.take_error_hold();
         self.set_state("dead");
     }
 
@@ -1060,6 +1072,7 @@ mod tests {
             origin: None,
             context_used: None,
             context_size: None,
+            last_error: None,
         };
         std::fs::write(
             dir.join("meta.json"),

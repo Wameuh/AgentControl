@@ -12,7 +12,7 @@ import { t } from "../i18n";
  *  verte idle, grise dead. */
 const DOT_ROLE: Record<string, string> = {
   working: "human", running: "human", starting: "human",
-  waiting_input: "inference", failed: "inference",
+  waiting_input: "inference", failed: "inference", error: "inference",
   compacting: "agent",
   idle: "neutral",
   interrupted: "slate", dead: "slate", asleep: "slate",

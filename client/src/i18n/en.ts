@@ -205,7 +205,7 @@ export const en = {
   map_last_exit: "Last exit", map_source: "Source",
   map_autostart: "Autostart", map_version: "Version",
   map_leg_working: "working", map_leg_wait: "waiting",
-  map_leg_idle: "idle", map_leg_dead: "dead",
+  map_leg_idle: "idle", map_leg_error: "error", map_leg_dead: "dead",
   map_leg_flow: "active flow",
   map_leg_prog: "program", map_leg_agent: "agent",
   map_leg_manage: "manages", map_leg_know: "observed",

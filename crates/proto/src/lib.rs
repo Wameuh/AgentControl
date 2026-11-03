@@ -377,8 +377,10 @@ pub struct SessionMeta {
     /// spawn (session/load). Clés = id d'option ("model", "mode", …).
     #[serde(default)]
     pub pending_config: std::collections::HashMap<String, String>,
-    /// running | waiting_input | idle | dead | interrupted | asleep
-    /// (asleep : agent libéré volontairement, réveil auto au prochain envoi)
+    /// running | waiting_input | idle | dead | interrupted | asleep | error
+    /// (asleep : agent libéré volontairement, réveil auto au prochain envoi ;
+    /// error : dernier tour session/prompt en échec — cf. `last_error`,
+    /// livraison suspendue jusqu'à retry ou action explicite)
     #[serde(default = "default_state")]
     pub state: String,
     /// Groupe nommé (sidebar) — None = non groupé.
@@ -403,6 +405,24 @@ pub struct SessionMeta {
     /// Fenêtre de contexte annoncée par l'agent (tokens).
     #[serde(default)]
     pub context_size: Option<u64>,
+    /// Dernier échec de tour session/prompt (état "error") — kind :
+    /// rate_limit | model | auth | other. Effacé au premier tour
+    /// réussi ou reset de cycle (spawn, /clear, set_model…).
+    #[serde(default)]
+    pub last_error: Option<LastError>,
+}
+
+/// Trace persistée du dernier échec `session/prompt` (état "error").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LastError {
+    /// Message d'erreur brut (tronqué à la pose).
+    pub message: String,
+    /// Classification : rate_limit | model | auth | other.
+    pub kind: String,
+    /// Horodatage du premier échec de la série.
+    pub at: String,
+    /// Échecs consécutifs du même kind.
+    pub count: u32,
 }
 
 fn default_state() -> String {

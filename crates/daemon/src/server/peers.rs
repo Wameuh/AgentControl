@@ -178,6 +178,7 @@ impl Daemon {
                     origin: None,
                     context_used: None,
                     context_size: None,
+                    last_error: None,
                 };
                 let dir = Session::create_dir(&self.root, &meta)?;
                 let session2 = Session::open(dir, &self.compact)?;

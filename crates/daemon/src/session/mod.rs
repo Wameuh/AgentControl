@@ -47,6 +47,15 @@ struct CompactHold {
     auto: bool,
 }
 
+/// Retenue active après un tour `session/prompt` en échec — miroir de
+/// `CompactHold` : le drain s'arrête en conservant `busy`, les envois
+/// s'enfilent jusqu'à la sortie du hold (timer de retry pour
+/// `rate_limit`, action explicite sinon). `timer` : None = jamais de
+/// retry automatique (model/auth/other — seul l'utilisateur lève).
+struct ErrorHold {
+    timer: Option<tokio::task::JoinHandle<()>>,
+}
+
 pub struct Session {
     pub dir: PathBuf,
     pub meta: Mutex<SessionMeta>,
@@ -91,6 +100,12 @@ pub struct Session {
     /// jusqu'au signal de fin (contexte réduit, message, cancel,
     /// timeout) — un prompt livré pendant le compact l'annulerait.
     compacting: Mutex<Option<CompactHold>>,
+    /// Dernier tour en échec : livraison suspendue — le runner a breaké
+    /// en conservant `busy`. Levée par le timer de retry (`rate_limit`)
+    /// ou une action explicite (send user, force, set_model, respawn,
+    /// /clear). Distinct de `compacting` : une session en erreur reste
+    /// « error » (visible) et ne relance pas « continue your task ».
+    error_hold: Mutex<Option<ErrorHold>>,
     /// Seuil du compact auto résolu à l'open : global `[compact]` +
     /// override `[agents.<id>.compact]` (server/cfg.rs, CompactSrc) —
     /// l'override session (compact.json, clés `ac.compact_*`) s'applique
@@ -226,6 +241,7 @@ impl Session {
             active_prompts: AtomicU64::new(0),
             prompt_queue: Mutex::new(std::collections::VecDeque::new()),
             compacting: Mutex::new(None),
+            error_hold: Mutex::new(None),
             compact_base,
             compact_override,
             me: me.clone(),
@@ -438,6 +454,125 @@ impl Session {
         });
     }
 
+    // -------------------------------------------------------------------
+    // Retenue d'erreur (tour session/prompt en échec)
+    // -------------------------------------------------------------------
+
+    /// Une retenue d'erreur est-elle active (livraison suspendue) ?
+    pub fn error_held(&self) -> bool {
+        self.error_hold.lock().unwrap().is_some()
+    }
+
+    /// Retire la retenue d'erreur (annule le timer de retry s'il y en a
+    /// un). Retourne vrai si une retenue était active.
+    pub(super) fn take_error_hold(&self) -> bool {
+        let h = self.error_hold.lock().unwrap().take();
+        if let Some(h) = &h {
+            if let Some(t) = &h.timer {
+                t.abort();
+            }
+        }
+        h.is_some()
+    }
+
+    /// Pose la retenue d'erreur + état « error » + trace persistée —
+    /// appelé par le drain après un tour en échec, juste avant de
+    /// breaker en conservant `busy`. `retry` = backoff `rate_limit` :
+    /// à l'échéance le hold tombe et le drain relance UN tour, qui
+    /// ré-armera si l'échec persiste. None = jamais de retry
+    /// automatique (model/auth/other).
+    pub(super) fn hold_error(&self, kind: &str, msg: &str) {
+        self.set_last_error(kind, msg);
+        let count = self
+            .meta
+            .lock()
+            .unwrap()
+            .last_error
+            .as_ref()
+            .map(|le| le.count)
+            .unwrap_or(1);
+        let retry = (kind == "rate_limit")
+            .then(|| prompt::backoff_for(count));
+        let mut h = self.error_hold.lock().unwrap();
+        if let Some(old) = h.take() {
+            if let Some(t) = &old.timer {
+                t.abort();
+            }
+        }
+        let timer = retry.map(|d| {
+            let me = self.me.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(d).await;
+                if let Some(s) = me.upgrade() {
+                    // Échéance du backoff : le hold tombe, le drain
+                    // retente la file (un seul retry — un nouvel échec
+                    // ré-armera avec le backoff suivant).
+                    s.take_error_hold();
+                    s.spawn_drain();
+                }
+            })
+        });
+        *h = Some(ErrorHold { timer });
+        drop(h);
+        self.set_state("error");
+        self.emit(EventKind::System {
+            text: match kind {
+                "rate_limit" => format!(
+                    "session en erreur : rate limit — retry automatique                      programmé ({msg})"
+                ),
+                _ => format!(
+                    "session en erreur : {kind} — aucun retry automatique                      (envoi forcé, set_model ou resume pour débloquer) ({msg})"
+                ),
+            },
+        });
+    }
+
+    /// Enregistre l'échec dans meta.last_error — `count` incrémenté
+    /// tant que le kind reste identique (série consécutive).
+    pub(super) fn set_last_error(&self, kind: &str, msg: &str) {
+        let mut m = self.meta.lock().unwrap();
+        let count = match &m.last_error {
+            Some(le) if le.kind == kind => le.count + 1,
+            _ => 1,
+        };
+        let mut message = msg.to_string();
+        if message.chars().count() > 300 {
+            message = message.chars().take(300).collect();
+        }
+        m.last_error = Some(proto::LastError {
+            message,
+            kind: kind.to_string(),
+            at: proto::now_iso(),
+            count,
+        });
+        drop(m);
+        self.save_meta();
+    }
+
+    /// Efface la trace d'erreur persistée (succès de tour, reset de
+    /// cycle) — n'a pas d'effet sans last_error posé.
+    pub(super) fn clear_last_error(&self) {
+        {
+            let mut m = self.meta.lock().unwrap();
+            if m.last_error.is_none() {
+                return;
+            }
+            m.last_error = None;
+        }
+        self.save_meta();
+    }
+
+    /// Sortie complète de l'état d'erreur (action explicite : force,
+    /// set_model, respawn, /clear) — lève la retenue, efface la trace
+    /// et repasse « idle » si l'état était « error » et l'agent vivant.
+    pub(super) fn clear_error(&self) {
+        self.take_error_hold();
+        self.clear_last_error();
+        if self.meta_snapshot().state == "error" && self.is_alive() {
+            self.set_state("idle");
+        }
+    }
+
 }
 
 #[cfg(test)]
@@ -480,6 +615,7 @@ mod tests {
             origin: None,
             context_used: None,
             context_size: None,
+            last_error: None,
         };
         std::fs::write(
             dir.join("meta.json"),
@@ -830,6 +966,96 @@ mod tests {
         s.set_config_option("ac.compact_enabled", "on").await.unwrap();
         s.handle_session_update(&usage(95_500)).await;
         assert_eq!(s.prompt_queue.lock().unwrap().front().unwrap().0, "/compact");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Classification des échecs session/prompt — pilote le retry :
+    /// auth > rate_limit > model > other.
+    #[test]
+    fn error_classify() {
+        use prompt::classify_error;
+        assert_eq!(
+            classify_error("Reached free model rate limit. Upgrade to a paid plan"),
+            "rate_limit"
+        );
+        assert_eq!(classify_error("HTTP 429 too many requests"), "rate_limit");
+        assert_eq!(classify_error("resource exhausted"), "rate_limit");
+        assert_eq!(classify_error("Invalid params: model foo"), "model");
+        assert_eq!(classify_error("model not found"), "model");
+        assert_eq!(classify_error("401 unauthorized"), "auth");
+        assert_eq!(classify_error("invalid api key"), "auth");
+        // auth prime sur les mots « quota »/« limit ».
+        assert_eq!(classify_error("403 quota exceeded"), "auth");
+        assert_eq!(classify_error("connection reset by peer"), "other");
+    }
+
+    /// Backoff rate_limit : 60 s puis exponentiel, plafonné à 1 h.
+    #[test]
+    fn error_backoff() {
+        assert_eq!(prompt::backoff_for(1), std::time::Duration::from_secs(60));
+        assert_eq!(prompt::backoff_for(2), std::time::Duration::from_secs(120));
+        assert_eq!(prompt::backoff_for(7), std::time::Duration::from_secs(3600));
+        assert_eq!(prompt::backoff_for(30), std::time::Duration::from_secs(3600));
+    }
+
+    /// hold_error pose l'état « error », la trace persistée (count
+    /// incrémenté tant que le kind se répète) et la retenue ;
+    /// clear_error lève le tout. rate_limit → timer armé, autres kinds
+    /// → jamais de retry automatique.
+    #[tokio::test]
+    async fn error_hold_cycle() {
+        let (s, dir) = tmp_session("error-hold");
+        s.hold_error("model", "model not found");
+        let m = s.meta_snapshot();
+        assert_eq!(m.state, "error");
+        let le = m.last_error.unwrap();
+        assert_eq!(le.kind, "model");
+        assert_eq!(le.count, 1);
+        assert!(!le.message.is_empty());
+        assert!(s.error_held());
+        // Timer absent pour model (jamais de retry auto).
+        assert!(s.error_hold.lock().unwrap().as_ref().unwrap().timer.is_none());
+
+        // Re-échec même kind → count++, hold ré-armé.
+        s.hold_error("model", "still missing");
+        assert_eq!(s.meta_snapshot().last_error.unwrap().count, 2);
+        assert!(s.error_held());
+
+        // rate_limit → timer armé (retry programmé).
+        s.hold_error("rate_limit", "429");
+        assert!(s.error_hold.lock().unwrap().as_ref().unwrap().timer.is_some());
+        // count repart à 1 : kind différent = nouvelle série.
+        assert_eq!(s.meta_snapshot().last_error.unwrap().count, 1);
+
+        // Action explicite : tout tombe. L'état repasse « idle »
+        // seulement si l'agent vit — ici pas de process, « error »
+        // reste (un dead/on_agent_exit fera foi de l'état final).
+        s.clear_error();
+        assert!(!s.error_held());
+        let m = s.meta_snapshot();
+        assert!(m.last_error.is_none());
+        assert_eq!(m.state, "error");
+
+        // Persisté dans meta.json : la trace écrite est relue à l'open.
+        s.hold_error("auth", "401");
+        let s2 = Session::open(dir.clone(), &test_compact_src()).unwrap();
+        let le2 = s2.meta_snapshot().last_error.unwrap();
+        assert_eq!(le2.kind, "auth");
+        assert_eq!(s2.meta_snapshot().state, "error");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Succès de tour : la trace d'erreur s'efface (clear_last_error
+    /// est le no-op bon marché du chemin nominal).
+    #[test]
+    fn error_clear_on_success() {
+        let (s, dir) = tmp_session("error-clear");
+        s.set_last_error("other", "boom");
+        assert!(s.meta_snapshot().last_error.is_some());
+        s.clear_last_error();
+        assert!(s.meta_snapshot().last_error.is_none());
+        // Appel répété : no-op, pas de réécriture.
+        s.clear_last_error();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

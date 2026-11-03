@@ -192,6 +192,10 @@ impl Session {
                 self.meta.lock().unwrap().model = Some(model.into());
                 self.save_meta();
                 self.emit_model_applied(model, wanted);
+                // Action explicite de réparation : un changement de
+                // modèle lève la retenue d'erreur (kind model/auth —
+                // c'est précisément le geste attendu pour débloquer).
+                self.clear_error();
                 Ok(())
             }
             Err(_) => {
