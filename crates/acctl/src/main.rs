@@ -224,14 +224,13 @@ async fn main() -> Result<()> {
     let mut c = connect().await?;
     match args[0].as_str() {
         "status" => println!("{}", c.call(proto::ReqKind::DaemonStatus).await?),
-        // Auto-update du démon vers la version passée (défaut : celle
-        // d'acctl) — le démon se remplace puis est relancé par son
-        // superviseur ; la connexion peut couper juste après la réponse.
+        // Auto-update du démon vers la version passée (défaut : "latest"
+        // = dernière release publiée, résolue par le démon — la version
+        // locale peut n'exister qu'en build de branche → 404).
+        // Le démon se remplace puis est relancé par son superviseur ;
+        // la connexion peut couper juste après la réponse.
         "daemon-update" => {
-            let version = args
-                .get(1)
-                .cloned()
-                .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+            let version = args.get(1).cloned().unwrap_or_else(|| "latest".into());
             println!(
                 "{}",
                 c.call(proto::ReqKind::UpdateDaemon { version }).await?

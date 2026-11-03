@@ -27,9 +27,10 @@ impl Drop for UpdateGuard {
 }
 
 /// Remplace le binaire courant par celui de la release `version`
-/// (accepte "0.5.0" ou "v0.5.0"). Bloquant : appeler via
-/// `spawn_blocking`. En cas de succès supervisé, un exit différé est
-/// armé — l'appelant reçoit la réponse avant la mort du process.
+/// (accepte "0.5.0", "v0.5.0", ou "latest"/"" = dernière release
+/// publiée). Bloquant : appeler via `spawn_blocking`. En cas de
+/// succès supervisé, un exit différé est armé — l'appelant reçoit
+/// la réponse avant la mort du process.
 pub fn self_update(version: &str) -> Result<Value> {
     if UPDATING
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -39,12 +40,27 @@ pub fn self_update(version: &str) -> Result<Value> {
     }
     let _guard = UpdateGuard;
 
-    let ver = version.trim().trim_start_matches('v');
+    // "latest" (ou absence de version côté acctl) = dernière release
+    // publiée — la version du binaire local n'existe souvent pas en
+    // release (build de branche, stable pas encore taguée) → 404.
+    let ver = match version.trim().trim_start_matches('v') {
+        "" | "latest" => latest_release()?,
+        v => v.to_string(),
+    };
     // La version part en segment d'URL : whitelist semver stricte —
     // `../` traverserait vers un asset arbitraire (tout client du
     // socket peut appeler, agents et listener TCP sans auth compris).
-    if !valid_version(ver) {
+    if !valid_version(&ver) {
         bail!("version cible invalide (semver attendu, ex. \"0.5.0\")");
+    }
+    // No-op explicite : remplacer le binaire par la même version serait
+    // un téléchargement + un restart pour rien.
+    if ver == env!("CARGO_PKG_VERSION") {
+        return Ok(json!({
+            "noop": true,
+            "version": ver,
+            "restarting": false,
+        }));
     }
     let arch = match std::env::consts::ARCH {
         "x86_64" => "x86_64",
@@ -73,7 +89,13 @@ pub fn self_update(version: &str) -> Result<Value> {
     let url = format!(
         "https://github.com/{REPO}/releases/download/v{ver}/agentcontrol-server-{arch}-linux.tar.gz"
     );
-    let tgz = http_get(&url).with_context(|| format!("téléchargement {url}"))?;
+    let tgz = match http_get(&url) {
+        Ok(b) => b,
+        Err(HttpError::Status(404)) => bail!("{}", release_not_found(&ver)),
+        Err(e) => {
+            return Err(anyhow::Error::from(e)).with_context(|| format!("téléchargement {url}"))
+        }
+    };
     let staging = dir.join(format!(".ac-upd-{}", std::process::id()));
     std::fs::create_dir_all(&staging).context("staging")?;
     let res = swap_binaries(&tgz, &staging, &dir, &exe);
@@ -139,16 +161,163 @@ fn probe_dir_writable(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn http_get(url: &str) -> Result<Vec<u8>> {
-    let mut body = Vec::new();
-    ureq::get(url)
+/// Erreur HTTP qui conserve le code de statut — un 404 sur l'asset
+/// signifie « release inexistante », pas « panne réseau », et mérite
+/// un message orienté tags disponibles plutôt que l'erreur ureq brute.
+enum HttpError {
+    Status(u16),
+    Other(anyhow::Error),
+}
+impl From<HttpError> for anyhow::Error {
+    fn from(e: HttpError) -> Self {
+        match e {
+            HttpError::Status(c) => anyhow::anyhow!("HTTP {c}"),
+            HttpError::Other(e) => e,
+        }
+    }
+}
+
+fn http_get(url: &str) -> std::result::Result<Vec<u8>, HttpError> {
+    let resp = ureq::get(url)
         .timeout(std::time::Duration::from_secs(120))
+        .set("User-Agent", "agentcontrol-selfupdate")
         .call()
-        .with_context(|| format!("GET {url}"))?
-        .into_reader()
+        .map_err(|e| match e {
+            ureq::Error::Status(code, _) => HttpError::Status(code),
+            e => HttpError::Other(anyhow::Error::new(e).context(format!("GET {url}"))),
+        })?;
+    let mut body = Vec::new();
+    resp.into_reader()
         .take(64 * 1024 * 1024)
-        .read_to_end(&mut body)?;
+        .read_to_end(&mut body)
+        .map_err(|e| HttpError::Other(e.into()))?;
     Ok(body)
+}
+
+/// GET JSON sur l'API GitHub (User-Agent obligatoire, sinon 403).
+fn gh_api(path: &str) -> Result<Value> {
+    let url = format!("https://api.github.com/repos/{REPO}/{path}");
+    let resp = ureq::get(&url)
+        .timeout(std::time::Duration::from_secs(15))
+        .set("User-Agent", "agentcontrol-selfupdate")
+        .call()
+        .with_context(|| format!("GET {url}"))?;
+    serde_json::from_reader(resp.into_reader().take(8 * 1024 * 1024))
+        .context("décodage JSON GitHub")
+}
+
+/// Dernière release publiée (max semver sur `/releases`, drafts exclus) :
+/// stable d'abord, prerelease (canal rc) seulement si aucune stable
+/// n'existe — le rc s'obtient en passant son tag explicitement.
+fn latest_release() -> Result<String> {
+    let rels = gh_api("releases?per_page=20")?;
+    let arr = rels.as_array().context("réponse releases inattendue")?;
+    let mut best_any = String::new();
+    let mut best_stable = String::new();
+    for r in arr {
+        if r["draft"].as_bool().unwrap_or(false) {
+            continue;
+        }
+        let Some(tag) = r["tag_name"].as_str() else {
+            continue;
+        };
+        let v = tag.trim().trim_start_matches('v');
+        if !valid_version(v) {
+            continue;
+        }
+        if best_any.is_empty() || semver_cmp(v, &best_any) == std::cmp::Ordering::Greater {
+            best_any = v.to_string();
+        }
+        if !r["prerelease"].as_bool().unwrap_or(false)
+            && (best_stable.is_empty()
+                || semver_cmp(v, &best_stable) == std::cmp::Ordering::Greater)
+        {
+            best_stable = v.to_string();
+        }
+    }
+    let best = if best_stable.is_empty() {
+        best_any
+    } else {
+        best_stable
+    };
+    if best.is_empty() {
+        bail!("aucune release publiée trouvée pour {REPO}");
+    }
+    Ok(best)
+}
+
+/// Message d'erreur 404 orienté utilisateur : la release demandée
+/// n'existe pas — suggère un tag existant et liste les récents.
+fn release_not_found(ver: &str) -> String {
+    let hint = "préciser un tag existant, ex. acctl daemon-update vX.Y.Z";
+    match gh_api("releases?per_page=10") {
+        Ok(rels) => {
+            let tags: Vec<&str> = rels
+                .as_array()
+                .map(|a| a.iter().filter_map(|r| r["tag_name"].as_str()).collect())
+                .unwrap_or_default();
+            if tags.is_empty() {
+                format!("release v{ver} introuvable — {hint}")
+            } else {
+                let ex = tags[0];
+                format!(
+                    "release v{ver} introuvable — préciser un tag existant, \
+                     ex. acctl daemon-update {ex} ; tags : {}",
+                    tags.join(", ")
+                )
+            }
+        }
+        Err(_) => format!("release v{ver} introuvable (HTTP 404) — {hint}"),
+    }
+}
+
+/// Compare semver minimal : `x.y.z` numérique puis identifiants de
+/// pré-release (stable > pré-release ; numérique < alphanum, semver §11).
+fn semver_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering::*;
+    fn parse(v: &str) -> (Vec<u64>, Vec<String>) {
+        let v = v.split('+').next().unwrap_or(v);
+        let (core, pre) = v.split_once('-').unwrap_or((v, ""));
+        let n = core.split('.').map(|x| x.parse().unwrap_or(0)).collect();
+        let p = if pre.is_empty() {
+            Vec::new()
+        } else {
+            pre.split('.').map(String::from).collect()
+        };
+        (n, p)
+    }
+    let (an, ap) = parse(a);
+    let (bn, bp) = parse(b);
+    for i in 0..3 {
+        let d = an.get(i).copied().unwrap_or(0).cmp(&bn.get(i).copied().unwrap_or(0));
+        if d != Equal {
+            return d;
+        }
+    }
+    match (ap.is_empty(), bp.is_empty()) {
+        (true, true) => return Equal,
+        (true, false) => return Greater,
+        (false, true) => return Less,
+        (false, false) => {}
+    }
+    for i in 0..ap.len().max(bp.len()) {
+        match (ap.get(i), bp.get(i)) {
+            (None, _) => return Less,
+            (_, None) => return Greater,
+            (Some(x), Some(y)) => {
+                let d = match (x.parse::<u64>(), y.parse::<u64>()) {
+                    (Ok(xn), Ok(yn)) => xn.cmp(&yn),
+                    (Ok(_), Err(_)) => Less,
+                    (Err(_), Ok(_)) => Greater,
+                    (Err(_), Err(_)) => x.cmp(y),
+                };
+                if d != Equal {
+                    return d;
+                }
+            }
+        }
+    }
+    Equal
 }
 
 /// Extrait `agentcontrol-daemon` (+ `acctl` si présent dans le même
