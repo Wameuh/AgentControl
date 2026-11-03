@@ -73,3 +73,4 @@
 254: acctl daemon-update without a version now targets the latest published release, reports a clear error with available tags on 404, and no-ops when already up to date
 255: Android app data (SSH private key, saved credentials) can no longer be exfiltrated through adb backup or cloud auto-backup — the generated manifest now sets allowBackup to false, enforced by a CI check on the merged manifest.
 261: Pull request reviews no longer get discarded when the reviewer hits a rate limit; the review waits for the retry, and the timeout does not run during the backoff.
+262: Backlog orchestrator serializes work on rate limit: one active session at a time, reviewers first, rate-limited sessions wait out their backoff instead of being nudged or replaced.
