@@ -201,8 +201,8 @@ fn gh_api(endpoint: &str) -> GhCall {
         }
     };
     if status.success() {
-        let _ = out_drain.join();
-        return GhCall::Ok;
+        let body = out_drain.join().unwrap_or_default();
+        return GhCall::Ok(body);
     }
     let _ = out_drain.join();
     let err = err_drain.join().unwrap_or_default();
@@ -214,7 +214,9 @@ fn gh_api(endpoint: &str) -> GhCall {
 
 /// Résultat classé d'un `gh api` — voir `gh_api`.
 enum GhCall {
-    Ok,
+    /// stdout de la réponse — la vérif existence lit head/base dans
+    /// le payload pulls pour reconnaître la release PR.
+    Ok(String),
     Http(u16),
     Down,
 }
@@ -412,6 +414,13 @@ pub enum Verify {
     /// (`gh` manquant ou non authentifié côté github). À retenter —
     /// n'est jamais un refus définitif.
     Unreachable,
+    /// La référence existe mais c'est la PR de release
+    /// (head `next_release` → base `main`) : elle ne doit jamais entrer
+    /// au registre — elle reste OPEN par construction et bloquerait la
+    /// garde « toutes PR soldées » de l'orchestrateur (deadlock
+    /// patchnotes vécu : #187 re-registrée à chaque `gh pr ready` du
+    /// worker patchnotes).
+    Release,
 }
 
 /// Existence-check d'une référence avant enregistrement auto (watcher →
@@ -458,7 +467,18 @@ fn verify_github(t: &RefTarget) -> Verify {
         return Verify::Unreachable;
     }
     match gh_api(&format!("repos/{}/pulls/{}", t.repo, t.pr)) {
-        GhCall::Ok => Verify::Exists,
+        GhCall::Ok(body) => {
+            // La release PR `next_release → main` (auto-release-pr.yml)
+            // existe mais reste exclue du registre — cf. Verify::Release.
+            let v = serde_json::from_str::<Value>(&body).unwrap_or_default();
+            if v["head"]["ref"].as_str() == Some("next_release")
+                && v["base"]["ref"].as_str() == Some("main")
+            {
+                Verify::Release
+            } else {
+                Verify::Exists
+            }
+        }
         GhCall::Http(404) | GhCall::Http(410) => Verify::Missing,
         // 403 (rate-limit, SSO non granté), 5xx, échec sans statut →
         // indécidable : à retenter, pas un refus définitif.
