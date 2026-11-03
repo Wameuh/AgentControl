@@ -386,7 +386,14 @@ impl Daemon {
             s.mark_spawning();
         }
         match s
-            .spawn_agent(&cmd, &envs, Some(native), true, self.mcp_servers(sid), None)
+            .spawn_agent(
+                &cmd,
+                &envs,
+                Some(native),
+                true,
+                self.mcp_servers(sid),
+                Some((None, meta.model.clone())),
+            )
             .await
         {
             Ok(true) => {

@@ -221,8 +221,18 @@ impl Session {
     /// le mode arrive via DEVIN_PERMISSION_MODE et vaut déjà la demande.
     /// La valeur n'est envoyée que si elle figure dans les options annoncées
     /// par l'agent : une valeur du domaine env (ex. "normal") qui n'est pas
-    /// un id ACP est ignorée plutôt que d'échouer. À appeler uniquement au
-    /// premier spawn (session/new) — au resume, pending_config fait foi.
+    /// un id ACP est ignorée plutôt que d'échouer.
+    /// La valeur résolue est TOUJOURS poussée, même quand elle semble déjà
+    /// courante : `meta.mode`/`meta.model` sont pré-seedés avec la valeur
+    /// demandée (h_new_session) et le `currentValue` rapporté peut n'être
+    /// qu'un écho de l'env de spawn (DEVIN_MODEL) — ni l'un ni l'autre ne
+    /// prouve que l'inférence applique le modèle (le store natif peut en
+    /// montrer un autre). `set_config_option` est idempotent : le push
+    /// inconditionnel est ce qui garantit l'application, et il écrit le
+    /// modèle persisté côté agent pour les prochains resume.
+    /// Appelée au premier spawn (session/new) ET aux respawns qui portent
+    /// un spawn_cfg (resume/clear : le modèle persisté côté agent peut
+    /// différer de la demande).
     pub async fn apply_spawn_config(
         self: &Arc<Self>,
         mode: Option<&str>,
@@ -233,18 +243,7 @@ impl Session {
             if want.is_empty() {
                 continue;
             }
-            let cur: Option<String> = {
-                let m = self.meta.lock().unwrap();
-                match id {
-                    "mode" => m.mode.clone(),
-                    _ => m.model.clone(),
-                }
-            };
             let known = self.known_config_values(id);
-            // Déjà la valeur courante → rien à faire.
-            if cur.as_deref() == Some(want) {
-                continue;
-            }
             // Résolution tolérante : la valeur demandée à la création
             // ("swe-2", "SWE-2"…) est acceptée si elle désigne une seule
             // option annoncée. Liste vide (agent sans annonce) → pas de
@@ -283,11 +282,6 @@ impl Session {
                 }
             };
             let want = want2.as_str();
-            // La demande résolue peut déjà être la valeur courante
-            // ("swe-2" demandé alors que swe-2-high est actif).
-            if cur.as_deref() == Some(want) {
-                continue;
-            }
             let r = match self.set_config_option(id, want).await {
                 Ok(()) => Ok(()),
                 Err(e) => {

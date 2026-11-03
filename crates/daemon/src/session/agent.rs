@@ -32,9 +32,12 @@ impl Session {
     /// `skip_replay` : le journal local contient déjà l'historique de cette
     /// session native → les updates rejouées par session/load sont ignorées.
     /// Passer false après un rebind (journal reset) pour les journaliser.
-    /// `spawn_cfg` : (mode, model) demandés à la création — appliqués via
-    /// ACP tant que `spawning` est encore vrai, donc avant tout drain ou
-    /// envoi concurrent (le premier prompt voit la config demandée).
+    /// `spawn_cfg` : (mode, model) à ré-affirmer via ACP tant que
+    /// `spawning` est encore vrai, donc avant tout drain ou envoi
+    /// concurrent (le premier prompt voit la config demandée). Porté à la
+    /// création (mode+model demandés) et aux respawns qui veulent forcer
+    /// une valeur (resume/clear : le modèle — le mode est déjà couvert
+    /// par l'env et le restage pending_config).
     /// Retour : Ok(true) spawn livré, Ok(false) supplanté en douceur — un
     /// kill/rebind a invalidé la génération après le handshake : la session
     /// appartient à un nouveau cycle (ni config, ni livraison, ni état).
