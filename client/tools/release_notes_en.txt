@@ -81,3 +81,4 @@
 266: PR reviews now report their verdict over native agent-to-agent messaging — the reviewer pushes its verdict to the daemon through the new agentcontrol_report_verdict MCP tool and the daemon posts the GitHub comment itself, instead of waiting for the session to go idle and scanning its journal; the journal block remains the fallback.
 268: The orchestrator now wakes asleep workers carrying wip items before spawning new workers on pending items — free slots go to finishing in-flight work first (oldest deferred nudge first), so pending tasks no longer starve committed work.
 269: Sessions in transient wait states now show a distinct opal gem in the sidebar — rate-limit backoff (error + kind=rate_limit) and asleep sessions are no longer visually merged with failures, dead sessions, or user-input waits.
+256: Status bar metrics now distinguish host-wide CPU/memory/load from the daemon process (which also shows its own CPU %)
