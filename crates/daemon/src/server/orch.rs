@@ -994,8 +994,10 @@ fn workspaces_json(enabled: bool, cfg: &cfg::OrchCfg) -> Vec<Value> {
 /// courante, ou si sa branche head est `next_release` (re-registrement
 /// via le watcher — le numéro seul couvre déjà le cas nominal, la
 /// branche attrape les entrées dont la fiche a été enrichie par sync).
-fn release_pr_entry(p: &proto::PrEntry, release_pr: u64) -> bool {
-    p.pr == release_pr || p.branch.as_deref() == Some("next_release")
+/// `release_pr = 0` (numéro non résolu) : la branche seule décide — un
+/// change Gerrit non résolu (`pr 0`) ne doit pas matcher par numéro.
+pub(crate) fn release_pr_entry(p: &proto::PrEntry, release_pr: u64) -> bool {
+    (release_pr > 0 && p.pr == release_pr) || p.branch.as_deref() == Some("next_release")
 }
 
 /// « Ce meta est-il un Manager vivant du workspace `repo` ? » —
@@ -1226,6 +1228,14 @@ impl Daemon {
             // consomme un slot max_workers (comme plan_review), et le
             // dispatch pending prime sur le réveil des waiters PR.
             let mut asleep_nudges: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
+            //    N° de la release PR `next_release → main` courante —
+            //    résolution paresseuse (une sonde gh par cycle au plus,
+            //    seulement si une entrée registre est en jeu). L'entrée
+            //    qui la désigne est exclue du critère de ménage : elle
+            //    appartient au bot auto-release (même exclusion que la
+            //    garde patchnotes), pas au worker auquel le watcher
+            //    l'a attribuée — sinon `open_prs` ne se vide jamais.
+            let mut release_num: Option<u64> = None;
             for w in workers.clone() {
                 if !self.orch.is_enabled() {
                     return Ok(());
@@ -1262,6 +1272,14 @@ impl Daemon {
                     for p in prs.iter().filter(|p| {
                         p.session == sid && !matches!(p.status.as_str(), "closed" | "merged")
                     }) {
+                        if release_num.is_none() {
+                            release_num = Some(
+                                self.gh_release_pr(ws).await.map(|r| r.0).unwrap_or(0),
+                            );
+                        }
+                        if release_pr_entry(p, release_num.unwrap_or(0)) {
+                            continue;
+                        }
                         let st_gh = self.orch_pr_state(p, ws).await;
                         my_prs.insert(p.pr.to_string(), st_gh);
                     }
@@ -1408,6 +1426,21 @@ impl Daemon {
                     st.assignments.remove(sid);
                     workers.retain(|x| x.id != sid);
                     continue;
+                }
+                // Retenu uniquement par des PRs « ouvertes » : une
+                // entrée registre stale (mergée/fermée non syncée —
+                // hors GitHub aucune sonde live ne la corrige)
+                // bloquerait le rm indéfiniment. `pr_sync` est throttlé
+                // (PR_SYNC_MIN_INTERVAL) — déclenché en tâche de fond,
+                // le rm reprendra au tick suivant si le statut était
+                // du bruit.
+                if my_open.is_empty() {
+                    let d = Arc::clone(self);
+                    tokio::spawn(async move {
+                        if let Err(e) = d.h_pr_sync().await {
+                            warn!("orchestrateur: pr_sync pré-ménage: {e:#}");
+                        }
+                    });
                 }
                 st.clean_since.remove(sid);
                 // Garde ac-wait : la session attend le ping d'un waiter
@@ -1738,7 +1771,7 @@ impl Daemon {
 
     /// PR de release auto (`next_release` → `main`) si ouverte :
     /// Some((number, isDraft)).
-    async fn gh_release_pr(&self, ws: &Path) -> Option<(u64, bool)> {
+    pub(crate) async fn gh_release_pr(&self, ws: &Path) -> Option<(u64, bool)> {
         let (rc, out, _) = run_out(
             &["gh", "pr", "list", "--head", "next_release", "--base", "main",
               "--state", "open", "--json", "number,isDraft", "--limit", "1"],
@@ -2272,6 +2305,11 @@ mod tests {
         // PR de feature ordinaire → comptée.
         assert!(!release_pr_entry(&entry(9, Some("feat/x")), 187));
         assert!(!release_pr_entry(&entry(9, None), 187));
+        // Numéro non résolu (release PR absente ou sonde en échec) : un
+        // change Gerrit pr=0 ne doit pas matcher par numéro — la
+        // branche seule décide.
+        assert!(!release_pr_entry(&entry(0, None), 0));
+        assert!(release_pr_entry(&entry(0, Some("next_release")), 0));
     }
 
     #[test]

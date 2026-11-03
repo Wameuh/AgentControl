@@ -416,7 +416,8 @@ enum SweepAction {
     Keep,
 }
 
-/// Rm si le reviewer a disparu, si l'item est sorti du pipeline de
+/// Rm si le reviewer a disparu ou est irrécupérable (dead/error —
+/// `reviewer_alive` false), si l'item est sorti du pipeline de
 /// revue (absent/done/pending) ou passé en implémentation ; Keep tant
 /// qu'une review est en vol (`reviewing`) ou que le reviewer n'est
 /// pas idle ; Sleep sinon — y compris sur item stalled.
@@ -1145,6 +1146,19 @@ impl Daemon {
 
         // ---- E. Entretien des sessions P/W (ledger, titre, post,
         // détection plan, nudges, rm) — reviewers : titre seulement.
+        // N° de la release PR `next_release → main` pour l'exclusion
+        // du critère de ménage (même règle que le cycle legacy : elle
+        // appartient au bot auto-release, pas au session à laquelle le
+        // watcher l'a attribuée) — une sonde gh seulement si une
+        // entrée registre non terminale existe.
+        let release_pr = if prs
+            .iter()
+            .any(|p| !matches!(p.status.as_str(), "closed" | "merged"))
+        {
+            self.gh_release_pr(ws).await.map(|r| r.0).unwrap_or(0)
+        } else {
+            0
+        };
         let mut outcome = PlanOutcome::default();
         for m in metas.iter().filter(|m| is_backlog(m, cfg)).cloned() {
             if !self.orch.is_enabled() {
@@ -1167,7 +1181,8 @@ impl Daemon {
                     outcome.planners += 1;
                     outcome.workers += 1;
                     self.planner_upkeep(
-                        &m, bin, cfg, ws, tasks, prs, st, now, rl > 0, &mut free,
+                        &m, bin, cfg, ws, tasks, prs, release_pr, st, now, rl > 0,
+                        &mut free,
                     )
                     .await;
                 }
@@ -1180,6 +1195,7 @@ impl Daemon {
                         ws,
                         tasks,
                         prs,
+                        release_pr,
                         st,
                         now,
                         &["wip"],
@@ -1263,10 +1279,16 @@ impl Daemon {
                 .unwrap_or(false);
             let rmeta = metas.iter().find(|m| m.id == rsid);
             let rstate = rmeta.map(|m| m.state.as_str());
+            // dead/error : la session existe encore mais
+            // `reviewer_choice` ne la réutilisera jamais — la balayer
+            // comme absente (rm + purge de la map) sinon elle
+            // s'accumule ; le dispatch respawnera au besoin.
+            let reviewer_alive = session_ids.contains(&rsid)
+                && !matches!(rstate, Some("dead") | Some("error"));
             match reviewer_sweep(
                 status,
                 implementing,
-                session_ids.contains(&rsid),
+                reviewer_alive,
                 rstate == Some("idle"),
                 cfg.reviewer_reuse,
             ) {
@@ -1528,6 +1550,7 @@ impl Daemon {
         ws: &Path,
         tasks: &[Task],
         prs: &[proto::PrEntry],
+        release_pr: u64,
         st: &mut OrchPersist,
         now: f64,
         open_statuses: &[&str],
@@ -1557,10 +1580,11 @@ impl Daemon {
             .collect();
         let mut my_prs: BTreeMap<String, String> = BTreeMap::new();
         if cfg.watch_prs {
-            for p in prs
-                .iter()
-                .filter(|p| p.session == sid && !matches!(p.status.as_str(), "closed" | "merged"))
-            {
+            for p in prs.iter().filter(|p| {
+                p.session == sid
+                    && !matches!(p.status.as_str(), "closed" | "merged")
+                    && !release_pr_entry(p, release_pr)
+            }) {
                 let st_gh = self.orch_pr_state(p, ws).await;
                 my_prs.insert(p.pr.to_string(), st_gh);
             }
@@ -1666,6 +1690,20 @@ impl Daemon {
             st.clean_since.remove(sid);
             st.assignments.remove(sid);
             return false;
+        }
+        // Retenu uniquement par des PRs « ouvertes » : une entrée
+        // registre stale (mergée/fermée non syncée — hors GitHub aucune
+        // sonde live ne la corrige) bloquerait le rm indéfiniment.
+        // `pr_sync` est throttlé (PR_SYNC_MIN_INTERVAL) — déclenché en
+        // tâche de fond, le rm reprendra au tick suivant si le statut
+        // était du bruit.
+        if my_open.is_empty() {
+            let d = Arc::clone(self);
+            tokio::spawn(async move {
+                if let Err(e) = d.h_pr_sync().await {
+                    warn!("orchestrateur: pr_sync pré-ménage: {e:#}");
+                }
+            });
         }
         st.clean_since.remove(sid);
         // Planner gelé « revue humaine requise » : aucun envoi tant que
@@ -1799,6 +1837,7 @@ impl Daemon {
         ws: &Path,
         tasks: &[Task],
         prs: &[proto::PrEntry],
+        release_pr: u64,
         st: &mut OrchPersist,
         now: f64,
         quota_serial: bool,
@@ -1830,6 +1869,7 @@ impl Daemon {
                 ws,
                 tasks,
                 prs,
+                release_pr,
                 st,
                 now,
                 &["wip", "plan_review", "reviewing"],
