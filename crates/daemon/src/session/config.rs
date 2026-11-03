@@ -232,12 +232,14 @@ impl Session {
     /// modèle persisté côté agent pour les prochains resume.
     /// Appelée au premier spawn (session/new) ET aux respawns qui portent
     /// un spawn_cfg (resume/clear : le modèle persisté côté agent peut
-    /// différer de la demande). `quiet` = ré-affirmation de respawn : les
-    /// warnings « absent des options annoncées »/ambigu sont tus (la
-    /// valeur peut venir d'un report agent hors liste — ex. catalogue env
-    /// DEVIN_MODEL ou défaut du compte — rien n'est à signaler, le push
-    /// est de toute façon impossible) ; à la création (quiet=false) la
-    /// demande explicite non résoluble garde son warning.
+    /// différer de la demande). `quiet` = ré-affirmation de respawn,
+    /// best-effort et silencieuse : le push n'est tenté que si le
+    /// configId est annoncé ET la valeur résoluble (une valeur hors
+    /// config_options — catalogue env DEVIN_MODEL, défaut du compte —
+    /// est skippée sans warning : rien à signaler, elle ne peut pas être
+    /// posée), sans fallback set_mode/set_model ni events Error ; à la
+    /// création (quiet=false) la demande explicite non résoluble garde
+    /// son warning et le fallback reste câblé.
     pub async fn apply_spawn_config(
         self: &Arc<Self>,
         mode: Option<&str>,
@@ -247,6 +249,26 @@ impl Session {
         for (id, want) in [("mode", mode), ("model", model)] {
             let Some(want) = want else { continue };
             if want.is_empty() {
+                continue;
+            }
+            if quiet {
+                // Ré-affirmation de respawn, best-effort et silencieuse :
+                // seul un configId annoncé ET une valeur résoluble
+                // autorisent le push (une valeur hors config_options —
+                // catalogue env, défaut du compte — ne peut de toute
+                // façon pas être posée). Pas de fallback set_mode/
+                // set_model : un "/model <m>" en filé pendant spawning
+                // partirait comme un vrai tour utilisateur au drain.
+                let opts = self.option_values(id);
+                let v = match resolve_config_value(&opts, want) {
+                    Resolve::Hit(v) => v,
+                    _ => continue,
+                };
+                if let Err(e) = self.push_config_option(id, &v).await {
+                    self.emit(EventKind::System {
+                        text: format!("{id}={v} non ré-affirmé au resume: {e:#}"),
+                    });
+                }
                 continue;
             }
             let known = self.known_config_values(id);
@@ -264,7 +286,7 @@ impl Session {
                 match resolve_config_value(&known, want) {
                     Resolve::Hit(v) => v,
                     Resolve::Ambiguous(c) => {
-                        if id == "model" && !quiet {
+                        if id == "model" {
                             self.emit(EventKind::System {
                                 text: format!(
                                     "model={want} (demandé à la création) ambigu — candidats : {}",
@@ -275,7 +297,7 @@ impl Session {
                         continue;
                     }
                     Resolve::Unknown => {
-                        if id == "model" && !quiet {
+                        if id == "model" {
                             self.emit(EventKind::System {
                                 text: format!(
                                     "model={want} (demandé à la création) absent des options annoncées — valeurs : {}",
@@ -299,12 +321,9 @@ impl Session {
                 }
             };
             if let Err(e) = r {
-                let text = if quiet {
-                    format!("{id}={want} non ré-affirmé au resume: {e:#}")
-                } else {
-                    format!("{id}={want} (demandé à la création) non appliqué: {e:#}")
-                };
-                self.emit(EventKind::System { text });
+                self.emit(EventKind::System {
+                    text: format!("{id}={want} (demandé à la création) non appliqué: {e:#}"),
+                });
             }
         }
     }
@@ -369,10 +388,6 @@ impl Session {
             self.emit(EventKind::ConfigOptions { options: opts });
             return Ok(());
         }
-        let sid = self
-            .meta_snapshot()
-            .native_session_id
-            .context("no native session id")?;
         // Garde-fou : si le configId est annoncé dans config_options avec
         // une liste, la valeur est résolue contre elle (exact, casse,
         // préfixe univoque) — jamais de valeur absente de la liste envoyée
@@ -410,39 +425,8 @@ impl Session {
         };
         let value = value.as_str();
         let known: Vec<String> = known.into_iter().map(|(v, _)| v).collect();
-        match self
-            .acp_request(
-                "session/set_config_option",
-                json!({"sessionId": sid, "configId": config_id, "value": value}),
-            )
-            .await
-        {
-            Ok(_) => {
-                // Sync la méta tout de suite — l'agent renverra sans doute un
-                // config_option_update, mais l'UI doit rester cohérente même
-                // s'il n'en envoie pas.
-                let opts = {
-                    let mut m = self.meta.lock().unwrap();
-                    if let Some(opt) = m.config_options.iter_mut().find(|o| o.id == config_id) {
-                        opt.current_value = value.into();
-                    }
-                    match config_id {
-                        "mode" => m.mode = Some(value.into()),
-                        "model" => m.model = Some(value.into()),
-                        _ => {}
-                    }
-                    m.config_options.clone()
-                };
-                self.save_meta();
-                self.emit(EventKind::ConfigOptions { options: opts });
-                // Symétrie avec set_model : changer de modèle via
-                // config_option est la même réparation — lève la
-                // retenue d'erreur et relance la file si un hold tombait.
-                if config_id == "model" && self.clear_error() && self.has_queued() {
-                    self.spawn_drain();
-                }
-                Ok(())
-            }
+        match self.push_config_option(config_id, value).await {
+            Ok(()) => Ok(()),
             Err(e) => {
                 let hint = if known.is_empty() {
                     String::new()
@@ -460,6 +444,48 @@ impl Session {
                 Err(e).with_context(|| msg)
             }
         }
+    }
+
+    /// Corps de `set_config_option` une fois la valeur arrêtée : envoie
+    /// `session/set_config_option`, puis sync meta + event ConfigOptions
+    /// au succès (et lève la retenue d'erreur pour `model`). Aucun event
+    /// Error émis — l'appelant choisit sa forme de compte-rendu (Error
+    /// détaillé pour l'action utilisateur, warn discret pour la
+    /// ré-affirmation de respawn).
+    async fn push_config_option(&self, config_id: &str, value: &str) -> Result<()> {
+        let sid = self
+            .meta_snapshot()
+            .native_session_id
+            .context("no native session id")?;
+        self.acp_request(
+            "session/set_config_option",
+            json!({"sessionId": sid, "configId": config_id, "value": value}),
+        )
+        .await?;
+        // Sync la méta tout de suite — l'agent renverra sans doute un
+        // config_option_update, mais l'UI doit rester cohérente même
+        // s'il n'en envoie pas.
+        let opts = {
+            let mut m = self.meta.lock().unwrap();
+            if let Some(opt) = m.config_options.iter_mut().find(|o| o.id == config_id) {
+                opt.current_value = value.into();
+            }
+            match config_id {
+                "mode" => m.mode = Some(value.into()),
+                "model" => m.model = Some(value.into()),
+                _ => {}
+            }
+            m.config_options.clone()
+        };
+        self.save_meta();
+        self.emit(EventKind::ConfigOptions { options: opts });
+        // Symétrie avec set_model : changer de modèle via
+        // config_option est la même réparation — lève la
+        // retenue d'erreur et relance la file si un hold tombait.
+        if config_id == "model" && self.clear_error() && self.has_queued() {
+            self.spawn_drain();
+        }
+        Ok(())
     }
 
     /// Option daemon-side `ac.<key>` (préfixe déjà consommé) — override
