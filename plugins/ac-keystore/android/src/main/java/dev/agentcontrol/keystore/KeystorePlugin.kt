@@ -24,6 +24,11 @@ class KeystorePlugin(activity: Activity): Plugin(activity) {
   private val ivLen = 12
   private val tagBits = 128
 
+  // Synchronisé : AndroidKeyStore remplace silencieusement l'entrée
+  // existante au generateKey — sans verrou, deux seal concurrents au
+  // premier usage génèreraient deux clés et le ciphertext produit sous
+  // la clé écrasée serait indéchiffrable à vie.
+  @Synchronized
   private fun key(): SecretKey {
     val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
     (ks.getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.let {
