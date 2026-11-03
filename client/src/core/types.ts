@@ -187,6 +187,13 @@ export interface ParamSpec {
   validation?: string | null;
   /** Valeurs autorisées (enum). */
   choices?: string[];
+  /** Libellés d'affichage parallèles à `choices` (même index) —
+   *  absent/vide = afficher les valeurs brutes. */
+  choice_labels?: string[];
+  /** Enum « ouverte » : `choices` est indicative (annoncée par
+   *  l'agent) — une valeur hors liste reste enregistrable, le client
+   *  la signale « (?) » au lieu de bloquer. */
+  open_enum?: boolean;
 }
 
 /** Spec [[components]] de components.toml — lue et écrite telle quelle. */

@@ -1522,6 +1522,7 @@ impl Daemon {
         let title = format!("{}{}", cfg.title_prefix, number);
         let prompt = cfg.prompt.clone().unwrap_or_else(|| PROMPT.to_string());
         let group = (!cfg.group.is_empty()).then(|| cfg.group.clone());
+        self.warn_unknown_spawn_cfg(cfg);
         let v = match self
             .h_new_session(
                 cfg.agent.clone(),
@@ -1545,6 +1546,36 @@ impl Daemon {
         self.apply_spawn_cfg(&sid).await;
         info!("orchestrateur: spawned {title} = {sid}");
         Some(sid)
+    }
+
+    /// Alerte si `model`/`mode` configurés sont hors des listes
+    /// annoncées par le profil `agent` — l'agent refusera
+    /// vraisemblablement la valeur au spawn (Invalid params). Listes
+    /// inconnues → pas de warning (information absente, jamais
+    /// bloquant).
+    pub(crate) fn warn_unknown_spawn_cfg(self: &Arc<Self>, cfg: &super::OrchCfg) {
+        let agent = if cfg.agent.is_empty() {
+            super::OrchCfg::default().agent
+        } else {
+            cfg.agent.clone()
+        };
+        let dyn_ = orch_cfg::dyn_choices(&self.root, &agent);
+        for (key, val, known) in [
+            ("model", &cfg.model, &dyn_.models),
+            ("mode", &cfg.mode, &dyn_.modes),
+        ] {
+            if !val.is_empty() && !known.is_empty() && !known.iter().any(|(v, _)| v == val) {
+                warn!(
+                    "orchestrateur: {key} « {val} » hors liste annoncée \
+                     par l'agent « {agent} » — valeurs : {}",
+                    known
+                        .iter()
+                        .map(|(v, _)| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
     }
 
     /// Queue commune des spawns orchestrés (workers + Managers) :
@@ -1618,6 +1649,7 @@ impl Daemon {
         }
         let tpl = cfg.manager_prompt.as_deref().unwrap_or(MANAGER_PROMPT);
         let prompt = tpl.replace("{REPO}", repo).replace("{WS}", &cwd);
+        self.warn_unknown_spawn_cfg(cfg);
         let v = self
             .h_new_session(
                 cfg.agent.clone(),

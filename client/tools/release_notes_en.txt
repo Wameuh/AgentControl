@@ -60,3 +60,4 @@
 239: Changing models is now forgiving — "/model" lists the advertised models, and values like "swe-2" or "SWE-2" resolve to the right announced entry; ambiguous or unknown values return the valid list instead of a raw "Invalid params" error.
 240: PR reviews (/mr review) can now be served natively by the daemon — it watches open next_release PRs for the trigger comment, spawns a read-only reviewer session on the exact head, and posts the ## Verdict comment itself (opt-in pr_review)
 241: Orchestrator: independent on/off toggles for each review mechanism (plan re-review, PR re-review, reviewer reuse) — disabling mid-flight unfreezes in-flight items
+146: Orchestrator settings: the model/mode/thought-level fields are now dropdowns listing the values actually advertised by the configured agent — a custom value stays allowed (shown "(?)" with a spawn-time warning) instead of a silent typo failing at spawn.

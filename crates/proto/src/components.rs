@@ -218,6 +218,16 @@ pub struct ParamSpec {
     /// Valeurs autorisées — exigé et seulement pour `kind=enum`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub choices: Vec<String>,
+    /// Libellés d'affichage parallèles à `choices` (même index) —
+    /// absent/vide = le client affiche les valeurs brutes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choice_labels: Vec<String>,
+    /// Enum « ouverte » : `choices` est une liste indicative (annoncée
+    /// dynamiquement par l'agent) — une valeur hors liste reste
+    /// enregistrable, le client avertit au lieu de bloquer sur
+    /// `comp_param_badenum`. Sans effet hors `kind=enum`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub open_enum: bool,
 }
 
 /// Cible de rendu de la config utilisateur — template TOML dans lequel
