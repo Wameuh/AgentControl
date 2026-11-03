@@ -390,11 +390,13 @@ Manual off-PR: `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]`.
 ## Known pitfalls
 
 - `anyhow::bail!` in a `Result<_, String>` function → E0308.
-- `ureq`: `native-tls` feature (not rustls/ring → no C compiler
-  required for the Windows check); `libssl-dev`/`pkg-config` needed
-  on Ubuntu (CI). NB: russh **requires** ring (C) — the Windows check
-  passes via the zig shims `/tmp/zig-shim/x86_64-w64-mingw32-gcc{,++}`
-  (`zig cc -target x86_64-windows-gnu`, filter cc-rs's `--target=`).
+- `ureq`: `tls` feature (rustls) everywhere — `native-tls` is only a
+  custom connector via `AgentBuilder::tls_connector`, never a default
+  backend → without `tls`, `ureq::get/post` on https fail with
+  "no TLS backend is configured". ring (C) is already required via
+  russh — the Windows check passes via the zig shims
+  `/tmp/zig-shim/x86_64-w64-mingw32-gcc{,++}` (`zig cc -target
+  x86_64-windows-gnu`, filter cc-rs's `--target=`).
 - `flex-shrink:0` required on items of a scrollable flex-column.
 - Tauri 2: `set_var` is `unsafe`; `get_webview_window` requires
   `use tauri::Manager`; `Image::new_owned` takes raw RGBA.

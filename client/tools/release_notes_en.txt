@@ -68,4 +68,5 @@
 249: Backlog orchestrator no longer releases and re-claims in-progress items every cycle when plan review is off — the unfreeze path now only targets items that actually came through the plan pipeline.
 250: The orchestrator no longer nudges a session that is waiting on a live ac-wait waiter — the waiter ping itself wakes the session; dead, timed-out or cancelled waiters still count as absent so the nudge remains the safety net.
 245: The release PR no longer deadlocks the backlog orchestrator — its open state no longer counts as unfinished work, so the auto-patchnotes cycle can complete.
+252: The Update button now actually works — ureq was built without a default TLS backend, so every HTTPS call (release check, download) failed with "no TLS backend is configured"; the client now uses rustls, matching the daemon.
 253: Windows pinned taskbar icon now groups correctly when pinned from the desktop shortcut — the MSI now stamps the AppUserModelID on the desktop .lnk like the Start Menu one; pins created before this fix still need one unpin/re-pin from the Start Menu.
