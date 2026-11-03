@@ -207,9 +207,9 @@ pub fn config_path() -> PathBuf {
 }
 
 pub fn load_connections() -> Vec<serde_json::Value> {
-    std::fs::read_to_string(config_path())
+    secrets::read_secret_file(&config_path())
         .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default()
 }
 
@@ -243,7 +243,10 @@ pub fn save_connection(cfg: &serde_json::Value) {
     list.retain(|c| conn_key_json(c) != key);
     list.insert(0, cfg.clone());
     list.truncate(10);
-    let _ = std::fs::write(config_path(), serde_json::to_string_pretty(&list).unwrap());
+    let _ = secrets::write_secret_file(
+        &config_path(),
+        serde_json::to_string_pretty(&list).unwrap().as_bytes(),
+    );
 }
 
 /// Retire une connexion de la liste (même clé de dédup que save).
@@ -251,7 +254,10 @@ pub fn remove_connection(cfg: &serde_json::Value) {
     let mut list = load_connections();
     let key = conn_key_json(cfg);
     list.retain(|c| conn_key_json(c) != key);
-    let _ = std::fs::write(config_path(), serde_json::to_string_pretty(&list).unwrap());
+    let _ = secrets::write_secret_file(
+        &config_path(),
+        serde_json::to_string_pretty(&list).unwrap().as_bytes(),
+    );
 }
 
 /// Les N dernières lignes du log (pour l'UI). Si le fichier courant est
@@ -936,6 +942,8 @@ impl Client {
 
 pub mod ssh_native;
 
+mod secrets;
+pub use secrets::{init_secret_box, SecretBox};
 
 #[cfg(test)]
 mod tests {
