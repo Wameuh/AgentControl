@@ -47,6 +47,7 @@
         "sidebarImage": "icons/nsis-sidebar.bmp"
       },
       "wix": {
+        "template": "wix/main.wxs",
         "bannerPath": "icons/wix-banner.bmp",
         "dialogImagePath": "icons/wix-dialog.bmp"
       }
