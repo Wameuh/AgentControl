@@ -307,13 +307,20 @@ fn reviewer_choice(
     in_session_ids: bool,
     reuse: bool,
 ) -> ReviewerChoice {
+    // rate_limit avant `reuse` : backoff partagé — un reviewer mappé en
+    // rate_limit est attendu même quand `reviewer_reuse` est coupé
+    // (un spawn de remplacement repartirait sur la même limite).
+    if matches!(
+        (mapped, in_session_ids, meta_state),
+        (Some(_), true, Some("error"))
+    ) && meta_err_kind == Some("rate_limit")
+    {
+        return ReviewerChoice::Wait;
+    }
     if !reuse {
         return ReviewerChoice::Spawn;
     }
     match (mapped, in_session_ids, meta_state) {
-        (Some(_), true, Some("error")) if meta_err_kind == Some("rate_limit") => {
-            ReviewerChoice::Wait
-        }
         // « error » hors rate_limit = en panne (model/auth/other) —
         // inutile de le réveiller, il ne répondra qu'au même échec.
         (Some(sid), true, Some(state)) if state != "dead" && state != "error" => {
@@ -2785,11 +2792,16 @@ mod tests {
     #[test]
     fn flags_rereview_reuse() {
         // `reviewer_reuse` coupé : jamais de Reuse — Spawn même si le
-        // reviewer mappé est vivant.
+        // reviewer mappé est vivant. SAUF rate_limit : le Wait prime
+        // (un spawn repartirait sur la limite partagée).
         let sid = "s-r1".to_string();
         assert_eq!(
             reviewer_choice(Some(&sid), Some("idle"), None, true, false),
             ReviewerChoice::Spawn
+        );
+        assert_eq!(
+            reviewer_choice(Some(&sid), Some("error"), Some("rate_limit"), true, false),
+            ReviewerChoice::Wait
         );
         // Et la sweep le supprime au lieu de l'endormir (Sleep→Rm).
         assert_eq!(
