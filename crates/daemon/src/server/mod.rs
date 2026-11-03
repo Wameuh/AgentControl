@@ -392,7 +392,11 @@ impl Daemon {
                 Some(native),
                 true,
                 self.mcp_servers(sid),
-                Some((None, meta.model.clone())),
+                Some(crate::session::SpawnCfg {
+                    model: meta.model.clone(),
+                    quiet: true,
+                    ..Default::default()
+                }),
             )
             .await
         {

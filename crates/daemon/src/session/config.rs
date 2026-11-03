@@ -232,11 +232,17 @@ impl Session {
     /// modèle persisté côté agent pour les prochains resume.
     /// Appelée au premier spawn (session/new) ET aux respawns qui portent
     /// un spawn_cfg (resume/clear : le modèle persisté côté agent peut
-    /// différer de la demande).
+    /// différer de la demande). `quiet` = ré-affirmation de respawn : les
+    /// warnings « absent des options annoncées »/ambigu sont tus (la
+    /// valeur peut venir d'un report agent hors liste — ex. catalogue env
+    /// DEVIN_MODEL ou défaut du compte — rien n'est à signaler, le push
+    /// est de toute façon impossible) ; à la création (quiet=false) la
+    /// demande explicite non résoluble garde son warning.
     pub async fn apply_spawn_config(
         self: &Arc<Self>,
         mode: Option<&str>,
         model: Option<&str>,
+        quiet: bool,
     ) {
         for (id, want) in [("mode", mode), ("model", model)] {
             let Some(want) = want else { continue };
@@ -258,7 +264,7 @@ impl Session {
                 match resolve_config_value(&known, want) {
                     Resolve::Hit(v) => v,
                     Resolve::Ambiguous(c) => {
-                        if id == "model" {
+                        if id == "model" && !quiet {
                             self.emit(EventKind::System {
                                 text: format!(
                                     "model={want} (demandé à la création) ambigu — candidats : {}",
@@ -269,7 +275,7 @@ impl Session {
                         continue;
                     }
                     Resolve::Unknown => {
-                        if id == "model" {
+                        if id == "model" && !quiet {
                             self.emit(EventKind::System {
                                 text: format!(
                                     "model={want} (demandé à la création) absent des options annoncées — valeurs : {}",
@@ -293,9 +299,12 @@ impl Session {
                 }
             };
             if let Err(e) = r {
-                self.emit(EventKind::System {
-                    text: format!("{id}={want} (demandé à la création) non appliqué: {e:#}"),
-                });
+                let text = if quiet {
+                    format!("{id}={want} non ré-affirmé au resume: {e:#}")
+                } else {
+                    format!("{id}={want} (demandé à la création) non appliqué: {e:#}")
+                };
+                self.emit(EventKind::System { text });
             }
         }
     }

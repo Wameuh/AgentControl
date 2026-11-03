@@ -32,12 +32,12 @@ impl Session {
     /// `skip_replay` : le journal local contient déjà l'historique de cette
     /// session native → les updates rejouées par session/load sont ignorées.
     /// Passer false après un rebind (journal reset) pour les journaliser.
-    /// `spawn_cfg` : (mode, model) à ré-affirmer via ACP tant que
+    /// `spawn_cfg` : mode/modèle à ré-affirmer via ACP tant que
     /// `spawning` est encore vrai, donc avant tout drain ou envoi
     /// concurrent (le premier prompt voit la config demandée). Porté à la
-    /// création (mode+model demandés) et aux respawns qui veulent forcer
-    /// une valeur (resume/clear : le modèle — le mode est déjà couvert
-    /// par l'env et le restage pending_config).
+    /// création (mode+model demandés, `quiet=false`) et aux respawns qui
+    /// veulent forcer une valeur (resume/clear : le modèle, `quiet=true`
+    /// — le mode est déjà couvert par l'env et le restage pending_config).
     /// Retour : Ok(true) spawn livré, Ok(false) supplanté en douceur — un
     /// kill/rebind a invalidé la génération après le handshake : la session
     /// appartient à un nouveau cycle (ni config, ni livraison, ni état).
@@ -48,7 +48,7 @@ impl Session {
         resume_native_id: Option<String>,
         skip_replay: bool,
         mcp_servers: Value,
-        spawn_cfg: Option<(Option<String>, Option<String>)>,
+        spawn_cfg: Option<SpawnCfg>,
     ) -> Result<bool> {
         // Un seul spawn à la fois : un sleep pendant un réveil en vol
         // libère `waking`, et un nouvel envoi peut alors lancer un
@@ -85,9 +85,13 @@ impl Session {
         // en file tant que spawning est vrai — aucun tour ne peut partir
         // sous le mode par défaut devant la config demandée.
         if matches!(r, Ok(true)) {
-            if let Some((mode, model)) = &spawn_cfg {
-                self.apply_spawn_config(mode.as_deref(), model.as_deref())
-                    .await;
+            if let Some(cfg) = &spawn_cfg {
+                self.apply_spawn_config(
+                    cfg.mode.as_deref(),
+                    cfg.model.as_deref(),
+                    cfg.quiet,
+                )
+                .await;
             }
         }
         self.spawning.store(false, Ordering::SeqCst);

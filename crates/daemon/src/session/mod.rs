@@ -56,6 +56,18 @@ struct ErrorHold {
     timer: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// Mode/modèle à (ré-)affirmer via ACP après le handshake de spawn.
+/// `quiet` : true pour les ré-affirmations de respawn (resume/wake/
+/// clear/fork/boot) — la valeur peut venir d'un report agent hors des
+/// options annoncées, rien à signaler ; false à la création, où une
+/// demande non résoluble mérite un warning explicite.
+#[derive(Clone, Default)]
+pub(crate) struct SpawnCfg {
+    pub mode: Option<String>,
+    pub model: Option<String>,
+    pub quiet: bool,
+}
+
 pub struct Session {
     pub dir: PathBuf,
     pub meta: Mutex<SessionMeta>,

@@ -204,7 +204,11 @@ impl Daemon {
                                     meta.native_session_id.clone(),
                                     true,
                                     self.mcp_servers(&session),
-                                    Some((None, meta.model.clone())),
+                                    Some(crate::session::SpawnCfg {
+                                        model: meta.model.clone(),
+                                        quiet: true,
+                                        ..Default::default()
+                                    }),
                                 )
                                 .await;
                         }
@@ -227,7 +231,11 @@ impl Daemon {
                                 meta.native_session_id.clone(),
                                 true,
                                 self.mcp_servers(&session),
-                                Some((None, meta.model.clone())),
+                                Some(crate::session::SpawnCfg {
+                                    model: meta.model.clone(),
+                                    quiet: true,
+                                    ..Default::default()
+                                }),
                             )
                             .await
                         {
@@ -376,7 +384,11 @@ impl Daemon {
                         None,
                         true,
                         self.mcp_servers(&session),
-                        Some((None, meta.model.clone())),
+                        Some(crate::session::SpawnCfg {
+                            model: meta.model.clone(),
+                            quiet: true,
+                            ..Default::default()
+                        }),
                     )
                     .await
                 {
@@ -560,7 +572,11 @@ impl Daemon {
                 meta.native_session_id.clone(),
                 skip_replay,
                 self.mcp_servers(&meta.id),
-                Some((None, meta.model.clone())),
+                Some(crate::session::SpawnCfg {
+                    model: meta.model.clone(),
+                    quiet: true,
+                    ..Default::default()
+                }),
             )
             .await;
         // Rendormir seulement si rien d'externe n'a repris la session
@@ -620,7 +636,11 @@ impl Daemon {
                     native,
                     skip_replay,
                     d.mcp_servers(&sid),
-                    Some((mode, model)),
+                    Some(crate::session::SpawnCfg {
+                        mode,
+                        model,
+                        quiet: false,
+                    }),
                 )
                 .await;
             // Supprimée pendant le spawn : tuer l'agent frais éventuel —
