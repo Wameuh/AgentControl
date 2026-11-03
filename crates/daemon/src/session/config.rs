@@ -377,7 +377,12 @@ impl Session {
                 match config_id {
                     "mode" => m.mode = Some(value.into()),
                     "model" => m.model = Some(value.into()),
-                    _ => {}
+                    _ => {
+                        // Condition voulue persistante : rejouée à chaque
+                        // spawn (reconcile post-handshake), pas seulement
+                        // au prochain — sinon perdue au second réveil.
+                        m.desired_config.insert(config_id.into(), value.into());
+                    }
                 }
                 m.config_options.clone()
             };
@@ -473,7 +478,12 @@ impl Session {
             match config_id {
                 "mode" => m.mode = Some(value.into()),
                 "model" => m.model = Some(value.into()),
-                _ => {}
+                // Sticky : rejoué à chaque spawn — un session/load qui
+                // restaure la valeur persistée côté agent ne doit pas
+                // perdre la condition (thought_level…).
+                _ => {
+                    m.desired_config.insert(config_id.into(), value.into());
+                }
             }
             m.config_options.clone()
         };

@@ -384,6 +384,13 @@ pub struct SessionMeta {
     /// spawn (session/load). Clés = id d'option ("model", "mode", …).
     #[serde(default)]
     pub pending_config: std::collections::HashMap<String, String>,
+    /// Config « voulue » posée pendant que l'agent vivait (hors mode/model,
+    /// qui ont leurs champs dédiés — `thought_level`, …) : comme l'env de
+    /// spawn ne la porte pas et qu'un session/load peut restaurer des
+    /// valeurs persistées différentes, chaque entrée est re-poussée à
+    /// chaque spawn tant qu'elle diffère de ce que l'agent rapporte.
+    #[serde(default)]
+    pub desired_config: std::collections::HashMap<String, String>,
     /// running | waiting_input | idle | dead | interrupted | asleep | error
     /// (asleep : agent libéré volontairement, réveil auto au prochain envoi ;
     /// error : dernier tour session/prompt en échec — cf. `last_error`,
