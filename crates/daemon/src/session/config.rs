@@ -30,6 +30,12 @@ impl Session {
             .context("no native session id")?;
         self.acp_request("session/set_mode", acp::session_set_mode_params(&sid, mode))
             .await?;
+        // Sync la méta au succès comme set_config_option : un agent qui
+        // applique sans renvoyer de mode_changed laisserait meta.mode
+        // stale — le reconcile post-handshake re-pousserait alors
+        // l'ancienne valeur à chaque réveil.
+        self.meta.lock().unwrap().mode = Some(mode.into());
+        self.save_meta();
         Ok(())
     }
 

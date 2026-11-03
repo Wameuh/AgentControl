@@ -365,13 +365,16 @@ impl Session {
         {
             let mut m = self.meta.lock().unwrap();
             if let Some(want) = meta.mode.clone() {
-                if m.mode.as_deref() != Some(want.as_str()) {
+                // "" n'est pas un mode poussable (apply_spawn_config le
+                // filtre déjà) — sans garde, il bouclerait un set_mode
+                // en échec à chaque spawn.
+                if !want.is_empty() && m.mode.as_deref() != Some(want.as_str()) {
                     m.pending_config.insert("mode".into(), want.clone());
                     m.mode = Some(want);
                 }
             }
             if let Some(want) = meta.model.clone() {
-                if m.model.as_deref() != Some(want.as_str()) {
+                if !want.is_empty() && m.model.as_deref() != Some(want.as_str()) {
                     m.pending_config.insert("model".into(), want.clone());
                     m.model = Some(want);
                 }
