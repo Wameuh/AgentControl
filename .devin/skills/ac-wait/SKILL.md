@@ -71,6 +71,13 @@ ac-wait --log w-1730000000-12345      # tail du log (polls, notif)
 
 ## Pièges
 
+- **Nudge orchestrateur inhibé** : tant qu'un waiter vit, l'orchestrateur
+  ne relance pas la session (garde `acwait_pending` côté démon — waiter
+  stale/pid mort/timeout dépassé → le nudge reprend son rôle de filet).
+  Ne compte donc sur le nudge que comme dernier recours : le waiter doit
+  avoir un `--timeout` raisonnable pour que la session finisse par
+  revenir.
+
 - **Toujours un timeout** : un waiter ≠ une surveillance infinie. Ajuste
   `--timeout`/`--interval` au scénario (CI : 60-120 s de poll).
 - **Condition idempotente et cheap** : elle tourne en boucle — pas d'effet

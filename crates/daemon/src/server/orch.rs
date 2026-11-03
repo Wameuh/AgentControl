@@ -700,6 +700,115 @@ pub(crate) fn now_secs() -> f64 {
         .as_secs_f64()
 }
 
+/// Répertoire d'état des waiters ac-wait (cf. `tools/ac-wait` :
+/// `${XDG_STATE_HOME:-~/.local/state}/ac-wait`). Les waiters vivent sur
+/// l'hôte du démon quand les sessions y tournent — un waiter déclaré
+/// depuis un hôte distant (AGENTCONTROL_TCP) est invisible ici et le
+/// nudge reprend son rôle de filet de sécurité.
+fn acwait_state_dir() -> Option<PathBuf> {
+    if let Ok(d) = std::env::var("XDG_STATE_HOME") {
+        if !d.is_empty() {
+            return Some(PathBuf::from(d).join("ac-wait"));
+        }
+    }
+    std::env::var("HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .map(|h| PathBuf::from(h).join(".local/state/ac-wait"))
+}
+
+/// `sid` a-t-elle un waiter ac-wait vivant ? Un waiter vivant réveillera
+/// la session via `acctl send --steer` quand sa condition tombera — la
+/// nudger entre-temps est redondant (bruit : la session constate que
+/// rien n'a changé, ré-arme et se rendort). Un waiter **stale** — `.done`
+/// écrit, `.cancel` posé, pid mort, ou `started + timeout` dépassé —
+/// compte comme absent : le nudge reste le filet de sécurité si le
+/// waiter est mort sans notifier.
+pub(crate) fn acwait_pending(sid: &str) -> bool {
+    /// Marge post-timeout : la notif TIMEOUT part avant l'écriture du
+    /// `.done` — ne pas nudger pendant que le waiter termine.
+    const TIMEOUT_GRACE_S: f64 = 120.0;
+    /// Worker spawné mais `.pid` pas encore écrit : actif seulement si
+    /// le meta est tout frais.
+    const START_GRACE_S: f64 = 30.0;
+    let Some(dir) = acwait_state_dir() else { return false };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return false };
+    let now = now_secs();
+    for e in entries.flatten() {
+        let meta_path = e.path();
+        if meta_path.extension().and_then(|x| x.to_str()) != Some("meta") {
+            continue;
+        }
+        let base = meta_path.with_extension("");
+        if base.with_extension("done").exists() || base.with_extension("cancel").exists() {
+            continue;
+        }
+        let Ok(meta) = std::fs::read_to_string(&meta_path) else {
+            continue;
+        };
+        // Meta = lignes `key=%q` shell-quotées ; les ids de session et
+        // les nombres n'ont pas besoin de quote — on strippe quand même
+        // les quotes simples/doubles pour la robustesse.
+        let field = |k: &str| -> Option<String> {
+            meta.lines().find_map(|l| {
+                let (k2, v) = l.split_once('=')?;
+                (k2 == k).then(|| {
+                    v.trim()
+                        .trim_matches('\'')
+                        .trim_matches('"')
+                        .to_string()
+                })
+            })
+        };
+        if field("session").as_deref() != Some(sid) {
+            continue;
+        }
+        // Timeout dépassé sans `.done` → le worker est mort en vol.
+        if let (Some(started), Some(timeout)) = (
+            field("started").and_then(|v| v.parse::<f64>().ok()),
+            field("timeout").and_then(|v| v.parse::<f64>().ok()),
+        ) {
+            if now - started > timeout + TIMEOUT_GRACE_S {
+                continue;
+            }
+        }
+        // Worker vivant ? `.pid` présent → pid doit répondre à kill -0 ;
+        // absent → worker pas encore démarré, actif seulement si le
+        // meta vient d'être écrit (sinon mort avant son propre boot).
+        let pid_path = base.with_extension("pid");
+        match std::fs::read_to_string(&pid_path) {
+            Ok(content) => {
+                let pid: i32 = content.trim().parse().unwrap_or(0);
+                #[cfg(unix)]
+                let alive = pid > 0 && {
+                    let rc = unsafe { libc::kill(pid, 0) };
+                    rc == 0
+                        || std::io::Error::last_os_error().raw_os_error()
+                            == Some(libc::EPERM)
+                };
+                #[cfg(not(unix))]
+                let alive = pid > 0;
+                if !alive {
+                    continue;
+                }
+            }
+            Err(_) => {
+                let fresh = std::fs::metadata(&meta_path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .map(|e| e.as_secs_f64() < START_GRACE_S)
+                    .unwrap_or(false);
+                if !fresh {
+                    continue;
+                }
+            }
+        }
+        return true;
+    }
+    false
+}
+
 /// Item de la file AgentBacklog (projection JSON du `--list --all`).
 pub(crate) type Task = Value;
 
@@ -1230,6 +1339,12 @@ impl Daemon {
                     continue;
                 }
                 st.clean_since.remove(sid);
+                // Garde ac-wait : la session attend le ping d'un waiter
+                // vivant → ne pas nudger (le waiter la réveillera ;
+                // waiter stale → compte comme absent, filet conservé).
+                if acwait_pending(sid) {
+                    continue;
+                }
                 if now - st.nudges.get(sid).copied().unwrap_or(0.0)
                     >= cfg.nudge_cooldown_secs as f64
                 {

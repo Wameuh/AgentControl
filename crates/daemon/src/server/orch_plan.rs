@@ -671,6 +671,11 @@ impl Daemon {
             if busy || now - started < cfg.nudge_cooldown_secs as f64 {
                 continue;
             }
+            // Même garde ac-wait que pour workers/planners : un waiter
+            // vivant du reviewer le réveillera — pas de nudge.
+            if acwait_pending(&rsid) {
+                continue;
+            }
             if st
                 .nudges
                 .get(&rsid)
@@ -1575,6 +1580,12 @@ impl Daemon {
         // normal. Le skip est placé après le rm « tout soldé » : un
         // planner orphelin post-reassign reste nettoyé.
         if !nudge_allowed(my_items.keys().any(|i| st.stalled_plans.contains_key(i))) {
+            return true;
+        }
+        // Garde ac-wait : un planner/worker qui attend le ping d'un
+        // waiter vivant ne doit pas être nudgé (le waiter le réveillera
+        // — nudger ici compterait en plus vers PLAN_MAX_NUDGES).
+        if acwait_pending(sid) {
             return true;
         }
         let idle_long =
