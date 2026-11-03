@@ -550,6 +550,9 @@ impl Session {
             );
             return;
         }
+        // Abort du timer de retry d'un éventuel hold : une session
+        // morte ne doit pas se relancer toute seule.
+        self.take_error_hold();
         self.set_state("dead");
         info!("[{}] agent process exited", self.meta_snapshot().id);
         self.emit(EventKind::System {
@@ -993,6 +996,16 @@ impl Session {
             match m.state.as_str() {
                 "running" | "working" | "waiting_input" | "idle" | "starting" | "compacting" => {
                     m.state = "interrupted".into();
+                    true
+                }
+                "error" => {
+                    // L'erreur concernait un process mort avec le démon
+                    // et aucun hold ne survit à l'open (en mémoire) —
+                    // garder « error » figerait la session (les gardes
+                    // orch/acctl bloqueraient toute relance) alors que
+                    // rien n'est réellement retenu.
+                    m.state = "interrupted".into();
+                    m.last_error = None;
                     true
                 }
                 _ => false,

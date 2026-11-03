@@ -514,14 +514,22 @@ impl Session {
         });
         *h = Some(ErrorHold { timer });
         drop(h);
+        // « dead » déjà posé entre le check du drain et ici → reculer :
+        // « error » écraserait l'état terminal. La fenêtre résiduelle
+        // (exit entre ce check et set_state) est couverte par le
+        // take_error_hold d'on_agent_exit.
+        if self.meta_snapshot().state == "dead" {
+            self.take_error_hold();
+            return;
+        }
         self.set_state("error");
         self.emit(EventKind::System {
             text: match kind {
                 "rate_limit" => format!(
-                    "session en erreur : rate limit — retry automatique                      programmé ({msg})"
+                    "session en erreur : rate limit — retry automatique programmé ({msg})"
                 ),
                 _ => format!(
-                    "session en erreur : {kind} — aucun retry automatique                      (envoi forcé, set_model ou resume pour débloquer) ({msg})"
+                    "session en erreur : {kind} — aucun retry automatique (envoi forcé, set_model ou resume pour débloquer) ({msg})"
                 ),
             },
         });
@@ -987,6 +995,15 @@ mod tests {
         // auth prime sur les mots « quota »/« limit ».
         assert_eq!(classify_error("403 quota exceeded"), "auth");
         assert_eq!(classify_error("connection reset by peer"), "other");
+        // Forme snake_case des erreurs API.
+        assert_eq!(classify_error("error: rate_limit_error"), "rate_limit");
+        // Codes nus = mot entier : timestamps/ids/ports ne matchent pas.
+        assert_eq!(classify_error("ts=1704290000 port=4031"), "other");
+        // « upgrade » seul n'est pas une limite de débit.
+        assert_eq!(
+            classify_error("please upgrade your daemon to continue"),
+            "other"
+        );
     }
 
     /// Backoff rate_limit : 60 s puis exponentiel, plafonné à 1 h.

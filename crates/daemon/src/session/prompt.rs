@@ -31,9 +31,16 @@ pub(super) enum TurnOutcome {
 /// quasiment jamais « model ».
 pub(super) fn classify_error(msg: &str) -> &'static str {
     let m = msg.to_lowercase();
+    // Codes HTTP en mot entier : « 429 » nu matcherait « 1704290000 »
+    // (timestamp/id/port) — le split sur non-alphanumérique impose une
+    // frontière de token.
+    let has_code = |code: &str| {
+        m.split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|w| w == code)
+    };
     if m.contains("unauthorized")
-        || m.contains("401")
-        || m.contains("403")
+        || has_code("401")
+        || has_code("403")
         || m.contains("authentication")
         || m.contains("credentials")
         || m.contains("login")
@@ -43,9 +50,9 @@ pub(super) fn classify_error(msg: &str) -> &'static str {
     }
     if m.contains("rate limit")
         || m.contains("ratelimit")
-        || m.contains("429")
+        || m.contains("rate_limit")
+        || has_code("429")
         || m.contains("quota")
-        || m.contains("upgrade")
         || m.contains("too many requests")
         || m.contains("resource exhausted")
     {
@@ -118,7 +125,7 @@ impl Session {
             if kind == "rate_limit" {
                 self.enqueue_prompt(text, false, PromptSrc::User);
                 self.emit(EventKind::System {
-                    text: "session en erreur (rate limit) — message en file,                            retry programmé"
+                    text: "session en erreur (rate limit) — message en file, retry programmé"
                         .into(),
                 });
                 return Ok(false);
@@ -220,11 +227,14 @@ impl Session {
             }
             // La retenue d'erreur tombe aussi — la trace last_error
             // survit jusqu'au prochain résultat de tour (un succès
-            // l'efface, un échec la ré-écrit).
-            self.take_error_hold();
+            // l'efface, un échec la ré-écrit). `eheld` entre dans la
+            // condition du drain : pendant le hold, busy resté vrai
+            // sans runner rendrait `already` toujours vrai — le message
+            // forcé s'empilerait sans jamais livrer.
+            let eheld = self.take_error_hold();
             let _ = self.cancel().await;
             let already = self.enqueue_prompt(text, true, PromptSrc::User);
-            if held || !already {
+            if held || eheld || !already {
                 // retenue levée (aucun runner ne tournait) ou file vide.
                 self.spawn_drain();
             }
@@ -506,6 +516,24 @@ impl Session {
                             text: "compact terminé — échec de la commande".into(),
                         });
                     }
+                    // Le prompt fautif retourne en tête de file :
+                    // le retry rate_limit rejoue alors un vrai tour
+                    // qui solde l'erreur au succès (sinon la retenue
+                    // retomberait sur une file vide → « error » collant
+                    // sans issue). Le src User devient UserJournaled —
+                    // le user_message est déjà dans le journal, un
+                    // second emit au drain le dupliquerait.
+                    {
+                        let src2 = if src == PromptSrc::User {
+                            PromptSrc::UserJournaled
+                        } else {
+                            src
+                        };
+                        self.prompt_queue
+                            .lock()
+                            .unwrap()
+                            .push_front((next.clone(), src2));
+                    }
                     // Retenue d'erreur : suspendre la livraison (busy
                     // conservé comme pour compact) plutôt qu'enchaîner
                     // la file sur le même échec — c'est le mécanisme
@@ -578,10 +606,13 @@ impl Session {
                     // encore côté agent — l'état reste visible jusqu'au
                     // signal de fin (la retenue garde les envois en file).
                     self.set_state("compacting");
-                } else if !binding_dead {
+                } else if !binding_dead && !self.error_held() {
                     // Pas de re-départ idle : le kill ci-dessous va
                     // poser dead via on_agent_exit — un « idle »
-                    // posé ici le recouvrirait selon l'ordre.
+                    // posé ici le recouvrirait selon l'ordre. Même
+                    // garde pour la retenue d'erreur : un steer en vol
+                    // qui finit après hold_error ne doit pas redescendre
+                    // l'état « error » à « idle ».
                     self.set_state("idle");
                 }
             }

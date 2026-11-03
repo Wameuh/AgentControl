@@ -2180,13 +2180,14 @@ impl Daemon {
     /// aux deux h_send pour que le retry post-resume garde la même
     /// sémantique.
     async fn plan_send(self: &Arc<Self>, sid: &str, msg: String, force: bool) -> bool {
-        // Session en erreur : le dernier tour a échoué — un nudge
-        // s'enfilerait derrière la retenue sans être livré. Le retry
-        // rate_limit ou l'action utilisateur la débloquera ; le tick
-        // suivant retentera.
+        // Retenue d'erreur active : un nudge s'enfilerait derrière
+        // sans être livré — le retry rate_limit ou l'action utilisateur
+        // lèvera le hold et le tick suivant retentera. Gate sur le hold
+        // vivant, pas l'état persisté : « error » avec hold parti (levée
+        // explicite, retry échue) reste livrable.
         if let Ok(s) = self.get_session(sid).await {
-            if s.meta_snapshot().state == "error" {
-                info!("orchestrateur: {sid} en erreur — nudge abandonné");
+            if s.error_held() {
+                info!("orchestrateur: {sid} en retenue d'erreur — nudge abandonné");
                 return false;
             }
         }
