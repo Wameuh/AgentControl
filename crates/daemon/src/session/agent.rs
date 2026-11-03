@@ -57,6 +57,9 @@ impl Session {
         // respawner par-dessus le tuerait pour rien (deuxième réveil,
         // resume pendant un spawn).
         if self.is_alive() {
+            // Marquage `spawning` posé en amont (réservation de place) : une
+            // session vivante n'est pas en démarrage — ne pas le laisser bloqué.
+            self.spawning.store(false, Ordering::SeqCst);
             return Ok(true);
         }
         // Nouveau process = nouveau cycle de livraison : retenue compact

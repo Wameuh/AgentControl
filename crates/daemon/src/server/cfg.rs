@@ -13,7 +13,16 @@ pub struct AgentProfile {
     /// Override du seuil de compact auto `[agents.<id>.compact]` — voir
     /// CompactPartial/CompactSrc (niveau agent entre global et session).
     pub compact: CompactPartial,
+    /// Nombre max d'agents vivants (ou en démarrage) simultanés pour ce
+    /// profil — 0 = illimité. Au-delà, une session idle du profil est
+    /// endormie pour faire place ; sans session inactive, le spawn est
+    /// refusé avec erreur (ensure_agent_slot).
+    pub max_instances: u32,
 }
+
+/// Plafond d'instances par profil agent quand `max_instances` n'est pas
+/// précisé dans `[agents.<id>]`.
+pub const DEFAULT_MAX_INSTANCES: u32 = 6;
 
 /// Valeur de {mode} pour la ligne de commande/env de l'agent : les ids de
 /// modes de **session ACP** qui n'existent pas côté CLI (`plan`, `smart`,

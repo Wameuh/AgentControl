@@ -67,6 +67,9 @@ struct AgentConf {
     /// (`[agents.<id>.compact]`) — session > agent > global.
     #[serde(default)]
     compact: server::CompactPartial,
+    /// Agents vivants simultanés max pour ce profil (défaut 6, 0 = illimité).
+    #[serde(default)]
+    max_instances: Option<u32>,
 }
 
 fn default_tcp() -> String {
@@ -205,6 +208,7 @@ fn default_agents() -> HashMap<String, AgentProfile> {
             command: vec!["devin".into(), "acp".into()],
             env: devin_env,
             compact: server::CompactPartial::default(),
+            max_instances: server::DEFAULT_MAX_INSTANCES,
         },
     );
     m
@@ -352,6 +356,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
                 command: c.command,
                 env: c.env,
                 compact: c.compact,
+                max_instances: c.max_instances.unwrap_or(server::DEFAULT_MAX_INSTANCES),
             },
         );
     }
