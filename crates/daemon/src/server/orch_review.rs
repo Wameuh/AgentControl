@@ -391,8 +391,13 @@ impl Daemon {
                 self.orch_save(&st);
                 continue;
             }
-            // Timeout → kill + échec (pas de boucle silencieuse).
-            if now - started > cfg.pr_review_timeout as f64 {
+            // Timeout → kill + échec (pas de boucle silencieuse). Une
+            // session en `error` (rate limit) attend sa reprise : le
+            // temps de backoff ne compte pas dans le timeout.
+            let rate_limited = metas
+                .iter()
+                .any(|m| m.id == sid && m.state == "error");
+            if !rate_limited && now - started > cfg.pr_review_timeout as f64 {
                 warn!("orchestrateur: review PR {key} timeout → failed");
                 self.gh_comment(&repo, pr_n, &fail_comment("timeout"), &cfg)
                     .await;
@@ -441,9 +446,13 @@ impl Daemon {
                     continue;
                 }
             }
-            // En vol : working/compacting/starting → attendre. Idle :
-            // le tour est fini — le bloc doit être là, sinon échec.
-            if matches!(meta.state.as_str(), "working" | "compacting" | "starting") {
+            // En vol : working/compacting/starting → attendre ; error
+            // (rate limit, reprise automatique) et waiting_input aussi.
+            // Idle : le tour est fini — le bloc doit être là, sinon échec.
+            if matches!(
+                meta.state.as_str(),
+                "working" | "compacting" | "starting" | "error" | "waiting_input"
+            ) {
                 continue;
             }
             let block = self
