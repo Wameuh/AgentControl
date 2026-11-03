@@ -1189,6 +1189,10 @@ impl Daemon {
             let rl = rate_limited_count(&metas, cfg);
 
             // 2. ledger worker → {items, prs} + gestion des inactifs.
+            // Nudges depuis `asleep` différés après le spawn : un réveil
+            // consomme un slot max_workers (comme plan_review), et le
+            // dispatch pending prime sur le réveil des waiters PR.
+            let mut asleep_nudges: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
             for w in workers.clone() {
                 if !self.orch.is_enabled() {
                     return Ok(());
@@ -1390,6 +1394,16 @@ impl Daemon {
                 if now - st.nudges.get(sid).copied().unwrap_or(0.0)
                     >= cfg.nudge_cooldown_secs as f64
                 {
+                    // Asleep : différé post-spawn (consomme un slot).
+                    // Idle : déjà compté dans alive → nudge immédiat.
+                    if state == "asleep" {
+                        asleep_nudges.push((
+                            sid.to_string(),
+                            open_prs.iter().map(|s| (*s).clone()).collect(),
+                            my_open.iter().map(|s| (*s).clone()).collect(),
+                        ));
+                        continue;
+                    }
                     info!(
                         "orchestrateur: {sid} idle (open_prs={open_prs:?} \
                          wip={my_open:?}) → nudge"
@@ -1404,11 +1418,15 @@ impl Daemon {
             if !self.orch.is_enabled() {
                 return Ok(());
             }
+            // Les `asleep` ne tiennent pas de slot (plus de process) —
+            // aligné sur backlog_alive du pipeline plan_review. Un
+            // réveil ultérieur consomme le slot via le budget `free`.
+            let alive = workers.iter().filter(|w| w.state != "asleep").count();
+            let mut free = (cfg.max_workers as usize).saturating_sub(alive);
             // Mode sériel quota (rl > 0) : au plus UN spawn, et seulement
             // si aucune session ne tourne — les sessions en erreur
             // rate_limit attendent leur backoff, les idles ne sont pas
             // réveillées. Sinon dispatch normal.
-            let slots = (cfg.max_workers as usize).saturating_sub(workers.len());
             let to_spawn = if rl > 0 {
                 let active = workers.iter().any(|w| {
                     matches!(
@@ -1424,16 +1442,16 @@ impl Daemon {
                     "{rl} session(s) en rate_limit — exécution sérialisée \
                      (1 session à la fois)"
                 ));
-                usize::from(!active && !pending.is_empty()).min(slots)
+                usize::from(!active && !pending.is_empty()).min(free)
             } else {
-                pending.len().min(slots)
+                pending.len().min(free)
             };
             for _ in 0..to_spawn {
                 st.counter += 1;
                 info!(
                     "orchestrateur: pending={} active={} → spawn {}{}",
                     pending.len(),
-                    workers.len(),
+                    alive,
                     cfg.title_prefix,
                     st.counter
                 );
@@ -1442,6 +1460,32 @@ impl Daemon {
                     if let Ok(s) = self.get_session(&sid).await {
                         workers.push(s.meta_snapshot());
                     }
+                    free = free.saturating_sub(1);
+                }
+            }
+
+            // 3b. Réveil des waiters asleep (PR ouvertes / wip) dans la
+            // limite des slots restants — spawn prioritaire ci-dessus.
+            for (sid, open_prs, my_open) in asleep_nudges {
+                if free == 0 {
+                    info!(
+                        "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
+                         wip={my_open:?}) → nudge différé (max_workers)"
+                    );
+                    continue;
+                }
+                if !self.orch.is_enabled() {
+                    return Ok(());
+                }
+                let open_refs: Vec<&String> = open_prs.iter().collect();
+                let wip_refs: Vec<&String> = my_open.iter().collect();
+                info!(
+                    "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
+                     wip={my_open:?}) → nudge (slot free={free})"
+                );
+                if self.orch_nudge(&sid, &open_refs, &wip_refs).await {
+                    st.nudges.insert(sid, now);
+                    free = free.saturating_sub(1);
                 }
             }
 
