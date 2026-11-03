@@ -381,6 +381,12 @@ impl OrchProbe {
         }
     }
 
+    /// Détail libre sans toucher la phase — le tick plan s'en sert pour
+    /// signaler le mode sériel quota (champ `status` privé au module).
+    pub(crate) fn set_detail(&self, detail: Option<String>) {
+        self.status.lock().unwrap().detail = detail;
+    }
+
     /// Pose immédiate d'une entrée ledger dans l'état live — utilisée
     /// par le post « sorti du backlog » (le write-back de fin de tick
     /// n'arriverait qu'après : un `orch off` entre-temps perdrait le
@@ -809,6 +815,28 @@ pub(crate) fn acwait_pending(sid: &str) -> bool {
     false
 }
 
+/// Sessions du composant en retenue `rate_limit` sur le même agent (et
+/// le même modèle si configuré) — le quota est partagé : tant qu'une
+/// session patiente sur son backoff, tout spawn ou nudge derrière
+/// repartirait sur la même limite dès sa levée. Pilote le « mode
+/// sériel » du cycle : nudges workers/planners suspendus, au plus une
+/// session active à la fois, reviewer prioritaire (et jamais tué — son
+/// backoff le reprend).
+pub(crate) fn rate_limited_count(metas: &[SessionMeta], cfg: &cfg::OrchCfg) -> usize {
+    metas
+        .iter()
+        .filter(|m| {
+            m.origin.as_deref() == Some(COMPONENT_ORIGIN)
+                && m.state == "error"
+                && m.last_error
+                    .as_ref()
+                    .is_some_and(|le| le.kind == "rate_limit")
+                && m.agent == cfg.agent
+                && (cfg.model.is_empty() || m.model.as_deref() == Some(cfg.model.as_str()))
+        })
+        .count()
+}
+
 /// Item de la file AgentBacklog (projection JSON du `--list --all`).
 pub(crate) type Task = Value;
 
@@ -1154,6 +1182,12 @@ impl Daemon {
                 }
             }
 
+            // Sessions du composant en retenue rate_limit (quota partagé
+            // agent/modèle) — calculée une fois pour tout le tick : tant
+            // que rl > 0 le cycle passe en mode sériel (nudges suspendus,
+            // un seul spawn et seulement si rien ne tourne).
+            let rl = rate_limited_count(&metas, cfg);
+
             // 2. ledger worker → {items, prs} + gestion des inactifs.
             for w in workers.clone() {
                 if !self.orch.is_enabled() {
@@ -1345,6 +1379,14 @@ impl Daemon {
                 if acwait_pending(sid) {
                     continue;
                 }
+                // Mode sériel quota : un nudge réveillerait la session
+                // pour repartir sur la même limite — on laisse la
+                // session en vol (ou en backoff) finir seule. Idem une
+                // session « error » (rate_limit en reprise auto ou
+                // panne) : le nudge n'accélère rien.
+                if rl > 0 || state == "error" {
+                    continue;
+                }
                 if now - st.nudges.get(sid).copied().unwrap_or(0.0)
                     >= cfg.nudge_cooldown_secs as f64
                 {
@@ -1362,27 +1404,27 @@ impl Daemon {
             if !self.orch.is_enabled() {
                 return Ok(());
             }
-            // Une session du composant en rate_limit sur le même agent
-            // (ou même modèle si configuré) : spawner derrière partagerait
-            // la même limite — suspendre les spawns ce cycle-ci.
-            let rl = metas.iter().filter(|m| {
-                m.origin.as_deref() == Some(COMPONENT_ORIGIN)
-                    && m.state == "error"
-                    && m.last_error
-                        .as_ref()
-                        .is_some_and(|le| le.kind == "rate_limit")
-                    && m.agent == cfg.agent
-                    && (cfg.model.is_empty() || m.model.as_deref() == Some(cfg.model.as_str()))
-            }).count();
+            // Mode sériel quota (rl > 0) : au plus UN spawn, et seulement
+            // si aucune session ne tourne — les sessions en erreur
+            // rate_limit attendent leur backoff, les idles ne sont pas
+            // réveillées. Sinon dispatch normal.
             let slots = (cfg.max_workers as usize).saturating_sub(workers.len());
             let to_spawn = if rl > 0 {
+                let active = workers.iter().any(|w| {
+                    matches!(
+                        w.state.as_str(),
+                        "working" | "compacting" | "starting" | "waiting_input"
+                    )
+                });
                 info!(
-                    "orchestrateur: {rl} session(s) en rate_limit — spawns suspendus"
+                    "orchestrateur: {rl} session(s) en rate_limit — mode sériel \
+                     (active={active})"
                 );
                 self.orch.status.lock().unwrap().detail = Some(format!(
-                    "{rl} session(s) en rate_limit — spawns suspendus"
+                    "{rl} session(s) en rate_limit — exécution sérialisée \
+                     (1 session à la fois)"
                 ));
-                0
+                usize::from(!active && !pending.is_empty()).min(slots)
             } else {
                 pending.len().min(slots)
             };

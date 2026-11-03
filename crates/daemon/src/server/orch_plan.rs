@@ -266,6 +266,22 @@ fn backlog_alive(metas: &[SessionMeta], cfg: &cfg::OrchCfg) -> usize {
         .count()
 }
 
+/// Sessions Backlog-* réellement en train de tourner — base du mode
+/// sériel quota : `error` (backoff rate_limit, en attente de reprise),
+/// `idle` et `asleep` ne comptent pas tant que rien ne les pousse.
+fn backlog_active(metas: &[SessionMeta], cfg: &cfg::OrchCfg) -> usize {
+    metas
+        .iter()
+        .filter(|m| {
+            is_backlog(m, cfg)
+                && matches!(
+                    m.state.as_str(),
+                    "working" | "compacting" | "starting" | "waiting_input"
+                )
+        })
+        .count()
+}
+
 /// Choix au dispatch `plan_review` : réutiliser le reviewer mémorisé
 /// (il garde la mémoire de ses rounds précédents → convergence) ou
 /// spawner une session neuve.
@@ -273,14 +289,21 @@ fn backlog_alive(metas: &[SessionMeta], cfg: &cfg::OrchCfg) -> usize {
 enum ReviewerChoice {
     Reuse(String),
     Spawn,
+    /// Reviewer mappé en backoff rate_limit : ni spawn ni réveil —
+    /// son retry session le reprendra, on attend.
+    Wait,
 }
 
 /// Reuse si le reviewer mémorisé est encore là et pas mort ; Spawn
 /// sinon (session absente, dead, jamais mappée — ou `reviewer_reuse`
 /// coupé : comportement éphémère, une session neuve par round).
+/// `meta_err_kind` = `last_error.kind` du reviewer mappé : `rate_limit`
+/// → Wait (quota partagé en backoff — le tuer ou spawner derrière
+/// rebrûlerait la limite à sa levée).
 fn reviewer_choice(
     mapped: Option<&String>,
     meta_state: Option<&str>,
+    meta_err_kind: Option<&str>,
     in_session_ids: bool,
     reuse: bool,
 ) -> ReviewerChoice {
@@ -288,6 +311,9 @@ fn reviewer_choice(
         return ReviewerChoice::Spawn;
     }
     match (mapped, in_session_ids, meta_state) {
+        (Some(_), true, Some("error")) if meta_err_kind == Some("rate_limit") => {
+            ReviewerChoice::Wait
+        }
         // « error » hors rate_limit = en panne (model/auth/other) —
         // inutile de le réveiller, il ne répondra qu'au même échec.
         (Some(sid), true, Some(state)) if state != "dead" && state != "error" => {
@@ -560,6 +586,11 @@ impl Daemon {
     ) -> Result<PlanOutcome> {
         let now = now_secs();
         let by_id: HashMap<u64, &Task> = tasks.iter().map(|t| (task_id(t), t)).collect();
+        // Quota partagé : une session du composant en backoff rate_limit
+        // → mode sériel pour tout le tick (dispatch et nudges P/W) —
+        // tout envoi derrière repartirait sur la même limite à la
+        // levée du backoff.
+        let rl = rate_limited_count(metas, cfg);
 
         // ---- A. Cycle de vie reviewer : mort, marqueur VERDICT, timeout.
         for t in tasks
@@ -668,7 +699,10 @@ impl Daemon {
                 .find(|m| m.id == rsid)
                 .map(|m| m.state.as_str());
             let busy = rstate.is_some_and(|s| matches!(s, "working" | "compacting" | "starting"));
-            if busy || now - started < cfg.nudge_cooldown_secs as f64 {
+            // « error » : rate_limit en backoff (reprise auto par le
+            // retry session — on attend, jamais de kill) ou panne
+            // model/auth — un nudge n'accélère rien dans les deux cas.
+            if rstate == Some("error") || busy || now - started < cfg.nudge_cooldown_secs as f64 {
                 continue;
             }
             // Même garde ac-wait que pour workers/planners : un waiter
@@ -795,6 +829,17 @@ impl Daemon {
         // puis planners/workers sous réserve anti-deadlock.
         let alive = backlog_alive(metas, cfg);
         let mut free = (cfg.max_workers as usize).saturating_sub(alive);
+        // Mode sériel quota : au plus une session active à la fois —
+        // dispatch seulement quand rien ne tourne ; la boucle reviewer
+        // ci-dessous passe la première (priorité au reviewer) et un
+        // reviewer en backoff est attendu, jamais remplacé (Wait).
+        if rl > 0 {
+            free = free.min(usize::from(backlog_active(metas, cfg) == 0));
+            self.orch.set_detail(Some(format!(
+                "{rl} session(s) en rate_limit — exécution sérialisée \
+                 (1 session à la fois, reviewer prioritaire)"
+            )));
+        }
         // Un reviewer persistant endormi ne tient pas le slot : il ne
         // consomme rien et se réveille au prochain claim-review.
         let reviewers_alive = metas
@@ -854,19 +899,23 @@ impl Daemon {
             // Réutilisation du reviewer persistant mémorisé : même
             // session → il retrouve ses points du round précédent.
             let mapped = st.reviewers.get(&key);
-            let mstate = mapped.and_then(|sid| {
-                metas
-                    .iter()
-                    .find(|m| &m.id == sid)
-                    .map(|m| m.state.as_str())
-            });
+            let mapped_meta = mapped.and_then(|sid| metas.iter().find(|m| &m.id == sid));
+            let mstate = mapped_meta.map(|m| m.state.as_str());
             let choice = reviewer_choice(
                 mapped,
                 mstate,
+                mapped_meta
+                    .and_then(|m| m.last_error.as_ref())
+                    .map(|le| le.kind.as_str()),
                 mapped.is_some_and(|s| session_ids.contains(s)),
                 cfg.reviewer_reuse,
             );
             let mut spawn_new = true;
+            // Backoff rate_limit du reviewer mappé : son retry session
+            // reprendra le round — pas de spawn de remplacement ni de rm.
+            if matches!(choice, ReviewerChoice::Wait) {
+                continue;
+            }
             if let ReviewerChoice::Reuse(rsid) = choice {
                 // Reviewer encore en fin de tour : poser le watermark
                 // avant la fin de son écriture relirait un VERDICT du
@@ -1086,7 +1135,7 @@ impl Daemon {
                 Some(Role::Planner) => {
                     outcome.planners += 1;
                     outcome.workers += 1;
-                    self.planner_upkeep(&m, bin, cfg, ws, tasks, prs, st, now)
+                    self.planner_upkeep(&m, bin, cfg, ws, tasks, prs, st, now, rl > 0)
                         .await;
                 }
                 _ => {
@@ -1103,6 +1152,7 @@ impl Daemon {
                         &["wip"],
                         &cfg.title_prefix,
                         None,
+                        rl > 0,
                     )
                     .await;
                 }
@@ -1442,6 +1492,7 @@ impl Daemon {
         open_statuses: &[&str],
         title_prefix: &str,
         plan_item: Option<u64>,
+        quota_serial: bool,
     ) -> bool {
         let sid = w.id.as_str();
         let state = w.state.as_str();
@@ -1588,6 +1639,16 @@ impl Daemon {
         if acwait_pending(sid) {
             return true;
         }
+        // Mode sériel quota : aucun nudge tant qu'une session du
+        // composant patiente en backoff rate_limit — la session en vol
+        // (ou en attente de reprise) doit finir seule, tout envoi
+        // derrière repartirait sur la même limite. Le nudge reviewer
+        // reste autorisé : c'est la session prioritaire. Idem une
+        // session « error » (reprise auto ou panne) : sans retenue
+        // active le nudge partirait sur le même échec.
+        if quota_serial || state == "error" {
+            return true;
+        }
         let idle_long =
             now - st.nudges.get(sid).copied().unwrap_or(0.0) >= cfg.nudge_cooldown_secs as f64;
         if !idle_long {
@@ -1680,6 +1741,7 @@ impl Daemon {
         prs: &[proto::PrEntry],
         st: &mut OrchPersist,
         now: f64,
+        quota_serial: bool,
     ) {
         let sid = w.id.as_str().to_string();
         let my_item = tasks
@@ -1712,6 +1774,7 @@ impl Daemon {
                 &["wip", "plan_review", "reviewing"],
                 PLANNER_PREFIX,
                 plan_nudge,
+                quota_serial,
             )
             .await;
         if !alive {
@@ -2580,31 +2643,44 @@ mod tests {
         // Mappé + vivant (idle/asleep/working/waiting_input) → Reuse.
         for st in ["idle", "asleep", "working", "waiting_input"] {
             assert_eq!(
-                reviewer_choice(Some(&sid), Some(st), true, true),
+                reviewer_choice(Some(&sid), Some(st), None, true, true),
                 ReviewerChoice::Reuse(sid.clone()),
                 "state={st}"
             );
         }
         // Mappé mais mort / absent des sessions / sans meta → Spawn.
         assert_eq!(
-            reviewer_choice(Some(&sid), Some("dead"), true, true),
+            reviewer_choice(Some(&sid), Some("dead"), None, true, true),
             ReviewerChoice::Spawn
         );
-        // « error » = en panne — réveiller ne sert à rien, session neuve.
+        // « error » rate_limit : backoff en cours → Wait (on attend la
+        // reprise, on ne remplace pas). Autre « error » = en panne —
+        // réveiller ne sert à rien, session neuve.
         assert_eq!(
-            reviewer_choice(Some(&sid), Some("error"), true, true),
+            reviewer_choice(Some(&sid), Some("error"), Some("rate_limit"), true, true),
+            ReviewerChoice::Wait
+        );
+        assert_eq!(
+            reviewer_choice(Some(&sid), Some("error"), Some("auth"), true, true),
             ReviewerChoice::Spawn
         );
         assert_eq!(
-            reviewer_choice(Some(&sid), Some("idle"), false, true),
+            reviewer_choice(Some(&sid), Some("error"), None, true, true),
             ReviewerChoice::Spawn
         );
         assert_eq!(
-            reviewer_choice(Some(&sid), None, true, true),
+            reviewer_choice(Some(&sid), Some("idle"), None, false, true),
+            ReviewerChoice::Spawn
+        );
+        assert_eq!(
+            reviewer_choice(Some(&sid), None, None, true, true),
             ReviewerChoice::Spawn
         );
         // Jamais mappé → Spawn.
-        assert_eq!(reviewer_choice(None, None, false, true), ReviewerChoice::Spawn);
+        assert_eq!(
+            reviewer_choice(None, None, None, false, true),
+            ReviewerChoice::Spawn
+        );
     }
 
     #[test]
@@ -2712,7 +2788,7 @@ mod tests {
         // reviewer mappé est vivant.
         let sid = "s-r1".to_string();
         assert_eq!(
-            reviewer_choice(Some(&sid), Some("idle"), true, false),
+            reviewer_choice(Some(&sid), Some("idle"), None, true, false),
             ReviewerChoice::Spawn
         );
         // Et la sweep le supprime au lieu de l'endormir (Sleep→Rm).
@@ -2772,5 +2848,15 @@ mod tests {
             mk("Backlog-W3", "working"),
         ];
         assert_eq!(backlog_alive(&metas, &c), 2);
+        // Comptage « actif » du mode sériel : working/waiting_input
+        // comptent, idle/asleep/error (backoff en attente) non.
+        let metas = vec![
+            mk("Backlog-P1", "idle"),
+            mk("Backlog-R2", "error"),
+            mk("Backlog-W3", "working"),
+            mk("Backlog-P4", "waiting_input"),
+            mk("Backlog-W5", "asleep"),
+        ];
+        assert_eq!(backlog_active(&metas, &c), 2);
     }
 }
