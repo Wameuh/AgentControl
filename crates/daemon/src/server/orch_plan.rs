@@ -2313,8 +2313,8 @@ impl Daemon {
             .filter(|t| {
                 matches!(task_status(t), "plan_review" | "reviewing")
                     || (task_status(t) == "wip"
-                        && ItemPhase::of(st.item_phase.get(&task_id(t).to_string()))
-                            == ItemPhase::Planning)
+                        && st.item_phase.get(&task_id(t).to_string()).map(String::as_str)
+                            == Some("planning"))
             })
             .cloned()
             .collect::<Vec<_>>()
