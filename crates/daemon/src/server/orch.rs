@@ -75,7 +75,7 @@ MISSION — boucle tant que le backlog partage contient des taches :
 
 4. Mene ta PR jusqu'au merge : si la regle de merge de /workspace/AGENTS.md le permet pour un agent (derniere review auto « Verdict: APPROVED » posterieure au push du head courant, fraicheur verifiee via les PushEvents du repo), procede au merge toi-meme ; sinon le merge reste a l'utilisateur — surveille jusqu'au merge effectif (gh pr view <N> --json state).
 
-5. Marque la tache faite : agentbacklog --done <ID> --agent-id "<ton agent-id>" UNIQUEMENT quand ta PR est effectivement MERGED (verifie l'etat GitHub, pas seulement ready+checks). Pour une tache sans PR propre (ex. item patchnotes auto) : --done quand les criteres de la tache sont remplis.
+5. Marque la tache faite : agentbacklog --done <ID> --agent-id "<ton agent-id>" UNIQUEMENT quand ta PR est effectivement MERGED (verifie l'etat GitHub, pas seulement ready+checks). Cette regle « done-on-merge » vise TA PR de feature vers next_release — elle ne s'applique PAS aux taches sans PR propre (ex. item patchnotes auto, dont la PR visee est la release PR next_release -> main reservee au merge utilisateur) : pour celles-ci, --done quand les criteres propres de la tache sont remplis (ils sont dans sa description — jamais « attendre le merge » d'une PR qui ne t'appartient pas).
 
 Blocage insurmontable sur une tache : agentbacklog --release <ID> --agent-id "<ton agent-id>", explique la raison dans ta reponse, puis reprends a l'etape 1.
 
@@ -91,7 +91,8 @@ MISSION :
 1. Body = patchnotes utilisateur EN ANGLAIS couvrant TOUTES les PR mergees dans next_release sur le cycle (inventaire : git fetch origin && git log origin/main..origin/next_release --oneline, ou les commits de la PR). Le generateur automatique (auto-release-pr.yml, cf item #18 / PR #126-127) regenere le body a chaque push sur next_release : verifie qu'il est a jour vis-a-vis du head courant, EN ANGLAIS, et lisible par un utilisateur (fonctionnalites visibles, pas le detail technique interne). S'il est stale ou non anglophone, declenche la regeneration via le mecanisme du workflow ; a defaut reecris le body toi-meme (gh pr edit <N> --body). Si le generateur doit produire de l'anglais durablement, corrige-le via le cycle PR normal plutot qu'une edition manuelle.
 2. Passe la PR en ready : gh pr ready <N> — cela declenche release-bump (tag rc.k + commit de version sur next_release), c'est voulu. Ne merge JAMAIS la release PR vers main : le merge reste a l'utilisateur.
 3. Si le generateur produit un body defectueux, corrige-le via le cycle PR normal dans un worktree separe (base origin/next_release).
-4. Quand la release PR est ready avec un body a jour : agentbacklog --done <ID> --agent-id "<ton agent-id>"."#;
+4. Quand la release PR est ready avec un body a jour : agentbacklog --done <ID> --agent-id "<ton agent-id>". C'est le critere de cloture de CET item — la regle generique « --done quand ta PR est merged » ne s'applique pas ici : tu n'as pas de PR propre, et la release PR ne sera JAMAIS mergee par un agent (le merge vers main reste a l'utilisateur, c'est voulu). N'attends pas son merge pour solder.
+5. Apres ton --done, si du travail revient dans le backlog la garde de l'orchestrateur repasse la release PR en draft automatiquement — c'est normal, rien a faire : a la prochaine cloture de cycle (backlog a nouveau vide), un nouvel item patchnotes sera cree pour repasser la PR ready. Ta responsabilite se limite au critere de l'etape 4."#;
 
 /// `origin` des sessions Manager — rôle d'intendance backlog proposé
 /// par le client (un par workspace routé), distinct des workers : le
