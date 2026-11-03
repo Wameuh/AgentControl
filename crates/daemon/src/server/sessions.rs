@@ -24,7 +24,7 @@ impl Daemon {
                     .get(&agent)
                     .with_context(|| format!("agent inconnu: {agent}"))?
                     .clone();
-                self.ensure_agent_slot(&agent).await?;
+                let _slot = self.ensure_agent_slot(&agent).await?;
                 // `~`/`$VAR` expansés + existence validée ici — sinon le
                 // spawn échouait en tâche de fond bien après la réponse.
                 let cwd = resolve_cwd(&cwd)?;
@@ -110,7 +110,7 @@ impl Daemon {
                     .get(&agent)
                     .with_context(|| format!("agent inconnu: {agent}"))?
                     .clone();
-                self.ensure_agent_slot(&agent).await?;
+                let _slot = self.ensure_agent_slot(&agent).await?;
                 let cwd = resolve_cwd(&cwd)?;
                 let meta = SessionMeta {
                     id: proto::new_id("s"),
@@ -162,7 +162,7 @@ impl Daemon {
     pub(super) async fn h_fork_session(self: &Arc<Self>, session: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
                 let meta = s.meta_snapshot();
-                self.ensure_agent_slot(&meta.agent).await?;
+                let _slot = self.ensure_agent_slot(&meta.agent).await?;
                 let native = meta
                     .native_session_id
                     .clone()
@@ -331,6 +331,13 @@ impl Daemon {
 
     pub(super) async fn h_clear_session(self: &Arc<Self>, session: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
+                // Session endormie/morte : le clear relance un agent, donc
+                // il faut une place (une session vivante la garde déjà).
+                let slot = if s.is_alive() {
+                    None
+                } else {
+                    Some(self.ensure_agent_slot(&s.meta_snapshot().agent).await?)
+                };
                 // Kill silencieux (gen invalidée) puis journal vidé — les
                 // events de mort du vieux process n'atterrissent nulle part.
                 s.kill_for_respawn().await;
@@ -355,6 +362,10 @@ impl Daemon {
                 // sinon le garde asleep de spawn_agent stopperait le
                 // respawn (contexte effacé → échec = dead, pas asleep).
                 s.leave_asleep();
+                if slot.is_some() {
+                    s.mark_spawning();
+                }
+                drop(slot);
                 // resume_native_id=None → session/new : contexte agent vide.
                 if let Err(e) = s
                     .spawn_agent(&cmd, &envs, None, true, self.mcp_servers(&session), None)
@@ -503,9 +514,11 @@ impl Daemon {
         // Avant leave_asleep : un refus laisse la session endormie/morte,
         // pas bloquée en « starting ». Une session déjà vivante ne compte
         // pas de nouvelle instance.
-        if !s.is_alive() {
-            self.ensure_agent_slot(&meta.agent).await?;
-        }
+        let slot = if s.is_alive() {
+            None
+        } else {
+            Some(self.ensure_agent_slot(&meta.agent).await?)
+        };
         let was_asleep = s.leave_asleep();
         // Génération avant le spawn : un kill/rebind intervenu (clear,
         // sleep, rebind) la change — la session ne doit alors PAS être
@@ -522,6 +535,10 @@ impl Daemon {
             meta.mode.as_deref(),
             &meta.id,
         );
+        if slot.is_some() {
+            s.mark_spawning();
+        }
+        drop(slot);
         let r = s
             .spawn_agent(
                 &cmd,

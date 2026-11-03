@@ -14,7 +14,9 @@ pub struct AgentProfile {
     /// CompactPartial/CompactSrc (niveau agent entre global et session).
     pub compact: CompactPartial,
     /// Nombre max d'agents vivants (ou en démarrage) simultanés pour ce
-    /// profil — 0 = illimité. Au-delà, un spawn est refusé avec erreur.
+    /// profil — 0 = illimité. Au-delà, une session idle du profil est
+    /// endormie pour faire place ; sans session inactive, le spawn est
+    /// refusé avec erreur (ensure_agent_slot).
     pub max_instances: u32,
 }
 

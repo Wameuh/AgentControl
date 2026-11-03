@@ -134,6 +134,15 @@ use crate::journal;
 use crate::prs::PrRegistry;
 use crate::session::Session;
 
+/// Horodatage du dernier event d'une session (ISO-8601, "" si journal vide).
+fn last_event_ts(s: &Arc<Session>) -> String {
+    s.journal
+        .read_page(&s.dir, None, 1)
+        .ok()
+        .and_then(|p| p.last().map(|e| e.ts.clone()))
+        .unwrap_or_default()
+}
+
 /// Prompt injecté aux sessions reprises après un arrêt brutal du démon —
 /// livré comme un envoi utilisateur (journalisé, visible dans le chat).
 const AUTO_RESUME_PROMPT: &str = "continue please";
@@ -187,6 +196,8 @@ pub struct Daemon {
     /// AppState.sys côté client ; l'horodatage interne à System garde
     /// l'intervalle minimal) ; alimente le bloc "host" de daemon_status.
     host_sys: std::sync::Mutex<sysinfo::System>,
+    /// Sérialise les réservations de place d'instance (ensure_agent_slot).
+    slot_lock: tokio::sync::Mutex<()>,
 }
 
 
@@ -261,6 +272,7 @@ impl Daemon {
             web,
             dir_watch_n: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             host_sys: std::sync::Mutex::new(sysinfo::System::new()),
+            slot_lock: tokio::sync::Mutex::new(()),
         });
         d.pr_verify.spawn_worker();
         let mut resumable = Vec::new();
@@ -346,15 +358,6 @@ impl Daemon {
             warn!("{sid}: agent « {} » inconnu — reprise ignorée", meta.agent);
             return;
         };
-        if !s.is_alive() {
-            if let Err(e) = self.ensure_agent_slot(&meta.agent).await {
-                warn!("{sid}: reprise auto refusée: {e:#}");
-                s.emit(proto::EventKind::Error {
-                    message: format!("reprise auto: {e:#}"),
-                });
-                return;
-            }
-        }
         let (cmd, envs) = self.agent_parts(
             &profile,
             meta.model.as_deref(),
@@ -368,6 +371,19 @@ impl Daemon {
         // client finit idle plutôt que sauter toute la reprise.
         if s.is_alive() && self.wait_revived_or_done(&s, sid).await {
             return;
+        }
+        if !s.is_alive() {
+            let _slot = match self.ensure_agent_slot(&meta.agent).await {
+                Ok(g) => g,
+                Err(e) => {
+                    warn!("{sid}: reprise auto refusée: {e:#}");
+                    s.emit(proto::EventKind::Error {
+                        message: format!("reprise auto: {e:#}"),
+                    });
+                    return;
+                }
+            };
+            s.mark_spawning();
         }
         match s
             .spawn_agent(&cmd, &envs, Some(native), true, self.mcp_servers(sid), None)
@@ -458,16 +474,23 @@ impl Daemon {
     }
 
     /// Réserve une place d'instance pour le profil `agent` avant un spawn.
-    /// Plafond `max_instances` atteint → endort les sessions inactives de
-    /// ce profil (idle, file vide), la moins récemment active d'abord :
-    /// le journal est conservé, la session se réveille au prochain envoi.
-    /// Aucune inactive pour faire de la place → refus. 0 = illimité.
-    pub(crate) async fn ensure_agent_slot(&self, agent: &str) -> Result<()> {
+    /// Plafond `max_instances` atteint → endort les sessions idle du profil
+    /// (file vide, ni spawning ni waking), la moins récemment active d'abord
+    /// (date du dernier event) : le journal est conservé, la session se
+    /// réveille au prochain envoi. Aucune inactive → refus. 0 = illimité.
+    /// Le verrou rendu sérialise les réservations : l'appelant le garde
+    /// jusqu'à avoir marqué la session `spawning` — sinon deux spawns
+    /// concurrents verraient la même place libre.
+    pub(crate) async fn ensure_agent_slot(
+        &self,
+        agent: &str,
+    ) -> Result<tokio::sync::MutexGuard<'_, ()>> {
+        let guard = self.slot_lock.lock().await;
         let Some(max) = self.agents.get(agent).map(|p| p.max_instances) else {
-            return Ok(());
+            return Ok(guard);
         };
         if max == 0 {
-            return Ok(());
+            return Ok(guard);
         }
         let live: Vec<Arc<Session>> = self
             .sessions
@@ -479,7 +502,7 @@ impl Daemon {
             .collect();
         let excess = (live.len() + 1).saturating_sub(max as usize);
         if excess == 0 {
-            return Ok(());
+            return Ok(guard);
         }
         let mut idle: Vec<Arc<Session>> = live
             .iter()
@@ -491,7 +514,7 @@ impl Daemon {
             })
             .cloned()
             .collect();
-        idle.sort_by_key(|s| s.journal.last_seq());
+        idle.sort_by_cached_key(last_event_ts);
         anyhow::ensure!(
             idle.len() >= excess,
             "limite d'instances atteinte pour « {agent} » ({}/{max}) — aucune session inactive à endormir",
@@ -501,7 +524,7 @@ impl Daemon {
             info!("plafond {agent} ({max}) : endormie {}", s.meta_snapshot().id);
             s.sleep().await;
         }
-        Ok(())
+        Ok(guard)
     }
 
 

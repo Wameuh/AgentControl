@@ -120,7 +120,7 @@ impl Daemon {
                 }
 
                 let agent_id = agent.unwrap_or_else(|| cm.agent.clone());
-                self.ensure_agent_slot(&agent_id).await?;
+                let _slot = self.ensure_agent_slot(&agent_id).await?;
                 let profile = self
                     .agents
                     .get(&agent_id)
