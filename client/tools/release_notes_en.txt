@@ -64,3 +64,4 @@
 243: Sessions now show an error state (rate limit, model, auth) instead of silently idling; the orchestrator backs off instead of re-prompting in a loop.
 230: Backlog orchestrator gains an opt-in plan→review→implementation pipeline — a planner drafts a plan, a reviewer validates it, and a worker implements it, all driven by the daemon.
 238: Backlog orchestrator keeps a single reviewer session at a time and retries its nudge without releasing the item, instead of spawning competing reviewers.
+248: Worker prompt clarified: the `--done` rule for the auto patchnotes item no longer conflicts with the release PR merge being user-only — the item is done once the release PR is ready with up-to-date English notes.
