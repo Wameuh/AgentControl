@@ -65,6 +65,7 @@ export interface HostStats {
   mem_total_mb?: number;
   load1?: number;
   rss_mb?: number;
+  daemon_cpu?: number;
 }
 
 /** Résout le bloc `host` à afficher (injecté par main.ts — la sonde
@@ -80,7 +81,8 @@ function fmtMemPair(usedMb: number, totalMb: number): string {
 }
 
 /** Segment « srv » de la barre : cpu + mem de l'hôte démon (+ load unix
- *  et RSS du process démon — distingue charge hôte vs démon). */
+ *  et RSS/CPU du process démon — les libellés i18n distinguent la
+ *  portée : « host » = machine entière, « daemon » = process seul). */
 function hostPart(): string {
   const h = hostStats?.();
   if (!h || typeof h.cpu !== "number" ||
@@ -94,7 +96,12 @@ function hostPart(): string {
     mem: fmtMemPair(h.mem_used_mb, h.mem_total_mb),
   });
   if (typeof h.load1 === "number") s += ` · ${t("sb_srv_load", { v: h.load1 })}`;
-  if (typeof h.rss_mb === "number") s += ` · ${t("sb_srv_dmn", { v: h.rss_mb })}`;
+  if (typeof h.rss_mb === "number") {
+    // daemon_cpu absent sur les vieux démons → repli « RSS seul ».
+    s += ` · ${typeof h.daemon_cpu === "number"
+      ? t("sb_srv_dmn_cpu", { cpu: h.daemon_cpu.toFixed(1), v: h.rss_mb })
+      : t("sb_srv_dmn", { v: h.rss_mb })}`;
+  }
   return ` · ${s}`;
 }
 
@@ -105,10 +112,16 @@ async function updateStatusbar() {
     const fmt = (b: number) => b >= 1_048_576 ? `${(b / 1_048_576).toFixed(1)} MB/s` : b >= 1024 ? `${(b / 1024).toFixed(0)} kB/s` : `${Math.round(b)} B/s`;
     // Web : rss/cpu = métriques du process Tauri (0 en navigateur) — on
     // n'affiche que le trafic de la WebSocket vers le démon.
-    $("sb-stats").textContent = (isWeb
+    const el = $("sb-stats");
+    const host = hostPart();
+    el.textContent = (isWeb
       ? `↓${fmt(s.rx_bps)} ↑${fmt(s.tx_bps)}`
       : `mem ${Math.round(s.rss_mb)} MB · cpu ${s.cpu.toFixed(1)}% · ↓${fmt(s.rx_bps)} ↑${fmt(s.tx_bps)}`)
-      + hostPart();
+      + host;
+    // Tooltip : l'espace est trop compté pour expliciter chaque
+    // métrique inline — la portée (client / hôte entier / process
+    // démon) est détaillée au survol.
+    el.title = t("sb_stats_tip") + (host ? `\n${t("sb_srv_tip")}` : "");
   } catch { /* silencieux */ }
 }
 
