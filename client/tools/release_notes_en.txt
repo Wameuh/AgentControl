@@ -65,3 +65,4 @@
 230: Backlog orchestrator gains an opt-in plan→review→implementation pipeline — a planner drafts a plan, a reviewer validates it, and a worker implements it, all driven by the daemon.
 238: Backlog orchestrator keeps a single reviewer session at a time and retries its nudge without releasing the item, instead of spawning competing reviewers.
 247: Backlog worker prompt no longer asks the auto-patchnotes worker to wait for a merge it never owns — the item now spells out that 'release PR ready + body up to date' is its completion criterion, and documents the re-draft/re-item behavior if new work arrives.
+249: Backlog orchestrator no longer releases and re-claims in-progress items every cycle when plan review is off — the unfreeze path now only targets items that actually came through the plan pipeline.
