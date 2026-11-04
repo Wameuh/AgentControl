@@ -45,9 +45,12 @@ fn boxed() -> Option<&'static dyn SecretBox> {
 }
 
 /// Écrit un fichier secret : chiffré si la box est active, clair sinon.
-/// Mode 0600 dès la création (unix) — jamais de fenêtre en permissions
-/// d'umask. Échec de `seal` = échec de l'écriture (fail closed : pas de
-/// repli silencieux en clair).
+/// Écriture atomique `<name>.part` + `rename` — un kill en cours
+/// d'écriture ne laisse jamais un secret tronqué (le .part orphelin
+/// sera écrasé à la prochaine écriture). Mode 0600 dès la création
+/// (unix) — jamais de fenêtre en permissions d'umask. Échec de `seal`
+/// = échec de l'écriture (fail closed : pas de repli silencieux en
+/// clair).
 pub(crate) fn write_secret_file(path: &Path, data: &[u8]) -> io::Result<()> {
     let bytes = match boxed() {
         Some(b) => {
@@ -64,6 +67,9 @@ pub(crate) fn write_secret_file(path: &Path, data: &[u8]) -> io::Result<()> {
         }
         None => data.to_vec(),
     };
+    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(".part");
+    let tmp = path.with_file_name(tmp_name);
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -71,8 +77,14 @@ pub(crate) fn write_secret_file(path: &Path, data: &[u8]) -> io::Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let mut f = opts.open(path)?;
-    io::Write::write_all(&mut f, &bytes)
+    let mut f = opts.open(&tmp)?;
+    io::Write::write_all(&mut f, &bytes)?;
+    drop(f);
+    // Windows refuse le rename sur une cible existante — la suppression
+    // préalable ouvre une micro-fenêtre, acceptable hors box (desktop).
+    #[cfg(windows)]
+    let _ = std::fs::remove_file(path);
+    std::fs::rename(&tmp, path)
 }
 
 /// Lit un fichier secret : déchiffre si le magic est présent (box
