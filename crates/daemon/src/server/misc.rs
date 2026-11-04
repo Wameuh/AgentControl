@@ -51,8 +51,8 @@ impl Daemon {
     /// Bloc `"host"` de daemon_status : cpu % (f64 arrondi à 1 décimale
     /// — un arrondi f32 s'élargirait en f64 avec du bruit binaire, cf.
     /// #122), mem used/total Mo, load1 (unix seulement — l'API renvoie
-    /// 0 sur Windows) et rss_mb du process démon (distingue charge hôte
-    /// vs démon). Le `System` persistant rend le delta CPU significatif
+    /// 0 sur Windows) et rss_mb + daemon_cpu du process démon
+    /// (distingue charge hôte vs démon). Le `System` persistant rend le delta CPU significatif
     /// entre deux appels ; le poll client (~10 s) dépasse l'intervalle
     /// minimal interne de sysinfo — refresh direct à chaque appel.
     fn host_stats(&self) -> Value {
@@ -76,6 +76,11 @@ impl Daemon {
             sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
             if let Some(p) = sys.process(pid) {
                 host["rss_mb"] = json!(p.memory() / 1_048_576);
+                // CPU % du process démon — delta entre deux refresh du
+                // `System` persistant (le poll client ~10 s dépasse
+                // l'intervalle minimal) ; premier appel ≈ 0.
+                host["daemon_cpu"] =
+                    json!(((p.cpu_usage() as f64) * 10.0).round() / 10.0);
             }
         }
         host
