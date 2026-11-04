@@ -1060,15 +1060,19 @@ impl Daemon {
                             .unwrap_or((-1, String::new(), "spawn impossible".into()));
                     if rc == 0 {
                         info!("orchestrateur: reviewer {rsid} → #{id} (claim-review)");
-                        // Reuse coupée : l'ancien reviewer mappé ne
-                        // sera jamais réutilisé — le supprimer au lieu
-                        // de l'orpheliner en écrasant le mapping.
-                        if !cfg.reviewer_reuse {
-                            if let Some(old) =
-                                st.reviewers.get(&key).cloned().filter(|o| *o != rsid)
-                            {
-                                self.plan_rm_session(&old, st).await;
-                            }
+                        // L'ancien reviewer mappé est supprimé avant
+                        // l'écrasement du mapping — sinon il devient
+                        // orphelin définitif (la sweep ne voit que les
+                        // entrées présentes). Reuse coupée : jamais
+                        // réutilisé ; reuse active : `Spawn` n'est
+                        // choisi que si l'ancien est dead/error hors
+                        // rate_limit (sain → `Reuse`, backoff → `Wait`)
+                        // — dans les deux cas injoignable, le rm est
+                        // sans risque (session déjà partie → warn).
+                        if let Some(old) =
+                            st.reviewers.get(&key).cloned().filter(|o| *o != rsid)
+                        {
+                            self.plan_rm_session(&old, st).await;
                         }
                         st.reviewers.insert(key.clone(), rsid.clone());
                         self.reviewer_claim_reset(&rsid, planner, &key, st).await;
