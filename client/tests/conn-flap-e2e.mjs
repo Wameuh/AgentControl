@@ -257,6 +257,10 @@ await setDs({ version: "9.9.9", sessions: 1 });
 await drain();
 check("t8 reconnect gen2", await waitSeg("ok"));
 check("t8 log reconnect gen2", (await logs("reconnect #")).length >= 1);
+// Watchdog succès avec `_ac_gen` plus haute → noteGen monotone
+// resynchronise (filet anti-régression dialogue vs retry).
+await setDs({ version: "9.9.9", sessions: 1, _ac_gen: 3 });
+await sleep(500);
 const calls8 = await connectCalls();
 const l8b = await logLen();
 // Sonde périmée (gen 1) : pas de strike, pas de down.
@@ -268,7 +272,7 @@ check("t8 sonde périmée loguée", await waitLog("sonde périmée", l8b));
 check("t8 sonde périmée → encore ok", (await st()) === "ok", await segCls());
 check("t8 sonde périmée : aucun retry",
   (await connectCalls()) === calls8, "calls=" + (await connectCalls()));
-await setDs({ version: "9.9.9", sessions: 1 });
+await setDs({ version: "9.9.9", sessions: 1, _ac_gen: 3 });
 // conn_error list_sessions périmé → markDead ignoré.
 await p.evaluate(() => {
   window.__listSessions = [{ conn: "local", conn_error: true, gen: 1 }];
@@ -276,29 +280,29 @@ await p.evaluate(() => {
 await sleep(400);
 check("t8 conn_error périmé → ok", (await st()) === "ok", await segCls());
 await p.evaluate(() => { window.__listSessions = []; });
-// conn-dead périmé (gen 1) → ignoré.
+// conn-dead périmé (gen 2 < 3 resync) → ignoré.
 const l8c = await logLen();
 await p.evaluate(() => {
   const id = window.__acListeners["conn-dead"];
   window.__TAURI_INTERNALS__.runCallback(id, {
-    payload: { conn: "local", why: "eof distant", gen: 1 },
+    payload: { conn: "local", why: "eof distant", gen: 2 },
   });
 });
 check("t8 conn-dead périmé logué", await waitLog("conn-dead périmé", l8c));
 check("t8 conn-dead périmé → ok", (await st()) === "ok", await segCls());
-// conn-dead frais (gen 2) → down légitime.
+// conn-dead frais (gen 3) → down légitime.
 const l8d = await logLen();
 await p.evaluate(() => {
   const id = window.__acListeners["conn-dead"];
   window.__TAURI_INTERNALS__.runCallback(id, {
-    payload: { conn: "local", why: "eof distant (test)", gen: 2 },
+    payload: { conn: "local", why: "eof distant (test)", gen: 3 },
   });
 });
 check("t8 conn-dead frais → down", await waitSeg("bad"));
 check("t8 why frais",
   (await logs("eof distant (test)")).length >= 1,
   JSON.stringify(await logs("conn local down")));
-await setDs({ version: "9.9.9", sessions: 1 });
+await setDs({ version: "9.9.9", sessions: 1, _ac_gen: 3 });
 await drain();
 
 console.log(`${pass} PASS, ${fail} FAIL`);

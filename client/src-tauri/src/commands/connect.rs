@@ -153,11 +153,15 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
     let c = Client::connect(&t).await.map_err(|e| format!("{e:#}"))?;
     let status = c.call(ReqKind::DaemonStatus).await.map_err(|e| format!("{e:#}"))?;
     let gen = {
+        // Compteur global : un disconnect→reconnect ne repart pas à 1
+        // (sinon un noteGen UI en retard avec Math.max resterait figé
+        // sous la vraie gen), et deux connect concurrents sur la même
+        // clé ne peuvent pas produire la même gen.
+        let gen = state
+            .next_gen
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
         let mut map = state.conns.lock().await;
-        let gen = map
-            .get(&key)
-            .map(|p| p.gen.wrapping_add(1))
-            .unwrap_or(1);
         let prev = map.insert(
             key.clone(),
             ConnCtx {

@@ -145,10 +145,15 @@ export class ConnectionManager {
     this.deps.capsChanged();
   }
 
-  /** Mémorise `_ac_gen` renvoyé par le bridge après un `connect` réussi. */
+  /** Mémorise `_ac_gen` (connect ou sonde succès). Strictement monotone
+   *  par clé : un `markConnected` tardif (dialogue post-await) ne doit
+   *  pas écraser la gen d'un `retryConn` plus récent — sinon toute
+   *  sonde/conn-dead vivante serait filtrée comme périmée à jamais. */
   private noteGen(key: string, status?: Record<string, unknown> | null) {
     const g = status?._ac_gen;
-    if (typeof g === "number" && Number.isFinite(g)) this.gens.set(key, g);
+    if (typeof g !== "number" || !Number.isFinite(g)) return;
+    const cur = this.gens.get(key) ?? 0;
+    if (g >= cur) this.gens.set(key, g);
   }
 
   /** Résultat encore valide pour la gen courante ? Absent / legacy →
@@ -417,6 +422,7 @@ export class ConnectionManager {
       this.timer.delete(conn);
     }
     this.nextAt.delete(conn);
+    this.gens.delete(conn);
     this.live.set(conn, "down");
     this.deps.termDead(conn);
     await invoke("disconnect", { conn }).catch((e) => showErr(String(e)));
@@ -634,6 +640,8 @@ export class ConnectionManager {
             anyOk = true;
             // Succès = la série d'échecs est rompue, même si la conn
             // n'avait jamais été déclarée down (1 strike effacé).
+            // `_ac_gen` injecté côté Rust → resync si noteGen a régressé.
+            this.noteGen(k, v as Record<string, unknown>);
             this.strikes.delete(k);
             this.ignored.delete(k);
             this.setCaps(k, v as Record<string, unknown>);

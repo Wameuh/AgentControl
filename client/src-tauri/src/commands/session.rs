@@ -90,7 +90,7 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
                 }
             };
             match r {
-                Ok(v) if merged => {
+                Ok(mut v) if merged => {
                     n_ok += 1;
                     // Réponse lente mais arrivée — mesure de la latence
                     // sous charge : warn au-delà de la moitié du timeout
@@ -98,6 +98,14 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
                     if rtt > secs * 500 {
                         client_core::log(Level::Warn,
                             format!("{method} {k}: réponse lente {rtt} ms"));
+                    }
+                    // `_ac_gen` sur les succès daemon_status : le watchdog
+                    // resynchronise `gens` UI si un noteGen concurrent
+                    // avait régressé (connect dialogue vs retry).
+                    if method == "daemon_status" {
+                        if let Some(o) = v.as_object_mut() {
+                            o.insert("_ac_gen".into(), json!(gen));
+                        }
                     }
                     out[k] = v;
                 }
