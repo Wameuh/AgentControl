@@ -748,6 +748,7 @@ mod tests {
                 size: None,
                 diff: None,
                 locations: None,
+                input: None,
             },
         }
     }

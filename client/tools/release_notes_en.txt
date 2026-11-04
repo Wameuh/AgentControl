@@ -87,3 +87,5 @@
 258: Idle orchestrator sessions are now cleaned up again — a worker keeping the release PR in its registry entry (or a stale merged entry) no longer blocks removal, and dead/errored reviewers are swept instead of accumulating.
 
 257: On Android, the app SSH key, keys imported by pairing and saved connections (SSH passwords, key paths) are now encrypted at rest with a non-exportable Android Keystore key — existing installs migrate silently on first read.
+
+271: Expanded tool call blocks now show the command that was launched (exec) or the tool parameters (read/edit…) in a dedicated block above the output — long heredocs/scripts stay collapsed behind an expand button.

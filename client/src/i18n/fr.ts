@@ -176,7 +176,7 @@ export const fr: Record<Key, string> = {
   accent_int_desc: "Variante saturée et flashy de la palette d'accent",
   bganim_desc: "Dégradé animé en arrière-plan — le couper économise la batterie",
   lang_desc: "Appliquée immédiatement à toute l'interface",
-  delete_armed: "suppr ?", loading: "chargement…", load_full: "charger la sortie complète…",
+  delete_armed: "suppr ?", loading: "chargement…", load_full: "charger la sortie complète…", cmd_full: "afficher la commande complète…",
   thought: "pensée", resolved: "résolu — ", mode_arrow: "mode → ",
   cmds_avail: "{n} commandes disponibles", state_arrow: "état → ",
   perm_title: "demande de permission", answer_ph: "réponse (JSON ou texte)",

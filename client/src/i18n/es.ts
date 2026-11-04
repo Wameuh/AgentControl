@@ -179,7 +179,7 @@ export const es: Record<Key, string> = {
   bganim_desc: "Degradado animado tras la app — desactivarlo ahorra batería",
   lang_desc: "Se aplica inmediatamente a toda la interfaz",
   // generated
-  delete_armed: "¿elim ?", loading: "cargando…", load_full: "cargar la salida completa…",
+  delete_armed: "¿elim ?", loading: "cargando…", load_full: "cargar la salida completa…", cmd_full: "mostrar el comando completo…",
   thought: "pensamiento", resolved: "resuelto — ", mode_arrow: "modo → ",
   cmds_avail: "{n} comandos disponibles", state_arrow: "estado → ",
   perm_title: "solicitud de permiso", answer_ph: "respuesta (JSON o texto)",
