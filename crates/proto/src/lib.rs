@@ -394,7 +394,10 @@ pub struct SessionMeta {
     /// running | waiting_input | idle | dead | interrupted | asleep | error
     /// (asleep : agent libéré volontairement, réveil auto au prochain envoi ;
     /// error : dernier tour session/prompt en échec — cf. `last_error`,
-    /// livraison suspendue jusqu'à retry ou action explicite)
+    /// livraison suspendue jusqu'à retry ou action explicite).
+    /// `wait` n'existe qu'à la sérialisation (list_sessions/session_info) :
+    /// dérivé d'un `idle` réel ayant un waiter ac-wait vivant — affichage
+    /// seul, jamais persisté.
     #[serde(default = "default_state")]
     pub state: String,
     /// Groupe nommé (sidebar) — None = non groupé.

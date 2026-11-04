@@ -992,7 +992,9 @@ export class Sidebar {
         ? `error: ${s.last_error.kind} · ${s.last_error.message} · x${s.last_error.count} · ${s.last_error.at}`
         : s.state === "asleep"
           ? `asleep · ${t("dot_asleep_tip")}`
-          : s.state;
+          : s.state === "wait"
+            ? `wait · ${t("dot_wait_tip")}`
+            : s.state;
     div.innerHTML = `<span class="dot st-${dotCls(s.state, s.last_error)}" title="${q(esc(dotTip))}">${dotIcon(s.state, s.last_error)}</span><span class="t">${this.hl(s.title)}</span>${originHtml}${prHtml}<span class="a">${this.hl(s.agent)}</span><button class="sess-del" title="Supprimer">${icon("close")}</button>`;
     div.onclick = () => {
       void this.openSession(s.id);

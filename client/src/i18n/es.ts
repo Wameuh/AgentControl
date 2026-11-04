@@ -433,6 +433,7 @@ export const es: Record<Key, string> = {
   spawned_by: "creada por {parent}",
   via: "vía", origin_tip: "creada por el servicio {origin}",
   dot_asleep_tip: "dormida — despierta con el próximo mensaje",
+  dot_wait_tip: "en espera — un waiter ac-wait la despertará",
   bottom_jump_title: "Volver al hilo en directo",
   // retours utilisateur : toasts, dialogue démon, états vides
   retry: "Reintentar",

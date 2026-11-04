@@ -772,14 +772,22 @@ fn acwait_state_dir() -> Option<PathBuf> {
 /// compte comme absent : le nudge reste le filet de sécurité si le
 /// waiter est mort sans notifier.
 pub(crate) fn acwait_pending(sid: &str) -> bool {
+    acwait_live_sids().contains(sid)
+}
+
+/// Sids ayant au moins un waiter ac-wait vivant — scan unique du
+/// répertoire d'état (un appel par lot de sessions, ex. list_sessions,
+/// au lieu d'une relecture disque par session).
+pub(crate) fn acwait_live_sids() -> HashSet<String> {
     /// Marge post-timeout : la notif TIMEOUT part avant l'écriture du
     /// `.done` — ne pas nudger pendant que le waiter termine.
     const TIMEOUT_GRACE_S: f64 = 120.0;
     /// Worker spawné mais `.pid` pas encore écrit : actif seulement si
     /// le meta est tout frais.
     const START_GRACE_S: f64 = 30.0;
-    let Some(dir) = acwait_state_dir() else { return false };
-    let Ok(entries) = std::fs::read_dir(&dir) else { return false };
+    let mut out = HashSet::new();
+    let Some(dir) = acwait_state_dir() else { return out };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return out };
     let now = now_secs();
     for e in entries.flatten() {
         let meta_path = e.path();
@@ -807,9 +815,9 @@ pub(crate) fn acwait_pending(sid: &str) -> bool {
                 })
             })
         };
-        if field("session").as_deref() != Some(sid) {
+        let Some(sid) = field("session") else {
             continue;
-        }
+        };
         // Timeout dépassé sans `.done` → le worker est mort en vol.
         if let (Some(started), Some(timeout)) = (
             field("started").and_then(|v| v.parse::<f64>().ok()),
@@ -851,9 +859,9 @@ pub(crate) fn acwait_pending(sid: &str) -> bool {
                 }
             }
         }
-        return true;
+        out.insert(sid);
     }
-    false
+    out
 }
 
 /// Sessions du composant en retenue `rate_limit` sur un profil routé
