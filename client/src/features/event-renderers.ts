@@ -279,11 +279,33 @@ export class EventRenderer {
         <span class="badge st-${status}">${status}</span>
       </div>
       <div class="tool-body" hidden>
+        ${ev.input ? '<pre class="tool-cmd"></pre>' : ""}
         <pre class="tool-out"></pre>
         ${ev.blob ? '<button class="btn-more">charger la sortie complète…</button>' : ""}
         ${ev.diff ? `<pre class="tool-diff">${esc(ev.diff as string)}</pre>` : ""}
       </div>`;
     const body = d.querySelector<HTMLElement>(".tool-body")!;
+    const cmd = d.querySelector<HTMLElement>(".tool-cmd");
+    if (cmd) {
+      const full = ev.input as string;
+      // Heredocs/scripts longs : tête seule + bouton d'expansion — le
+      // journal n'est pas noyé par une commande de 200 lignes.
+      const MAXL = 30, MAXC = 3000;
+      const lines = full.split("\n");
+      if (lines.length > MAXL || full.length > MAXC) {
+        cmd.textContent = lines.slice(0, MAXL).join("\n").slice(0, MAXC) + "\n…";
+        const exp = document.createElement("button");
+        exp.className = "btn-more";
+        exp.textContent = t("cmd_full");
+        exp.addEventListener("click", () => {
+          cmd.textContent = full;
+          exp.remove();
+        });
+        cmd.after(exp);
+      } else {
+        cmd.textContent = full;
+      }
+    }
     const pre = d.querySelector<HTMLElement>(".tool-out")!;
     if (ev.excerpt) pre.textContent = ev.excerpt as string;
     d.querySelector(".tool-head")!.addEventListener("click", () => {

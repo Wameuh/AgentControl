@@ -66,6 +66,11 @@ pub enum EventKind {
         diff: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         locations: Option<Vec<String>>,
+        /// Paramètres d'appel formatés (`rawInput` ACP : commande exec,
+        /// chemins read/edit…) — affichés dans le bloc déplié, avant la
+        /// sortie. Champ additif : les anciens journaux n'en ont pas.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input: Option<String>,
     },
     /// Mise à jour de statut/contenu d'un tool call existant.
     ToolCallUpdate {
@@ -221,11 +226,13 @@ impl EventKind {
                 excerpt,
                 diff,
                 locations,
+                input,
                 ..
             } => joined(
                 [
                     Some(kind.as_str()),
                     Some(title.as_str()),
+                    input.as_deref(),
                     excerpt.as_deref(),
                     diff.as_deref(),
                 ]

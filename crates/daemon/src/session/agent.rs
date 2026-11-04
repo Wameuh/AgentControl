@@ -798,10 +798,13 @@ impl Session {
                 title,
                 kind,
                 locations,
+                input,
             } => {
                 if !self.loading_replay.load(Ordering::SeqCst) {
                     self.flush_text();
-                    self.apply_tool_update(call_id, status, text, diff, title, kind, locations);
+                    self.apply_tool_update(
+                        call_id, status, text, diff, title, kind, locations, input,
+                    );
                 }
             }
             acp::Mapped::Ignore => {}
@@ -818,6 +821,7 @@ impl Session {
         title: Option<String>,
         kind: Option<String>,
         locations: Option<Vec<String>>,
+        input: Option<String>,
     ) {
         let is_new = {
             let mut tc = self.tool_calls.lock().unwrap();
@@ -861,6 +865,7 @@ impl Session {
                 size,
                 diff,
                 locations,
+                input,
             });
         } else {
             self.emit(EventKind::ToolCallUpdate {

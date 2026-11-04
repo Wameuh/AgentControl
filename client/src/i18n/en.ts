@@ -176,7 +176,7 @@ export const en = {
   bganim_desc: "Slow-moving gradient behind the app — off saves battery",
   lang_desc: "Applied immediately to the whole interface",
   // generated
-  delete_armed: "del ?", loading: "loading…", load_full: "load full output…",
+  delete_armed: "del ?", loading: "loading…", load_full: "load full output…", cmd_full: "show full command…",
   thought: "thought", resolved: "resolved — ", mode_arrow: "mode → ",
   cmds_avail: "{n} commands available", state_arrow: "state → ",
   perm_title: "permission request", answer_ph: "answer (JSON or text)",

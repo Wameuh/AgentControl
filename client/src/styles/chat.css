@@ -299,6 +299,7 @@ img.md-img {
 .tool-ico { flex: none; }
 .tool-title { flex: 1; font-family: Mono, ui-monospace, monospace; font-size: 12.5px; color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-body { border-top: 1px solid var(--line); padding: 9px 12px; }
+.tool-cmd { margin: 0 0 8px; padding: 6px 9px; font: 12px/1.5 Mono, ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; color: var(--fg); background: rgba(var(--tint-rgb), .05); border-left: 2px solid var(--accent); border-radius: 6px; }
 .tool-out { margin: 0; font: 12px/1.5 Mono, ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; color: var(--muted); max-height: 400px; overflow-y: auto; }
 .tool-diff { margin: 8px 0 0; font: 12px Mono, ui-monospace, monospace; color: var(--violet); white-space: pre-wrap; }
 .btn-more { margin-top: 7px; font-size: 12px; }

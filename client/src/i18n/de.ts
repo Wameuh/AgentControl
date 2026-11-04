@@ -179,7 +179,7 @@ export const de: Record<Key, string> = {
   bganim_desc: "Langsam wandernder Farbverlauf hinter der App — aus spart Akku",
   lang_desc: "Wird sofort auf die gesamte Oberfläche angewendet",
   // generated
-  delete_armed: "löschen ?", loading: "lädt…", load_full: "vollständige Ausgabe laden…",
+  delete_armed: "löschen ?", loading: "lädt…", load_full: "vollständige Ausgabe laden…", cmd_full: "vollständigen Befehl anzeigen…",
   thought: "Gedanke", resolved: "gelöst — ", mode_arrow: "Modus → ",
   cmds_avail: "{n} Befehle verfügbar", state_arrow: "Status → ",
   perm_title: "Berechtigungsanfrage", answer_ph: "Antwort (JSON oder Text)",
