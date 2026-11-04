@@ -11,6 +11,11 @@ use tokio::sync::Mutex;
 
 pub(crate) struct ConnCtx {
     pub(crate) client: Arc<Client>,
+    /// Incrémenté à chaque `connect` réussi pour cette clé — les résultats
+    /// fusionnés et les events `conn-dead` d'un client remplacé portent
+    /// l'ancienne gen et sont ignorés (sinon un RPC périmé marquait la
+    /// nouvelle conn down juste après un reconnect ok).
+    pub(crate) gen: u64,
 }
 
 pub(crate) struct AppState {

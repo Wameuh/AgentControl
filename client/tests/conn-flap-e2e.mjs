@@ -17,6 +17,8 @@ const MOCK = `(function () {
   // Sonde pilotée par le test : {local: réponse|{error,rtt_ms,silent_ms}}.
   const OK = { version: "9.9.9", sessions: 1 };
   window.__ds = { local: OK, servers: 1, sessions: 1 };
+  // list_sessions piloté (conn_error périmé post-reconnect).
+  window.__listSessions = [];
   // Résolvers de connect en attente — le test les relâche à la main.
   window.__pendingConnects = [];
   window.__connectHang = false;
@@ -25,7 +27,7 @@ const MOCK = `(function () {
     switch (method) {
       case "daemon_status":
         return args.conn ? OK : window.__ds;
-      case "list_sessions": return [];
+      case "list_sessions": return window.__listSessions;
       case "pr_list": return [];
       case "events": return { events: [], last_seq: 0 };
       default: return null;
@@ -234,6 +236,68 @@ check("t7 plafond → strike", await waitLog("durablement", l7, 6000));
 check("t7 strike1 encore ok", (await st()) === "ok", await segCls());
 check("t7 2ᵉ salve → strike2", await waitLog("sonde ko ×2", l7, 9000));
 check("t7 RPC bloqué durable → down", (await st()) === "bad", await segCls());
+await setDs({ version: "9.9.9", sessions: 1 });
+await drain();
+
+// t8 — race post-reconnect : résultats de l'ANCIENNE gen ne doivent
+// PAS tuer la conn fraîche (repro du flap « reconnect ok → sonde ko
+// → down — conn-dead (EOF transport) »). Connect avec _ac_gen:2 ;
+// sonde / conn_error / conn-dead stampés gen:1 → ignorés ; gen:2 tue.
+check("t8 conn revenue ok", await waitSeg("ok"));
+await p.evaluate(() => {
+  window.__connectResult = { version: "9.9.9", sessions: 1, _ac_gen: 2 };
+});
+// Forcer un cycle down→reconnect pour poser la gen via noteGen.
+const l8 = await logLen();
+await setDs({ error: "connexion fermée", kind: "error", rtt_ms: 12, gen: 2 });
+check("t8 prep strike1", await waitLog("sonde ko ×1", l8));
+check("t8 prep strike2", await waitLog("sonde ko ×2", l8));
+check("t8 prep down", await waitSeg("bad"));
+await setDs({ version: "9.9.9", sessions: 1 });
+await drain();
+check("t8 reconnect gen2", await waitSeg("ok"));
+check("t8 log reconnect gen2", (await logs("reconnect #")).length >= 1);
+const calls8 = await connectCalls();
+const l8b = await logLen();
+// Sonde périmée (gen 1) : pas de strike, pas de down.
+await setDs({
+  error: "connexion fermée", kind: "error",
+  rtt_ms: 2760, silent_ms: 4436, gen: 1,
+});
+check("t8 sonde périmée loguée", await waitLog("sonde périmée", l8b));
+check("t8 sonde périmée → encore ok", (await st()) === "ok", await segCls());
+check("t8 sonde périmée : aucun retry",
+  (await connectCalls()) === calls8, "calls=" + (await connectCalls()));
+await setDs({ version: "9.9.9", sessions: 1 });
+// conn_error list_sessions périmé → markDead ignoré.
+await p.evaluate(() => {
+  window.__listSessions = [{ conn: "local", conn_error: true, gen: 1 }];
+});
+await sleep(400);
+check("t8 conn_error périmé → ok", (await st()) === "ok", await segCls());
+await p.evaluate(() => { window.__listSessions = []; });
+// conn-dead périmé (gen 1) → ignoré.
+const l8c = await logLen();
+await p.evaluate(() => {
+  const id = window.__acListeners["conn-dead"];
+  window.__TAURI_INTERNALS__.runCallback(id, {
+    payload: { conn: "local", why: "eof distant", gen: 1 },
+  });
+});
+check("t8 conn-dead périmé logué", await waitLog("conn-dead périmé", l8c));
+check("t8 conn-dead périmé → ok", (await st()) === "ok", await segCls());
+// conn-dead frais (gen 2) → down légitime.
+const l8d = await logLen();
+await p.evaluate(() => {
+  const id = window.__acListeners["conn-dead"];
+  window.__TAURI_INTERNALS__.runCallback(id, {
+    payload: { conn: "local", why: "eof distant (test)", gen: 2 },
+  });
+});
+check("t8 conn-dead frais → down", await waitSeg("bad"));
+check("t8 why frais",
+  (await logs("eof distant (test)")).length >= 1,
+  JSON.stringify(await logs("conn local down")));
 await setDs({ version: "9.9.9", sessions: 1 });
 await drain();
 

@@ -216,12 +216,18 @@ export class Sidebar {
     this.applyPrRows(prRes.rows, prRes.failed);
     // Marqueur Rust `conn_error` : la sonde list_sessions d'une conn a
     // échoué (timeout 8 s) → la marquer down (une seule fois : déjà down,
-    // markDead re-rendererait refresh en boucle).
+    // markDead re-rendererait refresh en boucle). Gen périmée = résultat
+    // d'un client remplacé au reconnect → ignoré (sinon down immédiat
+    // après « reconnect ok » avec le why par défaut trompeur).
     const list = raw.filter((s) => {
       if (this.pendingDel.has(s.id)) return false;
       if (!(s as { conn_error?: boolean }).conn_error) return true;
       const k = s.conn ?? "";
-      if ((this.conns.state(k) ?? "ok") === "ok") this.conns.markDead(k);
+      const gen = (s as { gen?: number }).gen;
+      if (!this.conns.isFresh(k, gen)) return false;
+      if ((this.conns.state(k) ?? "ok") === "ok") {
+        this.conns.markDead(k, "list_sessions: conn_error");
+      }
       return false;
     });
     // Conn down : ses sessions n'arrivent plus — réafficher le dernier cache

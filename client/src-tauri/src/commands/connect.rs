@@ -152,9 +152,19 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
     };
     let c = Client::connect(&t).await.map_err(|e| format!("{e:#}"))?;
     let status = c.call(ReqKind::DaemonStatus).await.map_err(|e| format!("{e:#}"))?;
-    {
+    let gen = {
         let mut map = state.conns.lock().await;
-        let prev = map.insert(key.clone(), ConnCtx { client: c.clone() });
+        let gen = map
+            .get(&key)
+            .map(|p| p.gen.wrapping_add(1))
+            .unwrap_or(1);
+        let prev = map.insert(
+            key.clone(),
+            ConnCtx {
+                client: c.clone(),
+                gen,
+            },
+        );
         // La conn remplacée : close() arrête son reader — sinon la
         // boucle gardait une Arc vivante et le tunnel ssh orphelin
         // fuyait (jamais tué tant que le reader tient le client). Si
@@ -190,11 +200,14 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
         if d.as_ref().is_none_or(|k| !map.contains_key(k)) {
             *d = Some(key.clone());
         }
-    }
-    // Mort de la boucle de lecture → event `conn-dead` {conn, why} pour
-    // l'UI : la cause réelle (post-mortem transport) remonte dans le
-    // libellé « down » au lieu du « EOF transport » générique. Le Weak
-    // évite de retenir le client si la connexion est remplacée/fermée.
+        gen
+    };
+    // Mort de la boucle de lecture → event `conn-dead` {conn, why, gen}
+    // pour l'UI : la cause réelle (post-mortem transport) remonte dans
+    // le libellé « down » au lieu du « EOF transport » générique. Le
+    // Weak évite de retenir le client si la connexion est remplacée/
+    // fermée. `gen` fige l'identité de CE client : un emit après
+    // remplacement (TOCTOU post-ptr_eq) est filtré côté Rust et UI.
     {
         let weak = Arc::downgrade(&c);
         let mut dead = c.dead.clone();
@@ -206,18 +219,32 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
                 return; // client droppé avant de mourir (remplacé/déconnecté)
             }
             let Some(c2) = weak.upgrade() else { return };
-            let still = {
+            let why = {
                 let st = app.state::<AppState>();
                 let m = st.conns.lock().await;
-                m.get(&k).is_some_and(|x| Arc::ptr_eq(&x.client, &c2))
+                let Some(x) = m.get(&k) else { return };
+                // gen + ptr_eq sous le même lock que la décision d'émettre :
+                // un insert concurrent ne peut plus passer entre le check
+                // et l'emit (l'emit lit why ici, hors lock ensuite — le
+                // gen dans le payload permet à l'UI de double-filtrer).
+                if x.gen != gen || !Arc::ptr_eq(&x.client, &c2) {
+                    return;
+                }
+                c2.death_reason()
+                    .unwrap_or_else(|| "EOF transport".into())
             };
-            if still {
-                let why = c2
-                    .death_reason()
-                    .unwrap_or_else(|| "EOF transport".into());
-                let _ = app.emit("conn-dead", serde_json::json!({"conn": k, "why": why}));
-            }
+            let _ = app.emit(
+                "conn-dead",
+                serde_json::json!({"conn": k, "why": why, "gen": gen}),
+            );
         });
+    }
+    // `_ac_gen` : l'UI ignore sondes / conn_error / conn-dead d'une gen
+    // antérieure après reconnect (RPC fusionnés encore en vol sur l'Arc
+    // remplacé). Champ réservé bridge — pas une capability démon.
+    let mut status = status;
+    if let Some(o) = status.as_object_mut() {
+        o.insert("_ac_gen".into(), serde_json::json!(gen));
     }
     Ok(status)
 }
