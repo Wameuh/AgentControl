@@ -404,6 +404,23 @@ fn reviewer_sleep_ok(state: &str) -> bool {
     state == "idle"
 }
 
+/// Le reviewer mappé compte-t-il comme « vivant » pour la sweep ?
+/// `dead` et `error` hors rate_limit (model/auth — jamais de retry
+/// auto, `reviewer_choice` ne les réutilise pas non plus) sont
+/// irrécupérables → balayés ; `error`+`rate_limit` est un backoff
+/// transitoire repris par le retry session — conservé, à l'image du
+/// `Wait` de `reviewer_choice` (le tuer puis respawner rebrûlerait la
+/// limite partagée et perdrait le contexte du reviewer persistant).
+fn reviewer_alive_for_sweep(
+    in_session_ids: bool,
+    state: Option<&str>,
+    err_kind: Option<&str>,
+) -> bool {
+    in_session_ids
+        && state != Some("dead")
+        && !(state == Some("error") && err_kind != Some("rate_limit"))
+}
+
 /// Décision de la sweep de fin de tick pour un reviewer mémorisé.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SweepAction {
@@ -416,11 +433,11 @@ enum SweepAction {
     Keep,
 }
 
-/// Rm si le reviewer a disparu ou est irrécupérable (dead/error —
-/// `reviewer_alive` false), si l'item est sorti du pipeline de
-/// revue (absent/done/pending) ou passé en implémentation ; Keep tant
-/// qu'une review est en vol (`reviewing`) ou que le reviewer n'est
-/// pas idle ; Sleep sinon — y compris sur item stalled.
+/// Rm si le reviewer a disparu ou est irrécupérable (dead/error hors
+/// rate_limit — `reviewer_alive` false), si l'item est sorti du
+/// pipeline de revue (absent/done/pending) ou passé en implémentation ;
+/// Keep tant qu'une review est en vol (`reviewing`) ou que le reviewer
+/// n'est pas idle ; Sleep sinon — y compris sur item stalled.
 fn reviewer_sweep(
     status: Option<&str>,
     implementing: bool,
@@ -1279,12 +1296,19 @@ impl Daemon {
                 .unwrap_or(false);
             let rmeta = metas.iter().find(|m| m.id == rsid);
             let rstate = rmeta.map(|m| m.state.as_str());
-            // dead/error : la session existe encore mais
-            // `reviewer_choice` ne la réutilisera jamais — la balayer
-            // comme absente (rm + purge de la map) sinon elle
-            // s'accumule ; le dispatch respawnera au besoin.
-            let reviewer_alive = session_ids.contains(&rsid)
-                && !matches!(rstate, Some("dead") | Some("error"));
+            // dead/error hors rate_limit : la session existe encore
+            // mais `reviewer_choice` ne la réutilisera jamais — la
+            // balayer comme absente (rm + purge de la map) sinon elle
+            // s'accumule ; le dispatch respawnera au besoin. Un
+            // backoff rate_limit reste « vivant » : le retry session
+            // reprendra la revue (même garde que `reviewer_choice`).
+            let reviewer_alive = reviewer_alive_for_sweep(
+                session_ids.contains(&rsid),
+                rstate,
+                rmeta
+                    .and_then(|m| m.last_error.as_ref())
+                    .map(|le| le.kind.as_str()),
+            );
             match reviewer_sweep(
                 status,
                 implementing,
@@ -2884,6 +2908,28 @@ mod tests {
             reviewer_sweep(Some("reviewing"), false, false, false, true),
             SweepAction::Rm
         );
+    }
+
+    /// « Vivant » pour la sweep — miroir de `reviewer_choice` : dead et
+    /// error hors rate_limit sont irrécupérables (balayés), le backoff
+    /// rate_limit est attendu (son retry session reprend la revue).
+    #[test]
+    fn reviewer_alive_sweep_miroir_choice() {
+        // Présent et sain → vivant.
+        assert!(reviewer_alive_for_sweep(true, Some("idle"), None));
+        assert!(reviewer_alive_for_sweep(true, Some("asleep"), None));
+        assert!(reviewer_alive_for_sweep(true, Some("interrupted"), None));
+        // Session disparue → pas vivante quel que soit l'état.
+        assert!(!reviewer_alive_for_sweep(false, Some("idle"), None));
+        // dead → irrécupérable.
+        assert!(!reviewer_alive_for_sweep(true, Some("dead"), None));
+        // error hors rate_limit (model/auth/other) → irrécupérable.
+        for kind in ["model", "auth", "other"] {
+            assert!(!reviewer_alive_for_sweep(true, Some("error"), Some(kind)));
+        }
+        assert!(!reviewer_alive_for_sweep(true, Some("error"), None));
+        // error + rate_limit → backoff transitoire, conservé (Wait).
+        assert!(reviewer_alive_for_sweep(true, Some("error"), Some("rate_limit")));
     }
 
     #[test]
