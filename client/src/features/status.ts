@@ -9,23 +9,42 @@ import { $ } from "../core/dom";
 import { t } from "../i18n";
 
 /** Gemme d'état : dorée working, violette compacting, rouge question/failed,
- *  verte idle, grise dead. */
+ *  verte idle, grise dead, **opale wait** — attente transitoire (backoff
+ *  rate_limit à reprise auto, session endormie réveillable) distincte des
+ *  échecs terminaux et de la demande d'input utilisateur. */
 const DOT_ROLE: Record<string, string> = {
   working: "human", running: "human", starting: "human",
   waiting_input: "inference", failed: "inference", error: "inference",
   compacting: "agent",
   idle: "neutral",
   interrupted: "slate", dead: "slate", asleep: "slate",
+  wait: "wait",
 };
-export function dotIcon(state: string): string {
-  return gemSVG(DOT_ROLE[state] ?? "slate");
+
+interface LastError {
+  kind?: string;
+}
+
+/** Clé effective de l'indicateur : `error` + `kind=rate_limit` (backoff,
+ *  reprise auto — pas une panne) et `asleep` (endormie, réveillable — pas
+ *  morte) basculent sur la teinte `wait` ; `waiting_input` reste rouge
+ *  (attente UTILISATEUR, action requise — sémantique différente). */
+function dotKey(state: string, lastError?: LastError | null): string {
+  if (state === "error" && lastError?.kind === "rate_limit") return "wait";
+  if (state === "asleep") return "wait";
+  return state;
+}
+
+export function dotIcon(state: string, lastError?: LastError | null): string {
+  return gemSVG(DOT_ROLE[dotKey(state, lastError)] ?? "slate");
 }
 
 /** Classe `st-*` whitelistée pour l'attribut class : un état arbitraire
  *  (jamais prévu côté démon, mais la confiance n'est pas un filtre)
  *  retombe sur "dead" plutôt que d'être interpolé brut. */
-export function dotCls(state: string): string {
-  return Object.hasOwn(DOT_ROLE, state) ? state : "dead";
+export function dotCls(state: string, lastError?: LastError | null): string {
+  const k = dotKey(state, lastError);
+  return Object.hasOwn(DOT_ROLE, k) ? k : "dead";
 }
 
 /** Icône fenêtre : rouge si une question attend, dorée si un agent tourne,
