@@ -15,8 +15,10 @@
 //!   le trigger.
 //! - La session reviewer `PRReview-<N>` (origin `feature:pr-review`)
 //!   est spawnée dans un worktree FRAIS détaché au `headRefOid` exact
-//!   — read-only, elle rend un bloc `REVIEW_RESULT_BEGIN … END` dont
-//!   la première ligne est `## Verdict: APPROVED|CHANGES_REQUESTED`.
+//!   — read-only, elle REND son verdict en A2A natif via le tool MCP
+//!   `agentcontrol_report_verdict` (push direct au démon, plus de
+//!   polling) ; le bloc `REVIEW_RESULT_BEGIN … END` scanné à idle
+//!   reste le filet de secours si le tool est indisponible.
 //! - Le DÉMON poste le verdict (compte gh local = OWNER, accepté par
 //!   `.devin/hooks/block-merge.py`) avec le SHA reviewé en pied ;
 //!   head déplacé avant le post → titre `## Verdict: stale` (jamais
@@ -264,7 +266,13 @@ Verdicts : APPROVED si la PR est mergeable en l'etat ; CHANGES_REQUESTED s'il y 
 
 ## SORTIE OBLIGATOIRE
 
-Termine ton tour par exactement ce bloc (rien apres) :
+Quand ton analyse est finie, rends ton verdict via l'outil MCP `agentcontrol_report_verdict` :
+- verdict : `APPROVED` ou `CHANGES_REQUESTED`
+- body : le corps du commentaire de review (findings, points verifies, non-bloquants — en francais)
+
+Le demon poste lui-meme le commentaire `## Verdict:` sur la PR puis termine ta session — rien d'autre a faire apres l'appel.
+
+Secours (uniquement si l'outil est indisponible) : termine ton tour par exactement ce bloc (rien apres) :
 
 REVIEW_RESULT_BEGIN
 ## Verdict: APPROVED
@@ -304,6 +312,10 @@ impl Daemon {
         let cfg = self.orch.cfg.read().unwrap().clone();
         let now = now_secs();
         let mut st = self.orch.state.lock().unwrap().clone();
+        // Snapshot `pr_reviews` au clone : les write-backs fusionnent
+        // par clé — un rapport de verdict A2A posé pendant la passe
+        // (RPC concurrent sur la map vivante) n'est pas écrasé.
+        let pr_snap = st.pr_reviews.clone();
         // Sortie rapide : mécanisme coupé et rien en vol → pas même le
         // scan des sessions à payer à chaque tick. Un retry en attente
         // compte comme du travail en vol — il doit être soldé, pas
@@ -360,8 +372,8 @@ impl Daemon {
                 }
                 info!("orchestrateur: review PR {key} soldée (pr_review off)");
             }
+            self.orch.write_back_merged(&mut st, &pr_snap);
             self.orch_save(&st);
-            *self.orch.state.lock().unwrap() = st;
             return Ok(());
         }
 
@@ -763,8 +775,8 @@ impl Daemon {
                 }
             }
         }
+        self.orch.write_back_merged(&mut st, &pr_snap);
         self.orch_save(&st);
-        *self.orch.state.lock().unwrap() = st;
         Ok(())
     }
 
@@ -790,6 +802,7 @@ impl Daemon {
             e.insert("state".into(), json!(end.as_str()));
             e.remove("pending_body");
             e.remove("post_tries");
+            e.remove("reported_by");
         }
         if !sid.is_empty() {
             let _ = self.h_delete_session(sid).await;
@@ -913,6 +926,84 @@ impl Daemon {
             }
         }
         self.orch_save(st);
+    }
+
+    /// Verdict rendu en A2A par la session reviewer
+    /// (`agentcontrol_report_verdict` → `ReqKind::ReviewReport`) — le
+    /// canal push qui remplace l'attente d'idle + scan du journal.
+    /// L'entrée est mutée EN PLACE sur la map vivante : écrire un clone
+    /// complet d'`OrchPersist` depuis ce handler RPC concurrent du tick
+    /// perdrait les mutations en vol (lost update dans les deux sens) —
+    /// le post reste au tick (écrivain unique via la branche
+    /// `pending_body`), `kick` le sort de son `poll_secs` : le verdict
+    /// part quasi immédiatement. Gardes : seule une session
+    /// `feature:pr-review` dont le sid (ou `reported_by` pour un second
+    /// appel) est celui d'une review `running` — double rapport =
+    /// idempotent. La session est terminée APRÈS la réponse RPC (le
+    /// pont MCP doit rendre le résultat du tool call).
+    pub(super) async fn h_review_report(
+        self: &Arc<Self>,
+        session: String,
+        verdict: String,
+        body: String,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        let meta = s.meta_snapshot();
+        anyhow::ensure!(
+            meta.origin.as_deref() == Some(PR_REVIEW_ORIGIN),
+            "verdict refusé : {session} hors pipeline pr-review"
+        );
+        anyhow::ensure!(
+            verdict == "APPROVED" || verdict == "CHANGES_REQUESTED",
+            "verdict inconnu: {verdict}"
+        );
+        let body = format!("## Verdict: {verdict}\n\n{body}");
+        {
+            let mut live = self.orch.state.lock().unwrap();
+            let found = live.pr_reviews.iter().find_map(|(k, v)| {
+                let mine = v.get("sid").and_then(Value::as_str) == Some(session.as_str())
+                    || v.get("reported_by").and_then(Value::as_str)
+                        == Some(session.as_str());
+                (EntryState::of(v) == EntryState::Running && mine)
+                    .then(|| (k.clone(), v.get("pending_body").is_some()))
+            });
+            let Some((key, duplicate)) = found else {
+                anyhow::bail!("aucune review en cours pour {session}");
+            };
+            if duplicate {
+                // Verdict déjà posé (journal ou premier appel) —
+                // idempotent : le second appel n'écrase rien.
+                return Ok(json!({"received": true, "duplicate": true}));
+            }
+            if let Some(e) = live.pr_reviews.get_mut(&key) {
+                e["pending_body"] = json!(body);
+                e["reported_by"] = json!(session.clone());
+                // sid libéré dès maintenant : le finish du tick saute
+                // la suppression — c'est la tâche différée ci-dessous
+                // qui termine la session après la réponse MCP.
+                e["sid"] = json!("");
+            }
+        }
+        // Persisté tout de suite : un crash entre le retour d'appel et
+        // le prochain tick ne perd pas le verdict.
+        {
+            let st = self.orch.state.lock().unwrap().clone();
+            self.orch_save(&st);
+        }
+        // Écrivain unique pour le post : le tick traite pending_body à
+        // sa prochaine passe — kick le réveille hors période (push
+        // effectif, pas de fenêtre d'un poll complet).
+        self.orch.kick();
+        // Fin de la session reviewer après la réponse : tuer pendant
+        // l'appel perdrait le retour du tool call — délai de grâce.
+        let d = Arc::clone(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            if let Err(e) = d.h_delete_session(session.clone()).await {
+                warn!("orchestrateur: suppression reviewer {session} post-verdict: {e:#}");
+            }
+        });
+        Ok(json!({"received": true}))
     }
 
     /// PR ouvertes à reviewer : `gh pr list --base next_release` par

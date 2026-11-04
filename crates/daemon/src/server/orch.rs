@@ -362,6 +362,30 @@ impl OrchProbe {
         self.wake.notify_one();
     }
 
+    /// Write-back d'une passe longue (tick review / cycle), fusion
+    /// `pr_reviews` incluse — le merge ET l'assignation sous le MÊME
+    /// lock : entre les deux aucun `h_review_report` ne peut glisser
+    /// une mutation qui serait aussitôt écrasée (lost update clos,
+    /// pas seulement réduit). Les entrées que la passe N'A PAS
+    /// touchées reprennent la valeur vivante ; une entrée modifiée
+    /// par la passe garde la version de la passe (décision locale
+    /// primant le rapport concurrent — la session reviewer sera
+    /// collectée au finish). `snap` = `pr_reviews` au moment du
+    /// clone de départ.
+    pub(crate) fn write_back_merged(
+        &self,
+        st: &mut OrchPersist,
+        snap: &HashMap<String, Value>,
+    ) {
+        let mut live = self.state.lock().unwrap();
+        for (k, live_v) in live.pr_reviews.iter() {
+            if st.pr_reviews.get(k) == snap.get(k) {
+                st.pr_reviews.insert(k.clone(), live_v.clone());
+            }
+        }
+        *live = st.clone();
+    }
+
     /// État composant déduit de la phase : actif → running, gardes
     /// bloquantes → degraded, désactivé → stopped.
     pub(crate) fn component_state(&self) -> proto::ComponentState {
@@ -1128,6 +1152,10 @@ impl Daemon {
             .collect();
         let now = now_secs();
         let mut st = self.orch.state.lock().unwrap().clone();
+        // Snapshot `pr_reviews` au clone : le write-back de fin de cycle
+        // fusionne par clé — un rapport de verdict A2A posé pendant le
+        // cycle (RPC concurrent sur la map vivante) n'est pas écrasé.
+        let pr_snap = st.pr_reviews.clone();
 
         // Un `orch off` en vol de cycle arrête tout : les étapes
         // suivantes (release, rm, nudge, spawn, garde PR) sont des
@@ -1587,7 +1615,7 @@ impl Daemon {
             stg.planners = n_planners;
             stg.reviewers = n_reviewers;
         }
-        *self.orch.state.lock().unwrap() = st.clone();
+        self.orch.write_back_merged(&mut st, &pr_snap);
         self.orch_save(&st);
         // off pendant le cycle : ne pas écraser le Disabled posé par
         // set_enabled (le composant remonterait « running » à tort).

@@ -1110,6 +1110,20 @@ pub enum ReqKind {
     /// n'est pas plus récente que le binaire courant, réponse
     /// `{noop: true, version, current, restarting:false}` sans update.
     UpdateDaemon { version: String },
+    /// Verdict de review de PR rendu en A2A par la session reviewer
+    /// (pont MCP `agentcontrol_report_verdict`) : push direct au démon,
+    /// qui poste lui-même le commentaire GitHub — la sortie de review
+    /// ne dépend plus du scan de journal à idle. Réservé aux sessions
+    /// dont `origin` = `feature:pr-review` avec une review `running`
+    /// enregistrée ; `verdict` ∈ `APPROVED` | `CHANGES_REQUESTED`,
+    /// `body` = corps du commentaire de review. Extension additive :
+    /// démons anciens → erreur « req inconnue », le bloc journal reste
+    /// le filet de secours.
+    ReviewReport {
+        session: String,
+        verdict: String,
+        body: String,
+    },
 }
 
 impl ReqKind {
@@ -1188,6 +1202,7 @@ impl ReqKind {
             Self::BacklogMetrics { .. } => "backlog_metrics",
             Self::DaemonStatus => "daemon_status",
             Self::UpdateDaemon { .. } => "update_daemon",
+            Self::ReviewReport { .. } => "review_report",
         }
     }
 }

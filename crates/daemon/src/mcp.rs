@@ -165,6 +165,29 @@ fn tools_list() -> Value {
             },
         },
         {
+            "name": "agentcontrol_report_verdict",
+            "description": "Rend ton verdict de review de PR au démon — \
+                réservé aux sessions reviewer PR (feature:pr-review). \
+                Push direct : le démon poste lui-même le commentaire \
+                `## Verdict:` sur la PR, puis termine ta session. \
+                Appelle-le quand ton analyse est finie, rien après.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "verdict": {
+                        "type": "string",
+                        "enum": ["APPROVED", "CHANGES_REQUESTED"],
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "corps du commentaire de review \
+                            (findings, points vérifiés, non-bloquants)",
+                    },
+                },
+                "required": ["verdict", "body"],
+            },
+        },
+        {
             "name": "agentcontrol_read_events",
             "description": "Lit la fin du transcript d'une autre session \
                 (messages user/agent/peer/système) pour prendre du contexte \
@@ -279,6 +302,21 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
                     " — elle se réveillera au prochain message"
                 }
             ))
+        }
+        "agentcontrol_report_verdict" => {
+            let from = self_session()
+                .ok_or("AGENTCONTROL_SESSION absent — session émettrice inconnue")?;
+            let verdict = args["verdict"]
+                .as_str()
+                .ok_or("argument 'verdict' manquant")?;
+            let body = args["body"].as_str().ok_or("argument 'body' manquant")?;
+            let v = daemon_call(proto::ReqKind::ReviewReport {
+                session: from,
+                verdict: verdict.into(),
+                body: body.into(),
+            })
+            .await?;
+            Ok(format!("verdict transmis au démon : {v}"))
         }
         "agentcontrol_read_events" => {
             let session = args["session"]
