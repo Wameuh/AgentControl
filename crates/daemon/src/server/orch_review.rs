@@ -372,9 +372,8 @@ impl Daemon {
                 }
                 info!("orchestrateur: review PR {key} soldée (pr_review off)");
             }
-            self.orch.merge_pr_reviews_live(&mut st, &pr_snap);
+            self.orch.write_back_merged(&mut st, &pr_snap);
             self.orch_save(&st);
-            *self.orch.state.lock().unwrap() = st;
             return Ok(());
         }
 
@@ -776,9 +775,8 @@ impl Daemon {
                 }
             }
         }
-        self.orch.merge_pr_reviews_live(&mut st, &pr_snap);
+        self.orch.write_back_merged(&mut st, &pr_snap);
         self.orch_save(&st);
-        *self.orch.state.lock().unwrap() = st;
         Ok(())
     }
 

@@ -362,25 +362,28 @@ impl OrchProbe {
         self.wake.notify_one();
     }
 
-    /// Fusionne `pr_reviews` avant le write-back d'une passe longue
-    /// (tick review / cycle) : les entrées que la passe N'A PAS
-    /// touchées reprennent la valeur vivante — un rapport de verdict
-    /// A2A (`h_review_report`, RPC concurrent mutant la map en place)
-    /// posé pendant les appels gh ne doit pas être écrasé par le
-    /// write-back du clone stale. Une entrée modifiée par la passe
-    /// garde la version de la passe (décision locale primant le
-    /// rapport concurrent — la session reviewer sera collectée au
-    /// finish). `snap` = `pr_reviews` au moment du clone de départ.
-    pub(crate) fn merge_pr_reviews_live(
+    /// Write-back d'une passe longue (tick review / cycle), fusion
+    /// `pr_reviews` incluse — le merge ET l'assignation sous le MÊME
+    /// lock : entre les deux aucun `h_review_report` ne peut glisser
+    /// une mutation qui serait aussitôt écrasée (lost update clos,
+    /// pas seulement réduit). Les entrées que la passe N'A PAS
+    /// touchées reprennent la valeur vivante ; une entrée modifiée
+    /// par la passe garde la version de la passe (décision locale
+    /// primant le rapport concurrent — la session reviewer sera
+    /// collectée au finish). `snap` = `pr_reviews` au moment du
+    /// clone de départ.
+    pub(crate) fn write_back_merged(
         &self,
         st: &mut OrchPersist,
         snap: &HashMap<String, Value>,
     ) {
-        for (k, live_v) in self.state.lock().unwrap().pr_reviews.iter() {
+        let mut live = self.state.lock().unwrap();
+        for (k, live_v) in live.pr_reviews.iter() {
             if st.pr_reviews.get(k) == snap.get(k) {
                 st.pr_reviews.insert(k.clone(), live_v.clone());
             }
         }
+        *live = st.clone();
     }
 
     /// État composant déduit de la phase : actif → running, gardes
@@ -1612,8 +1615,7 @@ impl Daemon {
             stg.planners = n_planners;
             stg.reviewers = n_reviewers;
         }
-        self.orch.merge_pr_reviews_live(&mut st, &pr_snap);
-        *self.orch.state.lock().unwrap() = st.clone();
+        self.orch.write_back_merged(&mut st, &pr_snap);
         self.orch_save(&st);
         // off pendant le cycle : ne pas écraser le Disabled posé par
         // set_enabled (le composant remonterait « running » à tort).
