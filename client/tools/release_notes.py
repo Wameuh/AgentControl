@@ -130,17 +130,42 @@ def english_notes():
             if (m := EN_LINE.match(ln))}
 
 
+MERGE_PR = re.compile(r"^Merge pull request #(\d+)\b")
+
+
+def merge_pr_map(rev_range):
+    """{sha: pr} — commits apportés par un merge commit `Merge pull
+    request #N` (leurs sujets ne portent pas de suffixe `(#N)`, contraire-
+    ment aux squashes). Sans ça leurs sujets bruts — souvent en français —
+    étaient repris tels quels et la note anglaise de la PR ne s'appliquait
+    jamais."""
+    out = {}
+    in_range = set(git("rev-list", rev_range).split())
+    for m in git("log", "--merges", "--format=%H", rev_range).split():
+        g = MERGE_PR.match(git("log", "-1", "--format=%s", m))
+        if not g:
+            continue
+        pr = g.group(1)
+        inner = git("rev-list", f"{m}^2", "--not", f"{m}^1").split()
+        out.update({sha: pr for sha in inner if sha in in_range})
+    return out
+
+
 def entries(rev_range):
     """Sujets du range (chronologique) -> {section: [(titre, pr)]}."""
     out = {name: [] for _, name in CATEGORIES}
     types = {t: name for t, name in CATEGORIES}
     en = english_notes()
-    subjects = git("log", "--format=%s", "--reverse", rev_range).splitlines()
-    for s in subjects:
+    owner = merge_pr_map(rev_range)
+    subjects = git("log", "--format=%H%x00%s", "--reverse",
+                   rev_range).splitlines()
+    seen = set()
+    for line in subjects:
+        sha, _, s = line.partition("\x00")
         m = SUBJECT.match(s)
         if not m or m.group(1) not in types:
             continue
-        pr = m.group(3)
+        pr = m.group(3) or owner.get(sha)
         title = (en.get(pr or "") or "").strip() or None
         if title is None:
             title = KEYWORD.sub("", m.group(2)).strip()
@@ -151,6 +176,10 @@ def entries(rev_range):
                 print(f"release_notes: PR #{pr} sans note anglaise dans "
                       f"{os.path.relpath(EN_NOTES, ROOT)} — sujet brut "
                       "repris", file=sys.stderr)
+        key = (title, pr)
+        if key in seen:
+            continue
+        seen.add(key)
         out[types[m.group(1)]].append((title, pr))
     return out
 
