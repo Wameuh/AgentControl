@@ -13,6 +13,28 @@ Run several agents in parallel, on one server or many. Organize them,
 queue their work, let them delegate to each other — and supervise the
 whole fleet from your desk or your couch.
 
+How the pieces fit together:
+
+```mermaid
+flowchart LR
+    desk["Desktop app"]
+    phone["Phone · second machine"]
+
+    subgraph srv["Your Linux server"]
+        daemon["agentcontrol-daemon<br/>sessions · event journal<br/>Unix socket + TCP 127.0.0.1:7331"]
+        agents["Coding agents — detached<br/>devin · claude · codex · cursor …<br/>(ACP over stdio)"]
+        orch["Backlog orchestrator<br/>agentbacklog queue<br/>Backlog-W* workers · PRReview-* reviewers"]
+        daemon -- "spawns, journals" --> agents
+        orch -- "spawns worker & reviewer sessions" --> daemon
+    end
+
+    desk -- "SSH tunnel · QR pairing" --> daemon
+    phone -- "SSH tunnel · QR pairing" --> daemon
+    agents -- "push branches, open PRs" --> gh["GitHub"]
+    gh -- "PRs, /mr review trigger" --> orch
+    orch -- "posts review verdicts" --> gh
+```
+
 ## Screenshots
 
 Markdown chat with expandable tool calls, pending permissions, session
