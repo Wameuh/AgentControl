@@ -386,7 +386,18 @@ impl Daemon {
             s.mark_spawning();
         }
         match s
-            .spawn_agent(&cmd, &envs, Some(native), true, self.mcp_servers(sid), None)
+            .spawn_agent(
+                &cmd,
+                &envs,
+                Some(native),
+                true,
+                self.mcp_servers(sid),
+                Some(crate::session::SpawnCfg {
+                    model: meta.model.clone(),
+                    quiet: true,
+                    ..Default::default()
+                }),
+            )
             .await
         {
             Ok(true) => {

@@ -204,7 +204,11 @@ impl Daemon {
                                     meta.native_session_id.clone(),
                                     true,
                                     self.mcp_servers(&session),
-                                    None,
+                                    Some(crate::session::SpawnCfg {
+                                        model: meta.model.clone(),
+                                        quiet: true,
+                                        ..Default::default()
+                                    }),
                                 )
                                 .await;
                         }
@@ -227,7 +231,11 @@ impl Daemon {
                                 meta.native_session_id.clone(),
                                 true,
                                 self.mcp_servers(&session),
-                                None,
+                                Some(crate::session::SpawnCfg {
+                                    model: meta.model.clone(),
+                                    quiet: true,
+                                    ..Default::default()
+                                }),
                             )
                             .await
                         {
@@ -367,8 +375,21 @@ impl Daemon {
                 }
                 drop(slot);
                 // resume_native_id=None → session/new : contexte agent vide.
+                // Comme au respawn, le modèle de meta est ré-affirmé via
+                // ACP (l'env seule ne garantit pas l'application réelle).
                 if let Err(e) = s
-                    .spawn_agent(&cmd, &envs, None, true, self.mcp_servers(&session), None)
+                    .spawn_agent(
+                        &cmd,
+                        &envs,
+                        None,
+                        true,
+                        self.mcp_servers(&session),
+                        Some(crate::session::SpawnCfg {
+                            model: meta.model.clone(),
+                            quiet: true,
+                            ..Default::default()
+                        }),
+                    )
                     .await
                 {
                     // État cohérent avec la réalité : l'agent n'a pas
@@ -539,6 +560,11 @@ impl Daemon {
             s.mark_spawning();
         }
         drop(slot);
+        // Ré-affirmer le modèle demandé après session/load : le store
+        // natif peut avoir persisté un autre modèle (défaut du compte,
+        // changement hors démon) — sans push, le résumé tourne sur le
+        // modèle restauré tout en affichant meta.model. Le mode est déjà
+        // couvert (env re-injectée + restage pending_config d'agent.rs).
         let r = s
             .spawn_agent(
                 &cmd,
@@ -546,7 +572,11 @@ impl Daemon {
                 meta.native_session_id.clone(),
                 skip_replay,
                 self.mcp_servers(&meta.id),
-                None,
+                Some(crate::session::SpawnCfg {
+                    model: meta.model.clone(),
+                    quiet: true,
+                    ..Default::default()
+                }),
             )
             .await;
         // Rendormir seulement si rien d'externe n'a repris la session
@@ -606,7 +636,11 @@ impl Daemon {
                     native,
                     skip_replay,
                     d.mcp_servers(&sid),
-                    Some((mode, model)),
+                    Some(crate::session::SpawnCfg {
+                        mode,
+                        model,
+                        quiet: false,
+                    }),
                 )
                 .await;
             // Supprimée pendant le spawn : tuer l'agent frais éventuel —
