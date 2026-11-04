@@ -1442,7 +1442,12 @@ impl Daemon {
                 }
             }
 
-            // 3. spawn pour les pending poppables.
+            // 3. Allocation des slots libres : réveil des asleep
+            // porteurs d'items wip EN PRIORITÉ (leur travail engagé
+            // prime le pending — on finit avant d'ouvrir), puis spawn
+            // pending, puis asleep sans wip (PR seules). L'ancien
+            // ordre « spawn d'abord » laissait les wips mourir
+            // derrière du pending permanent (#169).
             if !self.orch.is_enabled() {
                 return Ok(());
             }
@@ -1451,6 +1456,39 @@ impl Daemon {
             // réveil ultérieur consomme le slot via le budget `free`.
             let alive = workers.iter().filter(|w| w.state != "asleep").count();
             let mut free = (cfg.max_workers as usize).saturating_sub(alive);
+            // FIFO d'allocation : le plus ancien nudge différé d'abord
+            // (jamais nudgé = le plus ancien).
+            asleep_nudges
+                .sort_by_key(|(sid, _, _)| st.nudges.get(sid).copied().unwrap_or(0.0) as i64);
+            // 3a. Asleep porteurs d'items wip — priorité absolue : le
+            // pending n'est servi que s'il n'en reste aucun à réveiller.
+            for (sid, open_prs, my_open) in &asleep_nudges {
+                if my_open.is_empty() {
+                    continue;
+                }
+                if free == 0 {
+                    info!(
+                        "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
+                         wip={my_open:?}) → nudge différé (max_workers)"
+                    );
+                    continue;
+                }
+                if !self.orch.is_enabled() {
+                    return Ok(());
+                }
+                info!(
+                    "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
+                     wip={my_open:?}) → nudge wip-prioritaire (slot free={free})"
+                );
+                let open_refs: Vec<&String> = open_prs.iter().collect();
+                let wip_refs: Vec<&String> = my_open.iter().collect();
+                if self.orch_nudge(sid, &open_refs, &wip_refs).await {
+                    st.nudges.insert(sid.clone(), now);
+                    free = free.saturating_sub(1);
+                }
+            }
+            // 3b. spawn pour les pending poppables — seulement sur les
+            // slots que les wips asleep n'ont pas pris.
             // Mode sériel quota (rl > 0) : au plus UN spawn, et seulement
             // si aucune session ne tourne — les sessions en erreur
             // rate_limit attendent leur backoff, les idles ne sont pas
@@ -1492,9 +1530,14 @@ impl Daemon {
                 }
             }
 
-            // 3b. Réveil des waiters asleep (PR ouvertes / wip) dans la
-            // limite des slots restants — spawn prioritaire ci-dessus.
+            // 3c. Réveil des waiters asleep SANS wip (PR ouvertes
+            // seules) dans les slots restants — derniers servis : une
+            // PR qui attend CI/verdict ne produit pas de travail
+            // nouveau tant qu'elle dort.
             for (sid, open_prs, my_open) in asleep_nudges {
+                if !my_open.is_empty() {
+                    continue;
+                }
                 if free == 0 {
                     info!(
                         "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
