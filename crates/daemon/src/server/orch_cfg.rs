@@ -47,6 +47,10 @@ const KEYS: &[&str] = &[
     "group",
     "workspace",
     "agent",
+    "worker_agent",
+    "planner_agent",
+    "reviewer_agent",
+    "pr_reviewer_agent",
     "mode",
     "model",
     "thought_level",
@@ -199,6 +203,48 @@ fn dyn_ps(
     p
 }
 
+/// Mêmes listes sur plusieurs profils à la fois — union des couples
+/// (valeur, libellé) annoncés par chaque agent, premier libellé vu
+/// faisant foi. Sert le schéma quand les rôles (`*_agent`) pointent
+/// des profils différents : les dropdowns modèles/modes doivent
+/// couvrir tous les agents configurés (enum ouverte de toute façon).
+pub(crate) fn dyn_choices_multi(root: &Path, agents: &[&str]) -> DynChoices {
+    let mut out = DynChoices::default();
+    let merge = |dst: &mut Vec<(String, String)>, src: Vec<(String, String)>| {
+        for (v, n) in src {
+            if !dst.iter().any(|(x, _)| x == &v) {
+                dst.push((v, n));
+            }
+        }
+    };
+    for a in agents {
+        let d = dyn_choices(root, a);
+        merge(&mut out.models, d.models);
+        merge(&mut out.modes, d.modes);
+        merge(&mut out.thought_levels, d.thought_levels);
+    }
+    out
+}
+
+/// Param « profil d'agent par rôle » : enum des profils `[agents.*]`
+/// déclarés (ouverte — un profil peut être ajouté plus tard).
+fn agent_ps(
+    key: &str,
+    label: &str,
+    desc: &str,
+    default: Option<&str>,
+    agents: &[String],
+) -> ParamSpec {
+    let mut p = ps(key, label, desc, ParamKind::String, default);
+    if !agents.is_empty() {
+        p.kind = ParamKind::Enum;
+        p.choices = agents.to_vec();
+        p.open_enum = true;
+        p.description = Some(format!("{desc} — liste des profils déclarés"));
+    }
+    p
+}
+
 /// Schéma déclaratif des paramètres orchestrateur — posé dans
 /// `spec.params_schema` de l'item `backlog-orchestrator` : le client
 /// affiche alors son formulaire générique et envoie
@@ -207,7 +253,7 @@ fn dyn_ps(
 /// `dyn_` porte les listes annoncées par l'agent configuré (modèles,
 /// modes, thought levels) — les params correspondants deviennent des
 /// menus déroulants ouverts au lieu de champs texte libres.
-pub(crate) fn params_schema(dyn_: &DynChoices) -> Vec<ParamSpec> {
+pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSpec> {
     vec![
         ps(
             "enabled",
@@ -301,12 +347,44 @@ pub(crate) fn params_schema(dyn_: &DynChoices) -> Vec<ParamSpec> {
             ParamKind::Path,
             Some("/workspace"),
         ),
-        ps(
+        agent_ps(
             "agent",
             "Profil agent",
-            "profil `[agents.*]` des spawns ; vide = défaut",
-            ParamKind::String,
+            "profil `[agents.*]` des spawns ; vide = défaut — aussi le \
+             repli de tous les `*_agent` laissés vides",
             Some("devin"),
+            agents,
+        ),
+        agent_ps(
+            "worker_agent",
+            "Profil worker (Backlog-W*)",
+            "profil `[agents.*]` des workers ; vide = le param agent",
+            Some(""),
+            agents,
+        ),
+        agent_ps(
+            "planner_agent",
+            "Profil planner (Backlog-P*)",
+            "profil `[agents.*]` des planificateurs et implémenteurs ; \
+             vide = le param agent",
+            Some(""),
+            agents,
+        ),
+        agent_ps(
+            "reviewer_agent",
+            "Profil reviewer (Backlog-R*)",
+            "profil `[agents.*]` des reviewers de plan ; vide = le \
+             param agent",
+            Some(""),
+            agents,
+        ),
+        agent_ps(
+            "pr_reviewer_agent",
+            "Profil reviewer PR (PRReview-*)",
+            "profil `[agents.*]` des reviewers de PR ; vide = le param \
+             agent",
+            Some(""),
+            agents,
         ),
         dyn_ps(
             "mode",
@@ -496,6 +574,13 @@ pub(crate) fn params_values(cfg: &super::cfg::OrchCfg) -> HashMap<String, String
     m.insert("group".into(), cfg.group.clone());
     m.insert("workspace".into(), cfg.workspace.clone());
     m.insert("agent".into(), cfg.agent.clone());
+    m.insert("worker_agent".into(), cfg.worker_agent.clone());
+    m.insert("planner_agent".into(), cfg.planner_agent.clone());
+    m.insert("reviewer_agent".into(), cfg.reviewer_agent.clone());
+    m.insert(
+        "pr_reviewer_agent".into(),
+        cfg.pr_reviewer_agent.clone(),
+    );
     m.insert("mode".into(), cfg.mode.clone());
     m.insert("model".into(), cfg.model.clone());
     m.insert("thought_level".into(), cfg.thought_level.clone());
@@ -708,6 +793,12 @@ pub(crate) fn apply_patch(
                     val_string(v)?
                 }
             }
+            // Vide = héritage du profil `agent` (sémantique du champ,
+            // pas retour à un défaut fixe).
+            "worker_agent" => cfg.worker_agent = val_string(v)?,
+            "planner_agent" => cfg.planner_agent = val_string(v)?,
+            "reviewer_agent" => cfg.reviewer_agent = val_string(v)?,
+            "pr_reviewer_agent" => cfg.pr_reviewer_agent = val_string(v)?,
             "mode" => {
                 cfg.mode = if is_empty(v) {
                     OrchCfg::default().mode
@@ -938,6 +1029,49 @@ mod tests {
     }
 
     #[test]
+    fn patch_agents_par_role_et_fallback() {
+        use super::super::cfg::OrchCfg;
+        let mut c = OrchCfg::default();
+        // Défaut : tout hérite du profil global.
+        for r in [
+            c.worker_agent.clone(),
+            c.planner_agent.clone(),
+            c.reviewer_agent.clone(),
+            c.pr_reviewer_agent.clone(),
+        ] {
+            assert_eq!(c.agent_or(&r), "devin");
+        }
+        assert_eq!(c.role_agents(), vec!["devin"]);
+        apply_patch(
+            &mut c,
+            &patch(&[
+                ("worker_agent", json!("devin")),
+                ("reviewer_agent", json!("mock")),
+                ("pr_reviewer_agent", json!("cursor")),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(c.agent_or(&c.worker_agent), "devin");
+        assert_eq!(c.agent_or(&c.planner_agent), "devin"); // vide → agent
+        assert_eq!(c.agent_or(&c.reviewer_agent), "mock");
+        assert_eq!(c.agent_or(&c.pr_reviewer_agent), "cursor");
+        assert_eq!(c.role_agents(), vec!["devin", "mock", "cursor"]);
+        // Re-vide → retour à l'héritage.
+        apply_patch(&mut c, &patch(&[("reviewer_agent", json!(""))])).unwrap();
+        assert_eq!(c.agent_or(&c.reviewer_agent), "devin");
+        // Les params deviennent des enums ouverts sur les profils
+        // déclarés.
+        let agents = vec!["devin".to_string(), "mock".to_string()];
+        let schema = params_schema(&DynChoices::default(), &agents);
+        for key in ["agent", "worker_agent", "reviewer_agent"] {
+            let p = schema.iter().find(|p| p.key == key).unwrap();
+            assert_eq!(p.kind, ParamKind::Enum, "{key} doit devenir Enum");
+            assert!(p.open_enum);
+            assert_eq!(p.choices, agents);
+        }
+    }
+
+    #[test]
     fn patch_vide_defaut_ou_vide_semantique() {
         let mut c = super::super::cfg::OrchCfg {
             group: "G".into(),
@@ -1072,7 +1206,7 @@ mod tests {
 
     #[test]
     fn schema_couvre_les_cles_et_valeurs() {
-        let schema = params_schema(&DynChoices::default());
+        let schema = params_schema(&DynChoices::default(), &[]);
         assert_eq!(
             schema.iter().map(|p| p.key.as_str()).collect::<Vec<_>>(),
             KEYS.to_vec()
@@ -1086,7 +1220,7 @@ mod tests {
 
     #[test]
     fn schema_sans_liste_reste_en_texte_libre() {
-        let schema = params_schema(&DynChoices::default());
+        let schema = params_schema(&DynChoices::default(), &[]);
         for key in [
             "mode",
             "model",
@@ -1113,7 +1247,7 @@ mod tests {
             modes: vec![("bypass".into(), "Bypass".into())],
             thought_levels: vec![("max".into(), "max".into())],
         };
-        let schema = params_schema(&dyn_);
+        let schema = params_schema(&dyn_, &[]);
         let m = schema.iter().find(|p| p.key == "model").unwrap();
         assert_eq!(m.kind, ParamKind::Enum);
         assert!(m.open_enum);

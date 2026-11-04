@@ -1264,9 +1264,11 @@ impl Daemon {
             cfg.pr_reviewer_model.clone()
         };
         let group = (!cfg.group.is_empty()).then(|| cfg.group.clone());
+        let agent = cfg.agent_or(&cfg.pr_reviewer_agent);
+        self.warn_spawn_cfg(agent, &model, &cfg.pr_reviewer_mode);
         let v = self
             .h_new_session(
-                cfg.agent.clone(),
+                agent.to_string(),
                 wt.display().to_string(),
                 Some(format!("{PR_REVIEW_PREFIX}{n}")),
                 Some(model),

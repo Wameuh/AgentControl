@@ -976,6 +976,7 @@ mod tests {
             Arc::new(crate::server::OrchProbe::open(
                 crate::server::OrchCfg::default(),
             )),
+            Vec::new(),
         );
         let absent = tool_spec(&["ac-tool-inexistant-xyz"]);
         // Verdicts d'une passe antérieure (tool alors installé).
@@ -1010,6 +1011,7 @@ mod tests {
             Arc::new(crate::server::OrchProbe::open(
                 crate::server::OrchCfg::default(),
             )),
+            Vec::new(),
         );
         let mut spec = tool_spec(&["sh", "-c", "echo 0.2.0"]);
         spec.min_version = Some("0.3".into());
@@ -1046,6 +1048,7 @@ mod tests {
             Arc::new(crate::server::OrchProbe::open(
                 crate::server::OrchCfg::default(),
             )),
+            Vec::new(),
         );
         c.upsert("t", tool_spec(&["sh"])).await.unwrap();
         // Comme si le tool avait été sondé en échec avant la bascule.

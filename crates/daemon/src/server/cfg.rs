@@ -157,6 +157,18 @@ pub struct OrchCfg {
     /// Profil agent des workers (défaut "devin").
     #[serde(default = "dagent")]
     pub agent: String,
+    /// Profil `[agents.*]` des workers `Backlog-W*` — vide = `agent`.
+    #[serde(default)]
+    pub worker_agent: String,
+    /// Profil des planificateurs/implémenteurs `Backlog-P*` — vide = `agent`.
+    #[serde(default)]
+    pub planner_agent: String,
+    /// Profil des reviewers de plan `Backlog-R*` — vide = `agent`.
+    #[serde(default)]
+    pub reviewer_agent: String,
+    /// Profil des reviewers PR `PRReview-*` — vide = `agent`.
+    #[serde(default)]
+    pub pr_reviewer_agent: String,
     /// Mode demandé au spawn (défaut "bypass").
     #[serde(default = "dmode")]
     pub mode: String,
@@ -337,6 +349,10 @@ impl Default for OrchCfg {
             group: dgroup(),
             workspace: dws(),
             agent: dagent(),
+            worker_agent: String::new(),
+            planner_agent: String::new(),
+            reviewer_agent: String::new(),
+            pr_reviewer_agent: String::new(),
             mode: dmode(),
             model: dmodel(),
             thought_level: dlevel(),
@@ -360,6 +376,37 @@ impl Default for OrchCfg {
             pr_review_timeout: d2700(),
             repo_workspaces: drw(),
         }
+    }
+}
+
+impl OrchCfg {
+    /// Profil effectif d'un rôle : le param dédié (`*_agent`) s'il est
+    /// posé, sinon le profil global `agent` — compat des configs
+    /// mono-profil.
+    pub fn agent_or<'a>(&'a self, role: &'a str) -> &'a str {
+        if role.is_empty() {
+            self.agent.as_str()
+        } else {
+            role
+        }
+    }
+
+    /// Profils effectifs de tous les rôles spawnés par l'orchestrateur
+    /// (worker, planner, reviewer, reviewer PR), dédoublonnés — le
+    /// périmètre « quota » du mode sériel rate_limit.
+    pub fn role_agents(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for a in [
+            self.agent_or(&self.worker_agent),
+            self.agent_or(&self.planner_agent),
+            self.agent_or(&self.reviewer_agent),
+            self.agent_or(&self.pr_reviewer_agent),
+        ] {
+            if !a.is_empty() && !out.contains(&a) {
+                out.push(a);
+            }
+        }
+        out
     }
 }
 

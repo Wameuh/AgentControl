@@ -127,6 +127,21 @@ reviewer sessions. Flipping `pr_review` off settles running reviews:
 reviewer session deleted, worktree removed, `review failed:
 disabled` posted so polling workers aren't left waiting.
 
+**Agent profile per role** (`backlog_orchestrator` params, hot-settable
+via `acctl comp set`, dropdown of the declared `[agents.*]` profiles in
+the config UI): `worker_agent` (`Backlog-W*`), `planner_agent`
+(`Backlog-P*` — planners AND implementers), `reviewer_agent`
+(`Backlog-R*` plan reviews) and `pr_reviewer_agent` (`PRReview-*`).
+Empty = the global `agent` param — a mono-profile config behaves
+exactly as before. Modes and models stay per-profile vocabularies:
+`*_mode`/`model` are passed as-is to the spawn — a value outside the
+profile's announced list logs a warn and the spawn may be refused by
+the agent (adjust the role's `*_mode`/profile accordingly; each agent
+has its own mode names). The rate_limit serial mode stays global to
+the component: a hold on ANY routed profile serializes the whole
+pipeline (per-profile quotas aren't declared, so the gate can't be
+per-agent yet).
+
 **Auto review**: when the work looks done **(PR still draft)**,
 **note `TS=$(date -u +%FT%TZ)`**, comment `/mr review`
 (`gh pr comment <N> --body "/mr review"`),

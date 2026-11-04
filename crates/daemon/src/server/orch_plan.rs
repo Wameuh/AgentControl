@@ -1025,7 +1025,14 @@ impl Daemon {
                 ],
             );
             match self
-                .plan_spawn(st.counter, REVIEWER_PREFIX, &cfg.reviewer_mode, prompt, cfg)
+                .plan_spawn(
+                    st.counter,
+                    REVIEWER_PREFIX,
+                    cfg.agent_or(&cfg.reviewer_agent),
+                    &cfg.reviewer_mode,
+                    prompt,
+                    cfg,
+                )
                 .await
             {
                 Some(rsid) => {
@@ -1078,9 +1085,10 @@ impl Daemon {
             let id = task_id(t);
             let key = id.to_string();
             let no_plan = task_no_plan(t);
-            let (prefix, mode, prompt) = if no_plan {
+            let (prefix, agent, mode, prompt) = if no_plan {
                 (
                     cfg.title_prefix.clone(),
+                    cfg.agent_or(&cfg.worker_agent),
                     cfg.implement_mode.clone(),
                     fill(
                         CLAIMED_WORKER_PROMPT,
@@ -1094,6 +1102,7 @@ impl Daemon {
             } else {
                 (
                     PLANNER_PREFIX.to_string(),
+                    cfg.agent_or(&cfg.planner_agent),
                     cfg.planner_mode.clone(),
                     fill(
                         PLANNER_PROMPT,
@@ -1107,7 +1116,7 @@ impl Daemon {
             };
             st.counter += 1;
             let Some(sid) = self
-                .plan_spawn(st.counter, &prefix, &mode, prompt, cfg)
+                .plan_spawn(st.counter, &prefix, agent, &mode, prompt, cfg)
                 .await
             else {
                 continue;
@@ -1409,7 +1418,14 @@ impl Daemon {
                         ],
                     );
                     if let Some(nsid) = self
-                        .plan_spawn(st.counter, PLANNER_PREFIX, &cfg.implement_mode, prompt, cfg)
+                        .plan_spawn(
+                            st.counter,
+                            PLANNER_PREFIX,
+                            cfg.agent_or(&cfg.planner_agent),
+                            &cfg.implement_mode,
+                            prompt,
+                            cfg,
+                        )
                         .await
                     {
                         let (rc, _o, e) =
@@ -2253,21 +2269,23 @@ impl Daemon {
 
     /// Spawn d'une session pipeline — même mécanique que `orch_spawn`
     /// (h_new_session origin composant + apply_spawn_cfg) mais rôle
-    /// paramétré : préfixe, mode et prompt ne dépendent plus de la cfg
-    /// worker.
+    /// paramétré : préfixe, profil agent, mode et prompt ne dépendent
+    /// plus de la cfg worker.
     async fn plan_spawn(
         self: &Arc<Self>,
         number: u64,
         prefix: &str,
+        agent: &str,
         mode: &str,
         prompt: String,
         cfg: &cfg::OrchCfg,
     ) -> Option<String> {
         let title = format!("{prefix}{number}");
         let group = (!cfg.group.is_empty()).then(|| cfg.group.clone());
+        self.warn_spawn_cfg(agent, &cfg.model, mode);
         let v = match self
             .h_new_session(
-                cfg.agent.clone(),
+                agent.to_string(),
                 cfg.workspace.clone(),
                 Some(title.clone()),
                 Some(cfg.model.clone()),

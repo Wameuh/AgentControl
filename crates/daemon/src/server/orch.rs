@@ -839,14 +839,19 @@ pub(crate) fn acwait_pending(sid: &str) -> bool {
     false
 }
 
-/// Sessions du composant en retenue `rate_limit` sur le même agent (et
-/// le même modèle si configuré) — le quota est partagé : tant qu'une
-/// session patiente sur son backoff, tout spawn ou nudge derrière
-/// repartirait sur la même limite dès sa levée. Pilote le « mode
-/// sériel » du cycle : nudges workers/planners suspendus, au plus une
-/// session active à la fois, reviewer prioritaire (et jamais tué — son
-/// backoff le reprend).
+/// Sessions du composant en retenue `rate_limit` sur un profil routé
+/// (tout `*_agent` effectif ; et le même modèle si `model` est configuré)
+/// — le quota est partagé : tant qu'une session patiente sur son
+/// backoff, tout spawn ou nudge derrière repartirait sur la même limite
+/// dès sa levée. Pilote le « mode sériel » du cycle : nudges
+/// workers/planners suspendus, au plus une session active à la fois,
+/// reviewer prioritaire (et jamais tué — son backoff le reprend).
+/// Choix multi-profils : la sérialisation reste globale au composant
+/// (conservateur — un quota trouvé sur n'importe quel profil gèle tout
+/// le pipeline) plutôt que par agent, les quotas n'étant pas déclarés
+/// par profil.
 pub(crate) fn rate_limited_count(metas: &[SessionMeta], cfg: &cfg::OrchCfg) -> usize {
+    let agents = cfg.role_agents();
     metas
         .iter()
         .filter(|m| {
@@ -855,7 +860,7 @@ pub(crate) fn rate_limited_count(metas: &[SessionMeta], cfg: &cfg::OrchCfg) -> u
                 && m.last_error
                     .as_ref()
                     .is_some_and(|le| le.kind == "rate_limit")
-                && m.agent == cfg.agent
+                && agents.contains(&m.agent.as_str())
                 && (cfg.model.is_empty() || m.model.as_deref() == Some(cfg.model.as_str()))
         })
         .count()
@@ -1843,10 +1848,11 @@ impl Daemon {
         let title = format!("{}{}", cfg.title_prefix, number);
         let prompt = cfg.prompt.clone().unwrap_or_else(|| PROMPT.to_string());
         let group = (!cfg.group.is_empty()).then(|| cfg.group.clone());
-        self.warn_unknown_spawn_cfg(cfg);
+        let agent = cfg.agent_or(&cfg.worker_agent);
+        self.warn_spawn_cfg(agent, &cfg.model, &cfg.mode);
         let v = match self
             .h_new_session(
-                cfg.agent.clone(),
+                agent.to_string(),
                 cfg.workspace.clone(),
                 Some(title.clone()),
                 Some(cfg.model.clone()),
@@ -1869,23 +1875,24 @@ impl Daemon {
         Some(sid)
     }
 
-    /// Alerte si `model`/`mode` configurés sont hors des listes
-    /// annoncées par le profil `agent` — l'agent refusera
-    /// vraisemblablement la valeur au spawn (Invalid params). Listes
-    /// inconnues → pas de warning (information absente, jamais
-    /// bloquant).
-    pub(crate) fn warn_unknown_spawn_cfg(self: &Arc<Self>, cfg: &super::OrchCfg) {
-        let agent = if cfg.agent.is_empty() {
+    /// Alerte si `model`/`mode` demandés au spawn sont hors des listes
+    /// annoncées par le profil `agent` du rôle — l'agent refusera
+    /// vraisemblablement la valeur (Invalid params). Listes inconnues
+    /// → pas de warning (information absente, jamais bloquant ; le
+    /// fallback réel est le défaut de l'agent si le spawn rejette —
+    /// documenté : modes/modèles sont des vocabulaires par profil).
+    pub(crate) fn warn_spawn_cfg(self: &Arc<Self>, agent: &str, model: &str, mode: &str) {
+        let agent = if agent.is_empty() {
             super::OrchCfg::default().agent
         } else {
-            cfg.agent.clone()
+            agent.to_string()
         };
         let dyn_ = orch_cfg::dyn_choices(&self.root, &agent);
         for (key, val, known) in [
-            ("model", &cfg.model, &dyn_.models),
-            ("mode", &cfg.mode, &dyn_.modes),
+            ("model", model, &dyn_.models),
+            ("mode", mode, &dyn_.modes),
         ] {
-            if !val.is_empty() && !known.is_empty() && !known.iter().any(|(v, _)| v == val) {
+            if !val.is_empty() && !known.is_empty() && !known.iter().any(|(v, _)| v.as_str() == val) {
                 warn!(
                     "orchestrateur: {key} « {val} » hors liste annoncée \
                      par l'agent « {agent} » — valeurs : {}",
@@ -1970,7 +1977,7 @@ impl Daemon {
         }
         let tpl = cfg.manager_prompt.as_deref().unwrap_or(MANAGER_PROMPT);
         let prompt = tpl.replace("{REPO}", repo).replace("{WS}", &cwd);
-        self.warn_unknown_spawn_cfg(cfg);
+        self.warn_spawn_cfg(&cfg.agent, &cfg.model, &cfg.mode);
         let v = self
             .h_new_session(
                 cfg.agent.clone(),

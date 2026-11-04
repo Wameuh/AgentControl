@@ -248,6 +248,7 @@ impl Daemon {
         let pr_verify = Arc::new(prs::PrVerifier::new(Arc::clone(&prs), move |t| {
             forgesync::verify_ref(&forge_set, t)
         }));
+        let agent_ids: Vec<String> = agents.keys().cloned().collect();
         let d = Arc::new(Self {
             root: root.clone(),
             sessions: RwLock::new(HashMap::new()),
@@ -259,6 +260,7 @@ impl Daemon {
                 a2a.enabled,
                 Arc::clone(&web),
                 Arc::clone(&orch),
+                agent_ids,
             ),
             orch,
             a2a,
