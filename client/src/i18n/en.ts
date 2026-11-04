@@ -428,6 +428,7 @@ export const en = {
   pr_unres_hint: "never resolved by sync ({n} failures) — likely phantom repo or dead host",
   spawned_by: "spawned by {parent}",
   via: "via", origin_tip: "created by service {origin}",
+  dot_asleep_tip: "asleep — wakes on next message",
   bottom_jump_title: "Back to live tail",
   // retours utilisateur : toasts, dialogue démon, états vides
   retry: "Retry",

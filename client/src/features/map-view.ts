@@ -648,7 +648,7 @@ export class MapView {
       const sgn = i % 2 ? 1 : -1;
       const cx = (px + x) / 2 + (-dy / len) * len * 0.14 * sgn;
       const cy = (py + y) / 2 + (dx / len) * len * 0.14 * sgn;
-      const st = dotCls(s.state);
+      const st = dotCls(s.state, s.last_error);
       edges.push(
         `<path class="e e-s st-${st}${ACTIVE.has(s.state) ? " flow" : ""}" ` +
           `d="M ${px.toFixed(1)} ${py.toFixed(1)} Q ${cx.toFixed(1)} ${cy.toFixed(1)} ${x.toFixed(1)} ${y.toFixed(1)}">` +
@@ -709,7 +709,7 @@ export class MapView {
       const sp = pos.get(`s:${s.id}`);
       if (!sp || hiddenIds.has(s.id)) continue; // cycle / groupe replié
       const [x, y] = sp;
-      const st = dotCls(s.state);
+      const st = dotCls(s.state, s.last_error);
       const pr = prOf.get(s.id);
       const via = s.origin ? `\n${t("via")} ${s.origin}` : "";
       nodes.push(
@@ -717,7 +717,7 @@ export class MapView {
           `data-session="${q(s.id)}" role="button" tabindex="0">` +
           `<title>${esc(`${s.title}\n${s.state} · ${s.agent}${via}`)}</title>` +
           `<circle class="nc" r="${R_SESS}"/>` +
-          nest(dotIcon(s.state), -10, -10, 20) +
+          nest(dotIcon(s.state, s.last_error), -10, -10, 20) +
           `<text class="nl" y="${R_SESS + 14}">${esc(trunc(s.title, 18))}` +
           (pr ? ` <tspan class="npr">#${pr}</tspan>` : "") +
           `</text>` +

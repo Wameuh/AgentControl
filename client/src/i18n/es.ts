@@ -431,6 +431,7 @@ export const es: Record<Key, string> = {
   pr_unres_hint: "nunca resuelta por el sync ({n} fallos) — probable repo fantasma o host muerto",
   spawned_by: "creada por {parent}",
   via: "vía", origin_tip: "creada por el servicio {origin}",
+  dot_asleep_tip: "dormida — despierta con el próximo mensaje",
   bottom_jump_title: "Volver al hilo en directo",
   // retours utilisateur : toasts, dialogue démon, états vides
   retry: "Reintentar",

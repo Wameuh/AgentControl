@@ -147,7 +147,7 @@ export class PrListView {
       el.title = t("pr_sess_gone");
       return el;
     }
-    el.innerHTML = `<span class="dot st-${dotCls(s.state)}" title="${q(esc(s.state))}">${dotIcon(s.state)}</span>` +
+    el.innerHTML = `<span class="dot st-${dotCls(s.state, s.last_error)}" title="${q(esc(s.state))}">${dotIcon(s.state, s.last_error)}</span>` +
       `<span class="stxt">${this.deps.hl(s.title)}</span>`;
     el.title = `${s.title} — ${s.agent}`;
     (el as HTMLButtonElement).onclick = (e) => {

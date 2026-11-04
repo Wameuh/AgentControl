@@ -431,6 +431,7 @@ export const de: Record<Key, string> = {
   pr_unres_hint: "nie vom Sync aufgelöst ({n} Fehler) — wahrscheinlich Phantom-Repo oder toter Host",
   spawned_by: "erstellt von {parent}",
   via: "via", origin_tip: "erstellt vom Dienst {origin}",
+  dot_asleep_tip: "ruhend — wacht bei der nächsten Nachricht auf",
   bottom_jump_title: "Zum Live-Ende zurück",
   // Benutzer-Feedback: Toasts, Daemon-Dialog, Leerzustände
   retry: "Wiederholen",
