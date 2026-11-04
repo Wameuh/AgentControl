@@ -59,6 +59,10 @@ export class ConnectionManager {
    *  durablement bloqué et l'échec compte malgré le trafic. */
   private ignored = new Map<string, number>();
   private gone = new Set<string>();
+  /** Génération du client Rust courant (`_ac_gen` renvoyé par `connect`)
+   *  — sonde / conn_error / conn-dead d'une gen antérieure = résultat
+   *  d'un Arc remplacé, ignoré (sinon reconnect-ok → down immédiat). */
+  private gens = new Map<string, number>();
 
   private deps = {
     /** Re-render de la sidebar (sessions + badges). */
@@ -141,6 +145,33 @@ export class ConnectionManager {
     this.deps.capsChanged();
   }
 
+  /** Mémorise `_ac_gen` (connect ou sonde succès). Strictement monotone
+   *  par clé : un `markConnected` tardif (dialogue post-await) ne doit
+   *  pas écraser la gen d'un `retryConn` plus récent — sinon toute
+   *  sonde/conn-dead vivante serait filtrée comme périmée à jamais. */
+  private noteGen(key: string, status?: Record<string, unknown> | null) {
+    const g = status?._ac_gen;
+    if (typeof g !== "number" || !Number.isFinite(g)) return;
+    const cur = this.gens.get(key) ?? 0;
+    if (g >= cur) this.gens.set(key, g);
+  }
+
+  /** Résultat encore valide pour la gen courante ? Absent / legacy →
+   *  accepté (web, vieux bridges). `gen < cur` = client remplacé →
+   *  périmé. `gen > cur` = bookkeeping UI en retard (connect supersédé
+   *  sans noteGen, etc.) → signal du client **live**, accepté et
+   *  forwardé dans `gens` pour reconverger (sinon conn-dead/sondes
+   *  vivantes filtrées à jamais, sans resync possible si déjà morte). */
+  isFresh(key: string, gen?: number | null): boolean {
+    if (gen == null || Number.isNaN(gen)) return true;
+    const cur = this.gens.get(key);
+    if (cur == null || gen >= cur) {
+      if (typeof gen === "number") this.gens.set(key, gen);
+      return true;
+    }
+    return false;
+  }
+
   /** Connexion établie → la surveillance/backoff la suit (fin de doConnect).
    *  `status` = daemon_status déjà en main (`connect` le retourne) —
    *  sinon probe immédiat pour les capabilities. */
@@ -148,6 +179,7 @@ export class ConnectionManager {
     const ck = this.keyOf(cfg);
     this.cfg.set(ck, cfg);
     this.gone.delete(ck); // reconnectée via le dialogue → ré-active
+    this.noteGen(ck, status);
     this.markAlive(ck);
     if (status && !status.error) {
       this.setCaps(ck, status);
@@ -183,6 +215,7 @@ export class ConnectionManager {
       this.attempts.delete(k);
       this.strikes.delete(k);
       this.ignored.delete(k);
+      this.gens.delete(k);
       this.gone.delete(k);
       this.deps.dropConvsForConn(k);
       this.deps.closeIfConn(k);
@@ -257,8 +290,16 @@ export class ConnectionManager {
    *  compte « up » pour l'icône d'état), false sinon. */
   private probeFailed(key: string, v: {
     error?: string; kind?: string; silent_ms?: number; rtt_ms?: number;
+    gen?: number;
   }): boolean {
     if (!this.cfg.has(key) || this.gone.has(key)) return false;
+    // Sonde démarrée sur un client remplacé depuis — ne pas striker
+    // la gen courante (silent/rtt « vieux » typiques de ce cas).
+    if (!this.isFresh(key, v.gen)) {
+      logUi("info",
+        `conn ${key}: sonde périmée (gen ${v.gen}≠${this.gens.get(key)}) — ignorée`);
+      return true; // transport considéré joignable : la gen fraîche l'est
+    }
     const err = v.error ?? "?";
     // kind champ structuré (fusion ≥ cette version) ; repli sur le
     // littéral "timeout" pour les vieux démons / bridges sans kind.
@@ -344,6 +385,7 @@ export class ConnectionManager {
         this.renderState();
         return;
       }
+      this.noteGen(key, st);
       this.markAlive(key);
       logUi("info",
         `conn ${key}: reconnect #${this.attempts.get(key) ?? 1} ok (${Date.now() - t0} ms)`);
@@ -387,6 +429,7 @@ export class ConnectionManager {
       this.timer.delete(conn);
     }
     this.nextAt.delete(conn);
+    this.gens.delete(conn);
     this.live.set(conn, "down");
     this.deps.termDead(conn);
     await invoke("disconnect", { conn }).catch((e) => showErr(String(e)));
@@ -439,6 +482,7 @@ export class ConnectionManager {
     this.attempts.delete(conn);
     this.strikes.delete(conn);
     this.ignored.delete(conn);
+    this.gens.delete(conn);
     this.caps.delete(conn);
     // La conn sort de cfg : renderState (sb-left/chip) la retire sans
     // attendre une transition d'état ultérieure.
@@ -564,12 +608,18 @@ export class ConnectionManager {
       if (k && (this.gone.has(k) || this.live.get(k) === "down")) this.retry(k);
     });
     // Mort instantanée du transport (reader côté Rust). Payload {conn,
-    // why} — la cause post-mortem (RST, keepalive-timeout, canal fermé…)
-    // remplace le « EOF transport » générique dans le log « down » ;
-    // la forme string reste tolérée (pushes web legacy).
-    listen<{ conn: string; why?: string } | string>("conn-dead", (e) => {
+    // why, gen} — la cause post-mortem (RST, keepalive-timeout, canal
+    // fermé…) remplace le « EOF transport » générique dans le log
+    // « down » ; la forme string reste tolérée (pushes web legacy).
+    // gen périmée = mort du client remplacé pendant/après reconnect.
+    listen<{ conn: string; why?: string; gen?: number } | string>("conn-dead", (e) => {
       const p = e.payload;
       if (typeof p === "string") return this.markDead(p);
+      if (!this.isFresh(p.conn, p.gen)) {
+        logUi("info",
+          `conn ${p.conn}: conn-dead périmé (gen ${p.gen}≠${this.gens.get(p.conn)}) — ignoré`);
+        return;
+      }
       this.markDead(p.conn, p.why ?? "conn-dead (EOF transport)");
     });
 
@@ -591,11 +641,14 @@ export class ConnectionManager {
             // que le segment reste vert.
             anyOk = this.probeFailed(k, v as {
               error?: string; kind?: string; silent_ms?: number; rtt_ms?: number;
+              gen?: number;
             }) || anyOk;
           } else {
             anyOk = true;
             // Succès = la série d'échecs est rompue, même si la conn
             // n'avait jamais été déclarée down (1 strike effacé).
+            // `_ac_gen` injecté côté Rust → resync si noteGen a régressé.
+            this.noteGen(k, v as Record<string, unknown>);
             this.strikes.delete(k);
             this.ignored.delete(k);
             this.setCaps(k, v as Record<string, unknown>);

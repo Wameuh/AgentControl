@@ -116,6 +116,7 @@ pub fn run() {
             sys: Mutex::new(sysinfo::System::new()),
             net: Mutex::new(std::collections::VecDeque::new()),
             cli_conn: cli_conn_arg(),
+            next_gen: std::sync::atomic::AtomicU64::new(0),
         })
         .invoke_handler(tauri::generate_handler![
             commands::connect::connect,

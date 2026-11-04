@@ -5,12 +5,20 @@
 use anyhow::Context;
 use client_core::Client;
 use serde::Deserialize;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tauri::State;
 use tokio::sync::Mutex;
 
 pub(crate) struct ConnCtx {
     pub(crate) client: Arc<Client>,
+    /// Token d'instance du client courant — alloué depuis `AppState::next_gen`
+    /// (compteur global monotone). Les résultats fusionnés et les events
+    /// `conn-dead` d'un client remplacé portent l'ancienne gen et sont
+    /// ignorés (sinon un RPC périmé marquait la nouvelle conn down juste
+    /// après un reconnect ok). Global : un disconnect→reconnect ne
+    /// repart jamais à 1 (évite qu'un `Math.max` UI reste aveugle).
+    pub(crate) gen: u64,
 }
 
 pub(crate) struct AppState {
@@ -27,6 +35,9 @@ pub(crate) struct AppState {
     /// AGENTCONTROL_CONN) — modèle multi-instances : une instance = une
     /// connexion, le frontend la lit via la commande `cli_conn`.
     pub(crate) cli_conn: Option<String>,
+    /// Compteur global de gen — `fetch_add(1)+1` à chaque `connect`
+    /// réussi, toutes clés confondues. Jamais remis à zéro.
+    pub(crate) next_gen: AtomicU64,
 }
 
 pub(crate) async fn get_conn(state: &State<'_, AppState>, key: Option<&str>) -> Result<Arc<Client>, String> {

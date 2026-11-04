@@ -65,7 +65,7 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
                 // si le transport vit) de l'erreur de transport (mort
                 // proche, strike direct) — consommé par le watchdog.
                 let kind = if r.is_err() { "timeout" } else { "error" };
-                (k, r.map_err(|_| anyhow::anyhow!("timeout")).and_then(|x| x),
+                (k, c, r.map_err(|_| anyhow::anyhow!("timeout")).and_then(|x| x),
                     t0.elapsed().as_millis() as u64, silent, kind)
             });
         }
@@ -73,9 +73,24 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
         let mut out = json!({});
         let mut n_ok = 0u64;
         while let Some(res) = set.join_next().await {
-            let Ok((k, r, rtt, silent, kind)) = res else { continue };
+            let Ok((k, c, r, rtt, silent, kind)) = res else { continue };
+            // Client remplacé pendant l'appel (reconnect) : le résultat
+            // appartient à l'ancienne gen — le publier marquait la
+            // nouvelle conn down (sonde ko / conn_error → markDead) alors
+            // que le tunnel frais venait de réussir.
+            let gen = {
+                let map = state.conns.lock().await;
+                match map.get(&k) {
+                    Some(x) if Arc::ptr_eq(&x.client, &c) => x.gen,
+                    _ => {
+                        client_core::log(Level::Info,
+                            format!("{method} {k}: résultat périmé (client remplacé) — ignoré"));
+                        continue;
+                    }
+                }
+            };
             match r {
-                Ok(v) if merged => {
+                Ok(mut v) if merged => {
                     n_ok += 1;
                     // Réponse lente mais arrivée — mesure de la latence
                     // sous charge : warn au-delà de la moitié du timeout
@@ -83,6 +98,14 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
                     if rtt > secs * 500 {
                         client_core::log(Level::Warn,
                             format!("{method} {k}: réponse lente {rtt} ms"));
+                    }
+                    // `_ac_gen` sur les succès daemon_status : le watchdog
+                    // resynchronise `gens` UI si un noteGen concurrent
+                    // avait régressé (connect dialogue vs retry).
+                    if method == "daemon_status" {
+                        if let Some(o) = v.as_object_mut() {
+                            o.insert("_ac_gen".into(), json!(gen));
+                        }
                     }
                     out[k] = v;
                 }
@@ -101,13 +124,15 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
                     client_core::log(Level::Warn,
                         format!("{method} {k}: {e:#} (rtt {rtt} ms, silent {silent} ms)"));
                     out[k] = json!({"error": format!("{e:#}"), "kind": kind,
-                        "rtt_ms": rtt, "silent_ms": silent});
+                        "rtt_ms": rtt, "silent_ms": silent, "gen": gen});
                 }
                 // Le frontend filtre ce marqueur → conn marquée down et
                 // sessions servies depuis le cache au lieu de disparaître.
+                // `gen` : l'UI ignore un conn_error d'une gen antérieure
+                // (filet si un chemin contourne le filtre ptr_eq).
                 Err(e) => {
                     client_core::log(Level::Warn, format!("{method} {k}: {e:#}"));
-                    all.push(json!({"conn": k, "conn_error": true}));
+                    all.push(json!({"conn": k, "conn_error": true, "gen": gen}));
                 }
             }
         }

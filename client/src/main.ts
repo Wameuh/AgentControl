@@ -300,10 +300,14 @@ map.bind({
 
 // Conn perdue (transport mort) : les PTY du démon meurent avec → bannière
 // dans les terminaux concernés (reopen possible via ↻ au retour).
-// Payload {conn, why} ; la forme string reste tolérée (web legacy).
-void listen<{ conn: string } | string>("conn-dead", (e) => {
+// Payload {conn, why, gen} ; la forme string reste tolérée (web legacy).
+// Gen périmée = mort du client remplacé — ne pas tuer les PTY de la
+// conn fraîche (même filtre que ConnectionManager).
+void listen<{ conn: string; why?: string; gen?: number } | string>("conn-dead", (e) => {
   const p = e.payload;
-  term.markConnDead(typeof p === "string" ? p : p.conn);
+  if (typeof p === "string") return term.markConnDead(p);
+  if (!conns.isFresh(p.conn, p.gen)) return;
+  term.markConnDead(p.conn);
 });
 
 // --- Events sessions (push du démon via le bridge Tauri) ---------------------
