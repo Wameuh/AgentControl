@@ -1166,11 +1166,13 @@ impl Daemon {
         // N° de la release PR `next_release → main` pour l'exclusion
         // du critère de ménage (même règle que le cycle legacy : elle
         // appartient au bot auto-release, pas au session à laquelle le
-        // watcher l'a attribuée) — une sonde gh seulement si une
-        // entrée registre non terminale existe.
-        let release_pr = if prs
-            .iter()
-            .any(|p| !matches!(p.status.as_str(), "closed" | "merged"))
+        // watcher l'a attribuée) — une sonde gh seulement si la
+        // surveillance PR est active et qu'une entrée registre non
+        // terminale existe.
+        let release_pr = if cfg.watch_prs
+            && prs
+                .iter()
+                .any(|p| !matches!(p.status.as_str(), "closed" | "merged"))
         {
             self.gh_release_pr(ws).await.map(|r| r.0).unwrap_or(0)
         } else {
