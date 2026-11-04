@@ -20,15 +20,22 @@
 //! - Le DÉMON poste le verdict (compte gh local = OWNER, accepté par
 //!   `.devin/hooks/block-merge.py`) avec le SHA reviewé en pied ;
 //!   head déplacé avant le post → titre `## Verdict: stale` (jamais
-//!   `APPROVED`) ; échec/timeout/pas de bloc → `review failed: <kind>`
-//!   (ni `#`/`*` ni « Verdict » → jamais pris pour une review par le
+//!   `APPROVED`) ; échec définitif → `review failed: <kind>` (ni
+//!   `#`/`*` ni « Verdict » → jamais pris pour une review par le
 //!   hook). Session supprimée et worktree retiré à la fin de passe.
+//! - Les échecs transitoires (spawn KO — rate limit en tête, reviewer
+//!   mort ou idle sans bloc, timeout, verdict malformé) sont REJOUÉS
+//!   en backoff borné (2 min/10 min/30 min, 3 retries) : l'entrée
+//!   passe `retry_wait` avec `retry_at` et `attempts`, hors du pool et
+//!   sans masquer un nouveau déclencheur ; `review failed` n'arrive
+//!   qu'à l'épuisement ou pour une cause définitive (head déplacé,
+//!   mécanisme coupé, blocage sur requête).
 //!
 //! L'état vit dans `OrchPersist.pr_reviews` (`repo#N` →
 //! `{last_trigger_id, sid, sha, started, state}`) — persisté AVANT le
 //! spawn (claim-first) : un crash du démon ne relance rien en double,
-//! une entrée `running` dont la session a disparu termine en
-//! `review failed: interrupted`.
+//! une entrée `running` dont la session a disparu part en retry
+//! (`interrupted`) puis `failed` à l'épuisement des tentatives.
 
 use super::orch::*;
 use super::*;
@@ -64,11 +71,21 @@ const TRIGGER_AUTHORS: &[&str] = &["OWNER", "MEMBER", "COLLABORATOR"];
 const EXTERNAL_ACK: &str = "Launching a review";
 /// Balayage des worktrees orphelins une fois par process.
 static ORPHAN_SWEPT: AtomicBool = AtomicBool::new(false);
+/// Tentatives max par trigger : 1 essai + 3 retries — un rate limit ou
+/// un spawn qui échoue ne consomme plus le déclencheur pour rien.
+const REVIEW_MAX_ATTEMPTS: u64 = 4;
+/// Backoff entre tentatives (indice = tentative échouée - 1) :
+/// 2 min, 10 min, 30 min — borné, jamais de boucle infinie.
+const REVIEW_RETRY_DELAYS: [u64; 3] = [120, 600, 1800];
 
-/// État d'une entrée `pr_reviews` — persisté claim-first.
+/// État d'une entrée `pr_reviews` — persisté claim-first. `RetryWait`
+/// = échec transitoire soldé provisoirement : la prochaine tentative
+/// est programmée (`retry_at`), l'entrée ne compte ni dans le pool ni
+/// comme « en cours » pour les nouveaux triggers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EntryState {
     Running,
+    RetryWait,
     Done,
     Failed,
 }
@@ -77,12 +94,14 @@ impl EntryState {
     fn as_str(self) -> &'static str {
         match self {
             EntryState::Running => "running",
+            EntryState::RetryWait => "retry_wait",
             EntryState::Done => "done",
             EntryState::Failed => "failed",
         }
     }
     fn of(v: &Value) -> Self {
         match v.get("state").and_then(Value::as_str) {
+            Some("retry_wait") => EntryState::RetryWait,
             Some("done") => EntryState::Done,
             Some("failed") => EntryState::Failed,
             _ => EntryState::Running,
@@ -137,6 +156,16 @@ fn verdict_body_ok(body: &str) -> bool {
 /// lire comme une review.
 fn fail_comment(kind: &str) -> String {
     format!("review failed: {kind} — reposter le déclencheur ({TRIGGER_ESCAPED}) pour relancer")
+}
+
+/// Note de reprogrammation postée quand un retry est armé — même
+/// prudence : minuscules, pas de « Verdict », jamais prise pour une
+/// review ni pour un échec définitif par les workers qui pollent.
+fn retry_comment(kind: &str, delay_secs: u64) -> String {
+    format!(
+        "review retry scheduled in ~{} min ({kind}) — déclencheur déjà consommé, relance automatique",
+        delay_secs.div_ceil(60)
+    )
 }
 
 /// Le commentaire d'ack — commence par « Launching… » : jamais pris
@@ -276,12 +305,14 @@ impl Daemon {
         let now = now_secs();
         let mut st = self.orch.state.lock().unwrap().clone();
         // Sortie rapide : mécanisme coupé et rien en vol → pas même le
-        // scan des sessions à payer à chaque tick.
+        // scan des sessions à payer à chaque tick. Un retry en attente
+        // compte comme du travail en vol — il doit être soldé, pas
+        // abandonné en l'état.
         if !cfg.pr_review
             && !st
                 .pr_reviews
                 .values()
-                .any(|v| EntryState::of(v) == EntryState::Running)
+                .any(|v| matches!(EntryState::of(v), EntryState::Running | EntryState::RetryWait))
         {
             return Ok(());
         }
@@ -293,14 +324,17 @@ impl Daemon {
         };
 
         // Bascule en vol : `pr_review` repassé à false — les entrées
-        // Running sont soldées (session supprimée, worktree retiré,
-        // échec posté pour débloquer le worker qui poll), puis retour
-        // : aucune nouvelle détection.
+        // Running ET les retries en attente sont soldées (session
+        // supprimée, worktree retiré, échec posté pour débloquer le
+        // worker qui poll — une désactivation est une cause
+        // définitive), puis retour : aucune nouvelle détection.
         if !cfg.pr_review {
             let running: Vec<(String, Value)> = st
                 .pr_reviews
                 .iter()
-                .filter(|(_, v)| EntryState::of(v) == EntryState::Running)
+                .filter(|(_, v)| {
+                    matches!(EntryState::of(v), EntryState::Running | EntryState::RetryWait)
+                })
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             for (key, entry) in running {
@@ -370,43 +404,41 @@ impl Daemon {
                     .await;
                 continue;
             }
-            // Session disparue → échec explicite (le worker ne poll pas
-            // 10 min pour rien) plutôt qu'une entrée running éternelle.
+            // Session disparue → retry borné (crash/démon relancé = le
+            // cas vécu) ; échec explicite seulement une fois les
+            // tentatives épuisées — un « running » éternel n'est pas
+            // une option non plus.
             if !session_ids.contains(sid) {
-                self.gh_comment(
+                self.pr_review_transient_fail(
+                    &key,
+                    "interrupted — session reviewer disparue",
                     repo,
                     pr_n,
-                    &fail_comment("interrupted — session reviewer disparue"),
-                    &cfg,
-                )
-                .await;
-                self.pr_review_finish(
-                    &key,
-                    EntryState::Failed,
                     &mut st,
                     &wt,
-                    Path::new(ws_of(&cfg, repo)),
+                    &cfg,
                 )
                 .await;
                 self.orch_save(&st);
                 continue;
             }
-            // Timeout → kill + échec (pas de boucle silencieuse). Une
-            // session en `error` (rate limit) attend sa reprise : le
-            // temps de backoff ne compte pas dans le timeout.
+            // Timeout → kill + retry borné (un reviewer trop lent est
+            // souvent un symptôme de rate limit ambiant). Une session
+            // en `error` (rate limit) attend sa reprise : le temps de
+            // backoff ne compte pas dans le timeout.
             let rate_limited = metas
                 .iter()
                 .any(|m| m.id == sid && m.state == "error");
             if !rate_limited && now - started > cfg.pr_review_timeout as f64 {
-                warn!("orchestrateur: review PR {key} timeout → failed");
-                self.gh_comment(&repo, pr_n, &fail_comment("timeout"), &cfg)
-                    .await;
-                self.pr_review_finish(
+                warn!("orchestrateur: review PR {key} timeout → retry");
+                self.pr_review_transient_fail(
                     &key,
-                    EntryState::Failed,
+                    "timeout",
+                    repo,
+                    pr_n,
                     &mut st,
                     &wt,
-                    Path::new(ws_of(&cfg, repo)),
+                    &cfg,
                 )
                 .await;
                 self.orch_save(&st);
@@ -481,29 +513,33 @@ impl Daemon {
                         .await;
                 }
                 Some(_) => {
-                    warn!("orchestrateur: review PR {key} bloc verdict malformé → failed");
-                    self.gh_comment(&repo, pr_n, &fail_comment("malformed verdict block"), &cfg)
-                        .await;
-                    self.pr_review_finish(
+                    warn!("orchestrateur: review PR {key} bloc verdict malformé → retry");
+                    self.pr_review_transient_fail(
                         &key,
-                        EntryState::Failed,
+                        "malformed verdict block",
+                        repo,
+                        pr_n,
                         &mut st,
                         &wt,
-                        Path::new(ws_of(&cfg, repo)),
+                        &cfg,
                     )
                     .await;
                     self.orch_save(&st);
                 }
                 None => {
-                    info!("orchestrateur: review PR {key} idle sans bloc verdict → failed");
-                    self.gh_comment(&repo, pr_n, &fail_comment("no verdict block"), &cfg)
-                        .await;
-                    self.pr_review_finish(
-                        &key,
-                        EntryState::Failed,
-                        &mut st,
-                        &wt,
-                        Path::new(ws_of(&cfg, repo)),
+                    // Idle sans bloc : le cas typique du reviewer mort
+                    // en vol sur rate limit (sa trace d'erreur peut
+                    // encore le dire) — transitoire, retry borné.
+                    let kind = metas
+                        .iter()
+                        .find(|m| m.id == sid)
+                        .and_then(|m| m.last_error.as_ref())
+                        .filter(|le| le.kind == "rate_limit")
+                        .map(|_| "rate_limit")
+                        .unwrap_or("no verdict block");
+                    info!("orchestrateur: review PR {key} idle sans bloc verdict ({kind}) → retry");
+                    self.pr_review_transient_fail(
+                        &key, kind, repo, pr_n, &mut st, &wt, &cfg,
                     )
                     .await;
                     self.orch_save(&st);
@@ -511,7 +547,10 @@ impl Daemon {
             }
         }
 
-        // ---- 2. Détection des triggers sur les PR ouvertes.
+        // ---- 2. Retries dus, puis détection des triggers — même pool
+        // pour les deux (seul Running occupe une place : une entrée
+        // retry_wait ne bloque rien, et un nouveau trigger sur sa PR
+        // est servi sans attendre l'échéance).
         let pool_free = cfg.pr_review_max_parallel as usize;
         let mut free = pool_free.saturating_sub(
             st.pr_reviews
@@ -519,6 +558,109 @@ impl Daemon {
                 .filter(|v| EntryState::of(v) == EntryState::Running)
                 .count(),
         );
+
+        // 2a. Reprogrammations échues — ancienneté avant les nouveaux
+        // triggers. Un head déplacé depuis l'échec solde l'entrée
+        // définitivement : reviewer le vieux sha produirait un « stale ».
+        let due: Vec<String> = st
+            .pr_reviews
+            .iter()
+            .filter(|(_, v)| {
+                EntryState::of(v) == EntryState::RetryWait
+                    && v.get("retry_at")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(f64::MAX)
+                        <= now
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in due {
+            if free == 0 || !self.orch.is_enabled() {
+                break;
+            }
+            let entry = st.pr_reviews.get(&key).cloned().unwrap_or_default();
+            let sha = entry
+                .get("sha")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let Some((repo, pr)) = key.split_once('#') else {
+                continue;
+            };
+            let Ok(pr_n) = pr.parse::<u64>() else {
+                continue;
+            };
+            let wt = pr_review_dir(pr_n, &sha);
+            if let Some(h) = self.gh_pr_head(repo, pr_n, &cfg).await {
+                if h != sha {
+                    self.gh_comment(repo, pr_n, &fail_comment("stale — head changed"), &cfg)
+                        .await;
+                    self.pr_review_finish(
+                        &key,
+                        EntryState::Failed,
+                        &mut st,
+                        &wt,
+                        Path::new(ws_of(&cfg, repo)),
+                    )
+                    .await;
+                    self.orch_save(&st);
+                    continue;
+                }
+            }
+            // Relance : mêmes champs qu'un claim frais ; `attempts`
+            // survit — il borne le total pour CE trigger.
+            if let Some(e) = st.pr_reviews.get_mut(&key).and_then(Value::as_object_mut) {
+                e.insert("state".into(), json!(EntryState::Running.as_str()));
+                e.insert("started".into(), json!(now));
+                e.insert("sid".into(), json!(""));
+                e.insert("denied".into(), json!(0));
+                e.remove("retry_at");
+            }
+            self.orch_save(&st);
+            match self.pr_review_launch(repo, pr_n, &sha, &key, &cfg).await {
+                Ok(sid) => {
+                    if let Some(e) = st.pr_reviews.get_mut(&key) {
+                        e["sid"] = json!(sid.clone());
+                    }
+                    self.orch_save(&st);
+                    self.gh_comment(
+                        repo,
+                        pr_n,
+                        &ack_comment(
+                            if cfg.pr_reviewer_model.is_empty() {
+                                &cfg.model
+                            } else {
+                                &cfg.pr_reviewer_model
+                            },
+                            &sid,
+                        ),
+                        &cfg,
+                    )
+                    .await;
+                    free -= 1;
+                }
+                Err(e) => {
+                    warn!("orchestrateur: retry launch review {key}: {e:#}");
+                    remove_review_worktree(
+                        Path::new(ws_of(&cfg, repo)),
+                        &pr_review_dir(pr_n, &sha),
+                    );
+                    self.pr_review_transient_fail(
+                        &key,
+                        "spawn failed",
+                        repo,
+                        pr_n,
+                        &mut st,
+                        &wt,
+                        &cfg,
+                    )
+                    .await;
+                }
+            }
+            self.orch_save(&st);
+        }
+
+        // 2b. Triggers nouveaux sur les PR ouvertes.
         for (repo, pr_n, _head) in self.pr_review_candidates(&cfg).await {
             if free == 0 {
                 break;
@@ -608,11 +750,16 @@ impl Daemon {
                         Path::new(ws_of(&cfg, &repo)),
                         &pr_review_dir(pr_n, &head_sha),
                     );
-                    self.gh_comment(&repo, pr_n, &fail_comment("spawn failed"), &cfg)
-                        .await;
-                    if let Some(e2) = st.pr_reviews.get_mut(&key) {
-                        e2["state"] = json!(EntryState::Failed.as_str());
-                    }
+                    self.pr_review_transient_fail(
+                        &key,
+                        "spawn failed",
+                        &repo,
+                        pr_n,
+                        &mut st,
+                        &pr_review_dir(pr_n, &head_sha),
+                        &cfg,
+                    )
+                    .await;
                 }
             }
         }
@@ -648,6 +795,62 @@ impl Daemon {
             let _ = self.h_delete_session(sid).await;
         }
         remove_review_worktree(ws, wt);
+    }
+
+    /// Échec transitoire borné : solde l'essai (session supprimée,
+    /// worktree retiré) puis arme `retry_at` en backoff tant que
+    /// `REVIEW_MAX_ATTEMPTS` n'est pas atteint — la note « review retry
+    /// scheduled » est postée, `review failed` restant réservé à
+    /// l'épuisement des tentatives ou aux causes définitives (PR
+    /// fermée/head déplacé, pr_review coupé, blocage sur requête).
+    /// Pendant `retry_wait` l'entrée ne compte ni dans le pool ni comme
+    /// review en cours : un NOUVEAU trigger est servi immédiatement —
+    /// le retry ne masque jamais une commande explicite.
+    async fn pr_review_transient_fail(
+        self: &Arc<Self>,
+        key: &str,
+        kind: &str,
+        repo: &str,
+        pr_n: u64,
+        st: &mut OrchPersist,
+        wt: &Path,
+        cfg: &cfg::OrchCfg,
+    ) {
+        let attempts = st
+            .pr_reviews
+            .get(key)
+            .and_then(|e| e.get("attempts"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            + 1;
+        if attempts < REVIEW_MAX_ATTEMPTS {
+            let delay = REVIEW_RETRY_DELAYS
+                .get((attempts - 1) as usize)
+                .copied()
+                .unwrap_or(REVIEW_RETRY_DELAYS[REVIEW_RETRY_DELAYS.len() - 1]);
+            self.pr_review_finish(key, EntryState::RetryWait, st, wt, Path::new(ws_of(cfg, repo)))
+                .await;
+            if let Some(e) = st.pr_reviews.get_mut(key).and_then(Value::as_object_mut) {
+                e.insert("attempts".into(), json!(attempts));
+                e.insert("retry_at".into(), json!(now_secs() + delay as f64));
+                e.insert("sid".into(), json!(""));
+                e.insert("denied".into(), json!(0));
+            }
+            self.gh_comment(repo, pr_n, &retry_comment(kind, delay), cfg)
+                .await;
+            info!("orchestrateur: review PR {key} {kind} → retry #{attempts} dans {delay}s");
+        } else {
+            warn!("orchestrateur: review PR {key} {kind} — tentatives épuisées → failed");
+            self.gh_comment(repo, pr_n, &fail_comment(kind), cfg).await;
+            self.pr_review_finish(
+                key,
+                EntryState::Failed,
+                st,
+                wt,
+                Path::new(ws_of(cfg, repo)),
+            )
+            .await;
+        }
     }
 
     /// Une tentative de post du verdict persisté (`pending_body`) :
