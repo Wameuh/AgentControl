@@ -362,6 +362,27 @@ impl OrchProbe {
         self.wake.notify_one();
     }
 
+    /// Fusionne `pr_reviews` avant le write-back d'une passe longue
+    /// (tick review / cycle) : les entrées que la passe N'A PAS
+    /// touchées reprennent la valeur vivante — un rapport de verdict
+    /// A2A (`h_review_report`, RPC concurrent mutant la map en place)
+    /// posé pendant les appels gh ne doit pas être écrasé par le
+    /// write-back du clone stale. Une entrée modifiée par la passe
+    /// garde la version de la passe (décision locale primant le
+    /// rapport concurrent — la session reviewer sera collectée au
+    /// finish). `snap` = `pr_reviews` au moment du clone de départ.
+    pub(crate) fn merge_pr_reviews_live(
+        &self,
+        st: &mut OrchPersist,
+        snap: &HashMap<String, Value>,
+    ) {
+        for (k, live_v) in self.state.lock().unwrap().pr_reviews.iter() {
+            if st.pr_reviews.get(k) == snap.get(k) {
+                st.pr_reviews.insert(k.clone(), live_v.clone());
+            }
+        }
+    }
+
     /// État composant déduit de la phase : actif → running, gardes
     /// bloquantes → degraded, désactivé → stopped.
     pub(crate) fn component_state(&self) -> proto::ComponentState {
@@ -1128,6 +1149,10 @@ impl Daemon {
             .collect();
         let now = now_secs();
         let mut st = self.orch.state.lock().unwrap().clone();
+        // Snapshot `pr_reviews` au clone : le write-back de fin de cycle
+        // fusionne par clé — un rapport de verdict A2A posé pendant le
+        // cycle (RPC concurrent sur la map vivante) n'est pas écrasé.
+        let pr_snap = st.pr_reviews.clone();
 
         // Un `orch off` en vol de cycle arrête tout : les étapes
         // suivantes (release, rm, nudge, spawn, garde PR) sont des
@@ -1587,6 +1612,7 @@ impl Daemon {
             stg.planners = n_planners;
             stg.reviewers = n_reviewers;
         }
+        self.orch.merge_pr_reviews_live(&mut st, &pr_snap);
         *self.orch.state.lock().unwrap() = st.clone();
         self.orch_save(&st);
         // off pendant le cycle : ne pas écraser le Disabled posé par

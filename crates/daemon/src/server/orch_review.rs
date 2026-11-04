@@ -312,6 +312,10 @@ impl Daemon {
         let cfg = self.orch.cfg.read().unwrap().clone();
         let now = now_secs();
         let mut st = self.orch.state.lock().unwrap().clone();
+        // Snapshot `pr_reviews` au clone : les write-backs fusionnent
+        // par clé — un rapport de verdict A2A posé pendant la passe
+        // (RPC concurrent sur la map vivante) n'est pas écrasé.
+        let pr_snap = st.pr_reviews.clone();
         // Sortie rapide : mécanisme coupé et rien en vol → pas même le
         // scan des sessions à payer à chaque tick. Un retry en attente
         // compte comme du travail en vol — il doit être soldé, pas
@@ -368,6 +372,7 @@ impl Daemon {
                 }
                 info!("orchestrateur: review PR {key} soldée (pr_review off)");
             }
+            self.orch.merge_pr_reviews_live(&mut st, &pr_snap);
             self.orch_save(&st);
             *self.orch.state.lock().unwrap() = st;
             return Ok(());
@@ -771,6 +776,7 @@ impl Daemon {
                 }
             }
         }
+        self.orch.merge_pr_reviews_live(&mut st, &pr_snap);
         self.orch_save(&st);
         *self.orch.state.lock().unwrap() = st;
         Ok(())
@@ -798,6 +804,7 @@ impl Daemon {
             e.insert("state".into(), json!(end.as_str()));
             e.remove("pending_body");
             e.remove("post_tries");
+            e.remove("reported_by");
         }
         if !sid.is_empty() {
             let _ = self.h_delete_session(sid).await;
@@ -925,14 +932,17 @@ impl Daemon {
 
     /// Verdict rendu en A2A par la session reviewer
     /// (`agentcontrol_report_verdict` → `ReqKind::ReviewReport`) — le
-    /// canal push qui remplace l'attente d'idle + scan du journal :
-    /// le body est persisté en `pending_body` puis posté via le chemin
-    /// commun (head re-vérifié, titre stale si déplacé, retry borné).
-    /// Gardes : seule une session `feature:pr-review` dont le sid est
-    /// celui d'une review `running` peut rendre un verdict — double
-    /// rapport = idempotent. La session est terminée APRÈS la réponse
-    /// RPC : la tuer pendant l'appel perdrait le retour du tool call
-    /// (court délai de grâce en tâche de fond).
+    /// canal push qui remplace l'attente d'idle + scan du journal.
+    /// L'entrée est mutée EN PLACE sur la map vivante : écrire un clone
+    /// complet d'`OrchPersist` depuis ce handler RPC concurrent du tick
+    /// perdrait les mutations en vol (lost update dans les deux sens) —
+    /// le post reste au tick (écrivain unique via la branche
+    /// `pending_body`), `kick` le sort de son `poll_secs` : le verdict
+    /// part quasi immédiatement. Gardes : seule une session
+    /// `feature:pr-review` dont le sid (ou `reported_by` pour un second
+    /// appel) est celui d'une review `running` — double rapport =
+    /// idempotent. La session est terminée APRÈS la réponse RPC (le
+    /// pont MCP doit rendre le résultat du tool call).
     pub(super) async fn h_review_report(
         self: &Arc<Self>,
         session: String,
@@ -950,59 +960,50 @@ impl Daemon {
             "verdict inconnu: {verdict}"
         );
         let body = format!("## Verdict: {verdict}\n\n{body}");
-        anyhow::ensure!(verdict_body_ok(&body), "verdict malformé");
-        let mut st = self.orch.state.lock().unwrap().clone();
-        // La review running dont le sid est l'appelant — une session
-        // reviewer ne sert qu'une review à la fois.
-        let Some((key, entry)) = st
-            .pr_reviews
-            .iter()
-            .find(|(_, v)| {
-                EntryState::of(v) == EntryState::Running
-                    && v.get("sid").and_then(Value::as_str) == Some(session.as_str())
-            })
-            .map(|(k, v)| (k.clone(), v.clone()))
-        else {
-            anyhow::bail!("aucune review en cours pour {session}");
-        };
-        if entry
-            .get("pending_body")
-            .and_then(Value::as_str)
-            .is_some()
         {
-            // Le scan journal a déjà capté un verdict — idempotent.
-            return Ok(json!({"received": true, "duplicate": true}));
+            let mut live = self.orch.state.lock().unwrap();
+            let found = live.pr_reviews.iter().find_map(|(k, v)| {
+                let mine = v.get("sid").and_then(Value::as_str) == Some(session.as_str())
+                    || v.get("reported_by").and_then(Value::as_str)
+                        == Some(session.as_str());
+                (EntryState::of(v) == EntryState::Running && mine)
+                    .then(|| (k.clone(), v.get("pending_body").is_some()))
+            });
+            let Some((key, duplicate)) = found else {
+                anyhow::bail!("aucune review en cours pour {session}");
+            };
+            if duplicate {
+                // Verdict déjà posé (journal ou premier appel) —
+                // idempotent : le second appel n'écrase rien.
+                return Ok(json!({"received": true, "duplicate": true}));
+            }
+            if let Some(e) = live.pr_reviews.get_mut(&key) {
+                e["pending_body"] = json!(body);
+                e["reported_by"] = json!(session.clone());
+                // sid libéré dès maintenant : le finish du tick saute
+                // la suppression — c'est la tâche différée ci-dessous
+                // qui termine la session après la réponse MCP.
+                e["sid"] = json!("");
+            }
         }
-        let Some((repo, pr)) = key.split_once('#') else {
-            anyhow::bail!("clé de review invalide: {key}");
-        };
-        let Ok(pr_n) = pr.parse::<u64>() else {
-            anyhow::bail!("clé de review invalide: {key}");
-        };
-        let repo = repo.to_string();
-        let sha = entry
-            .get("sha")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let wt = pr_review_dir(pr_n, &sha);
-        let cfg = self.orch.cfg.read().unwrap().clone();
-        if let Some(e) = st.pr_reviews.get_mut(&key) {
-            e["pending_body"] = json!(body);
-            e["sid"] = json!("");
+        // Persisté tout de suite : un crash entre le retour d'appel et
+        // le prochain tick ne perd pas le verdict.
+        {
+            let st = self.orch.state.lock().unwrap().clone();
+            self.orch_save(&st);
         }
-        self.orch_save(&st);
-        // Post synchrone via le chemin commun (push, pas de poll) — un
-        // échec laisse pending_body au retry borné du tick.
-        self.pr_review_post_attempt(&key, &repo, pr_n, &sha, &mut st, &cfg, &wt)
-            .await;
-        *self.orch.state.lock().unwrap() = st;
-        // Fin de la session reviewer après la réponse : le pont MCP doit
-        // d'abord rendre le résultat du tool call (délai de grâce).
+        // Écrivain unique pour le post : le tick traite pending_body à
+        // sa prochaine passe — kick le réveille hors période (push
+        // effectif, pas de fenêtre d'un poll complet).
+        self.orch.kick();
+        // Fin de la session reviewer après la réponse : tuer pendant
+        // l'appel perdrait le retour du tool call — délai de grâce.
         let d = Arc::clone(self);
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-            let _ = d.h_delete_session(session).await;
+            if let Err(e) = d.h_delete_session(session.clone()).await {
+                warn!("orchestrateur: suppression reviewer {session} post-verdict: {e:#}");
+            }
         });
         Ok(json!({"received": true}))
     }
