@@ -75,3 +75,4 @@
 261: Pull request reviews no longer get discarded when the reviewer hits a rate limit; the review waits for the retry, and the timeout does not run during the backoff.
 262: Backlog orchestrator serializes work on rate limit: one active session at a time, reviewers first, rate-limited sessions wait out their backoff instead of being nudged or replaced.
 263: Each agent profile (devin, cursor…) now has a concurrent instance cap (max_instances, default 6). Starting a session beyond the cap puts the least recently active idle session of that profile to sleep; it wakes on the next message.
+264: Backlog orchestrator max_workers now also limits nudges that wake a sleeping worker (e.g. waiting on an open PR) — asleep waiters no longer all wake at once past the cap.

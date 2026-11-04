@@ -258,12 +258,27 @@ fn force_safe_state(state: &str) -> bool {
 
 /// Sessions Backlog-* qui consomment réellement un slot : une session
 /// `asleep` n'a plus de process agent — elle ne compte pas dans
-/// `alive` (son réveil consommera un slot au moment du dispatch).
+/// `alive` (son réveil consommera un slot au moment du dispatch
+/// **ou** d'un nudge — cf. `nudge_consumes_slot`).
 fn backlog_alive(metas: &[SessionMeta], cfg: &cfg::OrchCfg) -> usize {
     metas
         .iter()
         .filter(|m| is_backlog(m, cfg) && m.state != "asleep")
         .count()
+}
+
+/// Un nudge depuis `asleep` réveille le process agent et doit donc
+/// consommer un slot `max_workers` (même budget que spawn / reuse).
+/// Idle/error/… : la session compte déjà dans `alive`, pas de slot
+/// supplémentaire. `free == 0` → le nudge est différé au prochain tick
+/// où un slot se libère (spawn prioritaire : `free` est déjà réduit
+/// par le dispatch §D avant l'entretien §E).
+fn nudge_slot_ok(free: usize, state: &str) -> bool {
+    state != "asleep" || free > 0
+}
+
+fn nudge_consumes_slot(state: &str) -> bool {
+    state == "asleep"
 }
 
 /// Sessions Backlog-* réellement en train de tourner — base du mode
@@ -1142,8 +1157,10 @@ impl Daemon {
                 Some(Role::Planner) => {
                     outcome.planners += 1;
                     outcome.workers += 1;
-                    self.planner_upkeep(&m, bin, cfg, ws, tasks, prs, st, now, rl > 0)
-                        .await;
+                    self.planner_upkeep(
+                        &m, bin, cfg, ws, tasks, prs, st, now, rl > 0, &mut free,
+                    )
+                    .await;
                 }
                 _ => {
                     outcome.workers += 1;
@@ -1160,6 +1177,7 @@ impl Daemon {
                         &cfg.title_prefix,
                         None,
                         rl > 0,
+                        &mut free,
                     )
                     .await;
                 }
@@ -1500,6 +1518,9 @@ impl Daemon {
         title_prefix: &str,
         plan_item: Option<u64>,
         quota_serial: bool,
+        // Slots `max_workers` restants après le dispatch §D — un nudge
+        // depuis `asleep` en consomme un (réveil = process agent).
+        free: &mut usize,
     ) -> bool {
         let sid = w.id.as_str();
         let state = w.state.as_str();
@@ -1661,6 +1682,16 @@ impl Daemon {
         if !idle_long {
             return true;
         }
+        // max_workers : un réveil depuis asleep consomme un slot — sans
+        // budget restant (déjà pris par le dispatch), différer. Idle
+        // compte déjà dans alive → pas de garde.
+        if !nudge_slot_ok(*free, state) {
+            info!(
+                "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
+                 wip={my_open:?}) → nudge différé (max_workers)"
+            );
+            return true;
+        }
         match plan_item {
             Some(item_id) => {
                 let n = st.plan_nudges.get(sid).copied().unwrap_or(0);
@@ -1692,6 +1723,9 @@ impl Daemon {
                 if self.plan_send(sid, msg, force_safe_state(state)).await {
                     st.nudges.insert(sid.to_string(), now);
                     st.plan_nudges.insert(sid.to_string(), n + 1);
+                    if nudge_consumes_slot(state) {
+                        *free = free.saturating_sub(1);
+                    }
                 }
             }
             _ => {
@@ -1729,6 +1763,9 @@ impl Daemon {
                     .await
                 {
                     st.nudges.insert(sid.to_string(), now);
+                    if nudge_consumes_slot(state) {
+                        *free = free.saturating_sub(1);
+                    }
                 }
             }
         }
@@ -1749,6 +1786,7 @@ impl Daemon {
         st: &mut OrchPersist,
         now: f64,
         quota_serial: bool,
+        free: &mut usize,
     ) {
         let sid = w.id.as_str().to_string();
         let my_item = tasks
@@ -1782,6 +1820,7 @@ impl Daemon {
                 PLANNER_PREFIX,
                 plan_nudge,
                 quota_serial,
+                free,
             )
             .await;
         if !alive {
@@ -2870,5 +2909,18 @@ mod tests {
             mk("Backlog-W5", "asleep"),
         ];
         assert_eq!(backlog_active(&metas, &c), 2);
+    }
+
+    /// Nudge et max_workers : seul un réveil depuis `asleep` consomme
+    /// un slot ; `free == 0` bloque ce réveil, idle reste nudgeable.
+    #[test]
+    fn nudge_respecte_max_workers_slot() {
+        assert!(nudge_slot_ok(0, "idle"));
+        assert!(nudge_slot_ok(0, "waiting_input"));
+        assert!(!nudge_slot_ok(0, "asleep"));
+        assert!(nudge_slot_ok(1, "asleep"));
+        assert!(nudge_consumes_slot("asleep"));
+        assert!(!nudge_consumes_slot("idle"));
+        assert!(!nudge_consumes_slot("working"));
     }
 }

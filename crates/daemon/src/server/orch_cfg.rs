@@ -257,7 +257,9 @@ pub(crate) fn params_schema(dyn_: &DynChoices) -> Vec<ParamSpec> {
         ps(
             "max_workers",
             "Workers max",
-            "sessions worker simultanées — 0 = aucun spawn",
+            "sessions worker simultanées (hors asleep) — 0 = aucun \
+             spawn ; un nudge qui réveille un worker endormi consomme \
+             aussi un slot",
             ParamKind::Int,
             Some("5"),
         ),
