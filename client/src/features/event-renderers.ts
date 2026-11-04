@@ -295,7 +295,7 @@ export class EventRenderer {
       if (lines.length > MAXL || full.length > MAXC) {
         cmd.textContent = lines.slice(0, MAXL).join("\n").slice(0, MAXC) + "\n…";
         const exp = document.createElement("button");
-        exp.className = "btn-more";
+        exp.className = "btn-cmd";
         exp.textContent = t("cmd_full");
         exp.addEventListener("click", () => {
           cmd.textContent = full;

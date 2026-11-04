@@ -294,7 +294,7 @@ body.android #sess-filter input { min-height: 44px; font-size: 15px; padding-rig
 body.android #sess-filter-clear { min-width: 44px; min-height: 44px; padding: 0; }
 /* Headers pliables des tool calls + boutons « voir plus » */
 body.android .tool-head { min-height: 44px; }
-body.android .btn-more { min-height: 44px; }
+body.android .btn-more, body.android .btn-cmd { min-height: 44px; }
 /* Permissions / questions : actions et champ réponse */
 body.android .btn-allow, body.android .btn-reject { min-height: 44px; }
 body.android .q-input { min-height: 44px; font-size: 16px; }
