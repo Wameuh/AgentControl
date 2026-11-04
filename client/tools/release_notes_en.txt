@@ -84,3 +84,4 @@
 256: Status bar metrics now distinguish host-wide CPU/memory/load from the daemon process (which also shows its own CPU %)
 267: Per-role agent profiles in the backlog orchestrator (worker/planner/reviewer/PR reviewer can each run on a different [agents.*] profile)
 270: After a successful reconnect, late failures from the replaced connection no longer mark the fresh link down — generation tokens drop stale probes, list_sessions errors and conn-dead events that previously caused an immediate flap loop.
+258: Idle orchestrator sessions are now cleaned up again — a worker keeping the release PR in its registry entry (or a stale merged entry) no longer blocks removal, and dead/errored reviewers are swept instead of accumulating.

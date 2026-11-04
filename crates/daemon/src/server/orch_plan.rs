@@ -404,6 +404,23 @@ fn reviewer_sleep_ok(state: &str) -> bool {
     state == "idle"
 }
 
+/// Le reviewer mappé compte-t-il comme « vivant » pour la sweep ?
+/// `dead` et `error` hors rate_limit (model/auth — jamais de retry
+/// auto, `reviewer_choice` ne les réutilise pas non plus) sont
+/// irrécupérables → balayés ; `error`+`rate_limit` est un backoff
+/// transitoire repris par le retry session — conservé, à l'image du
+/// `Wait` de `reviewer_choice` (le tuer puis respawner rebrûlerait la
+/// limite partagée et perdrait le contexte du reviewer persistant).
+fn reviewer_alive_for_sweep(
+    in_session_ids: bool,
+    state: Option<&str>,
+    err_kind: Option<&str>,
+) -> bool {
+    in_session_ids
+        && state != Some("dead")
+        && !(state == Some("error") && err_kind != Some("rate_limit"))
+}
+
 /// Décision de la sweep de fin de tick pour un reviewer mémorisé.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SweepAction {
@@ -416,10 +433,11 @@ enum SweepAction {
     Keep,
 }
 
-/// Rm si le reviewer a disparu, si l'item est sorti du pipeline de
-/// revue (absent/done/pending) ou passé en implémentation ; Keep tant
-/// qu'une review est en vol (`reviewing`) ou que le reviewer n'est
-/// pas idle ; Sleep sinon — y compris sur item stalled.
+/// Rm si le reviewer a disparu ou est irrécupérable (dead/error hors
+/// rate_limit — `reviewer_alive` false), si l'item est sorti du
+/// pipeline de revue (absent/done/pending) ou passé en implémentation ;
+/// Keep tant qu'une review est en vol (`reviewing`) ou que le reviewer
+/// n'est pas idle ; Sleep sinon — y compris sur item stalled.
 fn reviewer_sweep(
     status: Option<&str>,
     implementing: bool,
@@ -1042,15 +1060,19 @@ impl Daemon {
                             .unwrap_or((-1, String::new(), "spawn impossible".into()));
                     if rc == 0 {
                         info!("orchestrateur: reviewer {rsid} → #{id} (claim-review)");
-                        // Reuse coupée : l'ancien reviewer mappé ne
-                        // sera jamais réutilisé — le supprimer au lieu
-                        // de l'orpheliner en écrasant le mapping.
-                        if !cfg.reviewer_reuse {
-                            if let Some(old) =
-                                st.reviewers.get(&key).cloned().filter(|o| *o != rsid)
-                            {
-                                self.plan_rm_session(&old, st).await;
-                            }
+                        // L'ancien reviewer mappé est supprimé avant
+                        // l'écrasement du mapping — sinon il devient
+                        // orphelin définitif (la sweep ne voit que les
+                        // entrées présentes). Reuse coupée : jamais
+                        // réutilisé ; reuse active : `Spawn` n'est
+                        // choisi que si l'ancien est dead/error hors
+                        // rate_limit (sain → `Reuse`, backoff → `Wait`)
+                        // — dans les deux cas injoignable, le rm est
+                        // sans risque (session déjà partie → warn).
+                        if let Some(old) =
+                            st.reviewers.get(&key).cloned().filter(|o| *o != rsid)
+                        {
+                            self.plan_rm_session(&old, st).await;
                         }
                         st.reviewers.insert(key.clone(), rsid.clone());
                         self.reviewer_claim_reset(&rsid, planner, &key, st).await;
@@ -1145,6 +1167,21 @@ impl Daemon {
 
         // ---- E. Entretien des sessions P/W (ledger, titre, post,
         // détection plan, nudges, rm) — reviewers : titre seulement.
+        // N° de la release PR `next_release → main` pour l'exclusion
+        // du critère de ménage (même règle que le cycle legacy : elle
+        // appartient au bot auto-release, pas au session à laquelle le
+        // watcher l'a attribuée) — une sonde gh seulement si la
+        // surveillance PR est active et qu'une entrée registre non
+        // terminale existe.
+        let release_pr = if cfg.watch_prs
+            && prs
+                .iter()
+                .any(|p| !matches!(p.status.as_str(), "closed" | "merged"))
+        {
+            self.gh_release_pr(ws).await.map(|r| r.0).unwrap_or(0)
+        } else {
+            0
+        };
         let mut outcome = PlanOutcome::default();
         for m in metas.iter().filter(|m| is_backlog(m, cfg)).cloned() {
             if !self.orch.is_enabled() {
@@ -1167,7 +1204,8 @@ impl Daemon {
                     outcome.planners += 1;
                     outcome.workers += 1;
                     self.planner_upkeep(
-                        &m, bin, cfg, ws, tasks, prs, st, now, rl > 0, &mut free,
+                        &m, bin, cfg, ws, tasks, prs, release_pr, st, now, rl > 0,
+                        &mut free,
                     )
                     .await;
                 }
@@ -1180,6 +1218,7 @@ impl Daemon {
                         ws,
                         tasks,
                         prs,
+                        release_pr,
                         st,
                         now,
                         &["wip"],
@@ -1263,10 +1302,23 @@ impl Daemon {
                 .unwrap_or(false);
             let rmeta = metas.iter().find(|m| m.id == rsid);
             let rstate = rmeta.map(|m| m.state.as_str());
+            // dead/error hors rate_limit : la session existe encore
+            // mais `reviewer_choice` ne la réutilisera jamais — la
+            // balayer comme absente (rm + purge de la map) sinon elle
+            // s'accumule ; le dispatch respawnera au besoin. Un
+            // backoff rate_limit reste « vivant » : le retry session
+            // reprendra la revue (même garde que `reviewer_choice`).
+            let reviewer_alive = reviewer_alive_for_sweep(
+                session_ids.contains(&rsid),
+                rstate,
+                rmeta
+                    .and_then(|m| m.last_error.as_ref())
+                    .map(|le| le.kind.as_str()),
+            );
             match reviewer_sweep(
                 status,
                 implementing,
-                session_ids.contains(&rsid),
+                reviewer_alive,
                 rstate == Some("idle"),
                 cfg.reviewer_reuse,
             ) {
@@ -1528,6 +1580,7 @@ impl Daemon {
         ws: &Path,
         tasks: &[Task],
         prs: &[proto::PrEntry],
+        release_pr: u64,
         st: &mut OrchPersist,
         now: f64,
         open_statuses: &[&str],
@@ -1557,10 +1610,11 @@ impl Daemon {
             .collect();
         let mut my_prs: BTreeMap<String, String> = BTreeMap::new();
         if cfg.watch_prs {
-            for p in prs
-                .iter()
-                .filter(|p| p.session == sid && !matches!(p.status.as_str(), "closed" | "merged"))
-            {
+            for p in prs.iter().filter(|p| {
+                p.session == sid
+                    && !matches!(p.status.as_str(), "closed" | "merged")
+                    && !release_pr_entry(p, release_pr)
+            }) {
                 let st_gh = self.orch_pr_state(p, ws).await;
                 my_prs.insert(p.pr.to_string(), st_gh);
             }
@@ -1666,6 +1720,20 @@ impl Daemon {
             st.clean_since.remove(sid);
             st.assignments.remove(sid);
             return false;
+        }
+        // Retenu uniquement par des PRs « ouvertes » : une entrée
+        // registre stale (mergée/fermée non syncée — hors GitHub aucune
+        // sonde live ne la corrige) bloquerait le rm indéfiniment.
+        // `pr_sync` est throttlé (PR_SYNC_MIN_INTERVAL) — déclenché en
+        // tâche de fond, le rm reprendra au tick suivant si le statut
+        // était du bruit.
+        if my_open.is_empty() {
+            let d = Arc::clone(self);
+            tokio::spawn(async move {
+                if let Err(e) = d.h_pr_sync().await {
+                    warn!("orchestrateur: pr_sync pré-ménage: {e:#}");
+                }
+            });
         }
         st.clean_since.remove(sid);
         // Planner gelé « revue humaine requise » : aucun envoi tant que
@@ -1799,6 +1867,7 @@ impl Daemon {
         ws: &Path,
         tasks: &[Task],
         prs: &[proto::PrEntry],
+        release_pr: u64,
         st: &mut OrchPersist,
         now: f64,
         quota_serial: bool,
@@ -1830,6 +1899,7 @@ impl Daemon {
                 ws,
                 tasks,
                 prs,
+                release_pr,
                 st,
                 now,
                 &["wip", "plan_review", "reviewing"],
@@ -2844,6 +2914,28 @@ mod tests {
             reviewer_sweep(Some("reviewing"), false, false, false, true),
             SweepAction::Rm
         );
+    }
+
+    /// « Vivant » pour la sweep — miroir de `reviewer_choice` : dead et
+    /// error hors rate_limit sont irrécupérables (balayés), le backoff
+    /// rate_limit est attendu (son retry session reprend la revue).
+    #[test]
+    fn reviewer_alive_sweep_miroir_choice() {
+        // Présent et sain → vivant.
+        assert!(reviewer_alive_for_sweep(true, Some("idle"), None));
+        assert!(reviewer_alive_for_sweep(true, Some("asleep"), None));
+        assert!(reviewer_alive_for_sweep(true, Some("interrupted"), None));
+        // Session disparue → pas vivante quel que soit l'état.
+        assert!(!reviewer_alive_for_sweep(false, Some("idle"), None));
+        // dead → irrécupérable.
+        assert!(!reviewer_alive_for_sweep(true, Some("dead"), None));
+        // error hors rate_limit (model/auth/other) → irrécupérable.
+        for kind in ["model", "auth", "other"] {
+            assert!(!reviewer_alive_for_sweep(true, Some("error"), Some(kind)));
+        }
+        assert!(!reviewer_alive_for_sweep(true, Some("error"), None));
+        // error + rate_limit → backoff transitoire, conservé (Wait).
+        assert!(reviewer_alive_for_sweep(true, Some("error"), Some("rate_limit")));
     }
 
     #[test]
