@@ -85,3 +85,5 @@
 267: Per-role agent profiles in the backlog orchestrator (worker/planner/reviewer/PR reviewer can each run on a different [agents.*] profile)
 270: After a successful reconnect, late failures from the replaced connection no longer mark the fresh link down — generation tokens drop stale probes, list_sessions errors and conn-dead events that previously caused an immediate flap loop.
 258: Idle orchestrator sessions are now cleaned up again — a worker keeping the release PR in its registry entry (or a stale merged entry) no longer blocks removal, and dead/errored reviewers are swept instead of accumulating.
+
+257: On Android, the app SSH key, keys imported by pairing and saved connections (SSH passwords, key paths) are now encrypted at rest with a non-exportable Android Keystore key — existing installs migrate silently on first read.

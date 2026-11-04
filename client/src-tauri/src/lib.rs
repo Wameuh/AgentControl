@@ -59,6 +59,29 @@ fn set_app_user_model_id(id: &str) {
     }
 }
 
+/// Bridge `SecretBox` (client-core) → plugin `ac-keystore` : les
+/// fichiers secrets du core passent par AES/GCM du keystore Android.
+/// Résolution paresseuse via `app.state` — la state est managée par le
+/// plugin à l'init, avant le premier accès fichier.
+#[cfg(target_os = "android")]
+struct KeystoreBox(tauri::AppHandle);
+
+#[cfg(target_os = "android")]
+impl client_core::SecretBox for KeystoreBox {
+    fn seal(&self, data: &[u8]) -> anyhow::Result<Vec<u8>> {
+        self.0
+            .state::<tauri_plugin_ac_keystore::Keystore<tauri::Wry>>()
+            .seal(data)
+            .map_err(|e| anyhow::anyhow!("keystore seal: {e}"))
+    }
+    fn open(&self, data: &[u8]) -> anyhow::Result<Vec<u8>> {
+        self.0
+            .state::<tauri_plugin_ac_keystore::Keystore<tauri::Wry>>()
+            .open(data)
+            .map_err(|e| anyhow::anyhow!("keystore open: {e}"))
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Workaround WebKitGTK : webview blanche/noire après unfocus ou au boot
@@ -79,7 +102,7 @@ pub fn run() {
     // les raccourcis des installateurs.
     #[cfg(target_os = "windows")]
     set_app_user_model_id(context.config().identifier.as_str());
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -93,8 +116,13 @@ pub fn run() {
             // Android : pas de HOME — les chemins client-core (clé SSH,
             // connexions, logs) racinent dans le app_data_dir.
             #[cfg(target_os = "android")]
-            if let Ok(d) = app.path().app_data_dir() {
-                client_core::init_paths(d.join("agentcontrol"));
+            {
+                if let Ok(d) = app.path().app_data_dir() {
+                    client_core::init_paths(d.join("agentcontrol"));
+                }
+                // Box installée même si app_data_dir a échoué : un secret
+                // sans keystore échoue plutôt que d'être écrit en clair.
+                client_core::init_secret_box(KeystoreBox(app.handle().clone()));
             }
             // Icône fenêtre = gemme générée (marche aussi avec --no-bundle,
             // là où les icônes de bundle ne sont pas installées).
@@ -150,7 +178,12 @@ pub fn run() {
             commands::update::check_update,
             commands::update::update_client,
             commands::update::update_last_status,
-        ])
+        ]);
+    // Chiffrement au repos des secrets (clé app ed25519, clés appairées,
+    // connections.json) via Android Keystore — desktop inchangé.
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(tauri_plugin_ac_keystore::init());
+    builder
         .run(context)
         .expect("error while running tauri application");
 }

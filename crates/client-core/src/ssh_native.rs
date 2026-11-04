@@ -84,7 +84,7 @@ pub fn ensure_keypair() -> Result<PathBuf> {
 /// Ligne authorized_keys à ajouter côté serveur ("ssh-ed25519 AAAA… agentcontrol").
 pub fn pubkey_line() -> Result<String> {
     let p = ensure_keypair()?;
-    let key = russh::keys::load_secret_key(&p, None).context("clé privée")?;
+    let key = load_private_key(&p).context("clé privée")?;
     Ok(format!(
         "{} agentcontrol",
         key.public_key().to_openssh().unwrap_or_default()
@@ -107,10 +107,18 @@ pub fn check_key_pem(pem: &str) -> Result<()> {
 /// Lit + valide un fichier de clé privée (le `~` est déjà expansé
 /// par l'appelant). Erreur contextualisée si absent ou illisible.
 pub fn read_key_pem(path: &Path) -> Result<String> {
-    let pem = std::fs::read_to_string(path)
+    let bytes = crate::secrets::read_secret_file(path)
         .with_context(|| format!("clé {}", path.display()))?;
+    let pem = String::from_utf8(bytes).context("clé non texte (utf8)")?;
     check_key_pem(&pem)?;
     Ok(pem)
+}
+
+/// Charge une clé privée depuis un fichier — lecture via le secret-box
+/// (fichier scellé keystore déchiffré, clair hérité accepté).
+fn load_private_key(path: &Path) -> Result<russh::keys::PrivateKey> {
+    let pem = read_key_pem(path)?;
+    russh::keys::decode_secret_key(&pem, None).with_context(|| format!("clé {}", path.display()))
 }
 
 /// Clé privée reçue par appairage : écrite dans paired_keys/ (jamais
@@ -141,17 +149,10 @@ pub fn import_paired_key(pem: &str, name: &str) -> Result<PathBuf> {
 }
 
 /// Écrit une clé privée en 0600 dès la création — jamais de fenêtre
-/// en permissions d'umask entre `write` et `chmod`.
+/// en permissions d'umask entre `write` et `chmod`. Chiffré au repos
+/// si la box keystore est installée (Android).
 fn write_secret(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let mut f = opts.open(path)?;
-    std::io::Write::write_all(&mut f, data)
+    crate::secrets::write_secret_file(path, data)
 }
 
 /// Options d'une connexion native : pinning de la host key et/ou
@@ -342,7 +343,7 @@ async fn connect_auth(
     }
     let kp = key.map(PathBuf::from).unwrap_or_else(key_path);
     if kp.exists() {
-        let key = russh::keys::load_secret_key(&kp, None)
+        let key = load_private_key(&kp)
             .with_context(|| format!("clé {}", kp.display()))?;
         let auth = h
             .authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), None))
@@ -482,7 +483,7 @@ pub async fn pair_attempt(
     label: &str,
 ) -> Result<String> {
     let kp = ensure_keypair()?;
-    let own = russh::keys::load_secret_key(&kp, None).context("clé app")?;
+    let own = load_private_key(&kp).context("clé app")?;
     let own_pub = own.public_key().to_openssh().unwrap_or_default();
     let own_fp = own
         .public_key()

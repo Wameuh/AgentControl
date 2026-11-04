@@ -35,5 +35,10 @@ sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 [target.'cfg(not(target_os = "android"))'.dependencies]
 ureq = { version = "2.12", default-features = false, features = ["json", "tls"] }
 
+[target.'cfg(target_os = "android")'.dependencies]
+# Secrets au repos via Android Keystore (clé app, clés appairées,
+# connections.json) — desktop inchangé (pas de dépendance).
+tauri-plugin-ac-keystore = { path = "../../plugins/ac-keystore" }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_UI_Shell"] }
