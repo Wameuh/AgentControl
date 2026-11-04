@@ -873,6 +873,11 @@ impl Daemon {
             ReqKind::Subscribe { session, after_seq } => {
                 self.h_subscribe(session, after_seq).await
             }
+            ReqKind::ReviewReport {
+                session,
+                verdict,
+                body,
+            } => self.h_review_report(session, verdict, body).await,
             // Interceptés par la couche connexion (ordre des inputs +
             // cycle de vie borné à la connexion) — jamais atteint ici.
             ReqKind::TermOpen { .. }

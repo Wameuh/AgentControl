@@ -15,8 +15,10 @@
 //!   le trigger.
 //! - La session reviewer `PRReview-<N>` (origin `feature:pr-review`)
 //!   est spawnée dans un worktree FRAIS détaché au `headRefOid` exact
-//!   — read-only, elle rend un bloc `REVIEW_RESULT_BEGIN … END` dont
-//!   la première ligne est `## Verdict: APPROVED|CHANGES_REQUESTED`.
+//!   — read-only, elle REND son verdict en A2A natif via le tool MCP
+//!   `agentcontrol_report_verdict` (push direct au démon, plus de
+//!   polling) ; le bloc `REVIEW_RESULT_BEGIN … END` scanné à idle
+//!   reste le filet de secours si le tool est indisponible.
 //! - Le DÉMON poste le verdict (compte gh local = OWNER, accepté par
 //!   `.devin/hooks/block-merge.py`) avec le SHA reviewé en pied ;
 //!   head déplacé avant le post → titre `## Verdict: stale` (jamais
@@ -264,7 +266,13 @@ Verdicts : APPROVED si la PR est mergeable en l'etat ; CHANGES_REQUESTED s'il y 
 
 ## SORTIE OBLIGATOIRE
 
-Termine ton tour par exactement ce bloc (rien apres) :
+Quand ton analyse est finie, rends ton verdict via l'outil MCP `agentcontrol_report_verdict` :
+- verdict : `APPROVED` ou `CHANGES_REQUESTED`
+- body : le corps du commentaire de review (findings, points verifies, non-bloquants — en francais)
+
+Le demon poste lui-meme le commentaire `## Verdict:` sur la PR puis termine ta session — rien d'autre a faire apres l'appel.
+
+Secours (uniquement si l'outil est indisponible) : termine ton tour par exactement ce bloc (rien apres) :
 
 REVIEW_RESULT_BEGIN
 ## Verdict: APPROVED
@@ -913,6 +921,90 @@ impl Daemon {
             }
         }
         self.orch_save(st);
+    }
+
+    /// Verdict rendu en A2A par la session reviewer
+    /// (`agentcontrol_report_verdict` → `ReqKind::ReviewReport`) — le
+    /// canal push qui remplace l'attente d'idle + scan du journal :
+    /// le body est persisté en `pending_body` puis posté via le chemin
+    /// commun (head re-vérifié, titre stale si déplacé, retry borné).
+    /// Gardes : seule une session `feature:pr-review` dont le sid est
+    /// celui d'une review `running` peut rendre un verdict — double
+    /// rapport = idempotent. La session est terminée APRÈS la réponse
+    /// RPC : la tuer pendant l'appel perdrait le retour du tool call
+    /// (court délai de grâce en tâche de fond).
+    pub(super) async fn h_review_report(
+        self: &Arc<Self>,
+        session: String,
+        verdict: String,
+        body: String,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        let meta = s.meta_snapshot();
+        anyhow::ensure!(
+            meta.origin.as_deref() == Some(PR_REVIEW_ORIGIN),
+            "verdict refusé : {session} hors pipeline pr-review"
+        );
+        anyhow::ensure!(
+            verdict == "APPROVED" || verdict == "CHANGES_REQUESTED",
+            "verdict inconnu: {verdict}"
+        );
+        let body = format!("## Verdict: {verdict}\n\n{body}");
+        anyhow::ensure!(verdict_body_ok(&body), "verdict malformé");
+        let mut st = self.orch.state.lock().unwrap().clone();
+        // La review running dont le sid est l'appelant — une session
+        // reviewer ne sert qu'une review à la fois.
+        let Some((key, entry)) = st
+            .pr_reviews
+            .iter()
+            .find(|(_, v)| {
+                EntryState::of(v) == EntryState::Running
+                    && v.get("sid").and_then(Value::as_str) == Some(session.as_str())
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+        else {
+            anyhow::bail!("aucune review en cours pour {session}");
+        };
+        if entry
+            .get("pending_body")
+            .and_then(Value::as_str)
+            .is_some()
+        {
+            // Le scan journal a déjà capté un verdict — idempotent.
+            return Ok(json!({"received": true, "duplicate": true}));
+        }
+        let Some((repo, pr)) = key.split_once('#') else {
+            anyhow::bail!("clé de review invalide: {key}");
+        };
+        let Ok(pr_n) = pr.parse::<u64>() else {
+            anyhow::bail!("clé de review invalide: {key}");
+        };
+        let repo = repo.to_string();
+        let sha = entry
+            .get("sha")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let wt = pr_review_dir(pr_n, &sha);
+        let cfg = self.orch.cfg.read().unwrap().clone();
+        if let Some(e) = st.pr_reviews.get_mut(&key) {
+            e["pending_body"] = json!(body);
+            e["sid"] = json!("");
+        }
+        self.orch_save(&st);
+        // Post synchrone via le chemin commun (push, pas de poll) — un
+        // échec laisse pending_body au retry borné du tick.
+        self.pr_review_post_attempt(&key, &repo, pr_n, &sha, &mut st, &cfg, &wt)
+            .await;
+        *self.orch.state.lock().unwrap() = st;
+        // Fin de la session reviewer après la réponse : le pont MCP doit
+        // d'abord rendre le résultat du tool call (délai de grâce).
+        let d = Arc::clone(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            let _ = d.h_delete_session(session).await;
+        });
+        Ok(json!({"received": true}))
     }
 
     /// PR ouvertes à reviewer : `gh pr list --base next_release` par
