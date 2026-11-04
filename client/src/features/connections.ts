@@ -157,12 +157,19 @@ export class ConnectionManager {
   }
 
   /** Résultat encore valide pour la gen courante ? Absent / legacy →
-   *  accepté (web, vieux bridges). Gen connue et différente → périmé. */
+   *  accepté (web, vieux bridges). `gen < cur` = client remplacé →
+   *  périmé. `gen > cur` = bookkeeping UI en retard (connect supersédé
+   *  sans noteGen, etc.) → signal du client **live**, accepté et
+   *  forwardé dans `gens` pour reconverger (sinon conn-dead/sondes
+   *  vivantes filtrées à jamais, sans resync possible si déjà morte). */
   isFresh(key: string, gen?: number | null): boolean {
     if (gen == null || Number.isNaN(gen)) return true;
     const cur = this.gens.get(key);
-    if (cur == null) return true;
-    return gen === cur;
+    if (cur == null || gen >= cur) {
+      if (typeof gen === "number") this.gens.set(key, gen);
+      return true;
+    }
+    return false;
   }
 
   /** Connexion établie → la surveillance/backoff la suit (fin de doConnect).

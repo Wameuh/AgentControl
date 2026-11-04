@@ -153,15 +153,16 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
     let c = Client::connect(&t).await.map_err(|e| format!("{e:#}"))?;
     let status = c.call(ReqKind::DaemonStatus).await.map_err(|e| format!("{e:#}"))?;
     let gen = {
-        // Compteur global : un disconnect→reconnect ne repart pas à 1
-        // (sinon un noteGen UI en retard avec Math.max resterait figé
-        // sous la vraie gen), et deux connect concurrents sur la même
-        // clé ne peuvent pas produire la même gen.
+        let mut map = state.conns.lock().await;
+        // `fetch_add` SOUS le lock : l'ordre d'allocation = l'ordre
+        // d'insertion. Hors lock, A=5 puis B=9 avec B qui insert en
+        // premier laisserait map=5 alors que l'UI a noté 9 → noteGen
+        // monotone ne peut plus descendre, sondes live filtrées à jamais.
+        // Compteur global : disconnect→reconnect ne repart pas à 1.
         let gen = state
             .next_gen
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
-        let mut map = state.conns.lock().await;
         let prev = map.insert(
             key.clone(),
             ConnCtx {

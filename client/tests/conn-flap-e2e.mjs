@@ -304,6 +304,33 @@ check("t8 why frais",
   JSON.stringify(await logs("conn local down")));
 await setDs({ version: "9.9.9", sessions: 1, _ac_gen: 3 });
 await drain();
+check("t8b conn revenue ok", await waitSeg("ok"));
+// gen > cur (UI en retard) : signal live, pas périmé — reconverge.
+await p.evaluate(() => {
+  window.__connectResult = { version: "9.9.9", sessions: 1, _ac_gen: 4 };
+});
+const l8e = await logLen();
+await setDs({ error: "connexion fermée", kind: "error", rtt_ms: 12, gen: 4 });
+check("t8b prep down", await waitLog("sonde ko ×2", l8e));
+check("t8b prep bad", await waitSeg("bad"));
+await setDs({ version: "9.9.9", sessions: 1, _ac_gen: 4 });
+await drain();
+check("t8b reconnect", await waitSeg("ok"));
+// UI connaît 4 ; un conn-dead stampé 6 (map plus haute, noteGen raté)
+// doit tuer — pas être filtré comme périmé.
+const l8f = await logLen();
+await p.evaluate(() => {
+  const id = window.__acListeners["conn-dead"];
+  window.__TAURI_INTERNALS__.runCallback(id, {
+    payload: { conn: "local", why: "eof gen>cur", gen: 6 },
+  });
+});
+check("t8b gen>cur → down", await waitSeg("bad"));
+check("t8b gen>cur why",
+  (await logs("eof gen>cur")).length >= 1,
+  JSON.stringify(await logs("conn local down")));
+await setDs({ version: "9.9.9", sessions: 1, _ac_gen: 6 });
+await drain();
 
 console.log(`${pass} PASS, ${fail} FAIL`);
 if (fail) {
