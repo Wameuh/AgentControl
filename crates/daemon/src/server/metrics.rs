@@ -412,6 +412,7 @@ mod tests {
             available_models: Vec::new(),
             config_options: Vec::new(),
             pending_config: Default::default(),
+            desired_config: Default::default(),
             state: state.into(),
             group: None,
             spawned_by: None,

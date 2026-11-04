@@ -351,25 +351,57 @@ impl Session {
         });
         // Config demandée pendant que l'agent était mort : rejouer maintenant
         // (modèle/mode choisis hors-ligne appliqués au resume).
-        // Un mode ACP-only omis de l'env par env_mode n'a jamais été posé
-        // par le spawn : sans re-stage, le respawn (session/new fallback,
-        // ou session/load qui ne restaure pas le mode) le perdrait —
-        // pending_config le rejoue par session/set_mode ci-dessous. Le
-        // mode souhaité est lu sur le snapshot pré-spawn : meta.mode a
-        // déjà été aligné sur ce que le handshake rapporte (défaut
-        // agent en session/new) ; le skip évite le set_mode redondant
-        // quand session/load l'avait restauré.
-        if let Some(want) = meta.mode.clone() {
-            if crate::server::env_mode(&want) != want {
-                let mut m = self.meta.lock().unwrap();
-                if m.mode.as_deref() != Some(want.as_str()) {
-                    m.pending_config.entry("mode".into()).or_insert(want);
+        // Réconciliation post-handshake : la valeur DEMANDÉE (snapshot
+        // pré-spawn) prime sur ce que l'agent rapporte. Un session/load
+        // peut restaurer le mode/modèle persisté côté agent en ignorant
+        // l'env de spawn (DEVIN_PERMISSION_MODE…) — un agent endormi en
+        // bypass repartait alors en mode par défaut, et le mode rapporté
+        // écrasait meta.mode (spawn_args/env faux pour tous les réveils
+        // suivants). Un mode ACP-only omis de l'env par env_mode n'a
+        // jamais été posé non plus. Tout mismatch est re-poussé via
+        // pending_config (set_config_option / set_mode au drain) et
+        // meta.mode/model restaurés sur la valeur demandée ; le skip
+        // évite l'appel redondant quand session/load l'avait restauré.
+        {
+            let mut m = self.meta.lock().unwrap();
+            if let Some(want) = meta.mode.clone() {
+                // "" n'est pas un mode poussable (apply_spawn_config le
+                // filtre déjà) — sans garde, il bouclerait un set_mode
+                // en échec à chaque spawn.
+                if !want.is_empty() && m.mode.as_deref() != Some(want.as_str()) {
+                    m.pending_config.insert("mode".into(), want.clone());
+                    m.mode = Some(want);
+                }
+            }
+            if let Some(want) = meta.model.clone() {
+                if !want.is_empty() && m.model.as_deref() != Some(want.as_str()) {
+                    m.pending_config.insert("model".into(), want.clone());
+                    m.model = Some(want);
+                }
+            }
+            // Conditions de session posées en live (thought_level…) :
+            // ni l'env ni le handshake ne les portent — re-poussées à
+            // chaque spawn tant que la valeur rapportée diffère de la
+            // voulue (desired_config, sticky par nature).
+            let desired: Vec<(String, String)> = m
+                .desired_config
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            for (k, v) in desired {
+                let reported = m
+                    .config_options
+                    .iter()
+                    .find(|o| o.id == k)
+                    .map(|o| o.current_value.as_str());
+                if reported != Some(v.as_str()) {
+                    m.pending_config.insert(k, v);
                 }
             }
         }
-        let pending: Vec<(String, String)> = {
-            self.meta.lock().unwrap().pending_config.drain().collect()
-        };
+        self.save_meta();
+        let pending: Vec<(String, String)> =
+            { self.meta.lock().unwrap().pending_config.drain().collect() };
         if !pending.is_empty() {
             self.save_meta(); // persiste la map vidée même si les appels échouent
         }
@@ -389,7 +421,13 @@ impl Session {
                 self.emit(EventKind::Error {
                     message: format!("config différée {k}={v}: {e:#}"),
                 });
+                // Re-mise en pending : un échec transitoire ne doit pas
+                // perdre la condition voulue — retentée au prochain spawn.
+                self.meta.lock().unwrap().pending_config.insert(k, v);
             }
+        }
+        if !self.meta.lock().unwrap().pending_config.is_empty() {
+            self.save_meta();
         }
         // Reset de cycle : un spawn réussi solde la trace d'erreur
         // d'un éventuel cycle précédent (respawn, /clear, réveil) et
@@ -1076,6 +1114,15 @@ mod tests {
     }
 
     fn tmp_session(tag: &str, native_id: &str) -> (Arc<Session>, PathBuf) {
+        tmp_session_cfg(tag, native_id, None, None)
+    }
+
+    fn tmp_session_cfg(
+        tag: &str,
+        native_id: &str,
+        mode: Option<&str>,
+        model: Option<&str>,
+    ) -> (Arc<Session>, PathBuf) {
         let dir =
             std::env::temp_dir().join(format!("ac-spawn-test-{}-{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1087,13 +1134,14 @@ mod tests {
             cwd: "/tmp".into(),
             created_at: proto::now_iso(),
             native_session_id: Some(native_id.to_string()),
-            mode: None,
-            model: None,
+            mode: mode.map(String::from),
+            model: model.map(String::from),
             available_modes: vec![],
             available_commands: vec![],
             available_models: vec![],
             config_options: vec![],
             pending_config: Default::default(),
+            desired_config: Default::default(),
             state: "interrupted".into(),
             group: None,
             spawned_by: None,
@@ -1164,6 +1212,59 @@ for line in sys.stdin:
         else:
             ok(mid, {{"stopReason": "end_turn"}})
 "#
+            ),
+        )
+        .unwrap();
+        script
+    }
+
+    /// Variante : chaque requête est loguée dans `req.log` (method +
+    /// params, une ligne JSON) et session/load rapporte le mode persisté
+    /// côté agent (« default ») — pas celui demandé — via configOptions,
+    /// comme le fait Devin au resume.
+    fn fake_agent_mode_report(dir: &PathBuf) -> PathBuf {
+        let script = dir.join("fake-agent-mode.py");
+        let log = dir.join("req.log");
+        std::fs::write(
+            &script,
+            format!(
+                r#"import sys, json
+
+LOG = {log:?}
+
+def ok(mid, result):
+    print(json.dumps({{"jsonrpc": "2.0", "id": mid, "result": result}}), flush=True)
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    mid = msg.get("id")
+    method = msg.get("method")
+    params = msg.get("params") or {{}}
+    if mid is None:
+        continue
+    with open(LOG, "a") as f:
+        f.write(json.dumps({{"method": method, "params": params}}) + "\n")
+    if method == "initialize":
+        ok(mid, {{"protocolVersion": 1,
+                 "agentCapabilities": {{"loadSession": True}}}})
+    elif method == "session/load":
+        ok(mid, {{"sessionId": params.get("sessionId"),
+                 "configOptions": [
+                     {{"id": "mode", "currentValue": "default",
+                       "options": [{{"value": "default"}},
+                                   {{"value": "bypass"}}]}}]}})
+    elif method == "session/new":
+        ok(mid, {{"sessionId": "new-native-1"}})
+    elif method in ("session/set_config_option", "session/set_mode",
+                    "session/set_model"):
+        ok(mid, {{}})
+    elif method == "session/prompt":
+        ok(mid, {{"stopReason": "end_turn"}})
+"#,
+                log = log.display().to_string()
             ),
         )
         .unwrap();
@@ -1267,6 +1368,48 @@ for line in sys.stdin:
         assert!(
             !texts.iter().any(|t| t.contains("prompt failed")),
             "prompt en échec après repli: {texts:?}"
+        );
+        s.kill().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Bug remonté : sleep d'une session bypass → session/load rapporte
+    /// le mode persisté côté agent (« default ») qui écrasait meta.mode
+    /// sans rien re-pousser → l'agent restait en mode par défaut. Le
+    /// reconcile post-handshake doit envoyer session/set_config_option
+    /// « mode »=bypass et garder meta.mode sur la valeur demandée.
+    #[tokio::test]
+    async fn load_mode_mismatch_is_repushed() {
+        let Some(py) = python() else {
+            eprintln!("python absent — test ignoré");
+            return;
+        };
+        let (s, dir) = tmp_session_cfg("modefix", "native-mode", Some("bypass"), None);
+        let agent = fake_agent_mode_report(&dir);
+        let cmd = vec![py, agent.display().to_string()];
+        let ok = s
+            .spawn_agent(
+                &cmd,
+                &Default::default(),
+                Some("native-mode".into()),
+                true,
+                json!([]),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(ok && s.is_alive());
+        // meta.mode reste sur la valeur demandée — pas le « default »
+        // rapporté (sinon spawn_args/env repartent faux au prochain
+        // réveil).
+        assert_eq!(s.meta_snapshot().mode.as_deref(), Some("bypass"));
+        // Le mode a été re-poussé vers l'agent : set_config_option ou
+        // set_mode avec « bypass » doit apparaître dans req.log.
+        let log = std::fs::read_to_string(dir.join("req.log")).unwrap();
+        assert!(
+            log.contains("\"session/set_config_option\"") && log.contains("\"bypass\"")
+                || log.contains("\"session/set_mode\"") && log.contains("\"bypass\""),
+            "mode non re-poussé: {log}"
         );
         s.kill().await;
         let _ = std::fs::remove_dir_all(&dir);

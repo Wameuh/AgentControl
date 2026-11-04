@@ -36,7 +36,6 @@ mod sessions;
 mod term;
 
 pub use cfg::{A2aCfg, AgentProfile, CompactCfg, CompactPartial, CompactPolicy, CompactSrc, OrchCfg, RetentionCfg, DEFAULT_MAX_INSTANCES};
-pub(crate) use cfg::env_mode;
 pub(crate) use orch::OrchProbe;
 
 use anyhow::{Context, Result};

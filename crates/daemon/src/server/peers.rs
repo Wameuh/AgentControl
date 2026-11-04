@@ -173,6 +173,7 @@ impl Daemon {
                     available_models: vec![],
                     config_options: vec![],
                     pending_config: Default::default(),
+                    desired_config: Default::default(),
                     state: "starting".into(),
                     group: group.or_else(|| cm.group.clone()),
                     spawned_by: Some(from.clone()),

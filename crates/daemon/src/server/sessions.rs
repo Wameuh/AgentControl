@@ -48,6 +48,7 @@ impl Daemon {
                     available_models: vec![],
                     config_options: vec![],
                     pending_config: Default::default(),
+                    desired_config: Default::default(),
                     state: "starting".into(),
                     // Même normalisation que set_group : blank → None.
                     group: group.filter(|g| !g.trim().is_empty()),
@@ -126,6 +127,7 @@ impl Daemon {
                     available_models: vec![],
                     config_options: vec![],
                     pending_config: Default::default(),
+                    desired_config: Default::default(),
                     state: "starting".into(),
                     group: None,
                     spawned_by: None,

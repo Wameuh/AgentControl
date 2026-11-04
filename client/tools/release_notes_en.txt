@@ -89,3 +89,4 @@
 257: On Android, the app SSH key, keys imported by pairing and saved connections (SSH passwords, key paths) are now encrypted at rest with a non-exportable Android Keystore key — existing installs migrate silently on first read.
 
 271: Expanded tool call blocks now show the command that was launched (exec) or the tool parameters (read/edit…) in a dedicated block above the output — long heredocs/scripts stay collapsed behind an expand button.
+259: Waking a sleeping session now restores its permission mode and settings — session/load could restore the agent-side persisted mode (bypass lost to default) and overwrite meta.mode, breaking spawn env for every later wake; the post-handshake reconcile now re-pushes the requested mode/model and replays sticky config (thought_level) whenever the agent reports a different value.

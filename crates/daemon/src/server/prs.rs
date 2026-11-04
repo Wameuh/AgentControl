@@ -702,6 +702,7 @@ mod tests {
             available_models: vec![],
             config_options: vec![],
             pending_config: Default::default(),
+            desired_config: Default::default(),
             state: "idle".into(),
             group: None,
             spawned_by: None,

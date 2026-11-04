@@ -30,6 +30,12 @@ impl Session {
             .context("no native session id")?;
         self.acp_request("session/set_mode", acp::session_set_mode_params(&sid, mode))
             .await?;
+        // Sync la méta au succès comme set_config_option : un agent qui
+        // applique sans renvoyer de mode_changed laisserait meta.mode
+        // stale — le reconcile post-handshake re-pousserait alors
+        // l'ancienne valeur à chaque réveil.
+        self.meta.lock().unwrap().mode = Some(mode.into());
+        self.save_meta();
         Ok(())
     }
 
@@ -377,7 +383,12 @@ impl Session {
                 match config_id {
                     "mode" => m.mode = Some(value.into()),
                     "model" => m.model = Some(value.into()),
-                    _ => {}
+                    _ => {
+                        // Condition voulue persistante : rejouée à chaque
+                        // spawn (reconcile post-handshake), pas seulement
+                        // au prochain — sinon perdue au second réveil.
+                        m.desired_config.insert(config_id.into(), value.into());
+                    }
                 }
                 m.config_options.clone()
             };
@@ -473,7 +484,12 @@ impl Session {
             match config_id {
                 "mode" => m.mode = Some(value.into()),
                 "model" => m.model = Some(value.into()),
-                _ => {}
+                // Sticky : rejoué à chaque spawn — un session/load qui
+                // restaure la valeur persistée côté agent ne doit pas
+                // perdre la condition (thought_level…).
+                _ => {
+                    m.desired_config.insert(config_id.into(), value.into());
+                }
             }
             m.config_options.clone()
         };
