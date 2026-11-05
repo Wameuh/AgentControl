@@ -19,6 +19,7 @@ import { nav } from "../ui/nav";
 import { fillEfforts, joinModel, splitModel } from "./modelbar";
 import { costFor, ensureCosts } from "./modelcosts";
 import { notifications } from "./notifications";
+import { catalogFor, ensureCatalog } from "./modelcatalog";
 import type { EventRenderer } from "./event-renderers";
 
 const MAX_RENDERED = 400;
@@ -797,6 +798,20 @@ export class ChatView {
       // Coûts catalogue du profil agent (model_costs) — re-render des
       // selects à l'arrivée de la map (premier affichage sans coût).
       ensureCosts(app.current.conn ?? "", app.current.agent, this.costsReady);
+      // Catalogue complet du profil (model_catalog) : les variantes
+      // hors annonce ACP rejoignent les options, badgées « catalogue » —
+      // leur application passe par le side-channel démon (close→
+      // override→load), pas par session/set_config_option.
+      ensureCatalog(app.current.conn ?? "", app.current.agent, this.costsReady);
+      const cat = catalogFor(app.current.conn ?? "", app.current.agent);
+      if (cat) {
+        const known = new Set(rawOpts.map((o) => o.v));
+        for (const e of Object.values(cat)) {
+          if (!known.has(e.value)) {
+            rawOpts.push({ v: e.value, label: `${e.label} · ${t("catalog_badge")}` });
+          }
+        }
+      }
       md.hidden = false;
       mf.hidden = true;
       // Modèles de base dédupliqués (effort géré à part) + entrée Fusion

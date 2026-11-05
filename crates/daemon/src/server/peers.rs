@@ -168,6 +168,7 @@ impl Daemon {
                     native_session_id: None,
                     mode: mode.or(if same_agent { cm.mode.clone() } else { None }),
                     model: model.or(if same_agent { cm.model.clone() } else { None }),
+                    model_source: None,
                     available_modes: vec![],
                     available_commands: vec![],
                     available_models: vec![],

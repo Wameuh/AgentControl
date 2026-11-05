@@ -193,6 +193,7 @@ export const fr: Record<Key, string> = {
   fusion_none: "Aucune combinaison Fusion annoncée par l'agent.",
   fusion_bad: "Combinaison Fusion non annoncée par l'agent : ",
   cost_label: "Coût",
+  catalog_badge: "catalogue",
   fusion_entry: "✨ Fusion (2 modèles)…", cmd_placeholder: "⌘ commandes…",
   effort_default: "défaut", subscribe_err: "subscribe : ",
   settings_title: "Paramètres", about_title: "À propos d'AgentControl",

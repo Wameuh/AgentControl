@@ -17,6 +17,9 @@ export interface SessionMeta {
   native_session_id?: string;
   mode?: string;
   model?: string;
+  /** Provenance du modèle : "announced" (options ACP) | "catalogue"
+   *  (variante hors annonce, posée via side-channel provider). */
+  model_source?: string;
   available_modes: string[];
   available_commands: CmdInfo[];
   available_models: string[];

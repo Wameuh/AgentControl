@@ -135,6 +135,7 @@ impl Session {
             let mut m = self.meta.lock().unwrap();
             m.pending_config.insert("model".into(), model.into());
             m.model = Some(model.into());
+            m.model_source = Some("announced".into());
             drop(m);
             self.save_meta();
             self.emit(EventKind::System {
@@ -202,7 +203,10 @@ impl Session {
             .await
         {
             Ok(_) => {
-                self.meta.lock().unwrap().model = Some(model.into());
+                let mut m = self.meta.lock().unwrap();
+                m.model = Some(model.into());
+                m.model_source = Some("announced".into());
+                drop(m);
                 self.save_meta();
                 self.emit_model_applied(model, wanted);
                 // Action explicite de réparation : un changement de
@@ -221,6 +225,7 @@ impl Session {
                 // meta.model écrit AVANT l'envoi : la valeur relue par
                 // h_set_model reflète la demande même si le prompt part en file.
                 self.meta.lock().unwrap().model = Some(model.into());
+                self.meta.lock().unwrap().model_source = Some("announced".into());
                 self.save_meta();
                 self.send_prompt(&format!("/model {model}"), false, false)
                     .await
@@ -344,6 +349,18 @@ impl Session {
         }
     }
 
+    /// Pose meta.model + sa provenance ("announced" | "catalogue") —
+    /// utilisé par la voie side-channel catalogue (server::sessions) qui
+    /// ne passe JAMAIS par set_config_option/set_model : l'agent ACP
+    /// refuse les valeurs hors annonce.
+    pub fn set_model_meta(&self, model: Option<String>, source: Option<String>) {
+        let mut m = self.meta.lock().unwrap();
+        m.model = model;
+        m.model_source = source;
+        drop(m);
+        self.save_meta();
+    }
+
     /// Rebind l'ID natif (pour reprendre une autre session de l'agent).
     pub fn set_native_id(&self, id: &str) {
         self.meta.lock().unwrap().native_session_id = Some(id.into());
@@ -463,7 +480,10 @@ impl Session {
                 }
                 match config_id {
                     "mode" => m.mode = Some(value.into()),
-                    "model" => m.model = Some(value.into()),
+                    "model" => {
+                        m.model = Some(value.into());
+                        m.model_source = Some("announced".into());
+                    }
                     _ => {
                         // Condition voulue persistante : rejouée à chaque
                         // spawn (reconcile post-handshake), pas seulement

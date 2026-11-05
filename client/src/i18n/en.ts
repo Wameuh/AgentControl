@@ -193,6 +193,7 @@ export const en = {
   fusion_none: "No Fusion combinations announced by the agent.",
   fusion_bad: "Fusion combination not announced by the agent: ",
   cost_label: "Cost",
+  catalog_badge: "catalogue",
   fusion_entry: "✨ Fusion (2 models)…", cmd_placeholder: "⌘ commands…",
   effort_default: "default", subscribe_err: "subscribe: ",
   settings_title: "Settings", about_title: "About AgentControl",

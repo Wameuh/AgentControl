@@ -129,6 +129,7 @@ impl Outbox {
     }
 }
 
+use crate::catalogue::CatalogueCache;
 use crate::costs::CostCache;
 use crate::journal;
 use crate::prs::PrRegistry;
@@ -205,6 +206,9 @@ pub struct Daemon {
     /// Coûts catalogue des modèles par profil agent (costs.rs) —
     /// sondes `devin models`… avec cache TTL, servis par ModelCosts.
     pub model_costs: CostCache,
+    /// Catalogues complets par profil (`catalogue_cmd`) — sert les
+    /// variantes hors annonce ACP via ReqKind::ModelCatalog.
+    pub catalogues: CatalogueCache,
 }
 
 
@@ -285,6 +289,7 @@ impl Daemon {
             host_sys: std::sync::Mutex::new(sysinfo::System::new()),
             slot_lock: tokio::sync::Mutex::new(()),
             model_costs: CostCache::default(),
+            catalogues: CatalogueCache::default(),
         });
         d.pr_verify.spawn_worker();
         let mut resumable = Vec::new();
@@ -656,6 +661,7 @@ impl Daemon {
             ReqKind::RefreshAgentCaps { agent } => {
                 self.h_refresh_agent_caps(agent).await
             }
+            ReqKind::ModelCatalog { agent } => self.h_model_catalog(agent).await,
             ReqKind::ListSessions => self.h_list_sessions().await,
             ReqKind::NewSession {
                 agent,

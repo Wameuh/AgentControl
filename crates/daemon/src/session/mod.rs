@@ -750,6 +750,7 @@ mod tests {
             native_session_id: None,
             mode: None,
             model: None,
+            model_source: None,
             available_modes: vec![],
             available_commands: vec![],
             available_models: vec![],

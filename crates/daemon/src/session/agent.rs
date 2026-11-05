@@ -1316,6 +1316,7 @@ mod tests {
             native_session_id: Some(native_id.to_string()),
             mode: mode.map(String::from),
             model: model.map(String::from),
+            model_source: None,
             available_modes: vec![],
             available_commands: vec![],
             available_models: vec![],

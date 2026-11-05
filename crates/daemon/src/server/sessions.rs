@@ -66,6 +66,7 @@ impl Daemon {
                     native_session_id: None,
                     mode: mode.clone(),
                     model: model.clone(),
+                    model_source: model.as_ref().map(|_| "announced".to_string()),
                     available_modes: vec![],
                     available_commands: vec![],
                     available_models: vec![],
@@ -146,6 +147,7 @@ impl Daemon {
                     native_session_id: Some(native_id),
                     mode: None,
                     model: None,
+                    model_source: None,
                     available_modes: vec![],
                     available_commands: vec![],
                     available_models: vec![],
@@ -541,6 +543,80 @@ impl Daemon {
         });
     }
 
+    /// Vrai si `value` est une variante catalogue-only pour la session :
+    /// présente dans le catalogue du profil (`catalogue_cmd`) ET absente
+    /// des valeurs modèle annoncées (config_options + available_models).
+    /// Profil sans catalogue/override → toujours faux : le chemin ACP
+    /// (set_config_option/set_model) reste inchangé.
+    async fn catalogue_only(&self, s: &Arc<Session>, value: &str) -> bool {
+        let meta = s.meta_snapshot();
+        let Some(profile) = self.agents.get(&meta.agent) else {
+            return false;
+        };
+        if profile.catalogue_cmd.is_none() || profile.model_override_cmd.is_none() {
+            return false;
+        }
+        let catalog = self
+            .catalogues
+            .get(&meta.agent, profile.catalogue_cmd.as_deref())
+            .await;
+        if !catalog.iter().any(|e| e.value == value) {
+            return false;
+        }
+        !crate::server::orch_cfg::meta_config_values(&meta, "model")
+            .iter()
+            .any(|(v, _)| v == value)
+    }
+
+    /// Application d'une valeur catalogue-only — l'ACP refuse les
+    /// valeurs hors annonce : séquence kill (session_locks libérés) →
+    /// `model_override_cmd` ({native_sid}/{model} substitués) → respawn
+    /// (session/load restaure le modèle persisté). Jamais de
+    /// set_config_option ni de pending_config pour ces valeurs. En cas
+    /// d'échec de l'override : meta.model revenu à la valeur précédente
+    /// + event Error, la session est quand même respawnée.
+    async fn apply_catalogue_model(&self, s: &Arc<Session>, model: &str) -> Result<()> {
+        let meta = s.meta_snapshot();
+        let native = meta
+            .native_session_id
+            .clone()
+            .context("session sans id natif — override catalogue impossible")?;
+        let profile = self
+            .agents
+            .get(&meta.agent)
+            .with_context(|| format!("agent inconnu: {}", meta.agent))?
+            .clone();
+        let tpl = profile
+            .model_override_cmd
+            .clone()
+            .context("profil sans model_override_cmd")?;
+        let prev = (meta.model.clone(), meta.model_source.clone());
+        s.set_model_meta(Some(model.to_string()), Some("catalogue".into()));
+        s.emit(EventKind::System {
+            text: format!("modèle catalogue « {model} » — application via side-channel…"),
+        });
+        // Kill AVANT l'override : le process `devin acp` détient le lock
+        // de session et réécrirait le store à sa fermeture — le
+        // `devin -r` ne doit jamais tourner pendant qu'il vit.
+        s.sleep().await;
+        let rendered = tpl
+            .replace("{native_sid}", &native)
+            .replace("{model}", model);
+        let cwd = meta.cwd.clone();
+        let r = tokio::task::spawn_blocking(move || run_override_cmd(&rendered, &cwd))
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("override join: {e}")));
+        if let Err(e) = r {
+            s.set_model_meta(prev.0, prev.1);
+            s.emit(EventKind::Error {
+                message: format!(
+                    "override modèle « {model} » échoué: {e:#} — valeur précédente conservée"
+                ),
+            });
+        }
+        self.respawn(s, false).await
+    }
+
     /// Réveil d'une session endormie (déclenché par un envoi user) :
     /// respawn + session/load — même mécanique que ResumeSession. Le drain
     /// post-spawn livre les prompts enfilés pendant le sommeil.
@@ -665,7 +741,7 @@ impl Daemon {
                     d.mcp_servers(&sid),
                     Some(crate::session::SpawnCfg {
                         mode,
-                        model,
+                        model: model.clone(),
                         quiet: false,
                     }),
                 )
@@ -678,6 +754,16 @@ impl Daemon {
             }
             match r {
                 Ok(true) => {
+                    // Modèle catalogue-only demandé à la création : le
+                    // session/new vient de tourner sur la valeur clampée
+                    // par l'agent — close→override→load pour persister la
+                    // vraie valeur dans le store provider AVANT de livrer
+                    // le prompt initial.
+                    if let Some(m) = model.as_deref() {
+                        if d.catalogue_only(&s, m).await {
+                            let _ = d.apply_catalogue_model(&s, m).await;
+                        }
+                    }
                     match deliver {
                         FreshDeliver::None => {}
                         FreshDeliver::UserPrompt(p) => {
@@ -945,6 +1031,11 @@ impl Daemon {
 
     pub(super) async fn h_set_model(self: &Arc<Self>, session: String, model: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
+                if self.catalogue_only(&s, &model).await {
+                    self.apply_catalogue_model(&s, &model).await?;
+                    let applied = s.meta_snapshot().model.unwrap_or(model);
+                    return Ok(json!({"model": applied}));
+                }
                 s.set_model(&model).await?;
                 // Valeur effective post-résolution (peut différer de la
                 // demande : "swe-2" → "swe-2-high").
@@ -954,6 +1045,13 @@ impl Daemon {
 
     pub(super) async fn h_set_config_option(self: &Arc<Self>, session: String, config_id: String, value: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
+                // Les valeurs catalogue-only passent par le side-channel,
+                // jamais par session/set_config_option (refus ACP garanti).
+                if config_id == "model" && self.catalogue_only(&s, &value).await {
+                    self.apply_catalogue_model(&s, &value).await?;
+                    let applied = s.meta_snapshot().model.unwrap_or(value);
+                    return Ok(json!({"config": config_id, "value": applied}));
+                }
                 s.set_config_option(&config_id, &value).await?;
                 Ok(json!({"config": config_id, "value": value}))
     }
@@ -1066,4 +1164,61 @@ fn match_excerpt(hay: &str, needle: &str, ctx: usize) -> Option<String> {
         s.push('…');
     }
     Some(s)
+}
+
+/// Exécute `model_override_cmd` (argv simple, `{native_sid}`/`{model}`
+/// déjà substitués par l'appelant) avec borne de temps — `devin -r …
+/// --model X` doit sortir vite (stdin EOF) ; au-delà on tue. Le stderr
+/// est capturé pour le message d'erreur.
+fn run_override_cmd(cmdline: &str, cwd: &str) -> Result<()> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let argv: Vec<String> = cmdline.split_whitespace().map(String::from).collect();
+    anyhow::ensure!(!argv.is_empty(), "model_override_cmd vide après substitution");
+    let mut child = Command::new(&argv[0])
+        .args(&argv[1..])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("spawn override {}", argv[0]))?;
+    let mut err = child.stderr.take();
+    let err_reader = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        if let Some(e) = err.as_mut() {
+            let _ = e.read_to_end(&mut b);
+        }
+        b
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = err_reader.join();
+                anyhow::bail!("model_override_cmd timeout 60s");
+            }
+        }
+    };
+    let err_bytes = err_reader.join().unwrap_or_default();
+    if !status.success() {
+        let msg = String::from_utf8_lossy(&err_bytes);
+        let msg = msg.trim();
+        anyhow::bail!(
+            "exit {:?}{}",
+            status.code(),
+            if msg.is_empty() {
+                String::new()
+            } else {
+                format!(" — {}", msg.chars().take(400).collect::<String>())
+            }
+        );
+    }
+    Ok(())
 }

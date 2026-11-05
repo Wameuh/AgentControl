@@ -2300,6 +2300,7 @@ mod tests {
             native_session_id: None,
             mode: None,
             model: None,
+            model_source: None,
             available_modes: Vec::new(),
             available_commands: Vec::new(),
             available_models: Vec::new(),
