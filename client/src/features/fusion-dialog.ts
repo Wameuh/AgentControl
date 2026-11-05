@@ -53,6 +53,9 @@ export function openFusion() {
   a.onchange = refreshEA;
   ea.onchange = refreshB;
   b.onchange = refreshEB;
+  // eb est une feuille (rien à rechainer) : seule la ligne coût dépend
+  // de sa valeur — sans ce handler elle afficherait l'ancien prix.
+  eb.onchange = updateCost;
 
   // Pré-remplir depuis la valeur fusion courante (reconfiguration)
   const curVal =
