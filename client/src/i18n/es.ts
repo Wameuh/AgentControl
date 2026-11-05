@@ -437,6 +437,8 @@ export const es: Record<Key, string> = {
   just_now: "ahora mismo",
   wait_for: "desde hace {d}",
   wait_max: "máx {d}",
+  save: "Guardar",
+  settings_dirty: "cambios sin guardar",
   bottom_jump_title: "Volver al hilo en directo",
   // retours utilisateur : toasts, dialogue démon, états vides
   retry: "Reintentar",

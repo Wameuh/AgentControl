@@ -434,6 +434,8 @@ export const en = {
   just_now: "just now",
   wait_for: "for {d}",
   wait_max: "max {d}",
+  save: "Save",
+  settings_dirty: "unsaved changes",
   bottom_jump_title: "Back to live tail",
   // retours utilisateur : toasts, dialogue démon, états vides
   retry: "Retry",

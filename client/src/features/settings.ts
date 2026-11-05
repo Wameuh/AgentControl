@@ -58,6 +58,81 @@ export class SettingsPanel {
    *  empilés seraient inertes l'un sous l'autre (injecté par le
    *  bootstrap). */
   onOpening: () => void = () => {};
+
+  /** Options stagées par id de contrôle (#190) : `apply` relit la
+   *  valeur du contrôle au clic « Enregistrer », `reset` recharge le
+   *  contrôle depuis la valeur persistée (« Annuler »), `preview`
+   *  applique aussi au change (aperçu live thème/accent — reverté par
+   *  reset+apply à l'annulation), `onChange` = effet immédiat sans
+   *  persistance (preview sonore d'un preset). */
+  private staged = new Map<
+    string,
+    { apply: () => void; reset: () => void; preview: boolean; onChange?: () => void }
+  >();
+  private dirtyIds = new Set<string>();
+
+  private stage(
+    id: string,
+    o: {
+      apply: () => void;
+      reset: () => void;
+      preview?: boolean;
+      onChange?: () => void;
+      event?: "onchange" | "oninput";
+    },
+  ) {
+    const el = $(id) as HTMLInputElement | HTMLSelectElement;
+    this.staged.set(id, {
+      apply: o.apply,
+      reset: o.reset,
+      preview: o.preview === true,
+      onChange: o.onChange,
+    });
+    el[o.event ?? "onchange"] = () => this.markDirty(id);
+  }
+
+  private markDirty(id: string) {
+    const s = this.staged.get(id);
+    if (!s) return;
+    this.dirtyIds.add(id);
+    if (s.preview) s.apply();
+    s.onChange?.();
+    this.syncDirty();
+  }
+
+  private syncDirty() {
+    const d = this.dirtyIds.size > 0;
+    ($("s-save") as HTMLButtonElement).disabled = !d;
+    ($("s-cancel") as HTMLButtonElement).disabled = !d;
+    $("s-dirty").hidden = !d;
+  }
+
+  /** « Enregistrer » : applique toutes les options modifiées d'un coup —
+   *  les previews live sont rejouées (écriture idempotente). */
+  private save() {
+    for (const id of [...this.dirtyIds]) this.staged.get(id)?.apply();
+    this.dirtyIds.clear();
+    this.syncDirty();
+  }
+
+  /** « Annuler » : recharge les contrôles depuis les valeurs persistées
+   *  et revert les aperçus live — plus rien de stagé ni d'appliqué.
+   *  Appelé aussi à la fermeture (annulation silencieuse : jamais
+   *  d'application partielle, #190). */
+  private cancelStaged() {
+    if (!this.dirtyIds.size) return;
+    for (const id of [...this.dirtyIds]) {
+      const s = this.staged.get(id);
+      if (!s) continue;
+      s.reset();
+      if (s.preview) s.apply();
+    }
+    this.dirtyIds.clear();
+    this.syncDirty();
+    this.syncSndOpts();
+    this.syncNotifOpts();
+    this.syncSecStates();
+  }
   /** Clé connKey de la connexion actuellement liée — pré-sélectionne le
    *  serveur dans le select « Appairer » (injecté par le bootstrap). */
   activeConnKey: () => string | null = () => null;
@@ -173,6 +248,9 @@ export class SettingsPanel {
   }
 
   close() {
+    // Modifications stagées non enregistrées → annulation silencieuse
+    // (revert des aperçus live inclus) : jamais d'application partielle.
+    this.cancelStaged();
     // L'inert est retiré même si le panneau avait déjà été masqué par un
     // autre chemin (early-return historique : un résiduel gelait #chat
     // sans cause visible — le watchdog core/modal filet de sécurité).
@@ -289,23 +367,58 @@ export class SettingsPanel {
         this.close();
     });
 
-    ($("s-theme") as HTMLSelectElement).onchange = (e) => {
-      applyTheme((e.target as HTMLSelectElement).value as "dark" | "light");
-      this.themeChanged();
-      this.syncSecStates();
-    };
-    ($("s-accent") as HTMLSelectElement).onchange = (e) => {
-      applyAccent((e.target as HTMLSelectElement).value as Accent);
-      this.themeChanged();
-      this.syncSecStates();
-    };
-    ($("s-accent-int") as HTMLSelectElement).onchange = (e) => {
-      applyAccentStrong((e.target as HTMLSelectElement).value === "strong");
-      this.themeChanged();
-      this.syncSecStates();
-    };
-    ($("s-bganim") as HTMLInputElement).onchange = (e) =>
-      applyBgAnim((e.target as HTMLInputElement).checked);
+    // Options stagées (#190) : appliquées seulement au clic
+    // « Enregistrer » — les cosmétiques (thème/accent/fond animé)
+    // gardent un aperçu live, reverté à l'annulation.
+    this.stage("s-theme", {
+      apply: () => {
+        applyTheme(
+          ($("s-theme") as HTMLSelectElement).value as "dark" | "light",
+        );
+        this.themeChanged();
+        this.syncSecStates();
+      },
+      reset: () => {
+        ($("s-theme") as HTMLSelectElement).value =
+          document.documentElement.classList.contains("light")
+            ? "light"
+            : "dark";
+      },
+      preview: true,
+    });
+    this.stage("s-accent", {
+      apply: () => {
+        applyAccent(($("s-accent") as HTMLSelectElement).value as Accent);
+        this.themeChanged();
+        this.syncSecStates();
+      },
+      reset: () => {
+        ($("s-accent") as HTMLSelectElement).value = accentPref();
+      },
+      preview: true,
+    });
+    this.stage("s-accent-int", {
+      apply: () => {
+        applyAccentStrong(
+          ($("s-accent-int") as HTMLSelectElement).value === "strong",
+        );
+        this.themeChanged();
+        this.syncSecStates();
+      },
+      reset: () => {
+        ($("s-accent-int") as HTMLSelectElement).value =
+          accentStrongPref() ? "strong" : "soft";
+      },
+      preview: true,
+    });
+    this.stage("s-bganim", {
+      apply: () =>
+        applyBgAnim(($("s-bganim") as HTMLInputElement).checked),
+      reset: () => {
+        ($("s-bganim") as HTMLInputElement).checked = bgAnimOn();
+      },
+      preview: true,
+    });
     // Options du select langue construites depuis LANGS (un bloc de
     // dictionnaire = une entrée) — libellés natifs, pas de data-i18n :
     // chaque langue se nomme dans sa propre langue.
@@ -316,28 +429,46 @@ export class SettingsPanel {
       opt.textContent = l.label;
       langSel.append(opt);
     }
-    langSel.onchange = (e) => {
-      setLang((e.target as HTMLSelectElement).value as Lang);
-      this.langChanged();
-      // setLang → applyStatic a retraduit les options → lire leurs
-      // libellés après coup pour les résumés de section.
-      this.syncSecStates();
-    };
-    ($("s-sendmode") as HTMLSelectElement).onchange = (e) => {
-      localStorage.setItem(
-        "ac-sendmode",
-        (e.target as HTMLSelectElement).value === "steer" ? "steer" : "queue",
-      );
-      this.sendModeChanged();
-      this.syncSecStates();
-    };
-    ($("s-autoconn") as HTMLInputElement).onchange = (e) => {
-      localStorage.setItem(
-        "ac-autoconnect",
-        (e.target as HTMLInputElement).checked ? "1" : "0",
-      );
-      this.syncSecStates();
-    };
+    this.stage("s-lang", {
+      apply: () => {
+        setLang(($("s-lang") as HTMLSelectElement).value as Lang);
+        this.langChanged();
+        // setLang → applyStatic a retraduit les options → lire leurs
+        // libellés après coup pour les résumés de section.
+        this.syncSecStates();
+      },
+      reset: () => {
+        ($("s-lang") as HTMLSelectElement).value = getLang();
+      },
+    });
+    this.stage("s-sendmode", {
+      apply: () => {
+        localStorage.setItem(
+          "ac-sendmode",
+          ($("s-sendmode") as HTMLSelectElement).value === "steer"
+            ? "steer"
+            : "queue",
+        );
+        this.sendModeChanged();
+        this.syncSecStates();
+      },
+      reset: () => {
+        ($("s-sendmode") as HTMLSelectElement).value = sendPref();
+      },
+    });
+    this.stage("s-autoconn", {
+      apply: () => {
+        localStorage.setItem(
+          "ac-autoconnect",
+          ($("s-autoconn") as HTMLInputElement).checked ? "1" : "0",
+        );
+        this.syncSecStates();
+      },
+      reset: () => {
+        ($("s-autoconn") as HTMLInputElement).checked =
+          localStorage.getItem("ac-autoconnect") !== "0";
+      },
+    });
     // « Pair… » : même modale que l'icône QR de la vue connexions —
     // shareQr pré-remplit l'endpoint (pair_resolve) et liste les
     // appareils déjà appairés au serveur choisi.
@@ -364,39 +495,73 @@ export class SettingsPanel {
       void this.refreshPairAccess();
     ($("s-pacc-ref") as HTMLButtonElement).onclick = () =>
       void this.refreshPairAccess();
-    ($("s-images") as HTMLInputElement).onchange = (e) =>
-      localStorage.setItem(
-        "ac-inline-images",
-        (e.target as HTMLInputElement).checked ? "1" : "0",
-      );
-    ($("s-rcchan") as HTMLInputElement).onchange = (e) =>
-      localStorage.setItem(
-        "ac-rcchannel",
-        (e.target as HTMLInputElement).checked ? "1" : "0",
-      );
-    ($("s-encoding") as HTMLSelectElement).onchange = (e) => {
-      localStorage.setItem("ac-encoding", (e.target as HTMLSelectElement).value);
-      this.syncSecStates();
-    };
-    ($("s-mdrender") as HTMLInputElement).onchange = (e) => {
-      const on = (e.target as HTMLInputElement).checked;
-      localStorage.setItem("ac-md-render", on ? "1" : "0");
-      this.mdRenderChanged(on);
-    };
-    ($("s-snd") as HTMLInputElement).onchange = (e) => {
-      localStorage.setItem(
-        "ac-snd",
-        (e.target as HTMLInputElement).checked ? "1" : "0",
-      );
-      this.syncSndOpts();
-      this.syncSecStates();
-    };
-    for (const k of ["done", "question", "error"] as SoundKind[]) {
-      ($(`s-snd-${k}`) as HTMLInputElement).onchange = (e) =>
+    this.stage("s-images", {
+      apply: () =>
         localStorage.setItem(
-          `ac-snd-${k}`,
-          (e.target as HTMLInputElement).checked ? "1" : "0",
+          "ac-inline-images",
+          ($("s-images") as HTMLInputElement).checked ? "1" : "0",
+        ),
+      reset: () => {
+        ($("s-images") as HTMLInputElement).checked = inlineImages();
+      },
+    });
+    this.stage("s-rcchan", {
+      apply: () =>
+        localStorage.setItem(
+          "ac-rcchannel",
+          ($("s-rcchan") as HTMLInputElement).checked ? "1" : "0",
+        ),
+      reset: () => {
+        ($("s-rcchan") as HTMLInputElement).checked = rcChannel();
+      },
+    });
+    this.stage("s-encoding", {
+      apply: () => {
+        localStorage.setItem(
+          "ac-encoding",
+          ($("s-encoding") as HTMLSelectElement).value,
         );
+        this.syncSecStates();
+      },
+      reset: () => {
+        ($("s-encoding") as HTMLSelectElement).value = defaultEncoding();
+      },
+    });
+    this.stage("s-mdrender", {
+      apply: () => {
+        const on = ($("s-mdrender") as HTMLInputElement).checked;
+        localStorage.setItem("ac-md-render", on ? "1" : "0");
+        this.mdRenderChanged(on);
+      },
+      reset: () => {
+        ($("s-mdrender") as HTMLInputElement).checked =
+          localStorage.getItem("ac-md-render") !== "0";
+      },
+    });
+    this.stage("s-snd", {
+      apply: () => {
+        localStorage.setItem(
+          "ac-snd",
+          ($("s-snd") as HTMLInputElement).checked ? "1" : "0",
+        );
+        this.syncSndOpts();
+        this.syncSecStates();
+      },
+      reset: () => {
+        ($("s-snd") as HTMLInputElement).checked = sndEnabled();
+      },
+    });
+    for (const k of ["done", "question", "error"] as SoundKind[]) {
+      this.stage(`s-snd-${k}`, {
+        apply: () =>
+          localStorage.setItem(
+            `ac-snd-${k}`,
+            ($(`s-snd-${k}`) as HTMLInputElement).checked ? "1" : "0",
+          ),
+        reset: () => {
+          ($(`s-snd-${k}`) as HTMLInputElement).checked = sndTypeOn(k);
+        },
+      });
       // Options des presets construites depuis la bibliothèque — portent
       // data-i18n, retraduites par applyStatic au changement de langue.
       const sel = $(`s-snd-preset-${k}`) as HTMLSelectElement;
@@ -407,61 +572,105 @@ export class SettingsPanel {
         opt.textContent = t(p.label);
         sel.append(opt);
       }
-      // Choisir un preset le joue aussitôt — aperçu immédiat du choix.
-      sel.onchange = () => {
-        localStorage.setItem(`ac-snd-preset-${k}`, sel.value);
-        sounds.test(k);
-      };
+      // Choisir un preset le joue aussitôt — aperçu sonore immédiat du
+      // choix (onChange sans persistance ; le setItem attend le save).
+      this.stage(`s-snd-preset-${k}`, {
+        apply: () =>
+          localStorage.setItem(
+            `ac-snd-preset-${k}`,
+            ($(`s-snd-preset-${k}`) as HTMLSelectElement).value,
+          ),
+        reset: () => {
+          ($(`s-snd-preset-${k}`) as HTMLSelectElement).value =
+            sndPresetId(k);
+        },
+        onChange: () => sounds.test(k),
+      });
       // « Tester » joue même tout désactivé — le geste débloque l'autoplay
       // de la webview (Android) en plus de donner un aperçu volume réel.
       ($(`s-snd-test-${k}`) as HTMLButtonElement).onclick = () =>
         sounds.test(k);
     }
-    ($("s-snd-unfocused") as HTMLInputElement).onchange = (e) =>
-      localStorage.setItem(
-        "ac-snd-unfocused",
-        (e.target as HTMLInputElement).checked ? "1" : "0",
-      );
-    // Activation explicite du canal → demande de permission OS immédiate
-    // (geste utilisateur = meilleur contexte pour le prompt natif).
-    ($("s-notif") as HTMLInputElement).onchange = (e) => {
-      const on = (e.target as HTMLInputElement).checked;
-      localStorage.setItem("ac-notif", on ? "1" : "0");
-      if (on) {
-        void notifications.ensurePermission(true).then((ok) => {
-          $("s-notif-denied").hidden = ok;
-        });
-      } else {
-        $("s-notif-denied").hidden = true;
-      }
-      this.syncNotifOpts();
-      this.syncSecStates();
-    };
-    for (const k of ["done", "question", "error"] as AlertKind[]) {
-      ($(`s-notif-${k}`) as HTMLInputElement).onchange = (e) =>
+    this.stage("s-snd-unfocused", {
+      apply: () =>
         localStorage.setItem(
-          `ac-notif-${k}`,
-          (e.target as HTMLInputElement).checked ? "1" : "0",
-        );
+          "ac-snd-unfocused",
+          ($("s-snd-unfocused") as HTMLInputElement).checked ? "1" : "0",
+        ),
+      reset: () => {
+        ($("s-snd-unfocused") as HTMLInputElement).checked =
+          sndOnlyUnfocused();
+      },
+    });
+    // Activation explicite du canal → demande de permission OS au save
+    // (geste utilisateur = meilleur contexte pour le prompt natif).
+    this.stage("s-notif", {
+      apply: () => {
+        const on = ($("s-notif") as HTMLInputElement).checked;
+        localStorage.setItem("ac-notif", on ? "1" : "0");
+        if (on) {
+          void notifications.ensurePermission(true).then((ok) => {
+            $("s-notif-denied").hidden = ok;
+          });
+        } else {
+          $("s-notif-denied").hidden = true;
+        }
+        this.syncNotifOpts();
+        this.syncSecStates();
+      },
+      reset: () => {
+        ($("s-notif") as HTMLInputElement).checked = notifEnabled();
+      },
+    });
+    for (const k of ["done", "question", "error"] as AlertKind[]) {
+      this.stage(`s-notif-${k}`, {
+        apply: () =>
+          localStorage.setItem(
+            `ac-notif-${k}`,
+            ($(`s-notif-${k}`) as HTMLInputElement).checked ? "1" : "0",
+          ),
+        reset: () => {
+          ($(`s-notif-${k}`) as HTMLInputElement).checked = notifTypeOn(k);
+        },
+      });
     }
-    ($("s-notif-unfocused") as HTMLInputElement).onchange = (e) =>
-      localStorage.setItem(
-        "ac-notif-unfocused",
-        (e.target as HTMLInputElement).checked ? "1" : "0",
-      );
+    this.stage("s-notif-unfocused", {
+      apply: () =>
+        localStorage.setItem(
+          "ac-notif-unfocused",
+          ($("s-notif-unfocused") as HTMLInputElement).checked ? "1" : "0",
+        ),
+      reset: () => {
+        ($("s-notif-unfocused") as HTMLInputElement).checked =
+          notifOnlyUnfocused();
+      },
+    });
     ($("s-notif-test") as HTMLButtonElement).onclick = () =>
       notifications.test();
-    ($("s-snd-vol") as HTMLInputElement).oninput = (e) => {
-      localStorage.setItem(
-        "ac-snd-vol",
-        (e.target as HTMLInputElement).value,
-      );
-      this.syncSecStates();
-    };
+    this.stage("s-snd-vol", {
+      event: "oninput",
+      apply: () => {
+        localStorage.setItem(
+          "ac-snd-vol",
+          ($("s-snd-vol") as HTMLInputElement).value,
+        );
+        this.syncSecStates();
+      },
+      reset: () => {
+        ($("s-snd-vol") as HTMLInputElement).value = String(
+          Math.round(sndVolume() * 100),
+        );
+      },
+    });
     ($("s-checkupdate") as HTMLButtonElement).onclick = () => this.runUpdateCheck();
     // « Voir les logs » : la visionneuse client.log partagée — la télémétrie
     // update (check → install) y est lisible sans quitter les paramètres.
     bindLogView($("s-logs") as HTMLDetailsElement);
+    // Staging (#190) : « Enregistrer » applique tout, « Annuler »
+    // restaure — inactifs tant que rien n'est modifié.
+    ($("s-save") as HTMLButtonElement).onclick = () => this.save();
+    ($("s-cancel") as HTMLButtonElement).onclick = () => this.cancelStaged();
+    this.syncDirty();
   }
 
   /** Résumé d'état à droite du titre de chaque section — la valeur
