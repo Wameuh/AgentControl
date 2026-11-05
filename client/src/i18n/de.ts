@@ -437,6 +437,8 @@ export const de: Record<Key, string> = {
   just_now: "gerade eben",
   wait_for: "seit {d}",
   wait_max: "max. {d}",
+  save: "Speichern",
+  settings_dirty: "ungespeicherte Änderungen",
   bottom_jump_title: "Zum Live-Ende zurück",
   // Benutzer-Feedback: Toasts, Daemon-Dialog, Leerzustände
   retry: "Wiederholen",
