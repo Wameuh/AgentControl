@@ -54,8 +54,10 @@ exit 0 ; `--timeout` (défaut 2 h) → message TIMEOUT. Le message est borné
 
 ```bash
 ac-wait --name "CI #123" --interval 60 -- gh pr checks 123 --required
-ac-wait --name "merge #123" -- gh pr view 123 --json state -q .state | grep -q MERGED
+ac-wait --name "merge #123" -- bash -c 'gh pr view 123 --json state -q .state | grep -q MERGED'
 #  ^ astuce : la condition = « la commande exit 0 » — pipe/filtre librement
+#    MAIS dans bash -c : un `|` nu dans la ligne appelante coupe la commande
+#    (le waiter ne recevrait que le premier membre → ping immédiat).
 ac-wait --until-file /tmp/build.done --name "build fini"
 ac-wait --until-pid 4207 --name "mort du batch"          # pid déjà mort → OK direct
 ac-wait --until-port 127.0.0.1:8080 --name "daemon up"
