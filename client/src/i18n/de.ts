@@ -434,6 +434,9 @@ export const de: Record<Key, string> = {
   via: "via", origin_tip: "erstellt vom Dienst {origin}",
   dot_asleep_tip: "ruhend — wacht bei der nächsten Nachricht auf",
   dot_wait_tip: "wartend — ein ac-wait-Waiter weckt sie",
+  just_now: "gerade eben",
+  wait_for: "seit {d}",
+  wait_max: "max. {d}",
   bottom_jump_title: "Zum Live-Ende zurück",
   // Benutzer-Feedback: Toasts, Daemon-Dialog, Leerzustände
   retry: "Wiederholen",

@@ -465,6 +465,26 @@ pub struct SessionMeta {
     /// réussi ou reset de cycle (spawn, /clear, set_model…).
     #[serde(default)]
     pub last_error: Option<LastError>,
+    /// Détail du waiter ac-wait — présent seulement quand `state ==
+    /// "wait"` (dérivé à la sérialisation comme `wait`, jamais persisté).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<WaitInfo>,
+}
+
+/// Détail du waiter ac-wait vivant qui justifie l'état `wait` — le
+/// plus ancien vivant rapporte (l'attente la plus longue est la plus
+/// parlante pour repérer un waiter bloqué, #189).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaitInfo {
+    /// Âge du waiter en secondes (`now - started` au moment de la
+    /// sérialisation — 0.5 pour « vient de démarrer »).
+    pub secs: f64,
+    /// Nom déclaré du waiter (`ac-wait --name`) — vide si absent.
+    #[serde(default)]
+    pub name: String,
+    /// Timeout configuré du waiter (secondes), s'il en a un.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<f64>,
 }
 
 /// Trace persistée du dernier échec `session/prompt` (état "error").

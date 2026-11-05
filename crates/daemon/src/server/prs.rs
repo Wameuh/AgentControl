@@ -710,6 +710,7 @@ mod tests {
             context_used: None,
             context_size: None,
             last_error: None,
+            wait: None,
         };
         std::fs::write(
             dir.join("meta.json"),

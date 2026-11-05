@@ -5,6 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import { $, esc, notify, q, showErr } from "../core/dom";
+import { fmtDur } from "../core/format";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
 import { isAndroid, meshSetMood } from "../core/chrome";
@@ -29,6 +30,18 @@ import type { ComponentsPanel } from "./components";
 import type { MapView } from "./map-view";
 
 const DTYPE = "application/x-ac-session";
+
+/** Segment « · depuis 12 min · nom · max 2 h » du tooltip « wait »
+ *  (#189) — vide quand le démon ne rapporte pas le détail du waiter
+ *  (vieux démon : comportement antérieur inchangé). */
+function waitTip(s: SessionMeta): string {
+  const w = s.wait;
+  if (!w) return "";
+  const age = w.secs < 1 ? t("just_now") : t("wait_for", { d: fmtDur(w.secs) });
+  const name = w.name ? ` · ${w.name}` : "";
+  const max = w.timeout ? ` · ${t("wait_max", { d: fmtDur(w.timeout) })}` : "";
+  return ` · ${age}${name}${max}`;
+}
 
 /** Charge d'un drag interne à l'arbre : session (id) ou sous-arbre de
  *  groupe (path). `kind` absent = session (payloads antérieurs). */
@@ -999,7 +1012,7 @@ export class Sidebar {
         : s.state === "asleep"
           ? `asleep · ${t("dot_asleep_tip")}`
           : s.state === "wait"
-            ? `wait · ${t("dot_wait_tip")}`
+            ? `wait${waitTip(s)} · ${t("dot_wait_tip")}`
             : s.state;
     div.innerHTML = `<span class="dot st-${dotCls(s.state, s.last_error)}" title="${q(esc(dotTip))}">${dotIcon(s.state, s.last_error)}</span><span class="t">${this.hl(s.title)}</span>${originHtml}${prHtml}<span class="a">${this.hl(s.agent)}</span><button class="sess-del" title="Supprimer">${icon("close")}</button>`;
     div.onclick = () => {
