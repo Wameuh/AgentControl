@@ -46,8 +46,8 @@ allowed (resync and back-to-clean). Accepted tripwire: shell writes
 (`>`, `sed -i`) aren't intercepted — the `Stop` hook is the safety net.
 
 **Waiting = `ac-wait`, never in-turn**: any wait longer than ~1 min
-(CI checks, `/mr review` verdict, merge watch, the ~30 s ready
-delay, long builds) is delegated to a background waiter, never
+(CI checks, `/mr review` verdict, merge watch, long builds)
+is delegated to a background waiter, never
 spent blocking a tool call. `ac-wait --name "<t>" --interval 60
 -- <cmd>` returns a wait-id immediately, re-evaluates `<cmd>`
 until exit 0, then pings the session via `acctl send` —
