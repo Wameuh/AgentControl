@@ -259,11 +259,16 @@ fn force_safe_state(state: &str) -> bool {
 /// Sessions Backlog-* qui consomment réellement un slot : une session
 /// `asleep` n'a plus de process agent — elle ne compte pas dans
 /// `alive` (son réveil consommera un slot au moment du dispatch
-/// **ou** d'un nudge — cf. `nudge_consumes_slot`).
-fn backlog_alive(metas: &[SessionMeta], cfg: &cfg::OrchCfg) -> usize {
+/// **ou** d'un nudge — cf. `nudge_consumes_slot`), SAUF un `asleep`
+/// sous waiter ac-wait vivant (`live`) : son retour est garanti par
+/// le ping externe et consommera un slot — le compter évite de
+/// remplacer puis de dépasser max_workers au réveil (#181).
+/// `live` est fourni par l'appelant (scan unique du répertoire
+/// d'état par tick — `acwait_live_sids`).
+fn backlog_alive(metas: &[SessionMeta], cfg: &cfg::OrchCfg, live: &HashSet<String>) -> usize {
     metas
         .iter()
-        .filter(|m| is_backlog(m, cfg) && m.state != "asleep")
+        .filter(|m| is_backlog(m, cfg) && counts_as_alive(&m.state, &m.id, live))
         .count()
 }
 
@@ -867,7 +872,7 @@ impl Daemon {
 
         // ---- D. Dispatch : reviewers d'abord (débloque l'in-flight),
         // puis planners/workers sous réserve anti-deadlock.
-        let alive = backlog_alive(metas, cfg);
+        let alive = backlog_alive(metas, cfg, &acwait_live_sids());
         let mut free = (cfg.max_workers as usize).saturating_sub(alive);
         // Mode sériel quota : au plus une session active à la fois —
         // dispatch seulement quand rien ne tourne ; la boucle reviewer
@@ -3009,7 +3014,15 @@ mod tests {
             mk("Backlog-R2", "asleep"),
             mk("Backlog-W3", "working"),
         ];
-        assert_eq!(backlog_alive(&metas, &c), 2);
+        assert_eq!(backlog_alive(&metas, &c, &HashSet::new()), 2);
+        // Un asleep sous waiter ac-wait vivant tient son slot : son
+        // réveil est garanti par le ping — le compter évite le spawn
+        // d'un remplaçant puis max_workers+1 (#181). Pas de waiter
+        // vivant → retour non garanti → compte 0 (comportement avant).
+        let mut live = HashSet::new();
+        assert_eq!(backlog_alive(&metas, &c, &live), 2);
+        live.insert("s-x".to_string());
+        assert_eq!(backlog_alive(&metas, &c, &live), 3);
         // Comptage « actif » du mode sériel : working/waiting_input
         // comptent, idle/asleep/error (backoff en attente) non.
         let metas = vec![

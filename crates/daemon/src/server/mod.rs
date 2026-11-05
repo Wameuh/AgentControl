@@ -537,7 +537,17 @@ impl Daemon {
             })
             .cloned()
             .collect();
-        idle.sort_by_cached_key(last_event_ts);
+        // Victimes LRU, mais les idles sous waiter ac-wait vivant en
+        // dernier : leur retour est planifié (ping du waiter → réveil
+        // qui reprendra un slot ici même) — préférer endormir les
+        // idles sans retour garanti (#181). Un waiter stale compte
+        // comme absent → la session reste une victime LRU normale.
+        if !idle.is_empty() {
+            let waiting = orch::acwait_live_sids();
+            idle.sort_by_cached_key(|s| {
+                (waiting.contains(&s.meta_snapshot().id), last_event_ts(s))
+            });
+        }
         anyhow::ensure!(
             idle.len() >= excess,
             "limite d'instances atteinte pour « {agent} » ({}/{max}) — aucune session inactive à endormir",

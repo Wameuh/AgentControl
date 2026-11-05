@@ -775,10 +775,31 @@ pub(crate) fn acwait_pending(sid: &str) -> bool {
     acwait_live_sids().contains(sid)
 }
 
+/// La session occupe-t-elle un slot `max_workers` au sens du comptage
+/// `alive`/`backlog_alive` ? Tout sauf `asleep`, PLUS un `asleep` dont
+/// un waiter ac-wait vivant garantit le retour : le ping réveillera la
+/// session et lui fera consommer un slot à ce moment — la compter dès
+/// maintenant évite de spawner un remplaçant puis de rester
+/// durablement à `max_workers + 1` (#181). Waiter stale → retour non
+/// garanti → compte 0 comme tout `asleep`.
+pub(crate) fn counts_as_alive(state: &str, sid: &str, live: &HashSet<String>) -> bool {
+    state != "asleep" || live.contains(sid)
+}
+
 /// Sids ayant au moins un waiter ac-wait vivant — scan unique du
 /// répertoire d'état (un appel par lot de sessions, ex. list_sessions,
 /// au lieu d'une relecture disque par session).
 pub(crate) fn acwait_live_sids() -> HashSet<String> {
+    let Some(dir) = acwait_state_dir() else {
+        return HashSet::new();
+    };
+    acwait_live_sids_in(&dir)
+}
+
+/// Corps testable du scan (`acwait_live_sids` sur un répertoire
+/// explicite) : `.meta` dont le `.done`/`.cancel` n'existe pas, pid
+/// vivant (ou meta tout frais sans pid), timeout non dépassé.
+fn acwait_live_sids_in(dir: &std::path::Path) -> HashSet<String> {
     /// Marge post-timeout : la notif TIMEOUT part avant l'écriture du
     /// `.done` — ne pas nudger pendant que le waiter termine.
     const TIMEOUT_GRACE_S: f64 = 120.0;
@@ -786,8 +807,7 @@ pub(crate) fn acwait_live_sids() -> HashSet<String> {
     /// le meta est tout frais.
     const START_GRACE_S: f64 = 30.0;
     let mut out = HashSet::new();
-    let Some(dir) = acwait_state_dir() else { return out };
-    let Ok(entries) = std::fs::read_dir(&dir) else { return out };
+    let Ok(entries) = std::fs::read_dir(dir) else { return out };
     let now = now_secs();
     for e in entries.flatten() {
         let meta_path = e.path();
@@ -1516,9 +1536,16 @@ impl Daemon {
                 return Ok(());
             }
             // Les `asleep` ne tiennent pas de slot (plus de process) —
-            // aligné sur backlog_alive du pipeline plan_review. Un
-            // réveil ultérieur consomme le slot via le budget `free`.
-            let alive = workers.iter().filter(|w| w.state != "asleep").count();
+            // sauf ceux qu'un waiter ac-wait vivant réveillera : leur
+            // retour est garanti et consommera un slot — les compter
+            // évite le spawn d'un remplaçant puis max+1 au ping (#181).
+            // Waiter stale → compte 0, réveil budgété par `free` comme
+            // avant. Aligné sur backlog_alive du pipeline plan_review.
+            let live_waiters = acwait_live_sids();
+            let alive = workers
+                .iter()
+                .filter(|w| counts_as_alive(&w.state, &w.id, &live_waiters))
+                .count();
             let mut free = (cfg.max_workers as usize).saturating_sub(alive);
             // FIFO d'allocation : le plus ancien nudge différé d'abord
             // (jamais nudgé = le plus ancien).
@@ -2358,5 +2385,69 @@ mod tests {
         assert!(workspaces_json(true, &cfg).is_empty());
         cfg.spawn_managers = true;
         assert_eq!(workspaces_json(true, &cfg).len(), 1);
+    }
+
+    #[test]
+    fn asleep_sous_waiter_compte_alive() {
+        // #181 : un asleep dont le waiter ac-wait est vivant tient son
+        // slot max_workers (retour garanti par le ping) — le compter
+        // empêche le spawn d'un remplaçant puis le dépassement au
+        // réveil. Waiter absent/stale → retour non garanti → compte 0.
+        let mut live = HashSet::new();
+        live.insert("s-w1".to_string());
+        assert!(counts_as_alive("asleep", "s-w1", &live));
+        assert!(!counts_as_alive("asleep", "s-w2", &live));
+        // Non-asleep : compte toujours, waiter ou pas.
+        for st in ["idle", "working", "error"] {
+            assert!(counts_as_alive(st, "s-w2", &live));
+        }
+    }
+
+    /// Meta ac-wait minimale : `key=%q` shell-quoté — valeurs simples
+    /// acceptées telles quelles (le parseur strippe les quotes).
+    fn write_waiter(dir: &std::path::Path, id: &str, meta: &str) {
+        std::fs::write(dir.join(format!("{id}.meta")), meta).unwrap();
+    }
+
+    #[test]
+    fn acwait_live_filtre_stales() {
+        let dir = std::env::temp_dir().join(format!("ac-wait-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let now = now_secs();
+        // Vivant : pid du process courant (kill -0 réussit), timeout large.
+        write_waiter(
+            &dir,
+            "w1",
+            &format!("session=s-live\nstarted={now}\ntimeout=3600\n"),
+        );
+        std::fs::write(dir.join("w1.pid"), std::process::id().to_string()).unwrap();
+        // Stale : timeout + grâce dépassés sans .done (worker mort en vol).
+        write_waiter(
+            &dir,
+            "w2",
+            &format!("session=s-stale\nstarted={}\ntimeout=10\n", now - 10_000.0),
+        );
+        std::fs::write(dir.join("w2.pid"), std::process::id().to_string()).unwrap();
+        // Terminé : .done posé → exclu même si le meta est frais.
+        write_waiter(
+            &dir,
+            "w3",
+            &format!("session=s-done\nstarted={now}\ntimeout=3600\n"),
+        );
+        std::fs::write(dir.join("w3.done"), "done").unwrap();
+        // Frais sans .pid : worker pas encore démarré → vivant (grâce
+        // de boot du meta tout juste écrit).
+        write_waiter(
+            &dir,
+            "w4",
+            &format!("session=s-boot\nstarted={now}\ntimeout=3600\n"),
+        );
+        let sids = acwait_live_sids_in(&dir);
+        assert!(sids.contains("s-live"));
+        assert!(!sids.contains("s-stale"));
+        assert!(!sids.contains("s-done"));
+        assert!(sids.contains("s-boot"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
