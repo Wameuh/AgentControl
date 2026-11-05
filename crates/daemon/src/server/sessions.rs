@@ -15,6 +15,17 @@ impl Daemon {
                 let mut list: Vec<SessionMeta> =
                     sessions.values().map(|s| s.meta_snapshot()).collect();
                 list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                // « wait » dérivé à l'affichage : idle + waiter ac-wait
+                // vivant — la session se parque en attendant le ping du
+                // waiter, pas une action utilisateur. meta.state interne
+                // reste "idle" (orchestrateur, retries, file de prompts
+                // raisonnent sur l'état réel).
+                let waiting = super::orch::acwait_live_sids();
+                for m in &mut list {
+                    if m.state == "idle" && waiting.contains(m.id.as_str()) {
+                        m.state = "wait".into();
+                    }
+                }
                 Ok(serde_json::to_value(list)?)
     }
 
@@ -886,8 +897,14 @@ impl Daemon {
 
     pub(super) async fn h_session_info(self: &Arc<Self>, session: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
+                let mut meta = s.meta_snapshot();
+                // Même dérivation « wait » que list_sessions (idle +
+                // waiter ac-wait vivant) — affichage seul.
+                if meta.state == "idle" && super::orch::acwait_pending(&meta.id) {
+                    meta.state = "wait".into();
+                }
                 Ok(json!({
-                    "meta": s.meta_snapshot(),
+                    "meta": meta,
                     "pending": s.pending_requests(),
                     "alive": s.is_alive(),
                     "queue": s.queue_snapshot(),

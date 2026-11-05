@@ -93,3 +93,4 @@
 272: Release notes now attribute commits brought in by a "Merge pull request #N" merge to their PR, so their English note applies instead of the raw subject.
 276: Chat messages are now selectable and copyable — right-click a selection for "Copy", fenced code blocks get a copy button, and text selection survives streaming tool output.
 277: Model selectors now show catalogue pricing when the agent provider exposes it (e.g. Devin) — cost suffixes on the header model/effort dropdowns, a cost line in the Fusion dialog, and priced suggestions in the new-session dialog; hidden when the provider reports nothing.
+274: Sessions parked on an ac-wait waiter now show the opal "wait" gem instead of a misleading idle green — with a tooltip explaining the wait.

@@ -430,6 +430,7 @@ export const en = {
   spawned_by: "spawned by {parent}",
   via: "via", origin_tip: "created by service {origin}",
   dot_asleep_tip: "asleep — wakes on next message",
+  dot_wait_tip: "waiting — an ac-wait waiter will wake it",
   bottom_jump_title: "Back to live tail",
   // retours utilisateur : toasts, dialogue démon, états vides
   retry: "Retry",

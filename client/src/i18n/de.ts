@@ -433,6 +433,7 @@ export const de: Record<Key, string> = {
   spawned_by: "erstellt von {parent}",
   via: "via", origin_tip: "erstellt vom Dienst {origin}",
   dot_asleep_tip: "ruhend — wacht bei der nächsten Nachricht auf",
+  dot_wait_tip: "wartend — ein ac-wait-Waiter weckt sie",
   bottom_jump_title: "Zum Live-Ende zurück",
   // Benutzer-Feedback: Toasts, Daemon-Dialog, Leerzustände
   retry: "Wiederholen",
