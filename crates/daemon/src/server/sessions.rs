@@ -591,9 +591,19 @@ impl Daemon {
             .clone()
             .context("profil sans model_override_cmd")?;
         let prev = (meta.model.clone(), meta.model_source.clone());
+        // Le kill est destructif pour un tour en vol (le prompt meurt
+        // avec le process) — signalé explicitement, la voie annoncée
+        // (set_config_option) est non destructive.
+        let busy = matches!(
+            meta.state.as_str(),
+            "running" | "waiting_input" | "starting" | "spawning"
+        );
         s.set_model_meta(Some(model.to_string()), Some("catalogue".into()));
         s.emit(EventKind::System {
-            text: format!("modèle catalogue « {model} » — application via side-channel…"),
+            text: format!(
+                "modèle catalogue « {model} » — application via side-channel{}…",
+                if busy { " (le tour en cours sera interrompu)" } else { "" }
+            ),
         });
         // Kill AVANT l'override : le process `devin acp` détient le lock
         // de session et réécrirait le store à sa fermeture — le
@@ -627,7 +637,9 @@ impl Daemon {
         let Some(p) = self.agents.get(agent) else {
             return false;
         };
-        if p.catalogue_cmd.is_none() {
+        // Les deux clés : sans model_override_cmd la valeur catalogue
+        // n'est pas applicable — inutile de sonder pour rien.
+        if p.catalogue_cmd.is_none() || p.model_override_cmd.is_none() {
             return false;
         }
         self.catalogues
@@ -760,6 +772,18 @@ impl Daemon {
                 Some(m) => d.catalogue_member(&s.meta_snapshot().agent, m).await,
                 None => false,
             };
+            // Source posée AVANT le handshake : sinon la réconciliation
+            // post-spawn (agent.rs) verrait un modèle « announced »
+            // mismatché vs la valeur clampée reportée et stagerait
+            // pending_config["model"] → replay de set_config_option
+            // voués à l'échec (3 events Error factices) avant que le
+            // side-channel ne purge. Avec "catalogue", le reconcile
+            // skippe et set_model_meta purge le pending.
+            if cat_hit {
+                if let Some(m) = model.as_deref() {
+                    s.set_model_meta(Some(m.to_string()), Some("catalogue".into()));
+                }
+            }
             let r = s
                 .spawn_agent(
                     &cmd,
@@ -1081,7 +1105,16 @@ impl Daemon {
                 let s = self.get_session(&session).await?;
                 // Les valeurs catalogue-only passent par le side-channel,
                 // jamais par session/set_config_option (refus ACP garanti).
-                if config_id == "model" && self.catalogue_only(&s, &value).await {
+                // L'option modèle peut être adressée par son id ACP ou sa
+                // catégorie « model » — les deux déclenchent l'override.
+                let is_model_cfg = config_id == "model" || {
+                    let m = s.meta_snapshot();
+                    m.config_options.iter().any(|o| {
+                        (o.id == config_id || o.category == config_id)
+                            && (o.id == "model" || o.category == "model")
+                    })
+                };
+                if is_model_cfg && self.catalogue_only(&s, &value).await {
                     self.apply_catalogue_model(&s, &value).await?;
                     let applied = s.meta_snapshot().model.unwrap_or(value);
                     return Ok(json!({"config": config_id, "value": applied}));

@@ -273,6 +273,16 @@ impl Session {
                 continue;
             }
             if quiet {
+                // Ré-affirmation catalogue : la valeur vit dans le store
+                // provider (model_override_cmd), pas dans les options
+                // annoncées — la re-pousser via set_config_option serait
+                // un refus ACP ou une réécriture de l'override.
+                if id == "model"
+                    && self.meta.lock().unwrap().model_source.as_deref()
+                        == Some("catalogue")
+                {
+                    continue;
+                }
                 // Ré-affirmation de respawn, best-effort et silencieuse :
                 // seul un configId annoncé ET une valeur résoluble
                 // autorisent le push (une valeur hors config_options —
@@ -589,12 +599,26 @@ impl Session {
             if let Some(opt) = m.config_options.iter_mut().find(|o| o.id == config_id) {
                 opt.current_value = value.into();
             }
+            // L'option peut être adressée par son id ACP ou sa catégorie
+            // (« model ») — les deux comptent pour meta.model/source.
+            let modelish = config_id == "model"
+                || m.config_options.iter().any(|o| {
+                    (o.id == config_id || o.category == config_id)
+                        && (o.id == "model" || o.category == "model")
+                });
             match config_id {
                 "mode" => m.mode = Some(value.into()),
-                "model" => m.model = Some(value.into()),
+                "model" => {
+                    m.model = Some(value.into());
+                    m.model_source = Some("announced".into());
+                }
                 // Sticky : rejoué à chaque spawn — un session/load qui
                 // restaure la valeur persistée côté agent ne doit pas
                 // perdre la condition (thought_level…).
+                _ if modelish => {
+                    m.model = Some(value.into());
+                    m.model_source = Some("announced".into());
+                }
                 _ => {
                     m.desired_config.insert(config_id.into(), value.into());
                 }
