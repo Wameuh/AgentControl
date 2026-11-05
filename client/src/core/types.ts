@@ -20,6 +20,10 @@ export interface SessionMeta {
   /** Provenance du modèle : "announced" (options ACP) | "catalogue"
    *  (variante hors annonce, posée via side-channel provider). */
   model_source?: string;
+  /** Sid natif contre lequel le dernier override catalogue a tourné. */
+  model_override_sid?: string;
+  /** L'agent annonce session/load (absent = pas encore spawné). */
+  supports_load?: boolean;
   available_modes: string[];
   available_commands: CmdInfo[];
   available_models: string[];

@@ -68,6 +68,7 @@ impl Daemon {
                     model: model.clone(),
                     model_source: model.as_ref().map(|_| "announced".to_string()),
                     model_override_sid: None,
+                    supports_load: None,
                     available_modes: vec![],
                     available_commands: vec![],
                     available_models: vec![],
@@ -150,6 +151,7 @@ impl Daemon {
                     model: None,
                     model_source: None,
                     model_override_sid: None,
+                    supports_load: None,
                     available_modes: vec![],
                     available_commands: vec![],
                     available_models: vec![],
@@ -568,9 +570,32 @@ impl Daemon {
         if !catalog.iter().any(|e| e.value == value) {
             return false;
         }
+        // Sans session/load le chemin est inapplicable (store indexé
+        // par sid) — retomber sur l'ACP pour que l'erreur soit honnête.
+        if meta.supports_load == Some(false) {
+            return false;
+        }
         !crate::server::orch_cfg::meta_config_values(&meta, "model")
             .iter()
             .any(|(v, _)| v == value)
+    }
+
+    /// Modèle catalogue choisi sur une session endormie/morte : rien à
+    /// tuer — on enregistre la valeur et on invalide
+    /// `model_override_sid` pour que le prochain respawn (réveil,
+    /// resume) rejoue l'override via `reapply_catalogue_if_new_sid`.
+    /// Même modèle déjà appliqué sur ce sid : re-sélection = no-op.
+    fn stage_catalogue_model(&self, s: &Arc<Session>, model: &str) {
+        let m = s.meta_snapshot();
+        if m.model.as_deref() == Some(model)
+            && m.model_source.as_deref() == Some("catalogue")
+            && m.model_override_sid.is_some()
+            && m.model_override_sid == m.native_session_id
+        {
+            return;
+        }
+        s.set_model_meta(Some(model.to_string()), Some("catalogue".into()));
+        s.set_model_override_sid(None);
     }
 
     /// Application d'une valeur catalogue-only — l'ACP refuse les
@@ -589,6 +614,16 @@ impl Daemon {
             && meta.model_override_sid.as_deref() == meta.native_session_id.as_deref()
         {
             return Ok(());
+        }
+        // Agent sans session/load : chaque spawn fait un session/new →
+        // l'override viserait un sid mort né — refus explicite plutôt
+        // qu'un cycle voué à l'échec.
+        if meta.supports_load == Some(false) {
+            let msg = "agent sans session/load — variante catalogue non applicable";
+            s.emit(EventKind::Error {
+                message: msg.into(),
+            });
+            anyhow::bail!("{msg}");
         }
         let native = meta
             .native_session_id
@@ -625,7 +660,7 @@ impl Daemon {
         // Kill AVANT l'override : le process `devin acp` détient le lock
         // de session et réécrirait le store à sa fermeture — le
         // `devin -r` ne doit jamais tourner pendant qu'il vit.
-        s.sleep().await;
+        s.sleep_for_override().await;
         let rendered = tpl
             .replace("{native_sid}", &native)
             .replace("{model}", model);
@@ -634,8 +669,21 @@ impl Daemon {
             .await
             .unwrap_or_else(|e| Err(anyhow::anyhow!("override join: {e}")));
         if let Err(e) = r {
-            s.set_model_meta(prev.0, prev.1);
-            s.set_model_override_sid(prev.2);
+            // Création : meta.model valait déjà la valeur catalogue
+            // demandée — rien d'annoncé à restaurer. Repasser la
+            // provenance à "announced" pour que le handshake suivant
+            // rapporte la valeur réellement appliquée (clampée)
+            // au lieu de laisser croire que l'override a pris.
+            let creation = prev.0.as_deref() == Some(model)
+                && prev.1.as_deref() == Some("catalogue");
+            s.set_model_meta(
+                prev.0,
+                if creation {
+                    Some("announced".into())
+                } else {
+                    prev.1
+                },
+            );
             s.emit(EventKind::Error {
                 message: format!(
                     "override modèle « {model} » échoué: {e:#} — valeur précédente conservée"
@@ -670,6 +718,13 @@ impl Daemon {
         let (Some(model), Some(sid)) = (m.model.clone(), m.native_session_id.clone()) else {
             return;
         };
+        // Agent sans session/load : chaque spawn fait un session/new →
+        // sid frais à chaque itération → rejeu infini (kill + override
+        // + respawn en boucle). La feature est de toute façon
+        // inapplicable — le store indexé par sid ne suit jamais.
+        if m.supports_load == Some(false) {
+            return;
+        }
         if m.model_override_sid.as_deref() == Some(sid.as_str()) {
             return;
         }
@@ -875,6 +930,19 @@ impl Daemon {
                             if d.catalogue_only(&s, m).await {
                                 let _ = d.apply_catalogue_model(&s, m).await;
                             } else {
+                                // Membre du catalogue mais non
+                                // applicable (agent sans session/load)
+                                // : la provenance « catalogue » posée
+                                // avant le handshake ne doit pas
+                                // survivre — meta reflète la valeur
+                                // annoncée/clampée réellement retenue.
+                                let snap = s.meta_snapshot();
+                                let reported = snap
+                                    .config_options
+                                    .iter()
+                                    .find(|o| o.id == "model")
+                                    .map(|o| o.current_value.clone());
+                                s.set_model_meta(reported, Some("announced".into()));
                                 let _ = s.apply_spawn_config(None, Some(m), false).await;
                             }
                         }
@@ -1151,7 +1219,14 @@ impl Daemon {
     pub(super) async fn h_set_model(self: &Arc<Self>, session: String, model: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
                 if self.catalogue_only(&s, &model).await {
-                    self.apply_catalogue_model(&s, &model).await?;
+                    if s.is_alive() {
+                        self.apply_catalogue_model(&s, &model).await?;
+                    } else {
+                        // Endormie/morte : stage — le prochain respawn
+                        // rejoue l'override (comme les valeurs
+                        // annoncées qui attendent le réveil).
+                        self.stage_catalogue_model(&s, &model);
+                    }
                     let applied = s.meta_snapshot().model.unwrap_or(model);
                     return Ok(json!({"model": applied}));
                 }
@@ -1176,7 +1251,11 @@ impl Daemon {
                     })
                 };
                 if is_model_cfg && self.catalogue_only(&s, &value).await {
-                    self.apply_catalogue_model(&s, &value).await?;
+                    if s.is_alive() {
+                        self.apply_catalogue_model(&s, &value).await?;
+                    } else {
+                        self.stage_catalogue_model(&s, &value);
+                    }
                     let applied = s.meta_snapshot().model.unwrap_or(value);
                     return Ok(json!({"config": config_id, "value": applied}));
                 }

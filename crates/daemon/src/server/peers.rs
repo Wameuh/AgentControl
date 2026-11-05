@@ -190,6 +190,7 @@ impl Daemon {
                     mode: mode.or(if same_agent { cm.mode.clone() } else { None }),
                     model_source: eff_source,
                     model_override_sid: eff_osid,
+                    supports_load: None,
                     model: eff_model,
                     available_modes: vec![],
                     available_commands: vec![],

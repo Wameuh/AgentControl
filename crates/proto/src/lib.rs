@@ -417,6 +417,12 @@ pub struct SessionMeta {
     /// étant indexé par sid.
     #[serde(default)]
     pub model_override_sid: Option<String>,
+    /// L'agent annonce `session/load` (capacités ACP du handshake) —
+    /// None = pas encore spawné. Sans load, le store provider indexé
+    /// par sid ne peut pas suivre : le chemin catalogue-only est
+    /// structurellement inapplicable.
+    #[serde(default)]
+    pub supports_load: Option<bool>,
     /// Modes annoncés par l'agent (session/new|load → modes.availableModes)
     #[serde(default)]
     pub available_modes: Vec<String>,

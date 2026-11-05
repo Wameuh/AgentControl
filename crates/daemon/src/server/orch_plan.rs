@@ -2996,6 +2996,7 @@ mod tests {
             model: None,
             model_source: None,
             model_override_sid: None,
+            supports_load: None,
             available_modes: Vec::new(),
             available_commands: Vec::new(),
             available_models: Vec::new(),

@@ -413,6 +413,18 @@ impl Session {
                     }
                 }
                 m.config_options = parsed;
+                // Source catalogue : current_value rapporte la valeur
+                // clampée — aligner sur l'uid catalogue pour que le
+                // client voie la valeur réellement demandée.
+                if m.model_source.as_deref() == Some("catalogue") {
+                    if let Some(want) = m.model.clone() {
+                        if let Some(o) =
+                            m.config_options.iter_mut().find(|o| o.id == "model")
+                        {
+                            o.current_value = want;
+                        }
+                    }
+                }
                 // Liste fraîchement annoncée dans CETTE réponse — borne
                 // la fraîcheur pour le drop définitif du replay
                 // pending_config (uniquement si la liste a été
@@ -425,6 +437,24 @@ impl Session {
         // comme refus définitif → la marque tombe, la clé repassera
         // par pending_config au reconcile ci-dessous.
         self.revive_rejected_config();
+        // Capacité session/load persistée : le chemin catalogue-only
+        // (store provider indexé par sid) n'a de sens que si l'agent
+        // sait recharger une session — sinon chaque spawn fait un
+        // session/new et l'override ne peut jamais suivre le sid.
+        let load_changed = {
+            let mut m = self.meta.lock().unwrap();
+            let mut changed = m.supports_load != Some(supports_load);
+            m.supports_load = Some(supports_load);
+            if !supports_load && m.model_source.as_deref() == Some("catalogue") {
+                m.model_source = Some("announced".into());
+                m.model = None;
+                changed = true;
+            }
+            changed
+        };
+        if load_changed {
+            self.save_meta();
+        }
         self.save_meta();
         // Capacités du profil : chaque handshake enrichit le cache démon
         // (agent_caps.json — selects du dialogue nouvelle session,
@@ -963,6 +993,19 @@ impl Session {
                                     _ => {}
                                 }
                             }
+                            // Idem handshake : current_value clampé →
+                            // aligner sur l'uid catalogue demandé.
+                            if m.model_source.as_deref() == Some("catalogue") {
+                                if let Some(want) = m.model.clone() {
+                                    if let Some(o) = m
+                                        .config_options
+                                        .iter_mut()
+                                        .find(|o| o.id == "model")
+                                    {
+                                        o.current_value = want;
+                                    }
+                                }
+                            }
                             m.agent.clone()
                         };
                         self.config_gen.fetch_add(1, Ordering::SeqCst);
@@ -1191,13 +1234,25 @@ impl Session {
     /// (sinon un nouvel envoi ré-acquerrait le flag pendant que
     /// l'ancienne tâche le libère aussi — double relâchement croisé).
     pub async fn sleep(&self) {
+        self.sleep_inner(
+            "session endormie — l'agent sera relancé au prochain message",
+        )
+        .await;
+    }
+
+    /// Sleep pour l'override catalogue : le relaunch est immédiat
+    /// (override → respawn dans la même opération) — le message
+    /// « relancé au prochain message » de sleep() serait trompeur.
+    pub async fn sleep_for_override(&self) {
+        self.sleep_inner("session suspendue — application du modèle catalogue…").await;
+    }
+
+    async fn sleep_inner(&self, msg: &'static str) {
         self.set_state("asleep");
         self.take_compact_hold();
         self.kill_for_respawn().await;
         self.flush_text();
-        self.emit(EventKind::System {
-            text: "session endormie — l'agent sera relancé au prochain message".into(),
-        });
+        self.emit(EventKind::System { text: msg.into() });
     }
 
     /// Sort de l'état "asleep" avant un spawn légitime (réveil auto ou
@@ -1338,6 +1393,7 @@ mod tests {
             model: model.map(String::from),
             model_source: None,
             model_override_sid: None,
+            supports_load: None,
             available_modes: vec![],
             available_commands: vec![],
             available_models: vec![],
