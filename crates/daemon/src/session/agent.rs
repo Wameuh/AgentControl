@@ -171,6 +171,74 @@ impl Session {
         Err(last)
     }
 
+    /// Réarme les refus définitifs (`config_rejected`) dont la valeur
+    /// redevient RÉSOLVABLE sur la liste fraîchement annoncée : la
+    /// marque tombe et la paire (k, v) — que meta.mode/model ne
+    /// conserve plus après resync — est ré-insérée dans
+    /// pending_config pour être rejouée (et appliquée si l'agent la
+    /// confirme). Unknown/Ambiguous/liste vide = toujours non
+    /// résolvable → la marque reste (sinon un passthrough sans garde
+    /// re-bouclerait le warn).
+    /// Appelée après chaque écriture fraîche de config_options /
+    /// available_models / available_modes.
+    fn revive_rejected_config(&self) {
+        // Deux phases : évaluer les valeurs HORS du lock config_rejected
+        // (known_config_values prend meta — le reconcile tient meta
+        // puis config_rejected, ordre inverse = deadlock).
+        let snapshot: Vec<(String, String)> = {
+            let rej = self.config_rejected.lock().unwrap();
+            rej.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        };
+        if snapshot.is_empty() {
+            return;
+        }
+        let mut rearm = Vec::new();
+        let keep: std::collections::HashMap<String, String> = snapshot
+            .into_iter()
+            .filter(|(k, v)| {
+                let known = self.known_config_values(k);
+                if known.is_empty() {
+                    return true; // rien à confirmer → marque conservée
+                }
+                match config::resolve_config_value(&known, v) {
+                    config::Resolve::Hit(_) => {
+                        rearm.push((k.clone(), v.clone()));
+                        false
+                    }
+                    _ => true,
+                }
+            })
+            .collect();
+        if !rearm.is_empty() {
+            {
+                let mut m = self.meta.lock().unwrap();
+                for (k, v) in &rearm {
+                    m.pending_config.insert(k.clone(), v.clone());
+                }
+            }
+            self.save_meta();
+        }
+        self.config_rejected
+            .lock()
+            .unwrap()
+            // retain sur (k,v) exact : une marque posée entre le snapshot
+            // et ici (autre cycle) n'est pas effacée à tort.
+            .retain(|k, v| keep.get(k) == Some(v));
+    }
+
+    /// Vrai si `(config_id, valeur)` a déjà été soldé comme refus
+    /// définitif — le reconcile saute alors le re-pending (le replay
+    /// la re-échouerait à chaque spawn) et garde la valeur rapportée
+    /// par l'agent dans meta.
+    fn config_rejected_has(&self, k: &str, v: &str) -> bool {
+        self.config_rejected
+            .lock()
+            .unwrap()
+            .get(k)
+            .map(String::as_str)
+            == Some(v)
+    }
+
     /// Retour : Ok(true) agent prêt (session idle posée), Ok(false) le
     /// handshake a réussi mais un kill/rebind a supplanté la génération
     /// entre-temps — le nouveau cycle possède la session (rien à poser).
@@ -185,6 +253,10 @@ impl Session {
         // Nouvelle génération : tout reader d'un process précédent devient
         // périmé — son on_agent_exit ne touchera plus l'état partagé.
         let gen = self.spawn_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        // Baseline des annonces config_options : une liste jugée
+        // « fraîche » au replay pending_config doit avoir été écrite
+        // APRÈS ce point (réponse handshake ou event de ce spawn).
+        let cfg_gen0 = self.config_gen.load(Ordering::SeqCst);
         // Un load tué en vol laisserait le flag vrai → les updates de la
         // session suivante seraient ignorées comme du replay.
         self.loading_replay.store(false, Ordering::SeqCst);
@@ -280,7 +352,8 @@ impl Session {
             let mut m = self.meta.lock().unwrap();
             m.native_session_id = Some(sid.to_string());
         }
-        // Modes disponibles éventuels
+        // Modes disponibles éventuels — annonce fraîche de ce spawn,
+        // comptée pour la fraîcheur du drop définitif pending_config.
         if let Some(modes) = resp.get("modes") {
             let mut m = self.meta.lock().unwrap();
             if let Some(cur) = modes.get("currentModeId").and_then(Value::as_str) {
@@ -292,6 +365,7 @@ impl Session {
                     .filter_map(|x| x.get("id").and_then(Value::as_str).map(String::from))
                     .collect();
             }
+            self.config_gen.fetch_add(1, Ordering::SeqCst);
         }
         // Modèles disponibles éventuels
         if let Some(models) = resp.get("models") {
@@ -310,6 +384,7 @@ impl Session {
                     })
                     .collect();
             }
+            self.config_gen.fetch_add(1, Ordering::SeqCst);
         }
         // Options de config directement dans la réponse session/new|load
         // (Devin les envoie normalement via config_option_update, mais après
@@ -329,8 +404,18 @@ impl Session {
                     }
                 }
                 m.config_options = parsed;
+                // Liste fraîchement annoncée dans CETTE réponse — borne
+                // la fraîcheur pour le drop définitif du replay
+                // pending_config (uniquement si la liste a été
+                // réellement réécrite : une annonce vide ne doit pas
+                // valider la liste persistée).
+                self.config_gen.fetch_add(1, Ordering::SeqCst);
             }
         }
+        // Une annonce fraîche peut rendre résoluble une valeur soldée
+        // comme refus définitif → la marque tombe, la clé repassera
+        // par pending_config au reconcile ci-dessous.
+        self.revive_rejected_config();
         self.save_meta();
         // Capacités du profil : chaque handshake enrichit le cache démon
         // (agent_caps.json — selects du dialogue nouvelle session,
@@ -372,14 +457,23 @@ impl Session {
             if let Some(want) = meta.mode.clone() {
                 // "" n'est pas un mode poussable (apply_spawn_config le
                 // filtre déjà) — sans garde, il bouclerait un set_mode
-                // en échec à chaque spawn.
-                if !want.is_empty() && m.mode.as_deref() != Some(want.as_str()) {
+                // en échec à chaque spawn. Une valeur soldée comme refus
+                // définitif n'est ni re-pendue ni restaurée dans meta :
+                // le handshake a déjà posé la valeur rapportée par
+                // l'agent (currentModeId), qui fait foi.
+                if !want.is_empty()
+                    && m.mode.as_deref() != Some(want.as_str())
+                    && !self.config_rejected_has("mode", &want)
+                {
                     m.pending_config.insert("mode".into(), want.clone());
                     m.mode = Some(want);
                 }
             }
             if let Some(want) = meta.model.clone() {
-                if !want.is_empty() && m.model.as_deref() != Some(want.as_str()) {
+                if !want.is_empty()
+                    && m.model.as_deref() != Some(want.as_str())
+                    && !self.config_rejected_has("model", &want)
+                {
                     m.pending_config.insert("model".into(), want.clone());
                     m.model = Some(want);
                 }
@@ -399,7 +493,11 @@ impl Session {
                     .iter()
                     .find(|o| o.id == k)
                     .map(|o| o.current_value.as_str());
-                if reported != Some(v.as_str()) {
+                if reported != Some(v.as_str()) && !self.config_rejected_has(&k, &v) {
+                    // Une valeur déjà soldée comme refus définitif n'est
+                    // pas re-pendée : le replay la re-échouerait à chaque
+                    // spawn (boucle de warn). revive_rejected_config la
+                    // ré-arme si une annonce fraîche la rend résolvable.
                     m.pending_config.insert(k, v);
                 }
             }
@@ -412,23 +510,94 @@ impl Session {
         }
         for (k, v) in pending {
             let r = match k.as_str() {
-                "model" => match self.set_config_option("model", &v).await {
-                    Ok(()) => Ok(()),
-                    Err(_) => self.set_model(&v).await.map(|_| ()),
-                },
-                "mode" => match self.set_config_option("mode", &v).await {
-                    Ok(()) => Ok(()),
-                    Err(_) => self.set_mode(&v).await,
-                },
+                // model/mode : d'abord la config_option annoncée, puis le
+                // setter dédié en repli. Le repli n'a pas toujours de
+                // garde-fou (set_mode envoie la valeur brute) — un refus
+                // de résolution au 1er essai sur liste fraîche reste
+                // définitif même si le repli échoue pour une autre raison.
+                id @ ("model" | "mode") => {
+                    match self.set_config_option(id, &v).await {
+                        Ok(()) => Ok(()),
+                        Err(e1) => {
+                            let e1_res =
+                                config::is_resolution_error(&format!("{e1:#}"));
+                            let fb = if id == "model" {
+                                self.set_model(&v).await.map(|_| ())
+                            } else {
+                                self.set_mode(&v).await
+                            };
+                            match fb {
+                                Ok(()) => Ok(()),
+                                Err(e2) => {
+                                    let fresh =
+                                        self.config_gen.load(Ordering::SeqCst) != cfg_gen0;
+                                    if fresh && e1_res {
+                                        Err(e1)
+                                    } else {
+                                        Err(e2)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 _ => self.set_config_option(&k, &v).await,
             };
             if let Err(e) = r {
-                self.emit(EventKind::Error {
-                    message: format!("config différée {k}={v}: {e:#}"),
-                });
-                // Re-mise en pending : un échec transitoire ne doit pas
-                // perdre la condition voulue — retentée au prochain spawn.
-                self.meta.lock().unwrap().pending_config.insert(k, v);
+                // Deux classes d'échec : un refus DÉFINITIF (la valeur
+                // est absente de la liste que l'agent vient d'annoncer
+                // pendant ce spawn — erreur de résolution du garde-fou,
+                // pas un Invalid params ACP) est soldé : re-pendre
+                // bouclerait le warn à chaque spawn à vie. Le transitoire
+                // (agent pas prêt, transport, rate-limit, liste périmée
+                // non rafraîchie ce spawn) garde le re-pending.
+                let fresh = self.config_gen.load(Ordering::SeqCst) != cfg_gen0;
+                let definitive =
+                    fresh && config::is_resolution_error(&format!("{e:#}"));
+                if definitive {
+                    // meta.mode/model reflètent la valeur DEMANDÉE (le
+                    // reconcile la restaure) — resynchroniser sur le
+                    // current_value annoncé pour que la session soit
+                    // affichée/relancée sur ce qui tourne vraiment.
+                    {
+                        let mut m = self.meta.lock().unwrap();
+                        if k == "model" || k == "mode" {
+                            let cur = m
+                                .config_options
+                                .iter()
+                                .find(|o| o.id == k || o.category == k)
+                                .map(|o| o.current_value.clone());
+                            if let Some(v) = cur {
+                                if k == "model" {
+                                    m.model = Some(v);
+                                } else {
+                                    m.mode = Some(v);
+                                }
+                            }
+                        }
+                    }
+                    self.save_meta();
+                    let mut rej = self.config_rejected.lock().unwrap();
+                    if rej.get(&k).map(String::as_str) != Some(v.as_str()) {
+                        rej.insert(k.clone(), v.clone());
+                        drop(rej);
+                        self.emit(EventKind::System {
+                            text: format!(
+                                "config {k}={v} abandonnée — refus définitif de l'agent \
+                                 (valeur hors liste annoncée) : {e:#}"
+                            ),
+                        });
+                    }
+                } else {
+                    self.emit(EventKind::Error {
+                        message: format!("config différée {k}={v}: {e:#}"),
+                    });
+                    // Re-mise en pending : un échec transitoire ne doit pas
+                    // perdre la condition voulue — retentée au prochain spawn.
+                    self.meta.lock().unwrap().pending_config.insert(k, v);
+                }
+            } else {
+                self.config_rejected.lock().unwrap().remove(&k);
             }
         }
         if !self.meta.lock().unwrap().pending_config.is_empty() {
@@ -776,6 +945,8 @@ impl Session {
                             }
                             m.agent.clone()
                         };
+                        self.config_gen.fetch_add(1, Ordering::SeqCst);
+                        self.revive_rejected_config();
                         self.save_meta();
                         // Le cache profil suit le flux live — addition,
                         // pas remplacement (le probe reste la voie refresh).

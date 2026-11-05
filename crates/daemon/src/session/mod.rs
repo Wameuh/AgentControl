@@ -151,6 +151,22 @@ pub struct Session {
     /// sa génération à la courante : périmée → son on_agent_exit se tait
     /// (pas de "agent exited"/dead ni de take() sur le child du successeur).
     spawn_gen: AtomicU64,
+    /// Incrémentée à chaque écriture de `meta.config_options` (réponse
+    /// session/new|load ou event config_option_update) et à chaque
+    /// annonce fraîche `modes`/`models`/`available_*` du handshake —
+    /// permet de distinguer une liste de valeurs FRAÎCHEMENT annoncée
+    /// pendant le spawn courant d'un cache persisté potentiellement
+    /// périmé (le replay pending_config n'y fait un drop définitif que
+    /// sur frais).
+    config_gen: AtomicU64,
+    /// `config_id` → valeur déjà signalée comme refus définitif au
+    /// replay pending_config — déduplique l'event système (une valeur
+    /// impossible ne réémet pas à chaque spawn) et empêche le
+    /// reconcile de la re-pendre. En mémoire seule : un restart du
+    /// démon réémet l'event une fois, acceptable. Nettoyée quand la
+    /// clé est appliquée avec succès, et par revive_rejected_config
+    /// quand une annonce fraîche la rend à nouveau résolvable.
+    config_rejected: Mutex<HashMap<String, String>>,
     /// Baseline du seuil compact : vrai dès qu'un usage_update LIVE a
     /// été vu depuis le dernier spawn. Reset au spawn → le premier
     /// update live compte comme un franchissement quand il est déjà au
@@ -286,6 +302,8 @@ impl Session {
             compact_override,
             me: me.clone(),
             spawn_gen: AtomicU64::new(0),
+            config_gen: AtomicU64::new(0),
+            config_rejected: Mutex::new(HashMap::new()),
             usage_seen: std::sync::atomic::AtomicBool::new(false),
             supplant_mark: AtomicU64::new(0),
             suppress_exit_gen: AtomicU64::new(0),
