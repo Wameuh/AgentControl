@@ -698,6 +698,7 @@ mod tests {
             mode: None,
             model: None,
             model_source: None,
+            model_override_sid: None,
             available_modes: vec![],
             available_commands: vec![],
             available_models: vec![],

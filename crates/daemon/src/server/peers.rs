@@ -171,6 +171,7 @@ impl Daemon {
                         .as_ref()
                         .map(|_| "announced".to_string())
                         .or_else(|| cm.model_source.clone()),
+                    model_override_sid: cm.model_override_sid.clone(),
                     model: model.or(if same_agent { cm.model.clone() } else { None }),
                     available_modes: vec![],
                     available_commands: vec![],

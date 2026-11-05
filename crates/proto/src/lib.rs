@@ -411,6 +411,12 @@ pub struct SessionMeta {
     /// `model_override_cmd` du profil — cf. catalogue_only côté démon).
     #[serde(default)]
     pub model_source: Option<String>,
+    /// Sid natif contre lequel `model_override_cmd` a été exécuté —
+    /// un spawn qui atterrit sur un NOUVEAU sid (clear, fallback
+    /// load→new, fork) doit rejouer l'override, le store provider
+    /// étant indexé par sid.
+    #[serde(default)]
+    pub model_override_sid: Option<String>,
     /// Modes annoncés par l'agent (session/new|load → modes.availableModes)
     #[serde(default)]
     pub available_modes: Vec<String>,

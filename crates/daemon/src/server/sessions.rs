@@ -67,6 +67,7 @@ impl Daemon {
                     mode: mode.clone(),
                     model: model.clone(),
                     model_source: model.as_ref().map(|_| "announced".to_string()),
+                    model_override_sid: None,
                     available_modes: vec![],
                     available_commands: vec![],
                     available_models: vec![],
@@ -148,6 +149,7 @@ impl Daemon {
                     mode: None,
                     model: None,
                     model_source: None,
+                    model_override_sid: None,
                     available_modes: vec![],
                     available_commands: vec![],
                     available_models: vec![],
@@ -426,6 +428,9 @@ impl Daemon {
                     s.mark_dead();
                     return Err(e.context("respawn après clear"));
                 }
+                // /clear a créé un nouveau sid natif : l'override
+                // catalogue du sid effacé ne s'y applique pas — rejouer.
+                self.reapply_catalogue_if_new_sid(&s).await;
                 info!("contexte effacé: {session}");
                 Ok(json!({"session": session}))
     }
@@ -590,13 +595,17 @@ impl Daemon {
             .model_override_cmd
             .clone()
             .context("profil sans model_override_cmd")?;
-        let prev = (meta.model.clone(), meta.model_source.clone());
+        let prev = (
+            meta.model.clone(),
+            meta.model_source.clone(),
+            meta.model_override_sid.clone(),
+        );
         // Le kill est destructif pour un tour en vol (le prompt meurt
         // avec le process) — signalé explicitement, la voie annoncée
         // (set_config_option) est non destructive.
         let busy = matches!(
             meta.state.as_str(),
-            "running" | "waiting_input" | "starting" | "spawning"
+            "running" | "working" | "waiting_input" | "starting" | "spawning" | "compacting"
         );
         s.set_model_meta(Some(model.to_string()), Some("catalogue".into()));
         s.emit(EventKind::System {
@@ -618,16 +627,49 @@ impl Daemon {
             .unwrap_or_else(|e| Err(anyhow::anyhow!("override join: {e}")));
         if let Err(e) = r {
             s.set_model_meta(prev.0, prev.1);
+            s.set_model_override_sid(prev.2);
             s.emit(EventKind::Error {
                 message: format!(
                     "override modèle « {model} » échoué: {e:#} — valeur précédente conservée"
                 ),
             });
+        } else {
+            // Mémorise le sid contre lequel l'override a tourné : un
+            // spawn ultérieur sur un autre sid (clear, fallback
+            // load→new, fork) détecte la dérive via model_override_sid
+            // et rejoue.
+            s.set_model_override_sid(Some(native.clone()));
         }
         // skip_replay=true comme wake_session : le journal est intact
         // (sleep ne le reset pas) — sans ça tout le replay session/load
         // serait re-émis et re-journalisé (historique dupliqué).
         self.respawn(s, true).await
+    }
+
+    /// Rejoue l'override catalogue quand le spawn vient d'atterrir sur
+    /// un sid natif DIFFÉRENT de celui contre lequel
+    /// `model_override_cmd` a tourné (clear → session/new, fallback
+    /// load→new, fork → nouveau sid) : le store provider est indexé par
+    /// sid, sans ce rejeu la session repartirait sur le modèle par
+    /// défaut du compte. No-op pour les valeurs annoncées et quand le
+    /// sid correspond déjà.
+    async fn reapply_catalogue_if_new_sid(&self, s: &Arc<Session>) {
+        let m = s.meta_snapshot();
+        if m.model_source.as_deref() != Some("catalogue") {
+            return;
+        }
+        let (Some(model), Some(sid)) = (m.model.clone(), m.native_session_id.clone()) else {
+            return;
+        };
+        if m.model_override_sid.as_deref() == Some(sid.as_str()) {
+            return;
+        }
+        s.emit(EventKind::System {
+            text: format!("nouveau sid natif {sid} — rejeu de l'override modèle « {model} »…"),
+        });
+        // Box::pin : apply_catalogue_model → respawn → reapply est une
+        // récursion async — l'indirection évite un futur de taille infinie.
+        let _ = Box::pin(self.apply_catalogue_model(s, &model)).await;
     }
 
     /// Vrai si `value` figure dans le catalogue du profil — utilisé à la
@@ -723,6 +765,12 @@ impl Daemon {
         // partie et ne doit pas empêcher le retour à asleep.
         if r.is_err() && was_asleep && s.supplant_mark() <= gen0 {
             s.mark_asleep();
+        }
+        // Spawn atterri sur un NOUVEAU sid natif (fallback load→new) :
+        // l'override catalogue du sid précédent ne s'applique pas —
+        // rejouer contre le nouveau avant de rendre la main.
+        if r.is_ok() {
+            self.reapply_catalogue_if_new_sid(s).await;
         }
         r.map(|_| ())
     }
@@ -822,6 +870,10 @@ impl Daemon {
                             }
                         }
                     }
+                    // Fork ou autre spawn sur un sid neuf avec modèle
+                    // catalogue : l'override a tourné sur l'ancien sid —
+                    // rejouer contre le nouveau (no-op si déjà fait).
+                    d.reapply_catalogue_if_new_sid(&s).await;
                     match deliver {
                         FreshDeliver::None => {}
                         FreshDeliver::UserPrompt(p) => {

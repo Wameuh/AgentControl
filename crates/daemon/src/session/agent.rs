@@ -371,7 +371,11 @@ impl Session {
         if let Some(models) = resp.get("models") {
             let mut m = self.meta.lock().unwrap();
             if let Some(cur) = models.get("currentModelId").and_then(Value::as_str) {
-                m.model = Some(cur.to_string());
+                // Source catalogue : currentModelId rapporte la valeur
+                // clampée/annoncée — ne pas écraser l'uid demandé.
+                if m.model_source.as_deref() != Some("catalogue") {
+                    m.model = Some(cur.to_string());
+                }
             }
             if let Some(av) = models.get("availableModels").and_then(Value::as_array) {
                 m.available_models = av
@@ -399,6 +403,11 @@ impl Session {
                 for o in &parsed {
                     match o.id.as_str() {
                         "mode" => m.mode = Some(o.current_value.clone()),
+                        // Source catalogue : l'agent rapporte la valeur
+                        // clampée (annoncée) — meta.model garde l'uid
+                        // demandé, sinon la provenance deviendrait
+                        // incohérente avec ce que le store applique.
+                        "model" if m.model_source.as_deref() == Some("catalogue") => {}
                         "model" => m.model = Some(o.current_value.clone()),
                         _ => {}
                     }
@@ -945,6 +954,11 @@ impl Session {
                             for o in options {
                                 match o.id.as_str() {
                                     "mode" => m.mode = Some(o.current_value.clone()),
+                                    // Idem handshake : ne pas écraser
+                                    // l'uid catalogue par la valeur
+                                    // clampée rapportée par l'agent.
+                                    "model" if m.model_source.as_deref()
+                                        == Some("catalogue") => {}
                                     "model" => m.model = Some(o.current_value.clone()),
                                     _ => {}
                                 }
@@ -1323,6 +1337,7 @@ mod tests {
             mode: mode.map(String::from),
             model: model.map(String::from),
             model_source: None,
+            model_override_sid: None,
             available_modes: vec![],
             available_commands: vec![],
             available_models: vec![],

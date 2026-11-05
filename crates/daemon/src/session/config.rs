@@ -378,6 +378,15 @@ impl Session {
         self.save_meta();
     }
 
+    /// Sid natif contre lequel le dernier `model_override_cmd` a tourné
+    /// — comparé au native_session_id courant pour détecter qu'un spawn
+    /// a atterri sur un NOUVEAU sid (clear, fallback load→new, fork) et
+    /// que l'override catalogue doit être rejoué.
+    pub fn set_model_override_sid(&self, sid: Option<String>) {
+        self.meta.lock().unwrap().model_override_sid = sid;
+        self.save_meta();
+    }
+
     /// Rebind l'ID natif (pour reprendre une autre session de l'agent).
     pub fn set_native_id(&self, id: &str) {
         self.meta.lock().unwrap().native_session_id = Some(id.into());
@@ -495,9 +504,20 @@ impl Session {
                 if let Some(opt) = m.config_options.iter_mut().find(|o| o.id == config_id) {
                     opt.current_value = value.into();
                 }
+                // L'option modèle peut être adressée par id ACP ou
+                // catégorie « model » — même règle que le chemin live.
+                let modelish = config_id == "model"
+                    || m.config_options.iter().any(|o| {
+                        (o.id == config_id || o.category == config_id)
+                            && (o.id == "model" || o.category == "model")
+                    });
                 match config_id {
                     "mode" => m.mode = Some(value.into()),
                     "model" => {
+                        m.model = Some(value.into());
+                        m.model_source = Some("announced".into());
+                    }
+                    _ if modelish => {
                         m.model = Some(value.into());
                         m.model_source = Some("announced".into());
                     }
