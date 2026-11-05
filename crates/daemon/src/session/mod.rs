@@ -473,7 +473,9 @@ impl Session {
             match self.journal.append(ev_kind) {
                 Ok(ev) => {
                     self.note_text_anchor(&ev.kind);
-                    self.turn_outputs.fetch_add(1, Ordering::SeqCst);
+                    if Self::is_agent_output(&ev.kind) {
+                        self.turn_outputs.fetch_add(1, Ordering::SeqCst);
+                    }
                     let _ = self.events_tx.send(ev);
                 }
                 Err(e) => error!("journal append failed: {e}"),

@@ -624,6 +624,11 @@ impl Session {
                     // l'état « error » à « idle ».
                     self.set_state("idle");
                 }
+                // Dernier prompt en vol terminé — point sûr pour un
+                // rename différé (le drain pouvait être fini depuis
+                // longtemps : un steer peut être le dernier à rendre
+                // la main, #183).
+                self.flush_pending_rename().await;
             }
         } else {
             self.active_prompts.fetch_sub(1, Ordering::SeqCst);

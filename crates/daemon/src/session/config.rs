@@ -397,7 +397,16 @@ impl Session {
     /// Pose le rename ACP différé (fin de tour / fin de drain) —
     /// seul le dernier titre compte, les renommages en rafale
     /// s'écrasent. Agent mort → le RPC échoue en silence (toléré).
+    /// Re-test de la fenêtre : un prompt steer concurrent
+    /// (`active_prompts`) ou un compact en vol reste un session/prompt
+    /// actif — le pending attend le prochain flush plutôt que
+    /// reproduire le stall #183 sur le tour steer/compact.
     pub(super) async fn flush_pending_rename(&self) {
+        if self.active_prompts.load(Ordering::SeqCst) > 0
+            || self.compacting.lock().unwrap().is_some()
+        {
+            return;
+        }
         let title = self.pending_rename.lock().unwrap().take();
         if let Some(t) = title {
             self.send_rename(&t).await;
