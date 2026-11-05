@@ -124,6 +124,9 @@ const SHAPES: Record<string, string> = {
   repo:
     '<path d="M6.5 3A2.5 2.5 0 0 0 4 5.5v13A2.5 2.5 0 0 0 6.5 21H20V3Z"/>' +
     '<path d="M9 3v4.4l2-1.4 2 1.4V3"/>',
+  copy:
+    '<rect x="9" y="9" width="12" height="12" rx="2"/>' +
+    '<path d="M5 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5"/>',
   // QR code (appairage)
   qr:
     '<rect x="4" y="4" width="6" height="6" rx="1"/>' +

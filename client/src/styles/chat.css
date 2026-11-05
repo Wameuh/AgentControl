@@ -264,6 +264,31 @@
   border: 1px solid var(--line); border-radius: 10px;
   font: 12.5px/1.5 Mono, ui-monospace, monospace; white-space: pre; overflow-x: auto;
 }
+/* Conteneur du bloc code + son bouton copier (incrusté en haut à droite,
+   visible au survol — discret sinon). Le <pre> perd ses marges au profit
+   du wrapper pour garder l'espacement d'origine entre blocs. */
+.md-codewrap { position: relative; margin: 8px 0; }
+.md-codewrap .md-code { margin: 0; }
+.md-copy {
+  position: absolute; top: 6px; right: 6px; z-index: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; padding: 0; border: 1px solid var(--line);
+  border-radius: 6px; background: var(--panel-solid); color: var(--dim);
+  cursor: pointer; opacity: 0; transition: opacity .12s;
+}
+.md-codewrap:hover .md-copy, .md-copy:focus-visible { opacity: 1; }
+.md-copy:hover { color: var(--ink); border-color: var(--line-strong); }
+.md-copy .ic { width: 13px; height: 13px; display: block; }
+
+/* Texte du fil sélectionnable — explicite pour les webviews aux défauts
+   variables (WebKitGTK, WKWebView, Android WebView). Les éléments
+   interactifs gardent leur user-select:none (.tool-head, .peer-head…). */
+#events .msg .md, #events .um-body, #events .peer-body,
+#events .sysline, #events .errline, #events .resolved,
+#events .perm-detail, #events .tool-out, #events .tool-cmd,
+#events .tool-diff, #events .thought .md, #events .thought summary {
+  -webkit-user-select: text; user-select: text;
+}
 .md table.mdt { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
 .md .mdt th, .md .mdt td { border: 1px solid var(--line); padding: 4px 10px; text-align: left; }
 .md .mdt th { background: rgba(var(--tint-rgb), .08); }

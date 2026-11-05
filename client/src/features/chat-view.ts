@@ -6,7 +6,7 @@
 // ---------------------------------------------------------------------------
 
 import { invoke } from "../core/bridge";
-import { $, esc, showErr } from "../core/dom";
+import { $, copyText, esc, showErr } from "../core/dom";
 import { fmtTok } from "../core/format";
 import { bgErr, call, callBg, connOp } from "../core/rpc";
 import { app } from "../core/state";
@@ -14,6 +14,7 @@ import type { AcEvent, SessionMeta } from "../core/types";
 import { gemSVG } from "../crystal";
 import { t } from "../i18n";
 import { icon, type IconName } from "../ui/icons";
+import { hideMenu, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
 import { fillEfforts, splitModel } from "./modelbar";
 import type { EventRenderer } from "./event-renderers";
@@ -69,6 +70,7 @@ export class ChatView {
   private renderer!: EventRenderer;
   private eventsEl = $("events");
   private sentinel = $("scroll-sentinel");
+  private selCtx = $("evctx");
 
   private openSeq = 0;
   private convCache = new Map<string, ConvCache>();
@@ -1270,6 +1272,18 @@ export class ChatView {
     }
   }
 
+  /** Menu contextuel « Copier » sur la sélection du fil (même composant
+   *  #evctx que les menus session/fichier — action-sheet sur Android). */
+  private openSelCtx(x: number, y: number, txt: string) {
+    const ctx = this.selCtx;
+    ctx.innerHTML = "";
+    menuBtn(ctx, t("copy"), "", () => {
+      hideMenu(ctx, "evctx");
+      void copyText(txt);
+    });
+    placeMenu(ctx, "evctx", x, y);
+  }
+
   /** Ligne système dans le fil (retourne l'élément pour mises à jour). */
   sysline(text: string, ic: IconName = "sys"): HTMLElement {
     const d = document.createElement("div");
@@ -1345,6 +1359,28 @@ export class ChatView {
       if (this.hasMoreNewer) void this.loadLatest();
       else this.eventsEl.scrollTo({ top: this.eventsEl.scrollHeight, behavior: "smooth" });
     };
+    // Clic droit sur une sélection du fil → menu « Copier » (le handler
+    // global de main.ts avale le contextmenu hors sélection — sans ça le
+    // texte de la discussion n'était pas copiable). Sans sélection on ne
+    // fait rien : le preventDefault global garde son rôle.
+    this.eventsEl.addEventListener("contextmenu", (e) => {
+      const sel = getSelection();
+      if (!sel || sel.isCollapsed || !this.eventsEl.contains(sel.anchorNode)) return;
+      const txt = sel.toString();
+      if (!txt.trim()) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.openSelCtx(e.clientX, e.clientY, txt);
+    });
+    // Fermeture du menu « Copier » : clic ailleurs / Échap / scroll du
+    // fil — même contrat que #fctx/#sctx (un clic DANS le menu ne doit
+    // pas le fermer avant l'action du bouton).
+    this.selCtx.addEventListener("click", (e) => e.stopPropagation());
+    window.addEventListener("click", () => hideMenu(this.selCtx, "evctx"));
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") hideMenu(this.selCtx, "evctx");
+    });
+    this.eventsEl.addEventListener("scroll", () => hideMenu(this.selCtx, "evctx"));
     // Image cassée (404, hôte inaccessible…) → on la remplace par son texte/URL,
     // l'<a> englobant reste cliquable. capture=true : error ne bubble pas.
     this.eventsEl.addEventListener(

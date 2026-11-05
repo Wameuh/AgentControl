@@ -87,7 +87,13 @@ initModalGuard();
 
 // Le menu natif du clic droit n'a pas de sens dans l'app — chaque menu
 // contextuel custom gère son propre preventDefault/stopPropagation.
-window.addEventListener("contextmenu", (e) => e.preventDefault());
+// Exception : une sélection de texte active → on laisse passer l'event
+// (WebView2/Android exposent un menu natif avec « Copier » ; le chat a
+// en plus son propre menu « Copier » sur #events).
+window.addEventListener("contextmenu", (e) => {
+  if (window.getSelection()?.toString()) return;
+  e.preventDefault();
+});
 
 // Modèle multi-instances : cette instance se lie à UNE connexion — celle
 // demandée par --conn <clé> (spawn_instance d'une autre instance), sinon
