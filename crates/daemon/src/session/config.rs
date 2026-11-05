@@ -374,20 +374,32 @@ impl Session {
 
     /// session/rename ACP — best-effort : l'échec est toléré (meta
     /// déjà à jour), un refus de méthode marque l'agent non supporté.
+    /// Attente bornée : acp_request n'a pas de timeout — un agent qui
+    /// accepte sans jamais répondre wedgerait le drain sur le flush
+    /// (#183) ; 10 s puis abandon, l'échec est toléré de toute façon.
     pub(super) async fn send_rename(&self, title: &str) {
         if !self.rename_supported.load(Ordering::SeqCst) {
             return;
         }
         if let Some(sid) = self.meta_snapshot().native_session_id {
-            if let Err(e) = self
-                .acp_request(
-                    "session/rename",
-                    json!({"sessionId": sid, "title": title}),
-                )
-                .await
-            {
-                let msg = format!("{e:#}").to_lowercase();
-                if msg.contains("not found") || msg.contains("not supported") {
+            let req = self.acp_request(
+                "session/rename",
+                json!({"sessionId": sid, "title": title}),
+            );
+            let err = match tokio::time::timeout(std::time::Duration::from_secs(10), req).await {
+                Ok(Ok(_)) => None,
+                Ok(Err(e)) => Some(format!("{e:#}").to_lowercase()),
+                Err(_) => Some("timeout".into()),
+            };
+            if let Some(msg) = err {
+                // « method not found »/« unknown method » (-32601) ou
+                // refus explicite — pas « not found » seul : « Session
+                // not found » (binding perdu) est transitoire, la
+                // méthode peut remarcher après rebind/réveil.
+                if msg.contains("method not found")
+                    || msg.contains("unknown method")
+                    || msg.contains("not supported")
+                {
                     self.rename_supported.store(false, Ordering::SeqCst);
                 }
             }
