@@ -44,12 +44,6 @@ export function costFor(
   return fresh(ckey(c, a))?.[model];
 }
 
-/** Suffixe « · $1/$5 » / « · Free » quand le coût est connu — "" sinon. */
-export function costSuffix(model: string, conn?: string, agent?: string): string {
-  const c = costFor(model, conn, agent);
-  return c ? ` · ${c.label}` : "";
-}
-
 /** Charge les coûts du profil `agent` sur `conn` si absents/périmés.
  *  `onReady` est appelé à chaque arrivée de données non vides (permet
  *  un re-render du select après le premier affichage sans coût). */
