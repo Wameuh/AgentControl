@@ -122,6 +122,10 @@ export interface AgentCaps {
   modes?: ConfigOpt[];
   models?: ConfigOpt[];
   config_options?: ConfigOption[];
+  /** Valeur courante rapportée (currentModeId / configOption "mode") —
+   *  indice d'affichage, peut être périmée. */
+  current_mode?: string;
+  current_model?: string;
 }
 
 export interface AcEvent {

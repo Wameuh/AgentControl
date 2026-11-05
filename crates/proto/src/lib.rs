@@ -368,6 +368,15 @@ pub struct AgentCaps {
     /// mode/model/thought_level chez Devin).
     #[serde(default)]
     pub config_options: Vec<ConfigOption>,
+    /// Valeur courante rapportée pour le mode (`modes.currentModeId` ou
+    /// la configOption "mode") — indice d'affichage pour la présélection,
+    /// pas un état fiable (elle peut être périmée ou propre à la session
+    /// moissonnée). Vide = inconnue.
+    #[serde(default)]
+    pub current_mode: String,
+    /// Idem pour le modèle (`models.currentModelId` ou configOption "model").
+    #[serde(default)]
+    pub current_model: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

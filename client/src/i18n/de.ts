@@ -56,7 +56,7 @@ export const de: Record<Key, string> = {
   new_session_h: "Neuer Agent", agent: "Agent", workdir: "Arbeitsverzeichnis",
   title_label: "Titel", title_ph: "meine Sitzung", mode_label: "Modus",
   mode_ph: "normal (optional)", model_label: "Modell", model_ph: "Standard",
-  attach_label: "Native ID fortsetzen", attach_ph: "(optional) vorhandene Agenten-Sitzungs-ID", opt_custom: "benutzerdefiniert…",
+  attach_label: "Native ID fortsetzen", attach_ph: "(optional) vorhandene Agenten-Sitzungs-ID", opt_custom: "benutzerdefiniert…", opt_default: "Standard",
   prompt_label: "Erste Nachricht", create: "Erstellen",
   conn_h: "Mit Daemon verbinden", recent: "Letzte Verbindungen",
   server_label: "Server",

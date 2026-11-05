@@ -56,7 +56,7 @@ export const es: Record<Key, string> = {
   new_session_h: "Nuevo agente", agent: "Agente", workdir: "Directorio de trabajo",
   title_label: "Título", title_ph: "mi sesión", mode_label: "Modo",
   mode_ph: "normal (opcional)", model_label: "Modelo", model_ph: "predeterminado",
-  attach_label: "Reanudar ID nativo", attach_ph: "(opcional) ID de sesión de agente existente", opt_custom: "personalizado…",
+  attach_label: "Reanudar ID nativo", attach_ph: "(opcional) ID de sesión de agente existente", opt_custom: "personalizado…", opt_default: "predeterminado",
   prompt_label: "Mensaje inicial", create: "Crear",
   conn_h: "Conectar al daemon", recent: "Conexiones recientes",
   server_label: "Servidor",

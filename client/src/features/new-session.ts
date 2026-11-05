@@ -60,7 +60,13 @@ export class NewSessionDialog {
     for (const o of (kind === "mode" ? caps?.modes : caps?.models) ?? []) {
       if (!vals.some((x) => x.v === o.value)) vals.push({ v: o.value, label: o.name || o.value });
     }
-    return { vals, cur: co?.currentValue };
+    return {
+      vals,
+      cur:
+        co?.currentValue ||
+        (kind === "mode" ? caps?.current_mode : caps?.current_model) ||
+        undefined,
+    };
   }
 
   /** Valeur effective d'un champ mode/model : le select quand il est
@@ -86,6 +92,13 @@ export class NewSessionDialog {
         inp.hidden = false;
         continue;
       }
+      // Option « défaut » en tête : valeur vide = laisser l'agent
+      // décider — jamais availableModes[0] imposé à la place du défaut.
+      const curLabel = cur ? vals.find((it) => it.v === cur)?.label : undefined;
+      const d = document.createElement("option");
+      d.value = "";
+      d.textContent = curLabel ? `${t("opt_default")} (${curLabel})` : t("opt_default");
+      sel.appendChild(d);
       for (const it of vals) {
         const o = document.createElement("option");
         o.value = it.v;
@@ -99,10 +112,9 @@ export class NewSessionDialog {
       sel.hidden = false;
       // Conserver la valeur déjà saisie : dans la liste → option ; hors
       // liste mais non vide → « custom » (le texte reste visible).
-      // Sinon présélectionner la valeur courante rapportée par l'agent.
+      // Vide → « défaut » (première option), rien n'est envoyé.
       if (vals.some((it) => it.v === prev)) sel.value = prev;
       else if (prev) sel.value = CUSTOM;
-      else if (cur && vals.some((it) => it.v === cur)) sel.value = cur;
       inp.hidden = sel.value !== CUSTOM;
     }
   }

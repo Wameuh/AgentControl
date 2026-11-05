@@ -54,7 +54,7 @@ export const fr: Record<Key, string> = {
   new_session_h: "Nouvel agent", agent: "Agent", workdir: "Dossier de travail",
   title_label: "Titre", title_ph: "ma session", mode_label: "Mode",
   mode_ph: "normal (optionnel)", model_label: "Modèle", model_ph: "défaut",
-  attach_label: "Reprendre ID natif", attach_ph: "(optionnel) ID session agent existante", opt_custom: "personnalisé…",
+  attach_label: "Reprendre ID natif", attach_ph: "(optionnel) ID session agent existante", opt_custom: "personnalisé…", opt_default: "défaut",
   prompt_label: "Message initial", create: "Créer",
   conn_h: "Connexion au démon", recent: "Connexions récentes",
   server_label: "Serveur",

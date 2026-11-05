@@ -53,7 +53,7 @@ export const en = {
   new_session_h: "New agent", agent: "Agent", workdir: "Working directory",
   title_label: "Title", title_ph: "my session", mode_label: "Mode",
   mode_ph: "normal (optional)", model_label: "Model", model_ph: "default",
-  attach_label: "Resume native ID", attach_ph: "(optional) existing agent session ID", opt_custom: "custom…",
+  attach_label: "Resume native ID", attach_ph: "(optional) existing agent session ID", opt_custom: "custom…", opt_default: "default",
   prompt_label: "Initial message", create: "Create",
   conn_h: "Connect to daemon", recent: "Recent connections",
   server_label: "Server",

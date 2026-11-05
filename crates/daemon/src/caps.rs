@@ -89,6 +89,26 @@ impl CapsRegistry {
             if !caps.config_options.is_empty() {
                 e.config_options = caps.config_options.clone();
             }
+            // Valeurs courantes rapportées : indices de présélection —
+            // remplacées par la dernière annonce non vide, et dérivées
+            // des configOptions quand elles les portent.
+            if !caps.current_mode.is_empty() {
+                e.current_mode = caps.current_mode.clone();
+            }
+            if !caps.current_model.is_empty() {
+                e.current_model = caps.current_model.clone();
+            }
+            for (kind, cur) in [("mode", &mut e.current_mode), ("model", &mut e.current_model)] {
+                if let Some(o) = caps
+                    .config_options
+                    .iter()
+                    .find(|o| o.id == kind || o.category == kind)
+                {
+                    if !o.current_value.is_empty() {
+                        *cur = o.current_value.clone();
+                    }
+                }
+            }
             e.updated_at = proto::now_iso();
         }
         self.persist();
@@ -105,6 +125,18 @@ impl CapsRegistry {
             let mut m = self.map.lock().unwrap();
             let e = m.entry(agent.to_string()).or_default();
             e.config_options = options.to_vec();
+            // La notification porte aussi les valeurs courantes — les
+            // indices de présélection restent frais entre deux probes.
+            for (kind, cur) in [("mode", &mut e.current_mode), ("model", &mut e.current_model)] {
+                if let Some(o) = options
+                    .iter()
+                    .find(|o| o.id == kind || o.category == kind)
+                {
+                    if !o.current_value.is_empty() {
+                        *cur = o.current_value.clone();
+                    }
+                }
+            }
             e.updated_at = proto::now_iso();
         }
         self.persist();
@@ -184,6 +216,22 @@ pub(crate) fn caps_from_new_resp(resp: &Value) -> proto::AgentCaps {
             .filter_map(|o| serde_json::from_value::<proto::ConfigOption>(o.clone()).ok())
             .collect();
     }
+    // Valeurs courantes annoncées par le handshake (indices de
+    // présélection — la liste seule ne dit pas quel est le défaut).
+    if let Some(v) = resp
+        .get("modes")
+        .and_then(|m| m.get("currentModeId"))
+        .and_then(Value::as_str)
+    {
+        c.current_mode = v.to_string();
+    }
+    if let Some(v) = resp
+        .get("models")
+        .and_then(|m| m.get("currentModelId"))
+        .and_then(Value::as_str)
+    {
+        c.current_model = v.to_string();
+    }
     c
 }
 
@@ -251,7 +299,12 @@ pub async fn probe(profile: &AgentProfile, cwd: &Path) -> Result<proto::AgentCap
         // arrivent après la réponse — on lit jusqu'au silence.
         io.drain(&mut stdin).await;
         let mut caps = caps_from_new_resp(&resp);
-        caps.config_options = io.config_options;
+        // La notification (liste complète, la plus récente) prime sur la
+        // réponse — mais un drain vide ne doit pas effacer les options
+        // qu'elle portait (agents qui annoncent tout dans session/new).
+        if !io.config_options.is_empty() {
+            caps.config_options = io.config_options;
+        }
         caps.updated_at = proto::now_iso();
         anyhow::Ok(caps)
     };
