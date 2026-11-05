@@ -21,6 +21,7 @@ import type { ConnectionManager } from "./connections";
 import { grpNorm, grpParent, inSubtree } from "./groups";
 import type { GroupStore } from "./groups";
 import { stateDiff } from "./state-diff";
+import { notifications } from "./notifications";
 import type { NewSessionDialog } from "./new-session";
 import type { SettingsPanel } from "./settings";
 import type { ConnView } from "./conn-view";
@@ -188,6 +189,8 @@ export class Sidebar {
    *  recouvrent — la session s'afficherait dessous, invisible). */
   private openSession(id: string): Promise<void> {
     this.closeChatOverlays();
+    // chat.open retire les notifs done/error de la session ouverte
+    // (#184 — point d'entrée unique de tous les chemins d'ouverture).
     return this.chat.open(id);
   }
 
@@ -247,6 +250,9 @@ export class Sidebar {
     // Canaux d'alerte (sons, notifs OS) : diff d'états partagé — la liste
     // fusionnée couvre toutes les conns, pas seulement la session ouverte.
     stateDiff.noteStates(list);
+    // Balayage périodique des notifs OS : conditions résolues sans
+    // transition vue (restart app, shade stale) — throttlé ~30 s.
+    void notifications.reconcile(list);
     this.checkSpawns(list);
     // Un spawn tourne sans canal event (session non ouverte → pas de
     // status_changed) → repoller tant qu'un "starting" reste dans son
