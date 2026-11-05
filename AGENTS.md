@@ -45,6 +45,24 @@ or off `next_release`, and `SessionStart` reports the state.
 allowed (resync and back-to-clean). Accepted tripwire: shell writes
 (`>`, `sed -i`) aren't intercepted — the `Stop` hook is the safety net.
 
+**Waiting = `ac-wait`, never in-turn**: any wait longer than ~1 min
+(CI checks, `/mr review` verdict, merge watch, the ~30 s ready
+delay, long builds) is delegated to a background waiter, never
+spent blocking a tool call. `ac-wait --name "<t>" --interval 60
+-- <cmd>` returns a wait-id immediately, re-evaluates `<cmd>`
+until exit 0, then pings the session via `acctl send` —
+`[ac-wait] <t> : OK|TIMEOUT` arrives as a normal message (and
+wakes an asleep session). Arm the waiter, **end your turn**
+(optionally `acctl sleep "$AGENTCONTROL_SESSION"` to park for
+real — a parked worker keeps its max_workers slot, #280). Never
+run a blocking `gh pr checks --watch`, a `sleep`-retry loop or a
+`while ! cond` poll in a tool call — that's a slot burned doing
+nothing. Waiter commands must be cheap and read-only (`gh
+api`/`gh pr view`, file tests, `grep`) — never builds or heavy
+commands in a loop. Short one-shot checks (< ~1 min, e.g.
+`sleep 30` before `gh pr ready`) may stay in-turn; `ac-wait --
+sleep 30` works too if you'd rather yield the turn.
+
 **Drafts**: a PR stays **draft through the whole work + review
 cycle** — pipelines only run **after** the review (`gh pr ready` =
 final green light: `ready_for_review` event → CI checks). **The
@@ -62,24 +80,34 @@ run and cancel it (same concurrency group) → head with no CI
 ⚠️ `gh pr checks <N> --watch` exits green on skipped or
 cancelled runs → gate on the head's **check runs**, not on run
 metadata (`workflow_run.event` never reports `ready_for_review`,
-and `createdAt` is a race):
+and `createdAt` is a race). Arm an **ac-wait waiter** on the
+check-runs of the head SHA (see **Waiting** — never a blocking
+`--watch` nor a sleep-loop in-turn):
 
 ```bash
 SHA=$(gh pr view <N> --json headRefOid -q .headRefOid)
-for i in $(seq 1 20); do
-  COUNT=$(gh api --paginate "repos/{owner}/{repo}/commits/$SHA/check-runs?per_page=100" --jq \
-    '.check_runs[] | select(.name | test("^(daemon-linux|client)( |-|$)"))
-      | select(.conclusion != "skipped" and .conclusion != "cancelled") | .name' | wc -l)
-  [ "$COUNT" -gt 0 ] && break; sleep 15
-done
-if [ "${COUNT:-0}" -eq 0 ]; then
-  echo "aucun check run réel — head à réparer (gh pr ready --undo &&
-        sleep 30 && gh pr ready), ou relancer depuis la racine du clone"
-else
-  gh pr checks <N> --watch
-fi
+ac-wait --name "checks PR #<N>" --interval 60 --timeout 3600 -- bash -c "
+  gh api --paginate 'repos/{owner}/{repo}/commits/$SHA/check-runs?per_page=100' --jq '
+    .check_runs[] | select(.name | test(\"^(daemon-linux|client)( |-|\$)\"))
+      | select(.conclusion != \"skipped\" and .conclusion != \"cancelled\")
+      | .status + \" \" + (.conclusion // \"-\") + \" \" + .name'
+  R=\$(gh api --paginate 'repos/{owner}/{repo}/commits/$SHA/check-runs?per_page=100' --jq '
+    [.check_runs[] | select(.name | test(\"^(daemon-linux|client)( |-|\$)\"))
+      | select(.conclusion != \"skipped\" and .conclusion != \"cancelled\")]
+    | if length >= 6
+      then (if all(.status == \"completed\")
+            then (if all(.conclusion == \"success\") then \"DONE\" else \"FAIL\" end)
+            else \"PENDING\" end)
+      else \"PENDING\" end')
+  echo \$R; [ \$R != PENDING ]"
 ```
 
+The ping prints each real run's `status conclusion name` plus the
+verdict word: `DONE` = all 6 green → merge; `FAIL` = a real red →
+`gh run view <id> --log-failed`. `TIMEOUT` with no `DONE`/`FAIL` —
+or a stuck `PENDING` — usually means the head got **zero real
+runs** (the late `synchronize` dispatch cancelled the ready run):
+repair with `gh pr ready --undo && sleep 30 && gh pr ready`.
 Run from the clone root (`{owner}/{repo}` = repo of the cwd);
 the name filter must track `build.yml`'s required jobs. Without
 the failure branch, an all-skipped head would come out green after
@@ -154,15 +182,28 @@ per-agent yet).
 **Auto review**: when the work looks done **(PR still draft)**,
 **note `TS=$(date -u +%FT%TZ)`**, comment `/mr review`
 (`gh pr comment <N> --body "/mr review"`),
-then **poll the comments** until the review — the automation
-first posts an ack (`Launching a review…`) and the review may
-come out under **the user account OR the bot** → don't filter the
+then **arm an ac-wait waiter** on the comments — never poll them
+in a loop (see **Waiting**). The automation first posts an ack
+(`Launching a review…`) and the review may come out under
+**the user account OR the bot** → don't filter the
 author: match the marker **posted after `$TS`** (`--paginate`
 required — recent comments are on the last page;
 `Review|Verdict` since the format varies: `## Review` / `## Verdict: …`):
-`gh api --paginate 'repos/{owner}/{repo}/issues/<N>/comments?per_page=100' --jq '.[] | select(.body | test("^[*#]+ ?(Review|Verdict)")) | select(.created_at > "'"$TS"'") | .body'`.
-As soon as it's posted, address it — no fixed wait
-(give up after ~10 min if nothing).
+
+```bash
+TS=$(date -u +%FT%TZ)
+gh pr comment <N> --body "/mr review"
+ac-wait --name "verdict PR #<N>" --interval 60 --timeout 1800 -- bash -c "
+  gh api --paginate 'repos/{owner}/{repo}/issues/<N>/comments?per_page=100' --jq '
+    .[] | select(.body | test(\"^[*#]+ ?(Review|Verdict)\"))
+      | select(.created_at > \"$TS\") | .body' | grep -q Verdict"
+```
+
+As soon as the ping arrives, read the comment and address it.
+`TIMEOUT` (~30 min) → check whether the review was actually
+launched (the `Launching a review…` ack can lag when the
+orchestrator is busy) — re-arm the waiter if it's running, or
+retrigger otherwise.
 Changes to make → fix and push **staying draft**,
 then re-run `/mr review`; `gh pr ready` only once the review
 is settled (see **Drafts**). NB: a review
