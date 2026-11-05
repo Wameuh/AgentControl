@@ -189,9 +189,8 @@ export class Sidebar {
    *  recouvrent — la session s'afficherait dessous, invisible). */
   private openSession(id: string): Promise<void> {
     this.closeChatOverlays();
-    // Ouverture dans l'app = notifs done/error vues : les retirer du
-    // shade OS (équivalent du clic autoCancel, sans le clic — #184).
-    notifications.sessionOpened(id);
+    // chat.open retire les notifs done/error de la session ouverte
+    // (#184 — point d'entrée unique de tous les chemins d'ouverture).
     return this.chat.open(id);
   }
 

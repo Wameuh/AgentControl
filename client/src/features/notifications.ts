@@ -66,12 +66,19 @@ class OsNotifications {
   private lastSent = new Map<string, number>();
   /** Ids OS des notifs émises, indexés par "conn:sid:kind" — nécessaires
    *  au cancel() quand la condition se résout autrement que par un clic
-   *  (#184 : le compteur DE/shade sinon ne redescend jamais). */
-  private ids = new Map<string, number>();
+   *  (#184 : le compteur DE/shade sinon ne redescend jamais). L'entrée
+   *  garde ses composantes : la clé n'est PAS re-parsable (connKeyOf
+   *  produit du multi-segments — "ssh:host:port"). */
+  private ids = new Map<
+    string,
+    { id: number; conn: string; sid: string; kind: string }
+  >();
   /** Prochain id alloué — posés nous-mêmes dans options.id : pas besoin
-   *  de la valeur de retour de notify et le ré-envoi même clé remplace
-   *  la notif précédente au lieu d'empiler. Base aléatoire pour ne pas
-   *  écraser les ids choisis par le plugin hors de ce canal. */
+   *  de la valeur de retour de notify. Sur Android le ré-envoi même id
+   *  remplace la notif précédente ; sur desktop elle empile, mais les
+   *  ids suivis permettent au remove_active de fermer d'un coup toutes
+   *  les notifs partageant l'id. Base aléatoire pour ne pas écraser les
+   *  ids choisis par le plugin hors de ce canal. */
   private nextId = 1_000_000 + Math.floor(Math.random() * 1_000_000);
   /** Dernier balayage reconcile() — l'IPC get_active reste borné à
    *  ~1/30 s (le refresh sidebar tourne toutes les ~10 s). */
@@ -192,10 +199,11 @@ class OsNotifications {
     const where =
       conn && this.deps.connCount() > 1 ? ` — ${connLabel(conn)}` : "";
     const key = `${conn || "default"}:${s.id}:${kind}`;
-    const id = this.ids.get(key) ?? this.nextId++;
+    const id = this.ids.get(key)?.id ?? this.nextId++;
     const options: Options = {
-      // Id posé nous-mêmes : cancel() ne dépend pas du retour de notify
-      // et un ré-envoi même clé remplace la notif au lieu d'empiler.
+      // Id posé nous-mêmes : remove_active ne dépend pas du retour de
+      // notify ; sur Android le même id remplace la notif au lieu
+      // d'empiler (le backend desktop envoie replaces_id=0 en dur).
       id,
       title: "AgentControl",
       body: t(EV_KEY[kind], { title: s.title || s.id }) + where,
@@ -210,7 +218,7 @@ class OsNotifications {
     // shim window.Notification) : un échec de livraison remonte ici.
     try {
       await invoke("plugin:notification|notify", { options });
-      this.ids.set(key, id);
+      this.ids.set(key, { id, conn: conn || "default", sid: s.id, kind });
       return true;
     } catch (e) {
       logUi("error", `notif: envoi impossible: ${e}`);
@@ -221,11 +229,17 @@ class OsNotifications {
   // --- Annulation à la résolution de la condition (#184) ---------------
 
   /** Retire des notifs OS par leurs ids — best-effort (une notif déjà
-   *  partie/cliquée n'est pas une erreur). */
+   *  partie/cliquée n'est pas une erreur). `remove_active` et non
+   *  `cancel` : cancel ne vise que les notifs planifiées (jamais
+   *  utilisées ici) et n'est pas enregistrée côté desktop ; remove_active
+   *  matche l'id posé par nous dans le tracker du plugin puis émet
+   *  CloseNotification en D-Bus (freedesktop) / removeActive (Android). */
   private async cancelIds(ids: number[]) {
     if (!ids.length) return;
     try {
-      await invoke("plugin:notification|cancel", { ids });
+      await invoke("plugin:notification|remove_active", {
+        notifications: ids.map((id) => ({ id })),
+      });
     } catch (e) {
       logUi("warn", `notif: cancel impossible: ${e}`);
     }
@@ -233,10 +247,10 @@ class OsNotifications {
 
   /** Retire la notif d'une clé suivie si émise par cette instance. */
   private cancelKey(key: string) {
-    const id = this.ids.get(key);
-    if (id === undefined) return;
+    const e = this.ids.get(key);
+    if (!e) return;
     this.ids.delete(key);
-    void this.cancelIds([id]);
+    void this.cancelIds([e.id]);
   }
 
   /** La session quitte `waiting_input` (question répondue dans l'app,
@@ -248,12 +262,14 @@ class OsNotifications {
 
   /** L'utilisateur ouvre la session dans l'app (équivalent du clic sur
    *  la notif, sans le clic) → les notifs « done »/« error » sont
-   *  vues — la « question » est conservée si encore waiting_input. */
+   *  vues — la « question » est conservée si encore waiting_input.
+   *  Appelé depuis chat.open : tous les chemins d'ouverture (sidebar,
+   *  backlog, map, lien peer, clic notif) y convergent. */
   sessionOpened(sid: string) {
-    for (const kind of ["done", "error"] as const) {
-      for (const key of [...this.ids.keys()]) {
-        // sid unique — conn insensible : la clé est "conn:sid:kind".
-        if (key.endsWith(`:${sid}:${kind}`)) this.cancelKey(key);
+    for (const [key, e] of [...this.ids]) {
+      // sid unique — conn insensible (s-XXXXXXXX aléatoire par démon).
+      if (e.sid === sid && (e.kind === "done" || e.kind === "error")) {
+        this.cancelKey(key);
       }
     }
   }
@@ -261,8 +277,8 @@ class OsNotifications {
   /** La session a disparu de la liste (rm/kill) — clé "conn:sid" :
    *  plus aucune notif ne la concerne. Appelé via onGone. */
   sessionGone(key: string) {
-    for (const k of [...this.ids.keys()]) {
-      if (k.startsWith(`${key}:`)) this.cancelKey(k);
+    for (const [k, e] of [...this.ids]) {
+      if (`${e.conn}:${e.sid}` === key) this.cancelKey(k);
     }
   }
 
@@ -289,18 +305,20 @@ class OsNotifications {
       if (kind === "question") return s.state !== "waiting_input";
       return false; // done/error : soldées par clic / ouverture / rm
     };
-    // Index local (instance courante).
-    for (const key of [...this.ids.keys()]) {
-      const [conn, sid, kind] = key.split(":");
-      if (resolved(conn, sid, kind)) this.cancelKey(key);
+    // Index local (instance courante) — composantes portées par
+    // l'entrée, jamais re-parsées (conn est multi-segments).
+    for (const [key, e] of [...this.ids]) {
+      if (resolved(e.conn, e.sid, e.kind)) this.cancelKey(key);
     }
     // Balayage OS : notifs actives émises par nous (extra.sid présent)
-    // dont l'index est perdu (restart app) — mêmes règles.
+    // dont l'index est perdu (restart app) — mêmes règles. Mobile-only :
+    // freedesktop n'expose pas la liste des notifs actives (le rejet est
+    // déjà attrapé — l'index local suffit côté desktop).
     try {
       const acts = await invoke<{ id?: number; extra?: { sid?: string; conn?: string; kind?: string } }[]>(
         "plugin:notification|get_active",
       );
-      const ownIds = new Set(this.ids.values());
+      const ownIds = new Set([...this.ids.values()].map((e) => e.id));
       const stale: number[] = [];
       for (const a of acts ?? []) {
         if (typeof a.id !== "number" || ownIds.has(a.id)) continue;

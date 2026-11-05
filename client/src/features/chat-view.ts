@@ -18,6 +18,7 @@ import { hideMenu, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
 import { fillEfforts, joinModel, splitModel } from "./modelbar";
 import { costFor, ensureCosts } from "./modelcosts";
+import { notifications } from "./notifications";
 import type { EventRenderer } from "./event-renderers";
 
 const MAX_RENDERED = 400;
@@ -396,6 +397,11 @@ export class ChatView {
   }
 
   async open(id: string, force = false, conn = "") {
+    // Ouverture dans l'app = notifs done/error vues : les retirer du
+    // shade OS (équivalent du clic autoCancel, sans le clic — #184).
+    // Point d'entrée unique : sidebar, backlog, map, lien peer et clic
+    // notif convergent tous ici.
+    notifications.sessionOpened(id);
     const seq = ++this.openSeq;
     // Les events live arrivant pendant le chargement (le sub précédent
     // tourne encore jusqu'au subscribe) sont tamponnés : intercalés entre
