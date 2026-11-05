@@ -413,6 +413,21 @@ impl Session {
             .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Vrai pendant la fenêtre sleep→`model_override_cmd` de
+    /// l'override catalogue : aucun spawn (réveil, resume, clear,
+    /// fork) ne doit créer un `devin acp` pendant que le `devin -r`
+    /// tourne — le store provider serait lu/écrit à la fois par les
+    /// deux canaux.
+    pub fn catalogue_override_active(&self) -> bool {
+        self.catalogue_override_active
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn set_catalogue_override_active(&self, v: bool) {
+        self.catalogue_override_active
+            .store(v, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Purge `pending_config["model"]` — ceinture+bretelles après un
     /// échec d'override catalogue : une valeur catalogue restaurée
     /// « announced » ne doit jamais être rejouée en

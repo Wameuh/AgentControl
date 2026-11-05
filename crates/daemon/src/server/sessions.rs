@@ -511,6 +511,15 @@ impl Daemon {
     /// sur une session qui vient de s'endormir et doivent déclencher le
     /// même réveil.
     pub(super) fn spawn_wake(self: &Arc<Self>, s: &Arc<Session>, session: &str) {
+        if s.catalogue_override_active() {
+            // Override catalogue en vol : le `devin -r` tourne, un
+            // spawn maintenant violerait l'invariant du side-channel.
+            // Enfiler suffit — le respawn final de l'override draine
+            // la file (spawn_agent post-spawn) ; wake_pending couvre
+            // le cas où il échouerait.
+            s.arm_wake_pending();
+            return;
+        }
         if !s.wake_begin() {
             // Réveil déjà en vol — l'envoi est en file ; s'il finit
             // asleep (sleep en vol, échec), wake_pending le relance.
@@ -607,7 +616,7 @@ impl Daemon {
     /// set_config_option ni de pending_config pour ces valeurs. En cas
     /// d'échec de l'override : meta.model revenu à la valeur précédente
     /// + event Error, la session est quand même respawnée.
-    async fn apply_catalogue_model(&self, s: &Arc<Session>, model: &str) -> Result<()> {
+    async fn apply_catalogue_model(self: &Arc<Self>, s: &Arc<Session>, model: &str) -> Result<()> {
         let meta = s.meta_snapshot();
         // Re-sélection de la valeur déjà appliquée sur ce sid : le cycle
         // kill→override→load ne changerait rien — no-op.
@@ -659,6 +668,12 @@ impl Daemon {
                 if busy { " (le tour en cours sera interrompu)" } else { "" }
             ),
         });
+        // Fenêtre critique : process acp mort, `devin -r` en cours —
+        // catalogue_override_active bloque tout spawn concurrent
+        // (spawn_agent, spawn_wake, resume_and_deliver) qui violerait
+        // l'invariant « jamais d'acp pendant l'override ». Relâché AVANT
+        // le respawn ci-dessous : c'est notre propre spawn_agent.
+        s.set_catalogue_override_active(true);
         // Kill AVANT l'override : le process `devin acp` détient le lock
         // de session et réécrirait le store à sa fermeture — le
         // `devin -r` ne doit jamais tourner pendant qu'il vit.
@@ -670,6 +685,7 @@ impl Daemon {
         let r = tokio::task::spawn_blocking(move || run_override_cmd(&rendered, &cwd))
             .await
             .unwrap_or_else(|e| Err(anyhow::anyhow!("override join: {e}")));
+        s.set_catalogue_override_active(false);
         if let Err(e) = r {
             // `creation` est vrai aussi pour une re-application de la
             // valeur courante (reapply sur nouveau sid, re-sélection) :
@@ -718,7 +734,7 @@ impl Daemon {
     /// sid, sans ce rejeu la session repartirait sur le modèle par
     /// défaut du compte. No-op pour les valeurs annoncées et quand le
     /// sid correspond déjà.
-    async fn reapply_catalogue_if_new_sid(&self, s: &Arc<Session>) {
+    async fn reapply_catalogue_if_new_sid(self: &Arc<Self>, s: &Arc<Session>) {
         let m = s.meta_snapshot();
         if m.model_source.as_deref() != Some("catalogue") {
             return;
@@ -748,10 +764,14 @@ impl Daemon {
         }
         if s.catalogue_reapply_streak() >= Session::CATALOGUE_REAPPLY_MAX {
             s.halt_catalogue_reapply();
-            // Mémoriser le sid courant : sans ça un spawn following
-            // sur le MÊME sid (load réparé) retenterait — le halt
-            // reste jusqu'à action explicite.
-            s.set_model_override_sid(Some(sid.clone()));
+            // PAS de set_model_override_sid ici : le figer sur le sid
+            // courant rendrait la re-sélection explicite de la même
+            // valeur no-op (gardes model==+sid==) — l'utilisateur
+            // devrait choisir une autre valeur pour retenter. Sans
+            // figé, override_sid reste le dernier sid réellement
+            // ciblé : le halt bloque le rejeu automatique, et un
+            // reset explicite permet à apply de retenter (le no-op
+            // ne tire que si le sid correspond VRAIMENT).
             s.emit(EventKind::Error {
                 message: format!(
                     "rejeu de l'override catalogue « {model} » abandonné — le sid natif change à chaque spawn ({sid})"
@@ -790,7 +810,7 @@ impl Daemon {
     /// Réveil d'une session endormie (déclenché par un envoi user) :
     /// respawn + session/load — même mécanique que ResumeSession. Le drain
     /// post-spawn livre les prompts enfilés pendant le sommeil.
-    async fn wake_session(&self, session: &str) -> Result<()> {
+    async fn wake_session(self: &Arc<Self>, session: &str) -> Result<()> {
         let s = self.get_session(session).await?;
         s.emit(EventKind::System {
             text: "réveil de la session…".into(),
@@ -803,7 +823,7 @@ impl Daemon {
     /// anti-respawn de spawn_agent (state==asleep → bail) stopperait le
     /// réveil ; en cas d'échec la session retourne à "asleep" pour que le
     /// prochain envoi retente (une session morte, elle, reste morte).
-    pub(super) async fn respawn(&self, s: &Arc<Session>, skip_replay: bool) -> Result<()> {
+    pub(super) async fn respawn(self: &Arc<Self>, s: &Arc<Session>, skip_replay: bool) -> Result<()> {
         let meta = s.meta_snapshot();
         // Avant leave_asleep : un refus laisse la session endormie/morte,
         // pas bloquée en « starting ». Une session déjà vivante ne compte

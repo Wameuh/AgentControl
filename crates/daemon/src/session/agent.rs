@@ -56,6 +56,12 @@ impl Session {
         // s'exécuteraient en parallèle (handshakes ACP écrits dans le
         // stdin l'un de l'autre, stdin_tx/child en last-writer-wins).
         let _guard = self.spawn_lock.lock().await;
+        // Override catalogue en vol : le `devin -r` tourne pendant que
+        // le process acp est mort — un spawn ici créerait un acp
+        // concurrent, exactement ce que le side-channel interdit.
+        if self.catalogue_override_active() {
+            return Err(anyhow::anyhow!("override catalogue en cours"));
+        }
         // Le spawn attendu derrière le lock a livré un agent vivant :
         // respawner par-dessus le tuerait pour rien (deuxième réveil,
         // resume pendant un spawn).

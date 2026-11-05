@@ -334,6 +334,14 @@ impl Daemon {
     /// de lancer un second spawn.
     pub(super) async fn resume_and_deliver(self: &Arc<Self>, session: &str, wrapped: String, steer: bool) -> Result<()> {
         let s = self.get_session(session).await?;
+        if s.catalogue_override_active() {
+            // Override catalogue en vol : enfiler — le respawn final
+            // de l'override draine la file (spawn_agent post-spawn).
+            if s.send_peer_prompt(&wrapped, steer).await? {
+                self.spawn_wake(&s, session);
+            }
+            return Ok(());
+        }
         if !s.wake_begin() {
             // Un autre réveil est en vol : enfiler seulement. Ok(true) =
             // il a relâché `waking` entre-temps et la cible est endormie

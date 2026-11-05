@@ -195,6 +195,11 @@ pub struct Session {
     /// explicite (sélection modèle, stage, /clear, création).
     catalogue_reapply_streak: AtomicU64,
     catalogue_reapply_halted: std::sync::atomic::AtomicBool,
+    /// Override catalogue en vol (sleep→`model_override_cmd`) : le
+    /// process ACP est mort et le `devin -r` tourne — tout spawn
+    /// concurrent violerait l'invariant du side-channel. spawn_agent
+    /// et les chemins de réveil le respectent.
+    catalogue_override_active: std::sync::atomic::AtomicBool,
     /// Spawn en vol (process + handshake session/load) — le stdin est posé
     /// avant la fin du handshake : les envois doivent s'enfiler, un drain
     /// livrerait un "Session not found" sur l'agent pas encore prêt.
@@ -317,6 +322,7 @@ impl Session {
             waking: std::sync::atomic::AtomicBool::new(false),
             catalogue_reapply_streak: AtomicU64::new(0),
             catalogue_reapply_halted: std::sync::atomic::AtomicBool::new(false),
+            catalogue_override_active: std::sync::atomic::AtomicBool::new(false),
             spawning: std::sync::atomic::AtomicBool::new(false),
             runner_active: std::sync::atomic::AtomicBool::new(false),
             wake_pending: std::sync::atomic::AtomicBool::new(false),
