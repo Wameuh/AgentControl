@@ -63,11 +63,11 @@ const PROMPT: &str = r#"[Session creee automatiquement par le service backlog-or
 
 Tu es un worker autonome sur le repo AgentControl (cwd /workspace). Commence par lire /workspace/AGENTS.md — le workflow PR/CI qu'il decrit est obligatoire.
 
-MISSION — boucle tant que le backlog partage contient des taches :
+MISSION — une seule tache (un worker = un item, pas de boucle) :
 
-1. Recupere la prochaine tache : agentbacklog --pop --agent-id "$AGENTCONTROL_SESSION" --json (si la variable est vide, utilise un id stable de ton choix et reutilise-le partout). Exit 1 « queue is empty » -> plus de tache disponible : si une de tes PR attend encore un merge, va a l'etape 4, sinon reponds « backlog vide » et arrete. Exit 0 -> le JSON {id, title, description} est ton cahier des charges complet.
+1. Recupere UNE tache : agentbacklog --pop --agent-id "$AGENTCONTROL_SESSION" --json (si la variable est vide, utilise un id stable de ton choix et reutilise-le partout). Exit 1 « queue is empty » -> rien a faire : reponds « backlog vide » et arrete — l'orchestrateur supprime les workers inactifs tout soldes. Exit 0 -> le JSON {id, title, description} est ton cahier des charges complet.
 
-   Cas particulier : si une de tes taches reste wip parce que sa PR n'est pas encore mergée, tu n'es PAS libre — mene d'abord cette PR jusqu'au merge (etape 4), marque --done, puis seulement reprends la boucle ici.
+   Cas particulier : si une de tes taches reste wip parce que sa PR n'est pas encore mergée (poppee avant cette consigne), tu n'es PAS libre — mene d'abord cette PR jusqu'au merge (etape 4), marque --done, puis reprends l'item poppe ci-dessus le cas echeant. Tu t'arretes quand TOUT ce qui t'est attribue est solde — tu NE RE-POP JAMAIS apres un --done : l'orchestrateur spawn un worker neuf par item pending.
 
 2. Implemente la tache en suivant sa description a la lettre : git worktree dedie base sur origin/next_release (JAMAIS dans le checkout principal /workspace), spec, verifications demandees. Option : review locale du diff avant de pousser — si `agent-reviewer review --help` existe (agent-reviewer >= 0.3) : `agent-reviewer review --path <ton worktree> --base origin/next_release` imprime la review sur stdout (exit 0 = APPROVED, 4 = CONDITIONAL, 5 = REJECTED).
 
@@ -77,9 +77,9 @@ MISSION — boucle tant que le backlog partage contient des taches :
 
 4. Mene ta PR jusqu'au merge : si la regle de merge de /workspace/AGENTS.md le permet pour un agent (derniere review auto « Verdict: APPROVED » posterieure au push du head courant, fraicheur verifiee via les PushEvents du repo), procede au merge toi-meme (`gh pr merge <N> --squash --delete-branch` — squash = convention du repo, delete-branch = menage de la branche head au merge) ; sinon le merge reste a l'utilisateur — surveille jusqu'au merge effectif via un waiter (`ac-wait -- bash -c 'gh pr view <N> --json state -q .state | grep -q MERGED'` — pipe enrobe dans bash -c, un `|` nu couperait la commande).
 
-5. Marque la tache faite : agentbacklog --done <ID> --agent-id "<ton agent-id>" UNIQUEMENT quand ta PR est effectivement MERGED (verifie l'etat GitHub, pas seulement ready+checks) — cette regle vise TA PR de feature vers next_release. Pour une tache sans PR propre (ex. item patchnotes auto, dont la release PR appartient a l'utilisateur) : --done quand les criteres propres de la tache sont remplis, sans jamais attendre un merge qui n'est pas le tien.
+5. Marque la tache faite : agentbacklog --done <ID> --agent-id "<ton agent-id>" UNIQUEMENT quand ta PR est effectivement MERGED (verifie l'etat GitHub, pas seulement ready+checks) — cette regle vise TA PR de feature vers next_release. Pour une tache sans PR propre (ex. item patchnotes auto, dont la release PR appartient a l'utilisateur) : --done quand les criteres propres de la tache sont remplis, sans jamais attendre un merge qui n'est pas le tien. Puis ARRETE : reponds « termine » et cesse tout travail — ne re-pop jamais, l'orchestrateur te supprime et spawn un worker neuf pour le pending suivant.
 
-Blocage insurmontable sur une tache : agentbacklog --release <ID> --agent-id "<ton agent-id>", explique la raison dans ta reponse, puis reprends a l'etape 1.
+Blocage insurmontable sur une tache : agentbacklog --release <ID> --agent-id "<ton agent-id>", explique la raison dans ta reponse, puis arrete — l'item repart pending pour un autre worker.
 
 Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; push uniquement sur ta branche de PR ; nettoie ton worktree a la fin (git worktree remove) ; reponds en francais."#;
 
@@ -1909,9 +1909,10 @@ impl Daemon {
             ));
         }
         parts.push(
-            "Quand tout est solde : agentbacklog --pop --agent-id \
-             \"$AGENTCONTROL_SESSION\" --json pour la tache suivante s'il en \
-             reste, sinon arrete."
+            "Quand tout est solde : reponds « termine » et arrete — \
+             l'orchestrateur supprime les workers inactifs tout soldes et \
+             spawn un worker neuf par item pending (un worker = un item, \
+             pas de re-pop)."
                 .into(),
         );
         let msg = parts.join(" ");
