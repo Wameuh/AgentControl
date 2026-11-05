@@ -106,3 +106,4 @@
 288: PR and plan reviewers are now explicitly barred from compiling, building or testing — reviews stay strictly read-only and the CI check-runs remain the compile/test guarantee.
 289: A session parked on an ac-wait waiter now shows how long it has been waiting — the wait gem's tooltip reports the oldest live waiter's age, its declared name (e.g. "verdict PR #42") and its timeout, making a silently stuck wait distinguishable from a normal one.
 290: Settings changes are now staged and only applied when you click Save — a Cancel button (and the unsaved-changes badge next to it) restores the previous values, cosmetic options still live-preview but revert on cancel, and closing the panel silently discards anything unsaved.
+281: Model selectors can now offer every variant from the agent catalogue (e.g. Devin effort levels ACP does not announce), applied through a provider side-channel when configured.
