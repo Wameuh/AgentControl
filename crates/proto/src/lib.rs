@@ -478,6 +478,11 @@ pub struct LastError {
     pub at: String,
     /// Échecs consécutifs du même kind.
     pub count: u32,
+    /// Retry programmé pour `rate_limit` (epoch secondes UTC) — calé
+    /// sur l'échéance annoncée par le provider quand le message la
+    /// porte, sinon now + backoff. None = pas de retry automatique.
+    #[serde(default)]
+    pub retry_at: Option<i64>,
 }
 
 fn default_state() -> String {

@@ -76,6 +76,133 @@ pub(super) fn backoff_for(count: u32) -> std::time::Duration {
     std::time::Duration::from_secs(secs.min(3600))
 }
 
+/// Secondes epoch UTC d'un SystemTime (0 si avant l'epoch — jamais en
+/// pratique, le temps système est post-1970).
+pub(super) fn unix_secs(t: std::time::SystemTime) -> i64 {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Jitter du retry calé sur une échéance annoncée : 5-15 s, dérivé de
+/// façon déterministe du message et du count (pas de RNG — testable,
+/// stable d'un spawn à l'autre pour une même annonce).
+pub(super) fn reset_jitter(msg: &str, count: u32) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in msg.bytes().chain(count.to_le_bytes()) {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    5 + h % 11
+}
+
+/// `<n>[.<d>] <unité?>` en tête de `s` — retourne les secondes. Unité
+/// absente → `default_secs` (None = unité exigée). Mots reconnus :
+/// second/sec, minute/min, hour/hr, day — anglais uniquement, le
+/// provider n'annonce pas dans une autre langue.
+fn parse_duration_secs(s: &str, default_secs: Option<u64>) -> Option<u64> {
+    let s = s.trim_start_matches(|c: char| !c.is_ascii_digit());
+    let int_len = s.bytes().take_while(u8::is_ascii_digit).count();
+    if int_len == 0 {
+        return None;
+    }
+    let (int_part, rest) = s.split_at(int_len);
+    let mut secs: f64 = int_part.parse().ok()?;
+    let rest = rest.trim_start();
+    if let Some(frac) = rest.strip_prefix('.') {
+        let flen = frac.bytes().take_while(u8::is_ascii_digit).count();
+        if flen > 0 {
+            secs += format!("0.{}", &frac[..flen]).parse::<f64>().ok()?;
+        }
+    }
+    let unit = rest
+        .trim_start_matches(|c: char| !c.is_ascii_alphabetic())
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .next()
+        .unwrap_or("");
+    let mult = match unit {
+        "" => default_secs?,
+        u if u.starts_with("sec") => 1,
+        u if u.starts_with("min") => 60,
+        u if u.starts_with("h") || u.starts_with("hr") => 3600,
+        u if u.starts_with("day") => 86400,
+        _ => return None,
+    };
+    Some((secs * mult as f64).round() as u64)
+}
+
+fn unix_to_system(unix: i64) -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + std::time::Duration::from_secs(unix.max(0) as u64)
+}
+
+/// Échéance de reset annoncée par le provider dans un message
+/// rate_limit : « reset in 15 minutes », « try again in 2 hours »,
+/// « retry-after: 120 » (secondes nues, convention HTTP), ou heure
+/// absolue « at 13:56 UTC ». None = rien d'exploitable ou échéance
+/// absurde (> 1 h dans le futur, > 5 min dans le passé — le backoff
+/// classique reprend la main dans les deux cas).
+pub(super) fn parse_reset_at(
+    msg: &str,
+    now: std::time::SystemTime,
+) -> Option<std::time::SystemTime> {
+    let now_unix = unix_secs(now);
+    let m = msg.to_lowercase();
+    let sane = |target: i64| {
+        let d = target - now_unix;
+        (-300..=3600).contains(&d).then(|| unix_to_system(target))
+    };
+    // (a) durée relative : « reset in 15 minutes », « try again in 2 h »
+    for kw in [
+        "reset in ",
+        "resets in ",
+        "try again in ",
+        "try again at ",
+        "retry after ",
+        "retry in ",
+        "retry-after",
+        "retry_after",
+    ] {
+        let Some(i) = m.find(kw) else { continue };
+        let rest = &m[i + kw.len()..];
+        // retry-after admet la forme nue « : 120 » (secondes) ; les
+        // autres tournures exigent une unité explicite.
+        let bare = kw.starts_with("retry");
+        if let Some(d) = parse_duration_secs(rest, bare.then_some(1)) {
+            return sane(now_unix.saturating_add(d as i64));
+        }
+    }
+    // (b) heure absolue UTC : « (at 13:56 UTC) » — le suffixe de fuseau
+    // est exigé pour ne pas capter « meet at 5:30 ».
+    for (i, _) in m.match_indices("at ") {
+        let rest = m[i + 3..].trim_start();
+        let b = rest.as_bytes();
+        if b.len() < 5 || !b[0].is_ascii_digit() {
+            continue;
+        }
+        let Some(colon) = rest.find(':') else { continue };
+        let (Ok(hh), Ok(mm)) = (
+            rest[..colon].parse::<u32>(),
+            rest[colon + 1..].get(..2).unwrap_or("").parse::<u32>(),
+        ) else {
+            continue;
+        };
+        let after = rest[colon + 3..].to_lowercase();
+        let tz = after.trim_start().starts_with("utc") || after.trim_start().starts_with("gmt");
+        if hh > 23 || mm > 59 || !tz {
+            continue;
+        }
+        use chrono::Datelike;
+        let dt = chrono::DateTime::<chrono::Utc>::from(now);
+        let target_unix = chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), dt.day())
+            .and_then(|d| d.and_hms_opt(hh, mm, 0))
+            .map(|n| n.and_utc().timestamp());
+        if let Some(t) = target_unix {
+            return sane(t);
+        }
+    }
+    None
+}
+
 impl Session {
     // -----------------------------------------------------------------------
     // API publique (dispatchée par le serveur)

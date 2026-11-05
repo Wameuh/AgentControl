@@ -559,27 +559,80 @@ impl Session {
     /// ré-armera si l'échec persiste. None = jamais de retry
     /// automatique (model/auth/other).
     pub(super) fn hold_error(&self, kind: &str, msg: &str) {
-        self.set_last_error(kind, msg);
-        let count = self
-            .meta
-            .lock()
-            .unwrap()
-            .last_error
-            .as_ref()
-            .map(|le| le.count)
-            .unwrap_or(1);
-        let retry = (kind == "rate_limit")
-            .then(|| prompt::backoff_for(count));
+        // Échéance annoncée par le provider (« reset in 15 minutes »,
+        // « at 13:56 UTC »…) : le retry se cale dessus (+ jitter) au
+        // lieu de l'exponentiel — et un échec tombé DANS la fenêtre
+        // annoncée (retry_at persisté > now) est attendu par
+        // construction : ni count incrémenté ni échéance repoussée
+        // (sinon chaque tentative pré-reset achetait un backoff
+        // doublé — cas réel : 7 échecs → 1 h de mort pour un reset à
+        // 15 min). Sans annonce : backoff inchangé.
+        let now = std::time::SystemTime::now();
+        let now_unix = prompt::unix_secs(now);
+        let announced = (kind == "rate_limit")
+            .then(|| prompt::parse_reset_at(msg, now))
+            .flatten()
+            .map(prompt::unix_secs);
+        let prev = self.meta.lock().unwrap().last_error.clone();
+        let prev_rl = prev.as_ref().filter(|le| le.kind == "rate_limit");
+        let in_window = kind == "rate_limit"
+            && prev_rl
+                .and_then(|le| le.retry_at)
+                .is_some_and(|t| t > now_unix);
+        let count = if in_window {
+            prev_rl.map(|le| le.count).unwrap_or(1)
+        } else {
+            match &prev {
+                Some(le) if le.kind == kind => le.count + 1,
+                _ => 1,
+            }
+        };
+        // Échéance : annonce fraîche > fenêtre précédente (recalage sur
+        // le reset connu, pas de double) > backoff exponentiel.
+        let fresh = announced;
+        let reused = if fresh.is_none() && in_window {
+            prev_rl.and_then(|le| le.retry_at)
+        } else {
+            None
+        };
+        let (delay, retry_at) = if let Some(t) = fresh.or(reused) {
+            let jittered = fresh
+                .map(|_| prompt::reset_jitter(msg, count) as i64)
+                .unwrap_or(0);
+            let target = t + jittered;
+            // Annonce fraîche : borne [60 s, 1 h] (le parse a déjà
+            // rejeté l'absurde, le clamp couvre le reset tout juste
+            // passé). Fenêtre reprise : échéance déjà calibrée, on ne
+            // fait que ne pas la dépasser.
+            let d = if fresh.is_some() {
+                (target - now_unix).clamp(60, 3600)
+            } else {
+                (target - now_unix).max(0)
+            };
+            (
+                std::time::Duration::from_secs(d as u64),
+                Some(now_unix + d),
+            )
+        } else {
+            let d = prompt::backoff_for(count);
+            (d, Some(now_unix + d.as_secs() as i64))
+        };
+        // retry_at n'a de sens que pour rate_limit — les autres kinds
+        // n'ont jamais de retry automatique.
+        let retry_at = (kind == "rate_limit")
+            .then_some(retry_at)
+            .flatten();
+        self.set_last_error(kind, msg, count, retry_at);
         let mut h = self.error_hold.lock().unwrap();
         if let Some(old) = h.take() {
             if let Some(t) = &old.timer {
                 t.abort();
             }
         }
-        let timer = retry.map(|d| {
+        let timer = (kind == "rate_limit").then(|| {
             let me = self.me.clone();
             tokio::spawn(async move {
-                tokio::time::sleep(d).await;
+                tokio::time::sleep(delay).await;
                 if let Some(s) = me.upgrade() {
                     // Échéance du backoff : le hold tombe, le drain
                     // retente la file (un seul retry — un nouvel échec
@@ -612,14 +665,17 @@ impl Session {
         });
     }
 
-    /// Enregistre l'échec dans meta.last_error — `count` incrémenté
-    /// tant que le kind reste identique (série consécutive).
-    pub(super) fn set_last_error(&self, kind: &str, msg: &str) {
+    /// Enregistre l'échec dans meta.last_error — `count` et `retry_at`
+    /// sont calculés par l'appelant (hold_error gère la fenêtre
+    /// annoncée : un échec in-window ne doit pas incrémenter).
+    pub(super) fn set_last_error(
+        &self,
+        kind: &str,
+        msg: &str,
+        count: u32,
+        retry_at: Option<i64>,
+    ) {
         let mut m = self.meta.lock().unwrap();
-        let count = match &m.last_error {
-            Some(le) if le.kind == kind => le.count + 1,
-            _ => 1,
-        };
         let mut message = msg.to_string();
         if message.chars().count() > 300 {
             message = message.chars().take(300).collect();
@@ -629,6 +685,7 @@ impl Session {
             kind: kind.to_string(),
             at: proto::now_iso(),
             count,
+            retry_at,
         });
         drop(m);
         self.save_meta();
@@ -1097,6 +1154,84 @@ mod tests {
         assert_eq!(prompt::backoff_for(30), std::time::Duration::from_secs(3600));
     }
 
+    /// parse_reset_at : durée relative, retry-after nu, heure UTC
+    /// absolue ; et les échéances absurdes rejetées (> 1 h, > 5 min
+    /// dans le passé) → backoff.
+    #[test]
+    fn reset_at_parsing() {
+        let now = std::time::SystemTime::now();
+        let at = |d: i64| {
+            prompt::unix_secs(now) + d
+        };
+        // « reset in 15 minutes » — le message réel du provider.
+        let t = prompt::parse_reset_at(
+            "Reached free model rate limit. Your limit will reset in 15 minutes (at 13:56 UTC)",
+            now,
+        )
+        .unwrap();
+        let d = prompt::unix_secs(t) - at(0);
+        assert!((890..=910).contains(&d), "reset in 15min → ~900s, got {d}");
+        // « try again in 2 hours » → > 1 h → absurde → None.
+        assert!(prompt::parse_reset_at("try again in 2 hours", now).is_none());
+        // « retry-after: 120 » → secondes nues (convention HTTP).
+        let t = prompt::parse_reset_at("HTTP 429 — retry-after: 120", now).unwrap();
+        assert_eq!(prompt::unix_secs(t) - at(0), 120);
+        // Heure absolue UTC : « at HH:MM UTC » — calcule l'écart réel.
+        // Garde minuit : +10 min peut basculer au jour suivant, cas non
+        // géré par le parse (same-day) — on saute le test dans cette
+        // fenêtre plutôt que de flaker.
+        let hhmm = {
+            let dt = chrono::DateTime::<chrono::Utc>::from(now);
+            use chrono::Timelike;
+            if dt.hour() >= 23 && dt.minute() >= 45 {
+                return;
+            }
+            let target = dt + chrono::Duration::minutes(10);
+            format!("{:02}:{:02}", target.hour(), target.minute())
+        };
+        let msg = format!("quota exceeded (at {hhmm} UTC)");
+        let t = prompt::parse_reset_at(&msg, now).unwrap();
+        let d = prompt::unix_secs(t) - at(0);
+        assert!((540..=600).contains(&d), "at HH:MM UTC → ~600s, got {d}");
+        // Sans fuseau → pas d'heure absolue (« meet at 5:30 » ignoré).
+        assert!(prompt::parse_reset_at("meet at 5:30", now).is_none());
+        // « reset in 3 days » → > 1 h → None.
+        assert!(prompt::parse_reset_at("reset in 3 days", now).is_none());
+        // Message sans échéance → None.
+        assert!(prompt::parse_reset_at("429 too many requests", now).is_none());
+    }
+
+    /// hold_error calé sur l'échéance annoncée : retry_at persisté
+    /// ≈ now + délai annoncé (+ jitter), et un second échec DANS la
+    /// fenêtre n'incrémente pas le count ni ne repousse l'échéance.
+    #[tokio::test]
+    async fn rate_limit_announced_window() {
+        let (s, dir) = tmp_session("rl-window");
+        s.hold_error(
+            "rate_limit",
+            "rate limit — your limit will reset in 15 minutes",
+        );
+        let le = s.meta_snapshot().last_error.unwrap();
+        assert_eq!(le.count, 1);
+        let retry1 = le.retry_at.expect("retry_at posé");
+        let now = prompt::unix_secs(std::time::SystemTime::now());
+        let d = retry1 - now;
+        assert!((870..=930).contains(&d), "retry ~15min+jitter, got {d}");
+        // Second échec immédiat (même fenêtre) : count figé, échéance
+        // recalée sur la même fenêtre — pas de backoff doublé.
+        s.hold_error(
+            "rate_limit",
+            "rate limit — your limit will reset in 15 minutes",
+        );
+        let le2 = s.meta_snapshot().last_error.unwrap();
+        assert_eq!(le2.count, 1, "échec in-window : count non incrémenté");
+        assert!(le2.retry_at.unwrap() > now, "échéance conservée");
+        // Un kind différent repart à 1.
+        s.hold_error("model", "model not found");
+        assert_eq!(s.meta_snapshot().last_error.unwrap().count, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// hold_error pose l'état « error », la trace persistée (count
     /// incrémenté tant que le kind se répète) et la retenue ;
     /// clear_error lève le tout. rate_limit → timer armé, autres kinds
@@ -1149,7 +1284,7 @@ mod tests {
     #[test]
     fn error_clear_on_success() {
         let (s, dir) = tmp_session("error-clear");
-        s.set_last_error("other", "boom");
+        s.set_last_error("other", "boom", 1, None);
         assert!(s.meta_snapshot().last_error.is_some());
         s.clear_last_error();
         assert!(s.meta_snapshot().last_error.is_none());

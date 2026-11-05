@@ -24,7 +24,7 @@ export interface SessionMeta {
   state: string;
   /** Dernier échec de tour (état "error") — kind : rate_limit | model
    *  | auth | other ; count = échecs consécutifs du même kind. */
-  last_error?: { message: string; kind: string; at: string; count: number };
+  last_error?: { message: string; kind: string; at: string; count: number; retry_at?: number | null };
   context_used?: number;
   context_size?: number;
   /** Session créatrice (spawn agent→agent) — affichage imbriqué sidebar. */
