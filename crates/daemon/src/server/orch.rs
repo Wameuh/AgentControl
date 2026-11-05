@@ -825,6 +825,29 @@ fn acwait_live_sids_in(dir: &std::path::Path) -> HashSet<String> {
     acwait_live_waiters_in(dir).into_keys().collect()
 }
 
+/// Déséchappe les séquences `\c` → `c` du format `%q` (printf/bash) —
+/// couvre les cas produits pour un nom libre (espaces, quotes,
+/// backslashes). Le quoting ANSI-C `$'…'` (caractères de contrôle)
+/// n'est pas géré : jamais produit pour `--name` en pratique.
+fn unquote_sh(v: &str) -> String {
+    if !v.contains('\\') {
+        return v.to_string();
+    }
+    let mut out = String::with_capacity(v.len());
+    let mut chars = v.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some(n) => out.push(n),
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn acwait_live_waiters_in(dir: &std::path::Path) -> HashMap<String, AcwaitWait> {
     /// Marge post-timeout : la notif TIMEOUT part avant l'écriture du
     /// `.done` — ne pas nudger pendant que le waiter termine.
@@ -906,7 +929,12 @@ fn acwait_live_waiters_in(dir: &std::path::Path) -> HashMap<String, AcwaitWait> 
         }
         let w = AcwaitWait {
             started,
-            name: field("name").unwrap_or_default(),
+            // `name=` est écrit `printf 'name=%q'` par ac-wait — %q
+            // produit des échappements backslash (`verdict\ PR\ #42`),
+            // pas des quotes : déséchapper `\c` → `c` après le strip
+            // des quotes bordantes (#189 — sinon le tooltip affiche
+            // les `\` sur tous les noms à espaces).
+            name: unquote_sh(&field("name").unwrap_or_default()),
             timeout,
         };
         // Multi-waiters : le plus ancien vivant rapporte (started
@@ -2515,8 +2543,9 @@ mod tests {
         write_waiter(
             &dir,
             "w-old",
+            // `name=%q` réel : échappements backslash, pas des quotes.
             &format!(
-                "session=s-multi\nname='verdict PR #42'\nstarted={}\ntimeout=1800\n",
+                "session=s-multi\nname=verdict\\ PR\\ #42\nstarted={}\ntimeout=1800\n",
                 now - 900.0
             ),
         );
@@ -2524,7 +2553,7 @@ mod tests {
         let ws = acwait_live_waiters_in(&dir);
         let w = ws.get("s-multi").expect("waiter vivant attendu");
         assert_eq!(w.started, Some(now - 900.0));
-        assert_eq!(w.name, "verdict PR #42"); // quotes shell strippées
+        assert_eq!(w.name, "verdict PR #42"); // backslashes %q déséchappés
         assert_eq!(w.timeout, Some(1800.0));
         let _ = std::fs::remove_dir_all(&dir);
     }
