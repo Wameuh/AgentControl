@@ -582,6 +582,14 @@ impl Daemon {
     /// + event Error, la session est quand même respawnée.
     async fn apply_catalogue_model(&self, s: &Arc<Session>, model: &str) -> Result<()> {
         let meta = s.meta_snapshot();
+        // Re-sélection de la valeur déjà appliquée sur ce sid : le cycle
+        // kill→override→load ne changerait rien — no-op.
+        if meta.model.as_deref() == Some(model)
+            && meta.model_source.as_deref() == Some("catalogue")
+            && meta.model_override_sid.as_deref() == meta.native_session_id.as_deref()
+        {
+            return Ok(());
+        }
         let native = meta
             .native_session_id
             .clone()
@@ -633,13 +641,14 @@ impl Daemon {
                     "override modèle « {model} » échoué: {e:#} — valeur précédente conservée"
                 ),
             });
-        } else {
-            // Mémorise le sid contre lequel l'override a tourné : un
-            // spawn ultérieur sur un autre sid (clear, fallback
-            // load→new, fork) détecte la dérive via model_override_sid
-            // et rejoue.
-            s.set_model_override_sid(Some(native.clone()));
         }
+        // Le sid est mémorisé MÊME en cas d'échec : sinon reapply
+        // (respawn→reapply→apply) bouclerait à l'infini sur un override
+        // qui échoue en permanence (template erroné, provider down) —
+        // kill + `devin -r` 60 s + respawn à chaque itération. Une
+        // re-sélection explicite repasse par apply_catalogue_model et
+        // retente ; un nouveau sid (clear/fork) retente aussi.
+        s.set_model_override_sid(Some(native));
         // skip_replay=true comme wake_session : le journal est intact
         // (sleep ne le reset pas) — sans ça tout le replay session/load
         // serait re-émis et re-journalisé (historique dupliqué).
