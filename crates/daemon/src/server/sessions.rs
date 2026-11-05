@@ -614,7 +614,27 @@ impl Daemon {
                 ),
             });
         }
-        self.respawn(s, false).await
+        // skip_replay=true comme wake_session : le journal est intact
+        // (sleep ne le reset pas) — sans ça tout le replay session/load
+        // serait re-émis et re-journalisé (historique dupliqué).
+        self.respawn(s, true).await
+    }
+
+    /// Vrai si `value` figure dans le catalogue du profil — utilisé à la
+    /// création pour taire apply_spawn_config sur une valeur qui n'a
+    /// aucune chance d'être résolue contre les options annoncées.
+    async fn catalogue_member(&self, agent: &str, value: &str) -> bool {
+        let Some(p) = self.agents.get(agent) else {
+            return false;
+        };
+        if p.catalogue_cmd.is_none() {
+            return false;
+        }
+        self.catalogues
+            .get(agent, p.catalogue_cmd.as_deref())
+            .await
+            .iter()
+            .any(|e| e.value == value)
     }
 
     /// Réveil d'une session endormie (déclenché par un envoi user) :
@@ -732,6 +752,14 @@ impl Daemon {
             // spawn_cfg : mode/model appliqués par spawn_agent SOUS le
             // flag spawning — ni le drain post-spawn ni un envoi
             // concurrent ne peut partir avant la config demandée.
+            // Valeur possiblement catalogue-only : apply_spawn_config
+            // sauterait la résolution (hors options annoncées) avec un
+            // faux warning — le side-channel ci-dessous tranche une fois
+            // le handshake fait.
+            let cat_hit = match model.as_deref() {
+                Some(m) => d.catalogue_member(&s.meta_snapshot().agent, m).await,
+                None => false,
+            };
             let r = s
                 .spawn_agent(
                     &cmd,
@@ -741,7 +769,7 @@ impl Daemon {
                     d.mcp_servers(&sid),
                     Some(crate::session::SpawnCfg {
                         mode,
-                        model: model.clone(),
+                        model: if cat_hit { None } else { model.clone() },
                         quiet: false,
                     }),
                 )
@@ -758,10 +786,16 @@ impl Daemon {
                     // session/new vient de tourner sur la valeur clampée
                     // par l'agent — close→override→load pour persister la
                     // vraie valeur dans le store provider AVANT de livrer
-                    // le prompt initial.
+                    // le prompt initial. Membre du catalogue mais annoncée
+                    // aussi (rare) : apply_spawn_config l'avait sautée —
+                    // on l'applique par le chemin normal.
                     if let Some(m) = model.as_deref() {
-                        if d.catalogue_only(&s, m).await {
-                            let _ = d.apply_catalogue_model(&s, m).await;
+                        if cat_hit {
+                            if d.catalogue_only(&s, m).await {
+                                let _ = d.apply_catalogue_model(&s, m).await;
+                            } else {
+                                let _ = s.apply_spawn_config(None, Some(m), false).await;
+                            }
                         }
                     }
                     match deliver {

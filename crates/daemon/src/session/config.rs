@@ -357,6 +357,13 @@ impl Session {
         let mut m = self.meta.lock().unwrap();
         m.model = model;
         m.model_source = source;
+        // Une valeur catalogue ne doit jamais traîner dans pending_config
+        // (stagée avant que la source ne soit posée, ou par un chemin
+        // interne) — rejouée au spawn elle repartait en set_config_option
+        // → refus ACP → boucle d'erreurs à chaque réveil.
+        if m.model_source.as_deref() == Some("catalogue") {
+            m.pending_config.remove("model");
+        }
         drop(m);
         self.save_meta();
     }

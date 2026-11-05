@@ -470,7 +470,13 @@ impl Session {
                 }
             }
             if let Some(want) = meta.model.clone() {
+                // model_source="catalogue" : la valeur est posée par le
+                // side-channel (model_override_cmd), l'agent la reporte
+                // clampée — la re-pousser par pending_config/set_config_
+                // option serait un refus ACP garanti en boucle. On garde
+                // meta.model tel quel (c'est la valeur demandée).
                 if !want.is_empty()
+                    && m.model_source.as_deref() != Some("catalogue")
                     && m.model.as_deref() != Some(want.as_str())
                     && !self.config_rejected_has("model", &want)
                 {

@@ -167,8 +167,11 @@ impl Daemon {
                     created_at: proto::now_iso(),
                     native_session_id: None,
                     mode: mode.or(if same_agent { cm.mode.clone() } else { None }),
+                    model_source: model
+                        .as_ref()
+                        .map(|_| "announced".to_string())
+                        .or_else(|| cm.model_source.clone()),
                     model: model.or(if same_agent { cm.model.clone() } else { None }),
-                    model_source: None,
                     available_modes: vec![],
                     available_commands: vec![],
                     available_models: vec![],

@@ -16,15 +16,20 @@ pub struct CatalogEntry {
 pub type CatalogList = Vec<CatalogEntry>;
 
 const TTL: Duration = Duration::from_secs(3600);
+/// Échec ou catalogue vide : retenté vite (60 s) sans marteler le
+/// provider à chaque set_model — une sonde cassée ne doit pas faire
+/// patienter chaque changement de modèle jusqu'au timeout.
+const FAIL_TTL: Duration = Duration::from_secs(60);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(25);
 
 struct Entry {
     at: Instant,
+    ok: bool,
     models: CatalogList,
 }
 
 /// Cache paresseux par profil — la sonde n'a lieu qu'à expiration.
-/// Les échecs ne sont pas mis en cache : l'appel suivant réessaie.
+/// Succès → TTL 1 h ; échec/vide → FAIL_TTL 60 s.
 #[derive(Default)]
 pub struct CatalogueCache {
     inner: Mutex<std::collections::HashMap<String, Entry>>,
@@ -45,22 +50,24 @@ impl CatalogueCache {
             .ok()
             .flatten()
             .unwrap_or_default();
-        if !models.is_empty() {
-            self.inner.lock().unwrap().insert(
-                agent.into(),
-                Entry {
-                    at: Instant::now(),
-                    models: models.clone(),
-                },
-            );
-        }
+        // Le résultat (même vide = sonde en échec ou provider sans
+        // catalogue) est mis en cache : ok=false → FAIL_TTL.
+        let ok = !models.is_empty();
+        self.inner.lock().unwrap().insert(
+            agent.into(),
+            Entry {
+                at: Instant::now(),
+                ok,
+                models: models.clone(),
+            },
+        );
         models
     }
 
     fn cached(&self, agent: &str) -> Option<CatalogList> {
         let m = self.inner.lock().unwrap();
         m.get(agent)
-            .filter(|e| e.at.elapsed() < TTL)
+            .filter(|e| e.at.elapsed() < if e.ok { TTL } else { FAIL_TTL })
             .map(|e| e.models.clone())
     }
 }
@@ -155,12 +162,15 @@ mod tests {
 
     #[test]
     fn parse_catalog_entries() {
-        let out = "Available models (2 families)\n\
-SWE-2 (swe-2)\n\
-  aliases: swe\n\
-  swe-2-high          SWE-2 High  [262K context, Free]\n\
-  swe-2-flash-max     SWE-2 Flash Max  [262K context, $1 / 1M Input]\n\
-Pass a family slug to `--model`.\n";
+        let out = r#"Available models (2 families)
+
+SWE-2 (swe-2)
+  aliases: swe
+  swe-2-high          SWE-2 High  [262K context, Free]
+  swe-2-flash-max     SWE-2 Flash Max  [262K context, $1 / 1M Input]
+
+Pass a family slug to `--model`.
+"#;
         let m = parse_catalog(out);
         assert_eq!(m.len(), 2);
         assert_eq!(m[0].value, "swe-2-high");

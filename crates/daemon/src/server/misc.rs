@@ -192,10 +192,16 @@ impl Daemon {
             .agents
             .get(&agent)
             .ok_or_else(|| anyhow::anyhow!("agent inconnu: {agent}"))?;
-        let models = self
-            .catalogues
-            .get(&agent, profile.catalogue_cmd.as_deref())
-            .await;
+        // Les deux clés sont requises pour qu'une valeur catalogue soit
+        // applicable — servir le catalogue sans model_override_cmd
+        // proposerait des options vouées à l'échec côté ACP.
+        let models = if profile.catalogue_cmd.is_some() && profile.model_override_cmd.is_some() {
+            self.catalogues
+                .get(&agent, profile.catalogue_cmd.as_deref())
+                .await
+        } else {
+            Vec::new()
+        };
         Ok(json!({ "models": models }))
     }
 }
