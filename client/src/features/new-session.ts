@@ -81,6 +81,8 @@ export class NewSessionDialog {
    *  l'agent choisi — l'entrée « custom » du select rend la saisie
    *  libre ; agent sans annonce → input tel quel (comportement inchangé). */
   private applyAgentCaps() {
+    const conn = ($("f-conn") as HTMLSelectElement).value;
+    const agent = ($("f-agent") as HTMLSelectElement).value;
     for (const kind of ["mode", "model"] as const) {
       const inp = $(`f-${kind}`) as HTMLInputElement;
       const sel = $(`f-${kind}-sel`) as HTMLSelectElement;
@@ -102,7 +104,9 @@ export class NewSessionDialog {
       for (const it of vals) {
         const o = document.createElement("option");
         o.value = it.v;
-        o.textContent = it.label;
+        const cost = kind === "model" ? costFor(it.v, conn, agent) : undefined;
+        o.textContent = it.label + (cost ? ` · ${cost.label}` : "");
+        if (cost?.detail) o.title = cost.detail;
         sel.appendChild(o);
       }
       const c = document.createElement("option");
@@ -117,6 +121,11 @@ export class NewSessionDialog {
       else if (prev) sel.value = CUSTOM;
       inp.hidden = sel.value !== CUSTOM;
     }
+    // Coûts du profil affiché — re-render des selects à l'arrivée
+    // (suffixe « · coût » des options modèle, cf. renderModelList).
+    ensureCosts(conn, agent, () => {
+      if (($("dlg-new") as HTMLDialogElement).open) this.applyAgentCaps();
+    });
   }
 
   /** Placeholder unique dans le select agent (chargement / erreur). */
