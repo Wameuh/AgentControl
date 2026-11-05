@@ -189,7 +189,7 @@ impl Session {
         if snapshot.is_empty() {
             return;
         }
-        let keep: std::collections::HashSet<String> = snapshot
+        let keep: std::collections::HashMap<String, String> = snapshot
             .into_iter()
             .filter(|(k, v)| {
                 let known = self.known_config_values(k);
@@ -199,12 +199,26 @@ impl Session {
                         config::Resolve::Unknown | config::Resolve::Ambiguous(_)
                     )
             })
-            .map(|(k, _)| k)
             .collect();
         self.config_rejected
             .lock()
             .unwrap()
-            .retain(|k, _| keep.contains(k));
+            // retain sur (k,v) exact : une marque posée entre le snapshot
+            // et ici (autre cycle) n'est pas effacée à tort.
+            .retain(|k, v| keep.get(k) == Some(v));
+    }
+
+    /// Vrai si `(config_id, valeur)` a déjà été soldé comme refus
+    /// définitif — le reconcile saute alors le re-pending (le replay
+    /// la re-échouerait à chaque spawn) et garde la valeur rapportée
+    /// par l'agent dans meta.
+    fn config_rejected_has(&self, k: &str, v: &str) -> bool {
+        self.config_rejected
+            .lock()
+            .unwrap()
+            .get(k)
+            .map(String::as_str)
+            == Some(v)
     }
 
     /// Retour : Ok(true) agent prêt (session idle posée), Ok(false) le
@@ -425,14 +439,23 @@ impl Session {
             if let Some(want) = meta.mode.clone() {
                 // "" n'est pas un mode poussable (apply_spawn_config le
                 // filtre déjà) — sans garde, il bouclerait un set_mode
-                // en échec à chaque spawn.
-                if !want.is_empty() && m.mode.as_deref() != Some(want.as_str()) {
+                // en échec à chaque spawn. Une valeur soldée comme refus
+                // définitif n'est ni re-pendue ni restaurée dans meta :
+                // le handshake a déjà posé la valeur rapportée par
+                // l'agent (currentModeId), qui fait foi.
+                if !want.is_empty()
+                    && m.mode.as_deref() != Some(want.as_str())
+                    && !self.config_rejected_has("mode", &want)
+                {
                     m.pending_config.insert("mode".into(), want.clone());
                     m.mode = Some(want);
                 }
             }
             if let Some(want) = meta.model.clone() {
-                if !want.is_empty() && m.model.as_deref() != Some(want.as_str()) {
+                if !want.is_empty()
+                    && m.model.as_deref() != Some(want.as_str())
+                    && !self.config_rejected_has("model", &want)
+                {
                     m.pending_config.insert("model".into(), want.clone());
                     m.model = Some(want);
                 }
@@ -452,18 +475,12 @@ impl Session {
                     .iter()
                     .find(|o| o.id == k)
                     .map(|o| o.current_value.as_str());
-                if reported != Some(v.as_str()) {
+                if reported != Some(v.as_str()) && !self.config_rejected_has(&k, &v) {
                     // Une valeur déjà soldée comme refus définitif n'est
                     // pas re-pendée : le replay la re-échouerait à chaque
                     // spawn (boucle de warn). revive_rejected_config la
                     // ré-arme si une annonce fraîche la rend résolvable.
-                    let rejected = {
-                        let rej = self.config_rejected.lock().unwrap();
-                        rej.get(&k).map(String::as_str) == Some(v.as_str())
-                    };
-                    if !rejected {
-                        m.pending_config.insert(k, v);
-                    }
+                    m.pending_config.insert(k, v);
                 }
             }
         }
