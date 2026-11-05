@@ -879,6 +879,9 @@ impl Daemon {
                 verdict,
                 body,
             } => self.h_review_report(session, verdict, body).await,
+            ReqKind::PrReviewRequest { session, repo, pr } => {
+                self.h_pr_review_request(session, repo, pr).await
+            }
             // Interceptés par la couche connexion (ordre des inputs +
             // cycle de vie borné à la connexion) — jamais atteint ici.
             ReqKind::TermOpen { .. }

@@ -108,6 +108,15 @@ session on a detached worktree at the exact head, and posts the
 `## Verdict:` comment itself (ack `Launching a review — AgentControl
 orchestrator`). Same comment-level protocol — workers change nothing.
 
+The same review can also be **requested internally** (no GitHub
+comment): `acctl pr review <N> [--repo R]` or the MCP tool
+`agentcontrol_request_review {repo, pr}` — same queue, same guards
+(`pr_review`, pool, `pr_rereview`, bounded retries, worktree at the
+exact head), same `## Verdict:` comment posted by the daemon. An A2A
+requester (`session` set) gets the ack plus the verdict delivered as
+a message — no GitHub polling needed; the comment stays the official
+merge proof.
+
 **Review flags** (`backlog_orchestrator` params, all hot-settable via
 `acctl comp set` and shown in the config UI): each review mechanism
 has an independent on/off switch — `plan_review` (plan → review →

@@ -1138,6 +1138,22 @@ pub enum ReqKind {
         verdict: String,
         body: String,
     },
+    /// Demande INTERNE de review de PR (acctl `pr review`, tool MCP
+    /// `agentcontrol_request_review`, futur bouton client) : injecte
+    /// une demande dans la MÊME file que le trigger commentaire
+    /// `/mr review` — mêmes gardes (`pr_review`, pool
+    /// `pr_review_max_parallel`, `pr_rereview`, retries bornés,
+    /// worktree au head courant) et même verdict `## Verdict:` posté
+    /// par le démon sur GitHub (la preuve de merge ne change pas).
+    /// `session` = demandeur A2A (None = utilisateur/acctl → pas de
+    /// notification verdict) ; `repo` = `owner/name`, `pr` = numéro.
+    /// Extension additive : démons anciens → erreur « req inconnue ».
+    PrReviewRequest {
+        #[serde(default)]
+        session: Option<String>,
+        repo: String,
+        pr: u64,
+    },
 }
 
 impl ReqKind {
@@ -1217,6 +1233,7 @@ impl ReqKind {
             Self::DaemonStatus => "daemon_status",
             Self::UpdateDaemon { .. } => "update_daemon",
             Self::ReviewReport { .. } => "review_report",
+            Self::PrReviewRequest { .. } => "pr_review_request",
         }
     }
 }

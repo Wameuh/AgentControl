@@ -249,6 +249,12 @@ pub(crate) struct OrchPersist {
     /// jamais relu, une entrée running orpheline → « interrupted »).
     #[serde(default)]
     pub pr_reviews: HashMap<String, Value>,
+    /// `repo#N` → demande de review INTERNE en attente
+    /// (`{by, at, repo, pr}`) — injectée par `PrReviewRequest`
+    /// (acctl/MCP), drainée par la passe review comme un trigger
+    /// commentaire. `by` = session demandeuse A2A ("" = utilisateur).
+    #[serde(default)]
+    pub pr_review_requests: HashMap<String, Value>,
 }
 
 /// `stalled_plans` a été une `Vec<u64>` (r1 de la feature) avant le
@@ -363,24 +369,35 @@ impl OrchProbe {
     }
 
     /// Write-back d'une passe longue (tick review / cycle), fusion
-    /// `pr_reviews` incluse — le merge ET l'assignation sous le MÊME
-    /// lock : entre les deux aucun `h_review_report` ne peut glisser
-    /// une mutation qui serait aussitôt écrasée (lost update clos,
-    /// pas seulement réduit). Les entrées que la passe N'A PAS
-    /// touchées reprennent la valeur vivante ; une entrée modifiée
-    /// par la passe garde la version de la passe (décision locale
-    /// primant le rapport concurrent — la session reviewer sera
-    /// collectée au finish). `snap` = `pr_reviews` au moment du
-    /// clone de départ.
+    /// `pr_reviews` ET `pr_review_requests` incluse — le merge ET
+    /// l'assignation sous le MÊME lock : entre les deux aucun
+    /// `h_review_report` ni `h_pr_review_request` ne peut glisser une
+    /// mutation qui serait aussitôt écrasée (lost update clos, pas
+    /// seulement réduit). Les entrées que la passe N'A PAS touchées
+    /// reprennent la valeur vivante ; une entrée modifiée par la
+    /// passe garde la version de la passe (décision locale primant
+    /// le rapport concurrent — la session reviewer sera collectée au
+    /// finish). `snap`/`snap_req` = `pr_reviews`/`pr_review_requests`
+    /// au moment du clone de départ.
     pub(crate) fn write_back_merged(
         &self,
         st: &mut OrchPersist,
         snap: &HashMap<String, Value>,
+        snap_req: &HashMap<String, Value>,
     ) {
         let mut live = self.state.lock().unwrap();
         for (k, live_v) in live.pr_reviews.iter() {
             if st.pr_reviews.get(k) == snap.get(k) {
                 st.pr_reviews.insert(k.clone(), live_v.clone());
+            }
+        }
+        // `pr_review_requests` : sémantique « le plus récent gagne » —
+        // une demande upsertée pendant la passe (live ≠ snapshot)
+        // prime sur la décision du tick (servie/retirée) ; une entrée
+        // non touchée par le handler reprend la version de la passe.
+        for (k, live_v) in live.pr_review_requests.iter() {
+            if snap_req.get(k) != Some(live_v) {
+                st.pr_review_requests.insert(k.clone(), live_v.clone());
             }
         }
         *live = st.clone();
@@ -1163,6 +1180,7 @@ impl Daemon {
         // fusionne par clé — un rapport de verdict A2A posé pendant le
         // cycle (RPC concurrent sur la map vivante) n'est pas écrasé.
         let pr_snap = st.pr_reviews.clone();
+        let req_snap = st.pr_review_requests.clone();
 
         // Un `orch off` en vol de cycle arrête tout : les étapes
         // suivantes (release, rm, nudge, spawn, garde PR) sont des
@@ -1696,7 +1714,7 @@ impl Daemon {
             stg.planners = n_planners;
             stg.reviewers = n_reviewers;
         }
-        self.orch.write_back_merged(&mut st, &pr_snap);
+        self.orch.write_back_merged(&mut st, &pr_snap, &req_snap);
         self.orch_save(&st);
         // off pendant le cycle : ne pas écraser le Disabled posé par
         // set_enabled (le composant remonterait « running » à tort).

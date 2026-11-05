@@ -188,6 +188,30 @@ fn tools_list() -> Value {
             },
         },
         {
+            "name": "agentcontrol_request_review",
+            "description": "Demande une review de PR à l'orchestrateur \
+                AgentControl — même pipeline que le commentaire `/mr review` \
+                (worktree au head, verdict `## Verdict:` posté sur la PR). \
+                Ta session est notifiée du verdict via \
+                agentcontrol_send_message (ack « acceptée » puis résultat) — \
+                pas de polling GitHub nécessaire. Réservé aux PR dont la \
+                base est `next_release`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repo": {
+                        "type": "string",
+                        "description": "repo owner/name (ex: Wameuh/AgentControl)",
+                    },
+                    "pr": {
+                        "type": "integer",
+                        "description": "numéro de la pull request",
+                    },
+                },
+                "required": ["repo", "pr"],
+            },
+        },
+        {
             "name": "agentcontrol_read_events",
             "description": "Lit la fin du transcript d'une autre session \
                 (messages user/agent/peer/système) pour prendre du contexte \
@@ -317,6 +341,26 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
             })
             .await?;
             Ok(format!("verdict transmis au démon : {v}"))
+        }
+        "agentcontrol_request_review" => {
+            let from = self_session()
+                .ok_or("AGENTCONTROL_SESSION absent — session émettrice inconnue")?;
+            let repo = args["repo"].as_str().ok_or("argument 'repo' manquant")?;
+            let pr = args["pr"]
+                .as_u64()
+                .ok_or("argument 'pr' manquant (nombre)")?;
+            let v = daemon_call(proto::ReqKind::PrReviewRequest {
+                session: Some(from),
+                repo: repo.into(),
+                pr,
+            })
+            .await?;
+            Ok(format!(
+                "demande de review enregistrée : {} — le verdict te sera \
+                 notifié par message (preuve officielle : commentaire \
+                 `## Verdict:` sur la PR)",
+                v["key"].as_str().unwrap_or("?")
+            ))
         }
         "agentcontrol_read_events" => {
             let session = args["session"]
