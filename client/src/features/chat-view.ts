@@ -1372,6 +1372,15 @@ export class ChatView {
       e.stopPropagation();
       this.openSelCtx(e.clientX, e.clientY, txt);
     });
+    // Fermeture du menu « Copier » : clic ailleurs / Échap / scroll du
+    // fil — même contrat que #fctx/#sctx (un clic DANS le menu ne doit
+    // pas le fermer avant l'action du bouton).
+    this.selCtx.addEventListener("click", (e) => e.stopPropagation());
+    window.addEventListener("click", () => hideMenu(this.selCtx, "evctx"));
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") hideMenu(this.selCtx, "evctx");
+    });
+    this.eventsEl.addEventListener("scroll", () => hideMenu(this.selCtx, "evctx"));
     // Image cassée (404, hôte inaccessible…) → on la remplace par son texte/URL,
     // l'<a> englobant reste cliquable. capture=true : error ne bubble pas.
     this.eventsEl.addEventListener(
