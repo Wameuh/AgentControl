@@ -15,6 +15,10 @@ impl Session {
     pub async fn set_mode(&self, mode: &str) -> Result<()> {
         if !self.is_alive() {
             // Agent mort : mémoriser, rejoué au resume comme "mode".
+            // Demande explicite → purge la marque de refus définitif :
+            // le replay la retentera et l'event de drop sera réémis
+            // (le geste utilisateur ne doit pas disparaître en silence).
+            self.config_rejected.lock().unwrap().remove("mode");
             let mut m = self.meta.lock().unwrap();
             m.pending_config.insert("mode".into(), mode.into());
             m.mode = Some(mode.into());
@@ -127,6 +131,7 @@ impl Session {
     /// tant que l'agent n'a pas re-annoncé ses options).
     pub async fn set_model(self: &Arc<Self>, model: &str) -> Result<()> {
         if !self.is_alive() {
+            self.config_rejected.lock().unwrap().remove("model");
             let mut m = self.meta.lock().unwrap();
             m.pending_config.insert("model".into(), model.into());
             m.model = Some(model.into());
@@ -444,6 +449,12 @@ impl Session {
             return self.set_daemon_option(key, value);
         }
         if !self.is_alive() {
+            // Demande explicite → purge la marque de refus définitif
+            // (le replay retentera et le drop réémettra son event).
+            self.config_rejected
+                .lock()
+                .unwrap()
+                .remove(config_id);
             let opts = {
                 let mut m = self.meta.lock().unwrap();
                 m.pending_config.insert(config_id.into(), value.into());

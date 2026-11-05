@@ -171,11 +171,14 @@ impl Session {
         Err(last)
     }
 
-    /// Purge les marques de refus définitif (`config_rejected`) dont la
-    /// valeur redevient résolvable sur la liste fraîchement annoncée :
-    /// la clé repassera par pending_config au prochain reconcile et
-    /// sera appliquée. Liste vide = rien à confirmer → la marque tombe
-    /// aussi (l'agent fera foi, comportement permissif historique).
+    /// Réarme les refus définitifs (`config_rejected`) dont la valeur
+    /// redevient RÉSOLVABLE sur la liste fraîchement annoncée : la
+    /// marque tombe et la paire (k, v) — que meta.mode/model ne
+    /// conserve plus après resync — est ré-insérée dans
+    /// pending_config pour être rejouée (et appliquée si l'agent la
+    /// confirme). Unknown/Ambiguous/liste vide = toujours non
+    /// résolvable → la marque reste (sinon un passthrough sans garde
+    /// re-bouclerait le warn).
     /// Appelée après chaque écriture fraîche de config_options /
     /// available_models / available_modes.
     fn revive_rejected_config(&self) {
@@ -189,17 +192,32 @@ impl Session {
         if snapshot.is_empty() {
             return;
         }
+        let mut rearm = Vec::new();
         let keep: std::collections::HashMap<String, String> = snapshot
             .into_iter()
             .filter(|(k, v)| {
                 let known = self.known_config_values(k);
-                !known.is_empty()
-                    && matches!(
-                        config::resolve_config_value(&known, v),
-                        config::Resolve::Unknown | config::Resolve::Ambiguous(_)
-                    )
+                if known.is_empty() {
+                    return true; // rien à confirmer → marque conservée
+                }
+                match config::resolve_config_value(&known, v) {
+                    config::Resolve::Hit(_) => {
+                        rearm.push((k.clone(), v.clone()));
+                        false
+                    }
+                    _ => true,
+                }
             })
             .collect();
+        if !rearm.is_empty() {
+            {
+                let mut m = self.meta.lock().unwrap();
+                for (k, v) in &rearm {
+                    m.pending_config.insert(k.clone(), v.clone());
+                }
+            }
+            self.save_meta();
+        }
         self.config_rejected
             .lock()
             .unwrap()
