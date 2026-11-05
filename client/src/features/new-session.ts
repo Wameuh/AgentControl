@@ -8,6 +8,7 @@ import { call } from "../core/rpc";
 import { app } from "../core/state";
 import type { AgentOpt, SessionMeta } from "../core/types";
 import { t } from "../i18n";
+import { costFor, ensureCosts } from "./modelcosts";
 import type { GroupStore } from "./groups";
 
 export class NewSessionDialog {
@@ -98,24 +99,47 @@ export class NewSessionDialog {
     await this.fillAgents(effConn, ref?.agent);
     if (ref) ($("f-cwd") as HTMLInputElement).value = ref.cwd;
     // Suggestions de modèles : union des config_options connues des sessions
-    const sess = await call<SessionMeta[]>("list_sessions").catch(() => [] as SessionMeta[]);
-    const seen = new Set<string>();
+    this.modelSessions = await call<SessionMeta[]>("list_sessions").catch(() => [] as SessionMeta[]);
+    this.renderModelList();
+    ($("dlg-new") as HTMLDialogElement).showModal();
+  }
+
+  /** Sessions sources des suggestions de modèles (union des
+   *  config_options « model »), mémorisées pour renderModelList. */
+  private modelSessions: SessionMeta[] = [];
+
+  /** Remplit le datalist #model-list : dédup par valeur, libellé
+   *  « nom · coût » quand le catalogue du profil de la session source
+   *  est connu (model_costs). Re-rendu à l'arrivée des coûts. */
+  private renderModelList() {
     const dl = $("model-list");
     dl.innerHTML = "";
-    for (const s of sess) {
+    const seen = new Set<string>();
+    const pairs = new Set<string>();
+    for (const s of this.modelSessions) {
       for (const co of s.config_options ?? []) {
         if (co.id !== "model" && co.category !== "model") continue;
         for (const o of co.options) {
           if (seen.has(o.value)) continue;
           seen.add(o.value);
+          const cost = costFor(o.value, s.conn ?? "", s.agent);
           const el = document.createElement("option");
           el.value = o.value;
-          el.label = o.name || o.value;
+          el.label = (o.name || o.value) + (cost ? ` · ${cost.label}` : "");
+          if (cost?.detail) el.title = cost.detail;
           dl.appendChild(el);
         }
       }
+      if (s.agent) pairs.add(`${s.conn ?? ""} ${s.agent}`);
     }
-    ($("dlg-new") as HTMLDialogElement).showModal();
+    // Coûts des profils représentés — re-render du datalist à l'arrivée
+    // (dialogue encore ouvert seulement).
+    for (const p of pairs) {
+      const i = p.indexOf(" ");
+      ensureCosts(p.slice(0, i), p.slice(i + 1), () => {
+        if (($("dlg-new") as HTMLDialogElement).open) this.renderModelList();
+      });
+    }
   }
 
   // Changement de serveur cible → recharger les agents de ce serveur. Token de

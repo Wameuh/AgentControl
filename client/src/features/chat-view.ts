@@ -16,7 +16,8 @@ import { t } from "../i18n";
 import { icon, type IconName } from "../ui/icons";
 import { hideMenu, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
-import { fillEfforts, splitModel } from "./modelbar";
+import { fillEfforts, joinModel, splitModel } from "./modelbar";
+import { costFor, ensureCosts } from "./modelcosts";
 import type { EventRenderer } from "./event-renderers";
 
 const MAX_RENDERED = 400;
@@ -101,6 +102,8 @@ export class ChatView {
   private convLoadingEl: HTMLElement | null = null;
   /** Hôtes en cours d'auto-connexion (écran vide "connexion à…"). */
   private connectingHosts: string[] = [];
+  /** Callback stable pour ensureCosts — dédupliqué côté modelcosts. */
+  private readonly costsReady = () => this.updateHeader();
 
   private deps = {
     /** Marque la ligne de session active dans la sidebar. */
@@ -780,20 +783,31 @@ export class ChatView {
       ? modelOpt.options.map((o) => ({ v: o.value, label: o.name || o.value }))
       : app.current.available_models.map((m) => ({ v: m, label: m }));
     if (rawOpts.length) {
+      // Coûts catalogue du profil agent (model_costs) — re-render des
+      // selects à l'arrivée de la map (premier affichage sans coût).
+      ensureCosts(app.current.conn ?? "", app.current.agent, this.costsReady);
       md.hidden = false;
       mf.hidden = true;
       // Modèles de base dédupliqués (effort géré à part) + entrée Fusion
       const bases = new Map<string, string>();
+      // Premier effort annoncé par base — c'est la variante que
+      // resolveModel applique par défaut : le coût affiché sur la base
+      // est celui de cette variante (ex. swe-2-high → -lightning payant).
+      const firstEff = new Map<string, string>();
       for (const o of rawOpts) {
         if (o.v.startsWith("fusion-")) continue;
-        const [b] = splitModel(o.v);
+        const [b, e] = splitModel(o.v);
         if (!bases.has(b)) bases.set(b, o.label);
+        if (e && !firstEff.has(b)) firstEff.set(b, e);
       }
       md.innerHTML = "";
       for (const [b, label] of bases) {
         const o = document.createElement("option");
         o.value = b;
-        o.textContent = "🧠 " + label;
+        const fe = firstEff.get(b);
+        const cost = costFor(fe ? joinModel(b, fe) : b);
+        o.textContent = "🧠 " + label + (cost ? ` · ${cost.label}` : "");
+        if (cost?.detail) o.title = cost.detail;
         md.appendChild(o);
       }
       // Entrée Fusion : uniquement si l'agent annonce des modèles fusion-*

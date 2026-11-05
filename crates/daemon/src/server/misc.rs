@@ -44,6 +44,9 @@ impl Daemon {
                     // de la file de prompts — injecte dans le tour en
                     // cours sans l'annuler).
                     "queue_steer": true,
+                    // Idem pour ReqKind::ModelCosts (suffixes de prix
+                    // des selects de modèles — costs.rs).
+                    "model_costs": true,
                     "host": host,
                 }))
     }
@@ -107,6 +110,19 @@ impl Daemon {
                     })
                     .collect();
                 Ok(json!(list))
+    }
+
+    /// `ModelCosts` : {"models": {<id>: {label, detail}}} — map vide
+    /// quand le profil n'a pas de source de coût (provider inconnu,
+    /// sonde en échec). La sonde tourne hors du chemin async.
+    pub(super) async fn h_model_costs(self: &Arc<Self>, agent: String) -> Result<Value> {
+        let command = self
+            .agents
+            .get(&agent)
+            .map(|p| p.command.clone())
+            .ok_or_else(|| anyhow::anyhow!("agent inconnu: {agent}"))?;
+        let costs = self.model_costs.get(&agent, &command).await;
+        Ok(json!({ "models": costs }))
     }
 }
 

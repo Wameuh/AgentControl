@@ -192,6 +192,7 @@ export const en = {
   fork_started: "fork in progress — the native session is released then reopened (~30 s)…",
   fusion_none: "No Fusion combinations announced by the agent.",
   fusion_bad: "Fusion combination not announced by the agent: ",
+  cost_label: "Cost",
   fusion_entry: "✨ Fusion (2 models)…", cmd_placeholder: "⌘ commands…",
   effort_default: "default", subscribe_err: "subscribe: ",
   settings_title: "Settings", about_title: "About AgentControl",

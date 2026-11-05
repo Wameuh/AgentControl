@@ -7,6 +7,7 @@ import { $, dlgErr, showErr } from "../core/dom";
 import { app } from "../core/state";
 import { t } from "../i18n";
 import { applyModelValue, fillSel, fusionParts, fusionTable, splitModel } from "./modelbar";
+import { costFor, ensureCosts } from "./modelcosts";
 
 let fusionApplied = false;
 
@@ -22,9 +23,21 @@ export function openFusion() {
   const eb = $("fu-eb") as HTMLSelectElement;
   const effLabel = (x: string) => x || "défaut";
 
+  // Coût catalogue de la combinaison composée (id fusion-* exact) —
+  // ligne d'info du dialogue, masquée quand le provider n'expose rien.
+  const fuCost = $("fu-cost");
+  const updateCost = () => {
+    const v = `fusion-${a.value}${ea.value ? "-" + ea.value : ""}-sidekick-${b.value}${eb.value ? "-" + eb.value : ""}`;
+    const c = fusionTable().valid.has(v) ? costFor(v) : undefined;
+    fuCost.hidden = !c;
+    fuCost.textContent = c ? `${t("cost_label")} : ${c.label}` : "";
+    fuCost.title = c?.detail ?? "";
+  };
+
   const refreshEB = () => {
     const effs = [...(sides.get(`${a.value}|${ea.value}`)?.get(b.value) ?? new Set<string>())];
     fillSel(eb, effs.map((e) => [e, effLabel(e)]));
+    updateCost();
   };
   const refreshB = () => {
     const m = sides.get(`${a.value}|${ea.value}`) ?? new Map<string, Set<string>>();
@@ -40,6 +53,9 @@ export function openFusion() {
   a.onchange = refreshEA;
   ea.onchange = refreshB;
   b.onchange = refreshEB;
+  // eb est une feuille (rien à rechainer) : seule la ligne coût dépend
+  // de sa valeur — sans ce handler elle afficherait l'ancien prix.
+  eb.onchange = updateCost;
 
   // Pré-remplir depuis la valeur fusion courante (reconfiguration)
   const curVal =
@@ -58,6 +74,12 @@ export function openFusion() {
     refreshEA();
   }
   fusionApplied = false;
+  updateCost(); // la pré-sélection peut avoir changé eb après refreshEB
+  // Si les coûts n'étaient pas encore arrivés à l'ouverture, la ligne
+  // se remplit dès que la map du profil arrive (dialogue encore ouvert).
+  ensureCosts(app.current?.conn ?? "", app.current?.agent ?? "", () => {
+    if (($("dlg-fusion") as HTMLDialogElement).open) updateCost();
+  });
   ($("dlg-fusion") as HTMLDialogElement).showModal();
 }
 

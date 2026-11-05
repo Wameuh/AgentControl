@@ -203,6 +203,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         "daemon_status" => ReqKind::DaemonStatus,
         "update_daemon" => ReqKind::UpdateDaemon { version: s("version") },
         "list_agents" => ReqKind::ListAgents,
+        "model_costs" => ReqKind::ModelCosts { agent: s("agent") },
         "list_sessions" => ReqKind::ListSessions,
         "session_info" => ReqKind::SessionInfo { session: s("session") },
         "new_session" => ReqKind::NewSession {
