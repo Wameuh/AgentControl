@@ -204,6 +204,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         "update_daemon" => ReqKind::UpdateDaemon { version: s("version") },
         "list_agents" => ReqKind::ListAgents,
         "model_costs" => ReqKind::ModelCosts { agent: s("agent") },
+        "refresh_agent_caps" => ReqKind::RefreshAgentCaps { agent: s("agent") },
         "list_sessions" => ReqKind::ListSessions,
         "session_info" => ReqKind::SessionInfo { session: s("session") },
         "new_session" => ReqKind::NewSession {
