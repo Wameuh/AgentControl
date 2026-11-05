@@ -431,6 +431,9 @@ export const fr: Record<Key, string> = {
   via: "via", origin_tip: "créée par le service {origin}",
   dot_asleep_tip: "endormie — se réveille au prochain message",
   dot_wait_tip: "en attente — un waiter ac-wait la réveillera",
+  just_now: "à l'instant",
+  wait_for: "depuis {d}",
+  wait_max: "max {d}",
   bottom_jump_title: "Revenir au fil en direct",
   // retours utilisateur : toasts, dialogue démon, états vides
   retry: "Réessayer",

@@ -434,6 +434,9 @@ export const es: Record<Key, string> = {
   via: "vía", origin_tip: "creada por el servicio {origin}",
   dot_asleep_tip: "dormida — despierta con el próximo mensaje",
   dot_wait_tip: "en espera — un waiter ac-wait la despertará",
+  just_now: "ahora mismo",
+  wait_for: "desde hace {d}",
+  wait_max: "máx {d}",
   bottom_jump_title: "Volver al hilo en directo",
   // retours utilisateur : toasts, dialogue démon, états vides
   retry: "Reintentar",

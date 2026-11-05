@@ -3007,6 +3007,7 @@ mod tests {
             context_used: None,
             context_size: None,
             last_error: None,
+            wait: None,
         };
         let c = cfg_default();
         let metas = vec![

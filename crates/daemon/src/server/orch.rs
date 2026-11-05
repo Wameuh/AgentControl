@@ -792,23 +792,70 @@ pub(crate) fn counts_as_alive(state: &str, sid: &str, live: &HashSet<String>) ->
 /// répertoire d'état (un appel par lot de sessions, ex. list_sessions,
 /// au lieu d'une relecture disque par session).
 pub(crate) fn acwait_live_sids() -> HashSet<String> {
+    acwait_live_waiters().into_keys().collect()
+}
+
+/// Détail du waiter vivant retenu pour une session — le plus ancien
+/// (`started` minimal) quand plusieurs sont armés : l'attente la plus
+/// longue est la plus parlante pour repérer un waiter bloqué (#189).
+pub(crate) struct AcwaitWait {
+    /// `started=` du meta (epoch) — absent en pratique jamais, mais
+    /// Option pour que l'entrée sans started perde l'arbitrage.
+    pub started: Option<f64>,
+    /// `name=` déclaré (`--name`) — chaîne vide si absent.
+    pub name: String,
+    /// `timeout=` déclaré (secondes).
+    pub timeout: Option<f64>,
+}
+
+/// sid → son waiter ac-wait vivant le plus ancien — même scan que
+/// `acwait_live_sids`, pour l'affichage « en attente depuis … » (#189).
+pub(crate) fn acwait_live_waiters() -> HashMap<String, AcwaitWait> {
     let Some(dir) = acwait_state_dir() else {
-        return HashSet::new();
+        return HashMap::new();
     };
-    acwait_live_sids_in(&dir)
+    acwait_live_waiters_in(&dir)
 }
 
 /// Corps testable du scan (`acwait_live_sids` sur un répertoire
 /// explicite) : `.meta` dont le `.done`/`.cancel` n'existe pas, pid
 /// vivant (ou meta tout frais sans pid), timeout non dépassé.
+#[cfg(test)]
 fn acwait_live_sids_in(dir: &std::path::Path) -> HashSet<String> {
+    acwait_live_waiters_in(dir).into_keys().collect()
+}
+
+/// Déséchappe les séquences `\c` → `c` du format `%q` (printf/bash) —
+/// couvre les cas produits pour un nom libre (espaces, quotes,
+/// backslashes). Le quoting ANSI-C `$'…'` (caractères de contrôle)
+/// n'est pas géré : jamais produit pour `--name` en pratique.
+fn unquote_sh(v: &str) -> String {
+    if !v.contains('\\') {
+        return v.to_string();
+    }
+    let mut out = String::with_capacity(v.len());
+    let mut chars = v.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some(n) => out.push(n),
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn acwait_live_waiters_in(dir: &std::path::Path) -> HashMap<String, AcwaitWait> {
     /// Marge post-timeout : la notif TIMEOUT part avant l'écriture du
     /// `.done` — ne pas nudger pendant que le waiter termine.
     const TIMEOUT_GRACE_S: f64 = 120.0;
     /// Worker spawné mais `.pid` pas encore écrit : actif seulement si
     /// le meta est tout frais.
     const START_GRACE_S: f64 = 30.0;
-    let mut out = HashSet::new();
+    let mut out = HashMap::new();
     let Ok(entries) = std::fs::read_dir(dir) else { return out };
     let now = now_secs();
     for e in entries.flatten() {
@@ -840,11 +887,10 @@ fn acwait_live_sids_in(dir: &std::path::Path) -> HashSet<String> {
         let Some(sid) = field("session") else {
             continue;
         };
+        let started = field("started").and_then(|v| v.parse::<f64>().ok());
+        let timeout = field("timeout").and_then(|v| v.parse::<f64>().ok());
         // Timeout dépassé sans `.done` → le worker est mort en vol.
-        if let (Some(started), Some(timeout)) = (
-            field("started").and_then(|v| v.parse::<f64>().ok()),
-            field("timeout").and_then(|v| v.parse::<f64>().ok()),
-        ) {
+        if let (Some(started), Some(timeout)) = (started, timeout) {
             if now - started > timeout + TIMEOUT_GRACE_S {
                 continue;
             }
@@ -881,7 +927,30 @@ fn acwait_live_sids_in(dir: &std::path::Path) -> HashSet<String> {
                 }
             }
         }
-        out.insert(sid);
+        let w = AcwaitWait {
+            started,
+            // `name=` est écrit `printf 'name=%q'` par ac-wait — %q
+            // produit des échappements backslash (`verdict\ PR\ #42`),
+            // pas des quotes : déséchapper `\c` → `c` après le strip
+            // des quotes bordantes (#189 — sinon le tooltip affiche
+            // les `\` sur tous les noms à espaces).
+            name: unquote_sh(&field("name").unwrap_or_default()),
+            timeout,
+        };
+        // Multi-waiters : le plus ancien vivant rapporte (started
+        // minimal — `None` perd l'arbitrage).
+        match out.entry(sid) {
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(w);
+            }
+            std::collections::hash_map::Entry::Occupied(mut o) => {
+                if w.started.unwrap_or(f64::MAX)
+                    < o.get().started.unwrap_or(f64::MAX)
+                {
+                    o.insert(w);
+                }
+            }
+        }
     }
     out
 }
@@ -2244,6 +2313,7 @@ mod tests {
             context_used: None,
             context_size: None,
             last_error: None,
+            wait: None,
         }
     }
 
@@ -2451,6 +2521,40 @@ mod tests {
         assert!(!sids.contains("s-stale"));
         assert!(!sids.contains("s-done"));
         assert!(sids.contains("s-boot"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn acwait_waiters_retient_le_plus_ancien() {
+        let dir =
+            std::env::temp_dir().join(format!("ac-wait-test-multi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let now = now_secs();
+        let pid = std::process::id().to_string();
+        // Deux waiters vivants sur la même session : le plus ancien
+        // (started minimal) rapporte son nom/âge/timeout (#189).
+        write_waiter(
+            &dir,
+            "w-new",
+            &format!("session=s-multi\nname=recent\nstarted={now}\ntimeout=600\n"),
+        );
+        std::fs::write(dir.join("w-new.pid"), &pid).unwrap();
+        write_waiter(
+            &dir,
+            "w-old",
+            // `name=%q` réel : échappements backslash, pas des quotes.
+            &format!(
+                "session=s-multi\nname=verdict\\ PR\\ #42\nstarted={}\ntimeout=1800\n",
+                now - 900.0
+            ),
+        );
+        std::fs::write(dir.join("w-old.pid"), &pid).unwrap();
+        let ws = acwait_live_waiters_in(&dir);
+        let w = ws.get("s-multi").expect("waiter vivant attendu");
+        assert_eq!(w.started, Some(now - 900.0));
+        assert_eq!(w.name, "verdict PR #42"); // backslashes %q déséchappés
+        assert_eq!(w.timeout, Some(1800.0));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

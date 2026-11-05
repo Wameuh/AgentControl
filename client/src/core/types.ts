@@ -32,6 +32,9 @@ export interface SessionMeta {
   /** Provenance externe (session créée par un service via new_session
    *  `origin`) — badge « via » sidebar + marquage du prompt initial. */
   origin?: string;
+  /** Détail du waiter ac-wait — présent seulement quand state="wait"
+   *  (#189 : âge du waiter le plus ancien, son nom, son timeout). */
+  wait?: { secs: number; name?: string; timeout?: number };
 }
 
 /** Registre PR ↔ session du démon (prs.json) — badge sidebar. */

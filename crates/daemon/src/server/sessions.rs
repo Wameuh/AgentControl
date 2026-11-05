@@ -19,11 +19,23 @@ impl Daemon {
                 // vivant — la session se parque en attendant le ping du
                 // waiter, pas une action utilisateur. meta.state interne
                 // reste "idle" (orchestrateur, retries, file de prompts
-                // raisonnent sur l'état réel).
-                let waiting = super::orch::acwait_live_sids();
+                // raisonnent sur l'état réel). Le détail du waiter
+                // (âge/nom/timeout, #189) voyage dans `meta.wait`.
+                let waiting = super::orch::acwait_live_waiters();
+                let now = super::orch::now_secs();
                 for m in &mut list {
-                    if m.state == "idle" && waiting.contains(m.id.as_str()) {
-                        m.state = "wait".into();
+                    if m.state == "idle" {
+                        if let Some(w) = waiting.get(m.id.as_str()) {
+                            m.state = "wait".into();
+                            m.wait = Some(proto::WaitInfo {
+                                secs: w
+                                    .started
+                                    .map(|st| (now - st).max(0.0))
+                                    .unwrap_or(0.0),
+                                name: w.name.clone(),
+                                timeout: w.timeout,
+                            });
+                        }
                     }
                 }
                 Ok(serde_json::to_value(list)?)
@@ -68,6 +80,7 @@ impl Daemon {
                     context_used: None,
                     context_size: None,
                     last_error: None,
+                    wait: None,
                 };
                 let dir = Session::create_dir(&self.root, &meta)?;
                 let session = Session::open(dir, &self.compact, Arc::clone(&self.caps))?;
@@ -146,6 +159,7 @@ impl Daemon {
                     context_used: None,
                     context_size: None,
                     last_error: None,
+                    wait: None,
                 };
                 let dir = Session::create_dir(&self.root, &meta)?;
                 let session = Session::open(dir, &self.compact, Arc::clone(&self.caps))?;
@@ -899,9 +913,20 @@ impl Daemon {
                 let s = self.get_session(&session).await?;
                 let mut meta = s.meta_snapshot();
                 // Même dérivation « wait » que list_sessions (idle +
-                // waiter ac-wait vivant) — affichage seul.
-                if meta.state == "idle" && super::orch::acwait_pending(&meta.id) {
-                    meta.state = "wait".into();
+                // waiter ac-wait vivant) — affichage seul, avec le
+                // détail du waiter dans `meta.wait` (#189).
+                if meta.state == "idle" {
+                    if let Some(w) = super::orch::acwait_live_waiters().get(&meta.id) {
+                        meta.state = "wait".into();
+                        meta.wait = Some(proto::WaitInfo {
+                            secs: w
+                                .started
+                                .map(|st| (super::orch::now_secs() - st).max(0.0))
+                                .unwrap_or(0.0),
+                            name: w.name.clone(),
+                            timeout: w.timeout,
+                        });
+                    }
                 }
                 Ok(json!({
                     "meta": meta,
