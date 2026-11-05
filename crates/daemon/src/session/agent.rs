@@ -171,6 +171,42 @@ impl Session {
         Err(last)
     }
 
+    /// Purge les marques de refus définitif (`config_rejected`) dont la
+    /// valeur redevient résolvable sur la liste fraîchement annoncée :
+    /// la clé repassera par pending_config au prochain reconcile et
+    /// sera appliquée. Liste vide = rien à confirmer → la marque tombe
+    /// aussi (l'agent fera foi, comportement permissif historique).
+    /// Appelée après chaque écriture fraîche de config_options /
+    /// available_models / available_modes.
+    fn revive_rejected_config(&self) {
+        // Deux phases : évaluer les valeurs HORS du lock config_rejected
+        // (known_config_values prend meta — le reconcile tient meta
+        // puis config_rejected, ordre inverse = deadlock).
+        let snapshot: Vec<(String, String)> = {
+            let rej = self.config_rejected.lock().unwrap();
+            rej.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        };
+        if snapshot.is_empty() {
+            return;
+        }
+        let keep: std::collections::HashSet<String> = snapshot
+            .into_iter()
+            .filter(|(k, v)| {
+                let known = self.known_config_values(k);
+                !known.is_empty()
+                    && matches!(
+                        config::resolve_config_value(&known, v),
+                        config::Resolve::Unknown | config::Resolve::Ambiguous(_)
+                    )
+            })
+            .map(|(k, _)| k)
+            .collect();
+        self.config_rejected
+            .lock()
+            .unwrap()
+            .retain(|k, _| keep.contains(k));
+    }
+
     /// Retour : Ok(true) agent prêt (session idle posée), Ok(false) le
     /// handshake a réussi mais un kill/rebind a supplanté la génération
     /// entre-temps — le nouveau cycle possède la session (rien à poser).
@@ -284,7 +320,8 @@ impl Session {
             let mut m = self.meta.lock().unwrap();
             m.native_session_id = Some(sid.to_string());
         }
-        // Modes disponibles éventuels
+        // Modes disponibles éventuels — annonce fraîche de ce spawn,
+        // comptée pour la fraîcheur du drop définitif pending_config.
         if let Some(modes) = resp.get("modes") {
             let mut m = self.meta.lock().unwrap();
             if let Some(cur) = modes.get("currentModeId").and_then(Value::as_str) {
@@ -296,6 +333,7 @@ impl Session {
                     .filter_map(|x| x.get("id").and_then(Value::as_str).map(String::from))
                     .collect();
             }
+            self.config_gen.fetch_add(1, Ordering::SeqCst);
         }
         // Modèles disponibles éventuels
         if let Some(models) = resp.get("models") {
@@ -314,6 +352,7 @@ impl Session {
                     })
                     .collect();
             }
+            self.config_gen.fetch_add(1, Ordering::SeqCst);
         }
         // Options de config directement dans la réponse session/new|load
         // (Devin les envoie normalement via config_option_update, mais après
@@ -333,11 +372,18 @@ impl Session {
                     }
                 }
                 m.config_options = parsed;
+                // Liste fraîchement annoncée dans CETTE réponse — borne
+                // la fraîcheur pour le drop définitif du replay
+                // pending_config (uniquement si la liste a été
+                // réellement réécrite : une annonce vide ne doit pas
+                // valider la liste persistée).
+                self.config_gen.fetch_add(1, Ordering::SeqCst);
             }
-            // Liste fraîchement annoncée dans CETTE réponse — borne la
-            // fraîcheur pour le drop définitif du replay pending_config.
-            self.config_gen.fetch_add(1, Ordering::SeqCst);
         }
+        // Une annonce fraîche peut rendre résoluble une valeur soldée
+        // comme refus définitif → la marque tombe, la clé repassera
+        // par pending_config au reconcile ci-dessous.
+        self.revive_rejected_config();
         self.save_meta();
         // Capacités du profil : chaque handshake enrichit le cache démon
         // (agent_caps.json — selects du dialogue nouvelle session,
@@ -407,7 +453,17 @@ impl Session {
                     .find(|o| o.id == k)
                     .map(|o| o.current_value.as_str());
                 if reported != Some(v.as_str()) {
-                    m.pending_config.insert(k, v);
+                    // Une valeur déjà soldée comme refus définitif n'est
+                    // pas re-pendée : le replay la re-échouerait à chaque
+                    // spawn (boucle de warn). revive_rejected_config la
+                    // ré-arme si une annonce fraîche la rend résolvable.
+                    let rejected = {
+                        let rej = self.config_rejected.lock().unwrap();
+                        rej.get(&k).map(String::as_str) == Some(v.as_str())
+                    };
+                    if !rejected {
+                        m.pending_config.insert(k, v);
+                    }
                 }
             }
         }
@@ -855,6 +911,7 @@ impl Session {
                             m.agent.clone()
                         };
                         self.config_gen.fetch_add(1, Ordering::SeqCst);
+                        self.revive_rejected_config();
                         self.save_meta();
                         // Le cache profil suit le flux live — addition,
                         // pas remplacement (le probe reste la voie refresh).

@@ -45,7 +45,7 @@ impl Session {
     /// value + name affiché) complétées par `available_models` /
     /// `available_modes`. Vide = l'agent n'a rien annoncé → les appelants
     /// restent permissifs (pas de garde sur information absente).
-    fn known_config_values(&self, config_id: &str) -> Vec<(String, String)> {
+    pub(super) fn known_config_values(&self, config_id: &str) -> Vec<(String, String)> {
         let m = self.meta.lock().unwrap();
         crate::server::orch_cfg::meta_config_values(&m, config_id)
     }
@@ -732,13 +732,13 @@ impl Session {
 /// égalité insensible à la casse sur `value`/`name` → préfixe insensible
 /// à la casse (Hit si un seul candidat, Ambiguous sinon) → Unknown.
 #[derive(Debug, PartialEq)]
-enum Resolve {
+pub(super) enum Resolve {
     Hit(String),
     Ambiguous(Vec<String>),
     Unknown,
 }
 
-fn resolve_config_value(known: &[(String, String)], want: &str) -> Resolve {
+pub(super) fn resolve_config_value(known: &[(String, String)], want: &str) -> Resolve {
     if let Some((v, _)) = known.iter().find(|(v, _)| v == want) {
         return Resolve::Hit(v.clone());
     }
