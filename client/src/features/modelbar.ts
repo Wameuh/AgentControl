@@ -7,7 +7,7 @@
 import { $, showErr } from "../core/dom";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
-import type { CmdInfo } from "../core/types";
+import type { CmdInfo, SessionMeta } from "../core/types";
 import { costFor } from "./modelcosts";
 
 export const cmdName = (c: CmdInfo) => (typeof c === "string" ? c.replace(/^\//, "") : c.name);
@@ -124,8 +124,9 @@ export function fillSel(s: HTMLSelectElement, items: [string, string][]) {
   }
 }
 
-/** Wiring des <select> du header ; `openFusion` injecté (fusion-dialog). */
-export function initModelBar(openFusion: () => void) {
+/** Wiring des <select> du header ; `openFusion` injecté (fusion-dialog),
+ *  `metaChanged` re-rend le header après une meta rafraîchie. */
+export function initModelBar(openFusion: () => void, metaChanged: () => void = () => {}) {
   ($("mode-select") as HTMLSelectElement).onchange = (e) => {
     if (!app.current) return;
     const sel = e.target as HTMLSelectElement;
@@ -156,6 +157,37 @@ export function initModelBar(openFusion: () => void) {
     const v = (e.target as HTMLInputElement).value.trim();
     if (v) await call("set_model", { session: app.current.id, model: v }).catch((er) => showErr(String(er)));
   });
+
+  // ⟳ : probe jetable côté démon (spawn session/new dans un cwd scratch)
+  // → cache du profil + meta des sessions du profil rafraîchis (listes
+  // mode/modèle/config sans recréer la session — ex. nouveau modèle
+  // provider). session_info relit les listes ; l'event config_options
+  // poussé en parallèle mène au même rendu (idempotent).
+  ($("btn-caps-refresh") as HTMLButtonElement).onclick = async (e) => {
+    const s = app.current;
+    if (!s) return;
+    const btn = e.currentTarget as HTMLButtonElement;
+    btn.disabled = true;
+    btn.classList.add("spin");
+    try {
+      await call("refresh_agent_caps", { agent: s.agent, conn: s.conn });
+      const info = await call<{ meta: SessionMeta }>("session_info", {
+        session: s.id,
+        conn: s.conn,
+      });
+      s.available_modes = info.meta.available_modes;
+      s.available_models = info.meta.available_models;
+      s.config_options = info.meta.config_options;
+      s.mode = info.meta.mode;
+      s.model = info.meta.model;
+      metaChanged();
+    } catch (er) {
+      showErr(String(er));
+    } finally {
+      btn.disabled = false;
+      btn.classList.remove("spin");
+    }
+  };
 
   $("btn-fusion-edit").onclick = () => openFusion();
 }

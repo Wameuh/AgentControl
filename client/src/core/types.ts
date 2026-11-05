@@ -113,6 +113,21 @@ export interface ConfigOption {
   currentValue?: string; options: ConfigOpt[];
 }
 
+/** Capacités moissonnées par le démon pour un profil agent
+ *  (agent_caps.json — handshakes session/new|load, config_option_update
+ *  et probes refresh_agent_caps). Tout est optionnel : absent = l'agent
+ *  n'a rien annoncé → saisie libre. */
+export interface AgentCaps {
+  updated_at?: string;
+  modes?: ConfigOpt[];
+  models?: ConfigOpt[];
+  config_options?: ConfigOption[];
+  /** Valeur courante rapportée (currentModeId / configOption "mode") —
+   *  indice d'affichage, peut être périmée. */
+  current_mode?: string;
+  current_model?: string;
+}
+
 export interface AcEvent {
   seq: number;
   ts: string;
@@ -122,7 +137,7 @@ export interface AcEvent {
 
 export interface DirEntry { name: string; dir: boolean; size: number }
 
-export type AgentOpt = { id: string; name: string; available?: boolean };
+export type AgentOpt = { id: string; name: string; available?: boolean; caps?: AgentCaps };
 
 /** Coût catalogue d'un modèle (RPC model_costs) : `label` compact pour
  *  le libellé d'option (« Free », « $1/$5 »), `detail` = texte brut du

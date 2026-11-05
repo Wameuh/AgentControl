@@ -189,6 +189,10 @@ pub struct Daemon {
     /// overrides `[agents.<id>.compact]` — résolution par session à
     /// l'open (le sidecar `compact.json` complète par-dessus).
     pub compact: CompactSrc,
+    /// Capacités annoncées par profil agent (modes/models/config) —
+    /// moissonnées aux handshakes + config_option_update, persistées
+    /// agent_caps.json, sondées par refresh_agent_caps (caps.rs).
+    pub caps: Arc<crate::caps::CapsRegistry>,
     /// Compteur global des dossiers surveillés (watch_dir explorateur,
     /// toutes conns confondues) — borne le plafond de dirwatch.rs.
     dir_watch_n: Arc<std::sync::atomic::AtomicUsize>,
@@ -245,6 +249,7 @@ impl Daemon {
             }
         }
         let prs = Arc::new(PrRegistry::open(&root));
+        let caps = crate::caps::CapsRegistry::open(&root);
         // Set forge figé pour la vérif d'existence (hôtes déclarés +
         // token_env) — la config ne change pas à chaud.
         let forge_set = forges.list_json().as_array().cloned().unwrap_or_default();
@@ -268,6 +273,7 @@ impl Daemon {
             orch,
             a2a,
             compact,
+            caps,
             peer_rate: std::sync::Mutex::new(HashMap::new()),
             spawn_rate: std::sync::Mutex::new(HashMap::new()),
             prs,
@@ -289,7 +295,7 @@ impl Daemon {
                 if !entry.file_type()?.is_dir() {
                     continue;
                 }
-                match Session::open(entry.path(), &d.compact) {
+                match Session::open(entry.path(), &d.compact, Arc::clone(&d.caps)) {
                     Ok(s) => {
                         // État persisté lu avant reconcile (qui efface la
                         // distinction actif/idle en passant tout à
@@ -637,6 +643,9 @@ impl Daemon {
             ReqKind::UpdateDaemon { version } => self.h_update_daemon(version).await,
             ReqKind::ListAgents => self.h_list_agents().await,
             ReqKind::ModelCosts { agent } => self.h_model_costs(agent).await,
+            ReqKind::RefreshAgentCaps { agent } => {
+                self.h_refresh_agent_caps(agent).await
+            }
             ReqKind::ListSessions => self.h_list_sessions().await,
             ReqKind::NewSession {
                 agent,

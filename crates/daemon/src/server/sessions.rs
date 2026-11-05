@@ -70,7 +70,7 @@ impl Daemon {
                     last_error: None,
                 };
                 let dir = Session::create_dir(&self.root, &meta)?;
-                let session = Session::open(dir, &self.compact)?;
+                let session = Session::open(dir, &self.compact, Arc::clone(&self.caps))?;
                 let sid = meta.id.clone();
                 self.watch_prs(&session);
                 self.sessions.write().await.insert(sid.clone(), session.clone());
@@ -148,7 +148,7 @@ impl Daemon {
                     last_error: None,
                 };
                 let dir = Session::create_dir(&self.root, &meta)?;
-                let session = Session::open(dir, &self.compact)?;
+                let session = Session::open(dir, &self.compact, Arc::clone(&self.caps))?;
                 let sid = meta.id.clone();
                 self.watch_prs(&session);
                 self.sessions.write().await.insert(sid.clone(), session.clone());
@@ -280,7 +280,7 @@ impl Daemon {
                 meta2.context_used = None;
                 meta2.context_size = None;
                 let dir = Session::create_dir(&self.root, &meta2)?;
-                let session2 = Session::open(dir, &self.compact)?;
+                let session2 = Session::open(dir, &self.compact, Arc::clone(&self.caps))?;
                 let sid2 = meta2.id.clone();
                 self.watch_prs(&session2);
                 self.sessions

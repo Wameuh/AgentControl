@@ -47,6 +47,10 @@ impl Daemon {
                     // Idem pour ReqKind::ModelCosts (suffixes de prix
                     // des selects de modèles — costs.rs).
                     "model_costs": true,
+                    // Idem pour les capacités par profil agent : champ
+                    // `caps` de list_agents + RPC refresh_agent_caps
+                    // (bouton refresh mode/modèle du header).
+                    "agent_caps": true,
                     "host": host,
                 }))
     }
@@ -106,6 +110,12 @@ impl Daemon {
                             "name": a.name,
                             "command": a.command,
                             "available": a.command.first().map(|c| command_available(c)).unwrap_or(false),
+                            // Capacités moissonnées pour le profil
+                            // (agent_caps.json — modes/models/config
+                            // annoncés par les sessions passées et les
+                            // probes). null tant que rien n'a été
+                            // annoncé → le client garde la saisie libre.
+                            "caps": self.caps.get(k),
                         })
                     })
                     .collect();
@@ -123,6 +133,52 @@ impl Daemon {
             .ok_or_else(|| anyhow::anyhow!("agent inconnu: {agent}"))?;
         let costs = self.model_costs.get(&agent, &command).await;
         Ok(json!({ "models": costs }))
+    }
+
+    /// `RefreshAgentCaps` : sonde les capacités d'un profil par un
+    /// spawn jetable (session/new dans un cwd scratch, drain bref des
+    /// notifications, kill — caps::probe), remplace l'instantané du
+    /// cache et le ré-applique aux sessions du profil (listes fraîches
+    /// sélectionnables sans recréer la session ; la valeur courante de
+    /// chaque session est conservée). Cher (un spawn d'agent complet) :
+    /// sérialisé par `probe_lock`, réservé à une action explicite.
+    pub(super) async fn h_refresh_agent_caps(self: &Arc<Self>, agent: String) -> Result<Value> {
+        let profile = self
+            .agents
+            .get(&agent)
+            .with_context(|| format!("agent inconnu: {agent}"))?
+            .clone();
+        match profile.command.first() {
+            Some(c) if command_available(c) => {}
+            other => {
+                anyhow::bail!(
+                    "commande agent introuvable : {}",
+                    other.map(String::as_str).unwrap_or("(vide)")
+                )
+            }
+        }
+        let _permit = self.caps.probe_lock().lock().await;
+        let cwd = self.root.join("probe");
+        std::fs::create_dir_all(&cwd).context("cwd du probe")?;
+        let caps = crate::caps::probe(&profile, &cwd).await?;
+        self.caps.set(&agent, caps.clone());
+        // Ré-application aux sessions du profil — meta + push
+        // ConfigOptions aux clients abonnés.
+        let sessions = self.sessions.read().await;
+        let mut touched = Vec::new();
+        for s in sessions.values() {
+            if s.meta_snapshot().agent != agent {
+                continue;
+            }
+            if s.apply_caps(&caps) {
+                touched.push(s.meta_snapshot().id);
+            }
+        }
+        Ok(json!({
+            "agent": agent,
+            "caps": caps,
+            "sessions": touched,
+        }))
     }
 }
 

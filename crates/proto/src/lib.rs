@@ -319,7 +319,7 @@ impl CmdInfo {
 }
 
 /// Option de config agent (ACP config_option_update — ex. mode, model chez Devin).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ConfigOpt {
     pub value: String,
     #[serde(default)]
@@ -328,7 +328,7 @@ pub struct ConfigOpt {
     pub description: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ConfigOption {
     pub id: String,
     #[serde(default)]
@@ -339,6 +339,44 @@ pub struct ConfigOption {
     pub current_value: String,
     #[serde(default)]
     pub options: Vec<ConfigOpt>,
+}
+
+// ---------------------------------------------------------------------------
+// Capacités annoncées par un profil agent (cache démon agent_caps.json)
+// ---------------------------------------------------------------------------
+
+/// Capacités moissonnées pour un profil `[agents.<id>]` : modes, modèles
+/// et options de config qu'au moins une session du profil a annoncés
+/// (handshake session/new|load → `modes`/`models`/`configOptions`,
+/// notifications `config_option_update`, ou probe `refresh_agent_caps`).
+/// Alimente le dialogue « nouvelle session » (selects par agent via
+/// `list_agents`) et la ré-application aux sessions du profil après un
+/// refresh. Tous les champs sont additifs — absent/vide = l'agent n'a
+/// rien annoncé (le client retombe sur la saisie libre).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentCaps {
+    /// Horodatage ISO de la dernière moisson.
+    #[serde(default)]
+    pub updated_at: String,
+    /// Modes ACP (`modes.availableModes` : id→`value`, name).
+    #[serde(default)]
+    pub modes: Vec<ConfigOpt>,
+    /// Modèles ACP (`models.availableModels` : modelId→`value`, name).
+    #[serde(default)]
+    pub models: Vec<ConfigOpt>,
+    /// Options de config dynamiques (extension `config_option_update` —
+    /// mode/model/thought_level chez Devin).
+    #[serde(default)]
+    pub config_options: Vec<ConfigOption>,
+    /// Valeur courante rapportée pour le mode (`modes.currentModeId` ou
+    /// la configOption "mode") — indice d'affichage pour la présélection,
+    /// pas un état fiable (elle peut être périmée ou propre à la session
+    /// moissonnée). Vide = inconnue.
+    #[serde(default)]
+    pub current_mode: String,
+    /// Idem pour le modèle (`models.currentModelId` ou configOption "model").
+    #[serde(default)]
+    pub current_model: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1131,6 +1169,15 @@ pub enum ReqKind {
     /// n'est pas plus récente que le binaire courant, réponse
     /// `{noop: true, version, current, restarting:false}` sans update.
     UpdateDaemon { version: String },
+    /// Moissonne les capacités d'un profil agent par un spawn jetable
+    /// (initialize + session/new dans un cwd scratch, drain bref des
+    /// notifications, kill) puis met à jour le cache `agent_caps.json`
+    /// et les sessions du profil (meta + push ConfigOptions). Cher —
+    /// un spawn d'agent complet : réservé à une action explicite
+    /// (bouton refresh du client), jamais en boucle. Réponse :
+    /// `{agent, caps, sessions:[ids rafraîchis]}`. Extension additive :
+    /// démons anciens → erreur « req inconnue ».
+    RefreshAgentCaps { agent: String },
     /// Verdict de review de PR rendu en A2A par la session reviewer
     /// (pont MCP `agentcontrol_report_verdict`) : push direct au démon,
     /// qui poste lui-même le commentaire GitHub — la sortie de review
@@ -1240,6 +1287,7 @@ impl ReqKind {
             Self::BacklogMetrics { .. } => "backlog_metrics",
             Self::DaemonStatus => "daemon_status",
             Self::UpdateDaemon { .. } => "update_daemon",
+            Self::RefreshAgentCaps { .. } => "refresh_agent_caps",
             Self::ReviewReport { .. } => "review_report",
             Self::PrReviewRequest { .. } => "pr_review_request",
         }
