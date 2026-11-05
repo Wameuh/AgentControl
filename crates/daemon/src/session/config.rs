@@ -6,6 +6,7 @@ use super::*;
 use anyhow::{Context, Result};
 use proto::EventKind;
 use serde_json::{json, Value};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::acp;
@@ -346,16 +347,81 @@ impl Session {
         self.save_meta();
     }
 
+    /// Renomme : meta local posée immédiatement + tentative
+    /// session/rename chez l'agent (optionnelle). L'appel ACP est
+    /// DIFFÉRÉ quand un tour vole (busy / active_prompts / compact) —
+    /// un RPC pendant session/prompt peut avorter le tour en silence
+    /// (#183) ; `flush_pending_rename` le pose entre deux tours ou à
+    /// la fin du drain. Premier « method not found » → l'agent ne le
+    /// supporte pas : plus de retentatives pour la session.
     pub async fn rename(&self, title: &str) {
         self.meta.lock().unwrap().title = title.into();
         self.save_meta();
+        if self.turn_in_flight() {
+            *self.pending_rename.lock().unwrap() = Some(title.into());
+            return;
+        }
+        self.send_rename(title).await;
+    }
+
+    /// Tour ou activité agent en vol : ne pas émettre de RPC ACP
+    /// annexe (rename) pendant ce créneau (#183).
+    fn turn_in_flight(&self) -> bool {
+        self.busy.load(Ordering::SeqCst)
+            || self.active_prompts.load(Ordering::SeqCst) > 0
+            || self.compacting.lock().unwrap().is_some()
+    }
+
+    /// session/rename ACP — best-effort : l'échec est toléré (meta
+    /// déjà à jour), un refus de méthode marque l'agent non supporté.
+    /// Attente bornée : acp_request n'a pas de timeout — un agent qui
+    /// accepte sans jamais répondre wedgerait le drain sur le flush
+    /// (#183) ; 10 s puis abandon, l'échec est toléré de toute façon.
+    pub(super) async fn send_rename(&self, title: &str) {
+        if !self.rename_supported.load(Ordering::SeqCst) {
+            return;
+        }
         if let Some(sid) = self.meta_snapshot().native_session_id {
-            let _ = self
-                .acp_request(
-                    "session/rename",
-                    json!({"sessionId": sid, "title": title}),
-                )
-                .await;
+            let req = self.acp_request(
+                "session/rename",
+                json!({"sessionId": sid, "title": title}),
+            );
+            let err = match tokio::time::timeout(std::time::Duration::from_secs(10), req).await {
+                Ok(Ok(_)) => None,
+                Ok(Err(e)) => Some(format!("{e:#}").to_lowercase()),
+                Err(_) => Some("timeout".into()),
+            };
+            if let Some(msg) = err {
+                // « method not found »/« unknown method » (-32601) ou
+                // refus explicite — pas « not found » seul : « Session
+                // not found » (binding perdu) est transitoire, la
+                // méthode peut remarcher après rebind/réveil.
+                if msg.contains("method not found")
+                    || msg.contains("unknown method")
+                    || msg.contains("not supported")
+                {
+                    self.rename_supported.store(false, Ordering::SeqCst);
+                }
+            }
+        }
+    }
+
+    /// Pose le rename ACP différé (fin de tour / fin de drain) —
+    /// seul le dernier titre compte, les renommages en rafale
+    /// s'écrasent. Agent mort → le RPC échoue en silence (toléré).
+    /// Re-test de la fenêtre : un prompt steer concurrent
+    /// (`active_prompts`) ou un compact en vol reste un session/prompt
+    /// actif — le pending attend le prochain flush plutôt que
+    /// reproduire le stall #183 sur le tour steer/compact.
+    pub(super) async fn flush_pending_rename(&self) {
+        if self.active_prompts.load(Ordering::SeqCst) > 0
+            || self.compacting.lock().unwrap().is_some()
+        {
+            return;
+        }
+        let title = self.pending_rename.lock().unwrap().take();
+        if let Some(t) = title {
+            self.send_rename(&t).await;
         }
     }
 
