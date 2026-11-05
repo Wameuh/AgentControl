@@ -312,10 +312,12 @@ impl Daemon {
         let cfg = self.orch.cfg.read().unwrap().clone();
         let now = now_secs();
         let mut st = self.orch.state.lock().unwrap().clone();
-        // Snapshot `pr_reviews` au clone : les write-backs fusionnent
-        // par clé — un rapport de verdict A2A posé pendant la passe
+        // Snapshot `pr_reviews`/`pr_review_requests` au clone : les
+        // write-backs fusionnent par clé — un rapport de verdict A2A
+        // ou une demande de review interne posée pendant la passe
         // (RPC concurrent sur la map vivante) n'est pas écrasé.
         let pr_snap = st.pr_reviews.clone();
+        let req_snap = st.pr_review_requests.clone();
         // Sortie rapide : mécanisme coupé et rien en vol → pas même le
         // scan des sessions à payer à chaque tick. Un retry en attente
         // compte comme du travail en vol — il doit être soldé, pas
@@ -325,6 +327,7 @@ impl Daemon {
                 .pr_reviews
                 .values()
                 .any(|v| matches!(EntryState::of(v), EntryState::Running | EntryState::RetryWait))
+            && st.pr_review_requests.is_empty()
         {
             return Ok(());
         }
@@ -371,8 +374,43 @@ impl Daemon {
                     e["state"] = json!(EntryState::Failed.as_str());
                 }
                 info!("orchestrateur: review PR {key} soldée (pr_review off)");
+                let by = entry
+                    .get("requested_by")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if !by.is_empty() {
+                    self.pr_review_notify(
+                        &by,
+                        format!("[AgentControl] review {key} soldée — pr_review désactivé"),
+                    )
+                    .await;
+                }
             }
-            self.orch.write_back_merged(&mut st, &pr_snap);
+            // Demandes internes en file : soldées pareil — un
+            // mécanisme coupé est une cause définitive, le demandeur
+            // est notifié plutôt que laissé attendre un verdict.
+            let pending_reqs: Vec<(String, String)> = st
+                .pr_review_requests
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        v.get("by").and_then(Value::as_str).unwrap_or("").to_string(),
+                    )
+                })
+                .collect();
+            for (key, by) in pending_reqs {
+                st.pr_review_requests.remove(&key);
+                if !by.is_empty() {
+                    self.pr_review_notify(
+                        &by,
+                        format!("[AgentControl] review {key} refusée — pr_review désactivé"),
+                    )
+                    .await;
+                }
+            }
+            self.orch.write_back_merged(&mut st, &pr_snap, &req_snap);
             self.orch_save(&st);
             return Ok(());
         }
@@ -672,6 +710,171 @@ impl Daemon {
             self.orch_save(&st);
         }
 
+        // 2a.5. Demandes internes (`PrReviewRequest` — acctl/MCP) :
+        // même claim et même lancement qu'un trigger commentaire,
+        // servies avant lui (demande explicite). Une PR déjà `running`
+        // n'est pas doublée : la demande RESTE en file et sera servie
+        // après la review courante (même règle qu'un trigger
+        // commentaire arrivé pendant une review) ; `retry_wait` ne
+        // bloque rien — le nouveau claim remplace l'entrée.
+        let mut reqs: Vec<(String, Value)> = st
+            .pr_review_requests
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        reqs.sort_by(|a, b| {
+            a.1.get("at")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0)
+                .partial_cmp(&b.1.get("at").and_then(Value::as_f64).unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for (key, req) in reqs {
+            if free == 0 || !self.orch.is_enabled() {
+                break;
+            }
+            let by = req
+                .get("by")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let Some((repo, pr)) = key.split_once('#') else {
+                st.pr_review_requests.remove(&key);
+                continue;
+            };
+            let Ok(pr_n) = pr.parse::<u64>() else {
+                st.pr_review_requests.remove(&key);
+                continue;
+            };
+            let repo = repo.to_string();
+            // Review déjà en cours → la demande attend son terme.
+            if st
+                .pr_reviews
+                .get(&key)
+                .is_some_and(|v| EntryState::of(v) == EntryState::Running)
+            {
+                continue;
+            }
+            // Une review soldée `done` lancée APRÈS la demande la
+            // couvre déjà (trigger commentaire ou autre voie entre-temps)
+            // — la solder sans relancer une review/redondante.
+            let req_at = req.get("at").and_then(Value::as_f64).unwrap_or(0.0);
+            if st
+                .pr_reviews
+                .get(&key)
+                .is_some_and(|e| {
+                    EntryState::of(e) == EntryState::Done
+                        && e.get("started").and_then(Value::as_f64).unwrap_or(0.0) >= req_at
+                })
+            {
+                st.pr_review_requests.remove(&key);
+                continue;
+            }
+            // `pr_rereview` coupé : une review soldée `done` ne se
+            // relance pas — la demande est refusée et soldée (le
+            // demandeur est notifié, pas seulement l'ack RPC passé).
+            if !cfg.pr_rereview
+                && st
+                    .pr_reviews
+                    .get(&key)
+                    .is_some_and(|v| EntryState::of(v) == EntryState::Done)
+            {
+                st.pr_review_requests.remove(&key);
+                self.pr_review_notify(
+                    &by,
+                    format!("[AgentControl] review {key} refusée — pr_rereview désactivé, verdict déjà posté"),
+                )
+                .await;
+                continue;
+            }
+            let Some(head_sha) = self.gh_pr_head(&repo, pr_n, &cfg).await else {
+                st.pr_review_requests.remove(&key);
+                self.pr_review_notify(
+                    &by,
+                    format!("[AgentControl] review {key} refusée — PR introuvable ou fermée"),
+                )
+                .await;
+                continue;
+            };
+            // Claim-first identique au trigger commentaire ; le
+            // watermark `last_trigger_id` est conservé pour ne pas
+            // faire refire les anciens commentaires trigger.
+            let last_tid = st
+                .pr_reviews
+                .get(&key)
+                .and_then(|v| v.get("last_trigger_id"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            st.pr_review_requests.remove(&key);
+            st.pr_reviews.insert(
+                key.clone(),
+                json!({
+                    "last_trigger_id": last_tid,
+                    "sid": "",
+                    "sha": head_sha,
+                    "started": now,
+                    "state": EntryState::Running.as_str(),
+                    "denied": 0,
+                    "origin": "internal",
+                    "requested_by": by,
+                }),
+            );
+            self.orch_save(&st);
+            match self
+                .pr_review_launch(&repo, pr_n, &head_sha, &key, &cfg)
+                .await
+            {
+                Ok(sid) => {
+                    if let Some(e) = st.pr_reviews.get_mut(&key) {
+                        e["sid"] = json!(sid.clone());
+                    }
+                    self.orch_save(&st);
+                    self.gh_comment(
+                        &repo,
+                        pr_n,
+                        &ack_comment(
+                            if cfg.pr_reviewer_model.is_empty() {
+                                &cfg.model
+                            } else {
+                                &cfg.pr_reviewer_model
+                            },
+                            &sid,
+                        ),
+                        &cfg,
+                    )
+                    .await;
+                    self.pr_review_notify(
+                        &by,
+                        format!(
+                            "[AgentControl] review {key} acceptée — session {sid} lancée \
+                             (worktree au head {})",
+                            &head_sha[..head_sha.len().min(7)]
+                        ),
+                    )
+                    .await;
+                    free -= 1;
+                }
+                Err(e) => {
+                    warn!("orchestrateur: launch review {key} (demande interne): {e:#}");
+                    remove_review_worktree(
+                        Path::new(ws_of(&cfg, &repo)),
+                        &pr_review_dir(pr_n, &head_sha),
+                    );
+                    self.pr_review_transient_fail(
+                        &key,
+                        "spawn failed",
+                        &repo,
+                        pr_n,
+                        &mut st,
+                        &pr_review_dir(pr_n, &head_sha),
+                        &cfg,
+                    )
+                    .await;
+                }
+            }
+            self.orch_save(&st);
+        }
+
         // 2b. Triggers nouveaux sur les PR ouvertes.
         for (repo, pr_n, _head) in self.pr_review_candidates(&cfg).await {
             if free == 0 {
@@ -775,7 +978,7 @@ impl Daemon {
                 }
             }
         }
-        self.orch.write_back_merged(&mut st, &pr_snap);
+        self.orch.write_back_merged(&mut st, &pr_snap, &req_snap);
         self.orch_save(&st);
         Ok(())
     }
@@ -791,13 +994,27 @@ impl Daemon {
         wt: &Path,
         ws: &Path,
     ) {
-        let sid = st
+        let (sid, by, verdict) = st
             .pr_reviews
             .get(key)
-            .and_then(|e| e.get("sid"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+            .map(|e| {
+                (
+                    e.get("sid")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    e.get("requested_by")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    e.get("pending_body")
+                        .and_then(Value::as_str)
+                        .and_then(|b| b.lines().next())
+                        .unwrap_or("")
+                        .to_string(),
+                )
+            })
+            .unwrap_or_default();
         if let Some(e) = st.pr_reviews.get_mut(key).and_then(Value::as_object_mut) {
             e.insert("state".into(), json!(end.as_str()));
             e.remove("pending_body");
@@ -808,6 +1025,20 @@ impl Daemon {
             let _ = self.h_delete_session(sid).await;
         }
         remove_review_worktree(ws, wt);
+        // Verdict/échec notifié au demandeur A2A d'une review interne
+        // — le commentaire GitHub reste la preuve officielle (hooks de
+        // merge), ceci est le canal direct sans polling. Best-effort :
+        // une session disparue ne casse jamais la review.
+        if !by.is_empty() && matches!(end, EntryState::Done | EntryState::Failed) {
+            let text = if end == EntryState::Done {
+                format!("[AgentControl] review {key} terminée — verdict posté sur la PR : {verdict}")
+            } else {
+                format!(
+                    "[AgentControl] review {key} échouée — voir le commentaire d'échec sur la PR"
+                )
+            };
+            self.pr_review_notify(&by, text).await;
+        }
     }
 
     /// Échec transitoire borné : solde l'essai (session supprimée,
@@ -1004,6 +1235,152 @@ impl Daemon {
             }
         });
         Ok(json!({"received": true}))
+    }
+
+    /// Trigger INTERNE de review (`PrReviewRequest` — acctl
+    /// `pr review`, MCP `agentcontrol_request_review`) : valide la PR
+    /// puis enfile une demande que la passe review draine comme un
+    /// trigger commentaire — MÊME file, mêmes gardes (`pr_review`,
+    /// pool, `pr_rereview`, retries bornés, worktree au head courant)
+    /// et même verdict `## Verdict:` posté par le démon. `session` =
+    /// demandeur A2A : tracé `requested_by` dans l'état persisté,
+    /// destinataire de l'ack « acceptée » et de la notification du
+    /// verdict (le commentaire GitHub reste la preuve officielle).
+    /// Réponse : `{status:"queued", key, behind_running}` — les
+    /// refus remontent en erreur RPC explicite.
+    pub(super) async fn h_pr_review_request(
+        self: &Arc<Self>,
+        session: Option<String>,
+        repo: String,
+        pr: u64,
+    ) -> Result<Value> {
+        let cfg = self.orch.cfg.read().unwrap().clone();
+        anyhow::ensure!(cfg.pr_review, "pr_review désactivé (orchestrateur)");
+        anyhow::ensure!(pr > 0, "numéro de PR invalide");
+        anyhow::ensure!(
+            repo.contains('/') && !repo.contains(char::is_whitespace),
+            "repo attendu au format owner/name"
+        );
+        // Demandeur A2A : la session doit exister (traçabilité de la
+        // notification verdict — jamais de notification vers un
+        // sid inventé).
+        if let Some(sid) = &session {
+            self.get_session(sid).await?;
+        }
+        // PR cible : ouverte + base allowlistée — les mêmes gardes
+        // que le chemin commentaire (jamais `main`).
+        let Some((state, base, _head)) = self.gh_pr_info(&repo, pr, &cfg).await else {
+            anyhow::bail!("PR {repo}#{pr} introuvable");
+        };
+        anyhow::ensure!(state == "OPEN", "PR {repo}#{pr} fermée ({state})");
+        anyhow::ensure!(
+            base == ALLOWED_BASE,
+            "PR {repo}#{pr} : base «{base}» ≠ {ALLOWED_BASE} — review refusée"
+        );
+        let key = format!("{repo}#{pr}");
+        let by = session.unwrap_or_default();
+        let (behind, snapshot) = {
+            let mut live = self.orch.state.lock().unwrap();
+            // `pr_rereview` coupé : une review déjà soldée `done` ne
+            // se relance pas — refus explicite (comme le trigger
+            // commentaire qui serait ignoré au prochain tick).
+            if !cfg.pr_rereview
+                && live
+                    .pr_reviews
+                    .get(&key)
+                    .is_some_and(|v| EntryState::of(v) == EntryState::Done)
+            {
+                anyhow::bail!(
+                    "pr_rereview désactivé — une review a déjà été rendue sur {key}"
+                );
+            }
+            // Upsert : le plus récent gagne (même règle que les
+            // triggers commentaire) — une demande en file est
+            // remplacée, jamais doublée ; une review `running`
+            // n'empêche pas l'enfilement (servie après son terme).
+            live.pr_review_requests.insert(
+                key.clone(),
+                json!({
+                    "by": by,
+                    "at": now_secs(),
+                    "repo": repo,
+                    "pr": pr,
+                }),
+            );
+            let behind = live
+                .pr_reviews
+                .get(&key)
+                .is_some_and(|v| EntryState::of(v) == EntryState::Running);
+            (behind, live.clone())
+        };
+        // Persisté tout de suite : un crash avant le prochain tick
+        // ne perd pas la demande.
+        self.orch_save(&snapshot);
+        // Écrivain unique pour le drain : kick sort la passe de son
+        // `poll_secs` — la demande est servie quasi immédiatement si
+        // le pool est libre.
+        self.orch.kick();
+        Ok(json!({
+            "status": "queued",
+            "key": key,
+            "behind_running": behind,
+        }))
+    }
+
+    /// `gh pr view` → (state, baseRefName, headRefOid) — validation
+    /// d'une demande interne (ouverte + base allowlistée).
+    async fn gh_pr_info(
+        &self,
+        repo: &str,
+        pr_n: u64,
+        cfg: &cfg::OrchCfg,
+    ) -> Option<(String, String, String)> {
+        let (rc, out, _e) = run_out(
+            &[
+                "gh",
+                "pr",
+                "view",
+                &pr_n.to_string(),
+                "-R",
+                repo,
+                "--json",
+                "state,baseRefName,headRefOid",
+                "-q",
+                "[.state, .baseRefName, .headRefOid] | @tsv",
+            ],
+            Path::new(&cfg.workspace),
+        )
+        .await
+        .unwrap_or((-1, String::new(), String::new()));
+        if rc != 0 {
+            return None;
+        }
+        let mut f = out.trim().splitn(3, '\t');
+        Some((
+            f.next()?.to_string(),
+            f.next()?.to_string(),
+            f.next().unwrap_or("").to_string(),
+        ))
+    }
+
+    /// Notification A2A au demandeur d'une review interne — même
+    /// mécanique qu'`orch_nudge` (envoi direct, réveil auto d'une
+    /// session endormie). Best-effort : une session disparue ne doit
+    /// jamais casser la review — le verdict reste posté sur GitHub.
+    async fn pr_review_notify(self: &Arc<Self>, by: &str, text: String) {
+        if by.is_empty() {
+            return;
+        }
+        if self
+            .h_send(by.to_string(), text.clone(), false, false)
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        if self.h_resume_session(by.to_string(), None).await.is_ok() {
+            let _ = self.h_send(by.to_string(), text, false, false).await;
+        }
     }
 
     /// PR ouvertes à reviewer : `gh pr list --base next_release` par

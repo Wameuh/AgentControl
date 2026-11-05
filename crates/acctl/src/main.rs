@@ -23,6 +23,9 @@
 //!   acctl pr add <N|I<cid>> [--session S] [--repo R]
 //!       [--forge github|gitlab|gerrit] [--host H[:port]] [--note txt]
 //!   acctl pr note <N|I<cid>> <texte...> | acctl pr rm <N|I<cid>> | acctl pr sync
+//!   acctl pr review <N> [--repo R]       — review native (pr_review du
+//!       démon) : même pipeline que `/mr review`, verdict notifié en
+//!       message si lancé depuis une session agent
 //!   acctl comp [ls] [--json] | info <n> | start|stop|restart <n>
 //!       | logs <n> [--tail N] | catalog [--json] [--refresh]
 //!       | install <n> | add <n> [--kind K] [--cmd "<argv>"] [--hc S]
