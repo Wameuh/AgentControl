@@ -187,6 +187,15 @@ renderer.bind({
 // notifications OS restent indépendants mais voient les mêmes transitions.
 stateDiff.onTransition((kind) => sounds.alert(kind));
 stateDiff.onTransition((kind, s) => notifications.alert(kind, s));
+// Annulation des notifs OS quand leur condition se résout (#184) :
+// sortie de waiting_input → la « question » n'a plus lieu d'être ;
+// session disparue de la liste → plus aucune notif ne la concerne.
+stateDiff.onRawTransition((prev, s) => {
+  if (prev === "waiting_input" && s.state !== "waiting_input") {
+    notifications.questionResolved(s);
+  }
+});
+stateDiff.onGone((key) => notifications.sessionGone(key));
 notifications.bind({
   connCount: () => conns.knownConns().length,
   // Clic sur la notif → même trajet qu'une ouverture depuis la sidebar :

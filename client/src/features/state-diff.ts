@@ -34,10 +34,27 @@ class StateDiff {
   /** Dernier état vu par "conn:id" — la comparaison produit les alertes. */
   private last = new Map<string, string>();
   private listeners: TransitionListener[] = [];
+  /** Transitions BRUTES (prev → session) : les canaux de réconciliation
+   *  (annulation de notif quand la condition se résout, #184) ont besoin
+   *  de toutes les sorties d'état, pas seulement des alertes classifiées. */
+  private rawListeners: ((prev: string, s: SessionMeta) => void)[] = [];
+  /** Session disparue de la liste fusionnée (rm/kill) — clé "conn:id". */
+  private goneListeners: ((key: string) => void)[] = [];
 
   /** Canaux abonnés — appelés dans l'ordre d'enregistrement, par session. */
   onTransition(cb: TransitionListener) {
     this.listeners.push(cb);
+  }
+
+  /** Appelé sur chaque transition réelle (avant les alertes classifiées). */
+  onRawTransition(cb: (prev: string, s: SessionMeta) => void) {
+    this.rawListeners.push(cb);
+  }
+
+  /** Appelé quand une session quitte la liste — les effets attachés
+   *  (notifs OS) n'ont plus de support (#184). */
+  onGone(cb: (key: string) => void) {
+    this.goneListeners.push(cb);
   }
 
   /** Diff d'états sur la liste fusionnée du refresh sidebar. Les sessions
@@ -55,6 +72,13 @@ class StateDiff {
       const prev = this.last.get(key);
       this.last.set(key, s.state);
       if (prev === undefined || prev === s.state) continue;
+      for (const cb of this.rawListeners) {
+        try {
+          cb(prev, s);
+        } catch (e) {
+          logUi("error", `state-diff: canal brut en échec: ${e}`);
+        }
+      }
       const kind = classify(prev, s.state);
       if (kind) {
         // Un canal en panne ne doit pas couper les autres ni la purge des
@@ -69,7 +93,16 @@ class StateDiff {
       }
     }
     for (const k of [...this.last.keys()]) {
-      if (!seen.has(k)) this.last.delete(k);
+      if (!seen.has(k)) {
+        this.last.delete(k);
+        for (const cb of this.goneListeners) {
+          try {
+            cb(k);
+          } catch (e) {
+            logUi("error", `state-diff: canal gone en échec: ${e}`);
+          }
+        }
+      }
     }
   }
 }
