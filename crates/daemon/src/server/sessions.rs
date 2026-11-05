@@ -194,6 +194,11 @@ impl Daemon {
 
     pub(super) async fn h_fork_session(self: &Arc<Self>, session: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
+                // Le TUI fork mute le même sid natif que `devin -r` —
+                // double mutation concurrente du store provider.
+                if s.catalogue_override_active() {
+                    anyhow::bail!("override catalogue en cours — réessayez dans un instant");
+                }
                 let meta = s.meta_snapshot();
                 let _slot = self.ensure_agent_slot(&meta.agent).await?;
                 let native = meta
@@ -372,6 +377,12 @@ impl Daemon {
 
     pub(super) async fn h_clear_session(self: &Arc<Self>, session: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
+                // /clear tuerait le process puis son spawn_agent
+                // bailerait sur le flag — journal effacé + mark_dead
+                // pour un clear qui n'a pas abouti. Refus propre.
+                if s.catalogue_override_active() {
+                    anyhow::bail!("override catalogue en cours — réessayez dans un instant");
+                }
                 // Session endormie/morte : le clear relance un agent, donc
                 // il faut une place (une session vivante la garde déjà).
                 let slot = if s.is_alive() {
@@ -617,6 +628,13 @@ impl Daemon {
     /// d'échec de l'override : meta.model revenu à la valeur précédente
     /// + event Error, la session est quand même respawnée.
     async fn apply_catalogue_model(self: &Arc<Self>, s: &Arc<Session>, model: &str) -> Result<()> {
+        // Sérialise les apply concurrents sur cette session : deux
+        // `devin -r` en parallèle sur le même sid = last-writer-wins
+        // incohérent entre store provider et meta. Relâché AVANT le
+        // respawn final : le reapply interne à ce respawn est
+        // séquentiel (même tâche), pas concurrent — le spawn_lock
+        // gère les vraies courses de spawn.
+        let apply_guard = s.catalogue_apply_lock().lock().await;
         let meta = s.meta_snapshot();
         // Re-sélection de la valeur déjà appliquée sur ce sid : le cycle
         // kill→override→load ne changerait rien — no-op.
@@ -714,13 +732,27 @@ impl Daemon {
                 ),
             });
         }
-        // Le sid est mémorisé MÊME en cas d'échec : sinon reapply
-        // (respawn→reapply→apply) bouclerait à l'infini sur un override
-        // qui échoue en permanence (template erroné, provider down) —
-        // kill + `devin -r` 60 s + respawn à chaque itération. Une
-        // re-sélection explicite repasse par apply_catalogue_model et
-        // retente ; un nouveau sid (clear/fork) retente aussi.
-        s.set_model_override_sid(Some(native));
+        // Le sid n'est mémorisé que si meta.model est ENCORE la valeur
+        // qu'on vient d'appliquer : une valeur stagée pendant la
+        // fenêtre (h_set_model sur session endormie →
+        // stage_catalogue_model) doit rester « à rejouer » — sinon
+        // reapply verrait override_sid == sid et la valeur stagée
+        // ne serait jamais appliquée alors que meta l'affiche.
+        let still_applied = {
+            let m = s.meta_snapshot();
+            m.model.as_deref() == Some(model)
+                && m.model_source.as_deref() == Some("catalogue")
+        };
+        if still_applied {
+            s.set_model_override_sid(Some(native));
+        }
+        // Session supprimée pendant l'override : ne pas respawner un
+        // process orphelin (même garde que spawn_fresh).
+        let session_id = s.meta_snapshot().id;
+        drop(apply_guard);
+        if !self.sessions.read().await.contains_key(&session_id) {
+            return Ok(());
+        }
         // skip_replay=true comme wake_session : le journal est intact
         // (sleep ne le reset pas) — sans ça tout le replay session/load
         // serait re-émis et re-journalisé (historique dupliqué).
@@ -1341,6 +1373,13 @@ impl Daemon {
 
     pub(super) async fn h_delete_session(self: &Arc<Self>, session: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
+                // Suppression pendant l'override : le respawn final
+                // d'apply spawnerait un process orphelin (session
+                // sortie du registre, dir supprimé). Refus propre —
+                // apply vérifie aussi contains_key avant de respawner.
+                if s.catalogue_override_active() {
+                    anyhow::bail!("override catalogue en cours — réessayez dans un instant");
+                }
                 // Spawn en vol : invalider la génération fait avorter le
                 // handshake immédiatement (kill simple = rien à tuer tant
                 // que l'enfant n'est pas posé — il finirait session/new
@@ -1361,6 +1400,12 @@ impl Daemon {
 
     pub(super) async fn h_kill_session(self: &Arc<Self>, session: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
+                // Kill pendant l'override : no-op sur process déjà mort
+                // puis le respawn final de apply ressusciterait la
+                // session — kill silencieusement annulé.
+                if s.catalogue_override_active() {
+                    anyhow::bail!("override catalogue en cours — réessayez dans un instant");
+                }
                 if s.is_spawning() {
                     // Kill pendant un spawn en vol (création async,
                     // réveil, resume) : aucun enfant à tuer ou handshake

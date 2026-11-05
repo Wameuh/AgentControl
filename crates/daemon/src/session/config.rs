@@ -428,6 +428,12 @@ impl Session {
             .store(v, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Mutex sérialisant les apply catalogue concurrents sur cette
+    /// session (deux `model_override_cmd` sur le même sid).
+    pub fn catalogue_apply_lock(&self) -> &tokio::sync::Mutex<()> {
+        &self.catalogue_apply_lock
+    }
+
     /// Purge `pending_config["model"]` — ceinture+bretelles après un
     /// échec d'override catalogue : une valeur catalogue restaurée
     /// « announced » ne doit jamais être rejouée en
