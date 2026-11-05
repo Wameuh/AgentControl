@@ -264,7 +264,7 @@ Relis le diff `origin/{BASE}...HEAD` (git show/git diff --stat puis fichiers) EN
 
 ## INTERDIT — lecture seule stricte
 
-Ton travail est la RELISE du diff et du code environnant. La compilation et les tests sont garantis par la CI (6 check-runs) sur la PR — les lancer ici ne fait que bruler du temps et des tokens :
+Ton travail est la RELISE du diff et du code environnant. La compilation et les tests sont garantis par la CI (6 check-runs) au moment du ready — les lancer ici ne fait que bruler du temps et des tokens :
 
 - NE PAS compiler, builder ni tester : aucun `cargo build/check/test`, `npm install/build`, `tsc`, `go build/test`, `pytest`, etc. — pas pour verifier que ca compile, pas pour reproduire un bug.
 - NE PAS executer de code issu de la PR : ni binaires, ni scripts, ni hooks.
