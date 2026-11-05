@@ -539,7 +539,7 @@ Verifie la faisabilite, la completude et les risques du plan EN REGARDANT LE COD
 
 Aux rounds successifs : verifie d'abord que TES points du round precedent sont traites ; ne souleve de nouveaux points que s'ils sont bloquants ; APPROVED si tes points bloquants sont resolus et rien de nouveau bloquant.
 
-Tu NE modifies RIEN : aucune edition, aucune commande mutante — lecture seule — SAUF ces deux commandes, dans l'ordre, quand ton verdict est pret :
+Tu NE modifies RIEN : aucune edition, aucune commande mutante — lecture seule — ET tu ne compiles, ne buildes, ne testes RIEN non plus (cargo/npm/tsc/go…) : verifier un plan = lire le code, pas executer — si un point du plan semble faux ou infaisable, tranche-le a la lecture ou refuse-le, ne lance pas de build pour le prouver. SAUF ces deux commandes, dans l'ordre, quand ton verdict est pret :
 
   a) agentbacklog --verdict {ID} --reviewer "$AGENTCONTROL_SESSION" --outcome APPROVED|DENIED|CONDITIONAL --comment "<ton commentaire>"
   b) acctl msg "$AGENTCONTROL_SESSION" {PLANNER} "<verdict + commentaire>"
