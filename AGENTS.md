@@ -19,7 +19,9 @@ Workflow: create a branch from `next_release` → push →
 re-run, still in draft) → review settled → `gh pr ready`
 (≥30 s after the last push) → wait for green CI checks → merge.
 **Merge**: to `main`, always the user. To `next_release`,
-**the agent may merge** via `gh pr merge <N>` when the latest auto
+**the agent may merge** via `gh pr merge <N> --squash --delete-branch`
+(squash convention + head cleanup — belt-and-suspenders over the repo
+setting `delete_branch_on_merge`) when the latest auto
 review carries a **`Verdict: APPROVED` title** posted after the push
 of the current head (freshness verified via the repo's PushEvents,
 `activity` feed fallback — events can lag by hours) —
@@ -44,6 +46,11 @@ or off `next_release`, and `SessionStart` reports the state.
 `fetch` / `pull` / `reset` / `restore` / `checkout -- <paths>` stay
 allowed (resync and back-to-clean). Accepted tripwire: shell writes
 (`>`, `sed -i`) aren't intercepted — the `Stop` hook is the safety net.
+Branch heads are deleted on merge (`--delete-branch` + repo setting):
+a worktree whose remote branch vanished keeps working (the local
+branch stays), but resync with `git fetch --prune` and drop stale
+worktrees with `git worktree remove` — `git branch -D` on a
+checked-out branch fails, remove the worktree first.
 
 **Waiting = `ac-wait`, never in-turn**: any wait longer than ~1 min
 (CI checks, `/mr review` verdict, merge watch, long builds)
