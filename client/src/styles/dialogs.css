@@ -1,19 +1,19 @@
 /* Menus contextuels (fichiers : copier/supprimer — sessions : rename/fork/exit) */
-#fctx, #sctx {
+#fctx, #sctx, #evctx {
   position: fixed; z-index: 80; min-width: 170px;
   background: var(--panel-solid); border: 1px solid var(--line-strong);
   border-radius: 8px; padding: 4px; display: flex; flex-direction: column;
   box-shadow: 0 8px 26px rgba(0, 0, 0, .45);
 }
-#fctx button, #sctx button {
+#fctx button, #sctx button, #evctx button {
   background: none; border: none; color: var(--ink); text-align: left;
   padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 12px;
 }
-#fctx button:hover, #sctx button:hover { background: rgba(var(--tint-rgb), .08); }
-#fctx button:disabled, #sctx button:disabled { opacity: .4; cursor: default; }
-#fctx button:disabled:hover, #sctx button:disabled:hover { background: none; }
-#fctx button.danger, #sctx button.danger { color: var(--red); }
-#fctx .fctx-path, #sctx .fctx-path {
+#fctx button:hover, #sctx button:hover, #evctx button:hover { background: rgba(var(--tint-rgb), .08); }
+#fctx button:disabled, #sctx button:disabled, #evctx button:disabled { opacity: .4; cursor: default; }
+#fctx button:disabled:hover, #sctx button:disabled:hover, #evctx button:disabled:hover { background: none; }
+#fctx button.danger, #sctx button.danger, #evctx button.danger { color: var(--red); }
+#fctx .fctx-path, #sctx .fctx-path, #evctx .fctx-path {
   padding: 4px 10px 6px; color: var(--dim); font-size: 10.5px;
   font-family: Mono, ui-monospace, monospace; border-bottom: 1px solid var(--line);
   margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
