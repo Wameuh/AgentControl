@@ -367,6 +367,29 @@ impl Session {
             }
             self.config_gen.fetch_add(1, Ordering::SeqCst);
         }
+        // Capacité session/load persistée : le chemin catalogue-only
+        // (store provider indexé par sid) n'a de sens que si l'agent
+        // sait recharger une session — sinon chaque spawn fait un
+        // session/new et l'override ne peut jamais suivre le sid.
+        // Persisté AVANT le parsing models/configOptions : si l'agent
+        // s'avère sans load, une provenance « catalogue » (modèle
+        // stagé sur une session jamais spawnée) est aussitôt repassée
+        // à "announced" — les valeurs clampées rapportées ci-dessous
+        // sont alors écrites dans meta au lieu de rester masquées.
+        let load_changed = {
+            let mut m = self.meta.lock().unwrap();
+            let mut changed = m.supports_load != Some(supports_load);
+            m.supports_load = Some(supports_load);
+            if !supports_load && m.model_source.as_deref() == Some("catalogue") {
+                m.model_source = Some("announced".into());
+                m.model = None;
+                changed = true;
+            }
+            changed
+        };
+        if load_changed {
+            self.save_meta();
+        }
         // Modèles disponibles éventuels
         if let Some(models) = resp.get("models") {
             let mut m = self.meta.lock().unwrap();
@@ -437,24 +460,6 @@ impl Session {
         // comme refus définitif → la marque tombe, la clé repassera
         // par pending_config au reconcile ci-dessous.
         self.revive_rejected_config();
-        // Capacité session/load persistée : le chemin catalogue-only
-        // (store provider indexé par sid) n'a de sens que si l'agent
-        // sait recharger une session — sinon chaque spawn fait un
-        // session/new et l'override ne peut jamais suivre le sid.
-        let load_changed = {
-            let mut m = self.meta.lock().unwrap();
-            let mut changed = m.supports_load != Some(supports_load);
-            m.supports_load = Some(supports_load);
-            if !supports_load && m.model_source.as_deref() == Some("catalogue") {
-                m.model_source = Some("announced".into());
-                m.model = None;
-                changed = true;
-            }
-            changed
-        };
-        if load_changed {
-            self.save_meta();
-        }
         self.save_meta();
         // Capacités du profil : chaque handshake enrichit le cache démon
         // (agent_caps.json — selects du dialogue nouvelle session,

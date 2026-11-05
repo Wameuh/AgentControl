@@ -378,6 +378,54 @@ impl Session {
         self.save_meta();
     }
 
+    /// Borne du rejeu catalogue automatique : au-delà, le sid natif
+    /// churn à chaque spawn (load→new permanent) — la chaîne
+    /// kill→override→respawn ne peut pas converger, on coupe avec un
+    /// event Error plutôt que boucler indéfiniment.
+    pub const CATALOGUE_REAPPLY_MAX: u64 = 2;
+
+    pub fn catalogue_reapply_streak(&self) -> u64 {
+        self.catalogue_reapply_streak.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn bump_catalogue_reapply(&self) {
+        self.catalogue_reapply_streak
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn catalogue_reapply_halted(&self) -> bool {
+        self.catalogue_reapply_halted
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn halt_catalogue_reapply(&self) {
+        self.catalogue_reapply_halted
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Remise à zéro par les actions explicites (sélection modèle,
+    /// stage sur endormie, /clear, création) : chaque intention
+    /// utilisateur redémarre une chaîne bornée.
+    pub fn reset_catalogue_reapply(&self) {
+        self.catalogue_reapply_streak
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.catalogue_reapply_halted
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Purge `pending_config["model"]` — ceinture+bretelles après un
+    /// échec d'override catalogue : une valeur catalogue restaurée
+    /// « announced » ne doit jamais être rejouée en
+    /// set_config_option au prochain spawn (refus ACP → boucle
+    /// d'Error à chaque réveil).
+    pub fn clear_pending_model(&self) {
+        let mut m = self.meta.lock().unwrap();
+        if m.pending_config.remove("model").is_some() {
+            drop(m);
+            self.save_meta();
+        }
+    }
+
     /// Sid natif contre lequel le dernier `model_override_cmd` a tourné
     /// — comparé au native_session_id courant pour détecter qu'un spawn
     /// a atterri sur un NOUVEAU sid (clear, fallback load→new, fork) et

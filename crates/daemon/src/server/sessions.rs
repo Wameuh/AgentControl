@@ -432,6 +432,8 @@ impl Daemon {
                 }
                 // /clear a créé un nouveau sid natif : l'override
                 // catalogue du sid effacé ne s'y applique pas — rejouer.
+                // Action explicite : nouvelle chaîne de rejeu bornée.
+                s.reset_catalogue_reapply();
                 self.reapply_catalogue_if_new_sid(&s).await;
                 info!("contexte effacé: {session}");
                 Ok(json!({"session": session}))
@@ -669,24 +671,30 @@ impl Daemon {
             .await
             .unwrap_or_else(|e| Err(anyhow::anyhow!("override join: {e}")));
         if let Err(e) = r {
-            // Création : meta.model valait déjà la valeur catalogue
-            // demandée — rien d'annoncé à restaurer. Repasser la
-            // provenance à "announced" pour que le handshake suivant
-            // rapporte la valeur réellement appliquée (clampée)
-            // au lieu de laisser croire que l'override a pris.
+            // `creation` est vrai aussi pour une re-application de la
+            // valeur courante (reapply sur nouveau sid, re-sélection) :
+            // il n'y a alors AUCUNE valeur annoncée à restaurer.
+            // Remettre l'uid catalogue avec "announced" empoisonnerait
+            // pending_config à chaque spawn (refus ACP en boucle) et
+            // afficherait une valeur jamais appliquée — on pose None :
+            // le handshake du respawn écrira la valeur clampée
+            // réellement retenue par l'agent.
             let creation = prev.0.as_deref() == Some(model)
                 && prev.1.as_deref() == Some("catalogue");
-            s.set_model_meta(
-                prev.0,
-                if creation {
-                    Some("announced".into())
-                } else {
-                    prev.1
-                },
-            );
+            if creation {
+                s.set_model_meta(None, Some("announced".into()));
+            } else {
+                s.set_model_meta(prev.0, prev.1);
+            }
+            s.clear_pending_model();
             s.emit(EventKind::Error {
                 message: format!(
-                    "override modèle « {model} » échoué: {e:#} — valeur précédente conservée"
+                    "override modèle « {model} » échoué: {e:#} — {}",
+                    if creation {
+                        "valeur annoncée par l'agent conservée"
+                    } else {
+                        "valeur précédente conservée"
+                    }
                 ),
             });
         }
@@ -728,6 +736,30 @@ impl Daemon {
         if m.model_override_sid.as_deref() == Some(sid.as_str()) {
             return;
         }
+        // Borne de la chaîne reapply→apply→respawn→reapply : si le sid
+        // churn à chaque spawn (session/load qui dégrade en new en
+        // permanence — entrée de store illisible), model_override_sid
+        // ne rejoint jamais le sid courant et la boucle ne converge
+        // pas. Halt après MAX reapplies automatiques ; toute action
+        // explicite (re-sélection, stage, /clear, création) remet le
+        // compteur à zéro.
+        if s.catalogue_reapply_halted() {
+            return;
+        }
+        if s.catalogue_reapply_streak() >= Session::CATALOGUE_REAPPLY_MAX {
+            s.halt_catalogue_reapply();
+            // Mémoriser le sid courant : sans ça un spawn following
+            // sur le MÊME sid (load réparé) retenterait — le halt
+            // reste jusqu'à action explicite.
+            s.set_model_override_sid(Some(sid.clone()));
+            s.emit(EventKind::Error {
+                message: format!(
+                    "rejeu de l'override catalogue « {model} » abandonné — le sid natif change à chaque spawn ({sid})"
+                ),
+            });
+            return;
+        }
+        s.bump_catalogue_reapply();
         s.emit(EventKind::System {
             text: format!("nouveau sid natif {sid} — rejeu de l'override modèle « {model} »…"),
         });
@@ -927,6 +959,9 @@ impl Daemon {
                     // on l'applique par le chemin normal.
                     if let Some(m) = model.as_deref() {
                         if cat_hit {
+                            // Création/fork : intention explicite —
+                            // nouvelle chaîne de rejeu bornée.
+                            s.reset_catalogue_reapply();
                             if d.catalogue_only(&s, m).await {
                                 let _ = d.apply_catalogue_model(&s, m).await;
                             } else {
@@ -1219,6 +1254,8 @@ impl Daemon {
     pub(super) async fn h_set_model(self: &Arc<Self>, session: String, model: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
                 if self.catalogue_only(&s, &model).await {
+                    // Action explicite : nouvelle chaîne de rejeu bornée.
+                    s.reset_catalogue_reapply();
                     if s.is_alive() {
                         self.apply_catalogue_model(&s, &model).await?;
                     } else {
@@ -1251,6 +1288,7 @@ impl Daemon {
                     })
                 };
                 if is_model_cfg && self.catalogue_only(&s, &value).await {
+                    s.reset_catalogue_reapply();
                     if s.is_alive() {
                         self.apply_catalogue_model(&s, &value).await?;
                     } else {
