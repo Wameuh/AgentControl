@@ -129,6 +129,7 @@ impl Outbox {
     }
 }
 
+use crate::costs::CostCache;
 use crate::journal;
 use crate::prs::PrRegistry;
 use crate::session::Session;
@@ -197,6 +198,9 @@ pub struct Daemon {
     host_sys: std::sync::Mutex<sysinfo::System>,
     /// Sérialise les réservations de place d'instance (ensure_agent_slot).
     slot_lock: tokio::sync::Mutex<()>,
+    /// Coûts catalogue des modèles par profil agent (costs.rs) —
+    /// sondes `devin models`… avec cache TTL, servis par ModelCosts.
+    pub model_costs: CostCache,
 }
 
 
@@ -274,6 +278,7 @@ impl Daemon {
             dir_watch_n: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             host_sys: std::sync::Mutex::new(sysinfo::System::new()),
             slot_lock: tokio::sync::Mutex::new(()),
+            model_costs: CostCache::default(),
         });
         d.pr_verify.spawn_worker();
         let mut resumable = Vec::new();
@@ -631,6 +636,7 @@ impl Daemon {
             ReqKind::DaemonStatus => self.h_daemon_status().await,
             ReqKind::UpdateDaemon { version } => self.h_update_daemon(version).await,
             ReqKind::ListAgents => self.h_list_agents().await,
+            ReqKind::ModelCosts { agent } => self.h_model_costs(agent).await,
             ReqKind::ListSessions => self.h_list_sessions().await,
             ReqKind::NewSession {
                 agent,

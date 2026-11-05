@@ -195,6 +195,7 @@ export const de: Record<Key, string> = {
   fork_started: "Fork läuft — die native Sitzung wird freigegeben und neu geöffnet (~30 s)…",
   fusion_none: "Keine Fusion-Kombinationen vom Agenten angekündigt.",
   fusion_bad: "Fusion-Kombination vom Agenten nicht angekündigt: ",
+  cost_label: "Kosten",
   fusion_entry: "✨ Fusion (2 Modelle)…", cmd_placeholder: "⌘ Befehle…",
   effort_default: "Standard", subscribe_err: "subscribe: ",
   settings_title: "Einstellungen", about_title: "Über AgentControl",

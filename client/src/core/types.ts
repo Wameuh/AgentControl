@@ -124,6 +124,11 @@ export interface DirEntry { name: string; dir: boolean; size: number }
 
 export type AgentOpt = { id: string; name: string; available?: boolean };
 
+/** Coût catalogue d'un modèle (RPC model_costs) : `label` compact pour
+ *  le libellé d'option (« Free », « $1/$5 »), `detail` = texte brut du
+ *  catalogue pour le tooltip. */
+export type ModelCostInfo = { label: string; detail?: string };
+
 // Type alias (pas interface) → signature d'index implicite, assignable à
 // Record<string, unknown> pour connKeyOf().
 export type SavedConn = {

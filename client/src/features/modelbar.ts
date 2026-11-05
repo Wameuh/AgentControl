@@ -8,6 +8,7 @@ import { $, showErr } from "../core/dom";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
 import type { CmdInfo } from "../core/types";
+import { costFor } from "./modelcosts";
 
 export const cmdName = (c: CmdInfo) => (typeof c === "string" ? c.replace(/^\//, "") : c.name);
 export const cmdDesc = (c: CmdInfo) => (typeof c === "string" ? "" : (c.description ?? ""));
@@ -68,7 +69,12 @@ export function fillEfforts(base: string, cur: string) {
     o.value = e;
     // "[context=…,effort=…]" → contenu lisible sans les crochets
     // ("[]" de cursor = variante par défaut → garder "[]" plutôt que vide)
-    o.textContent = e.startsWith("[") ? e.slice(1, -1) || e : e;
+    const label = e.startsWith("[") ? e.slice(1, -1) || e : e;
+    // Coût catalogue du modèle complet (base + effort) quand dispo —
+    // suffixe indicatif, absent si le provider n'expose rien.
+    const cost = costFor(joinModel(base, e));
+    o.textContent = label + (cost ? ` · ${cost.label}` : "");
+    if (cost?.detail) o.title = cost.detail;
     es.appendChild(o);
   }
   if (effs.includes(cur)) es.value = cur;

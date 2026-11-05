@@ -598,6 +598,10 @@ pub enum ReqKind {
     },
     ListSessions,
     ListAgents,
+    /// Coûts catalogue des modèles d'un profil agent (sonde provider
+    /// type `devin models`, cache côté démon) — {"models": {id: {label,
+    /// detail}}}. Map vide quand le provider n'expose pas de coût.
+    ModelCosts { agent: String },
     Send {
         session: String,
         text: String,
@@ -1152,6 +1156,7 @@ impl ReqKind {
             Self::AttachSession { .. } => "attach_session",
             Self::ListSessions => "list_sessions",
             Self::ListAgents => "list_agents",
+            Self::ModelCosts { .. } => "model_costs",
             Self::Send { .. } => "send",
             Self::PeerSend { .. } => "peer_send",
             Self::PeerSpawn { .. } => "peer_spawn",
