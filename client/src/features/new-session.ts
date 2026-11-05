@@ -9,6 +9,7 @@ import { app } from "../core/state";
 import type { AgentCaps, AgentOpt, SessionMeta } from "../core/types";
 import { t } from "../i18n";
 import { costFor, ensureCosts } from "./modelcosts";
+import { catalogFor, ensureCatalog } from "./modelcatalog";
 import type { GroupStore } from "./groups";
 
 /** Valeur sentinelle des selects mode/modèle : saisie libre. */
@@ -224,13 +225,35 @@ export class NewSessionDialog {
       }
       if (s.agent) pairs.add(`${s.conn ?? ""} ${s.agent}`);
     }
-    // Coûts des profils représentés — re-render du datalist à l'arrivée
-    // (dialogue encore ouvert seulement).
+    // Variantes catalogue-only des profils représentés (model_catalog) —
+    // badgées, applicables via le side-channel démon à la création.
     for (const p of pairs) {
       const i = p.indexOf(" ");
-      ensureCosts(p.slice(0, i), p.slice(i + 1), () => {
+      const conn = p.slice(0, i);
+      const agent = p.slice(i + 1);
+      const cat = catalogFor(conn, agent);
+      if (cat) {
+        for (const e of Object.values(cat)) {
+          if (seen.has(e.value)) continue;
+          seen.add(e.value);
+          const el = document.createElement("option");
+          el.value = e.value;
+          el.label = `${e.label} · ${t("catalog_badge")}`;
+          dl.appendChild(el);
+        }
+      }
+    }
+    // Coûts + catalogues des profils représentés — re-render du datalist
+    // à l'arrivée (dialogue encore ouvert seulement).
+    for (const p of pairs) {
+      const i = p.indexOf(" ");
+      const conn = p.slice(0, i);
+      const agent = p.slice(i + 1);
+      const rerender = () => {
         if (($("dlg-new") as HTMLDialogElement).open) this.renderModelList();
-      });
+      };
+      ensureCosts(conn, agent, rerender);
+      ensureCatalog(conn, agent, rerender);
     }
   }
 

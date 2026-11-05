@@ -66,6 +66,9 @@ impl Daemon {
                     native_session_id: None,
                     mode: mode.clone(),
                     model: model.clone(),
+                    model_source: model.as_ref().map(|_| "announced".to_string()),
+                    model_override_sid: None,
+                    supports_load: None,
                     available_modes: vec![],
                     available_commands: vec![],
                     available_models: vec![],
@@ -146,6 +149,9 @@ impl Daemon {
                     native_session_id: Some(native_id),
                     mode: None,
                     model: None,
+                    model_source: None,
+                    model_override_sid: None,
+                    supports_load: None,
                     available_modes: vec![],
                     available_commands: vec![],
                     available_models: vec![],
@@ -188,6 +194,11 @@ impl Daemon {
 
     pub(super) async fn h_fork_session(self: &Arc<Self>, session: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
+                // Le TUI fork mute le même sid natif que `devin -r` —
+                // double mutation concurrente du store provider.
+                if s.catalogue_override_active() {
+                    anyhow::bail!("override catalogue en cours — réessayez dans un instant");
+                }
                 let meta = s.meta_snapshot();
                 let _slot = self.ensure_agent_slot(&meta.agent).await?;
                 let native = meta
@@ -224,8 +235,8 @@ impl Daemon {
                         // Restaure la source si on l'avait tuée.
                         if was_alive {
                             let (cmd, envs) = spawn_args(&profile, &meta);
-                            let _ = s
-                                .spawn_agent(
+                            if matches!(
+                                s.spawn_agent(
                                     &cmd,
                                     &envs,
                                     meta.native_session_id.clone(),
@@ -237,7 +248,11 @@ impl Daemon {
                                         ..Default::default()
                                     }),
                                 )
-                                .await;
+                                .await,
+                                Ok(true)
+                            ) {
+                                self.reapply_catalogue_if_new_sid(&s).await;
+                            }
                         }
                         return Err(e.context("fork via le TUI de l'agent"));
                     }
@@ -266,7 +281,11 @@ impl Daemon {
                             )
                             .await
                         {
-                            Ok(_) => break,
+                            Ok(true) => {
+                                self.reapply_catalogue_if_new_sid(&s).await;
+                                break;
+                            }
+                            Ok(false) => break,
                             Err(e) => {
                                 if attempt == 7 || !format!("{e:#}").contains("already open") {
                                     s.emit(EventKind::System {
@@ -322,6 +341,14 @@ impl Daemon {
 
     pub(super) async fn h_resume_session(self: &Arc<Self>, session: String, native_id: Option<String>) -> Result<Value> {
                 let s = self.get_session(&session).await?;
+                // Rebind pendant l'override : process déjà mort (kill
+                // sauté) mais journal.reset + set_native_id
+                // s'exécuteraient — le respawn final d'apply repartirait
+                // sur le sid étranger avec un journal vidé. Même garde
+                // que fork/clear/delete/kill.
+                if s.catalogue_override_active() {
+                    anyhow::bail!("override catalogue en cours — réessayez dans un instant");
+                }
                 if s.is_alive() && native_id.is_none() {
                     return Ok(json!({"session": session, "already": true}));
                 }
@@ -366,6 +393,12 @@ impl Daemon {
 
     pub(super) async fn h_clear_session(self: &Arc<Self>, session: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
+                // /clear tuerait le process puis son spawn_agent
+                // bailerait sur le flag — journal effacé + mark_dead
+                // pour un clear qui n'a pas abouti. Refus propre.
+                if s.catalogue_override_active() {
+                    anyhow::bail!("override catalogue en cours — réessayez dans un instant");
+                }
                 // Session endormie/morte : le clear relance un agent, donc
                 // il faut une place (une session vivante la garde déjà).
                 let slot = if s.is_alive() {
@@ -424,6 +457,11 @@ impl Daemon {
                     s.mark_dead();
                     return Err(e.context("respawn après clear"));
                 }
+                // /clear a créé un nouveau sid natif : l'override
+                // catalogue du sid effacé ne s'y applique pas — rejouer.
+                // Action explicite : nouvelle chaîne de rejeu bornée.
+                s.reset_catalogue_reapply();
+                self.reapply_catalogue_if_new_sid(&s).await;
                 info!("contexte effacé: {session}");
                 Ok(json!({"session": session}))
     }
@@ -500,6 +538,15 @@ impl Daemon {
     /// sur une session qui vient de s'endormir et doivent déclencher le
     /// même réveil.
     pub(super) fn spawn_wake(self: &Arc<Self>, s: &Arc<Session>, session: &str) {
+        if s.catalogue_override_active() {
+            // Override catalogue en vol : le `devin -r` tourne, un
+            // spawn maintenant violerait l'invariant du side-channel.
+            // Enfiler suffit — le respawn final de l'override draine
+            // la file (spawn_agent post-spawn) ; wake_pending couvre
+            // le cas où il échouerait.
+            s.arm_wake_pending();
+            return;
+        }
         if !s.wake_begin() {
             // Réveil déjà en vol — l'envoi est en file ; s'il finit
             // asleep (sleep en vol, échec), wake_pending le relance.
@@ -541,10 +588,277 @@ impl Daemon {
         });
     }
 
+    /// Vrai si `value` est une variante catalogue-only pour la session :
+    /// présente dans le catalogue du profil (`catalogue_cmd`) ET absente
+    /// des valeurs modèle annoncées (config_options + available_models).
+    /// Profil sans catalogue/override → toujours faux : le chemin ACP
+    /// (set_config_option/set_model) reste inchangé.
+    async fn catalogue_only(&self, s: &Arc<Session>, value: &str) -> bool {
+        let meta = s.meta_snapshot();
+        let Some(profile) = self.agents.get(&meta.agent) else {
+            return false;
+        };
+        if profile.catalogue_cmd.is_none() || profile.model_override_cmd.is_none() {
+            return false;
+        }
+        let catalog = self
+            .catalogues
+            .get(&meta.agent, profile.catalogue_cmd.as_deref())
+            .await;
+        if !catalog.iter().any(|e| e.value == value) {
+            return false;
+        }
+        // Sans session/load le chemin est inapplicable (store indexé
+        // par sid) — retomber sur l'ACP pour que l'erreur soit honnête.
+        if meta.supports_load == Some(false) {
+            return false;
+        }
+        !crate::server::orch_cfg::meta_config_values(&meta, "model")
+            .iter()
+            .any(|(v, _)| v == value)
+    }
+
+    /// Modèle catalogue choisi sur une session endormie/morte : rien à
+    /// tuer — on enregistre la valeur et on invalide
+    /// `model_override_sid` pour que le prochain respawn (réveil,
+    /// resume) rejoue l'override via `reapply_catalogue_if_new_sid`.
+    /// Même modèle déjà appliqué sur ce sid : re-sélection = no-op.
+    fn stage_catalogue_model(&self, s: &Arc<Session>, model: &str) {
+        let m = s.meta_snapshot();
+        if m.model.as_deref() == Some(model)
+            && m.model_source.as_deref() == Some("catalogue")
+            && m.model_override_sid.is_some()
+            && m.model_override_sid == m.native_session_id
+        {
+            return;
+        }
+        s.set_model_meta(Some(model.to_string()), Some("catalogue".into()));
+        s.set_model_override_sid(None);
+    }
+
+    /// Application d'une valeur catalogue-only — l'ACP refuse les
+    /// valeurs hors annonce : séquence kill (session_locks libérés) →
+    /// `model_override_cmd` ({native_sid}/{model} substitués) → respawn
+    /// (session/load restaure le modèle persisté). Jamais de
+    /// set_config_option ni de pending_config pour ces valeurs. En cas
+    /// d'échec de l'override : meta.model revenu à la valeur précédente
+    /// + event Error, la session est quand même respawnée.
+    async fn apply_catalogue_model(self: &Arc<Self>, s: &Arc<Session>, model: &str) -> Result<()> {
+        // Sérialise les apply concurrents sur cette session : deux
+        // `devin -r` en parallèle sur le même sid = last-writer-wins
+        // incohérent entre store provider et meta. Relâché AVANT le
+        // respawn final : le reapply interne à ce respawn est
+        // séquentiel (même tâche), pas concurrent — le spawn_lock
+        // gère les vraies courses de spawn.
+        let apply_guard = s.catalogue_apply_lock().lock().await;
+        let meta = s.meta_snapshot();
+        // Re-sélection de la valeur déjà appliquée sur ce sid : le cycle
+        // kill→override→load ne changerait rien — no-op.
+        if meta.model.as_deref() == Some(model)
+            && meta.model_source.as_deref() == Some("catalogue")
+            && meta.model_override_sid.as_deref() == meta.native_session_id.as_deref()
+        {
+            return Ok(());
+        }
+        // Agent sans session/load : chaque spawn fait un session/new →
+        // l'override viserait un sid mort né — refus explicite plutôt
+        // qu'un cycle voué à l'échec.
+        if meta.supports_load == Some(false) {
+            let msg = "agent sans session/load — variante catalogue non applicable";
+            s.emit(EventKind::Error {
+                message: msg.into(),
+            });
+            anyhow::bail!("{msg}");
+        }
+        let native = meta
+            .native_session_id
+            .clone()
+            .context("session sans id natif — override catalogue impossible")?;
+        let profile = self
+            .agents
+            .get(&meta.agent)
+            .with_context(|| format!("agent inconnu: {}", meta.agent))?
+            .clone();
+        let tpl = profile
+            .model_override_cmd
+            .clone()
+            .context("profil sans model_override_cmd")?;
+        let prev = (
+            meta.model.clone(),
+            meta.model_source.clone(),
+            meta.model_override_sid.clone(),
+        );
+        // Le kill est destructif pour un tour en vol (le prompt meurt
+        // avec le process) — signalé explicitement, la voie annoncée
+        // (set_config_option) est non destructive.
+        let busy = matches!(
+            meta.state.as_str(),
+            "running" | "working" | "waiting_input" | "starting" | "spawning" | "compacting"
+        );
+        s.set_model_meta(Some(model.to_string()), Some("catalogue".into()));
+        s.emit(EventKind::System {
+            text: format!(
+                "modèle catalogue « {model} » — application via side-channel{}…",
+                if busy { " (le tour en cours sera interrompu)" } else { "" }
+            ),
+        });
+        // Fenêtre critique : process acp mort, `devin -r` en cours —
+        // catalogue_override_active bloque tout spawn concurrent
+        // (spawn_agent, spawn_wake, resume_and_deliver) qui violerait
+        // l'invariant « jamais d'acp pendant l'override ». Relâché AVANT
+        // le respawn ci-dessous : c'est notre propre spawn_agent.
+        s.set_catalogue_override_active(true);
+        // Kill AVANT l'override : le process `devin acp` détient le lock
+        // de session et réécrirait le store à sa fermeture — le
+        // `devin -r` ne doit jamais tourner pendant qu'il vit.
+        s.sleep_for_override().await;
+        let rendered = tpl
+            .replace("{native_sid}", &native)
+            .replace("{model}", model);
+        let cwd = meta.cwd.clone();
+        let r = tokio::task::spawn_blocking(move || run_override_cmd(&rendered, &cwd))
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("override join: {e}")));
+        s.set_catalogue_override_active(false);
+        if let Err(e) = r {
+            // `creation` est vrai aussi pour une re-application de la
+            // valeur courante (reapply sur nouveau sid, re-sélection) :
+            // il n'y a alors AUCUNE valeur annoncée à restaurer.
+            // Remettre l'uid catalogue avec "announced" empoisonnerait
+            // pending_config à chaque spawn (refus ACP en boucle) et
+            // afficherait une valeur jamais appliquée — on pose None :
+            // le handshake du respawn écrira la valeur clampée
+            // réellement retenue par l'agent.
+            let creation = prev.0.as_deref() == Some(model)
+                && prev.1.as_deref() == Some("catalogue");
+            if creation {
+                s.set_model_meta(None, Some("announced".into()));
+            } else {
+                s.set_model_meta(prev.0, prev.1);
+            }
+            s.clear_pending_model();
+            s.emit(EventKind::Error {
+                message: format!(
+                    "override modèle « {model} » échoué: {e:#} — {}",
+                    if creation {
+                        "valeur annoncée par l'agent conservée"
+                    } else {
+                        "valeur précédente conservée"
+                    }
+                ),
+            });
+        }
+        // Le sid n'est mémorisé que si meta.model est ENCORE la valeur
+        // qu'on vient d'appliquer : une valeur stagée pendant la
+        // fenêtre (h_set_model sur session endormie →
+        // stage_catalogue_model) doit rester « à rejouer » — sinon
+        // reapply verrait override_sid == sid et la valeur stagée
+        // ne serait jamais appliquée alors que meta l'affiche.
+        let still_applied = {
+            let m = s.meta_snapshot();
+            m.model.as_deref() == Some(model)
+                && m.model_source.as_deref() == Some("catalogue")
+        };
+        if still_applied {
+            s.set_model_override_sid(Some(native));
+        }
+        // Session supprimée pendant l'override : ne pas respawner un
+        // process orphelin (même garde que spawn_fresh).
+        let session_id = s.meta_snapshot().id;
+        drop(apply_guard);
+        if !self.sessions.read().await.contains_key(&session_id) {
+            return Ok(());
+        }
+        // skip_replay=true comme wake_session : le journal est intact
+        // (sleep ne le reset pas) — sans ça tout le replay session/load
+        // serait re-émis et re-journalisé (historique dupliqué).
+        self.respawn(s, true).await
+    }
+
+    /// Rejoue l'override catalogue quand le spawn vient d'atterrir sur
+    /// un sid natif DIFFÉRENT de celui contre lequel
+    /// `model_override_cmd` a tourné (clear → session/new, fallback
+    /// load→new, fork → nouveau sid) : le store provider est indexé par
+    /// sid, sans ce rejeu la session repartirait sur le modèle par
+    /// défaut du compte. No-op pour les valeurs annoncées et quand le
+    /// sid correspond déjà.
+    pub(super) async fn reapply_catalogue_if_new_sid(self: &Arc<Self>, s: &Arc<Session>) {
+        let m = s.meta_snapshot();
+        if m.model_source.as_deref() != Some("catalogue") {
+            return;
+        }
+        let (Some(model), Some(sid)) = (m.model.clone(), m.native_session_id.clone()) else {
+            return;
+        };
+        // Agent sans session/load : chaque spawn fait un session/new →
+        // sid frais à chaque itération → rejeu infini (kill + override
+        // + respawn en boucle). La feature est de toute façon
+        // inapplicable — le store indexé par sid ne suit jamais.
+        if m.supports_load == Some(false) {
+            return;
+        }
+        if m.model_override_sid.as_deref() == Some(sid.as_str()) {
+            return;
+        }
+        // Borne de la chaîne reapply→apply→respawn→reapply : si le sid
+        // churn à chaque spawn (session/load qui dégrade en new en
+        // permanence — entrée de store illisible), model_override_sid
+        // ne rejoint jamais le sid courant et la boucle ne converge
+        // pas. Halt après MAX reapplies automatiques ; toute action
+        // explicite (re-sélection, stage, /clear, création) remet le
+        // compteur à zéro.
+        if s.catalogue_reapply_halted() {
+            return;
+        }
+        if s.catalogue_reapply_streak() >= Session::CATALOGUE_REAPPLY_MAX {
+            s.halt_catalogue_reapply();
+            // PAS de set_model_override_sid ici : le figer sur le sid
+            // courant rendrait la re-sélection explicite de la même
+            // valeur no-op (gardes model==+sid==) — l'utilisateur
+            // devrait choisir une autre valeur pour retenter. Sans
+            // figé, override_sid reste le dernier sid réellement
+            // ciblé : le halt bloque le rejeu automatique, et un
+            // reset explicite permet à apply de retenter (le no-op
+            // ne tire que si le sid correspond VRAIMENT).
+            s.emit(EventKind::Error {
+                message: format!(
+                    "rejeu de l'override catalogue « {model} » abandonné — le sid natif change à chaque spawn ({sid})"
+                ),
+            });
+            return;
+        }
+        s.bump_catalogue_reapply();
+        s.emit(EventKind::System {
+            text: format!("nouveau sid natif {sid} — rejeu de l'override modèle « {model} »…"),
+        });
+        // Box::pin : apply_catalogue_model → respawn → reapply est une
+        // récursion async — l'indirection évite un futur de taille infinie.
+        let _ = Box::pin(self.apply_catalogue_model(s, &model)).await;
+    }
+
+    /// Vrai si `value` figure dans le catalogue du profil — utilisé à la
+    /// création pour taire apply_spawn_config sur une valeur qui n'a
+    /// aucune chance d'être résolue contre les options annoncées.
+    async fn catalogue_member(&self, agent: &str, value: &str) -> bool {
+        let Some(p) = self.agents.get(agent) else {
+            return false;
+        };
+        // Les deux clés : sans model_override_cmd la valeur catalogue
+        // n'est pas applicable — inutile de sonder pour rien.
+        if p.catalogue_cmd.is_none() || p.model_override_cmd.is_none() {
+            return false;
+        }
+        self.catalogues
+            .get(agent, p.catalogue_cmd.as_deref())
+            .await
+            .iter()
+            .any(|e| e.value == value)
+    }
+
     /// Réveil d'une session endormie (déclenché par un envoi user) :
     /// respawn + session/load — même mécanique que ResumeSession. Le drain
     /// post-spawn livre les prompts enfilés pendant le sommeil.
-    async fn wake_session(&self, session: &str) -> Result<()> {
+    async fn wake_session(self: &Arc<Self>, session: &str) -> Result<()> {
         let s = self.get_session(session).await?;
         s.emit(EventKind::System {
             text: "réveil de la session…".into(),
@@ -557,7 +871,7 @@ impl Daemon {
     /// anti-respawn de spawn_agent (state==asleep → bail) stopperait le
     /// réveil ; en cas d'échec la session retourne à "asleep" pour que le
     /// prochain envoi retente (une session morte, elle, reste morte).
-    pub(super) async fn respawn(&self, s: &Arc<Session>, skip_replay: bool) -> Result<()> {
+    pub(super) async fn respawn(self: &Arc<Self>, s: &Arc<Session>, skip_replay: bool) -> Result<()> {
         let meta = s.meta_snapshot();
         // Avant leave_asleep : un refus laisse la session endormie/morte,
         // pas bloquée en « starting ». Une session déjà vivante ne compte
@@ -616,6 +930,12 @@ impl Daemon {
         if r.is_err() && was_asleep && s.supplant_mark() <= gen0 {
             s.mark_asleep();
         }
+        // Spawn atterri sur un NOUVEAU sid natif (fallback load→new) :
+        // l'override catalogue du sid précédent ne s'applique pas —
+        // rejouer contre le nouveau avant de rendre la main.
+        if r.is_ok() {
+            self.reapply_catalogue_if_new_sid(s).await;
+        }
         r.map(|_| ())
     }
 
@@ -656,6 +976,26 @@ impl Daemon {
             // spawn_cfg : mode/model appliqués par spawn_agent SOUS le
             // flag spawning — ni le drain post-spawn ni un envoi
             // concurrent ne peut partir avant la config demandée.
+            // Valeur possiblement catalogue-only : apply_spawn_config
+            // sauterait la résolution (hors options annoncées) avec un
+            // faux warning — le side-channel ci-dessous tranche une fois
+            // le handshake fait.
+            let cat_hit = match model.as_deref() {
+                Some(m) => d.catalogue_member(&s.meta_snapshot().agent, m).await,
+                None => false,
+            };
+            // Source posée AVANT le handshake : sinon la réconciliation
+            // post-spawn (agent.rs) verrait un modèle « announced »
+            // mismatché vs la valeur clampée reportée et stagerait
+            // pending_config["model"] → replay de set_config_option
+            // voués à l'échec (3 events Error factices) avant que le
+            // side-channel ne purge. Avec "catalogue", le reconcile
+            // skippe et set_model_meta purge le pending.
+            if cat_hit {
+                if let Some(m) = model.as_deref() {
+                    s.set_model_meta(Some(m.to_string()), Some("catalogue".into()));
+                }
+            }
             let r = s
                 .spawn_agent(
                     &cmd,
@@ -665,7 +1005,7 @@ impl Daemon {
                     d.mcp_servers(&sid),
                     Some(crate::session::SpawnCfg {
                         mode,
-                        model,
+                        model: if cat_hit { None } else { model.clone() },
                         quiet: false,
                     }),
                 )
@@ -678,6 +1018,42 @@ impl Daemon {
             }
             match r {
                 Ok(true) => {
+                    // Modèle catalogue-only demandé à la création : le
+                    // session/new vient de tourner sur la valeur clampée
+                    // par l'agent — close→override→load pour persister la
+                    // vraie valeur dans le store provider AVANT de livrer
+                    // le prompt initial. Membre du catalogue mais annoncée
+                    // aussi (rare) : apply_spawn_config l'avait sautée —
+                    // on l'applique par le chemin normal.
+                    if let Some(m) = model.as_deref() {
+                        if cat_hit {
+                            // Création/fork : intention explicite —
+                            // nouvelle chaîne de rejeu bornée.
+                            s.reset_catalogue_reapply();
+                            if d.catalogue_only(&s, m).await {
+                                let _ = d.apply_catalogue_model(&s, m).await;
+                            } else {
+                                // Membre du catalogue mais non
+                                // applicable (agent sans session/load)
+                                // : la provenance « catalogue » posée
+                                // avant le handshake ne doit pas
+                                // survivre — meta reflète la valeur
+                                // annoncée/clampée réellement retenue.
+                                let snap = s.meta_snapshot();
+                                let reported = snap
+                                    .config_options
+                                    .iter()
+                                    .find(|o| o.id == "model")
+                                    .map(|o| o.current_value.clone());
+                                s.set_model_meta(reported, Some("announced".into()));
+                                let _ = s.apply_spawn_config(None, Some(m), false).await;
+                            }
+                        }
+                    }
+                    // Fork ou autre spawn sur un sid neuf avec modèle
+                    // catalogue : l'override a tourné sur l'ancien sid —
+                    // rejouer contre le nouveau (no-op si déjà fait).
+                    d.reapply_catalogue_if_new_sid(&s).await;
                     match deliver {
                         FreshDeliver::None => {}
                         FreshDeliver::UserPrompt(p) => {
@@ -945,6 +1321,20 @@ impl Daemon {
 
     pub(super) async fn h_set_model(self: &Arc<Self>, session: String, model: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
+                if self.catalogue_only(&s, &model).await {
+                    // Action explicite : nouvelle chaîne de rejeu bornée.
+                    s.reset_catalogue_reapply();
+                    if s.is_alive() {
+                        self.apply_catalogue_model(&s, &model).await?;
+                    } else {
+                        // Endormie/morte : stage — le prochain respawn
+                        // rejoue l'override (comme les valeurs
+                        // annoncées qui attendent le réveil).
+                        self.stage_catalogue_model(&s, &model);
+                    }
+                    let applied = s.meta_snapshot().model.unwrap_or(model);
+                    return Ok(json!({"model": applied}));
+                }
                 s.set_model(&model).await?;
                 // Valeur effective post-résolution (peut différer de la
                 // demande : "swe-2" → "swe-2-high").
@@ -954,6 +1344,27 @@ impl Daemon {
 
     pub(super) async fn h_set_config_option(self: &Arc<Self>, session: String, config_id: String, value: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
+                // Les valeurs catalogue-only passent par le side-channel,
+                // jamais par session/set_config_option (refus ACP garanti).
+                // L'option modèle peut être adressée par son id ACP ou sa
+                // catégorie « model » — les deux déclenchent l'override.
+                let is_model_cfg = config_id == "model" || {
+                    let m = s.meta_snapshot();
+                    m.config_options.iter().any(|o| {
+                        (o.id == config_id || o.category == config_id)
+                            && (o.id == "model" || o.category == "model")
+                    })
+                };
+                if is_model_cfg && self.catalogue_only(&s, &value).await {
+                    s.reset_catalogue_reapply();
+                    if s.is_alive() {
+                        self.apply_catalogue_model(&s, &value).await?;
+                    } else {
+                        self.stage_catalogue_model(&s, &value);
+                    }
+                    let applied = s.meta_snapshot().model.unwrap_or(value);
+                    return Ok(json!({"config": config_id, "value": applied}));
+                }
                 s.set_config_option(&config_id, &value).await?;
                 Ok(json!({"config": config_id, "value": value}))
     }
@@ -978,6 +1389,13 @@ impl Daemon {
 
     pub(super) async fn h_delete_session(self: &Arc<Self>, session: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
+                // Suppression pendant l'override : le respawn final
+                // d'apply spawnerait un process orphelin (session
+                // sortie du registre, dir supprimé). Refus propre —
+                // apply vérifie aussi contains_key avant de respawner.
+                if s.catalogue_override_active() {
+                    anyhow::bail!("override catalogue en cours — réessayez dans un instant");
+                }
                 // Spawn en vol : invalider la génération fait avorter le
                 // handshake immédiatement (kill simple = rien à tuer tant
                 // que l'enfant n'est pas posé — il finirait session/new
@@ -998,6 +1416,12 @@ impl Daemon {
 
     pub(super) async fn h_kill_session(self: &Arc<Self>, session: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
+                // Kill pendant l'override : no-op sur process déjà mort
+                // puis le respawn final de apply ressusciterait la
+                // session — kill silencieusement annulé.
+                if s.catalogue_override_active() {
+                    anyhow::bail!("override catalogue en cours — réessayez dans un instant");
+                }
                 if s.is_spawning() {
                     // Kill pendant un spawn en vol (création async,
                     // réveil, resume) : aucun enfant à tuer ou handshake
@@ -1066,4 +1490,61 @@ fn match_excerpt(hay: &str, needle: &str, ctx: usize) -> Option<String> {
         s.push('…');
     }
     Some(s)
+}
+
+/// Exécute `model_override_cmd` (argv simple, `{native_sid}`/`{model}`
+/// déjà substitués par l'appelant) avec borne de temps — `devin -r …
+/// --model X` doit sortir vite (stdin EOF) ; au-delà on tue. Le stderr
+/// est capturé pour le message d'erreur.
+fn run_override_cmd(cmdline: &str, cwd: &str) -> Result<()> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let argv: Vec<String> = cmdline.split_whitespace().map(String::from).collect();
+    anyhow::ensure!(!argv.is_empty(), "model_override_cmd vide après substitution");
+    let mut child = Command::new(&argv[0])
+        .args(&argv[1..])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("spawn override {}", argv[0]))?;
+    let mut err = child.stderr.take();
+    let err_reader = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        if let Some(e) = err.as_mut() {
+            let _ = e.read_to_end(&mut b);
+        }
+        b
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = err_reader.join();
+                anyhow::bail!("model_override_cmd timeout 60s");
+            }
+        }
+    };
+    let err_bytes = err_reader.join().unwrap_or_default();
+    if !status.success() {
+        let msg = String::from_utf8_lossy(&err_bytes);
+        let msg = msg.trim();
+        anyhow::bail!(
+            "exit {:?}{}",
+            status.code(),
+            if msg.is_empty() {
+                String::new()
+            } else {
+                format!(" — {}", msg.chars().take(400).collect::<String>())
+            }
+        );
+    }
+    Ok(())
 }

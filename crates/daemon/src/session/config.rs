@@ -135,6 +135,7 @@ impl Session {
             let mut m = self.meta.lock().unwrap();
             m.pending_config.insert("model".into(), model.into());
             m.model = Some(model.into());
+            m.model_source = Some("announced".into());
             drop(m);
             self.save_meta();
             self.emit(EventKind::System {
@@ -202,7 +203,10 @@ impl Session {
             .await
         {
             Ok(_) => {
-                self.meta.lock().unwrap().model = Some(model.into());
+                let mut m = self.meta.lock().unwrap();
+                m.model = Some(model.into());
+                m.model_source = Some("announced".into());
+                drop(m);
                 self.save_meta();
                 self.emit_model_applied(model, wanted);
                 // Action explicite de réparation : un changement de
@@ -221,6 +225,7 @@ impl Session {
                 // meta.model écrit AVANT l'envoi : la valeur relue par
                 // h_set_model reflète la demande même si le prompt part en file.
                 self.meta.lock().unwrap().model = Some(model.into());
+                self.meta.lock().unwrap().model_source = Some("announced".into());
                 self.save_meta();
                 self.send_prompt(&format!("/model {model}"), false, false)
                     .await
@@ -268,6 +273,16 @@ impl Session {
                 continue;
             }
             if quiet {
+                // Ré-affirmation catalogue : la valeur vit dans le store
+                // provider (model_override_cmd), pas dans les options
+                // annoncées — la re-pousser via set_config_option serait
+                // un refus ACP ou une réécriture de l'override.
+                if id == "model"
+                    && self.meta.lock().unwrap().model_source.as_deref()
+                        == Some("catalogue")
+                {
+                    continue;
+                }
                 // Ré-affirmation de respawn, best-effort et silencieuse :
                 // seul un configId annoncé ET une valeur résoluble
                 // autorisent le push (une valeur hors config_options —
@@ -342,6 +357,103 @@ impl Session {
                 });
             }
         }
+    }
+
+    /// Pose meta.model + sa provenance ("announced" | "catalogue") —
+    /// utilisé par la voie side-channel catalogue (server::sessions) qui
+    /// ne passe JAMAIS par set_config_option/set_model : l'agent ACP
+    /// refuse les valeurs hors annonce.
+    pub fn set_model_meta(&self, model: Option<String>, source: Option<String>) {
+        let mut m = self.meta.lock().unwrap();
+        m.model = model;
+        m.model_source = source;
+        // Une valeur catalogue ne doit jamais traîner dans pending_config
+        // (stagée avant que la source ne soit posée, ou par un chemin
+        // interne) — rejouée au spawn elle repartait en set_config_option
+        // → refus ACP → boucle d'erreurs à chaque réveil.
+        if m.model_source.as_deref() == Some("catalogue") {
+            m.pending_config.remove("model");
+        }
+        drop(m);
+        self.save_meta();
+    }
+
+    /// Borne du rejeu catalogue automatique : au-delà, le sid natif
+    /// churn à chaque spawn (load→new permanent) — la chaîne
+    /// kill→override→respawn ne peut pas converger, on coupe avec un
+    /// event Error plutôt que boucler indéfiniment.
+    pub const CATALOGUE_REAPPLY_MAX: u64 = 2;
+
+    pub fn catalogue_reapply_streak(&self) -> u64 {
+        self.catalogue_reapply_streak.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn bump_catalogue_reapply(&self) {
+        self.catalogue_reapply_streak
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn catalogue_reapply_halted(&self) -> bool {
+        self.catalogue_reapply_halted
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn halt_catalogue_reapply(&self) {
+        self.catalogue_reapply_halted
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Remise à zéro par les actions explicites (sélection modèle,
+    /// stage sur endormie, /clear, création) : chaque intention
+    /// utilisateur redémarre une chaîne bornée.
+    pub fn reset_catalogue_reapply(&self) {
+        self.catalogue_reapply_streak
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.catalogue_reapply_halted
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Vrai pendant la fenêtre sleep→`model_override_cmd` de
+    /// l'override catalogue : aucun spawn (réveil, resume, clear,
+    /// fork) ne doit créer un `devin acp` pendant que le `devin -r`
+    /// tourne — le store provider serait lu/écrit à la fois par les
+    /// deux canaux.
+    pub fn catalogue_override_active(&self) -> bool {
+        self.catalogue_override_active
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn set_catalogue_override_active(&self, v: bool) {
+        self.catalogue_override_active
+            .store(v, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Mutex sérialisant les apply catalogue concurrents sur cette
+    /// session (deux `model_override_cmd` sur le même sid).
+    pub fn catalogue_apply_lock(&self) -> &tokio::sync::Mutex<()> {
+        &self.catalogue_apply_lock
+    }
+
+    /// Purge `pending_config["model"]` — ceinture+bretelles après un
+    /// échec d'override catalogue : une valeur catalogue restaurée
+    /// « announced » ne doit jamais être rejouée en
+    /// set_config_option au prochain spawn (refus ACP → boucle
+    /// d'Error à chaque réveil).
+    pub fn clear_pending_model(&self) {
+        let mut m = self.meta.lock().unwrap();
+        if m.pending_config.remove("model").is_some() {
+            drop(m);
+            self.save_meta();
+        }
+    }
+
+    /// Sid natif contre lequel le dernier `model_override_cmd` a tourné
+    /// — comparé au native_session_id courant pour détecter qu'un spawn
+    /// a atterri sur un NOUVEAU sid (clear, fallback load→new, fork) et
+    /// que l'override catalogue doit être rejoué.
+    pub fn set_model_override_sid(&self, sid: Option<String>) {
+        self.meta.lock().unwrap().model_override_sid = sid;
+        self.save_meta();
     }
 
     /// Rebind l'ID natif (pour reprendre une autre session de l'agent).
@@ -461,9 +573,23 @@ impl Session {
                 if let Some(opt) = m.config_options.iter_mut().find(|o| o.id == config_id) {
                     opt.current_value = value.into();
                 }
+                // L'option modèle peut être adressée par id ACP ou
+                // catégorie « model » — même règle que le chemin live.
+                let modelish = config_id == "model"
+                    || m.config_options.iter().any(|o| {
+                        (o.id == config_id || o.category == config_id)
+                            && (o.id == "model" || o.category == "model")
+                    });
                 match config_id {
                     "mode" => m.mode = Some(value.into()),
-                    "model" => m.model = Some(value.into()),
+                    "model" => {
+                        m.model = Some(value.into());
+                        m.model_source = Some("announced".into());
+                    }
+                    _ if modelish => {
+                        m.model = Some(value.into());
+                        m.model_source = Some("announced".into());
+                    }
                     _ => {
                         // Condition voulue persistante : rejouée à chaque
                         // spawn (reconcile post-handshake), pas seulement
@@ -562,12 +688,26 @@ impl Session {
             if let Some(opt) = m.config_options.iter_mut().find(|o| o.id == config_id) {
                 opt.current_value = value.into();
             }
+            // L'option peut être adressée par son id ACP ou sa catégorie
+            // (« model ») — les deux comptent pour meta.model/source.
+            let modelish = config_id == "model"
+                || m.config_options.iter().any(|o| {
+                    (o.id == config_id || o.category == config_id)
+                        && (o.id == "model" || o.category == "model")
+                });
             match config_id {
                 "mode" => m.mode = Some(value.into()),
-                "model" => m.model = Some(value.into()),
+                "model" => {
+                    m.model = Some(value.into());
+                    m.model_source = Some("announced".into());
+                }
                 // Sticky : rejoué à chaque spawn — un session/load qui
                 // restaure la valeur persistée côté agent ne doit pas
                 // perdre la condition (thought_level…).
+                _ if modelish => {
+                    m.model = Some(value.into());
+                    m.model_source = Some("announced".into());
+                }
                 _ => {
                     m.desired_config.insert(config_id.into(), value.into());
                 }

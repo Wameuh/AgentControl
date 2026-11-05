@@ -51,6 +51,10 @@ impl Daemon {
                     // `caps` de list_agents + RPC refresh_agent_caps
                     // (bouton refresh mode/modèle du header).
                     "agent_caps": true,
+                    // Idem pour ReqKind::ModelCatalog (variantes modèle
+                    // hors annonce ACP — catalogue.rs, clés
+                    // catalogue_cmd/model_override_cmd des profils).
+                    "model_catalog": true,
                     "host": host,
                 }))
     }
@@ -179,6 +183,26 @@ impl Daemon {
             "caps": caps,
             "sessions": touched,
         }))
+    }
+
+    /// `ModelCatalog` : {"models": [{value, label}]} — liste vide quand
+    /// le profil n'a pas de `catalogue_cmd` ou si la sonde échoue.
+    pub(super) async fn h_model_catalog(self: &Arc<Self>, agent: String) -> Result<Value> {
+        let profile = self
+            .agents
+            .get(&agent)
+            .ok_or_else(|| anyhow::anyhow!("agent inconnu: {agent}"))?;
+        // Les deux clés sont requises pour qu'une valeur catalogue soit
+        // applicable — servir le catalogue sans model_override_cmd
+        // proposerait des options vouées à l'échec côté ACP.
+        let models = if profile.catalogue_cmd.is_some() && profile.model_override_cmd.is_some() {
+            self.catalogues
+                .get(&agent, profile.catalogue_cmd.as_deref())
+                .await
+        } else {
+            Vec::new()
+        };
+        Ok(json!({ "models": models }))
     }
 }
 

@@ -18,6 +18,16 @@ pub struct AgentProfile {
     /// endormie pour faire place ; sans session inactive, le spawn est
     /// refusé avec erreur (ensure_agent_slot).
     pub max_instances: u32,
+    /// Commande liste du catalogue complet des modèles du provider
+    /// (`[agents.<id>.catalogue_cmd]`, ex. "devin models list") — les
+    /// variantes qu'ACP n'annonce pas. None = pas de catalogue.
+    pub catalogue_cmd: Option<String>,
+    /// Template shell d'override du modèle persisté côté provider
+    /// (`[agents.<id>.model_override_cmd]`, ex.
+    /// "devin -r {native_sid} --model {model}") — exécuté entre le kill
+    /// de l'agent ACP et le session/load quand la valeur choisie est
+    /// catalogue-only. Requis pour appliquer une telle valeur.
+    pub model_override_cmd: Option<String>,
 }
 
 /// Plafond d'instances par profil agent quand `max_instances` n'est pas

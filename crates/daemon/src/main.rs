@@ -1,5 +1,6 @@
 mod acp;
 mod caps;
+mod catalogue;
 mod components;
 mod costs;
 mod forges;
@@ -72,6 +73,14 @@ struct AgentConf {
     /// Agents vivants simultanés max pour ce profil (défaut 6, 0 = illimité).
     #[serde(default)]
     max_instances: Option<u32>,
+    /// Commande liste du catalogue complet des modèles (variantes hors
+    /// annonce ACP) — ex. "devin models list".
+    #[serde(default)]
+    catalogue_cmd: Option<String>,
+    /// Template shell `{native_sid}`/`{model}` pour persister un modèle
+    /// catalogue-only côté provider (ex. "devin -r {native_sid} --model {model}").
+    #[serde(default)]
+    model_override_cmd: Option<String>,
 }
 
 fn default_tcp() -> String {
@@ -211,6 +220,8 @@ fn default_agents() -> HashMap<String, AgentProfile> {
             env: devin_env,
             compact: server::CompactPartial::default(),
             max_instances: server::DEFAULT_MAX_INSTANCES,
+            catalogue_cmd: None,
+            model_override_cmd: None,
         },
     );
     m
@@ -359,6 +370,8 @@ async fn serve(root: &std::path::Path) -> Result<()> {
                 env: c.env,
                 compact: c.compact,
                 max_instances: c.max_instances.unwrap_or(server::DEFAULT_MAX_INSTANCES),
+                catalogue_cmd: c.catalogue_cmd,
+                model_override_cmd: c.model_override_cmd,
             },
         );
     }

@@ -159,6 +159,27 @@ impl Daemon {
                         })
                     })
                     .unwrap_or_else(|| format!("spawn:{from}"));
+                // Modèle effectif (param ou héritage même agent) : les
+                // champs de provenance ne sont hérités que s'il y a
+                // réellement un modèle — sinon source="catalogue" +
+                // model=None bloquerait l'enregistrement du modèle
+                // rapporté par l'agent (gardes agent.rs).
+                let explicit_model = model.is_some();
+                let eff_model = model.or(if same_agent { cm.model.clone() } else { None });
+                let eff_source = if eff_model.is_some() {
+                    if explicit_model {
+                        Some("announced".to_string())
+                    } else {
+                        cm.model_source.clone()
+                    }
+                } else {
+                    None
+                };
+                let eff_osid = if eff_source.as_deref() == Some("catalogue") {
+                    cm.model_override_sid.clone()
+                } else {
+                    None
+                };
                 let meta = SessionMeta {
                     id: proto::new_id("s"),
                     agent: agent_id.clone(),
@@ -167,7 +188,10 @@ impl Daemon {
                     created_at: proto::now_iso(),
                     native_session_id: None,
                     mode: mode.or(if same_agent { cm.mode.clone() } else { None }),
-                    model: model.or(if same_agent { cm.model.clone() } else { None }),
+                    model_source: eff_source,
+                    model_override_sid: eff_osid,
+                    supports_load: None,
+                    model: eff_model,
                     available_modes: vec![],
                     available_commands: vec![],
                     available_models: vec![],
@@ -310,6 +334,14 @@ impl Daemon {
     /// de lancer un second spawn.
     pub(super) async fn resume_and_deliver(self: &Arc<Self>, session: &str, wrapped: String, steer: bool) -> Result<()> {
         let s = self.get_session(session).await?;
+        if s.catalogue_override_active() {
+            // Override catalogue en vol : enfiler — le respawn final
+            // de l'override draine la file (spawn_agent post-spawn).
+            if s.send_peer_prompt(&wrapped, steer).await? {
+                self.spawn_wake(&s, session);
+            }
+            return Ok(());
+        }
         if !s.wake_begin() {
             // Un autre réveil est en vol : enfiler seulement. Ok(true) =
             // il a relâché `waking` entre-temps et la cible est endormie

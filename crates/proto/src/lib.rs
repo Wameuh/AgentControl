@@ -406,6 +406,23 @@ pub struct SessionMeta {
     pub mode: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    /// Provenance du modèle courant : "announced" (options ACP) ou
+    /// "catalogue" (variante hors annonce ACP, posée via le side-channel
+    /// `model_override_cmd` du profil — cf. catalogue_only côté démon).
+    #[serde(default)]
+    pub model_source: Option<String>,
+    /// Sid natif contre lequel `model_override_cmd` a été exécuté —
+    /// un spawn qui atterrit sur un NOUVEAU sid (clear, fallback
+    /// load→new, fork) doit rejouer l'override, le store provider
+    /// étant indexé par sid.
+    #[serde(default)]
+    pub model_override_sid: Option<String>,
+    /// L'agent annonce `session/load` (capacités ACP du handshake) —
+    /// None = pas encore spawné. Sans load, le store provider indexé
+    /// par sid ne peut pas suivre : le chemin catalogue-only est
+    /// structurellement inapplicable.
+    #[serde(default)]
+    pub supports_load: Option<bool>,
     /// Modes annoncés par l'agent (session/new|load → modes.availableModes)
     #[serde(default)]
     pub available_modes: Vec<String>,
@@ -668,6 +685,11 @@ pub enum ReqKind {
     /// type `devin models`, cache côté démon) — {"models": {id: {label,
     /// detail}}}. Map vide quand le provider n'expose pas de coût.
     ModelCosts { agent: String },
+    /// Catalogue complet des modèles d'un profil agent (clés
+    /// `catalogue_cmd`/`model_override_cmd` de `[agents.*]`) —
+    /// {"models": [{value, label}]} ; vide quand le profil n'a pas de
+    /// commande catalogue ou si la sonde échoue.
+    ModelCatalog { agent: String },
     Send {
         session: String,
         text: String,
@@ -1248,6 +1270,7 @@ impl ReqKind {
             Self::ListSessions => "list_sessions",
             Self::ListAgents => "list_agents",
             Self::ModelCosts { .. } => "model_costs",
+            Self::ModelCatalog { .. } => "model_catalog",
             Self::Send { .. } => "send",
             Self::PeerSend { .. } => "peer_send",
             Self::PeerSpawn { .. } => "peer_spawn",

@@ -56,6 +56,12 @@ impl Session {
         // s'exécuteraient en parallèle (handshakes ACP écrits dans le
         // stdin l'un de l'autre, stdin_tx/child en last-writer-wins).
         let _guard = self.spawn_lock.lock().await;
+        // Override catalogue en vol : le `devin -r` tourne pendant que
+        // le process acp est mort — un spawn ici créerait un acp
+        // concurrent, exactement ce que le side-channel interdit.
+        if self.catalogue_override_active() {
+            return Err(anyhow::anyhow!("override catalogue en cours"));
+        }
         // Le spawn attendu derrière le lock a livré un agent vivant :
         // respawner par-dessus le tuerait pour rien (deuxième réveil,
         // resume pendant un spawn).
@@ -367,11 +373,38 @@ impl Session {
             }
             self.config_gen.fetch_add(1, Ordering::SeqCst);
         }
+        // Capacité session/load persistée : le chemin catalogue-only
+        // (store provider indexé par sid) n'a de sens que si l'agent
+        // sait recharger une session — sinon chaque spawn fait un
+        // session/new et l'override ne peut jamais suivre le sid.
+        // Persisté AVANT le parsing models/configOptions : si l'agent
+        // s'avère sans load, une provenance « catalogue » (modèle
+        // stagé sur une session jamais spawnée) est aussitôt repassée
+        // à "announced" — les valeurs clampées rapportées ci-dessous
+        // sont alors écrites dans meta au lieu de rester masquées.
+        let load_changed = {
+            let mut m = self.meta.lock().unwrap();
+            let mut changed = m.supports_load != Some(supports_load);
+            m.supports_load = Some(supports_load);
+            if !supports_load && m.model_source.as_deref() == Some("catalogue") {
+                m.model_source = Some("announced".into());
+                m.model = None;
+                changed = true;
+            }
+            changed
+        };
+        if load_changed {
+            self.save_meta();
+        }
         // Modèles disponibles éventuels
         if let Some(models) = resp.get("models") {
             let mut m = self.meta.lock().unwrap();
             if let Some(cur) = models.get("currentModelId").and_then(Value::as_str) {
-                m.model = Some(cur.to_string());
+                // Source catalogue : currentModelId rapporte la valeur
+                // clampée/annoncée — ne pas écraser l'uid demandé.
+                if m.model_source.as_deref() != Some("catalogue") {
+                    m.model = Some(cur.to_string());
+                }
             }
             if let Some(av) = models.get("availableModels").and_then(Value::as_array) {
                 m.available_models = av
@@ -399,11 +432,28 @@ impl Session {
                 for o in &parsed {
                     match o.id.as_str() {
                         "mode" => m.mode = Some(o.current_value.clone()),
+                        // Source catalogue : l'agent rapporte la valeur
+                        // clampée (annoncée) — meta.model garde l'uid
+                        // demandé, sinon la provenance deviendrait
+                        // incohérente avec ce que le store applique.
+                        "model" if m.model_source.as_deref() == Some("catalogue") => {}
                         "model" => m.model = Some(o.current_value.clone()),
                         _ => {}
                     }
                 }
                 m.config_options = parsed;
+                // Source catalogue : current_value rapporte la valeur
+                // clampée — aligner sur l'uid catalogue pour que le
+                // client voie la valeur réellement demandée.
+                if m.model_source.as_deref() == Some("catalogue") {
+                    if let Some(want) = m.model.clone() {
+                        if let Some(o) =
+                            m.config_options.iter_mut().find(|o| o.id == "model")
+                        {
+                            o.current_value = want;
+                        }
+                    }
+                }
                 // Liste fraîchement annoncée dans CETTE réponse — borne
                 // la fraîcheur pour le drop définitif du replay
                 // pending_config (uniquement si la liste a été
@@ -470,7 +520,13 @@ impl Session {
                 }
             }
             if let Some(want) = meta.model.clone() {
+                // model_source="catalogue" : la valeur est posée par le
+                // side-channel (model_override_cmd), l'agent la reporte
+                // clampée — la re-pousser par pending_config/set_config_
+                // option serait un refus ACP garanti en boucle. On garde
+                // meta.model tel quel (c'est la valeur demandée).
                 if !want.is_empty()
+                    && m.model_source.as_deref() != Some("catalogue")
                     && m.model.as_deref() != Some(want.as_str())
                     && !self.config_rejected_has("model", &want)
                 {
@@ -939,8 +995,26 @@ impl Session {
                             for o in options {
                                 match o.id.as_str() {
                                     "mode" => m.mode = Some(o.current_value.clone()),
+                                    // Idem handshake : ne pas écraser
+                                    // l'uid catalogue par la valeur
+                                    // clampée rapportée par l'agent.
+                                    "model" if m.model_source.as_deref()
+                                        == Some("catalogue") => {}
                                     "model" => m.model = Some(o.current_value.clone()),
                                     _ => {}
+                                }
+                            }
+                            // Idem handshake : current_value clampé →
+                            // aligner sur l'uid catalogue demandé.
+                            if m.model_source.as_deref() == Some("catalogue") {
+                                if let Some(want) = m.model.clone() {
+                                    if let Some(o) = m
+                                        .config_options
+                                        .iter_mut()
+                                        .find(|o| o.id == "model")
+                                    {
+                                        o.current_value = want;
+                                    }
                                 }
                             }
                             m.agent.clone()
@@ -1171,13 +1245,25 @@ impl Session {
     /// (sinon un nouvel envoi ré-acquerrait le flag pendant que
     /// l'ancienne tâche le libère aussi — double relâchement croisé).
     pub async fn sleep(&self) {
+        self.sleep_inner(
+            "session endormie — l'agent sera relancé au prochain message",
+        )
+        .await;
+    }
+
+    /// Sleep pour l'override catalogue : le relaunch est immédiat
+    /// (override → respawn dans la même opération) — le message
+    /// « relancé au prochain message » de sleep() serait trompeur.
+    pub async fn sleep_for_override(&self) {
+        self.sleep_inner("session suspendue — application du modèle catalogue…").await;
+    }
+
+    async fn sleep_inner(&self, msg: &'static str) {
         self.set_state("asleep");
         self.take_compact_hold();
         self.kill_for_respawn().await;
         self.flush_text();
-        self.emit(EventKind::System {
-            text: "session endormie — l'agent sera relancé au prochain message".into(),
-        });
+        self.emit(EventKind::System { text: msg.into() });
     }
 
     /// Sort de l'état "asleep" avant un spawn légitime (réveil auto ou
@@ -1316,6 +1402,9 @@ mod tests {
             native_session_id: Some(native_id.to_string()),
             mode: mode.map(String::from),
             model: model.map(String::from),
+            model_source: None,
+            model_override_sid: None,
+            supports_load: None,
             available_modes: vec![],
             available_commands: vec![],
             available_models: vec![],
