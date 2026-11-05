@@ -6,6 +6,7 @@ use super::*;
 use anyhow::{Context, Result};
 use proto::EventKind;
 use serde_json::{json, Value};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::acp;
@@ -346,16 +347,60 @@ impl Session {
         self.save_meta();
     }
 
+    /// Renomme : meta local posée immédiatement + tentative
+    /// session/rename chez l'agent (optionnelle). L'appel ACP est
+    /// DIFFÉRÉ quand un tour vole (busy / active_prompts / compact) —
+    /// un RPC pendant session/prompt peut avorter le tour en silence
+    /// (#183) ; `flush_pending_rename` le pose entre deux tours ou à
+    /// la fin du drain. Premier « method not found » → l'agent ne le
+    /// supporte pas : plus de retentatives pour la session.
     pub async fn rename(&self, title: &str) {
         self.meta.lock().unwrap().title = title.into();
         self.save_meta();
+        if self.turn_in_flight() {
+            *self.pending_rename.lock().unwrap() = Some(title.into());
+            return;
+        }
+        self.send_rename(title).await;
+    }
+
+    /// Tour ou activité agent en vol : ne pas émettre de RPC ACP
+    /// annexe (rename) pendant ce créneau (#183).
+    fn turn_in_flight(&self) -> bool {
+        self.busy.load(Ordering::SeqCst)
+            || self.active_prompts.load(Ordering::SeqCst) > 0
+            || self.compacting.lock().unwrap().is_some()
+    }
+
+    /// session/rename ACP — best-effort : l'échec est toléré (meta
+    /// déjà à jour), un refus de méthode marque l'agent non supporté.
+    pub(super) async fn send_rename(&self, title: &str) {
+        if !self.rename_supported.load(Ordering::SeqCst) {
+            return;
+        }
         if let Some(sid) = self.meta_snapshot().native_session_id {
-            let _ = self
+            if let Err(e) = self
                 .acp_request(
                     "session/rename",
                     json!({"sessionId": sid, "title": title}),
                 )
-                .await;
+                .await
+            {
+                let msg = format!("{e:#}").to_lowercase();
+                if msg.contains("not found") || msg.contains("not supported") {
+                    self.rename_supported.store(false, Ordering::SeqCst);
+                }
+            }
+        }
+    }
+
+    /// Pose le rename ACP différé (fin de tour / fin de drain) —
+    /// seul le dernier titre compte, les renommages en rafale
+    /// s'écrasent. Agent mort → le RPC échoue en silence (toléré).
+    pub(super) async fn flush_pending_rename(&self) {
+        let title = self.pending_rename.lock().unwrap().take();
+        if let Some(t) = title {
+            self.send_rename(&t).await;
         }
     }
 

@@ -21,7 +21,7 @@ use proto::{Event, EventKind, SessionMeta};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use tokio::process::Child;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -105,6 +105,21 @@ pub struct Session {
     /// Requêtes session/prompt en vol (runner + steer concurrents) —
     /// l'état ne repasse idle que quand toutes sont terminées.
     active_prompts: AtomicU64,
+    /// `session/rename` ACP différé : le titre local est posé d'office
+    /// (meta) mais l'appel agent attend la fin du tour en vol — un RPC
+    /// pendant session/prompt peut avorter le tour silencieusement
+    /// (#183). Posé entre deux tours ou à la fin du drain.
+    pending_rename: Mutex<Option<String>>,
+    /// `session/rename` déclaré supporté par l'agent : un premier refus
+    /// « method not found » (-32601) le marque non supporté pour la
+    /// durée de la session — l'appel est optionnel, pas la peine de
+    /// retenter (et de risquer le stall) à chaque rename (#183).
+    rename_supported: std::sync::atomic::AtomicBool,
+    /// Sorties visibles du tour en vol (texte/pensée/tool call) —
+    /// snapshot au départ du `session/prompt` puis comparé à la fin :
+    /// inchangé = tour terminé sans rien produire → tracer (#183),
+    /// end_turn propre et avortement silencieux sinon indistinguables.
+    turn_outputs: AtomicU64,
     /// Messages en attente d'un tour libre (FIFO) — (texte, provenance) :
     /// un prompt peer drainé ne doit PAS devenir un user_message dans le
     /// journal (son PeerMessage est déjà journalisé côté appelant).
@@ -260,6 +275,9 @@ impl Session {
             loading_replay: std::sync::atomic::AtomicBool::new(false),
             busy: std::sync::atomic::AtomicBool::new(false),
             active_prompts: AtomicU64::new(0),
+            pending_rename: Mutex::new(None),
+            rename_supported: std::sync::atomic::AtomicBool::new(true),
+            turn_outputs: AtomicU64::new(0),
             prompt_queue: Mutex::new(std::collections::VecDeque::new()),
             compacting: Mutex::new(None),
             error_hold: Mutex::new(None),
@@ -330,10 +348,26 @@ impl Session {
         match self.journal.append(kind) {
             Ok(ev) => {
                 self.note_text_anchor(&ev.kind);
+                if Self::is_agent_output(&ev.kind) {
+                    self.turn_outputs.fetch_add(1, Ordering::SeqCst);
+                }
                 let _ = self.events_tx.send(ev);
             }
             Err(e) => error!("[{}] journal append failed: {e}", self.meta_snapshot().id),
         }
+    }
+
+    /// Production « visible » d'un tour : texte, pensée, tool call.
+    /// Sert à détecter un `end_turn` qui n'a rien produit (#183) —
+    /// un turn mort en silence ressemble sinon à un end_turn propre.
+    fn is_agent_output(kind: &EventKind) -> bool {
+        matches!(
+            kind,
+            EventKind::AgentText { .. }
+                | EventKind::AgentThought { .. }
+                | EventKind::ToolCall { .. }
+                | EventKind::ToolCallUpdate { .. }
+        )
     }
 
     /// Doublon de `is_thought`/`norm` par rapport au dernier bloc texte
@@ -439,6 +473,7 @@ impl Session {
             match self.journal.append(ev_kind) {
                 Ok(ev) => {
                     self.note_text_anchor(&ev.kind);
+                    self.turn_outputs.fetch_add(1, Ordering::SeqCst);
                     let _ = self.events_tx.send(ev);
                 }
                 Err(e) => error!("journal append failed: {e}"),
@@ -1101,5 +1136,66 @@ mod tests {
         // Appel répété : no-op, pas de réécriture.
         s.clear_last_error();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #183 : rename pendant un tour — l'appel ACP est retenu jusqu'au
+    /// prochain point ordonné (un RPC pendant session/prompt pouvait
+    /// avorter le tour en silence) ; la meta locale est posée d'office.
+    #[tokio::test]
+    async fn rename_defere_pendant_tour() {
+        let (s, dir) = tmp_session("rename-defer");
+        // Idle : rien de retenu — l'envoi part directement (no-op ici
+        // sans native_session_id, le pending reste vide).
+        s.rename("idle-title").await;
+        assert_eq!(s.meta_snapshot().title, "idle-title");
+        assert!(s.pending_rename.lock().unwrap().is_none());
+        // Tour en vol : meta posée d'office, envoi ACP différé.
+        s.busy.store(true, Ordering::SeqCst);
+        s.rename("mid-turn").await;
+        assert_eq!(s.meta_snapshot().title, "mid-turn");
+        assert_eq!(
+            s.pending_rename.lock().unwrap().as_deref(),
+            Some("mid-turn")
+        );
+        // Rafale : seul le dernier titre est retenu.
+        s.rename("mid-turn-2").await;
+        assert_eq!(
+            s.pending_rename.lock().unwrap().as_deref(),
+            Some("mid-turn-2")
+        );
+        // Fin de tour : le pending est consommé (send no-op sans agent).
+        s.busy.store(false, Ordering::SeqCst);
+        s.flush_pending_rename().await;
+        assert!(s.pending_rename.lock().unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #183 : texte/pensée/tool call comptent comme sorties de tour —
+    /// la détection « end_turn sans rien produit » raisonne dessus.
+    #[test]
+    fn is_agent_output_kinds() {
+        assert!(Session::is_agent_output(&EventKind::AgentText {
+            text: "x".into()
+        }));
+        assert!(Session::is_agent_output(&EventKind::ToolCallUpdate {
+            call_id: "c".into(),
+            status: proto::ToolStatus::Running,
+            excerpt: None,
+            blob: None,
+            size: None,
+            diff: None,
+        }));
+        for k in [
+            EventKind::System { text: "s".into() },
+            EventKind::Error { message: "e".into() },
+            EventKind::UserMessage {
+                text: "u".into(),
+                steer: false,
+                origin: None,
+                spawn_prompt: false,
+            },
+        ] {
+            assert!(!Session::is_agent_output(&k));
+        }
     }
 }

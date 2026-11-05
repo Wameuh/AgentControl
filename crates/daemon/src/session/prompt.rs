@@ -555,7 +555,16 @@ impl Session {
                     break;
                 }
             }
+            // Entre deux tours : poser un rename ACP différé pendant
+            // celui qui vient de finir — envoyé pendant le RPC il
+            // pouvait avorter le tour en silence (#183). Idempotent
+            // (dernier titre seul est envoyé).
+            self.flush_pending_rename().await;
         }
+        // Fin de drain (file vide, break erreur, retenue) : dernier
+        // point ordonné avant le prochain prompt — le RPC échoue en
+        // silence si l'agent est mort (toléré).
+        self.flush_pending_rename().await;
         self.runner_active.store(false, Ordering::SeqCst);
         // Fenêtre de sortie : un push arrivé pendant qu'on rendait le flag
         // (son spawn_drain a pu heurter le CAS et repartir sans livrer) —
@@ -633,6 +642,9 @@ impl Session {
         // Un tour de l'ancien contexte tué par un clear n'émet pas son
         // "prompt failed" dans le journal frais.
         let gen = self.spawn_gen.load(Ordering::SeqCst);
+        // Compteur de sorties au départ du tour — comparé à la réponse
+        // pour détecter un end_turn qui n'a rien produit (#183).
+        let out0 = self.turn_outputs.load(Ordering::SeqCst);
         match self.prompt_rpc(text).await {
             Ok(v) => {
                 let sr = v.get("stopReason").and_then(Value::as_str);
@@ -646,6 +658,20 @@ impl Session {
                         // Succès : la trace d'erreur d'un éventuel retry
                         // rate_limit s'efface (no-op sinon).
                         self.clear_last_error();
+                        // Aucune sortie pendant le tour : un RPC annexe
+                        // en plein vol (session/rename) pouvait avorter
+                        // la réponse sans bruit — end_turn propre et
+                        // avortement silencieux sinon indistinguables
+                        // (#183). Tracer pour que l'œil comprenne la
+                        // soudaine inactivité.
+                        if self.turn_outputs.load(Ordering::SeqCst) == out0 {
+                            self.emit(EventKind::System {
+                                text: format!(
+                                    "tour terminé sans sortie (stopReason: {})",
+                                    sr.unwrap_or("?")
+                                ),
+                            });
+                        }
                         TurnOutcome::Ok
                     }
                     Some(sr) => {
