@@ -272,7 +272,7 @@ export class Tts {
       apply: () => localStorage.setItem("ac-tts-voice", voiceSel.value),
       // Le select reconstruit ses options depuis le catalogue et
       // resélectionne la préférence ("" si la voix n'est plus offerte).
-      reset: () => this.syncVoiceSelect(),
+      reset: () => this.syncVoiceSelect(true),
     });
     stage("s-tts-speed", {
       apply: () => localStorage.setItem("ac-tts-speed", speedSel.value),
@@ -294,7 +294,7 @@ export class Tts {
       this.queue = [];
       void this.speakNow("preview", t("tts_preview_text"), null);
     };
-    this.syncVoiceSelect();
+    this.syncVoiceSelect(true);
   }
 
   /** Re-sync à l'ouverture des settings (valeurs persistées + voix). */
@@ -303,17 +303,21 @@ export class Tts {
     ($("s-tts-engine") as HTMLSelectElement).value = ttsEnginePref();
     ($("s-tts-speed") as HTMLSelectElement).value = String(ttsSpeedPref());
     ($("s-tts-autoread") as HTMLInputElement).checked = ttsAutoread();
-    this.syncVoiceSelect();
+    this.syncVoiceSelect(true);
     void this.refreshState();
   }
 
   /** Options du select voix = catalogue `tts_state` (data-driven — les
    *  modèles installés offrent leurs voix ; « auto » = défaut du modèle).
-   *  La préférence est conservée si la voix reste proposée. */
-  private syncVoiceSelect() {
+   *  `toPref` resélectionne la préférence persistée (init, ouverture,
+   *  reset staging) ; sinon la valeur affichée est conservée si encore
+   *  offerte — un refresh async (tts_dl_state) ne doit pas écraser une
+   *  édition non enregistrée (#190). */
+  private syncVoiceSelect(toPref = false) {
     const sel = $("s-tts-voice") as HTMLSelectElement | null;
     if (!sel) return;
     const cur = ttsVoicePref();
+    const shown = sel.value;
     sel.innerHTML = "";
     const auto = document.createElement("option");
     auto.value = "";
@@ -326,6 +330,9 @@ export class Tts {
       o.textContent = v.label;
       sel.append(o);
     }
-    sel.value = this.voices.some((v) => v.id === cur) ? cur : "";
+    const offered = (id: string) =>
+      id === "" || this.voices.some((v) => v.id === id);
+    const pick = toPref ? cur : offered(shown) ? shown : cur;
+    sel.value = offered(pick) ? pick : "";
   }
 }

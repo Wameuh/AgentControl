@@ -392,7 +392,10 @@ export class SettingsPanel {
     // applyConnChrome (themeChanged → reapplyChrome) — un applyAccent
     // direct serait défait par la ré-application de la pref persistée.
     const accentPreview = () => {
-      stageAccent(($("s-accent") as HTMLSelectElement).value as Accent);
+      const v = ($("s-accent") as HTMLSelectElement).value as Accent;
+      // Null quand le choix rejoint la pref (annulation incluse) — pas
+      // d'override résiduel après revert.
+      stageAccent(v === accentPref() ? null : v);
       this.themeChanged();
       this.syncSecStates();
     };
