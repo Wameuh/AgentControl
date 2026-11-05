@@ -235,8 +235,8 @@ impl Daemon {
                         // Restaure la source si on l'avait tuée.
                         if was_alive {
                             let (cmd, envs) = spawn_args(&profile, &meta);
-                            let _ = s
-                                .spawn_agent(
+                            if matches!(
+                                s.spawn_agent(
                                     &cmd,
                                     &envs,
                                     meta.native_session_id.clone(),
@@ -248,7 +248,11 @@ impl Daemon {
                                         ..Default::default()
                                     }),
                                 )
-                                .await;
+                                .await,
+                                Ok(true)
+                            ) {
+                                self.reapply_catalogue_if_new_sid(&s).await;
+                            }
                         }
                         return Err(e.context("fork via le TUI de l'agent"));
                     }
@@ -277,7 +281,11 @@ impl Daemon {
                             )
                             .await
                         {
-                            Ok(_) => break,
+                            Ok(true) => {
+                                self.reapply_catalogue_if_new_sid(&s).await;
+                                break;
+                            }
+                            Ok(false) => break,
                             Err(e) => {
                                 if attempt == 7 || !format!("{e:#}").contains("already open") {
                                     s.emit(EventKind::System {
@@ -333,6 +341,14 @@ impl Daemon {
 
     pub(super) async fn h_resume_session(self: &Arc<Self>, session: String, native_id: Option<String>) -> Result<Value> {
                 let s = self.get_session(&session).await?;
+                // Rebind pendant l'override : process déjà mort (kill
+                // sauté) mais journal.reset + set_native_id
+                // s'exécuteraient — le respawn final d'apply repartirait
+                // sur le sid étranger avec un journal vidé. Même garde
+                // que fork/clear/delete/kill.
+                if s.catalogue_override_active() {
+                    anyhow::bail!("override catalogue en cours — réessayez dans un instant");
+                }
                 if s.is_alive() && native_id.is_none() {
                     return Ok(json!({"session": session, "already": true}));
                 }
@@ -766,7 +782,7 @@ impl Daemon {
     /// sid, sans ce rejeu la session repartirait sur le modèle par
     /// défaut du compte. No-op pour les valeurs annoncées et quand le
     /// sid correspond déjà.
-    async fn reapply_catalogue_if_new_sid(self: &Arc<Self>, s: &Arc<Session>) {
+    pub(super) async fn reapply_catalogue_if_new_sid(self: &Arc<Self>, s: &Arc<Session>) {
         let m = s.meta_snapshot();
         if m.model_source.as_deref() != Some("catalogue") {
             return;

@@ -418,6 +418,9 @@ impl Daemon {
             .await
         {
             Ok(true) => {
+                // Fallback load→new : rejouer l'override catalogue sur
+                // le sid frais (no-op si le sid correspond déjà).
+                self.reapply_catalogue_if_new_sid(&s).await;
                 info!("{sid}: agent relancé — envoi « {AUTO_RESUME_PROMPT} »");
                 self.send_resume_prompt(&s, sid).await;
             }
