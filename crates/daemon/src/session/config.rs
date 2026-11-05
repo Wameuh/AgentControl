@@ -37,6 +37,7 @@ impl Session {
         // l'ancienne valeur à chaque réveil.
         self.meta.lock().unwrap().mode = Some(mode.into());
         self.save_meta();
+        self.config_rejected.lock().unwrap().remove("mode");
         Ok(())
     }
 
@@ -207,6 +208,7 @@ impl Session {
                 if self.clear_error() && self.has_queued() {
                     self.spawn_drain();
                 }
+                self.config_rejected.lock().unwrap().remove("model");
                 Ok(())
             }
             Err(_) => {
@@ -217,7 +219,9 @@ impl Session {
                 self.save_meta();
                 self.send_prompt(&format!("/model {model}"), false, false)
                     .await
-                    .map(|_| ())
+                    .map(|_| {
+                        self.config_rejected.lock().unwrap().remove("model");
+                    })
             }
         }
     }
@@ -567,6 +571,7 @@ impl Session {
         if config_id == "model" && self.clear_error() && self.has_queued() {
             self.spawn_drain();
         }
+        self.config_rejected.lock().unwrap().remove(config_id);
         Ok(())
     }
 
@@ -763,6 +768,16 @@ fn resolve_config_value(known: &[(String, String)], want: &str) -> Resolve {
     }
 }
 
+/// Vrai si le message est une erreur de RÉSOLUTION du garde-fou
+/// (valeur absente ou ambiguë dans la liste annoncée) — refus
+/// définitif : retenter à l'identique ne changera rien tant que
+/// l'agent n'annonce pas d'autres options. Un Invalid params ACP ou
+/// une erreur transport n'a pas ces marqueurs → transitoire.
+pub(super) fn is_resolution_error(msg: &str) -> bool {
+    (msg.contains("inconnu «") || msg.contains("ambigu «"))
+        && (msg.contains("— valeurs") || msg.contains("— candidats"))
+}
+
 /// « a, b, c, … » — tronqué à 8 entrées pour les messages d'erreur.
 fn join_known(known: &[(String, String)]) -> String {
     let mut vals: Vec<&str> = known.iter().map(|(v, _)| v.as_str()).collect();
@@ -831,13 +846,37 @@ fn describe_policy(p: &CompactPolicy) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{join_known, resolve_config_value, Resolve};
+    use super::{is_resolution_error, join_known, resolve_config_value, Resolve};
 
     fn known(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
             .iter()
             .map(|(v, n)| (v.to_string(), n.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn resolution_error_is_definitive_only() {
+        // Garde-fou de résolution (valeur hors liste / ambiguë) → définitif.
+        assert!(is_resolution_error(
+            "set_config_option model inconnu « swe-2-flash-max » — valeurs : swe-2-medium"
+        ));
+        assert!(is_resolution_error(
+            "model ambigu « swe » — candidats : swe-2-high, swe-2-low"
+        ));
+        assert!(is_resolution_error(
+            "mode inconnu « yolo » — valeurs : normal, plan"
+        ));
+        // Transitoire : transport, agent pas prêt, Invalid params ACP.
+        assert!(!is_resolution_error("no native session id"));
+        assert!(!is_resolution_error(
+            "session/set_model: Invalid params: unknown model"
+        ));
+        assert!(!is_resolution_error("agent exited"));
+        // « inconnu » sans la signature complète (ex. option daemon) → pas
+        // assimilé : trop fragile pour un drop définitif.
+        assert!(!is_resolution_error("option démon inconnue : ac.foo"));
+        assert!(!is_resolution_error("valeur inconnue"));
     }
 
     #[test]

@@ -185,6 +185,10 @@ impl Session {
         // Nouvelle génération : tout reader d'un process précédent devient
         // périmé — son on_agent_exit ne touchera plus l'état partagé.
         let gen = self.spawn_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        // Baseline des annonces config_options : une liste jugée
+        // « fraîche » au replay pending_config doit avoir été écrite
+        // APRÈS ce point (réponse handshake ou event de ce spawn).
+        let cfg_gen0 = self.config_gen.load(Ordering::SeqCst);
         // Un load tué en vol laisserait le flag vrai → les updates de la
         // session suivante seraient ignorées comme du replay.
         self.loading_replay.store(false, Ordering::SeqCst);
@@ -330,6 +334,9 @@ impl Session {
                 }
                 m.config_options = parsed;
             }
+            // Liste fraîchement annoncée dans CETTE réponse — borne la
+            // fraîcheur pour le drop définitif du replay pending_config.
+            self.config_gen.fetch_add(1, Ordering::SeqCst);
         }
         self.save_meta();
         // Capacités du profil : chaque handshake enrichit le cache démon
@@ -412,23 +419,94 @@ impl Session {
         }
         for (k, v) in pending {
             let r = match k.as_str() {
-                "model" => match self.set_config_option("model", &v).await {
-                    Ok(()) => Ok(()),
-                    Err(_) => self.set_model(&v).await.map(|_| ()),
-                },
-                "mode" => match self.set_config_option("mode", &v).await {
-                    Ok(()) => Ok(()),
-                    Err(_) => self.set_mode(&v).await,
-                },
+                // model/mode : d'abord la config_option annoncée, puis le
+                // setter dédié en repli. Le repli n'a pas toujours de
+                // garde-fou (set_mode envoie la valeur brute) — un refus
+                // de résolution au 1er essai sur liste fraîche reste
+                // définitif même si le repli échoue pour une autre raison.
+                id @ ("model" | "mode") => {
+                    match self.set_config_option(id, &v).await {
+                        Ok(()) => Ok(()),
+                        Err(e1) => {
+                            let e1_res =
+                                config::is_resolution_error(&format!("{e1:#}"));
+                            let fb = if id == "model" {
+                                self.set_model(&v).await.map(|_| ())
+                            } else {
+                                self.set_mode(&v).await
+                            };
+                            match fb {
+                                Ok(()) => Ok(()),
+                                Err(e2) => {
+                                    let fresh =
+                                        self.config_gen.load(Ordering::SeqCst) != cfg_gen0;
+                                    if fresh && e1_res {
+                                        Err(e1)
+                                    } else {
+                                        Err(e2)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 _ => self.set_config_option(&k, &v).await,
             };
             if let Err(e) = r {
-                self.emit(EventKind::Error {
-                    message: format!("config différée {k}={v}: {e:#}"),
-                });
-                // Re-mise en pending : un échec transitoire ne doit pas
-                // perdre la condition voulue — retentée au prochain spawn.
-                self.meta.lock().unwrap().pending_config.insert(k, v);
+                // Deux classes d'échec : un refus DÉFINITIF (la valeur
+                // est absente de la liste que l'agent vient d'annoncer
+                // pendant ce spawn — erreur de résolution du garde-fou,
+                // pas un Invalid params ACP) est soldé : re-pendre
+                // bouclerait le warn à chaque spawn à vie. Le transitoire
+                // (agent pas prêt, transport, rate-limit, liste périmée
+                // non rafraîchie ce spawn) garde le re-pending.
+                let fresh = self.config_gen.load(Ordering::SeqCst) != cfg_gen0;
+                let definitive =
+                    fresh && config::is_resolution_error(&format!("{e:#}"));
+                if definitive {
+                    // meta.mode/model reflètent la valeur DEMANDÉE (le
+                    // reconcile la restaure) — resynchroniser sur le
+                    // current_value annoncé pour que la session soit
+                    // affichée/relancée sur ce qui tourne vraiment.
+                    {
+                        let mut m = self.meta.lock().unwrap();
+                        if k == "model" || k == "mode" {
+                            let cur = m
+                                .config_options
+                                .iter()
+                                .find(|o| o.id == k || o.category == k)
+                                .map(|o| o.current_value.clone());
+                            if let Some(v) = cur {
+                                if k == "model" {
+                                    m.model = Some(v);
+                                } else {
+                                    m.mode = Some(v);
+                                }
+                            }
+                        }
+                    }
+                    self.save_meta();
+                    let mut rej = self.config_rejected.lock().unwrap();
+                    if rej.get(&k).map(String::as_str) != Some(v.as_str()) {
+                        rej.insert(k.clone(), v.clone());
+                        drop(rej);
+                        self.emit(EventKind::System {
+                            text: format!(
+                                "config {k}={v} abandonnée — refus définitif de l'agent \
+                                 (valeur hors liste annoncée) : {e:#}"
+                            ),
+                        });
+                    }
+                } else {
+                    self.emit(EventKind::Error {
+                        message: format!("config différée {k}={v}: {e:#}"),
+                    });
+                    // Re-mise en pending : un échec transitoire ne doit pas
+                    // perdre la condition voulue — retentée au prochain spawn.
+                    self.meta.lock().unwrap().pending_config.insert(k, v);
+                }
+            } else {
+                self.config_rejected.lock().unwrap().remove(&k);
             }
         }
         if !self.meta.lock().unwrap().pending_config.is_empty() {
@@ -776,6 +854,7 @@ impl Session {
                             }
                             m.agent.clone()
                         };
+                        self.config_gen.fetch_add(1, Ordering::SeqCst);
                         self.save_meta();
                         // Le cache profil suit le flux live — addition,
                         // pas remplacement (le probe reste la voie refresh).
