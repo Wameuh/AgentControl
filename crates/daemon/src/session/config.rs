@@ -598,6 +598,62 @@ impl Session {
         Mutex::new(o)
     }
 
+    /// Ré-applique un instantané de capacités frais (probe
+    /// `refresh_agent_caps`) : les LISTES annoncées sont remplacées
+    /// (available_modes/models, options de chaque configId) mais la
+    /// valeur courante de la session est conservée — `current_value`
+    /// et `meta.mode`/`meta.model` sont un état par session que le
+    /// spawn jetable ne connaît pas. Push ConfigOptions aux abonnés
+    /// quand les options ont bougé. Retour : vrai si la méta a changé.
+    pub fn apply_caps(&self, caps: &proto::AgentCaps) -> bool {
+        let (changed, opts) = {
+            let mut m = self.meta.lock().unwrap();
+            let mut changed = false;
+            let modes: Vec<String> = caps.modes.iter().map(|o| o.value.clone()).collect();
+            if !modes.is_empty() && m.available_modes != modes {
+                m.available_modes = modes;
+                changed = true;
+            }
+            let models: Vec<String> = caps.models.iter().map(|o| o.value.clone()).collect();
+            if !models.is_empty() && m.available_models != models {
+                m.available_models = models;
+                changed = true;
+            }
+            for co in &caps.config_options {
+                match m.config_options.iter_mut().find(|o| o.id == co.id) {
+                    // Nouvelle annonce pour un configId inconnu : entrée
+                    // complète (son current_value est le meilleur indice).
+                    None => {
+                        m.config_options.push(co.clone());
+                        changed = true;
+                    }
+                    // ConfigId connu : seule la liste des options est
+                    // rafraîchie — la valeur courante reste celle que la
+                    // session a rapportée/choisie.
+                    Some(o) => {
+                        if o.options != co.options
+                            || o.name != co.name
+                            || o.category != co.category
+                        {
+                            o.name = co.name.clone();
+                            o.category = co.category.clone();
+                            o.options = co.options.clone();
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            (changed, m.config_options.clone())
+        };
+        if !changed {
+            return false;
+        }
+        self.save_meta();
+        if !opts.is_empty() {
+            self.emit(EventKind::ConfigOptions { options: opts });
+        }
+        true
+    }
 }
 
 /// Résolution tolérante d'une valeur de config contre la liste annoncée

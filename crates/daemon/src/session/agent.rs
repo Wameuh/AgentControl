@@ -332,6 +332,11 @@ impl Session {
             }
         }
         self.save_meta();
+        // Capacités du profil : chaque handshake enrichit le cache démon
+        // (agent_caps.json — selects du dialogue nouvelle session,
+        // refresh_agent_caps). No-op si l'agent n'a rien annoncé.
+        self.caps
+            .harvest(&meta.agent, &crate::caps::caps_from_new_resp(&resp));
         // Un kill (sleep/clear/respawn concurrent) a invalidé la génération
         // pendant le handshake : le process vient d'être tué — ni line de
         // spawn, ni replay de config, ni "idle" (ils pollueraient le cycle
@@ -758,7 +763,7 @@ impl Session {
                         self.save_meta();
                     }
                     EventKind::ConfigOptions { options } => {
-                        {
+                        let agent = {
                             let mut m = self.meta.lock().unwrap();
                             m.config_options = options.clone();
                             // sync mode/model courants pour compat UI
@@ -769,8 +774,12 @@ impl Session {
                                     _ => {}
                                 }
                             }
-                        }
+                            m.agent.clone()
+                        };
                         self.save_meta();
+                        // Le cache profil suit le flux live — addition,
+                        // pas remplacement (le probe reste la voie refresh).
+                        self.caps.update_options(&agent, options);
                     }
                     EventKind::UsageUpdate { used, size, .. } => {
                         let mut m = self.meta.lock().unwrap();
@@ -1156,7 +1165,7 @@ mod tests {
         )
         .unwrap();
         (
-            Session::open(dir.clone(), &test_compact_src()).unwrap(),
+            Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap(),
             dir,
         )
     }

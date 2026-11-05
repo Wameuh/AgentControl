@@ -719,7 +719,7 @@ mod tests {
         Session::open(dir, &CompactSrc {
             global: crate::server::CompactCfg::default(),
             by_agent: Default::default(),
-        })
+        }, crate::caps::CapsRegistry::in_memory())
         .unwrap()
     }
 

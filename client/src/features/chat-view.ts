@@ -143,6 +143,9 @@ export class ChatView {
     connHome: () => {},
     /** ⌨ affiché seulement si le démon de la conn connaît term_open. */
     termCapable: (_conn: string) => false,
+    /** Bouton refresh mode/modèle — capability `agent_caps` du démon
+     *  (champ `caps` de list_agents + RPC refresh_agent_caps). */
+    capsCapable: (_conn: string) => false,
     /** agent_text live réellement rendu en queue (ni trou comblé ni
      *  replay) → candidat à la lecture auto TTS (#138). */
     onAgentText: (_ev: AcEvent) => {},
@@ -718,6 +721,8 @@ export class ChatView {
       !app.current || !this.deps.pinCapable(app.current?.conn ?? "default");
     $("btn-term").hidden =
       !app.current || !this.deps.termCapable(app.current?.conn ?? "default");
+    $("btn-caps-refresh").hidden =
+      !app.current || !this.deps.capsCapable(app.current?.conn ?? "default");
     if (!app.current) {
       $("chat-ctx").hidden = true;
       $("chat-opts").hidden = true;
@@ -870,7 +875,8 @@ export class ChatView {
     // fantôme ajoute un gap dans le header et peut déclencher un wrap.
     $("chat-opts").hidden =
       ms.hidden && md.hidden && es.hidden && mf.hidden &&
-      $("btn-fusion-edit").hidden && dyn.children.length === 0;
+      $("btn-fusion-edit").hidden && $("btn-caps-refresh").hidden &&
+      dyn.children.length === 0;
   }
 
   private nearBottom() {

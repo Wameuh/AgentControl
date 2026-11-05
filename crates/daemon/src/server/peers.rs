@@ -183,7 +183,7 @@ impl Daemon {
                     last_error: None,
                 };
                 let dir = Session::create_dir(&self.root, &meta)?;
-                let session2 = Session::open(dir, &self.compact)?;
+                let session2 = Session::open(dir, &self.compact, Arc::clone(&self.caps))?;
                 let sid2 = meta.id.clone();
                 self.watch_prs(&session2);
                 self.sessions

@@ -27,6 +27,7 @@ use tokio::process::Child;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::error;
 
+use crate::caps::CapsRegistry;
 use crate::journal::{self, Journal};
 use crate::server::{CompactPartial, CompactPolicy, CompactSrc};
 use self::compact::compact_done_text;
@@ -118,6 +119,9 @@ pub struct Session {
     /// /clear). Distinct de `compacting` : une session en erreur reste
     /// « error » (visible) et ne relance pas « continue your task ».
     error_hold: Mutex<Option<ErrorHold>>,
+    /// Cache des capacités par profil agent (agent_caps.json) —
+    /// alimenté aux handshakes et config_option_update (caps.rs).
+    caps: Arc<CapsRegistry>,
     /// Seuil du compact auto résolu à l'open : global `[compact]` +
     /// override `[agents.<id>.compact]` (server/cfg.rs, CompactSrc) —
     /// l'override session (compact.json, clés `ac.compact_*`) s'applique
@@ -223,7 +227,12 @@ impl Session {
     /// Ouvre une session existante sur disque (sans spawn d'agent).
     /// `src` = seuils compact du démon (global + overrides par profil
     /// agent) — résolus contre `meta.agent` puis l'override sidecar.
-    pub fn open(dir: PathBuf, compact_src: &CompactSrc) -> Result<Arc<Self>> {
+    /// `caps` = cache démon des capacités par profil (agent_caps.json).
+    pub fn open(
+        dir: PathBuf,
+        compact_src: &CompactSrc,
+        caps: Arc<CapsRegistry>,
+    ) -> Result<Arc<Self>> {
         let meta: SessionMeta = serde_json::from_str(
             &std::fs::read_to_string(dir.join("meta.json")).context("meta.json illisible")?,
         )?;
@@ -254,6 +263,7 @@ impl Session {
             prompt_queue: Mutex::new(std::collections::VecDeque::new()),
             compacting: Mutex::new(None),
             error_hold: Mutex::new(None),
+            caps,
             compact_base,
             compact_override,
             me: me.clone(),
@@ -647,7 +657,7 @@ mod tests {
             serde_json::to_string_pretty(&meta).unwrap(),
         )
         .unwrap();
-        (Session::open(dir.clone(), &test_compact_src()).unwrap(), dir)
+        (Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap(), dir)
     }
 
     fn kinds(dir: &PathBuf) -> Vec<&'static str> {
@@ -694,7 +704,7 @@ mod tests {
         );
         // Réouverture : l'ancre est amorcée depuis la queue du journal,
         // un écho post-restart reste dédupliqué.
-        let s2 = Session::open(dir.clone(), &test_compact_src()).unwrap();
+        let s2 = Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
         s2.emit(EventKind::AgentThought { text: "espaces multiples ici".into() });
         assert_eq!(
             kinds(&dir).iter().filter(|k| **k == "agent_thought").count(),
@@ -742,7 +752,7 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0]["live"], true);
         // Persisté : la réouverture recharge pinned.json.
-        let s2 = Session::open(dir.clone(), &test_compact_src()).unwrap();
+        let s2 = Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
         assert_eq!(s2.pins_snapshot().len(), 1);
         // Journal vidé (/clear, rebind) : épinglé conservé mais mort.
         s2.journal.reset(&dir).unwrap();
@@ -772,7 +782,7 @@ mod tests {
         // suppression persistée à la réouverture.
         assert!(s2.unpin(1));
         assert!(!s2.unpin(1));
-        let s3 = Session::open(dir.clone(), &test_compact_src()).unwrap();
+        let s3 = Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
         assert!(s3.pins_snapshot().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -945,7 +955,7 @@ mod tests {
         s.set_config_option("ac.compact_at_pct", "off").await.unwrap();
         assert_eq!(s.compact_policy().at_pct, Some(0.9));
         // Persisté : la réouverture relit compact.json.
-        let s2 = Session::open(dir.clone(), &test_compact_src()).unwrap();
+        let s2 = Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
         let p = s2.compact_policy();
         assert!(!p.enabled && p.at_tokens == Some(50_000) && p.at_pct == Some(0.9));
         // Rejets : clé inconnue, booléen, borne %.
@@ -963,7 +973,7 @@ mod tests {
             },
             by_agent: Default::default(),
         };
-        let s3 = Session::open(dir.clone(), &src).unwrap();
+        let s3 = Session::open(dir.clone(), &src, CapsRegistry::in_memory()).unwrap();
         assert_eq!(s3.compact_policy().at_tokens, Some(50_000)); // override persistant
         s3.set_config_option("ac.compact_at_tokens", "0").await.unwrap();
         assert!(s3.compact_policy().at_tokens.is_none()); // règle décochée
@@ -1072,7 +1082,7 @@ mod tests {
 
         // Persisté dans meta.json : la trace écrite est relue à l'open.
         s.hold_error("auth", "401");
-        let s2 = Session::open(dir.clone(), &test_compact_src()).unwrap();
+        let s2 = Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
         let le2 = s2.meta_snapshot().last_error.unwrap();
         assert_eq!(le2.kind, "auth");
         assert_eq!(s2.meta_snapshot().state, "error");

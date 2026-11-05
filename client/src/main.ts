@@ -168,6 +168,7 @@ chat.bind(renderer, {
   firstPostCapable: (c) => conns.cap(c)?.first_post === true,
   termCapable: (c) => conns.cap(c)?.terminal === true,
   pinCapable: (c) => conns.cap(c)?.pinned === true,
+  capsCapable: (c) => conns.cap(c)?.agent_caps === true,
   pinsMark: (el) => pins.markNode(el),
 });
 search.bind({ jumpToSeq: (seq) => chat.jumpToSeq(seq) });
@@ -432,7 +433,7 @@ notifications.init();
 initFirstPost((c) => conns.cap(c)?.first_post === true);
 initModelCosts({ capable: (c) => conns.cap(c)?.model_costs === true });
 pins.init();
-initModelBar(openFusion);
+initModelBar(openFusion, () => chat.updateHeader());
 initFusionDialog();
 initStatus(() => {
   // Bloc host du démon de la conn affichée (session ouverte), sinon de
