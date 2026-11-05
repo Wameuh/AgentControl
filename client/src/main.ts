@@ -20,6 +20,7 @@ import {
   accentPref,
   accentOf,
   applyAccentStrong,
+  themePref,
   accentStrongPref,
   applyConnChrome,
   initGems,
@@ -62,7 +63,7 @@ import type { AcEvent, SavedConn } from "./core/types";
 
 // Thème + langue persistés (localStorage), appliqués au boot
 initLang();
-applyTheme(localStorage.getItem("ac-theme") === "light" ? "light" : "dark");
+applyTheme(themePref());
 // Accent appliqué au boot, avant le premier rendu utile (pas de flash).
 applyAccent(accentPref());
 // Intensité d'accent — dimension orthogonale, classe accent-strong.

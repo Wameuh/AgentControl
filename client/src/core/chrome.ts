@@ -14,7 +14,7 @@ import { connLabel } from "./conn";
 const mesh = (window as {
   MeshBackground?: {
     setMood: (m: string, o: object) => void;
-    setAnimated: (on: boolean) => void;
+    setAnimated: (on: boolean, persist?: boolean) => void;
     isAnimated: () => boolean;
     getMood?: () => { base: number[]; light: number[]; agent: number[] };
   };
@@ -144,9 +144,13 @@ function syncMeshAccent() {
   mesh?.setMood(bgMood(), { ...meshColors, intensity: 0.55 });
 }
 
-export function applyTheme(name: "dark" | "light") {
+/** Thème persisté — « dark » si absent ou inconnu (défaut du boot). */
+export const themePref = (): "dark" | "light" =>
+  localStorage.getItem("ac-theme") === "light" ? "light" : "dark";
+
+export function applyTheme(name: "dark" | "light", persist = true) {
   document.documentElement.classList.toggle("light", name === "light");
-  localStorage.setItem("ac-theme", name);
+  if (persist) localStorage.setItem("ac-theme", name);
   // La palette dérivée dépend du mode : recalcul après le toggle.
   syncMeshAccent();
 }
@@ -199,9 +203,18 @@ export function applyAccentStrong(on: boolean, persist = true) {
  *  l'identifiant visuel de la connexion. Sans couleur de conn, l'accent
  *  global des réglages s'applique.
  *  conn = clé connKey ; null = aucune connexion liée (retour au neutre). */
+/** Accent stagé dans les réglages (#190) : choisi en aperçu mais pas
+ *  encore enregistré. Il prime sur la préférence persistée comme repli
+ *  dans applyConnChrome — la couleur de conn garde la priorité, donc
+ *  l'aperçu montre le rendu tel qu'il sera après « Enregistrer ». */
+let stagedAccent: Accent | null = null;
+export const stageAccent = (a: Accent | null) => {
+  stagedAccent = a;
+};
+
 export function applyConnChrome(conn: string | null, color?: Accent | null) {
   document.documentElement.classList.toggle("conn-tinted", !!color);
-  applyAccent(color ?? accentPref(), false);
+  applyAccent(color ?? stagedAccent ?? accentPref(), false);
   const label = conn && conn !== "web" ? ` — ${connLabel(conn)}` : "";
   const title = `AgentControl${label}`;
   document.title = title;
@@ -210,13 +223,26 @@ export function applyConnChrome(conn: string | null, color?: Accent | null) {
   void appWin?.setTitle(title).catch(() => {});
 }
 
-/** « Fond animé » : setAnimated applique + persiste (propriétaire unique). */
-export function applyBgAnim(on: boolean) {
-  mesh?.setAnimated(on);
+/** « Fond animé » : setAnimated applique + persiste (propriétaire unique) ;
+ *  `persist:false` pour un aperçu non enregistré (staging réglages). */
+export function applyBgAnim(on: boolean, persist = true) {
+  mesh?.setAnimated(on, persist);
 }
 
 /** État effectif du fond animé (résout ac-bganim / reduced-motion / Android). */
 export const bgAnimOn = () => mesh?.isAnimated() ?? false;
+
+/** Réglage « fond animé » persisté résolu comme au boot (absent → suit
+ *  prefers-reduced-motion ; toujours off sous Android) — bgAnimOn reflète
+ *  l'état live, impropre à re-lire la valeur enregistrée après un aperçu. */
+export function bgAnimPrefOn(): boolean {
+  const stored = localStorage.getItem("ac-bganim");
+  const on =
+    stored === null
+      ? !window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      : stored === "1";
+  return on && !isAndroid();
+}
 
 /** Gemme cristal : verte (neutral) = identité app ; dorée (human) = travail. */
 export function initGems() {

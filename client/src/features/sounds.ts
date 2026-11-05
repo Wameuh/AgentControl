@@ -40,8 +40,9 @@ export const sndPresetId = (k: SoundKind) => {
   const id = localStorage.getItem(`ac-snd-preset-${k}`) ?? "";
   return PRESETS[k].some((p) => p.id === id) ? id : PRESETS[k][0].id;
 };
-const sndPreset = (k: SoundKind) =>
-  PRESETS[k].find((p) => p.id === sndPresetId(k)) ?? PRESETS[k][0];
+const presetById = (k: SoundKind, id: string) =>
+  PRESETS[k].find((p) => p.id === id) ?? PRESETS[k][0];
+const sndPreset = (k: SoundKind) => presetById(k, sndPresetId(k));
 
 class SoundAlerts {
   private lastPlay = new Map<SoundKind, number>();
@@ -52,9 +53,11 @@ class SoundAlerts {
   }
 
   /** Bouton « tester » des paramètres — volontairement sans garde (toggle,
-   *  focus, cooldown) : le geste utilisateur débloque aussi l'autoplay. */
-  test(kind: SoundKind) {
-    void this.emit(kind);
+   *  focus, cooldown) : le geste utilisateur débloque aussi l'autoplay.
+   *  `presetId`/`volume` forcent l'aperçu d'un choix stagé non encore
+   *  persisté (réglages) — sans eux, la config enregistrée est jouée. */
+  test(kind: SoundKind, presetId?: string, volume?: number) {
+    void this.emit(kind, presetId, volume);
   }
 
   /** Vrai tant que la politique autoplay garde l'AudioContext suspendu
@@ -109,7 +112,7 @@ class SoundAlerts {
     return this.ctx;
   }
 
-  private async emit(kind: SoundKind) {
+  private async emit(kind: SoundKind, presetId?: string, volume?: number) {
     const ctx = this.audioCtx();
     if (!ctx) return;
     // Hors geste (event réseau) resume() peut rester pending jusqu'au
@@ -137,7 +140,7 @@ class SoundAlerts {
     // doublées) peuvent dépasser la crête unitaire là où les wav étaient
     // normalisés. Le graphe est déconnecté une fois la queue passée.
     const master = ctx.createGain();
-    master.gain.value = sndVolume();
+    master.gain.value = volume ?? sndVolume();
     const comp = ctx.createDynamicsCompressor();
     comp.threshold.value = -18;
     comp.knee.value = 20;
@@ -145,7 +148,11 @@ class SoundAlerts {
     comp.attack.value = 0.002;
     comp.release.value = 0.15;
     master.connect(comp).connect(ctx.destination);
-    const ttl = playPreset(ctx, master, sndPreset(kind));
+    const ttl = playPreset(
+      ctx,
+      master,
+      presetId !== undefined ? presetById(kind, presetId) : sndPreset(kind),
+    );
     setTimeout(() => {
       master.disconnect();
       comp.disconnect();

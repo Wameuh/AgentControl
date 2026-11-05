@@ -16,6 +16,7 @@ import {
   setSttLang,
   type SttLang,
 } from "./stt-prefs";
+import type { Stager } from "./settings";
 
 const CMD = (c: string) => `plugin:ac-stt|${c}`;
 
@@ -36,27 +37,37 @@ export class SttModelsPanel {
     secStateId: "s-st-stt",
   });
 
-  init() {
+  init(stage: Stager) {
     if (!supported()) return;
     this.dl.init();
     // Selects moteur/langue : le localStorage fait foi (le Kotlin perd
-    // son état volatile au reload webview) — un changement est poussé au
-    // plugin immédiatement, sinon les prefs sont ré-appliquées avant
-    // chaque dictée par le mic.
+    // son état volatile au reload webview). Stagé (#190) : le changement
+    // est poussé au plugin au clic « Enregistrer » — de toute façon les
+    // prefs sont ré-appliquées avant chaque dictée par le mic.
     const engSel = $("s-stt-engine") as HTMLSelectElement;
     const langSel = $("s-stt-lang") as HTMLSelectElement;
     engSel.value = sttEngine();
     langSel.value = sttLang();
-    engSel.onchange = () => {
-      const e = engSel.value === "system" ? "system" : "sherpa";
-      setSttEngine(e);
-      void invoke(CMD("stt_set_engine"), { engine: e }).catch(() => {});
-    };
-    langSel.onchange = () => {
-      const l = langSel.value as SttLang;
-      setSttLang(l);
-      void invoke(CMD("stt_set_language"), { lang: l }).catch(() => {});
-    };
+    stage("s-stt-engine", {
+      apply: () => {
+        const e = engSel.value === "system" ? "system" : "sherpa";
+        setSttEngine(e);
+        void invoke(CMD("stt_set_engine"), { engine: e }).catch(() => {});
+      },
+      reset: () => {
+        engSel.value = sttEngine();
+      },
+    });
+    stage("s-stt-lang", {
+      apply: () => {
+        const l = langSel.value as SttLang;
+        setSttLang(l);
+        void invoke(CMD("stt_set_language"), { lang: l }).catch(() => {});
+      },
+      reset: () => {
+        langSel.value = sttLang();
+      },
+    });
   }
 
   /** Relecture complète de l'état (ouverture des settings). */
@@ -68,15 +79,14 @@ export class SttModelsPanel {
 
   /** Le SpeechRecognizer on-device (API 31+, appareil dépendant) gate
    *  l'option « system » : absente → option grisée (elle reste lisible —
-   *  la raison est dans le desc, pas cachée). La préférence persistée
-   *  fait foi pour la valeur affichée. */
+   *  la raison est dans le desc, pas cachée). Les valeurs affichées sont
+   *  gérées par init/reset du staging (#190) — ne pas les réécrire ici,
+   *  un refresh asynchrone écraserait une édition non enregistrée. */
   private async syncEngine() {
     const st = await invoke<SttEngineState>(CMD("stt_state")).catch(
       () => null,
     );
     const engSel = $("s-stt-engine") as HTMLSelectElement;
-    engSel.value = sttEngine();
-    ($("s-stt-lang") as HTMLSelectElement).value = sttLang();
     if (!st) return;
     const sysOpt = engSel.querySelector<HTMLOptionElement>(
       'option[value="system"]',
