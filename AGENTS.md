@@ -281,6 +281,26 @@ subject is reused and the generator flags it in the workflow logs).
 Lines from already-released PRs are inert — can be purged each
 cycle.
 
+**Android APK signing**: release APKs are signed post-build by
+`apksigner` with the CI upload keystore (secrets
+`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
+`ANDROID_KEY_ALIAS`, optional `ANDROID_KEY_PASSWORD`) — generated
+once via `client/tools/android-upload-keystore.sh`. The generated
+Gradle project has no `signingConfig`, so the release variant ships
+unsigned and the workflow zipaligns + signs it; a verify step
+compares the APK signer SHA-256 to the keystore cert (fail-closed).
+Without `ANDROID_KEYSTORE_BASE64`, PR/main builds fall back to
+`--debug` (ephemeral runner signature, warning only) but a `v*` tag
+**fails** — a signed release must never be skipped. `versionCode`
+is derived from semver (major*1e6 + minor*1e3 + patch) so it is
+identical for `rc.N` and the final `X.Y.Z` of a cycle — Android
+accepts equal versionCodes (only downgrades are refused) and the
+code strictly grows cycle over cycle. ⚠️ One-time transition: the
+first update after this change carries a different signature than
+the old debug-keystore APKs → install over the top is refused once —
+users must **uninstall then reinstall** (the device key and saved
+connections live in app_data → re-pair/re-enter them).
+
 Release = `next_release` → `main` PR switched **ready** →
 `version.yml`'s `release-bump` job computes `last tag + level`,
 commit `chore: bump version` pushed to `next_release` (the PR
