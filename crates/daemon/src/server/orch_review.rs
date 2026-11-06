@@ -362,6 +362,11 @@ impl Daemon {
         // retry de CE tick). `attempts` conservé : le failover n'est
         // pas un échec de la review, mais le budget de retries reste
         // la borne anti-churn.
+        // Le worktree de review doit partir AVEC la session : sinon
+        // le `git worktree add` de la relance bute sur le chemin
+        // existant → transient_fail (tentative consommée + commentaire
+        // « spawn failed » trompeur) — même motif que la bascule
+        // pr_review off / pr_review_finish.
         for (key, entry) in st.pr_reviews.iter_mut() {
             if EntryState::of(entry) != EntryState::Running {
                 continue;
@@ -369,6 +374,15 @@ impl Daemon {
             let sid = entry.get("sid").and_then(Value::as_str).unwrap_or("");
             if !stale_set.contains(sid) {
                 continue;
+            }
+            let sha = entry.get("sha").and_then(Value::as_str).unwrap_or("");
+            if let Some((repo, pr)) = key.split_once('#') {
+                if let Ok(pr_n) = pr.parse::<u64>() {
+                    remove_review_worktree(
+                        Path::new(ws_of(cfg, repo)),
+                        &pr_review_dir(pr_n, sha),
+                    );
+                }
             }
             if let Some(e) = entry.as_object_mut() {
                 e.insert("state".into(), json!(EntryState::RetryWait.as_str()));

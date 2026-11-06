@@ -112,7 +112,7 @@ fn fail_role<'a>(m: &SessionMeta, cfg: &'a cfg::OrchCfg) -> Option<(FailRole, &'
 /// est perdu — items `wip` et PRs sont réinjectés explicitement.
 const WORKER_FAILOVER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — worker de REPRISE apres changement de profil provider (failover rate_limit), pas par un agent humain ni une session parente.]
 
-Tu es un worker sur le repo {REPO} (cwd {WS}) — tu remplaces une session detruite car bloquee en rate_limit sur l'ancien profil. Son contexte est perdu ; le travail est recoverable via la file AgentBacklog, les worktrees et le registre PR.
+Tu es un worker sur le repo (cwd {WS}) — tu remplaces une session detruite car bloquee en rate_limit sur l'ancien profil. Son contexte est perdu ; le travail est recoverable via la file AgentBacklog, les worktrees et le registre PR.
 
 Commence par lire {WS}/AGENTS.md — le workflow PR/CI qu'il decrit est obligatoire.
 
@@ -124,7 +124,7 @@ Commence par lire {WS}/AGENTS.md — le workflow PR/CI qu'il decrit est obligato
 
 ## MISSION
 1. Pour chaque item ci-dessus : verifie son etat (`agentbacklog --list --json`), retrouve ou cree le worktree dedie (`git worktree add ~/worktrees/ac-<feat> -b <branch> origin/next_release` — JAMAIS dans le checkout principal), continue le travail et mene la PR selon le cycle complet de AGENTS.md.
-2. Quand tout est solde : `agentbacklog --pop --agent-id "$AGENTCONTROL_SESSION" --json` pour la tache suivante s'il en reste, sinon arrete.
+2. Continue jusqu'a ce que tes items soient `--done` et tes PRs soldees (mergees ou cloturees), puis ARRETE-toi purement et simplement. Tu NE LANCES JAMAIS `agentbacklog --pop` toi-meme : l'orchestrateur dispatche le travail suivant (un worker = un item ; un pop contournerait la revue de plan en mode plan_review et l'invariant « contexte frais par item »).
 3. `agentbacklog --done <ID> --agent-id "$AGENTCONTROL_SESSION"` UNIQUEMENT quand ta PR est effectivement MERGED ; blocage insurmontable : `agentbacklog --release <ID> --agent-id "$AGENTCONTROL_SESSION"`, explique la raison, puis arrete.
 
 Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; push uniquement sur ta branche de PR ; nettoie ton worktree a la fin ; reponds en francais."#;
@@ -249,7 +249,6 @@ impl Daemon {
         let prompt = orch_plan::fill(
             WORKER_FAILOVER_PROMPT,
             &[
-                ("REPO", cfg.workspace.clone()),
                 ("WS", cfg.workspace.clone()),
                 ("ITEMS", items_txt),
                 ("PRS", prs_txt),
@@ -337,6 +336,12 @@ impl Daemon {
             self.failover_rm(sid, st).await;
             return;
         }
+        // Comme pour le worker : si un spawn est refusé (quota,
+        // profile), l'ancienne session est CONSERVÉE — elle reste en
+        // backoff et le prochain tick réessaiera pour les items non
+        // encore remplacés. Suppression seulement quand tout est
+        // réassigné (les items déjà partis ne lui appartiennent plus).
+        let mut all_replaced = true;
         for t in &my_wip {
             if !self.orch.is_enabled() {
                 return;
@@ -397,8 +402,9 @@ impl Daemon {
                 .await
             else {
                 warn!(
-                    "orchestrateur: failover planner {sid} — spawn {new_agent} refusé, session conservée"
+                    "orchestrateur: failover planner {sid} — spawn {new_agent} refusé pour #{key}, session conservée pour retry"
                 );
+                all_replaced = false;
                 continue;
             };
             let (rc, _o, e) =
@@ -408,6 +414,7 @@ impl Daemon {
             if rc != 0 {
                 warn!("orchestrateur: failover --reassign #{key} → {nsid} rc={rc} {e}");
                 self.plan_rm_session(&nsid, st).await;
+                all_replaced = false;
                 continue;
             }
             // Le journal du nouveau SID repart à seq 1 : sans reset,
@@ -418,7 +425,9 @@ impl Daemon {
             st.planner_seq.remove(&key);
             info!("orchestrateur: failover planner {sid} → {nsid} pour #{key}");
         }
-        self.failover_rm(sid, st).await;
+        if all_replaced {
+            self.failover_rm(sid, st).await;
+        }
     }
 
     /// Reviewer `Backlog-R*` : items `reviewing` → `--unclaim-review`
