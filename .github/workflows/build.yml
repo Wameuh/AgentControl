@@ -208,7 +208,8 @@ jobs:
           if-no-files-found: error
 
   # -----------------------------------------------------------------
-  # Client Android : APK aarch64 (debug-signé, installable directement).
+  # Client Android : APK aarch64 (release-signé via keystore CI quand
+  # les secrets ANDROID_KEYSTORE_* sont présents, debug sinon hors tag).
   # gen/android n'est pas commité → `tauri android init` dans le job.
   # -----------------------------------------------------------------
   client-android:
@@ -251,6 +252,11 @@ jobs:
         working-directory: client
       - name: tauri android init + build APK
         working-directory: client
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           npx tauri android init --ci
           # Caméra pour le scan QR d'appairage — manifest généré, patch
@@ -268,7 +274,34 @@ jobs:
             src-tauri/gen/android/app/src/main/AndroidManifest.xml
           # Icônes commitées (tauri icon) → projet généré
           cp -r src-tauri/icons/android/* src-tauri/gen/android/app/src/main/res/
-          npx tauri android build --apk --debug --target aarch64
+          # ── Signature release : sans keystore CI, chaque APK était
+          # signé par le debug keystore éphémère du runner → signature
+          # différente à chaque build → Android refuse l'update
+          # in-place (INSTALL_FAILED_UPDATE_INCOMPATIBLE). Avec les
+          # secrets ANDROID_KEYSTORE_* (upload keystore, cf.
+          # client/tools/android-upload-keystore.sh) on build la
+          # variante release et on signe l'APK par apksigner — le
+          # projet Gradle généré n'a pas de signingConfig. Sans
+          # secrets : builds PR/main → --debug (artefact de test
+          # seulement) ; tags v* → fail-closed, une release Android
+          # non signée ne doit plus jamais être publiée.
+          SIGNED=0
+          if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ]; then
+            SIGNED=1
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "::error::Secrets ANDROID_KEYSTORE_* absents — APK release non signable. Générer le keystore via client/tools/android-upload-keystore.sh puis gh secret set (cf. AGENTS.md § Releases)."
+            exit 1
+          else
+            echo "::warning::ANDROID_KEYSTORE_BASE64 absent — APK --debug à signature éphémère (build de test, non publié)."
+          fi
+          if [ "$SIGNED" = 1 ]; then
+            echo "ANDROID_SIGNED=1" >> "$GITHUB_ENV"
+            MODE=""
+          else
+            echo "ANDROID_SIGNED=0" >> "$GITHUB_ENV"
+            MODE="--debug"
+          fi
+          npx tauri android build --apk $MODE --target aarch64
           # ── Spike ac-stt : le plugin local plugins/ac-stt doit être
           # inclus sans patch — son build.rs émet
           # cargo:android_library_path qui remonte en
@@ -289,6 +322,65 @@ jobs:
           # L'AAR sherpa-onnx doit être lié : jniLibs arm64 dans l'APK.
           find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" \
             -exec sh -c 'unzip -l "$1" | grep -q "arm64-v8a/libsherpa-onnx-jni.so"' _ {} \;
+          # Signature post-build (mode release uniquement) : l'APK
+          # sort non signé (*-unsigned.apk) → zipalign puis apksigner
+          # avec le keystore CI. Le certificat est identique à chaque
+          # build → les updates in-place redeviennent possibles.
+          if [ "$SIGNED" = 1 ]; then
+            BT=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)
+            KS="$RUNNER_TEMP/agentcontrol-upload-keystore.jks"
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$KS"
+            mapfile -t APKLIST < <(find src-tauri/gen/android/app/build/outputs/apk -name "*-unsigned.apk")
+            if [ "${#APKLIST[@]}" -eq 0 ]; then
+              echo "::error::aucun APK *-unsigned.apk produit par le build release"
+              exit 1
+            fi
+            for apk in "${APKLIST[@]}"; do
+              echo "signature de $apk"
+              "$BT/zipalign" -f -p 4 "$apk" "$apk.aligned"
+              "$BT/apksigner" sign \
+                --ks "$KS" \
+                --ks-key-alias "$ANDROID_KEY_ALIAS" \
+                --ks-pass "pass:$ANDROID_KEYSTORE_PASSWORD" \
+                --key-pass "pass:${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}" \
+                --out "$apk.signed" "$apk.aligned"
+              mv "$apk.signed" "$apk"
+              rm -f "$apk.aligned"
+            done
+          fi
+      - name: Vérifier signature et versionCode de l'APK
+        working-directory: client
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [ "${ANDROID_SIGNED:-0}" != "1" ]; then
+            echo "APK non signé (build de test sans keystore) — vérification ignorée."
+            exit 0
+          fi
+          set -euo pipefail
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)
+          KS="$RUNNER_TEMP/agentcontrol-upload-keystore.jks"
+          # Empreinte SHA-256 attendue du certificat signataire —
+          # comparée au digest apksigner : un APK silencieusement
+          # signé par une autre clé (ex. debug) fait échouer le job.
+          EXPECT=$("$JAVA_HOME/bin/keytool" -list -v -keystore "$KS" \
+            -alias "$ANDROID_KEY_ALIAS" -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+            | awk '/SHA256:/{print $2; exit}' | tr -d ':' | tr 'A-F' 'a-f')
+          mapfile -t APKLIST < <(find src-tauri/gen/android/app/build/outputs/apk -name "*.apk")
+          for apk in "${APKLIST[@]}"; do
+            echo "== $apk"
+            "$BT/apksigner" verify --print-certs "$apk"
+            GOT=$("$BT/apksigner" verify --print-certs "$apk" \
+              | grep -oE 'SHA-256 digest: [0-9a-f]+' | head -1 \
+              | grep -oE '[0-9a-f]{64}')
+            if [ "$GOT" != "$EXPECT" ]; then
+              echo "::error::certificat signataire inattendu ($GOT ≠ $EXPECT)"
+              exit 1
+            fi
+            "$BT/aapt" dump badging "$apk" 2>/dev/null \
+              | grep -E "^package:|versionCode" || true
+          done
       - name: Renommer l'APK avec la version
         working-directory: client
         run: |
@@ -296,8 +388,9 @@ jobs:
           # hors tag : suffixe SHA pour distinguer les builds de test (PR/main)
           SUFFIX=""
           if [ "${GITHUB_REF_NAME#v}" = "$GITHUB_REF_NAME" ]; then SUFFIX="-${GITHUB_SHA:0:7}"; fi
+          KIND="debug"; [ "${ANDROID_SIGNED:-0}" = "1" ] && KIND="release"
           find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" \
-            -exec sh -c 'mv "$1" "$(dirname "$1")/AgentControl_'"$VER$SUFFIX"'_aarch64-debug.apk"' _ {} \;
+            -exec sh -c 'mv "$1" "$(dirname "$1")/AgentControl_'"$VER$SUFFIX"'_aarch64-'"$KIND"'.apk"' _ {} \;
           find src-tauri/gen/android/app/build/outputs/apk -name "*.apk"
       - uses: actions/upload-artifact@v4
         with:

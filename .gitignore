@@ -24,3 +24,7 @@ graphify-out/
 
 # artefact local du workflow /mr review
 .review_ts
+
+# Keystore Android — jamais commité (signature release, cf. client/tools/android-upload-keystore.sh)
+*.jks
+*.keystore
