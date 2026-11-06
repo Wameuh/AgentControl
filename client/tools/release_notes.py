@@ -42,12 +42,16 @@ MARK_END = "<!-- release-notes:end -->"
 
 # Notes anglaises rédigées par PR : lignes `<PR>: <note>` dans
 # release_notes_en.txt (`#` = commentaire, pas de commentaire inline).
-# Section optionnelle `[feat|fix|perf]` juste après `<PR>:` — requise
-# pour les sujets de commit non conventionnels (sans préfixe
-# feat:/fix:/perf:), seule façon de les catégoriser ; ignorée sinon.
+# Clé alternative `sha:<hex>:` (préfixe ≥7 accepté) pour un commit dont
+# la PR n'est pas attribuable — squash sans suffixe `(#N)` ni merge
+# `Merge pull request #N`. Section optionnelle `[feat|fix|perf]` juste
+# après la clé — requise pour les sujets de commit non conventionnels
+# (sans préfixe feat:/fix:/perf:), seule façon de les catégoriser ;
+# ignorée sinon.
 EN_NOTES = os.path.join(ROOT, "client", "tools", "release_notes_en.txt")
 EN_LINE = re.compile(
-    r"\s*(\d+)\s*:\s*(?:\[(feat|fix|perf)\]\s*)?(.+?)\s*$")
+    r"\s*(?:(\d+)|sha:([0-9a-fA-F]{7,40}))\s*:\s*"
+    r"(?:\[(feat|fix|perf)\]\s*)?(.+?)\s*$")
 
 # type conventional -> section user-facing ; les autres types (docs,
 # test, chore, ci, build, refactor, style, …) sont internes et exclus.
@@ -129,13 +133,29 @@ def next_version(rev_range):
 
 
 def english_notes():
-    """{pr: (section|None, note)} depuis EN_NOTES ; {} si absent."""
+    """{clé: (section|None, note)} depuis EN_NOTES ; {} si absent.
+    Clé = numéro de PR, ou `sha:<hex>` minuscule pour un commit sans PR
+    attribuable (squash sans suffixe `(#N)`)."""
     try:
         raw = open(EN_NOTES, encoding="utf-8").read().splitlines()
     except OSError:
         return {}
-    return {m.group(1): (m.group(2), m.group(3)) for ln in raw
-            if (m := EN_LINE.match(ln))}
+    out = {}
+    for ln in raw:
+        if (m := EN_LINE.match(ln)):
+            out[m.group(1) or f"sha:{m.group(2).lower()}"] = \
+                (m.group(3), m.group(4))
+    return out
+
+
+def note_for(en, pr, sha):
+    """(section, note) EN pour une PR ou le sha du commit, sinon None —
+    la note `sha:<hex>:` d'un commit ne s'applique qu'à lui."""
+    if pr and (hit := en.get(pr)):
+        return hit
+    return next((v for k, v in en.items()
+                 if k.startswith("sha:") and sha.startswith(k[4:])),
+                None)
 
 
 MERGE_PR = re.compile(r"^Merge pull request #(\d+)\b")
@@ -175,30 +195,30 @@ def entries(rev_range):
         # « Chat : … » matche SUBJECT mais n'est pas un type conventional.
         if not m or m.group(1) != m.group(1).lower():
             fb = FALLBACK_PR.search(s)
-            if fb and (hit := en.get(fb.group(1))):
+            pr = fb.group(1) if fb else None
+            if (hit := note_for(en, pr, sha)):
                 sec, note = hit
-                if sec and note and (note, fb.group(1)) not in seen:
-                    seen.add((note, fb.group(1)))
-                    out[types[sec]].append((note, fb.group(1)))
+                if sec and note and (note, pr or sha) not in seen:
+                    seen.add((note, pr or sha))
+                    out[types[sec]].append((note, pr))
                 elif not sec:
-                    print(f"release_notes: PR #{fb.group(1)} a une note "
-                          f"anglaise sans section [feat|fix|perf] sur un "
-                          "sujet non conventionnel — ignorée",
-                          file=sys.stderr)
+                    print(f"release_notes: {pr or 'commit ' + sha[:7]} a "
+                          f"une note anglaise sans section "
+                          "[feat|fix|perf] sur un sujet non conventionnel "
+                          "— ignorée", file=sys.stderr)
             continue
         if m.group(1) not in types:
             continue
         pr = m.group(3) or owner.get(sha)
-        title = ((en.get(pr or "") or (None, ""))[1]).strip() or None
+        title = ((note_for(en, pr, sha) or (None, ""))[1]).strip() or None
         if title is None:
             title = KEYWORD.sub("", m.group(2)).strip()
             if not title:
                 continue
             title = title[0].upper() + title[1:]
-            if pr:
-                print(f"release_notes: PR #{pr} sans note anglaise dans "
-                      f"{os.path.relpath(EN_NOTES, ROOT)} — sujet brut "
-                      "repris", file=sys.stderr)
+            print(f"release_notes: {pr or 'commit ' + sha[:7]} sans note "
+                  f"anglaise dans {os.path.relpath(EN_NOTES, ROOT)} — "
+                  "sujet brut repris", file=sys.stderr)
         key = (title, pr)
         if key in seen:
             continue

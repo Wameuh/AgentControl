@@ -1,12 +1,18 @@
 # English user-facing release notes, one line per merged PR:
 #
 #     <PR number>: <english note>
+#     sha:<commit sha or ≥7-char prefix>: <english note>
 #
 # Every user-visible feat/fix/perf PR adds its line here (written by the
 # PR author, in English). release_notes.py uses it instead of the commit
 # subject — usually French — and warns in the workflow logs when an
-# entry is missing. `#` lines are comments; no inline comments.
-# Entries for already-released PRs are inert — prune at release time.
+# entry is missing. The `sha:` form covers a commit whose PR cannot be
+# attributed (squash subject without a `(#N)` suffix and no
+# `Merge pull request #N` ancestor). `#` lines are comments; no inline
+# comments. For non-conventional commit subjects (no
+# feat:/fix:/perf: prefix) the section must be tagged right after the
+# key: `<PR>: [feat|fix|perf] <note>`. Entries for already-released PRs
+# are inert — prune at release time.
 #
 182: Client updates now report progress and surface explicit errors instead of failing silently.
 183: Catalog components can declare configurable parameters, editable from the client.
@@ -110,3 +116,4 @@
 281: [feat] Model selectors can now offer every variant from the agent catalogue (e.g. Devin effort levels ACP does not announce), applied through a provider side-channel when configured.
 291: Release notes now cover pull requests whose squash subject lacks a conventional prefix (e.g. "Chat : …") — an English note tagged [feat]/[fix]/[perf] is picked up instead of the PR silently disappearing from the release body.
 292: Backlog orchestrator sessions stuck in rate-limit backoff are now respawned on the new agent profile when a per-role *_agent setting changes — wip items reassigned, open PRs re-attributed, reviewers re-queued; active sessions and ac-wait sleepers are left untouched.
+sha:71fcbdf871390152ae3de8661e3fc1da87e2e3f7: ACP-only session modes (plan/smart/ask) are no longer injected into the agent's spawn environment — they are session modes, not CLI permission modes; injecting them used to kill agents at startup and on every respawn.
