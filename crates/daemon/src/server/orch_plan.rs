@@ -79,7 +79,7 @@ const JOURNAL_SCAN: usize = 150;
 /// events du planner vaut livraison du verdict.
 const RELAY_SCAN: usize = 60;
 /// Borne du plan inline dans le prompt reviewer / implémenteur.
-const PLAN_INLINE_MAX: usize = 30_000;
+pub(crate) const PLAN_INLINE_MAX: usize = 30_000;
 /// Borne de la description inline dans les prompts pipeline.
 const DESC_INLINE_MAX: usize = 16_000;
 /// Idle-nudges d'un planificateur en phase plan avant kill+release.
@@ -137,7 +137,7 @@ fn task_no_plan(t: &Task) -> bool {
     t.get("no_plan")
         .is_some_and(|v| v.as_i64().is_some_and(|i| i != 0) || v.as_bool() == Some(true))
 }
-fn task_plan_content<'a>(t: &'a Task) -> &'a str {
+pub(crate) fn task_plan_content<'a>(t: &'a Task) -> &'a str {
     t.get("plan_content").and_then(Value::as_str).unwrap_or("")
 }
 fn task_plan_file<'a>(t: &'a Task) -> &'a str {
@@ -147,7 +147,7 @@ fn task_plan_file<'a>(t: &'a Task) -> &'a str {
 /// `title`+`description` d'un item, prêts à inliner dans un prompt —
 /// la description est le cahier des charges : pas de résumé, juste une
 /// borne de sécurité sur les monstres.
-fn item_body(t: &Task) -> String {
+pub(crate) fn item_body(t: &Task) -> String {
     let title = t.get("title").and_then(Value::as_str).unwrap_or("");
     let desc = t
         .get("description")
@@ -163,7 +163,7 @@ fn item_body(t: &Task) -> String {
     )
 }
 
-fn clip_inline(s: &str, max: usize) -> String {
+pub(crate) fn clip_inline(s: &str, max: usize) -> String {
     let mut c = s.chars();
     let out: String = c.by_ref().take(max).collect();
     if c.next().is_some() {
@@ -499,7 +499,7 @@ impl ItemPhase {
 // spawn quand a2a est actif — pas de placeholder dédié).
 // ---------------------------------------------------------------------------
 
-const PLANNER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
+pub(crate) const PLANNER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
 
 Tu es le PLANIFICATEUR de l'item backlog ci-dessous (session $AGENTCONTROL_SESSION, cwd {WS}). Un reviewer relira ton plan ; si le verdict est APPROVED tu passeras en implementation toi-meme.
 
@@ -558,7 +558,7 @@ Quand ton verdict est pret, dans l'ordre :
   b) acctl msg "$AGENTCONTROL_SESSION" {PLANNER} "<verdict + commentaire>"
 Termine ton tour par une ligne exactement « VERDICT: APPROVED|DENIED|CONDITIONAL »."#;
 
-const IMPLEMENTER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
+pub(crate) const IMPLEMENTER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
 
 Tu es l'IMPLEMENTEUR de l'item backlog ci-dessous (session $AGENTCONTROL_SESSION, cwd {WS}) — le plan a ete APPROUVE (round {ROUND}). Le planificateur initial a disparu avant l'implementation : tu reprends la tache.
 
@@ -591,7 +591,7 @@ Blocage insurmontable : agentbacklog --release {ID} --agent-id "$AGENTCONTROL_SE
 
 Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; push uniquement sur ta branche de PR ; nettoie ton worktree a la fin (git worktree remove) ; reponds en francais."#;
 
-fn fill(tpl: &str, pairs: &[(&str, String)]) -> String {
+pub(crate) fn fill(tpl: &str, pairs: &[(&str, String)]) -> String {
     let mut s = tpl.to_string();
     for (k, v) in pairs {
         s = s.replace(&format!("{{{k}}}"), v);
@@ -2054,7 +2054,7 @@ impl Daemon {
     /// Dernier marqueur `PLAN_FILE:` du journal (AgentText) → (seq,
     /// chemin résolu). `~` et relatif sont normalisés sur le cwd de la
     /// session.
-    async fn plan_marker(&self, s: &Arc<Session>, m: &SessionMeta) -> Option<(u64, PathBuf)> {
+    pub(crate) async fn plan_marker(&self, s: &Arc<Session>, m: &SessionMeta) -> Option<(u64, PathBuf)> {
         let events = s.journal.read_page(&s.dir, None, JOURNAL_SCAN).ok()?;
         for ev in events.iter().rev() {
             let EventKind::AgentText { text } = &ev.kind else {
@@ -2346,7 +2346,7 @@ impl Daemon {
     /// (h_new_session origin composant + apply_spawn_cfg) mais rôle
     /// paramétré : préfixe, profil agent, mode et prompt ne dépendent
     /// plus de la cfg worker.
-    async fn plan_spawn(
+    pub(crate) async fn plan_spawn(
         self: &Arc<Self>,
         number: u64,
         prefix: &str,
@@ -2438,7 +2438,7 @@ impl Daemon {
 
     /// rm tolérant d'une session pipeline + nettoyage des marqueurs
     /// persistés la concernant.
-    async fn plan_rm_session(self: &Arc<Self>, sid: &str, st: &mut OrchPersist) {
+    pub(crate) async fn plan_rm_session(self: &Arc<Self>, sid: &str, st: &mut OrchPersist) {
         if let Err(e) = self.h_delete_session(sid.to_string()).await {
             warn!("orchestrateur: rm {sid}: {e:#}");
         }

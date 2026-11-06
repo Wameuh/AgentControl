@@ -186,6 +186,26 @@ the component: a hold on ANY routed profile serializes the whole
 pipeline (per-profile quotas aren't declared, so the gate can't be
 per-agent yet).
 
+**Failover provider** (`server/orch_failover.rs`): changing a role's
+`*_agent` only affects the NEXT spawns — sessions already parked in
+`rate_limit` backoff would retry forever on the saturated provider
+and keep the serial gate closed. Each tick, a component session
+(`Backlog-W*`/`Backlog-P*`/`Backlog-R*`/`PRReview-*`) in `error` +
+`last_error.kind == "rate_limit"` whose `meta.agent` no longer
+matches the role's effective profile is replaced on the current
+profile: workers get their `wip` items `--reassign`ed plus their
+open PRs re-attributed in the registry and a handoff prompt;
+planners/implementers get a fresh `Backlog-P*` on the right phase
+(draft `PLAN_FILE` recovered from the old journal); plan reviewers
+are unclaimed (`--unclaim-review`) so the pipeline respawns them;
+PR reviewers go back to `retry_wait` for an immediate relaunch.
+Active sessions, `ac-wait` waiters and non-`rate_limit` holds
+(`model`/`auth`/`other`) are never touched — the drift check makes
+it self-healing across restarts. The failover is NOT quota-aware:
+picking a profile that shares the same account/quota just reproduces
+the rate limit on the new provider — choose a genuinely different
+profile.
+
 **Auto review**: when the work looks done **(PR still draft)**,
 **note `TS=$(date -u +%FT%TZ)`**, comment `/mr review`
 (`gh pr comment <N> --body "/mr review"`),

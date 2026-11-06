@@ -26,6 +26,11 @@ pub(crate) mod orch_plan;
 /// Review de PR servie par le démon (`pr_review`) — passe séparée
 /// d'`orch_plan`, garde-fous propres (allowlist base, pool dédié).
 pub(crate) mod orch_review;
+/// Failover provider (item #193) : sessions du composant en backoff
+/// `rate_limit` sur un profil `*_agent` remplacé → respawn sur le
+/// profil courant (worker/planner/reviewer ; PRReview-* dans
+/// orch_review.rs).
+pub(crate) mod orch_failover;
 /// Surface de config éditable à chaud de l'orchestrateur (schéma
 /// params, validation de patch, persistance config.toml) — partagée
 /// avec `crate::components` (params_schema/params de l'item internal).

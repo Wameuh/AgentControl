@@ -314,6 +314,72 @@ fn clip(s: &str, max: usize) -> String {
 }
 
 impl Daemon {
+    /// Failover provider (item #193) — voir server/orch_failover.rs.
+    /// Une session `PRReview-*` en backoff `rate_limit` sur un profil
+    /// `pr_reviewer_agent` remplacé → détruite ; l'entrée `pr_reviews`
+    /// correspondante repasse en `retry_wait` immédiat et la passe
+    /// retry la relance sur le profil courant (head SHA revérifié).
+    /// Self-healing : le drift `meta.agent` ≠ `agent_or(pr_reviewer_agent)`
+    /// est le déclencheur — un restart entre le `comp set` et le tick
+    /// est rattrapé sans file d'événements.
+    async fn orch_failover_pr_reviews(
+        self: &Arc<Self>,
+        metas: &[SessionMeta],
+        st: &mut OrchPersist,
+        cfg: &cfg::OrchCfg,
+    ) {
+        let effective = cfg.agent_or(&cfg.pr_reviewer_agent);
+        if effective.is_empty() {
+            return;
+        }
+        // Candidates : origin PRReview + error/rate_limit + agent ≠
+        // profil courant + pas de waiter ac-wait vivant (le ping du
+        // waiter la réveillera sur l'ancien provider — inchangée).
+        let stale: Vec<String> = metas
+            .iter()
+            .filter(|m| {
+                m.origin.as_deref() == Some(PR_REVIEW_ORIGIN)
+                    && m.state == "error"
+                    && m.last_error
+                        .as_ref()
+                        .is_some_and(|e| e.kind == "rate_limit")
+                    && m.agent != effective
+                    && !acwait_pending(&m.id)
+            })
+            .map(|m| m.id.clone())
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        let stale_set: HashSet<&str> = stale.iter().map(String::as_str).collect();
+        for sid in &stale {
+            if let Err(e) = self.h_delete_session(sid.clone()).await {
+                warn!("orchestrateur: failover rm {sid}: {e:#}");
+            }
+        }
+        // Entrées running dont la session vient d'être détruite →
+        // retry immédiat (`retry_at` = now → éligible dans la passe
+        // retry de CE tick). `attempts` conservé : le failover n'est
+        // pas un échec de la review, mais le budget de retries reste
+        // la borne anti-churn.
+        for (key, entry) in st.pr_reviews.iter_mut() {
+            if EntryState::of(entry) != EntryState::Running {
+                continue;
+            }
+            let sid = entry.get("sid").and_then(Value::as_str).unwrap_or("");
+            if !stale_set.contains(sid) {
+                continue;
+            }
+            if let Some(e) = entry.as_object_mut() {
+                e.insert("state".into(), json!(EntryState::RetryWait.as_str()));
+                e.insert("retry_at".into(), json!(now_secs()));
+                e.insert("sid".into(), json!(""));
+                e.insert("denied".into(), json!(0));
+            }
+            info!("orchestrateur: review PR {key} — failover provider, retry sur « {effective} »");
+        }
+    }
+
     /// Passe review de PR — appelée par `orch_tick` quand
     /// `cfg.pr_review`. Jamais fatale au tick : les erreurs par PR
     /// sont loguées, la passe continue.
@@ -423,6 +489,13 @@ impl Daemon {
             self.orch_save(&st);
             return Ok(());
         }
+
+        // Failover provider (item #193) : reviews PR dont la session
+        // `PRReview-*` est en backoff rate_limit sur un profil
+        // `pr_reviewer_agent` qui n'est plus celui configuré → session
+        // détruite, entrée repassée en retry immédiat — la passe
+        // retry ci-dessous la relance sur le nouveau profil.
+        self.orch_failover_pr_reviews(&metas, &mut st, &cfg).await;
 
         // Balayage des worktrees orphelins — une fois par process
         // (crash du démon ou rm manuel : le dossier pr-reviews/* d'une
