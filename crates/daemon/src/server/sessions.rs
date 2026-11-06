@@ -44,6 +44,8 @@ impl Daemon {
     pub(super) async fn h_new_session(self: &Arc<Self>, agent: String, cwd: String, title: Option<String>, model: Option<String>, mode: Option<String>, prompt: Option<String>, origin: Option<String>, group: Option<String>) -> Result<Value> {
                 let profile = self
                     .agents
+                    .read()
+                    .await
                     .get(&agent)
                     .with_context(|| format!("agent inconnu: {agent}"))?
                     .clone();
@@ -135,6 +137,8 @@ impl Daemon {
     pub(super) async fn h_attach_session(self: &Arc<Self>, agent: String, cwd: String, native_id: String, title: Option<String>) -> Result<Value> {
                 let profile = self
                     .agents
+                    .read()
+                    .await
                     .get(&agent)
                     .with_context(|| format!("agent inconnu: {agent}"))?
                     .clone();
@@ -207,6 +211,8 @@ impl Daemon {
                     .context("fork : la session n'a pas d'id natif")?;
                 let profile = self
                     .agents
+                    .read()
+                    .await
                     .get(&meta.agent)
                     .with_context(|| format!("agent inconnu: {}", meta.agent))?
                     .clone();
@@ -417,6 +423,8 @@ impl Daemon {
                 let meta = s.meta_snapshot();
                 let profile = self
                     .agents
+                    .read()
+                    .await
                     .get(&meta.agent)
                     .with_context(|| format!("agent inconnu: {}", meta.agent))?
                     .clone();
@@ -595,7 +603,7 @@ impl Daemon {
     /// (set_config_option/set_model) reste inchangé.
     async fn catalogue_only(&self, s: &Arc<Session>, value: &str) -> bool {
         let meta = s.meta_snapshot();
-        let Some(profile) = self.agents.get(&meta.agent) else {
+        let Some(profile) = self.agents.read().await.get(&meta.agent).cloned() else {
             return false;
         };
         if profile.catalogue_cmd.is_none() || profile.model_override_cmd.is_none() {
@@ -676,6 +684,8 @@ impl Daemon {
             .context("session sans id natif — override catalogue impossible")?;
         let profile = self
             .agents
+            .read()
+            .await
             .get(&meta.agent)
             .with_context(|| format!("agent inconnu: {}", meta.agent))?
             .clone();
@@ -840,7 +850,7 @@ impl Daemon {
     /// création pour taire apply_spawn_config sur une valeur qui n'a
     /// aucune chance d'être résolue contre les options annoncées.
     async fn catalogue_member(&self, agent: &str, value: &str) -> bool {
-        let Some(p) = self.agents.get(agent) else {
+        let Some(p) = self.agents.read().await.get(agent).cloned() else {
             return false;
         };
         // Les deux clés : sans model_override_cmd la valeur catalogue
@@ -888,6 +898,8 @@ impl Daemon {
         let gen0 = s.generation();
         let profile = self
             .agents
+            .read()
+            .await
             .get(&meta.agent)
             .with_context(|| format!("agent inconnu: {}", meta.agent))?
             .clone();

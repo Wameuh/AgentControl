@@ -123,6 +123,8 @@ impl Daemon {
                 let _slot = self.ensure_agent_slot(&agent_id).await?;
                 let profile = self
                     .agents
+                    .read()
+                    .await
                     .get(&agent_id)
                     .with_context(|| format!("agent inconnu: {agent_id}"))?
                     .clone();

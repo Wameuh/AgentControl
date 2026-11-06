@@ -12,7 +12,7 @@ impl Daemon {
                 Ok(json!({
                     "version": env!("CARGO_PKG_VERSION"),
                     "sessions": sessions.len(),
-                    "agents": self.agents.keys().collect::<Vec<_>>(),
+                    "agents": self.agents.read().await.keys().collect::<Vec<_>>(),
                     // Capacité annoncée au client : ce démon sait répondre à
                     // ReqKind::UpdateDaemon. Gate fiable côté client — un
                     // démon plus vieux répondrait `parse: unknown variant`
@@ -107,6 +107,8 @@ impl Daemon {
     pub(super) async fn h_list_agents(self: &Arc<Self>) -> Result<Value> {
                 let list: Vec<Value> = self
                     .agents
+                    .read()
+                    .await
                     .iter()
                     .map(|(k, a)| {
                         json!({
@@ -132,6 +134,8 @@ impl Daemon {
     pub(super) async fn h_model_costs(self: &Arc<Self>, agent: String) -> Result<Value> {
         let command = self
             .agents
+            .read()
+            .await
             .get(&agent)
             .map(|p| p.command.clone())
             .ok_or_else(|| anyhow::anyhow!("agent inconnu: {agent}"))?;
@@ -149,6 +153,8 @@ impl Daemon {
     pub(super) async fn h_refresh_agent_caps(self: &Arc<Self>, agent: String) -> Result<Value> {
         let profile = self
             .agents
+            .read()
+            .await
             .get(&agent)
             .with_context(|| format!("agent inconnu: {agent}"))?
             .clone();
@@ -190,7 +196,10 @@ impl Daemon {
     pub(super) async fn h_model_catalog(self: &Arc<Self>, agent: String) -> Result<Value> {
         let profile = self
             .agents
+            .read()
+            .await
             .get(&agent)
+            .cloned()
             .ok_or_else(|| anyhow::anyhow!("agent inconnu: {agent}"))?;
         // Les deux clés sont requises pour qu'une valeur catalogue soit
         // applicable — servir le catalogue sans model_override_cmd
@@ -210,13 +219,24 @@ impl Daemon {
 /// (tel qu'assuré par ensure_agent_path) ou chemin absolu existant.
 /// Réutilisé par la détection « installed » du catalogue composants.
 pub(crate) fn command_available(cmd: &str) -> bool {
+    command_path(cmd).is_some()
+}
+
+/// Résout `argv[0]` en chemin concret : absolu existant+exécutable, ou
+/// premier hit sur le PATH du démon (celui qu'assure `ensure_agent_path`
+/// au boot). `None` = introuvable — `available:false` côté list_agents.
+/// Le chemin absolu retourné lève l'ambiguïté d'un nom générique
+/// (`agent` peut désigner autre chose selon la machine).
+pub(crate) fn command_path(cmd: &str) -> Option<std::path::PathBuf> {
     let p = PathBuf::from(cmd);
     if p.is_absolute() {
-        return is_executable(&p);
+        return is_executable(&p).then_some(p);
     }
-    std::env::var_os("PATH")
-        .map(|path| std::env::split_paths(&path).any(|d| is_executable(&d.join(cmd))))
-        .unwrap_or(false)
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|d| d.join(cmd))
+            .find(|c| is_executable(c))
+    })
 }
 
 fn is_executable(p: &std::path::Path) -> bool {

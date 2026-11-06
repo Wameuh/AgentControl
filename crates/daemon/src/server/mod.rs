@@ -4,6 +4,9 @@
 //! + blobs), peers.rs (agent↔agent), prs.rs (registre PR), misc.rs.
 
 mod cfg;
+/// Profils agents éditables à chaud (composant interne `agents` —
+/// params → `[agents.*]` de config.toml, hot-reload du profil).
+pub(crate) mod agents_cfg;
 mod components;
 /// Watch FS de l'explorateur (auto-refresh) — cycle de vie borné à la
 /// connexion, debounce+coalesce anti-rafale, jamais journalisé.
@@ -156,7 +159,11 @@ const AUTO_RESUME_PROMPT: &str = "continue please";
 pub struct Daemon {
     pub root: PathBuf,
     pub sessions: RwLock<HashMap<String, Arc<Session>>>,
-    pub agents: HashMap<String, AgentProfile>,
+    /// Profils agents — mutable à chaud : `ComponentSetParams` sur le
+    /// composant interne `agents` réécrit `[agents.*]` de config.toml
+    /// puis remplace les profils en place (agents_cfg.rs). Les lectures
+    /// passent par `.read().await`.
+    pub agents: Arc<RwLock<HashMap<String, AgentProfile>>>,
     pub retention: RetentionCfg,
     pub a2a: A2aCfg,
     /// Horodatage des envois agent→agent par paire (from,to) — rate-limit.
@@ -270,10 +277,13 @@ impl Daemon {
             forgesync::verify_ref(&forge_set, t)
         }));
         let agent_ids: Vec<String> = agents.keys().cloned().collect();
+        // Profils partagés avec Components (params du composant interne
+        // `agents`) — mutabilité à chaud voir agents_cfg.rs.
+        let agents = Arc::new(RwLock::new(agents));
         let d = Arc::new(Self {
             root: root.clone(),
             sessions: RwLock::new(HashMap::new()),
-            agents,
+            agents: Arc::clone(&agents),
             retention,
             components: Components::open(
                 &root,
@@ -282,6 +292,7 @@ impl Daemon {
                 Arc::clone(&web),
                 Arc::clone(&orch),
                 agent_ids,
+                Arc::clone(&agents),
             ),
             orch,
             a2a,
@@ -381,7 +392,7 @@ impl Daemon {
             info!("{sid}: pas de session native — reprise ignorée");
             return;
         };
-        let Some(profile) = self.agents.get(&meta.agent).cloned() else {
+        let Some(profile) = self.agents.read().await.get(&meta.agent).cloned() else {
             warn!("{sid}: agent « {} » inconnu — reprise ignorée", meta.agent);
             return;
         };
@@ -527,7 +538,7 @@ impl Daemon {
         agent: &str,
     ) -> Result<tokio::sync::MutexGuard<'_, ()>> {
         let guard = self.slot_lock.lock().await;
-        let Some(max) = self.agents.get(agent).map(|p| p.max_instances) else {
+        let Some(max) = self.agents.read().await.get(agent).map(|p| p.max_instances) else {
             return Ok(guard);
         };
         if max == 0 {

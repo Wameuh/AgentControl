@@ -927,8 +927,22 @@ pub(crate) fn persist(root: &Path, cfg: &super::cfg::OrchCfg) -> Result<()> {
         .parse::<toml_edit::DocumentMut>()
         .context("re-parse OrchCfg")?;
     doc["backlog_orchestrator"] = toml_edit::Item::Table(sub.as_table().clone());
+    commit_config(root, &path, doc.to_string(), perms)
+}
+
+/// Écriture atomique d'un config.toml déjà rendu : tmp `.part` +
+/// permissions de l'original recopiées (0600 pour un fichier neuf,
+/// comme `web.token`) puis rename sur `path` (cible canonicalisée —
+/// un symlink est suivi, pas remplacé). Partagé avec
+/// `agents_cfg::persist` — toute réécriture de section passe par là.
+pub(crate) fn commit_config(
+    root: &Path,
+    path: &Path,
+    text: String,
+    perms: Option<std::fs::Permissions>,
+) -> Result<()> {
     let tmp = root.join("config.toml.part");
-    std::fs::write(&tmp, doc.to_string()).context("écriture config.toml.part")?;
+    std::fs::write(&tmp, text).context("écriture config.toml.part")?;
     // Le tmp naît en 0666&~umask : recopier les permissions de
     // l'original (un config 0600 ne doit pas ressortir lisible par
     // tous) ; fichier neuf → 0600, la même retenue que web.token.
@@ -938,7 +952,7 @@ pub(crate) fn persist(root: &Path, cfg: &super::cfg::OrchCfg) -> Result<()> {
         let p = perms.unwrap_or_else(|| std::fs::Permissions::from_mode(0o600));
         std::fs::set_permissions(&tmp, p).context("permissions config.toml.part")?;
     }
-    std::fs::rename(&tmp, &path).context("rename config.toml")?;
+    std::fs::rename(&tmp, path).context("rename config.toml")?;
     Ok(())
 }
 

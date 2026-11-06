@@ -89,7 +89,7 @@ description = "FIFO feature queue (SQLite ~/.agentbacklog/backlog.db)"
 
 | `kind` | Meaning | Lifecycle | Examples |
 | --- | --- | --- | --- |
-| `internal` | feature compiled into the daemon | no process; state derived from config (web active if `bind_http`, a2a if enabled…) | mcp-serve, prs, web, janitor |
+| `internal` | feature compiled into the daemon | no process; state derived from config (web active if `bind_http`, a2a if enabled…) | mcp-serve, prs, web, janitor, backlog-orchestrator, agents |
 | `process` | long-running program managed by the daemon | spawn/stop/restart/healthcheck/logs | agentreviewer, future MCPs/scripts |
 | `external` | declared, managed elsewhere | observed via healthcheck only — the daemon never touches its lifecycle | supervisord, sshd, cron, review-bot, systemd unit |
 | `tool` | stateless CLI/install | presence + version (`command --version` probe); no long process — `installed`/`absent` states | agentbacklog, acctl, graphify |
@@ -425,6 +425,7 @@ The "living" piece: **graph of programs and sessions**.
 | web UI | `internal` | `bind_http` feature — state = active/inactive |
 | janitor | `internal` | internal task |
 | backlog-orchestrator | **`internal`** (overturned — see below) | the managed-`process` plan was superseded in #29: the loop was ported into the daemon (better: direct session calls, `AGENTCONTROL_*` env unnecessary, no process to lose) — dev container migrated in #140, supervisord conf disabled pending removal (`INSTALL.md` §5) |
+| agents | `internal` | agent profiles (`[agents.*]`) are daemon config, not a process — the component only exposes their editable surface: one `list` param per profile (argv CSV), persisted as the full `[agents.<id>]` section of config.toml and hot-reloaded (`component_set_params` / `acctl comp set agents <id> <argv-csv>`) |
 | agentbacklog | `tool` | stateless CLI — passive node + version + catalog install |
 | acctl | `tool` | same |
 | pr-db | external/legacy | end of transition (feat #59) — declarable as `external` if still present |

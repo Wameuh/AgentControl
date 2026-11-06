@@ -544,6 +544,11 @@ impl CompactPolicy {
 }
 
 impl CompactPartial {
+    /// Tous les champs absents — rien à sériser dans `[agents.*.compact]`.
+    pub fn is_empty(&self) -> bool {
+        self.enabled.is_none() && self.at_tokens.is_none() && self.at_pct.is_none()
+    }
+
     /// Applique les champs posés à la politique courante (merge par
     /// champ — un override peut ne toucher qu'une seule règle).
     /// `0`/hors borne = « off » : la règle héritée est retirée — borne
