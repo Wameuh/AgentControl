@@ -93,6 +93,11 @@ export class ChatView {
   private hasMoreHistory = true;
   private hasMoreNewer = false;
   private pendingLive: AcEvent[] = [];
+  /** Events live en attente de rendu — flushés groupés sur le prochain
+   *  rAF : une rafale de stream (tool_call_update, agent_text) ne doit
+   *  pas monopoliser le main thread entre deux frappes du composer. */
+  private liveQueue: AcEvent[] = [];
+  private liveRaf = 0;
   private jumpSeq = 0; // invalidation des sauts de recherche en vol
   private loadSeq = 0; // propriété du load en cours : un finally périmé ne doit pas libérer le flag d'un load plus récent
   /** open() en vol : les events live sont tamponnés (pendingLive) —
@@ -282,6 +287,13 @@ export class ChatView {
     this.hasMoreHistory = true;
     this.hasMoreNewer = false;
     this.pendingLive = [];
+    // Events live pas encore rendus : ils appartiennent à la conversation
+    // quittée — les rendre dans la nouvelle vue serait un trou de seq.
+    this.liveQueue = [];
+    if (this.liveRaf) {
+      cancelAnimationFrame(this.liveRaf);
+      this.liveRaf = 0;
+    }
     this.loadingPage = false;
     this.unseenBelow = 0;
     this.jumpSeq++; // un saut de recherche en vol ne doit plus réinjecter sa fenêtre
@@ -290,6 +302,13 @@ export class ChatView {
 
   /** Détache la conversation affichée dans le cache (session quittée). */
   private stashConv(id: string, conn: string) {
+    // Events live en file rAF : les rendre AVANT le détachement, tant que
+    // app.current pointe encore sur cette session — sinon le rAF
+    // partirait sous la session suivante et y injecterait des events
+    // étrangers (pendingLive/renderedSeqs de la mauvaise conv).
+    // opening=true ici → appendEventNow les range dans pendingLive,
+    // qui est justement stashé/restauré avec le fragment.
+    this.flushLive();
     const frag = document.createDocumentFragment();
     let lastSeq = 0;
     let n0 = 0;
@@ -929,6 +948,37 @@ export class ChatView {
   }
 
   appendEvent(ev: AcEvent, live: boolean) {
+    // Live en vue directe : mise en file pour un rendu groupé à la
+    // prochaine frame — la frappe clavier passe avant le paint, un
+    // stream ne doit pas la retarder. Les autres chemins (replay,
+    // tampon ancré/open) restent synchrones : déjà des batchs.
+    if (live && !this.hasMoreNewer && !this.opening) {
+      this.liveQueue.push(ev);
+      if (this.liveQueue.length > 400) {
+        // File anormalement pleine (rAF suspendu, onglet masqué) :
+        // vider tout de suite plutôt que gonfler sans borne.
+        this.flushLive();
+      } else if (!this.liveRaf) {
+        this.liveRaf = requestAnimationFrame(() => this.flushLive());
+      }
+      return;
+    }
+    this.appendEventNow(ev, live);
+  }
+
+  /** Rend les events live accumulés depuis le dernier frame, dans l'ordre
+   *  d'arrivée (seq croissante garantie par le flux). */
+  private flushLive() {
+    if (this.liveRaf) {
+      cancelAnimationFrame(this.liveRaf);
+      this.liveRaf = 0;
+    }
+    const q = this.liveQueue;
+    this.liveQueue = [];
+    for (const ev of q) this.appendEventNow(ev, true);
+  }
+
+  private appendEventNow(ev: AcEvent, live: boolean) {
     // La queue enregistre aussi les updates (dedup par seq) — sinon une
     // réouverture via tail rend les tool_call sans leur output streamé.
     if (app.current) this.pushTail(app.current.id, app.current.conn ?? "default", ev);
@@ -1169,6 +1219,10 @@ export class ChatView {
     // perd ni ne s'insère dans l'ancienne vue avant le clearConv.
     const wasAnchored = this.hasMoreNewer;
     this.hasMoreNewer = true;
+    // File rAF d'abord : hasMoreNewer la déroute vers pendingLive, captée
+    // par le snapshot ci-dessous — sinon clearConv la viderait et les
+    // events live en vol seraient perdus (jamais rejoués).
+    this.flushLive();
     const pending = this.pendingLive;
     try {
       const [before, after] = await Promise.all([
@@ -1268,8 +1322,13 @@ export class ChatView {
   private async loadLatest() {
     if (!app.current) return;
     const sid = app.current.id;
+    // File rAF d'abord : hasMoreNewer la déroute vers pendingLive, captée
+    // par le snapshot — clearConv la viderait sinon avant le pendingLive
+    // recréé (même garde que jumpToSeq).
+    this.hasMoreNewer = true;
+    this.flushLive();
     const pending = this.pendingLive;
-    this.clearConv();
+    this.clearConv(); // remet hasMoreNewer à false
     this.hasMoreNewer = true; // les events live restent tamponnés pendant l'await
     const js = this.jumpSeq; // post-clearConv : un saut ultérieur invalide ce load
     this.showConvLoading(true);
@@ -1309,7 +1368,7 @@ export class ChatView {
     this.pendingLive = [];
     this.suppressAutoRead = true;
     try {
-      for (const ev of rest) this.appendEvent(ev, true);
+      for (const ev of rest) this.appendEventNow(ev, true);
     } finally {
       this.suppressAutoRead = false;
     }

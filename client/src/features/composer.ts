@@ -61,12 +61,28 @@ export class Composer {
   // l'étendre à ~2/3 (re-clic = repli). Le bouton disparaît dès que le
   // texte redevient court (ou le champ est vidé/envoyé).
 
+  /** rAF de coalescence fitInput/refreshAc : la frappe produit un event
+   *  input par touche — mesure (reflow forcé) et rebuild dropdown au
+   *  plus une fois par frame, jamais dans le handler de la keystroke. */
+  private uiRaf = 0;
+
+  private scheduleUi() {
+    if (this.uiRaf) return;
+    this.uiRaf = requestAnimationFrame(() => {
+      this.uiRaf = 0;
+      this.refreshAc();
+      this.fitInput();
+    });
+  }
+
   private setInput(v: string) {
     ($("input") as HTMLTextAreaElement).value = v;
-    this.fitInput();
     // La dropdown suit la valeur même quand elle change sans event input
     // (envoi, applyAc, reprise de file) — sinon elle resterait affichée.
-    this.refreshAc();
+    // Différé à la frame : un programmatic set n'a pas besoin d'un reflow
+    // synchrone (et la dictée enchaîne les setInput par partial).
+    this.acStale = true;
+    this.scheduleUi();
   }
 
   fitInput() {
@@ -711,18 +727,39 @@ export class Composer {
     ($("input") as HTMLTextAreaElement).focus();
   }
 
+  /** Requête pour laquelle la dropdown a été construite + référence de
+   *  la liste de commandes — rebuild sauté tant que ni l'une ni l'autre
+   *  n'a changé (la frappe fait varier la valeur à chaque touche, mais
+   *  pas toujours la query slash : texte libre, collage…). */
+  private acQuery: string | null = null;
+  private acCmds: CmdInfo[] | null = null;
+  /** Valeur modifiée depuis le dernier refreshAc rendu — le keydown
+   *  resynchronise avant d'agir sur une sélection qui pourrait être
+   *  d'une frame de retard. */
+  private acStale = false;
+  /** Dropdown masquée par Échap/blur : un rAF en vol ne doit pas la
+   *  rouvrir — seule une vraie frappe (event input) la ré-arme. */
+  private acDismissed = false;
+
   private refreshAc() {
     const inp = $("input") as HTMLTextAreaElement;
     const ac = $("cmd-ac");
     const v = inp.value;
     const m = /^\/([\w-]*)$/.exec(v);
-    if (!m || !app.current) {
+    this.acStale = false;
+    if (!m || !app.current || this.acDismissed) {
       ac.hidden = true;
+      this.acQuery = null;
+      this.acCmds = null;
       return;
     }
     const q = m[1].toLowerCase();
+    const cmds = app.current.available_commands;
+    if (q === this.acQuery && cmds === this.acCmds && !ac.hidden) return;
+    this.acQuery = q;
+    this.acCmds = cmds;
     const matches = [
-      ...app.current.available_commands,
+      ...cmds,
       ...BUILTINS(),
     ]
       .filter((c) => cmdName(c).toLowerCase().startsWith(q))
@@ -858,6 +895,10 @@ export class Composer {
     $("btn-alt").onclick = () => this.sendInput(this.altMode());
     $("input").addEventListener("keydown", (e) => {
       const ac = $("cmd-ac");
+      // Le refresh coalescé sur rAF peut ne pas avoir encore vu la
+      // dernière frappe : resynchroniser avant d'agir sur la sélection
+      // (sinon Entrée/Tab appliquent une commande périmée).
+      if (!ac.hidden && this.acStale) this.refreshAc();
       if (!ac.hidden) {
         const sel = ac.querySelector<HTMLElement>(".ac-item.sel");
         if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -872,6 +913,7 @@ export class Composer {
         }
         if (e.key === "Escape") {
           ac.hidden = true;
+          this.acDismissed = true;
           return;
         }
       }
@@ -898,12 +940,18 @@ export class Composer {
       // partial — le segment live se ré-ancre au curseur (hors
       // composition IME, sinon chaque lettre committerait l'autocorrect).
       this.mic.onUserInput(e as InputEvent);
-      this.refreshAc();
-      this.fitInput();
+      this.acStale = true;
+      this.acDismissed = false;
+      this.scheduleUi();
     });
     $("input").addEventListener("blur", () => {
-      // délai pour laisser le click sur un item passer
-      setTimeout(() => ($("cmd-ac").hidden = true), 150);
+      // délai pour laisser le click sur un item passer — le masquage
+      // arme aussi acDismissed pour qu'un rAF en vol ne rouvre pas la
+      // dropdown après coup.
+      setTimeout(() => {
+        $("cmd-ac").hidden = true;
+        this.acDismissed = true;
+      }, 150);
     });
 
     // ✕ du panneau d'inspection de la file (aussi cliqué par le back
