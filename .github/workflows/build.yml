@@ -367,7 +367,8 @@ jobs:
           EXPECT=$("$JAVA_HOME/bin/keytool" -list -v -keystore "$KS" \
             -alias "$ANDROID_KEY_ALIAS" -storepass "$ANDROID_KEYSTORE_PASSWORD" \
             | awk '/SHA256:/{print $2; exit}' | tr -d ':' | tr 'A-F' 'a-f')
-          for apk in $(find src-tauri/gen/android/app/build/outputs/apk -name "*.apk"); do
+          mapfile -t APKLIST < <(find src-tauri/gen/android/app/build/outputs/apk -name "*.apk")
+          for apk in "${APKLIST[@]}"; do
             echo "== $apk"
             "$BT/apksigner" verify --print-certs "$apk"
             GOT=$("$BT/apksigner" verify --print-certs "$apk" \

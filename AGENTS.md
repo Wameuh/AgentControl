@@ -471,8 +471,10 @@ Manual off-PR: `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]`.
   `client_core::init_paths(app_data_dir)` since HOME is absent.
 - `ureq`, `tauri-plugin-shell`: desktop-only (target cfg in src-tauri/
   Cargo.toml); `check_update`/`update_client` return Err on Android.
-- CI APK: aarch64 debug-signed (artifact + release). `--target` to add
-  other ABIs.
+- CI APK: aarch64 signed by the CI release keystore when the
+  `ANDROID_KEYSTORE_*` secrets exist, `--debug` fallback otherwise —
+  `v*` tags fail without them (cf. § Releases → Android APK signing).
+  `--target` to add other ABIs.
 
 ## Code conventions
 
