@@ -302,6 +302,13 @@ export class ChatView {
 
   /** Détache la conversation affichée dans le cache (session quittée). */
   private stashConv(id: string, conn: string) {
+    // Events live en file rAF : les rendre AVANT le détachement, tant que
+    // app.current pointe encore sur cette session — sinon le rAF
+    // partirait sous la session suivante et y injecterait des events
+    // étrangers (pendingLive/renderedSeqs de la mauvaise conv).
+    // opening=true ici → appendEventNow les range dans pendingLive,
+    // qui est justement stashé/restauré avec le fragment.
+    this.flushLive();
     const frag = document.createDocumentFragment();
     let lastSeq = 0;
     let n0 = 0;
