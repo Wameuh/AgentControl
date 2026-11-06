@@ -355,11 +355,33 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
         return Err(msg);
     }
     ulog(format!("install v{tag} réussie → relance"));
-    write_update_status(&format!("OK {tag}"));
-    if let Ok(exe) = std::env::current_exe() {
-        let _ = std::process::Command::new(exe).spawn();
+    // Le spawn de relance peut échouer (exe déplacé, fork refusé…) :
+    // `let _ =` avalait l'erreur en silence et l'app mourait sans
+    // remplaçant. Désormais : statut WARN (le prochain boot dit
+    // « installée mais relance ratée ») + erreur explicite, et le
+    // process RESTE VIVANT — mieux vaut l'ancienne version en mémoire
+    // qu'une app morte.
+    let relaunch = std::env::current_exe()
+        .map_err(|e| e.to_string())
+        .and_then(|exe| {
+            std::process::Command::new(exe)
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        });
+    match relaunch {
+        Ok(()) => {
+            write_update_status(&format!("OK {tag}"));
+            std::process::exit(0);
+        }
+        Err(e) => {
+            write_update_status(&format!("WARN {tag} relance impossible : {e}"));
+            ulog(format!("install v{tag} OK mais relance impossible — {e}"));
+            Err(format!(
+                "v{tag} installée mais relance impossible ({e}) — redémarrez l'app"
+            ))
+        }
     }
-    std::process::exit(0);
 }
 
 /// Update en un clic (macOS) : télécharge le .dmg de la release, le monte
@@ -456,14 +478,29 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
         .arg(&app)
         .status();
     ulog(format!("install v{tag} réussie → relance"));
-    write_update_status(&format!("OK {tag}"));
     // -n force une nouvelle instance : l'actuelle n'est pas encore morte
     // quand open s'exécute (simple `open` ne ferait que l'activer).
-    let _ = std::process::Command::new("open")
+    // Même garde que Linux : un spawn raté ne doit plus passer sous
+    // silence — statut WARN + erreur, l'app reste vivante.
+    let relaunch = std::process::Command::new("open")
         .arg("-n")
         .arg(&app)
-        .spawn();
-    std::process::exit(0);
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string());
+    match relaunch {
+        Ok(()) => {
+            write_update_status(&format!("OK {tag}"));
+            std::process::exit(0);
+        }
+        Err(e) => {
+            write_update_status(&format!("WARN {tag} relance impossible : {e}"));
+            ulog(format!("install v{tag} OK mais relance impossible — {e}"));
+            Err(format!(
+                "v{tag} installée mais relance impossible ({e}) — redémarrez l'app"
+            ))
+        }
+    }
 }
 
 /// Update en un clic (Windows) — trois chemins selon l'exe courant :
@@ -639,7 +676,7 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     std::fs::write(
         &bat,
         format!(
-            "@echo off\r\nping -n 2 127.0.0.1 >nul\r\n{action}\r\nif errorlevel 1 goto fail\r\n>\"{st}\" echo OK {tag}\r\ndel \"{dls}\"\r\n{ok_dels}start \"\" \"{curs}\"\r\ndel \"%~f0\" & exit /b 0\r\n:fail\r\n>\"{st}\" echo FAIL {cause}\r\n{fail_dels}start \"\" \"{curs}\"\r\nexit /b 1\r\n"
+            "@echo off\r\nping -n 2 127.0.0.1 >nul\r\n{action}\r\nif errorlevel 1 goto fail\r\n>\"{st}\" echo OK {tag}\r\ndel \"{dls}\"\r\n{ok_dels}start \"\" \"{curs}\"\r\nif errorlevel 1 >\"{st}\" echo WARN {tag} relance impossible\r\ndel \"%~f0\" & exit /b 0\r\n:fail\r\n>\"{st}\" echo FAIL {cause}\r\n{fail_dels}start \"\" \"{curs}\"\r\nexit /b 1\r\n"
         ),
     )
     .map_err(|e| e.to_string())?;

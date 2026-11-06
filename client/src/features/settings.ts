@@ -11,11 +11,12 @@ import { applyTheme, themePref, applyAccent, stageAccent, accentPref, applyAccen
 import { defaultEncoding } from "../core/encoding";
 import { inlineImages } from "../core/format";
 import { cmpVer, connKeyOf, connLabel } from "../core/conn";
+import { call } from "../core/rpc";
 import { setLang, getLang, t, LANGS, type Lang } from "../i18n";
 import { nav } from "../ui/nav";
 import type { SavedConn } from "../core/types";
 import { renderAccesses, shareQr } from "./pairing";
-import { checkUpdate, performClientUpdate, rcChannel } from "./update";
+import { checkUpdate, performClientUpdate, performDaemonUpdate, rcChannel } from "./update";
 import {
   sounds,
   sndEnabled,
@@ -214,6 +215,7 @@ export class SettingsPanel {
       .catch(() => {});
     $("s-update-status").textContent = "";
     ($("s-doupdate") as HTMLButtonElement).hidden = true;
+    ($("s-dodaemon") as HTMLButtonElement).hidden = true;
     // Web : pas de reconnexion optionnelle (la conn unique est vitale) ni
     // d'update client (la SPA suit le binaire démon) → sections masquées.
     $("s-sec-conn").hidden = isWeb;
@@ -321,18 +323,32 @@ export class SettingsPanel {
     });
   }
 
-  /** "Vérifier les mises à jour" : remote vs local → statut + bouton maj. */
+  /** "Vérifier les mises à jour" : remote vs local → statut + bouton maj.
+   *  Couvre aussi le démon de la connexion active (versions affichées
+   *  côte à côte, update proposée via update_daemon/ensure_daemon). */
   private async runUpdateCheck() {
     const btn = $("s-checkupdate") as HTMLButtonElement;
+    const dbtn = $("s-dodaemon") as HTMLButtonElement;
     const status = $("s-update-status");
     const go = $("s-doupdate") as HTMLButtonElement;
     go.hidden = true;
+    dbtn.hidden = true;
     status.textContent = t("update_checking");
     btn.disabled = true;
     try {
-      const { local, remote } = await checkUpdate();
+      const ck = this.activeConnKey();
+      const [{ local, remote }, dst] = await Promise.all([
+        checkUpdate(),
+        ck
+          ? call<Record<string, unknown>>("daemon_status", { conn: ck })
+              .catch(() => null)
+          : Promise.resolve(null),
+      ]);
+      const dv = typeof dst?.version === "string" ? dst.version : "";
+      const parts = [
+        t("update_versions", { lv: local, dv: dv || "—", rv: remote || "?" }),
+      ];
       if (cmpVer(remote, local) > 0) {
-        status.textContent = t("update_available", { v: remote });
         go.hidden = false;
         go.onclick = async () => {
           go.disabled = true;
@@ -345,14 +361,45 @@ export class SettingsPanel {
             go.textContent = prev;
           }
         };
+        parts.push(t("update_available", { v: remote }));
       } else {
-        status.textContent = t("update_uptodate", { v: local });
+        parts.push(t("update_uptodate", { v: local }));
       }
+      // Cible d'update du démon = la version vers laquelle tout converge
+      // (client à jour → sa version locale ; client en retard → la
+      // dernière release — les assets démon sont tagués pareil).
+      const dTarget = cmpVer(remote, local) > 0 ? remote : local;
+      if (dv && ck && cmpVer(dv, dTarget) < 0) {
+        dbtn.hidden = false;
+        dbtn.onclick = async () => {
+          dbtn.disabled = true;
+          try {
+            await performDaemonUpdate({
+              conn: ck,
+              target: dTarget,
+              current: dv,
+              cfg: await this.daemonCfgFor(ck),
+            });
+          } finally {
+            dbtn.disabled = false;
+          }
+        };
+        parts.push(t("daemon_update_available", { v: dTarget }));
+      }
+      status.textContent = parts.join(" — ");
     } catch {
       status.textContent = t("update_failed");
     } finally {
       btn.disabled = false;
     }
+  }
+
+  /** Config sauvegardée correspondant à la clé conn active — nécessaire
+   *  au repli ssh d'ensure_daemon (credentials, host_keys, port…). */
+  private async daemonCfgFor(ck: string): Promise<SavedConn | null> {
+    const list = await invoke<SavedConn[]>("saved_connections")
+      .catch(() => [] as SavedConn[]);
+    return list.find((c) => connKeyOf(c, isAndroid()) === ck) ?? null;
   }
 
   init() {
