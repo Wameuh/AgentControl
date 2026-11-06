@@ -6,12 +6,14 @@
 //!   compact.rs — retenue des prompts pendant un /compact agent-side
 //!   config.rs  — mode/modèle/groupe/titre/options de config dynamiques
 //!   pins.rs    — messages épinglés persistés (pinned.json)
+//!   watch.rs   — watchdog « tour silencieux » (events agent, nudge)
 
 mod agent;
 mod compact;
 mod config;
 mod pins;
 mod prompt;
+mod watch;
 
 /// Issue d'un steer_queued — le serveur la traduit en {delivered, reason}.
 pub(crate) use prompt::SteerOutcome;
@@ -19,7 +21,7 @@ pub(crate) use prompt::SteerOutcome;
 use anyhow::{Context, Result};
 use proto::{Event, EventKind, SessionMeta};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -120,6 +122,13 @@ pub struct Session {
     /// inchangé = tour terminé sans rien produire → tracer (#183),
     /// end_turn propre et avortement silencieux sinon indistinguables.
     turn_outputs: AtomicU64,
+    /// Watchdog « tour silencieux » : horloge du dernier event agent
+    /// + flags de l'épisode de silence courant (watch.rs).
+    watch: Mutex<watch::TurnWatch>,
+    /// Tool calls en vol (statut Pending/Running, non terminés) —
+    /// pendant leur attente un silence d'events est normal : le
+    /// watchdog journalise mais ne nudge pas (watch.rs).
+    tool_inflight: Mutex<HashSet<String>>,
     /// Messages en attente d'un tour libre (FIFO) — (texte, provenance) :
     /// un prompt peer drainé ne doit PAS devenir un user_message dans le
     /// journal (son PeerMessage est déjà journalisé côté appelant).
@@ -311,6 +320,8 @@ impl Session {
             pending_rename: Mutex::new(None),
             rename_supported: std::sync::atomic::AtomicBool::new(true),
             turn_outputs: AtomicU64::new(0),
+            watch: Mutex::new(watch::TurnWatch::new()),
+            tool_inflight: Mutex::new(HashSet::new()),
             prompt_queue: Mutex::new(std::collections::VecDeque::new()),
             compacting: Mutex::new(None),
             error_hold: Mutex::new(None),
@@ -546,6 +557,10 @@ impl Session {
             }
             m.state = state.into();
         }
+        // Transition = nouvel épisode watchdog : l'horloge repart
+        // (un idle ancien ne doit pas faire tirer le premier tour) et
+        // les flags log/nudge de l'épisode clos sont levés.
+        self.watch_state_change();
         self.save_meta();
         self.emit(EventKind::StatusChanged {
             state: state.into(),
@@ -797,7 +812,7 @@ mod tests {
         (Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap(), dir)
     }
 
-    fn kinds(dir: &PathBuf) -> Vec<&'static str> {
+    pub(super) fn kinds(dir: &PathBuf) -> Vec<&'static str> {
         let j = Journal::open(dir).unwrap();
         j.read_page(dir, None, 100)
             .unwrap()

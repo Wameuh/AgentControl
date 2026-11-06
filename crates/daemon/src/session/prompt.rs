@@ -737,6 +737,11 @@ impl Session {
         if self.spawn_gen.load(Ordering::SeqCst) == gen {
             self.flush_text();
             if self.active_prompts.fetch_sub(1, Ordering::SeqCst) == 1 {
+                // Plus aucun tour en vol : les tool calls « en vol »
+                // d'un agent mort en pleine requête ne doivent pas
+                // survivre — le watchdog ne lirait plus qu'une
+                // attente fantôme au tour suivant.
+                self.tool_inflight.lock().unwrap().clear();
                 if self.compacting.lock().unwrap().is_some() {
                     // Le /compact a rendu la main mais la compaction tourne
                     // encore côté agent — l'état reste visible jusqu'au

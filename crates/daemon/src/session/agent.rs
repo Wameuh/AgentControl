@@ -80,6 +80,10 @@ impl Session {
         self.take_compact_hold();
         self.usage_seen.store(false, Ordering::SeqCst);
         self.busy.store(false, Ordering::SeqCst);
+        // Nouveau process : aucun tool call ne peut être « en vol »
+        // d'un ancien cycle — le watchdog ne doit pas lire une
+        // attente fantôme.
+        self.tool_inflight.lock().unwrap().clear();
         // Fenêtre "pas encore prêt" : stdin posé tôt mais session/load pas
         // terminé — drain_queue/envois directs doivent rester en file.
         self.spawning.store(true, Ordering::SeqCst);
@@ -881,6 +885,10 @@ impl Session {
             Ok(v) => v,
             Err(_) => return,
         };
+        // Toute ligne valide = signe de vie pour le watchdog « tour
+        // silencieux » (watch.rs) — réponses, notifications et
+        // requêtes agent→client comptent pareil.
+        self.note_agent_event();
         // Réponse à une de nos requêtes ?
         if v.get("method").is_none() && v.get("id").is_some() {
             let id = v["id"].as_u64().unwrap_or(0);
@@ -1104,7 +1112,10 @@ impl Session {
     }
 
     /// Journalise un tool_call / tool_call_update, avec externalisation blob.
-    fn apply_tool_update(
+    /// Met aussi à jour `tool_inflight` (statuts Pending/Running = en
+    /// vol, Done/Failed = terminé) — le watchdog s'en sert pour
+    /// distinguer un long outil de la normale d'un stall d'inférence.
+    pub(super) fn apply_tool_update(
         &self,
         call_id: String,
         status: ToolStatus,
@@ -1115,6 +1126,17 @@ impl Session {
         locations: Option<Vec<String>>,
         input: Option<String>,
     ) {
+        if !call_id.is_empty() {
+            let mut ti = self.tool_inflight.lock().unwrap();
+            match status {
+                ToolStatus::Done | ToolStatus::Failed => {
+                    ti.remove(call_id.as_str());
+                }
+                _ => {
+                    ti.insert(call_id.clone());
+                }
+            }
+        }
         let is_new = {
             let mut tc = self.tool_calls.lock().unwrap();
             let known = tc.contains_key(&call_id);

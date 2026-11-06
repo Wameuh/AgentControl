@@ -40,7 +40,7 @@ mod prs;
 mod sessions;
 mod term;
 
-pub use cfg::{A2aCfg, AgentProfile, CompactCfg, CompactPartial, CompactPolicy, CompactSrc, OrchCfg, RetentionCfg, DEFAULT_MAX_INSTANCES};
+pub use cfg::{A2aCfg, AgentProfile, CompactCfg, CompactPartial, CompactPolicy, CompactSrc, OrchCfg, RetentionCfg, WatchdogCfg, DEFAULT_MAX_INSTANCES};
 pub(crate) use orch::OrchProbe;
 
 use anyhow::{Context, Result};
@@ -195,6 +195,9 @@ pub struct Daemon {
     /// overrides `[agents.<id>.compact]` — résolution par session à
     /// l'open (le sidecar `compact.json` complète par-dessus).
     pub compact: CompactSrc,
+    /// Watchdog « tour silencieux » `[watchdog]` — seuil de silence
+    /// sans event agent, nudge « continue », cadence de la boucle.
+    pub watchdog: WatchdogCfg,
     /// Capacités annoncées par profil agent (modes/models/config) —
     /// moissonnées aux handshakes + config_option_update, persistées
     /// agent_caps.json, sondées par refresh_agent_caps (caps.rs).
@@ -231,6 +234,7 @@ impl Daemon {
         bind_tcp: String,
         orch: OrchCfg,
         compact: CompactCfg,
+        watchdog: WatchdogCfg,
     ) -> Result<(Arc<Self>, Vec<String>)> {
         let web = Arc::new(RwLock::new(None));
         let orch = Arc::new(OrchProbe::open(orch));
@@ -282,6 +286,7 @@ impl Daemon {
             orch,
             a2a,
             compact,
+            watchdog,
             caps,
             peer_rate: std::sync::Mutex::new(HashMap::new()),
             spawn_rate: std::sync::Mutex::new(HashMap::new()),
@@ -1634,6 +1639,28 @@ pub async fn janitor(daemon: Arc<Daemon>) {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Watchdog « tour silencieux » ([watchdog] de config.toml) : à chaque
+/// `check_secs`, chaque session en tour ouvert (working/compacting)
+/// est mesurée sur son silence d'events agent — `Session::watchdog_tick`
+/// journalise et nudge « continue your task » au-delà de
+/// `silence_secs` (session/watch.rs). Purement consultatif : la boucle
+/// n'écrit rien d'autre que via les méthodes de Session.
+pub async fn watchdog(daemon: Arc<Daemon>) {
+    let cfg = daemon.watchdog.clone();
+    let check = std::time::Duration::from_secs(cfg.check_secs.max(5));
+    loop {
+        tokio::time::sleep(check).await;
+        if !cfg.enabled {
+            continue;
+        }
+        let sessions: Vec<Arc<Session>> =
+            daemon.sessions.read().await.values().cloned().collect();
+        for s in &sessions {
+            s.watchdog_tick(&cfg);
         }
     }
 }

@@ -53,6 +53,11 @@ struct Config {
     /// via setcfg `ac.compact_*` (compact.json).
     #[serde(default)]
     compact: server::CompactCfg,
+    /// Watchdog « tour silencieux » : session working/compacting sans
+    /// event agent depuis silence_secs → log + nudge « continue »
+    /// (session/watch.rs, server::watchdog).
+    #[serde(default)]
+    watchdog: server::WatchdogCfg,
     /// Forges de review au-delà de GitHub : `[[forges]]` {type, hosts,
     /// token_env} — détection des URLs GitLab/Gerrit dans les sorties
     /// outils (voir docs/forges.md). github.com + gitlab.com implicites.
@@ -103,6 +108,7 @@ impl Default for Config {
             a2a: server::A2aCfg::default(),
             backlog_orchestrator: server::OrchCfg::default(),
             compact: server::CompactCfg::default(),
+            watchdog: server::WatchdogCfg::default(),
             forges: Vec::new(),
         }
     }
@@ -385,6 +391,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
         cfg.bind_tcp.clone(),
         cfg.backlog_orchestrator.clone(),
         cfg.compact.clone(),
+        cfg.watchdog.clone(),
     )
     .await?;
     tracing::info!(
@@ -459,6 +466,8 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     let d1 = daemon.clone();
     let d2 = daemon.clone();
     tokio::spawn(async move { server::janitor(d2).await });
+    let d4 = daemon.clone();
+    tokio::spawn(async move { server::watchdog(d4).await });
 
     // Composants managés : orphelins d'un crash éventuel, autostarts et
     // boucle de sondes — après le bind des listeners : l'env injectée
