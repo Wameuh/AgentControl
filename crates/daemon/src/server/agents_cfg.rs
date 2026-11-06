@@ -128,6 +128,10 @@ struct AgentToml<'a> {
 /// persisté à moitié. `agents_tbl` absent → créé ; présent non-table
 /// → erreur (jamais d'écrasement aveugle).
 pub(crate) fn persist(root: &Path, edits: &[(String, AgentProfile)]) -> Result<()> {
+    // Read-modify-write entier sous le verrou commun config.toml —
+    // les writers `[backlog_orchestrator]` et `[agents.*]` partagent
+    // le même tmp `config.toml.part` (voir orch_cfg::config_lock).
+    let _config = super::orch_cfg::config_lock();
     let path = root.join("config.toml");
     let path = std::fs::canonicalize(&path).unwrap_or(path);
     let (text, perms) = match std::fs::read_to_string(&path) {
@@ -269,7 +273,10 @@ mod tests {
         assert!(text.contains("DEVIN_PERMISSION_MODE"));
         assert!(text.contains("enabled = true"));
         assert!(text.contains("[agents.cursor]"));
-        assert!(text.contains("command = [\"agent\", \"acp\"]") || text.contains("command = [ \"agent\", \"acp\" ]") || text.contains("\"agent\"") && text.contains("\"acp\""));
+        assert!(
+            text.contains("command = [\"agent\", \"acp\"]")
+                || text.contains("command = [ \"agent\", \"acp\" ]")
+        );
         assert!(text.contains("FOO = \"bar\""));
         let _ = std::fs::remove_dir_all(&dir);
     }

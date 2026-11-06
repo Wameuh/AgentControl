@@ -909,6 +909,8 @@ pub(crate) fn apply_patch(
 /// canonicalisé : un `config.toml` symlink écrit sur sa cible plutôt
 /// que de le remplacer par un fichier régulier.
 pub(crate) fn persist(root: &Path, cfg: &super::cfg::OrchCfg) -> Result<()> {
+    // Read-modify-write entier sous le verrou commun — voir config_lock.
+    let _config = config_lock();
     let path = root.join("config.toml");
     // Cible réelle d'un éventuel symlink (absent → tel quel).
     let path = std::fs::canonicalize(&path).unwrap_or(path);
@@ -928,6 +930,21 @@ pub(crate) fn persist(root: &Path, cfg: &super::cfg::OrchCfg) -> Result<()> {
         .context("re-parse OrchCfg")?;
     doc["backlog_orchestrator"] = toml_edit::Item::Table(sub.as_table().clone());
     commit_config(root, &path, doc.to_string(), perms)
+}
+
+/// Verrou d'écriture config.toml — sérialise TOUT read-modify-write de
+/// la config (`orch_cfg::persist`, `agents_cfg::persist`…) : lecture du
+/// document → édition de section → commit atomique. Les writers
+/// historiques tenaient des verrous différents (`orch.cfg` vs
+/// `Daemon.agents`) : deux `comp set` quasi simultanés sur des
+/// sections distinctes pouvaient perdre l'édition de l'autre (chacun
+/// repartait d'un doc lu avant le commit adverse) et collisionner sur
+/// le tmp `config.toml.part` partagé. Mutex statique : couvre aussi
+/// les appelants hors `Daemon` (tests). Empoisonné → on continue
+/// (la config reste cohérente, un panic ne doit pas geler les sets).
+pub(crate) fn config_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Écriture atomique d'un config.toml déjà rendu : tmp `.part` +
