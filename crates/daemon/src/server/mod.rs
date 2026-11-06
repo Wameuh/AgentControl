@@ -4,22 +4,46 @@
 //! + blobs), peers.rs (agent↔agent), prs.rs (registre PR), misc.rs.
 
 mod cfg;
+/// Profils agents éditables à chaud (composant interne `agents` —
+/// params → `[agents.*]` de config.toml, hot-reload du profil).
+pub(crate) mod agents_cfg;
 mod components;
+/// Watch FS de l'explorateur (auto-refresh) — cycle de vie borné à la
+/// connexion, debounce+coalesce anti-rafale, jamais journalisé.
+mod dirwatch;
 /// Bornage workspace réutilisé par l'endpoint HTTP /media|/download.
 pub(crate) mod files;
 /// `command_available` est réutilisé par la détection du catalogue
 /// (components/catalog.rs) et par la garde AgentBacklog de
 /// l'orchestrateur natif.
 pub(crate) mod misc;
+/// Métriques backlog : journal JSONL échantillonné par le tick
+/// orchestrateur + RPC `backlog_metrics` (série + agrégats).
+pub(crate) mod metrics;
 /// `OrchProbe` est partagé avec `crate::components` (statut du
 /// composant interne `backlog-orchestrator` dans list_components).
 pub(crate) mod orch;
+/// Pipeline plan→review→implémentation de l'orchestrateur
+/// (`plan_review=true`) — sessions planner/reviewer, verdicts, stall.
+pub(crate) mod orch_plan;
+/// Review de PR servie par le démon (`pr_review`) — passe séparée
+/// d'`orch_plan`, garde-fous propres (allowlist base, pool dédié).
+pub(crate) mod orch_review;
+/// Failover provider (item #193) : sessions du composant en backoff
+/// `rate_limit` sur un profil `*_agent` remplacé → respawn sur le
+/// profil courant (worker/planner/reviewer ; PRReview-* dans
+/// orch_review.rs).
+pub(crate) mod orch_failover;
+/// Surface de config éditable à chaud de l'orchestrateur (schéma
+/// params, validation de patch, persistance config.toml) — partagée
+/// avec `crate::components` (params_schema/params de l'item internal).
+pub(crate) mod orch_cfg;
 mod peers;
 mod prs;
 mod sessions;
 mod term;
 
-pub use cfg::{A2aCfg, AgentProfile, CompactCfg, CompactPartial, CompactPolicy, CompactSrc, OrchCfg, RetentionCfg};
+pub use cfg::{A2aCfg, AgentProfile, CompactCfg, CompactPartial, CompactPolicy, CompactSrc, OrchCfg, RetentionCfg, WatchdogCfg, DEFAULT_MAX_INSTANCES};
 pub(crate) use orch::OrchProbe;
 
 use anyhow::{Context, Result};
@@ -113,9 +137,20 @@ impl Outbox {
     }
 }
 
+use crate::catalogue::CatalogueCache;
+use crate::costs::CostCache;
 use crate::journal;
 use crate::prs::PrRegistry;
 use crate::session::Session;
+
+/// Horodatage du dernier event d'une session (ISO-8601, "" si journal vide).
+fn last_event_ts(s: &Arc<Session>) -> String {
+    s.journal
+        .read_page(&s.dir, None, 1)
+        .ok()
+        .and_then(|p| p.last().map(|e| e.ts.clone()))
+        .unwrap_or_default()
+}
 
 /// Prompt injecté aux sessions reprises après un arrêt brutal du démon —
 /// livré comme un envoi utilisateur (journalisé, visible dans le chat).
@@ -124,7 +159,11 @@ const AUTO_RESUME_PROMPT: &str = "continue please";
 pub struct Daemon {
     pub root: PathBuf,
     pub sessions: RwLock<HashMap<String, Arc<Session>>>,
-    pub agents: HashMap<String, AgentProfile>,
+    /// Profils agents — mutable à chaud : `ComponentSetParams` sur le
+    /// composant interne `agents` réécrit `[agents.*]` de config.toml
+    /// puis remplace les profils en place (agents_cfg.rs). Les lectures
+    /// passent par `.read().await`.
+    pub agents: Arc<RwLock<HashMap<String, AgentProfile>>>,
     pub retention: RetentionCfg,
     pub a2a: A2aCfg,
     /// Horodatage des envois agent→agent par paire (from,to) — rate-limit.
@@ -137,6 +176,10 @@ pub struct Daemon {
     >,
     /// Registre PR ↔ session (prs.json) — voir prs.rs.
     pub prs: Arc<PrRegistry>,
+    /// File de vérification forge des références détectées — une URL de
+    /// review n'entre au registre qu'après preuve d'existence réelle
+    /// (server/prs.rs `PrVerifier`). Worker unique spawné à l'open.
+    pr_verify: Arc<prs::PrVerifier>,
     /// État du sync des statuts PR (`pr_sync`) — throttle + exclusion
     /// d'un second run pendant qu'un fetch forge est en vol.
     pr_sync: Arc<std::sync::Mutex<prs::PrSyncCtl>>,
@@ -159,6 +202,28 @@ pub struct Daemon {
     /// overrides `[agents.<id>.compact]` — résolution par session à
     /// l'open (le sidecar `compact.json` complète par-dessus).
     pub compact: CompactSrc,
+    /// Watchdog « tour silencieux » `[watchdog]` — seuil de silence
+    /// sans event agent, nudge « continue », cadence de la boucle.
+    pub watchdog: WatchdogCfg,
+    /// Capacités annoncées par profil agent (modes/models/config) —
+    /// moissonnées aux handshakes + config_option_update, persistées
+    /// agent_caps.json, sondées par refresh_agent_caps (caps.rs).
+    pub caps: Arc<crate::caps::CapsRegistry>,
+    /// Compteur global des dossiers surveillés (watch_dir explorateur,
+    /// toutes conns confondues) — borne le plafond de dirwatch.rs.
+    dir_watch_n: Arc<std::sync::atomic::AtomicUsize>,
+    /// sysinfo persisté → delta CPU entre deux appels (même rôle que
+    /// AppState.sys côté client ; l'horodatage interne à System garde
+    /// l'intervalle minimal) ; alimente le bloc "host" de daemon_status.
+    host_sys: std::sync::Mutex<sysinfo::System>,
+    /// Sérialise les réservations de place d'instance (ensure_agent_slot).
+    slot_lock: tokio::sync::Mutex<()>,
+    /// Coûts catalogue des modèles par profil agent (costs.rs) —
+    /// sondes `devin models`… avec cache TTL, servis par ModelCosts.
+    pub model_costs: CostCache,
+    /// Catalogues complets par profil (`catalogue_cmd`) — sert les
+    /// variantes hors annonce ACP via ReqKind::ModelCatalog.
+    pub catalogues: CatalogueCache,
 }
 
 
@@ -176,6 +241,7 @@ impl Daemon {
         bind_tcp: String,
         orch: OrchCfg,
         compact: CompactCfg,
+        watchdog: WatchdogCfg,
     ) -> Result<(Arc<Self>, Vec<String>)> {
         let web = Arc::new(RwLock::new(None));
         let orch = Arc::new(OrchProbe::open(orch));
@@ -202,10 +268,22 @@ impl Daemon {
                 }
             }
         }
+        let prs = Arc::new(PrRegistry::open(&root));
+        let caps = crate::caps::CapsRegistry::open(&root);
+        // Set forge figé pour la vérif d'existence (hôtes déclarés +
+        // token_env) — la config ne change pas à chaud.
+        let forge_set = forges.list_json().as_array().cloned().unwrap_or_default();
+        let pr_verify = Arc::new(prs::PrVerifier::new(Arc::clone(&prs), move |t| {
+            forgesync::verify_ref(&forge_set, t)
+        }));
+        let agent_ids: Vec<String> = agents.keys().cloned().collect();
+        // Profils partagés avec Components (params du composant interne
+        // `agents`) — mutabilité à chaud voir agents_cfg.rs.
+        let agents = Arc::new(RwLock::new(agents));
         let d = Arc::new(Self {
             root: root.clone(),
             sessions: RwLock::new(HashMap::new()),
-            agents,
+            agents: Arc::clone(&agents),
             retention,
             components: Components::open(
                 &root,
@@ -213,17 +291,28 @@ impl Daemon {
                 a2a.enabled,
                 Arc::clone(&web),
                 Arc::clone(&orch),
+                agent_ids,
+                Arc::clone(&agents),
             ),
             orch,
             a2a,
             compact,
+            watchdog,
+            caps,
             peer_rate: std::sync::Mutex::new(HashMap::new()),
             spawn_rate: std::sync::Mutex::new(HashMap::new()),
-            prs: Arc::new(PrRegistry::open(&root)),
+            prs,
+            pr_verify,
             pr_sync: Arc::new(std::sync::Mutex::new(prs::PrSyncCtl::default())),
             forges,
             web,
+            dir_watch_n: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            host_sys: std::sync::Mutex::new(sysinfo::System::new()),
+            slot_lock: tokio::sync::Mutex::new(()),
+            model_costs: CostCache::default(),
+            catalogues: CatalogueCache::default(),
         });
+        d.pr_verify.spawn_worker();
         let mut resumable = Vec::new();
         let sdir = root.join("sessions");
         if sdir.exists() {
@@ -232,7 +321,7 @@ impl Daemon {
                 if !entry.file_type()?.is_dir() {
                     continue;
                 }
-                match Session::open(entry.path(), &d.compact) {
+                match Session::open(entry.path(), &d.compact, Arc::clone(&d.caps)) {
                     Ok(s) => {
                         // État persisté lu avant reconcile (qui efface la
                         // distinction actif/idle en passant tout à
@@ -303,7 +392,7 @@ impl Daemon {
             info!("{sid}: pas de session native — reprise ignorée");
             return;
         };
-        let Some(profile) = self.agents.get(&meta.agent).cloned() else {
+        let Some(profile) = self.agents.read().await.get(&meta.agent).cloned() else {
             warn!("{sid}: agent « {} » inconnu — reprise ignorée", meta.agent);
             return;
         };
@@ -321,11 +410,38 @@ impl Daemon {
         if s.is_alive() && self.wait_revived_or_done(&s, sid).await {
             return;
         }
+        if !s.is_alive() {
+            let _slot = match self.ensure_agent_slot(&meta.agent).await {
+                Ok(g) => g,
+                Err(e) => {
+                    warn!("{sid}: reprise auto refusée: {e:#}");
+                    s.emit(proto::EventKind::Error {
+                        message: format!("reprise auto: {e:#}"),
+                    });
+                    return;
+                }
+            };
+            s.mark_spawning();
+        }
         match s
-            .spawn_agent(&cmd, &envs, Some(native), true, self.mcp_servers(sid), None)
+            .spawn_agent(
+                &cmd,
+                &envs,
+                Some(native),
+                true,
+                self.mcp_servers(sid),
+                Some(crate::session::SpawnCfg {
+                    model: meta.model.clone(),
+                    quiet: true,
+                    ..Default::default()
+                }),
+            )
             .await
         {
             Ok(true) => {
+                // Fallback load→new : rejouer l'override catalogue sur
+                // le sid frais (no-op si le sid correspond déjà).
+                self.reapply_catalogue_if_new_sid(&s).await;
                 info!("{sid}: agent relancé — envoi « {AUTO_RESUME_PROMPT} »");
                 self.send_resume_prompt(&s, sid).await;
             }
@@ -409,6 +525,70 @@ impl Daemon {
             .with_context(|| format!("session inconnue: {id}"))
     }
 
+    /// Réserve une place d'instance pour le profil `agent` avant un spawn.
+    /// Plafond `max_instances` atteint → endort les sessions idle du profil
+    /// (file vide, ni spawning ni waking), la moins récemment active d'abord
+    /// (date du dernier event) : le journal est conservé, la session se
+    /// réveille au prochain envoi. Aucune inactive → refus. 0 = illimité.
+    /// Le verrou rendu sérialise les réservations : l'appelant le garde
+    /// jusqu'à avoir marqué la session `spawning` — sinon deux spawns
+    /// concurrents verraient la même place libre.
+    pub(crate) async fn ensure_agent_slot(
+        &self,
+        agent: &str,
+    ) -> Result<tokio::sync::MutexGuard<'_, ()>> {
+        let guard = self.slot_lock.lock().await;
+        let Some(max) = self.agents.read().await.get(agent).map(|p| p.max_instances) else {
+            return Ok(guard);
+        };
+        if max == 0 {
+            return Ok(guard);
+        }
+        let live: Vec<Arc<Session>> = self
+            .sessions
+            .read()
+            .await
+            .values()
+            .filter(|s| s.meta_snapshot().agent == agent && (s.is_alive() || s.is_spawning()))
+            .cloned()
+            .collect();
+        let excess = (live.len() + 1).saturating_sub(max as usize);
+        if excess == 0 {
+            return Ok(guard);
+        }
+        let mut idle: Vec<Arc<Session>> = live
+            .iter()
+            .filter(|s| {
+                s.meta_snapshot().state == "idle"
+                    && !s.has_queued()
+                    && !s.is_spawning()
+                    && !s.is_waking()
+            })
+            .cloned()
+            .collect();
+        // Victimes LRU, mais les idles sous waiter ac-wait vivant en
+        // dernier : leur retour est planifié (ping du waiter → réveil
+        // qui reprendra un slot ici même) — préférer endormir les
+        // idles sans retour garanti (#181). Un waiter stale compte
+        // comme absent → la session reste une victime LRU normale.
+        if !idle.is_empty() {
+            let waiting = orch::acwait_live_sids();
+            idle.sort_by_cached_key(|s| {
+                (waiting.contains(&s.meta_snapshot().id), last_event_ts(s))
+            });
+        }
+        anyhow::ensure!(
+            idle.len() >= excess,
+            "limite d'instances atteinte pour « {agent} » ({}/{max}) — aucune session inactive à endormir",
+            live.len()
+        );
+        for s in idle.into_iter().take(excess) {
+            info!("plafond {agent} ({max}) : endormie {}", s.meta_snapshot().id);
+            s.sleep().await;
+        }
+        Ok(guard)
+    }
+
 
     // -----------------------------------------------------------------------
     // Agent↔agent : helpers
@@ -424,7 +604,7 @@ impl Daemon {
         mode: Option<&str>,
         session_id: &str,
     ) -> (Vec<String>, HashMap<String, String>) {
-        let (m, md) = (model.unwrap_or(""), mode.unwrap_or(""));
+        let (m, md) = (model.unwrap_or(""), cfg::env_mode(mode.unwrap_or("")));
         let cmd: Vec<String> = profile
             .command
             .iter()
@@ -501,6 +681,11 @@ impl Daemon {
             ReqKind::DaemonStatus => self.h_daemon_status().await,
             ReqKind::UpdateDaemon { version } => self.h_update_daemon(version).await,
             ReqKind::ListAgents => self.h_list_agents().await,
+            ReqKind::ModelCosts { agent } => self.h_model_costs(agent).await,
+            ReqKind::RefreshAgentCaps { agent } => {
+                self.h_refresh_agent_caps(agent).await
+            }
+            ReqKind::ModelCatalog { agent } => self.h_model_catalog(agent).await,
             ReqKind::ListSessions => self.h_list_sessions().await,
             ReqKind::NewSession {
                 agent,
@@ -633,6 +818,9 @@ impl Daemon {
             ReqKind::QueuePromote { session, index } => {
                 self.h_queue_promote(session, index).await
             }
+            ReqKind::QueueSteer { session, index } => {
+                self.h_queue_steer(session, index).await
+            }
             ReqKind::Cancel { session } => self.h_cancel(session).await,
             ReqKind::SessionInfo { session } => self.h_session_info(session).await,
             ReqKind::SetMode { session, mode } => self.h_set_mode(session, mode).await,
@@ -719,24 +907,45 @@ impl Daemon {
             ReqKind::ComponentCatalog { refresh } => {
                 self.h_component_catalog(refresh).await
             }
-            ReqKind::ComponentInstall { name } => self.h_component_install(name).await,
+            ReqKind::ComponentInstall { name, params } => {
+                self.h_component_install(name, params).await
+            }
+            ReqKind::ComponentSetParams { name, params } => {
+                self.h_component_set_params(name, params).await
+            }
             ReqKind::ComponentQuery { name, query } => {
                 self.h_component_query(name, query).await
             }
             ReqKind::OrchestratorSet { enabled } => {
                 self.h_orch_set(enabled).await
             }
+            ReqKind::OrchestratorConfig { patch } => {
+                self.h_orch_config(patch).await
+            }
             ReqKind::ManagerSpawn { repo } => self.h_manager_spawn(&repo).await,
+            ReqKind::BacklogMetrics { window } => {
+                self.h_backlog_metrics(window).await
+            }
             ReqKind::Subscribe { session, after_seq } => {
                 self.h_subscribe(session, after_seq).await
+            }
+            ReqKind::ReviewReport {
+                session,
+                verdict,
+                body,
+            } => self.h_review_report(session, verdict, body).await,
+            ReqKind::PrReviewRequest { session, repo, pr } => {
+                self.h_pr_review_request(session, repo, pr).await
             }
             // Interceptés par la couche connexion (ordre des inputs +
             // cycle de vie borné à la connexion) — jamais atteint ici.
             ReqKind::TermOpen { .. }
             | ReqKind::TermInput { .. }
             | ReqKind::TermResize { .. }
-            | ReqKind::TermClose { .. } => {
-                anyhow::bail!("requête terminal hors couche connexion")
+            | ReqKind::TermClose { .. }
+            | ReqKind::WatchDir { .. }
+            | ReqKind::UnwatchDir { .. } => {
+                anyhow::bail!("requête bornée à la connexion hors serve_conn")
             }
         }
     }
@@ -812,6 +1021,9 @@ impl Daemon {
         // Terminaux ouverts par CETTE connexion — bornés à sa durée de vie :
         // déconnexion → la map est droppée → master fermé → shells SIGHUP.
         let mut terms = term::Terms::new();
+        // Watches FS de l'explorateur ouverts par CETTE connexion — même
+        // cycle de vie que les terminaux : la mort de la conn les démonte.
+        let mut dir_watches = dirwatch::DirWatches::new(Arc::clone(&self.dir_watch_n));
         // Retour des spawns dispatchés (TermEvt::Spawned) + fins de flux
         // PTY (TermEvt::Done) — un seul canal préserve l'ordre relatif.
         let (term_evt_tx, mut term_evt_rx) =
@@ -926,6 +1138,16 @@ impl Daemon {
                                 Self::send_resp(&outbox, &Response::err(req.id, format!("{e:#}")))?;
                             }
                         }
+                        continue;
+                    }
+                    // Watch FS explorateur : inline comme le terminal —
+                    // l'état vit dans `dir_watches` et les pushes sortent
+                    // par l'outbox de cette connexion (jamais de dispatch
+                    // concurrent, jamais de journalisation).
+                    if let Some(resp) =
+                        self.h_dir_watch(&mut dir_watches, &req, &outbox).await
+                    {
+                        Self::send_resp(&outbox, &resp)?;
                         continue;
                     }
                     // Terminal : input/resize/close inline (l'ordre des
@@ -1428,6 +1650,28 @@ pub async fn janitor(daemon: Arc<Daemon>) {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Watchdog « tour silencieux » ([watchdog] de config.toml) : à chaque
+/// `check_secs`, chaque session en tour ouvert (working/compacting)
+/// est mesurée sur son silence d'events agent — `Session::watchdog_tick`
+/// journalise et nudge « continue your task » au-delà de
+/// `silence_secs` (session/watch.rs). Purement consultatif : la boucle
+/// n'écrit rien d'autre que via les méthodes de Session.
+pub async fn watchdog(daemon: Arc<Daemon>) {
+    let cfg = daemon.watchdog.clone();
+    let check = std::time::Duration::from_secs(cfg.check_secs.max(5));
+    loop {
+        tokio::time::sleep(check).await;
+        if !cfg.enabled {
+            continue;
+        }
+        let sessions: Vec<Arc<Session>> =
+            daemon.sessions.read().await.values().cloned().collect();
+        for s in &sessions {
+            s.watchdog_tick(&cfg);
         }
     }
 }

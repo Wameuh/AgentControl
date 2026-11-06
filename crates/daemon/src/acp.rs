@@ -91,6 +91,9 @@ pub enum Mapped {
         title: Option<String>,
         kind: Option<String>,
         locations: Option<Vec<String>>,
+        /// rawInput formaté (commande, paramètres) — journalisé sur
+        /// l'event tool_call pour l'affichage du bloc déplié.
+        input: Option<String>,
     },
     /// Rien à journaliser
     Ignore,
@@ -141,6 +144,7 @@ pub fn map_update(update: &Value) -> Mapped {
                     })
                     .unwrap_or_default()
             });
+            let input = update.get("rawInput").and_then(fmt_input);
             Mapped::ToolUpdate {
                 call_id,
                 status,
@@ -149,6 +153,7 @@ pub fn map_update(update: &Value) -> Mapped {
                 title: Some(title),
                 kind: Some(kind),
                 locations,
+                input,
             }
         }
         "tool_call_update" => {
@@ -167,6 +172,7 @@ pub fn map_update(update: &Value) -> Mapped {
                 title: update.get("title").and_then(Value::as_str).map(String::from),
                 kind: update.get("kind").and_then(Value::as_str).map(String::from),
                 locations: None,
+                input: update.get("rawInput").and_then(fmt_input),
             }
         }
         "plan" => {
@@ -386,8 +392,22 @@ fn clip(s: &str, max: usize) -> String {
 /// Rend un rawInput ACP lisible : champ notable seul → la valeur brute ;
 /// plusieurs champs → "clé: valeur" par ligne ; sinon JSON compacté.
 fn fmt_detail(v: &Value) -> Option<String> {
+    fmt_raw_input(v, 1500, 400, 800)
+}
+
+/// Même forme que `fmt_detail` mais bornes larges : le journal garde la
+/// commande quasiment entière (les heredocs/scripts longs sont repliés
+/// côté client, pas tronqués ici à 400 chars).
+fn fmt_input(v: &Value) -> Option<String> {
+    fmt_raw_input(v, 12_000, 12_000, 2000)
+}
+
+/// Rend un rawInput ACP lisible : champ notable seul → la valeur brute ;
+/// plusieurs champs → "clé: valeur" par ligne ; sinon JSON compacté.
+/// `single`/`field`/`json` = bornes de clip par forme.
+fn fmt_raw_input(v: &Value, single: usize, field: usize, json: usize) -> Option<String> {
     match v {
-        Value::String(s) if !s.is_empty() => Some(clip(s, 1500)),
+        Value::String(s) if !s.is_empty() => Some(clip(s, single)),
         Value::Object(m) => {
             const KEYS: [&str; 18] = [
                 "command", "cmd", "file_path", "path", "file", "url", "uri",
@@ -398,7 +418,7 @@ fn fmt_detail(v: &Value) -> Option<String> {
             for k in KEYS {
                 if let Some(s) = m.get(k).and_then(Value::as_str) {
                     if !s.is_empty() {
-                        lines.push((k, clip(s, 400)));
+                        lines.push((k, clip(s, field)));
                     }
                 }
             }
@@ -408,7 +428,7 @@ fn fmt_detail(v: &Value) -> Option<String> {
                     if js == "{}" {
                         None
                     } else {
-                        Some(clip(&js, 800))
+                        Some(clip(&js, json))
                     }
                 }
                 1 => Some(lines[0].1.clone()),
@@ -426,7 +446,7 @@ fn fmt_detail(v: &Value) -> Option<String> {
             if js == "[]" {
                 None
             } else {
-                Some(clip(&js, 800))
+                Some(clip(&js, json))
             }
         }
         Value::Number(n) => Some(n.to_string()),

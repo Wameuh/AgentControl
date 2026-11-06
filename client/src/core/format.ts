@@ -213,6 +213,32 @@ export function mdRender(src: string): string {
   }
 }
 
+/** Markdown → texte prononçable (TTS #138) : blocs de code, markup et
+ *  URLs exclus — la voix lit la prose, ni la syntaxe ni le code. */
+export function speechText(src: string): string {
+  return src
+    .replace(/```[\s\S]*?(?:```|$)/g, " ")
+    .replace(/`([^`\n]+)`/g, "$1")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s*(?:\*{3,}|-{3,}|_{3,})$/gm, " ")
+    .replace(/^\s*>\s?/gm, "")
+    .replace(/^\s*(?:[-*+]|\d+[.)])\s+/gm, "")
+    .replace(/^\s*\|?[\s:|-]+\|[\s:|-]*$/gm, " ")
+    .replace(/\|/g, " ")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\b__([^_]+)__\b/g, "$1")
+    .replace(/\*([^*\n]+)\*/g, "$1")
+    .replace(/(^|[^\w])_([^_\n]+)_(?=[^\w]|$)/g, "$1$2")
+    .replace(/~~([^~]+)~~/g, "$1")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 /** Extensions affichées en aperçu image (data URL — pas de script dans <img>). */
 export const IMG_MIME: Record<string, string> = {
   png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
@@ -235,3 +261,20 @@ export const fmtSize = (n: number) =>
 
 export const fmtTok = (n: number) =>
   n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n);
+
+/** Durée courte pour les tooltips (âge d'un waiter, #189) :
+ *  "34 s", "12 min", "1 h 05", "2 j". < 1 s → "0 s" (l'appelant
+ *  affiche « à l'instant »). */
+export const fmtDur = (secs: number): string => {
+  const s = Math.max(0, Math.round(secs));
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min`;
+  if (s < 86400) {
+    const h = Math.floor(s / 3600);
+    const m = Math.round((s % 3600) / 60);
+    if (m === 0) return `${h} h`;
+    if (m === 60) return `${h + 1} h`;
+    return `${h} h ${String(m).padStart(2, "0")}`;
+  }
+  return `${Math.floor(s / 86400)} j`;
+};

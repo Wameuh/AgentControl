@@ -6,9 +6,14 @@
 import { $, dlgErr, showErr } from "../core/dom";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
-import type { AgentOpt, SessionMeta } from "../core/types";
+import type { AgentCaps, AgentOpt, SessionMeta } from "../core/types";
 import { t } from "../i18n";
+import { costFor, ensureCosts } from "./modelcosts";
+import { catalogFor, ensureCatalog } from "./modelcatalog";
 import type { GroupStore } from "./groups";
+
+/** Valeur sentinelle des selects mode/modèle : saisie libre. */
+const CUSTOM = "__custom";
 
 export class NewSessionDialog {
   /** Rafraîchit la sidebar après création (injecté). */
@@ -37,6 +42,93 @@ export class NewSessionDialog {
     return call<AgentOpt[]>("list_agents", conn ? { conn } : {});
   }
 
+  /** Agents du dernier chargement — `caps` alimente les selects par profil. */
+  private agents: AgentOpt[] = [];
+
+  /** Valeurs annoncées par le profil choisi pour `kind` ("mode"|"model") :
+   *  options de config (id|category, portent des labels) en priorité,
+   *  complétées par la liste brute modes/models du cache. `cur` = la
+   *  valeur courante rapportée par l'agent (présélection). */
+  private capValues(kind: "mode" | "model"): {
+    vals: { v: string; label: string }[];
+    cur?: string;
+  } {
+    const caps: AgentCaps | undefined = this.agents.find(
+      (a) => a.id === ($("f-agent") as HTMLSelectElement).value,
+    )?.caps;
+    const co = caps?.config_options?.find((o) => o.id === kind || o.category === kind);
+    const vals = (co?.options ?? []).map((o) => ({ v: o.value, label: o.name || o.value }));
+    for (const o of (kind === "mode" ? caps?.modes : caps?.models) ?? []) {
+      if (!vals.some((x) => x.v === o.value)) vals.push({ v: o.value, label: o.name || o.value });
+    }
+    return {
+      vals,
+      cur:
+        co?.currentValue ||
+        (kind === "mode" ? caps?.current_mode : caps?.current_model) ||
+        undefined,
+    };
+  }
+
+  /** Valeur effective d'un champ mode/model : le select quand il est
+   *  visible (hors entrée « custom »), sinon la saisie libre. */
+  private fieldValue(kind: "mode" | "model"): string {
+    const sel = $(`f-${kind}-sel`) as HTMLSelectElement;
+    const inp = $(`f-${kind}`) as HTMLInputElement;
+    return sel.hidden || sel.value === CUSTOM ? inp.value : sel.value;
+  }
+
+  /** Bascule f-mode/f-model en <select> alimenté par les capacités de
+   *  l'agent choisi — l'entrée « custom » du select rend la saisie
+   *  libre ; agent sans annonce → input tel quel (comportement inchangé). */
+  private applyAgentCaps() {
+    const conn = ($("f-conn") as HTMLSelectElement).value;
+    const agent = ($("f-agent") as HTMLSelectElement).value;
+    for (const kind of ["mode", "model"] as const) {
+      const inp = $(`f-${kind}`) as HTMLInputElement;
+      const sel = $(`f-${kind}-sel`) as HTMLSelectElement;
+      const prev = this.fieldValue(kind);
+      const { vals, cur } = this.capValues(kind);
+      sel.innerHTML = "";
+      if (!vals.length) {
+        sel.hidden = true;
+        inp.hidden = false;
+        continue;
+      }
+      // Option « défaut » en tête : valeur vide = laisser l'agent
+      // décider — jamais availableModes[0] imposé à la place du défaut.
+      const curLabel = cur ? vals.find((it) => it.v === cur)?.label : undefined;
+      const d = document.createElement("option");
+      d.value = "";
+      d.textContent = curLabel ? `${t("opt_default")} (${curLabel})` : t("opt_default");
+      sel.appendChild(d);
+      for (const it of vals) {
+        const o = document.createElement("option");
+        o.value = it.v;
+        const cost = kind === "model" ? costFor(it.v, conn, agent) : undefined;
+        o.textContent = it.label + (cost ? ` · ${cost.label}` : "");
+        if (cost?.detail) o.title = cost.detail;
+        sel.appendChild(o);
+      }
+      const c = document.createElement("option");
+      c.value = CUSTOM;
+      c.textContent = t("opt_custom");
+      sel.appendChild(c);
+      sel.hidden = false;
+      // Conserver la valeur déjà saisie : dans la liste → option ; hors
+      // liste mais non vide → « custom » (le texte reste visible).
+      // Vide → « défaut » (première option), rien n'est envoyé.
+      if (vals.some((it) => it.v === prev)) sel.value = prev;
+      else if (prev) sel.value = CUSTOM;
+      inp.hidden = sel.value !== CUSTOM;
+    }
+    // Coûts du profil affiché — re-render des selects à l'arrivée
+    // (suffixe « · coût » des options modèle, cf. renderModelList).
+    ensureCosts(conn, agent, () => {
+      if (($("dlg-new") as HTMLDialogElement).open) this.applyAgentCaps();
+    });
+  }
+
   /** Placeholder unique dans le select agent (chargement / erreur). */
   private agentPlaceholder(msg: string) {
     const sel = $("f-agent") as HTMLSelectElement;
@@ -48,6 +140,7 @@ export class NewSessionDialog {
   }
 
   private renderAgents(agents: AgentOpt[], keep?: string) {
+    this.agents = agents;
     const sel = $("f-agent") as HTMLSelectElement;
     sel.innerHTML = "";
     for (const a of agents) {
@@ -59,6 +152,7 @@ export class NewSessionDialog {
     }
     if (!agents.length) this.agentPlaceholder(t("agents_failed"));
     if (keep && [...sel.options].some((o) => o.value === keep)) sel.value = keep;
+    this.applyAgentCaps();
   }
 
   /** Remplit le select : placeholder "chargement…" pendant l'appel ;
@@ -98,24 +192,69 @@ export class NewSessionDialog {
     await this.fillAgents(effConn, ref?.agent);
     if (ref) ($("f-cwd") as HTMLInputElement).value = ref.cwd;
     // Suggestions de modèles : union des config_options connues des sessions
-    const sess = await call<SessionMeta[]>("list_sessions").catch(() => [] as SessionMeta[]);
-    const seen = new Set<string>();
+    this.modelSessions = await call<SessionMeta[]>("list_sessions").catch(() => [] as SessionMeta[]);
+    this.renderModelList();
+    ($("dlg-new") as HTMLDialogElement).showModal();
+  }
+
+  /** Sessions sources des suggestions de modèles (union des
+   *  config_options « model »), mémorisées pour renderModelList. */
+  private modelSessions: SessionMeta[] = [];
+
+  /** Remplit le datalist #model-list : dédup par valeur, libellé
+   *  « nom · coût » quand le catalogue du profil de la session source
+   *  est connu (model_costs). Re-rendu à l'arrivée des coûts. */
+  private renderModelList() {
     const dl = $("model-list");
     dl.innerHTML = "";
-    for (const s of sess) {
+    const seen = new Set<string>();
+    const pairs = new Set<string>();
+    for (const s of this.modelSessions) {
       for (const co of s.config_options ?? []) {
         if (co.id !== "model" && co.category !== "model") continue;
         for (const o of co.options) {
           if (seen.has(o.value)) continue;
           seen.add(o.value);
+          const cost = costFor(o.value, s.conn ?? "", s.agent);
           const el = document.createElement("option");
           el.value = o.value;
-          el.label = o.name || o.value;
+          el.label = (o.name || o.value) + (cost ? ` · ${cost.label}` : "");
+          if (cost?.detail) el.title = cost.detail;
+          dl.appendChild(el);
+        }
+      }
+      if (s.agent) pairs.add(`${s.conn ?? ""} ${s.agent}`);
+    }
+    // Variantes catalogue-only des profils représentés (model_catalog) —
+    // badgées, applicables via le side-channel démon à la création.
+    for (const p of pairs) {
+      const i = p.indexOf(" ");
+      const conn = p.slice(0, i);
+      const agent = p.slice(i + 1);
+      const cat = catalogFor(conn, agent);
+      if (cat) {
+        for (const e of Object.values(cat)) {
+          if (seen.has(e.value)) continue;
+          seen.add(e.value);
+          const el = document.createElement("option");
+          el.value = e.value;
+          el.label = `${e.label} · ${t("catalog_badge")}`;
           dl.appendChild(el);
         }
       }
     }
-    ($("dlg-new") as HTMLDialogElement).showModal();
+    // Coûts + catalogues des profils représentés — re-render du datalist
+    // à l'arrivée (dialogue encore ouvert seulement).
+    for (const p of pairs) {
+      const i = p.indexOf(" ");
+      const conn = p.slice(0, i);
+      const agent = p.slice(i + 1);
+      const rerender = () => {
+        if (($("dlg-new") as HTMLDialogElement).open) this.renderModelList();
+      };
+      ensureCosts(conn, agent, rerender);
+      ensureCatalog(conn, agent, rerender);
+    }
   }
 
   // Changement de serveur cible → recharger les agents de ce serveur. Token de
@@ -136,6 +275,14 @@ export class NewSessionDialog {
         dlgErr("f-err", String(e));
       }
     });
+
+    $("f-agent").addEventListener("change", () => this.applyAgentCaps());
+    for (const kind of ["mode", "model"] as const) {
+      ($(`f-${kind}-sel`) as HTMLSelectElement).onchange = (e) => {
+        const sel = e.target as HTMLSelectElement;
+        ($(`f-${kind}`) as HTMLInputElement).hidden = sel.value !== CUSTOM;
+      };
+    }
 
     $("btn-new-session").onclick = () => {
       this.pendingGroup = null;
@@ -181,8 +328,8 @@ export class NewSessionDialog {
             cwd,
             conn: grp?.conn ?? selConn,
             title: ($("f-title") as HTMLInputElement).value || cwd.split("/").pop(),
-            mode: ($("f-mode") as HTMLInputElement).value || undefined,
-            model: ($("f-model") as HTMLInputElement).value || undefined,
+            mode: this.fieldValue("mode") || undefined,
+            model: this.fieldValue("model") || undefined,
             prompt: ($("f-prompt") as HTMLTextAreaElement).value || undefined,
           })
       ).catch((er) => {

@@ -272,6 +272,22 @@ impl PrRegistry {
         Ok(true)
     }
 
+    /// `true` si la référence a déjà une entrée (clé numérique ou fiche
+    /// portant son Change-Id). Une entrée connue court-circuite la
+    /// vérification forge — son existence a déjà été tranchée à sa
+    /// création ; la détection ne fait alors que (ré)attribuer.
+    pub fn known(&self, r: &PrRef) -> bool {
+        let g = self.map.lock().unwrap();
+        match r
+            .change_id
+            .as_deref()
+            .and_then(|c| find_by_cid(&g, r.forge, &r.host, c))
+        {
+            Some(_) => true,
+            None => g.contains_key(&ref_key(r)),
+        }
+    }
+
     /// Statut vu dans une sortie outil (ligne « Merged pull request
     /// o/r#N », « Merged merge request », URL + « merged » pour Gerrit) :
     /// fait objectif, pas une attribution — met à jour `status` quelle
@@ -466,8 +482,9 @@ fn cid_key(forge: &str, host: &str, change_id: &str) -> String {
     )
 }
 
-/// Clé d'une référence détectée — même règle que `entry_key`.
-fn ref_key(r: &PrRef) -> String {
+/// Clé d'une référence détectée — même règle que `entry_key`. Sert
+/// aussi de clé de dédup de la file de vérification (server/prs.rs).
+pub(crate) fn ref_key(r: &PrRef) -> String {
     if r.pr == 0 {
         if let Some(cid) = r.change_id.as_deref() {
             return cid_key(r.forge, &r.host, cid);

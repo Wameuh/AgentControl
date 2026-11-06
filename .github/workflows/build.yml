@@ -83,11 +83,23 @@ jobs:
       - uses: actions/checkout@v4
 
       # Idem daemon : suffixe rc dans la version buildée. Windows exclu
-      # — MSI/NSIS exigent une version numérique, l'injection casserait
-      # le bundling (artefacts rc Windows gardent X.Y.Z en interne).
+      # de l'injection — MSI/NSIS exigent une version numérique : son
+      # identité rc passe par AGENTCONTROL_RC compilée dans le binaire
+      # (app_version "X.Y.Z-rc.K", version bundle toujours "X.Y.Z").
       - name: Version RC
         if: runner.os == 'Linux' && contains(github.ref_name, '-rc.')
         run: python3 client/tools/bump_version.py "${GITHUB_REF_NAME#v}"
+
+      # Identité rc compilée : AGENTCONTROL_RC=K → app_version répond
+      # « X.Y.Z-rc.K » (updater) sans toucher la version bundle —
+      # sinon un client rc Windows s'identifiait « X.Y.Z » et restait
+      # « à jour » à vie (semver : rc < stable à X.Y.Z égal). Posée
+      # aussi sur Linux : inoffensif, l'injection y porte déjà le
+      # suffixe et la garde anti double-suffixe l'ignore.
+      - name: Identité RC compilée
+        if: contains(github.ref_name, '-rc.')
+        shell: bash
+        run: echo "AGENTCONTROL_RC=${GITHUB_REF_NAME##*-rc.}" >> "$GITHUB_ENV"
 
       - name: Deps Tauri (Ubuntu)
         if: runner.os == 'Linux'
@@ -158,7 +170,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # Pas d'injection de version rc (idem Windows) : CFBundleVersion
-      # exige du numérique — un artefact rc macOS s'identifie X.Y.Z.
+      # exige du numérique — l'identité rc est compilée dans le binaire
+      # via AGENTCONTROL_RC (cf. job client).
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -170,6 +183,10 @@ jobs:
           cache-dependency-path: client/package-lock.json
       - run: npm ci
         working-directory: client
+      - name: Identité RC compilée
+        if: contains(github.ref_name, '-rc.')
+        shell: bash
+        run: echo "AGENTCONTROL_RC=${GITHUB_REF_NAME##*-rc.}" >> "$GITHUB_ENV"
       - name: Build Tauri
         working-directory: client
         run: npx tauri build
@@ -191,7 +208,8 @@ jobs:
           if-no-files-found: error
 
   # -----------------------------------------------------------------
-  # Client Android : APK aarch64 (debug-signé, installable directement).
+  # Client Android : APK aarch64 (release-signé via keystore CI quand
+  # les secrets ANDROID_KEYSTORE_* sont présents, debug sinon hors tag).
   # gen/android n'est pas commité → `tauri android init` dans le job.
   # -----------------------------------------------------------------
   client-android:
@@ -234,11 +252,135 @@ jobs:
         working-directory: client
       - name: tauri android init + build APK
         working-directory: client
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           npx tauri android init --ci
+          # Caméra pour le scan QR d'appairage — manifest généré, patch
+          # post-init (gen/android non commité). La webview gère le grant
+          # runtime via onPermissionRequest (wry).
+          sed -i 's|</manifest>|    <uses-permission android:name="android.permission.CAMERA"/>\n</manifest>|' \
+            src-tauri/gen/android/app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.CAMERA' src-tauri/gen/android/app/src/main/AndroidManifest.xml
+          # Pas de backup adb/cloud : app_data contient la clé privée
+          # ed25519 et connections.json (secrets en clair) — le template
+          # Tauri n'a pas d'allowBackup (défaut true). Patch post-init.
+          sed -i 's|<application|<application\n        android:allowBackup="false"|' \
+            src-tauri/gen/android/app/src/main/AndroidManifest.xml
+          grep -q 'android:allowBackup="false"' \
+            src-tauri/gen/android/app/src/main/AndroidManifest.xml
           # Icônes commitées (tauri icon) → projet généré
           cp -r src-tauri/icons/android/* src-tauri/gen/android/app/src/main/res/
-          npx tauri android build --apk --debug --target aarch64
+          # ── Signature release : sans keystore CI, chaque APK était
+          # signé par le debug keystore éphémère du runner → signature
+          # différente à chaque build → Android refuse l'update
+          # in-place (INSTALL_FAILED_UPDATE_INCOMPATIBLE). Avec les
+          # secrets ANDROID_KEYSTORE_* (upload keystore, cf.
+          # client/tools/android-upload-keystore.sh) on build la
+          # variante release et on signe l'APK par apksigner — le
+          # projet Gradle généré n'a pas de signingConfig. Sans
+          # secrets : builds PR/main → --debug (artefact de test
+          # seulement) ; tags v* → fail-closed, une release Android
+          # non signée ne doit plus jamais être publiée.
+          SIGNED=0
+          if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ]; then
+            SIGNED=1
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "::error::Secrets ANDROID_KEYSTORE_* absents — APK release non signable. Générer le keystore via client/tools/android-upload-keystore.sh puis gh secret set (cf. AGENTS.md § Releases)."
+            exit 1
+          else
+            echo "::warning::ANDROID_KEYSTORE_BASE64 absent — APK --debug à signature éphémère (build de test, non publié)."
+          fi
+          if [ "$SIGNED" = 1 ]; then
+            echo "ANDROID_SIGNED=1" >> "$GITHUB_ENV"
+            MODE=""
+          else
+            echo "ANDROID_SIGNED=0" >> "$GITHUB_ENV"
+            MODE="--debug"
+          fi
+          npx tauri android build --apk $MODE --target aarch64
+          # ── Spike ac-stt : le plugin local plugins/ac-stt doit être
+          # inclus sans patch — son build.rs émet
+          # cargo:android_library_path qui remonte en
+          # DEP_TAURI_PLUGIN_AC_STT_ANDROID_LIBRARY_PATH dans le build.rs
+          # de l'app, lequel écrit tauri.settings.gradle. Fail-closed.
+          grep -q ":tauri-plugin-ac-stt" src-tauri/gen/android/tauri.settings.gradle
+          grep -q 'implementation(project(":tauri-plugin-ac-stt"))' \
+            src-tauri/gen/android/app/tauri.build.gradle.kts
+          # RECORD_AUDIO provient du manifest du module plugin, mergé
+          # dans l'app par le manifest merger gradle.
+          find src-tauri/gen/android/app/build/intermediates \
+            -name "AndroidManifest.xml" -path "*merged*" \
+            -exec grep -l "RECORD_AUDIO" {} \; | grep -q .
+          # allowBackup="false" doit survivre au manifest merger.
+          find src-tauri/gen/android/app/build/intermediates \
+            -name "AndroidManifest.xml" -path "*merged*" \
+            -exec grep -l 'allowBackup="false"' {} \; | grep -q .
+          # L'AAR sherpa-onnx doit être lié : jniLibs arm64 dans l'APK.
+          find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" \
+            -exec sh -c 'unzip -l "$1" | grep -q "arm64-v8a/libsherpa-onnx-jni.so"' _ {} \;
+          # Signature post-build (mode release uniquement) : l'APK
+          # sort non signé (*-unsigned.apk) → zipalign puis apksigner
+          # avec le keystore CI. Le certificat est identique à chaque
+          # build → les updates in-place redeviennent possibles.
+          if [ "$SIGNED" = 1 ]; then
+            BT=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)
+            KS="$RUNNER_TEMP/agentcontrol-upload-keystore.jks"
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$KS"
+            mapfile -t APKLIST < <(find src-tauri/gen/android/app/build/outputs/apk -name "*-unsigned.apk")
+            if [ "${#APKLIST[@]}" -eq 0 ]; then
+              echo "::error::aucun APK *-unsigned.apk produit par le build release"
+              exit 1
+            fi
+            for apk in "${APKLIST[@]}"; do
+              echo "signature de $apk"
+              "$BT/zipalign" -f -p 4 "$apk" "$apk.aligned"
+              "$BT/apksigner" sign \
+                --ks "$KS" \
+                --ks-key-alias "$ANDROID_KEY_ALIAS" \
+                --ks-pass "pass:$ANDROID_KEYSTORE_PASSWORD" \
+                --key-pass "pass:${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}" \
+                --out "$apk.signed" "$apk.aligned"
+              mv "$apk.signed" "$apk"
+              rm -f "$apk.aligned"
+            done
+          fi
+      - name: Vérifier signature et versionCode de l'APK
+        working-directory: client
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [ "${ANDROID_SIGNED:-0}" != "1" ]; then
+            echo "APK non signé (build de test sans keystore) — vérification ignorée."
+            exit 0
+          fi
+          set -euo pipefail
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)
+          KS="$RUNNER_TEMP/agentcontrol-upload-keystore.jks"
+          # Empreinte SHA-256 attendue du certificat signataire —
+          # comparée au digest apksigner : un APK silencieusement
+          # signé par une autre clé (ex. debug) fait échouer le job.
+          EXPECT=$("$JAVA_HOME/bin/keytool" -list -v -keystore "$KS" \
+            -alias "$ANDROID_KEY_ALIAS" -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+            | awk '/SHA256:/{print $2; exit}' | tr -d ':' | tr 'A-F' 'a-f')
+          mapfile -t APKLIST < <(find src-tauri/gen/android/app/build/outputs/apk -name "*.apk")
+          for apk in "${APKLIST[@]}"; do
+            echo "== $apk"
+            "$BT/apksigner" verify --print-certs "$apk"
+            GOT=$("$BT/apksigner" verify --print-certs "$apk" \
+              | grep -oE 'SHA-256 digest: [0-9a-f]+' | head -1 \
+              | grep -oE '[0-9a-f]{64}')
+            if [ "$GOT" != "$EXPECT" ]; then
+              echo "::error::certificat signataire inattendu ($GOT ≠ $EXPECT)"
+              exit 1
+            fi
+            "$BT/aapt" dump badging "$apk" 2>/dev/null \
+              | grep -E "^package:|versionCode" || true
+          done
       - name: Renommer l'APK avec la version
         working-directory: client
         run: |
@@ -246,8 +388,9 @@ jobs:
           # hors tag : suffixe SHA pour distinguer les builds de test (PR/main)
           SUFFIX=""
           if [ "${GITHUB_REF_NAME#v}" = "$GITHUB_REF_NAME" ]; then SUFFIX="-${GITHUB_SHA:0:7}"; fi
+          KIND="debug"; [ "${ANDROID_SIGNED:-0}" = "1" ] && KIND="release"
           find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" \
-            -exec sh -c 'mv "$1" "$(dirname "$1")/AgentControl_'"$VER$SUFFIX"'_aarch64-debug.apk"' _ {} \;
+            -exec sh -c 'mv "$1" "$(dirname "$1")/AgentControl_'"$VER$SUFFIX"'_aarch64-'"$KIND"'.apk"' _ {} \;
           find src-tauri/gen/android/app/build/outputs/apk -name "*.apk"
       - uses: actions/upload-artifact@v4
         with:

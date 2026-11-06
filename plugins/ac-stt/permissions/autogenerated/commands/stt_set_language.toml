@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-stt-set-language"
+description = "Enables the stt_set_language command without any pre-configured scope."
+commands.allow = ["stt_set_language"]
+
+[[permission]]
+identifier = "deny-stt-set-language"
+description = "Denies the stt_set_language command without any pre-configured scope."
+commands.deny = ["stt_set_language"]

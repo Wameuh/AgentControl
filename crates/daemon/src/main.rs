@@ -1,5 +1,8 @@
 mod acp;
+mod caps;
+mod catalogue;
 mod components;
+mod costs;
 mod forges;
 mod journal;
 mod logging;
@@ -50,6 +53,11 @@ struct Config {
     /// via setcfg `ac.compact_*` (compact.json).
     #[serde(default)]
     compact: server::CompactCfg,
+    /// Watchdog « tour silencieux » : session working/compacting sans
+    /// event agent depuis silence_secs → log + nudge « continue »
+    /// (session/watch.rs, server::watchdog).
+    #[serde(default)]
+    watchdog: server::WatchdogCfg,
     /// Forges de review au-delà de GitHub : `[[forges]]` {type, hosts,
     /// token_env} — détection des URLs GitLab/Gerrit dans les sorties
     /// outils (voir docs/forges.md). github.com + gitlab.com implicites.
@@ -67,6 +75,17 @@ struct AgentConf {
     /// (`[agents.<id>.compact]`) — session > agent > global.
     #[serde(default)]
     compact: server::CompactPartial,
+    /// Agents vivants simultanés max pour ce profil (défaut 6, 0 = illimité).
+    #[serde(default)]
+    max_instances: Option<u32>,
+    /// Commande liste du catalogue complet des modèles (variantes hors
+    /// annonce ACP) — ex. "devin models list".
+    #[serde(default)]
+    catalogue_cmd: Option<String>,
+    /// Template shell `{native_sid}`/`{model}` pour persister un modèle
+    /// catalogue-only côté provider (ex. "devin -r {native_sid} --model {model}").
+    #[serde(default)]
+    model_override_cmd: Option<String>,
 }
 
 fn default_tcp() -> String {
@@ -89,6 +108,7 @@ impl Default for Config {
             a2a: server::A2aCfg::default(),
             backlog_orchestrator: server::OrchCfg::default(),
             compact: server::CompactCfg::default(),
+            watchdog: server::WatchdogCfg::default(),
             forges: Vec::new(),
         }
     }
@@ -205,6 +225,33 @@ fn default_agents() -> HashMap<String, AgentProfile> {
             command: vec!["devin".into(), "acp".into()],
             env: devin_env,
             compact: server::CompactPartial::default(),
+            max_instances: server::DEFAULT_MAX_INSTANCES,
+            catalogue_cmd: None,
+            model_override_cmd: None,
+        },
+    );
+    // Cursor CLI — ACP natif (`agent acp` / `cursor-agent acp`, même
+    // binaire : `agent` est un alias d'install). argv[0] résolu en
+    // chemin absolu : `agent` est un nom générique (collision possible)
+    // — la résolution fige le binaire concret trouvé sur le PATH au
+    // boot, et `available` reflète l'existence réelle. La commande
+    // reste surchargeable : `[agents.cursor]` dans config.toml ou le
+    // composant interne `agents` (options → composants).
+    let cursor_bin = ["cursor-agent", "agent"]
+        .iter()
+        .find_map(|c| server::misc::command_path(c))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "cursor-agent".into());
+    m.insert(
+        "cursor".into(),
+        AgentProfile {
+            name: "Cursor CLI".into(),
+            command: vec![cursor_bin, "acp".into()],
+            env: HashMap::new(),
+            compact: server::CompactPartial::default(),
+            max_instances: server::DEFAULT_MAX_INSTANCES,
+            catalogue_cmd: None,
+            model_override_cmd: None,
         },
     );
     m
@@ -352,6 +399,9 @@ async fn serve(root: &std::path::Path) -> Result<()> {
                 command: c.command,
                 env: c.env,
                 compact: c.compact,
+                max_instances: c.max_instances.unwrap_or(server::DEFAULT_MAX_INSTANCES),
+                catalogue_cmd: c.catalogue_cmd,
+                model_override_cmd: c.model_override_cmd,
             },
         );
     }
@@ -365,13 +415,14 @@ async fn serve(root: &std::path::Path) -> Result<()> {
         cfg.bind_tcp.clone(),
         cfg.backlog_orchestrator.clone(),
         cfg.compact.clone(),
+        cfg.watchdog.clone(),
     )
     .await?;
     tracing::info!(
         "{} session(s) chargée(s), root={}, agents: {}",
         daemon.sessions.read().await.len(),
         root.display(),
-        daemon.agents.keys().cloned().collect::<Vec<_>>().join(", ")
+        daemon.agents.read().await.keys().cloned().collect::<Vec<_>>().join(", ")
     );
 
     // Socket Unix
@@ -439,6 +490,8 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     let d1 = daemon.clone();
     let d2 = daemon.clone();
     tokio::spawn(async move { server::janitor(d2).await });
+    let d4 = daemon.clone();
+    tokio::spawn(async move { server::watchdog(d4).await });
 
     // Composants managés : orphelins d'un crash éventuel, autostarts et
     // boucle de sondes — après le bind des listeners : l'env injectée

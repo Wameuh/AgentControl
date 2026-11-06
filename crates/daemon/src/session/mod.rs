@@ -6,24 +6,30 @@
 //!   compact.rs — retenue des prompts pendant un /compact agent-side
 //!   config.rs  — mode/modèle/groupe/titre/options de config dynamiques
 //!   pins.rs    — messages épinglés persistés (pinned.json)
+//!   watch.rs   — watchdog « tour silencieux » (events agent, nudge)
 
 mod agent;
 mod compact;
 mod config;
 mod pins;
 mod prompt;
+mod watch;
+
+/// Issue d'un steer_queued — le serveur la traduit en {delivered, reason}.
+pub(crate) use prompt::SteerOutcome;
 
 use anyhow::{Context, Result};
 use proto::{Event, EventKind, SessionMeta};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use tokio::process::Child;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::error;
 
+use crate::caps::CapsRegistry;
 use crate::journal::{self, Journal};
 use crate::server::{CompactPartial, CompactPolicy, CompactSrc};
 use self::compact::compact_done_text;
@@ -42,6 +48,27 @@ struct CompactHold {
     used_at_start: Option<u64>,
     timer: tokio::task::JoinHandle<()>,
     auto: bool,
+}
+
+/// Retenue active après un tour `session/prompt` en échec — miroir de
+/// `CompactHold` : le drain s'arrête en conservant `busy`, les envois
+/// s'enfilent jusqu'à la sortie du hold (timer de retry pour
+/// `rate_limit`, action explicite sinon). `timer` : None = jamais de
+/// retry automatique (model/auth/other — seul l'utilisateur lève).
+struct ErrorHold {
+    timer: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Mode/modèle à (ré-)affirmer via ACP après le handshake de spawn.
+/// `quiet` : true pour les ré-affirmations de respawn (resume/wake/
+/// clear/fork/boot) — la valeur peut venir d'un report agent hors des
+/// options annoncées, rien à signaler ; false à la création, où une
+/// demande non résoluble mérite un warning explicite.
+#[derive(Clone, Default)]
+pub(crate) struct SpawnCfg {
+    pub mode: Option<String>,
+    pub model: Option<String>,
+    pub quiet: bool,
 }
 
 pub struct Session {
@@ -80,6 +107,28 @@ pub struct Session {
     /// Requêtes session/prompt en vol (runner + steer concurrents) —
     /// l'état ne repasse idle que quand toutes sont terminées.
     active_prompts: AtomicU64,
+    /// `session/rename` ACP différé : le titre local est posé d'office
+    /// (meta) mais l'appel agent attend la fin du tour en vol — un RPC
+    /// pendant session/prompt peut avorter le tour silencieusement
+    /// (#183). Posé entre deux tours ou à la fin du drain.
+    pending_rename: Mutex<Option<String>>,
+    /// `session/rename` déclaré supporté par l'agent : un premier refus
+    /// « method not found » (-32601) le marque non supporté pour la
+    /// durée de la session — l'appel est optionnel, pas la peine de
+    /// retenter (et de risquer le stall) à chaque rename (#183).
+    rename_supported: std::sync::atomic::AtomicBool,
+    /// Sorties visibles du tour en vol (texte/pensée/tool call) —
+    /// snapshot au départ du `session/prompt` puis comparé à la fin :
+    /// inchangé = tour terminé sans rien produire → tracer (#183),
+    /// end_turn propre et avortement silencieux sinon indistinguables.
+    turn_outputs: AtomicU64,
+    /// Watchdog « tour silencieux » : horloge du dernier event agent
+    /// + flags de l'épisode de silence courant (watch.rs).
+    watch: Mutex<watch::TurnWatch>,
+    /// Tool calls en vol (statut Pending/Running, non terminés) —
+    /// pendant leur attente un silence d'events est normal : le
+    /// watchdog journalise mais ne nudge pas (watch.rs).
+    tool_inflight: Mutex<HashSet<String>>,
     /// Messages en attente d'un tour libre (FIFO) — (texte, provenance) :
     /// un prompt peer drainé ne doit PAS devenir un user_message dans le
     /// journal (son PeerMessage est déjà journalisé côté appelant).
@@ -88,6 +137,15 @@ pub struct Session {
     /// jusqu'au signal de fin (contexte réduit, message, cancel,
     /// timeout) — un prompt livré pendant le compact l'annulerait.
     compacting: Mutex<Option<CompactHold>>,
+    /// Dernier tour en échec : livraison suspendue — le runner a breaké
+    /// en conservant `busy`. Levée par le timer de retry (`rate_limit`)
+    /// ou une action explicite (send user, force, set_model, respawn,
+    /// /clear). Distinct de `compacting` : une session en erreur reste
+    /// « error » (visible) et ne relance pas « continue your task ».
+    error_hold: Mutex<Option<ErrorHold>>,
+    /// Cache des capacités par profil agent (agent_caps.json) —
+    /// alimenté aux handshakes et config_option_update (caps.rs).
+    caps: Arc<CapsRegistry>,
     /// Seuil du compact auto résolu à l'open : global `[compact]` +
     /// override `[agents.<id>.compact]` (server/cfg.rs, CompactSrc) —
     /// l'override session (compact.json, clés `ac.compact_*`) s'applique
@@ -102,6 +160,22 @@ pub struct Session {
     /// sa génération à la courante : périmée → son on_agent_exit se tait
     /// (pas de "agent exited"/dead ni de take() sur le child du successeur).
     spawn_gen: AtomicU64,
+    /// Incrémentée à chaque écriture de `meta.config_options` (réponse
+    /// session/new|load ou event config_option_update) et à chaque
+    /// annonce fraîche `modes`/`models`/`available_*` du handshake —
+    /// permet de distinguer une liste de valeurs FRAÎCHEMENT annoncée
+    /// pendant le spawn courant d'un cache persisté potentiellement
+    /// périmé (le replay pending_config n'y fait un drop définitif que
+    /// sur frais).
+    config_gen: AtomicU64,
+    /// `config_id` → valeur déjà signalée comme refus définitif au
+    /// replay pending_config — déduplique l'event système (une valeur
+    /// impossible ne réémet pas à chaque spawn) et empêche le
+    /// reconcile de la re-pendre. En mémoire seule : un restart du
+    /// démon réémet l'event une fois, acceptable. Nettoyée quand la
+    /// clé est appliquée avec succès, et par revive_rejected_config
+    /// quand une annonce fraîche la rend à nouveau résolvable.
+    config_rejected: Mutex<HashMap<String, String>>,
     /// Baseline du seuil compact : vrai dès qu'un usage_update LIVE a
     /// été vu depuis le dernier spawn. Reset au spawn → le premier
     /// update live compte comme un franchissement quand il est déjà au
@@ -113,10 +187,33 @@ pub struct Session {
     /// : > départ = kill/rebind intervenu pendant SON spawn → la session
     /// appartient au nouveau cycle, l'erreur du spawn doit se taire.
     supplant_mark: AtomicU64,
+    /// Génération du process tué par kill_failed_spawn (handshake raté)
+    /// — son on_agent_exit doit faire le ménage sans poser « dead » ni
+    /// journaliser « agent process exited » : l'état final appartient à
+    /// l'appelant du spawn. CAS par génération : un marqueur périmé ne
+    /// peut pas éteindre l'exit d'un autre process.
+    suppress_exit_gen: AtomicU64,
     /// Réveil (respawn auto sur envoi vers une session "asleep") en cours —
     /// déduplique les envois concurrents : les suivants s'enfilent sans
     /// relancer un second spawn.
     waking: std::sync::atomic::AtomicBool,
+    /// Rejeu catalogue consécutifs + halt — borne la chaîne
+    /// reapply→apply→respawn→reapply quand session/load dégrade en
+    /// session/new à chaque itération (sid instable : store provider
+    /// illisible, sid expirant…). Remis à zéro par toute action
+    /// explicite (sélection modèle, stage, /clear, création).
+    catalogue_reapply_streak: AtomicU64,
+    catalogue_reapply_halted: std::sync::atomic::AtomicBool,
+    /// Override catalogue en vol (sleep→`model_override_cmd`) : le
+    /// process ACP est mort et le `devin -r` tourne — tout spawn
+    /// concurrent violerait l'invariant du side-channel. spawn_agent
+    /// et les chemins de réveil le respectent.
+    catalogue_override_active: std::sync::atomic::AtomicBool,
+    /// Sérialise apply_catalogue_model par session : deux `devin -r`
+    /// concurrents sur le même sid = last-writer-wins incohérent
+    /// entre store provider et meta. Relâché avant le respawn final
+    /// (le reapply interne à ce respawn est séquentiel, pas concurrent).
+    catalogue_apply_lock: tokio::sync::Mutex<()>,
     /// Spawn en vol (process + handshake session/load) — le stdin est posé
     /// avant la fin du handshake : les envois doivent s'enfiler, un drain
     /// livrerait un "Session not found" sur l'agent pas encore prêt.
@@ -187,7 +284,12 @@ impl Session {
     /// Ouvre une session existante sur disque (sans spawn d'agent).
     /// `src` = seuils compact du démon (global + overrides par profil
     /// agent) — résolus contre `meta.agent` puis l'override sidecar.
-    pub fn open(dir: PathBuf, compact_src: &CompactSrc) -> Result<Arc<Self>> {
+    /// `caps` = cache démon des capacités par profil (agent_caps.json).
+    pub fn open(
+        dir: PathBuf,
+        compact_src: &CompactSrc,
+        caps: Arc<CapsRegistry>,
+    ) -> Result<Arc<Self>> {
         let meta: SessionMeta = serde_json::from_str(
             &std::fs::read_to_string(dir.join("meta.json")).context("meta.json illisible")?,
         )?;
@@ -215,15 +317,29 @@ impl Session {
             loading_replay: std::sync::atomic::AtomicBool::new(false),
             busy: std::sync::atomic::AtomicBool::new(false),
             active_prompts: AtomicU64::new(0),
+            pending_rename: Mutex::new(None),
+            rename_supported: std::sync::atomic::AtomicBool::new(true),
+            turn_outputs: AtomicU64::new(0),
+            watch: Mutex::new(watch::TurnWatch::new()),
+            tool_inflight: Mutex::new(HashSet::new()),
             prompt_queue: Mutex::new(std::collections::VecDeque::new()),
             compacting: Mutex::new(None),
+            error_hold: Mutex::new(None),
+            caps,
             compact_base,
             compact_override,
             me: me.clone(),
             spawn_gen: AtomicU64::new(0),
+            config_gen: AtomicU64::new(0),
+            config_rejected: Mutex::new(HashMap::new()),
             usage_seen: std::sync::atomic::AtomicBool::new(false),
             supplant_mark: AtomicU64::new(0),
+            suppress_exit_gen: AtomicU64::new(0),
             waking: std::sync::atomic::AtomicBool::new(false),
+            catalogue_reapply_streak: AtomicU64::new(0),
+            catalogue_reapply_halted: std::sync::atomic::AtomicBool::new(false),
+            catalogue_override_active: std::sync::atomic::AtomicBool::new(false),
+            catalogue_apply_lock: tokio::sync::Mutex::new(()),
             spawning: std::sync::atomic::AtomicBool::new(false),
             runner_active: std::sync::atomic::AtomicBool::new(false),
             wake_pending: std::sync::atomic::AtomicBool::new(false),
@@ -282,10 +398,26 @@ impl Session {
         match self.journal.append(kind) {
             Ok(ev) => {
                 self.note_text_anchor(&ev.kind);
+                if Self::is_agent_output(&ev.kind) {
+                    self.turn_outputs.fetch_add(1, Ordering::SeqCst);
+                }
                 let _ = self.events_tx.send(ev);
             }
             Err(e) => error!("[{}] journal append failed: {e}", self.meta_snapshot().id),
         }
+    }
+
+    /// Production « visible » d'un tour : texte, pensée, tool call.
+    /// Sert à détecter un `end_turn` qui n'a rien produit (#183) —
+    /// un turn mort en silence ressemble sinon à un end_turn propre.
+    fn is_agent_output(kind: &EventKind) -> bool {
+        matches!(
+            kind,
+            EventKind::AgentText { .. }
+                | EventKind::AgentThought { .. }
+                | EventKind::ToolCall { .. }
+                | EventKind::ToolCallUpdate { .. }
+        )
     }
 
     /// Doublon de `is_thought`/`norm` par rapport au dernier bloc texte
@@ -337,15 +469,19 @@ impl Session {
         }
         // Fin de compact signalée par le texte agent : détectée dès que
         // le buffer la contient — le flush peut ne jamais venir si c'est
-        // le dernier message du compact.
+        // le dernier message du compact. Le chunk entrant est testé à
+        // part : accumulé sans séparateur, il peut fusionner un
+        // mot-frontière («…done» + «compact…» → «donecompact») et
+        // masquer le signal que le chunk seul portait.
         let compact_done = kind == "agent"
             && self.compacting.lock().unwrap().is_some()
-            && self
-                .cur_text
-                .lock()
-                .unwrap()
-                .as_ref()
-                .is_some_and(|(_, buf)| compact_done_text(buf));
+            && (compact_done_text(text)
+                || self
+                    .cur_text
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|(_, buf)| compact_done_text(buf)));
         if compact_done {
             self.end_compact("signal agent", false);
         }
@@ -380,12 +516,16 @@ impl Session {
                     text: buf,
                     steer: false,
                     origin: None,
+                    spawn_prompt: false,
                 },
                 _ => EventKind::AgentText { text: buf },
             };
             match self.journal.append(ev_kind) {
                 Ok(ev) => {
                     self.note_text_anchor(&ev.kind);
+                    if Self::is_agent_output(&ev.kind) {
+                        self.turn_outputs.fetch_add(1, Ordering::SeqCst);
+                    }
                     let _ = self.events_tx.send(ev);
                 }
                 Err(e) => error!("journal append failed: {e}"),
@@ -417,10 +557,202 @@ impl Session {
             }
             m.state = state.into();
         }
+        // Transition = nouvel épisode watchdog : l'horloge repart
+        // (un idle ancien ne doit pas faire tirer le premier tour) et
+        // les flags log/nudge de l'épisode clos sont levés.
+        self.watch_state_change();
         self.save_meta();
         self.emit(EventKind::StatusChanged {
             state: state.into(),
         });
+    }
+
+    // -------------------------------------------------------------------
+    // Retenue d'erreur (tour session/prompt en échec)
+    // -------------------------------------------------------------------
+
+    /// Une retenue d'erreur est-elle active (livraison suspendue) ?
+    pub fn error_held(&self) -> bool {
+        self.error_hold.lock().unwrap().is_some()
+    }
+
+    /// Retire la retenue d'erreur (annule le timer de retry s'il y en a
+    /// un). Retourne vrai si une retenue était active.
+    pub(super) fn take_error_hold(&self) -> bool {
+        let h = self.error_hold.lock().unwrap().take();
+        if let Some(h) = &h {
+            if let Some(t) = &h.timer {
+                t.abort();
+            }
+        }
+        h.is_some()
+    }
+
+    /// Pose la retenue d'erreur + état « error » + trace persistée —
+    /// appelé par le drain après un tour en échec, juste avant de
+    /// breaker en conservant `busy`. `retry` = backoff `rate_limit` :
+    /// à l'échéance le hold tombe et le drain relance UN tour, qui
+    /// ré-armera si l'échec persiste. None = jamais de retry
+    /// automatique (model/auth/other).
+    pub(super) fn hold_error(&self, kind: &str, msg: &str) {
+        // Échéance annoncée par le provider (« reset in 15 minutes »,
+        // « at 13:56 UTC »…) : le retry se cale dessus (+ jitter) au
+        // lieu de l'exponentiel — et un échec tombé DANS la fenêtre
+        // annoncée (retry_at persisté > now) est attendu par
+        // construction : ni count incrémenté ni échéance repoussée
+        // (sinon chaque tentative pré-reset achetait un backoff
+        // doublé — cas réel : 7 échecs → 1 h de mort pour un reset à
+        // 15 min). Sans annonce : backoff inchangé.
+        let now = std::time::SystemTime::now();
+        let now_unix = prompt::unix_secs(now);
+        let announced = (kind == "rate_limit")
+            .then(|| prompt::parse_reset_at(msg, now))
+            .flatten()
+            .map(prompt::unix_secs);
+        let prev = self.meta.lock().unwrap().last_error.clone();
+        let prev_rl = prev.as_ref().filter(|le| le.kind == "rate_limit");
+        let in_window = kind == "rate_limit"
+            && prev_rl
+                .and_then(|le| le.retry_at)
+                .is_some_and(|t| t > now_unix);
+        let count = if in_window {
+            prev_rl.map(|le| le.count).unwrap_or(1)
+        } else {
+            match &prev {
+                Some(le) if le.kind == kind => le.count + 1,
+                _ => 1,
+            }
+        };
+        // Échéance : annonce fraîche > fenêtre précédente (recalage sur
+        // le reset connu, pas de double) > backoff exponentiel.
+        let fresh = announced;
+        let reused = if fresh.is_none() && in_window {
+            prev_rl.and_then(|le| le.retry_at)
+        } else {
+            None
+        };
+        let (delay, retry_at) = if let Some(t) = fresh.or(reused) {
+            let jittered = fresh
+                .map(|_| prompt::reset_jitter(msg, count) as i64)
+                .unwrap_or(0);
+            let target = t + jittered;
+            // Annonce fraîche : borne [60 s, 1 h] (le parse a déjà
+            // rejeté l'absurde, le clamp couvre le reset tout juste
+            // passé). Fenêtre reprise : échéance déjà calibrée, on ne
+            // fait que ne pas la dépasser.
+            let d = if fresh.is_some() {
+                (target - now_unix).clamp(60, 3600)
+            } else {
+                (target - now_unix).max(0)
+            };
+            (
+                std::time::Duration::from_secs(d as u64),
+                Some(now_unix + d),
+            )
+        } else {
+            let d = prompt::backoff_for(count);
+            (d, Some(now_unix + d.as_secs() as i64))
+        };
+        // retry_at n'a de sens que pour rate_limit — les autres kinds
+        // n'ont jamais de retry automatique.
+        let retry_at = (kind == "rate_limit")
+            .then_some(retry_at)
+            .flatten();
+        self.set_last_error(kind, msg, count, retry_at);
+        let mut h = self.error_hold.lock().unwrap();
+        if let Some(old) = h.take() {
+            if let Some(t) = &old.timer {
+                t.abort();
+            }
+        }
+        let timer = (kind == "rate_limit").then(|| {
+            let me = self.me.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                if let Some(s) = me.upgrade() {
+                    // Échéance du backoff : le hold tombe, le drain
+                    // retente la file (un seul retry — un nouvel échec
+                    // ré-armera avec le backoff suivant).
+                    s.take_error_hold();
+                    s.spawn_drain();
+                }
+            })
+        });
+        *h = Some(ErrorHold { timer });
+        drop(h);
+        // « dead » déjà posé entre le check du drain et ici → reculer :
+        // « error » écraserait l'état terminal. La fenêtre résiduelle
+        // (exit entre ce check et set_state) est couverte par le
+        // take_error_hold d'on_agent_exit.
+        if self.meta_snapshot().state == "dead" {
+            self.take_error_hold();
+            return;
+        }
+        self.set_state("error");
+        self.emit(EventKind::System {
+            text: match kind {
+                "rate_limit" => format!(
+                    "session en erreur : rate limit — retry automatique programmé ({msg})"
+                ),
+                _ => format!(
+                    "session en erreur : {kind} — aucun retry automatique (envoi forcé, set_model ou resume pour débloquer) ({msg})"
+                ),
+            },
+        });
+    }
+
+    /// Enregistre l'échec dans meta.last_error — `count` et `retry_at`
+    /// sont calculés par l'appelant (hold_error gère la fenêtre
+    /// annoncée : un échec in-window ne doit pas incrémenter).
+    pub(super) fn set_last_error(
+        &self,
+        kind: &str,
+        msg: &str,
+        count: u32,
+        retry_at: Option<i64>,
+    ) {
+        let mut m = self.meta.lock().unwrap();
+        let mut message = msg.to_string();
+        if message.chars().count() > 300 {
+            message = message.chars().take(300).collect();
+        }
+        m.last_error = Some(proto::LastError {
+            message,
+            kind: kind.to_string(),
+            at: proto::now_iso(),
+            count,
+            retry_at,
+        });
+        drop(m);
+        self.save_meta();
+    }
+
+    /// Efface la trace d'erreur persistée (succès de tour, reset de
+    /// cycle) — n'a pas d'effet sans last_error posé.
+    pub(super) fn clear_last_error(&self) {
+        {
+            let mut m = self.meta.lock().unwrap();
+            if m.last_error.is_none() {
+                return;
+            }
+            m.last_error = None;
+        }
+        self.save_meta();
+    }
+
+    /// Sortie complète de l'état d'erreur (action explicite : force,
+    /// set_model, respawn, /clear) — lève la retenue, efface la trace
+    /// et repasse « idle » si l'état était « error » et l'agent vivant.
+    /// Retourne vrai si une retenue a été levée — l'appelant peut alors
+    /// relancer le drain (busy conservé vrai sans runner coincerait la
+    /// file, désormais toujours garnie du prompt fautif re-enfilé).
+    pub(super) fn clear_error(&self) -> bool {
+        let held = self.take_error_hold();
+        self.clear_last_error();
+        if self.meta_snapshot().state == "error" && self.is_alive() {
+            self.set_state("idle");
+        }
+        held
     }
 
 }
@@ -430,14 +762,14 @@ mod tests {
     use super::*;
 
     /// CompactSrc de test : défauts globaux, aucun override agent.
-    fn test_compact_src() -> CompactSrc {
+    pub(super) fn test_compact_src() -> CompactSrc {
         CompactSrc {
             global: crate::server::CompactCfg::default(),
             by_agent: Default::default(),
         }
     }
 
-    fn tmp_session(tag: &str) -> (Arc<Session>, PathBuf) {
+    pub(super) fn tmp_session(tag: &str) -> (Arc<Session>, PathBuf) {
         let dir = std::env::temp_dir().join(format!(
             "ac-dedup-test-{}-{}",
             std::process::id(),
@@ -454,27 +786,33 @@ mod tests {
             native_session_id: None,
             mode: None,
             model: None,
+            model_source: None,
+            model_override_sid: None,
+            supports_load: None,
             available_modes: vec![],
             available_commands: vec![],
             available_models: vec![],
             config_options: vec![],
             pending_config: Default::default(),
+            desired_config: Default::default(),
             state: "idle".into(),
             group: None,
             spawned_by: None,
             origin: None,
             context_used: None,
             context_size: None,
+            last_error: None,
+            wait: None,
         };
         std::fs::write(
             dir.join("meta.json"),
             serde_json::to_string_pretty(&meta).unwrap(),
         )
         .unwrap();
-        (Session::open(dir.clone(), &test_compact_src()).unwrap(), dir)
+        (Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap(), dir)
     }
 
-    fn kinds(dir: &PathBuf) -> Vec<&'static str> {
+    pub(super) fn kinds(dir: &PathBuf) -> Vec<&'static str> {
         let j = Journal::open(dir).unwrap();
         j.read_page(dir, None, 100)
             .unwrap()
@@ -505,6 +843,7 @@ mod tests {
             text: "autre".into(),
             steer: false,
             origin: None,
+            spawn_prompt: false,
         });
         s.emit(EventKind::AgentText { text: "autre".into() });
         assert_eq!(kinds(&dir).len(), 5);
@@ -517,7 +856,7 @@ mod tests {
         );
         // Réouverture : l'ancre est amorcée depuis la queue du journal,
         // un écho post-restart reste dédupliqué.
-        let s2 = Session::open(dir.clone(), &test_compact_src()).unwrap();
+        let s2 = Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
         s2.emit(EventKind::AgentThought { text: "espaces multiples ici".into() });
         assert_eq!(
             kinds(&dir).iter().filter(|k| **k == "agent_thought").count(),
@@ -544,6 +883,7 @@ mod tests {
             text: "pin moi".into(),
             steer: false,
             origin: None,
+            spawn_prompt: false,
         });
         s.emit(EventKind::AgentText {
             text: "réponse".into(),
@@ -564,7 +904,7 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0]["live"], true);
         // Persisté : la réouverture recharge pinned.json.
-        let s2 = Session::open(dir.clone(), &test_compact_src()).unwrap();
+        let s2 = Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
         assert_eq!(s2.pins_snapshot().len(), 1);
         // Journal vidé (/clear, rebind) : épinglé conservé mais mort.
         s2.journal.reset(&dir).unwrap();
@@ -579,6 +919,7 @@ mod tests {
             text: "autre cycle".into(),
             steer: false,
             origin: None,
+            spawn_prompt: false,
         });
         assert_eq!(s2.pins_snapshot()[0]["live"], false);
         // Re-pin du même seq = nouvel event : l'entrée morte est
@@ -593,7 +934,7 @@ mod tests {
         // suppression persistée à la réouverture.
         assert!(s2.unpin(1));
         assert!(!s2.unpin(1));
-        let s3 = Session::open(dir.clone(), &test_compact_src()).unwrap();
+        let s3 = Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
         assert!(s3.pins_snapshot().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -705,6 +1046,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Ordre « /compact forcé → brief en file » du verdict approved
+    /// (orch_plan::plan_apply_verdict) : le /compact envoyé en force
+    /// passe devant les prompts déjà en attente, le brief normal reste
+    /// derrière — miroir de plan_send sur session non prête (h_send →
+    /// enqueue_prompt(force) quand !accepting_prompts).
+    #[tokio::test]
+    async fn compact_force_front() {
+        let (s, dir) = tmp_session("compact-force");
+        s.send_prompt("m1", false, false).await.unwrap();
+        s.send_prompt("m2", false, false).await.unwrap();
+        s.send_prompt("/compact", true, false).await.unwrap();
+        s.send_prompt("brief", false, false).await.unwrap();
+        {
+            let q = s.prompt_queue.lock().unwrap();
+            let texts: Vec<&str> = q.iter().map(|(t, _)| t.as_str()).collect();
+            assert_eq!(texts, ["/compact", "m1", "m2", "brief"]);
+            // Le /compact forcé garde PromptSrc::User → arm_compact
+            // (auto=false) au drain → pas de « continue your task » en
+            // double du brief.
+            assert_eq!(q.front().unwrap().1, PromptSrc::User);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Retenue compact armée sur session non prête : le non forcé est
+    /// retenu en file, le forcé s'enfile en tête. Couvre l'ORDRE de
+    /// file seulement — la branche « pas prêt » ne consulte pas la
+    /// retenue (ni désarmement ni cancel : take_compact_hold n'est
+    /// atteint que si accepting_prompts).
+    #[tokio::test]
+    async fn compact_force_front_with_hold() {
+        let (s, dir) = tmp_session("compact-hold");
+        s.arm_compact(false);
+        s.send_prompt("retenu", false, false).await.unwrap();
+        s.send_prompt("/compact", true, false).await.unwrap();
+        {
+            let q = s.prompt_queue.lock().unwrap();
+            let texts: Vec<&str> = q.iter().map(|(t, _)| t.as_str()).collect();
+            assert_eq!(texts, ["/compact", "retenu"]);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// setcfg `ac.compact_*` : override session effectif immédiatement
     /// et persisté en compact.json (réouverture → toujours actif) ;
     /// « off » sur un seuil = retour à la valeur héritée ; clés et
@@ -723,7 +1107,7 @@ mod tests {
         s.set_config_option("ac.compact_at_pct", "off").await.unwrap();
         assert_eq!(s.compact_policy().at_pct, Some(0.9));
         // Persisté : la réouverture relit compact.json.
-        let s2 = Session::open(dir.clone(), &test_compact_src()).unwrap();
+        let s2 = Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
         let p = s2.compact_policy();
         assert!(!p.enabled && p.at_tokens == Some(50_000) && p.at_pct == Some(0.9));
         // Rejets : clé inconnue, booléen, borne %.
@@ -741,7 +1125,7 @@ mod tests {
             },
             by_agent: Default::default(),
         };
-        let s3 = Session::open(dir.clone(), &src).unwrap();
+        let s3 = Session::open(dir.clone(), &src, CapsRegistry::in_memory()).unwrap();
         assert_eq!(s3.compact_policy().at_tokens, Some(50_000)); // override persistant
         s3.set_config_option("ac.compact_at_tokens", "0").await.unwrap();
         assert!(s3.compact_policy().at_tokens.is_none()); // règle décochée
@@ -770,5 +1154,243 @@ mod tests {
         s.handle_session_update(&usage(95_500)).await;
         assert_eq!(s.prompt_queue.lock().unwrap().front().unwrap().0, "/compact");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Classification des échecs session/prompt — pilote le retry :
+    /// auth > rate_limit > model > other.
+    #[test]
+    fn error_classify() {
+        use prompt::classify_error;
+        assert_eq!(
+            classify_error("Reached free model rate limit. Upgrade to a paid plan"),
+            "rate_limit"
+        );
+        assert_eq!(classify_error("HTTP 429 too many requests"), "rate_limit");
+        assert_eq!(classify_error("resource exhausted"), "rate_limit");
+        assert_eq!(classify_error("Invalid params: model foo"), "model");
+        assert_eq!(classify_error("model not found"), "model");
+        assert_eq!(classify_error("401 unauthorized"), "auth");
+        assert_eq!(classify_error("invalid api key"), "auth");
+        // auth prime sur les mots « quota »/« limit ».
+        assert_eq!(classify_error("403 quota exceeded"), "auth");
+        assert_eq!(classify_error("connection reset by peer"), "other");
+        // Forme snake_case des erreurs API.
+        assert_eq!(classify_error("error: rate_limit_error"), "rate_limit");
+        // Codes nus = mot entier : timestamps/ids/ports ne matchent pas.
+        assert_eq!(classify_error("ts=1704290000 port=4031"), "other");
+        // « upgrade » seul n'est pas une limite de débit.
+        assert_eq!(
+            classify_error("please upgrade your daemon to continue"),
+            "other"
+        );
+    }
+
+    /// Backoff rate_limit : 60 s puis exponentiel, plafonné à 1 h.
+    #[test]
+    fn error_backoff() {
+        assert_eq!(prompt::backoff_for(1), std::time::Duration::from_secs(60));
+        assert_eq!(prompt::backoff_for(2), std::time::Duration::from_secs(120));
+        assert_eq!(prompt::backoff_for(7), std::time::Duration::from_secs(3600));
+        assert_eq!(prompt::backoff_for(30), std::time::Duration::from_secs(3600));
+    }
+
+    /// parse_reset_at : durée relative, retry-after nu, heure UTC
+    /// absolue ; et les échéances absurdes rejetées (> 1 h, > 5 min
+    /// dans le passé) → backoff.
+    #[test]
+    fn reset_at_parsing() {
+        let now = std::time::SystemTime::now();
+        let at = |d: i64| {
+            prompt::unix_secs(now) + d
+        };
+        // « reset in 15 minutes » — le message réel du provider.
+        let t = prompt::parse_reset_at(
+            "Reached free model rate limit. Your limit will reset in 15 minutes (at 13:56 UTC)",
+            now,
+        )
+        .unwrap();
+        let d = prompt::unix_secs(t) - at(0);
+        assert!((890..=910).contains(&d), "reset in 15min → ~900s, got {d}");
+        // « try again in 2 hours » → > 1 h → absurde → None.
+        assert!(prompt::parse_reset_at("try again in 2 hours", now).is_none());
+        // « retry-after: 120 » → secondes nues (convention HTTP).
+        let t = prompt::parse_reset_at("HTTP 429 — retry-after: 120", now).unwrap();
+        assert_eq!(prompt::unix_secs(t) - at(0), 120);
+        // Heure absolue UTC : « at HH:MM UTC » — calcule l'écart réel.
+        // Garde minuit : +10 min peut basculer au jour suivant, cas non
+        // géré par le parse (same-day) — on saute le test dans cette
+        // fenêtre plutôt que de flaker.
+        let hhmm = {
+            let dt = chrono::DateTime::<chrono::Utc>::from(now);
+            use chrono::Timelike;
+            if dt.hour() >= 23 && dt.minute() >= 45 {
+                return;
+            }
+            let target = dt + chrono::Duration::minutes(10);
+            format!("{:02}:{:02}", target.hour(), target.minute())
+        };
+        let msg = format!("quota exceeded (at {hhmm} UTC)");
+        let t = prompt::parse_reset_at(&msg, now).unwrap();
+        let d = prompt::unix_secs(t) - at(0);
+        assert!((540..=600).contains(&d), "at HH:MM UTC → ~600s, got {d}");
+        // Sans fuseau → pas d'heure absolue (« meet at 5:30 » ignoré).
+        assert!(prompt::parse_reset_at("meet at 5:30", now).is_none());
+        // « reset in 3 days » → > 1 h → None.
+        assert!(prompt::parse_reset_at("reset in 3 days", now).is_none());
+        // Message sans échéance → None.
+        assert!(prompt::parse_reset_at("429 too many requests", now).is_none());
+    }
+
+    /// hold_error calé sur l'échéance annoncée : retry_at persisté
+    /// ≈ now + délai annoncé (+ jitter), et un second échec DANS la
+    /// fenêtre n'incrémente pas le count ni ne repousse l'échéance.
+    #[tokio::test]
+    async fn rate_limit_announced_window() {
+        let (s, dir) = tmp_session("rl-window");
+        s.hold_error(
+            "rate_limit",
+            "rate limit — your limit will reset in 15 minutes",
+        );
+        let le = s.meta_snapshot().last_error.unwrap();
+        assert_eq!(le.count, 1);
+        let retry1 = le.retry_at.expect("retry_at posé");
+        let now = prompt::unix_secs(std::time::SystemTime::now());
+        let d = retry1 - now;
+        assert!((870..=930).contains(&d), "retry ~15min+jitter, got {d}");
+        // Second échec immédiat (même fenêtre) : count figé, échéance
+        // recalée sur la même fenêtre — pas de backoff doublé.
+        s.hold_error(
+            "rate_limit",
+            "rate limit — your limit will reset in 15 minutes",
+        );
+        let le2 = s.meta_snapshot().last_error.unwrap();
+        assert_eq!(le2.count, 1, "échec in-window : count non incrémenté");
+        assert!(le2.retry_at.unwrap() > now, "échéance conservée");
+        // Un kind différent repart à 1.
+        s.hold_error("model", "model not found");
+        assert_eq!(s.meta_snapshot().last_error.unwrap().count, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// hold_error pose l'état « error », la trace persistée (count
+    /// incrémenté tant que le kind se répète) et la retenue ;
+    /// clear_error lève le tout. rate_limit → timer armé, autres kinds
+    /// → jamais de retry automatique.
+    #[tokio::test]
+    async fn error_hold_cycle() {
+        let (s, dir) = tmp_session("error-hold");
+        s.hold_error("model", "model not found");
+        let m = s.meta_snapshot();
+        assert_eq!(m.state, "error");
+        let le = m.last_error.unwrap();
+        assert_eq!(le.kind, "model");
+        assert_eq!(le.count, 1);
+        assert!(!le.message.is_empty());
+        assert!(s.error_held());
+        // Timer absent pour model (jamais de retry auto).
+        assert!(s.error_hold.lock().unwrap().as_ref().unwrap().timer.is_none());
+
+        // Re-échec même kind → count++, hold ré-armé.
+        s.hold_error("model", "still missing");
+        assert_eq!(s.meta_snapshot().last_error.unwrap().count, 2);
+        assert!(s.error_held());
+
+        // rate_limit → timer armé (retry programmé).
+        s.hold_error("rate_limit", "429");
+        assert!(s.error_hold.lock().unwrap().as_ref().unwrap().timer.is_some());
+        // count repart à 1 : kind différent = nouvelle série.
+        assert_eq!(s.meta_snapshot().last_error.unwrap().count, 1);
+
+        // Action explicite : tout tombe. L'état repasse « idle »
+        // seulement si l'agent vit — ici pas de process, « error »
+        // reste (un dead/on_agent_exit fera foi de l'état final).
+        s.clear_error();
+        assert!(!s.error_held());
+        let m = s.meta_snapshot();
+        assert!(m.last_error.is_none());
+        assert_eq!(m.state, "error");
+
+        // Persisté dans meta.json : la trace écrite est relue à l'open.
+        s.hold_error("auth", "401");
+        let s2 = Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
+        let le2 = s2.meta_snapshot().last_error.unwrap();
+        assert_eq!(le2.kind, "auth");
+        assert_eq!(s2.meta_snapshot().state, "error");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Succès de tour : la trace d'erreur s'efface (clear_last_error
+    /// est le no-op bon marché du chemin nominal).
+    #[test]
+    fn error_clear_on_success() {
+        let (s, dir) = tmp_session("error-clear");
+        s.set_last_error("other", "boom", 1, None);
+        assert!(s.meta_snapshot().last_error.is_some());
+        s.clear_last_error();
+        assert!(s.meta_snapshot().last_error.is_none());
+        // Appel répété : no-op, pas de réécriture.
+        s.clear_last_error();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #183 : rename pendant un tour — l'appel ACP est retenu jusqu'au
+    /// prochain point ordonné (un RPC pendant session/prompt pouvait
+    /// avorter le tour en silence) ; la meta locale est posée d'office.
+    #[tokio::test]
+    async fn rename_defere_pendant_tour() {
+        let (s, dir) = tmp_session("rename-defer");
+        // Idle : rien de retenu — l'envoi part directement (no-op ici
+        // sans native_session_id, le pending reste vide).
+        s.rename("idle-title").await;
+        assert_eq!(s.meta_snapshot().title, "idle-title");
+        assert!(s.pending_rename.lock().unwrap().is_none());
+        // Tour en vol : meta posée d'office, envoi ACP différé.
+        s.busy.store(true, Ordering::SeqCst);
+        s.rename("mid-turn").await;
+        assert_eq!(s.meta_snapshot().title, "mid-turn");
+        assert_eq!(
+            s.pending_rename.lock().unwrap().as_deref(),
+            Some("mid-turn")
+        );
+        // Rafale : seul le dernier titre est retenu.
+        s.rename("mid-turn-2").await;
+        assert_eq!(
+            s.pending_rename.lock().unwrap().as_deref(),
+            Some("mid-turn-2")
+        );
+        // Fin de tour : le pending est consommé (send no-op sans agent).
+        s.busy.store(false, Ordering::SeqCst);
+        s.flush_pending_rename().await;
+        assert!(s.pending_rename.lock().unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #183 : texte/pensée/tool call comptent comme sorties de tour —
+    /// la détection « end_turn sans rien produit » raisonne dessus.
+    #[test]
+    fn is_agent_output_kinds() {
+        assert!(Session::is_agent_output(&EventKind::AgentText {
+            text: "x".into()
+        }));
+        assert!(Session::is_agent_output(&EventKind::ToolCallUpdate {
+            call_id: "c".into(),
+            status: proto::ToolStatus::Running,
+            excerpt: None,
+            blob: None,
+            size: None,
+            diff: None,
+        }));
+        for k in [
+            EventKind::System { text: "s".into() },
+            EventKind::Error { message: "e".into() },
+            EventKind::UserMessage {
+                text: "u".into(),
+                steer: false,
+                origin: None,
+                spawn_prompt: false,
+            },
+        ] {
+            assert!(!Session::is_agent_output(&k));
+        }
     }
 }

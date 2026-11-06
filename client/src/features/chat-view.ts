@@ -6,16 +6,20 @@
 // ---------------------------------------------------------------------------
 
 import { invoke } from "../core/bridge";
-import { $, esc, showErr } from "../core/dom";
+import { $, copyText, esc, showErr } from "../core/dom";
 import { fmtTok } from "../core/format";
-import { call } from "../core/rpc";
+import { bgErr, call, callBg, connOp } from "../core/rpc";
 import { app } from "../core/state";
 import type { AcEvent, SessionMeta } from "../core/types";
 import { gemSVG } from "../crystal";
 import { t } from "../i18n";
 import { icon, type IconName } from "../ui/icons";
+import { hideMenu, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
-import { fillEfforts, splitModel } from "./modelbar";
+import { fillEfforts, joinModel, splitModel } from "./modelbar";
+import { costFor, ensureCosts } from "./modelcosts";
+import { notifications } from "./notifications";
+import { catalogFor, ensureCatalog } from "./modelcatalog";
 import type { EventRenderer } from "./event-renderers";
 
 const MAX_RENDERED = 400;
@@ -69,6 +73,7 @@ export class ChatView {
   private renderer!: EventRenderer;
   private eventsEl = $("events");
   private sentinel = $("scroll-sentinel");
+  private selCtx = $("evctx");
 
   private openSeq = 0;
   private convCache = new Map<string, ConvCache>();
@@ -99,6 +104,8 @@ export class ChatView {
   private convLoadingEl: HTMLElement | null = null;
   /** Hôtes en cours d'auto-connexion (écran vide "connexion à…"). */
   private connectingHosts: string[] = [];
+  /** Callback stable pour ensureCosts — dédupliqué côté modelcosts. */
+  private readonly costsReady = () => this.updateHeader();
 
   private deps = {
     /** Marque la ligne de session active dans la sidebar. */
@@ -138,6 +145,12 @@ export class ChatView {
     connHome: () => {},
     /** ⌨ affiché seulement si le démon de la conn connaît term_open. */
     termCapable: (_conn: string) => false,
+    /** Bouton refresh mode/modèle — capability `agent_caps` du démon
+     *  (champ `caps` de list_agents + RPC refresh_agent_caps). */
+    capsCapable: (_conn: string) => false,
+    /** agent_text live réellement rendu en queue (ni trou comblé ni
+     *  replay) → candidat à la lecture auto TTS (#138). */
+    onAgentText: (_ev: AcEvent) => {},
   };
 
   bind(renderer: EventRenderer, d: Partial<typeof this.deps>) {
@@ -385,6 +398,11 @@ export class ChatView {
   }
 
   async open(id: string, force = false, conn = "") {
+    // Ouverture dans l'app = notifs done/error vues : les retirer du
+    // shade OS (équivalent du clic autoCancel, sans le clic — #184).
+    // Point d'entrée unique : sidebar, backlog, map, lien peer et clic
+    // notif convergent tous ici.
+    notifications.sessionOpened(id);
     const seq = ++this.openSeq;
     // Les events live arrivant pendant le chargement (le sub précédent
     // tourne encore jusqu'au subscribe) sont tamponnés : intercalés entre
@@ -455,11 +473,11 @@ export class ChatView {
     }
 
     let lastErr: unknown = null;
-    const info = await call<{
+    const info = await callBg<{
       meta: SessionMeta; pending: string[]; alive: boolean; last_seq: number;
     }>("session_info", { session: id, conn: connHint }).catch((e) => {
       lastErr = e;
-      showErr(`session_info: ${e}`);
+      bgErr("session_info", e, connHint);
       return null;
     });
     if (stale()) return;
@@ -495,9 +513,9 @@ export class ChatView {
       sys.innerHTML = `${icon("loader")} ${esc(t("resume_wait"))}`;
       this.eventsEl.appendChild(sys);
       try {
-        await call("resume_session", { session: id });
+        await callBg("resume_session", { session: id });
         if (stale()) { sys.remove(); return; }
-        const info2 = await call<{ meta: SessionMeta; alive: boolean }>("session_info", {
+        const info2 = await callBg<{ meta: SessionMeta; alive: boolean }>("session_info", {
           session: id,
         });
         if (stale()) { sys.remove(); return; }
@@ -557,12 +575,14 @@ export class ChatView {
       } else {
         let page = { events: [] as AcEvent[], last_seq: 0 };
         try {
-          page = await call<{ events: AcEvent[]; last_seq: number }>("events", {
+          page = await callBg<{ events: AcEvent[]; last_seq: number }>("events", {
             session: id,
             limit: INITIAL_PAGE,
           });
         } catch (e) {
-          showErr(`events: ${e}`);
+          // Transitoire → silence : la page vide rabat afterSeq sur la
+          // fenêtre de fin et le subscribe rejoue le trou.
+          bgErr("events", e, connHint);
         }
         if (stale()) return;
         this.showConvLoading(false);
@@ -578,9 +598,13 @@ export class ChatView {
 
     // Subscribe live à partir du dernier event connu
     if (stale()) return;
-    await invoke("subscribe", { session: id, afterSeq, conn: app.current?.conn ?? connHint }).catch((e) => {
-      // Le flux live est mort (ex. restart démon) → erreur visible
-      showErr(`subscribe: ${e}`);
+    const subConn = app.current?.conn ?? connHint;
+    await connOp(subConn, () =>
+      invoke("subscribe", { session: id, afterSeq, conn: subConn }),
+    ).catch((e) => {
+      // Transitoire → silence (reopenIfConn rejoue l'open au retour) ;
+      // flux live mort (ex. restart démon) → erreur visible.
+      bgErr("subscribe", e, subConn);
     });
     // Journal réinitialisé (native changé) → les résultats de recherche
     // indexent l'ancien journal (seqs reparties à 1) → fermer la recherche.
@@ -604,7 +628,7 @@ export class ChatView {
     this.deps.onSessionChanged(); // les résultats pointent vers l'ancien journal
     if (!app.current) return;
     const sid = app.current.id;
-    const info = await call<{ meta: SessionMeta; last_seq: number }>("session_info", {
+    const info = await callBg<{ meta: SessionMeta; last_seq: number }>("session_info", {
       session: sid,
     }).catch(() => null);
     if (!info || app.current?.id !== sid) return;
@@ -620,7 +644,7 @@ export class ChatView {
       !this.eventsEl.querySelector(".ev") &&
       this.pendingLive.length === 0
     ) {
-      const page = await call<{ events: AcEvent[] }>("events", {
+      const page = await callBg<{ events: AcEvent[] }>("events", {
         session: sid,
         limit: INITIAL_PAGE,
       }).catch(() => null);
@@ -704,6 +728,8 @@ export class ChatView {
       !app.current || !this.deps.pinCapable(app.current?.conn ?? "default");
     $("btn-term").hidden =
       !app.current || !this.deps.termCapable(app.current?.conn ?? "default");
+    $("btn-caps-refresh").hidden =
+      !app.current || !this.deps.capsCapable(app.current?.conn ?? "default");
     if (!app.current) {
       $("chat-ctx").hidden = true;
       $("chat-opts").hidden = true;
@@ -768,21 +794,48 @@ export class ChatView {
     const rawOpts = modelOpt
       ? modelOpt.options.map((o) => ({ v: o.value, label: o.name || o.value }))
       : app.current.available_models.map((m) => ({ v: m, label: m }));
+    // Catalogue complet du profil (model_catalog) : les variantes hors
+    // annonce ACP rejoignent les options, badgées « catalogue » — leur
+    // application passe par le side-channel démon (close→override→load),
+    // pas par session/set_config_option. Fusionné AVANT le test
+    // rawOpts.length : un profil sans option annoncée doit quand même
+    // proposer ses variantes catalogue.
+    ensureCatalog(app.current.conn ?? "", app.current.agent, this.costsReady);
+    const cat = catalogFor(app.current.conn ?? "", app.current.agent);
+    if (cat) {
+      const known = new Set(rawOpts.map((o) => o.v));
+      for (const e of Object.values(cat)) {
+        if (!known.has(e.value)) {
+          rawOpts.push({ v: e.value, label: `${e.label} · ${t("catalog_badge")}` });
+        }
+      }
+    }
     if (rawOpts.length) {
+      // Coûts catalogue du profil agent (model_costs) — re-render des
+      // selects à l'arrivée de la map (premier affichage sans coût).
+      ensureCosts(app.current.conn ?? "", app.current.agent, this.costsReady);
       md.hidden = false;
       mf.hidden = true;
       // Modèles de base dédupliqués (effort géré à part) + entrée Fusion
       const bases = new Map<string, string>();
+      // Premier effort annoncé par base — c'est la variante que
+      // resolveModel applique par défaut : le coût affiché sur la base
+      // est celui de cette variante (ex. swe-2-high → -lightning payant).
+      const firstEff = new Map<string, string>();
       for (const o of rawOpts) {
         if (o.v.startsWith("fusion-")) continue;
-        const [b] = splitModel(o.v);
+        const [b, e] = splitModel(o.v);
         if (!bases.has(b)) bases.set(b, o.label);
+        if (e && !firstEff.has(b)) firstEff.set(b, e);
       }
       md.innerHTML = "";
       for (const [b, label] of bases) {
         const o = document.createElement("option");
         o.value = b;
-        o.textContent = "🧠 " + label;
+        const fe = firstEff.get(b);
+        const cost = costFor(fe ? joinModel(b, fe) : b);
+        o.textContent = "🧠 " + label + (cost ? ` · ${cost.label}` : "");
+        if (cost?.detail) o.title = cost.detail;
         md.appendChild(o);
       }
       // Entrée Fusion : uniquement si l'agent annonce des modèles fusion-*
@@ -845,7 +898,8 @@ export class ChatView {
     // fantôme ajoute un gap dans le header et peut déclencher un wrap.
     $("chat-opts").hidden =
       ms.hidden && md.hidden && es.hidden && mf.hidden &&
-      $("btn-fusion-edit").hidden && dyn.children.length === 0;
+      $("btn-fusion-edit").hidden && $("btn-caps-refresh").hidden &&
+      dyn.children.length === 0;
   }
 
   private nearBottom() {
@@ -953,6 +1007,12 @@ export class ChatView {
     // inséré en milieu de vue ne doit pas le ré-ancrer (la dédup texte
     // des events live suivants comparerait à un contenu hors flux).
     if (!insertAt) this.renderer.noteText(ev, node);
+    // Message agent live en queue de fil (ni replay ni trou comblé ni
+    // flush de tampon) → lecture auto TTS si le setting est actif
+    // (no-op sinon/hors Android).
+    if (live && !insertAt && ev.type === "agent_text" && !this.suppressAutoRead) {
+      this.deps.onAgentText(ev);
+    }
     this.renderedCount++;
     if (ev.seq < this.minRendered) this.minRendered = ev.seq;
     if (ev.type === "tool_call") {
@@ -1112,12 +1172,12 @@ export class ChatView {
     const pending = this.pendingLive;
     try {
       const [before, after] = await Promise.all([
-        call<{ events: AcEvent[] }>("events", {
+        callBg<{ events: AcEvent[] }>("events", {
           session: sid,
           before_seq: seq + 1, // exclusif → la page se termine sur le match
           limit: JUMP_BEFORE,
         }),
-        call<{ events: AcEvent[]; last_seq: number }>("events", {
+        callBg<{ events: AcEvent[]; last_seq: number }>("events", {
           session: sid,
           after_seq: seq,
           limit: JUMP_AFTER,
@@ -1150,7 +1210,7 @@ export class ChatView {
       this.hasMoreNewer = wasAnchored;
       if (!this.hasMoreNewer) this.flushPendingLive();
       this.updateBottomBtn();
-      showErr(`events: ${e}`);
+      bgErr("events", e, app.current?.conn ?? "");
       return false;
     }
   }
@@ -1186,7 +1246,7 @@ export class ChatView {
     const ls = ++this.loadSeq;
     this.loadingPage = true;
     try {
-      const page = await call<{ events: AcEvent[]; last_seq: number }>("events", {
+      const page = await callBg<{ events: AcEvent[]; last_seq: number }>("events", {
         session: sid,
         after_seq: this.maxRendered,
         limit: PAGE,
@@ -1197,6 +1257,8 @@ export class ChatView {
         this.hasMoreNewer = false;
         this.flushPendingLive();
       }
+    } catch (e) {
+      bgErr("events", e, app.current?.conn ?? "");
     } finally {
       if (ls === this.loadSeq) this.loadingPage = false;
     }
@@ -1212,7 +1274,7 @@ export class ChatView {
     const js = this.jumpSeq; // post-clearConv : un saut ultérieur invalide ce load
     this.showConvLoading(true);
     try {
-      const page = await call<{ events: AcEvent[]; last_seq: number }>("events", {
+      const page = await callBg<{ events: AcEvent[]; last_seq: number }>("events", {
         session: sid,
         limit: INITIAL_PAGE,
       });
@@ -1230,18 +1292,39 @@ export class ChatView {
       this.pendingLive = [...pending, ...this.pendingLive];
       this.unseenBelow = this.pendingLive.length;
       this.updateBottomBtn();
-      showErr(`events: ${e}`);
+      bgErr("events", e, app.current?.conn ?? "");
     } finally {
       this.showConvLoading(false);
     }
   }
 
   /** Déverse les events tamponnés en vue ancrée — ceux déjà recouverts
-   *  par la fenêtre sont filtrés par seq (live append les rend en bas). */
+   *  par la fenêtre sont filtrés par seq (live append les rend en bas).
+   *  Ce sont du replay/rattrapage (trou de subscribe, sortie d'ancre,
+   *  fin d'open) : JAMAIS de lecture auto TTS dessus — seule la poussée
+   *  live immédiate est candidate (suppressAutoRead). */
+  private suppressAutoRead = false;
   private flushPendingLive() {
     const rest = this.pendingLive.filter((e) => e.seq > this.maxRendered);
     this.pendingLive = [];
-    for (const ev of rest) this.appendEvent(ev, true);
+    this.suppressAutoRead = true;
+    try {
+      for (const ev of rest) this.appendEvent(ev, true);
+    } finally {
+      this.suppressAutoRead = false;
+    }
+  }
+
+  /** Menu contextuel « Copier » sur la sélection du fil (même composant
+   *  #evctx que les menus session/fichier — action-sheet sur Android). */
+  private openSelCtx(x: number, y: number, txt: string) {
+    const ctx = this.selCtx;
+    ctx.innerHTML = "";
+    menuBtn(ctx, t("copy"), "", () => {
+      hideMenu(ctx, "evctx");
+      void copyText(txt);
+    });
+    placeMenu(ctx, "evctx", x, y);
   }
 
   /** Ligne système dans le fil (retourne l'élément pour mises à jour). */
@@ -1277,7 +1360,7 @@ export class ChatView {
     try {
       while (this.hasMoreHistory && this.sentinelVisible()) {
         const prevMin = this.minRendered;
-        const page = await call<{ events: AcEvent[] }>("events", {
+        const page = await callBg<{ events: AcEvent[] }>("events", {
           session: sid,
           before_seq: this.minRendered,
           limit: PAGE,
@@ -1296,7 +1379,7 @@ export class ChatView {
         if (this.minRendered >= prevMin) break;
       }
     } catch (e) {
-      showErr(`events: ${e}`);
+      bgErr("events", e, app.current?.conn ?? "");
     } finally {
       if (ls === this.loadSeq) this.loadingPage = false;
     }
@@ -1319,6 +1402,28 @@ export class ChatView {
       if (this.hasMoreNewer) void this.loadLatest();
       else this.eventsEl.scrollTo({ top: this.eventsEl.scrollHeight, behavior: "smooth" });
     };
+    // Clic droit sur une sélection du fil → menu « Copier » (le handler
+    // global de main.ts avale le contextmenu hors sélection — sans ça le
+    // texte de la discussion n'était pas copiable). Sans sélection on ne
+    // fait rien : le preventDefault global garde son rôle.
+    this.eventsEl.addEventListener("contextmenu", (e) => {
+      const sel = getSelection();
+      if (!sel || sel.isCollapsed || !this.eventsEl.contains(sel.anchorNode)) return;
+      const txt = sel.toString();
+      if (!txt.trim()) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.openSelCtx(e.clientX, e.clientY, txt);
+    });
+    // Fermeture du menu « Copier » : clic ailleurs / Échap / scroll du
+    // fil — même contrat que #fctx/#sctx (un clic DANS le menu ne doit
+    // pas le fermer avant l'action du bouton).
+    this.selCtx.addEventListener("click", (e) => e.stopPropagation());
+    window.addEventListener("click", () => hideMenu(this.selCtx, "evctx"));
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") hideMenu(this.selCtx, "evctx");
+    });
+    this.eventsEl.addEventListener("scroll", () => hideMenu(this.selCtx, "evctx"));
     // Image cassée (404, hôte inaccessible…) → on la remplace par son texte/URL,
     // l'<a> englobant reste cliquable. capture=true : error ne bubble pas.
     this.eventsEl.addEventListener(

@@ -33,6 +33,13 @@ pub enum EventKind {
         /// ordinaires (jamais sérialisé quand None).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin: Option<String>,
+        /// Prompt de spawn d'une session service (journalisé à la
+        /// création avec `origin`) — boilerplate de mission, pas un
+        /// « post » utile : `first_post` le saute pour servir le premier
+        /// vrai message. `false` partout ailleurs ; absent des journaux
+        /// antérieurs (dégradation douce : repli détection `origin`).
+        #[serde(default)]
+        spawn_prompt: bool,
     },
     AgentText {
         text: String,
@@ -59,6 +66,11 @@ pub enum EventKind {
         diff: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         locations: Option<Vec<String>>,
+        /// Paramètres d'appel formatés (`rawInput` ACP : commande exec,
+        /// chemins read/edit…) — affichés dans le bloc déplié, avant la
+        /// sortie. Champ additif : les anciens journaux n'en ont pas.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input: Option<String>,
     },
     /// Mise à jour de statut/contenu d'un tool call existant.
     ToolCallUpdate {
@@ -214,11 +226,13 @@ impl EventKind {
                 excerpt,
                 diff,
                 locations,
+                input,
                 ..
             } => joined(
                 [
                     Some(kind.as_str()),
                     Some(title.as_str()),
+                    input.as_deref(),
                     excerpt.as_deref(),
                     diff.as_deref(),
                 ]
@@ -305,7 +319,7 @@ impl CmdInfo {
 }
 
 /// Option de config agent (ACP config_option_update — ex. mode, model chez Devin).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ConfigOpt {
     pub value: String,
     #[serde(default)]
@@ -314,7 +328,7 @@ pub struct ConfigOpt {
     pub description: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ConfigOption {
     pub id: String,
     #[serde(default)]
@@ -325,6 +339,44 @@ pub struct ConfigOption {
     pub current_value: String,
     #[serde(default)]
     pub options: Vec<ConfigOpt>,
+}
+
+// ---------------------------------------------------------------------------
+// Capacités annoncées par un profil agent (cache démon agent_caps.json)
+// ---------------------------------------------------------------------------
+
+/// Capacités moissonnées pour un profil `[agents.<id>]` : modes, modèles
+/// et options de config qu'au moins une session du profil a annoncés
+/// (handshake session/new|load → `modes`/`models`/`configOptions`,
+/// notifications `config_option_update`, ou probe `refresh_agent_caps`).
+/// Alimente le dialogue « nouvelle session » (selects par agent via
+/// `list_agents`) et la ré-application aux sessions du profil après un
+/// refresh. Tous les champs sont additifs — absent/vide = l'agent n'a
+/// rien annoncé (le client retombe sur la saisie libre).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentCaps {
+    /// Horodatage ISO de la dernière moisson.
+    #[serde(default)]
+    pub updated_at: String,
+    /// Modes ACP (`modes.availableModes` : id→`value`, name).
+    #[serde(default)]
+    pub modes: Vec<ConfigOpt>,
+    /// Modèles ACP (`models.availableModels` : modelId→`value`, name).
+    #[serde(default)]
+    pub models: Vec<ConfigOpt>,
+    /// Options de config dynamiques (extension `config_option_update` —
+    /// mode/model/thought_level chez Devin).
+    #[serde(default)]
+    pub config_options: Vec<ConfigOption>,
+    /// Valeur courante rapportée pour le mode (`modes.currentModeId` ou
+    /// la configOption "mode") — indice d'affichage pour la présélection,
+    /// pas un état fiable (elle peut être périmée ou propre à la session
+    /// moissonnée). Vide = inconnue.
+    #[serde(default)]
+    pub current_mode: String,
+    /// Idem pour le modèle (`models.currentModelId` ou configOption "model").
+    #[serde(default)]
+    pub current_model: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -354,6 +406,23 @@ pub struct SessionMeta {
     pub mode: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    /// Provenance du modèle courant : "announced" (options ACP) ou
+    /// "catalogue" (variante hors annonce ACP, posée via le side-channel
+    /// `model_override_cmd` du profil — cf. catalogue_only côté démon).
+    #[serde(default)]
+    pub model_source: Option<String>,
+    /// Sid natif contre lequel `model_override_cmd` a été exécuté —
+    /// un spawn qui atterrit sur un NOUVEAU sid (clear, fallback
+    /// load→new, fork) doit rejouer l'override, le store provider
+    /// étant indexé par sid.
+    #[serde(default)]
+    pub model_override_sid: Option<String>,
+    /// L'agent annonce `session/load` (capacités ACP du handshake) —
+    /// None = pas encore spawné. Sans load, le store provider indexé
+    /// par sid ne peut pas suivre : le chemin catalogue-only est
+    /// structurellement inapplicable.
+    #[serde(default)]
+    pub supports_load: Option<bool>,
     /// Modes annoncés par l'agent (session/new|load → modes.availableModes)
     #[serde(default)]
     pub available_modes: Vec<String>,
@@ -370,8 +439,20 @@ pub struct SessionMeta {
     /// spawn (session/load). Clés = id d'option ("model", "mode", …).
     #[serde(default)]
     pub pending_config: std::collections::HashMap<String, String>,
-    /// running | waiting_input | idle | dead | interrupted | asleep
-    /// (asleep : agent libéré volontairement, réveil auto au prochain envoi)
+    /// Config « voulue » posée pendant que l'agent vivait (hors mode/model,
+    /// qui ont leurs champs dédiés — `thought_level`, …) : comme l'env de
+    /// spawn ne la porte pas et qu'un session/load peut restaurer des
+    /// valeurs persistées différentes, chaque entrée est re-poussée à
+    /// chaque spawn tant qu'elle diffère de ce que l'agent rapporte.
+    #[serde(default)]
+    pub desired_config: std::collections::HashMap<String, String>,
+    /// running | waiting_input | idle | dead | interrupted | asleep | error
+    /// (asleep : agent libéré volontairement, réveil auto au prochain envoi ;
+    /// error : dernier tour session/prompt en échec — cf. `last_error`,
+    /// livraison suspendue jusqu'à retry ou action explicite).
+    /// `wait` n'existe qu'à la sérialisation (list_sessions/session_info) :
+    /// dérivé d'un `idle` réel ayant un waiter ac-wait vivant — affichage
+    /// seul, jamais persisté.
     #[serde(default = "default_state")]
     pub state: String,
     /// Groupe nommé (sidebar) — None = non groupé.
@@ -396,6 +477,49 @@ pub struct SessionMeta {
     /// Fenêtre de contexte annoncée par l'agent (tokens).
     #[serde(default)]
     pub context_size: Option<u64>,
+    /// Dernier échec de tour session/prompt (état "error") — kind :
+    /// rate_limit | model | auth | other. Effacé au premier tour
+    /// réussi ou reset de cycle (spawn, /clear, set_model…).
+    #[serde(default)]
+    pub last_error: Option<LastError>,
+    /// Détail du waiter ac-wait — présent seulement quand `state ==
+    /// "wait"` (dérivé à la sérialisation comme `wait`, jamais persisté).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<WaitInfo>,
+}
+
+/// Détail du waiter ac-wait vivant qui justifie l'état `wait` — le
+/// plus ancien vivant rapporte (l'attente la plus longue est la plus
+/// parlante pour repérer un waiter bloqué, #189).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaitInfo {
+    /// Âge du waiter en secondes (`now - started` au moment de la
+    /// sérialisation — 0.5 pour « vient de démarrer »).
+    pub secs: f64,
+    /// Nom déclaré du waiter (`ac-wait --name`) — vide si absent.
+    #[serde(default)]
+    pub name: String,
+    /// Timeout configuré du waiter (secondes), s'il en a un.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<f64>,
+}
+
+/// Trace persistée du dernier échec `session/prompt` (état "error").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LastError {
+    /// Message d'erreur brut (tronqué à la pose).
+    pub message: String,
+    /// Classification : rate_limit | model | auth | other.
+    pub kind: String,
+    /// Horodatage du premier échec de la série.
+    pub at: String,
+    /// Échecs consécutifs du même kind.
+    pub count: u32,
+    /// Retry programmé pour `rate_limit` (epoch secondes UTC) — calé
+    /// sur l'échéance annoncée par le provider quand le message la
+    /// porte, sinon now + backoff. None = pas de retry automatique.
+    #[serde(default)]
+    pub retry_at: Option<i64>,
 }
 
 fn default_state() -> String {
@@ -557,6 +681,15 @@ pub enum ReqKind {
     },
     ListSessions,
     ListAgents,
+    /// Coûts catalogue des modèles d'un profil agent (sonde provider
+    /// type `devin models`, cache côté démon) — {"models": {id: {label,
+    /// detail}}}. Map vide quand le provider n'expose pas de coût.
+    ModelCosts { agent: String },
+    /// Catalogue complet des modèles d'un profil agent (clés
+    /// `catalogue_cmd`/`model_override_cmd` de `[agents.*]`) —
+    /// {"models": [{value, label}]} ; vide quand le profil n'a pas de
+    /// commande catalogue ou si la sonde échoue.
+    ModelCatalog { agent: String },
     Send {
         session: String,
         text: String,
@@ -698,12 +831,40 @@ pub enum ReqKind {
         #[serde(default)]
         archive: Option<String>,
     },
+    /// Surveille le dossier `path` (relatif au cwd, borné workspace,
+    /// non récursif) pour l'auto-refresh de l'explorateur : le démon
+    /// pousse `{push:"dir_changed", session, path}` après debounce+coalesce
+    /// — trafic éphémère, JAMAIS journalisé. Le watch vit et meurt avec
+    /// la connexion qui l'a demandé (une session affichée = un client) ;
+    /// ré-émettre sur un dossier déjà suivi est idempotent. Réponse
+    /// `{watching, dir}` — `watching:false` = plafond global atteint,
+    /// le client retombe alors sur le refresh manuel.
+    WatchDir {
+        session: String,
+        #[serde(default)]
+        path: String,
+    },
+    /// Retire le watch `path` de `session` — ou tous ses watches quand
+    /// `path` est absent (panneau fermé, session quittée). Réponse
+    /// `{unwatched}` = nombre de watches réellement retirés.
+    UnwatchDir {
+        session: String,
+        #[serde(default)]
+        path: Option<String>,
+    },
     /// Gestion de la file de prompts (index = position dans la file).
     QueueList { session: String },
     QueueEdit { session: String, index: u64, text: String },
     QueueDrop { session: String, index: u64 },
     /// Tête de file + annulation du tour courant = envoi forcé.
     QueuePromote { session: String, index: u64 },
+    /// Retire l'entrée `index` de la file et tente de l'injecter en
+    /// steer dans le tour en cours (session/prompt concurrent, SANS
+    /// annuler le tour — ≠ QueuePromote). Refus ou impossibilité →
+    /// l'entrée est remise à sa position. Réponse {delivered, reason?,
+    /// queue} — delivered : "steer" | "sent" | "requeued" | "held" |
+    /// "gone".
+    QueueSteer { session: String, index: u64 },
     /// Page d'historique : les `limit` événements avant `before_seq`
     /// (before_seq absent ou 0 = depuis la fin), ou — si `after_seq` est
     /// fourni — les `limit` événements après `after_seq` en ordre croissant
@@ -732,7 +893,11 @@ pub enum ReqKind {
     /// Premier post du cycle courant : le premier `user_message` du
     /// journal. Le journal est vidé à /clear, /new et au rebind —
     /// « premier » suit donc automatiquement le dernier reset.
-    /// Réponse : `{post: {seq, ts, text, steer}}` ou `{post: null}`
+    /// Session créée par un service (`origin`) : son premier
+    /// `user_message` est le prompt de spawn (`spawn_prompt: true` —
+    /// boilerplate de mission, pas un post) et est sauté en faveur du
+    /// `user_message` suivant (ex. le post « [Backlog] item »).
+    /// Réponse : `{post: {seq, ts, text, steer, origin}}` ou `{post: null}`
     /// (aucun message utilisateur dans le cycle — ex. juste après
     /// un /clear) ; `{post: null, truncated: true}` quand la
     /// compaction du journal a supprimé la tête — le vrai premier
@@ -966,8 +1131,26 @@ pub enum ReqKind {
     },
     /// Exécute la recette d'une entrée catalogue (steps auditées :
     /// `run` argv fixe, `write_file` borné HOME, `upsert_spec`…) →
-    /// {installed, name, state, notes}.
-    ComponentInstall { name: String },
+    /// {installed, name, state, notes, config_required}. `params` porte
+    /// les valeurs collectées côté client (dialogue des params
+    /// déclarés par l'entrée) — validées avant la recette, rendues
+    /// dans la config du composant quand les requis sont remplis.
+    ComponentInstall {
+        name: String,
+        #[serde(default)]
+        params: Option<std::collections::HashMap<String, String>>,
+    },
+    /// Édite les paramètres déclarés d'un composant (la seule surface
+    /// de config utilisateur — cf. `spec.params_schema`) : fusion dans
+    /// `spec.params` (une valeur vide retire la clé), validation par
+    /// type/regex/choix, réécriture de components.toml, re-rendu de la
+    /// config managée puis restart si le `process` tourne. Réponse :
+    /// `{name, state, params(masqués), config_required, rendered,
+    /// restarted}`.
+    ComponentSetParams {
+        name: String,
+        params: std::collections::HashMap<String, String>,
+    },
     /// Exécute une requête de données déclarée sur le composant —
     /// `spec.queries[query]` en argv direct, jamais de shell (le
     /// composant expose ses données auditées : ex.
@@ -982,6 +1165,24 @@ pub enum ReqKind {
     /// `{enabled, status}` — status = instantané exposé aussi dans
     /// `ListComponents`/`ComponentInfo`.
     OrchestratorSet { enabled: bool },
+    /// Lecture/édition à chaud de la config de l'orchestrateur backlog.
+    /// `patch` absent = get → `{config, status}` ; `patch` présent =
+    /// merge partiel validé par champ (clés = celles de
+    /// `[backlog_orchestrator]` ; valeurs en JSON natif ou forme chaîne
+    /// « "60" »/« "on" »/« Repo=/cwd,… » — les deux convergent sur la
+    /// même validation) puis la section config.toml est réécrite
+    /// (survit aux redémarrages) → `{config, applied, persisted,
+    /// status}`. Application : au prochain tick (max_workers, poll_secs,
+    /// nudge_cooldown, flags, group) ou au prochain spawn (agent, mode,
+    /// model, thought_level, prompts, repo_workspaces, workspace) —
+    /// `enabled` posé ici est persisté ET appliqué au runtime (à la
+    /// différence d'`OrchestratorSet`, runtime seul). Extension
+    /// additive : démons anciens → erreur « req inconnue », pas de
+    /// coupure protocole.
+    OrchestratorConfig {
+        #[serde(default)]
+        patch: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+    },
     /// Spawn d'un « Manager » pour le workspace routé `repo` (feature
     /// d'intendance backlog : le client le propose quand le composant
     /// `agentbacklog` + l'orchestrateur sont actifs — cf.
@@ -989,6 +1190,18 @@ pub enum ReqKind {
     /// Manager vivant pour ce repo est renvoyé tel quel. Réponse :
     /// `{session, repo, cwd, title, existing}`.
     ManagerSpawn { repo: String },
+    /// Métriques backlog : série temporelle échantillonnée par le tick
+    /// de l'orchestrateur natif (`~/.agentbacklog/metrics.jsonl`) +
+    /// agrégats calculés à la volée sur les timestamps des items
+    /// AgentBacklog. `window` : "24h"|"7d"|"30d"|"all" (défaut "7d").
+    /// Réponse : `{window, since, generated_at, samples, aggregates}`
+    /// — lead time moyen/médian, attente file, items terminés/jour,
+    /// pic de workers. Extension additive : démons anciens → erreur
+    /// « req inconnue », pas de coupure protocole.
+    BacklogMetrics {
+        #[serde(default)]
+        window: Option<String>,
+    },
     DaemonStatus,
     /// Auto-update du démon vers la release `version` demandée par le
     /// client (ex. "0.5.0" → tag v0.5.0 — jamais « latest » : le démon
@@ -998,8 +1211,50 @@ pub enum ReqKind {
     /// son superviseur — le marqueur pid conservé déclenche la reprise
     /// auto des sessions au boot. Réponse : `{updated, path,
     /// restarting}` — `restarting:false` = binaire remplacé mais aucun
-    /// superviseur détecté (restart manuel requis).
+    /// superviseur détecté (restart manuel requis). `"latest"`/`""`
+    /// (acctl sans arg) résout la dernière release publiée ; si elle
+    /// n'est pas plus récente que le binaire courant, réponse
+    /// `{noop: true, version, current, restarting:false}` sans update.
     UpdateDaemon { version: String },
+    /// Moissonne les capacités d'un profil agent par un spawn jetable
+    /// (initialize + session/new dans un cwd scratch, drain bref des
+    /// notifications, kill) puis met à jour le cache `agent_caps.json`
+    /// et les sessions du profil (meta + push ConfigOptions). Cher —
+    /// un spawn d'agent complet : réservé à une action explicite
+    /// (bouton refresh du client), jamais en boucle. Réponse :
+    /// `{agent, caps, sessions:[ids rafraîchis]}`. Extension additive :
+    /// démons anciens → erreur « req inconnue ».
+    RefreshAgentCaps { agent: String },
+    /// Verdict de review de PR rendu en A2A par la session reviewer
+    /// (pont MCP `agentcontrol_report_verdict`) : push direct au démon,
+    /// qui poste lui-même le commentaire GitHub — la sortie de review
+    /// ne dépend plus du scan de journal à idle. Réservé aux sessions
+    /// dont `origin` = `feature:pr-review` avec une review `running`
+    /// enregistrée ; `verdict` ∈ `APPROVED` | `CHANGES_REQUESTED`,
+    /// `body` = corps du commentaire de review. Extension additive :
+    /// démons anciens → erreur « req inconnue », le bloc journal reste
+    /// le filet de secours.
+    ReviewReport {
+        session: String,
+        verdict: String,
+        body: String,
+    },
+    /// Demande INTERNE de review de PR (acctl `pr review`, tool MCP
+    /// `agentcontrol_request_review`, futur bouton client) : injecte
+    /// une demande dans la MÊME file que le trigger commentaire
+    /// `/mr review` — mêmes gardes (`pr_review`, pool
+    /// `pr_review_max_parallel`, `pr_rereview`, retries bornés,
+    /// worktree au head courant) et même verdict `## Verdict:` posté
+    /// par le démon sur GitHub (la preuve de merge ne change pas).
+    /// `session` = demandeur A2A (None = utilisateur/acctl → pas de
+    /// notification verdict) ; `repo` = `owner/name`, `pr` = numéro.
+    /// Extension additive : démons anciens → erreur « req inconnue ».
+    PrReviewRequest {
+        #[serde(default)]
+        session: Option<String>,
+        repo: String,
+        pr: u64,
+    },
 }
 
 impl ReqKind {
@@ -1014,6 +1269,8 @@ impl ReqKind {
             Self::AttachSession { .. } => "attach_session",
             Self::ListSessions => "list_sessions",
             Self::ListAgents => "list_agents",
+            Self::ModelCosts { .. } => "model_costs",
+            Self::ModelCatalog { .. } => "model_catalog",
             Self::Send { .. } => "send",
             Self::PeerSend { .. } => "peer_send",
             Self::PeerSpawn { .. } => "peer_spawn",
@@ -1024,10 +1281,13 @@ impl ReqKind {
             Self::CreatePath { .. } => "create_path",
             Self::FindFiles { .. } => "find_files",
             Self::DownloadPath { .. } => "download_path",
+            Self::WatchDir { .. } => "watch_dir",
+            Self::UnwatchDir { .. } => "unwatch_dir",
             Self::QueueList { .. } => "queue_list",
             Self::QueueEdit { .. } => "queue_edit",
             Self::QueueDrop { .. } => "queue_drop",
             Self::QueuePromote { .. } => "queue_promote",
+            Self::QueueSteer { .. } => "queue_steer",
             Self::Events { .. } => "events",
             Self::SearchEvents { .. } => "search_events",
             Self::FirstPost { .. } => "first_post",
@@ -1067,11 +1327,17 @@ impl ReqKind {
             Self::ComponentRemove { .. } => "component_remove",
             Self::ComponentCatalog { .. } => "component_catalog",
             Self::ComponentInstall { .. } => "component_install",
+            Self::ComponentSetParams { .. } => "component_set_params",
             Self::ComponentQuery { .. } => "component_query",
             Self::OrchestratorSet { .. } => "orchestrator_set",
+            Self::OrchestratorConfig { .. } => "orchestrator_config",
             Self::ManagerSpawn { .. } => "manager_spawn",
+            Self::BacklogMetrics { .. } => "backlog_metrics",
             Self::DaemonStatus => "daemon_status",
             Self::UpdateDaemon { .. } => "update_daemon",
+            Self::RefreshAgentCaps { .. } => "refresh_agent_caps",
+            Self::ReviewReport { .. } => "review_report",
+            Self::PrReviewRequest { .. } => "pr_review_request",
         }
     }
 }

@@ -55,7 +55,7 @@ const MOCK = `(function () {
     invoke(cmd, args) {
       const p = Promise.resolve();
       if (cmd === "platform") return p.then(() => "linux");
-      if (cmd === "plugin:app|version") return p.then(() => "0.6.0");
+      if (cmd === "app_version") return p.then(() => "0.6.0");
       if (cmd === "plugin:event|listen") {
         window.__acListeners[args.event] = args.handler;
         return p.then(() => ++cbId);

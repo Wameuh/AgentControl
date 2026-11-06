@@ -138,7 +138,7 @@ export class GroupStore {
         for (const a of grpAncestors(ng)) all.add(a);
       }
       for (const g of all) { const o = document.createElement("option"); o.value = g; dl.appendChild(o); }
-    });
+    }).catch(() => {}); // suggestions en rab — fusion multi-conns, pas de toast
     dlg.showModal();
   }
 

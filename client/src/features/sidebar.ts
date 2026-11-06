@@ -5,6 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import { $, esc, notify, q, showErr } from "../core/dom";
+import { fmtDur } from "../core/format";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
 import { isAndroid, meshSetMood } from "../core/chrome";
@@ -20,7 +21,8 @@ import type { ChatView } from "./chat-view";
 import type { ConnectionManager } from "./connections";
 import { grpNorm, grpParent, inSubtree } from "./groups";
 import type { GroupStore } from "./groups";
-import { sounds } from "./sounds";
+import { stateDiff } from "./state-diff";
+import { notifications } from "./notifications";
 import type { NewSessionDialog } from "./new-session";
 import type { SettingsPanel } from "./settings";
 import type { ConnView } from "./conn-view";
@@ -28,6 +30,18 @@ import type { ComponentsPanel } from "./components";
 import type { MapView } from "./map-view";
 
 const DTYPE = "application/x-ac-session";
+
+/** Segment « · depuis 12 min · nom · max 2 h » du tooltip « wait »
+ *  (#189) — vide quand le démon ne rapporte pas le détail du waiter
+ *  (vieux démon : comportement antérieur inchangé). */
+function waitTip(s: SessionMeta): string {
+  const w = s.wait;
+  if (!w) return "";
+  const age = w.secs < 1 ? t("just_now") : t("wait_for", { d: fmtDur(w.secs) });
+  const name = w.name ? ` · ${w.name}` : "";
+  const max = w.timeout ? ` · ${t("wait_max", { d: fmtDur(w.timeout) })}` : "";
+  return ` · ${age}${name}${max}`;
+}
 
 /** Charge d'un drag interne à l'arbre : session (id) ou sous-arbre de
  *  groupe (path). `kind` absent = session (payloads antérieurs). */
@@ -188,6 +202,8 @@ export class Sidebar {
    *  recouvrent — la session s'afficherait dessous, invisible). */
   private openSession(id: string): Promise<void> {
     this.closeChatOverlays();
+    // chat.open retire les notifs done/error de la session ouverte
+    // (#184 — point d'entrée unique de tous les chemins d'ouverture).
     return this.chat.open(id);
   }
 
@@ -216,12 +232,18 @@ export class Sidebar {
     this.applyPrRows(prRes.rows, prRes.failed);
     // Marqueur Rust `conn_error` : la sonde list_sessions d'une conn a
     // échoué (timeout 8 s) → la marquer down (une seule fois : déjà down,
-    // markDead re-rendererait refresh en boucle).
+    // markDead re-rendererait refresh en boucle). Gen périmée = résultat
+    // d'un client remplacé au reconnect → ignoré (sinon down immédiat
+    // après « reconnect ok » avec le why par défaut trompeur).
     const list = raw.filter((s) => {
       if (this.pendingDel.has(s.id)) return false;
       if (!(s as { conn_error?: boolean }).conn_error) return true;
       const k = s.conn ?? "";
-      if ((this.conns.state(k) ?? "ok") === "ok") this.conns.markDead(k);
+      const gen = (s as { gen?: number }).gen;
+      if (!this.conns.isFresh(k, gen)) return false;
+      if ((this.conns.state(k) ?? "ok") === "ok") {
+        this.conns.markDead(k, "list_sessions: conn_error");
+      }
       return false;
     });
     // Conn down : ses sessions n'arrivent plus — réafficher le dernier cache
@@ -238,9 +260,12 @@ export class Sidebar {
     app.lastSessions = list;
     // La vue backlog résout agent_id → titre de session : snapshot frais.
     this.backlogView.noteSessions();
-    // Alertes sonores : diff d'états (la liste fusionnée couvre toutes les
-    // conns — le canal event ne suit que la session ouverte).
-    sounds.noteStates(list);
+    // Canaux d'alerte (sons, notifs OS) : diff d'états partagé — la liste
+    // fusionnée couvre toutes les conns, pas seulement la session ouverte.
+    stateDiff.noteStates(list);
+    // Balayage périodique des notifs OS : conditions résolues sans
+    // transition vue (restart app, shade stale) — throttlé ~30 s.
+    void notifications.reconcile(list);
     this.checkSpawns(list);
     // Un spawn tourne sans canal event (session non ouverte → pas de
     // status_changed) → repoller tant qu'un "starting" reste dans son
@@ -981,7 +1006,15 @@ export class Sidebar {
     const originHtml = s.origin
       ? `<span class="sess-origin" title="${q(esc(t("origin_tip", { origin: s.origin })))}">${t("via")} ${this.hl(s.origin.replace(/^component:/, "") || s.origin)}</span>`
       : "";
-    div.innerHTML = `<span class="dot st-${dotCls(s.state)}" title="${q(esc(s.state))}">${dotIcon(s.state)}</span><span class="t">${this.hl(s.title)}</span>${originHtml}${prHtml}<span class="a">${this.hl(s.agent)}</span><button class="sess-del" title="Supprimer">${icon("close")}</button>`;
+    const dotTip =
+      s.state === "error" && s.last_error
+        ? `error: ${s.last_error.kind} · ${s.last_error.message} · x${s.last_error.count} · ${s.last_error.at}`
+        : s.state === "asleep"
+          ? `asleep · ${t("dot_asleep_tip")}`
+          : s.state === "wait"
+            ? `wait${waitTip(s)} · ${t("dot_wait_tip")}`
+            : s.state;
+    div.innerHTML = `<span class="dot st-${dotCls(s.state, s.last_error)}" title="${q(esc(dotTip))}">${dotIcon(s.state, s.last_error)}</span><span class="t">${this.hl(s.title)}</span>${originHtml}${prHtml}<span class="a">${this.hl(s.agent)}</span><button class="sess-del" title="Supprimer">${icon("close")}</button>`;
     div.onclick = () => {
       void this.openSession(s.id);
       // Mobile : fermer le drawer après sélection.

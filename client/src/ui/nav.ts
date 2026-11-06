@@ -103,17 +103,19 @@ export class OverlayNav {
     if (id === "drawer") {
       $("sidebar").classList.remove("open");
       this.scrimOff("drawer");
-    } else if (id === "sheet" || id === "fctx" || id === "sctx") {
+    } else if (id === "sheet" || id === "fctx" || id === "sctx" || id === "evctx") {
       this.omenu.hidden = true;
       $("fctx").hidden = true;
       $("sctx").hidden = true;
+      $("evctx").hidden = true;
       this.scrimOff("sheet");
     } else if (id === "fileview") {
       $("file-viewer").classList.remove("open");
       stopVideos($("file-viewer"));
     } else if (id === "files") {
-      $("file-panel").hidden = true;
-      stopVideos($("file-panel"));
+      // Passe par le ✕ : closeFilePanel porte le close complet
+      // (vidéo, vue, recherche — et les watches FS de l'explorateur).
+      $("file-close").click();
     } else if (id === "term") {
       // Passe par le handler de ✕ : wantOpen retombe + nav.close.
       $("btn-term-hide").click();
@@ -189,7 +191,7 @@ export class OverlayNav {
       const inDrawer = (e.target as HTMLElement).closest("#sidebar") != null;
       if (!isAndroid() || document.querySelector("dialog[open]")) { swiping = false; return; }
       swiping = (inDrawer && $("sidebar").classList.contains("open")) ||
-        (!inDrawer && t0.clientX <= 26 && !(e.target as HTMLElement).closest("#file-panel, #omenu, #fctx, #sctx"));
+        (!inDrawer && t0.clientX <= 26 && !(e.target as HTMLElement).closest("#file-panel, #omenu, #fctx, #sctx, #evctx"));
       sx = t0.clientX; sy = t0.clientY;
     }, { passive: true });
     document.addEventListener("touchmove", (e) => {

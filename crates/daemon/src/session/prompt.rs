@@ -10,6 +10,199 @@ use std::sync::atomic::Ordering;
 
 use crate::acp;
 
+/// Issue d'un tour `session/prompt` pour le runner.
+pub(super) enum TurnOutcome {
+    /// Réponse OK (ou stopReason `cancelled` — annulation volontaire,
+    /// jamais une erreur).
+    Ok,
+    /// RPC ou stopReason en échec : kind = classification, msg brut.
+    Failed { kind: &'static str, msg: String },
+    /// Génération périmée pendant le tour (clear/kill) : ni erreur ni
+    /// action — le nouveau cycle décide.
+    Cancelled,
+}
+
+/// Classification d'une erreur `session/prompt` — pilote le retry :
+/// `rate_limit` = backoff automatique borné, `model`/`auth`/`other` =
+/// jamais de retry sans action explicite (changer de modèle/réparer
+/// l'auth est une décision humaine).
+/// Ordre des tests : auth > rate_limit > model — un « 403 » est auth
+/// même avec « quota » dans le texte, un « rate limit » ne contient
+/// quasiment jamais « model ».
+pub(super) fn classify_error(msg: &str) -> &'static str {
+    let m = msg.to_lowercase();
+    // Codes HTTP en mot entier : « 429 » nu matcherait « 1704290000 »
+    // (timestamp/id/port) — le split sur non-alphanumérique impose une
+    // frontière de token.
+    let has_code = |code: &str| {
+        m.split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|w| w == code)
+    };
+    if m.contains("unauthorized")
+        || has_code("401")
+        || has_code("403")
+        || m.contains("authentication")
+        || m.contains("credentials")
+        || m.contains("login")
+        || m.contains("api key")
+    {
+        return "auth";
+    }
+    if m.contains("rate limit")
+        || m.contains("ratelimit")
+        || m.contains("rate_limit")
+        || has_code("429")
+        || m.contains("quota")
+        || m.contains("too many requests")
+        || m.contains("resource exhausted")
+    {
+        return "rate_limit";
+    }
+    if (m.contains("invalid params") && m.contains("model"))
+        || m.contains("model not found")
+        || m.contains("unknown model")
+        || m.contains("model unavailable")
+        || (m.contains("does not exist") && m.contains("model"))
+    {
+        return "model";
+    }
+    "other"
+}
+
+/// Backoff du retry `rate_limit` : 60 s au premier échec, doublé à
+/// chaque échec consécutif du même kind, plafonné à 1 h.
+pub(super) fn backoff_for(count: u32) -> std::time::Duration {
+    let secs = 60u64.saturating_mul(1u64 << count.saturating_sub(1).min(6));
+    std::time::Duration::from_secs(secs.min(3600))
+}
+
+/// Secondes epoch UTC d'un SystemTime (0 si avant l'epoch — jamais en
+/// pratique, le temps système est post-1970).
+pub(super) fn unix_secs(t: std::time::SystemTime) -> i64 {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Jitter du retry calé sur une échéance annoncée : 5-15 s, dérivé de
+/// façon déterministe du message et du count (pas de RNG — testable,
+/// stable d'un spawn à l'autre pour une même annonce).
+pub(super) fn reset_jitter(msg: &str, count: u32) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in msg.bytes().chain(count.to_le_bytes()) {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    5 + h % 11
+}
+
+/// `<n>[.<d>] <unité?>` en tête de `s` — retourne les secondes. Unité
+/// absente → `default_secs` (None = unité exigée). Mots reconnus :
+/// second/sec, minute/min, hour/hr, day — anglais uniquement, le
+/// provider n'annonce pas dans une autre langue.
+fn parse_duration_secs(s: &str, default_secs: Option<u64>) -> Option<u64> {
+    let s = s.trim_start_matches(|c: char| !c.is_ascii_digit());
+    let int_len = s.bytes().take_while(u8::is_ascii_digit).count();
+    if int_len == 0 {
+        return None;
+    }
+    let (int_part, rest) = s.split_at(int_len);
+    let mut secs: f64 = int_part.parse().ok()?;
+    let rest = rest.trim_start();
+    if let Some(frac) = rest.strip_prefix('.') {
+        let flen = frac.bytes().take_while(u8::is_ascii_digit).count();
+        if flen > 0 {
+            secs += format!("0.{}", &frac[..flen]).parse::<f64>().ok()?;
+        }
+    }
+    let unit = rest
+        .trim_start_matches(|c: char| !c.is_ascii_alphabetic())
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .next()
+        .unwrap_or("");
+    let mult = match unit {
+        "" => default_secs?,
+        u if u.starts_with("sec") => 1,
+        u if u.starts_with("min") => 60,
+        u if u.starts_with("h") || u.starts_with("hr") => 3600,
+        u if u.starts_with("day") => 86400,
+        _ => return None,
+    };
+    Some((secs * mult as f64).round() as u64)
+}
+
+fn unix_to_system(unix: i64) -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + std::time::Duration::from_secs(unix.max(0) as u64)
+}
+
+/// Échéance de reset annoncée par le provider dans un message
+/// rate_limit : « reset in 15 minutes », « try again in 2 hours »,
+/// « retry-after: 120 » (secondes nues, convention HTTP), ou heure
+/// absolue « at 13:56 UTC ». None = rien d'exploitable ou échéance
+/// absurde (> 1 h dans le futur, > 5 min dans le passé — le backoff
+/// classique reprend la main dans les deux cas).
+pub(super) fn parse_reset_at(
+    msg: &str,
+    now: std::time::SystemTime,
+) -> Option<std::time::SystemTime> {
+    let now_unix = unix_secs(now);
+    let m = msg.to_lowercase();
+    let sane = |target: i64| {
+        let d = target - now_unix;
+        (-300..=3600).contains(&d).then(|| unix_to_system(target))
+    };
+    // (a) durée relative : « reset in 15 minutes », « try again in 2 h »
+    for kw in [
+        "reset in ",
+        "resets in ",
+        "try again in ",
+        "try again at ",
+        "retry after ",
+        "retry in ",
+        "retry-after",
+        "retry_after",
+    ] {
+        let Some(i) = m.find(kw) else { continue };
+        let rest = &m[i + kw.len()..];
+        // retry-after admet la forme nue « : 120 » (secondes) ; les
+        // autres tournures exigent une unité explicite.
+        let bare = kw.starts_with("retry");
+        if let Some(d) = parse_duration_secs(rest, bare.then_some(1)) {
+            return sane(now_unix.saturating_add(d as i64));
+        }
+    }
+    // (b) heure absolue UTC : « (at 13:56 UTC) » — le suffixe de fuseau
+    // est exigé pour ne pas capter « meet at 5:30 ».
+    for (i, _) in m.match_indices("at ") {
+        let rest = m[i + 3..].trim_start();
+        let b = rest.as_bytes();
+        if b.len() < 5 || !b[0].is_ascii_digit() {
+            continue;
+        }
+        let Some(colon) = rest.find(':') else { continue };
+        let (Ok(hh), Ok(mm)) = (
+            rest[..colon].parse::<u32>(),
+            rest[colon + 1..].get(..2).unwrap_or("").parse::<u32>(),
+        ) else {
+            continue;
+        };
+        let after = rest[colon + 3..].to_lowercase();
+        let tz = after.trim_start().starts_with("utc") || after.trim_start().starts_with("gmt");
+        if hh > 23 || mm > 59 || !tz {
+            continue;
+        }
+        use chrono::Datelike;
+        let dt = chrono::DateTime::<chrono::Utc>::from(now);
+        let target_unix = chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), dt.day())
+            .and_then(|d| d.and_hms_opt(hh, mm, 0))
+            .map(|n| n.and_utc().timestamp());
+        if let Some(t) = target_unix {
+            return sane(t);
+        }
+    }
+    None
+}
+
 impl Session {
     // -----------------------------------------------------------------------
     // API publique (dispatchée par le serveur)
@@ -43,6 +236,31 @@ impl Session {
                 });
                 return Ok(false);
             }
+        }
+        // Retenue d'erreur : le runner a breaké en gardant `busy` —
+        // plus aucun tour ne part. `rate_limit` : le message attend le
+        // retry programmé en file. Autres kinds : un envoi utilisateur
+        // explicite est l'action de déblocage — le hold tombe et la
+        // livraison repart tout de suite (drain explicite, comme au
+        // désarmement compact : busy vrai ne garantit plus un runner).
+        if !force && self.error_held() {
+            let kind = self
+                .meta_snapshot()
+                .last_error
+                .map(|le| le.kind)
+                .unwrap_or_default();
+            if kind == "rate_limit" {
+                self.enqueue_prompt(text, false, PromptSrc::User);
+                self.emit(EventKind::System {
+                    text: "session en erreur (rate limit) — message en file, retry programmé"
+                        .into(),
+                });
+                return Ok(false);
+            }
+            let _ = self.clear_error();
+            self.enqueue_prompt(text, false, PromptSrc::User);
+            self.spawn_drain();
+            return Ok(false);
         }
         // Agent pas prêt à recevoir (mort, ou spawn/handshake en vol :
         // le stdin existe avant la fin du session/load) — enfiler : un
@@ -84,6 +302,7 @@ impl Session {
                     text: text.clone(),
                     steer: true,
                     origin: None,
+                    spawn_prompt: false,
                 });
                 match s.prompt_rpc(&text).await {
                     Ok(_) => {}
@@ -91,10 +310,32 @@ impl Session {
                         if s.spawn_gen.load(Ordering::SeqCst) != gen {
                             return;
                         }
+                        // /compact armé ci-dessus puis refusé : désarmer —
+                        // sinon la retenue fantôme bloque la file jusqu'au
+                        // timeout (même fix que le drain sur commande en
+                        // échec). « compacting » posé par la sortie du
+                        // dernier prompt en vol doit être redressé : le
+                        // garde-fou vient d'être avorté, plus rien ne le
+                        // corrigerait (state != compacting → un autre
+                        // prompt vole encore, ne pas toucher).
+                        let disarmed = is_compact_cmd(&text) && s.take_compact_hold();
+                        if disarmed && s.meta_snapshot().state == "compacting" {
+                            s.set_state("idle");
+                        }
                         s.emit(EventKind::System {
                             text: format!("steer refusé ({e}) — message en file"),
                         });
-                        if !s.enqueue_prompt(&text, false, PromptSrc::UserJournaled) {
+                        // Remise en file inconditionnelle (la condition
+                        // de drain ne doit pas la sauter — un /compact
+                        // refusé désarmé perdrait le message). La
+                        // retenue laissait busy vrai sans runner (le
+                        // drain s'arrête sur compacting en conservant
+                        // busy) : après désarmement, le « runner déjà
+                        // là » supposé par enqueue_prompt est faux —
+                        // drain explicite pour ne pas orpheliner la file.
+                        let already =
+                            s.enqueue_prompt(&text, false, PromptSrc::UserJournaled);
+                        if disarmed || !already {
                             s.drain_queue().await;
                         }
                     }
@@ -103,17 +344,24 @@ impl Session {
             return Ok(false);
         }
         if force {
-            // bypass volontaire : sort de la retenue compact le cas
-            // échéant, annule le tour courant, livre en priorité.
+            // bypass volontaire : sort des retenues compact/erreur le
+            // cas échéant, annule le tour courant, livre en priorité.
             let held = self.take_compact_hold();
             if held {
                 self.emit(EventKind::System {
                     text: "compact interrompu — envoi forcé".into(),
                 });
             }
+            // La retenue d'erreur tombe aussi — la trace last_error
+            // survit jusqu'au prochain résultat de tour (un succès
+            // l'efface, un échec la ré-écrit). `eheld` entre dans la
+            // condition du drain : pendant le hold, busy resté vrai
+            // sans runner rendrait `already` toujours vrai — le message
+            // forcé s'empilerait sans jamais livrer.
+            let eheld = self.take_error_hold();
             let _ = self.cancel().await;
             let already = self.enqueue_prompt(text, true, PromptSrc::User);
-            if held || !already {
+            if held || eheld || !already {
                 // retenue levée (aucun runner ne tournait) ou file vide.
                 self.spawn_drain();
             }
@@ -147,6 +395,13 @@ impl Session {
                 });
                 return Ok(false);
             }
+        }
+        // Retenue d'erreur : un peer ne peut pas « réparer » — le
+        // message attend la sortie du hold (retry rate_limit ou action
+        // utilisateur), sans lever la retenue.
+        if self.error_held() {
+            self.enqueue_prompt(wrapped, false, PromptSrc::Peer);
+            return Ok(false);
         }
         // Même garde que send_prompt : mort ou spawn en vol → enfiler,
         // le drain post-spawn livrera. Endormie entre le check du
@@ -337,6 +592,12 @@ impl Session {
             if self.compacting.lock().unwrap().is_some() {
                 break;
             }
+            // Même retenue que compact : un tour en échec a suspendu la
+            // livraison — sortie en conservant `busy`, le timer de
+            // retry (rate_limit) ou l'action explicite relancera.
+            if self.error_hold.lock().unwrap().is_some() {
+                break;
+            }
             let (next, src) = {
                 let mut q = self.prompt_queue.lock().unwrap();
                 match q.pop_front() {
@@ -364,25 +625,73 @@ impl Session {
                     text: next.clone(),
                     steer: false,
                     origin: None,
+                    spawn_prompt: false,
                 });
             }
             let armed = is_compact_cmd(&next);
             if armed {
                 self.arm_compact(src == PromptSrc::Auto);
             }
-            if !self.run_turn(&next).await && armed && self.take_compact_hold() {
-                // /compact refusé ou inconnu côté agent : aucune
-                // compaction ne tourne — désarmer plutôt que retenir
-                // les envois jusqu'au timeout. Pas de spawn_drain :
-                // cette boucle poursuit la livraison elle-même.
-                self.emit(EventKind::System {
-                    text: "compact terminé — échec de la commande".into(),
-                });
-                if self.is_alive() {
-                    self.set_state("idle");
+            match self.run_turn(&next).await {
+                TurnOutcome::Ok | TurnOutcome::Cancelled => {}
+                TurnOutcome::Failed { kind, msg } => {
+                    if armed && self.take_compact_hold() {
+                        // /compact refusé ou inconnu côté agent : aucune
+                        // compaction ne tourne — désarmer plutôt que
+                        // retenir les envois jusqu'au timeout.
+                        self.emit(EventKind::System {
+                            text: "compact terminé — échec de la commande".into(),
+                        });
+                    }
+                    // Le prompt fautif retourne en tête de file :
+                    // le retry rate_limit rejoue alors un vrai tour
+                    // qui solde l'erreur au succès (sinon la retenue
+                    // retomberait sur une file vide → « error » collant
+                    // sans issue). Le src User devient UserJournaled —
+                    // le user_message est déjà dans le journal, un
+                    // second emit au drain le dupliquerait.
+                    {
+                        let src2 = if src == PromptSrc::User {
+                            PromptSrc::UserJournaled
+                        } else {
+                            src
+                        };
+                        self.prompt_queue
+                            .lock()
+                            .unwrap()
+                            .push_front((next.clone(), src2));
+                    }
+                    // Retenue d'erreur : suspendre la livraison (busy
+                    // conservé comme pour compact) plutôt qu'enchaîner
+                    // la file sur le même échec — c'est le mécanisme
+                    // qui cassait la boucle de relance orchestrateur.
+                    // Le timer rate_limit ou une action explicite la
+                    // lèvera. Agent mort pendant le tour (binding
+                    // perdu, kill) → pas de hold : on_agent_exit pose
+                    // dead, un état « error » écrasé par-dessus serait
+                    // un mensonge transitoire devenu permanent.
+                    if self.is_alive() {
+                        self.hold_error(kind, &msg);
+                    } else if self.meta_snapshot().state != "dead" {
+                        // Mort détectée mais l'exit pas encore propagé :
+                        // laisser dead arriver plutôt qu'un « error »
+                        // fantôme — et libérer busy pour ne pas figer
+                        // la file si le drain post-respawn repart.
+                        self.busy.store(false, Ordering::SeqCst);
+                    }
+                    break;
                 }
             }
+            // Entre deux tours : poser un rename ACP différé pendant
+            // celui qui vient de finir — envoyé pendant le RPC il
+            // pouvait avorter le tour en silence (#183). Idempotent
+            // (dernier titre seul est envoyé).
+            self.flush_pending_rename().await;
         }
+        // Fin de drain (file vide, break erreur, retenue) : dernier
+        // point ordonné avant le prochain prompt — le RPC échoue en
+        // silence si l'agent est mort (toléré).
+        self.flush_pending_rename().await;
         self.runner_active.store(false, Ordering::SeqCst);
         // Fenêtre de sortie : un push arrivé pendant qu'on rendait le flag
         // (son spawn_drain a pu heurter le CAS et repartir sans livrer) —
@@ -392,6 +701,7 @@ impl Session {
         // post-spawn.
         if self.accepting_prompts()
             && self.compacting.lock().unwrap().is_none()
+            && self.error_hold.lock().unwrap().is_none()
             && !self.prompt_queue.lock().unwrap().is_empty()
         {
             self.spawn_drain();
@@ -416,48 +726,114 @@ impl Session {
         let resp = self
             .acp_request("session/prompt", acp::session_prompt_params(&sid, text))
             .await;
+        // L'agent répond « Session not found » : sa session native a
+        // disparu (store vidé, GC interne) — la liaison est morte pour
+        // de bon et le process restant ne peut plus rien servir pour
+        // cette session. Le tuer plutôt que de laisser un vivant sans
+        // contexte : is_alive() resterait vrai → resume répondrait
+        // « already » et chaque envoi retomberait sur la même erreur,
+        // session coincée à vie (même impasse qu'un handshake raté).
+        let binding_dead = matches!(&resp, Err(e) if session_binding_lost(&format!("{e:#}")));
         if self.spawn_gen.load(Ordering::SeqCst) == gen {
             self.flush_text();
             if self.active_prompts.fetch_sub(1, Ordering::SeqCst) == 1 {
+                // Plus aucun tour en vol : les tool calls « en vol »
+                // d'un agent mort en pleine requête ne doivent pas
+                // survivre — le watchdog ne lirait plus qu'une
+                // attente fantôme au tour suivant.
+                self.tool_inflight.lock().unwrap().clear();
                 if self.compacting.lock().unwrap().is_some() {
                     // Le /compact a rendu la main mais la compaction tourne
                     // encore côté agent — l'état reste visible jusqu'au
                     // signal de fin (la retenue garde les envois en file).
                     self.set_state("compacting");
-                } else {
+                } else if !binding_dead && !self.error_held() {
+                    // Pas de re-départ idle : le kill ci-dessous va
+                    // poser dead via on_agent_exit — un « idle »
+                    // posé ici le recouvrirait selon l'ordre. Même
+                    // garde pour la retenue d'erreur : un steer en vol
+                    // qui finit après hold_error ne doit pas redescendre
+                    // l'état « error » à « idle ».
                     self.set_state("idle");
                 }
+                // Dernier prompt en vol terminé — point sûr pour un
+                // rename différé (le drain pouvait être fini depuis
+                // longtemps : un steer peut être le dernier à rendre
+                // la main, #183).
+                self.flush_pending_rename().await;
             }
         } else {
             self.active_prompts.fetch_sub(1, Ordering::SeqCst);
+        }
+        if binding_dead {
+            self.drop_dead_binding(gen).await;
         }
         resp
     }
 
     /// Un tour session/prompt : working → réponse → idle.
-    /// Retourne faux si le `session/prompt` RPC a échoué.
-    async fn run_turn(&self, text: &str) -> bool {
+    /// Issue typée pour le runner : Ok (end_turn ou cancelled), Failed
+    /// (kind classifié → retenue d'erreur), Cancelled (génération
+    /// périmée — silence total, le nouveau cycle décide).
+    async fn run_turn(&self, text: &str) -> TurnOutcome {
         // Un tour de l'ancien contexte tué par un clear n'émet pas son
         // "prompt failed" dans le journal frais.
         let gen = self.spawn_gen.load(Ordering::SeqCst);
+        // Compteur de sorties au départ du tour — comparé à la réponse
+        // pour détecter un end_turn qui n'a rien produit (#183).
+        let out0 = self.turn_outputs.load(Ordering::SeqCst);
         match self.prompt_rpc(text).await {
             Ok(v) => {
-                if let Some(sr) = v.get("stopReason").and_then(Value::as_str) {
-                    if sr != "end_turn" && self.spawn_gen.load(Ordering::SeqCst) == gen {
+                let sr = v.get("stopReason").and_then(Value::as_str);
+                if self.spawn_gen.load(Ordering::SeqCst) != gen {
+                    return TurnOutcome::Cancelled;
+                }
+                match sr {
+                    // Annulation volontaire (cancel utilisateur) : pas
+                    // une erreur — la file poursuit normalement.
+                    Some("cancelled") | Some("end_turn") | None => {
+                        // Succès : la trace d'erreur d'un éventuel retry
+                        // rate_limit s'efface (no-op sinon).
+                        self.clear_last_error();
+                        // Aucune sortie pendant le tour : un RPC annexe
+                        // en plein vol (session/rename) pouvait avorter
+                        // la réponse sans bruit — end_turn propre et
+                        // avortement silencieux sinon indistinguables
+                        // (#183). Tracer pour que l'œil comprenne la
+                        // soudaine inactivité.
+                        if self.turn_outputs.load(Ordering::SeqCst) == out0 {
+                            self.emit(EventKind::System {
+                                text: format!(
+                                    "tour terminé sans sortie (stopReason: {})",
+                                    sr.unwrap_or("?")
+                                ),
+                            });
+                        }
+                        TurnOutcome::Ok
+                    }
+                    Some(sr) => {
                         self.emit(EventKind::System {
                             text: format!("turn ended: {sr}"),
                         });
+                        TurnOutcome::Failed {
+                            kind: "other",
+                            msg: format!("stopReason: {sr}"),
+                        }
                     }
                 }
-                true
             }
             Err(e) => {
-                if self.spawn_gen.load(Ordering::SeqCst) == gen {
-                    self.emit(EventKind::Error {
-                        message: format!("prompt failed: {e}"),
-                    });
+                if self.spawn_gen.load(Ordering::SeqCst) != gen {
+                    return TurnOutcome::Cancelled;
                 }
-                false
+                let msg = format!("{e}");
+                self.emit(EventKind::Error {
+                    message: format!("prompt failed: {msg}"),
+                });
+                TurnOutcome::Failed {
+                    kind: classify_error(&msg),
+                    msg,
+                }
             }
         }
     }
@@ -511,6 +887,190 @@ impl Session {
                 true
             }
             None => false,
+        }
+    }
+
+    /// Promotion « steer » d'une entrée de file : la retire puis tente
+    /// un session/prompt concurrent dans le tour en cours — même
+    /// mécanique que le steer de send_prompt, SANS annuler le tour
+    /// (≠ queue_promote + cancel). Refus → l'entrée est remise à sa
+    /// position initiale, jamais perdue ni dupliquée. Les retenues du
+    /// drain s'appliquent : compact en cours = interdit (Held),
+    /// agent pas prêt = Held (le handler décide du réveil), session
+    /// sans tour = remise en tête + drain (livraison normale directe).
+    pub async fn steer_queued(&self, idx: usize) -> SteerOutcome {
+        // Retenue compact prioritaire : un prompt injecté pendant le
+        // compact l'annulerait côté agent — la file reste inchangée.
+        if self.compacting.lock().unwrap().is_some() {
+            return SteerOutcome::Held("compact");
+        }
+        // Retenue d'erreur : pas de tour en cours à « steer » — le
+        // steer injecterait un session/prompt direct malgré le hold.
+        if self.error_held() {
+            return SteerOutcome::Held("error");
+        }
+        // Agent pas prêt (mort, spawn/réveil en vol, endormie) : un
+        // session/prompt répondrait "Session not found" — même garde
+        // que send_prompt. L'entrée reste en file ; le handler traduit
+        // "asleep" en réveil (spawn_wake livrera la file au retour).
+        if !self.accepting_prompts() {
+            let why = if self.meta_snapshot().state == "asleep" {
+                "asleep"
+            } else if self.is_waking() {
+                "waking"
+            } else if self.is_spawning() {
+                "spawning"
+            } else {
+                "not_ready"
+            };
+            return SteerOutcome::Held(why);
+        }
+        // Pop sous le lock : une entrée retirée ici ne peut pas être
+        // livrée en double par le runner (le drain repart d'un push ou
+        // du re-queue explicite ci-dessous).
+        let (text, src) = {
+            let mut q = self.prompt_queue.lock().unwrap();
+            match q.remove(idx) {
+                Some(e) => e,
+                None => return SteerOutcome::Gone,
+            }
+        };
+        // Session libre (busy faux ⇒ file vide et aucun tour) : le steer
+        // n'a pas d'objet — remise en file et drain relancé = livraison
+        // immédiate par le chemin normal.
+        if !self.busy.load(Ordering::SeqCst) {
+            // Même arm que enqueue_prompt : remise en file pendant un
+            // réveil en vol — l'entrée doit survivre à un réveil raté.
+            if self.is_waking() {
+                self.arm_wake_pending();
+            }
+            {
+                let mut q = self.prompt_queue.lock().unwrap();
+                let at = idx.min(q.len());
+                q.insert(at, (text, src));
+                // Même invariant que enqueue_prompt : file non vide ⇒
+                // busy posé sous le lock de la file.
+                self.busy.store(true, Ordering::SeqCst);
+            }
+            self.spawn_drain();
+            return SteerOutcome::Sent;
+        }
+        // Compact armé entre le premier check et le pop (le runner vient
+        // de livrer un /compact) : la retenue prime — remise à sa place.
+        if self.compacting.lock().unwrap().is_some() {
+            // Parité enqueue_prompt : réveil en vol → arm pour que la
+            // tâche propriétaire enchaîne un réveil si la session
+            // retourne « asleep » avec la file non vide.
+            if self.is_waking() {
+                self.arm_wake_pending();
+            }
+            let mut q = self.prompt_queue.lock().unwrap();
+            let at = idx.min(q.len());
+            q.insert(at, (text, src));
+            return SteerOutcome::Held("compact");
+        }
+        // Génération capturée AVANT le spawn : une tâche schedulée après
+        // un clear est périmée d'emblée (comme le steer de send_prompt).
+        let gen = self.spawn_gen.load(Ordering::SeqCst);
+        let me = self.me.clone();
+        // Verdict rapide remonté au RPC : l'agent répond vite à un steer
+        // refusé → le client reçoit « requeued » sans attendre le refresh.
+        // Un steer accepté, lui, tient le RPC jusqu'à la fin du tour —
+        // au-delà d'un court budget la réponse reste « steer » optimiste
+        // (un refus tardif retombe en file + event système).
+        let (ack_tx, ack_rx) = oneshot::channel::<Option<String>>();
+        tokio::spawn(async move {
+            let Some(s) = me.upgrade() else { return };
+            if s.spawn_gen.load(Ordering::SeqCst) != gen {
+                return;
+            }
+            // Même arme que le drain : un /compact auto en file reste
+            // auto (relance « continue your task » à la fin).
+            if is_compact_cmd(&text) {
+                s.arm_compact(src == PromptSrc::Auto);
+            }
+            s.emit(EventKind::System {
+                text: "message en file promu en steer par l'utilisateur".into(),
+            });
+            // User → user_message steer journalisé à la remise (comme
+            // send_prompt). Peer/Auto : déjà tracés par leur émetteur.
+            if src == PromptSrc::User {
+                s.emit(EventKind::UserMessage {
+                    text: text.clone(),
+                    steer: true,
+                    origin: None,
+                    spawn_prompt: false,
+                });
+            }
+            match s.prompt_rpc(&text).await {
+                Ok(_) => {
+                    let _ = ack_tx.send(None);
+                }
+                Err(e) => {
+                    // Clear pendant le RPC : pas de ré-enfilement d'un
+                    // message d'un contexte disparu.
+                    if s.spawn_gen.load(Ordering::SeqCst) != gen {
+                        let _ = ack_tx.send(Some(format!("{e}")));
+                        return;
+                    }
+                    // /compact armé ci-dessus puis refusé : désarmer —
+                    // la retenue fantôme bloquerait la file jusqu'au
+                    // timeout et relancerait un « continue your task »
+                    // spurieux pour un auto jamais exécuté (même fix
+                    // que le drain : take_compact_hold sur commande
+                    // en échec). « compacting » posé par la sortie du
+                    // dernier prompt en vol doit être redressé : le
+                    // garde-fou vient d'être avorté, plus rien ne le
+                    // corrigerait (state != compacting → un autre
+                    // prompt vole encore, ne pas toucher).
+                    let disarmed = is_compact_cmd(&text) && s.take_compact_hold();
+                    if disarmed && s.meta_snapshot().state == "compacting" {
+                        s.set_state("idle");
+                    }
+                    s.emit(EventKind::System {
+                        text: format!("steer refusé ({e}) — message remis en file"),
+                    });
+                    // User → UserJournaled : le user_message steer est
+                    // déjà visible, le drain ne doit pas le réémettre.
+                    let src2 = if src == PromptSrc::User {
+                        PromptSrc::UserJournaled
+                    } else {
+                        src
+                    };
+                    // Même arm que enqueue_prompt : remise en file
+                    // pendant un réveil en vol — l'entrée doit survivre
+                    // à un réveil raté.
+                    if s.is_waking() {
+                        s.arm_wake_pending();
+                    }
+                    // Remise à la position initiale — busy.swap sous le
+                    // lock de la file, sérialisé avec le pop du runner.
+                    let was_busy = {
+                        let mut q = s.prompt_queue.lock().unwrap();
+                        let at = idx.min(q.len());
+                        q.insert(at, (text.clone(), src2));
+                        s.busy.swap(true, Ordering::SeqCst)
+                    };
+                    // ack APRÈS la réinsertion : la file renvoyée avec
+                    // « requeued » contient déjà l'entrée restaurée.
+                    let _ = ack_tx.send(Some(format!("{e}")));
+                    // Retenue désarmée : busy vrai peut survivre sans
+                    // runner (le drain s'arrête sur compacting en
+                    // conservant busy) — le « runner déjà là » supposé
+                    // par was_busy est alors faux → drain explicite
+                    // pour ne pas orpheliner l'entrée remise.
+                    if disarmed || !was_busy {
+                        s.drain_queue().await;
+                    }
+                }
+            }
+        });
+        match tokio::time::timeout(std::time::Duration::from_secs(2), ack_rx).await {
+            Ok(Ok(Some(e))) => SteerOutcome::Requeued(e),
+            // Accepté et terminé vite, timeout (toujours en vol) ou
+            // tâche morte : dans tous les cas l'entrée n'est plus en
+            // file — le client la reverrait via un refus tardif.
+            _ => SteerOutcome::Steer,
         }
     }
 
@@ -570,4 +1130,54 @@ impl Session {
         self.pending_agent.lock().unwrap().keys().cloned().collect()
     }
 
+}
+
+/// L'agent répond que l'id de session native n'existe plus chez lui
+/// (« Session not found », « unknown session », « no such session »…) :
+/// la liaison démon↔agent est définitivement morte. Phrases complètes
+/// où « session » est le sujet du marqueur — l'erreur arrive wrappée
+/// « acp session/prompt: <msg> » : une conjonction « session » +
+/// marqueur disjoints serait toujours vraie (le préfixe contient
+/// « session ») et un « file not found » / « unknown tool » tuerait un
+/// agent sain.
+pub(super) fn session_binding_lost(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    [
+        "session not found",
+        "session is not found",
+        "session was not found",
+        "no such session",
+        "unknown session",
+        "session does not exist",
+        "session doesn't exist",
+        "session not exist",
+        "cannot find session",
+        "could not find session",
+        "can not find session",
+        "session introuvable",
+        "session est introuvable",
+        "session inexistante",
+    ]
+    .iter()
+    .any(|k| m.contains(k))
+}
+
+/// Issue d'un `steer_queued` — traduite par le handler en
+/// {delivered, reason} pour le client.
+#[derive(Debug)]
+pub enum SteerOutcome {
+    /// Steer lancé dans le tour courant (ou achevé sous le budget
+    /// d'attente) — un refus tardif retombe en file + event système.
+    Steer,
+    /// Plus de tour en cours : remise en file et drain relancé —
+    /// livraison normale directe.
+    Sent,
+    /// L'agent a refusé rapidement — entrée remise à sa position.
+    Requeued(String),
+    /// Livraison impossible pour l'instant — file inchangée :
+    /// "compact" | "asleep" | "waking" | "spawning" | "not_ready".
+    Held(&'static str),
+    /// Index hors file — entrée déjà livrée ou retirée entre
+    /// l'affichage et le clic.
+    Gone,
 }

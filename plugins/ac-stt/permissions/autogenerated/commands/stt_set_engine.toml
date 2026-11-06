@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-stt-set-engine"
+description = "Enables the stt_set_engine command without any pre-configured scope."
+commands.allow = ["stt_set_engine"]
+
+[[permission]]
+identifier = "deny-stt-set-engine"
+description = "Denies the stt_set_engine command without any pre-configured scope."
+commands.deny = ["stt_set_engine"]

@@ -5,13 +5,13 @@
 // le cache de conversation à chaque changement de session.
 // ---------------------------------------------------------------------------
 
-import { $, esc, mkEv, q, showErr } from "../core/dom";
+import { $, copyText, esc, mkEv, q, showErr } from "../core/dom";
 import { linkify, mdRender } from "../core/format";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
 import type { AcEvent, CmdInfo, ConfigOption } from "../core/types";
 import { t } from "../i18n";
-import { icon } from "../ui/icons";
+import { icon, qIco } from "../ui/icons";
 
 // Seuils au-delà desquels une bulle user est repliée par défaut.
 const USER_FOLD_CHARS = 480;
@@ -52,6 +52,9 @@ export class EventRenderer {
     statusChanged: () => {},
     /** Clic sur un en-tête de message peer → ouvrir la session cible. */
     openSession: (_id: string) => {},
+    /** Message agent rendu → le TTS y attache son bouton haut-parleur
+     *  (no-op hors Android). */
+    agentText: (_el: HTMLElement, _ev: AcEvent) => {},
   };
 
   bind(d: Partial<typeof this.deps>) {
@@ -141,6 +144,8 @@ export class EventRenderer {
       case "agent_text": {
         const d = mkEv("msg agent", ev.seq);
         d.innerHTML = `<div class="md">${mdRender(ev.text as string)}</div>`;
+        this.codeCopyButtons(d);
+        this.deps.agentText(d, ev);
         return d;
       }
       case "peer_message": {
@@ -164,6 +169,7 @@ export class EventRenderer {
         const txt = ev.text as string;
         const head = txt.trim().split("\n")[0].slice(0, 110);
         d.innerHTML = `<details class="th"><summary>${icon("chev-right", "ic-caret")} ${icon("thought")} ${esc(head)}</summary><div class="md th-body">${mdRender(txt)}</div></details>`;
+        this.codeCopyButtons(d);
         return d;
       }
       case "tool_call":
@@ -259,6 +265,27 @@ export class EventRenderer {
     }
   }
 
+  /// Bouton « copier » en surimpression de chaque bloc de code markdown.
+  /// La copie lit textContent : le HTML coloré (spans syn-*) n'a pas de
+  /// texte propre, textContent restitue le code source exact.
+  private codeCopyButtons(root: ParentNode) {
+    for (const pre of root.querySelectorAll<HTMLElement>("pre.md-code")) {
+      const wrap = document.createElement("div");
+      wrap.className = "md-codewrap";
+      pre.replaceWith(wrap);
+      wrap.appendChild(pre);
+      const b = qIco("copy", t("copy"));
+      b.className = "md-copy";
+      b.onclick = () => {
+        void copyText(pre.textContent ?? "").then(() => {
+          b.innerHTML = icon("check");
+          setTimeout(() => { b.innerHTML = icon("copy"); }, 1200);
+        });
+      };
+      wrap.appendChild(b);
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Tool calls : bloc pliable + expand blob
   // -------------------------------------------------------------------------
@@ -275,11 +302,33 @@ export class EventRenderer {
         <span class="badge st-${status}">${status}</span>
       </div>
       <div class="tool-body" hidden>
+        ${ev.input ? '<pre class="tool-cmd"></pre>' : ""}
         <pre class="tool-out"></pre>
         ${ev.blob ? '<button class="btn-more">charger la sortie complète…</button>' : ""}
         ${ev.diff ? `<pre class="tool-diff">${esc(ev.diff as string)}</pre>` : ""}
       </div>`;
     const body = d.querySelector<HTMLElement>(".tool-body")!;
+    const cmd = d.querySelector<HTMLElement>(".tool-cmd");
+    if (cmd) {
+      const full = ev.input as string;
+      // Heredocs/scripts longs : tête seule + bouton d'expansion — le
+      // journal n'est pas noyé par une commande de 200 lignes.
+      const MAXL = 30, MAXC = 3000;
+      const lines = full.split("\n");
+      if (lines.length > MAXL || full.length > MAXC) {
+        cmd.textContent = lines.slice(0, MAXL).join("\n").slice(0, MAXC) + "\n…";
+        const exp = document.createElement("button");
+        exp.className = "btn-cmd";
+        exp.textContent = t("cmd_full");
+        exp.addEventListener("click", () => {
+          cmd.textContent = full;
+          exp.remove();
+        });
+        cmd.after(exp);
+      } else {
+        cmd.textContent = full;
+      }
+    }
     const pre = d.querySelector<HTMLElement>(".tool-out")!;
     if (ev.excerpt) pre.textContent = ev.excerpt as string;
     d.querySelector(".tool-head")!.addEventListener("click", () => {
@@ -363,7 +412,10 @@ export class EventRenderer {
       const body = d.querySelector<HTMLElement>(".tool-body")!;
       const pre = d.querySelector<HTMLElement>(".tool-out")!;
       if (ev.excerpt) {
-        pre.textContent += ev.excerpt as string;
+        // appendChild plutôt que textContent += : la réécriture du nœud
+        // détruirait une sélection de texte en cours dans la sortie
+        // streamée — ajouter un text node en queue la préserve.
+        pre.appendChild(document.createTextNode(ev.excerpt as string));
         if (body.hidden) {
           // signaler du nouveau contenu sans ouvrir
           d.querySelector(".tool-head")!.classList.add("has-new");

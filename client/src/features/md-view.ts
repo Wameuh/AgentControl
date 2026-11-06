@@ -132,7 +132,11 @@ export class MdView {
     // Chemins cliquables du rendu : relatifs au dossier du fichier ouvert.
     view.addEventListener("click", (e) => {
       const el = (e.target as HTMLElement).closest<HTMLElement>(".flink");
-      if (el?.dataset.path) this.deps.openFile(this.resolve(el.dataset.path));
+      if (!el?.dataset.path) return;
+      // Traité ici : la délégation globale des <a> (initExternalLinks)
+      // lit defaultPrevented et laisse ce clic tranquille.
+      e.preventDefault();
+      this.deps.openFile(this.resolve(el.dataset.path));
     });
   }
 

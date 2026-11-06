@@ -27,9 +27,10 @@ impl Drop for UpdateGuard {
 }
 
 /// Remplace le binaire courant par celui de la release `version`
-/// (accepte "0.5.0" ou "v0.5.0"). Bloquant : appeler via
-/// `spawn_blocking`. En cas de succès supervisé, un exit différé est
-/// armé — l'appelant reçoit la réponse avant la mort du process.
+/// (accepte "0.5.0", "v0.5.0", ou "latest"/"" = dernière release
+/// publiée). Bloquant : appeler via `spawn_blocking`. En cas de
+/// succès supervisé, un exit différé est armé — l'appelant reçoit
+/// la réponse avant la mort du process.
 pub fn self_update(version: &str) -> Result<Value> {
     if UPDATING
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -39,12 +40,34 @@ pub fn self_update(version: &str) -> Result<Value> {
     }
     let _guard = UpdateGuard;
 
-    let ver = version.trim().trim_start_matches('v');
+    // "latest" (ou absence de version côté acctl) = dernière release
+    // publiée — la version du binaire local n'existe souvent pas en
+    // release (build de branche, stable pas encore taguée) → 404.
+    let arg = version.trim().trim_start_matches('v');
+    let (ver, latest) = if arg.is_empty() || arg.eq_ignore_ascii_case("latest") {
+        (latest_release()?, true)
+    } else {
+        (arg.to_string(), false)
+    };
     // La version part en segment d'URL : whitelist semver stricte —
     // `../` traverserait vers un asset arbitraire (tout client du
     // socket peut appeler, agents et listener TCP sans auth compris).
-    if !valid_version(ver) {
+    if !valid_version(&ver) {
         bail!("version cible invalide (semver attendu, ex. \"0.5.0\")");
+    }
+    // No-op sur le chemin `latest` quand la cible n'est pas plus
+    // récente que le binaire courant : un branch build (ex. 0.10.0
+    // alors que la dernière stable publiée est 0.9.0) ne doit pas
+    // être rétrogradé en silence. Un tag explicite reste toujours
+    // appliqué — il sert à réinstaller/converger vers l'artefact
+    // publié même à version égale.
+    if latest && semver_cmp(env!("CARGO_PKG_VERSION"), &ver) != std::cmp::Ordering::Less {
+        return Ok(json!({
+            "noop": true,
+            "version": ver,
+            "current": env!("CARGO_PKG_VERSION"),
+            "restarting": false,
+        }));
     }
     let arch = match std::env::consts::ARCH {
         "x86_64" => "x86_64",
@@ -73,7 +96,13 @@ pub fn self_update(version: &str) -> Result<Value> {
     let url = format!(
         "https://github.com/{REPO}/releases/download/v{ver}/agentcontrol-server-{arch}-linux.tar.gz"
     );
-    let tgz = http_get(&url).with_context(|| format!("téléchargement {url}"))?;
+    let tgz = match http_get(&url) {
+        Ok(b) => b,
+        Err(HttpError::Status(404)) => bail!("{}", release_not_found(&ver)),
+        Err(e) => {
+            return Err(anyhow::Error::from(e)).with_context(|| format!("téléchargement {url}"))
+        }
+    };
     let staging = dir.join(format!(".ac-upd-{}", std::process::id()));
     std::fs::create_dir_all(&staging).context("staging")?;
     let res = swap_binaries(&tgz, &staging, &dir, &exe);
@@ -139,16 +168,191 @@ fn probe_dir_writable(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn http_get(url: &str) -> Result<Vec<u8>> {
-    let mut body = Vec::new();
-    ureq::get(url)
+/// Erreur HTTP qui conserve le code de statut — un 404 sur l'asset
+/// signifie « release inexistante », pas « panne réseau », et mérite
+/// un message orienté tags disponibles plutôt que l'erreur ureq brute.
+enum HttpError {
+    Status(u16),
+    Other(anyhow::Error),
+}
+impl From<HttpError> for anyhow::Error {
+    fn from(e: HttpError) -> Self {
+        match e {
+            HttpError::Status(c) => anyhow::anyhow!("HTTP {c}"),
+            HttpError::Other(e) => e,
+        }
+    }
+}
+
+fn http_get(url: &str) -> std::result::Result<Vec<u8>, HttpError> {
+    let resp = ureq::get(url)
         .timeout(std::time::Duration::from_secs(120))
+        .set("User-Agent", "agentcontrol-selfupdate")
         .call()
-        .with_context(|| format!("GET {url}"))?
-        .into_reader()
+        .map_err(|e| match e {
+            ureq::Error::Status(code, _) => HttpError::Status(code),
+            e => HttpError::Other(anyhow::Error::new(e).context(format!("GET {url}"))),
+        })?;
+    let mut body = Vec::new();
+    resp.into_reader()
         .take(64 * 1024 * 1024)
-        .read_to_end(&mut body)?;
+        .read_to_end(&mut body)
+        .map_err(|e| HttpError::Other(e.into()))?;
     Ok(body)
+}
+
+/// GET JSON sur l'API GitHub (User-Agent obligatoire, sinon 403).
+fn gh_api(path: &str) -> Result<Value> {
+    let url = format!("https://api.github.com/repos/{REPO}/{path}");
+    let resp = ureq::get(&url)
+        .timeout(std::time::Duration::from_secs(15))
+        .set("User-Agent", "agentcontrol-selfupdate")
+        .call()
+        .with_context(|| format!("GET {url}"))?;
+    serde_json::from_reader(resp.into_reader().take(8 * 1024 * 1024))
+        .context("décodage JSON GitHub")
+}
+
+/// Dernière release publiée : `releases/latest` d'abord — la release
+/// marquée latest (posée par le workflow sur chaque tag non-rc) est
+/// authoritative et jamais paginée ; les rc en accumulent sans la
+/// déplacer. Fallback : scan paginé de `/releases` (stable préférée,
+/// prerelease seulement si aucune stable n'existe — le rc s'obtient
+/// en passant son tag explicitement).
+fn latest_release() -> Result<String> {
+    if let Ok(v) = gh_api("releases/latest") {
+        if let Some(t) = v["tag_name"].as_str().map(|t| t.trim().trim_start_matches('v'))
+        {
+            if valid_version(t) {
+                return Ok(t.to_string());
+            }
+        }
+    }
+    // Fallback « aucune stable » (ou API latest en échec) : max semver
+    // sur les releases, stable préférée — paginé, le repo accumule
+    // des dizaines de releases par cycle.
+    let mut best_any = String::new();
+    let mut best_stable = String::new();
+    for page in 1..=3 {
+        let rels = gh_api(&format!("releases?per_page=100&page={page}"))?;
+        let arr = rels.as_array().context("réponse releases inattendue")?;
+        if arr.is_empty() {
+            break;
+        }
+        for r in arr {
+            if r["draft"].as_bool().unwrap_or(false) {
+                continue;
+            }
+            let Some(tag) = r["tag_name"].as_str() else {
+                continue;
+            };
+            let v = tag.trim().trim_start_matches('v');
+            if !valid_version(v) {
+                continue;
+            }
+            if best_any.is_empty() || semver_cmp(v, &best_any) == std::cmp::Ordering::Greater
+            {
+                best_any = v.to_string();
+            }
+            if !r["prerelease"].as_bool().unwrap_or(false)
+                && (best_stable.is_empty()
+                    || semver_cmp(v, &best_stable) == std::cmp::Ordering::Greater)
+            {
+                best_stable = v.to_string();
+            }
+        }
+        if arr.len() < 100 {
+            break;
+        }
+    }
+    let best = if best_stable.is_empty() {
+        best_any
+    } else {
+        best_stable
+    };
+    if best.is_empty() {
+        bail!("aucune release publiée trouvée pour {REPO}");
+    }
+    Ok(best)
+}
+
+/// Message d'erreur 404 orienté utilisateur : la release demandée
+/// n'existe pas — suggère un tag existant et liste les récents.
+fn release_not_found(ver: &str) -> String {
+    let hint = "préciser un tag existant, ex. acctl daemon-update vX.Y.Z";
+    match gh_api("releases?per_page=100") {
+        Ok(rels) => {
+            let tags: Vec<&str> = rels
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|r| r["tag_name"].as_str())
+                        .take(15)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if tags.is_empty() {
+                format!("release v{ver} introuvable — {hint}")
+            } else {
+                let ex = tags[0];
+                format!(
+                    "release v{ver} introuvable — préciser un tag existant, \
+                     ex. acctl daemon-update {ex} ; tags : {}",
+                    tags.join(", ")
+                )
+            }
+        }
+        Err(_) => format!("release v{ver} introuvable (HTTP 404) — {hint}"),
+    }
+}
+
+/// Compare semver minimal : `x.y.z` numérique puis identifiants de
+/// pré-release (stable > pré-release ; numérique < alphanum, semver §11).
+fn semver_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering::*;
+    fn parse(v: &str) -> (Vec<u64>, Vec<String>) {
+        let v = v.split('+').next().unwrap_or(v);
+        let (core, pre) = v.split_once('-').unwrap_or((v, ""));
+        let n = core.split('.').map(|x| x.parse().unwrap_or(0)).collect();
+        let p = if pre.is_empty() {
+            Vec::new()
+        } else {
+            pre.split('.').map(String::from).collect()
+        };
+        (n, p)
+    }
+    let (an, ap) = parse(a);
+    let (bn, bp) = parse(b);
+    for i in 0..3 {
+        let d = an.get(i).copied().unwrap_or(0).cmp(&bn.get(i).copied().unwrap_or(0));
+        if d != Equal {
+            return d;
+        }
+    }
+    match (ap.is_empty(), bp.is_empty()) {
+        (true, true) => return Equal,
+        (true, false) => return Greater,
+        (false, true) => return Less,
+        (false, false) => {}
+    }
+    for i in 0..ap.len().max(bp.len()) {
+        match (ap.get(i), bp.get(i)) {
+            (None, _) => return Less,
+            (_, None) => return Greater,
+            (Some(x), Some(y)) => {
+                let d = match (x.parse::<u64>(), y.parse::<u64>()) {
+                    (Ok(xn), Ok(yn)) => xn.cmp(&yn),
+                    (Ok(_), Err(_)) => Less,
+                    (Err(_), Ok(_)) => Greater,
+                    (Err(_), Err(_)) => x.cmp(y),
+                };
+                if d != Equal {
+                    return d;
+                }
+            }
+        }
+    }
+    Equal
 }
 
 /// Extrait `agentcontrol-daemon` (+ `acctl` si présent dans le même
@@ -202,4 +406,28 @@ fn stage_executable(src: &Path, dir: &Path, name: &str) -> Result<PathBuf> {
     }
     std::fs::File::open(&staged)?.sync_data()?;
     Ok(staged)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cmp::Ordering::*;
+
+    #[test]
+    fn semver_cmp_orders_core_and_prerelease() {
+        assert_eq!(semver_cmp("0.9.0", "0.10.0"), Less);
+        assert_eq!(semver_cmp("0.10.0-rc.17", "0.10.0-rc.2"), Greater);
+        assert_eq!(semver_cmp("0.10.0-rc.2", "0.10.0"), Less); // stable > rc
+        assert_eq!(semver_cmp("1.0.0", "1.0.0"), Equal);
+        assert_eq!(semver_cmp("1.0.0-rc.1+meta", "1.0.0-rc.1"), Equal);
+        assert_eq!(semver_cmp("0.10.0-beta", "0.10.0-rc"), Less); // alphanum
+    }
+
+    #[test]
+    fn valid_version_accepts_rc_and_rejects_traversal() {
+        assert!(valid_version("0.10.0-rc.17"));
+        assert!(!valid_version("../x"));
+        assert!(!valid_version("latest"));
+        assert!(!valid_version("0.10"));
+    }
 }

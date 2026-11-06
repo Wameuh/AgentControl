@@ -8,6 +8,29 @@ use tauri::State;
 
 use crate::state::AppState;
 
+/// Version « identité » du client : `X.Y.Z` du manifeste, suffixée
+/// `-rc.K` quand le binaire a été compilé pour un tag rc (env
+/// AGENTCONTROL_RC=K posé par build.yml — l'injection fichier de
+/// bump_version.py est impossible sur Windows/macOS : MSI et
+/// CFBundleVersion exigent du numérique). Linux/Android ont déjà le
+/// suffixe dans Cargo.toml → pas de double suffixe. Sans ce suffixe
+/// l'updater restait « à jour » à vie : « X.Y.Z » local > « -rc.K »
+/// distant (prerelease < stable à X.Y.Z égal). Le gate mineur
+/// démon↔client reste sain : minorOf() masque le suffixe.
+#[tauri::command]
+pub(crate) fn app_version() -> String {
+    const V: &str = env!("CARGO_PKG_VERSION");
+    // Re-validation ici et pas seulement à l'émission (build.rs) :
+    // option_env! lit aussi l'env AMBIANTE de rustc — un
+    // `AGENTCONTROL_RC=abc cargo build` passerait sinon tel quel.
+    match option_env!("AGENTCONTROL_RC") {
+        Some(k) if !V.contains('-') && k.bytes().all(|b| b.is_ascii_digit()) => {
+            format!("{V}-rc.{k}")
+        }
+        _ => V.to_string(),
+    }
+}
+
 /// "android" | "windows" | "macos" | "linux" — pour les gates frontend.
 #[tauri::command]
 pub(crate) fn platform() -> &'static str {
@@ -88,7 +111,7 @@ pub(crate) async fn sys_stats(state: State<'_, AppState>) -> Result<Value, Strin
     let dt = now.duration_since(t0).as_secs_f64().max(0.001);
     Ok(json!({
         "rss_mb": (p.memory() as f64 / 1_048_576.0).round(),
-        "cpu": (p.cpu_usage() * 10.0).round() / 10.0,
+        "cpu": ((p.cpu_usage() as f64) * 10.0).round() / 10.0,
         "rx_bps": ((rx - rx0) as f64 / dt).round(),
         "tx_bps": ((tx - tx0) as f64 / dt).round(),
     }))
@@ -132,5 +155,24 @@ pub(crate) fn set_app_icon(window: tauri::WebviewWindow, state: &str) -> Result<
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    /// `sysinfo::cpu_usage()` est f32 : si l'arrondi reste en f32,
+    /// l'élargissement f32→f64 de serde_json expose la queue binaire
+    /// (`33.3_f32` → `33.29999923706055`). Le cast AVANT l'arrondi
+    /// produit un f64 propre que ryu imprime « 33.3 ».
+    #[test]
+    fn cpu_rounds_in_f64_not_f32() {
+        let cpu_f32: f32 = 33.3;
+        let v = json!({ "cpu": ((cpu_f32 as f64) * 10.0).round() / 10.0 });
+        assert_eq!(v["cpu"].to_string(), "33.3");
+        // Contre-exemple : la version f32 sérialise la queue binaire.
+        let bad = json!({ "cpu": (cpu_f32 * 10.0).round() / 10.0 });
+        assert_ne!(bad["cpu"].to_string(), "33.3");
+    }
 }
 

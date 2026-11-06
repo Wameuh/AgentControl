@@ -7,7 +7,8 @@
 import { $, showErr } from "../core/dom";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
-import type { CmdInfo } from "../core/types";
+import type { CmdInfo, SessionMeta } from "../core/types";
+import { costFor } from "./modelcosts";
 
 export const cmdName = (c: CmdInfo) => (typeof c === "string" ? c.replace(/^\//, "") : c.name);
 export const cmdDesc = (c: CmdInfo) => (typeof c === "string" ? "" : (c.description ?? ""));
@@ -38,30 +39,42 @@ export function fusionParts(v: string): [string, string, string, string] | null 
   return [pb, pe, sb, se];
 }
 
+const modelOpts = (): { v: string }[] => JSON.parse(($("model-select") as HTMLSelectElement).dataset.opts || "[]");
+
 /** Remplit le select d'effort pour une base de modèle donnée. */
 export function effortsFor(base: string): string[] {
-  const opts: { v: string }[] = JSON.parse(($("model-select") as HTMLSelectElement).dataset.opts || "[]");
   const effs = new Set<string>();
-  for (const o of opts) {
-    if (o.v === base || o.v.startsWith(base + "-") || o.v.startsWith(base + "[")) {
-      const e = splitModel(o.v)[1];
-      if (e) effs.add(e);
-    }
+  for (const o of modelOpts()) {
+    const [b, e] = splitModel(o.v);
+    if (b === base && e) effs.add(e);
   }
   return [...effs];
+}
+
+/** Valeur complète à envoyer pour `base` : seulement une option annoncée par l'agent
+ *  (l'agent refuse une base nue quand elle n'existe qu'avec un suffixe d'effort). */
+export function resolveModel(base: string, eff: string): string {
+  const effs = effortsFor(base);
+  if (eff && effs.includes(eff)) return joinModel(base, eff);
+  if (modelOpts().some((o) => o.v === base)) return base;
+  return effs.length ? joinModel(base, effs[0]) : base;
 }
 
 export function fillEfforts(base: string, cur: string) {
   const es = $("effort-select") as HTMLSelectElement;
   const effs = effortsFor(base);
   es.innerHTML = "";
-  if (effs.length <= 1) return;
   for (const e of effs) {
     const o = document.createElement("option");
     o.value = e;
     // "[context=…,effort=…]" → contenu lisible sans les crochets
     // ("[]" de cursor = variante par défaut → garder "[]" plutôt que vide)
-    o.textContent = e.startsWith("[") ? e.slice(1, -1) || e : e;
+    const label = e.startsWith("[") ? e.slice(1, -1) || e : e;
+    // Coût catalogue du modèle complet (base + effort) quand dispo —
+    // suffixe indicatif, absent si le provider n'expose rien.
+    const cost = costFor(joinModel(base, e));
+    o.textContent = label + (cost ? ` · ${cost.label}` : "");
+    if (cost?.detail) o.title = cost.detail;
     es.appendChild(o);
   }
   if (effs.includes(cur)) es.value = cur;
@@ -111,8 +124,9 @@ export function fillSel(s: HTMLSelectElement, items: [string, string][]) {
   }
 }
 
-/** Wiring des <select> du header ; `openFusion` injecté (fusion-dialog). */
-export function initModelBar(openFusion: () => void) {
+/** Wiring des <select> du header ; `openFusion` injecté (fusion-dialog),
+ *  `metaChanged` re-rend le header après une meta rafraîchie. */
+export function initModelBar(openFusion: () => void, metaChanged: () => void = () => {}) {
   ($("mode-select") as HTMLSelectElement).onchange = (e) => {
     if (!app.current) return;
     const sel = e.target as HTMLSelectElement;
@@ -129,14 +143,13 @@ export function initModelBar(openFusion: () => void) {
       return;
     }
     fillEfforts(sel.value, "");
-    const eff = ($("effort-select") as HTMLSelectElement).value;
-    applyModelValue(joinModel(sel.value, eff));
+    applyModelValue(resolveModel(sel.value, ($("effort-select") as HTMLSelectElement).value));
   };
 
   ($("effort-select") as HTMLSelectElement).onchange = (e) => {
     const base = ($("model-select") as HTMLSelectElement).value;
     const eff = (e.target as HTMLSelectElement).value;
-    if (base && base !== "__fusion") applyModelValue(joinModel(base, eff));
+    if (base && base !== "__fusion") applyModelValue(resolveModel(base, eff));
   };
 
   ($("model-free") as HTMLInputElement).addEventListener("keydown", async (e) => {
@@ -144,6 +157,37 @@ export function initModelBar(openFusion: () => void) {
     const v = (e.target as HTMLInputElement).value.trim();
     if (v) await call("set_model", { session: app.current.id, model: v }).catch((er) => showErr(String(er)));
   });
+
+  // ⟳ : probe jetable côté démon (spawn session/new dans un cwd scratch)
+  // → cache du profil + meta des sessions du profil rafraîchis (listes
+  // mode/modèle/config sans recréer la session — ex. nouveau modèle
+  // provider). session_info relit les listes ; l'event config_options
+  // poussé en parallèle mène au même rendu (idempotent).
+  ($("btn-caps-refresh") as HTMLButtonElement).onclick = async (e) => {
+    const s = app.current;
+    if (!s) return;
+    const btn = e.currentTarget as HTMLButtonElement;
+    btn.disabled = true;
+    btn.classList.add("spin");
+    try {
+      await call("refresh_agent_caps", { agent: s.agent, conn: s.conn });
+      const info = await call<{ meta: SessionMeta }>("session_info", {
+        session: s.id,
+        conn: s.conn,
+      });
+      s.available_modes = info.meta.available_modes;
+      s.available_models = info.meta.available_models;
+      s.config_options = info.meta.config_options;
+      s.mode = info.meta.mode;
+      s.model = info.meta.model;
+      metaChanged();
+    } catch (er) {
+      showErr(String(er));
+    } finally {
+      btn.disabled = false;
+      btn.classList.remove("spin");
+    }
+  };
 
   $("btn-fusion-edit").onclick = () => openFusion();
 }

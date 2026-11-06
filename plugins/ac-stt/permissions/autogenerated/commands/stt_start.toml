@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-stt-start"
+description = "Enables the stt_start command without any pre-configured scope."
+commands.allow = ["stt_start"]
+
+[[permission]]
+identifier = "deny-stt-start"
+description = "Denies the stt_start command without any pre-configured scope."
+commands.deny = ["stt_start"]

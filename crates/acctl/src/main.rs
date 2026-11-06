@@ -23,13 +23,21 @@
 //!   acctl pr add <N|I<cid>> [--session S] [--repo R]
 //!       [--forge github|gitlab|gerrit] [--host H[:port]] [--note txt]
 //!   acctl pr note <N|I<cid>> <texte...> | acctl pr rm <N|I<cid>> | acctl pr sync
+//!   acctl pr review <N> [--repo R]       — review native (pr_review du
+//!       démon) : même pipeline que `/mr review`, verdict notifié en
+//!       message si lancé depuis une session agent
 //!   acctl comp [ls] [--json] | info <n> | start|stop|restart <n>
 //!       | logs <n> [--tail N] | catalog [--json] [--refresh]
 //!       | install <n> | add <n> [--kind K] [--cmd "<argv>"] [--hc S]
-//!       [--env K=V ...] [--cwd C] [--desc D] [--autostart] | rm <n>
+//!       [--env K=V ...] [--cwd C] [--desc D] [--vargv "<argv>"]
+//!       [--vmin V] [--autostart] | rm <n>
 //!                                     — composants managés du démon
-//!   acctl orch [on|off|status]       — orchestrateur backlog natif
-//!                                     (bascule à chaud, défaut status)
+//!   acctl orch [on|off|status|config|set <clé> <val>…]
+//!       | metrics [--window 24h|7d|30d|all]
+//!                                     — orchestrateur backlog natif
+//!                                     (on|off : bascule runtime ;
+//!                                     config/set : édition persistée ;
+//!                                     metrics : série + agrégats)
 //!
 //! Connexion : $AGENTCONTROL_SOCK (défaut ~/.agentcontrol/daemon.sock)
 //!             ou $AGENTCONTROL_TCP host:port
@@ -219,14 +227,13 @@ async fn main() -> Result<()> {
     let mut c = connect().await?;
     match args[0].as_str() {
         "status" => println!("{}", c.call(proto::ReqKind::DaemonStatus).await?),
-        // Auto-update du démon vers la version passée (défaut : celle
-        // d'acctl) — le démon se remplace puis est relancé par son
-        // superviseur ; la connexion peut couper juste après la réponse.
+        // Auto-update du démon vers la version passée (défaut : "latest"
+        // = dernière release publiée, résolue par le démon — la version
+        // locale peut n'exister qu'en build de branche → 404).
+        // Le démon se remplace puis est relancé par son superviseur ;
+        // la connexion peut couper juste après la réponse.
         "daemon-update" => {
-            let version = args
-                .get(1)
-                .cloned()
-                .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+            let version = args.get(1).cloned().unwrap_or_else(|| "latest".into());
             println!(
                 "{}",
                 c.call(proto::ReqKind::UpdateDaemon { version }).await?
@@ -308,11 +315,21 @@ async fn main() -> Result<()> {
                     } else {
                         format!("{}↳ ", "  ".repeat((depth - 1).min(4)))
                     };
+                    // État affiché — « error » porte le kind en
+                    // suffixe (error:rate_limit…) pour distinguer un
+                    // retry programmé d'une panne à réparer.
+                    let state = match s["state"].as_str().unwrap_or("") {
+                        "error" => match s["last_error"]["kind"].as_str() {
+                            Some(k) => format!("error:{k}"),
+                            None => "error".to_string(),
+                        },
+                        st => st.to_string(),
+                    };
                     let line = format!(
                         "{}{}  {:<12} {:<14} {}  {}{}{}",
                         indent,
                         sid,
-                        s["state"].as_str().unwrap_or(""),
+                        state,
                         s["agent"].as_str().unwrap_or(""),
                         s["created_at"].as_str().unwrap_or("").get(..16).unwrap_or(""),
                         s["title"].as_str().unwrap_or(""),
@@ -645,9 +662,12 @@ async fn main() -> Result<()> {
         }
         "pr" => pr::run(&args, &mut c).await?,
         "comp" | "components" => comp::run(&args, &mut c).await?,
-        // `acctl orch` — bascule à chaud de l'orchestrateur backlog
-        // natif (RPC orchestrator_set) ; `status` = component_info de
-        // l'interne (phase, ledger workers, gardes).
+        // `acctl orch` — orchestrateur backlog natif : bascule runtime
+        // on|off (orchestrator_set), `status` = component_info de
+        // l'interne (phase, ledger workers, gardes), `config` = lecture
+        // de la config éditable, `set` = patch persisté
+        // (orchestrator_config), `metrics` = série + agrégats
+        // (backlog_metrics).
         "orch" | "orchestrator" => {
             let sub = args.get(1).map(String::as_str).unwrap_or("status");
             match sub {
@@ -662,7 +682,56 @@ async fn main() -> Result<()> {
                         name: "backlog-orchestrator".into(),
                     }).await?);
                 }
-                other => bail!("usage: acctl orch [on|off|status] (inconnu: {other})"),
+                // Série + agrégats du journal métriques : fenêtre
+                // positionnelle ou `--window` (défaut 7d).
+                "metrics" => {
+                    let mut window = "7d".to_string();
+                    let mut i = 2;
+                    while i < args.len() {
+                        match args[i].as_str() {
+                            "--window" | "-w" => {
+                                i += 1;
+                                window = args
+                                    .get(i)
+                                    .cloned()
+                                    .context("--window <24h|7d|30d|all>")?;
+                            }
+                            other if !other.starts_with('-') => window = other.into(),
+                            other => bail!("option inconnue: {other}"),
+                        }
+                        i += 1;
+                    }
+                    let v = c
+                        .call(proto::ReqKind::BacklogMetrics { window: Some(window) })
+                        .await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                "config" | "get" => {
+                    let v = c.call(proto::ReqKind::OrchestratorConfig { patch: None }).await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                "set" => {
+                    // Paires positionnelles `clé valeur` — une ou
+                    // plusieurs. La valeur passe en JSON natif quand
+                    // elle parse (bool/int/objet repo_workspaces)
+                    // sinon en chaîne — le démon reconvertit selon la
+                    // clé dans les deux cas (même validation).
+                    let pairs = &args[2..];
+                    if pairs.is_empty() || pairs.len() % 2 != 0 {
+                        bail!("usage: acctl orch set <clé> <valeur> [<clé> <valeur>…]");
+                    }
+                    let mut patch = std::collections::BTreeMap::new();
+                    for kv in pairs.chunks_exact(2) {
+                        let v = serde_json::from_str::<Value>(&kv[1])
+                            .unwrap_or_else(|_| Value::String(kv[1].clone()));
+                        patch.insert(kv[0].clone(), v);
+                    }
+                    let v = c.call(proto::ReqKind::OrchestratorConfig {
+                        patch: Some(patch),
+                    }).await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                other => bail!("usage: acctl orch [on|off|status|config|set <clé> <val>…|metrics [--window W]] (inconnu: {other})"),
             }
         }
         other => bail!("commande inconnue: {other}"),

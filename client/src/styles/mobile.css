@@ -233,15 +233,17 @@ body.android #file-nums { font-size: 13px; }
 body.android #fv-conflict { font-size: 13px; padding: 8px 12px; }
 body.android #fv-conflict button { min-height: 44px; padding: 6px 12px; font-size: 13px; }
 /* Menus contextuels (fichiers, sessions) → action sheet ancré bas. */
-body.android #fctx, body.android #sctx {
+body.android #fctx, body.android #sctx, body.android #evctx {
   position: fixed; left: 0 !important; right: 0; bottom: 0; top: auto !important;
   z-index: 70; border-radius: 18px 18px 0 0; width: auto;
   padding: 8px 10px calc(12px + env(safe-area-inset-bottom));
   border: 1px solid var(--line); border-bottom: 0;
   animation: sheet-up .2s ease-out;
 }
-body.android #fctx button, body.android #sctx button { padding: 14px 16px; font-size: 16px; text-align: left; width: 100%; }
-body.android #fctx .fctx-path, body.android #sctx .fctx-path { padding: 10px 16px 6px; font-size: 12px; }
+body.android #fctx button, body.android #sctx button, body.android #evctx button { padding: 14px 16px; font-size: 16px; text-align: left; width: 100%; }
+body.android #fctx .fctx-path, body.android #sctx .fctx-path, body.android #evctx .fctx-path { padding: 10px 16px 6px; font-size: 12px; }
+/* Pas de hover tactile : le bouton copier des blocs code reste visible. */
+body.android .md-copy { opacity: 1; }
 /* Header chat : 1re ligne = titre/état/actions, 2e = options scrollables. */
 body.android #chat-header {
   flex-wrap: wrap; row-gap: 6px; min-height: 48px; padding: 6px 8px;
@@ -294,7 +296,7 @@ body.android #sess-filter input { min-height: 44px; font-size: 15px; padding-rig
 body.android #sess-filter-clear { min-width: 44px; min-height: 44px; padding: 0; }
 /* Headers pliables des tool calls + boutons « voir plus » */
 body.android .tool-head { min-height: 44px; }
-body.android .btn-more { min-height: 44px; }
+body.android .btn-more, body.android .btn-cmd { min-height: 44px; }
 /* Permissions / questions : actions et champ réponse */
 body.android .btn-allow, body.android .btn-reject { min-height: 44px; }
 body.android .q-input { min-height: 44px; font-size: 16px; }

@@ -17,11 +17,21 @@ export interface SessionMeta {
   native_session_id?: string;
   mode?: string;
   model?: string;
+  /** Provenance du modèle : "announced" (options ACP) | "catalogue"
+   *  (variante hors annonce, posée via side-channel provider). */
+  model_source?: string;
+  /** Sid natif contre lequel le dernier override catalogue a tourné. */
+  model_override_sid?: string;
+  /** L'agent annonce session/load (absent = pas encore spawné). */
+  supports_load?: boolean;
   available_modes: string[];
   available_commands: CmdInfo[];
   available_models: string[];
   config_options?: ConfigOption[];
   state: string;
+  /** Dernier échec de tour (état "error") — kind : rate_limit | model
+   *  | auth | other ; count = échecs consécutifs du même kind. */
+  last_error?: { message: string; kind: string; at: string; count: number; retry_at?: number | null };
   context_used?: number;
   context_size?: number;
   /** Session créatrice (spawn agent→agent) — affichage imbriqué sidebar. */
@@ -29,6 +39,9 @@ export interface SessionMeta {
   /** Provenance externe (session créée par un service via new_session
    *  `origin`) — badge « via » sidebar + marquage du prompt initial. */
   origin?: string;
+  /** Détail du waiter ac-wait — présent seulement quand state="wait"
+   *  (#189 : âge du waiter le plus ancien, son nom, son timeout). */
+  wait?: { secs: number; name?: string; timeout?: number };
 }
 
 /** Registre PR ↔ session du démon (prs.json) — badge sidebar. */
@@ -73,8 +86,13 @@ export interface CompStatus {
   restarts?: number;
   /** Code du dernier exit (128+signal si tué par signal). */
   last_exit?: number;
-  /** Version sondée d'un `tool` (1re ligne de sa commande, ≤200 c). */
+  /** Version sondée de l'outil managé (`version_argv`, ou `command`
+   *  d'un tool) — 1re ligne ≤200 c. */
   version?: string;
+  /** Seuil `min_version` déclaré (spec ou entrée catalogue homonyme). */
+  version_min?: string;
+  /** Version sondée sous `version_min` — badge « mise à jour requise ». */
+  version_outdated?: boolean;
 }
 
 /** Item ListComponents : spec aplatie + état (`item_json` côté démon). */
@@ -105,6 +123,21 @@ export interface ConfigOption {
   currentValue?: string; options: ConfigOpt[];
 }
 
+/** Capacités moissonnées par le démon pour un profil agent
+ *  (agent_caps.json — handshakes session/new|load, config_option_update
+ *  et probes refresh_agent_caps). Tout est optionnel : absent = l'agent
+ *  n'a rien annoncé → saisie libre. */
+export interface AgentCaps {
+  updated_at?: string;
+  modes?: ConfigOpt[];
+  models?: ConfigOpt[];
+  config_options?: ConfigOption[];
+  /** Valeur courante rapportée (currentModeId / configOption "mode") —
+   *  indice d'affichage, peut être périmée. */
+  current_mode?: string;
+  current_model?: string;
+}
+
 export interface AcEvent {
   seq: number;
   ts: string;
@@ -114,7 +147,12 @@ export interface AcEvent {
 
 export interface DirEntry { name: string; dir: boolean; size: number }
 
-export type AgentOpt = { id: string; name: string; available?: boolean };
+export type AgentOpt = { id: string; name: string; available?: boolean; caps?: AgentCaps };
+
+/** Coût catalogue d'un modèle (RPC model_costs) : `label` compact pour
+ *  le libellé d'option (« Free », « $1/$5 »), `detail` = texte brut du
+ *  catalogue pour le tooltip. */
+export type ModelCostInfo = { label: string; detail?: string };
 
 // Type alias (pas interface) → signature d'index implicite, assignable à
 // Record<string, unknown> pour connKeyOf().
@@ -130,6 +168,9 @@ export type SavedConn = {
   password?: string;
   key?: string;
   native?: boolean;
+  /** Empreintes `SHA256:…` de host key épinglées — persistées par
+   *  l'appairage B′ ; toute connexion native du profil les impose. */
+  host_keys?: string[];
   /** Accent propre à la connexion (multi-instances : une couleur par
    *  démon pour identifier l'instance d'un coup d'œil). Nom d'accent
    *  ("sage" | "gold" | …) — absent = accent global des réglages. */
@@ -158,11 +199,46 @@ export type ComponentHealthcheck =
   | { kind: "http"; url: string }
   | { kind: "command"; argv: string[] };
 
+/** Type d'un paramètre déclaré — pilote le widget du formulaire et la
+ *  validation côté démon. */
+export type ParamKind =
+  | "string" | "path" | "int" | "duration" | "bool" | "enum" | "list" | "json";
+
+/** Paramètre de config déclaré (catalogue → spec.params_schema) : la
+ *  seule surface éditable d'un composant managé — la spec interne
+ *  (command/restart/healthcheck) reste propriété du catalogue. */
+export interface ParamSpec {
+  key: string;
+  label: string;
+  description?: string | null;
+  required: boolean;
+  kind: ParamKind;
+  /** Forme chaîne — castée selon kind. */
+  default?: string | null;
+  secret?: boolean;
+  /** Regex (string/path). */
+  validation?: string | null;
+  /** Valeurs autorisées (enum). */
+  choices?: string[];
+  /** Libellés d'affichage parallèles à `choices` (même index) —
+   *  absent/vide = afficher les valeurs brutes. */
+  choice_labels?: string[];
+  /** Enum « ouverte » : `choices` est indicative (annoncée par
+   *  l'agent) — une valeur hors liste reste enregistrable, le client
+   *  la signale « (?) » au lieu de bloquer. */
+  open_enum?: boolean;
+}
+
 /** Spec [[components]] de components.toml — lue et écrite telle quelle. */
 export interface ComponentSpec {
   name: string;
   kind: ComponentKind;
   command: string[];
+  /** Sonde de version de l'outil managé (process/external ; remplace
+   *  `command` pour un tool) — déclarée par le catalogue ou à la main. */
+  version_argv?: string[] | null;
+  /** Version minimale exigée de l'outil managé → badge « obsolète ». */
+  min_version?: string | null;
   env: Record<string, string>;
   cwd: string | null;
   autostart: boolean;
@@ -170,27 +246,50 @@ export interface ComponentSpec {
   restart_sec: number;
   healthcheck: ComponentHealthcheck;
   description: string | null;
+  /** Entrée catalogue d'origine — non nul = composant managé par
+   *  catalogue : l'édition utilisateur se borne aux `params`. */
+  catalog?: string | null;
+  /** Paramètres éditables déclarés (schéma copié à l'install). */
+  params_schema?: ParamSpec[];
+  /** Valeurs effectives des params — `secret` masqués (« •••••• »). */
+  params?: Record<string, string>;
+  /** Cible de rendu de la config managée (fichier possédé démon). */
+  render?: { path: string; template: string } | null;
+  /** Requêtes de données déclarées (`component_query` → argv). */
+  queries?: Record<string, string[]>;
 }
 
 export interface ComponentStatus {
   state: ComponentState;
+  /** "ok" | "fail" | "outdated" — « outdated » = outil sous
+   *  `version_min` (actionnable : mettre à jour l'outil). */
   health?: string;
   pid?: number;
   uptime_s?: number;
   restarts?: number;
   last_exit?: number;
-  /** Version sondée d'un `tool` (1re ligne de sa commande, ≤200 c). */
+  /** Version sondée de l'outil managé (≤200 c). */
   version?: string;
+  /** Seuil `min_version` déclaré (spec ou entrée catalogue homonyme). */
+  version_min?: string;
+  /** Version sondée sous `version_min` — badge « mise à jour requise ». */
+  version_outdated?: boolean;
+  /** Params required sans valeur — « configuration requise » :
+   *  spawn bloqué tant que la liste n'est pas vide. */
+  config_required?: string[];
 }
 
 /** Item ListComponents / ComponentInfo : spec + état runtime. `source`
- *  = "internal" (déclaré en code, non éditable) | "components.toml". */
+ *  = "internal" (déclaré en code, non éditable) | "components.toml".
+ *  `catalog` = le nom est couvert par une entrée du catalogue →
+ *  édition bornée aux params déclarés, spec interne scellée. */
 export interface ComponentItem {
   name: string;
   kind: ComponentKind;
   autostart: boolean;
   description?: string | null;
   source?: string;
+  catalog?: boolean;
   spec: ComponentSpec;
   status: ComponentStatus;
 }
@@ -203,6 +302,8 @@ export interface CatalogEntry {
   repo?: string | null;
   homepage?: string | null;
   suggested_spec: ComponentSpec;
+  /** Paramètres éditables déclarés — collectés au dialogue d'install. */
+  params?: ParamSpec[];
   installed: boolean;
   version?: string | null;
   latest_version?: string | null;

@@ -31,6 +31,7 @@ export function daemonParams(cfg: Record<string, unknown>, tag: string) {
     password: cfg.password ?? null,
     key: cfg.key ?? null,
     native: cfg.native ?? null,
+    hostKeys: cfg.host_keys ?? null,
   };
 }
 

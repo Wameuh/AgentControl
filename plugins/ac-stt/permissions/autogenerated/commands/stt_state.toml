@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-stt-state"
+description = "Enables the stt_state command without any pre-configured scope."
+commands.allow = ["stt_state"]
+
+[[permission]]
+identifier = "deny-stt-state"
+description = "Denies the stt_state command without any pre-configured scope."
+commands.deny = ["stt_state"]

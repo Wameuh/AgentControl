@@ -63,15 +63,31 @@ name = "Devin CLI"
 command = ["devin", "acp"]
 
 # DEVIN_PERMISSION_MODE est lue par le CLI au démarrage.
+#
+# Variantes modèle hors annonce ACP (ex. swe-2-flash-max que Devin
+# n'expose pas dans config_options) : les deux clés ci-dessous activent
+# le catalogue + l'override side-channel. `catalogue_cmd` liste les
+# variantes complètes ; `model_override_cmd` persiste la valeur dans le
+# store provider entre le kill de l'agent ACP et le session/load —
+# {native_sid} et {model} sont substitués. Sans elles, seules les
+# valeurs annoncées ACP sont sélectionnables.
+# catalogue_cmd = "devin models list"
+# model_override_cmd = "devin -r {native_sid} --model {model} --respect-workspace-trust false"
 [agents.devin.env]
 DEVIN_PERMISSION_MODE = "{mode}"
 
-# Cursor CLI — ACP natif (sous-commande cachée, aucun argument).
-# Login préalable : `cursor-agent login`. Le mode/modèle demandés à la
-# création sont appliqués via ACP après session/new (pas de placeholder).
-[agents.cursor]
-name = "Cursor CLI"
-command = ["cursor-agent", "acp"]
+# Cursor CLI — ACP natif, preset BUILT-IN (id `cursor`, affiché dans le
+# sélecteur de session sans rien déclarer ici). argv[0] est résolu sur
+# le PATH au boot (`cursor-agent` puis l'alias `agent`) en chemin
+# absolu. Login préalable : `cursor-agent login` (ou `agent login`).
+# Le mode/modèle demandés à la création sont appliqués via ACP après
+# session/new (pas de placeholder).
+# Surcharger la commande sans éditer ce fichier : options →
+# composants → « agents » (ou `acctl comp set agents cursor
+# "agent,acp"`) — persisté ici en `[agents.cursor]` complet.
+# [agents.cursor]
+# name = "Cursor CLI"
+# command = ["agent", "acp"]
 
 # Codex CLI — pas d'ACP natif : via l'adaptateur officiel
 # `npm i -g @agentclientprotocol/codex-acp` (repo zed-industries archivé,

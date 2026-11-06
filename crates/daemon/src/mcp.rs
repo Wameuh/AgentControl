@@ -165,6 +165,53 @@ fn tools_list() -> Value {
             },
         },
         {
+            "name": "agentcontrol_report_verdict",
+            "description": "Rend ton verdict de review de PR au démon — \
+                réservé aux sessions reviewer PR (feature:pr-review). \
+                Push direct : le démon poste lui-même le commentaire \
+                `## Verdict:` sur la PR, puis termine ta session. \
+                Appelle-le quand ton analyse est finie, rien après.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "verdict": {
+                        "type": "string",
+                        "enum": ["APPROVED", "CHANGES_REQUESTED"],
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "corps du commentaire de review \
+                            (findings, points vérifiés, non-bloquants)",
+                    },
+                },
+                "required": ["verdict", "body"],
+            },
+        },
+        {
+            "name": "agentcontrol_request_review",
+            "description": "Demande une review de PR à l'orchestrateur \
+                AgentControl — même pipeline que le commentaire `/mr review` \
+                (worktree au head, verdict `## Verdict:` posté sur la PR). \
+                Ta session est notifiée du verdict via \
+                agentcontrol_send_message (ack « acceptée » puis résultat) — \
+                pas de polling GitHub nécessaire. Réservé aux PR dont la \
+                base est `next_release`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repo": {
+                        "type": "string",
+                        "description": "repo owner/name (ex: Wameuh/AgentControl)",
+                    },
+                    "pr": {
+                        "type": "integer",
+                        "description": "numéro de la pull request",
+                    },
+                },
+                "required": ["repo", "pr"],
+            },
+        },
+        {
             "name": "agentcontrol_read_events",
             "description": "Lit la fin du transcript d'une autre session \
                 (messages user/agent/peer/système) pour prendre du contexte \
@@ -278,6 +325,41 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
                 } else {
                     " — elle se réveillera au prochain message"
                 }
+            ))
+        }
+        "agentcontrol_report_verdict" => {
+            let from = self_session()
+                .ok_or("AGENTCONTROL_SESSION absent — session émettrice inconnue")?;
+            let verdict = args["verdict"]
+                .as_str()
+                .ok_or("argument 'verdict' manquant")?;
+            let body = args["body"].as_str().ok_or("argument 'body' manquant")?;
+            let v = daemon_call(proto::ReqKind::ReviewReport {
+                session: from,
+                verdict: verdict.into(),
+                body: body.into(),
+            })
+            .await?;
+            Ok(format!("verdict transmis au démon : {v}"))
+        }
+        "agentcontrol_request_review" => {
+            let from = self_session()
+                .ok_or("AGENTCONTROL_SESSION absent — session émettrice inconnue")?;
+            let repo = args["repo"].as_str().ok_or("argument 'repo' manquant")?;
+            let pr = args["pr"]
+                .as_u64()
+                .ok_or("argument 'pr' manquant (nombre)")?;
+            let v = daemon_call(proto::ReqKind::PrReviewRequest {
+                session: Some(from),
+                repo: repo.into(),
+                pr,
+            })
+            .await?;
+            Ok(format!(
+                "demande de review enregistrée : {} — le verdict te sera \
+                 notifié par message (preuve officielle : commentaire \
+                 `## Verdict:` sur la PR)",
+                v["key"].as_str().unwrap_or("?")
             ))
         }
         "agentcontrol_read_events" => {

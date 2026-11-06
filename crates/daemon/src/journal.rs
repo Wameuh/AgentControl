@@ -232,13 +232,28 @@ impl Journal {
         Ok(())
     }
 
-    /// Premier `user_message` du journal (cycle courant) — scan de la
-    /// tête en flux, borné par FIRST_POST_SCAN_MAX lignes : le journal
-    /// peut faire des centaines de Mo, on ne le charge jamais entier.
+    /// Premier `user_message` « utile » du journal (cycle courant) —
+    /// scan de la tête en flux, borné par FIRST_POST_SCAN_MAX lignes :
+    /// le journal peut faire des centaines de Mo, on ne le charge
+    /// jamais entier.
+    ///
+    /// `session_origin` = `SessionMeta.origin` (None → session humaine).
+    /// Pour une session SERVICE, le premier `user_message` est le prompt
+    /// de spawn journalisé à la création (boilerplate de mission — pas
+    /// un post) : on le saute et on rend le `user_message` suivant (ex.
+    /// le post « [Backlog] item » de l'orchestrateur). Discriminants :
+    /// le flag `spawn_prompt` posé à l'émission ; repli pour les
+    /// journaux antérieurs — reconnaissables à l'absence de la clé
+    /// `spawn_prompt` dans la ligne sérialisée — où un premier
+    /// `user_message` portant `origin == session_origin` est assumé
+    /// être ce prompt. Résidu accepté : sur un journal d'avant le flag
+    /// vidé puis reposté, un post service sans `user_message` avant lui
+    /// serait sauté à tort.
+    ///
     /// La compaction supprime la TÊTE du fichier : sans détection, le
     /// premier `user_message` restant serait un prompt de milieu de
     /// cycle présenté comme « premier post » → Truncated dans ce cas.
-    pub fn first_post(&self, dir: &Path) -> Result<FirstPost> {
+    pub fn first_post(&self, dir: &Path, session_origin: Option<&str>) -> Result<FirstPost> {
         /// Le prelude d'un cycle (status/system/commands post-spawn) ne
         /// fait que quelques events — la borne est très large au-delà.
         const FIRST_POST_SCAN_MAX: usize = 4096;
@@ -257,6 +272,7 @@ impl Journal {
             Err(e) => return Err(e.into()),
         };
         let mut first_seen = false;
+        let mut saw_user_message = false;
         for (n, line) in BufReader::new(f).lines().enumerate() {
             if n >= FIRST_POST_SCAN_MAX {
                 break;
@@ -273,7 +289,27 @@ impl Journal {
             if !std::mem::replace(&mut first_seen, true) && ev.seq != 1 {
                 return Ok(FirstPost::Truncated);
             }
-            if matches!(ev.kind, EventKind::UserMessage { .. }) {
+            if let EventKind::UserMessage {
+                spawn_prompt,
+                ref origin,
+                ..
+            } = ev.kind
+            {
+                // Prompt de spawn d'une session service : flag explicite,
+                // ou — journaux écrits avant le flag (la clé
+                // `spawn_prompt` n'existe alors pas dans la ligne) —
+                // premier user_message portant l'origine de la session ;
+                // jamais un « post » utile. Un UM flaggé `false` garde
+                // le repli inerte → post-/clear, un post service reposté
+                // en tête de journal n'est pas sauté à tort.
+                let legacy_prompt = !saw_user_message
+                    && !line.contains("\"spawn_prompt\"")
+                    && session_origin.is_some()
+                    && origin.as_deref() == session_origin;
+                saw_user_message = true;
+                if spawn_prompt || legacy_prompt {
+                    continue;
+                }
                 return Ok(FirstPost::Found(ev));
             }
         }
@@ -474,6 +510,120 @@ mod tests {
             j.append(EventKind::AgentText { text: t.to_string() }).unwrap();
         }
         j
+    }
+
+    fn um(text: &str, origin: Option<&str>, spawn: bool) -> EventKind {
+        EventKind::UserMessage {
+            text: text.into(),
+            steer: false,
+            origin: origin.map(str::to_string),
+            spawn_prompt: spawn,
+        }
+    }
+
+    fn found_text(fp: FirstPost) -> String {
+        match fp {
+            FirstPost::Found(ev) => match ev.kind {
+                EventKind::UserMessage { text, .. } => text,
+                _ => panic!("Found ne porte qu'un user_message"),
+            },
+            FirstPost::Truncated => panic!("Truncated inattendu"),
+            FirstPost::Empty => panic!("Empty inattendu"),
+        }
+    }
+
+    /// first_post — session humaine : premier user_message servi ;
+    /// session service : le prompt de spawn est sauté (flag explicite,
+    /// ou premier UM portant l'origin — journaux antérieurs).
+    #[test]
+    fn first_post() {
+        let svc = "component:backlog-orchestrator";
+
+        // Session humaine : le premier user_message est le post.
+        let dir = tmpdir("fp-human");
+        let j = Journal::open(&dir).unwrap();
+        j.append(um("salut", None, false)).unwrap();
+        j.append(um("re-salut", None, false)).unwrap();
+        assert_eq!(found_text(j.first_post(&dir, None).unwrap()), "salut");
+
+        // Session service, journal actuel : system + prompt flaggé +
+        // post [Backlog] → le post est le premier utile.
+        let dir = tmpdir("fp-svc");
+        let j = Journal::open(&dir).unwrap();
+        j.append(EventKind::System { text: "créée par svc".into() }).unwrap();
+        j.append(um("MISSION boilerplate", Some(svc), true)).unwrap();
+        j.append(EventKind::AgentText { text: "…".into() }).unwrap();
+        j.append(um("[Backlog] item #105 — bug", Some(svc), false)).unwrap();
+        let t = found_text(j.first_post(&dir, Some(svc)).unwrap());
+        assert!(t.contains("#105"), "{t}");
+
+        // Le même journal lu sans origin (cas impossible — une session
+        // service a toujours meta.origin) servirait le prompt : la
+        // discrimination repose entièrement sur session_origin.
+        // Session service avec SEUL le prompt → Empty, pas le boilerplate.
+        let dir = tmpdir("fp-svc-empty");
+        let j = Journal::open(&dir).unwrap();
+        j.append(EventKind::System { text: "créée".into() }).unwrap();
+        j.append(um("MISSION boilerplate", Some(svc), true)).unwrap();
+        j.append(EventKind::AgentText { text: "…".into() }).unwrap();
+        assert!(matches!(
+            j.first_post(&dir, Some(svc)).unwrap(),
+            FirstPost::Empty
+        ));
+
+        // Journal LEGACY (écrit avant le flag — les lignes n'ont PAS la
+        // clé spawn_prompt) : le premier UM portant l'origin de la
+        // session est sauté ; le post qui suit (même origin) est servi.
+        let dir = tmpdir("fp-legacy");
+        let lines = [
+            r#"{"seq":1,"ts":"t","type":"system","text":"créée"}"#,
+            r#"{"seq":2,"ts":"t","type":"user_message","text":"MISSION boilerplate","steer":false,"origin":"component:backlog-orchestrator"}"#,
+            r#"{"seq":3,"ts":"t","type":"user_message","text":"[Backlog] item #105 — bug","steer":false,"origin":"component:backlog-orchestrator"}"#,
+        ];
+        std::fs::write(dir.join("events.jsonl"), lines.join("\n") + "\n").unwrap();
+        let j = Journal::open(&dir).unwrap();
+        let t = found_text(j.first_post(&dir, Some(svc)).unwrap());
+        assert!(t.contains("#105"), "{t}");
+
+        // Journal ACTUEL post-/clear : un post service reposté en tête
+        // (flaggé `false` explicitement) est servi tel quel — le repli
+        // origin ne joue que sur les lignes d'avant le flag.
+        let dir = tmpdir("fp-repost");
+        let j = Journal::open(&dir).unwrap();
+        j.append(um("[Backlog] item #9 — repost", Some(svc), false))
+            .unwrap();
+        let t = found_text(j.first_post(&dir, Some(svc)).unwrap());
+        assert!(t.contains("#9"), "{t}");
+
+        // Premier UM sans origin concordant → servi tel quel (pas un
+        // prompt de spawn : une session créée par un autre service ne
+        // porte pas l'origin de CELLE-CI).
+        let dir = tmpdir("fp-foreign");
+        let j = Journal::open(&dir).unwrap();
+        j.append(um("nudge", Some("component:autre"), false)).unwrap();
+        j.append(um("[Backlog] item #9 — x", Some(svc), false)).unwrap();
+        assert_eq!(
+            found_text(j.first_post(&dir, Some(svc)).unwrap()),
+            "nudge"
+        );
+
+        // Tête coupée par la compaction (premier seq != 1) → Truncated,
+        // même pour une session service.
+        let dir = tmpdir("fp-trunc");
+        let line = serde_json::to_string(&Event {
+            seq: 7,
+            ts: "t".into(),
+            kind: um("queue", None, false),
+        })
+        .unwrap();
+        std::fs::write(dir.join("events.jsonl"), format!("{line}\n")).unwrap();
+        let j = Journal::open(&dir).unwrap();
+        assert!(matches!(
+            j.first_post(&dir, Some(svc)).unwrap(),
+            FirstPost::Truncated
+        ));
+
+        let _ = std::fs::remove_dir_all(tmpdir("fp-human"));
     }
 
     #[test]

@@ -14,7 +14,7 @@ import { connLabel } from "./conn";
 const mesh = (window as {
   MeshBackground?: {
     setMood: (m: string, o: object) => void;
-    setAnimated: (on: boolean) => void;
+    setAnimated: (on: boolean, persist?: boolean) => void;
     isAnimated: () => boolean;
     getMood?: () => { base: number[]; light: number[]; agent: number[] };
   };
@@ -101,6 +101,11 @@ function meshAgentRgb(light: number[]): number[] {
   const [h, s, l] = rgbToHsl(light);
   return hslToRgb([(h - 30 + 360) % 360, s * 0.55, l * 0.93]);
 }
+/** Profondeur du résidu en lumière « négative » (thème clair) : la
+ *  facette converge vers `base×(1−k) + accent×DEPTH×k` — DEPTH 0.6
+ *  garde un voile accentué sobre, jamais saturé. */
+const PAPER_DEPTH = 0.6;
+
 /** Re-lit la palette résolue et la pousse au mesh : sa lumière principale
  *  = accent (thème, ou couleur de connexion quand l'instance est liée),
  *  sa base = --bg dérivé. « sauge » retombe pile sur les presets.
@@ -115,17 +120,37 @@ function syncMeshAccent() {
     // Accent choisi (classe theme-*) : la teinte des lumières agents suit
     // l'accent — sinon elles resteraient sur le vert des presets et les
     // facettes tourneraient vert sous un accent rouge. Accent par défaut :
-    // le preset bicolore sable/sauge (identité app) est conservé.
+    // le preset bicolore sable/sauge (identité app) est conservé —
+    // sauf en intensité forte (accent-strong), où « sauge » devient une
+    // olive saturée dérivée comme les autres accents.
     const themed = [...document.documentElement.classList]
-      .some((c) => c.startsWith("theme-"));
+      .some((c) => c.startsWith("theme-") || c === "accent-strong");
     if (themed) meshColors.agentTint = meshAgentRgb(light);
+    // Thème clair (« paper », mood.dark) : la couleur des lumières est
+    // SOUSTRAITE de la base (sgn<0 dans mesh-bg#shade) — envoyer
+    // l'accent brut fait tourner le résidu vers sa complémentaire
+    // (violet → facettes VERTES, rouge → cyan…). On envoie la couleur
+    // à soustraire pour que le résidu reste dans la famille de
+    // l'accent : light = base − accent×DEPTH → facet ≈ base(1−k) +
+    // accent×DEPTH×k. Accent par défaut non touché : le preset paper
+    // (sepia → résidu gris-bleu) est son rendu voulu.
+    if (themed && bgMood() === "paper") {
+      const neg = (c: number[]) =>
+        base.map((b, i) => Math.max(0, Math.round(b - c[i] * PAPER_DEPTH)));
+      meshColors.light = neg(light);
+      if (meshColors.agentTint) meshColors.agentTint = neg(meshColors.agentTint);
+    }
   }
   mesh?.setMood(bgMood(), { ...meshColors, intensity: 0.55 });
 }
 
-export function applyTheme(name: "dark" | "light") {
+/** Thème persisté — « dark » si absent ou inconnu (défaut du boot). */
+export const themePref = (): "dark" | "light" =>
+  localStorage.getItem("ac-theme") === "light" ? "light" : "dark";
+
+export function applyTheme(name: "dark" | "light", persist = true) {
   document.documentElement.classList.toggle("light", name === "light");
-  localStorage.setItem("ac-theme", name);
+  if (persist) localStorage.setItem("ac-theme", name);
   // La palette dérivée dépend du mode : recalcul après le toggle.
   syncMeshAccent();
 }
@@ -154,6 +179,20 @@ export function applyAccent(name: Accent, persist = true) {
   syncMeshAccent();
 }
 
+// Intensité d'accent — dimension orthogonale (classe :root.accent-strong,
+// cf. base.css) : « douce » = défaut, « forte » = variantes saturées.
+export const accentStrongPref = (): boolean =>
+  localStorage.getItem("ac-accent-strong") === "1";
+
+/** Applique l'intensité ; indépendante de l'accent actif (global ou
+ *  couleur de connexion) — la classe n'est jamais retirée par
+ *  applyAccent. */
+export function applyAccentStrong(on: boolean, persist = true) {
+  document.documentElement.classList.toggle("accent-strong", on);
+  if (persist) localStorage.setItem("ac-accent-strong", on ? "1" : "0");
+  syncMeshAccent();
+}
+
 /** Chrome par connexion liée (modèle multi-instances : 1 instance = 1
  *  connexion) : accent propre à la conn (sinon celui des réglages),
  *  liseré d'identification (:root.conn-tinted, styles/layout.css) et
@@ -164,9 +203,18 @@ export function applyAccent(name: Accent, persist = true) {
  *  l'identifiant visuel de la connexion. Sans couleur de conn, l'accent
  *  global des réglages s'applique.
  *  conn = clé connKey ; null = aucune connexion liée (retour au neutre). */
+/** Accent stagé dans les réglages (#190) : choisi en aperçu mais pas
+ *  encore enregistré. Il prime sur la préférence persistée comme repli
+ *  dans applyConnChrome — la couleur de conn garde la priorité, donc
+ *  l'aperçu montre le rendu tel qu'il sera après « Enregistrer ». */
+let stagedAccent: Accent | null = null;
+export const stageAccent = (a: Accent | null) => {
+  stagedAccent = a;
+};
+
 export function applyConnChrome(conn: string | null, color?: Accent | null) {
   document.documentElement.classList.toggle("conn-tinted", !!color);
-  applyAccent(color ?? accentPref(), false);
+  applyAccent(color ?? stagedAccent ?? accentPref(), false);
   const label = conn && conn !== "web" ? ` — ${connLabel(conn)}` : "";
   const title = `AgentControl${label}`;
   document.title = title;
@@ -175,13 +223,26 @@ export function applyConnChrome(conn: string | null, color?: Accent | null) {
   void appWin?.setTitle(title).catch(() => {});
 }
 
-/** « Fond animé » : setAnimated applique + persiste (propriétaire unique). */
-export function applyBgAnim(on: boolean) {
-  mesh?.setAnimated(on);
+/** « Fond animé » : setAnimated applique + persiste (propriétaire unique) ;
+ *  `persist:false` pour un aperçu non enregistré (staging réglages). */
+export function applyBgAnim(on: boolean, persist = true) {
+  mesh?.setAnimated(on, persist);
 }
 
 /** État effectif du fond animé (résout ac-bganim / reduced-motion / Android). */
 export const bgAnimOn = () => mesh?.isAnimated() ?? false;
+
+/** Réglage « fond animé » persisté résolu comme au boot (absent → suit
+ *  prefers-reduced-motion ; toujours off sous Android) — bgAnimOn reflète
+ *  l'état live, impropre à re-lire la valeur enregistrée après un aperçu. */
+export function bgAnimPrefOn(): boolean {
+  const stored = localStorage.getItem("ac-bganim");
+  const on =
+    stored === null
+      ? !window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      : stored === "1";
+  return on && !isAndroid();
+}
 
 /** Gemme cristal : verte (neutral) = identité app ; dorée (human) = travail. */
 export function initGems() {
@@ -235,6 +296,26 @@ export function initPlatform() {
 /// Ouvre une URL externe (plugin opener — navigateur système sur Android).
 export function shellOpen(url: string) {
   invoke("plugin:opener|open_url", { url }).catch(() => {});
+}
+
+/// Délégation globale des liens externes : les <a href> produits par le
+/// rendu (format.ts : ulink, liens md, images cliquables) portent
+/// target="_blank" — dans la webview wry sans newWindow handler, le clic
+/// est mort (voire navigue la webview et perd l'app). Un listener document
+/// en bubbling : les handlers d'élément tournent avant (flink, about-gh,
+/// pin-tag…) et marquent e.defaultPrevented → skip ; sinon allowlist
+/// http(s) stricte sur l'attribut brut — jamais file:, javascript:,
+/// agentcontrol:, mailto: ni les relatifs — puis opener. En mode web le
+/// même invoke aboutit à window.open (bridge) : un seul chemin.
+export function initExternalLinks() {
+  document.addEventListener("click", (e) => {
+    if (e.defaultPrevented) return;
+    const a = (e.target as HTMLElement).closest?.("a[href]");
+    const href = a?.getAttribute("href")?.trim() ?? "";
+    if (!/^https?:\/\//i.test(href)) return;
+    e.preventDefault();
+    shellOpen(href);
+  });
 }
 
 // Fenêtre custom (decorations: false) : drag natif via startDragging()

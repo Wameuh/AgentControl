@@ -120,8 +120,11 @@ impl Daemon {
                 }
 
                 let agent_id = agent.unwrap_or_else(|| cm.agent.clone());
+                let _slot = self.ensure_agent_slot(&agent_id).await?;
                 let profile = self
                     .agents
+                    .read()
+                    .await
                     .get(&agent_id)
                     .with_context(|| format!("agent inconnu: {agent_id}"))?
                     .clone();
@@ -158,6 +161,27 @@ impl Daemon {
                         })
                     })
                     .unwrap_or_else(|| format!("spawn:{from}"));
+                // Modèle effectif (param ou héritage même agent) : les
+                // champs de provenance ne sont hérités que s'il y a
+                // réellement un modèle — sinon source="catalogue" +
+                // model=None bloquerait l'enregistrement du modèle
+                // rapporté par l'agent (gardes agent.rs).
+                let explicit_model = model.is_some();
+                let eff_model = model.or(if same_agent { cm.model.clone() } else { None });
+                let eff_source = if eff_model.is_some() {
+                    if explicit_model {
+                        Some("announced".to_string())
+                    } else {
+                        cm.model_source.clone()
+                    }
+                } else {
+                    None
+                };
+                let eff_osid = if eff_source.as_deref() == Some("catalogue") {
+                    cm.model_override_sid.clone()
+                } else {
+                    None
+                };
                 let meta = SessionMeta {
                     id: proto::new_id("s"),
                     agent: agent_id.clone(),
@@ -166,21 +190,27 @@ impl Daemon {
                     created_at: proto::now_iso(),
                     native_session_id: None,
                     mode: mode.or(if same_agent { cm.mode.clone() } else { None }),
-                    model: model.or(if same_agent { cm.model.clone() } else { None }),
+                    model_source: eff_source,
+                    model_override_sid: eff_osid,
+                    supports_load: None,
+                    model: eff_model,
                     available_modes: vec![],
                     available_commands: vec![],
                     available_models: vec![],
                     config_options: vec![],
                     pending_config: Default::default(),
+                    desired_config: Default::default(),
                     state: "starting".into(),
                     group: group.or_else(|| cm.group.clone()),
                     spawned_by: Some(from.clone()),
                     origin: None,
                     context_used: None,
                     context_size: None,
+                    last_error: None,
+                    wait: None,
                 };
                 let dir = Session::create_dir(&self.root, &meta)?;
-                let session2 = Session::open(dir, &self.compact)?;
+                let session2 = Session::open(dir, &self.compact, Arc::clone(&self.caps))?;
                 let sid2 = meta.id.clone();
                 self.watch_prs(&session2);
                 self.sessions
@@ -304,8 +334,16 @@ impl Daemon {
     /// livraison du message. Si un réveil déclenché par l'utilisateur est
     /// déjà en vol, on s'enfile simplement (drain post-spawn) plutôt que
     /// de lancer un second spawn.
-    async fn resume_and_deliver(self: &Arc<Self>, session: &str, wrapped: String, steer: bool) -> Result<()> {
+    pub(super) async fn resume_and_deliver(self: &Arc<Self>, session: &str, wrapped: String, steer: bool) -> Result<()> {
         let s = self.get_session(session).await?;
+        if s.catalogue_override_active() {
+            // Override catalogue en vol : enfiler — le respawn final
+            // de l'override draine la file (spawn_agent post-spawn).
+            if s.send_peer_prompt(&wrapped, steer).await? {
+                self.spawn_wake(&s, session);
+            }
+            return Ok(());
+        }
         if !s.wake_begin() {
             // Un autre réveil est en vol : enfiler seulement. Ok(true) =
             // il a relâché `waking` entre-temps et la cible est endormie

@@ -739,7 +739,30 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             }
             println!("sync ok ({} vérifiées, {} maj)", out.checked, out.updates.len());
         }
-        other => anyhow::bail!("pr: sous-commande inconnue: {other} (add|ls|note|rm|sync)"),
+        "review" => {
+            // Review native de la PR (pr_review de l'orchestrateur) :
+            // même pipeline que le commentaire `/mr review` — worktree
+            // au head courant, verdict `## Verdict:` posté par le
+            // démon. GitHub only (gh) ; le verdict arrive en message
+            // si acctl tourne dans une session agent (AGENTCONTROL_SESSION).
+            let t = detect_target(args, c, 2).await?;
+            anyhow::ensure!(
+                t.change_id.is_none() && t.forge == "github",
+                "acctl pr review : review native = GitHub only"
+            );
+            anyhow::ensure!(!t.repo.is_empty(), "repo requis (--repo ou remote git)");
+            let v = c
+                .call(proto::ReqKind::PrReviewRequest {
+                    session: std::env::var("AGENTCONTROL_SESSION")
+                        .ok()
+                        .filter(|s| !s.is_empty()),
+                    repo: t.repo,
+                    pr: t.pr,
+                })
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        }
+        other => anyhow::bail!("pr: sous-commande inconnue: {other} (add|ls|note|rm|sync|review)"),
     }
     Ok(())
 }

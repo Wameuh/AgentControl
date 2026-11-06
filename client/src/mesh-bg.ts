@@ -307,9 +307,9 @@
   };
   if (reducedMotion.addEventListener) reducedMotion.addEventListener("change", onMotionPreference);
 
-  function setAnimated(on) {
+  function setAnimated(on, persist = true) {
     animOn = !!on;
-    localStorage.setItem("ac-bganim", animOn ? "1" : "0");
+    if (persist) localStorage.setItem("ac-bganim", animOn ? "1" : "0");
     if (animated()) {
       start();
     } else {

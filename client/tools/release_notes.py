@@ -4,6 +4,12 @@ lisibles par des utilisateurs (sections New features / Bug fixes /
 Improvements), construites à partir des sujets de squash mergés sur
 next_release dans le cycle courant.
 
+Libellés anglais : le sujet de commit est rédigé en français — chaque PR
+feat/fix/perf doit donc déposer sa note utilisateur anglaise dans
+`client/tools/release_notes_en.txt` (lignes `<PR>: <note>`). À défaut le
+sujet nettoyé est repris et un avertissement est émis sur stderr
+(visible dans les logs du workflow).
+
 Version affichée = prochaine release calculée comme release-bump
 (version.yml) : borne = dernier commit `chore: bump version` dont le tag
 vX.Y.Z existe, sinon dernier tag semver ; niveau = mot-clé parenthésé le
@@ -34,6 +40,19 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 MARK_START = "<!-- release-notes:start -->"
 MARK_END = "<!-- release-notes:end -->"
 
+# Notes anglaises rédigées par PR : lignes `<PR>: <note>` dans
+# release_notes_en.txt (`#` = commentaire, pas de commentaire inline).
+# Clé alternative `sha:<hex>:` (préfixe ≥7 accepté) pour un commit dont
+# la PR n'est pas attribuable — squash sans suffixe `(#N)` ni merge
+# `Merge pull request #N`. Section optionnelle `[feat|fix|perf]` juste
+# après la clé — requise pour les sujets de commit non conventionnels
+# (sans préfixe feat:/fix:/perf:), seule façon de les catégoriser ;
+# ignorée sinon.
+EN_NOTES = os.path.join(ROOT, "client", "tools", "release_notes_en.txt")
+EN_LINE = re.compile(
+    r"\s*(?:(\d+)|sha:([0-9a-fA-F]{7,40}))\s*:\s*"
+    r"(?:\[(feat|fix|perf)\]\s*)?(.+?)\s*$")
+
 # type conventional -> section user-facing ; les autres types (docs,
 # test, chore, ci, build, refactor, style, …) sont internes et exclus.
 CATEGORIES = [
@@ -43,6 +62,10 @@ CATEGORIES = [
 ]
 
 SUBJECT = re.compile(r"^(\w+)(?:\([^)]*\))?!?\s*:\s*(.+?)\s*(?:\(#(\d+)\)\s*)?$")
+# Sujet sans préfixe conventional mais suffixé `(#N)` — ex. « Chat :
+# sélection et copie (#276) » : la note EN balisée `[section]` peut
+# quand même être reprise (sinon la PR user-facing est invisible).
+FALLBACK_PR = re.compile(r"\(#(\d+)\)\s*$")
 SEMVER = re.compile(r"^v\d+\.\d+\.\d+$")
 # Mots-clés de bump : info pipeline, jamais montrée à l'utilisateur.
 KEYWORD = re.compile(r"\s*\((?:major|minor|sync|patch)\)", re.IGNORECASE)
@@ -109,20 +132,98 @@ def next_version(rev_range):
     }[level]
 
 
+def english_notes():
+    """{clé: (section|None, note)} depuis EN_NOTES ; {} si absent.
+    Clé = numéro de PR, ou `sha:<hex>` minuscule pour un commit sans PR
+    attribuable (squash sans suffixe `(#N)`)."""
+    try:
+        raw = open(EN_NOTES, encoding="utf-8").read().splitlines()
+    except OSError:
+        return {}
+    out = {}
+    for ln in raw:
+        if (m := EN_LINE.match(ln)):
+            out[m.group(1) or f"sha:{m.group(2).lower()}"] = \
+                (m.group(3), m.group(4))
+    return out
+
+
+def note_for(en, pr, sha):
+    """(section, note) EN pour une PR ou le sha du commit, sinon None —
+    la note `sha:<hex>:` d'un commit ne s'applique qu'à lui."""
+    if pr and (hit := en.get(pr)):
+        return hit
+    return next((v for k, v in en.items()
+                 if k.startswith("sha:") and sha.startswith(k[4:])),
+                None)
+
+
+MERGE_PR = re.compile(r"^Merge pull request #(\d+)\b")
+
+
+def merge_pr_map(rev_range):
+    """{sha: pr} — commits apportés par un merge commit `Merge pull
+    request #N` (leurs sujets ne portent pas de suffixe `(#N)`, contraire-
+    ment aux squashes). Sans ça leurs sujets bruts — souvent en français —
+    étaient repris tels quels et la note anglaise de la PR ne s'appliquait
+    jamais."""
+    out = {}
+    in_range = set(git("rev-list", rev_range).split())
+    for m in git("log", "--merges", "--format=%H", rev_range).split():
+        g = MERGE_PR.match(git("log", "-1", "--format=%s", m))
+        if not g:
+            continue
+        pr = g.group(1)
+        inner = git("rev-list", f"{m}^2", "--not", f"{m}^1").split()
+        out.update({sha: pr for sha in inner if sha in in_range})
+    return out
+
+
 def entries(rev_range):
     """Sujets du range (chronologique) -> {section: [(titre, pr)]}."""
     out = {name: [] for _, name in CATEGORIES}
     types = {t: name for t, name in CATEGORIES}
-    subjects = git("log", "--format=%s", "--reverse", rev_range).splitlines()
-    for s in subjects:
+    en = english_notes()
+    owner = merge_pr_map(rev_range)
+    subjects = git("log", "--format=%H%x00%s", "--reverse",
+                   rev_range).splitlines()
+    seen = set()
+    for line in subjects:
+        sha, _, s = line.partition("\x00")
         m = SUBJECT.match(s)
-        if not m or m.group(1) not in types:
+        # Conventionnel = type en minuscules (« feat: », « fix(scope): ») ;
+        # « Chat : … » matche SUBJECT mais n'est pas un type conventional.
+        if not m or m.group(1) != m.group(1).lower():
+            fb = FALLBACK_PR.search(s)
+            pr = fb.group(1) if fb else None
+            if (hit := note_for(en, pr, sha)):
+                sec, note = hit
+                if sec and note and (note, pr or sha) not in seen:
+                    seen.add((note, pr or sha))
+                    out[types[sec]].append((note, pr))
+                elif not sec:
+                    print(f"release_notes: {pr or 'commit ' + sha[:7]} a "
+                          f"une note anglaise sans section "
+                          "[feat|fix|perf] sur un sujet non conventionnel "
+                          "— ignorée", file=sys.stderr)
             continue
-        title = KEYWORD.sub("", m.group(2)).strip()
-        if not title:
+        if m.group(1) not in types:
             continue
-        title = title[0].upper() + title[1:]
-        out[types[m.group(1)]].append((title, m.group(3)))
+        pr = m.group(3) or owner.get(sha)
+        title = ((note_for(en, pr, sha) or (None, ""))[1]).strip() or None
+        if title is None:
+            title = KEYWORD.sub("", m.group(2)).strip()
+            if not title:
+                continue
+            title = title[0].upper() + title[1:]
+            print(f"release_notes: {pr or 'commit ' + sha[:7]} sans note "
+                  f"anglaise dans {os.path.relpath(EN_NOTES, ROOT)} — "
+                  "sujet brut repris", file=sys.stderr)
+        key = (title, pr)
+        if key in seen:
+            continue
+        seen.add(key)
+        out[types[m.group(1)]].append((title, pr))
     return out
 
 

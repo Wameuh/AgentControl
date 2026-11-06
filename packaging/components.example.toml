@@ -12,20 +12,23 @@
 # Référence complète des kinds/champs : docs/components-integration.md §2.1.
 
 # ---------------------------------------------------------------------------
-# backlog-orchestrator — cas d'usage typique : un service qui vivait sous
+# agentreviewer — cas d'usage typique : un watcher qui vivait sous
 # supervisord passe sous le cycle de vie du démon (start/stop/restart,
 # healthcheck, logs paginés via component_logs).
+# NB : « backlog-orchestrator » est un nom RÉSERVÉ (composant internal
+# natif) — upsert/install dessus échoue ; sa migration supervisord →
+# interne est dans packaging/INSTALL.md §5.
 # ---------------------------------------------------------------------------
 [[components]]
-name = "backlog-orchestrator"
+name = "agentreviewer"
 kind = "process"                    # internal | process | external | tool
-command = ["python3", "~/.local/bin/backlog-orchestrator.py"]
+command = ["~/.local/bin/agent-reviewer", "--watch"]
 cwd = "~"                           # défaut : <AGENTCONTROL_HOME>
 autostart = true
 restart = "on-failure"              # always | on-failure | never
 restart_sec = 5                     # backoff de base (×2, cap 60 s)
 healthcheck = { kind = "process" }  # none | process | tcp | http | command
-description = "Spawn les workers du backlog AgentBacklog"
+description = "Watcher de review pilotant ce démon"
 
 # Env additionnelle (facultatif). AGENTCONTROL_SOCK/TCP/HOME/COMPONENT
 # sont de toute façon injectées par le démon et PRIMENT sur ce bloc — un

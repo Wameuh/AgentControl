@@ -19,18 +19,24 @@ import {
   applyAccent,
   accentPref,
   accentOf,
+  applyAccentStrong,
+  themePref,
+  accentStrongPref,
   applyConnChrome,
   initGems,
   initPlatform,
   isAndroid,
   initWindowChrome,
+  initExternalLinks,
   shellOpen,
 } from "./core/chrome";
 import { nav, type SheetItem } from "./ui/nav";
 import { hydrateIcons } from "./ui/icons";
-import { initStatus } from "./features/status";
+import { initStatus, type HostStats } from "./features/status";
 import { checkBootUpdate } from "./features/update";
 import { initModelBar } from "./features/modelbar";
+import { initModelCosts } from "./features/modelcosts";
+import { initModelCatalog } from "./features/modelcatalog";
 import { initFusionDialog, openFusion } from "./features/fusion-dialog";
 import { GroupStore } from "./features/groups";
 import { NewSessionDialog } from "./features/new-session";
@@ -42,10 +48,15 @@ import { SessionSearch } from "./features/search";
 import { Sidebar } from "./features/sidebar";
 import { Composer } from "./features/composer";
 import { FileExplorer } from "./features/files";
+import { QuickOpen } from "./features/quickopen";
 import { MapView } from "./features/map-view";
 import { TermPanel } from "./features/terminal";
 import { SettingsPanel } from "./features/settings";
+import { Tts } from "./features/tts";
 import { ComponentsPanel } from "./features/components";
+import { stateDiff } from "./features/state-diff";
+import { sounds } from "./features/sounds";
+import { notifications } from "./features/notifications";
 import { initFirstPost } from "./features/first-post";
 import { Pins } from "./features/pins";
 import { initLang, t, applyStatic } from "./i18n";
@@ -53,20 +64,39 @@ import type { AcEvent, SavedConn } from "./core/types";
 
 // Thème + langue persistés (localStorage), appliqués au boot
 initLang();
-applyTheme(localStorage.getItem("ac-theme") === "light" ? "light" : "dark");
+applyTheme(themePref());
 // Accent appliqué au boot, avant le premier rendu utile (pas de flash).
 applyAccent(accentPref());
+// Intensité d'accent — dimension orthogonale, classe accent-strong.
+applyAccentStrong(accentStrongPref(), false);
 applyStatic();
 initGems();
 initPlatform();
 initWindowChrome();
+initExternalLinks();
+// Spike ac-stt : prouve la jonction webview → plugin (Kotlin `SttPlugin`
+// sur Android, stub Rust sur desktop, stub bridge en web).
+invoke("plugin:ac-stt|stt_ping")
+  .then((r) => console.debug("[stt] ping:", r))
+  .catch((e) => console.warn("[stt] ping failed:", e));
+// Core : état moteur/modèle/permission au boot — diagnostic logcat du
+// chantier core (le bouton mic arrive avec l'item UX).
+invoke("plugin:ac-stt|stt_state")
+  .then((r) => console.debug("[stt] state:", r))
+  .catch((e) => console.warn("[stt] state failed:", e));
 // Log open/close des modals + watchdog anti-gel (dialog invisible, inert
 // résiduel) — avant tout showModal pour tracer aussi les dialogs du boot.
 initModalGuard();
 
 // Le menu natif du clic droit n'a pas de sens dans l'app — chaque menu
 // contextuel custom gère son propre preventDefault/stopPropagation.
-window.addEventListener("contextmenu", (e) => e.preventDefault());
+// Exception : une sélection de texte active → on laisse passer l'event
+// (WebView2/Android exposent un menu natif avec « Copier » ; le chat a
+// en plus son propre menu « Copier » sur #events).
+window.addEventListener("contextmenu", (e) => {
+  if (window.getSelection()?.toString()) return;
+  e.preventDefault();
+});
 
 // Modèle multi-instances : cette instance se lie à UNE connexion — celle
 // demandée par --conn <clé> (spawn_instance d'une autre instance), sinon
@@ -96,11 +126,13 @@ const chat = new ChatView();
 const sidebar = new Sidebar();
 const composer = new Composer();
 const files = new FileExplorer();
+const quick = new QuickOpen();
 const map = new MapView();
 const term = new TermPanel();
 const connView = new ConnView();
 const newSess = new NewSessionDialog();
 const settings = new SettingsPanel();
+const tts = new Tts();
 const comps = new ComponentsPanel();
 const search = new SessionSearch();
 const pins = new Pins();
@@ -110,6 +142,7 @@ const pins = new Pins();
 initRpc({
   currentConn: () => app.current?.conn,
   connState: (k) => conns.state(k),
+  connGone: (k) => conns.isGone(k),
 });
 
 chat.bind(renderer, {
@@ -126,7 +159,10 @@ chat.bind(renderer, {
     search.onSessionChanged();
     composer.sessionChanged();
     pins.sessionChanged();
+    // Une voix qui commente un journal qu'on a quitté = bug UX → stop.
+    tts.sessionChanged();
   },
+  onAgentText: (ev) => tts.onAgentText(ev),
   onSessionGone: (id) => composer.dropSession(id),
   connCount: () => conns.knownConns().length,
   connsDownOrNone: () => !conns.anyUp(),
@@ -134,6 +170,7 @@ chat.bind(renderer, {
   firstPostCapable: (c) => conns.cap(c)?.first_post === true,
   termCapable: (c) => conns.cap(c)?.terminal === true,
   pinCapable: (c) => conns.cap(c)?.pinned === true,
+  capsCapable: (c) => conns.cap(c)?.agent_caps === true,
   pinsMark: (el) => pins.markNode(el),
 });
 search.bind({ jumpToSeq: (seq) => chat.jumpToSeq(seq) });
@@ -146,11 +183,55 @@ renderer.bind({
   ctxChanged: () => chat.updateCtx(),
   statusChanged: () => void sidebar.refresh(),
   openSession: (id) => void chat.open(id),
+  agentText: (el, ev) => tts.attachMsg(el, ev),
+});
+// Canaux d'alerte branchés sur le diff partagé (state-diff) — sons et
+// notifications OS restent indépendants mais voient les mêmes transitions.
+stateDiff.onTransition((kind) => sounds.alert(kind));
+stateDiff.onTransition((kind, s) => notifications.alert(kind, s));
+// Annulation des notifs OS quand leur condition se résout (#184) :
+// sortie de waiting_input → la « question » n'a plus lieu d'être ;
+// session disparue de la liste → plus aucune notif ne la concerne.
+stateDiff.onRawTransition((prev, s) => {
+  if (prev === "waiting_input" && s.state !== "waiting_input") {
+    notifications.questionResolved(s);
+  }
+});
+stateDiff.onGone((key) => notifications.sessionGone(key));
+notifications.bind({
+  connCount: () => conns.knownConns().length,
+  // Clic sur la notif → même trajet qu'une ouverture depuis la sidebar :
+  // les overlays de #chat doivent d'abord sortir (motif newSess.openSession).
+  openSession: (id, conn) => {
+    settings.close();
+    connView.close();
+    map.close();
+    comps.close();
+    void chat.open(id, false, conn);
+  },
 });
 sidebar.bind(conns, groups, newSess, chat, settings, connView, comps, map);
 composer.bind(chat);
 composer.refresh = () => sidebar.refresh();
+// Hint « modèle absent » du bouton mic → ouvre les settings directement
+// sur la section de téléchargement STT (details dépliée + scroll).
+composer.mic.openSttSettings = () => {
+  settings.open();
+  const sec = $("s-sec-stt") as HTMLDetailsElement;
+  sec.open = true;
+  sec.scrollIntoView({ block: "start" });
+};
+// « modèle absent » d'un clic haut-parleur → settings sur la section
+// TTS (même motif que le hint mic → section STT).
+tts.openSettings = () => {
+  settings.open();
+  const sec = $("s-sec-tts") as HTMLDetailsElement;
+  sec.open = true;
+  sec.scrollIntoView({ block: "start" });
+};
+settings.tts = tts;
 composer.bindAttachCapable((c) => conns.cap(c ?? "default")?.files === true);
+composer.bindQueueSteerCapable((c) => conns.cap(c ?? "default")?.queue_steer === true);
 conns.bind({
   refresh: () => sidebar.refresh(),
   reopenIfConn: (c) => chat.reopenIfConn(c),
@@ -181,6 +262,8 @@ connView.connecting = (hosts) => chat.setConnecting(hosts);
 // les autres (sinon : empilement opaque + inert, écran "figé").
 connView.onOpening = () => { settings.close(); map.close(); comps.close(); };
 settings.onOpening = () => { connView.close(); map.close(); comps.close(); };
+// Select « Appairer » des settings : pré-sélection sur la conn liée.
+settings.activeConnKey = () => conns.knownConns()[0] ?? null;
 comps.bind(conns);
 comps.onOpening = () => { settings.close(); connView.close(); map.close(); };
 newSess.bind(groups);
@@ -199,6 +282,10 @@ newSess.openSession = (id, conn) => {
 newSess.knownConns = () => conns.knownConns();
 groups.refresh = () => void sidebar.refresh();
 files.bind({ sysline: (txt, ic) => chat.sysline(txt, ic) });
+quick.bind({
+  openFile: (p) => files.openFilePanel(p),
+  openDir: (rel) => files.revealInTree(rel),
+});
 settings.langChanged = () => {
   // applyStatic a réécrit le placeholder avec input_ph — hints à jour.
   composer.refreshHints();
@@ -230,9 +317,17 @@ map.bind({
   onToggle: (open) => sidebar.setMapOpen(open),
 });
 
-// Conn perdue (EOF transport) : les PTY du démon meurent avec → bannière
+// Conn perdue (transport mort) : les PTY du démon meurent avec → bannière
 // dans les terminaux concernés (reopen possible via ↻ au retour).
-void listen<string>("conn-dead", (e) => term.markConnDead(e.payload));
+// Payload {conn, why, gen} ; la forme string reste tolérée (web legacy).
+// Gen périmée = mort du client remplacé — ne pas tuer les PTY de la
+// conn fraîche (même filtre que ConnectionManager).
+void listen<{ conn: string; why?: string; gen?: number } | string>("conn-dead", (e) => {
+  const p = e.payload;
+  if (typeof p === "string") return term.markConnDead(p);
+  if (!conns.isFresh(p.conn, p.gen)) return;
+  term.markConnDead(p.conn);
+});
 
 // --- Events sessions (push du démon via le bridge Tauri) ---------------------
 
@@ -264,6 +359,15 @@ await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
   }
   if (app.current && session === app.current.id) {
     chat.appendEvent(event, true);
+  }
+  // Les events système « message en file » / « steer refusé — remis
+  // en file » / retenue compact changent la file sans status_changed :
+  // le bandeau de file resterait périmé jusqu'au prochain changement
+  // d'état — refresh immédiat, restreint aux textes liés à la file
+  // (un queue_list par event sinon, gratuit mais inutile).
+  if (event.type === "system" && app.current?.id === session
+      && /file|steer|compact/i.test((event.text as string) ?? "")) {
+    void composer.refreshQueue();
   }
   if (event.type === "status_changed") void sidebar.refresh();
 });
@@ -305,6 +409,7 @@ $("chat-more").onclick = () => {
   if (app.current && term.supported())
     items.push({ icon: "terminal", label: t("term_title"), fn: () => $("btn-term").click() });
   if (app.current) items.push({ icon: "folder", label: t("files_title"), fn: () => $("btn-files").click() });
+  if (app.current) items.push({ icon: "search", label: t("qo_open_path"), fn: () => quick.open("path") });
   if (app.current && !app.alive && app.current.state !== "starting")
     items.push({ icon: "play", label: t("resume"), fn: () => $("btn-resume").click() });
   if (app.current && app.alive)
@@ -329,14 +434,27 @@ search.init();
 sidebar.init();
 composer.init();
 files.init();
+quick.init();
 term.init();
 map.init();
 settings.init();
+tts.init();
 comps.init();
+notifications.init();
 initFirstPost((c) => conns.cap(c)?.first_post === true);
+initModelCosts({ capable: (c) => conns.cap(c)?.model_costs === true });
+initModelCatalog({ capable: (c) => conns.cap(c)?.model_catalog === true });
 pins.init();
-initModelBar(openFusion);
+initModelBar(openFusion, () => chat.updateHeader());
 initFusionDialog();
-initStatus();
+initStatus(() => {
+  // Bloc host du démon de la conn affichée (session ouverte), sinon de
+  // la conn liée — absent sur vieux démon → segment masqué.
+  const k = app.current?.conn ?? conns.knownConns()[0] ?? "default";
+  // Conn down/en essai : les caps gardent la dernière valeur connue —
+  // masquer plutôt qu'afficher des chiffres périmés sous icône grise.
+  if ((conns.state(k) ?? "ok") !== "ok") return undefined;
+  return conns.cap(k)?.host as HostStats | undefined;
+});
 checkBootUpdate();
 connView.autoConnect(savedConns, cliConn ?? undefined);

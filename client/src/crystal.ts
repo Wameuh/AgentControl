@@ -9,6 +9,7 @@ const PALETTES: Record<string, string[]> = {
   neutral: ["#4a573e", "#727555", "#8f8665", "#38472f", "#5c6949", "#626747", "#a19673", "#455139"],
   slate: ["#74777b", "#96999d", "#babdc1", "#474b50", "#85898f", "#696e75", "#d1d3d5", "#5b6066"],
   inference: ["#a8504a", "#ce7770", "#e89486", "#6b302e", "#b9635c", "#9e4b49", "#f4b0a0", "#813937"],
+  wait: ["#3f6f6a", "#5a8f85", "#7fb0a2", "#2e5350", "#4d7f78", "#689a90", "#a8cfc4", "#426a63"],
 };
 
 const BASES: Record<string, string> = {
@@ -17,6 +18,7 @@ const BASES: Record<string, string> = {
   neutral: "#303b29",
   slate: "#45494e",
   inference: "#5c2929",
+  wait: "#28423f",
 };
 
 type Pt = [number, number];
@@ -101,7 +103,7 @@ function geometry(key: string): Geometry {
 
 let uid = 0;
 
-/** SVG complet d'une gemme. `role` ∈ agent|human|neutral|slate|inference. */
+/** SVG complet d'une gemme. `role` ∈ agent|human|neutral|slate|inference|wait. */
 export function gemSVG(role: string): string {
   const g = geometry("agentcontrol");
   const pal = PALETTES[role] ?? PALETTES.neutral;
