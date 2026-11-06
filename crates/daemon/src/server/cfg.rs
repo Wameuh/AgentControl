@@ -588,6 +588,54 @@ impl CompactSrc {
     }
 }
 
+/// Watchdog « tour silencieux » (section `[watchdog]` de config.toml) :
+/// une session en tour ouvert (`working`/`compacting`) qui ne reçoit
+/// plus AUCUN event de l'agent depuis `silence_secs` est soit un long
+/// tool call (attente normale), soit une inférence gelée sans timeout
+/// côté agent (cas W129 : ~4 min de stall puis reprise). Le watchdog
+/// journalise une fois par épisode et, sauf tool call en cours,
+/// enfile un nudge « continue your task » derrière le tour en vol —
+/// inoffensif si le tour reprend seul, salvateur s'il est mort (cas
+/// #183). Voir session/watch.rs.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct WatchdogCfg {
+    /// Watchdog actif (défaut true) — `enabled = false` le coupe.
+    #[serde(default = "dtrue")]
+    pub enabled: bool,
+    /// Silence max sans event agent pendant un tour ouvert, en
+    /// secondes (défaut 240 — le stall observé W129 a duré ~4 min).
+    /// `0` = jamais de déclenchement.
+    #[serde(default = "d240")]
+    pub silence_secs: u64,
+    /// Nudge « continue your task » enfilé derrière le tour en vol
+    /// (défaut true ; false = journalisation seule, aucun prompt
+    /// injecté).
+    #[serde(default = "dtrue")]
+    pub nudge: bool,
+    /// Période de la boucle de surveillance, en secondes (défaut 20,
+    /// min 5 côté boucle).
+    #[serde(default = "d20u64")]
+    pub check_secs: u64,
+}
+
+fn d240() -> u64 {
+    240
+}
+fn d20u64() -> u64 {
+    20
+}
+
+impl Default for WatchdogCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            silence_secs: 240,
+            nudge: true,
+            check_secs: 20,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
