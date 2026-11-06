@@ -42,8 +42,12 @@ MARK_END = "<!-- release-notes:end -->"
 
 # Notes anglaises rédigées par PR : lignes `<PR>: <note>` dans
 # release_notes_en.txt (`#` = commentaire, pas de commentaire inline).
+# Section optionnelle `[feat|fix|perf]` juste après `<PR>:` — requise
+# pour les sujets de commit non conventionnels (sans préfixe
+# feat:/fix:/perf:), seule façon de les catégoriser ; ignorée sinon.
 EN_NOTES = os.path.join(ROOT, "client", "tools", "release_notes_en.txt")
-EN_LINE = re.compile(r"\s*(\d+)\s*:\s*(.+?)\s*$")
+EN_LINE = re.compile(
+    r"\s*(\d+)\s*:\s*(?:\[(feat|fix|perf)\]\s*)?(.+?)\s*$")
 
 # type conventional -> section user-facing ; les autres types (docs,
 # test, chore, ci, build, refactor, style, …) sont internes et exclus.
@@ -54,6 +58,10 @@ CATEGORIES = [
 ]
 
 SUBJECT = re.compile(r"^(\w+)(?:\([^)]*\))?!?\s*:\s*(.+?)\s*(?:\(#(\d+)\)\s*)?$")
+# Sujet sans préfixe conventional mais suffixé `(#N)` — ex. « Chat :
+# sélection et copie (#276) » : la note EN balisée `[section]` peut
+# quand même être reprise (sinon la PR user-facing est invisible).
+FALLBACK_PR = re.compile(r"\(#(\d+)\)\s*$")
 SEMVER = re.compile(r"^v\d+\.\d+\.\d+$")
 # Mots-clés de bump : info pipeline, jamais montrée à l'utilisateur.
 KEYWORD = re.compile(r"\s*\((?:major|minor|sync|patch)\)", re.IGNORECASE)
@@ -121,12 +129,12 @@ def next_version(rev_range):
 
 
 def english_notes():
-    """{pr: note anglaise rédigée} depuis EN_NOTES ; {} si absent."""
+    """{pr: (section|None, note)} depuis EN_NOTES ; {} si absent."""
     try:
         raw = open(EN_NOTES, encoding="utf-8").read().splitlines()
     except OSError:
         return {}
-    return {m.group(1): m.group(2) for ln in raw
+    return {m.group(1): (m.group(2), m.group(3)) for ln in raw
             if (m := EN_LINE.match(ln))}
 
 
@@ -163,10 +171,25 @@ def entries(rev_range):
     for line in subjects:
         sha, _, s = line.partition("\x00")
         m = SUBJECT.match(s)
-        if not m or m.group(1) not in types:
+        # Conventionnel = type en minuscules (« feat: », « fix(scope): ») ;
+        # « Chat : … » matche SUBJECT mais n'est pas un type conventional.
+        if not m or m.group(1) != m.group(1).lower():
+            fb = FALLBACK_PR.search(s)
+            if fb and (hit := en.get(fb.group(1))):
+                sec, note = hit
+                if sec and note and (note, fb.group(1)) not in seen:
+                    seen.add((note, fb.group(1)))
+                    out[types[sec]].append((note, fb.group(1)))
+                elif not sec:
+                    print(f"release_notes: PR #{fb.group(1)} a une note "
+                          f"anglaise sans section [feat|fix|perf] sur un "
+                          "sujet non conventionnel — ignorée",
+                          file=sys.stderr)
+            continue
+        if m.group(1) not in types:
             continue
         pr = m.group(3) or owner.get(sha)
-        title = (en.get(pr or "") or "").strip() or None
+        title = ((en.get(pr or "") or (None, ""))[1]).strip() or None
         if title is None:
             title = KEYWORD.sub("", m.group(2)).strip()
             if not title:
