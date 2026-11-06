@@ -17,6 +17,12 @@ import { icon, qIco } from "../ui/icons";
 const USER_FOLD_CHARS = 480;
 const USER_FOLD_LINES = 5;
 
+// Dernier excerpt (snapshot cumulatif) reçu par bloc outil — les
+// tool_call_update portent la sortie COMPLÈTE à chaque fois : n'ajouter
+// que le delta garde le coût total en O(sortie) au lieu de O(n²) dans
+// le DOM. WeakMap : libéré avec le nœud.
+const lastToolExcerpt = new WeakMap<HTMLElement, string>();
+
 export class EventRenderer {
   // Réassignés au swap de session (cache par conversation) — publics pour
   // que ChatView puisse les stash/restaurer.
@@ -330,7 +336,10 @@ export class EventRenderer {
       }
     }
     const pre = d.querySelector<HTMLElement>(".tool-out")!;
-    if (ev.excerpt) pre.textContent = ev.excerpt as string;
+    if (ev.excerpt) {
+      pre.textContent = ev.excerpt as string;
+      lastToolExcerpt.set(pre, ev.excerpt as string);
+    }
     d.querySelector(".tool-head")!.addEventListener("click", () => {
       body.hidden = !body.hidden;
       d.classList.toggle("open", !body.hidden);
@@ -412,11 +421,27 @@ export class EventRenderer {
       const body = d.querySelector<HTMLElement>(".tool-body")!;
       const pre = d.querySelector<HTMLElement>(".tool-out")!;
       if (ev.excerpt) {
-        // appendChild plutôt que textContent += : la réécriture du nœud
-        // détruirait une sélection de texte en cours dans la sortie
-        // streamée — ajouter un text node en queue la préserve.
-        pre.appendChild(document.createTextNode(ev.excerpt as string));
-        if (body.hidden) {
+        // L'excerpt d'un update est le snapshot cumulatif de la sortie
+        // (plafonné à EXCERPT côté démon) : ajouter le snapshot entier à
+        // chaque update dupliquerait tout le passé — O(n²) de texte dans
+        // le <pre>. Le préfixe étant stable, n'ajouter que le delta ;
+        // appendChild plutôt que textContent = préserve une sélection en
+        // cours. Un excerpt non préfixe (agent non cumulatif) remplace.
+        const ex = ev.excerpt as string;
+        const prev = lastToolExcerpt.get(pre) ?? "";
+        let grew = false;
+        if (ex.startsWith(prev)) {
+          const delta = ex.slice(prev.length);
+          if (delta) {
+            pre.appendChild(document.createTextNode(delta));
+            grew = true;
+          }
+        } else {
+          pre.textContent = ex;
+          grew = true;
+        }
+        lastToolExcerpt.set(pre, ex);
+        if (grew && body.hidden) {
           // signaler du nouveau contenu sans ouvrir
           d.querySelector(".tool-head")!.classList.add("has-new");
         }
