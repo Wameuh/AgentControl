@@ -132,6 +132,9 @@ impl Daemon {
         if name == crate::server::orch::COMPONENT_NAME {
             return self.h_orch_params_set(params).await;
         }
+        if name == crate::server::agents_cfg::COMPONENT_NAME {
+            return self.h_agents_params_set(params).await;
+        }
         self.components.set_params(&name, &params).await
     }
 

@@ -77,6 +77,12 @@ const INTERNALS: &[Internal] = &[
                       opt-in (workers, nudges, release orphelins, garde \
                       release PR ; ex-script Python)",
     },
+    Internal {
+        name: "agents",
+        description: "Profils agents ACP — commande de chaque profil \
+                      [agents.*] éditable (persistée dans config.toml, \
+                      hot-reload)",
+    },
 ];
 
 pub struct Components {
@@ -112,6 +118,9 @@ pub struct Components {
     /// Ids des profils `[agents.*]` déclarés — alimente les dropdowns
     /// `*_agent` du schéma orchestrateur.
     agent_ids: Vec<String>,
+    /// Profils agents vivants (partagé avec `Daemon.agents`) — alimente
+    /// le schéma/valeurs du composant interne `agents`.
+    agents: Arc<RwLock<HashMap<String, crate::server::AgentProfile>>>,
     /// Cache des sondes upstream du catalogue (tag+notes par repo,
     /// TTL ~5 min) — voir catalog.rs. Mutex std : sections courtes
     /// (get/insert), jamais tenue pendant un await.
@@ -129,6 +138,7 @@ impl Components {
         web: Arc<RwLock<Option<Value>>>,
         orch: Arc<OrchProbe>,
         agent_ids: Vec<String>,
+        agents: Arc<RwLock<HashMap<String, crate::server::AgentProfile>>>,
     ) -> Arc<Self> {
         let dir = root.join("components");
         let specs = match read_specs(&root.join("components.toml")) {
@@ -177,6 +187,7 @@ impl Components {
             down: Arc::new(AtomicBool::new(false)),
             orch,
             agent_ids,
+            agents,
             upstream: Mutex::new(HashMap::new()),
         })
     }
@@ -301,6 +312,39 @@ impl Components {
             let mut item = item_json(&spec, &st, "internal");
             item["orchestrator"] = self.orch.status_json();
             return Some(item);
+        }
+        if name == crate::server::agents_cfg::COMPONENT_NAME {
+            // Profils agents ACP : un param `list` par profil (argv de
+            // la commande) — le formulaire « Configurer » envoie
+            // `component_set_params` (intercepté → agents_cfg, persiste
+            // `[agents.*]` de config.toml + hot-reload des profils).
+            let i = INTERNALS.iter().find(|i| i.name == name)?;
+            let agents = self.agents.read().await;
+            let spec = ComponentSpec {
+                name: name.to_string(),
+                kind: ComponentKind::Internal,
+                command: Vec::new(),
+                version_argv: None,
+                min_version: None,
+                env: HashMap::new(),
+                cwd: None,
+                autostart: true,
+                restart: RestartPolicy::Never,
+                restart_sec: 0,
+                healthcheck: Healthcheck::None,
+                description: Some(i.description.to_string()),
+                queries: HashMap::new(),
+                catalog: None,
+                params_schema: crate::server::agents_cfg::params_schema(&agents),
+                params: crate::server::agents_cfg::params_values(&agents),
+                render: None,
+            };
+            drop(agents);
+            let st = ComponentStatus {
+                state: ComponentState::Running,
+                ..Default::default()
+            };
+            return Some(item_json(&spec, &st, "internal"));
         }
         if let Some(i) = INTERNALS.iter().find(|i| i.name == name) {
             let running = self.internal_active(name).await;

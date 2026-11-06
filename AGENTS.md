@@ -171,6 +171,20 @@ reviewer sessions. Flipping `pr_review` off settles running reviews:
 reviewer session deleted, worktree removed, `review failed:
 disabled` posted so polling workers aren't left waiting.
 
+**Agent profiles**: `devin` and `cursor` are built-in presets
+(`default_agents()` in main.rs — cursor's argv[0] is resolved to an
+absolute path on the daemon PATH at boot: `cursor-agent` then the
+`agent` alias). Every `[agents.*]` profile (built-in or config.toml)
+is listed by `list_agents` — `available:false` greys it in the new
+session dialog. The internal component **`agents`** (options →
+composants, or `acctl comp set agents <id> <argv-csv>`) edits each
+profile's ACP command: one `list` param per profile, persisted as the
+FULL `[agents.<id>]` section of config.toml (name/env/compact/catalog
+included — a partial write would silently drop fields at next boot)
+and hot-reloaded into `Daemon.agents` (tokio RwLock — reads via
+`.read().await`). Ids are not creatable/removable this way — declare
+new profiles in config.toml.
+
 **Agent profile per role** (`backlog_orchestrator` params, hot-settable
 via `acctl comp set`, dropdown of the declared `[agents.*]` profiles in
 the config UI): `worker_agent` (`Backlog-W*`), `planner_agent`

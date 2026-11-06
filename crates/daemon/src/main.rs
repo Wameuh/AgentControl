@@ -230,6 +230,30 @@ fn default_agents() -> HashMap<String, AgentProfile> {
             model_override_cmd: None,
         },
     );
+    // Cursor CLI — ACP natif (`agent acp` / `cursor-agent acp`, même
+    // binaire : `agent` est un alias d'install). argv[0] résolu en
+    // chemin absolu : `agent` est un nom générique (collision possible)
+    // — la résolution fige le binaire concret trouvé sur le PATH au
+    // boot, et `available` reflète l'existence réelle. La commande
+    // reste surchargeable : `[agents.cursor]` dans config.toml ou le
+    // composant interne `agents` (options → composants).
+    let cursor_bin = ["cursor-agent", "agent"]
+        .iter()
+        .find_map(|c| server::misc::command_path(c))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "cursor-agent".into());
+    m.insert(
+        "cursor".into(),
+        AgentProfile {
+            name: "Cursor CLI".into(),
+            command: vec![cursor_bin, "acp".into()],
+            env: HashMap::new(),
+            compact: server::CompactPartial::default(),
+            max_instances: server::DEFAULT_MAX_INSTANCES,
+            catalogue_cmd: None,
+            model_override_cmd: None,
+        },
+    );
     m
 }
 
@@ -398,7 +422,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
         "{} session(s) chargée(s), root={}, agents: {}",
         daemon.sessions.read().await.len(),
         root.display(),
-        daemon.agents.keys().cloned().collect::<Vec<_>>().join(", ")
+        daemon.agents.read().await.keys().cloned().collect::<Vec<_>>().join(", ")
     );
 
     // Socket Unix
