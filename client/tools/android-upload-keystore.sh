@@ -50,6 +50,7 @@ else
     -storepass "$ANDROID_KEYSTORE_PASSWORD" \
     -keypass "$ANDROID_KEYSTORE_PASSWORD" \
     -dname "CN=AgentControl, OU=dev, O=Wameuh, C=FR"
+  chmod 600 "$KS"
   echo "keystore créé : $KS" >&2
 fi
 
