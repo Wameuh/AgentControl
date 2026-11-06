@@ -109,3 +109,4 @@
 290: Settings changes are now staged and only applied when you click Save — a Cancel button (and the unsaved-changes badge next to it) restores the previous values, cosmetic options still live-preview but revert on cancel, and closing the panel silently discards anything unsaved.
 281: [feat] Model selectors can now offer every variant from the agent catalogue (e.g. Devin effort levels ACP does not announce), applied through a provider side-channel when configured.
 291: Release notes now cover pull requests whose squash subject lacks a conventional prefix (e.g. "Chat : …") — an English note tagged [feat]/[fix]/[perf] is picked up instead of the PR silently disappearing from the release body.
+292: Backlog orchestrator sessions stuck in rate-limit backoff are now respawned on the new agent profile when a per-role *_agent setting changes — wip items reassigned, open PRs re-attributed, reviewers re-queued; active sessions and ac-wait sleepers are left untouched.

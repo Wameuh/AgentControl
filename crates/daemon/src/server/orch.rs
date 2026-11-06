@@ -1289,6 +1289,17 @@ impl Daemon {
             return Ok(());
         }
 
+        // Failover provider (server/orch_failover.rs) : sessions du
+        // composant en backoff rate_limit sur un profil `*_agent` qui
+        // n'est plus celui configuré pour leur rôle → remplacées sur
+        // le profil courant. Self-healing : le drift meta.agent ≠
+        // agent_or(rôle) est le déclencheur, donc un restart entre le
+        // `comp set` et ce tick est rattrapé sans file d'événements.
+        // Placé avant le dispatch : le pipeline profite du profil
+        // libéré dans le même cycle.
+        self.orch_failover_tick(bin, cfg, ws, &tasks, &metas, &prs, &mut st)
+            .await;
+
         // plan_review (opt-in) : pipeline plan→review→implémentation
         // dédié (server/orch_plan.rs — même snapshot, même état
         // persisté partagé) ; l'autre branche est le dispatch worker
