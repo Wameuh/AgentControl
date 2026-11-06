@@ -1219,6 +1219,10 @@ export class ChatView {
     // perd ni ne s'insère dans l'ancienne vue avant le clearConv.
     const wasAnchored = this.hasMoreNewer;
     this.hasMoreNewer = true;
+    // File rAF d'abord : hasMoreNewer la déroute vers pendingLive, captée
+    // par le snapshot ci-dessous — sinon clearConv la viderait et les
+    // events live en vol seraient perdus (jamais rejoués).
+    this.flushLive();
     const pending = this.pendingLive;
     try {
       const [before, after] = await Promise.all([
@@ -1318,8 +1322,13 @@ export class ChatView {
   private async loadLatest() {
     if (!app.current) return;
     const sid = app.current.id;
+    // File rAF d'abord : hasMoreNewer la déroute vers pendingLive, captée
+    // par le snapshot — clearConv la viderait sinon avant le pendingLive
+    // recréé (même garde que jumpToSeq).
+    this.hasMoreNewer = true;
+    this.flushLive();
     const pending = this.pendingLive;
-    this.clearConv();
+    this.clearConv(); // remet hasMoreNewer à false
     this.hasMoreNewer = true; // les events live restent tamponnés pendant l'await
     const js = this.jumpSeq; // post-clearConv : un saut ultérieur invalide ce load
     this.showConvLoading(true);
