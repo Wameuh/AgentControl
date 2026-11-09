@@ -393,3 +393,27 @@ button:disabled { opacity: .5; cursor: default; }
   font-size: 10px; text-transform: uppercase; letter-spacing: .4px;
   color: var(--dim);
 }
+/* Steppers orchestrateur (max_workers / reviews PR max) — patch à chaud
+   via component_set_params ; valeur lue dans spec.params de
+   list_components. */
+.bl-m-ctl {
+  display: flex; align-items: center; gap: 6px;
+  padding: 2px 1px 6px; font-size: 11px; color: var(--dim);
+}
+.bl-m-ctl .bl-m-ctl-l { flex: 1; min-width: 0; }
+.bl-m-step {
+  width: 18px; height: 18px; padding: 0; font-size: 12px; line-height: 1;
+  border: 1px solid var(--line); border-radius: 5px;
+  background: none; color: var(--ink); cursor: pointer;
+}
+.bl-m-step:hover { border-color: var(--accent); color: var(--accent); }
+.bl-m-step[disabled] { opacity: .4; cursor: default; }
+.bl-m-step-v {
+  min-width: 14px; text-align: center;
+  font-family: Mono, ui-monospace, monospace; color: var(--ink);
+}
+.bl-m-err {
+  display: flex; align-items: center; gap: 6px;
+  padding: 2px 1px 4px; font-size: 11px; color: var(--gold);
+}
+.bl-m-err .ic { width: 12px; height: 12px; flex: none; }

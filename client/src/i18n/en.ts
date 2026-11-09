@@ -427,6 +427,11 @@ export const en = {
   bl_m_wait: "avg queue wait",
   bl_m_day: "done / day",
   bl_m_peak: "workers peak",
+  bl_m_wmax: "Workers max",
+  bl_m_prmax: "PR reviews max",
+  bl_m_orch_err: "Orchestrator update failed",
+  bl_m_hint:
+    "Applied at the next orchestrator tick — lowering the cap lets live workers finish their item first",
   pr_loading: "Loading PRs…",
   pr_unassigned: "Unassigned",
   pr_done: "Done",

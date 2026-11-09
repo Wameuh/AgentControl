@@ -46,6 +46,13 @@ const DONE_MAX = 8;
 /** Sentinelle du filtre déroulant « items sans repo » — une valeur
  *  qui ne peut pas être un nom de repo taggé. */
 const REPO_UNTAGGED = "__untagged__";
+/** Steppers orchestrateur de la section Activité : param → borne haute
+ *  UI (0–{max}). Une valeur déjà au-delà (réglée via `acctl comp set`)
+ *  reste affichée et décrémentable — la borne ne borne que le pas. */
+const ORCH_STEPS: Record<string, { max: number; key: Key }> = {
+  max_workers: { max: 20, key: "bl_m_wmax" },
+  pr_review_max_parallel: { max: 8, key: "bl_m_prmax" },
+};
 /** Fenêtres proposées par la RPC `backlog_metrics` (parse démon :
  *  `<n>h` / `<n>d` / `all`). Libellé affiché neutre fr/en. */
 const M_WINDOWS: [string, string][] = [
@@ -153,6 +160,14 @@ export class BacklogView {
   private metricsWin = localStorage.getItem("ac-bl-metrics-win") || "7d";
   private metricsOpen = localStorage.getItem("ac-bl-metrics-open") !== "0";
   private metricsRo: ResizeObserver | null = null;
+  /** Params orchestrateur lus dans `list_components` (spec.params de
+   *  l'item backlog-orchestrator = valeurs courtes `params_values`) —
+   *  alimentent les steppers max_workers / reviews PR. Reset au
+   *  changement de conn comme le reste de l'état par-démon. */
+  private orchParams: Record<string, string> = {};
+  private orchConn: string | null = null;
+  private orchCtlBusy = new Set<string>();
+  private orchErr: string | null = null;
 
   bind(d: Partial<BacklogDeps>) {
     Object.assign(this.deps, d);
@@ -221,6 +236,12 @@ export class BacklogView {
 
   private async refresh() {
     const conn = this.deps.conn();
+    if (conn !== this.orchConn) {
+      this.orchConn = conn;
+      this.orchParams = {};
+      this.orchCtlBusy.clear();
+      this.orchErr = null;
+    }
     // Métriques : même cadence que le panneau mais en parallèle — une
     // RPC lente ne retarde jamais le rendu de la file. Onglet inactif
     // ou section repliée → pas de fetch (la série 30 j peut peser
@@ -229,6 +250,7 @@ export class BacklogView {
     if (!this.deps.componentsCapable(conn)) {
       this.state = { kind: "cap" };
       this.mgrWs = []; // vieux démon : pas de surface Manager
+      this.orchParams = {}; // ni steppers (pas de params exposés)
       this.render();
       return;
     }
@@ -245,7 +267,12 @@ export class BacklogView {
     // Surface « Manager » : workspaces routés exposés par
     // l'orchestrateur actif (status.workspaces) — détection voulue
     // = composant agentbacklog déclaré + orchestrateur actif.
-    const orch = comps.find((c) => c.name === ORCH_COMP)?.orchestrator;
+    const orchItem = comps.find((c) => c.name === ORCH_COMP);
+    const orch = orchItem?.orchestrator;
+    this.orchParams = (orchItem?.spec?.params ?? {}) as Record<
+      string,
+      string
+    >;
     this.mgrWs =
       comp && orch?.enabled
         ? (orch.workspaces ?? [])
@@ -400,7 +427,12 @@ export class BacklogView {
       `${this.metricsAvail}|${this.metricsOpen}|${this.metricsWin}|` +
       (this.metrics
         ? `${this.metrics.sample_count}|${this.metrics.samples?.at(-1)?.ts}|${JSON.stringify(this.metrics.aggregates)}`
-        : "null");
+        : "null") +
+      // Steppers : seules les valeurs affichées comptent (le reste de
+      // params_values est stable et inutile à sérialiser à chaque poll).
+      `|${this.orchParams.max_workers}|${this.orchParams.pr_review_max_parallel}` +
+      JSON.stringify([...this.orchCtlBusy]) +
+      this.orchErr;
     if (sig === this.lastSig) return;
     this.lastSig = sig;
 
@@ -642,7 +674,7 @@ export class BacklogView {
           `<div class="sess-none">${esc(t("bl_m_none"))}</div>` +
           this.cardsHtml(m);
       }
-      body = `<div class="bl-m-body">${sel}${body}</div>`;
+      body = `<div class="bl-m-body">${sel}${this.orchCtlHtml()}${body}</div>`;
     }
     return (
       `<div class="bl-sec bl-metrics"><div class="grp-head bl-m-head" id="bl-m-tgl">` +
@@ -673,6 +705,68 @@ export class BacklogView {
     );
   }
 
+  /** Rangée de steppers orchestrateur — un par param de ORCH_STEPS
+   *  présent dans spec.params (démon exposant les params éditables ;
+   *  absent → rien, comme les autres gardes capability). La valeur
+   *  affichée est celle lue dans list_components — le prochain poll
+   *  (~4 s) la rafraîchit après un set. */
+  private orchCtlHtml(): string {
+    let rows = "";
+    for (const [param, cfg] of Object.entries(ORCH_STEPS)) {
+      const raw = this.orchParams[param];
+      const cur = raw == null ? NaN : parseInt(raw, 10);
+      if (!Number.isFinite(cur)) continue;
+      const hi = Math.max(cfg.max, cur); // valeur hors borne : seul − agit
+      const busy = this.orchCtlBusy.has(param);
+      rows +=
+        `<div class="bl-m-ctl" title="${q(esc(t("bl_m_hint")))}">` +
+        `<span class="bl-m-ctl-l">${esc(t(cfg.key))}</span>` +
+        `<button class="bl-m-step" data-orch-step="${param}:-1"${busy || cur <= 0 ? " disabled" : ""}>−</button>` +
+        `<span class="bl-m-step-v">${cur}</span>` +
+        `<button class="bl-m-step" data-orch-step="${param}:+1"${busy || cur >= hi ? " disabled" : ""}>+</button>` +
+        `</div>`;
+    }
+    if (this.orchErr) {
+      rows += `<div class="bl-m-err">${icon("warn")} ${esc(this.orchErr)}</div>`;
+    }
+    return rows;
+  }
+
+  /** Stepper → `component_set_params` (patch partiel — le démon merge
+   *  sur la cfg orchestrateur, persisté config.toml, effet au prochain
+   *  tick). En baisse, les workers vivants finissent leur item : pas
+   *  de kill (comportement du comptage `alive`, cf hint UI). */
+  private async setOrchParam(param: string, delta: number) {
+    if (this.orchCtlBusy.has(param)) return;
+    const cur = parseInt(this.orchParams[param] ?? "", 10);
+    const bound = ORCH_STEPS[param]?.max ?? 20;
+    if (!Number.isFinite(cur)) return;
+    const next = Math.min(Math.max(cur + delta, 0), Math.max(bound, cur));
+    if (next === cur) return;
+    this.orchCtlBusy.add(param);
+    this.orchErr = null;
+    this.render();
+    const conn = this.deps.conn();
+    const err = await call("component_set_params", {
+      conn,
+      name: ORCH_COMP,
+      params: { [param]: String(next) },
+    }).then(
+      () => null,
+      (e: unknown) => String(e),
+    );
+    this.orchCtlBusy.delete(param);
+    if (err) {
+      this.orchErr = `${t("bl_m_orch_err")} — ${err}`;
+    } else {
+      // Affichage optimiste — la valeur persistée remonte au prochain
+      // list_components (le refresh immédiat ci-dessous la confirme).
+      this.orchParams = { ...this.orchParams, [param]: String(next) };
+    }
+    this.render();
+    void this.refresh();
+  }
+
   /** Toggle dépliable + sélecteur de fenêtre — rebind après chaque
    *  innerHTML (comme wireMgr). */
   private wireMetrics(el: HTMLElement) {
@@ -699,6 +793,12 @@ export class BacklogView {
         void this.refreshMetrics(this.deps.conn());
       },
     );
+    el.querySelectorAll<HTMLElement>("[data-orch-step]").forEach((b) => {
+      b.onclick = () => {
+        const [param, d] = (b.dataset.orchStep ?? "").split(":");
+        void this.setOrchParam(param, d === "-1" ? -1 : 1);
+      };
+    });
   }
 
   /** Redessine quand la sidebar change de largeur — le canvas suit

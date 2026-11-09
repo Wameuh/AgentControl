@@ -430,6 +430,11 @@ export const es: Record<Key, string> = {
   bl_m_wait: "espera media en cola",
   bl_m_day: "terminadas / día",
   bl_m_peak: "pico de workers",
+  bl_m_wmax: "Workers máx.",
+  bl_m_prmax: "Reviews PR máx.",
+  bl_m_orch_err: "Error al actualizar el orquestador",
+  bl_m_hint:
+    "Se aplica en el próximo tick del orquestador — al reducirlo, los workers activos terminan primero su tarea",
   pr_loading: "Cargando PR…",
   pr_unassigned: "Sin asignar",
   pr_done: "Terminadas",

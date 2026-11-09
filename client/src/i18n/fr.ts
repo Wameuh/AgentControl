@@ -427,6 +427,11 @@ export const fr: Record<Key, string> = {
   bl_m_wait: "attente file moyenne",
   bl_m_day: "terminés / jour",
   bl_m_peak: "pic de workers",
+  bl_m_wmax: "Workers max",
+  bl_m_prmax: "Reviews PR max",
+  bl_m_orch_err: "Échec de la mise à jour orchestrateur",
+  bl_m_hint:
+    "Appliqué au prochain tick de l'orchestrateur — en baisse, les workers vivants finissent d'abord leur item",
   pr_loading: "Chargement des PR…",
   pr_unassigned: "Non attribuées",
   pr_done: "Terminées",
