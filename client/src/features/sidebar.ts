@@ -18,7 +18,7 @@ import { nav } from "../ui/nav";
 import { PrListView, prBadge, prUnresolved, repoLabel, type PrRow } from "./prs";
 import { BacklogView } from "./backlog";
 import type { ChatView } from "./chat-view";
-import type { ConnectionManager } from "./connections";
+import type { AcTransport, ConnectionManager } from "./connections";
 import { grpNorm, grpParent, inSubtree } from "./groups";
 import type { GroupStore } from "./groups";
 import { stateDiff } from "./state-diff";
@@ -242,7 +242,8 @@ export class Sidebar {
       const gen = (s as { gen?: number }).gen;
       if (!this.conns.isFresh(k, gen)) return false;
       if ((this.conns.state(k) ?? "ok") === "ok") {
-        this.conns.markDead(k, "list_sessions: conn_error");
+        this.conns.markDead(k, "list_sessions: conn_error",
+          (s as { _ac_transport?: AcTransport })._ac_transport);
       }
       return false;
     });

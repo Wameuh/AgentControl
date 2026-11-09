@@ -11,6 +11,24 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::state::{get_conn, AppState};
 
+/// Compteurs transport exposés sous `_ac_transport` dans les sondes et
+/// les marqueurs `conn_error` — le frontend les recopie dans client.log
+/// pour reconstruire la chronologie sans deviner depuis les timeouts.
+pub(crate) fn ac_transport_json(st: &client_core::ClientStats) -> Value {
+    json!({
+        "age_ms": st.age_ms,
+        "rx_lines": st.rx_lines,
+        "tx_lines": st.tx_lines,
+        "rx_bytes": st.rx_bytes,
+        "tx_bytes": st.tx_bytes,
+        "pending": st.pending,
+        "abandoned": st.abandoned,
+        "dead": st.dead,
+        "silent_ms": st.silent_ms,
+        "tx_age_ms": st.tx_age_ms,
+    })
+}
+
 #[tauri::command]
 pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: String, params: Value) -> Result<Value, String> {
     // Connexion cible : params.conn explicite, sinon connexion par défaut.
@@ -61,19 +79,23 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
                 // silent_ms lu au retour : du trafic entrant récent prouve
                 // le transport vivant même quand la requête a expiré.
                 let silent = c.silent_ms();
+                // Stats transport au moment de la réponse/échec : le
+                // watchdog distingue socket morte, socket vivante sans
+                // réponse et RPC fantômes sans relire client.log.
+                let st = c.stats().await;
                 // kind discrimine l'expiration (lenteur/blackhole, excusable
                 // si le transport vit) de l'erreur de transport (mort
                 // proche, strike direct) — consommé par le watchdog.
                 let kind = if r.is_err() { "timeout" } else { "error" };
                 (k, c, r.map_err(|_| anyhow::anyhow!("timeout")).and_then(|x| x),
-                    t0.elapsed().as_millis() as u64, silent, kind)
+                    t0.elapsed().as_millis() as u64, silent, kind, st)
             });
         }
         let mut all = Vec::new();
         let mut out = json!({});
         let mut n_ok = 0u64;
         while let Some(res) = set.join_next().await {
-            let Ok((k, c, r, rtt, silent, kind)) = res else { continue };
+            let Ok((k, c, r, rtt, silent, kind, st)) = res else { continue };
             // Client remplacé pendant l'appel (reconnect) : le résultat
             // appartient à l'ancienne gen — le publier marquait la
             // nouvelle conn down (sonde ko / conn_error → markDead) alors
@@ -124,7 +146,8 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
                     client_core::log(Level::Warn,
                         format!("{method} {k}: {e:#} (rtt {rtt} ms, silent {silent} ms)"));
                     out[k] = json!({"error": format!("{e:#}"), "kind": kind,
-                        "rtt_ms": rtt, "silent_ms": silent, "gen": gen});
+                        "rtt_ms": rtt, "silent_ms": silent, "gen": gen,
+                        "_ac_transport": ac_transport_json(&st)});
                 }
                 // Le frontend filtre ce marqueur → conn marquée down et
                 // sessions servies depuis le cache au lieu de disparaître.
@@ -132,7 +155,8 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
                 // (filet si un chemin contourne le filtre ptr_eq).
                 Err(e) => {
                     client_core::log(Level::Warn, format!("{method} {k}: {e:#}"));
-                    all.push(json!({"conn": k, "conn_error": true, "gen": gen}));
+                    all.push(json!({"conn": k, "conn_error": true, "gen": gen,
+                        "_ac_transport": ac_transport_json(&st)}));
                 }
             }
         }

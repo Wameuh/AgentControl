@@ -4,6 +4,7 @@
 //! `tauri::mobile_entry_point`.
 
 mod commands;
+mod instance;
 mod state;
 mod stream;
 
@@ -124,6 +125,10 @@ pub fn run() {
                 // sans keystore échoue plutôt que d'être écrit en clair.
                 client_core::init_secret_box(KeystoreBox(app.handle().clone()));
             }
+            // Cycle de vie : pid/ppid/version/exe/conn + instances
+            // concurrentes — indispensable pour corréler un flap transport
+            // à un relaunch post-update ou à un spawn_instance.
+            instance::init(cli_conn_arg().as_deref());
             // Icône fenêtre = gemme générée (marche aussi avec --no-bundle,
             // là où les icônes de bundle ne sont pas installées).
             #[cfg(not(target_os = "android"))]

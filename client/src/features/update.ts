@@ -5,7 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import { invoke, getVersion, isWeb } from "../core/bridge";
-import { $, esc, notify } from "../core/dom";
+import { $, esc, logUi, notify } from "../core/dom";
 import { icon } from "../ui/icons";
 import { isAndroid, shellOpen } from "../core/chrome";
 import { cmpVer, connLabel, daemonParams } from "../core/conn";
@@ -149,6 +149,10 @@ export async function performDaemonUpdate(o: {
     t("update_now"),
   );
   if (!ok) return;
+  // Corrélation client.log : une mise à jour démon (surtout ensure_daemon
+  // ssh) peut coïncider avec un flap transport — la ligne porte conn +
+  // versions pour la retrouver sans fouiller les toasts.
+  logUi("info", `daemon update conn=${o.conn} ${o.current}->${o.target} confirmé`);
   // Capacité fraîche (le statut du check peut dater) : self_update
   // annonce que le démon connaît ReqKind::UpdateDaemon — un plus vieux
   // répondrait `parse: unknown variant` en id=0, droppé par le routage

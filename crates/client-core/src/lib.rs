@@ -193,7 +193,17 @@ pub fn log_at(level: Level, file: &str, line_no: u32, msg: impl std::fmt::Displa
     // (sortie ssh, erreur remontée) ne doit ni injecter de fausse entrée
     // ni perdre ses continuations au filtrage par niveau de l'UI.
     let msg = msg.to_string().replace(['\r', '\n'], "␤");
-    let line = format!("[{}] [{}]{} {}", proto::now_iso(), level.as_str(), src, msg);
+    // pid sur chaque ligne : plusieurs instances du client partagent le
+    // même client.log (update/relaunch, spawn_instance) — sans lui, une
+    // entrée transport ne dit pas QUEL process l'a écrite.
+    let pid = std::process::id();
+    let line = format!(
+        "[{}] [{}] [pid {pid}]{} {}",
+        proto::now_iso(),
+        level.as_str(),
+        src,
+        msg
+    );
     eprintln!("{line}");
     if let Ok(mut w) = logfile().lock() {
         w.write_line(&line);
@@ -653,14 +663,41 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
 /// drop du client. `try_lock` : best-effort, jamais de blocage en Drop.
 struct PendingGuard<'a> {
     map: &'a Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
+    abandoned: &'a AtomicU64,
     id: u64,
 }
 impl Drop for PendingGuard<'_> {
     fn drop(&mut self) {
         if let Ok(mut m) = self.map.try_lock() {
-            m.remove(&self.id);
+            // L'entrée n'est retirée par le reader qu'à la réponse : si le
+            // guard la solde encore, l'appel a été abandonné en vol
+            // (timeout externe, JoinSet droppé, écriture ko) — compteur
+            // exposé aux sondes pour distinguer lenteur et RPC fantôme.
+            if m.remove(&self.id).is_some() {
+                self.abandoned.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
+}
+
+/// Instantané transport d'un client — champs `_ac_*` des sondes et
+/// payload `conn-dead` : de quoi distinguer socket morte, socket vivante
+/// sans réponse et RPC en vol abandonnés sans deviner depuis les seuls
+/// timeouts.
+#[derive(Debug, Clone, Copy)]
+pub struct ClientStats {
+    pub age_ms: u64,
+    pub rx_lines: u64,
+    pub tx_lines: u64,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    pub pending: u64,
+    pub abandoned: u64,
+    pub dead: bool,
+    pub silent_ms: u64,
+    /// Âge de la dernière écriture RPC — avec silent_ms, dit si le client
+    /// attend une réponse à une requête partie ou s'il n'a rien demandé.
+    pub tx_age_ms: u64,
 }
 
 pub struct Client {
@@ -694,6 +731,20 @@ pub struct Client {
     /// générique, et journalisée.
     dead_info: std::sync::Mutex<Option<String>>,
     guard: Option<Arc<SshGuard>>,
+    /// Naissance du transport : age_ms dans les stats — un client tout
+    /// juste reconnecté qui meurt immédiatement n'a pas la même lecture
+    /// qu'un tunnel de plusieurs heures.
+    created_ms: AtomicU64,
+    rx_lines: AtomicU64,
+    tx_lines: AtomicU64,
+    rx_bytes: AtomicU64,
+    tx_bytes: AtomicU64,
+    /// Dernier octet JSON écrit — croisé avec silent_ms, distingue « je
+    /// n'ai rien demandé » de « j'ai demandé et rien ne revient ».
+    last_tx_ms: AtomicU64,
+    /// Appels RPC soldés par abandon (timeout/drop/write ko) — compteur
+    /// monotone exposé aux sondes : un pic à la mort = RPC fantômes.
+    abandoned_calls: AtomicU64,
 }
 
 fn now_ms() -> u64 {
@@ -713,6 +764,21 @@ fn transport_desc(t: &Transport) -> String {
         Transport::SshNative {
             host, port, user, ..
         } => format!("ssh-native:{user}@{host}:{port}"),
+    }
+}
+
+/// Classe une erreur io de lecture : distingue EOF/RST/timeout/reset pour
+/// le post-mortem — `erreur lecture` générique ne disait pas si le pair
+/// avait fermé proprement ou si le socket avait été aboyé.
+fn io_death_kind(e: &std::io::Error) -> &'static str {
+    match e.kind() {
+        std::io::ErrorKind::ConnectionReset => "reset socket (RST)",
+        std::io::ErrorKind::ConnectionAborted => "connexion avortée",
+        std::io::ErrorKind::BrokenPipe => "pipe brisé",
+        std::io::ErrorKind::UnexpectedEof => "EOF inattendu",
+        std::io::ErrorKind::TimedOut => "timeout io",
+        std::io::ErrorKind::NotConnected => "socket non connecté",
+        _ => "erreur socket",
     }
 }
 
@@ -750,7 +816,15 @@ impl Client {
             reader_abort: std::sync::OnceLock::new(),
             dead_info: std::sync::Mutex::new(None),
             guard,
+            created_ms: AtomicU64::new(now_ms()),
+            rx_lines: AtomicU64::new(0),
+            tx_lines: AtomicU64::new(0),
+            rx_bytes: AtomicU64::new(0),
+            tx_bytes: AtomicU64::new(0),
+            last_tx_ms: AtomicU64::new(now_ms()),
+            abandoned_calls: AtomicU64::new(0),
         });
+        log(Level::Info, format!("transport {} ouvert", client.desc));
         // Reader task : dispatch responses / pushes
         {
             let c = Arc::clone(&client);
@@ -761,7 +835,10 @@ impl Client {
                 loop {
                     match lines.next_line().await {
                         Ok(Some(line)) => {
-                            RX_TOTAL.fetch_add(line.len() as u64 + 1, Ordering::Relaxed);
+                            let n = line.len() as u64 + 1;
+                            RX_TOTAL.fetch_add(n, Ordering::Relaxed);
+                            c.rx_lines.fetch_add(1, Ordering::Relaxed);
+                            c.rx_bytes.fetch_add(n, Ordering::Relaxed);
                             c.last_rx_ms.store(now_ms(), Ordering::Relaxed);
                             if line.trim().is_empty() {
                                 continue;
@@ -799,7 +876,7 @@ impl Client {
                 // réception du signal.
                 let silent = c.silent_ms();
                 let cause = match &read_err {
-                    Some(e) => format!("erreur lecture ({e})"),
+                    Some(e) => format!("{} ({e})", io_death_kind(e)),
                     None => match &c.guard {
                         Some(g) => g.death_note(),
                         None => "eof distant (le pair a fermé)".to_string(),
@@ -834,6 +911,25 @@ impl Client {
     /// alors imputable au démon, pas au lien).
     pub fn silent_ms(&self) -> u64 {
         now_ms().saturating_sub(self.last_rx_ms.load(Ordering::Relaxed))
+    }
+
+    /// Instantané transport pour les sondes / l'event `conn-dead` :
+    /// compteurs par client + état mort + RPC en vol/abandonnés. Le
+    /// frontend s'en sert pour dire « socket morte » vs « socket
+    /// vivante, réponse absente » au lieu de deviner sur le seul timeout.
+    pub async fn stats(&self) -> ClientStats {
+        ClientStats {
+            age_ms: now_ms().saturating_sub(self.created_ms.load(Ordering::Relaxed)),
+            rx_lines: self.rx_lines.load(Ordering::Relaxed),
+            tx_lines: self.tx_lines.load(Ordering::Relaxed),
+            rx_bytes: self.rx_bytes.load(Ordering::Relaxed),
+            tx_bytes: self.tx_bytes.load(Ordering::Relaxed),
+            pending: self.pending.lock().await.len() as u64,
+            abandoned: self.abandoned_calls.load(Ordering::Relaxed),
+            dead: *self.dead.borrow(),
+            silent_ms: self.silent_ms(),
+            tx_age_ms: now_ms().saturating_sub(self.last_tx_ms.load(Ordering::Relaxed)),
+        }
     }
 
     /// Cause de mort du transport, posée par le reader (post-mortem) ou
@@ -911,12 +1007,20 @@ impl Client {
         // La future peut être droppée en vol (timeout externe, JoinSet) ou
         // timeout interne → sans guard l'entrée pending fuirait jusqu'au
         // drop du client.
-        let _pending_guard = PendingGuard { map: &self.pending, id };
+        let _pending_guard = PendingGuard {
+            map: &self.pending,
+            abandoned: &self.abandoned_calls,
+            id,
+        };
         let mut s = serde_json::to_string(&Request { id, req })?;
         s.push('\n');
         {
             let mut w = self.w.lock().await;
-            TX_TOTAL.fetch_add(s.len() as u64, Ordering::Relaxed);
+            let n = s.len() as u64;
+            TX_TOTAL.fetch_add(n, Ordering::Relaxed);
+            self.tx_lines.fetch_add(1, Ordering::Relaxed);
+            self.tx_bytes.fetch_add(n, Ordering::Relaxed);
+            self.last_tx_ms.store(now_ms(), Ordering::Relaxed);
             if let Err(e) = w.write_all(s.as_bytes()).await {
                 log(Level::Error, format!("daemon {name}: écriture ko {e}"));
                 return Err(e.into());
