@@ -79,6 +79,31 @@ try {
     `agrégats RPC affichés (${cards.join(" | ")})`);
   const legend = await p1.evaluate(() => document.querySelectorAll(".bl-m-legend span").length);
   ok(legend === 3, "légende 3 séries (pending/wip/workers)");
+  // Steppers orchestrateur : valeurs lues dans spec.params de
+  // list_components (mock : max_workers=5, pr_review_max_parallel=2).
+  const steps = await p1.evaluate(() =>
+    [...document.querySelectorAll(".bl-m-ctl")].map((c) => ({
+      label: c.querySelector(".bl-m-ctl-l")?.textContent,
+      val: c.querySelector(".bl-m-step-v")?.textContent,
+    })));
+  ok(steps.length === 2 && steps[0].val === "5" && steps[1].val === "2",
+    `steppers orchestrateur rendus (${JSON.stringify(steps)})`);
+  // « + » sur max_workers → component_set_params {max_workers:"6"} —
+  // le mock mute spec.params, le prochain list_components confirme.
+  await p1.evaluate(() =>
+    document.querySelector('[data-orch-step="max_workers:+1"]').click());
+  await sleep(300);
+  const setCall = await p1.evaluate(() => window.__setParamsCalls?.at(-1));
+  ok(setCall?.name === "backlog-orchestrator" &&
+     setCall?.params?.max_workers === "6",
+    `stepper + → component_set_params (${JSON.stringify(setCall)})`);
+  await p1.waitForFunction(
+    () => document.querySelector(
+      '[data-orch-step="max_workers:+1"]')
+      ?.closest(".bl-m-ctl")
+      ?.querySelector(".bl-m-step-v")?.textContent === "6",
+    { timeout: 9000 });
+  ok(true, "valeur max_workers rafraîchie à 6");
 } catch (e) {
   ok(false, `scénario samples: ${e.message}`);
 }
