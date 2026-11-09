@@ -723,6 +723,20 @@ impl Session {
                     }
                 }
                 m.config_options = fresh;
+                // Realignement catalogue (même règle qu'au handshake et
+                // dans le handler ConfigOptions) : current_value
+                // rapporté = valeur clampée — remettre l'uid catalogue
+                // demandé, sinon l'UI et la mémoire d'effort
+                // (modèle→effort) se cléent sur le mauvais id.
+                if m.model_source.as_deref() == Some("catalogue") {
+                    if let Some(want) = m.model.clone() {
+                        if let Some(o) =
+                            m.config_options.iter_mut().find(|o| o.id == "model")
+                        {
+                            o.current_value = want;
+                        }
+                    }
+                }
             }
             // L'option peut être adressée par son id ACP ou sa catégorie
             // (« model ») — les deux comptent pour meta.model/source.
@@ -756,6 +770,10 @@ impl Session {
         // que post-handshake.
         if has_fresh {
             self.revive_rejected_config();
+            // Le cache profil suit aussi les annonces portées par les
+            // réponses (même mise à jour que le handler ConfigOptions).
+            let agent = self.meta_snapshot().agent;
+            self.caps.update_options(&agent, &opts);
         }
         self.emit(EventKind::ConfigOptions { options: opts });
         // Symétrie avec set_model : changer de modèle via
