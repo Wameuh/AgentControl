@@ -163,7 +163,8 @@
 }
 #ce-internals summary:hover { color: var(--ink); }
 #ce-internals-json {
-  margin: 0; padding: 8px 10px 10px; overflow-x: auto;
+  margin: 0; padding: 8px 10px 22px; overflow-x: auto;
+  scrollbar-width: thin;
   font-family: var(--mono, monospace); font-size: 11.5px; line-height: 1.5;
   color: var(--muted); border-top: 1px solid var(--line);
 }
