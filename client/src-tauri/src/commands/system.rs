@@ -175,6 +175,9 @@ pub(crate) fn set_app_icon(window: tauri::WebviewWindow, state: &str) -> Result<
 #[cfg(target_os = "android")]
 #[tauri::command]
 pub(crate) fn app_signing(app: tauri::AppHandle) -> Result<Value, String> {
+    // Manager requis pour app.state() — import local : le crate n'est
+    // de toute façon pas compilé sur les autres cibles.
+    use tauri::Manager;
     let dev = app.state::<tauri_plugin_ac_device::Device<tauri::Wry>>();
     let info = dev
         .signing_info(option_env!("AGENTCONTROL_ANDROID_CERT_SHA256"))

@@ -309,6 +309,13 @@ jobs:
             CERT_SHA=$("$JAVA_HOME/bin/keytool" -list -v -keystore "$KS_PRE" \
               -alias "$ANDROID_KEY_ALIAS" -storepass "$ANDROID_KEYSTORE_PASSWORD" \
               | awk '/SHA256:/{print $2; exit}' | tr -d ':' | tr 'A-F' 'a-f')
+            # Fail-closed : une empreinte vide désactiverait silencieusement
+            # le garde-fou uninstall (verdict "unknown" partout) — le
+            # keystore est cassé si on arrive là, autant le voir ici.
+            if [ -z "$CERT_SHA" ]; then
+              echo "::error::Empreinte SHA-256 du keystore introuvable — garde-fou update Android non injectable."
+              exit 1
+            fi
             # GITHUB_ENV ne couvre que les steps suivants — l'export rend
             # la variable visible du `tauri android build` de CE step.
             export AGENTCONTROL_ANDROID_CERT_SHA256="$CERT_SHA"
