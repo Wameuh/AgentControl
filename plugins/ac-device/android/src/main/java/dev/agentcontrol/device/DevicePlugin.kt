@@ -50,7 +50,9 @@ class DevicePlugin(activity: Activity): Plugin(activity) {
     } else {
       pi.signatures?.firstOrNull()
     } ?: return null
-    val md = MessageDigest.getInstance("SHA-256").digest(cert.encoded)
+    // Signature (pas X509Certificate) : toByteArray() = DER du
+    // certificat — mêmes octets que keytool/apksigner → même empreinte.
+    val md = MessageDigest.getInstance("SHA-256").digest(cert.toByteArray())
     return md.joinToString("") { "%02x".format(it) }
   }
 

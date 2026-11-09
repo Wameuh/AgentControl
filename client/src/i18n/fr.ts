@@ -239,7 +239,7 @@ export const fr: Record<Key, string> = {
   daemon_update_now: "Mettre à jour le démon",
   update_android_reopen: "Mise à jour téléchargée — installez-la puis rouvrez l'app",
   upd_android_h: "Mise à jour Android — réinstallation requise",
-  upd_android_warn: "Cette version ne peut pas se mettre à jour en place (signature de debug ou clé étrangère) : Android refusera l'installation. La mise à jour impose de désinstaller l'app d'abord, ce qui efface TOUTES les données — connexions, clés, appairages. Un re-pairage par QR code sera nécessaire ensuite.",
+  upd_android_warn: "Cette version ne peut pas se mettre à jour en place (signature de debug ou clé étrangère) : Android refusera l'installation. La mise à jour impose de désinstaller l'app d'abord, ce qui efface TOUTES les données — connexions, clés, appairages. Un nouvel appairage par QR code sera nécessaire ensuite.",
   upd_android_go: "Télécharger quand même",
   update_partial: "v{v} installée mais relance impossible : {reason}",
   rcchan_label: "Pré-versions (rc)",

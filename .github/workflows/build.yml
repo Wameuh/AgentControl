@@ -332,6 +332,12 @@ jobs:
           grep -q ":tauri-plugin-ac-stt" src-tauri/gen/android/tauri.settings.gradle
           grep -q 'implementation(project(":tauri-plugin-ac-stt"))' \
             src-tauri/gen/android/app/tauri.build.gradle.kts
+          # ac-device (verdict signature APK) : même mécanisme
+          # cargo:android_library_path — sans lui app_signing planterait
+          # au runtime (plugin non enregistré).
+          grep -q ":tauri-plugin-ac-device" src-tauri/gen/android/tauri.settings.gradle
+          grep -q 'implementation(project(":tauri-plugin-ac-device"))' \
+            src-tauri/gen/android/app/tauri.build.gradle.kts
           # RECORD_AUDIO provient du manifest du module plugin, mergé
           # dans l'app par le manifest merger gradle.
           find src-tauri/gen/android/app/build/intermediates \
