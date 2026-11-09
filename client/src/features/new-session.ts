@@ -78,6 +78,10 @@ export class NewSessionDialog {
     return sel.hidden || sel.value === CUSTOM ? inp.value : sel.value;
   }
 
+  /** configId de la config_option « thought_level » du profil choisi
+   *  (id announced, pas nécessairement la chaîne littérale). */
+  private thoughtCfgId: string | null = null;
+
   /** Bascule f-mode/f-model en <select> alimenté par les capacités de
    *  l'agent choisi — l'entrée « custom » du select rend la saisie
    *  libre ; agent sans annonce → input tel quel (comportement inchangé). */
@@ -121,6 +125,39 @@ export class NewSessionDialog {
       if (vals.some((it) => it.v === prev)) sel.value = prev;
       else if (prev) sel.value = CUSTOM;
       inp.hidden = sel.value !== CUSTOM;
+    }
+    // thought_level : borné par l'annonce du profil (valeurs propres à
+    // chaque modèle — l'agent tranchera au spawn), option « défaut » =
+    // ne rien envoyer. Masqué quand le profil n'annonce rien.
+    const tsel = $("f-thought-sel") as HTMLSelectElement;
+    const twrap = $("f-thought-wrap") as HTMLElement;
+    const tcaps: AgentCaps | undefined = this.agents.find(
+      (a) => a.id === ($("f-agent") as HTMLSelectElement).value,
+    )?.caps;
+    const topt = tcaps?.config_options?.find(
+      (o) => o.id === "thought_level" || o.category === "thought_level",
+    );
+    tsel.innerHTML = "";
+    this.thoughtCfgId = topt?.id ?? null;
+    if (!topt?.options?.length) {
+      twrap.hidden = true;
+    } else {
+      twrap.hidden = false;
+      const d = document.createElement("option");
+      d.value = "";
+      const curLabel = topt.currentValue
+        ? topt.options.find((o) => o.value === topt.currentValue)?.name
+        : undefined;
+      d.textContent = curLabel
+        ? `${t("opt_default")} (${curLabel})`
+        : t("opt_default");
+      tsel.appendChild(d);
+      for (const o of topt.options) {
+        const el = document.createElement("option");
+        el.value = o.value;
+        el.textContent = o.name || o.value;
+        tsel.appendChild(el);
+      }
     }
     // Coûts du profil affiché — re-render des selects à l'arrivée
     // (suffixe « · coût » des options modèle, cf. renderModelList).
@@ -344,6 +381,22 @@ export class NewSessionDialog {
       btn.classList.remove("spin");
       btn.textContent = label0;
       if (!res) return;
+      // thought_level choisi à la création : la session vient d'être
+      // insérée (spawn en tâche de fond) — set_config_option tombe en
+      // pending_config et est rejoué post-handshake, APRÈS le modèle
+      // (ordonné model→options côté démon). Ordre imposé : model PUIS
+      // thought_level, jamais l'inverse.
+      const thought = attach
+        ? ""
+        : ($("f-thought-sel") as HTMLSelectElement).value;
+      if (thought && this.thoughtCfgId) {
+        call("set_config_option", {
+          session: res.session,
+          conn: grp?.conn ?? selConn ?? "",
+          config_id: this.thoughtCfgId,
+          value: thought,
+        }).catch((er) => showErr(String(er)));
+      }
       if (grp) {
         // conn "" = connexion par défaut côté routage — la même que celle qui
         // vient de créer la session (évite l'injection de current.conn).

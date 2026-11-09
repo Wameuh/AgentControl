@@ -47,7 +47,7 @@ export const en = {
   att_no_session: "Open a session to attach files",
   att_unsupported: "Daemon too old for attachments (needs files RPC)",
   model_free_ph: "model…", model_free_title: "Model name (Enter to apply)",
-  effort_title: "Effort level", delete: "Delete", delete_confirm: "del?",
+  effort_title: "Effort level", thought_label: "Thinking", delete: "Delete", delete_confirm: "del?",
   title_dblclick: "Double-click to rename",
   // dialogs
   new_session_h: "New agent", agent: "Agent", workdir: "Working directory",

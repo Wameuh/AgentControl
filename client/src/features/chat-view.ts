@@ -16,7 +16,15 @@ import { t } from "../i18n";
 import { icon, type IconName } from "../ui/icons";
 import { hideMenu, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
-import { fillEfforts, joinModel, splitModel } from "./modelbar";
+import {
+  fillEfforts,
+  fillThoughtLevels,
+  joinModel,
+  modelTransition,
+  rememberedEffort,
+  splitModel,
+  thoughtLevelOpt,
+} from "./modelbar";
 import { costFor, ensureCosts } from "./modelcosts";
 import { notifications } from "./notifications";
 import { catalogFor, ensureCatalog } from "./modelcatalog";
@@ -792,6 +800,9 @@ export class ChatView {
     const copts = app.current.config_options ?? [];
     const modeOpt = copts.find((o) => o.id === "mode" || o.category === "mode");
     const modelOpt = copts.find((o) => o.id === "model" || o.category === "model");
+    // Effort de raisonnement annoncé à part (Devin : thought_level) —
+    // effort-select se rebinde dessus ; absent → heuristique suffixe.
+    const thoughtOpt = thoughtLevelOpt(copts);
 
     const ms = $("mode-select") as HTMLSelectElement;
     if (modeOpt || app.current.available_modes.length) {
@@ -815,6 +826,9 @@ export class ChatView {
     const md = $("model-select") as HTMLSelectElement;
     const es = $("effort-select") as HTMLSelectElement;
     const mf = $("model-free") as HTMLInputElement;
+    // config_option réellement bindée sur effort-select ce rendu (pensée
+    // pour le saut dyn-opts — pas de doublon select générique dessous).
+    let boundThought: (typeof copts)[number] | undefined;
     const rawOpts = modelOpt
       ? modelOpt.options.map((o) => ({ v: o.value, label: o.name || o.value }))
       : app.current.available_models.map((m) => ({ v: m, label: m }));
@@ -882,16 +896,50 @@ export class ChatView {
       // Bouton ⚙ : reconfigurer la fusion quand elle est déjà active
       // (re-sélectionner la même option dans un <select> ne tire pas change)
       $("btn-fusion-edit").hidden = !curIsFusion;
-      // Select d'effort : suffixes réellement présents pour la base choisie
-      // (masqué en fusion — les efforts se choisissent dans le dialogue)
-      fillEfforts(md.value, curEff);
-      es.hidden = curIsFusion || es.options.length <= 1;
+      // Select d'effort : thought_level annoncé → ses options pour le
+      // modèle courant (masqué en fusion — les efforts se choisissent dans
+      // le dialogue) ; sinon suffixes réellement présents pour la base.
+      if (thoughtOpt && !curIsFusion) {
+        fillThoughtLevels(es, thoughtOpt);
+        es.title = thoughtOpt.name || t("effort_title");
+        es.hidden = es.options.length <= 1;
+        boundThought = thoughtOpt;
+      } else {
+        es.title = t("effort_title");
+        fillEfforts(md.value, curEff);
+        es.hidden = curIsFusion || es.options.length <= 1;
+      }
     } else {
       md.hidden = true;
       es.hidden = true;
+      es.title = t("effort_title");
       $("btn-fusion-edit").hidden = true;
       mf.hidden = false;
       mf.value = app.current.model ?? "";
+    }
+
+    // thought_level est PAR MODÈLE : au changement de modèle l'agent
+    // ré-annonce ses options et repart sur le défaut de CE modèle — si
+    // l'utilisateur y avait choisi un effort, on le rejoue une fois, ici
+    // (forcément après le set model : la transition n'est détectée que sur
+    // la config_options rafraîchie). Jamais ré-appliqué quand la valeur
+    // annoncée diffère des options du nouveau modèle.
+    if (thoughtOpt && boundThought && app.current.model) {
+      const curModel = modelOpt?.currentValue || app.current.model;
+      if (modelTransition(app.current.id, curModel)) {
+        const want = rememberedEffort(app.current.id, curModel);
+        if (
+          want &&
+          thoughtOpt.currentValue !== want &&
+          thoughtOpt.options.some((o) => o.value === want)
+        ) {
+          call("set_config_option", {
+            session: app.current.id,
+            config_id: thoughtOpt.id,
+            value: want,
+          }).catch((er) => showErr(String(er)));
+        }
+      }
     }
 
     // Autres options de config exposées par l'agent (ex. Devin : thought_level,
@@ -899,7 +947,7 @@ export class ChatView {
     const dyn = $("dyn-opts");
     dyn.innerHTML = "";
     for (const o of copts) {
-      if (o === modeOpt || o === modelOpt || !(o.options?.length)) continue;
+      if (o === modeOpt || o === modelOpt || o === boundThought || !(o.options?.length)) continue;
       const sel = document.createElement("select");
       sel.title = o.name || o.id;
       for (const opt of o.options) {

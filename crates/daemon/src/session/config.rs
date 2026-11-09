@@ -675,18 +675,68 @@ impl Session {
             .meta_snapshot()
             .native_session_id
             .context("no native session id")?;
-        self.acp_request(
-            "session/set_config_option",
-            json!({"sessionId": sid, "configId": config_id, "value": value}),
-        )
-        .await?;
+        let resp = self
+            .acp_request(
+                "session/set_config_option",
+                json!({"sessionId": sid, "configId": config_id, "value": value}),
+            )
+            .await?;
+        // L'agent joint parfois la liste configOptions COMPLÈTE dans la
+        // réponse (Devin — aucun config_option_update séparé) : l'ingérer
+        // évite à l'UI de garder les options de l'ANCIEN modèle — les
+        // options par-modèle (thought_level, speed) changent à chaque
+        // set model.
+        let fresh: Vec<proto::ConfigOption> = resp
+            .get("configOptions")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|o| serde_json::from_value::<proto::ConfigOption>(o.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let has_fresh = !fresh.is_empty();
+        if has_fresh {
+            self.config_gen.fetch_add(1, Ordering::SeqCst);
+        }
         // Sync la méta tout de suite — l'agent renverra sans doute un
         // config_option_update, mais l'UI doit rester cohérente même
         // s'il n'en envoie pas.
         let opts = {
             let mut m = self.meta.lock().unwrap();
-            if let Some(opt) = m.config_options.iter_mut().find(|o| o.id == config_id) {
-                opt.current_value = value.into();
+            if fresh.is_empty() {
+                if let Some(opt) =
+                    m.config_options.iter_mut().find(|o| o.id == config_id)
+                {
+                    opt.current_value = value.into();
+                }
+            } else {
+                for o in &fresh {
+                    match o.id.as_str() {
+                        "mode" => m.mode = Some(o.current_value.clone()),
+                        // Source catalogue : current_value rapporté =
+                        // valeur clampée — ne pas écraser l'uid demandé
+                        // (même règle qu'au handshake).
+                        "model" if m.model_source.as_deref() == Some("catalogue") => {}
+                        "model" => m.model = Some(o.current_value.clone()),
+                        _ => {}
+                    }
+                }
+                m.config_options = fresh;
+                // Realignement catalogue (même règle qu'au handshake et
+                // dans le handler ConfigOptions) : current_value
+                // rapporté = valeur clampée — remettre l'uid catalogue
+                // demandé, sinon l'UI et la mémoire d'effort
+                // (modèle→effort) se cléent sur le mauvais id.
+                if m.model_source.as_deref() == Some("catalogue") {
+                    if let Some(want) = m.model.clone() {
+                        if let Some(o) =
+                            m.config_options.iter_mut().find(|o| o.id == "model")
+                        {
+                            o.current_value = want;
+                        }
+                    }
+                }
             }
             // L'option peut être adressée par son id ACP ou sa catégorie
             // (« model ») — les deux comptent pour meta.model/source.
@@ -715,6 +765,16 @@ impl Session {
             m.config_options.clone()
         };
         self.save_meta();
+        // Annonce fraîche : une valeur soldée comme refus définitif peut
+        // être redevenue résolvable (options par-modèle) — même logique
+        // que post-handshake.
+        if has_fresh {
+            self.revive_rejected_config();
+            // Le cache profil suit aussi les annonces portées par les
+            // réponses (même mise à jour que le handler ConfigOptions).
+            let agent = self.meta_snapshot().agent;
+            self.caps.update_options(&agent, &opts);
+        }
         self.emit(EventKind::ConfigOptions { options: opts });
         // Symétrie avec set_model : changer de modèle via
         // config_option est la même réparation — lève la
@@ -724,6 +784,91 @@ impl Session {
         }
         self.config_rejected.lock().unwrap().remove(config_id);
         Ok(())
+    }
+
+    /// Re-pousse les conditions PAR-MODÈLE (`desired_config` + reliquats
+    /// `pending_config` hors model/mode) APRÈS `apply_spawn_config` : le
+    /// set model final fait retomber les options par-modèle
+    /// (thought_level…) à leur défaut chez certains agents — vérifié par
+    /// sonde, même à valeur identique — ce qui écraserait le niveau
+    /// rejoué par le drain pending_config du handshake. Best-effort :
+    /// valeur déjà rapportée → skip ; refus définitif → soldé comme au
+    /// drain ; transitoire → re-pend en pending_config (desired_config
+    /// de toute façon rejouera au prochain spawn).
+    pub async fn replay_model_scoped_config(&self) {
+        let entries: Vec<(String, String)> = {
+            let m = self.meta.lock().unwrap();
+            // BTreeMap = ordre déterministe ; desired_config PRIME sur
+            // pending_config (la valeur « collante » prime sur un
+            // reliquat de replay).
+            let mut map = std::collections::BTreeMap::new();
+            for (k, v) in m.pending_config.iter() {
+                if k != "model" && k != "mode" {
+                    map.insert(k.clone(), v.clone());
+                }
+            }
+            for (k, v) in m.desired_config.iter() {
+                map.insert(k.clone(), v.clone());
+            }
+            map.into_iter().collect()
+        };
+        if entries.is_empty() {
+            return;
+        }
+        let cfg_gen0 = self.config_gen.load(Ordering::SeqCst);
+        for (k, v) in entries {
+            // Déjà à la valeur voulue : le drain ou un set live l'a posée
+            // et le set model final n'a pas écrasé — rien à refaire.
+            let reported = {
+                self.meta
+                    .lock()
+                    .unwrap()
+                    .config_options
+                    .iter()
+                    .find(|o| o.id == k)
+                    .map(|o| o.current_value.clone())
+            };
+            if reported.as_deref() == Some(v.as_str()) || self.config_rejected_has(&k, &v) {
+                continue;
+            }
+            match self.set_config_option(&k, &v).await {
+                Ok(()) => {
+                    self.config_rejected.lock().unwrap().remove(&k);
+                }
+                Err(e) => {
+                    let fresh = self.config_gen.load(Ordering::SeqCst) != cfg_gen0;
+                    if fresh && is_resolution_error(&format!("{e:#}")) {
+                        // Même solde que le drain : valeur hors liste
+                        // annoncée — marque le refus pour ne pas
+                        // re-boucler à chaque spawn.
+                        let mut rej = self.config_rejected.lock().unwrap();
+                        if rej.get(&k).map(String::as_str) != Some(v.as_str()) {
+                            rej.insert(k.clone(), v.clone());
+                            drop(rej);
+                            self.emit(EventKind::System {
+                                text: format!(
+                                    "config {k}={v} abandonnée — refus définitif de l'agent \
+                                     (valeur hors liste annoncée) : {e:#}"
+                                ),
+                            });
+                        }
+                    } else {
+                        self.emit(EventKind::Error {
+                            message: format!("config différée {k}={v}: {e:#}"),
+                        });
+                        // Re-pend : la valeur reste due — retentée au
+                        // prochain spawn (desired_config la rejouera de
+                        // toute façon, pending couvre les valeurs
+                        // ré-armées par revive_rejected_config).
+                        self.meta
+                            .lock()
+                            .unwrap()
+                            .pending_config
+                            .insert(k, v);
+                    }
+                }
+            }
+        }
     }
 
     /// Option daemon-side `ac.<key>` (préfixe déjà consommé) — override

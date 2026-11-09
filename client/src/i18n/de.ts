@@ -50,7 +50,7 @@ export const de: Record<Key, string> = {
   att_no_session: "Öffnen Sie eine Sitzung, um Dateien anzuhängen",
   att_unsupported: "Daemon zu alt für Anhänge (Datei-RPC)",
   model_free_ph: "Modell…", model_free_title: "Modellname (Eingabe zum Übernehmen)",
-  effort_title: "Effort-Stufe", delete: "Löschen", delete_confirm: "löschen?",
+  effort_title: "Effort-Stufe", thought_label: "Denken", delete: "Löschen", delete_confirm: "löschen?",
   title_dblclick: "Doppelklick zum Umbenennen",
   // dialogs
   new_session_h: "Neuer Agent", agent: "Agent", workdir: "Arbeitsverzeichnis",

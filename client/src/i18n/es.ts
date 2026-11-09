@@ -50,7 +50,7 @@ export const es: Record<Key, string> = {
   att_no_session: "Abra una sesión para adjuntar archivos",
   att_unsupported: "Daemon demasiado antiguo para los adjuntos (RPC de archivos)",
   model_free_ph: "modelo…", model_free_title: "Nombre del modelo (Intro para aplicar)",
-  effort_title: "Nivel de esfuerzo", delete: "Eliminar", delete_confirm: "¿elim?",
+  effort_title: "Nivel de esfuerzo", thought_label: "Pensamiento", delete: "Eliminar", delete_confirm: "¿elim?",
   title_dblclick: "Doble clic para renombrar",
   // dialogs
   new_session_h: "Nuevo agente", agent: "Agente", workdir: "Directorio de trabajo",
