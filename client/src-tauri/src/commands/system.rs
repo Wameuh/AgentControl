@@ -164,6 +164,33 @@ pub(crate) fn set_app_icon(window: tauri::WebviewWindow, state: &str) -> Result<
     Ok(())
 }
 
+/// Verdict « update in-place possible » de l'APK Android installé
+/// (plugin ac-device → PackageManager : FLAG_DEBUGGABLE + empreinte du
+/// certificat signataire comparée à celle de la release, injectée au
+/// build par AGENTCONTROL_ANDROID_CERT_SHA256). `"impossible"` = build
+/// debug-signé ou clé étrangère → le frontend affiche le garde-fou
+/// « réinstall = perte des accès » avant de télécharger l'APK.
+/// Hors Android : update in-place géré par l'updater desktop, la
+/// question ne se pose pas → "unknown".
+#[cfg(target_os = "android")]
+#[tauri::command]
+pub(crate) fn app_signing(app: tauri::AppHandle) -> Result<Value, String> {
+    // Manager requis pour app.state() — import local : le crate n'est
+    // de toute façon pas compilé sur les autres cibles.
+    use tauri::Manager;
+    let dev = app.state::<tauri_plugin_ac_device::Device<tauri::Wry>>();
+    let info = dev
+        .signing_info(option_env!("AGENTCONTROL_ANDROID_CERT_SHA256"))
+        .map_err(|e| e.to_string())?;
+    serde_json::to_value(info).map_err(|e| e.to_string())
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+pub(crate) fn app_signing() -> Result<Value, String> {
+    Ok(json!({ "platform": "desktop", "update_in_place": "unknown" }))
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
