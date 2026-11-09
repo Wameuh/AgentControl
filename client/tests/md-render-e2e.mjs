@@ -55,6 +55,17 @@ const MOCK = `(function () {
         }
         return { content: f, truncated: false, path: "/home/agent/api/" + args.path };
       }
+      case "write_file": {
+        const f = FILES[args.path];
+        if (f == null) throw new Error("no such file " + args.path);
+        if (args.if_mtime_ms != null && args.if_mtime_ms !== 1) {
+          throw new Error("conflit: fichier modifié sur disque");
+        }
+        const bytes = Uint8Array.from(atob(args.data ?? ""), (c) => c.charCodeAt(0));
+        const text = new TextDecoder().decode(bytes);
+        FILES[args.path] = f.slice(0, args.offset) + text + f.slice(args.offset + (args.delete_len ?? 0));
+        return { path: "/home/agent/api/" + args.path, size: FILES[args.path].length, mtime_ms: 2 };
+      }
       case "daemon_status": return { version: "9.9.9", sessions: 1 };
       case "pr_list": return [];
       default: return null;
@@ -105,6 +116,8 @@ const vis = (sel) => p.evaluate((s) => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const click = (sel) => p.evaluate((s) => document.querySelector(s)?.click(), sel);
 
+// Panneau assez large → split côte-à-côte (fv-row) en édition md.
+await p.evaluateOnNewDocument(() => localStorage.setItem("ac-filepanel-w", "1100"));
 await p.goto("http://localhost:4185/", { waitUntil: "networkidle0" });
 await p.waitForSelector("#btn-connect", { timeout: 15000 });
 await click("#btn-connect"); await sleep(300);
@@ -167,18 +180,79 @@ check("flink ../client.ts → client.ts (résolution baseDir)", (await p.evaluat
 check("fv-md masqué sur .ts", !(await vis("#fv-md")));
 check("file-view source affiché sur .ts", await vis("#file-view"));
 
-// Retour sur deep.md → mode édition masque le toggle, la sortie restaure le rendu
+// Retour sur deep.md → édition : split source/aperçu live (desktop)
 await p.evaluate(() => [...document.querySelectorAll(".fnode.is-dir")].find((n) => n.textContent.includes("docs"))?.click());
 await sleep(500);
 await p.evaluate(() => [...document.querySelectorAll(".fnode")].find((n) => n.textContent.includes("deep.md"))?.click());
 await sleep(700);
 check("deep.md ouvert en mode rendu", await vis("#file-md"));
+check("fv-edit visible avec label", await vis("#fv-edit") && (await p.evaluate(() => document.querySelector("#fv-edit .fv-lbl")?.textContent.length ?? 0)) > 0);
 await click("#fv-edit"); await sleep(300);
+// Panneau trop étroit avec l'arbre → masquer la colonne pour atteindre
+// la largeur du split côte-à-côte (fv-row).
+await click("#btn-tree"); await sleep(200);
 check("édition : edwrap visible", await vis("#file-edwrap"));
-check("édition : fv-md masqué", !(await vis("#fv-md")));
-check("édition : rendu masqué", !(await vis("#file-md")));
-await click("#fv-edit"); await sleep(300); // sort d'édition (buffer non modifié → pas de dialog)
+check("édition : fv-md visible (aperçu togglable)", await vis("#fv-md"));
+check("édition : aperçu live visible", await vis("#file-md"));
+check("édition : file-view source masqué", !(await vis("#file-view")));
+check("split : classes fv-split+fv-row sur #file-main", await p.evaluate(() => {
+  const m = document.querySelector("#file-main");
+  return m.classList.contains("fv-split") && m.classList.contains("fv-row");
+}));
+
+// Frappe → l'aperçu live se met à jour (debounce 150 ms)
+await p.click("#file-edit");
+await p.keyboard.down("Control"); await p.keyboard.press("End"); await p.keyboard.up("Control");
+await p.keyboard.type(" HELLO-SPLIT");
+await sleep(500);
+const editVal = await p.evaluate(() => document.querySelector("#file-edit").value);
+check("frappe : buffer contient HELLO-SPLIT", editVal.includes("HELLO-SPLIT"));
+check("aperçu live : rendu contient HELLO-SPLIT", await p.evaluate(() => document.querySelector("#file-md").textContent.includes("HELLO-SPLIT")));
+check("dirty : statut « modified »", await p.evaluate(() => document.querySelector("#fv-status").textContent.includes("modified")));
+
+// Échap avec buffer sale → garde dirty (dialog), « rester » = continue
+await p.keyboard.press("Escape"); await sleep(300);
+check("dirty : dialog de garde affiché", await p.evaluate(() => document.querySelector("#dlg-filedirty").open));
+await click("#fd-stay"); await sleep(200);
+check("dirty : toujours en édition après « rester »", await vis("#file-edwrap"));
+// Le dialogue a volé le focus — le refocus avant la frappe suivante.
+await p.click("#file-edit"); await sleep(100);
+
+// Ctrl+Z → undo custom (rafale = un pas)
+await p.keyboard.down("Control"); await p.keyboard.press("z"); await p.keyboard.up("Control"); await sleep(200);
+check("Ctrl+Z : HELLO-SPLIT annulé", !(await p.evaluate(() => document.querySelector("#file-edit").value.includes("HELLO-SPLIT"))));
+await sleep(400);
+check("Ctrl+Z : aperçu revenu à l'état initial", !(await p.evaluate(() => document.querySelector("#file-md").textContent.includes("HELLO-SPLIT"))));
+// Ctrl+Shift+Z → redo
+await p.keyboard.down("Control"); await p.keyboard.down("Shift"); await p.keyboard.press("z"); await p.keyboard.up("Shift"); await p.keyboard.up("Control"); await sleep(200);
+check("Ctrl+Shift+Z : HELLO-SPLIT restauré", await p.evaluate(() => document.querySelector("#file-edit").value.includes("HELLO-SPLIT")));
+// Ctrl+Z à nouveau pour repartir propre
+await p.keyboard.down("Control"); await p.keyboard.press("z"); await p.keyboard.up("Control"); await sleep(200);
+check("undo retour état propre → dirty levé", await p.evaluate(() => !document.querySelector("#fv-status").textContent.includes("modified")),
+  await p.evaluate(() => JSON.stringify({ st: document.querySelector("#fv-status").textContent, v: document.querySelector("#file-edit").value.slice(0, 60) })));
+
+// Ctrl+S → save_edit (mock write_file)
+await p.keyboard.type(" SAVE-ME"); await sleep(100);
+await p.keyboard.down("Control"); await p.keyboard.press("s"); await p.keyboard.up("Control"); await sleep(400);
+check("Ctrl+S : statut « saved »", await p.evaluate(() => document.querySelector("#fv-status").textContent.includes("saved")), await p.evaluate(() => document.querySelector("#fv-status").textContent));
+check("Ctrl+S : dirty levé", !(await p.evaluate(() => document.querySelector("#fv-status").textContent.includes("modified"))));
+
+// Sortie d'édition (buffer sauvegardé → pas de dialog) → rendu restauré
+await click("#fv-edit"); await sleep(400);
+check("sortie édition : edwrap masqué", !(await vis("#file-edwrap")));
+check("sortie édition : split retiré", await p.evaluate(() => !document.querySelector("#file-main").classList.contains("fv-split")));
+check("sortie édition : aperçu contient le texte sauvé", await p.evaluate(() => document.querySelector("#file-md").textContent.includes("SAVE-ME")));
 check("sortie édition : rendu restauré", await vis("#file-md"));
+
+// Fichier non-md (.ts) : édition sans split ni aperçu
+await p.evaluate(() => [...document.querySelectorAll(".fnode")].find((n) => n.textContent.includes("client.ts"))?.click());
+await sleep(700);
+check("client.ts : fv-edit visible", await vis("#fv-edit"));
+await click("#fv-edit"); await sleep(300);
+check(".ts édition : edwrap visible", await vis("#file-edwrap"));
+check(".ts édition : pas de split", await p.evaluate(() => !document.querySelector("#file-main").classList.contains("fv-split")));
+check(".ts édition : fv-md masqué", !(await vis("#fv-md")));
+await click("#fv-edit"); await sleep(300);
 
 // read_file en échec sur un .md : l'erreur doit être visible en vue
 // source (pas de « … » éternel ni de rendu partiel silencieux).

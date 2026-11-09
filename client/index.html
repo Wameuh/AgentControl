@@ -671,7 +671,7 @@
                 <button id="fv-loadall" hidden data-i18n="fv_loadall">load all</button>
                 <select id="fv-enc" title="Encoding"></select>
                 <button id="fv-md" hidden data-icon="code" data-i18n-title="md_view" title="Rendered"></button>
-                <button id="fv-edit" hidden data-icon="edit" data-i18n-title="fv_edit_title" title="Edit"></button>
+                <button id="fv-edit" hidden data-i18n-title="fv_edit_title" title="Edit"><span class="fv-lbl" data-i18n="ctx_edit">Edit</span></button>
                 <button id="fv-save" hidden data-icon="check" data-i18n-title="fv_save_title" title="Save"></button>
               </div>
               <div id="fv-conflict" hidden>
@@ -679,13 +679,15 @@
                 <button id="fv-reload" data-i18n="conflict_reload">Reload</button>
                 <button id="fv-overwrite" data-i18n="conflict_overwrite">Overwrite</button>
               </div>
-              <pre id="file-view" class="syn"></pre>
-              <div id="file-md" class="md" hidden></div>
-              <div id="file-edwrap" hidden>
-                <pre id="file-nums" aria-hidden="true"></pre>
-                <div id="file-edscroll">
-                  <pre id="file-hl" class="syn" aria-hidden="true"></pre>
-                  <textarea id="file-edit" wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
+              <div id="file-main">
+                <pre id="file-view" class="syn"></pre>
+                <div id="file-md" class="md" hidden></div>
+                <div id="file-edwrap" hidden>
+                  <pre id="file-nums" aria-hidden="true"></pre>
+                  <div id="file-edscroll">
+                    <pre id="file-hl" class="syn" aria-hidden="true"></pre>
+                    <textarea id="file-edit" wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
+                  </div>
                 </div>
               </div>
             </div>

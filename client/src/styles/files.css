@@ -64,10 +64,25 @@
   color: var(--ink); font-size: 11px; padding: 2px 8px; cursor: pointer;
 }
 #fv-conflict button:hover { border-color: var(--accent); }
+#file-main {
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
+}
+/* Édition md avec aperçu : les deux vues visibles → split. fv-row =
+   côte-à-côte (panneau large), sinon empilé. Un seul enfant visible
+   hors split → pas de classe, colonne normale. */
+#file-main.fv-split.fv-row { flex-direction: row; }
+/* En split l'éditeur garde ~60 % de la place, l'aperçu ~40 %. */
+#file-main.fv-split #file-md { flex: 2; }
+#file-main.fv-split #file-edwrap { flex: 3; }
+#file-main.fv-split.fv-row > *:not([hidden]) + *:not([hidden]) { border-left: 1px solid var(--line); }
+#file-main.fv-split:not(.fv-row) > *:not([hidden]) + *:not([hidden]) { border-top: 1px solid var(--line); }
+/* Label texte des boutons de la barre (fv-edit « Éditer ») */
+#fv-bar .fv-lbl { font-size: 11px; white-space: nowrap; }
+body.android #fv-bar .fv-lbl { font-size: 13px; }
 /* Éditeur : gouttière + overlay coloré sous la textarea transparente.
    Le pre (#file-hl) et la textarea doivent rester pixel-identiques :
    même font, line-height, padding, tab-size, white-space. */
-#file-edwrap { flex: 1; min-height: 0; display: flex; }
+#file-edwrap { flex: 1; min-height: 0; min-width: 0; display: flex; }
 #file-nums {
   flex: none; overflow: hidden; margin: 0; padding: 12px 6px 22px 12px;
   font: 12px/1.5 Mono, ui-monospace, monospace; text-align: right;
