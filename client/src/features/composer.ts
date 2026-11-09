@@ -172,11 +172,17 @@ export class Composer {
       this.lastKnown = cur;
       return;
     }
+    // Insertions ET coupes/départs obtiennent leur propre pas : un cut
+    // absorbé dans la rafalle rendrait le texte coupé inatteignable
+    // (seul l'état d'avant la rafale est empilé, pas l'état pré-coupe).
     const ownStep =
       it === "insertFromPaste" ||
       it === "insertFromDrop" ||
       it === "insertFromYank" ||
-      it === "insertReplacementText";
+      it === "insertReplacementText" ||
+      it === "deleteByCut" ||
+      it === "deleteByDrag" ||
+      it === "deleteByDrop";
     if (ownStep || Date.now() - this.lastEditAt > UNDO_DEBOUNCE_MS) {
       // lastKnown = état d'avant CET edit (mis à jour en fin de handler).
       this.pushState(this.lastKnown);
