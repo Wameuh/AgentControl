@@ -281,6 +281,7 @@ newSess.openSession = (id, conn) => {
 };
 newSess.knownConns = () => conns.knownConns();
 groups.refresh = () => void sidebar.refresh();
+groups.deleteSession = (s) => sidebar.deleteSessionNow(s);
 files.bind({ sysline: (txt, ic) => chat.sysline(txt, ic) });
 quick.bind({
   openFile: (p) => files.openFilePanel(p),

@@ -928,7 +928,52 @@ export class Sidebar {
         .then(() => this.refresh())
         .catch((e) => showErr(String(e)));
     });
+    // « Dissoudre et supprimer » : détruit les sessions du sous-arbre —
+    // la confirmation (nombre, états, orch, ac-wait) vit dans
+    // dlg-grpdel, pas de double-clic armé ici.
+    menuBtn(this.ctx, t("grpdel_menu"), "danger", () => {
+      hideSessCtx();
+      this.groups.openDelDlg(conn, grp);
+    });
     placeMenu(this.ctx, "sctx", x, y);
+  }
+
+  /** delete_session d'une session hors du flux « × » de ligne (ex.
+   *  dissolve+delete d'un groupe) : mêmes tombstones que la
+   *  suppression unitaire — pendingDel (events session_deleted sans
+   *  toast, liste filtrée même si le snapshot date d'avant), markGone
+   *  si la session est affichée, spawnWatch oublié. Rejette après
+   *  restauration en cas d'échec RPC — l'appelant décide du sort
+   *  (toast du flux ligne, comptage du flux groupe). */
+  async deleteSessionNow(s: SessionMeta): Promise<void> {
+    this.pendingDel.add(s.id);
+    if (app.current?.id === s.id) {
+      // Session affichée : markGone fait le ménage complet (conv
+      // cachée, current, gem, boutons, badge "gone", updateHeader).
+      // L'event session_deleted trouvera app.current déjà null → il
+      // ne repassera pas par là.
+      this.chat.markGone();
+    } else {
+      this.chat.dropConv(s.id);
+    }
+    // Suppression volontaire : même garde que kill — pas un échec de
+    // spawn à notifier (checkSpawns l'oublierait de toute façon à la
+    // sortie de liste, mais autant ne pas toaster entre-temps).
+    app.spawnWatch.delete(s.id);
+    try {
+      await call("delete_session", { session: s.id, conn: s.conn });
+    } catch (er) {
+      this.pendingDel.delete(s.id);
+      // Échec → la session existe encore : la réinjecter dans le
+      // cache liste pour qu'elle réapparaisse au refresh (même
+      // offline si la connexion est tombée entre-temps) — sauf si
+      // sa connexion a été supprimée entre-temps.
+      if (this.conns.hasCfg(s.conn ?? "local") &&
+          !app.lastSessions.some((x) => x.id === s.id)) {
+        app.lastSessions.push(s);
+      }
+      throw er;
+    }
   }
 
   /** Renommage inline du titre dans la ligne session (même pattern que le
@@ -1042,35 +1087,10 @@ export class Sidebar {
       // Optimiste : la ligne disparaît sans attendre le démon (kill de
       // l'agent + purge des fichiers peuvent durer). L'event
       // session_deleted confirmera ; en cas d'erreur la ligne revient.
-      this.pendingDel.add(s.id);
-      if (app.current?.id === s.id) {
-        // Session affichée : markGone fait le ménage complet (conv
-        // cachée, current, gem, boutons, badge "gone", updateHeader).
-        // L'event session_deleted trouvera app.current déjà null → il
-        // ne repassera pas par là.
-        this.chat.markGone();
-      } else {
-        this.chat.dropConv(s.id);
-      }
       div.remove();
-      // Suppression volontaire : même garde que kill — pas un échec de
-      // spawn à notifier (checkSpawns l'oublierait de toute façon à la
-      // sortie de liste, mais autant ne pas toaster entre-temps).
-      app.spawnWatch.delete(s.id);
       void this.refresh();
-      void call("delete_session", { session: s.id, conn: s.conn })
-        .catch((er) => {
-          showErr(String(er));
-          this.pendingDel.delete(s.id);
-          // Échec → la session existe encore : la réinjecter dans le
-          // cache liste pour qu'elle réapparaisse au refresh (même
-          // offline si la connexion est tombée entre-temps) — sauf si
-          // sa connexion a été supprimée entre-temps.
-          if (this.conns.hasCfg(s.conn ?? "local") &&
-              !app.lastSessions.some((x) => x.id === s.id)) {
-            app.lastSessions.push(s);
-          }
-        })
+      void this.deleteSessionNow(s)
+        .catch((er) => showErr(String(er)))
         .finally(() => void this.refresh());
     });
     return div;
