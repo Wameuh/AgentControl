@@ -1421,6 +1421,10 @@ impl Daemon {
                 // suppression avant que le flux ne se ferme.
                 s.emit_ephemeral(proto::EventKind::SessionDeleted {});
                 self.sessions.write().await.remove(&session);
+                // Waiters ac-wait de la session : annulés ici — sinon
+                // le worker survivant pinguerait une session morte à
+                // sa prochaine échéance (send en échec, loggé).
+                super::orch::acwait_cancel_session(&session);
                 let _ = std::fs::remove_dir_all(&s.dir);
                 info!("session supprimée: {session}");
                 Ok(json!({"deleted": session}))

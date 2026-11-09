@@ -955,6 +955,67 @@ fn acwait_live_waiters_in(dir: &std::path::Path) -> HashMap<String, AcwaitWait> 
     out
 }
 
+/// Annule les waiters ac-wait d'une session supprimée : sans ça le
+/// worker survivant finirait par `acctl send` vers une session morte
+/// (échec loggé) au lieu de s'arrêter. Même geste que `ac-wait
+/// --cancel` moins la notification — le destinataire est déjà
+/// supprimé : `.cancel` posé, groupe de process tué, `.done` écrit.
+pub(crate) fn acwait_cancel_session(sid: &str) {
+    let Some(dir) = acwait_state_dir() else {
+        return;
+    };
+    acwait_cancel_session_in(&dir, sid);
+}
+
+/// Corps testable : pour chaque `<id>.meta` dont `session=` vaut `sid`
+/// et sans `.done`, pose `.cancel`, TERM le pid (groupe d'abord —
+/// `setsid` fait du pid le pgid, comme `ac-wait --cancel`), puis écrit
+/// `.done`. Un worker pas encore booté voit `.cancel` à sa première
+/// itération et sort proprement.
+fn acwait_cancel_session_in(dir: &std::path::Path, sid: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let meta_path = e.path();
+        if meta_path.extension().and_then(|x| x.to_str()) != Some("meta") {
+            continue;
+        }
+        let base = meta_path.with_extension("");
+        if base.with_extension("done").exists() {
+            continue;
+        }
+        let Ok(meta) = std::fs::read_to_string(&meta_path) else {
+            continue;
+        };
+        let is_target = meta.lines().any(|l| {
+            l.split_once('=').is_some_and(|(k, v)| {
+                k == "session"
+                    && v.trim().trim_matches('\'').trim_matches('"') == sid
+            })
+        });
+        if !is_target {
+            continue;
+        }
+        let _ = std::fs::write(base.with_extension("cancel"), "");
+        if let Ok(content) = std::fs::read_to_string(base.with_extension("pid")) {
+            if let Ok(pid) = content.trim().parse::<i32>() {
+                if pid > 0 {
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::kill(-pid, libc::SIGTERM);
+                        libc::kill(pid, libc::SIGTERM);
+                    }
+                }
+            }
+        }
+        let _ = std::fs::write(
+            base.with_extension("done"),
+            format!("cancelled {}\n", now_secs() as u64),
+        );
+    }
+}
+
 /// Sessions du composant en retenue `rate_limit` sur un profil routé
 /// (tout `*_agent` effectif ; et le même modèle si `model` est configuré)
 /// — le quota est partagé : tant qu'une session patiente sur son
