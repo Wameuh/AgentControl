@@ -23,7 +23,7 @@ import java.security.MessageDigest
 // signataire de la release. Vide (build hors CI / dev local) → le
 // verdict se limite à FLAG_DEBUGGABLE.
 @TauriPlugin
-class DevicePlugin(activity: Activity): Plugin(activity) {
+class DevicePlugin(private val activity: Activity): Plugin(activity) {
 
   // SHA-256 du certificat signataire de CETTE app, hex continu
   // minuscules — même format que l'EXPECTED calculé par build.yml
