@@ -102,6 +102,15 @@ impl Session {
                     cfg.quiet,
                 )
                 .await;
+                // Le set model final fait retomber les options
+                // PAR-MODÈLE (thought_level…) à leur défaut chez certains
+                // agents — vérifié par sonde, même à valeur identique —
+                // ce qui écraserait le niveau rejoué par le drain
+                // pending_config plus haut. Les repousser après la
+                // valeur modèle finale.
+                if cfg.model.as_deref().is_some_and(|m| !m.is_empty()) {
+                    self.replay_model_scoped_config().await;
+                }
             }
         }
         self.spawning.store(false, Ordering::SeqCst);
@@ -240,7 +249,7 @@ impl Session {
     /// définitif — le reconcile saute alors le re-pending (le replay
     /// la re-échouerait à chaque spawn) et garde la valeur rapportée
     /// par l'agent dans meta.
-    fn config_rejected_has(&self, k: &str, v: &str) -> bool {
+    pub(super) fn config_rejected_has(&self, k: &str, v: &str) -> bool {
         self.config_rejected
             .lock()
             .unwrap()
