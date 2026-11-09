@@ -210,7 +210,13 @@ impl Daemon {
     }
     pub(super) async fn h_get_blob(self: &Arc<Self>, session: String, blob: String, offset: u64, limit: u64) -> Result<Value> {
                 let s = self.get_session(&session).await?;
-                let (data, total) = journal::read_blob(&s.dir, &blob, offset, limit)?;
+                // Lecture disque (jusqu'à 4 Mio) hors de l'executor.
+                let dir = s.dir.clone();
+                let (data, total) = tokio::task::spawn_blocking(move || {
+                    journal::read_blob(&dir, &blob, offset, limit)
+                })
+                .await
+                .context("lecture blob")??;
                 Ok(json!({
                     "data": String::from_utf8_lossy(&data),
                     "total": total,

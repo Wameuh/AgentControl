@@ -569,6 +569,9 @@ impl CompactPartial {
 /// Entrées de résolution du seuil par session : global `[compact]` +
 /// overrides `[agents.<id>.compact]` indexés par id d'agent. Le sidecar
 /// `compact.json` est lu par la session à l'open.
+/// Clone : chaque chargement de session parallèle (Daemon::open) en
+/// prend une copie pour le spawn_blocking.
+#[derive(Clone)]
 pub struct CompactSrc {
     pub global: CompactCfg,
     pub by_agent: HashMap<String, CompactPartial>,
