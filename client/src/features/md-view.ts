@@ -32,6 +32,10 @@ export class MdView {
   private md = false;
   /** Le textarea d'édition couvre les deux vues. */
   private editing = false;
+  /** Édition + aperçu côte à côte possible (desktop) : le rendu reste
+   *  visible comme preview live pendant la frappe. Faux (mobile) →
+   *  l'édition masque le rendu, comme avant. */
+  private split = false;
   /** Rendu à refaire avant affichage (source modifiée depuis). */
   private stale = true;
   /** Dossier du fichier courant — base des .flink relatives. */
@@ -56,6 +60,7 @@ export class MdView {
   detach() {
     this.md = false;
     this.editing = false;
+    this.split = false;
     this.sync();
   }
 
@@ -67,16 +72,24 @@ export class MdView {
     if (this.rendered) this.schedule();
   }
 
-  /** Entrée/sortie du mode édition : l'édition porte toujours sur la
-   *  source — bouton et rendu masqués, restaurés à la sortie. */
+  /** Entrée/sortie du mode édition : sans split (mobile), l'édition
+   *  masque le rendu — avec split il reste affiché en aperçu live. */
   setEditing(on: boolean) {
     this.editing = on;
     this.sync();
   }
 
-  /** Le div rendu est la vue active (son scroll alimente maybeMore). */
+  /** Split source/preview autorisé pendant l'édition (décidé par
+   *  files.ts selon la plateforme — mobile = bascule simple). */
+  setSplit(on: boolean) {
+    this.split = on;
+    this.sync();
+  }
+
+  /** Le div rendu est la vue active — ou l'aperçu live en édition
+   *  splittée (son scroll alimente maybeMore dans les deux cas). */
   get rendered() {
-    return this.on && this.md && !this.editing;
+    return this.on && this.md && (!this.editing || this.split);
   }
 
   /** Préférence « rendu par défaut » basculée depuis le panneau
@@ -108,7 +121,9 @@ export class MdView {
   private sync() {
     const show = this.rendered;
     const btn = $("fv-md");
-    btn.hidden = !this.md || this.editing;
+    // En édition splittée le bouton reste utile : il masque/remet
+    // l'aperçu (bascule `on`) sans quitter l'éditeur.
+    btn.hidden = !this.md || (this.editing && !this.split);
     btn.classList.toggle("on", this.on);
     btn.innerHTML = icon(this.on ? "code" : "eye");
     btn.dataset.i18nTitle = this.on ? "md_source" : "md_view";
