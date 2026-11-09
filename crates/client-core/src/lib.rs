@@ -896,6 +896,11 @@ impl Client {
                 {
                     let mut m = c.pending.lock().await;
                     for (_, tx) in m.drain() {
+                        // Drain post-mortem = abandon : le guard ne le
+                        // comptera pas (entrée déjà retirée) — on le
+                        // compte ici pour que `aband=` reflète les RPC
+                        // en vol tués par la mort du transport.
+                        c.abandoned_calls.fetch_add(1, Ordering::Relaxed);
                         let _ = tx.send(Err("connexion fermée".into()));
                     }
                 }
@@ -970,6 +975,7 @@ impl Client {
             match self.pending.try_lock() {
                 Ok(mut m) => {
                     for (_, tx) in m.drain() {
+                        self.abandoned_calls.fetch_add(1, Ordering::Relaxed);
                         let _ = tx.send(Err("connexion fermée".into()));
                     }
                     return;
