@@ -296,7 +296,8 @@ export class Sidebar {
     this.prsView.setData(this.prRows, list, this.prFailed);
     this.renderPrBadge();
     const live = list.filter((s) =>
-      !s.offline && s.state !== "dead" && s.state !== "interrupted" && s.state !== "asleep");
+      !s.offline && s.state !== "dead" && s.state !== "interrupted" &&
+      s.state !== "asleep" && s.state !== "wait-asleep");
     setAppIcon(
       live.some((s) => s.state === "waiting_input")
         ? "red"
@@ -871,7 +872,8 @@ export class Sidebar {
         .catch((e) => showErr(String(e)));
     });
     sleepBtn.disabled = !!s.offline ||
-      s.state === "asleep" || s.state === "dead" || s.state === "interrupted";
+      s.state === "asleep" || s.state === "wait-asleep" ||
+      s.state === "dead" || s.state === "interrupted";
     // Exit = tue le process agent (kill_session) — la session reste, reprenable.
     // Action destructive → double-clic armé comme delete_path / sess-del.
     menuBtn(this.ctx, t("ctx_exit"), "danger", (b) => {
@@ -1056,9 +1058,11 @@ export class Sidebar {
         ? `error: ${s.last_error.kind} · ${s.last_error.message} · x${s.last_error.count} · ${s.last_error.at}`
         : s.state === "asleep"
           ? `asleep · ${t("dot_asleep_tip")}`
-          : s.state === "wait"
-            ? `wait${waitTip(s)} · ${t("dot_wait_tip")}`
-            : s.state;
+          : s.state === "wait-asleep"
+            ? `asleep · wait${waitTip(s)} · ${t("dot_wait_tip")}`
+            : s.state === "wait"
+              ? `wait${waitTip(s)} · ${t("dot_wait_tip")}`
+              : s.state;
     div.innerHTML = `<span class="dot st-${dotCls(s.state, s.last_error)}" title="${q(esc(dotTip))}">${dotIcon(s.state, s.last_error)}</span><span class="t">${this.hl(s.title)}</span>${originHtml}${prHtml}<span class="a">${this.hl(s.agent)}</span><button class="sess-del" title="Supprimer">${icon("close")}</button>`;
     div.onclick = () => {
       void this.openSession(s.id);

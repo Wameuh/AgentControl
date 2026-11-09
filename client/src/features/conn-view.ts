@@ -155,7 +155,7 @@ export class ConnView {
       .catch(() => null);
     const n = sessions?.filter((s) =>
       s.conn === conn && s.state !== "dead" && s.state !== "interrupted" &&
-      s.state !== "asleep").length;
+      s.state !== "asleep" && s.state !== "wait-asleep").length;
     return this.daemonAction(
       t("dupdate_h"),
       n == null

@@ -31,7 +31,7 @@ interface LastError {
  *  (attente UTILISATEUR, action requise — sémantique différente). */
 function dotKey(state: string, lastError?: LastError | null): string {
   if (state === "error" && lastError?.kind === "rate_limit") return "wait";
-  if (state === "asleep") return "wait";
+  if (state === "asleep" || state === "wait-asleep") return "wait";
   return state;
 }
 

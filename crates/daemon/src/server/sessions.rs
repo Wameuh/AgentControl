@@ -15,28 +15,17 @@ impl Daemon {
                 let mut list: Vec<SessionMeta> =
                     sessions.values().map(|s| s.meta_snapshot()).collect();
                 list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-                // « wait » dérivé à l'affichage : idle + waiter ac-wait
-                // vivant — la session se parque en attendant le ping du
-                // waiter, pas une action utilisateur. meta.state interne
-                // reste "idle" (orchestrateur, retries, file de prompts
-                // raisonnent sur l'état réel). Le détail du waiter
-                // (âge/nom/timeout, #189) voyage dans `meta.wait`.
+                // « wait » dérivé à l'affichage : idle/asleep + waiter
+                // ac-wait vivant — la session se parque en attendant le
+                // ping du waiter, pas une action utilisateur.
+                // meta.state interne reste réel (orchestrateur, retries,
+                // file de prompts raisonnent sur l'état vrai — un asleep
+                // + waiter compte déjà dans `alive`, #181). Le détail du
+                // waiter (âge/nom/timeout, #189) voyage dans `meta.wait`.
                 let waiting = super::orch::acwait_live_waiters();
                 let now = super::orch::now_secs();
                 for m in &mut list {
-                    if m.state == "idle" {
-                        if let Some(w) = waiting.get(m.id.as_str()) {
-                            m.state = "wait".into();
-                            m.wait = Some(proto::WaitInfo {
-                                secs: w
-                                    .started
-                                    .map(|st| (now - st).max(0.0))
-                                    .unwrap_or(0.0),
-                                name: w.name.clone(),
-                                timeout: w.timeout,
-                            });
-                        }
-                    }
+                    derive_wait_state(m, &waiting, now);
                 }
                 Ok(serde_json::to_value(list)?)
     }
@@ -1300,22 +1289,11 @@ impl Daemon {
     pub(super) async fn h_session_info(self: &Arc<Self>, session: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
                 let mut meta = s.meta_snapshot();
-                // Même dérivation « wait » que list_sessions (idle +
-                // waiter ac-wait vivant) — affichage seul, avec le
+                // Même dérivation « wait » que list_sessions (idle/asleep
+                // + waiter ac-wait vivant) — affichage seul, avec le
                 // détail du waiter dans `meta.wait` (#189).
-                if meta.state == "idle" {
-                    if let Some(w) = super::orch::acwait_live_waiters().get(&meta.id) {
-                        meta.state = "wait".into();
-                        meta.wait = Some(proto::WaitInfo {
-                            secs: w
-                                .started
-                                .map(|st| (super::orch::now_secs() - st).max(0.0))
-                                .unwrap_or(0.0),
-                            name: w.name.clone(),
-                            timeout: w.timeout,
-                        });
-                    }
-                }
+                let waiting = super::orch::acwait_live_waiters();
+                derive_wait_state(&mut meta, &waiting, super::orch::now_secs());
                 Ok(json!({
                     "meta": meta,
                     "pending": s.pending_requests(),
@@ -1481,6 +1459,34 @@ pub(super) enum FreshDeliver {
     Service { wrapped: String },
 }
 
+/// Dérivation « wait » à l'affichage : `idle` → `wait`, `asleep` →
+/// `wait-asleep` quand un waiter ac-wait vivant existe (le ping le
+/// réveillera). L'état dérivé `wait-asleep` conserve la distinction
+/// idle/asleep : le client garde ses gardes « endormie » (pas
+/// d'auto-resume à la consultation, bouton sleep, vue Repos) tout en
+/// voyant l'attente instrumentée et son détail `meta.wait` (#222).
+/// `meta.state` interne n'est jamais touché — la dérivation vit
+/// uniquement dans les sérialisations list_sessions/session_info.
+fn derive_wait_state(
+    m: &mut SessionMeta,
+    waiting: &std::collections::HashMap<String, super::orch::AcwaitWait>,
+    now: f64,
+) {
+    let derived = match m.state.as_str() {
+        "idle" => "wait",
+        "asleep" => "wait-asleep",
+        _ => return,
+    };
+    if let Some(w) = waiting.get(m.id.as_str()) {
+        m.state = derived.into();
+        m.wait = Some(proto::WaitInfo {
+            secs: w.started.map(|st| (now - st).max(0.0)).unwrap_or(0.0),
+            name: w.name.clone(),
+            timeout: w.timeout,
+        });
+    }
+}
+
 /// Extrait ~`ctx` caractères de contexte autour de la 1re occurrence de
 /// `needle` (déjà en minuscules) dans `hay`, ou None si absente.
 /// L'index est calculé sur la version minuscule puis reporté en chars sur
@@ -1563,4 +1569,88 @@ fn run_override_cmd(cmdline: &str, cwd: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::orch::AcwaitWait;
+
+    fn meta(state: &str) -> SessionMeta {
+        SessionMeta {
+            id: "s-x".into(),
+            agent: "devin".into(),
+            title: "t".into(),
+            cwd: "/w".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            native_session_id: None,
+            mode: None,
+            model: None,
+            model_source: None,
+            model_override_sid: None,
+            supports_load: None,
+            available_modes: vec![],
+            available_commands: vec![],
+            available_models: vec![],
+            config_options: vec![],
+            pending_config: Default::default(),
+            desired_config: Default::default(),
+            state: state.into(),
+            group: None,
+            spawned_by: None,
+            origin: None,
+            context_used: None,
+            context_size: None,
+            last_error: None,
+            wait: None,
+        }
+    }
+
+    fn waiter() -> AcwaitWait {
+        AcwaitWait {
+            started: Some(100.0),
+            name: "checks".into(),
+            timeout: Some(600.0),
+        }
+    }
+
+    #[test]
+    fn wait_derivation_idle() {
+        let waiting = std::collections::HashMap::from([("s-x".to_string(), waiter())]);
+        let mut m = meta("idle");
+        derive_wait_state(&mut m, &waiting, 160.0);
+        assert_eq!(m.state, "wait");
+        let w = m.wait.unwrap();
+        assert_eq!(w.secs, 60.0);
+        assert_eq!(w.name, "checks");
+        assert_eq!(w.timeout, Some(600.0));
+    }
+
+    #[test]
+    fn wait_derivation_asleep() {
+        // #222 : asleep + waiter vivant → « wait-asleep » (attente
+        // visible, distinction endormie préservée côté client).
+        let waiting = std::collections::HashMap::from([("s-x".to_string(), waiter())]);
+        let mut m = meta("asleep");
+        derive_wait_state(&mut m, &waiting, 160.0);
+        assert_eq!(m.state, "wait-asleep");
+        assert!(m.wait.is_some());
+    }
+
+    #[test]
+    fn wait_derivation_passthrough() {
+        let waiting = std::collections::HashMap::new();
+        for st in ["asleep", "idle", "working", "dead"] {
+            let mut m = meta(st);
+            derive_wait_state(&mut m, &waiting, 160.0);
+            assert_eq!(m.state, st);
+            assert!(m.wait.is_none());
+        }
+        // Waiter mort (absent du scan) → asleep reste asleep.
+        let waiting = std::collections::HashMap::from([("s-y".to_string(), waiter())]);
+        let mut m = meta("asleep");
+        derive_wait_state(&mut m, &waiting, 160.0);
+        assert_eq!(m.state, "asleep");
+        assert!(m.wait.is_none());
+    }
 }
