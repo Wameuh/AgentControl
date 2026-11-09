@@ -38,6 +38,13 @@ const UNRESOLVED_AFTER = 3;
 export function prUnresolved(p: PrEntry): boolean {
   return !CLOSED.has(p.status ?? "open") && (p.sync_fails ?? 0) >= UNRESOLVED_AFTER;
 }
+/** Entrée « citées » : détectée via une simple citation d'URL (via
+ *  "weak" — `gh pr ready|view|merge`…) sans signal de création. Pas
+ *  forcément une PR d'agent → section repliée dédiée, hors compteur
+ *  et badges session. */
+export function prCited(p: PrEntry): boolean {
+  return p.via === "weak";
+}
 /** Cap de la section « terminées » — un long historique reste
  *  atteignable via le filtre partagé sans alourdir le DOM. */
 const DONE_CAP = 40;
@@ -98,10 +105,12 @@ export class PrListView {
   }
 
   /** PRs ouvertes visibles dans le compteur de l'onglet Repos — les
-   *  « non résolubles » n'y comptent pas (rien d'actionnable). */
+   *  « non résolubles » et les simples citations n'y comptent pas
+   *  (rien d'actionnable / pas une PR d'agent). */
   openCount() {
     return this.rows.filter(
-      (r) => !r.conn_error && !CLOSED.has(r.status ?? "open") && !prUnresolved(r),
+      (r) => !r.conn_error && !CLOSED.has(r.status ?? "open") &&
+        !prUnresolved(r) && !prCited(r),
     ).length;
   }
 
@@ -158,12 +167,58 @@ export class PrListView {
     return el;
   }
 
+  /** Session référencée mais introuvable alors que sa connexion
+   *  répond : supprimée côté démon — l'entrée rejoint les « non
+   *  attribuées » au lieu de rester groupée par dépôt avec un chip
+   *  session mort. Conn down ≠ supprimée : le cache offline de
+   *  list_sessions la couvre déjà (sessOf la retrouve). */
+  private sessGone(p: PrEntry): boolean {
+    return !!p.session && !this.sessOf(p) &&
+      (this.deps.connState(p.conn ?? "") ?? "ok") === "ok";
+  }
+
+  /** Badges secondaires de la ligne : review (native orchestrateur
+   *  prioritaire sur la forge) + CI de la tête. Masqués sur les PR
+   *  soldées (leurs checks/reviews sont de l'histoire). */
+  private extraBadges(p: PrEntry): string {
+    if (CLOSED.has(p.status ?? "open") || prUnresolved(p)) return "";
+    let out = "";
+    const nr = p.native_review;
+    if (nr === "running") {
+      out += `<span class="pr-st st-nrev">${esc(t("pr_nrev_running"))}</span>`;
+    } else if (nr === "retry") {
+      out += `<span class="pr-st st-nrev-retry">${esc(t("pr_nrev_retry"))}</span>`;
+    } else if (nr === "queued") {
+      out += `<span class="pr-st st-nrev-queued">${esc(t("pr_nrev_queued"))}</span>`;
+    } else {
+      const rv = p.review;
+      if (rv === "approved") {
+        out += `<span class="pr-st st-approved">${esc(t("pr_rev_approved"))}</span>`;
+      } else if (rv === "changes_requested") {
+        out += `<span class="pr-st st-changes">${esc(t("pr_rev_changes"))}</span>`;
+      } else if (rv === "requested") {
+        out += `<span class="pr-st st-requested">${esc(t("pr_rev_requested"))}</span>`;
+      } else if (rv === "required") {
+        out += `<span class="pr-st st-required">${esc(t("pr_rev_required"))}</span>`;
+      }
+    }
+    const ci = p.ci;
+    if (ci === "pending") {
+      out += `<span class="pr-st st-cip">${esc(t("pr_ci_pending"))}</span>`;
+    } else if (ci === "success") {
+      out += `<span class="pr-st st-cis">${esc(t("pr_ci_ok"))}</span>`;
+    } else if (ci === "failure") {
+      out += `<span class="pr-st st-cif">${esc(t("pr_ci_fail"))}</span>`;
+    }
+    return out;
+  }
+
   private prRow(p: PrEntry, unassigned: boolean): HTMLElement {
     const st = p.status || "open";
     const unres = prUnresolved(p);
     const stTxt = unres
       ? t("pr_st_unresolved")
-      : st === "open" ? t("pr_st_open")
+      : st === "open" ? t("pr_st_ready")
       : st === "draft" ? t("pr_st_draft")
       : st === "conflict" ? t("pr_st_conflict")
       : st === "merged" ? t("pr_st_merged")
@@ -173,14 +228,30 @@ export class PrListView {
     div.className = "pr" + (CLOSED.has(st) ? " pr-done" : "") + (unres ? " pr-unres" : "");
     const openHost = p.host ||
       ({ github: "GitHub", gitlab: "gitlab.com", gerrit: "Gerrit" } as Record<string, string>)[p.forge || "github"] || "GitHub";
-    div.title = `${repoLabel(p)} ${prBadge(p)} — ${stTxt}${p.via ? ` · ${p.via}` : ""}` +
+    const extras = this.extraBadges(p);
+    const extraTxt = [
+      p.native_review === "running" ? t("pr_nrev_running")
+      : p.native_review === "retry" ? t("pr_nrev_retry")
+      : p.native_review === "queued" ? t("pr_nrev_queued")
+      : p.review === "approved" ? t("pr_rev_approved")
+      : p.review === "changes_requested" ? t("pr_rev_changes")
+      : p.review === "requested" ? t("pr_rev_requested")
+      : p.review === "required" ? t("pr_rev_required")
+      : "",
+      p.ci === "pending" ? t("pr_ci_pending")
+      : p.ci === "success" ? t("pr_ci_ok")
+      : p.ci === "failure" ? t("pr_ci_fail")
+      : "",
+    ].filter(Boolean).join(" · ");
+    div.title = `${repoLabel(p)} ${prBadge(p)} — ${stTxt}${extraTxt ? ` · ${extraTxt}` : ""}${p.via ? ` · ${p.via}` : ""}` +
       `${unres ? `\n${t("pr_unres_hint", { n: p.sync_fails ?? 0 })}` : ""}` +
       `${p.branch ? `\n${p.branch}` : ""}${p.note ? `\n${p.note}` : ""}\n${t("pr_open_title", { host: openHost })}`;
     const top = document.createElement("div");
     top.className = "pr-top";
     top.innerHTML = `<span class="pr-num">${esc(prBadge(p))}</span>` +
       `<span class="pr-t">${this.deps.hl(p.title ?? "")}</span>` +
-      `<span class="pr-st st-${unres ? "unres" : ["open", "draft", "conflict", "merged", "closed"].includes(st) ? st : "other"}">${esc(stTxt)}</span>`;
+      `<span class="pr-st st-${unres ? "unres" : ["open", "draft", "conflict", "merged", "closed"].includes(st) ? st : "other"}">${esc(stTxt)}</span>` +
+      extras;
     div.appendChild(top);
     const sub = document.createElement("div");
     sub.className = "pr-sub";
@@ -235,6 +306,7 @@ export class PrListView {
     const open: PrEntry[] = [];
     const unassigned: PrEntry[] = [];
     const done: PrEntry[] = [];
+    const cited: PrEntry[] = [];
     for (const r of this.rows) {
       if (r.conn_error) {
         // Conn OK mais pr_list en échec → démon trop ancien pour le
@@ -245,8 +317,15 @@ export class PrListView {
         noted = true;
         continue;
       }
+      // Citation sans signal de création (via "weak") → section
+      // « citées » dédiée, tous statuts : bruit repo hors périmètre
+      // agent, repliée par défaut.
+      if (prCited(r)) { cited.push(r); continue; }
       if (CLOSED.has(r.status ?? "open")) { done.push(r); continue; }
-      if (r.session) open.push(r);
+      // Session supprimée (conn vivante, session absente) → non
+      // attribuée comme une entrée sans session, pas groupée par
+      // dépôt avec un chip mort.
+      if (r.session && !this.sessGone(r)) open.push(r);
       else unassigned.push(r);
     }
 
@@ -313,6 +392,26 @@ export class PrListView {
         " unatt", true));
       shown += shownDone.length;
       if (!closed) for (const p of shownDone) el.appendChild(this.prRow(p, true));
+    }
+
+    // Section « citées » : entrées via "weak" (URL de PR citée dans une
+    // sortie sans commande de création) — potentiellement hors
+    // périmètre agent. Repliée par défaut, visible sous filtre.
+    const citedF = cited.filter(match);
+    if (citedF.length) {
+      citedF.sort(
+        (a, b) =>
+          (b.updated_at ?? "").localeCompare(a.updated_at ?? "") || b.pr - a.pr,
+      );
+      const shownCited = citedF.slice(0, DONE_CAP);
+      const key = "ac-prrepo-?cited";
+      const closed = this.isClosed(key, true);
+      el.appendChild(this.groupHead(
+        `<span class="pr-repo-ic">${icon("pr")}</span>${esc(t("pr_cited"))}`,
+        key, citedF.length > DONE_CAP ? `${DONE_CAP}+` : citedF.length,
+        " unatt", true));
+      shown += shownCited.length;
+      if (!closed) for (const p of shownCited) el.appendChild(this.prRow(p, true));
     }
 
     if (!shown && !noted) {

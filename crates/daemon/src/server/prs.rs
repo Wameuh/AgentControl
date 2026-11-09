@@ -428,12 +428,69 @@ impl Daemon {
     }
 
 
+    /// État de la review orchestrateur pour une entrée du registre :
+    /// "running" (session PRReview-* active), "retry" (retry_wait en
+    /// backoff), "queued" (demande interne en file). None = pas de
+    /// review native connue — la review forge prend le relais.
+    /// Clés `repo#N` de `OrchPersist.pr_reviews`/`pr_review_requests`,
+    /// appariées au lower-case (le registre est insensible à la casse,
+    /// `nameWithOwner` ne l'est pas toujours).
+    fn native_review_of(
+        reviews: &HashMap<String, Value>,
+        requests: &HashMap<String, Value>,
+        repo: &str,
+        pr: u64,
+    ) -> Option<&'static str> {
+        // Les clés persistées sont `repo#N` en casse forge — comparaison
+        // insensible à la casse (le registre normalise en minuscules).
+        for (k, e) in reviews {
+            let Some((r, n)) = k.rsplit_once('#') else { continue };
+            if n.parse::<u64>() != Ok(pr) || !r.eq_ignore_ascii_case(repo) {
+                continue;
+            }
+            match e.get("state").and_then(Value::as_str) {
+                Some("running") => return Some("running"),
+                Some("retry_wait") => return Some("retry"),
+                // done/failed : pas de review native à signaler — on
+                // vérifie quand même une demande interne encore en file.
+                _ => {}
+            }
+        }
+        for k in requests.keys() {
+            let Some((r, n)) = k.rsplit_once('#') else { continue };
+            if n.parse::<u64>() == Ok(pr) && r.eq_ignore_ascii_case(repo) {
+                return Some("queued");
+            }
+        }
+        None
+    }
+
     pub(super) async fn h_pr_list(self: &Arc<Self>, session: Option<String>) -> Result<Value> {
                 let mut v = self.prs.list();
                 if let Some(sid) = session {
                     v.retain(|e| e.session == sid);
                 }
-                Ok(serde_json::to_value(v)?)
+                // Jointure review native : la file `PRReview-*` de
+                // l'orchestrateur est locale — `native_review` marque
+                // les PR en review agent même sans reviewRequest forge.
+                let (reviews, requests) = {
+                    let st = self.orch.state.lock().unwrap();
+                    (st.pr_reviews.clone(), st.pr_review_requests.clone())
+                };
+                let mut out = Vec::with_capacity(v.len());
+                for e in &v {
+                    let mut j = serde_json::to_value(e)?;
+                    // La review orchestrateur ne connaît que github.com.
+                    let gh = proto::forge_kind(&e.forge) == "github"
+                        && (e.host.is_empty() || e.host == "github.com");
+                    if gh {
+                        if let Some(nr) = Self::native_review_of(&reviews, &requests, &e.repo, e.pr) {
+                            j["native_review"] = json!(nr);
+                        }
+                    }
+                    out.push(j);
+                }
+                Ok(json!(out))
     }
     pub(super) async fn h_pr_track(
         self: &Arc<Self>,
@@ -449,6 +506,8 @@ impl Daemon {
         status: Option<String>,
         note: Option<String>,
         sync_fails: Option<u32>,
+        review: Option<String>,
+        ci: Option<String>,
     ) -> Result<Value> {
                 let e = self.prs.track(TrackIn {
                     session,
@@ -463,6 +522,8 @@ impl Daemon {
                     status,
                     note,
                     sync_fails,
+                    review,
+                    ci,
                 })?;
                 Ok(serde_json::to_value(e)?)
     }
@@ -540,6 +601,9 @@ impl Daemon {
                     status: Some(u.status.clone()),
                     note: None,
                     sync_fails: None,
+                    // "" efface : la forge a répondu sans review/CI.
+                    review: Some(u.review.clone()),
+                    ci: Some(u.ci.clone()),
                 }) {
                     Ok(_) => applied += 1,
                     Err(e) => warn!("pr_sync track {} {}: {e:#}", u.repo, u.pr),

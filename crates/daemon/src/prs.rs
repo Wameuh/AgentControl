@@ -46,6 +46,11 @@ pub struct TrackIn {
     /// Compteur d'échecs de sync écrit tel quel (`pr sync` d'acctl) —
     /// None conserve, Some(0) = l'entrée a été lue live.
     pub sync_fails: Option<u32>,
+    /// Review forge normalisée — Some("") efface (valeur calculée par
+    /// le sync, jamais une saisie manuelle).
+    pub review: Option<String>,
+    /// CI forge normalisée — même convention que `review`.
+    pub ci: Option<String>,
 }
 
 impl PrRegistry {
@@ -204,6 +209,8 @@ impl PrRegistry {
                     note: t.note.clone(),
                     via: "manual".into(),
                     sync_fails: t.sync_fails.unwrap_or(0),
+                    review: t.review.clone().filter(|v| !v.is_empty()),
+                    ci: t.ci.clone().filter(|v| !v.is_empty()),
                     created_at: tstamp.clone(),
                     updated_at: tstamp,
                 };
@@ -222,8 +229,14 @@ impl PrRegistry {
     /// ressemblait à une création — `gh pr create`, `glab mr create`,
     /// `git review`, push `refs/for/*`) et que la session diffère —
     /// sinon no-op (évite de ré-émettre/bumper à chaque rescan de
-    /// journal au boot). Retourne true quand l'entrée a été
-    /// créée/réattribuée.
+    /// journal au boot). Une détection `strong` sur une entrée `weak`
+    /// de la MÊME session la promeut (`via: detected`) sans réémettre
+    /// d'event. Retourne true quand l'entrée a été créée/réattribuée.
+    ///
+    /// `via` à la création : "detected" sur signal fort, "weak" sinon
+    /// (URL de PR citée dans une sortie `gh pr ready|view|merge`… —
+    /// potentiellement une PR que l'agent n'a pas créée : le client la
+    /// range dans « citées » par défaut, hors badges et compteur).
     pub fn detected(&self, session: &str, r: &PrRef, strong: bool) -> Result<bool> {
         let mut g = self.map.lock().unwrap();
         // Change-Id : l'entrée peut être clée numériquement (déjà
@@ -234,13 +247,26 @@ impl PrRegistry {
             .and_then(|c| find_by_cid(&g, r.forge, &r.host, c))
             .unwrap_or_else(|| ref_key(r));
         match g.get_mut(&k) {
-            Some(old)
-                if old.via == "manual" || !strong || old.session == session =>
-            {
+            Some(old) if old.via == "manual" || !strong => {
+                return Ok(false);
+            }
+            Some(old) if old.session == session => {
+                // Signal fort sur une citation faible de la même
+                // session → promotion silencieuse (pas d'event : rien
+                // de nouveau à annoncer, juste via qui change).
+                if old.via == "weak" {
+                    old.via = "detected".into();
+                    old.updated_at = proto::now_iso();
+                    drop(g);
+                    self.save()?;
+                }
                 return Ok(false);
             }
             Some(old) => {
                 old.session = session.into();
+                // La réattribution passe par un signal fort → via
+                // canonique "detected" même si l'entrée était weak.
+                old.via = "detected".into();
                 old.updated_at = proto::now_iso();
             }
             None => {
@@ -259,8 +285,10 @@ impl PrRegistry {
                         title: None,
                         status: "open".into(),
                         note: None,
-                        via: "detected".into(),
+                        via: if strong { "detected" } else { "weak" }.into(),
                         sync_fails: 0,
+                        review: None,
+                        ci: None,
                         created_at: t.clone(),
                         updated_at: t,
                     },
@@ -428,6 +456,14 @@ fn apply_track(e: &mut PrEntry, t: &TrackIn, forge: &str, host: &str) {
     }
     if let Some(v) = t.sync_fails {
         e.sync_fails = v;
+    }
+    // "" efface : la valeur vient du sync (calculée), pas d'une
+    // saisie — une forge redevenue muette doit dépouiller le badge.
+    if let Some(v) = &t.review {
+        e.review = (!v.is_empty()).then(|| v.clone());
+    }
+    if let Some(v) = &t.ci {
+        e.ci = (!v.is_empty()).then(|| v.clone());
     }
     e.updated_at = proto::now_iso();
 }
@@ -719,6 +755,8 @@ mod tests {
             status: None,
             note: None,
             sync_fails: None,
+            review: None,
+            ci: None,
         })
         .unwrap();
         r.detected("s-3", &gl_ref("g/p", 5), true).unwrap();
@@ -750,6 +788,8 @@ mod tests {
             status: Some("merged".into()),
             note: None,
             sync_fails: None,
+            review: None,
+            ci: None,
         })
         .unwrap();
         let v = r.list();

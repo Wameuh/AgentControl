@@ -385,6 +385,8 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
                 .get("sync_fails")
                 .and_then(Value::as_u64)
                 .map(|v| v as u32),
+            review: so("review"),
+            ci: so("ci"),
         },
         "pr_untrack" => ReqKind::PrUntrack {
             repo: s("repo"),

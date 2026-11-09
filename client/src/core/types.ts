@@ -71,6 +71,15 @@ export interface PrEntry {
   /** Horodatages ISO du registre — tri de la section « terminées ». */
   created_at?: string;
   updated_at?: string;
+  /** Review lue sur la forge au dernier sync : approved |
+   *  changes_requested | requested | required. */
+  review?: string;
+  /** Checks CI de la tête au dernier sync : pending | success |
+   *  failure. */
+  ci?: string;
+  /** Review de l'orchestrateur local (PRReview-*) — injecté par
+   *  h_pr_list, pas persisté : running | retry | queued. */
+  native_review?: string;
 }
 
 /** État runtime d'un composant (champ `status` des items ListComponents). */

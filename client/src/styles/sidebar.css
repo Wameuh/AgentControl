@@ -259,6 +259,17 @@ button:disabled { opacity: .5; cursor: default; }
 /* « non résoluble » : sync jamais abouti (repo fantôme, hôte mort) —
    ligne estompée comme les terminées, pastille gold pointillée. */
 #pr-list .pr .pr-st.st-unres { color: var(--gold); border-style: dashed; border-color: color-mix(in srgb, var(--gold) 55%, transparent); }
+/* Badges secondaires : review (native prioritaire) + CI de la tête. */
+#pr-list .pr .pr-st.st-nrev { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+#pr-list .pr .pr-st.st-nrev-retry { color: var(--gold); border-style: dashed; border-color: color-mix(in srgb, var(--gold) 55%, transparent); }
+#pr-list .pr .pr-st.st-nrev-queued { color: var(--dim); border-style: dashed; }
+#pr-list .pr .pr-st.st-approved { color: var(--sage); border-color: rgba(184, 207, 174, .5); }
+#pr-list .pr .pr-st.st-changes { color: var(--err); border-color: rgba(232, 148, 134, .55); }
+#pr-list .pr .pr-st.st-requested { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+#pr-list .pr .pr-st.st-required { color: var(--dim); }
+#pr-list .pr .pr-st.st-cip { color: var(--gold); }
+#pr-list .pr .pr-st.st-cis { color: var(--sage); }
+#pr-list .pr .pr-st.st-cif { color: var(--err); border-color: rgba(232, 148, 134, .55); }
 #pr-list .pr.pr-unres { opacity: .55; }
 #pr-list .pr.pr-unres:hover { opacity: .85; }
 /* Entrées « terminées » (section historique) : estompées pour rester
