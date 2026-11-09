@@ -12,6 +12,8 @@ use serde_json::{json, Value};
 
 use std::io::Read;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// Deadline d'un appel `gh` : un gh wedged (credential helper bloqué,
@@ -19,6 +21,12 @@ use std::time::{Duration, Instant};
 /// démon indéfiniment — les runs « stuck » sont autorisés à repartir
 /// après 180 s côté démon, sans kill le process s'accumulerait.
 const GH_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Concurrence max des appels forge pendant un sync — bornée : `gh`
+/// et les hôtes REST n'aiment pas les rafales (rate limit GitHub,
+/// charge serveur), et un registre étoffé ne doit pas non plus ouvrir
+/// des centaines de sockets d'un coup.
+const SYNC_CONCURRENCY: usize = 6;
 
 /// Sortie stdout d'une commande `gh` (None si gh absent, en échec ou
 /// trop lent — le process est tué passé GH_TIMEOUT). Sortie vide
@@ -595,25 +603,6 @@ fn seen_of(e: &Value) -> PrSeen {
     }
 }
 
-/// Interroge les forges live pour chaque entrée du registre et produit
-/// les mises à jour à appliquer (aucune écriture ici — le démon track()
-/// directement, acctl pousse `pr_track`). `entries` = tableau sérialisé
-/// des PrEntry (`forge`, `host`, `repo`, `pr`, `change_id`, `status`).
-/// `set` = réponse `forge_list` (types + hôtes + token_env).
-pub fn collect_updates(set: &[Value], entries: &[Value]) -> SyncOutcome {
-    let mut out = SyncOutcome {
-        checked: 0,
-        updates: Vec::new(),
-        seen: Vec::new(),
-        failed: Vec::new(),
-        notes: Vec::new(),
-    };
-    collect_github(entries, &mut out);
-    collect_gitlab(set, entries, &mut out);
-    collect_gerrit(set, entries, &mut out);
-    out
-}
-
 /// Kind github dont l'hôte n'est pas github.com : hors périmètre —
 /// `gh` n'interroge que github.com et relibeller l'entrée la
 /// re-keyerait sur le mauvais hôte. Hôte absent = github.com (registre
@@ -622,15 +611,111 @@ fn gh_host_ok(e: &Value) -> bool {
     e["host"].as_str().unwrap_or("github.com") == "github.com"
 }
 
-/// GitHub — `gh pr list` groupé par repo connu : les repos comptent
-/// comme « vus » dès que gh répond (un hôte down laisse les entrées
-/// inchangées, sans note — gh absent est le cas nominal d'un démon
-/// minimal). Un repo dont le `gh pr list` échoue alors que gh est
-/// prouvé utilisable (`gh auth status` OK) = repo/référence injoignable
-/// → compté en échec ; gh absent ou non authentifié n'est PAS un
-/// échec d'entrée (aucune entrée ne doit passer « non résoluble » sur
-/// une machine sans gh fonctionnel).
-fn collect_github(entries: &[Value], out: &mut SyncOutcome) {
+/// Un appel forge unitaire de la collecte — github = un `gh pr list`
+/// par repo (déjà groupé), gitlab/gerrit = une requête REST par entrée.
+enum SyncJob<'a> {
+    GithubRepo(&'a str),
+    Gitlab(&'a Value),
+    Gerrit(&'a Value),
+}
+
+/// Contribution d'un job de collecte à `SyncOutcome` — produite en
+/// parallèle puis fusionnée dans l'ordre des jobs (déterministe,
+/// identique à l'ordre séquentiel historique).
+#[derive(Default)]
+struct SyncPartial {
+    checked: usize,
+    updates: Vec<PrUpdate>,
+    seen: Vec<PrSeen>,
+    failed: Vec<PrSeen>,
+    notes: Vec<String>,
+}
+
+impl SyncPartial {
+    fn fail(&mut self, e: &Value) {
+        self.failed.push(seen_of(e));
+    }
+}
+
+impl SyncOutcome {
+    fn absorb(&mut self, p: SyncPartial) {
+        self.checked += p.checked;
+        self.updates.extend(p.updates);
+        self.seen.extend(p.seen);
+        self.failed.extend(p.failed);
+        self.notes.extend(p.notes);
+    }
+}
+
+/// Exécute `f` sur chaque item avec au plus `SYNC_CONCURRENCY` threads —
+/// la collecte forge est I/O-bound (subprocess `gh`, HTTP ureq) : le
+/// parallélisme ramène le temps total à ~la lenteur max d'un appel au
+/// lieu de la somme. L'ordre des résultats suit celui des items.
+fn par_map<T: Sync, R: Send>(items: &[T], f: &(dyn Fn(&T) -> R + Sync)) -> Vec<R> {
+    let n = items.len();
+    if n <= 1 {
+        return items.iter().map(f).collect();
+    }
+    let workers = SYNC_CONCURRENCY.min(n);
+    let next = AtomicUsize::new(0);
+    let (tx, rx) = mpsc::channel::<(usize, R)>();
+    let slots = std::thread::scope(|s| {
+        for _ in 0..workers {
+            let tx = tx.clone();
+            let next = &next;
+            s.spawn(move || loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= n {
+                    break;
+                }
+                // rx ne se ferme qu'en fin de scope : un envoi en
+                // échec signifierait un bug — on sort plutôt que
+                // boucler.
+                if tx.send((i, f(&items[i]))).is_err() {
+                    break;
+                }
+            });
+        }
+        drop(tx);
+        let mut slots: Vec<Option<R>> = (0..n).map(|_| None).collect();
+        for _ in 0..n {
+            // Un worker panic → son tx meurt ; scope propage la panic à
+            // la sortie, les slots manquants ne sont jamais lus.
+            match rx.recv() {
+                Ok((i, r)) => slots[i] = Some(r),
+                Err(_) => break,
+            }
+        }
+        slots
+    });
+    slots
+        .into_iter()
+        .map(|p| p.expect("par_map: slot vide"))
+        .collect()
+}
+
+/// Interroge les forges live pour chaque entrée du registre et produit
+/// les mises à jour à appliquer (aucune écriture ici — le démon track()
+/// directement, acctl pousse `pr_track`). `entries` = tableau sérialisé
+/// des PrEntry (`forge`, `host`, `repo`, `pr`, `change_id`, `status`).
+/// `set` = réponse `forge_list` (types + hôtes + token_env).
+///
+/// Les appels forge tournent en parallèle borné (`SYNC_CONCURRENCY`) :
+/// un registre étoffé ou une forge lente ne fait plus la somme des
+/// latences — le temps total suit ~la lenteur max des jobs.
+pub fn collect_updates(set: &[Value], entries: &[Value]) -> SyncOutcome {
+    let started = Instant::now();
+    let mut out = SyncOutcome {
+        checked: 0,
+        updates: Vec::new(),
+        seen: Vec::new(),
+        failed: Vec::new(),
+        notes: Vec::new(),
+    };
+    // Kind github dont l'hôte n'est pas github.com : hors périmètre —
+    // `gh` n'interroge que github.com et relibeller l'entrée la
+    // re-keyerait sur le mauvais hôte. Hôte absent = github.com (registre
+    // historique). Classé d'office, sans job : jamais résolvable.
     for e in entries {
         if proto::forge_kind(e["forge"].as_str().unwrap_or("")) == "github" && !gh_host_ok(e) {
             out.notes.push(format!(
@@ -639,8 +724,6 @@ fn collect_github(entries: &[Value], out: &mut SyncOutcome) {
                 e["pr"].as_u64().unwrap_or(0),
                 e["host"].as_str().unwrap_or("?"),
             ));
-            // Jamais résolvable par gh (hôte hors github.com) : le
-            // compteur reflète l'impossibilité, pas une panne passagère.
             out.failed.push(seen_of(e));
         }
     }
@@ -657,98 +740,144 @@ fn collect_github(entries: &[Value], out: &mut SyncOutcome) {
     // versions). Sans lui impossible de distinguer « repo absent » de
     // « gh KO ».
     let gh_up = !repos.is_empty() && gh_ok(&["auth", "status"]);
-    for repo in repos {
-        let live = gh_out(&[
-            "pr", "list", "--repo", &repo, "--state", "all",
-            "--limit", "200", "--json",
-            "number,title,state,isDraft,headRefName",
-        ])
-        .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok());
-        let Some(live) = live else {
-            if gh_up {
-                // gh sert mais ce repo ne répond pas → fantôme/privé.
-                out.notes.push(format!(
-                    "github {repo}: repo absent ou inaccessible — statuts inchangés"
-                ));
-                for e in entries.iter().filter(|e| {
-                    proto::forge_kind(e["forge"].as_str().unwrap_or("")) == "github"
-                        && gh_host_ok(e)
-                        && e["repo"].as_str() == Some(repo.as_str())
-                }) {
-                    out.failed.push(seen_of(e));
-                }
-            } else {
-                out.notes
-                    .push(format!("github {repo}: gh indisponible — statuts inchangés"));
-            }
-            continue;
-        };
-        let tracked: Vec<&Value> = entries
+    // Jobs dans l'ordre de fusion historique : repos github triés,
+    // puis entrées gitlab, puis gerrit (ordre du registre).
+    let mut jobs: Vec<SyncJob> = repos
+        .iter()
+        .map(|r| SyncJob::GithubRepo(r.as_str()))
+        .collect();
+    jobs.extend(
+        entries
             .iter()
-            .filter(|e| {
+            .filter(|e| proto::forge_kind(e["forge"].as_str().unwrap_or("")) == "gitlab")
+            .map(SyncJob::Gitlab),
+    );
+    jobs.extend(
+        entries
+            .iter()
+            .filter(|e| proto::forge_kind(e["forge"].as_str().unwrap_or("")) == "gerrit")
+            .map(SyncJob::Gerrit),
+    );
+    let concurrency = SYNC_CONCURRENCY.min(jobs.len());
+    let parts = par_map(&jobs, &|j| match j {
+        SyncJob::GithubRepo(repo) => github_repo_sync(repo, gh_up, entries),
+        SyncJob::Gitlab(e) => gitlab_entry_sync(set, e),
+        SyncJob::Gerrit(e) => gerrit_entry_sync(set, e),
+    });
+    for p in parts {
+        out.absorb(p);
+    }
+    tracing::info!(
+        jobs = jobs.len(),
+        concurrency,
+        checked = out.checked,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "registre PR : collecte forge terminée"
+    );
+    out
+}
+
+/// GitHub — `gh pr list` groupé par repo connu : les repos comptent
+/// comme « vus » dès que gh répond (un hôte down laisse les entrées
+/// inchangées, sans note — gh absent est le cas nominal d'un démon
+/// minimal). Un repo dont le `gh pr list` échoue alors que gh est
+/// prouvé utilisable (`gh auth status` OK) = repo/référence injoignable
+/// → compté en échec ; gh absent ou non authentifié n'est PAS un
+/// échec d'entrée (aucune entrée ne doit passer « non résoluble » sur
+/// une machine sans gh fonctionnel).
+fn github_repo_sync(repo: &str, gh_up: bool, entries: &[Value]) -> SyncPartial {
+    let mut p = SyncPartial::default();
+    let live = gh_out(&[
+        "pr", "list", "--repo", repo, "--state", "all",
+        "--limit", "200", "--json",
+        "number,title,state,isDraft,headRefName",
+    ])
+    .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok());
+    let Some(live) = live else {
+        if gh_up {
+            // gh sert mais ce repo ne répond pas → fantôme/privé.
+            p.notes.push(format!(
+                "github {repo}: repo absent ou inaccessible — statuts inchangés"
+            ));
+            for e in entries.iter().filter(|e| {
                 proto::forge_kind(e["forge"].as_str().unwrap_or("")) == "github"
                     && gh_host_ok(e)
-                    && e["repo"].as_str() == Some(repo.as_str())
-            })
-            .collect();
-        for e in &tracked {
-            let n = e["pr"].as_u64().unwrap_or(0);
-            // `--limit 200` tronque la liste : sur un gros repo une
-            // entrée ancienne n'y figure plus sans être absente —
-            // requête directe avant de la compter injoignable.
-            let p = live
-                .iter()
-                .find(|p| p["number"].as_u64() == Some(n))
-                .cloned()
-                .or_else(|| {
-                    gh_out(&[
-                        "pr", "view", &n.to_string(), "--repo", &repo, "--json",
-                        "number,title,state,isDraft,headRefName",
-                    ])
-                    .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-                });
-            let Some(p) = p.filter(|p| p["number"].as_u64() == Some(n)) else {
-                // Le repo répond mais la référence n'y est plus
-                // (supprimée, jamais existée) → non résoluble en cours.
-                out.failed.push(seen_of(e));
-                continue;
-            };
-            out.checked += 1;
-            out.seen.push(seen_of(e));
-            let st = gh_state(&p);
-            let old = e["status"].as_str().unwrap_or("");
-            if st != old {
-                out.updates.push(PrUpdate {
-                    repo: repo.clone(),
-                    pr: n,
-                    forge: "github".into(),
-                    host: "github.com".into(),
-                    change_id: None,
-                    url: None,
-                    branch: p["headRefName"].as_str().map(String::from),
-                    title: p["title"].as_str().map(String::from),
-                    status: st,
-                    old_status: old.into(),
-                });
+                    && e["repo"].as_str() == Some(repo)
+            }) {
+                p.fail(e);
             }
+        } else {
+            p.notes
+                .push(format!("github {repo}: gh indisponible — statuts inchangés"));
         }
-        let untracked: Vec<u64> = live
+        return p;
+    };
+    let tracked: Vec<&Value> = entries
+        .iter()
+        .filter(|e| {
+            proto::forge_kind(e["forge"].as_str().unwrap_or("")) == "github"
+                && gh_host_ok(e)
+                && e["repo"].as_str() == Some(repo)
+        })
+        .collect();
+    for e in &tracked {
+        let n = e["pr"].as_u64().unwrap_or(0);
+        // `--limit 200` tronque la liste : sur un gros repo une
+        // entrée ancienne n'y figure plus sans être absente —
+        // requête directe avant de la compter injoignable.
+        let pr = live
             .iter()
-            .filter(|p| p["state"].as_str() == Some("OPEN"))
-            .map(|p| p["number"].as_u64().unwrap_or(0))
-            .filter(|n| !tracked.iter().any(|e| e["pr"].as_u64() == Some(*n)))
-            .collect();
-        if !untracked.is_empty() {
-            out.notes.push(format!(
-                "{repo}: PRs ouvertes non enregistrées: {}",
-                untracked
-                    .iter()
-                    .map(|n| format!("#{n}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
+            .find(|v| v["number"].as_u64() == Some(n))
+            .cloned()
+            .or_else(|| {
+                gh_out(&[
+                    "pr", "view", &n.to_string(), "--repo", repo, "--json",
+                    "number,title,state,isDraft,headRefName",
+                ])
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            });
+        let Some(pr) = pr.filter(|v| v["number"].as_u64() == Some(n)) else {
+            // Le repo répond mais la référence n'y est plus
+            // (supprimée, jamais existée) → non résoluble en cours.
+            p.fail(e);
+            continue;
+        };
+        p.checked += 1;
+        p.seen.push(seen_of(e));
+        let st = gh_state(&pr);
+        let old = e["status"].as_str().unwrap_or("");
+        if st != old {
+            p.updates.push(PrUpdate {
+                repo: repo.to_string(),
+                pr: n,
+                forge: "github".into(),
+                host: "github.com".into(),
+                change_id: None,
+                url: None,
+                branch: pr["headRefName"].as_str().map(String::from),
+                title: pr["title"].as_str().map(String::from),
+                status: st,
+                old_status: old.into(),
+            });
         }
     }
+    let untracked: Vec<u64> = live
+        .iter()
+        .filter(|v| v["state"].as_str() == Some("OPEN"))
+        .map(|v| v["number"].as_u64().unwrap_or(0))
+        .filter(|n| !tracked.iter().any(|e| e["pr"].as_u64() == Some(*n)))
+        .collect();
+    if !untracked.is_empty() {
+        p.notes.push(format!(
+            "{repo}: PRs ouvertes non enregistrées: {}",
+            untracked
+                .iter()
+                .map(|n| format!("#{n}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    p
 }
 
 /// GitLab — REST `/api/v4/…/merge_requests/<iid>` par entrée, token
@@ -756,136 +885,130 @@ fn collect_github(entries: &[Value], out: &mut SyncOutcome) {
 /// API 401 → entrée ignorée proprement. Hôtes bornés à ceux déclarés
 /// (`forge_list` inclut gitlab.com implicitement) — le registre ne doit
 /// pas devenir un vecteur de requêtes vers un hôte arbitraire.
-fn collect_gitlab(set: &[Value], entries: &[Value], out: &mut SyncOutcome) {
+fn gitlab_entry_sync(set: &[Value], e: &Value) -> SyncPartial {
+    let mut p = SyncPartial::default();
+    let host = e["host"].as_str().unwrap_or("gitlab.com");
+    let repo = e["repo"].as_str().unwrap_or("");
+    let n = e["pr"].as_u64().unwrap_or(0);
     let declared: Vec<&str> = forge_hosts(set, "gitlab")
         .iter()
         .map(|(h, _)| *h)
         .collect();
-    for e in entries {
-        if proto::forge_kind(e["forge"].as_str().unwrap_or("")) != "gitlab" {
-            continue;
-        }
-        let host = e["host"].as_str().unwrap_or("gitlab.com");
-        let repo = e["repo"].as_str().unwrap_or("");
-        let n = e["pr"].as_u64().unwrap_or(0);
-        if !declared.contains(&host) {
-            out.notes.push(format!(
-                "gitlab {host} {repo}!{n}: hôte non déclaré — statut inchangé"
-            ));
-            // Jamais résolvable tant que l'hôte n'est pas déclaré :
-            // le compteur le dit (repo fantôme ou config incomplète).
-            out.failed.push(seen_of(e));
-            continue;
-        }
-        let auth = forge_auth(set, "gitlab", host);
-        let headers: Vec<(&str, String)> = auth
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.clone()))
-            .collect();
-        let base = host_base(host);
-        let url = format!(
-            "{base}/api/v4/projects/{}/merge_requests/{n}",
-            urlenc(repo)
-        );
-        let Some(v) = http_json(&url, &headers) else {
-            out.notes.push(format!(
-                "gitlab {host} {repo}!{n}: indisponible — statut inchangé"
-            ));
-            out.failed.push(seen_of(e));
-            continue;
-        };
-        out.checked += 1;
-        out.seen.push(seen_of(e));
-        let st = glab_state(&v);
-        let old = e["status"].as_str().unwrap_or("");
-        if st != old {
-            out.updates.push(PrUpdate {
-                repo: repo.to_string(),
-                pr: n,
-                forge: "gitlab".into(),
-                host: host.to_string(),
-                change_id: None,
-                url: v["web_url"].as_str().map(String::from),
-                branch: v["source_branch"].as_str().map(String::from),
-                title: v["title"].as_str().map(String::from),
-                status: st,
-                old_status: old.into(),
-            });
-        }
+    if !declared.contains(&host) {
+        p.notes.push(format!(
+            "gitlab {host} {repo}!{n}: hôte non déclaré — statut inchangé"
+        ));
+        // Jamais résolvable tant que l'hôte n'est pas déclaré :
+        // le compteur le dit (repo fantôme ou config incomplète).
+        p.fail(e);
+        return p;
     }
+    let auth = forge_auth(set, "gitlab", host);
+    let headers: Vec<(&str, String)> = auth
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.clone()))
+        .collect();
+    let base = host_base(host);
+    let url = format!(
+        "{base}/api/v4/projects/{}/merge_requests/{n}",
+        urlenc(repo)
+    );
+    let Some(v) = http_json(&url, &headers) else {
+        p.notes.push(format!(
+            "gitlab {host} {repo}!{n}: indisponible — statut inchangé"
+        ));
+        p.fail(e);
+        return p;
+    };
+    p.checked += 1;
+    p.seen.push(seen_of(e));
+    let st = glab_state(&v);
+    let old = e["status"].as_str().unwrap_or("");
+    if st != old {
+        p.updates.push(PrUpdate {
+            repo: repo.to_string(),
+            pr: n,
+            forge: "gitlab".into(),
+            host: host.to_string(),
+            change_id: None,
+            url: v["web_url"].as_str().map(String::from),
+            branch: v["source_branch"].as_str().map(String::from),
+            title: v["title"].as_str().map(String::from),
+            status: st,
+            old_status: old.into(),
+        });
+    }
+    p
 }
 
 /// Gerrit — REST `GET /changes/<ref>` anonyme, hôtes déclarés seulement
 /// (comme l'extraction de refs : rien ne distingue un hôte Gerrit d'un
 /// autre service sans déclaration). Les entrées adressées par
 /// `change_id` résolvent leur numéro au passage (rekey côté registre).
-fn collect_gerrit(set: &[Value], entries: &[Value], out: &mut SyncOutcome) {
+fn gerrit_entry_sync(set: &[Value], e: &Value) -> SyncPartial {
+    let mut p = SyncPartial::default();
+    let host = e["host"].as_str().unwrap_or("");
+    if host.is_empty() {
+        // Entrée sans hôte : jamais résolvable — comptée en échec
+        // plutôt qu'ignorée silencieusement.
+        p.fail(e);
+        return p;
+    }
+    let repo = e["repo"].as_str().unwrap_or("");
+    let cid = e["change_id"].as_str();
+    let n = e["pr"].as_u64().unwrap_or(0);
+    let n_str = n.to_string();
+    let q = cid.unwrap_or(&n_str);
     let declared: Vec<&str> = forge_hosts(set, "gerrit")
         .iter()
         .map(|(h, _)| *h)
         .collect();
-    for e in entries {
-        if proto::forge_kind(e["forge"].as_str().unwrap_or("")) != "gerrit" {
-            continue;
-        }
-        let host = e["host"].as_str().unwrap_or("");
-        if host.is_empty() {
-            // Entrée sans hôte : jamais résolvable — comptée en échec
-            // plutôt qu'ignorée silencieusement.
-            out.failed.push(seen_of(e));
-            continue;
-        }
-        let repo = e["repo"].as_str().unwrap_or("");
-        let cid = e["change_id"].as_str();
-        let n = e["pr"].as_u64().unwrap_or(0);
-        let n_str = n.to_string();
-        let q = cid.unwrap_or(&n_str);
-        if !declared.contains(&host) {
-            out.notes.push(format!(
-                "gerrit {host} {q}: hôte non déclaré — statut inchangé"
-            ));
-            out.failed.push(seen_of(e));
-            continue;
-        }
-        let base = host_base(host);
-        let url = format!("{base}/changes/{q}");
-        let Some(v) = http_json(&url, &[]) else {
-            out.notes.push(format!(
-                "gerrit {host} {q}: indisponible — statut inchangé"
-            ));
-            out.failed.push(seen_of(e));
-            continue;
-        };
-        out.checked += 1;
-        out.seen.push(seen_of(e));
-        let st = gerrit_state(&v);
-        let resolved = v["_number"].as_u64().unwrap_or(n);
-        let old = e["status"].as_str().unwrap_or("");
-        if st != old || resolved != n {
-            out.updates.push(PrUpdate {
-                repo: v["project"].as_str().unwrap_or(repo).to_string(),
-                pr: resolved,
-                forge: "gerrit".into(),
-                host: host.to_string(),
-                change_id: cid
-                    .map(String::from)
-                    .or_else(|| v["change_id"].as_str().map(String::from)),
-                url: v["change_id"].as_str().map(|_| {
-                    proto::forge_url(
-                        "gerrit",
-                        host,
-                        v["project"].as_str().unwrap_or(repo),
-                        resolved,
-                        None,
-                    )
-                }),
-                branch: v["branch"].as_str().map(String::from),
-                title: v["subject"].as_str().map(String::from),
-                status: st,
-                old_status: old.into(),
-            });
-        }
+    if !declared.contains(&host) {
+        p.notes.push(format!(
+            "gerrit {host} {q}: hôte non déclaré — statut inchangé"
+        ));
+        p.fail(e);
+        return p;
     }
+    let base = host_base(host);
+    let url = format!("{base}/changes/{q}");
+    let Some(v) = http_json(&url, &[]) else {
+        p.notes.push(format!(
+            "gerrit {host} {q}: indisponible — statut inchangé"
+        ));
+        p.fail(e);
+        return p;
+    };
+    p.checked += 1;
+    p.seen.push(seen_of(e));
+    let st = gerrit_state(&v);
+    let resolved = v["_number"].as_u64().unwrap_or(n);
+    let old = e["status"].as_str().unwrap_or("");
+    if st != old || resolved != n {
+        p.updates.push(PrUpdate {
+            repo: v["project"].as_str().unwrap_or(repo).to_string(),
+            pr: resolved,
+            forge: "gerrit".into(),
+            host: host.to_string(),
+            change_id: cid
+                .map(String::from)
+                .or_else(|| v["change_id"].as_str().map(String::from)),
+            url: v["change_id"].as_str().map(|_| {
+                proto::forge_url(
+                    "gerrit",
+                    host,
+                    v["project"].as_str().unwrap_or(repo),
+                    resolved,
+                    None,
+                )
+            }),
+            branch: v["branch"].as_str().map(String::from),
+            title: v["subject"].as_str().map(String::from),
+            status: st,
+            old_status: old.into(),
+        });
+    }
+    p
 }
 
 #[cfg(test)]
@@ -966,6 +1089,21 @@ mod tests {
         assert!(!github_repo_ok("o//r"));
         assert!(!github_repo_ok("o/.."));
         assert!(!github_repo_ok("./x"));
+    }
+
+    /// `par_map` traite chaque item exactement une fois et rend les
+    /// résultats dans l'ordre des items, quelle que soit la fin des
+    /// jobs (délais variables).
+    #[test]
+    fn par_map_preserves_order() {
+        let items: Vec<usize> = (0..3 * SYNC_CONCURRENCY + 5).collect();
+        let out = par_map(&items, &|i| {
+            std::thread::sleep(Duration::from_millis((i % 7) as u64));
+            i * 2
+        });
+        assert_eq!(out, items.iter().map(|i| i * 2).collect::<Vec<_>>());
+        assert_eq!(par_map(&[] as &[usize], &|i| i + 1), Vec::<usize>::new());
+        assert_eq!(par_map(&[7usize], &|i| i + 1), vec![8]);
     }
 
     /// Les hôtes absents de `forge_list` ne doivent jamais être
