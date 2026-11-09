@@ -213,7 +213,7 @@ export class ComponentsPanel {
     }
     // L'inert ne tombe que si les autres overlays #chat sont fermés —
     // sinon #input serait ré-exposé derrière eux (frappes invisibles).
-    if ($("conn-view").hidden && $("settings-view").hidden && $("map-view").hidden)
+    if ($("conn-view").hidden && $("settings-view").hidden && $("map-view").hidden && $("logs-view").hidden)
       this.setChatInert(false);
     nav.close("components");
     if (!was) return;

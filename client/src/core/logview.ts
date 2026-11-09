@@ -7,8 +7,25 @@ import { invoke } from "./bridge";
 import { esc } from "./dom";
 
 /** Rang d'un niveau de log — le filtre du sélecteur est un niveau MINIMUM. */
-const logRank = (l: string): number =>
-  ({ debug: 0, info: 1, warn: 2, error: 3 } as Record<string, number>)[l] ?? 1;
+export const logRank = (l: string): number =>
+  ({ trace: 0, debug: 0, info: 1, warn: 2, error: 3 } as Record<string, number>)[
+    l
+  ] ?? 1;
+
+/** Niveau d'une ligne de log, quel que soit le format d'émetteur :
+ *  client.log `[iso] [LVL] f.rs:N msg` ou journal daemon tracing
+ *  `ISO  LVL cible: msg`. null = ligne sans niveau (suite d'un message
+ *  multi-lignes, backtrace…) — affichée en info. */
+export function logLineLevel(line: string): string | null {
+  const cli = line.match(
+    /^\[[^\]]*\] \[(TRACE|DEBUG|INFO|WARN|ERROR)\]/i,
+  );
+  if (cli) return cli[1].toLowerCase();
+  const dmn = line.match(
+    /^\d{4}-\d{2}-\d{2}T\S+\s+(TRACE|DEBUG|INFO|WARN|ERROR)\b/i,
+  );
+  return dmn ? dmn[1].toLowerCase() : null;
+}
 
 /** Tail de client.log filtré par niveau `min` et coloré dans `view`
  *  (lignes `[iso] [LVL] fichier.rs:NN msg` ; les lignes anciennes sans tag

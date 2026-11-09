@@ -722,6 +722,11 @@ impl Daemon {
 
     async fn handle(self: &Arc<Self>, req: ReqKind) -> Result<Value> {
         match req {
+            ReqKind::DaemonLogTail {
+                file,
+                offset,
+                limit,
+            } => self.h_daemon_log_tail(file, offset, limit).await,
             ReqKind::DaemonStatus => self.h_daemon_status().await,
             ReqKind::UpdateDaemon { version } => self.h_update_daemon(version).await,
             ReqKind::ListAgents => self.h_list_agents().await,

@@ -123,6 +123,13 @@ pub(crate) fn log_tail(n: Option<usize>) -> String {
     client_core::log_tail(n.unwrap_or(200))
 }
 
+/// Tranche incrémentale de client.log pour le suiveur live du panneau
+/// logs : {offset, data, size} — offset absent/invalide → dernière page.
+#[tauri::command]
+pub(crate) fn log_read(offset: Option<u64>, limit: Option<u64>) -> Value {
+    client_core::log_read(offset, limit)
+}
+
 /// Écrit une ligne dans client.log depuis le frontend (erreurs UI,
 /// diagnostics webview — préfixées `ui:`). Niveau tolérant, info si inconnu.
 /// file vide : la callsite Rust ne dirait rien d'utile sur la source TS.

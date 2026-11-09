@@ -51,6 +51,9 @@ impl Daemon {
                     // `caps` de list_agents + RPC refresh_agent_caps
                     // (bouton refresh mode/modèle du header).
                     "agent_caps": true,
+                    // Idem pour ReqKind::DaemonLogTail (panneau logs
+                    // live — onglet « Démon »).
+                    "daemon_logs": true,
                     // Idem pour ReqKind::ModelCatalog (variantes modèle
                     // hors annonce ACP — catalogue.rs, clés
                     // catalogue_cmd/model_override_cmd des profils).
@@ -189,6 +192,40 @@ impl Daemon {
             "caps": caps,
             "sessions": touched,
         }))
+    }
+
+    /// `DaemonLogTail{file?, offset?, limit?}` — tail incrémental du
+    /// journal du démon pour le panneau logs live : {file, offset,
+    /// data, size}. `incremental` seulement si le fichier renvoyé est
+    /// toujours le courant ET que l'offset tient dans sa taille —
+    /// rotation jour ou troncature → dernière page du fichier courant.
+    /// Borné (défaut 64 Kio, cap 256 Kio) et en spawn_blocking : le
+    /// poll client tourne toutes les ~1,5 s sans gêner la boucle async.
+    pub(super) async fn h_daemon_log_tail(
+        self: &Arc<Self>,
+        file: Option<String>,
+        offset: u64,
+        limit: Option<u64>,
+    ) -> Result<Value> {
+        let root = self.root.clone();
+        let limit = limit.unwrap_or(64 * 1024).clamp(4 * 1024, 256 * 1024);
+        tokio::task::spawn_blocking(move || {
+            let Some((name, path)) = crate::logging::current_log_file(&root) else {
+                return json!({ "file": "", "offset": 0, "data": "", "size": 0 });
+            };
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let incremental = file.as_deref() == Some(name.as_str());
+            let (data, new_off) =
+                crate::logging::tail_slice(&path, incremental, offset, limit);
+            json!({
+                "file": name,
+                "offset": new_off,
+                "data": data,
+                "size": size,
+            })
+        })
+        .await
+        .context("daemon_log_tail task")
     }
 
     /// `ModelCatalog` : {"models": [{value, label}]} — liste vide quand

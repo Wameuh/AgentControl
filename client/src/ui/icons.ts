@@ -116,6 +116,10 @@ const SHAPES: Record<string, string> = {
     '<path d="M8.5 6h12M8.5 12h12M8.5 18h12"/>' +
     '<path d="m3 5.9 1.2 1.2 2.3-2.4"/><path d="m3 11.9 1.2 1.2 2.3-2.4"/>' +
     '<path d="m3 17.9 1.2 1.2 2.3-2.4"/>',
+  // Panneau logs live (journaux client + démon)
+  scroll:
+    '<path d="M6 3.5h12A1.5 1.5 0 0 1 19.5 5v15.5l-3-2-3.5 2-3.5-2-3 2V5A1.5 1.5 0 0 1 6 3.5Z"/>' +
+    '<path d="M9.5 8.5h6M9.5 12h6M9.5 15.5h4"/>',
   pr:
     '<circle cx="6.5" cy="6" r="2.7"/><circle cx="6.5" cy="18" r="2.7"/>' +
     '<path d="M6.5 8.7v6.6"/>' +
