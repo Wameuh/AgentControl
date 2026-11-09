@@ -248,7 +248,7 @@ body {
 }
 
 ::selection { background: var(--accent); color: var(--bg); }
-::-webkit-scrollbar { width: 9px; }
+::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-thumb { background: rgba(var(--tint-rgb), .16); border-radius: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
 

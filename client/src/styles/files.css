@@ -69,13 +69,13 @@
    même font, line-height, padding, tab-size, white-space. */
 #file-edwrap { flex: 1; min-height: 0; display: flex; }
 #file-nums {
-  flex: none; overflow: hidden; margin: 0; padding: 12px 6px 12px 12px;
+  flex: none; overflow: hidden; margin: 0; padding: 12px 6px 22px 12px;
   font: 12px/1.5 Mono, ui-monospace, monospace; text-align: right;
   color: var(--dim); user-select: none; white-space: pre; min-width: 3ch;
 }
 #file-edscroll { position: relative; flex: 1; min-width: 0; overflow: hidden; }
 #file-hl, #file-edit {
-  position: absolute; inset: 0; margin: 0; padding: 12px;
+  position: absolute; inset: 0; margin: 0; padding: 12px 12px 22px;
   font: 12px/1.5 Mono, ui-monospace, monospace;
   white-space: pre; tab-size: 4;
 }
@@ -93,7 +93,8 @@
 }
 #file-edit::selection { background: rgba(var(--accent-rgb), .30); }
 #file-view {
-  flex: 1; min-width: 0; min-height: 0; overflow: auto; margin: 0; padding: 12px;
+  flex: 1; min-width: 0; min-height: 0; overflow: auto; margin: 0;
+  padding: 12px 12px 22px; scrollbar-width: thin;
   font: 12px/1.5 Mono, ui-monospace, monospace; white-space: pre;
   color: var(--ink); user-select: text;
 }

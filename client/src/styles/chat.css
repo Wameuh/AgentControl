@@ -260,9 +260,12 @@
   background: rgba(var(--tint-rgb), .1); padding: 1px 5px; border-radius: 5px;
 }
 .md .md-code {
-  margin: 8px 0; padding: 10px 12px; background: var(--code-bg);
+  margin: 8px 0; padding: 10px 12px 24px; background: var(--code-bg);
   border: 1px solid var(--line); border-radius: 10px;
-  font: 12.5px/1.5 Mono, ui-monospace, monospace; white-space: pre; overflow-x: auto;
+  font: 12.5px/1.5 Mono, ui-monospace, monospace; white-space: pre;
+  overflow-x: auto; scrollbar-width: thin;
+  /* padding-bottom généreux : la scrollbar horizontale classique
+     (non-overlay, ~17px max) ne doit jamais masquer la dernière ligne. */
 }
 /* Conteneur du bloc code + son bouton copier (incrusté en haut à droite,
    visible au survol — discret sinon). Le <pre> perd ses marges au profit
