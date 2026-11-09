@@ -181,6 +181,7 @@ pub fn run() {
             commands::system::log_read,
             commands::system::log_write,
             commands::system::set_app_icon,
+            commands::system::app_signing,
             commands::update::check_update,
             commands::update::update_client,
             commands::update::update_last_status,
@@ -188,7 +189,11 @@ pub fn run() {
     // Chiffrement au repos des secrets (clé app ed25519, clés appairées,
     // connections.json) via Android Keystore — desktop inchangé.
     #[cfg(target_os = "android")]
-    let builder = builder.plugin(tauri_plugin_ac_keystore::init());
+    let builder = builder
+        .plugin(tauri_plugin_ac_keystore::init())
+        // Verdict « update in-place possible » (signature de l'APK
+        // installé vs certificat release) — garde-fou uninstall Android.
+        .plugin(tauri_plugin_ac_device::init());
     builder
         .run(context)
         .expect("error while running tauri application");

@@ -170,6 +170,9 @@ async function webInvoke<T>(cmd: string, a: Record<string, unknown>): Promise<T>
     case "plugin:ac-stt|stt_dl_state":
     case "plugin:ac-stt|tts_dl_state":
       return { platform: "web", models: [] } as T;
+    case "app_signing":
+      // Pas d'APK en web — verdict neutre, jamais bloquant.
+      return { platform: "web", update_in_place: "unknown" } as T;
     default:
       // check_update / update_client / ensure_daemon / write_download :
       // absents du monde navigateur — la surface UI qui les invoque est

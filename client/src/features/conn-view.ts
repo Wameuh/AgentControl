@@ -515,6 +515,32 @@ export class ConnView {
     if (this.isOpen()) this.renderSavedList();
   }
 
+  /** Section « aucun accès configuré » (réinstall / premier lancement) :
+   *  le pairing QR est LE chemin de récupération — les clés Keystore ne
+   *  survivent pas à une désinstallation (#160), tout repart du QR
+   *  émis par le desktop. Visible tant que saved_connections est vide. */
+  private syncWelcome() {
+    $("cv-welcome").hidden = this.saved.length !== 0;
+  }
+
+  /** Scan QR (B′ v2 / endpoint H / repli A v1) → cfg → connect+save
+   *  par le chemin nominal. Partagé par le bouton du formulaire et la
+   *  section « restaurer mes accès » de l'accueil sans connexion. */
+  private async scanAndGo() {
+    try {
+      const cfg = await scanPair();
+      if (!cfg) return;
+      await this.go(cfg);
+      // La cfg vient d'être sauvegardée par go() → la section
+      // « premier accès » doit disparaître sans attendre une réouverture.
+      this.saved = await invoke<SavedConn[]>("saved_connections")
+        .catch(() => this.saved);
+      this.syncWelcome();
+    } catch (e) {
+      dlgErr("c-err", String(e));
+    }
+  }
+
   /** Liste des connexions sauvegardées : pastille couleur, hôte, statut
    *  live quand la clé est bound, actions (connecter ici / nouvelle
    *  instance desktop / éditer / supprimer en 2 taps). */
@@ -522,6 +548,7 @@ export class ConnView {
     const ul = $("cv-saved");
     ul.innerHTML = "";
     $("cv-saved-sec").hidden = this.saved.length === 0;
+    this.syncWelcome();
     this.saved.forEach((c) => {
       const key = connKeyOf(c, isAndroid());
       const st = this.conns.state(key);
@@ -760,15 +787,11 @@ export class ConnView {
     const scan = $("c-scan") as HTMLButtonElement;
     if (isWeb) {
       scan.hidden = true;
+      $("cv-restore").hidden = true;
     } else {
-      scan.onclick = async () => {
-        try {
-          const cfg = await scanPair();
-          if (cfg) await this.go(cfg);
-        } catch (e) {
-          dlgErr("c-err", String(e));
-        }
-      };
+      scan.onclick = () => void this.scanAndGo();
+      ($("cv-restore") as HTMLButtonElement).onclick = () =>
+        void this.scanAndGo();
     }
 
     // Le bouton vit dans la sidebar — drawer sur Android : le refermer

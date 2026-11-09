@@ -65,7 +65,10 @@ async function remoteVersion(): Promise<string> {
   return invoke<string>("check_update", { includeRc: rcChannel() });
 }
 
-/// URL de l'APK de la release `tag` (asset `.apk`), fallback = page releases.
+/// URL de l'APK de la release `tag` (asset `.apk`), fallback = page de
+/// la release du tag — PAS /releases/latest : sur le canal rc, latest
+/// pointerait la stable et l'utilisateur installerait la mauvaise
+/// version (le APK visé doit suivre `tag` même en échec d'énumération).
 async function apkReleaseUrl(tag: string): Promise<string> {
   try {
     const r = await fetch(
@@ -82,7 +85,28 @@ async function apkReleaseUrl(tag: string): Promise<string> {
   } catch {
     /* réseau */
   }
-  return "https://github.com/Wameuh/AgentControl/releases/latest";
+  return `https://github.com/Wameuh/AgentControl/releases/tag/v${tag}`;
+}
+
+/// Flow Android vérifié (backlog #232) : `shellOpen` → opener plugin →
+/// navigateur système → GitHub sert l'asset APK (content-type
+/// octet-stream) → téléchargement → l'utilisateur ouvre le fichier
+/// depuis ses téléchargements → package installer. « Install unknown
+/// apps » est une permission de l'app SOURCE (le navigateur) : Android
+/// la demande à la première install, un refus = échec côté installeur
+/// invisible pour nous — d'où le toast « rouvrez l'app » (le process
+/// peut être tué par le remplacement, Android ne relance jamais
+/// l'app). L'APK release est signé par l'upload keystore (#200) →
+/// update in-place possible UNIQUEMENT si l'app installée porte la
+/// même signature ; un appareil sur build debug-signé (rc pré-#200 ou
+/// build --debug) ne peut pas upgrader → uninstall → perte des accès
+/// (Keystore non exportables, #160) → re-pairing QR obligatoire.
+/// `app_signing` (plugin ac-device → PackageManager) rend le verdict :
+/// "impossible" = debuggable ou signataire ≠ certificat release.
+async function androidReinstallRisk(): Promise<boolean> {
+  const info = await invoke<{ update_in_place?: string }>("app_signing")
+    .catch(() => null);
+  return info?.update_in_place === "impossible";
 }
 
 /// Update du client vers `tag` : desktop = installeur auto
@@ -93,6 +117,19 @@ async function apkReleaseUrl(tag: string): Promise<string> {
 /// citent le repli manuel — commande ou page releases).
 export async function performClientUpdate(tag: string) {
   if (isAndroid()) {
+    // Garde-fou uninstall : si l'app installée ne peut pas upgrader
+    // in-place (signature ≠ release), le chemin impose une
+    // désinstallation qui efface TOUTES les données (allowBackup=false,
+    // #160 — les secrets Keystore ne sont pas exportables) : l'utilisateur
+    // doit le savoir AVANT de télécharger, pas après l'échec d'install.
+    if (await androidReinstallRisk()) {
+      const ok = await confirmPair(
+        t("upd_android_h"),
+        t("upd_android_warn"),
+        t("upd_android_go"),
+      );
+      if (!ok) return;
+    }
     shellOpen(await apkReleaseUrl(tag));
     // L'APK s'installe dans le gestionnaire de paquets : le process meurt
     // avec l'app et Android ne permet pas à une app remplacée de se

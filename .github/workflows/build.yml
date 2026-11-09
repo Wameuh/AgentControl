@@ -297,6 +297,21 @@ jobs:
           if [ "$SIGNED" = 1 ]; then
             echo "ANDROID_SIGNED=1" >> "$GITHUB_ENV"
             MODE=""
+            # Empreinte SHA-256 du certificat upload keystore, compilée
+            # dans l'APK (AGENTCONTROL_ANDROID_CERT_SHA256 → build.rs →
+            # app_signing → plugin ac-device) : le client compare le
+            # signataire de l'APK installé à cette valeur pour savoir si
+            # l'update in-place est possible (garde-fou uninstall —
+            # backlog #232). Le keystore est décodé ici, avant le build
+            # cargo qui lit l'env.
+            KS_PRE="$RUNNER_TEMP/agentcontrol-upload-keystore.jks"
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$KS_PRE"
+            CERT_SHA=$("$JAVA_HOME/bin/keytool" -list -v -keystore "$KS_PRE" \
+              -alias "$ANDROID_KEY_ALIAS" -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+              | awk '/SHA256:/{print $2; exit}' | tr -d ':' | tr 'A-F' 'a-f')
+            # GITHUB_ENV ne couvre que les steps suivants — l'export rend
+            # la variable visible du `tauri android build` de CE step.
+            export AGENTCONTROL_ANDROID_CERT_SHA256="$CERT_SHA"
           else
             echo "ANDROID_SIGNED=0" >> "$GITHUB_ENV"
             MODE="--debug"
