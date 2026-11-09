@@ -18,7 +18,7 @@ export async function renderClientLog(view: HTMLElement, min: string) {
   const txt = await invoke<string>("log_tail", { n: 400 }).catch(() => "");
   const rows: string[] = [];
   for (const line of txt.split("\n")) {
-    const m = line.match(/^(\[[^\]]*\] \[(DEBUG|INFO|WARN|ERROR)\])(?: (\S+:\d+))?/);
+    const m = line.match(/^(\[[^\]]*\] \[(DEBUG|INFO|WARN|ERROR)\](?: \[pid \d+\])?)(?: (\S+:\d+))?/);
     if (logRank(m?.[2]?.toLowerCase() ?? "info") < minRank) continue;
     const cls = m ? ` ll-${m[2].toLowerCase()}` : "";
     let body = esc(line);

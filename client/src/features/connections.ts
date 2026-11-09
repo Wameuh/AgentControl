@@ -335,7 +335,6 @@ export class ConnectionManager {
     gen?: number; _ac_transport?: AcTransport;
   }): boolean {
     if (!this.cfg.has(key) || this.gone.has(key)) return false;
-    if (v._ac_transport) this.lastTransport.set(key, v._ac_transport);
     // Sonde démarrée sur un client remplacé depuis — ne pas striker
     // la gen courante (silent/rtt « vieux » typiques de ce cas).
     if (!this.isFresh(key, v.gen)) {
@@ -343,6 +342,7 @@ export class ConnectionManager {
         `conn ${key}: sonde périmée (gen ${v.gen}≠${this.gens.get(key)}) — ignorée`);
       return true; // transport considéré joignable : la gen fraîche l'est
     }
+    if (v._ac_transport) this.lastTransport.set(key, v._ac_transport);
     const err = v.error ?? "?";
     // kind champ structuré (fusion ≥ cette version) ; repli sur le
     // littéral "timeout" pour les vieux démons / bridges sans kind.
@@ -362,7 +362,7 @@ export class ConnectionManager {
       if (ni < IGNORED_STRIKE_MAX) {
         this.ignored.set(key, ni);
         logUi("warn",
-          `conn ${key}: sonde timeout mais ${tstate} ` +
+          `conn ${key}: sonde timeout mais transport vivant (${tstate}) ` +
           `(silent ${v.silent_ms} ms, rtt ${v.rtt_ms ?? "?"} ms)` +
           fmtAcTransport(v._ac_transport) + ` — ignoré ×${ni}`);
         return true;
