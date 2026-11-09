@@ -316,30 +316,74 @@ impl Daemon {
         let mut resumable = Vec::new();
         let sdir = root.join("sessions");
         if sdir.exists() {
+            let mut dirs = Vec::new();
             for entry in std::fs::read_dir(&sdir)? {
                 let entry = entry?;
-                if !entry.file_type()?.is_dir() {
-                    continue;
+                if entry.file_type()?.is_dir() {
+                    dirs.push(entry.path());
                 }
-                match Session::open(entry.path(), &d.compact, Arc::clone(&d.caps)) {
-                    Ok(s) => {
-                        // État persisté lu avant reconcile (qui efface la
-                        // distinction actif/idle en passant tout à
-                        // "interrupted").
-                        let active = s.was_active();
-                        // Un agent n'est jamais vivant après un restart du
-                        // démon → interrupted + event journalisé.
-                        s.reconcile_state();
-                        let id = s.meta_snapshot().id;
-                        if active {
-                            resumable.push(id.clone());
-                        }
-                        d.watch_prs(&s);
-                        info!("session chargée: {id}");
-                        d.sessions.write().await.insert(id, s);
+            }
+            // Chargement parallèle borné : Session::open → Journal::open
+            // scanne events.jsonl EN ENTIER (index seq→offset) — N
+            // sessions × gros journaux = des minutes de blocage
+            // séquentiel avant même le bind des listeners, pendant
+            // lesquelles le client voit un flap de connexion (item
+            // #227). spawn_blocking + sémaphore : le parse reste hors
+            // de l'executor async sans ouvrir une centaine de threads
+            // de scan sur un VPS partagé.
+            let par = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .min(8);
+            let sem = Arc::new(tokio::sync::Semaphore::new(par));
+            let mut set = tokio::task::JoinSet::new();
+            for dir in dirs {
+                let dir_err = dir.clone();
+                let sem = Arc::clone(&sem);
+                let compact = d.compact.clone();
+                let caps = Arc::clone(&d.caps);
+                set.spawn(async move {
+                    let _permit = sem.acquire_owned().await.expect("semaphore jamais fermée");
+                    let r = tokio::task::spawn_blocking(move || {
+                        Session::open(dir, &compact, caps)
+                    })
+                    .await;
+                    (dir_err, r)
+                });
+            }
+            while let Some(joined) = set.join_next().await {
+                let (dir, r) = match joined {
+                    Ok(t) => t,
+                    Err(e) => {
+                        warn!("session load: tâche rejointe en erreur: {e}");
+                        continue;
                     }
-                    Err(e) => warn!("session load failed {:?}: {e:#}", entry.path()),
+                };
+                let s = match r {
+                    Ok(Ok(s)) => s,
+                    Ok(Err(e)) => {
+                        warn!("session load failed {:?}: {e:#}", dir);
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!("session load {:?}: join: {e}", dir);
+                        continue;
+                    }
+                };
+                // État persisté lu avant reconcile (qui efface la
+                // distinction actif/idle en passant tout à
+                // "interrupted").
+                let active = s.was_active();
+                // Un agent n'est jamais vivant après un restart du
+                // démon → interrupted + event journalisé.
+                s.reconcile_state();
+                let id = s.meta_snapshot().id;
+                if active {
+                    resumable.push(id.clone());
                 }
+                d.watch_prs(&s);
+                info!("session chargée: {id}");
+                d.sessions.write().await.insert(id, s);
             }
         }
         Ok((d, resumable))
@@ -950,6 +994,25 @@ impl Daemon {
         }
     }
 
+    /// Rattrapage borné d'un subscribe hors de l'executor async :
+    /// `read_tail` fait de l'I/O disque (index mémoire vide → scan du
+    /// fichier entier, des dizaines de Mo) — inline dans la boucle de
+    /// connexion il gelait la lecture des requêtes et les events live
+    /// du subscriber, ce qui se traduisait côté client par des timeouts
+    /// sur TOUTES les méthodes puis une fermeture (flap #227). L'ordre
+    /// est préservé : la réponse et les pushes partent après l'await,
+    /// le broadcast a bufferisé le live entre-temps.
+    async fn replay_tail(s: &Arc<Session>, after: u64) -> (Vec<proto::Event>, u64) {
+        let s = Arc::clone(s);
+        tokio::task::spawn_blocking(move || {
+            s.journal.read_tail(&s.dir, after, SUBSCRIBE_REPLAY_MAX)
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default()
+    }
+
     /// Sert une connexion : lit des Request en NDJSON, écrit Response/Push.
     /// Retourne quand le client se déconnecte.
     pub async fn serve_conn<S>(self: &Arc<Self>, stream: S) -> Result<()>
@@ -1111,10 +1174,8 @@ impl Daemon {
                                 // sinon un journal volumineux sature le
                                 // lien et fait échouer toutes les requêtes
                                 // concurrentes par timeout.
-                                let (backlog, skipped) = s
-                                    .journal
-                                    .read_tail(&s.dir, after, SUBSCRIBE_REPLAY_MAX)
-                                    .unwrap_or_default();
+                                let (backlog, skipped) =
+                                    Self::replay_tail(&s, after).await;
                                 let resp = Response::ok(req.id, json!({
                                     "subscribed": session,
                                     "last_seq": s.journal.last_seq(),
@@ -1245,10 +1306,8 @@ impl Daemon {
                                 };
                                 Self::send_push(&outbox, sid, &ev)?;
                             }
-                            let (backlog, skipped) = s
-                                .journal
-                                .read_tail(&s.dir, *last, SUBSCRIBE_REPLAY_MAX)
-                                .unwrap_or_default();
+                            let (backlog, skipped) =
+                                Self::replay_tail(&s, *last).await;
                             if skipped > 0 {
                                 warn!(session = %sid, skipped, "subscribe lagged: events sautés au-delà de la fenêtre");
                             }
@@ -1618,10 +1677,30 @@ pub async fn janitor(daemon: Arc<Daemon>) {
         let sessions: Vec<Arc<Session>> =
             daemon.sessions.read().await.values().cloned().collect();
         for s in &sessions {
-            if let Err(e) = s.journal.compact_if_needed(&s.dir, journal_max, journal_keep) {
+            // Compaction = réécriture complète du journal + rebuild de
+            // l'index : I/O disque synchrone, potentiellement des
+            // dizaines de Mo par session — hors de l'executor async
+            // (le balayage des N sessions gelait un worker à lui seul).
+            let s2 = Arc::clone(s);
+            let (jc, pb) = match tokio::task::spawn_blocking(move || {
+                (
+                    s2.journal
+                        .compact_if_needed(&s2.dir, journal_max, journal_keep),
+                    journal::purge_blobs(&s2.dir, blob_max),
+                )
+            })
+            .await
+            {
+                Ok(pair) => pair,
+                Err(e) => {
+                    warn!("janitor {}: tâche: {e}", s.meta_snapshot().id);
+                    continue;
+                }
+            };
+            if let Err(e) = jc {
                 warn!("compact {}: {e}", s.meta_snapshot().id);
             }
-            match journal::purge_blobs(&s.dir, blob_max) {
+            match pb {
                 Ok(n) if n > 0 => info!("blobs purgés {}: {n}", s.meta_snapshot().id),
                 Err(e) => warn!("purge blobs {}: {e}", s.meta_snapshot().id),
                 _ => {}

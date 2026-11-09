@@ -1111,13 +1111,21 @@ impl Daemon {
 
     pub(super) async fn h_events(self: &Arc<Self>, session: String, before_seq: Option<u64>, after_seq: Option<u64>, limit: u32) -> Result<Value> {
                 let s = self.get_session(&session).await?;
-                // after_seq présent → page ascendante (saut de recherche) ;
-                // sinon page arrière classique (pagination scroll-up).
-                let events = match after_seq {
-                    Some(a) => s.journal.read_page_after(&s.dir, a, limit as usize)?,
-                    None => s.journal.read_page(&s.dir, before_seq, limit as usize)?,
-                };
-                let last = s.journal.last_seq();
+                // Lecture disque (seek + parse JSONL) hors de l'executor :
+                // c'est LA requête de la chaîne connect→open côté client,
+                // un journal à index vide la gèlerait sinon (item #227).
+                let s2 = Arc::clone(&s);
+                let (events, last) = tokio::task::spawn_blocking(move || -> Result<(Vec<proto::Event>, u64)> {
+                    // after_seq présent → page ascendante (saut de recherche) ;
+                    // sinon page arrière classique (pagination scroll-up).
+                    let events = match after_seq {
+                        Some(a) => s2.journal.read_page_after(&s2.dir, a, limit as usize)?,
+                        None => s2.journal.read_page(&s2.dir, before_seq, limit as usize)?,
+                    };
+                    Ok((events, s2.journal.last_seq()))
+                })
+                .await
+                .context("lecture journal")??;
                 Ok(json!({"events": events, "last_seq": last}))
     }
 
@@ -1125,53 +1133,61 @@ impl Daemon {
     /// quelques aller-retours sans monopoliser la requête des minutes —
     /// le client relance avec le curseur `next_before` pour continuer.
     pub(super) async fn h_search_events(self: &Arc<Self>, session: String, query: String, before_seq: Option<u64>, limit: u32) -> Result<Value> {
-                const SEARCH_CHUNK: usize = 500;
-                const SEARCH_SCAN_CAP: u64 = 20_000;
                 let s = self.get_session(&session).await?;
                 let needle = query.trim().to_lowercase();
                 if needle.is_empty() {
                     return Ok(json!({"matches": [], "next_before": 0, "done": true, "scanned": 0}));
                 }
-                let want = (limit as usize).max(1);
-                let mut matches = Vec::new();
-                let mut cursor = before_seq.filter(|b| *b > 0).unwrap_or(u64::MAX);
-                let mut scanned = 0u64;
-                let mut done = false;
-                while !done && matches.len() < want && scanned < SEARCH_SCAN_CAP {
-                    let page = s.journal.read_page(&s.dir, Some(cursor), SEARCH_CHUNK)?;
-                    if page.is_empty() {
-                        done = true;
-                        break;
-                    }
-                    // cursor suit le dernier seq réellement examiné : arrêt
-                    // en pleine page (limit/cap) → next_before reprend sur
-                    // le reste non scanné de la page au lieu de la sauter.
-                    for ev in page.iter().rev() {
-                        scanned += 1;
-                        cursor = ev.seq;
-                        if let Some(excerpt) = match_excerpt(&ev.kind.searchable_text(), &needle, 60) {
-                            matches.push(json!({
-                                "seq": ev.seq,
-                                "ts": ev.ts,
-                                "type": ev.kind.type_tag(),
-                                "excerpt": excerpt,
-                            }));
-                        }
-                        if matches.len() >= want || scanned >= SEARCH_SCAN_CAP {
+                // Scan multi-pages (jusqu'à SEARCH_SCAN_CAP events) hors
+                // de l'executor — le parse JSONL synchrone gèlerait un
+                // worker async pendant des secondes sur gros journal.
+                let s2 = Arc::clone(&s);
+                tokio::task::spawn_blocking(move || -> Result<Value> {
+                    const SEARCH_CHUNK: usize = 500;
+                    const SEARCH_SCAN_CAP: u64 = 20_000;
+                    let want = (limit as usize).max(1);
+                    let mut matches = Vec::new();
+                    let mut cursor = before_seq.filter(|b| *b > 0).unwrap_or(u64::MAX);
+                    let mut scanned = 0u64;
+                    let mut done = false;
+                    while !done && matches.len() < want && scanned < SEARCH_SCAN_CAP {
+                        let page = s2.journal.read_page(&s2.dir, Some(cursor), SEARCH_CHUNK)?;
+                        if page.is_empty() {
+                            done = true;
                             break;
                         }
+                        // cursor suit le dernier seq réellement examiné : arrêt
+                        // en pleine page (limit/cap) → next_before reprend sur
+                        // le reste non scanné de la page au lieu de la sauter.
+                        for ev in page.iter().rev() {
+                            scanned += 1;
+                            cursor = ev.seq;
+                            if let Some(excerpt) = match_excerpt(&ev.kind.searchable_text(), &needle, 60) {
+                                matches.push(json!({
+                                    "seq": ev.seq,
+                                    "ts": ev.ts,
+                                    "type": ev.kind.type_tag(),
+                                    "excerpt": excerpt,
+                                }));
+                            }
+                            if matches.len() >= want || scanned >= SEARCH_SCAN_CAP {
+                                break;
+                            }
+                        }
+                        // Page courte entièrement examinée → début du journal.
+                        if cursor == page[0].seq && page.len() < SEARCH_CHUNK {
+                            done = true;
+                        }
                     }
-                    // Page courte entièrement examinée → début du journal.
-                    if cursor == page[0].seq && page.len() < SEARCH_CHUNK {
-                        done = true;
-                    }
-                }
-                Ok(json!({
-                    "matches": matches,
-                    "next_before": if cursor == u64::MAX { 0 } else { cursor },
-                    "done": done,
-                    "scanned": scanned,
-                }))
+                    Ok(json!({
+                        "matches": matches,
+                        "next_before": if cursor == u64::MAX { 0 } else { cursor },
+                        "done": done,
+                        "scanned": scanned,
+                    }))
+                })
+                .await
+                .context("recherche journal")?
     }
 
     /// Premier post du cycle courant : le journal ne contient que le
@@ -1187,7 +1203,15 @@ impl Daemon {
                 use crate::journal::FirstPost;
                 let s = self.get_session(&session).await?;
                 let origin = s.meta_snapshot().origin;
-                Ok(match s.journal.first_post(&s.dir, origin.as_deref())? {
+                // Scan de tête borné (FIRST_POST_SCAN_MAX lignes) hors de
+                // l'executor — même classe de blocage que events/search.
+                let s2 = Arc::clone(&s);
+                let fp = tokio::task::spawn_blocking(move || {
+                    s2.journal.first_post(&s2.dir, origin.as_deref())
+                })
+                .await
+                .context("first_post")??;
+                Ok(match fp {
                     FirstPost::Found(ev) => {
                         let proto::EventKind::UserMessage { text, steer, origin, .. } = ev.kind else {
                             unreachable!() // Found ne porte que ce kind

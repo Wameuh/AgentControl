@@ -385,17 +385,34 @@ impl Daemon {
             return;
         }
         let sid = s.meta_snapshot().id;
-        if let Ok(evs) = s.journal.read_page(&s.dir, None, 2000) {
-            let mut titles = HashMap::new();
-            for ev in &evs {
-                scan_pr_event(&self.pr_verify, &self.forges, s, &sid, ev, &mut titles);
-            }
-        }
         let verify = Arc::clone(&self.pr_verify);
         let forges = self.forges.clone();
         let weak = Arc::downgrade(s);
-        let mut rx = s.events_tx.subscribe();
+        let s2 = Arc::clone(s);
         tokio::spawn(async move {
+            // Receiver AVANT le backfill : les events produits pendant
+            // le scan sont bufferisés par le broadcast (cap 1024) au
+            // lieu de tomber dans le trou read_page→subscribe — et le
+            // backfill reste idempotent (le registre déduplique).
+            let mut rx = s2.events_tx.subscribe();
+            // Backfill borné (2000 events) hors de l'executor : le scan
+            // du journal ne gèle plus le worker — au chargement du
+            // démon c'était N sessions × journal (item #227).
+            {
+                let s3 = Arc::clone(&s2);
+                let sid_b = sid.clone();
+                let verify_b = Arc::clone(&verify);
+                let forges_b = forges.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Ok(evs) = s3.journal.read_page(&s3.dir, None, 2000) {
+                        let mut titles = HashMap::new();
+                        for ev in &evs {
+                            scan_pr_event(&verify_b, &forges_b, &s3, &sid_b, ev, &mut titles);
+                        }
+                    }
+                })
+                .await;
+            }
             let mut titles: HashMap<String, String> = HashMap::new();
             loop {
                 match rx.recv().await {
