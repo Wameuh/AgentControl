@@ -54,14 +54,25 @@ pub fn init(root: &Path) -> Option<tracing_appender::non_blocking::WorkerGuard> 
 
 /// Fichier journal courant : le `daemon.log.<date>` au nom le plus élevé
 /// (les dates ISO trient chronologiquement ; `daemon.log` nu toléré par
-/// robustesse). None = répertoire absent ou vide.
+/// robustesse). Le suffixe est filtré sur `\d{4}-\d{2}-\d{2}` — un
+/// résiduel `daemon.log.bak`/`.old` trierait au-dessus des noms datés
+/// et serait taillé indéfiniment. None = répertoire absent ou vide.
 pub fn current_log_file(root: &Path) -> Option<(String, PathBuf)> {
     let dir = root.join("logs");
     let mut best: Option<(String, PathBuf)> = None;
     for e in std::fs::read_dir(&dir).ok()? {
         let Ok(e) = e else { continue };
         let name = e.file_name().to_string_lossy().to_string();
-        if !(name == "daemon.log" || name.starts_with("daemon.log.")) {
+        let dated = name
+            .strip_prefix("daemon.log.")
+            .is_some_and(|s| s.len() == 10 && s.bytes().enumerate().all(|(i, b)| {
+                if i == 4 || i == 7 {
+                    b == b'-'
+                } else {
+                    b.is_ascii_digit()
+                }
+            }));
+        if !(name == "daemon.log" || dated) {
             continue;
         }
         if !e.file_type().map(|t| t.is_file()).unwrap_or(false) {
@@ -161,6 +172,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("logs")).unwrap();
         write(&dir.join("logs"), "daemon.log.2026-11-08", "old\n");
         write(&dir.join("logs"), "daemon.log.2026-11-09", "new\n");
+        write(&dir.join("logs"), "daemon.log.bak", "ignore\n");
         write(&dir.join("logs"), "client.log", "ignore\n");
         let (name, _) = current_log_file(&dir).unwrap();
         assert_eq!(name, "daemon.log.2026-11-09");

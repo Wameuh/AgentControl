@@ -225,6 +225,11 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
     let so = |k: &str| p.get(k).and_then(Value::as_str).map(String::from);
     Ok(match method {
         "daemon_status" => ReqKind::DaemonStatus,
+        "daemon_log_tail" => ReqKind::DaemonLogTail {
+            file: so("file"),
+            offset: p.get("offset").and_then(Value::as_u64).unwrap_or(0),
+            limit: p.get("limit").and_then(Value::as_u64),
+        },
         "update_daemon" => ReqKind::UpdateDaemon { version: s("version") },
         "list_agents" => ReqKind::ListAgents,
         "model_costs" => ReqKind::ModelCosts { agent: s("agent") },

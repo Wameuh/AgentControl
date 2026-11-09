@@ -8,7 +8,7 @@
 // sauf si l'utilisateur a remonté lire ; filtre niveau + pause.
 // ---------------------------------------------------------------------------
 
-import { invoke, isWeb } from "../core/bridge";
+import { invoke } from "../core/bridge";
 import { isAndroid } from "../core/chrome";
 import { $, esc, logUi } from "../core/dom";
 import { logLineLevel, logRank } from "../core/logview";
@@ -76,12 +76,6 @@ export class LogsPanel {
    *  inconnue » à chaque poll). */
   daemonCapable(k: string): boolean {
     return this.conns.cap(k)?.daemon_logs === true;
-  }
-
-  /** Visibilité du bouton titlebar — toujours : l'onglet Client marche
-   *  sans démon (Tauri : client.log ; web : tampon UI). */
-  syncBtn() {
-    $("tb-logs").hidden = false;
   }
 
   private setChatInert(v: boolean) {
@@ -173,8 +167,7 @@ export class LogsPanel {
       const o = document.createElement("option");
       o.value = k;
       const st = this.conns.state(k);
-      const label = k === "default" ? "default" : k;
-      o.textContent = st && st !== "ok" ? `${label} (${st})` : label;
+      o.textContent = st && st !== "ok" ? `${k} (${st})` : k;
       sel.appendChild(o);
     }
     sel.value = list.includes(want) ? want : list[0];
@@ -219,7 +212,7 @@ export class LogsPanel {
       }>("log_read", { offset: st.offset, limit: PAGE });
       st.offset = r.offset;
       this.appendData(st, r.data);
-      this.loaded = true;
+      if (this.tails[this.tab] === st) this.loaded = true;
     } catch (e) {
       logUi("debug", `log_read client: ${e}`);
     }
@@ -250,7 +243,7 @@ export class LogsPanel {
       st.file = r.file;
       st.offset = r.offset;
       this.appendData(st, r.data);
-      this.loaded = true;
+      if (this.tails[this.tab] === st) this.loaded = true;
     } catch (e) {
       logUi("debug", `daemon_log_tail ${conn}: ${e}`);
     }
@@ -267,6 +260,14 @@ export class LogsPanel {
     if (!parts.length) return;
     const before = st.rendered;
     st.lines.push(...parts);
+    // Flux inactif (changement d'onglet/conn pendant le fetch) : on
+    // accumule mais on ne touche pas au DOM — setTab/renderAll
+    // repeindra tout au retour sur cet onglet.
+    const active = this.tails[this.tab] === st;
+    if (!active) {
+      st.rendered = st.lines.length;
+      return;
+    }
     // Purge du tiers ancien quand le tampon déborde — re-rendu complet.
     if (st.lines.length > MAX_LINES) {
       st.lines.splice(0, Math.floor(MAX_LINES / 3));
