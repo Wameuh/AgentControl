@@ -809,8 +809,11 @@ pub(crate) fn counts_as_working(state: &str, sid: &str, live: &HashSet<String>) 
 /// ; `working` = `max_working` (en activité — `counts_as_working`).
 /// Spawn et réveil d'`asleep` consomment les DEUX : un `asleep` nudgé
 /// n'a par construction pas de waiter (garde `acwait_pending` en
-/// amont), il redevient working. `gained` compte les allocations du
-/// tick — base du compteur `working` du statut.
+/// amont), il redevient working. Exception connue : le nudge de
+/// relance d'un reviewer de revue en vol (§A de `orch_plan`, priorité
+/// revue) est volontairement hors budget — même classe de dépassement
+/// transitoire que le ping ac-wait. `gained` compte les allocations
+/// du tick — base du compteur `working` du statut.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct WorkerSlots {
     pub total: usize,
