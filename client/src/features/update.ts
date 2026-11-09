@@ -140,7 +140,7 @@ export async function performDaemonUpdate(o: {
     .catch(() => null);
   const n = sessions?.filter((s) =>
     s.conn === o.conn && s.state !== "dead" && s.state !== "interrupted" &&
-    s.state !== "asleep").length;
+    s.state !== "asleep" && s.state !== "wait-asleep").length;
   const ok = await confirmPair(
     t("dupdate_h"),
     n == null

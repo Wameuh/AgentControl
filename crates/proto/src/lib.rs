@@ -450,9 +450,11 @@ pub struct SessionMeta {
     /// (asleep : agent libéré volontairement, réveil auto au prochain envoi ;
     /// error : dernier tour session/prompt en échec — cf. `last_error`,
     /// livraison suspendue jusqu'à retry ou action explicite).
-    /// `wait` n'existe qu'à la sérialisation (list_sessions/session_info) :
-    /// dérivé d'un `idle` réel ayant un waiter ac-wait vivant — affichage
-    /// seul, jamais persisté.
+    /// `wait`/`wait-asleep` n'existent qu'à la sérialisation
+    /// (list_sessions/session_info) : dérivés d'un `idle`/`asleep`
+    /// réel ayant un waiter ac-wait vivant — affichage seul, jamais
+    /// persisté. `wait-asleep` préserve la distinction endormie pour
+    /// les gardes client (auto-resume, sleep, vue Repos).
     #[serde(default = "default_state")]
     pub state: String,
     /// Groupe nommé (sidebar) — None = non groupé.
@@ -482,8 +484,9 @@ pub struct SessionMeta {
     /// réussi ou reset de cycle (spawn, /clear, set_model…).
     #[serde(default)]
     pub last_error: Option<LastError>,
-    /// Détail du waiter ac-wait — présent seulement quand `state ==
-    /// "wait"` (dérivé à la sérialisation comme `wait`, jamais persisté).
+    /// Détail du waiter ac-wait — présent seulement quand `state` est
+    /// `wait`/`wait-asleep` (dérivé à la sérialisation comme `wait`,
+    /// jamais persisté).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<WaitInfo>,
 }

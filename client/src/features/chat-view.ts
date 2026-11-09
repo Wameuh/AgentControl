@@ -476,7 +476,7 @@ export class ChatView {
     app.current = listMeta ? { ...listMeta } : null;
     app.alive = !!app.current && !app.current.offline &&
       app.current.state !== "dead" && app.current.state !== "interrupted" &&
-      app.current.state !== "asleep";
+      app.current.state !== "asleep" && app.current.state !== "wait-asleep";
     // Session affichée différente → la recherche se ferme : ses résultats
     // indexent le journal de l'ancienne session, pas celui de la nouvelle.
     if (app.current?.id !== prevId) this.deps.onSessionChanged();
@@ -530,7 +530,8 @@ export class ChatView {
     // qu'attendre le spawn_lock derrière lui (sysline « reprise »
     // trompeuse pendant le boot normal).
     if (!app.alive && app.current.native_session_id &&
-        app.current.state !== "asleep" && app.current.state !== "starting") {
+        app.current.state !== "asleep" && app.current.state !== "wait-asleep" &&
+        app.current.state !== "starting") {
       const sys = document.createElement("div");
       sys.className = "sysline";
       sys.innerHTML = `${icon("loader")} ${esc(t("resume_wait"))}`;
