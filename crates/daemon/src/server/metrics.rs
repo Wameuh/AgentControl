@@ -9,7 +9,7 @@
 //!
 //! Journal : JSONL append-only, une ligne par sample —
 //!   {"ts":<epoch_s>, "pending":n, "poppable":n, "wip":n,
-//!    "workers_alive":n, "by_repo":{"<repo>":{"pending":n,"wip":n}}}
+//!    "workers_alive":n, "working":n, "by_repo":{"<repo>":{"pending":n,"wip":n}}}
 //! Rétention bornée : 30 jours ET ~100k samples (le premier seuil
 //! atteint tronque, en gardant les plus récents) ; la compaction
 //! réécrit le fichier (atomique `.part` + rename), déclenchée
@@ -26,7 +26,8 @@
 //! (`items_available:false`, champs items → null).
 
 use super::orch::{
-    now_secs, state_dir, task_poppable, task_status, OrchProbe, Task, COMPONENT_ORIGIN,
+    acwait_live_sids, counts_as_working, now_secs, state_dir, task_poppable, task_status,
+    OrchProbe, Task, COMPONENT_ORIGIN,
 };
 use super::*;
 use proto::SessionMeta;
@@ -57,7 +58,9 @@ pub(crate) fn metrics_path() -> PathBuf {
 /// `pending` = tous les items en attente (dep-bloqués inclus) ;
 /// `poppable` = le sous-ensemble lançable (dep soldée) ;
 /// `workers_alive` = sessions `origin` orchestrateur non terminales
-/// (asleep/idle compris — nudgeable n'est pas mort).
+/// (asleep/idle compris — nudgeable n'est pas mort) ; `working` =
+/// sous-ensemble EN ACTIVITÉ — non-asleep et sans waiter ac-wait
+/// vivant (le budget `max_working`, même règle que `counts_as_working`).
 fn build_sample(tasks: &[Task], metas: &[SessionMeta]) -> Value {
     let pending = tasks.iter().filter(|t| task_status(t) == "pending").count();
     let poppable = tasks
@@ -65,12 +68,22 @@ fn build_sample(tasks: &[Task], metas: &[SessionMeta]) -> Value {
         .filter(|t| task_status(t) == "pending" && task_poppable(t))
         .count();
     let wip = tasks.iter().filter(|t| task_status(t) == "wip").count();
+    let live_waiters = acwait_live_sids();
     let workers_alive = metas
         .iter()
         .filter(|m| {
             m.origin.as_deref() == Some(COMPONENT_ORIGIN)
                 && m.state != "dead"
                 && m.state != "interrupted"
+        })
+        .count();
+    let working = metas
+        .iter()
+        .filter(|m| {
+            m.origin.as_deref() == Some(COMPONENT_ORIGIN)
+                && m.state != "dead"
+                && m.state != "interrupted"
+                && counts_as_working(&m.state, &m.id, &live_waiters)
         })
         .count();
     // Répartition par workspace (tag `repo` des items) — optionnelle,
@@ -94,6 +107,7 @@ fn build_sample(tasks: &[Task], metas: &[SessionMeta]) -> Value {
         "poppable": poppable,
         "wip": wip,
         "workers_alive": workers_alive,
+        "working": working,
         "by_repo": by_repo
             .into_iter()
             .map(|(k, (p, w))| (k, json!({ "pending": p, "wip": w })))
@@ -479,6 +493,9 @@ mod tests {
         assert_eq!(s["poppable"], 2); // le dep-bloqué ne compte pas
         assert_eq!(s["wip"], 1);
         assert_eq!(s["workers_alive"], 2); // dead exclu, non-orch exclus
+        // working : sous-ensemble en activité — seul le meta « working »
+        // (asleep et dead exclus, autres origines exclues).
+        assert_eq!(s["working"], 1);
         assert_eq!(s["by_repo"]["AgentControl"]["pending"], 2);
         assert_eq!(s["by_repo"]["AgentControl"]["wip"], 1);
         assert!(s["ts"].as_f64().unwrap() > 0.0);
