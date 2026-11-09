@@ -479,8 +479,9 @@ impl Daemon {
     /// ne sanctifie pas `via`). Throttlé à PR_SYNC_MIN_INTERVAL et
     /// non réentrant : les onglets Dépôts de plusieurs clients peuvent
     /// demander en rafale sans dupliquer les appels forge. La réponse
-    /// peut prendre des dizaines de secondes (REST séquentiel à 8 s par
-    /// entrée injoignable) — les clients bornent leur attente (60 s)
+    /// peut prendre des dizaines de secondes (collecte forge bornée à
+    /// SYNC_CONCURRENCY appels simultanés — ~la lenteur max des entrées,
+    /// plus la somme) — les clients bornent leur attente (60 s)
     /// et relisent le registre au refresh suivant : le canal résultat
     /// est best-effort, la convergence passe par le registre.
     pub(super) async fn h_pr_sync(self: &Arc<Self>) -> Result<Value> {
