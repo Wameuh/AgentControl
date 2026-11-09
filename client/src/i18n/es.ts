@@ -431,6 +431,8 @@ export const es: Record<Key, string> = {
   bl_m_day: "terminadas / día",
   bl_m_peak: "pico de workers",
   bl_m_wmax: "Workers máx.",
+  bl_m_working: "workers activos",
+  bl_m_wactmax: "Workers activos máx.",
   bl_m_prmax: "Reviews PR máx.",
   bl_m_orch_err: "Error al actualizar el orquestador",
   bl_m_hint:

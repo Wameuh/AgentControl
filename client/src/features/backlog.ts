@@ -51,6 +51,7 @@ const REPO_UNTAGGED = "__untagged__";
  *  reste affichée et décrémentable — la borne ne borne que le pas. */
 const ORCH_STEPS: Record<string, { max: number; key: Key }> = {
   max_workers: { max: 20, key: "bl_m_wmax" },
+  max_working: { max: 20, key: "bl_m_wactmax" },
   pr_review_max_parallel: { max: 8, key: "bl_m_prmax" },
 };
 /** Fenêtres proposées par la RPC `backlog_metrics` (parse démon :
@@ -67,6 +68,7 @@ interface MetricsSample {
   pending?: number;
   wip?: number;
   workers_alive?: number;
+  working?: number;
 }
 
 /** Réponse `backlog_metrics` — agrégats calculés côté démon ; les
@@ -665,6 +667,7 @@ export class BacklogView {
           `<span><i class="bl-m-dot" style="background:var(--warn)"></i>${esc(t("bl_pending"))}</span>` +
           `<span><i class="bl-m-dot" style="background:var(--accent)"></i>${esc(t("bl_wip"))}</span>` +
           `<span><i class="bl-m-dot" style="background:var(--ok)"></i>${esc(t("bl_m_workers"))}</span>` +
+          `<span><i class="bl-m-dot" style="background:var(--violet)"></i>${esc(t("bl_m_working"))}</span>` +
           `</div>` +
           this.cardsHtml(m);
       } else {
@@ -847,6 +850,7 @@ export class BacklogView {
         s.pending ?? 0,
         s.wip ?? 0,
         s.workers_alive ?? 0,
+        s.working ?? 0,
       );
     }
 
@@ -875,6 +879,7 @@ export class BacklogView {
       ["pending", "--warn"],
       ["wip", "--accent"],
       ["workers_alive", "--ok"],
+      ["working", "--violet"],
     ];
     for (const [k, varName] of series) {
       const col = themeRgb(varName) ?? dim;

@@ -152,6 +152,13 @@ pub struct OrchCfg {
     /// Workers `title_prefix*` simultanés max (défaut 5).
     #[serde(default = "d5")]
     pub max_workers: u32,
+    /// Workers « en activité » simultanés max — un worker garé sur un
+    /// waiter ac-wait vivant libère un slot *working* mais garde son
+    /// slot total `max_workers` ; spawn et réveil d'`asleep` exigent
+    /// du mou sur les DEUX caps. 0 = non borné → suit `max_workers`
+    /// (comportement historique). Défaut 0.
+    #[serde(default)]
+    pub max_working: u32,
     /// Période de la boucle en secondes (défaut 60, min 10).
     #[serde(default = "d60")]
     pub poll_secs: u64,
@@ -354,6 +361,7 @@ impl Default for OrchCfg {
             auto_patchnotes: true,
             spawn_managers: true,
             max_workers: 5,
+            max_working: 0,
             poll_secs: 60,
             title_prefix: dprefix(),
             group: dgroup(),
@@ -390,6 +398,15 @@ impl Default for OrchCfg {
 }
 
 impl OrchCfg {
+    /// Cap effectif `max_working` : 0 = non borné → `max_workers`.
+    pub fn max_working_cap(&self) -> u64 {
+        u64::from(if self.max_working == 0 {
+            self.max_workers
+        } else {
+            self.max_working
+        })
+    }
+
     /// Profil effectif d'un rôle : le param dédié (`*_agent`) s'il est
     /// posé, sinon le profil global `agent` — compat des configs
     /// mono-profil.

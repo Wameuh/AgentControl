@@ -155,6 +155,9 @@ pub(crate) struct OrchStatus {
     /// ISO-8601 du dernier cycle exécuté (phase Active).
     pub last_cycle: Option<String>,
     pub workers: usize,
+    /// Sessions worker EN ACTIVITÉ (`max_working`) — hors waiter
+    /// ac-wait vivant ; approximation du tick (snapshot + allocations).
+    pub working: usize,
     pub pending: usize,
     pub wip: usize,
     /// Compteurs du pipeline plan_review (0 en mode legacy).
@@ -325,6 +328,7 @@ impl OrchProbe {
                 detail: cfg.enabled.then(|| "démarrage — en attente du premier cycle".into()),
                 last_cycle: None,
                 workers: 0,
+                working: 0,
                 pending: 0,
                 wip: 0,
                 planners: 0,
@@ -481,6 +485,7 @@ impl OrchProbe {
             "detail": st.detail,
             "last_cycle": st.last_cycle,
             "workers": st.workers,
+            "working": st.working,
             "pending": st.pending,
             "wip": st.wip,
             "planners": st.planners,
@@ -786,6 +791,50 @@ pub(crate) fn acwait_pending(sid: &str) -> bool {
 /// garanti → compte 0 comme tout `asleep`.
 pub(crate) fn counts_as_alive(state: &str, sid: &str, live: &HashSet<String>) -> bool {
     state != "asleep" || live.contains(sid)
+}
+
+/// La session consomme-t-elle un slot `max_working` (workers EN
+/// ACTIVITÉ) ? = `counts_as_alive` SANS waiter ac-wait vivant : un
+/// `asleep`+waiter garde son slot total (#181, retour garanti) mais
+/// est garé — il libère le slot working ; symétriquement une session
+/// non-asleep avec waiter pendante est « en attente » (le ping peut
+/// la steer à tout moment) → pas working tant que le waiter vit.
+/// `live` = même scan unique que `counts_as_alive`.
+pub(crate) fn counts_as_working(state: &str, sid: &str, live: &HashSet<String>) -> bool {
+    counts_as_alive(state, sid, live) && !live.contains(sid)
+}
+
+/// Budgets de slots worker d'un tick : `total` = `max_workers` (toutes
+/// sessions Backlog-* comptées `alive`, waiter ac-wait garé inclus)
+/// ; `working` = `max_working` (en activité — `counts_as_working`).
+/// Spawn et réveil d'`asleep` consomment les DEUX : un `asleep` nudgé
+/// n'a par construction pas de waiter (garde `acwait_pending` en
+/// amont), il redevient working. `gained` compte les allocations du
+/// tick — base du compteur `working` du statut.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct WorkerSlots {
+    pub total: usize,
+    pub working: usize,
+    pub gained: usize,
+}
+
+impl WorkerSlots {
+    /// Un slot peut-il être alloué ? Les DEUX caps doivent avoir du
+    /// mou. Dépassement transitoire accepté et voulu : le ping ac-wait
+    /// va direct à la session via `acctl send` — l'orchestrateur ne
+    /// peut pas le filtrer → un réveil de waiter peut dépasser
+    /// `max_working` jusqu'au prochain park. Le cap est un contrôle
+    /// d'admission (spawn/nudge), pas un kill.
+    pub fn ok(&self) -> bool {
+        self.total > 0 && self.working > 0
+    }
+
+    /// Alloue un slot (spawn ou réveil) — les deux budgets.
+    pub fn take(&mut self) {
+        self.total = self.total.saturating_sub(1);
+        self.working = self.working.saturating_sub(1);
+        self.gained += 1;
+    }
 }
 
 /// Sids ayant au moins un waiter ac-wait vivant — scan unique du
@@ -1365,13 +1414,13 @@ impl Daemon {
         // dédié (server/orch_plan.rs — même snapshot, même état
         // persisté partagé) ; l'autre branche est le dispatch worker
         // direct historique, inchangé.
-        let (n_workers, n_pending, n_planners, n_reviewers) = if cfg.plan_review {
+        let (n_workers, n_working, n_pending, n_planners, n_reviewers) = if cfg.plan_review {
             let oc = self
                 .orch_plan_tick(
                     bin, cfg, ws, &tasks, &metas, &session_ids, &prs, &mut st,
                 )
                 .await?;
-            (oc.workers, oc.pending, oc.planners, oc.reviewers)
+            (oc.workers, oc.working, oc.pending, oc.planners, oc.reviewers)
         } else {
             // 0. Désactivation en vol : items encore plan_review/
             //    reviewing → dégel en pending (claim-review + verdict
@@ -1684,12 +1733,23 @@ impl Daemon {
             // évite le spawn d'un remplaçant puis max+1 au ping (#181).
             // Waiter stale → compte 0, réveil budgété par `free` comme
             // avant. Aligné sur backlog_alive du pipeline plan_review.
+            // Deux budgets : `total` = max_workers (ci-dessus) et
+            // `working` = max_working — les sessions garées sur un
+            // waiter ac-wait comptent dans total mais pas working.
             let live_waiters = acwait_live_sids();
             let alive = workers
                 .iter()
                 .filter(|w| counts_as_alive(&w.state, &w.id, &live_waiters))
                 .count();
-            let mut free = (cfg.max_workers as usize).saturating_sub(alive);
+            let working = workers
+                .iter()
+                .filter(|w| counts_as_working(&w.state, &w.id, &live_waiters))
+                .count();
+            let mut slots = WorkerSlots {
+                total: (cfg.max_workers as usize).saturating_sub(alive),
+                working: (cfg.max_working_cap() as usize).saturating_sub(working),
+                gained: 0,
+            };
             // FIFO d'allocation : le plus ancien nudge différé d'abord
             // (jamais nudgé = le plus ancien).
             asleep_nudges
@@ -1700,10 +1760,10 @@ impl Daemon {
                 if my_open.is_empty() {
                     continue;
                 }
-                if free == 0 {
+                if !slots.ok() {
                     info!(
                         "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
-                         wip={my_open:?}) → nudge différé (max_workers)"
+                         wip={my_open:?}) → nudge différé (max_workers/max_working)"
                     );
                     continue;
                 }
@@ -1712,13 +1772,14 @@ impl Daemon {
                 }
                 info!(
                     "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
-                     wip={my_open:?}) → nudge wip-prioritaire (slot free={free})"
+                     wip={my_open:?}) → nudge wip-prioritaire (slots={:?})",
+                    slots
                 );
                 let open_refs: Vec<&String> = open_prs.iter().collect();
                 let wip_refs: Vec<&String> = my_open.iter().collect();
                 if self.orch_nudge(sid, &open_refs, &wip_refs).await {
                     st.nudges.insert(sid.clone(), now);
-                    free = free.saturating_sub(1);
+                    slots.take();
                 }
             }
             // 3b. spawn pour les pending poppables — seulement sur les
@@ -1742,9 +1803,11 @@ impl Daemon {
                     "{rl} session(s) en rate_limit — exécution sérialisée \
                      (1 session à la fois)"
                 ));
-                usize::from(!active && !pending.is_empty()).min(free)
+                usize::from(!active && !pending.is_empty())
+                    .min(slots.total)
+                    .min(slots.working)
             } else {
-                pending.len().min(free)
+                pending.len().min(slots.total).min(slots.working)
             };
             for _ in 0..to_spawn {
                 st.counter += 1;
@@ -1760,7 +1823,7 @@ impl Daemon {
                     if let Ok(s) = self.get_session(&sid).await {
                         workers.push(s.meta_snapshot());
                     }
-                    free = free.saturating_sub(1);
+                    slots.take();
                 }
             }
 
@@ -1772,10 +1835,10 @@ impl Daemon {
                 if !my_open.is_empty() {
                     continue;
                 }
-                if free == 0 {
+                if !slots.ok() {
                     info!(
                         "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
-                         wip={my_open:?}) → nudge différé (max_workers)"
+                         wip={my_open:?}) → nudge différé (max_workers/max_working)"
                     );
                     continue;
                 }
@@ -1786,15 +1849,22 @@ impl Daemon {
                 let wip_refs: Vec<&String> = my_open.iter().collect();
                 info!(
                     "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
-                     wip={my_open:?}) → nudge (slot free={free})"
+                     wip={my_open:?}) → nudge (slots={:?})",
+                    slots
                 );
                 if self.orch_nudge(&sid, &open_refs, &wip_refs).await {
                     st.nudges.insert(sid, now);
-                    free = free.saturating_sub(1);
+                    slots.take();
                 }
             }
 
-            (workers.len(), pending.len(), 0usize, 0usize)
+            (
+                workers.len(),
+                working + slots.gained,
+                pending.len(),
+                0usize,
+                0usize,
+            )
         };
 
         // 4. garde release PR : notes+ready quand vide, draft quand du
@@ -1887,6 +1957,7 @@ impl Daemon {
         {
             let mut stg = self.orch.status.lock().unwrap();
             stg.workers = n_workers;
+            stg.working = n_working;
             stg.pending = n_pending;
             stg.wip = tasks.iter().filter(|t| task_status(t) == "wip").count();
             stg.planners = n_planners;
@@ -2551,6 +2622,23 @@ mod tests {
         for st in ["idle", "working", "error"] {
             assert!(counts_as_alive(st, "s-w2", &live));
         }
+    }
+
+    #[test]
+    fn working_exclut_les_waiters_acwait() {
+        // max_working : alive SANS waiter ac-wait vivant. Un asleep+waiter
+        // garde son slot total mais est garé → pas working ; une session
+        // non-asleep avec waiter pendante est « en attente » → pas
+        // working tant que le waiter vit.
+        let mut live = HashSet::new();
+        live.insert("s-w1".to_string());
+        assert!(!counts_as_working("asleep", "s-w1", &live));
+        assert!(!counts_as_working("idle", "s-w1", &live));
+        assert!(!counts_as_working("working", "s-w1", &live));
+        // Sans waiter : non-asleep = working, asleep = ni alive ni working.
+        assert!(counts_as_working("idle", "s-w2", &live));
+        assert!(counts_as_working("working", "s-w2", &live));
+        assert!(!counts_as_working("asleep", "s-w2", &live));
     }
 
     /// Meta ac-wait minimale : `key=%q` shell-quoté — valeurs simples
