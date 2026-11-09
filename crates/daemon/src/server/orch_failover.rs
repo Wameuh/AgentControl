@@ -301,6 +301,8 @@ impl Daemon {
                 status: None,
                 note: None,
                 sync_fails: None,
+                review: None,
+                ci: None,
             });
         }
         info!(

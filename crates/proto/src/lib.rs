@@ -597,7 +597,11 @@ pub struct PrEntry {
     pub status: String,
     #[serde(default)]
     pub note: Option<String>,
-    /// "manual" (pr_track) — prioritaire — ou "detected" (scan auto).
+    /// "manual" (pr_track) — prioritaire —, "detected" (scan auto sur
+    /// signal fort : création) ou "weak" (URL citée sans commande de
+    /// création — ex. `gh pr ready`/`view`/`merge` : PR possiblement
+    /// étrangère à l'agent, reléguée dans la section « citées » du
+    /// client tant qu'aucun signal fort ne la promeut).
     #[serde(default)]
     pub via: String,
     /// Syncs consécutifs sans lecture live (hôte/repo injoignable,
@@ -606,6 +610,15 @@ pub struct PrEntry {
     /// lecture réussie.
     #[serde(default)]
     pub sync_fails: u32,
+    /// État de review lu sur la forge au dernier sync :
+    /// "approved" | "changes_requested" | "requested" | "required".
+    /// None = pas d'info (forge muette, gerrit, jamais syncée).
+    #[serde(default)]
+    pub review: Option<String>,
+    /// État des checks CI de la tête au dernier sync :
+    /// "pending" | "success" | "failure". None = pas d'info.
+    #[serde(default)]
+    pub ci: Option<String>,
     #[serde(default)]
     pub created_at: String,
     #[serde(default)]
@@ -1065,6 +1078,13 @@ pub enum ReqKind {
         /// `pr sync` côté acctl — 0 = vu live). None = inchangé.
         #[serde(default)]
         sync_fails: Option<u32>,
+        /// État de review forge à écrire ("" efface — valeur calculée
+        /// par le sync, jamais une saisie manuelle).
+        #[serde(default)]
+        review: Option<String>,
+        /// État CI forge à écrire ("" efface — même convention).
+        #[serde(default)]
+        ci: Option<String>,
     },
     PrUntrack {
         repo: String,

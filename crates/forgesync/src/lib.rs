@@ -328,6 +328,105 @@ fn gerrit_state(v: &Value) -> String {
     }
 }
 
+/// Review GitHub → label normalisé du registre : la `reviewDecision`
+/// tranche (changes_requested > approved), une `reviewRequest` en
+/// attente affine REVIEW_REQUIRED en "requested" (plus parlant), et
+/// REVIEW_REQUIRED sans demande explicite reste "required". "" = rien
+/// à signaler. Même vocabulaire que `PrEntry.review`.
+fn gh_review_state(v: &Value) -> String {
+    let dec = v["reviewDecision"].as_str().unwrap_or("");
+    if dec.eq_ignore_ascii_case("CHANGES_REQUESTED") {
+        return "changes_requested".into();
+    }
+    if dec.eq_ignore_ascii_case("APPROVED") {
+        return "approved".into();
+    }
+    if v["reviewRequests"]
+        .as_array()
+        .is_some_and(|a| !a.is_empty())
+    {
+        return "requested".into();
+    }
+    if dec.eq_ignore_ascii_case("REVIEW_REQUIRED") {
+        return "required".into();
+    }
+    String::new()
+}
+
+/// Checks CI GitHub (`statusCheckRollup` du `gh pr list`/`view` —
+/// aucun appel supplémentaire) → pending | success | failure.
+/// "" = rollup vide (pas de checks). Un check encore en cours rend
+/// "pending" même si un autre a déjà échoué — le verdict final n'est
+/// pas connu.
+fn gh_ci_state(v: &Value) -> String {
+    let Some(items) = v["statusCheckRollup"].as_array() else {
+        return String::new();
+    };
+    if items.is_empty() {
+        return String::new();
+    }
+    let mut pending = false;
+    let mut failed = false;
+    let mut ok = false;
+    for it in items {
+        // CheckRun → conclusion ; StatusContext → state (SUCCESS,
+        // FAILURE, PENDING, EXPECTED, ERROR…). Les deux coexistent dans
+        // le rollup ; `state` couvre les contextes sans check run.
+        let val = it["conclusion"]
+            .as_str()
+            .or_else(|| it["state"].as_str())
+            .unwrap_or("")
+            .to_uppercase();
+        match val.as_str() {
+            "SUCCESS" => ok = true,
+            // NEUTRAL/SKIPPED : ni succès ni échec (draft sans CI,
+            // check sauté) — seuls, ils ne signalent rien.
+            "NEUTRAL" | "SKIPPED" => {}
+            "FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED"
+            | "STARTUP_FAILURE" | "STALE" | "ERROR" => failed = true,
+            // En cours (status ≠ COMPLETED), EXPECTED/PENDING, ou
+            // conclusion illisible → pending par prudence.
+            _ => pending = true,
+        }
+    }
+    if pending {
+        "pending".into()
+    } else if failed {
+        "failure".into()
+    } else if ok {
+        "success".into()
+    } else {
+        String::new()
+    }
+}
+
+/// Review GitLab : reviewers assignés sur la MR → "requested" (la
+/// réponse MR standard n'a pas d'équivalent `reviewDecision`).
+fn glab_review_state(v: &Value) -> String {
+    if v["reviewers"].as_array().is_some_and(|a| !a.is_empty()) {
+        "requested".into()
+    } else {
+        String::new()
+    }
+}
+
+/// Pipeline de tête GitLab (`head_pipeline.status` du GET MR) →
+/// pending | success | failure. "" = pas de pipeline ou statut inconnu.
+fn glab_ci_state(v: &Value) -> String {
+    match v["head_pipeline"]["status"]
+        .as_str()
+        .unwrap_or("")
+        .to_lowercase()
+        .as_str()
+    {
+        "success" => "success".into(),
+        "failed" | "canceled" | "skipped" => "failure".into(),
+        "created" | "waiting_for_resource" | "preparing" | "pending"
+        | "running" | "scheduled" => "pending".into(),
+        _ => String::new(),
+    }
+}
+
 /// Cible d'une référence de review pour `live_ref` (équivalent du
 /// `PrTarget` résolu par acctl côté `pr add`).
 pub struct RefTarget {
@@ -352,7 +451,7 @@ pub fn live_ref(set: &[Value], t: &RefTarget) -> Option<Value> {
             let n = t.pr;
             gh_out(&[
                 "pr", "view", &n.to_string(), "--repo", &t.repo, "--json",
-                "title,state,isDraft,headRefName,url",
+                "title,state,isDraft,headRefName,url,reviewRequests,reviewDecision,statusCheckRollup",
             ])
             .and_then(|s| serde_json::from_str::<Value>(&s).ok())
             .map(|v| {
@@ -361,6 +460,8 @@ pub fn live_ref(set: &[Value], t: &RefTarget) -> Option<Value> {
                     "title": v["title"],
                     "branch": v["headRefName"],
                     "url": v["url"],
+                    "review": gh_review_state(&v),
+                    "ci": gh_ci_state(&v),
                     "pr": n,
                 })
             })
@@ -378,6 +479,8 @@ pub fn live_ref(set: &[Value], t: &RefTarget) -> Option<Value> {
                     "title": v["title"],
                     "branch": v["source_branch"],
                     "url": v["web_url"],
+                    "review": glab_review_state(&v),
+                    "ci": glab_ci_state(&v),
                     "pr": t.pr,
                 })
             })
@@ -560,6 +663,11 @@ pub struct PrUpdate {
     pub status: String,
     /// Statut registre avant sync (affichage `old -> new`).
     pub old_status: String,
+    /// Review forge normalisée (gh_review_state/glab_review_state) —
+    /// "" = aucune info (efface la valeur stockée à l'application).
+    pub review: String,
+    /// CI forge normalisée (gh_ci_state/glab_ci_state) — "" idem.
+    pub ci: String,
 }
 
 /// Référence d'une entrée évaluée par un passage de sync — adressage
@@ -790,7 +898,7 @@ fn github_repo_sync(repo: &str, gh_up: bool, entries: &[Value]) -> SyncPartial {
     let live = gh_out(&[
         "pr", "list", "--repo", repo, "--state", "all",
         "--limit", "200", "--json",
-        "number,title,state,isDraft,headRefName",
+        "number,title,state,isDraft,headRefName,reviewRequests,reviewDecision,statusCheckRollup",
     ])
     .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok());
     let Some(live) = live else {
@@ -832,7 +940,7 @@ fn github_repo_sync(repo: &str, gh_up: bool, entries: &[Value]) -> SyncPartial {
             .or_else(|| {
                 gh_out(&[
                     "pr", "view", &n.to_string(), "--repo", repo, "--json",
-                    "number,title,state,isDraft,headRefName",
+                    "number,title,state,isDraft,headRefName,reviewRequests,reviewDecision,statusCheckRollup",
                 ])
                 .and_then(|s| serde_json::from_str::<Value>(&s).ok())
             });
@@ -845,8 +953,16 @@ fn github_repo_sync(repo: &str, gh_up: bool, entries: &[Value]) -> SyncPartial {
         p.checked += 1;
         p.seen.push(seen_of(e));
         let st = gh_state(&pr);
+        let review = gh_review_state(&pr);
+        let ci = gh_ci_state(&pr);
         let old = e["status"].as_str().unwrap_or("");
-        if st != old {
+        // Review/CI comptent comme changement : une PR déjà à jour en
+        // statut peut voir ses checks ou sa review évoluer — sans ça
+        // les badges resteraient figés au premier statut vu.
+        if st != old
+            || review != e["review"].as_str().unwrap_or("")
+            || ci != e["ci"].as_str().unwrap_or("")
+        {
             p.updates.push(PrUpdate {
                 repo: repo.to_string(),
                 pr: n,
@@ -858,6 +974,8 @@ fn github_repo_sync(repo: &str, gh_up: bool, entries: &[Value]) -> SyncPartial {
                 title: pr["title"].as_str().map(String::from),
                 status: st,
                 old_status: old.into(),
+                review,
+                ci,
             });
         }
     }
@@ -923,8 +1041,13 @@ fn gitlab_entry_sync(set: &[Value], e: &Value) -> SyncPartial {
     p.checked += 1;
     p.seen.push(seen_of(e));
     let st = glab_state(&v);
+    let review = glab_review_state(&v);
+    let ci = glab_ci_state(&v);
     let old = e["status"].as_str().unwrap_or("");
-    if st != old {
+    if st != old
+        || review != e["review"].as_str().unwrap_or("")
+        || ci != e["ci"].as_str().unwrap_or("")
+    {
         p.updates.push(PrUpdate {
             repo: repo.to_string(),
             pr: n,
@@ -936,6 +1059,8 @@ fn gitlab_entry_sync(set: &[Value], e: &Value) -> SyncPartial {
             title: v["title"].as_str().map(String::from),
             status: st,
             old_status: old.into(),
+            review,
+            ci,
         });
     }
     p
@@ -1006,6 +1131,10 @@ fn gerrit_entry_sync(set: &[Value], e: &Value) -> SyncPartial {
             title: v["subject"].as_str().map(String::from),
             status: st,
             old_status: old.into(),
+            // Gerrit : pas d'équivalent reviewDecision/CI exploitable
+            // dans la réponse /changes — champs laissés vides.
+            review: String::new(),
+            ci: String::new(),
         });
     }
     p
@@ -1029,6 +1158,114 @@ mod tests {
         assert_eq!(gh_state(&json!({"state": "MERGED"})), "merged");
         assert_eq!(gh_state(&json!({"state": "CLOSED"})), "closed");
         assert_eq!(gh_state(&json!({})), "");
+    }
+
+    #[test]
+    fn gh_review_state_maps() {
+        // reviewDecision tranche en premier.
+        assert_eq!(
+            gh_review_state(&json!({"reviewDecision": "CHANGES_REQUESTED"})),
+            "changes_requested"
+        );
+        assert_eq!(
+            gh_review_state(&json!({"reviewDecision": "APPROVED"})),
+            "approved"
+        );
+        // Requests en attente : plus parlant que REVIEW_REQUIRED.
+        assert_eq!(
+            gh_review_state(&json!({
+                "reviewDecision": "REVIEW_REQUIRED",
+                "reviewRequests": [{"login": "octocat"}],
+            })),
+            "requested"
+        );
+        assert_eq!(
+            gh_review_state(&json!({"reviewDecision": "REVIEW_REQUIRED"})),
+            "required"
+        );
+        // Requests seules (pas de décision) → requested.
+        assert_eq!(
+            gh_review_state(&json!({"reviewRequests": [{"login": "octocat"}]})),
+            "requested"
+        );
+        assert_eq!(gh_review_state(&json!({})), "");
+        assert_eq!(gh_review_state(&json!({"reviewRequests": []})), "");
+    }
+
+    #[test]
+    fn gh_ci_state_maps() {
+        // CheckRun completed + conclusion.
+        assert_eq!(
+            gh_ci_state(&json!({"statusCheckRollup": [
+                {"__typename": "CheckRun", "conclusion": "SUCCESS"},
+                {"__typename": "CheckRun", "conclusion": "NEUTRAL"},
+            ]})),
+            "success"
+        );
+        // Un échec sans pending → failure.
+        assert_eq!(
+            gh_ci_state(&json!({"statusCheckRollup": [
+                {"conclusion": "SUCCESS"},
+                {"conclusion": "FAILURE"},
+            ]})),
+            "failure"
+        );
+        // Pending l'emporte même avec un échec (verdict final inconnu).
+        assert_eq!(
+            gh_ci_state(&json!({"statusCheckRollup": [
+                {"conclusion": "FAILURE"},
+                {"status": "IN_PROGRESS", "conclusion": null},
+            ]})),
+            "pending"
+        );
+        // StatusContext : state porte le verdict.
+        assert_eq!(
+            gh_ci_state(&json!({"statusCheckRollup": [
+                {"__typename": "StatusContext", "state": "SUCCESS"},
+            ]})),
+            "success"
+        );
+        assert_eq!(
+            gh_ci_state(&json!({"statusCheckRollup": [
+                {"__typename": "StatusContext", "state": "PENDING"},
+            ]})),
+            "pending"
+        );
+        // Rollup vide / absent → pas d'info.
+        assert_eq!(gh_ci_state(&json!({"statusCheckRollup": []})), "");
+        assert_eq!(gh_ci_state(&json!({})), "");
+        // Que des checks sautés (draft sans CI) → pas de badge.
+        assert_eq!(
+            gh_ci_state(&json!({"statusCheckRollup": [
+                {"conclusion": "SKIPPED"},
+                {"conclusion": "NEUTRAL"},
+            ]})),
+            ""
+        );
+    }
+
+    #[test]
+    fn glab_review_ci_state_maps() {
+        assert_eq!(
+            glab_review_state(&json!({"reviewers": [{"username": "a"}]})),
+            "requested"
+        );
+        assert_eq!(glab_review_state(&json!({"reviewers": []})), "");
+        assert_eq!(glab_review_state(&json!({})), "");
+        assert_eq!(
+            glab_ci_state(&json!({"head_pipeline": {"status": "running"}})),
+            "pending"
+        );
+        assert_eq!(
+            glab_ci_state(&json!({"head_pipeline": {"status": "success"}})),
+            "success"
+        );
+        assert_eq!(
+            glab_ci_state(&json!({"head_pipeline": {"status": "failed"}})),
+            "failure"
+        );
+        assert_eq!(glab_ci_state(&json!({"head_pipeline": null})), "");
+        assert_eq!(glab_ci_state(&json!({})), "");
     }
 
     #[test]

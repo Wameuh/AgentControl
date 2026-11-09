@@ -2497,6 +2497,8 @@ mod tests {
             note: None,
             via: "detected".into(),
             sync_fails: 0,
+            review: None,
+            ci: None,
             created_at: "t".into(),
             updated_at: "t".into(),
         };
