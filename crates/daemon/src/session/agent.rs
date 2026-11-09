@@ -191,7 +191,7 @@ impl Session {
     /// re-bouclerait le warn).
     /// Appelée après chaque écriture fraîche de config_options /
     /// available_models / available_modes.
-    fn revive_rejected_config(&self) {
+    pub(super) fn revive_rejected_config(&self) {
         // Deux phases : évaluer les valeurs HORS du lock config_rejected
         // (known_config_values prend meta — le reconcile tient meta
         // puis config_rejected, ordre inverse = deadlock).
@@ -563,8 +563,18 @@ impl Session {
             }
         }
         self.save_meta();
-        let pending: Vec<(String, String)> =
+        // Ordre de rejeu : le modèle D'ABORD — certaines config_options
+        // (thought_level chez Devin) sont par-modèle : les pousser avant
+        // le set model les verrait évaluées contre l'ancien modèle (valeurs
+        // hors liste → refus, ou niveau perdu). pending_config est une
+        // HashMap : sans tri, l'ordre de drain est arbitraire.
+        let mut pending: Vec<(String, String)> =
             { self.meta.lock().unwrap().pending_config.drain().collect() };
+        pending.sort_by_key(|(k, _)| match k.as_str() {
+            "model" => 0,
+            "mode" => 1,
+            _ => 2,
+        });
         if !pending.is_empty() {
             self.save_meta(); // persiste la map vidée même si les appels échouent
         }

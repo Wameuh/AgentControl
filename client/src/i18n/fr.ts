@@ -49,7 +49,7 @@ export const fr: Record<Key, string> = {
   att_no_session: "Ouvrez une session pour joindre des fichiers",
   att_unsupported: "Démon trop ancien pour les pièces jointes (RPC fichiers)",
   model_free_ph: "modèle…", model_free_title: "Nom du modèle (Entrée pour appliquer)",
-  effort_title: "Niveau d'effort", delete: "Supprimer", delete_confirm: "suppr ?",
+  effort_title: "Niveau d'effort", thought_label: "Réflexion", delete: "Supprimer", delete_confirm: "suppr ?",
   title_dblclick: "Double-clic pour renommer",
   new_session_h: "Nouvel agent", agent: "Agent", workdir: "Dossier de travail",
   title_label: "Titre", title_ph: "ma session", mode_label: "Mode",

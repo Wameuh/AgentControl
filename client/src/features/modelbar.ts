@@ -7,7 +7,7 @@
 import { $, showErr } from "../core/dom";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
-import type { CmdInfo, SessionMeta } from "../core/types";
+import type { CmdInfo, ConfigOption, SessionMeta } from "../core/types";
 import { costFor } from "./modelcosts";
 
 export const cmdName = (c: CmdInfo) => (typeof c === "string" ? c.replace(/^\//, "") : c.name);
@@ -114,6 +114,59 @@ export function fusionTable() {
   return { valid, prims, sides };
 }
 
+// ---------------------------------------------------------------------------
+// thought_level : effort de raisonnement annoncé comme config_option à part
+// entière (Devin — « Thinking », valeurs propres à chaque modèle). Quand il
+// est annoncé, effort-select se rebinde dessus ; sinon repli sur l'heuristique
+// de suffixe des ids de modèles (comportement historique).
+// ---------------------------------------------------------------------------
+
+/** config_option « effort de raisonnement » annoncée par l'agent, s'il y en a une. */
+export function thoughtLevelOpt(copts: ConfigOption[] | undefined): ConfigOption | undefined {
+  return copts?.find((o) => o.id === "thought_level" || o.category === "thought_level");
+}
+
+/** Remplit effort-select depuis les options annoncées d'une config_option
+ *  (thought_level) — la valeur courante rapportée par l'agent fait foi. */
+export function fillThoughtLevels(sel: HTMLSelectElement, opt: ConfigOption) {
+  sel.innerHTML = "";
+  for (const o of opt.options) {
+    const el = document.createElement("option");
+    el.value = o.value;
+    el.textContent = o.name || o.value;
+    sel.appendChild(el);
+  }
+  sel.value = opt.currentValue ?? "";
+}
+
+// Effort souhaité mémorisé par (session, modèle) : thought_level est PAR
+// MODÈLE — les options et le défaut varient d'un modèle à l'autre, donc un
+// choix ne se ré-applique qu'au retour sur le modèle où il a été fait.
+// Mémoire UI (volatil) : le replay respawn reste au démon (desired_config,
+// dernière valeur posée — le client re-pousse au besoin via la transition).
+const effortMem = new Map<string, Map<string, string>>();
+const lastModelSeen = new Map<string, string>();
+
+/** Vrai quand `model` diffère du dernier modèle vu pour cette session —
+ *  déclencheur unique de la ré-application d'effort (une transition, pas
+ *  un état : updateHeader tourne à chaque event méta). */
+export function modelTransition(sid: string, model: string): boolean {
+  const prev = lastModelSeen.get(sid);
+  if (prev === model) return false;
+  lastModelSeen.set(sid, model);
+  return true;
+}
+
+export function rememberEffort(sid: string, model: string, effort: string) {
+  let m = effortMem.get(sid);
+  if (!m) effortMem.set(sid, (m = new Map()));
+  m.set(model, effort);
+}
+
+export function rememberedEffort(sid: string, model: string): string | undefined {
+  return effortMem.get(sid)?.get(model);
+}
+
 export function fillSel(s: HTMLSelectElement, items: [string, string][]) {
   s.innerHTML = "";
   for (const [v, label] of items) {
@@ -142,6 +195,14 @@ export function initModelBar(openFusion: () => void, metaChanged: () => void = (
       openFusion();
       return;
     }
+    // thought_level annoncé : l'effort est orthogonal au modèle — envoyer
+    // la variante annoncée sans joindre de suffixe d'effort (le niveau se
+    // règle via effort-select, et le agent ré-annonce SES options pour le
+    // nouveau modèle — sa valeur courante fera foi, cf. updateHeader).
+    if (thoughtLevelOpt(app.current?.config_options)) {
+      applyModelValue(resolveModel(sel.value, ""));
+      return;
+    }
     fillEfforts(sel.value, "");
     applyModelValue(resolveModel(sel.value, ($("effort-select") as HTMLSelectElement).value));
   };
@@ -149,6 +210,19 @@ export function initModelBar(openFusion: () => void, metaChanged: () => void = (
   ($("effort-select") as HTMLSelectElement).onchange = (e) => {
     const base = ($("model-select") as HTMLSelectElement).value;
     const eff = (e.target as HTMLSelectElement).value;
+    const sid = app.current?.id;
+    const thought = thoughtLevelOpt(app.current?.config_options);
+    // Config_option réelle : set_config_option dedicated, effort mémorisé
+    // pour CE modèle (ré-appliqué au prochain retour dessus).
+    if (thought && sid && app.current?.model) {
+      call("set_config_option", {
+        session: sid,
+        config_id: thought.id,
+        value: eff,
+      }).catch((er) => showErr(String(er)));
+      rememberEffort(sid, app.current.model, eff);
+      return;
+    }
     if (base && base !== "__fusion") applyModelValue(resolveModel(base, eff));
   };
 

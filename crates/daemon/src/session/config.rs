@@ -675,18 +675,54 @@ impl Session {
             .meta_snapshot()
             .native_session_id
             .context("no native session id")?;
-        self.acp_request(
-            "session/set_config_option",
-            json!({"sessionId": sid, "configId": config_id, "value": value}),
-        )
-        .await?;
+        let resp = self
+            .acp_request(
+                "session/set_config_option",
+                json!({"sessionId": sid, "configId": config_id, "value": value}),
+            )
+            .await?;
+        // L'agent joint parfois la liste configOptions COMPLÈTE dans la
+        // réponse (Devin — aucun config_option_update séparé) : l'ingérer
+        // évite à l'UI de garder les options de l'ANCIEN modèle — les
+        // options par-modèle (thought_level, speed) changent à chaque
+        // set model.
+        let fresh: Vec<proto::ConfigOption> = resp
+            .get("configOptions")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|o| serde_json::from_value::<proto::ConfigOption>(o.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let has_fresh = !fresh.is_empty();
+        if has_fresh {
+            self.config_gen.fetch_add(1, Ordering::SeqCst);
+        }
         // Sync la méta tout de suite — l'agent renverra sans doute un
         // config_option_update, mais l'UI doit rester cohérente même
         // s'il n'en envoie pas.
         let opts = {
             let mut m = self.meta.lock().unwrap();
-            if let Some(opt) = m.config_options.iter_mut().find(|o| o.id == config_id) {
-                opt.current_value = value.into();
+            if fresh.is_empty() {
+                if let Some(opt) =
+                    m.config_options.iter_mut().find(|o| o.id == config_id)
+                {
+                    opt.current_value = value.into();
+                }
+            } else {
+                for o in &fresh {
+                    match o.id.as_str() {
+                        "mode" => m.mode = Some(o.current_value.clone()),
+                        // Source catalogue : current_value rapporté =
+                        // valeur clampée — ne pas écraser l'uid demandé
+                        // (même règle qu'au handshake).
+                        "model" if m.model_source.as_deref() == Some("catalogue") => {}
+                        "model" => m.model = Some(o.current_value.clone()),
+                        _ => {}
+                    }
+                }
+                m.config_options = fresh;
             }
             // L'option peut être adressée par son id ACP ou sa catégorie
             // (« model ») — les deux comptent pour meta.model/source.
@@ -715,6 +751,12 @@ impl Session {
             m.config_options.clone()
         };
         self.save_meta();
+        // Annonce fraîche : une valeur soldée comme refus définitif peut
+        // être redevenue résolvable (options par-modèle) — même logique
+        // que post-handshake.
+        if has_fresh {
+            self.revive_rejected_config();
+        }
         self.emit(EventKind::ConfigOptions { options: opts });
         // Symétrie avec set_model : changer de modèle via
         // config_option est la même réparation — lève la
