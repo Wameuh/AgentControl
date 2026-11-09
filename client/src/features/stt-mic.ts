@@ -54,8 +54,15 @@ export class SttMic {
    *  endpoint suivi d'un partial dans la même fenêtre ne doit pas perdre
    *  le segment figé (un slot unique l'écraserait silencieusement). */
   private deferredSeg: { text: string; final: boolean }[] = [];
-  /** Ré-écrit #input via le composer (value + fit + autocomplete). */
-  private writeInput: (v: string) => void = () => {};
+  /** Groupe d'undo de la dictée en cours — toutes les écritures d'une
+   *  même dictée partagent le même groupe : le composer les coalesce
+   *  en UN pas d'undo (jamais un par partial). Nouveau groupe à chaque
+   *  beginSegment, relâché à la fin de stop / mort de la capture. */
+  private undoGroup: string | undefined;
+  private dictSeq = 0;
+  /** Ré-écrit #input via le composer (value + fit + autocomplete).
+   *  `group` identifie la source pour la coalescence undo. */
+  private writeInput: (v: string, group?: string) => void = () => {};
   /** Ouvre les settings sur la section modèles STT (injecté par main). */
   openSttSettings: () => void = () => {};
   /** SpeechRecognizer on-device présent (dernier probe) — la pref
@@ -71,7 +78,7 @@ export class SttMic {
     return $("btn-mic") as HTMLButtonElement;
   }
 
-  init(hooks: { setInput: (v: string) => void }) {
+  init(hooks: { setInput: (v: string, group?: string) => void }) {
     if (!supported()) return;
     this.writeInput = hooks.setInput;
     this.btn().onclick = () => void this.toggle();
@@ -130,6 +137,7 @@ export class SttMic {
       // les partials repartent d'un segment neuf en fin de champ.
       this.seg = "";
       this.anchor = this.inp().value.length;
+      this.undoGroup = `stt${++this.dictSeq}`; // dictée active retrouvée
       this.setListening(true);
     } else if (!st.recording && this.listening) {
       // Capture morte côté natif (read cassé, unload, perte de focus
@@ -137,6 +145,7 @@ export class SttMic {
       // qu'aucun event n'arrive plus.
       this.seg = "";
       this.setListening(false);
+      this.undoGroup = undefined; // capture morte : dictée soldée
     } else {
       b.setAttribute("aria-pressed", String(this.listening));
     }
@@ -205,6 +214,7 @@ export class SttMic {
     this.anchor = s;
     this.lastFinal = "";
     this.deferredSeg = []; // résidu d'une dictée précédente non rejoué
+    this.undoGroup = `stt${++this.dictSeq}`;
     if (e > s) this.write(inp.value.slice(0, s) + inp.value.slice(e), s);
   }
 
@@ -229,6 +239,7 @@ export class SttMic {
     const fin = r?.text ?? "";
     if (fin && fin !== this.lastFinal) this.commit(fin);
     this.seg = "";
+    this.undoGroup = undefined; // dictée terminée : groupe soldé
   }
 
   private setListening(on: boolean) {
@@ -353,7 +364,7 @@ export class SttMic {
    *  flag évite que notre propre event `input` soit pris pour une frappe. */
   private write(next: string, cursor: number) {
     this.selfWrite = true;
-    this.writeInput(next);
+    this.writeInput(next, this.undoGroup);
     this.inp().setSelectionRange(cursor, cursor);
     this.selfWrite = false;
   }

@@ -18,6 +18,28 @@ import { Attachments } from "./attachments";
 import { SttMic } from "./stt-mic";
 import type { ChatView } from "./chat-view";
 
+// ---- Undo/redo du composer : pile custom d'états ----
+// Chaque `.value =` programmatique vide la pile d'undo native du
+// textarea — le composer garde donc sa propre pile {value, selection} :
+// un pas par insertion applicative (setInput), un pas par rafale de
+// frappe (debounce), un pas par collage/dépôt. Ctrl+Z / Ctrl+Shift+Z /
+// Ctrl+Y sont interceptés dans le keydown ; jamais pendant une
+// composition IME (l'autocorrect/clavier virtuel gèrent leurs undo).
+// La pile est propre à la session affichée : sessionChanged la vide.
+
+interface UndoState {
+  v: string;
+  s: number;
+  e: number;
+}
+
+/// Frappe : deux edits espacés de plus que ce délai ouvrent un pas
+/// d'undo distinct (sinon toute la saisie = un seul Ctrl+Z).
+const UNDO_DEBOUNCE_MS = 800;
+/// Borne de la pile (les très longs brouillons ne sont pas gardés à
+/// l'infini — 100 pas × un prompt reste raisonnable en mémoire).
+const UNDO_MAX = 100;
+
 // ---- Commandes built-in (toujours dispo, exécutées côté client) ----
 const BUILTINS = (): { name: string; description: string; hint: string }[] => [
   { name: "model", description: t("builtin_model"), hint: "<model>" },
@@ -66,6 +88,19 @@ export class Composer {
    *  plus une fois par frame, jamais dans le handler de la keystroke. */
   private uiRaf = 0;
 
+  /** Pile d'undo (états à restaurer) / redo. */
+  private undoStack: UndoState[] = [];
+  private redoStack: UndoState[] = [];
+  /** État connu du champ — référence « avant » pour la frappe : l'event
+   *  input arrive APRÈS la mutation, la valeur d'avant n'est plus
+   *  lisible que via ce snapshot continu. */
+  private lastKnown: UndoState = { v: "", s: 0, e: 0 };
+  private lastEditAt = 0;
+  /** Groupe d'écritures coalescées (dictée STT) : tant que le groupe du
+   *  dernier setInput est identique, pas de nouveau pas d'undo — une
+   *  dictée entière = UN Ctrl+Z, pas un par partial. */
+  private lastGroup: string | null = null;
+
   private scheduleUi() {
     if (this.uiRaf) return;
     this.uiRaf = requestAnimationFrame(() => {
@@ -75,14 +110,137 @@ export class Composer {
     });
   }
 
-  private setInput(v: string) {
-    ($("input") as HTMLTextAreaElement).value = v;
+  /** Écriture programmatique dans #input. `undoGroup` coalesce les
+   *  écritures successives d'une même source (dictée) en un seul pas
+   *  d'undo ; `skipUndo` pour les restaurations qui ne doivent pas être
+   *  annulables (brouillon d'une autre session). */
+  private setInput(
+    v: string,
+    opts?: { undoGroup?: string; skipUndo?: boolean },
+  ) {
+    const ta = $("input") as HTMLTextAreaElement;
+    if (!opts?.skipUndo && ta.value !== v) this.pushUndo(opts?.undoGroup);
+    ta.value = v;
+    this.lastKnown = this.snapshot();
     // La dropdown suit la valeur même quand elle change sans event input
     // (envoi, applyAc, reprise de file) — sinon elle resterait affichée.
     // Différé à la frame : un programmatic set n'a pas besoin d'un reflow
     // synchrone (et la dictée enchaîne les setInput par partial).
     this.acStale = true;
     this.scheduleUi();
+  }
+
+  // ---- Undo/redo ----
+
+  private snapshot(): UndoState {
+    const ta = $("input") as HTMLTextAreaElement;
+    const s = ta.selectionStart ?? ta.value.length;
+    return { v: ta.value, s, e: ta.selectionEnd ?? s };
+  }
+
+  /** Empile un état comme pas d'undo (sommet identique = no-op ignoré)
+   *  et vide la pile de redo — toute nouvelle édition invalide le futur. */
+  private pushState(s: UndoState) {
+    const top = this.undoStack[this.undoStack.length - 1];
+    if (top && top.v === s.v) return;
+    if (this.undoStack.length >= UNDO_MAX) this.undoStack.shift();
+    this.undoStack.push(s);
+    this.redoStack = [];
+  }
+
+  /** Avant un setInput : empile l'état courant — SAUF si le groupe est
+   *  celui de la dernière écriture (rafale coalescée : dictée). */
+  private pushUndo(group?: string) {
+    if (group && group === this.lastGroup) return;
+    this.pushState(this.snapshot());
+    this.lastGroup = group ?? null;
+  }
+
+  /** Frappe/collage natif (event input) : un pas par rafale via debounce ;
+   *  collage et dépôt forment leur propre pas immédiat. La composition
+   *  IME et les historyUndo/Redo natifs ne passent pas par la pile —
+   *  on se contente de resynchroniser la référence. */
+  private noteUserEdit(e: InputEvent) {
+    const cur = this.snapshot();
+    const it = e.inputType ?? "";
+    if (
+      e.isComposing ||
+      it === "insertCompositionText" ||
+      it === "historyUndo" ||
+      it === "historyRedo"
+    ) {
+      this.lastKnown = cur;
+      return;
+    }
+    // Insertions ET coupes/départs obtiennent leur propre pas : un cut
+    // absorbé dans la rafalle rendrait le texte coupé inatteignable
+    // (seul l'état d'avant la rafale est empilé, pas l'état pré-coupe).
+    const ownStep =
+      it === "insertFromPaste" ||
+      it === "insertFromDrop" ||
+      it === "insertFromYank" ||
+      it === "insertReplacementText" ||
+      it === "deleteByCut" ||
+      it === "deleteByDrag" ||
+      it === "deleteByDrop";
+    if (ownStep || Date.now() - this.lastEditAt > UNDO_DEBOUNCE_MS) {
+      // lastKnown = état d'avant CET edit (mis à jour en fin de handler).
+      this.pushState(this.lastKnown);
+    }
+    this.lastEditAt = Date.now();
+    this.lastKnown = cur;
+    this.lastGroup = null;
+  }
+
+  private undo() {
+    const s = this.undoStack.pop();
+    if (!s) return;
+    this.pushRedo(this.snapshot());
+    this.restore(s);
+  }
+
+  private redo() {
+    const s = this.redoStack.pop();
+    if (!s) return;
+    this.pushUndoRaw(this.snapshot());
+    this.restore(s);
+  }
+
+  /** Symétrique de pushState pour la pile de redo (pas de clear redo —
+   *  c'est la pile d'undo qui l'alimente). */
+  private pushRedo(s: UndoState) {
+    if (this.redoStack.length >= UNDO_MAX) this.redoStack.shift();
+    this.redoStack.push(s);
+  }
+
+  /** Empile sur undo SANS vider redo — utilisé par redo() lui-même. */
+  private pushUndoRaw(s: UndoState) {
+    if (this.undoStack.length >= UNDO_MAX) this.undoStack.shift();
+    this.undoStack.push(s);
+  }
+
+  /** Réapplique un état complet (valeur + sélection) — pas d'event
+   *  input, pas de nouveau pas d'undo. */
+  private restore(s: UndoState) {
+    const ta = $("input") as HTMLTextAreaElement;
+    ta.value = s.v;
+    const len = s.v.length;
+    ta.setSelectionRange(Math.min(s.s, len), Math.min(s.e, len));
+    this.lastKnown = this.snapshot();
+    this.lastEditAt = 0; // la frappe suivante ouvre une nouvelle rafale
+    this.lastGroup = null;
+    this.acStale = true;
+    this.scheduleUi();
+  }
+
+  /** La pile est propre à la session affichée : au changement, les
+   *  états d'une autre session ne doivent ni être restaurés ni recevoir
+   *  le brouillon comme pas d'undo. */
+  private clearHistory() {
+    this.undoStack = [];
+    this.redoStack = [];
+    this.lastEditAt = 0;
+    this.lastGroup = null;
   }
 
   fitInput() {
@@ -856,7 +1014,10 @@ export class Composer {
       if (cur) this.drafts.delete(cur);
       if (!this.draftSid && cur && text) next = next ? `${next}\n${text}` : text;
       this.draftSid = cur;
-      this.setInput(next);
+      // La pile d'undo est propre à la session quittée : le brouillon
+      // restauré ne doit pas être annulable (ni recevoir de pas).
+      this.clearHistory();
+      this.setInput(next, { skipUndo: true });
     }
     this.attach.onSessionChanged();
   }
@@ -869,7 +1030,10 @@ export class Composer {
     this.drafts.delete(id);
     if (this.draftSid === id) {
       this.draftSid = null;
-      this.setInput("");
+      // Le texte affiché appartenait à la session supprimée — sa pile
+      // d'undo part avec elle.
+      this.clearHistory();
+      this.setInput("", { skipUndo: true });
     }
     this.attach.dropSession(id);
   }
@@ -889,11 +1053,30 @@ export class Composer {
   init() {
     this.attach.init();
     this.draftSid = app.current?.id ?? null;
-    this.mic.init({ setInput: (v) => this.setInput(v) });
+    this.lastKnown = this.snapshot();
+    this.mic.init({
+      setInput: (v, group) => this.setInput(v, group ? { undoGroup: group } : undefined),
+    });
     this.refreshHints();
     $("btn-send").onclick = () => this.sendInput(this.defaultMode());
     $("btn-alt").onclick = () => this.sendInput(this.altMode());
     $("input").addEventListener("keydown", (e) => {
+      // Undo/redo custom (la pile native est vide par les .value=) —
+      // jamais pendant une composition IME : l'autocorrect et le
+      // clavier virtuel Android ont leurs propres annulations.
+      if (!e.isComposing && (e.ctrlKey || e.metaKey) && !e.altKey) {
+        const k = e.key.toLowerCase();
+        if (k === "z" && !e.shiftKey) {
+          e.preventDefault();
+          this.undo();
+          return;
+        }
+        if (k === "y" || (k === "z" && e.shiftKey)) {
+          e.preventDefault();
+          this.redo();
+          return;
+        }
+      }
       const ac = $("cmd-ac");
       // Le refresh coalescé sur rAF peut ne pas avoir encore vu la
       // dernière frappe : resynchroniser avant d'agir sur la sélection
@@ -940,6 +1123,7 @@ export class Composer {
       // partial — le segment live se ré-ancre au curseur (hors
       // composition IME, sinon chaque lettre committerait l'autocorrect).
       this.mic.onUserInput(e as InputEvent);
+      this.noteUserEdit(e as InputEvent);
       this.acStale = true;
       this.acDismissed = false;
       this.scheduleUi();
