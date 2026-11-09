@@ -151,7 +151,14 @@ fn cut_lines(buf: &[u8], base: u64, drop_head: bool) -> (String, u64) {
             String::from_utf8_lossy(&buf[lo..=i]).into_owned(),
             base + i as u64 + 1,
         ),
-        _ => (String::new(), base),
+        // Le seul '\n' était dans la tête purgée (ligne > limit) : on
+        // saute la fenêtre plutôt que de rejouer la même page. Sans
+        // '\n' du tout en incrémental (lo == 0) : on attend la fin de
+        // ligne — offset inchangé.
+        _ => (
+            String::new(),
+            base + if lo > 0 { buf.len() as u64 } else { 0 },
+        ),
     }
 }
 

@@ -39,9 +39,18 @@ interface Tail {
   offset: number | null;
   lines: string[];
   rendered: number;
+  /** Vrai après le 1er fetch réussi de CE flux — distingue « (vide) »
+   *  de « pas encore chargé » (par onglet, pas global). */
+  loaded: boolean;
 }
 
-const freshTail = (): Tail => ({ file: "", offset: null, lines: [], rendered: 0 });
+const freshTail = (): Tail => ({
+  file: "",
+  offset: null,
+  lines: [],
+  rendered: 0,
+  loaded: false,
+});
 
 export class LogsPanel {
   private conns!: ConnectionManager;
@@ -53,9 +62,6 @@ export class LogsPanel {
   private pollTimer: ReturnType<typeof setInterval> | undefined;
   private pollBusy = false;
   private tails: Record<Tab, Tail> = { client: freshTail(), daemon: freshTail() };
-  /** Vrai après le 1er rendu d'un onglet — distingure « (vide) » de
-   *  « pas encore chargé ». */
-  private loaded = false;
 
   bind(conns: ConnectionManager) {
     this.conns = conns;
@@ -122,7 +128,6 @@ export class LogsPanel {
     if (!was) return;
     // Réouverture = flux frais (la queue a pu défiler pendant la fermeture).
     this.tails = { client: freshTail(), daemon: freshTail() };
-    this.loaded = false;
     if (!isAndroid()) ($("input") as HTMLTextAreaElement).focus();
   }
 
@@ -143,10 +148,7 @@ export class LogsPanel {
     const sel = $("logs-conn") as HTMLSelectElement;
     sel.hidden = t !== "daemon";
     if (t === "daemon") {
-      // Capability par conn choisie : un démon ancien ne connaît pas la
-      // RPC — note honnête plutôt qu'une erreur à chaque poll.
-      const capable = this.daemonCapable(sel.value || this.connKey());
-      $("logs-daemon-note").hidden = capable;
+      this.syncDaemonNote();
     } else {
       $("logs-daemon-note").hidden = true;
     }
@@ -176,6 +178,12 @@ export class LogsPanel {
   private selectedConn(): string {
     const v = ($("logs-conn") as HTMLSelectElement).value;
     return v || this.connKey();
+  }
+
+  /** Note « démon trop vieux » — ré-évaluée au switch d'onglet ET au
+   *  changement de connexion (capability par conn, pas globale). */
+  private syncDaemonNote() {
+    $("logs-daemon-note").hidden = this.daemonCapable(this.selectedConn());
   }
 
   private syncPauseBtn() {
@@ -212,7 +220,7 @@ export class LogsPanel {
       }>("log_read", { offset: st.offset, limit: PAGE });
       st.offset = r.offset;
       this.appendData(st, r.data);
-      if (this.tails[this.tab] === st) this.loaded = true;
+      if (this.tails[this.tab] === st) st.loaded = true;
     } catch (e) {
       logUi("debug", `log_read client: ${e}`);
     }
@@ -243,7 +251,7 @@ export class LogsPanel {
       st.file = r.file;
       st.offset = r.offset;
       this.appendData(st, r.data);
-      if (this.tails[this.tab] === st) this.loaded = true;
+      if (this.tails[this.tab] === st) st.loaded = true;
     } catch (e) {
       logUi("debug", `daemon_log_tail ${conn}: ${e}`);
     }
@@ -274,8 +282,12 @@ export class LogsPanel {
       this.renderAll();
       return;
     }
+    // Premier rendu (before == 0) : le <pre> ne contient que le
+    // placeholder « … »/« aucune ligne » — appendChild le laisserait
+    // collé en tête du flux → re-rendu complet à la place.
     st.rendered = st.lines.length;
-    this.appendLines(st, before);
+    if (before === 0) this.renderAll();
+    else this.appendLines(st, before);
   }
 
   // -------------------------------------------------------------------
@@ -301,7 +313,7 @@ export class LogsPanel {
     }
     pre.innerHTML = rows.length
       ? rows.join("\n")
-      : `<span class="ll ll-meta">${esc(this.loaded ? t("logs_empty") : "…")}</span>`;
+      : `<span class="ll ll-meta">${esc(st.loaded ? t("logs_empty") : "…")}</span>`;
     st.rendered = st.lines.length;
     if (atBottom) pre.scrollTop = pre.scrollHeight;
   }
@@ -338,13 +350,15 @@ export class LogsPanel {
   }
 
   private lineInner(line: string): string {
-    // client.log : `[iso] [LVL]` (+ `f.rs:N`) en meta, reste en corps.
+    // client.log : `[iso] [LVL]` (+ `[pid N]` + `f.rs:N`) en meta,
+    // reste en corps — même gabarit que renderClientLog.
     const cli = line.match(
-      /^(\[[^\]]*\] \[(?:TRACE|DEBUG|INFO|WARN|ERROR)\])(?: (\S+:\d+))?/i,
+      /^(\[[^\]]*\] \[(?:TRACE|DEBUG|INFO|WARN|ERROR)\])(?: (\[pid \d+\]))?(?: (\S+:\d+))?/i,
     );
     if (cli) {
       let body = `<span class="ll-meta">${esc(cli[1])}</span>`;
       if (cli[2]) body += ` <span class="ll-meta">${esc(cli[2])}</span>`;
+      if (cli[3]) body += ` <span class="ll-meta">${esc(cli[3])}</span>`;
       return body + esc(line.slice(cli[0].length));
     }
     // daemon : `ISO  LVL` en meta, `cible: msg` en corps.
@@ -375,6 +389,7 @@ export class LogsPanel {
       // Changement de conn → flux daemon frais (autre machine, autre
       // fichier) : offset/file repartent à zéro.
       this.tails.daemon = freshTail();
+      this.syncDaemonNote();
       this.renderAll();
       void this.tick();
     };

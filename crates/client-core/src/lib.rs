@@ -371,7 +371,13 @@ pub fn log_read(offset: Option<u64>, limit: Option<u64>) -> serde_json::Value {
             String::from_utf8_lossy(&buf[lo..=i]).into_owned(),
             start + i as u64 + 1,
         ),
-        _ => (String::new(), start),
+        // Seul '\n' dans la tête purgée (ligne > limit) → on saute la
+        // fenêtre ; rien du tout en incrémental → attente de la fin de
+        // ligne (offset inchangé). Cf. daemon::logging::cut_lines.
+        _ => (
+            String::new(),
+            start + if lo > 0 { buf.len() as u64 } else { 0 },
+        ),
     };
     serde_json::json!({ "offset": new_off, "data": data, "size": size })
 }
