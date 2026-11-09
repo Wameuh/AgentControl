@@ -533,6 +533,11 @@ export const en = {
   comp_param_badjson: "{k}: invalid JSON",
   comp_internals: "Internals (catalog-owned, read-only)",
   comp_bound_note: "Catalog-managed component — only the declared parameters are editable.",
+  logs_tab_client: "Client", logs_tab_daemon: "Daemon",
+  logs_pause: "Pause follow", logs_resume: "Resume follow",
+  logs_conn: "Daemon connection",
+  logs_daemon_old: "Daemon too old for live logs — update it to enable this tab.",
+  logs_empty: "no log lines",
 } as const;
 
 export type Key = keyof typeof en;

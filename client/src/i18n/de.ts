@@ -536,4 +536,9 @@ export const de: Record<Key, string> = {
   comp_param_badjson: "{k}: ungültiges JSON",
   comp_internals: "Interne (katalogeigen, schreibgeschützt)",
   comp_bound_note: "Katalogverwaltete Komponente — nur die deklarierten Parameter sind editierbar.",
+  logs_tab_client: "Client", logs_tab_daemon: "Daemon",
+  logs_pause: "Verfolgung pausieren", logs_resume: "Verfolgung fortsetzen",
+  logs_conn: "Daemon-Verbindung",
+  logs_daemon_old: "Daemon zu alt für Live-Logs — zum Aktivieren dieses Tabs aktualisieren.",
+  logs_empty: "keine Logzeilen",
 };

@@ -533,4 +533,9 @@ export const fr: Record<Key, string> = {
   comp_param_badjson: "{k} : JSON invalide",
   comp_internals: "Internes (propriété du catalogue, lecture seule)",
   comp_bound_note: "Composant géré par le catalogue — seuls les paramètres déclarés sont éditables.",
+  logs_tab_client: "Client", logs_tab_daemon: "Démon",
+  logs_pause: "Suspendre le suivi", logs_resume: "Reprendre le suivi",
+  logs_conn: "Connexion du démon",
+  logs_daemon_old: "Démon trop ancien pour les logs live — mettez-le à jour pour activer cet onglet.",
+  logs_empty: "aucune ligne de log",
 };

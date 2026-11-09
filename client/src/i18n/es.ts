@@ -536,4 +536,9 @@ export const es: Record<Key, string> = {
   comp_param_badjson: "{k}: JSON inválido",
   comp_internals: "Internos (propiedad del catálogo, solo lectura)",
   comp_bound_note: "Componente gestionado por el catálogo — solo los parámetros declarados son editables.",
+  logs_tab_client: "Cliente", logs_tab_daemon: "Daemon",
+  logs_pause: "Pausar seguimiento", logs_resume: "Reanudar seguimiento",
+  logs_conn: "Conexión del daemon",
+  logs_daemon_old: "Daemon demasiado antiguo para logs en vivo — actualízalo para activar esta pestaña.",
+  logs_empty: "sin líneas de log",
 };

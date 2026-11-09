@@ -311,6 +311,77 @@ pub fn log_tail(n: usize) -> String {
     lines.join("\n")
 }
 
+/// Lecture incrémentale de client.log pour le suiveur live du panneau
+/// logs (commande Tauri `log_read`) : `{offset, data, size}`.
+/// `offset` = position octet dans client.log ; absent ou > taille
+/// (rotation 1 MiB → fichier recréé) → dernière page bornée `limit`
+/// (défaut 64 Kio, cap 256 Kio). Lignes complètes seulement : une
+/// ligne partielle en cours d'écriture est retenue pour le poll
+/// suivant. La rotation peut théoriquement rendre un offset périmé
+/// valide par coïncidence de taille — fenêtre d'un poll, cosmétique.
+pub fn log_read(offset: Option<u64>, limit: Option<u64>) -> serde_json::Value {
+    use std::io::{Read, Seek, SeekFrom};
+    let limit = limit.unwrap_or(64 * 1024).clamp(4 * 1024, 256 * 1024);
+    let path = log_path().join("client.log");
+    let empty = || serde_json::json!({ "offset": 0, "data": "", "size": 0 });
+    let Ok(mut f) = std::fs::File::open(&path) else {
+        return empty();
+    };
+    let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+    // Incrémental réel seulement si l'offset tient dans le fichier —
+    // absent ou > taille → dernière page (drop de la 1re ligne
+    // partielle de la fenêtre).
+    let incremental = offset.is_some_and(|o| o <= size);
+    let off = offset.unwrap_or(0);
+    let (start, end) = if incremental {
+        (off, size.min(off.saturating_add(limit)))
+    } else {
+        (size.saturating_sub(limit), size)
+    };
+    if start >= end {
+        return serde_json::json!({
+            "offset": if incremental { off } else { size },
+            "data": "",
+            "size": size,
+        });
+    }
+    let mut buf = vec![0u8; (end - start) as usize];
+    let ok = f.seek(SeekFrom::Start(start)).is_ok() && f.read_exact(&mut buf).is_ok();
+    if !ok {
+        return serde_json::json!({ "offset": off, "data": "", "size": size });
+    }
+    // Lignes complètes uniquement (cf. daemon::logging::tail_slice) ;
+    // drop_head seulement si la fenêtre démarre au milieu du fichier —
+    // start == 0 est une vraie frontière de ligne.
+    let mut lo = 0usize;
+    if !incremental && start > 0 {
+        match buf.iter().position(|&b| b == b'\n') {
+            Some(i) => lo = i + 1,
+            None => {
+                return serde_json::json!({
+                    "offset": start + buf.len() as u64,
+                    "data": "",
+                    "size": size,
+                })
+            }
+        }
+    }
+    let (data, new_off) = match buf.iter().rposition(|&b| b == b'\n') {
+        Some(i) if i >= lo => (
+            String::from_utf8_lossy(&buf[lo..=i]).into_owned(),
+            start + i as u64 + 1,
+        ),
+        // Seul '\n' dans la tête purgée (ligne > limit) → on saute la
+        // fenêtre ; rien du tout en incrémental → attente de la fin de
+        // ligne (offset inchangé). Cf. daemon::logging::cut_lines.
+        _ => (
+            String::new(),
+            start + if lo > 0 { buf.len() as u64 } else { 0 },
+        ),
+    };
+    serde_json::json!({ "offset": new_off, "data": data, "size": size })
+}
+
 // ---------------------------------------------------------------------------
 // Transports
 // ---------------------------------------------------------------------------

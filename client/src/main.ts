@@ -54,6 +54,7 @@ import { TermPanel } from "./features/terminal";
 import { SettingsPanel } from "./features/settings";
 import { Tts } from "./features/tts";
 import { ComponentsPanel } from "./features/components";
+import { LogsPanel } from "./features/logs";
 import { stateDiff } from "./features/state-diff";
 import { sounds } from "./features/sounds";
 import { notifications } from "./features/notifications";
@@ -134,6 +135,7 @@ const newSess = new NewSessionDialog();
 const settings = new SettingsPanel();
 const tts = new Tts();
 const comps = new ComponentsPanel();
+const logsPanel = new LogsPanel();
 const search = new SessionSearch();
 const pins = new Pins();
 
@@ -207,10 +209,11 @@ notifications.bind({
     connView.close();
     map.close();
     comps.close();
+    logsPanel.close();
     void chat.open(id, false, conn);
   },
 });
-sidebar.bind(conns, groups, newSess, chat, settings, connView, comps, map);
+sidebar.bind(conns, groups, newSess, chat, settings, connView, comps, map, logsPanel);
 composer.bind(chat);
 composer.refresh = () => sidebar.refresh();
 // Hint « modèle absent » du bouton mic → ouvre les settings directement
@@ -260,12 +263,14 @@ connView.refresh = () => sidebar.refresh();
 connView.connecting = (hosts) => chat.setConnecting(hosts);
 // Exclusion mutuelle des overlays plein #chat — chaque open() ferme
 // les autres (sinon : empilement opaque + inert, écran "figé").
-connView.onOpening = () => { settings.close(); map.close(); comps.close(); };
-settings.onOpening = () => { connView.close(); map.close(); comps.close(); };
+connView.onOpening = () => { settings.close(); map.close(); comps.close(); logsPanel.close(); };
+settings.onOpening = () => { connView.close(); map.close(); comps.close(); logsPanel.close(); };
 // Select « Appairer » des settings : pré-sélection sur la conn liée.
 settings.activeConnKey = () => conns.knownConns()[0] ?? null;
 comps.bind(conns);
-comps.onOpening = () => { settings.close(); connView.close(); map.close(); };
+comps.onOpening = () => { settings.close(); connView.close(); map.close(); logsPanel.close(); };
+logsPanel.bind(conns);
+logsPanel.onOpening = () => { settings.close(); connView.close(); map.close(); comps.close(); };
 newSess.bind(groups);
 newSess.refresh = () => void sidebar.refresh();
 // Le bouton « New agent » vit dans la sidebar (hors #chat — accessible
@@ -277,6 +282,7 @@ newSess.openSession = (id, conn) => {
   connView.close();
   map.close();
   comps.close();
+  logsPanel.close();
   void chat.open(id, false, conn);
 };
 newSess.knownConns = () => conns.knownConns();
@@ -314,7 +320,7 @@ map.bind({
   conn: () => conns.knownConns()[0] ?? "",
   componentsCapable: (c) => conns.cap(c)?.components === true,
   openSession: (id, conn) => void chat.open(id, false, conn),
-  onOpening: () => { settings.close(); connView.close(); comps.close(); },
+  onOpening: () => { settings.close(); connView.close(); comps.close(); logsPanel.close(); },
   onToggle: (open) => sidebar.setMapOpen(open),
 });
 
@@ -389,6 +395,7 @@ $("tb-about").onclick = async () => {
 $("tb-more").onclick = () => {
   const items: SheetItem[] = [
     { icon: "map", label: t("map_title"), fn: () => $("tb-map").click() },
+    { icon: "scroll", label: t("logs"), fn: () => $("tb-logs").click() },
   ];
   // Composants : même gate capability que le bouton titlebar masqué
   // sur mobile — pas d'entrée vers un panneau inutilisable.
@@ -441,6 +448,7 @@ map.init();
 settings.init();
 tts.init();
 comps.init();
+logsPanel.init();
 notifications.init();
 initFirstPost((c) => conns.cap(c)?.first_post === true);
 initModelCosts({ capable: (c) => conns.cap(c)?.model_costs === true });

@@ -15,6 +15,7 @@
         <span id="titlebar-title">AgentControl</span>
         <div class="tb-btns">
           <button id="tb-map" data-icon="map" title="Map" data-i18n-title="map_title"></button>
+          <button id="tb-logs" data-icon="scroll" title="Logs" data-i18n-title="logs"></button>
           <button id="tb-components" hidden data-icon="tool" title="Components" data-i18n-title="comp_h"></button>
           <button id="tb-settings" data-icon="settings" title="Settings" data-i18n-title="settings_title"></button>
           <button id="tb-about" data-icon="info" title="About" data-i18n-title="about_title"></button>
@@ -639,6 +640,29 @@
                 </div>
                 <pre id="comp-logs"></pre>
               </div>
+            </div>
+          </div>
+          <div id="logs-view" tabindex="-1" hidden>
+            <header id="logs-head">
+              <span id="logs-title" data-i18n="logs">Logs</span>
+              <div id="logs-tabs" role="tablist">
+                <button type="button" id="logs-tab-client" class="comp-tab on" role="tab" data-i18n="logs_tab_client">Client</button>
+                <button type="button" id="logs-tab-daemon" class="comp-tab" role="tab" data-i18n="logs_tab_daemon">Daemon</button>
+              </div>
+              <span class="comp-sp"></span>
+              <select id="logs-conn" hidden data-i18n-title="logs_conn" title="Daemon connection"></select>
+              <select id="logs-level" class="log-level" data-i18n-title="log_level" title="Minimum level">
+                <option value="debug">DEBUG</option>
+                <option value="info" selected>INFO</option>
+                <option value="warn">WARN</option>
+                <option value="error">ERROR</option>
+              </select>
+              <button type="button" id="logs-pause" data-icon="stop" data-i18n-title="logs_pause" title="Pause follow"></button>
+              <button type="button" id="logs-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <div id="logs-body">
+              <div id="logs-daemon-note" class="logs-note" hidden data-i18n="logs_daemon_old">Daemon too old for live logs.</div>
+              <pre id="logs-out" class="log-view logs-live"></pre>
             </div>
           </div>
         </main>

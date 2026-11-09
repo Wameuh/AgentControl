@@ -1205,6 +1205,27 @@ pub enum ReqKind {
         #[serde(default)]
         window: Option<String>,
     },
+    /// Tail incrémental du journal du démon (`<root>/logs/
+    /// daemon.log.<date>` — rotation quotidienne) pour le panneau logs
+    /// live du client : `file` = nom renvoyé par l'appel précédent
+    /// (changement = rotation jour → la réponse taille le NOUVEAU
+    /// fichier), `offset` = position octet dans ce fichier, `limit` =
+    /// fenêtre max par appel (défaut 64 Kio, cap 256 Kio). Réponse
+    /// `{file, offset, data, size}` — `data` = lignes complètes UTF-8
+    /// (une ligne partielle en fin de fichier est retenue jusqu'au
+    /// prochain poll). `file` absent ≠ nom courant ou `offset` > taille
+    /// → dernière page bornée par `limit`. Les octets du fichier
+    /// remplacé entre deux polls d'une rotation sont perdus (le fichier
+    /// daté est clos — pas de rattrapage multi-fichiers). Extension
+    /// additive : démons anciens → erreur « req inconnue ».
+    DaemonLogTail {
+        #[serde(default)]
+        file: Option<String>,
+        #[serde(default)]
+        offset: u64,
+        #[serde(default)]
+        limit: Option<u64>,
+    },
     DaemonStatus,
     /// Auto-update du démon vers la release `version` demandée par le
     /// client (ex. "0.5.0" → tag v0.5.0 — jamais « latest » : le démon
@@ -1336,6 +1357,7 @@ impl ReqKind {
             Self::OrchestratorConfig { .. } => "orchestrator_config",
             Self::ManagerSpawn { .. } => "manager_spawn",
             Self::BacklogMetrics { .. } => "backlog_metrics",
+            Self::DaemonLogTail { .. } => "daemon_log_tail",
             Self::DaemonStatus => "daemon_status",
             Self::UpdateDaemon { .. } => "update_daemon",
             Self::RefreshAgentCaps { .. } => "refresh_agent_caps",

@@ -651,7 +651,7 @@ export class ConnView {
     // Ne lever l'inert que si les autres overlays #chat sont aussi
     // fermés — sinon on ré-expose #input derrière settings-view/map-view/
     // components-view (frappes invisibles, le bug exact que l'inert prévient).
-    if ($("settings-view").hidden && $("map-view").hidden && $("components-view").hidden) {
+    if ($("settings-view").hidden && $("map-view").hidden && $("components-view").hidden && $("logs-view").hidden) {
       this.setChatInert(false);
     }
     nav.close("connview");
