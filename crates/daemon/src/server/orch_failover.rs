@@ -246,10 +246,17 @@ impl Daemon {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
+        // Workspace du remplaçant : celui de l'item wip à reprendre
+        // (tag repo → repo_workspaces) ; worker sans wip (PR seules)
+        // → workspace par défaut comme avant.
+        let fo_ws = my_wip
+            .first()
+            .map(|t| cfg.workspace_for(task_repo(t)).to_string())
+            .unwrap_or_else(|| cfg.workspace.clone());
         let prompt = orch_plan::fill(
             WORKER_FAILOVER_PROMPT,
             &[
-                ("WS", cfg.workspace.clone()),
+                ("WS", fo_ws.clone()),
                 ("ITEMS", items_txt),
                 ("PRS", prs_txt),
             ],
@@ -263,7 +270,15 @@ impl Daemon {
         };
         st.counter += 1;
         let Some(nsid) = self
-            .plan_spawn(st.counter, &cfg.title_prefix, &new_agent, mode, prompt, cfg)
+            .plan_spawn(
+                st.counter,
+                &cfg.title_prefix,
+                &new_agent,
+                mode,
+                prompt,
+                &fo_ws,
+                cfg,
+            )
             .await
         else {
             // Spawn refusé : on NE touche pas à l'ancienne session —
@@ -355,12 +370,16 @@ impl Daemon {
             } else {
                 (orch_plan::PLANNER_PROMPT, cfg.planner_mode.as_str())
             };
+            // Workspace routé de l'item repris (tag repo →
+            // repo_workspaces) — le remplaçant travaille dans le bon
+            // checkout.
+            let iws = cfg.workspace_for(task_repo(t)).to_string();
             let mut prompt = orch_plan::fill(
                 tpl,
                 &[
                     ("ID", key.clone()),
                     ("ITEM", orch_plan::item_body(t)),
-                    ("WS", cfg.workspace.clone()),
+                    ("WS", iws.clone()),
                     (
                         "ROUND",
                         t.get("review_round")
@@ -399,6 +418,7 @@ impl Daemon {
                     &new_agent,
                     mode,
                     prompt,
+                    &iws,
                     cfg,
                 )
                 .await

@@ -354,7 +354,9 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
         ps(
             "workspace",
             "Workspace workers",
-            "cwd des sessions workers et des appels « gh »",
+            "cwd des items non taggés et des appels CLI de \
+             l'orchestrateur — les items taggés sont routés par \
+             repo_workspaces",
             ParamKind::Path,
             Some("/workspace"),
         ),
@@ -421,7 +423,10 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
         ps(
             "prompt",
             "Prompt worker",
-            "prompt sur mesure des workers — vide = prompt intégré",
+            "prompt sur mesure des workers — vide = prompt intégré ; \
+             le dispatch par item (agentbacklog ≥ 0.7) substitue \
+             {WS} {REPO} {ID} {ITEM} et pré-assigne l'item (pas de \
+             --pop)",
             ParamKind::String,
             None,
         ),
@@ -553,9 +558,10 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
         ps(
             "repo_workspaces",
             "Workspaces routés",
-            "entrées « repo=/cwd » séparées par des virgules — la liste \
-             des workspaces routés + le périmètre des Managers ; \
-             vide = défaut",
+            "entrées « repo=/cwd » séparées par des virgules — routage \
+             des sessions par tag repo des items (worker, planner, \
+             reviewer, Manager) ; un tag sans entrée = item en \
+             attente ; vide = défaut",
             ParamKind::List,
             None,
         ),

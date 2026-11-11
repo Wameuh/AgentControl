@@ -147,6 +147,12 @@ export class BacklogView {
   /** Workspaces routés exposés par l'orchestrateur actif (surface
    *  « Manager » — un proposable par repo sans session vivante). */
   private mgrWs: { repo: string; cwd: string }[] = [];
+  /** Tags repo routés (`orchestrator.routed_tags` du statut) — null
+   *  = orchestrateur inactif ou démon trop vieux (pas de routage
+   *  worker → pas d'avertissement « non routable »). Sert à signaler
+   *  les items taggés d'un repo sans workspace déclaré : ils
+   *  attendent au lieu de partir dans le mauvais cwd. */
+  private routedTags: string[] | null = null;
   private mgrBusy = new Set<string>();
   private mgrErr: string | null = null;
   /** Signature du dernier rendu — le poll ne rebuild le DOM que si la
@@ -281,6 +287,12 @@ export class BacklogView {
             .filter((w): w is { repo: string; cwd?: string } => !!w.repo)
             .map((w) => ({ repo: w.repo, cwd: w.cwd ?? "" }))
         : [];
+    // routed_tags : exposé par les démons récents même spawn_managers
+    // coupé — absent sur un vieux démon → null (pas d'avertissement).
+    const rt = orch?.enabled ? orch.routed_tags : undefined;
+    this.routedTags = Array.isArray(rt)
+      ? rt.filter((x): x is string => typeof x === "string")
+      : null;
     if (!comp) {
       this.state = { kind: "absent" };
       this.render();
@@ -418,6 +430,7 @@ export class BacklogView {
       this.repoFilter +
       this.installing +
       JSON.stringify(this.mgrWs) +
+      JSON.stringify(this.routedTags) +
       JSON.stringify([...this.mgrBusy]) +
       this.mgrErr +
       JSON.stringify(
@@ -453,6 +466,11 @@ export class BacklogView {
       return;
     }
     const items = st.items;
+    // Avertissement « tag repo sans workspace » : les items taggés
+    // d'un repo absent de repo_workspaces ne sont pas dispatchés —
+    // le workspace se déclare dans les paramètres du composant
+    // backlog-orchestrator (champ « Workspaces routés »).
+    const unrouted = this.unroutedHtml(items);
 
     // ok : 3 sections — wip (agent résolu + depuis), pending (bloquées
     // marquées), done récentes (24 h, 8 max).
@@ -498,7 +516,7 @@ export class BacklogView {
       ...new Set(items.map((i) => i.repo).filter((r): r is string => !!r)),
     ].sort();
     const untagged = items.some((i) => !i.repo);
-    let html = mgr; // section « Managers » en tête, avant filtre et file
+    let html = mgr + unrouted; // sections fixes en tête, avant filtre et file
     if (repos.length + (untagged ? 1 : 0) >= 2) {
       html +=
         `<div class="bl-repo-filter"><select id="bl-repo-sel" title="${q(esc(t("bl_repo_filter")))}">` +
@@ -595,6 +613,29 @@ export class BacklogView {
         s.title === title &&
         s.state !== "dead" &&
         s.state !== "interrupted",
+    );
+  }
+
+  /** Bandeau « tag repo sans workspace routé » — items non soldés
+   *  taggés d'un repo absent de `routed_tags` : ils attendent (le
+   *  routage worker refuse de les spawn dans le mauvais cwd). Vide
+   *  sans orchestrateur actif ou sur démon ancien (routedTags null). */
+  private unroutedHtml(items: BacklogItem[]): string {
+    if (this.routedTags === null) return "";
+    const known = new Set(this.routedTags);
+    const bad = [
+      ...new Set(
+        items
+          .filter((i) => i.repo && i.status !== "done")
+          .map((i) => i.repo as string),
+      ),
+    ]
+      .filter((r) => !known.has(r))
+      .sort();
+    if (!bad.length) return "";
+    return (
+      `<div class="sess-none warn">${icon("warn")} ` +
+      `${esc(t("bl_unrouted", { tags: bad.join(", ") }))}</div>`
     );
   }
 

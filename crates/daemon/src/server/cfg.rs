@@ -168,7 +168,11 @@ pub struct OrchCfg {
     /// Groupe sidebar des workers (défaut "AgentControl").
     #[serde(default = "dgroup")]
     pub group: String,
-    /// cwd des sessions workers ET cwd des appels `gh` (défaut /workspace).
+    /// cwd des sessions du workspace PAR DÉFAUT (items non taggés,
+    /// workers legacy sans routage, appels `gh` sans `--repo`) et cwd
+    /// des appels `agentbacklog`/`gh` de l'orchestrateur — les workers
+    /// taggés sont routés par `repo_workspaces` (workspace_for).
+    /// Défaut /workspace.
     #[serde(default = "dws")]
     pub workspace: String,
     /// Profil agent des workers (défaut "devin").
@@ -293,8 +297,11 @@ pub struct OrchCfg {
     #[serde(default = "d2700")]
     pub pr_review_timeout: u64,
     /// Routing workspace repo → cwd : une entrée = un « workspace »
-    /// porté par le backlog (tag `--repo` des items). Sert aujourd'hui
-    /// à définir les Managers proposables (un par entrée) ; défaut
+    /// porté par le backlog (tag `--repo` des items). Route les
+    /// sessions spawnées pour un item taggé (worker legacy, planner,
+    /// implémenteur, reviewer de plan — `workspace_for`), propose les
+    /// Managers (un par entrée) et adosse les reviews PR
+    /// (`orch_review::ws_of`) ; défaut
     /// `{"AgentControl": "/workspace"}` — hérité du script d'origine.
     /// Dernier champ : sous-table TOML (voir l'avertissement en tête).
     #[serde(default = "drw")]
@@ -405,6 +412,36 @@ impl OrchCfg {
         } else {
             self.max_working
         })
+    }
+
+    /// Workspace de session pour un tag `repo` d'item backlog :
+    /// `repo_workspaces[tag]` quand le tag est routé, `workspace`
+    /// (défaut) pour les items non taggés ET pour les tags inconnus
+    /// (l'appelant filtre les non routables via `repo_routable` — un
+    /// tag sans mapping ne doit pas être travaillé dans le mauvais
+    /// cwd, il attend une déclaration de workspace).
+    pub fn workspace_for<'a>(&'a self, repo: &str) -> &'a str {
+        if repo.is_empty() {
+            return self.workspace.as_str();
+        }
+        self.repo_workspaces
+            .get(repo)
+            .map(String::as_str)
+            .unwrap_or(&self.workspace)
+    }
+
+    /// Le tag `repo` d'un item est-il routable ? Non taggé → workspace
+    /// par défaut (toujours routable) ; taggé → seulement s'il a une
+    /// entrée `repo_workspaces` (sinon l'item attend — jamais de spawn
+    /// dans le mauvais checkout).
+    pub fn repo_routable(&self, repo: &str) -> bool {
+        repo.is_empty() || self.repo_workspaces.contains_key(repo)
+    }
+
+    /// Tags `repo` effectivement routés (clés de `repo_workspaces`),
+    /// triés — exposé au client pour signaler les items non routables.
+    pub fn routed_tags(&self) -> Vec<String> {
+        self.repo_workspaces.keys().cloned().collect()
     }
 
     /// Profil effectif d'un rôle : le param dédié (`*_agent`) s'il est

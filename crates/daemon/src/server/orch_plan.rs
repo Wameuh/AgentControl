@@ -935,6 +935,7 @@ impl Daemon {
                 let id = task_id(t);
                 task_status(t) == "plan_review"
                     && task_reviewer(t).is_empty()
+                    && cfg.repo_routable(task_repo(t))
                     && !st.stalled_plans.contains_key(&id.to_string())
                     && !st
                         .review_retry
@@ -1062,12 +1063,16 @@ impl Daemon {
                     "(aucune)".to_string()
                 }
             };
+            // Workspace routé de l'item (tag repo → repo_workspaces) :
+            // reviewer ET planificateur travaillent dans le checkout
+            // du repo concerné — plus de revue de plan cross-repo.
+            let iws = cfg.workspace_for(task_repo(t)).to_string();
             let prompt = fill(
                 REVIEWER_PROMPT,
                 &[
                     ("ID", key.clone()),
                     ("ITEM", item_body(t)),
-                    ("WS", cfg.workspace.clone()),
+                    ("WS", iws.clone()),
                     ("PLANNER", planner_label),
                     ("PLAN", plan_inline),
                     ("ROUND", round.to_string()),
@@ -1081,6 +1086,7 @@ impl Daemon {
                     cfg.agent_or(&cfg.reviewer_agent),
                     &cfg.reviewer_mode,
                     prompt,
+                    &iws,
                     cfg,
                 )
                 .await
@@ -1138,6 +1144,13 @@ impl Daemon {
             }
             let id = task_id(t);
             let key = id.to_string();
+            // Tag repo sans workspace déclaré → l'item attend (jamais
+            // de spawn dans le mauvais cwd) ; routable → cwd de la
+            // session = workspace de l'item.
+            if !cfg.repo_routable(task_repo(t)) {
+                continue;
+            }
+            let iws = cfg.workspace_for(task_repo(t)).to_string();
             let no_plan = task_no_plan(t);
             let (prefix, agent, mode, prompt) = if no_plan {
                 (
@@ -1149,7 +1162,7 @@ impl Daemon {
                         &[
                             ("ID", key.clone()),
                             ("ITEM", item_body(t)),
-                            ("WS", cfg.workspace.clone()),
+                            ("WS", iws.clone()),
                         ],
                     ),
                 )
@@ -1163,14 +1176,14 @@ impl Daemon {
                         &[
                             ("ID", key.clone()),
                             ("ITEM", item_body(t)),
-                            ("WS", cfg.workspace.clone()),
+                            ("WS", iws.clone()),
                         ],
                     ),
                 )
             };
             st.counter += 1;
             let Some(sid) = self
-                .plan_spawn(st.counter, &prefix, agent, &mode, prompt, cfg)
+                .plan_spawn(st.counter, &prefix, agent, &mode, prompt, &iws, cfg)
                 .await
             else {
                 continue;
@@ -1425,6 +1438,11 @@ impl Daemon {
         let id = task_id(t);
         let key = id.to_string();
         let planner_sid = task_agent(t).to_string();
+        // Workspace routé de l'item : le planner (spawné dessus) et
+        // l'implémenteur de remplacement travaillent dans le checkout
+        // du repo taggé — le message d'approbation cite le bon
+        // AGENTS.md.
+        let iws = cfg.workspace_for(task_repo(t)).to_string();
         let planner_alive = !planner_sid.is_empty() && session_ids.contains(&planner_sid);
         // Watermark posé au claim-review du round courant : un
         // PeerMessage du round N-1 ne vaut pas livraison du verdict N.
@@ -1476,7 +1494,7 @@ impl Daemon {
                          --agent-id \"$AGENTCONTROL_SESSION\". Blocage \
                          insurmontable : --release + explication.",
                         round.saturating_sub(1).max(0),
-                        cfg.workspace,
+                        iws,
                         cmt = if comment.is_empty() {
                             String::new()
                         } else {
@@ -1503,7 +1521,7 @@ impl Daemon {
                         &[
                             ("ID", key.clone()),
                             ("ITEM", item_body(t)),
-                            ("WS", cfg.workspace.clone()),
+                            ("WS", iws.clone()),
                             ("ROUND", format!("{}", round.saturating_sub(1).max(0))),
                             ("PLAN", clip_inline(task_plan_content(t), PLAN_INLINE_MAX)),
                         ],
@@ -1515,6 +1533,7 @@ impl Daemon {
                             cfg.agent_or(&cfg.planner_agent),
                             &cfg.implement_mode,
                             prompt,
+                            &iws,
                             cfg,
                         )
                         .await
@@ -2380,7 +2399,9 @@ impl Daemon {
     /// Spawn d'une session pipeline — même mécanique que `orch_spawn`
     /// (h_new_session origin composant + apply_spawn_cfg) mais rôle
     /// paramétré : préfixe, profil agent, mode et prompt ne dépendent
-    /// plus de la cfg worker.
+    /// plus de la cfg worker. `cwd` = workspace routé de l'item
+    /// (repo_workspaces via `workspace_for`) — jamais le workspace par
+    /// défaut quand l'item est taggé.
     pub(crate) async fn plan_spawn(
         self: &Arc<Self>,
         number: u64,
@@ -2388,6 +2409,7 @@ impl Daemon {
         agent: &str,
         mode: &str,
         prompt: String,
+        cwd: &str,
         cfg: &cfg::OrchCfg,
     ) -> Option<String> {
         let title = format!("{prefix}{number}");
@@ -2396,7 +2418,7 @@ impl Daemon {
         let v = match self
             .h_new_session(
                 agent.to_string(),
-                cfg.workspace.clone(),
+                cwd.to_string(),
                 Some(title.clone()),
                 Some(cfg.model.clone()),
                 Some(mode.to_string()),
@@ -2673,6 +2695,19 @@ pub(crate) async fn cli_plan_capable(bin: &str, ws: &Path) -> bool {
     run_out(&[bin, "--help"], ws)
         .await
         .map(|(rc, out, _)| rc == 0 && out.contains("--claim-review"))
+        .unwrap_or(false)
+}
+
+/// `agentbacklog --help` mentionne `--claim` → le dispatch par item
+/// (routage repo/workspace) est jouable ; sinon le cycle legacy retombe
+/// sur le self-`--pop` historique non scopé (comportement dégradé,
+/// pas de blocage — un ancien agentbacklog continue de tourner).
+/// `--claim` matche aussi `--claim-review` dans l'aide — sans
+/// importance : les deux sont arrivés ensemble (≥ 0.7).
+pub(crate) async fn cli_claim_capable(bin: &str, ws: &Path) -> bool {
+    run_out(&[bin, "--help"], ws)
+        .await
+        .map(|(rc, out, _)| rc == 0 && out.contains("--claim"))
         .unwrap_or(false)
 }
 
