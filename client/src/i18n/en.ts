@@ -420,6 +420,8 @@ export const en = {
   bl_since: "for {t}", bl_ago: "{t} ago", bl_now: "just now",
   bl_repo_filter: "Filter by repository",
   bl_all_repos: "All repos", bl_repo_none: "no repo",
+  bl_unrouted:
+    "repo tag(s) without a routed workspace — these items wait instead of running in the wrong checkout: {tags}. Declare the workspace in the backlog-orchestrator component settings (\"Workspaces routés\" / repo_workspaces).",
   bl_metrics: "Activity",
   bl_m_window: "Metrics window",
   bl_m_loading: "Loading metrics…",

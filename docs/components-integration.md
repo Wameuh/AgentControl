@@ -453,6 +453,23 @@ origin+title+live-state dedup) — an existing Manager is returned as-is;
 `rename_session` breaks the dedup (accepted: the title is the
 contract).
 
+The same `repo_workspaces` map routes **workers**: when the installed
+`agentbacklog` supports `--claim` (≥ 0.7), each tick the orchestrator
+picks the next poppable item itself (priority DESC, id — the `--pop`
+order), spawns the worker with `cwd = repo_workspaces[repo]`
+(`workspace` for untagged items) and claims the item for that session —
+a worker can no longer pick an item belonging to another workspace.
+Untagged items keep the historical self-`--pop` fallback on old CLI
+versions. A tagged item whose tag has **no** mapping stays pending
+(never dispatched into the wrong checkout); the Backlog view warns via
+`orchestrator.routed_tags`, and the orchestrator status lists the
+waiting tags. Worker prompts are templated per item — `{WS}`, `{REPO}`,
+`{ID}`, `{ITEM}` — so AGENTS.md and PR instructions always come from
+the routed workspace. Plan-review roles (planner, reviewer,
+implementer) and failover replacements inherit the same routed cwd.
+`max_workers`/`max_working` stay global caps — routing changes the
+cwd, not the pool accounting.
+
 ### 2.10 Backlog metrics — sampled activity series
 
 The native orchestrator samples the queue at the end of each

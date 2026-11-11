@@ -83,6 +83,41 @@ Blocage insurmontable sur une tache : agentbacklog --release <ID> --agent-id "<t
 
 Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; push uniquement sur ta branche de PR ; nettoie ton worktree a la fin (git worktree remove) ; reponds en francais."#;
 
+/// Prompt worker du dispatch PAR ITEM (agentbacklog ≥ 0.7, `--claim`) :
+/// l'orchestrateur a déjà choisi l'item et son workspace — le prompt
+/// est templé `{WS}` (cwd de la session = workspace routé du tag repo),
+/// `{REPO}` (tag de l'item, « (non taggé) » sinon), `{ID}` et `{ITEM}`
+/// (titre + description inline). `cfg.prompt` remplace ce template et
+/// reçoit les mêmes substitutions. Les chemins et le workflow PR/CI
+/// viennent de l'AGENTS.md DU WORKSPACE ROUTÉ — rien n'est codé en dur
+/// pour un repo particulier.
+const WORKER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
+
+Tu es un worker autonome sur le workspace {WS} (repo {REPO}). Commence par lire {WS}/AGENTS.md — le workflow PR/CI qu'il decrit est obligatoire ; s'il est absent, applique les conventions du depot (branche -> PR draft -> review -> checks -> merge).
+
+## ITEM ASSIGNE — ton unique tache
+{ITEM}
+
+L'orchestrateur a deja marque cet item wip a ton nom (agent_id = ta session) : tu n'as PAS a lancer `agentbacklog --pop` — un worker = un item, et un pop pourrait prendre l'item d'un autre workspace.
+
+MISSION — une seule tache :
+
+1. Ton item t'est deja associe (status wip, agent_id = ta session) : `agentbacklog --list --json` le montre avec ton agent_id — le titre et la description ci-dessus sont ton cahier des charges complet.
+
+   Cas particulier : si une de tes taches reste wip parce que sa PR n'est pas encore mergée (assignee avant cette consigne), tu n'es PAS libre — mene d'abord cette PR jusqu'au merge (etape 4), marque --done, puis seulement ensuite l'item courant. Tu t'arretes quand TOUT ce qui t'est attribue est solde — tu NE RE-POP JAMAIS : l'orchestrateur spawn un worker neuf par item pending.
+
+2. Implemente la tache en suivant sa description a la lettre : git worktree dedie (JAMAIS dans le checkout principal {WS}), base sur la branche d'integration du repo, spec, verifications demandees. Option : review locale du diff avant de pousser si un outil de review locale est disponible.
+
+3. Cycle PR (cf AGENTS.md de {WS}) : branche -> push -> PR draft -> review auto -> traiter chaque round en restant draft (corriger, push, relancer la review) -> review soldee -> passer la PR ready -> attendre les checks VERTS sur le head SHA. Toute attente > ~1 min (verdict de review, checks CI, merge, delai) passe par un waiter ac-wait si le demon AgentControl l'expose — jamais de `--watch` bloquant ni de boucle de poll dans un tool call.
+
+4. Mene ta PR jusqu'au merge : si la regle de merge du repo le permet pour un agent (derniere review auto « Verdict: APPROVED » posterieure au push du head courant, fraicheur verifiee), procede au merge toi-meme ; sinon le merge reste a l'utilisateur — surveille jusqu'au merge effectif via un waiter (`ac-wait -- bash -c 'gh pr view <N> --json state -q .state | grep -q MERGED'` — pipe enrobe dans bash -c).
+
+5. Marque la tache faite : `agentbacklog --done <ID> --agent-id "$AGENTCONTROL_SESSION"` UNIQUEMENT quand ta PR est effectivement MERGED (verifie l'etat GitHub, pas seulement ready+checks) — ou quand les criteres propres de la tache sont remplis si elle n'a pas de PR. Puis ARRETE : reponds « termine » et cesse tout travail — ne re-pop jamais, l'orchestrateur te supprime et spawn un worker neuf pour le pending suivant.
+
+Blocage insurmontable sur une tache : `agentbacklog --release <ID> --agent-id "$AGENTCONTROL_SESSION"`, explique la raison dans ta reponse, puis arrete — l'item repart pending pour un autre worker.
+
+Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; push uniquement sur ta branche de PR ; nettoie ton worktree a la fin (git worktree remove) ; reponds en francais."#;
+
 const NOTES_TITLE: &str = "[auto] Patchnotes utilisateur de la release PR + passage ready";
 const NOTES_DESC: &str = r#"[Item cree automatiquement par backlog-orchestrator : backlog vide, cloture du cycle de release.]
 
@@ -509,6 +544,15 @@ impl OrchProbe {
                 self.is_enabled(),
                 &self.cfg.read().unwrap(),
             ),
+            // Tags repo routés (clés repo_workspaces) — exposés même
+            // quand spawn_managers est coupé : le client s'en sert
+            // pour signaler les items taggés sans workspace (non
+            // dispatchables — le routage worker les met en attente).
+            "routed_tags": if self.is_enabled() {
+                self.cfg.read().unwrap().routed_tags()
+            } else {
+                Vec::new()
+            },
         })
     }
 
@@ -1107,6 +1151,17 @@ pub(crate) fn task_status<'a>(t: &'a Task) -> &'a str {
 pub(crate) fn task_agent<'a>(t: &'a Task) -> &'a str {
     t.get("agent_id").and_then(Value::as_str).unwrap_or("")
 }
+/// Tag `repo`/workspace de l'item ("" = non taggé → workspace par
+/// défaut). Routage des sessions spawnées pour cet item.
+pub(crate) fn task_repo<'a>(t: &'a Task) -> &'a str {
+    t.get("repo").and_then(Value::as_str).unwrap_or("")
+}
+/// Priorité d'item — même tri que `agentbacklog --pop`
+/// (ORDER BY priority DESC, id) pour que le dispatch claim serve la
+/// même file que le self-pop historique.
+pub(crate) fn task_priority(t: &Task) -> i64 {
+    t.get("priority").and_then(Value::as_i64).unwrap_or(0)
+}
 /// Un item `pending` est « poppable » : sans dépendance ou dépendances
 /// toutes soldées — compter les dep-bloqués ferait spawner des workers
 /// qui trouveraient « queue is empty » (churn spawn/rm du script).
@@ -1386,6 +1441,20 @@ impl Daemon {
             .filter(|t| task_status(t) == "pending" && task_poppable(t))
             .cloned()
             .collect();
+        // Items taggés d'un repo SANS workspace déclaré
+        // (`repo_workspaces`) : non dispatchables — ils attendent une
+        // entrée de routing plutôt que de partir dans le mauvais cwd.
+        // Tags distincts, triés, pour le détail de statut.
+        let unrouted_tags: Vec<String> = {
+            let mut v: Vec<String> = pending
+                .iter()
+                .filter(|t| !cfg.repo_routable(task_repo(t)))
+                .map(|t| task_repo(t).to_string())
+                .collect();
+            v.sort();
+            v.dedup();
+            v
+        };
         let now = now_secs();
         let mut st = self.orch.state.lock().unwrap().clone();
         // Snapshot `pr_reviews` au clone : le write-back de fin de cycle
@@ -1785,13 +1854,28 @@ impl Daemon {
                     slots.take();
                 }
             }
-            // 3b. spawn pour les pending poppables — seulement sur les
-            // slots que les wips asleep n'ont pas pris.
-            // Mode sériel quota (rl > 0) : au plus UN spawn, et seulement
-            // si aucune session ne tourne — les sessions en erreur
-            // rate_limit attendent leur backoff, les idles ne sont pas
-            // réveillées. Sinon dispatch normal.
-            let to_spawn = if rl > 0 {
+            // 3b. Dispatch pending — DEUX mécanismes selon la surface
+            // CLI d'agentbacklog :
+            //  - ≥ 0.7 (`--claim`) : dispatch PAR ITEM — l'orchestrateur
+            //    choisit l'item (ordre du pop : priority DESC, id),
+            //    spawn le worker dans le workspace routé de son tag
+            //    `repo` (`repo_workspaces`, fallback `workspace` pour
+            //    les non taggés) et fait le `--claim` après le spawn
+            //    (échec → rm, item toujours pending). Routage strict :
+            //    un worker ne peut plus prendre l'item d'un autre
+            //    workspace, et les items taggés sans mapping
+            //    (`unrouted_tags`) ne sont jamais spawnés.
+            //  - plus ancien : self-`--pop` non scopé dans
+            //    `cfg.workspace` — comportement historique, dégradé
+            //    (pas de routage repo possible sans `--claim`).
+            // Mode sériel quota (rl > 0) : au plus UN spawn, et
+            // seulement si aucune session ne tourne — les sessions en
+            // erreur rate_limit attendent leur backoff, les idles ne
+            // sont pas réveillées. Sinon dispatch normal.
+            let serial_cap = |workers: &[SessionMeta], n: usize| -> usize {
+                if rl == 0 {
+                    return n;
+                }
                 let active = workers.iter().any(|w| {
                     matches!(
                         w.state.as_str(),
@@ -1806,27 +1890,105 @@ impl Daemon {
                     "{rl} session(s) en rate_limit — exécution sérialisée \
                      (1 session à la fois)"
                 ));
-                usize::from(!active && !pending.is_empty())
-                    .min(slots.total)
-                    .min(slots.working)
-            } else {
-                pending.len().min(slots.total).min(slots.working)
+                usize::from(!active).min(n)
             };
-            for _ in 0..to_spawn {
-                st.counter += 1;
-                info!(
-                    "orchestrateur: pending={} active={} → spawn {}{}",
-                    pending.len(),
-                    alive,
-                    cfg.title_prefix,
-                    st.counter
-                );
-                if let Some(sid) = self.orch_spawn(st.counter).await {
-                    // Session fraîche = worker actif pour le comptage du tick.
-                    if let Ok(s) = self.get_session(&sid).await {
-                        workers.push(s.meta_snapshot());
+            // Items dispatchables : routables uniquement, triés comme
+            // le pop (priority DESC, id ASC).
+            let mut spawnable: Vec<&Task> = pending
+                .iter()
+                .filter(|t| cfg.repo_routable(task_repo(t)))
+                .collect();
+            spawnable.sort_by(|a, b| {
+                task_priority(b)
+                    .cmp(&task_priority(a))
+                    .then(task_id(a).cmp(&task_id(b)))
+            });
+            if orch_plan::cli_claim_capable(bin, ws).await {
+                let cap = serial_cap(&workers, spawnable.len())
+                    .min(slots.total)
+                    .min(slots.working);
+                for t in spawnable.iter().take(cap) {
+                    if !slots.ok() || !self.orch.is_enabled() {
+                        break;
                     }
-                    slots.take();
+                    let id = task_id(t);
+                    let repo = task_repo(t);
+                    let cwd = cfg.workspace_for(repo).to_string();
+                    let repo_label = if repo.is_empty() {
+                        "(non taggé)".to_string()
+                    } else {
+                        repo.to_string()
+                    };
+                    let prompt = orch_plan::fill(
+                        cfg.prompt.as_deref().unwrap_or(WORKER_PROMPT),
+                        &[
+                            ("WS", cwd.clone()),
+                            ("REPO", repo_label.clone()),
+                            ("ID", id.to_string()),
+                            ("ITEM", orch_plan::item_body(t)),
+                        ],
+                    );
+                    st.counter += 1;
+                    info!(
+                        "orchestrateur: pending={} unrouted={} → spawn {}{} \
+                         pour #{} (repo {}, ws {})",
+                        pending.len(),
+                        unrouted_tags.len(),
+                        cfg.title_prefix,
+                        st.counter,
+                        id,
+                        repo_label,
+                        cwd
+                    );
+                    let Some(sid) = self
+                        .orch_spawn(st.counter, &cwd, prompt)
+                        .await
+                    else {
+                        continue;
+                    };
+                    let (rc, _o, e) = run_out(
+                        &[bin, "--claim", &id.to_string(), "--agent-id", &sid],
+                        ws,
+                    )
+                    .await
+                    .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                    if rc == 0 {
+                        if let Ok(s) = self.get_session(&sid).await {
+                            workers.push(s.meta_snapshot());
+                        }
+                        slots.take();
+                    } else {
+                        warn!("orchestrateur: claim #{id} rc={rc} {e} → rm {sid}");
+                        let _ = self.h_delete_session(sid).await;
+                    }
+                }
+            } else {
+                let cap = serial_cap(&workers, pending.len())
+                    .min(slots.total)
+                    .min(slots.working);
+                for _ in 0..cap {
+                    if !self.orch.is_enabled() {
+                        return Ok(());
+                    }
+                    st.counter += 1;
+                    info!(
+                        "orchestrateur: pending={} active={} → spawn {}{} \
+                         (self-pop, agentbacklog sans --claim)",
+                        pending.len(),
+                        alive,
+                        cfg.title_prefix,
+                        st.counter
+                    );
+                    let prompt = cfg.prompt.clone().unwrap_or_else(|| PROMPT.to_string());
+                    if let Some(sid) = self
+                        .orch_spawn(st.counter, &cfg.workspace, prompt)
+                        .await
+                    {
+                        if let Ok(s) = self.get_session(&sid).await {
+                            workers.push(s.meta_snapshot());
+                        }
+                        slots.take();
+                    }
                 }
             }
 
@@ -1980,8 +2142,22 @@ impl Daemon {
                 })
                 .filter_map(|m| m.last_error.as_ref().map(|le| le.kind.as_str()))
                 .collect();
-            let detail = (!errs.is_empty())
-                .then(|| format!("{} session(s) en erreur : {}", errs.len(), errs.join(", ")));
+            let mut detail_parts: Vec<String> = Vec::new();
+            if !errs.is_empty() {
+                detail_parts.push(format!(
+                    "{} session(s) en erreur : {}",
+                    errs.len(),
+                    errs.join(", ")
+                ));
+            }
+            if !unrouted_tags.is_empty() {
+                detail_parts.push(format!(
+                    "items non dispatchables — tag(s) repo sans workspace \
+                     (déclarer via repo_workspaces) : {}",
+                    unrouted_tags.join(", ")
+                ));
+            }
+            let detail = (!detail_parts.is_empty()).then(|| detail_parts.join(" ; "));
             self.orch.set_status(Phase::Active, detail);
         }
         // Échantillon métriques post-cycle (server/metrics.rs) —
@@ -2015,7 +2191,14 @@ impl Daemon {
     /// l'échelle de gh ("open"/"draft" → OPEN).
     pub(crate) async fn orch_pr_state(&self, p: &proto::PrEntry, ws: &Path) -> String {
         if p.forge == "github" && p.pr > 0 {
-            return self.gh_pr_state(p.pr, ws).await;
+            // `-R` accepte [HOST/]OWNER/REPO — host préfixé seulement
+            // s'il n'est pas l'hôte GitHub par défaut (GHES).
+            let repo = if p.host.is_empty() || p.host == "github.com" {
+                p.repo.clone()
+            } else {
+                format!("{}/{}", p.host, p.repo)
+            };
+            return self.gh_pr_state(p.pr, &repo, ws).await;
         }
         match p.status.as_str() {
             "open" | "draft" => "OPEN".into(),
@@ -2025,13 +2208,29 @@ impl Daemon {
         }
     }
 
-    /// État forge d'une PR du workspace (`gh pr view`) — "UNKNOWN" en
-    /// cas d'échec, jamais OPEN : traitée comme soldée (cf. script).
-    async fn gh_pr_state(&self, pr: u64, ws: &Path) -> String {
-        run_out(
-            &["gh", "pr", "view", &pr.to_string(), "--json", "state", "-q", ".state"],
-            ws,
-        )
+    /// État forge d'une PR — "UNKNOWN" en cas d'échec, jamais OPEN :
+    /// traitée comme soldée (cf. script). `repo` = "owner/name" de
+    /// l'entrée registre : passé à `gh -R` pour sonder LA BONNE forge
+    /// quel que soit le cwd (multi-workspaces — sinon la sonde
+    /// interrogerait la PR #N du repo du cwd, une autre PR).
+    async fn gh_pr_state(&self, pr: u64, repo: &str, ws: &Path) -> String {
+        let num = pr.to_string();
+        let mut argv: Vec<String> = vec![
+            "gh".into(),
+            "pr".into(),
+            "view".into(),
+            num,
+            "--json".into(),
+            "state".into(),
+            "-q".into(),
+            ".state".into(),
+        ];
+        if !repo.is_empty() {
+            argv.push("-R".into());
+            argv.push(repo.to_string());
+        }
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        run_out(&argv, ws)
         .await
         .ok()
         .filter(|(rc, out, _)| *rc == 0 && !out.is_empty())
@@ -2145,19 +2344,21 @@ impl Daemon {
     /// `component:backlog-orchestrator` — le prompt part wrappé service
     /// et la session se raccroche au nœud du composant dans le
     /// diagramme, groupe posé à la création), puis `thought_level` par
-    /// handler. Remplace les `acctl new/setcfg`/RPC socket du script.
-    async fn orch_spawn(self: &Arc<Self>, number: u64) -> Option<String> {
+    /// handler. `cwd` = workspace routé de l'item (repo_workspaces) et
+    /// `prompt` déjà templé — le dispatch claim passe le prompt par
+    /// item, le repli self-pop le prompt générique dans cfg.workspace.
+    /// Remplace les `acctl new/setcfg`/RPC socket du script.
+    async fn orch_spawn(self: &Arc<Self>, number: u64, cwd: &str, prompt: String) -> Option<String> {
         let cfg = self.orch.cfg.read().unwrap().clone();
         let cfg = &cfg;
         let title = format!("{}{}", cfg.title_prefix, number);
-        let prompt = cfg.prompt.clone().unwrap_or_else(|| PROMPT.to_string());
         let group = (!cfg.group.is_empty()).then(|| cfg.group.clone());
         let agent = cfg.agent_or(&cfg.worker_agent);
         self.warn_spawn_cfg(agent, &cfg.model, &cfg.mode);
         let v = match self
             .h_new_session(
                 agent.to_string(),
-                cfg.workspace.clone(),
+                cwd.to_string(),
                 Some(title.clone()),
                 Some(cfg.model.clone()),
                 Some(cfg.mode.clone()),
@@ -2724,5 +2925,44 @@ mod tests {
         assert_eq!(w.name, "verdict PR #42"); // backslashes %q déséchappés
         assert_eq!(w.timeout, Some(1800.0));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repo_routing_workspace_for_et_routable() {
+        let mut c = cfg::OrchCfg::default();
+        // Non taggé → workspace par défaut, toujours routable.
+        assert_eq!(c.workspace_for(""), "/workspace");
+        assert!(c.repo_routable(""));
+        // Tag connu → son cwd ; tag inconnu → fallback workspace mais
+        // NON routable (l'item doit attendre, pas partir dans le
+        // mauvais checkout).
+        c.repo_workspaces
+            .insert("Taskwondo".into(), "/home/dev/taskwondo".into());
+        assert_eq!(c.workspace_for("Taskwondo"), "/home/dev/taskwondo");
+        assert!(c.repo_routable("Taskwondo"));
+        assert_eq!(c.workspace_for("Inconnu"), "/workspace");
+        assert!(!c.repo_routable("Inconnu"));
+        // routed_tags = clés triées (BTreeMap), exposé au client.
+        assert_eq!(c.routed_tags(), vec!["AgentControl", "Taskwondo"]);
+    }
+
+    #[test]
+    fn worker_prompt_remplace_les_placeholders() {
+        let p = orch_plan::fill(
+            WORKER_PROMPT,
+            &[
+                ("WS", "/w".to_string()),
+                ("REPO", "Taskwondo".to_string()),
+                ("ID", "42".to_string()),
+                ("ITEM", "#42 — titre".to_string()),
+            ],
+        );
+        assert!(p.contains("cwd /w") || p.contains("/w"));
+        assert!(p.contains("repo Taskwondo"));
+        assert!(p.contains("#42 — titre"));
+        assert!(!p.contains("{WS}") && !p.contains("{ITEM}"));
+        // Le prompt worker ne doit plus imposer le self-pop : le dispatch
+        // claim pré-assigne l'item.
+        assert!(p.contains("PAS a lancer `agentbacklog --pop`"));
     }
 }

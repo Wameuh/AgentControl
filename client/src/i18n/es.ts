@@ -423,6 +423,8 @@ export const es: Record<Key, string> = {
   bl_since: "desde hace {t}", bl_ago: "hace {t}", bl_now: "ahora mismo",
   bl_repo_filter: "Filtrar por repositorio",
   bl_all_repos: "Todos los repos", bl_repo_none: "sin repo",
+  bl_unrouted:
+    "tag(s) de repo sin workspace enrutado — estos items esperan en lugar de ejecutarse en el checkout equivocado: {tags}. Declara el workspace en los ajustes del componente backlog-orchestrator (« Workspaces routés » / repo_workspaces).",
   bl_metrics: "Actividad",
   bl_m_window: "Ventana de métricas",
   bl_m_loading: "Cargando métricas…",

@@ -420,6 +420,8 @@ export const fr: Record<Key, string> = {
   bl_since: "depuis {t}", bl_ago: "il y a {t}", bl_now: "à l'instant",
   bl_repo_filter: "Filtrer par dépôt",
   bl_all_repos: "Tous les dépôts", bl_repo_none: "sans dépôt",
+  bl_unrouted:
+    "tag(s) repo sans workspace routé — ces items attendent au lieu de partir dans le mauvais checkout : {tags}. Déclarez le workspace dans les paramètres du composant backlog-orchestrator (« Workspaces routés » / repo_workspaces).",
   bl_metrics: "Activité",
   bl_m_window: "Fenêtre des métriques",
   bl_m_loading: "Chargement des métriques…",
