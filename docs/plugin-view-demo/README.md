@@ -1,8 +1,7 @@
 # Plugin démo « hello-plugin » — POC option B
 
 Vue plugin minimale prouvant la chaîne complète : **serve → iframe
-sandboxée → ready → query → data → rendu** (backlog #248,
-`~/plugin-views-exploration.md` §5).
+sandboxée → ready → query → data → rendu** (backlog #248).
 
 ## Installation (démo)
 
@@ -39,14 +38,21 @@ sandboxée → ready → query → data → rendu** (backlog #248,
 
 **Interdit** : invoke/RPC libre, autres composants, sessions, fichiers,
 secrets, token web, storage partagé — l'iframe est `sandbox` sans
-`allow-same-origin` (origine opaque) et la route `/plugin/<name>/`
-exige le token de bridge éphémère (TTL ~5 min, scopé au composant).
+`allow-same-origin` (origine opaque) et le **document**
+`/plugin/<name>/` exige le token de bridge éphémère (TTL ~5 min,
+scopé au composant). Les sous-ressources (js/css/img) sont servies
+sans token — même niveau d'exposition que la SPA : une iframe en
+origine opaque ne peut porter ni query ni cookie de session sur ses
+requêtes relatives, et les données passent par le bridge (RPC
+authentifiée), pas par les assets.
 
 ## Limites connues (POC — durcissement en follow-ups)
 
-- Token de bridge dans l'URL de l'iframe (`?token=`, TTL 5 min) —
+- Token de bridge dans l'URL du document (`?token=`, TTL 5 min) —
   acceptable pour une démo loopback ; v2 : cookie de session ou
-  handshake par en-tête.
+  handshake par en-tête. Une vue ouverte > 5 min qui re-navigue ou
+  lazy-charge un document retombera en 401 (les assets, eux, restent
+  servis — le token ne gate que le document).
 - CSP `script-src 'unsafe-inline'` — v2 : hashes/nonce des assets.
 - `web.bind` loopback → vue indisponible pour un démon distant ssh
   (le bind web n'est joignable qu'en local ou via le mode web).

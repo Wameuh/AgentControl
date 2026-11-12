@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Vue plugin (option B — docs/plugin-views-exploration.md §5) : overlay
+// Vue plugin (option B — backlog #248) : overlay
 // plein #chat contenant une <iframe sandbox="allow-scripts"> (origine
 // opaque — PAS allow-same-origin) dont les assets sont servis par le
 // démon sous /plugin/<name>/ (token de bridge éphémère, TTL ~5 min,
@@ -20,7 +20,7 @@ import { $, notify } from "../core/dom";
 import { call, callBg, bgErr } from "../core/rpc";
 import { b64decode } from "../core/encoding";
 import { isWeb } from "../core/bridge";
-import { shellOpen } from "../core/chrome";
+import { isAndroid, shellOpen } from "../core/chrome";
 import { t } from "../i18n";
 import { nav } from "../ui/nav";
 import type { ConnectionManager } from "./connections";
@@ -125,6 +125,10 @@ export class PluginView {
     this.onOpening();
     const view = $("plugin-view");
     view.hidden = false;
+    this.setChatInert(true);
+    // Focus au panneau : un focus résiduel dans #input enverrait des
+    // frappes invisibles à l'agent (même motif que settings/components).
+    view.focus({ preventScroll: true });
     $("pv-title").textContent = name;
     const frame = $("pv-frame") as HTMLIFrameElement;
     frame.src = `${base}/plugin/${encodeURIComponent(name)}/?token=${encodeURIComponent(tok.token)}`;
@@ -145,15 +149,32 @@ export class PluginView {
     // iframe zombie gardant son token éphémère en mémoire.
     frame.removeAttribute("src");
     frame.src = "about:blank";
+    frame.style.flex = "";
+    frame.style.height = "";
+    ($("plugin-view") as HTMLElement).style.overflowY = "";
     $("plugin-view").hidden = true;
+    // L'inert ne tombe que si les autres overlays #chat sont fermés —
+    // sinon #input serait ré-exposé derrière eux (frappes invisibles).
+    if (
+      $("conn-view").hidden && $("settings-view").hidden &&
+      $("map-view").hidden && $("components-view").hidden &&
+      $("logs-view").hidden
+    )
+      this.setChatInert(false);
     nav.close("plugin");
     this.name = "";
     this.connKey = "";
     this.token = "";
+    if (!isAndroid()) ($("input") as HTMLTextAreaElement).focus();
   }
 
-  toggle() {
-    if (this.isOpen()) this.close();
+  /** Rend les éléments recouverts de #chat inertes — même mécanisme
+   *  que settings-view/components-view (un <div> ne capte pas le focus
+   *  comme un <dialog> modal). */
+  private setChatInert(v: boolean) {
+    for (const el of [...$("chat").children]) {
+      if (el.id !== "plugin-view") (el as HTMLElement).inert = v;
+    }
   }
 
   /** Thème courant → `theme` au plugin (envoyé à l'ouverture, rejoué
@@ -273,9 +294,15 @@ export class PluginView {
 
   private onResize(m: Record<string, unknown>) {
     const h = typeof m.height === "number" ? m.height : 0;
-    if (h > 0) {
-      ($("pv-frame") as HTMLIFrameElement).style.height = `${Math.min(Math.max(h, 120), 4000)}px`;
-    }
+    if (h <= 0) return;
+    const frame = $("pv-frame") as HTMLIFrameElement;
+    // flex:1 (basis 0%) primerait sur style.height — passer en hauteur
+    // explicite pour que le bridge resize ait un effet réel.
+    frame.style.flex = "0 0 auto";
+    frame.style.height = `${Math.min(Math.max(h, 120), 4000)}px`;
+    // L'overlay reste plein écran : la hauteur plugin tient dans une
+    // zone scrollable — on rend #plugin-view scrollable dans ce cas.
+    ($("plugin-view") as HTMLElement).style.overflowY = "auto";
   }
 
   private onOpenExternal(m: Record<string, unknown>) {

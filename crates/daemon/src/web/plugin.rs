@@ -1,19 +1,29 @@
 //! Route `/plugin/<name>/<path>` — assets statiques d'une vue plugin
-//! (option B : iframe sandboxée + bridge postMessage borné, cf.
-//! docs/plugin-views-exploration.md §5 et le backlog #248).
+//! (option B : iframe sandboxée + bridge postMessage borné — backlog
+//! #248).
 //!
 //! Auth : token de bridge **éphémère** émis par `PluginViewToken{name}`
-//! (TTL ~5 min, scopé au composant) en `?token=` — jamais le
-//! `web.token` global : un asset de plugin n'a pas à connaître le
-//! token d'administration du démon, et un token de A n'ouvre pas la
-//! vue de B. L'exposition dans l'URL est bornée par le TTL et le
-//! listener loopback.
+//! (TTL ~5 min, scopé au composant) en `?token=` sur le **document**
+//! (index.html) — jamais le `web.token` global : un asset de plugin
+//! n'a pas à connaître le token d'administration du démon, et un token
+//! de A n'ouvre pas la vue de B. L'exposition dans l'URL est bornée
+//! par le TTL et le listener loopback.
+//!
+//! Les sous-ressources (js/css/img) sont servies **sans token** : une
+//! iframe sandboxée en origine opaque ne peut pas porter le `?token=`
+//! de la page parente sur ses requêtes relatives, et un cookie de
+//! session ne traverserait pas non plus une origine opaque en mode
+//! desktop (cross-site). Même niveau d'exposition que la SPA — des
+//! fichiers statiques choisis par l'auteur du composant ; les données
+//! passent par le bridge `component_query` (RPC authentifiée), pas par
+//! les assets. Le token reste exigé sur le document et conditionne le
+//! bootstrap `ready` du bridge.
 //!
 //! Garde-fous : la racine de service est le dossier de vue déclaré
 //! (`spec.view_dir` ou convention `components/<name>/web/`),
 //! canonicalisé — traversal `..`/symlink d'URL impossible
-//! (`safe_join`), pas de listing de dossier, taille d'asset bornée,
-//! CSP stricte + nosniff sur chaque réponse.
+//! (`safe_join` + re-canonicalisation), pas de listing de dossier,
+//! taille d'asset bornée, CSP stricte + nosniff sur chaque réponse.
 
 use super::http;
 use super::{mime_by_ext, safe_join};
@@ -27,22 +37,33 @@ use tokio::net::TcpStream;
 /// (durcissement par hash/nonce = v2) ; `connect-src 'none'` — le
 /// plugin ne dialogue qu'en postMessage, jamais en fetch ; l'origine
 /// est opaque (iframe `sandbox` sans `allow-same-origin`).
-const PLUGIN_CSP: &str = "default-src 'self'; \
-    script-src 'self' 'unsafe-inline'; \
-    style-src 'self' 'unsafe-inline'; \
-    img-src 'self' data:; \
-    font-src 'self' data:; \
-    connect-src 'none'; \
-    worker-src 'none'; \
-    base-uri 'none'; \
-    form-action 'none'";
+///
+/// `'self'` seul ne suffit pas : dans une iframe sandboxée sans
+/// `allow-same-origin`, le document a une origine opaque et `'self'`
+/// peut ne matcher aucune URL réseau selon le moteur — l'origine
+/// concrète de la requête (scheme + Host) est donc ajoutée
+/// explicitement à chaque directive de source.
+fn plugin_csp(origin: &str) -> String {
+    format!(
+        "default-src 'self' {o}; \
+         script-src 'self' 'unsafe-inline' {o}; \
+         style-src 'self' 'unsafe-inline' {o}; \
+         img-src 'self' data: {o}; \
+         font-src 'self' data: {o}; \
+         connect-src 'none'; \
+         worker-src 'none'; \
+         base-uri 'none'; \
+         form-action 'none'",
+        o = origin
+    )
+}
 
 /// Taille max d'un asset de vue — les données passent par le bridge
 /// (`component_query`), pas par des fichiers servis.
 const ASSET_MAX: u64 = 8 * 1024 * 1024;
 
-/// `GET|HEAD /plugin/<name>/<path>` — servi après le contrôle du token
-/// de vue ; la route est matchée avant le fallback SPA (mod.rs).
+/// `GET|HEAD /plugin/<name>/<path>` — le document (index.html) exige
+/// le token de vue ; les sous-ressources sont libres (voir l'entête).
 pub async fn serve_plugin(
     daemon: &Arc<Daemon>,
     stream: &mut TcpStream,
@@ -61,20 +82,26 @@ pub async fn serve_plugin(
     {
         return http::respond_err(stream, 404, "introuvable").await;
     }
-    let token = http::qparam(q, "token").unwrap_or_default();
-    if !daemon.components.view_token_valid(name, token) {
-        return http::respond_err(stream, 401, "token de vue invalide").await;
-    }
-    let Some(dir) = daemon.components.plugin_view_dir_of(name).await else {
-        return http::respond_err(stream, 404, "pas de vue pour ce composant").await;
-    };
     // "" ou "/" → index.html ; pas de listing de dossier.
     let mut rel = rel.to_string();
+    let is_doc = rel.is_empty() || rel.ends_with('/');
     if rel.is_empty() {
         rel = "index.html".into();
     } else if rel.ends_with('/') {
         rel.push_str("index.html");
     }
+    // Le token ne gate que le document : c'est lui qui démarre le
+    // bootstrap `ready` du bridge — les assets statiques, eux, sont
+    // au niveau d'exposition de la SPA (publique loopback).
+    if is_doc {
+        let token = http::qparam(q, "token").unwrap_or_default();
+        if !daemon.components.view_token_valid(name, token) {
+            return http::respond_err(stream, 401, "token de vue invalide").await;
+        }
+    }
+    let Some(dir) = daemon.components.plugin_view_dir_of(name).await else {
+        return http::respond_err(stream, 404, "pas de vue pour ce composant").await;
+    };
     let Some(file) = safe_join(&dir, &rel) else {
         return http::respond_err(stream, 404, "introuvable").await;
     };
@@ -91,7 +118,17 @@ pub async fn serve_plugin(
     if meta.len() > ASSET_MAX {
         return http::respond_err(stream, 413, "asset trop gros").await;
     }
-    let body = tokio::fs::read(&file).await?;
+    // Origine concrète de la requête pour la CSP (cf. plugin_csp) —
+    // Host absent (HTTP/1.0) → 'self' seul.
+    let host = head.header("host").unwrap_or_default();
+    let origin = if host.is_empty() {
+        String::new()
+    } else if host.contains(':') && !host.starts_with('[') {
+        // IPv6 littéral sans crochets — Host l'exige, on ne devine pas.
+        format!(" http://[{host}]")
+    } else {
+        format!(" http://{host}")
+    };
     let fname = file.file_name().unwrap_or_default().to_string_lossy();
     let mime = mime_by_ext(&fname);
     let ctype = if mime == "text/html" {
@@ -103,13 +140,15 @@ pub async fn serve_plugin(
     let headers = vec![
         ("Content-Type".into(), ctype),
         ("X-Content-Type-Options".into(), "nosniff".into()),
-        ("Content-Security-Policy".into(), PLUGIN_CSP.into()),
-        // Le token vit dans l'URL : aucun cache ne doit le retenir.
+        ("Content-Security-Policy".into(), plugin_csp(&origin)),
+        // Le token vit dans l'URL du document : aucun cache ne doit
+        // le retenir.
         ("Cache-Control".into(), "no-store".into()),
     ];
     if head.method == "HEAD" {
-        http::respond_head(stream, 200, &headers, body.len()).await
+        http::respond_head(stream, 200, &headers, meta.len() as usize).await
     } else {
+        let body = tokio::fs::read(&file).await?;
         http::respond(stream, 200, &headers, &body).await
     }
 }
