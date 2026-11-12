@@ -7,7 +7,7 @@ use client_core::{Client, Level};
 use proto::ReqKind;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::state::{get_conn, AppState};
 
