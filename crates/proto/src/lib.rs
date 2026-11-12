@@ -388,6 +388,16 @@ pub struct PermOption {
     pub kind: String,
 }
 
+/// Modèle « extra » déclaré par un profil agent (`[agents.<id>
+/// .extra_models]`) : valeur transmise telle quelle à
+/// session/set_model, libellé affiché dans les sélecteurs.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ExtraModel {
+    pub value: String,
+    #[serde(default)]
+    pub label: String,
+}
+
 // ---------------------------------------------------------------------------
 // Métadonnées de session (meta.json)
 // ---------------------------------------------------------------------------
@@ -429,9 +439,24 @@ pub struct SessionMeta {
     /// Commandes slash annoncées par l'agent (available_commands_update)
     #[serde(default)]
     pub available_commands: Vec<CmdInfo>,
-    /// Modèles annoncés par l'agent (session/new|load → models.availableModels)
+    /// Modèles annoncés par l'agent (session/new|load → models.availableModels),
+    /// complétés au handshake par les `extra_models` du profil
+    /// (`[agents.<id>.extra_models]`) : leurs valeurs sont fusionnées ici
+    /// et `session/set_model` les accepte telles quelles — sélectionnables
+    /// même hors annonce ACP (ex. variantes Fable de claude-code-acp).
+    /// Le libellé affiché vient du profil via `model_catalog`.
     #[serde(default)]
     pub available_models: Vec<String>,
+    /// Modèle advisor demandé pour cette session (profils déclarant
+    /// `advisor_models`) — injecté via `_meta.claudeCode.options` au
+    /// spawn ; "off" = désactivation explicite. None = défaut du profil.
+    #[serde(default)]
+    pub advisor: Option<String>,
+    /// Choix advisor déclarés par le profil — snapshot de
+    /// `[agents.<id>.advisor_models]` rafraîchi à chaque spawn ;
+    /// pilote le sélecteur client, vide = fonctionnalité absente.
+    #[serde(default)]
+    pub advisor_models: Vec<String>,
     /// Options de config dynamiques (config_option_update — mode/model chez Devin)
     #[serde(default)]
     pub config_options: Vec<ConfigOption>,
@@ -963,6 +988,12 @@ pub enum ReqKind {
         session: String,
         model: String,
     },
+    /// Modèle advisor de la session (profils `advisor_models`) — appliqué
+    /// au prochain spawn via `_meta` ACP ; "off" = désactivation explicite.
+    SetAdvisor {
+        session: String,
+        advisor: String,
+    },
     /// session/set_config_option (configId + value)
     SetConfigOption {
         session: String,
@@ -1343,6 +1374,7 @@ impl ReqKind {
             Self::SessionInfo { .. } => "session_info",
             Self::SetMode { .. } => "set_mode",
             Self::SetModel { .. } => "set_model",
+            Self::SetAdvisor { .. } => "set_advisor",
             Self::SetConfigOption { .. } => "set_config_option",
             Self::DeleteSession { .. } => "delete_session",
             Self::ClearSession { .. } => "clear_session",

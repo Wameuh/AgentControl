@@ -291,7 +291,7 @@ pub async fn probe(profile: &AgentProfile, cwd: &Path) -> Result<proto::AgentCap
             .call(
                 &mut stdin,
                 "session/new",
-                acp::session_new_params(&cwd.display().to_string(), json!([])),
+                acp::session_new_params(&cwd.display().to_string(), json!([]), None),
             )
             .await
             .context("session/new")?;

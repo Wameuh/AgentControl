@@ -2653,6 +2653,8 @@ mod tests {
             available_modes: Vec::new(),
             available_commands: Vec::new(),
             available_models: Vec::new(),
+            advisor: None,
+            advisor_models: Vec::new(),
             config_options: Vec::new(),
             pending_config: Default::default(),
             desired_config: Default::default(),
