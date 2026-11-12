@@ -268,15 +268,12 @@ pub(crate) fn command_available(cmd: &str) -> bool {
 /// côté list_agents. Le chemin absolu retourné lève l'ambiguïté d'un
 /// nom générique (`agent` peut désigner autre chose selon la machine).
 pub(crate) fn command_path(cmd: &str) -> Option<std::path::PathBuf> {
-    let p = PathBuf::from(cmd);
-    if p.is_absolute() {
-        return is_executable(&p).then_some(p);
-    }
-    // argv[0] avec séparateur (`./agent`, `bin/x`) = chemin relatif
-    // littéral — pas un nom à chercher dans les dossiers agents.
-    if cmd.contains('/') || cmd.contains('\\') {
-        return is_executable(&p).then_some(p);
-    }
+    command_path_in(cmd, &search_dirs())
+}
+
+/// Dossiers fouillés par `command_path`, dans l'ordre : `agent_path_dirs()`
+/// (injectés en tête du PATH par `ensure_agent_path`) puis le PATH process.
+fn search_dirs() -> Vec<PathBuf> {
     let mut dirs = agent_path_dirs();
     if let Some(path) = std::env::var_os("PATH") {
         for d in std::env::split_paths(&path) {
@@ -285,7 +282,19 @@ pub(crate) fn command_path(cmd: &str) -> Option<std::path::PathBuf> {
             }
         }
     }
-    dirs.into_iter()
+    dirs
+}
+
+/// Résout `cmd` contre `dirs` : chemin absolu ou relatif-with-séparateur
+/// (`./agent`, `bin/x`) = littéral exécutable, sinon premier
+/// `dirs/<cmd>` exécutable. `dirs` explicite pour les tests (pas de
+/// mutation d'env process-wide).
+fn command_path_in(cmd: &str, dirs: &[PathBuf]) -> Option<std::path::PathBuf> {
+    let p = PathBuf::from(cmd);
+    if p.is_absolute() || cmd.contains('/') || cmd.contains('\\') {
+        return is_executable(&p).then_some(p);
+    }
+    dirs.iter()
         .map(|d| d.join(cmd))
         .find(|c| is_executable(c))
 }
@@ -364,9 +373,9 @@ fn is_executable(p: &std::path::Path) -> bool {
 mod tests {
     use super::*;
 
-    /// Un binaire posé dans `~/.local/bin` APRÈS le boot est résolu par
-    /// `command_path` sans restart — `agent_path_dirs()` est fouillé à
-    /// chaud, pas seulement le PATH process figé.
+    /// Un binaire posé dans un dossier « agent » est résolu par
+    /// `command_path_in` — la recherche à chaud (dirs explicites, pas
+    /// le PATH process figé) voit les installs post-boot.
     #[cfg(unix)]
     #[test]
     fn command_path_trouve_les_installs_post_boot() {
@@ -385,14 +394,35 @@ mod tests {
         std::fs::write(&bin, "#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let prev = std::env::var_os("HOME");
-        std::env::set_var("HOME", &home);
-        let found = command_path("ac-test-agent-xyz");
-        match prev {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
+        let found = command_path_in("ac-test-agent-xyz", &[bin_dir.clone()]);
         let _ = std::fs::remove_dir_all(&home);
         assert_eq!(found.as_deref(), Some(bin.as_path()));
+    }
+
+    /// argv[0] avec séparateur = chemin relatif littéral, jamais cherché
+    /// dans les dossiers agents : `./agent` ne doit PAS se résoudre
+    /// vers `dir/agent` même si `dir` est dans les dossiers fouillés.
+    #[cfg(unix)]
+    #[test]
+    fn command_path_relatif_litteral() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "ac-cmdpath-rel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("ac-rel-agent-xyz");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Le cwd du test ne contient pas `./ac-rel-agent-xyz` : le
+        // littéral relatif ne résout rien — et les dossiers ne sont
+        // pas fouillés pour un argv[0] à séparateur.
+        let found = command_path_in("./ac-rel-agent-xyz", &[dir.clone()]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(found.is_none());
     }
 }
