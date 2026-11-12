@@ -272,6 +272,11 @@ pub(crate) fn command_path(cmd: &str) -> Option<std::path::PathBuf> {
     if p.is_absolute() {
         return is_executable(&p).then_some(p);
     }
+    // argv[0] avec séparateur (`./agent`, `bin/x`) = chemin relatif
+    // littéral — pas un nom à chercher dans les dossiers agents.
+    if cmd.contains('/') || cmd.contains('\\') {
+        return is_executable(&p).then_some(p);
+    }
     let mut dirs = agent_path_dirs();
     if let Some(path) = std::env::var_os("PATH") {
         for d in std::env::split_paths(&path) {
