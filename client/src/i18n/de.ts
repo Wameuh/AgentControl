@@ -571,4 +571,5 @@ export const de: Record<Key, string> = {
   comp_view: "Ansicht öffnen",
   pv_unsupported: "Plugin-Ansichten erfordern einen aktuellen Daemon — bitte aktualisieren.",
   pv_noweb: "Dieser Daemon stellt seine Weboberfläche nicht bereit — Plugin-Ansichten nicht verfügbar.",
+  pv_nav_unknown: "navigate: unbekanntes Ziel « {target} »",
 };

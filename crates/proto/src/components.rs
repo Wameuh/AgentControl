@@ -152,7 +152,9 @@ pub struct ComponentSpec {
     /// `/plugin/<name>/` (auth = token de bridge éphémère, jamais le
     /// web.token). `~` expansé sous le HOME du démon, chemin relatif
     /// résolu sous le root ; absent = convention
-    /// `<root>/components/<name>/web/` si ce dossier existe.
+    /// `<root>/components/<name>/web/` si ce dossier existe. Le chemin
+    /// est canonicalisé — `..`/symlink peuvent viser hors du root
+    /// (config opérateur de confiance, pas une entrée utilisateur).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view_dir: Option<String>,
 }

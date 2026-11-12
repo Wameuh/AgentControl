@@ -568,4 +568,5 @@ export const fr: Record<Key, string> = {
   comp_view: "Ouvrir la vue",
   pv_unsupported: "Les vues plugin exigent un démon récent — mettez-le à jour.",
   pv_noweb: "Ce démon n'expose pas son interface web — vues plugin indisponibles.",
+  pv_nav_unknown: "navigate : cible inconnue « {target} »",
 };

@@ -54,7 +54,6 @@ export class PluginView {
   private name = "";
   private connKey = "";
   private token = "";
-  private opened = false;
 
   bind(conns: ConnectionManager) {
     this.conns = conns;
@@ -138,13 +137,14 @@ export class PluginView {
     frame.setAttribute("title", name);
     nav.push("plugin");
     window.addEventListener("message", this.onMsg);
-    this.opened = true;
   }
 
   close() {
-    this.opened = false;
     window.removeEventListener("message", this.onMsg);
     const frame = $("pv-frame") as HTMLIFrameElement;
+    // hidden d'abord : le load de about:blank ne doit pas poster un
+    // `ready` (le handler ignore les messages une fois l'overlay masqué).
+    $("plugin-view").hidden = true;
     // src="about:blank" démonte le document plugin (et son JS) — pas de
     // iframe zombie gardant son token éphémère en mémoire.
     frame.removeAttribute("src");
@@ -152,7 +152,6 @@ export class PluginView {
     frame.style.flex = "";
     frame.style.height = "";
     ($("plugin-view") as HTMLElement).style.overflowY = "";
-    $("plugin-view").hidden = true;
     // L'inert ne tombe que si les autres overlays #chat sont fermés —
     // sinon #input serait ré-exposé derrière eux (frappes invisibles).
     if (
@@ -291,7 +290,7 @@ export class PluginView {
       this.close();
       this.openComponents();
     } else {
-      notify("warn", `navigate: cible inconnue « ${target} »`);
+      notify("warn", t("pv_nav_unknown", { target }));
     }
   }
 

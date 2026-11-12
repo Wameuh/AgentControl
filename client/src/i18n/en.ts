@@ -568,6 +568,7 @@ export const en = {
   comp_view: "Open view",
   pv_unsupported: "Plugin views need a recent daemon — update it first.",
   pv_noweb: "This daemon doesn't expose its web UI — plugin views unavailable.",
+  pv_nav_unknown: "navigate: unknown target « {target} »",
 } as const;
 
 export type Key = keyof typeof en;

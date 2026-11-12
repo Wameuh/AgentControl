@@ -123,12 +123,13 @@ pub async fn serve_plugin(
         return http::respond_err(stream, 413, "asset trop gros").await;
     }
     // Origine concrète de la requête pour la CSP (cf. plugin_csp) —
-    // Host absent (HTTP/1.0) → 'self' seul.
+    // Host absent (HTTP/1.0) → 'self' seul. IPv6 : ne bracket que le
+    // littéral nu (`::1`) — `host:port` et `[::1]:port` passent tels
+    // quels (un bracket sur host:port produirait une source invalide).
     let host = head.header("host").unwrap_or_default();
     let origin = if host.is_empty() {
         String::new()
-    } else if host.contains(':') && !host.starts_with('[') {
-        // IPv6 littéral sans crochets — Host l'exige, on ne devine pas.
+    } else if host.parse::<std::net::Ipv6Addr>().is_ok() {
         format!(" http://[{host}]")
     } else {
         format!(" http://{host}")
