@@ -1029,7 +1029,11 @@ impl Session {
                 Ok(r) => r,
                 Err(_) => {
                     self.acp_pending.lock().unwrap().remove(&id);
-                    bail!("acp {method}: aucune réponse après {} s", t.as_secs());
+                    // « timeout » en tête : load_err_keeps_native classe
+                    // le message comme empêchement TRANSITOIRE — un
+                    // session/load lent garde le sid natif (repli
+                    // session/new = perte de contexte sinon).
+                    bail!("acp {method}: timeout — aucune réponse après {} s", t.as_secs());
                 }
             },
             None => rx.await,
