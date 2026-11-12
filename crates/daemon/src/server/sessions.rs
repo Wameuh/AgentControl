@@ -1487,6 +1487,11 @@ impl Daemon {
                 // sa prochaine échéance (send en échec, loggé).
                 super::orch::acwait_cancel_session(&session);
                 let _ = std::fs::remove_dir_all(&s.dir);
+                // Pièces jointes du composer : <cwd>/.ac-uploads/<sid>/
+                // part avec la session (le client ne peut plus écrire —
+                // session morte). Borné au sous-dossier exact : les
+                // autres sessions partagent .ac-uploads.
+                purge_session_uploads(&s.meta_snapshot().cwd, &session);
                 info!("session supprimée: {session}");
                 Ok(json!({"deleted": session}))
     }
@@ -1654,6 +1659,43 @@ fn run_override_cmd(cmdline: &str, cwd: &str) -> Result<()> {
     Ok(())
 }
 
+/// `session` utilisable comme composant de chemin unique sous
+/// `.ac-uploads/` — rejette séparateurs, `.`/`..` et NUL (un id de
+/// session hostile ne doit pas pouvoir viser ailleurs).
+fn safe_session_component(s: &str) -> bool {
+    !s.is_empty()
+        && s != "."
+        && s != ".."
+        && !s.contains('/')
+        && !s.contains('\\')
+        && !s.contains('\0')
+}
+
+/// Supprime `<cwd>/.ac-uploads/<session>/` (pièces jointes du composer)
+/// à la suppression de la session. Garde-fous : seul ce sous-dossier
+/// exact — jamais `.ac-uploads/` entier ni le workspace ; cwd, base et
+/// cible sont canonicalisés, donc un `.ac-uploads/<sid>` symlink vers
+/// l'extérieur est refusé. Absents/illisibles → no-op.
+fn purge_session_uploads(cwd: &str, session: &str) {
+    if !safe_session_component(session) {
+        return;
+    }
+    let Ok(cwd) = std::fs::canonicalize(cwd) else {
+        return;
+    };
+    let Ok(base) = std::fs::canonicalize(cwd.join(".ac-uploads")) else {
+        return;
+    };
+    let Ok(target) = std::fs::canonicalize(base.join(session)) else {
+        return;
+    };
+    if target.starts_with(&base) && target.is_dir() {
+        if let Err(e) = std::fs::remove_dir_all(&target) {
+            warn!("purge .ac-uploads/{session}: {e}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1737,5 +1779,66 @@ mod tests {
         derive_wait_state(&mut m, &waiting, 160.0);
         assert_eq!(m.state, "asleep");
         assert!(m.wait.is_none());
+    }
+
+    fn tmpdir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir()
+            .join(format!("ac-purge-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn purge_uploads_ne_retire_que_le_sous_dossier_session() {
+        let cwd = tmpdir("only");
+        let up = cwd.join(".ac-uploads");
+        std::fs::create_dir_all(up.join("s-a")).unwrap();
+        std::fs::create_dir_all(up.join("s-b")).unwrap();
+        std::fs::write(up.join("s-a").join("f.bin"), b"x").unwrap();
+        std::fs::write(up.join("s-b").join("g.bin"), b"y").unwrap();
+        // Legacy : fichiers top-level sans sid — conservés (nettoyage
+        // manuel documenté, pas de migration destructive).
+        std::fs::write(up.join("ancien.bin"), b"z").unwrap();
+        std::fs::write(cwd.join("garde.txt"), b"w").unwrap();
+
+        purge_session_uploads(cwd.to_str().unwrap(), "s-a");
+
+        assert!(!up.join("s-a").exists());
+        assert!(up.join("s-b").join("g.bin").exists());
+        assert!(up.join("ancien.bin").exists());
+        assert!(cwd.join("garde.txt").exists());
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn purge_uploads_refuse_les_ids_non_simples() {
+        let cwd = tmpdir("guard");
+        let up = cwd.join(".ac-uploads");
+        std::fs::create_dir_all(up.join("victime")).unwrap();
+        std::fs::write(up.join("victime").join("f"), b"x").unwrap();
+
+        for bad in ["", ".", "..", "a/b", "a\\b", "../victime"] {
+            purge_session_uploads(cwd.to_str().unwrap(), bad);
+        }
+        assert!(up.join("victime").join("f").exists());
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn purge_uploads_refuse_un_symlink_sortant() {
+        let cwd = tmpdir("link");
+        let dehors = tmpdir("link-out");
+        let up = cwd.join(".ac-uploads");
+        std::fs::create_dir_all(&up).unwrap();
+        std::os::unix::fs::symlink(&dehors, up.join("s-evil")).unwrap();
+        std::fs::write(dehors.join("otage.txt"), b"x").unwrap();
+
+        purge_session_uploads(cwd.to_str().unwrap(), "s-evil");
+
+        assert!(dehors.join("otage.txt").exists());
+        let _ = std::fs::remove_dir_all(&cwd);
+        let _ = std::fs::remove_dir_all(&dehors);
     }
 }

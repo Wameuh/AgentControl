@@ -1,17 +1,20 @@
 // ---------------------------------------------------------------------------
 // Pièces jointes du composer : bouton « + » (file picker natif, Android
 // compris), glisser-déposer sur la zone chat/composer, collage depuis le
-// presse-papier. Chaque fichier part en tranches dans
-// <cwd>/.ac-uploads/<ts>-<nom> via les RPC fichiers existants
+// presse-papier (images/File objects ET fichiers copiés depuis un
+// gestionnaire — URI file:// lues via les commandes Tauri clipboard_*).
+// Chaque fichier part en tranches dans
+// <cwd>/.ac-uploads/<sid>/<ts>-<nom> via les RPC fichiers existants
 // (create_path exclusif + write_file par offset — pas de nouveau RPC) ;
 // le message envoyé à l'agent liste les chemins absolus, lisibles avec
-// ses outils habituels. Rétention : le dossier vit dans le workspace de
-// la session — visible dans l'explorateur, purgé avec lui.
+// ses outils habituels. Rétention : le sous-dossier <sid> est purgé par
+// le démon à la suppression de la session (delete_session).
 // ---------------------------------------------------------------------------
 
 import { $, esc, notify, showErr } from "../core/dom";
 import { icon, qIco } from "../ui/icons";
 import { call } from "../core/rpc";
+import { invoke, isWeb } from "../core/bridge";
 import { app } from "../core/state";
 import { isAndroid } from "../core/chrome";
 import { fmtSize } from "../core/format";
@@ -26,6 +29,14 @@ const CHUNK = 4 * 1024 * 1024;
 /// lit les pièces avec ses outils fichiers habituels).
 const DIR = ".ac-uploads";
 
+/// Source d'octets pour l'upload : nom + taille + lecture de tranches
+/// (File navigateur ou fichier local via clipboard_file_read).
+interface UploadSrc {
+  name: string;
+  size: number;
+  read: (start: number, end: number) => Promise<ArrayBuffer>;
+}
+
 type Status = "up" | "ok" | "err";
 /** Sortie volontaire de la boucle d'upload (retrait chip / changement
  *  de session) — distingue l'annulation d'un vrai échec RPC. */
@@ -35,13 +46,16 @@ interface Att {
   /** Nom affiché (sanitizé : basename + caractères sûrs). */
   name: string;
   size: number;
+  /** Lit la tranche [start, end) — File.slice côté navigateur, commande
+   *  Tauri clipboard_file_read pour les URI file:// collées. */
+  read: (start: number, end: number) => Promise<ArrayBuffer>;
   /** Session propriétaire — les RPC (upload comme delete) la visent
    *  même si l'affichage a changé entre-temps. */
   sid: string;
   /** Conn du chip — épinglée à l'attach (un switch de conn en vol ne
    *  doit pas dérouter les tranches vers un autre démon). */
   conn: string | undefined;
-  /** Chemin relatif au cwd cible (`.ac-uploads/…`) — fixé au create. */
+  /** Chemin relatif au cwd cible (`.ac-uploads/<sid>/…`) — fixé au create. */
   rel: string;
   /** Chemin absolu résolu renvoyé par create_path — va au message. */
   abs: string;
@@ -119,10 +133,29 @@ export class Attachments {
     });
     // Collage (image copiée, fichier depuis un gestionnaire) → upload.
     $("input").addEventListener("paste", (e) => {
-      const files = e.clipboardData?.files;
-      if (files && files.length) {
+      const cd = e.clipboardData;
+      if (!cd) return;
+      // items kind=file → getAsFile couvre plus de webviews que
+      // .files seul (certains ne remplissent que items).
+      const fromItems = [...(cd.items ?? [])]
+        .filter((i) => i.kind === "file")
+        .map((i) => i.getAsFile())
+        .filter((f): f is File => f !== null);
+      const files = fromItems.length ? fromItems : [...(cd.files ?? [])];
+      if (files.length) {
         e.preventDefault();
-        this.addFiles([...files]);
+        this.addFiles(files);
+        return;
+      }
+      // Fichier copié depuis un gestionnaire (surtout Linux) : pas de
+      // File object — le clipboard porte des URI file:// en
+      // text/uri-list / x-special/gnome-copied-files, parfois en
+      // text/plain brut « copy\nfile:///… ». La webview ne lit pas les
+      // chemins locaux → commandes Tauri clipboard_file_*.
+      const uris = clipboardFileUris(cd);
+      if (uris.length) {
+        e.preventDefault();
+        void this.addClipboardUris(uris);
       }
     });
     // Glisser-déposer : pas de DnD fichier sur Android (bouton seul).
@@ -199,6 +232,68 @@ export class Attachments {
   }
 
   addFiles(files: File[]) {
+    this.addSources(
+      files.map((f) => ({
+        name: f.name,
+        size: f.size,
+        read: (s: number, e: number) => f.slice(s, e).arrayBuffer(),
+      })),
+    );
+  }
+
+  /** Fichiers collés depuis un gestionnaire (URI file:// du
+   *  clipboard) : stat via la commande Tauri dédiée puis mêmes
+   *  tranches que les File — lecture bornée au scheme file:. */
+  private async addClipboardUris(uris: string[]) {
+    this.syncSession();
+    if (!this.sid) {
+      notify("warn", t("att_no_session"));
+      return;
+    }
+    if (isWeb) {
+      // Pas de lecture de chemins locaux dans un navigateur — le
+      // bouton « + » et le drag-drop restent le chemin web.
+      notify("warn", t("att_clip_web"));
+      return;
+    }
+    if (!this.capable(app.current?.conn)) {
+      notify("warn", t("att_unsupported"));
+      return;
+    }
+    for (const uri of uris) {
+      try {
+        const st = await invoke<{ name: string; size: number }>(
+          "clipboard_file_stat",
+          { uri },
+        );
+        if (st.size > MAX_BYTES) {
+          notify(
+            "warn",
+            t("att_too_big", { name: st.name, max: fmtSize(MAX_BYTES) }),
+          );
+          continue;
+        }
+        this.addSources([
+          {
+            name: st.name,
+            size: st.size,
+            read: async (s, e) =>
+              unb64(
+                await invoke<string>("clipboard_file_read", {
+                  uri,
+                  offset: s,
+                  limit: e - s,
+                }),
+              ),
+          },
+        ]);
+      } catch (e) {
+        showErr(t("att_clip_fail") + " — " + String(e));
+      }
+    }
+  }
+
+  private addSources(srcs: UploadSrc[]) {
     this.syncSession();
     if (!this.sid) {
       notify("warn", t("att_no_session"));
@@ -208,21 +303,25 @@ export class Attachments {
       notify("warn", t("att_unsupported"));
       return;
     }
-    for (const f of files) {
-      if (f.size > MAX_BYTES) {
-        notify("warn", t("att_too_big", { name: f.name, max: fmtSize(MAX_BYTES) }));
+    for (const src of srcs) {
+      if (src.size > MAX_BYTES) {
+        notify(
+          "warn",
+          t("att_too_big", { name: src.name, max: fmtSize(MAX_BYTES) }),
+        );
         continue;
       }
-      void this.attachOne(f);
+      void this.attachOne(src);
     }
   }
 
   // ---- Pipeline d'un fichier : chip → create exclusif → chunks ----
 
-  private async attachOne(file: File) {
+  private async attachOne(src: UploadSrc) {
     const a: Att = {
-      name: sanitizeName(file.name),
-      size: file.size,
+      name: sanitizeName(src.name),
+      size: src.size,
+      read: src.read,
       sid: this.sid!,
       conn: app.current?.conn,
       rel: "",
@@ -236,22 +335,25 @@ export class Attachments {
     this.render();
     const conn = a.conn;
     try {
-      // Le dossier d'uploads : create exclusif → « existe déjà » =
-      // présent, toute autre erreur est fatale à l'upload.
-      await call("create_path", {
-        session: a.sid,
-        path: DIR,
-        dir: true,
-        conn,
-      }).catch((e) => {
-        if (!/existe déjà/i.test(String(e))) throw e;
-      });
-      // Nom unique : .ac-uploads/<ts>-<nom> ; collision → suffixe -2,
-      // -3… avant l'extension (create_path est O_EXCL — jamais
+      // Dossiers d'uploads : .ac-uploads/<sid>/ (un par session — le
+      // démon purge ce sous-dossier à delete_session). create exclusif
+      // → « existe déjà » = présent, toute autre erreur est fatale.
+      for (const d of [DIR, `${DIR}/${a.sid}`]) {
+        await call("create_path", {
+          session: a.sid,
+          path: d,
+          dir: true,
+          conn,
+        }).catch((e) => {
+          if (!/existe déjà/i.test(String(e))) throw e;
+        });
+      }
+      // Nom unique : .ac-uploads/<sid>/<ts>-<nom> ; collision → suffixe
+      // -2, -3… avant l'extension (create_path est O_EXCL — jamais
       // d'écrasement silencieux).
       const stamp = Date.now().toString(36);
       for (let n = 0; ; n++) {
-        const rel = `${DIR}/${stamp}-${suffixName(a.name, n)}`;
+        const rel = `${DIR}/${a.sid}/${stamp}-${suffixName(a.name, n)}`;
         try {
           const r = await call<{ path: string }>("create_path", {
             session: a.sid,
@@ -266,9 +368,12 @@ export class Attachments {
           if (n >= 99) throw e;
         }
       }
-      while (a.sent < file.size) {
+      while (a.sent < a.size) {
         if (a.aborted) throw ABORT;
-        const buf = await file.slice(a.sent, a.sent + CHUNK).arrayBuffer();
+        const buf = await a.read(a.sent, a.sent + CHUNK);
+        // Fichier clipboard tronqué/modifié en vol : une tranche vide
+        // bouclerait sans fin — échec franc.
+        if (!buf.byteLength) throw new Error("lecture vide");
         await call("write_file", {
           session: a.sid,
           path: a.rel,
@@ -383,6 +488,40 @@ function suffixName(name: string, n: number): string {
   const dot = name.lastIndexOf(".");
   if (dot <= 0) return `${name}-${n + 1}`;
   return `${name.slice(0, dot)}-${n + 1}${name.slice(dot)}`;
+}
+
+/// URI file:// présentes dans le clipboard du paste : text/uri-list et
+/// x-special/gnome-copied-files (copie gestionnaire Linux), repli
+/// text/plain pour le payload brut « copy\nfile:///… » quand le MIME
+/// dédié n'est pas exposé. Dédupliquées, ordre de découverte conservé.
+function clipboardFileUris(cd: DataTransfer): string[] {
+  const out = new Set<string>();
+  for (const mime of [
+    "text/uri-list",
+    "x-special/gnome-copied-files",
+    "text/plain",
+    "text",
+  ]) {
+    let data = "";
+    try {
+      data = cd.getData(mime);
+    } catch {
+      continue; // type non exposé par cette webview
+    }
+    for (const line of data.split(/\r?\n/)) {
+      const u = line.trim();
+      if (u.startsWith("file://")) out.add(u);
+    }
+  }
+  return [...out];
+}
+
+/// Base64 → ArrayBuffer (réponse clipboard_file_read).
+function unb64(s: string): ArrayBuffer {
+  const bin = atob(s);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return u8.buffer;
 }
 
 /// Base64 d'un ArrayBuffer (String.fromCharCode borné par sous-tableaux
