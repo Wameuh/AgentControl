@@ -158,6 +158,8 @@ pub fn run() {
             commands::connect::ensure_daemon,
             commands::session::call,
             commands::files::write_download,
+            commands::files::clipboard_file_stat,
+            commands::files::clipboard_file_read,
             commands::saved::saved_connections,
             commands::saved::save_connection,
             commands::saved::remove_connection,
