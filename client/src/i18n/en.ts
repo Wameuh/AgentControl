@@ -299,7 +299,7 @@ export const en = {
   term_slow: "[still connecting — slow link…]",
   term_unsupported: "Daemon too old for the terminal — update it first.",
   tree_refresh: "Refresh tree", tree_empty: "(empty)",
-  file_search_ph: "Search files by name…", file_search_none: "No match",
+  file_search_ph: "Search files by name…", file_search_none: "No match", ft_split: "Drag to resize — double-click to reset",
   file_search_trunc: "Results truncated — refine the search",
   file_search_local: "Older daemon — searching open folders only",
   ctx_copy: "Copy content", ctx_copy_path: "Copy absolute path",

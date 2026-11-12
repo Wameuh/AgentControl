@@ -89,6 +89,11 @@ const UNDO_MAX_CHARS = 256 * 1024;
 /// Largeur du viewer à partir de laquelle l'aperçu md passe en
 /// split vertical (côte-à-côte) plutôt qu'empilé.
 const SPLIT_ROW_MIN = 600;
+/// Splitter explorateur ↔ preview : bornes en px et clé de persistance
+/// (largeur de #ft-side en pixels, globale à toutes les sessions).
+const FT_SIDE_MIN = 150;
+const FT_VIEW_MIN = 200;
+const FT_W_KEY = "ac-ft-width";
 
 /** Fichier texte ouvert dans le viewer — chargé progressivement. */
 interface CurFile {
@@ -1741,6 +1746,60 @@ export class FileExplorer {
     });
     const saved = Number(localStorage.getItem("ac-filepanel-w"));
     if (saved > 240) panel.style.width = `${saved}px`;
+
+    // Splitter explorateur ↔ preview (#ft-side / #file-viewer) : drag
+    // borné (≥ FT_SIDE_MIN côté arbre, ≥ FT_VIEW_MIN côté preview),
+    // largeur persistée, dbl-clic = retour au 44 % par défaut, flèches
+    // ←/→ quand la poignée a le focus. Masqué par CSS quand #ft-side
+    // est caché ou sous body.android (layout empilé, pas de split).
+    const side = $("ft-side");
+    const sd = $("ft-split");
+    sd.setAttribute("aria-label", sd.title);
+    const applyFtW = (w: number) => {
+      const bodyW = $("file-body").clientWidth;
+      const max = Math.max(FT_SIDE_MIN, bodyW - FT_VIEW_MIN);
+      side.style.width = `${Math.min(Math.max(w, FT_SIDE_MIN), max)}px`;
+      localStorage.setItem(FT_W_KEY, String(Math.round(side.getBoundingClientRect().width)));
+      // La largeur de l'arbre change → le split md (côte-à-côte ↔
+      // empilé) se ré-évalue.
+      this.updateSplitLayout();
+    };
+    sd.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      const startX = e.clientX;
+      const startW = side.getBoundingClientRect().width;
+      const move = (ev: PointerEvent) => {
+        // Bouton/Doigt relâché hors fenêtre → up perdu : auto-relâcher.
+        if (ev.buttons === 0) {
+          up();
+          return;
+        }
+        applyFtW(startW + ev.clientX - startX);
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        window.removeEventListener("pointercancel", up);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      window.addEventListener("pointercancel", up);
+    });
+    sd.addEventListener("dblclick", () => {
+      side.style.width = "";
+      localStorage.removeItem(FT_W_KEY);
+      this.updateSplitLayout();
+    });
+    sd.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      e.preventDefault();
+      applyFtW(side.getBoundingClientRect().width + (e.key === "ArrowRight" ? 16 : -16));
+    });
+    // Largeur persistée : appliquée telle quelle — les bornes restent
+    // garanties par min-width/max-width CSS de #ft-side.
+    const savedFt = Number(localStorage.getItem(FT_W_KEY));
+    if (savedFt > 0) side.style.width = `${savedFt}px`;
     // Redimensionnement fenêtre (rotation mobile, split desktop) :
     // l'orientation du split md suit la place disponible.
     window.addEventListener("resize", () => this.updateSplitLayout());

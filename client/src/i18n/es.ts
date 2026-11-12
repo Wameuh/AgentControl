@@ -302,7 +302,7 @@ export const es: Record<Key, string> = {
   term_slow: "[aún conectando — enlace lento…]",
   term_unsupported: "Daemon demasiado antiguo para el terminal — actualícelo primero.",
   tree_refresh: "Refrescar el árbol", tree_empty: "(vacío)",
-  file_search_ph: "Buscar archivos por nombre…", file_search_none: "Sin coincidencias",
+  file_search_ph: "Buscar archivos por nombre…", file_search_none: "Sin coincidencias", ft_split: "Arrastra para redimensionar — doble clic para restablecer",
   file_search_trunc: "Resultados truncados — refine la búsqueda",
   file_search_local: "Daemon antiguo — buscando solo en carpetas abiertas",
   ctx_copy: "Copiar el contenido", ctx_copy_path: "Copiar la ruta absoluta",
