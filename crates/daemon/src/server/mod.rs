@@ -479,6 +479,7 @@ impl Daemon {
                     quiet: true,
                     ..Default::default()
                 }),
+                self.spawn_hints(&profile, &meta),
             )
             .await
         {
@@ -674,6 +675,25 @@ impl Daemon {
             envs.insert("AGENTCONTROL_SESSION".into(), session_id.into());
         }
         (cmd, envs)
+    }
+
+    /// Indices de spawn dérivés du profil + meta : `_meta` ACP
+    /// additionnel (advisor — voir SpawnHints) et ids des modèles
+    /// « extra » du profil à fusionner dans available_models.
+    fn spawn_hints(
+        &self,
+        profile: &AgentProfile,
+        meta: &proto::SessionMeta,
+    ) -> crate::session::SpawnHints {
+        let acp_meta = advisor_acp_meta(profile, meta);
+        crate::session::SpawnHints {
+            acp_meta,
+            extra_models: profile
+                .extra_models
+                .iter()
+                .map(|e| e.value.clone())
+                .collect(),
+        }
     }
 
     /// Entrée mcpServers injectée dans session/new|load : le serveur MCP
@@ -875,6 +895,9 @@ impl Daemon {
             ReqKind::SetMode { session, mode } => self.h_set_mode(session, mode).await,
             ReqKind::SetModel { session, model } => {
                 self.h_set_model(session, model).await
+            }
+            ReqKind::SetAdvisor { session, advisor } => {
+                self.h_set_advisor(session, advisor).await
             }
             ReqKind::SetConfigOption {
                 session,
@@ -1608,6 +1631,73 @@ mod tests {
         let e2 = resolve_cwd("/dir_nope_zz9").unwrap_err().to_string();
         assert!(!e2.contains("depuis"), "{e2}");
     }
+
+    fn advisor_profile(models: &[&str]) -> super::AgentProfile {
+        super::AgentProfile {
+            name: "T".into(),
+            command: vec![],
+            env: Default::default(),
+            compact: Default::default(),
+            max_instances: 0,
+            catalogue_cmd: None,
+            model_override_cmd: None,
+            extra_models: vec![],
+            advisor_models: models.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn advisor_meta(advisor: Option<&str>) -> proto::SessionMeta {
+        proto::SessionMeta {
+            id: "s-t".into(),
+            agent: "t".into(),
+            title: String::new(),
+            cwd: String::new(),
+            created_at: String::new(),
+            native_session_id: None,
+            mode: None,
+            model: None,
+            model_source: None,
+            model_override_sid: None,
+            supports_load: None,
+            available_modes: vec![],
+            available_commands: vec![],
+            available_models: vec![],
+            advisor: advisor.map(str::to_string),
+            advisor_models: vec![],
+            config_options: vec![],
+            pending_config: Default::default(),
+            desired_config: Default::default(),
+            state: "idle".into(),
+            group: None,
+            spawned_by: None,
+            origin: None,
+            context_used: None,
+            context_size: None,
+            last_error: None,
+            wait: None,
+        }
+    }
+
+    #[test]
+    fn advisor_meta_json() {
+        use super::advisor_acp_meta;
+        // Profil sans advisor_models → jamais d'injection.
+        assert!(advisor_acp_meta(&advisor_profile(&[]), &advisor_meta(Some("opus"))).is_none());
+        // advisor non posé → rien (défaut du profil/agent).
+        assert!(advisor_acp_meta(&advisor_profile(&["opus"]), &advisor_meta(None)).is_none());
+        // Valeur → advisorModel via extraArgs.settings.
+        let v = advisor_acp_meta(&advisor_profile(&["opus"]), &advisor_meta(Some("fable"))).unwrap();
+        assert_eq!(
+            v["claudeCode"]["options"]["extraArgs"]["settings"],
+            serde_json::json!("{\"advisorModel\":\"fable\"}")
+        );
+        // "off" → désactivation explicite par env.
+        let v = advisor_acp_meta(&advisor_profile(&["opus"]), &advisor_meta(Some("off"))).unwrap();
+        assert_eq!(
+            v["claudeCode"]["options"]["env"]["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"],
+            "1"
+        );
+    }
 }
 
 /// Cycle de vie d'une conn cliente : open → durée → raison de close.
@@ -1759,5 +1849,26 @@ pub async fn watchdog(daemon: Arc<Daemon>) {
         for s in &sessions {
             s.watchdog_tick(&cfg);
         }
+    }
+}
+
+/// `_meta` ACP portant la demande advisor de la session, pour les
+/// profils qui déclarent `advisor_models` (mécanisme claude-code-acp :
+/// `advisorModel` injecté via `claudeCode.options.extraArgs.settings` ;
+/// la valeur "off" désactive explicitement via
+/// `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` dans `claudeCode.options.env`).
+/// None = rien à injecter (profil sans advisor ou choix non posé).
+fn advisor_acp_meta(profile: &AgentProfile, meta: &proto::SessionMeta) -> Option<Value> {
+    if profile.advisor_models.is_empty() {
+        return None;
+    }
+    match meta.advisor.as_deref() {
+        None | Some("") => None,
+        Some("off") => Some(json!({
+            "claudeCode": {"options": {"env": {"CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "1"}}}
+        })),
+        Some(v) => Some(json!({
+            "claudeCode": {"options": {"extraArgs": {"settings": json!({"advisorModel": v}).to_string()}}}
+        })),
     }
 }

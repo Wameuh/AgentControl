@@ -378,6 +378,15 @@ impl Session {
         self.save_meta();
     }
 
+    /// Pose meta.advisor — choix du modèle advisor de la session
+    /// (profils `advisor_models`). Appliqué au prochain spawn via le
+    /// `_meta` ACP (advisor_acp_meta côté serveur) ; "off" =
+    /// désactivation explicite.
+    pub fn set_advisor_meta(&self, advisor: Option<String>) {
+        self.meta.lock().unwrap().advisor = advisor;
+        self.save_meta();
+    }
+
     /// Borne du rejeu catalogue automatique : au-delà, le sid natif
     /// churn à chaque spawn (load→new permanent) — la chaîne
     /// kill→override→respawn ne peut pas converger, on coupe avec un

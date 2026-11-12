@@ -86,6 +86,15 @@ struct AgentConf {
     /// catalogue-only côté provider (ex. "devin -r {native_sid} --model {model}").
     #[serde(default)]
     model_override_cmd: Option<String>,
+    /// Modèles sélectionnables hors annonce ACP — `[{value=…, label=…}]`
+    /// (ex. variantes Fable de claude-code-acp que l'adaptateur n'annonce pas).
+    #[serde(default)]
+    extra_models: Vec<proto::ExtraModel>,
+    /// Modèles advisor proposables pour les sessions du profil — active
+    /// l'injection `advisorModel` via `_meta.claudeCode.options` au spawn
+    /// (mécanisme claude-code-acp). Ex. ["fable", "opus", "sonnet"].
+    #[serde(default)]
+    advisor_models: Vec<String>,
 }
 
 fn default_tcp() -> String {
@@ -228,6 +237,8 @@ fn default_agents() -> HashMap<String, AgentProfile> {
             max_instances: server::DEFAULT_MAX_INSTANCES,
             catalogue_cmd: None,
             model_override_cmd: None,
+            extra_models: Vec::new(),
+            advisor_models: Vec::new(),
         },
     );
     // Cursor CLI — ACP natif (`agent acp` / `cursor-agent acp`, même
@@ -255,6 +266,8 @@ fn default_agents() -> HashMap<String, AgentProfile> {
             max_instances: server::DEFAULT_MAX_INSTANCES,
             catalogue_cmd: None,
             model_override_cmd: None,
+            extra_models: Vec::new(),
+            advisor_models: Vec::new(),
         },
     );
     m
@@ -375,6 +388,8 @@ async fn serve(root: &std::path::Path) -> Result<()> {
                 max_instances: c.max_instances.unwrap_or(server::DEFAULT_MAX_INSTANCES),
                 catalogue_cmd: c.catalogue_cmd,
                 model_override_cmd: c.model_override_cmd,
+                extra_models: c.extra_models,
+                advisor_models: c.advisor_models,
             },
         );
     }

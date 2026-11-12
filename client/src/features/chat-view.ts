@@ -845,6 +845,12 @@ export class ChatView {
       for (const e of Object.values(cat)) {
         if (!known.has(e.value)) {
           rawOpts.push({ v: e.value, label: `${e.label} · ${t("catalog_badge")}` });
+        } else {
+          // Valeur déjà dans les annonces (extra_models du profil
+          // fusionnés à available_models) : le libellé catalogue
+          // (« Fable 5.1 ») fait foi sur la valeur brute.
+          const o = rawOpts.find((x) => x.v === e.value);
+          if (o && e.label) o.label = e.label;
         }
       }
     }
@@ -916,6 +922,31 @@ export class ChatView {
       $("btn-fusion-edit").hidden = true;
       mf.hidden = false;
       mf.value = app.current.model ?? "";
+    }
+
+    // Advisor (claude-code-acp) : profils déclarant advisor_models —
+    // le choix est persisté par le démon et injecté au spawn
+    // (_meta → advisorModel) ; changer recycle le process. "off" =
+    // désactivation explicite, les valeurs listées = modèles advisor.
+    const adv = $("advisor-select") as HTMLSelectElement;
+    const advModels = app.current.advisor_models ?? [];
+    if (advModels.length) {
+      adv.hidden = false;
+      adv.innerHTML = "";
+      const off = document.createElement("option");
+      off.value = "off";
+      off.textContent = t("advisor_off");
+      adv.appendChild(off);
+      for (const v of advModels) {
+        const o = document.createElement("option");
+        o.value = v;
+        o.textContent = v;
+        adv.appendChild(o);
+      }
+      adv.value = app.current.advisor ?? "off";
+      adv.title = t("advisor_title");
+    } else {
+      adv.hidden = true;
     }
 
     // thought_level est PAR MODÈLE : au changement de modèle l'agent

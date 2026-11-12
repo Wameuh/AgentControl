@@ -28,6 +28,18 @@ pub struct AgentProfile {
     /// de l'agent ACP et le session/load quand la valeur choisie est
     /// catalogue-only. Requis pour appliquer une telle valeur.
     pub model_override_cmd: Option<String>,
+    /// Modèles sélectionnables hors annonce ACP
+    /// (`[agents.<id>.extra_models]`, ex. variantes Fable de
+    /// claude-code-acp) — fusionnés dans `available_models` au
+    /// handshake et acceptés tels quels par `session/set_model`.
+    pub extra_models: Vec<proto::ExtraModel>,
+    /// Modèles advisor proposables pour les sessions du profil
+    /// (`[agents.<id>.advisor_models]`) — non vide = le démon injecte
+    /// `advisorModel` via `_meta.claudeCode.options` au spawn
+    /// (mécanisme claude-code-acp : `extraArgs.settings`, ou
+    /// `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` pour la valeur "off").
+    /// Vide = fonctionnalité absente.
+    pub advisor_models: Vec<String>,
 }
 
 /// Plafond d'instances par profil agent quand `max_instances` n'est pas

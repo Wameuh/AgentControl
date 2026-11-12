@@ -49,6 +49,7 @@ impl Session {
         skip_replay: bool,
         mcp_servers: Value,
         spawn_cfg: Option<SpawnCfg>,
+        hints: SpawnHints,
     ) -> Result<bool> {
         // Un seul spawn à la fois : un sleep pendant un réveil en vol
         // libère `waking`, et un nouvel envoi peut alors lancer un
@@ -88,7 +89,7 @@ impl Session {
         // terminé — drain_queue/envois directs doivent rester en file.
         self.spawning.store(true, Ordering::SeqCst);
         let r = self
-            .spawn_attempts(command, envs, resume_native_id, skip_replay, mcp_servers)
+            .spawn_attempts(command, envs, resume_native_id, skip_replay, mcp_servers, hints)
             .await;
         // Config de création APPLIQUÉE sous le flag spawning : le drain
         // post-spawn (lancé juste après) et les envois extérieurs restent
@@ -134,6 +135,7 @@ impl Session {
         resume_native_id: Option<String>,
         skip_replay: bool,
         mcp_servers: Value,
+        hints: SpawnHints,
     ) -> Result<bool> {
         let mut last = anyhow::anyhow!("spawn not attempted");
         let sid = self.meta_snapshot().id;
@@ -163,6 +165,7 @@ impl Session {
                     resume_native_id.clone(),
                     skip_replay,
                     mcp_servers.clone(),
+                    hints.clone(),
                 )
                 .await
             {
@@ -268,6 +271,7 @@ impl Session {
         resume_native_id: Option<String>,
         skip_replay: bool,
         mcp_servers: Value,
+        hints: SpawnHints,
     ) -> Result<bool> {
         // Nouvelle génération : tout reader d'un process précédent devient
         // périmé — son on_agent_exit ne touchera plus l'état partagé.
@@ -368,7 +372,13 @@ impl Session {
         // « already » sans jamais réparer) → kill silencieux, l'état
         // final est décidé par l'appelant du spawn.
         let hs = self
-            .acp_handshake(&meta, resume_native_id.clone(), skip_replay, mcp_servers)
+            .acp_handshake(
+                &meta,
+                resume_native_id.clone(),
+                skip_replay,
+                mcp_servers,
+                hints.acp_meta.as_ref(),
+            )
             .await;
         let (resp, supports_load, fell_back) = match hs {
             Ok(v) => v,
@@ -440,6 +450,22 @@ impl Session {
                             .map(String::from)
                     })
                     .collect();
+                // Modèles « extra » du profil (ex. Fable de
+                // claude-code-acp, hors annonce ACP) : fusionnés à la
+                // liste rapportée — set_model les accepte tels quels.
+                for v in &hints.extra_models {
+                    if !m.available_models.contains(v) {
+                        m.available_models.push(v.clone());
+                    }
+                }
+            } else if !hints.extra_models.is_empty() {
+                // L'agent n'annonce aucune liste : les extras seuls
+                // constituent la liste affichable.
+                for v in &hints.extra_models {
+                    if !m.available_models.contains(v) {
+                        m.available_models.push(v.clone());
+                    }
+                }
             }
             self.config_gen.fetch_add(1, Ordering::SeqCst);
         }
@@ -716,12 +742,16 @@ impl Session {
     /// masquerait un vrai conflit — et la boucle de retry du fork
     /// compte dessus.
     /// Retour : (réponse session/new|load, supports_load, fell_back).
+    /// `acp_meta` : objet `_meta` additionnel injecté dans les params
+    /// session/new|load (options propres à l'adaptateur — voir
+    /// SpawnHints, construit côté serveur depuis le profil).
     async fn acp_handshake(
         &self,
         meta: &SessionMeta,
         resume_native_id: Option<String>,
         skip_replay: bool,
         mcp_servers: Value,
+        acp_meta: Option<&Value>,
     ) -> Result<(Value, bool, bool)> {
         let init = self
             .acp_request("initialize", acp::initialize_params())
@@ -738,7 +768,7 @@ impl Session {
             let r = self
                 .acp_request(
                     "session/load",
-                    acp::session_load_params(&native, &meta.cwd, mcp_servers.clone()),
+                    acp::session_load_params(&native, &meta.cwd, mcp_servers.clone(), acp_meta),
                 )
                 .await;
             self.loading_replay.store(false, Ordering::SeqCst);
@@ -760,7 +790,7 @@ impl Session {
                     let v = self
                         .acp_request(
                             "session/new",
-                            acp::session_new_params(&meta.cwd, mcp_servers),
+                            acp::session_new_params(&meta.cwd, mcp_servers, acp_meta),
                         )
                         .await
                         .context("session/new (repli après session/load)")?;
@@ -771,7 +801,7 @@ impl Session {
             let v = self
                 .acp_request(
                     "session/new",
-                    acp::session_new_params(&meta.cwd, mcp_servers),
+                    acp::session_new_params(&meta.cwd, mcp_servers, acp_meta),
                 )
                 .await
                 .context("session/new")?;
@@ -1460,6 +1490,8 @@ mod tests {
             available_modes: vec![],
             available_commands: vec![],
             available_models: vec![],
+            advisor: None,
+            advisor_models: vec![],
             config_options: vec![],
             pending_config: Default::default(),
             desired_config: Default::default(),
@@ -1667,6 +1699,7 @@ for line in sys.stdin:
                 true,
                 json!([]),
                 None,
+                SpawnHints::default(),
             )
             .await
             .unwrap();
@@ -1717,6 +1750,7 @@ for line in sys.stdin:
                 true,
                 json!([]),
                 None,
+                SpawnHints::default(),
             )
             .await
             .unwrap();
@@ -1758,6 +1792,7 @@ for line in sys.stdin:
                 true,
                 json!([]),
                 None,
+                SpawnHints::default(),
             )
             .await;
         assert!(r.is_err());
@@ -1798,6 +1833,7 @@ for line in sys.stdin:
                 true,
                 json!([]),
                 None,
+                SpawnHints::default(),
             )
             .await
             .unwrap();

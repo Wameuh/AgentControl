@@ -241,13 +241,33 @@ impl Daemon {
         // Les deux clés sont requises pour qu'une valeur catalogue soit
         // applicable — servir le catalogue sans model_override_cmd
         // proposerait des options vouées à l'échec côté ACP.
-        let models = if profile.catalogue_cmd.is_some() && profile.model_override_cmd.is_some() {
+        let mut models = if profile.catalogue_cmd.is_some() && profile.model_override_cmd.is_some() {
             self.catalogues
                 .get(&agent, profile.catalogue_cmd.as_deref())
                 .await
         } else {
             Vec::new()
         };
+        // Modèles « extra » du profil (ex. Fable de claude-code-acp,
+        // hors annonce ACP) : proposés même sans catalogue_cmd —
+        // session/set_model les accepte tels quels, pas besoin du
+        // side-channel model_override_cmd.
+        {
+            let known: std::collections::HashSet<String> =
+                models.iter().map(|m| m.value.clone()).collect();
+            for e in &profile.extra_models {
+                if !known.contains(&e.value) {
+                    models.push(crate::catalogue::CatalogEntry {
+                        value: e.value.clone(),
+                        label: if e.label.is_empty() {
+                            e.value.clone()
+                        } else {
+                            e.label.clone()
+                        },
+                    });
+                }
+            }
+        }
         Ok(json!({ "models": models }))
     }
 }

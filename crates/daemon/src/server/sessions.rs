@@ -63,6 +63,8 @@ impl Daemon {
                     available_modes: vec![],
                     available_commands: vec![],
                     available_models: vec![],
+                    advisor: None,
+                    advisor_models: profile.advisor_models.clone(),
                     config_options: vec![],
                     pending_config: Default::default(),
                     desired_config: Default::default(),
@@ -148,6 +150,8 @@ impl Daemon {
                     available_modes: vec![],
                     available_commands: vec![],
                     available_models: vec![],
+                    advisor: None,
+                    advisor_models: profile.advisor_models.clone(),
                     config_options: vec![],
                     pending_config: Default::default(),
                     desired_config: Default::default(),
@@ -242,6 +246,7 @@ impl Daemon {
                                         quiet: true,
                                         ..Default::default()
                                     }),
+                                    self.spawn_hints(&profile, &meta),
                                 )
                                 .await,
                                 Ok(true)
@@ -273,6 +278,7 @@ impl Daemon {
                                     quiet: true,
                                     ..Default::default()
                                 }),
+                                self.spawn_hints(&profile, &meta),
                             )
                             .await
                         {
@@ -446,6 +452,7 @@ impl Daemon {
                             quiet: true,
                             ..Default::default()
                         }),
+                        self.spawn_hints(&profile, &meta),
                     )
                     .await
                 {
@@ -919,6 +926,7 @@ impl Daemon {
                     quiet: true,
                     ..Default::default()
                 }),
+                self.spawn_hints(&profile, &meta),
             )
             .await;
         // Rendormir seulement si rien d'externe n'a repris la session
@@ -997,6 +1005,16 @@ impl Daemon {
                     s.set_model_meta(Some(m.to_string()), Some("catalogue".into()));
                 }
             }
+            // Profils « extra »/advisor : le hint se construit au spawn
+            // depuis le profil courant (le snapshot meta porte déjà
+            // advisor/advisor_models — voir h_set_advisor).
+            let hints = {
+                let m0 = s.meta_snapshot();
+                match d.agents.read().await.get(&m0.agent) {
+                    Some(p) => d.spawn_hints(p, &m0),
+                    None => Default::default(),
+                }
+            };
             let r = s
                 .spawn_agent(
                     &cmd,
@@ -1009,6 +1027,7 @@ impl Daemon {
                         model: if cat_hit { None } else { model.clone() },
                         quiet: false,
                     }),
+                    hints,
                 )
                 .await;
             // Supprimée pendant le spawn : tuer l'agent frais éventuel —
@@ -1356,6 +1375,42 @@ impl Daemon {
                 Ok(json!({"model": applied}))
     }
 
+    /// Modèle advisor de la session : persisté dans meta puis appliqué
+    /// par respawn — la valeur n'est lue par l'agent qu'au spawn
+    /// (`advisorModel` via `_meta` → `--settings`), un process vivant
+    /// doit donc être recyclé (kill + session/load). Session endormie :
+    /// le choix est persisté et s'appliquera au prochain réveil.
+    pub(super) async fn h_set_advisor(self: &Arc<Self>, session: String, advisor: String) -> Result<Value> {
+                let s = self.get_session(&session).await?;
+                let agent = s.meta_snapshot().agent;
+                let profile = self
+                    .agents
+                    .read()
+                    .await
+                    .get(&agent)
+                    .cloned()
+                    .with_context(|| format!("agent inconnu: {agent}"))?;
+                if profile.advisor_models.is_empty() {
+                    anyhow::bail!("le profil « {agent} » ne déclare pas d'advisor (advisor_models)");
+                }
+                let advisor = advisor.trim().to_string();
+                if advisor != "off" && !profile.advisor_models.contains(&advisor) {
+                    anyhow::bail!(
+                        "advisor inconnu: {advisor} (attendu : off ou {:?})",
+                        profile.advisor_models
+                    );
+                }
+                s.set_advisor_meta(Some(advisor.clone()));
+                if s.is_alive() || s.is_spawning() {
+                    s.kill_for_respawn().await;
+                    self.respawn(&s, true).await?;
+                }
+                s.emit(EventKind::System {
+                    text: format!("advisor → {advisor}"),
+                });
+                Ok(json!({"advisor": advisor}))
+    }
+
     pub(super) async fn h_set_config_option(self: &Arc<Self>, session: String, config_id: String, value: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
                 // Les valeurs catalogue-only passent par le side-channel,
@@ -1616,6 +1671,8 @@ mod tests {
             available_modes: vec![],
             available_commands: vec![],
             available_models: vec![],
+            advisor: None,
+            advisor_models: vec![],
             config_options: vec![],
             pending_config: Default::default(),
             desired_config: Default::default(),

@@ -226,6 +226,20 @@ export function initModelBar(openFusion: () => void, metaChanged: () => void = (
     if (base && base !== "__fusion") applyModelValue(resolveModel(base, eff));
   };
 
+  // Advisor : choix persisté par le démon (meta.advisor) — appliqué au
+  // prochain spawn via _meta ; le déblocage affiche la valeur voulue
+  // sans attendre le respawn.
+  ($("advisor-select") as HTMLSelectElement).onchange = (e) => {
+    if (!app.current) return;
+    const v = (e.target as HTMLSelectElement).value;
+    call("set_advisor", { session: app.current.id, advisor: v })
+      .then(() => {
+        if (app.current) app.current.advisor = v;
+        metaChanged();
+      })
+      .catch((er) => showErr(String(er)));
+  };
+
   ($("model-free") as HTMLInputElement).addEventListener("keydown", async (e) => {
     if (e.key !== "Enter" || !app.current) return;
     const v = (e.target as HTMLInputElement).value.trim();

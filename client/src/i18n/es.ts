@@ -197,6 +197,7 @@ export const es: Record<Key, string> = {
   fusion_bad: "Combinación Fusion no anunciada por el agente: ",
   cost_label: "Coste",
   catalog_badge: "catálogo",
+  advisor_title: "Modelo asesor (créditos de uso)", advisor_off: "Asesor: off",
   fusion_entry: "✨ Fusión (2 modelos)…", cmd_placeholder: "⌘ comandos…",
   effort_default: "predeterminado", subscribe_err: "subscribe: ",
   settings_title: "Configuración", about_title: "Acerca de AgentControl",

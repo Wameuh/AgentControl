@@ -71,6 +71,17 @@ pub(crate) struct SpawnCfg {
     pub quiet: bool,
 }
 
+/// Indices de spawn dérivés du profil + meta de session (construits par
+/// le serveur, `spawn_hints`) : `_meta` additionnel injecté dans
+/// session/new|load (options propres à l'adaptateur — advisor
+/// claude-code-acp) et ids des modèles « extra » du profil à fusionner
+/// dans `available_models` après le handshake.
+#[derive(Clone, Default)]
+pub(crate) struct SpawnHints {
+    pub acp_meta: Option<Value>,
+    pub extra_models: Vec<String>,
+}
+
 pub struct Session {
     pub dir: PathBuf,
     pub meta: Mutex<SessionMeta>,
@@ -792,6 +803,8 @@ mod tests {
             available_modes: vec![],
             available_commands: vec![],
             available_models: vec![],
+            advisor: None,
+            advisor_models: vec![],
             config_options: vec![],
             pending_config: Default::default(),
             desired_config: Default::default(),

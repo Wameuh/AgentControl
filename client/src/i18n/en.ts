@@ -194,6 +194,7 @@ export const en = {
   fusion_bad: "Fusion combination not announced by the agent: ",
   cost_label: "Cost",
   catalog_badge: "catalogue",
+  advisor_title: "Advisor model (usage credits)", advisor_off: "Advisor: off",
   fusion_entry: "✨ Fusion (2 models)…", cmd_placeholder: "⌘ commands…",
   effort_default: "default", subscribe_err: "subscribe: ",
   settings_title: "Settings", about_title: "About AgentControl",

@@ -27,6 +27,12 @@ export interface SessionMeta {
   available_modes: string[];
   available_commands: CmdInfo[];
   available_models: string[];
+  /** Modèle advisor choisi (profils `advisor_models`) — "off" = off
+   *  explicite ; absent = défaut du profil. Appliqué au spawn. */
+  advisor?: string;
+  /** Choix advisor déclarés par le profil — sélecteur header visible
+   *  quand non vide (ex. claude-code-acp : fable/opus/sonnet). */
+  advisor_models?: string[];
   config_options?: ConfigOption[];
   state: string;
   /** Dernier échec de tour (état "error") — kind : rate_limit | model
