@@ -1674,8 +1674,10 @@ fn safe_session_component(s: &str) -> bool {
 /// Supprime `<cwd>/.ac-uploads/<session>/` (pièces jointes du composer)
 /// à la suppression de la session. Garde-fous : seul ce sous-dossier
 /// exact — jamais `.ac-uploads/` entier ni le workspace ; cwd, base et
-/// cible sont canonicalisés, donc un `.ac-uploads/<sid>` symlink vers
-/// l'extérieur est refusé. Absents/illisibles → no-op.
+/// cible sont canonicalisés et `base` doit rester sous le cwd (un
+/// `.ac-uploads` symlink sortant est refusé) ; `<sid>` symlink — même
+/// vers un sibling — est refusé car la cible canonicalisée doit être
+/// le chemin joint lui-même. Absents/illisibles → no-op.
 pub(super) fn purge_session_uploads(cwd: &str, session: &str) {
     if !safe_session_component(session) {
         return;
@@ -1686,13 +1688,23 @@ pub(super) fn purge_session_uploads(cwd: &str, session: &str) {
     let Ok(base) = std::fs::canonicalize(cwd.join(".ac-uploads")) else {
         return;
     };
-    let Ok(target) = std::fs::canonicalize(base.join(session)) else {
+    // `.ac-uploads` lui-même symlink sortant : sa canonicalisation
+    // mènerait hors du workspace — on ne touche à rien.
+    if !base.starts_with(&cwd) {
+        return;
+    }
+    let joined = base.join(session);
+    let Ok(target) = std::fs::canonicalize(&joined) else {
         return;
     };
-    if target.starts_with(&base) && target.is_dir() {
-        if let Err(e) = std::fs::remove_dir_all(&target) {
-            warn!("purge .ac-uploads/{session}: {e}");
-        }
+    // `<sid>` symlink — même vers un sibling de .ac-uploads : la cible
+    // canonicalisée diffère du chemin joint → refus. On ne supprime
+    // que le dossier réel `<sid>`, jamais ce vers quoi il pointe.
+    if target != joined || !target.is_dir() {
+        return;
+    }
+    if let Err(e) = std::fs::remove_dir_all(&target) {
+        warn!("purge .ac-uploads/{session}: {e}");
     }
 }
 
@@ -1840,5 +1852,39 @@ mod tests {
         assert!(dehors.join("otage.txt").exists());
         let _ = std::fs::remove_dir_all(&cwd);
         let _ = std::fs::remove_dir_all(&dehors);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn purge_uploads_refuse_ac_uploads_symlink_sortant() {
+        let cwd = tmpdir("linkbase");
+        let dehors = tmpdir("linkbase-out");
+        // .ac-uploads → dehors : base canonicalise hors du cwd.
+        std::os::unix::fs::symlink(&dehors, cwd.join(".ac-uploads")).unwrap();
+        std::fs::create_dir_all(dehors.join("s-a")).unwrap();
+        std::fs::write(dehors.join("s-a").join("f"), b"x").unwrap();
+
+        purge_session_uploads(cwd.to_str().unwrap(), "s-a");
+
+        assert!(dehors.join("s-a").join("f").exists());
+        let _ = std::fs::remove_dir_all(&cwd);
+        let _ = std::fs::remove_dir_all(&dehors);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn purge_uploads_refuse_un_symlink_frere() {
+        let cwd = tmpdir("linksib");
+        let up = cwd.join(".ac-uploads");
+        std::fs::create_dir_all(up.join("s-victime")).unwrap();
+        std::fs::write(up.join("s-victime").join("f"), b"x").unwrap();
+        // s-evil → s-victime (tous deux sous .ac-uploads) : la cible
+        // canonicalisée reste dans base — starts_with ne suffit pas.
+        std::os::unix::fs::symlink(up.join("s-victime"), up.join("s-evil")).unwrap();
+
+        purge_session_uploads(cwd.to_str().unwrap(), "s-evil");
+
+        assert!(up.join("s-victime").join("f").exists());
+        let _ = std::fs::remove_dir_all(&cwd);
     }
 }

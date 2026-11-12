@@ -154,6 +154,10 @@ export class Attachments {
       // chemins locaux → commandes Tauri clipboard_file_*.
       const uris = clipboardFileUris(cd);
       if (uris.length) {
+        // Web : pas de lecture de chemins locaux — laisser le collage
+        // texte se faire (le payload GNOME strict reste lisible) plutôt
+        // qu'un toast qui le mangerait.
+        if (isWeb) return;
         e.preventDefault();
         void this.addClipboardUris(uris);
       }
