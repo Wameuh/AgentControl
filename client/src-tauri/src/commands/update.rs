@@ -237,6 +237,84 @@ pub(crate) fn update_last_status() -> Option<String> {
     None
 }
 
+/// Suffixe « (deleted) » que le kernel ajoute au readlink de
+/// /proc/self/exe quand l'inode a été remplacé (dpkg -i renomme
+/// .dpkg-new par-dessus le binaire) : current_exe() rend alors un
+/// chemin inexistant → Command::new → ENOENT. Retiré avant tout usage.
+#[cfg(target_os = "linux")]
+fn strip_deleted_suffix(p: &std::path::Path) -> PathBuf {
+    let s = p.as_os_str().to_string_lossy();
+    match s.strip_suffix(" (deleted)") {
+        Some(stripped) => PathBuf::from(stripped),
+        None => p.to_path_buf(),
+    }
+}
+
+/// `dpkg-query -L agentcontrol` liste TOUT le contenu du paquet
+/// (.desktop, icônes, libs…) — on retient les fichiers sous
+/// /usr/bin|/usr/local/bin, en préférant celui qui porte le nom du
+/// binaire (un éventuel -helper ne doit pas gagner).
+#[cfg(target_os = "linux")]
+fn deb_binary_from_listing(listing: &str) -> Option<String> {
+    let mut fallback = None;
+    for line in listing.lines() {
+        let p = line.trim();
+        if !(p.starts_with("/usr/bin/") || p.starts_with("/usr/local/bin/")) {
+            continue;
+        }
+        if p.rsplit('/').next() == Some("agentcontrol") {
+            return Some(p.to_string());
+        }
+        if fallback.is_none() {
+            fallback = Some(p.to_string());
+        }
+    }
+    fallback
+}
+
+/// Chemin du NOUVEAU binaire à relancer après `dpkg -i`. L'ordre :
+/// le paquet installé (dpkg-query -L — fait foi sur l'emplacement
+/// réel), puis PATH (which), puis current_exe post-install débarrassé
+/// de « (deleted) » — le suffixe retiré, c'est le chemin du nouveau
+/// binaire. `exe_before` (current_exe capturé AVANT l'install) n'est
+/// qu'un dernier repli. Chaque candidat doit exister : un listing
+/// périmé ou un PATH trompeur ne doit pas gagner sur le suivant.
+#[cfg(target_os = "linux")]
+fn resolve_relaunch_path(exe_before: Option<&std::path::Path>) -> Result<PathBuf, String> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(out) = std::process::Command::new("dpkg-query")
+        .args(["-L", "agentcontrol"])
+        .output()
+    {
+        if out.status.success() {
+            if let Some(p) = deb_binary_from_listing(&String::from_utf8_lossy(&out.stdout)) {
+                candidates.push(PathBuf::from(p));
+            }
+        }
+    }
+    if let Ok(out) = std::process::Command::new("which")
+        .arg("agentcontrol")
+        .output()
+    {
+        if out.status.success() {
+            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !p.is_empty() {
+                candidates.push(PathBuf::from(p));
+            }
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        candidates.push(strip_deleted_suffix(&exe));
+    }
+    if let Some(before) = exe_before {
+        candidates.push(strip_deleted_suffix(before));
+    }
+    candidates
+        .into_iter()
+        .find(|p| p.exists())
+        .ok_or_else(|| "aucun chemin de relance résolu".to_string())
+}
+
 /// Télécharge un asset de la release `tag` vers un dossier temporaire
 /// dédié (agentcontrol-update, purgé à l'appel) et rend son chemin.
 /// Tag exact d'abord (les rc sont des prereleases — latest renverrait
@@ -293,6 +371,11 @@ fn fetch_release_asset(
 #[tauri::command]
 pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     ulog(format!("install v{tag} demandée"));
+    // Capturé AVANT dpkg -i : après le remplacement du binaire,
+    // current_exe() peut rendre « …/agentcontrol (deleted) » — le
+    // suffixe est retiré à l'usage, le chemin restant pointe le
+    // nouveau binaire (dernier repli du résolveur).
+    let exe_before = std::env::current_exe().ok();
     let deb = tokio::task::spawn_blocking({
         let tag = tag.clone();
         move || fetch_release_asset(&tag, "agentcontrol.deb", |n| n.ends_with(".deb"))
@@ -361,14 +444,13 @@ pub(crate) async fn update_client(tag: String) -> Result<(), String> {
     // « installée mais relance ratée ») + erreur explicite, et le
     // process RESTE VIVANT — mieux vaut l'ancienne version en mémoire
     // qu'une app morte.
-    let relaunch = std::env::current_exe()
-        .map_err(|e| e.to_string())
-        .and_then(|exe| {
-            std::process::Command::new(exe)
-                .spawn()
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        });
+    let relaunch = resolve_relaunch_path(exe_before.as_deref()).and_then(|exe| {
+        ulog(format!("chemin de relance résolu : {}", exe.display()));
+        std::process::Command::new(&exe)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("{} : {e}", exe.display()))
+    });
     match relaunch {
         Ok(()) => {
             write_update_status(&format!("OK {tag}"));
@@ -736,5 +818,48 @@ fn dir_writable_or_err(cur: &std::path::Path, tag: &str) -> Result<(), String> {
             ulog(format!("chemin portable refusé — {msg}"));
             Err(msg)
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    /// Le suffixe kernel « (deleted) » (inode remplacé par dpkg -i)
+    /// doit être retiré ; un chemin sain passe inchangé.
+    #[test]
+    fn strip_deleted_suffix() {
+        assert_eq!(
+            super::strip_deleted_suffix(std::path::Path::new(
+                "/usr/bin/agentcontrol (deleted)"
+            )),
+            PathBuf::from("/usr/bin/agentcontrol")
+        );
+        assert_eq!(
+            super::strip_deleted_suffix(std::path::Path::new("/opt/ac/agentcontrol")),
+            PathBuf::from("/opt/ac/agentcontrol")
+        );
+    }
+
+    /// dpkg-query -L liste tout le paquet : seuls les chemins
+    /// /usr/bin|/usr/local/bin sont candidats, le nom exact du
+    /// binaire gagne sur un helper, aucun candidat → None.
+    #[test]
+    fn deb_listing_picks_binary() {
+        let listing = "/usr/bin/agentcontrol\n\
+                       /usr/share/applications/agentcontrol.desktop\n\
+                       /usr/share/icons/hicolor/256x256/apps/agentcontrol.png\n\
+                       /usr/lib/agentcontrol/libfoo.so\n";
+        assert_eq!(
+            deb_binary_from_listing(listing),
+            Some("/usr/bin/agentcontrol".to_string())
+        );
+        let listing = "/usr/bin/agentcontrol-helper\n/usr/bin/agentcontrol\n";
+        assert_eq!(
+            deb_binary_from_listing(listing),
+            Some("/usr/bin/agentcontrol".to_string())
+        );
+        let listing = "/etc/agentcontrol/agentcontrol.conf\n/usr/lib/agentcontrol/x\n";
+        assert_eq!(deb_binary_from_listing(listing), None);
     }
 }
