@@ -933,6 +933,12 @@ export class ChatView {
     if (advModels.length) {
       adv.hidden = false;
       adv.innerHTML = "";
+      // "" = défaut du profil/agent (aucune injection) — distinct de
+      // "off" qui désactive explicitement.
+      const dft = document.createElement("option");
+      dft.value = "";
+      dft.textContent = t("advisor_default");
+      adv.appendChild(dft);
       const off = document.createElement("option");
       off.value = "off";
       off.textContent = t("advisor_off");
@@ -943,7 +949,7 @@ export class ChatView {
         o.textContent = v;
         adv.appendChild(o);
       }
-      adv.value = app.current.advisor ?? "off";
+      adv.value = app.current.advisor ?? "";
       adv.title = t("advisor_title");
     } else {
       adv.hidden = true;

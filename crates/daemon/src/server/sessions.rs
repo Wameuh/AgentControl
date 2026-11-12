@@ -1393,20 +1393,24 @@ impl Daemon {
                 if profile.advisor_models.is_empty() {
                     anyhow::bail!("le profil « {agent} » ne déclare pas d'advisor (advisor_models)");
                 }
+                // "" = retour au défaut du profil/agent (meta.advisor
+                // → None, aucune injection _meta) ; "off" = désactivation
+                // explicite ; sinon valeur parmi advisor_models.
                 let advisor = advisor.trim().to_string();
-                if advisor != "off" && !profile.advisor_models.contains(&advisor) {
+                if !advisor.is_empty() && advisor != "off" && !profile.advisor_models.contains(&advisor) {
                     anyhow::bail!(
-                        "advisor inconnu: {advisor} (attendu : off ou {:?})",
+                        "advisor inconnu: {advisor} (attendu : défaut, off ou {:?})",
                         profile.advisor_models
                     );
                 }
-                s.set_advisor_meta(Some(advisor.clone()));
+                s.set_advisor_meta((!advisor.is_empty()).then_some(advisor.clone()));
                 if s.is_alive() || s.is_spawning() {
                     s.kill_for_respawn().await;
                     self.respawn(&s, true).await?;
                 }
+                let shown = if advisor.is_empty() { "défaut" } else { advisor.as_str() };
                 s.emit(EventKind::System {
-                    text: format!("advisor → {advisor}"),
+                    text: format!("advisor → {shown}"),
                 });
                 Ok(json!({"advisor": advisor}))
     }

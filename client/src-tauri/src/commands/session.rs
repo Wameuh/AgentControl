@@ -293,6 +293,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         "cancel" => ReqKind::Cancel { session: s("session") },
         "set_mode" => ReqKind::SetMode { session: s("session"), mode: s("mode") },
         "set_model" => ReqKind::SetModel { session: s("session"), model: s("model") },
+        "set_advisor" => ReqKind::SetAdvisor { session: s("session"), advisor: s("advisor") },
         "set_config_option" => ReqKind::SetConfigOption {
             session: s("session"),
             config_id: s("config_id"),

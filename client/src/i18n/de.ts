@@ -197,7 +197,7 @@ export const de: Record<Key, string> = {
   fusion_bad: "Fusion-Kombination vom Agenten nicht angekündigt: ",
   cost_label: "Kosten",
   catalog_badge: "Katalog",
-  advisor_title: "Advisor-Modell (Nutzungsguthaben)", advisor_off: "Advisor: aus",
+  advisor_title: "Advisor-Modell (Nutzungsguthaben — Wechsel startet den Agenten neu)", advisor_default: "Advisor: Standard", advisor_off: "Advisor: aus",
   fusion_entry: "✨ Fusion (2 Modelle)…", cmd_placeholder: "⌘ Befehle…",
   effort_default: "Standard", subscribe_err: "subscribe: ",
   settings_title: "Einstellungen", about_title: "Über AgentControl",

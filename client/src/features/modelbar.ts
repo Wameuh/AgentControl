@@ -234,7 +234,7 @@ export function initModelBar(openFusion: () => void, metaChanged: () => void = (
     const v = (e.target as HTMLSelectElement).value;
     call("set_advisor", { session: app.current.id, advisor: v })
       .then(() => {
-        if (app.current) app.current.advisor = v;
+        if (app.current) app.current.advisor = v || undefined;
         metaChanged();
       })
       .catch((er) => showErr(String(er)));

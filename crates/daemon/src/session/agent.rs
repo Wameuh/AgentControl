@@ -469,6 +469,17 @@ impl Session {
             }
             self.config_gen.fetch_add(1, Ordering::SeqCst);
         }
+        // Choix advisor du profil : resynchronisés à chaque spawn —
+        // une session créée avant l'ajout de la clé `advisor_models`
+        // (ou sur un profil retouché) voit le sélecteur sans recréation.
+        {
+            let mut m = self.meta.lock().unwrap();
+            if m.advisor_models != hints.advisor_models {
+                m.advisor_models = hints.advisor_models.clone();
+                drop(m);
+                self.save_meta();
+            }
+        }
         // Options de config directement dans la réponse session/new|load
         // (Devin les envoie normalement via config_option_update, mais après
         // un session/load la réponse peut les porter elle-même).

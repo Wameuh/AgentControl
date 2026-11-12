@@ -439,23 +439,22 @@ pub struct SessionMeta {
     /// Commandes slash annoncées par l'agent (available_commands_update)
     #[serde(default)]
     pub available_commands: Vec<CmdInfo>,
-    /// Modèles annoncés par l'agent (session/new|load → models.availableModels)
-    #[serde(default)]
-    pub available_models: Vec<String>,
-    /// Modèles « extra » du profil (`[agents.<id>.extra_models]`) : leurs
-    /// valeurs sont fusionnées dans `available_models` au handshake et
-    /// `session/set_model` les accepte telles quelles — sélectionnables
+    /// Modèles annoncés par l'agent (session/new|load → models.availableModels),
+    /// complétés au handshake par les `extra_models` du profil
+    /// (`[agents.<id>.extra_models]`) : leurs valeurs sont fusionnées ici
+    /// et `session/set_model` les accepte telles quelles — sélectionnables
     /// même hors annonce ACP (ex. variantes Fable de claude-code-acp).
     /// Le libellé affiché vient du profil via `model_catalog`.
-    ///
+    #[serde(default)]
+    pub available_models: Vec<String>,
     /// Modèle advisor demandé pour cette session (profils déclarant
     /// `advisor_models`) — injecté via `_meta.claudeCode.options` au
     /// spawn ; "off" = désactivation explicite. None = défaut du profil.
     #[serde(default)]
     pub advisor: Option<String>,
-    /// Choix advisor déclarés par le profil à la création de la session
-    /// (`[agents.<id>.advisor_models]`) — pilote le sélecteur client ;
-    /// vide = fonctionnalité absente pour ce profil.
+    /// Choix advisor déclarés par le profil — snapshot de
+    /// `[agents.<id>.advisor_models]` rafraîchi à chaque spawn ;
+    /// pilote le sélecteur client, vide = fonctionnalité absente.
     #[serde(default)]
     pub advisor_models: Vec<String>,
     /// Options de config dynamiques (config_option_update — mode/model chez Devin)

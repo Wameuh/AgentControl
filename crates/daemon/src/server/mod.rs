@@ -693,6 +693,7 @@ impl Daemon {
                 .iter()
                 .map(|e| e.value.clone())
                 .collect(),
+            advisor_models: profile.advisor_models.clone(),
         }
     }
 

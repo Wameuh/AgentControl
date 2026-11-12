@@ -136,7 +136,7 @@ command = ["claude-agent-acp"]
 # CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1 dans [agents.claude.env]) :
 # `advisor_models` affiche un sélecteur par session ; la valeur est
 # injectée au spawn via `_meta.claudeCode.options` — mécanisme propre à
-# l'adaptateur @zed-industries/claude-code-acp (le adapter officiel
+# l'adaptateur @zed-industries/claude-code-acp — l'adaptateur officiel
 # @agentclientprotocol/claude-agent-acp ne le connaît pas). "off" est
 # toujours proposé (désactive explicitement). Changer de valeur recycle
 # le process agent. Sans clé : aucun sélecteur.

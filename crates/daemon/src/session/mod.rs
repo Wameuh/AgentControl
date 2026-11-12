@@ -80,6 +80,10 @@ pub(crate) struct SpawnCfg {
 pub(crate) struct SpawnHints {
     pub acp_meta: Option<Value>,
     pub extra_models: Vec<String>,
+    /// `advisor_models` du profil — resynchronisé dans meta à chaque
+    /// spawn (une session créée avant l'ajout de la clé voit le
+    /// sélecteur sans être recréée).
+    pub advisor_models: Vec<String>,
 }
 
 pub struct Session {
