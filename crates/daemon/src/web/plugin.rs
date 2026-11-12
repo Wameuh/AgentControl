@@ -32,6 +32,20 @@ use anyhow::Result;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 
+/// Noms jamais servis par `/plugin/` : les secrets du démon
+/// (`web.token`, configs TOML) et les clés privées usuelles — un
+/// `view_dir` pointant la racine ou `~` ne doit pas les exposer.
+fn is_sensitive_name(name: &str) -> bool {
+    name == "web.token"
+        || name == "config.toml"
+        || name == "components.toml"
+        || name.ends_with(".token")
+        || name.ends_with(".key")
+        || name.ends_with(".pem")
+        || name == "id_rsa"
+        || name == "id_ed25519"
+}
+
 /// CSP de la vue plugin : `default-src 'self'` = le dossier servi ;
 /// `'unsafe-inline'` toléré pour les scripts/styles inline du plugin
 /// (durcissement par hash/nonce = v2) ; `connect-src 'none'` — le
@@ -101,6 +115,15 @@ pub async fn serve_plugin(
         Ok(f) if f.starts_with(&dir) => f,
         _ => return http::respond_err(stream, 404, "introuvable").await,
     };
+    // Un `view_dir` large (`.`/root, `~`, `..`) est une config de
+    // confiance, mais les fichiers porteurs de secrets du démon ne
+    // doivent jamais être servis — même à un plugin déclaré.
+    if file
+        .file_name()
+        .is_some_and(|n| is_sensitive_name(&n.to_string_lossy()))
+    {
+        return http::respond_err(stream, 404, "introuvable").await;
+    }
     // Tout document HTML exige le token de vue (le chemin direct
     // `/plugin/<name>/index.html` compris — pas seulement l'URL
     // canonique) : c'est lui qui démarre le bootstrap `ready` du
