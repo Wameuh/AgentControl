@@ -3,7 +3,7 @@
 // serveur, de l'agent, workspace, modèle, assignation de groupe.
 // ---------------------------------------------------------------------------
 
-import { $, dlgErr, showErr } from "../core/dom";
+import { $, dlgErr, notify, showErr } from "../core/dom";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
 import type { AgentCaps, AgentOpt, SessionMeta } from "../core/types";
@@ -294,6 +294,39 @@ export class NewSessionDialog {
     }
   }
 
+  /** Session créée côté démon dont la réponse RPC s'est perdue
+   *  (timeout 60 s / tunnel coupé APRÈS l'insert — le démon répond
+   *  dès l'insertion, le spawn tourne en tâche de fond) : retrouvée
+   *  par agent (+ sid natif pour un attach), cwd compatible et
+   *  création de moins de 5 min. La plus récente gagne ; `conn`
+   *  filtrée quand elle est connue (multi-serveurs). */
+  private async findLateCreation(
+    agent: string,
+    cwd: string,
+    conn: string | undefined,
+    nativeId?: string,
+  ): Promise<string | null> {
+    const metas = await call<SessionMeta[]>("list_sessions").catch(
+      () => [] as SessionMeta[],
+    );
+    const now = Date.now();
+    // cwd saisi « ~… » ou relatif : le démon stocke le chemin expansé —
+    // comparaison par suffixe pour ne pas rater la session créée.
+    const tail = cwd.replace(/^~(?=\/|$)/, "").replace(/^\/+/, "");
+    const cands = metas
+      .filter(
+        (m) =>
+          m.agent === agent &&
+          (!nativeId || m.native_session_id === nativeId) &&
+          (!conn || !m.conn || m.conn === conn) &&
+          (m.cwd === cwd ||
+            (!!tail && (m.cwd === tail || m.cwd.endsWith("/" + tail)))) &&
+          now - Date.parse(m.created_at) < 5 * 60_000,
+      )
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+    return cands[0]?.id ?? null;
+  }
+
   // Changement de serveur cible → recharger les agents de ce serveur. Token de
   // séquence : un changement plus récent invalide la réponse encore en vol.
   private agentsReq = 0;
@@ -352,7 +385,18 @@ export class NewSessionDialog {
       fst.textContent = t("create_wait");
       fst.hidden = false;
       const dlg = $("dlg-new") as HTMLDialogElement;
-      const res = await (attach
+      // Attente bornée à 60 s côté RPC : le compteur rend l'attente
+      // visible au lieu de 60 s de silence après create_wait.
+      const t0 = Date.now();
+      const tick = setInterval(() => {
+        fst.textContent = `${t("create_wait")} (${Math.round((Date.now() - t0) / 1000)} s)`;
+      }, 1000);
+      // L'erreur est capturée, pas affichée tout de suite : le démon a
+      // pu créer la session puis perdre la réponse (timeout, tunnel
+      // coupé) — une sonde list_sessions la retrouve avant de déclarer
+      // l'échec (un échec de création ne doit jamais être muet).
+      let callErr: unknown = null;
+      let res = await (attach
         ? call<{ session: string }>("attach_session", {
             agent: ($("f-agent") as HTMLSelectElement).value,
             cwd,
@@ -370,17 +414,36 @@ export class NewSessionDialog {
             prompt: ($("f-prompt") as HTMLTextAreaElement).value || undefined,
           })
       ).catch((er) => {
-        // Dialogue détaché (Échap) pendant l'appel : une erreur dans
-        // f-err serait invisible — basculer en toast.
-        if (dlg.open) dlgErr("f-err", String(er));
-        else showErr(String(er));
+        callErr = er;
         return null;
       });
+      clearInterval(tick);
       fst.hidden = true;
       btn.disabled = false;
       btn.classList.remove("spin");
       btn.textContent = label0;
-      if (!res) return;
+      if (!res && callErr != null) {
+        fst.textContent = t("create_probe");
+        fst.hidden = false;
+        const late = await this.findLateCreation(
+          ($("f-agent") as HTMLSelectElement).value,
+          cwd,
+          grp?.conn ?? selConn,
+          attach || undefined,
+        );
+        fst.hidden = true;
+        if (late) {
+          res = { session: late };
+          notify("warn", t("create_late"));
+        }
+      }
+      if (!res) {
+        // Dialogue détaché (Échap) pendant l'appel : une erreur dans
+        // f-err serait invisible — basculer en toast.
+        if (dlg.open) dlgErr("f-err", String(callErr));
+        else showErr(String(callErr));
+        return;
+      }
       // thought_level choisi à la création : la session vient d'être
       // insérée (spawn en tâche de fond) — set_config_option tombe en
       // pending_config et est rejoué post-handshake, APRÈS le modèle
