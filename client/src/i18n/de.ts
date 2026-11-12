@@ -302,7 +302,7 @@ export const de: Record<Key, string> = {
   term_slow: "[noch am Verbinden — langsame Leitung…]",
   term_unsupported: "Daemon zu alt für das Terminal — bitte zuerst aktualisieren.",
   tree_refresh: "Baum aktualisieren", tree_empty: "(leer)",
-  file_search_ph: "Dateien nach Namen suchen…", file_search_none: "Kein Treffer",
+  file_search_ph: "Dateien nach Namen suchen…", file_search_none: "Kein Treffer", ft_split: "Ziehen zum Ändern der Größe — Doppelklick zum Zurücksetzen",
   file_search_trunc: "Ergebnisse gekürzt — Suche verfeinern",
   file_search_local: "Älterer Daemon — suche nur in geöffneten Ordnern",
   ctx_copy: "Inhalt kopieren", ctx_copy_path: "Absoluten Pfad kopieren",

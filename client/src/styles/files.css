@@ -156,8 +156,23 @@ body.android #fv-bar .fv-lbl { font-size: 13px; }
    barre de recherche au-dessus de l'arbre / de la liste de résultats. */
 #ft-side {
   width: 44%; min-width: 150px; flex: none; min-height: 0;
+  /* La preview garde au moins ~200 px même si une largeur persistée
+     (ou un drag) dépasse la place disponible. */
+  max-width: calc(100% - 200px);
   display: flex; flex-direction: column;
   border-right: 1px solid var(--line);
+}
+/* Poignée explorateur ↔ preview : affichée seulement quand la colonne
+   explorateur l'est (le layout Android empilé n'a pas de split). */
+#ft-split {
+  display: none; flex: none; width: 5px; margin: 0 -2px;
+  cursor: col-resize; position: relative; z-index: 3;
+  touch-action: none;
+}
+#ft-side:not([hidden]) ~ #ft-split { display: block; }
+#ft-split:hover, #ft-split:focus-visible {
+  background: rgba(var(--accent-rgb), .3);
+  outline: none;
 }
 #ft-bar {
   flex: none; position: relative; padding: 6px 8px;
