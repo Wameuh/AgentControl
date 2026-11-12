@@ -499,6 +499,8 @@ export const fr: Record<Key, string> = {
   agents_failed: "⚠ chargement des agents impossible",
   creating_agent: "création de l'agent…",
   create_wait: "Peut être long sur un serveur distant — Échap détache, la session s'ouvrira d'elle-même.",
+  create_probe: "La création continue peut-être côté démon — vérification…",
+  create_late: "Création lente côté démon — session retrouvée, ouverture.",
   spawn_failed: "« {title} » n'a pas démarré — ouvrir la session pour le détail",
   dstep_check: "Vérification de l'existant",
   dstep_download: "Téléchargement des binaires",

@@ -499,6 +499,8 @@ export const en = {
   agents_failed: "⚠ could not load agents",
   creating_agent: "creating the agent…",
   create_wait: "This can take a while on a remote server — Esc detaches, the session opens when ready.",
+  create_probe: "Creation may still be running daemon-side — checking…",
+  create_late: "Creation was slow daemon-side — session found and opened.",
   spawn_failed: "« {title} » failed to start — open the session for details",
   dstep_check: "Check remote state",
   dstep_download: "Download release binaries",

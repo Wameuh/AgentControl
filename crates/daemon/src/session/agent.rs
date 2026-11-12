@@ -21,6 +21,16 @@ use crate::journal;
 const MAX_INLINE: usize = 32 * 1024;
 /// Taille de l'extrait conservé dans l'event quand le contenu part en blob.
 const EXCERPT: usize = 4 * 1024;
+/// Bornes du handshake ACP (initialize / session/new|load) : un agent
+/// qui ne répond jamais ne doit pas laisser le spawn pendu à vie — la
+/// session restait « starting » sans que rien ne dise à quelle étape
+/// le handshake en était (ni côté log ni côté client). Dépassé → même
+/// traitement qu'un refus : kill du process + erreur nommant l'étape,
+/// rejouée par spawn_attempts puis visible via spawn_fresh.
+const HANDSHAKE_INIT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(60);
+const HANDSHAKE_SESSION_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(180);
 
 impl Session {
     // -----------------------------------------------------------------------
@@ -365,6 +375,13 @@ impl Session {
             bail!("spawn supplanté (kill pendant le spawn)");
         }
 
+        // Progression visible côté client : entre le spawn et
+        // « agent started » il peut s'écouler des dizaines de secondes
+        // (initialize + session/new) — sans cette ligne le chat semble
+        // figé pendant le handshake.
+        self.emit(EventKind::System {
+            text: "agent lancé — handshake ACP…".into(),
+        });
         // ACP handshake : initialize puis session/new|load. Un échec ne
         // doit pas laisser le process vivant — sinon is_alive() ment
         // (agent initialisé mais sans session liée : les envois
@@ -756,6 +773,10 @@ impl Session {
     /// `acp_meta` : objet `_meta` additionnel injecté dans les params
     /// session/new|load (options propres à l'adaptateur — voir
     /// SpawnHints, construit côté serveur depuis le profil).
+    /// Chaque étape est tracée dans le log démon (initiate → ok, durée)
+    /// et bornée : un agent muet sur session/new laissait le spawn
+    /// pendu sans trace de où il en était — le blocage est maintenant
+    /// localisable à la lecture du journal.
     async fn acp_handshake(
         &self,
         meta: &SessionMeta,
@@ -764,10 +785,22 @@ impl Session {
         mcp_servers: Value,
         acp_meta: Option<&Value>,
     ) -> Result<(Value, bool, bool)> {
+        let t_all = std::time::Instant::now();
+        info!("[{}] handshake: initialize…", meta.id);
+        let t0 = std::time::Instant::now();
         let init = self
-            .acp_request("initialize", acp::initialize_params())
+            .acp_request_bounded(
+                "initialize",
+                acp::initialize_params(),
+                HANDSHAKE_INIT_TIMEOUT,
+            )
             .await
             .context("initialize")?;
+        info!(
+            "[{}] handshake: initialize ok en {} ms",
+            meta.id,
+            t0.elapsed().as_millis()
+        );
         let agent_caps = init.get("agentCapabilities").cloned().unwrap_or(json!({}));
         let supports_load = agent_caps
             .get("loadSession")
@@ -776,15 +809,25 @@ impl Session {
 
         if let (Some(native), true) = (resume_native_id, supports_load) {
             self.loading_replay.store(skip_replay, Ordering::SeqCst);
+            info!("[{}] handshake: session/load…", meta.id);
+            let t0 = std::time::Instant::now();
             let r = self
-                .acp_request(
+                .acp_request_bounded(
                     "session/load",
                     acp::session_load_params(&native, &meta.cwd, mcp_servers.clone(), acp_meta),
+                    HANDSHAKE_SESSION_TIMEOUT,
                 )
                 .await;
             self.loading_replay.store(false, Ordering::SeqCst);
             match r {
-                Ok(v) => Ok((v, supports_load, false)),
+                Ok(v) => {
+                    info!(
+                        "[{}] handshake: session/load ok en {} ms",
+                        meta.id,
+                        t0.elapsed().as_millis()
+                    );
+                    Ok((v, supports_load, false))
+                }
                 Err(e) => {
                     if load_err_keeps_native(&format!("{e:#}")) {
                         return Err(e).context("session/load");
@@ -798,26 +841,50 @@ impl Session {
                             "session native perdue ({e}) — agent relancé sur un contexte neuf"
                         ),
                     });
+                    info!("[{}] handshake: session/new (repli)…", meta.id);
+                    let t0 = std::time::Instant::now();
                     let v = self
-                        .acp_request(
+                        .acp_request_bounded(
                             "session/new",
                             acp::session_new_params(&meta.cwd, mcp_servers, acp_meta),
+                            HANDSHAKE_SESSION_TIMEOUT,
                         )
                         .await
                         .context("session/new (repli après session/load)")?;
+                    info!(
+                        "[{}] handshake: session/new ok en {} ms",
+                        meta.id,
+                        t0.elapsed().as_millis()
+                    );
                     Ok((v, supports_load, true))
                 }
             }
         } else {
+            info!("[{}] handshake: session/new…", meta.id);
+            let t0 = std::time::Instant::now();
             let v = self
-                .acp_request(
+                .acp_request_bounded(
                     "session/new",
                     acp::session_new_params(&meta.cwd, mcp_servers, acp_meta),
+                    HANDSHAKE_SESSION_TIMEOUT,
                 )
                 .await
                 .context("session/new")?;
+            info!(
+                "[{}] handshake: session/new ok en {} ms",
+                meta.id,
+                t0.elapsed().as_millis()
+            );
             Ok((v, supports_load, false))
         }
+        .map(|(v, sl, fb)| {
+            info!(
+                "[{}] handshake terminé en {} ms",
+                meta.id,
+                t_all.elapsed().as_millis()
+            );
+            (v, sl, fb)
+        })
     }
 
     /// Tue le process laissé par un handshake raté (initialize ou
@@ -926,6 +993,29 @@ impl Session {
 
     /// Envoie une requête JSON-RPC à l'agent et attend la réponse.
     pub async fn acp_request(&self, method: &str, params: Value) -> Result<Value> {
+        self.acp_request_inner(method, params, None).await
+    }
+
+    /// acp_request bornée — réservée au handshake : `session/prompt`
+    /// n'a PAS de borne (un long tour est légitime, le watchdog gère
+    /// le silence). Au timeout l'entrée `acp_pending` est retirée : une
+    /// réponse tardive serait sinon créditée à un appel soldé et la
+    /// map fuirait jusqu'à la mort du process.
+    async fn acp_request_bounded(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: std::time::Duration,
+    ) -> Result<Value> {
+        self.acp_request_inner(method, params, Some(timeout)).await
+    }
+
+    async fn acp_request_inner(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Value> {
         let id = self.acp_next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.acp_pending.lock().unwrap().insert(id, tx);
@@ -934,7 +1024,17 @@ impl Session {
             self.acp_pending.lock().unwrap().remove(&id);
             return Err(e);
         }
-        match rx.await {
+        let res = match timeout {
+            Some(t) => match tokio::time::timeout(t, rx).await {
+                Ok(r) => r,
+                Err(_) => {
+                    self.acp_pending.lock().unwrap().remove(&id);
+                    bail!("acp {method}: aucune réponse après {} s", t.as_secs());
+                }
+            },
+            None => rx.await,
+        };
+        match res {
             Ok(Ok(v)) => Ok(v),
             Ok(Err(e)) => bail!("acp {method}: {e}"),
             Err(_) => bail!("acp {method}: channel closed"),

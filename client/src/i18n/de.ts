@@ -502,6 +502,8 @@ export const de: Record<Key, string> = {
   agents_failed: "⚠ Agenten konnten nicht geladen werden",
   creating_agent: "Agent wird erstellt…",
   create_wait: "Kann auf einem entfernten Server dauern — Esc löst ab, die Sitzung öffnet sich, sobald sie bereit ist.",
+  create_probe: "Erstellung läuft möglicherweise noch daemon-seitig — prüfe…",
+  create_late: "Erstellung daemon-seitig langsam — Sitzung gefunden, wird geöffnet.",
   spawn_failed: "« {title} » konnte nicht starten — Sitzung für Details öffnen",
   dstep_check: "Entfernten Status prüfen",
   dstep_download: "Release-Binärdateien herunterladen",

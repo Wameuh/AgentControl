@@ -502,6 +502,8 @@ export const es: Record<Key, string> = {
   agents_failed: "⚠ no se pudieron cargar los agentes",
   creating_agent: "creando el agente…",
   create_wait: "Puede tardar en un servidor remoto — Esc desvincula, la sesión se abre cuando esté lista.",
+  create_probe: "La creación puede seguir en curso en el demonio — comprobando…",
+  create_late: "Creación lenta en el demonio — sesión encontrada, abriendo.",
   spawn_failed: "« {title} » no arrancó — abra la sesión para el detalle",
   dstep_check: "Comprobar el estado remoto",
   dstep_download: "Descargar los binarios de la release",
