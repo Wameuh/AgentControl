@@ -721,6 +721,21 @@ pub enum ReqKind {
         title: Option<String>,
     },
     ListSessions,
+    /// Variante paginée de ListSessions : réponse
+    /// `{"sessions": [...], "next_offset": n|null, "total": t}` au lieu
+    /// du tableau brut — une grosse réponse reste UNE ligne NDJSON
+    /// indivisible qui affame les petits RPC sur un lien lent ; paginer
+    /// laisse la sonde et les appels légers s'intercaler entre les
+    /// pages. Requête inconnue des vieux démons (`parse: unknown
+    /// variant`) → le client retombe sur ListSessions (réponse unique).
+    ListSessionsPage {
+        /// Taille de page (défaut côté démon : 25, plafond 200).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+        /// Décalage dans la liste triée (created_at décroissant).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<u64>,
+    },
     ListAgents,
     /// Coûts catalogue des modèles d'un profil agent (sonde provider
     /// type `devin models`, cache côté démon) — {"models": {id: {label,
@@ -1343,6 +1358,7 @@ impl ReqKind {
             Self::ForkSession { .. } => "fork_session",
             Self::AttachSession { .. } => "attach_session",
             Self::ListSessions => "list_sessions",
+            Self::ListSessionsPage { .. } => "list_sessions_page",
             Self::ListAgents => "list_agents",
             Self::ModelCosts { .. } => "model_costs",
             Self::ModelCatalog { .. } => "model_catalog",

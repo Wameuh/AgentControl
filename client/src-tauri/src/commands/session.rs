@@ -11,6 +11,80 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::state::{get_conn, AppState};
 
+/// Sessions par page `list_sessions_page` — borne le poids d'une
+/// ligne NDJSON : une liste complète dépassait 150 ko sur les démons à
+/// beaucoup de sessions et faisait expirer la sonde (item #245). Les
+/// pages laissent les petits RPC s'intercaler entre les réponses.
+const LIST_PAGE_SIZE: u32 = 25;
+/// Garde-fou ~1000 sessions : au-delà on rend l'accumulé (le prochain
+/// refresh repagine) plutôt que boucler sur des pages incohérentes.
+const LIST_PAGE_MAX: u64 = 40;
+
+/// `list_sessions` paginé quand le démon connaît `list_sessions_page`,
+/// sinon la réponse unique historique — la capacité est mémorisée par
+/// clé de connexion (`AppState::list_page`) : un vieux démon répond
+/// `parse: unknown variant` une seule fois puis on reste sur
+/// ListSessions. Retourne le tableau JSON, comme `ListSessions`.
+async fn list_sessions_all(app: &AppHandle, k: &str, c: &Arc<Client>) -> Result<Value> {
+    let supported = app
+        .state::<AppState>()
+        .list_page
+        .lock()
+        .await
+        .get(k)
+        .copied()
+        .unwrap_or(true);
+    if !supported {
+        return c.call(ReqKind::ListSessions).await;
+    }
+    let mut all: Vec<Value> = Vec::new();
+    let mut offset = 0u64;
+    for _ in 0..LIST_PAGE_MAX {
+        match c
+            .call(ReqKind::ListSessionsPage {
+                limit: Some(LIST_PAGE_SIZE),
+                offset: Some(offset),
+            })
+            .await
+        {
+            Ok(v) => {
+                app.state::<AppState>()
+                    .list_page
+                    .lock()
+                    .await
+                    .insert(k.to_string(), true);
+                let Some(sessions) = v.get("sessions").and_then(Value::as_array) else {
+                    // Réponse hors forme page — rendue telle quelle.
+                    return Ok(v);
+                };
+                let next = v.get("next_offset").and_then(Value::as_u64);
+                all.extend(sessions.iter().cloned());
+                match next {
+                    Some(n) if n > offset => offset = n,
+                    _ => return Ok(json!(all)),
+                }
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if msg.contains("list_sessions_page") || msg.contains("unknown variant") {
+                    app.state::<AppState>()
+                        .list_page
+                        .lock()
+                        .await
+                        .insert(k.to_string(), false);
+                    return c.call(ReqKind::ListSessions).await;
+                }
+                return Err(e);
+            }
+        }
+    }
+    client_core::log(
+        Level::Warn,
+        format!("list_sessions {k}: borne de pages atteinte — liste tronquée"),
+    );
+    Ok(json!(all))
+}
+
 /// Compteurs transport exposés sous `_ac_transport` dans les sondes et
 /// les marqueurs `conn_error` — le frontend les recopie dans client.log
 /// pour reconstruire la chronologie sans deviner depuis les timeouts.
@@ -26,6 +100,7 @@ pub(crate) fn ac_transport_json(st: &client_core::ClientStats) -> Value {
         "dead": st.dead,
         "silent_ms": st.silent_ms,
         "tx_age_ms": st.tx_age_ms,
+        "rx_partial": st.rx_partial,
     })
 }
 
@@ -69,13 +144,33 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
         // Timeout par conn : 8 s pour les sondes (SILENT_KILL_MS côté
         // frontend = la fenêtre de « trafic récent » qui excuse un
         // timeout — pas le même réglage, à ne pas aligner aveuglément).
-        let secs = if method == "pr_sync" { 60 } else { 8 };
+        // list_sessions paginé = N allers-retours séquentiels : 20 s —
+        // ce n'est pas une sonde de vie (daemon_status la joue), un
+        // timeout allongé n'aggrave pas la détection des vraies morts.
+        let secs = if method == "pr_sync" {
+            60
+        } else if method == "list_sessions" {
+            20
+        } else {
+            8
+        };
+        let is_list_sessions = method == "list_sessions";
         let mut set = tokio::task::JoinSet::new();
         for (k, c) in pairs {
             let req = req.clone();
+            let app = app.clone();
             set.spawn(async move {
                 let t0 = std::time::Instant::now();
-                let r = tokio::time::timeout(std::time::Duration::from_secs(secs), c.call(req)).await;
+                // list_sessions passe par la variante paginée (filtre
+                // les grosses lignes NDJSON) — même timeout global.
+                let callfut = async {
+                    if is_list_sessions {
+                        list_sessions_all(&app, &k, &c).await
+                    } else {
+                        c.call(req).await
+                    }
+                };
+                let r = tokio::time::timeout(std::time::Duration::from_secs(secs), callfut).await;
                 // silent_ms lu au retour : du trafic entrant récent prouve
                 // le transport vivant même quand la requête a expiré.
                 let silent = c.silent_ms();

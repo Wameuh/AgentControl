@@ -150,6 +150,7 @@ pub fn run() {
             net: Mutex::new(std::collections::VecDeque::new()),
             cli_conn: cli_conn_arg(),
             next_gen: std::sync::atomic::AtomicU64::new(0),
+            list_page: Mutex::new(std::collections::HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
             commands::connect::connect,

@@ -757,6 +757,9 @@ impl Daemon {
             }
             ReqKind::ModelCatalog { agent } => self.h_model_catalog(agent).await,
             ReqKind::ListSessions => self.h_list_sessions().await,
+            ReqKind::ListSessionsPage { limit, offset } => {
+                self.h_list_sessions_page(limit, offset).await
+            }
             ReqKind::NewSession {
                 agent,
                 cwd,

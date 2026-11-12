@@ -38,21 +38,40 @@ pub(crate) struct AppState {
     /// Compteur global de gen — `fetch_add(1)+1` à chaque `connect`
     /// réussi, toutes clés confondues. Jamais remis à zéro.
     pub(crate) next_gen: AtomicU64,
+    /// Capacité `list_sessions_page` par clé de connexion : true = le
+    /// démon pagine, false = trop vieux (parse error mémorisé pour ne
+    /// pas repayer l'aller-retour à chaque refresh). Absent = inconnu
+    /// → on essaie la page d'abord, fallback propre.
+    pub(crate) list_page: Mutex<std::collections::HashMap<String, bool>>,
+}
+
+/// Clé de connexion résolue comme `get_conn` (explicite, défaut, ou
+/// première connue) — exposée pour les appelants qui ont besoin de la
+/// clé en plus du client (cache de capacité list_page).
+pub(crate) async fn resolve_conn_key(
+    state: &AppState,
+    key: Option<&str>,
+) -> Result<String, String> {
+    if let Some(k) = key.filter(|k| !k.is_empty()) {
+        return Ok(k.to_string());
+    }
+    if let Some(d) = state.default_conn.lock().await.clone() {
+        return Ok(d);
+    }
+    state
+        .conns
+        .lock()
+        .await
+        .keys()
+        .next()
+        .cloned()
+        .context("non connecté — configurez la connexion")
+        .map_err(|e| e.to_string())
 }
 
 pub(crate) async fn get_conn(state: &State<'_, AppState>, key: Option<&str>) -> Result<Arc<Client>, String> {
+    let k = resolve_conn_key(state, key).await?;
     let map = state.conns.lock().await;
-    let k = match key {
-        Some(k) if !k.is_empty() => k.to_string(),
-        _ => state
-            .default_conn
-            .lock()
-            .await
-            .clone()
-            .or_else(|| map.keys().next().cloned())
-            .context("non connecté — configurez la connexion")
-            .map_err(|e| e.to_string())?,
-    };
     map.get(&k)
         .map(|c| c.client.clone())
         .context(format!("connexion inconnue: {k}"))
