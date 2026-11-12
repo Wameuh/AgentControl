@@ -50,6 +50,9 @@ export interface AcTransport {
   dead?: boolean;
   silent_ms?: number;
   tx_age_ms?: number;
+  /** Octets de la ligne NDJSON en cours de réception — une sonde en
+   *  timeout pendant qu'un gros fetch se vide la voit monter. */
+  rx_partial?: number;
 }
 
 /** Une ligne compacte pour client.log : les compteurs bruts restent
@@ -65,6 +68,7 @@ export function fmtAcTransport(t?: AcTransport | null): string {
     `dead=${t.dead === true ? "oui" : t.dead === false ? "non" : "?"}`,
     `silent=${t.silent_ms ?? "?"}ms`,
     `txage=${t.tx_age_ms ?? "?"}ms`,
+    `rxpart=${t.rx_partial ?? "?"}B`,
   ];
   return ` [${parts.join(" ")}]`;
 }

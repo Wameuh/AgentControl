@@ -26,11 +26,28 @@ const CALL_TIMEOUT = 60_000;
 const TOKEN_KEY = "ac-web-token";
 /** Clé de conn unique du mode web (connKeyOf({kind:"web"}) côté client). */
 export const WEB_CONN = "web";
+/** Méthodes en lecture seule dont les appels identiques en vol sont
+ *  fusionnés (miroir de `req_dedupable` côté client-core Rust) : N
+ *  callers simultanés partagent UNE requête et sa réponse — 4×
+ *  list_sessions parallèles = 1 réponse sérialisée, pas 4. Les
+ *  méthodes à effet de bord en sont exclues. */
+const DEDUP_METHODS = new Set([
+  "daemon_status", "list_sessions", "list_agents", "model_costs",
+  "model_catalog", "session_info", "events", "search_events",
+  "first_post", "list_pinned", "queue_list", "list_dir", "find_files",
+  "list_native_sessions", "get_blob", "read_file", "download_path",
+  "daemon_log_tail", "list_components", "component_info",
+  "component_logs", "component_catalog", "component_query",
+  "forge_list", "pr_list", "pr_sync", "backlog_metrics", "subscribe",
+]);
 
 class WsClient {
   private ws: WebSocket | null = null;
   private seq = 1;
   private pending = new Map<number, Pending>();
+  /** Appels dédupliqués en vol : clé méthode+sérialisation params →
+   *  promesse partagée (voir DEDUP_METHODS). */
+  private inflight = new Map<string, Promise<unknown>>();
   private handlers = new Map<string, Set<Listener>>();
   private connectPromise: Promise<Record<string, unknown>> | null = null;
   private rxTotal = 0;
@@ -272,7 +289,20 @@ class WsClient {
 
   private async callInner<T>(method: string, params: Record<string, unknown>): Promise<T> {
     if (this.ws?.readyState !== WebSocket.OPEN) await this.connect();
-    return this.rawCall<T>(method, params);
+    if (!DEDUP_METHODS.has(method)) return this.rawCall<T>(method, params);
+    const key = method + "" + JSON.stringify(params);
+    let p = this.inflight.get(key);
+    if (!p) {
+      p = this.rawCall(method, params);
+      this.inflight.set(key, p);
+      const done = () => {
+        if (this.inflight.get(key) === p) this.inflight.delete(key);
+      };
+      // then() à deux branches : la promesse dérivée résout toujours —
+      // pas de rejet non géré quand l'appel partagé échoue.
+      p.then(done, done);
+    }
+    return p as Promise<T>;
   }
 
   private rawCall<T>(method: string, params: Record<string, unknown>): Promise<T> {

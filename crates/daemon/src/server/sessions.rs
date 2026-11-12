@@ -10,11 +10,22 @@ use crate::session::SteerOutcome;
 use crate::tui;
 
 impl Daemon {
-    pub(super) async fn h_list_sessions(self: &Arc<Self>) -> Result<Value> {
+    /// Liste triée (created_at décroissant) des metas avec l'état « wait »
+    /// dérivé — partagée par list_sessions et sa variante paginée : la
+    /// pagination ne doit pas changer le contenu, seulement le découp.
+    async fn sorted_session_metas(self: &Arc<Self>) -> Result<Vec<SessionMeta>> {
                 let sessions = self.sessions.read().await;
                 let mut list: Vec<SessionMeta> =
                     sessions.values().map(|s| s.meta_snapshot()).collect();
-                list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                // Tie-break sur l'id : created_at a une résolution
+                // millis — deux sessions de la même ms s'ordonnaient
+                // selon l'itération du HashMap, et la pagination
+                // (offset) exige un tri déterministe.
+                list.sort_by(|a, b| {
+                    b.created_at
+                        .cmp(&a.created_at)
+                        .then_with(|| a.id.cmp(&b.id))
+                });
                 // « wait » dérivé à l'affichage : idle/asleep + waiter
                 // ac-wait vivant — la session se parque en attendant le
                 // ping du waiter, pas une action utilisateur.
@@ -27,7 +38,40 @@ impl Daemon {
                 for m in &mut list {
                     derive_wait_state(m, &waiting, now);
                 }
-                Ok(serde_json::to_value(list)?)
+                Ok(list)
+    }
+
+    pub(super) async fn h_list_sessions(self: &Arc<Self>) -> Result<Value> {
+                Ok(serde_json::to_value(self.sorted_session_metas().await?)?)
+    }
+
+    /// Page de list_sessions : une réponse JSON est UNE ligne NDJSON
+    /// indivisible — sur un démon à beaucoup de sessions (des dizaines
+    /// de Ko), elle monopolise le socket et fait expirer les petits RPC
+    /// (sonde incluse). Le client pagine pour laisser les appels légers
+    /// s'intercaler entre les pages ; `next_offset` null = fin.
+    pub(super) async fn h_list_sessions_page(
+        self: &Arc<Self>,
+        limit: Option<u32>,
+        offset: Option<u64>,
+    ) -> Result<Value> {
+                const DEFAULT_PAGE: u64 = 25;
+                const MAX_PAGE: u64 = 200;
+                let limit = limit
+                    .map(|l| l as u64)
+                    .unwrap_or(DEFAULT_PAGE)
+                    .clamp(1, MAX_PAGE);
+                let offset = offset.unwrap_or(0);
+                let list = self.sorted_session_metas().await?;
+                let total = list.len() as u64;
+                let start = (offset as usize).min(list.len());
+                let end = start.saturating_add(limit as usize).min(list.len());
+                let next = (end < list.len()).then_some(end as u64);
+                Ok(json!({
+                    "sessions": list[start..end].to_vec(),
+                    "next_offset": next,
+                    "total": total,
+                }))
     }
 
     pub(super) async fn h_new_session(self: &Arc<Self>, agent: String, cwd: String, title: Option<String>, model: Option<String>, mode: Option<String>, prompt: Option<String>, origin: Option<String>, group: Option<String>) -> Result<Value> {
