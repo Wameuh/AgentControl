@@ -565,4 +565,7 @@ export const fr: Record<Key, string> = {
   logs_conn: "Connexion du démon",
   logs_daemon_old: "Démon trop ancien pour les logs live — mettez-le à jour pour activer cet onglet.",
   logs_empty: "aucune ligne de log",
+  comp_view: "Ouvrir la vue",
+  pv_unsupported: "Les vues plugin exigent un démon récent — mettez-le à jour.",
+  pv_noweb: "Ce démon n'expose pas son interface web — vues plugin indisponibles.",
 };

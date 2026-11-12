@@ -17,6 +17,8 @@
 //! - `GET /media`          → fichier workspace streamé, `Range` supporté
 //!                          (remplace le scheme acvideo:// du Tauri)
 //! - `GET /download`       → fichier/dossier (zip) en `attachment`
+//! - `GET /plugin/<n>/<p>`  → assets d'une vue plugin (token de bridge
+//!                          éphémère, CSP bornée — plugin.rs)
 //!
 //! Sécurité :
 //! - bind loopback uniquement — l'accès distant passe par `ssh -L`,
@@ -32,6 +34,7 @@
 
 mod http;
 mod media;
+mod plugin;
 mod ws;
 
 use anyhow::{Context, Result};
@@ -179,6 +182,11 @@ async fn serve_http(daemon: Arc<Daemon>, mut stream: TcpStream, ctx: Arc<WebCtx>
             } else {
                 media::serve_download(&daemon, &mut stream, &head, &q).await?;
             }
+        }
+        ("GET" | "HEAD", p) if p.starts_with("/plugin/") => {
+            // Vue plugin : auth par token de bridge éphémère (pas le
+            // web.token) — validée dans plugin::serve_plugin.
+            plugin::serve_plugin(&daemon, &mut stream, &head, &q).await?;
         }
         ("GET" | "HEAD", _) => {
             // Pages statiques publiques (aucune donnée sensible : la SPA

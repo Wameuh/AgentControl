@@ -273,6 +273,9 @@ export interface ComponentSpec {
   render?: { path: string; template: string } | null;
   /** Requêtes de données déclarées (`component_query` → argv). */
   queries?: Record<string, string[]>;
+  /** Vue plugin (option B) : dossier d'assets servi sous
+   *  `/plugin/<name>/` — iframe sandboxée + bridge postMessage. */
+  view_dir?: string | null;
 }
 
 export interface ComponentStatus {
@@ -308,6 +311,9 @@ export interface ComponentItem {
   catalog?: boolean;
   spec: ComponentSpec;
   status: ComponentStatus;
+  /** Vue plugin effective (spec.view_dir ou convention
+   *  components/<name>/web/ côté démon) — bouton « ouvrir la vue ». */
+  view?: boolean;
 }
 
 /** Entrée du catalogue embarqué (ComponentCatalog) : métadonnées +

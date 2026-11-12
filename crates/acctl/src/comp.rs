@@ -256,6 +256,7 @@ fn spec_from_args(name: &str, args: &[String]) -> Result<proto::ComponentSpec> {
         params_schema: Vec::new(),
         params: std::collections::HashMap::new(),
         render: None,
+        view_dir: flag_val(args, "--view-dir").map(String::from),
     })
 }
 
@@ -271,7 +272,8 @@ fn name_arg<'a>(args: &'a [String], usage: &'static str) -> Result<&'a str> {
 /// logs <n> [--tail N] | catalog [--json] [--refresh] |
 /// install <n> [--set K=V …] | set <n> <clé> <val> |
 /// add <n> [--kind K] [--cmd "<argv>"] [--hc S] [--env K=V …]
-/// [--cwd C] [--desc D] [--vargv "<argv>"] [--vmin V] [--autostart] |
+/// [--cwd C] [--desc D] [--vargv "<argv>"] [--vmin V] [--view-dir D]
+/// [--autostart] |
 /// edit <n> [flags add + --no-autostart --restart P --rsec N] | rm <n>`.
 ///
 /// Édition bornée : un composant adossé au catalogue (`catalog` dans
@@ -281,9 +283,9 @@ fn name_arg<'a>(args: &'a [String], usage: &'static str) -> Result<&'a str> {
 pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
     // Un flag à valeur en dernière position est une erreur d'usage —
     // mieux qu'une absorption silencieuse.
-    const VAL_FLAGS: [&str; 10] = [
+    const VAL_FLAGS: [&str; 11] = [
         "--kind", "--cmd", "--hc", "--env", "--cwd", "--desc", "--tail",
-        "--set", "--vargv", "--vmin",
+        "--set", "--vargv", "--vmin", "--view-dir",
     ];
     if let Some(f) = args.last().filter(|a| VAL_FLAGS.contains(&a.as_str())) {
         bail!("{f} sans valeur");
@@ -478,12 +480,12 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                 "comp edit <name> [--desc D] [--autostart|--no-autostart] \
                  [--kind K] [--cmd \"<argv>\"] [--hc S] [--env K=V …] \
                  [--cwd C] [--restart always|on-failure|never] [--rsec N] \
-                 [--vargv \"<argv>\"] [--vmin V]",
+                 [--vargv \"<argv>\"] [--vmin V] [--view-dir D]",
             )?;
             let f = &args[3..];
-            const VAL: [&str; 10] = [
+            const VAL: [&str; 11] = [
                 "--desc", "--kind", "--cmd", "--hc", "--env", "--cwd",
-                "--restart", "--rsec", "--vargv", "--vmin",
+                "--restart", "--rsec", "--vargv", "--vmin", "--view-dir",
             ];
             if let Some(x) = f.last().filter(|a| VAL.contains(&a.as_str())) {
                 bail!("{x} sans valeur");
@@ -499,9 +501,10 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                 // même borne que le formulaire client (params via
                 // `comp set`, internals = propriété de l'entrée). Le
                 // démon refuserait aussi l'upsert ; erreur claire ici.
-                const SEALED: [&str; 9] = [
+                const SEALED: [&str; 10] = [
                     "--kind", "--cmd", "--hc", "--env", "--cwd",
                     "--restart", "--rsec", "--vargv", "--vmin",
+                    "--view-dir",
                 ];
                 // Scan pairwise — un flag à valeur consomme le token
                 // suivant : un `--env` *dans une valeur* (--desc
@@ -572,6 +575,12 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                 }
                 if let Some(v) = flag_val(f, "--vmin") {
                     spec.min_version =
+                        (!v.trim().is_empty()).then(|| v.to_string());
+                }
+                // Vide = retrait de la déclaration (retombe sur la
+                // convention components/<name>/web/ côté démon).
+                if let Some(v) = flag_val(f, "--view-dir") {
+                    spec.view_dir =
                         (!v.trim().is_empty()).then(|| v.to_string());
                 }
             }

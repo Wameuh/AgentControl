@@ -55,6 +55,7 @@ import { SettingsPanel } from "./features/settings";
 import { Tts } from "./features/tts";
 import { ComponentsPanel } from "./features/components";
 import { LogsPanel } from "./features/logs";
+import { PluginView } from "./features/plugin-view";
 import { stateDiff } from "./features/state-diff";
 import { sounds } from "./features/sounds";
 import { notifications } from "./features/notifications";
@@ -148,6 +149,7 @@ const settings = new SettingsPanel();
 const tts = new Tts();
 const comps = new ComponentsPanel();
 const logsPanel = new LogsPanel();
+const pluginViews = new PluginView();
 const search = new SessionSearch();
 const pins = new Pins();
 
@@ -222,6 +224,7 @@ notifications.bind({
     map.close();
     comps.close();
     logsPanel.close();
+    pluginViews.close();
     void chat.open(id, false, conn);
   },
 });
@@ -275,14 +278,29 @@ connView.refresh = () => sidebar.refresh();
 connView.connecting = (hosts) => chat.setConnecting(hosts);
 // Exclusion mutuelle des overlays plein #chat — chaque open() ferme
 // les autres (sinon : empilement opaque + inert, écran "figé").
-connView.onOpening = () => { settings.close(); map.close(); comps.close(); logsPanel.close(); };
-settings.onOpening = () => { connView.close(); map.close(); comps.close(); logsPanel.close(); };
+connView.onOpening = () => { settings.close(); map.close(); comps.close(); logsPanel.close(); pluginViews.close(); };
+settings.onOpening = () => { connView.close(); map.close(); comps.close(); logsPanel.close(); pluginViews.close(); };
 // Select « Appairer » des settings : pré-sélection sur la conn liée.
 settings.activeConnKey = () => conns.knownConns()[0] ?? null;
 comps.bind(conns);
-comps.onOpening = () => { settings.close(); connView.close(); map.close(); logsPanel.close(); };
+comps.onOpening = () => { settings.close(); connView.close(); map.close(); logsPanel.close(); pluginViews.close(); };
 logsPanel.bind(conns);
-logsPanel.onOpening = () => { settings.close(); connView.close(); map.close(); comps.close(); };
+logsPanel.onOpening = () => { settings.close(); connView.close(); map.close(); comps.close(); pluginViews.close(); };
+// Vue plugin (option B) : bouton « vue » du panneau composants →
+// overlay iframe sandboxée + bridge postMessage borné. Même exclusion
+// mutuelle que les autres overlays #chat.
+pluginViews.bind(conns);
+pluginViews.onOpening = () => { settings.close(); connView.close(); map.close(); comps.close(); logsPanel.close(); };
+pluginViews.openSession = (id, conn) => {
+  settings.close();
+  connView.close();
+  map.close();
+  comps.close();
+  logsPanel.close();
+  void chat.open(id, false, conn);
+};
+pluginViews.openComponents = () => comps.open();
+comps.openView = (name, conn) => void pluginViews.open(name, conn);
 newSess.bind(groups);
 newSess.refresh = () => void sidebar.refresh();
 // Le bouton « New agent » vit dans la sidebar (hors #chat — accessible
@@ -295,6 +313,7 @@ newSess.openSession = (id, conn) => {
   map.close();
   comps.close();
   logsPanel.close();
+  pluginViews.close();
   void chat.open(id, false, conn);
 };
 newSess.knownConns = () => conns.knownConns();
@@ -318,6 +337,9 @@ settings.themeChanged = () => {
   // Changement d'accent global : la couleur propre à la conn liée garde
   // la priorité (ré-appliquée ici), l'accent global s'applique sinon.
   conns.reapplyChrome();
+  // Thème dark/light → resynchronise la vue plugin ouverte (bridge
+  // `theme` — le plugin ne peut pas lire le DOM parent).
+  pluginViews.onThemeChanged();
 };
 term.bind({
   termCapable: (c) => conns.cap(c)?.terminal === true,
@@ -332,7 +354,7 @@ map.bind({
   conn: () => conns.knownConns()[0] ?? "",
   componentsCapable: (c) => conns.cap(c)?.components === true,
   openSession: (id, conn) => void chat.open(id, false, conn),
-  onOpening: () => { settings.close(); connView.close(); comps.close(); logsPanel.close(); },
+  onOpening: () => { settings.close(); connView.close(); comps.close(); logsPanel.close(); pluginViews.close(); },
   onToggle: (open) => sidebar.setMapOpen(open),
 });
 
@@ -461,6 +483,7 @@ settings.init();
 tts.init();
 comps.init();
 logsPanel.init();
+pluginViews.init();
 notifications.init();
 initFirstPost((c) => conns.cap(c)?.first_post === true);
 initModelCosts({ capable: (c) => conns.cap(c)?.model_costs === true });

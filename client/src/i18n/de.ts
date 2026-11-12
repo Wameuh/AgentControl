@@ -568,4 +568,7 @@ export const de: Record<Key, string> = {
   logs_conn: "Daemon-Verbindung",
   logs_daemon_old: "Daemon zu alt für Live-Logs — zum Aktivieren dieses Tabs aktualisieren.",
   logs_empty: "keine Logzeilen",
+  comp_view: "Ansicht öffnen",
+  pv_unsupported: "Plugin-Ansichten erfordern einen aktuellen Daemon — bitte aktualisieren.",
+  pv_noweb: "Dieser Daemon stellt seine Weboberfläche nicht bereit — Plugin-Ansichten nicht verfügbar.",
 };

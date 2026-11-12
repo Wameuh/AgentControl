@@ -142,6 +142,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 params_schema: Vec::new(),
                 params: HashMap::new(),
                 render: None,
+                view_dir: None,
             },
             detect: CatalogDetect {
                 bin: Some("agentbacklog".into()),
@@ -248,6 +249,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 params_schema: Vec::new(),
                 params: HashMap::new(),
                 render: None,
+                view_dir: None,
             },
             detect: CatalogDetect {
                 bin: Some("agent-reviewer".into()),

@@ -147,6 +147,14 @@ pub struct ComponentSpec {
     /// par le démon — réécrit à chaque changement de paramètre).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render: Option<ConfigRender>,
+    /// Vue plugin (option B — iframe sandboxée + bridge postMessage) :
+    /// dossier d'assets statiques servi par le démon sous
+    /// `/plugin/<name>/` (auth = token de bridge éphémère, jamais le
+    /// web.token). `~` expansé sous le HOME du démon, chemin relatif
+    /// résolu sous le root ; absent = convention
+    /// `<root>/components/<name>/web/` si ce dossier existe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_dir: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

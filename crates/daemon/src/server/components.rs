@@ -148,4 +148,13 @@ impl Daemon {
     ) -> Result<Value> {
         self.components.query(&name, &query).await
     }
+
+    /// `PluginViewToken{name}` — émet un token de vue plugin éphémère
+    /// (TTL ~5 min, scopé au composant) pour la route HTTP
+    /// `/plugin/<name>/` et le bootstrap `ready` du bridge postMessage —
+    /// jamais le `web.token` global. → {component, token, ttl_s}.
+    pub(super) async fn h_plugin_view_token(self: &Arc<Self>, name: String) -> Result<Value> {
+        let (token, ttl) = self.components.issue_view_token(&name).await?;
+        Ok(json!({ "component": name, "token": token, "ttl_s": ttl }))
+    }
 }

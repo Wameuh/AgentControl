@@ -565,6 +565,9 @@ export const en = {
   logs_conn: "Daemon connection",
   logs_daemon_old: "Daemon too old for live logs — update it to enable this tab.",
   logs_empty: "no log lines",
+  comp_view: "Open view",
+  pv_unsupported: "Plugin views need a recent daemon — update it first.",
+  pv_noweb: "This daemon doesn't expose its web UI — plugin views unavailable.",
 } as const;
 
 export type Key = keyof typeof en;
