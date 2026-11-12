@@ -1,14 +1,14 @@
 # AgentControl — Installation
 
 Archive: `agentcontrol-server-<arch>-linux.tar.gz`
-Contents: `agentcontrol-daemon` · `acctl` · `acp-mock-agent` · `packaging/` (systemd unit, example config)
+Contents: `agentcontrol-daemon` · `acctl` · `packaging/` (systemd unit, example config)
 
 ## 1. Server (Ubuntu — where the agents run)
 
 ```bash
 tar xzf agentcontrol-server-*.tar.gz
 mkdir -p ~/.local/bin ~/.agentcontrol ~/.config/systemd/user
-cp agentcontrol-daemon acctl acp-mock-agent ~/.local/bin/
+cp agentcontrol-daemon acctl ~/.local/bin/
 cp packaging/agentcontrol-daemon.service ~/.config/systemd/user/
 cp packaging/config.example.toml ~/.agentcontrol/config.toml
 
@@ -22,7 +22,7 @@ The daemon listens on:
 - `127.0.0.1:7331` (loopback → reachable only via SSH tunnel)
 - `~/.agentcontrol/daemon.sock` (local)
 
-Local test: `~/.local/bin/acctl status` → `{"agents":["devin","mock"],...}`
+Local test: `~/.local/bin/acctl status` → `{"agents":["devin","cursor"],...}`
 
 ### Without systemd (testing)
 
