@@ -57,3 +57,11 @@ authentifiée), pas par les assets.
 - `web.bind` loopback → vue indisponible pour un démon distant ssh
   (le bind web n'est joignable qu'en local ou via le mode web).
 - Pas de push : le plugin poll via `query` (comme les composants).
+- `navigate`/`open-external` sont les seuls canaux sortants : un plugin
+  peut exfiltrer ce qu'il obtient via `query` en naviguant son iframe
+  vers un domaine tiers (`connect-src 'none'` ne couvre pas la
+  navigation — `navigate-to` n'existe pas en CSP). Le bridge
+  `ready`/`theme` est posté à chaque `load` de l'iframe : une
+  auto-navigation du plugin reçoit le token à nouveau — v2 : poster
+  `ready` une seule fois et documenter la navigation comme canal
+  declare-only.

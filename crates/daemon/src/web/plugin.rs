@@ -142,10 +142,23 @@ pub async fn serve_plugin(
     } else {
         mime.to_string()
     };
+    // CSP : le document garde la politique plugin + `sandbox
+    // allow-scripts` (défense en profondeur — une navigation directe
+    // avec un token valide ne doit pas produire de document non
+    // sandboxé lisant l'origine du démon) ; les sous-ressources, servies
+    // sans token sous l'origine authentifiée, prennent `sandbox` nu —
+    // un .svg/.html navigué directement y serait sinon un document
+    // scriptable dans l'origine du démon (vol du web.token via
+    // sessionStorage — même motif que media.rs).
+    let csp = if is_doc {
+        format!("{}; sandbox allow-scripts", plugin_csp(&origin))
+    } else {
+        "sandbox".to_string()
+    };
     let headers = vec![
         ("Content-Type".into(), ctype),
         ("X-Content-Type-Options".into(), "nosniff".into()),
-        ("Content-Security-Policy".into(), plugin_csp(&origin)),
+        ("Content-Security-Policy".into(), csp),
         // Le token vit dans l'URL du document : aucun cache ne doit
         // le retenir.
         ("Cache-Control".into(), "no-store".into()),

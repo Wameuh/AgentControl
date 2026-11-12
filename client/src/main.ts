@@ -228,7 +228,7 @@ notifications.bind({
     void chat.open(id, false, conn);
   },
 });
-sidebar.bind(conns, groups, newSess, chat, settings, connView, comps, map, logsPanel);
+sidebar.bind(conns, groups, newSess, chat, settings, connView, comps, map, logsPanel, pluginViews);
 composer.bind(chat);
 composer.refresh = () => sidebar.refresh();
 // Hint « modèle absent » du bouton mic → ouvre les settings directement
