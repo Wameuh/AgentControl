@@ -53,6 +53,18 @@ pub(crate) fn cli_conn(state: State<'_, AppState>) -> Option<String> {
     state.cli_conn.clone()
 }
 
+/// Instances client vivantes autres que celle-ci (registre pid
+/// `~/.agentcontrol/instances`, même détection que le log de boot).
+/// Le frontend s'en sert pour suspendre l'auto-connexion quand une
+/// seconde instance tourne déjà — deux clients passifs sur la même
+/// connexion se concurrencent (flap de transport, notifications
+/// doublées). `--conn` explicite reste honoré : c'est le spawn
+/// délibéré de la multi-instance.
+#[tauri::command]
+pub(crate) fn other_instances() -> Vec<serde_json::Value> {
+    crate::instance::live_others()
+}
+
 /// Lance une AUTRE instance du client liée à `conn` (clé connKey —
 /// `ssh{,-native}:h:p` | `tcp:addr` | `local`) : le modèle multi-instances
 /// est « 1 processus = 1 connexion », plusieurs instances en parallèle

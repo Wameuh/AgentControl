@@ -61,6 +61,7 @@ export const es: Record<Key, string> = {
   conn_h: "Conectar al daemon", recent: "Conexiones recientes",
   server_label: "Servidor",
   conn_spawn: "Abrir en una nueva instancia", conn_spawned: "nueva instancia lanzada",
+  inst_running_warn: "Ya hay otra instancia de AgentControl en ejecución — conexión automática en pausa. Conecta manualmente si hace falta.",
   conn_color: "Color de la conexión", conn_color_auto: "Acento de la app (predeterminado)",
   type_label: "Tipo", local_sock: "Socket local (daemon en esta máquina)",
   ssh_label: "SSH (servidor remoto)", tcp_label: "TCP directo", host_label: "Host",

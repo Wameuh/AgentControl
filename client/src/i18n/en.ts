@@ -58,6 +58,7 @@ export const en = {
   conn_h: "Connect to daemon", recent: "Recent connections",
   server_label: "Server",
   conn_spawn: "Open in a new instance", conn_spawned: "new instance launched",
+  inst_running_warn: "Another AgentControl instance is already running — auto-connect is paused. Connect manually if needed.",
   conn_color: "Connection color", conn_color_auto: "App accent (default)",
   type_label: "Type", local_sock: "Local socket (daemon on this machine)",
   ssh_label: "SSH (remote server)", tcp_label: "Direct TCP", host_label: "Host",

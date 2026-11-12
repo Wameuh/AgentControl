@@ -61,6 +61,7 @@ export const de: Record<Key, string> = {
   conn_h: "Mit Daemon verbinden", recent: "Letzte Verbindungen",
   server_label: "Server",
   conn_spawn: "In neuer Instanz öffnen", conn_spawned: "neue Instanz gestartet",
+  inst_running_warn: "Eine weitere AgentControl-Instanz läuft bereits — Auto-Verbindung pausiert. Bei Bedarf manuell verbinden.",
   conn_color: "Verbindungsfarbe", conn_color_auto: "App-Akzent (Standard)",
   type_label: "Typ", local_sock: "Lokaler Socket (Daemon auf diesem Rechner)",
   ssh_label: "SSH (entfernter Server)", tcp_label: "Direktes TCP", host_label: "Host",
