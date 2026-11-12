@@ -855,7 +855,10 @@ impl Components {
         // Purge paresseuse des expirés à chaque émission — la map reste
         // bornée sans sweeper dédié.
         let now = std::time::Instant::now();
-        let mut m = self.view_tokens.lock().unwrap();
+        // Mutex empoisonné : récupérer le guard plutôt que paniquer —
+        // un token émis dans un guard empoisonné reste valide (la map
+        // n'est jamais dans un état incohérent : sections courtes).
+        let mut m = self.view_tokens.lock().unwrap_or_else(|e| e.into_inner());
         m.retain(|_, (_, e)| *e > now);
         m.insert(token.clone(), (name.to_string(), exp));
         Ok((token, VIEW_TOKEN_TTL.as_secs()))
@@ -868,7 +871,7 @@ impl Components {
         if token.is_empty() {
             return false;
         }
-        let m = self.view_tokens.lock().unwrap();
+        let m = self.view_tokens.lock().unwrap_or_else(|e| e.into_inner());
         match m.get(token) {
             Some((n, exp)) => n == name && *exp > std::time::Instant::now(),
             None => false,

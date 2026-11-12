@@ -458,7 +458,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             let name = name_arg(
                 args,
                 "comp add <name> [--kind K] [--cmd \"<argv>\"] [--hc S] \
-                 [--env K=V …] [--cwd C] [--desc D] \
+                 [--env K=V …] [--cwd C] [--desc D] [--view-dir D] \
                  [--vargv \"<argv>\"] [--vmin V] [--autostart]",
             )?;
             let spec = spec_from_args(name, &args[3..])?;

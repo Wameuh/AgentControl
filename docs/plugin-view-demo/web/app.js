@@ -14,9 +14,10 @@
 (function () {
   "use strict";
 
-  var bridge = { token: null, component: null, parent: null };
+  var bridge = { token: null, component: null, parent: window.parent };
   var seq = 0;
   var pending = {};
+  var booted = false;
 
   function send(msg) {
     // targetOrigin "*" obligatoire : l'iframe sandboxée a une origine
@@ -43,17 +44,24 @@
 
   window.addEventListener("message", function (ev) {
     // Seul le parent légitime parle au plugin — source stricte.
-    if (ev.source !== bridge.parent) return;
+    if (ev.source !== window.parent) return;
+    // postMessage = structured clone : ev.data est déjà un objet (une
+    // string JSON reste tolérée).
     var m;
-    try { m = JSON.parse(ev.data); } catch (e) { return; }
-    if (!m || m.component !== bridge.component) return;
+    try {
+      m = typeof ev.data === "string" ? JSON.parse(ev.data) : ev.data;
+    } catch (e) { return; }
+    if (!m) return;
 
     if (m.ac === "ready") {
+      if (booted) return;
+      booted = true;
       bridge.token = m.token;
-      bridge.parent = ev.source;
+      bridge.component = m.component;
       boot();
       return;
     }
+    if (m.component !== bridge.component) return;
     if (m.ac === "data") {
       var p = pending[m.id];
       if (!p) return;

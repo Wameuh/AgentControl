@@ -3,8 +3,8 @@
 //! #248).
 //!
 //! Auth : token de bridge **éphémère** émis par `PluginViewToken{name}`
-//! (TTL ~5 min, scopé au composant) en `?token=` sur le **document**
-//! (index.html) — jamais le `web.token` global : un asset de plugin
+//! (TTL ~5 min, scopé au composant) en `?token=` sur les **documents
+//! HTML** — jamais le `web.token` global : un asset de plugin
 //! n'a pas à connaître le token d'administration du démon, et un token
 //! de A n'ouvre pas la vue de B. L'exposition dans l'URL est bornée
 //! par le TTL et le listener loopback.
@@ -62,8 +62,8 @@ fn plugin_csp(origin: &str) -> String {
 /// (`component_query`), pas par des fichiers servis.
 const ASSET_MAX: u64 = 8 * 1024 * 1024;
 
-/// `GET|HEAD /plugin/<name>/<path>` — le document (index.html) exige
-/// le token de vue ; les sous-ressources sont libres (voir l'entête).
+/// `GET|HEAD /plugin/<name>/<path>` — les documents HTML exigent le
+/// token de vue ; les sous-ressources sont libres (voir l'entête).
 pub async fn serve_plugin(
     daemon: &Arc<Daemon>,
     stream: &mut TcpStream,
@@ -84,20 +84,10 @@ pub async fn serve_plugin(
     }
     // "" ou "/" → index.html ; pas de listing de dossier.
     let mut rel = rel.to_string();
-    let is_doc = rel.is_empty() || rel.ends_with('/');
     if rel.is_empty() {
         rel = "index.html".into();
     } else if rel.ends_with('/') {
         rel.push_str("index.html");
-    }
-    // Le token ne gate que le document : c'est lui qui démarre le
-    // bootstrap `ready` du bridge — les assets statiques, eux, sont
-    // au niveau d'exposition de la SPA (publique loopback).
-    if is_doc {
-        let token = http::qparam(q, "token").unwrap_or_default();
-        if !daemon.components.view_token_valid(name, token) {
-            return http::respond_err(stream, 401, "token de vue invalide").await;
-        }
     }
     let Some(dir) = daemon.components.plugin_view_dir_of(name).await else {
         return http::respond_err(stream, 404, "pas de vue pour ce composant").await;
@@ -111,6 +101,20 @@ pub async fn serve_plugin(
         Ok(f) if f.starts_with(&dir) => f,
         _ => return http::respond_err(stream, 404, "introuvable").await,
     };
+    // Tout document HTML exige le token de vue (le chemin direct
+    // `/plugin/<name>/index.html` compris — pas seulement l'URL
+    // canonique) : c'est lui qui démarre le bootstrap `ready` du
+    // bridge. Les autres assets statiques, eux, sont au niveau
+    // d'exposition de la SPA (publique loopback).
+    let is_doc = file
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().to_lowercase().ends_with(".html"));
+    if is_doc {
+        let token = http::qparam(q, "token").unwrap_or_default();
+        if !daemon.components.view_token_valid(name, token) {
+            return http::respond_err(stream, 401, "token de vue invalide").await;
+        }
+    }
     let meta = match tokio::fs::metadata(&file).await {
         Ok(m) if m.is_file() => m,
         _ => return http::respond_err(stream, 404, "introuvable").await,

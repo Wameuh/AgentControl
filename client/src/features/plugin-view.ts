@@ -207,7 +207,10 @@ export class PluginView {
     if (ev.origin !== "null") return;
     let m: Record<string, unknown>;
     try {
-      m = JSON.parse(typeof ev.data === "string" ? ev.data : "");
+      // postMessage transmet un objet (structured clone) — le plugin
+      // envoie un objet, jamais du JSON texte ; une string reste
+      // tolérée pour les implémentations qui sérialisent.
+      m = typeof ev.data === "string" ? JSON.parse(ev.data) : ev.data;
     } catch {
       return;
     }
