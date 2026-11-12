@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hello plugin</title>
+<style>
+  :root { color-scheme: dark light; }
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px;
+         background: #14161a; color: #e8e6e1; }
+  @media (prefers-color-scheme: light) {
+    body { background: #f6f4ef; color: #1d1f24; }
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { opacity: .65; font-size: 13px; margin-bottom: 16px; }
+  button { font: inherit; padding: 6px 12px; border-radius: 8px;
+           border: 1px solid #8886; background: transparent;
+           color: inherit; cursor: pointer; }
+  button:hover { border-color: #888; }
+  ul { list-style: none; padding: 0; margin: 12px 0 0;
+       display: grid; gap: 6px; }
+  li { border: 1px solid #8884; border-radius: 8px; padding: 8px 10px;
+       font-size: 13.5px; }
+  li .meta { opacity: .6; font-size: 12px; }
+  .err { color: #d06060; font-size: 13px; white-space: pre-wrap; }
+  .bar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+<h1>hello plugin</h1>
+<div class="sub">Vue plugin AgentControl — démo du bridge postMessage (POC option B).</div>
+<div class="bar">
+  <button id="refresh">Rafraîchir la file</button>
+  <span id="status" class="sub"></span>
+</div>
+<ul id="items"></ul>
+<div id="err" class="err"></div>
+<script src="./app.js"></script>
+</body>
+</html>

@@ -568,4 +568,8 @@ export const es: Record<Key, string> = {
   logs_conn: "Conexión del daemon",
   logs_daemon_old: "Daemon demasiado antiguo para logs en vivo — actualízalo para activar esta pestaña.",
   logs_empty: "sin líneas de log",
+  comp_view: "Abrir vista",
+  pv_unsupported: "Las vistas de plugin requieren un demonio reciente — actualízalo.",
+  pv_noweb: "Este demonio no expone su interfaz web — vistas de plugin no disponibles.",
+  pv_nav_unknown: "navigate: destino desconocido « {target} »",
 };

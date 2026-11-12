@@ -58,6 +58,10 @@ impl Daemon {
                     // hors annonce ACP — catalogue.rs, clés
                     // catalogue_cmd/model_override_cmd des profils).
                     "model_catalog": true,
+                    // Idem pour ReqKind::PluginViewToken + la route
+                    // /plugin/<name>/ (vues plugin en iframe
+                    // sandboxée — option B).
+                    "plugin_views": true,
                     "host": host,
                 }))
     }

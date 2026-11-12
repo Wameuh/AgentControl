@@ -994,6 +994,9 @@ impl Daemon {
             ReqKind::ComponentQuery { name, query } => {
                 self.h_component_query(name, query).await
             }
+            ReqKind::PluginViewToken { name } => {
+                self.h_plugin_view_token(name).await
+            }
             ReqKind::OrchestratorSet { enabled } => {
                 self.h_orch_set(enabled).await
             }

@@ -1227,6 +1227,15 @@ pub enum ReqKind {
     /// `{code, data(b64), size, truncated, stderr?(b64)}` ; absent =
     /// composant ou query inconnue → erreur.
     ComponentQuery { name: String, query: String },
+    /// Token de vue plugin éphémère (option B — vue en iframe
+    /// sandboxée servie par le démon) : émis pour `name`, TTL ~5 min,
+    /// scopé au composant, exigé par la route HTTP `/plugin/<name>/`
+    /// (auth propre — jamais le `web.token` global) et renvoyé au
+    /// plugin par le bridge postMessage `ready`. Le composant doit
+    /// déclarer une vue (`spec.view_dir` ou convention
+    /// `components/<name>/web/`). Réponse :
+    /// `{component, token, ttl_s}`.
+    PluginViewToken { name: String },
     /// Bascule à chaud l'orchestrateur backlog natif (composant interne
     /// `backlog-orchestrator`, section `[backlog_orchestrator]` de
     /// config.toml pour l'activation par défaut) — bascule runtime
@@ -1421,6 +1430,7 @@ impl ReqKind {
             Self::ComponentInstall { .. } => "component_install",
             Self::ComponentSetParams { .. } => "component_set_params",
             Self::ComponentQuery { .. } => "component_query",
+            Self::PluginViewToken { .. } => "plugin_view_token",
             Self::OrchestratorSet { .. } => "orchestrator_set",
             Self::OrchestratorConfig { .. } => "orchestrator_config",
             Self::ManagerSpawn { .. } => "manager_spawn",

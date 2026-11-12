@@ -121,7 +121,8 @@ export class LogsPanel {
       $("conn-view").hidden &&
       $("settings-view").hidden &&
       $("map-view").hidden &&
-      $("components-view").hidden
+      $("components-view").hidden &&
+      $("plugin-view").hidden
     )
       this.setChatInert(false);
     nav.close("logs");

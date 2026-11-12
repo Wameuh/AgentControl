@@ -499,6 +499,9 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         "list_components" => ReqKind::ListComponents,
         "component_info" => ReqKind::ComponentInfo { name: s("name") },
         "component_query" => ReqKind::ComponentQuery { name: s("name"), query: s("query") },
+        // Token de vue plugin éphémère (iframe sandboxée + bridge
+        // postMessage) — gate capability daemon_status.plugin_views.
+        "plugin_view_token" => ReqKind::PluginViewToken { name: s("name") },
         "manager_spawn" => ReqKind::ManagerSpawn { repo: s("repo") },
         "component_start" => ReqKind::ComponentStart { name: s("name") },
         "component_stop" => ReqKind::ComponentStop { name: s("name") },

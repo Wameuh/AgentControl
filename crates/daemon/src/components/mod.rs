@@ -47,6 +47,12 @@ const QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const QUERY_MAX: usize = 512 * 1024;
 const QUERY_ERR_MAX: usize = 8 * 1024;
 
+/// Token de vue plugin (route `/plugin/<name>/` + bootstrap du bridge
+/// postMessage) : TTL court, scopé au composant — éphémère par
+/// construction, jamais persisté ni le `web.token` global.
+pub(crate) const VIEW_TOKEN_TTL: std::time::Duration =
+    std::time::Duration::from_secs(300);
+
 /// Une feature interne exposée comme composant : état déduit de la
 /// config/runtime du démon, jamais de cycle de vie.
 struct Internal {
@@ -125,6 +131,10 @@ pub struct Components {
     /// TTL ~5 min) — voir catalog.rs. Mutex std : sections courtes
     /// (get/insert), jamais tenue pendant un await.
     upstream: Mutex<HashMap<String, catalog::Upstream>>,
+    /// Tokens de vue plugin émis (route `/plugin/<name>/`) :
+    /// token → (composant, expiration). Mutex std : sections courtes
+    /// (insert/get/retain), jamais tenue pendant un await.
+    view_tokens: Mutex<HashMap<String, (String, std::time::Instant)>>,
 }
 
 impl Components {
@@ -189,6 +199,7 @@ impl Components {
             agent_ids,
             agents,
             upstream: Mutex::new(HashMap::new()),
+            view_tokens: Mutex::new(HashMap::new()),
         })
     }
 
@@ -266,11 +277,16 @@ impl Components {
     async fn item_of(&self, name: &str) -> Option<Value> {
         if let Some(spec) = self.specs.read().await.get(name).cloned() {
             let st = self.status_of(&spec).await;
-            return Some(item_json(
+            let mut item = item_json(
                 &render::masked_spec(&spec),
                 &st,
                 "components.toml",
-            ));
+            );
+            // Vue plugin effective (spec.view_dir ou convention
+            // components/<name>/web/) — le client n'affiche le bouton
+            // « ouvrir la vue » que si ce flag est vrai.
+            item["view"] = json!(self.plugin_view_dir(&spec).await.is_some());
+            return Some(item);
         }
         if name == orch::COMPONENT_NAME {
             // État déduit de la phase de l'orchestrateur natif + son
@@ -304,6 +320,7 @@ impl Components {
                 params_schema: crate::server::orch_cfg::params_schema(&dyn_, &self.agent_ids),
                 params: crate::server::orch_cfg::params_values(&cfg),
                 render: None,
+                view_dir: None,
             };
             let st = ComponentStatus {
                 state: self.orch.component_state(),
@@ -338,6 +355,7 @@ impl Components {
                 params_schema: crate::server::agents_cfg::params_schema(&agents),
                 params: crate::server::agents_cfg::params_values(&agents),
                 render: None,
+                view_dir: None,
             };
             drop(agents);
             let st = ComponentStatus {
@@ -366,6 +384,7 @@ impl Components {
                 params_schema: Vec::new(),
                 params: HashMap::new(),
                 render: None,
+                view_dir: None,
             };
             let st = ComponentStatus {
                 state: if running {
@@ -786,6 +805,79 @@ impl Components {
         Ok(resp)
     }
 
+    // -------------------------------------------------------------------
+    // Vue plugin (option B — iframe sandboxée, /plugin/<name>/)
+    // -------------------------------------------------------------------
+
+    /// Dossier d'assets de la vue d'une spec : `spec.view_dir`
+    /// (expansé `~`, relatif résolu sous le root du démon) ou la
+    /// convention `<root>/components/<name>/web/`. `None` = pas de vue ;
+    /// le chemin retourné est canonicalisé — c'est la racine de service
+    /// de la route `/plugin/`, tout `..` est ensuite impossible.
+    pub async fn plugin_view_dir(&self, spec: &ComponentSpec) -> Option<PathBuf> {
+        let raw = match spec.view_dir.as_deref() {
+            Some(d) if !d.trim().is_empty() => {
+                let p = catalog::expand_home(d);
+                if p.is_absolute() {
+                    p
+                } else {
+                    self.root.join(p)
+                }
+            }
+            _ => self.dir.join(&spec.name).join("web"),
+        };
+        let canon = raw.canonicalize().ok()?;
+        canon.is_dir().then_some(canon)
+    }
+
+    /// Dossier de vue par nom de composant (spec courante requise).
+    pub async fn plugin_view_dir_of(&self, name: &str) -> Option<PathBuf> {
+        let spec = self.spec_of(name).await?;
+        self.plugin_view_dir(&spec).await
+    }
+
+    /// Émet un token de vue plugin pour `name` — aléa 256 bits,
+    /// scopé au composant, TTL `VIEW_TOKEN_TTL`, jamais persisté.
+    /// Exige que le composant existe ET déclare une vue (spec.view_dir
+    /// ou convention `components/<name>/web/` existante).
+    pub async fn issue_view_token(&self, name: &str) -> Result<(String, u64)> {
+        let spec = self
+            .spec_of(name)
+            .await
+            .with_context(|| format!("composant inconnu: {name}"))?;
+        anyhow::ensure!(
+            self.plugin_view_dir(&spec).await.is_some(),
+            "« {name} » n'a pas de vue plugin — déclarer spec.view_dir \
+             ou déposer les assets dans components/{name}/web/"
+        );
+        let token = rand_hex()?;
+        let exp = std::time::Instant::now() + VIEW_TOKEN_TTL;
+        // Purge paresseuse des expirés à chaque émission — la map reste
+        // bornée sans sweeper dédié.
+        let now = std::time::Instant::now();
+        // Mutex empoisonné : récupérer le guard plutôt que paniquer —
+        // un token émis dans un guard empoisonné reste valide (la map
+        // n'est jamais dans un état incohérent : sections courtes).
+        let mut m = self.view_tokens.lock().unwrap_or_else(|e| e.into_inner());
+        m.retain(|_, (_, e)| *e > now);
+        m.insert(token.clone(), (name.to_string(), exp));
+        Ok((token, VIEW_TOKEN_TTL.as_secs()))
+    }
+
+    /// Le token de vue `token` est-il valide POUR `name` ? Scopé au
+    /// composant (un token de A n'ouvre pas la vue de B), TTL vérifié.
+    /// Sync : section Mutex std courte, aucun await dedans.
+    pub fn view_token_valid(&self, name: &str, token: &str) -> bool {
+        if token.is_empty() {
+            return false;
+        }
+        let m = self.view_tokens.lock().unwrap_or_else(|e| e.into_inner());
+        match m.get(token) {
+            Some((n, exp)) => n == name && *exp > std::time::Instant::now(),
+            None => false,
+        }
+    }
+
     /// Arrêt du démon : SIGTERM à tous les `process` managés d'un coup
     /// (la grâce court en parallèle — N composants ne coûtent pas
     /// N × 3 s), puis reap + SIGKILL résiduels. Même destin que les
@@ -957,6 +1049,18 @@ pub(crate) fn kind_name(k: ComponentKind) -> &'static str {
     }
 }
 
+/// Aléa 256 bits hexadécimal — même source que `gen_web_token`
+/// (/dev/urandom), sans persistance : un token de vue est éphémère
+/// par construction (TTL court, jamais écrit sur disque).
+fn rand_hex() -> Result<String> {
+    use std::io::Read;
+    let mut b = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .context("/dev/urandom")?
+        .read_exact(&mut b)?;
+    Ok(b.iter().map(|x| format!("{x:02x}")).collect())
+}
+
 /// Normalise `~`/`~/…` en tête de champ → HOME du démon, partout où
 /// un chemin peut figurer (command, cwd, valeurs env, argv d'une
 /// sonde `command`). Appliquée au chargement ET à l'upsert : la spec
@@ -999,6 +1103,7 @@ fn expand_home_fields(spec: &mut ComponentSpec) {
     if let Some(r) = &mut spec.render {
         r.path = catalog::expand_home_str(&r.path);
     }
+    spec.view_dir = spec.view_dir.as_deref().map(catalog::expand_home_str);
 }
 
 /// Refuse les specs inutilisables : nom invalide ou réservé à un
@@ -1124,6 +1229,9 @@ fn check_usable(spec: &ComponentSpec) -> Result<()> {
                 .with_context(|| format!("param « {k} » : valeur invalide"))?;
         }
     }
+    if let Some(d) = &spec.view_dir {
+        anyhow::ensure!(!d.trim().is_empty(), "view_dir vide");
+    }
     // Queries déclarées : nom [a-z0-9-]+, argv non vide, argv0 jamais
     // superviseur — `ComponentQuery` les exécute sans audit au runtime.
     for (qname, qargv) in &spec.queries {
@@ -1208,6 +1316,9 @@ fn sealed_fields_changed(new: &ComponentSpec, cur: &ComponentSpec) -> Vec<&'stat
     if new.min_version != cur.min_version {
         out.push("min_version");
     }
+    if new.view_dir != cur.view_dir {
+        out.push("view_dir");
+    }
     out
 }
 
@@ -1261,6 +1372,7 @@ mod tests {
             params_schema: Vec::new(),
             params: HashMap::new(),
             render: None,
+            view_dir: None,
         }
     }
 

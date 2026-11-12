@@ -29,6 +29,7 @@ import type { ConnView } from "./conn-view";
 import type { ComponentsPanel } from "./components";
 import type { LogsPanel } from "./logs";
 import type { MapView } from "./map-view";
+import type { PluginView } from "./plugin-view";
 
 const DTYPE = "application/x-ac-session";
 
@@ -102,6 +103,7 @@ export class Sidebar {
   private comps!: ComponentsPanel;
   private logsPanel!: LogsPanel;
   private map!: MapView;
+  private pluginViews!: PluginView;
 
   /** PRs ouvertes par session ("conn\0sid") — rempli par refresh ;
    *  vide si le démon ne connaît pas pr_list (vieux démon → pas de badge). */
@@ -162,7 +164,7 @@ export class Sidebar {
   }
   private ctx = $("sctx");
 
-  bind(conns: ConnectionManager, groups: GroupStore, newSess: NewSessionDialog, chat: ChatView, settings: SettingsPanel, connView: ConnView, comps: ComponentsPanel, map: MapView, logsPanel: LogsPanel) {
+  bind(conns: ConnectionManager, groups: GroupStore, newSess: NewSessionDialog, chat: ChatView, settings: SettingsPanel, connView: ConnView, comps: ComponentsPanel, map: MapView, logsPanel: LogsPanel, pluginViews: PluginView) {
     this.conns = conns;
     this.groups = groups;
     this.newSess = newSess;
@@ -172,6 +174,7 @@ export class Sidebar {
     this.comps = comps;
     this.map = map;
     this.logsPanel = logsPanel;
+    this.pluginViews = pluginViews;
     this.prsView.bind({
       openSession: (id) => this.openSession(id),
       connState: (k) => this.conns.state(k),
@@ -199,6 +202,7 @@ export class Sidebar {
     this.comps.close();
     this.map.close();
     this.logsPanel.close();
+    this.pluginViews.close();
   }
 
   /** Ouvrir une session depuis la sidebar = quitter les overlays de

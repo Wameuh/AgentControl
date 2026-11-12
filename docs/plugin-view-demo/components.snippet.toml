@@ -1,0 +1,19 @@
+# Spec du composant démo « hello-plugin » — à ajouter dans
+# <root>/components.toml du démon (root = AGENTCONTROL_HOME,
+# ~/.agentcontrol par défaut).
+#
+# La vue est découverte par la convention components/<name>/web/ —
+# view_dir est inutile ici ; le déclarer explicitement reste possible
+# (chemin absolu, ~ expansé, ou relatif au root du démon).
+#
+# La query « items » exécute `agentbacklog --list --json` en argv
+# direct (composant agentbacklog installé requis) — même canal que la
+# vue Backlog native, borné par component_query.
+
+[[components]]
+name = "hello-plugin"
+kind = "external"
+description = "Vue plugin de démo — file AgentBacklog en iframe sandboxée"
+
+[components.queries]
+items = ["agentbacklog", "--list", "--json"]
