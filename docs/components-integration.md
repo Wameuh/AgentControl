@@ -35,7 +35,7 @@ all).
 | `agentbacklog` (CLI) | FIFO feature queue in SQLite — atomic transactions, **no daemon** | `uv tool` in `~/.local/bin` (repo `github.com/Wameuh/AgentBacklog`) | `~/.agentbacklog/backlog.db` |
 | `pr-db` | local sqlite PR registry — **legacy**, replaced by the built-in registry (feat #59) | `~/.local/bin` | `~/.agentcontrol/prs.db` |
 | `graphify`, `graphify-mcp` | external uv tools | `~/.local/bin` | — |
-| `acp-mock-agent` | fake test ACP agent | release tarball binary | — |
+| `acp-mock-agent` | fake test ACP agent — only used by `client/tests/first-post-daemon-e2e.py` (`AC_MOCK`/PATH, `/bin/true` fallback); **not in the release tarball** (build.yml ships daemon + acctl + packaging only), legacy installs may still carry it | manual/legacy binary | — |
 | `supervisord` | **PID 1 of the dev container**: sshd + cron + agentcontrol-daemon (the backlog orchestrator moved inside the daemon — #140) | conf `/etc/supervisor/conf.d/` + `~/.supervisor/conf.d/` | — |
 | `cron`/`crontab` | scheduled jobs | supervised (`cron-spool` volume) | — |
 | Review automation | `/mr review` → review session | **another server**, out of local scope | — |

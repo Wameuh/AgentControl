@@ -281,7 +281,18 @@ impl Session {
         self.loading_replay.store(false, Ordering::SeqCst);
         let meta = self.meta_snapshot();
         let (cmd, args) = command.split_first().context("commande agent vide")?;
-        let mut child = Command::new(cmd)
+        // argv[0] résolu à chaud (PATH effectif + dossiers usuels) : le
+        // spawn emprunte le même binaire que celui qu'`available` a
+        // validé — un agent installé après le boot, ou un argv[0] figé
+        // par la résolution boot de `default_agents`, reste trouvable.
+        // Repli sur le nom brut si rien ne résout (spawn → ENOENT
+        // explicite, comme avant).
+        let resolved = crate::server::misc::command_path(cmd);
+        let cmd_os = resolved
+            .as_ref()
+            .map(|p| p.as_os_str())
+            .unwrap_or_else(|| std::ffi::OsStr::new(cmd));
+        let mut child = Command::new(cmd_os)
             .args(args)
             .current_dir(&meta.cwd)
             .envs(envs)

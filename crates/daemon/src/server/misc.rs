@@ -260,20 +260,99 @@ pub(crate) fn command_available(cmd: &str) -> bool {
 }
 
 /// Résout `argv[0]` en chemin concret : absolu existant+exécutable, ou
-/// premier hit sur le PATH du démon (celui qu'assure `ensure_agent_path`
-/// au boot). `None` = introuvable — `available:false` côté list_agents.
-/// Le chemin absolu retourné lève l'ambiguïté d'un nom générique
-/// (`agent` peut désigner autre chose selon la machine).
+/// premier hit sur le PATH effectif du démon — `agent_path_dirs()`
+/// (dossiers usuels injectés par `ensure_agent_path` au boot) puis le
+/// PATH process. La recherche refait ses stats à chaque appel : un
+/// binaire installé APRÈS le démarrage dans l'un de ces dossiers est
+/// `available` sans restart. `None` = introuvable — `available:false`
+/// côté list_agents. Le chemin absolu retourné lève l'ambiguïté d'un
+/// nom générique (`agent` peut désigner autre chose selon la machine).
 pub(crate) fn command_path(cmd: &str) -> Option<std::path::PathBuf> {
+    command_path_in(cmd, &search_dirs())
+}
+
+/// Dossiers fouillés par `command_path`, dans l'ordre : `agent_path_dirs()`
+/// (injectés en tête du PATH par `ensure_agent_path`) puis le PATH process.
+fn search_dirs() -> Vec<PathBuf> {
+    let mut dirs = agent_path_dirs();
+    if let Some(path) = std::env::var_os("PATH") {
+        for d in std::env::split_paths(&path) {
+            if !dirs.contains(&d) {
+                dirs.push(d);
+            }
+        }
+    }
+    dirs
+}
+
+/// Résout `cmd` contre `dirs` : chemin absolu ou relatif-with-séparateur
+/// (`./agent`, `bin/x`) = littéral exécutable, sinon premier
+/// `dirs/<cmd>` exécutable. `dirs` explicite pour les tests (pas de
+/// mutation d'env process-wide).
+fn command_path_in(cmd: &str, dirs: &[PathBuf]) -> Option<std::path::PathBuf> {
     let p = PathBuf::from(cmd);
-    if p.is_absolute() {
+    if p.is_absolute() || cmd.contains('/') || cmd.contains('\\') {
         return is_executable(&p).then_some(p);
     }
-    std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path)
-            .map(|d| d.join(cmd))
-            .find(|c| is_executable(c))
-    })
+    dirs.iter()
+        .map(|d| d.join(cmd))
+        .find(|c| is_executable(c))
+}
+
+/// Dossiers « agents » injectés en tête du PATH du démon au boot par
+/// `ensure_agent_path` (main.rs) — et fouillés à chaud par
+/// `command_path` : la liste est LE contrat partagé entre détection
+/// (`available`) et spawn (le PATH process les contient déjà, donc
+/// `Command::new` retrouve le même binaire). Couvre les installs hors
+/// PATH systemd minimal : ~/.local/bin, npm-global, shims mise, cargo,
+/// nvm, /usr/local/bin et homebrew (mac).
+pub(crate) fn agent_path_dirs() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    [
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(PathBuf::from)),
+        home.as_ref().map(|h| h.join(".local/bin")),
+        // $NVM_BIN (version active) prioritaire sur le repli
+        // « dernier ~/.nvm/versions/node/*/bin ».
+        std::env::var_os("NVM_BIN").map(PathBuf::from),
+        // Agents npm-globaux (codex-acp, claude-code-acp…) : shebang
+        // `#!/usr/bin/env node`, or nvm n'est pas sur le PATH systemd.
+        nvm_node_bin(home.as_ref()),
+        home.as_ref().map(|h| h.join(".npm-global/bin")),
+        home.as_ref()
+            .map(|h| h.join(".local/share/mise/shims")),
+        home.as_ref().map(|h| h.join(".cargo/bin")),
+        Some(PathBuf::from("/usr/local/bin")),
+        // macOS : installs hors /usr/local (Apple Silicon = /opt/homebrew).
+        Some(PathBuf::from("/opt/homebrew/bin")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// `~/.nvm/versions/node/<version max>/bin` — repli quand $NVM_BIN est absent.
+fn nvm_node_bin(home: Option<&PathBuf>) -> Option<PathBuf> {
+    let versions = home?.join(".nvm/versions/node");
+    let mut best: Option<(Vec<u64>, PathBuf)> = None;
+    for e in std::fs::read_dir(versions).ok()?.flatten() {
+        let bin = e.path().join("bin");
+        if !bin.is_dir() {
+            continue;
+        }
+        let ver: Vec<u64> = e
+            .file_name()
+            .to_string_lossy()
+            .trim_start_matches('v')
+            .split('.')
+            .map(|s| s.parse().unwrap_or(0))
+            .collect();
+        if best.as_ref().is_none_or(|(b, _)| ver > *b) {
+            best = Some((ver, bin));
+        }
+    }
+    best.map(|(_, p)| p)
 }
 
 fn is_executable(p: &std::path::Path) -> bool {
@@ -287,5 +366,63 @@ fn is_executable(p: &std::path::Path) -> bool {
     #[cfg(not(unix))]
     {
         p.is_file()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Un binaire posé dans un dossier « agent » est résolu par
+    /// `command_path_in` — la recherche à chaud (dirs explicites, pas
+    /// le PATH process figé) voit les installs post-boot.
+    #[cfg(unix)]
+    #[test]
+    fn command_path_trouve_les_installs_post_boot() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = std::env::temp_dir().join(format!(
+            "ac-cmdpath-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let bin_dir = home.join(".local/bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bin = bin_dir.join("ac-test-agent-xyz");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let found = command_path_in("ac-test-agent-xyz", &[bin_dir.clone()]);
+        let _ = std::fs::remove_dir_all(&home);
+        assert_eq!(found.as_deref(), Some(bin.as_path()));
+    }
+
+    /// argv[0] avec séparateur = chemin relatif littéral, jamais cherché
+    /// dans les dossiers agents : `./agent` ne doit PAS se résoudre
+    /// vers `dir/agent` même si `dir` est dans les dossiers fouillés.
+    #[cfg(unix)]
+    #[test]
+    fn command_path_relatif_litteral() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "ac-cmdpath-rel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("ac-rel-agent-xyz");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Le cwd du test ne contient pas `./ac-rel-agent-xyz` : le
+        // littéral relatif ne résout rien — et les dossiers ne sont
+        // pas fouillés pour un argv[0] à séparateur.
+        let found = command_path_in("./ac-rel-agent-xyz", &[dir.clone()]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(found.is_none());
     }
 }

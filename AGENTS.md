@@ -541,9 +541,13 @@ Manual off-PR: `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]`.
   Agent SDK → `claude` CLI unneeded. Auth: ANTHROPIC_API_KEY or
   CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`, headless OK).
 - Minimal systemd PATH: `ensure_agent_path` (main.rs) injects the
-  binary's dir + ~/.local/bin + nvm (`$NVM_BIN`, else latest
-  `~/.nvm/versions/node/*/bin`) — required for npm-global agents
-  (`#!/usr/bin/env node` shebang).
+  binary's dir + the usual agent dirs (`~/.local/bin`,
+  `~/.npm-global/bin`, `~/.local/share/mise/shims`, `~/.cargo/bin`,
+  nvm `$NVM_BIN`/latest `~/.nvm/versions/node/*/bin`,
+  `/usr/local/bin`, `/opt/homebrew/bin`) — the same list
+  `command_path` (server/misc.rs) searches on every call, so
+  `available` reflects post-boot installs without a daemon restart
+  and agent spawn re-resolves argv[0] to the same binary.
 - **Interrupted drag → stuck "grabbing" cursor** (WebKitGTK/Wayland,
   toolkit bug with no web-side remedy): NEVER detach an element that
   can be a drag source (list rebuild, `.remove()`) while a drag is in

@@ -79,7 +79,9 @@ DEVIN_PERMISSION_MODE = "{mode}"
 # Cursor CLI — ACP natif, preset BUILT-IN (id `cursor`, affiché dans le
 # sélecteur de session sans rien déclarer ici). argv[0] est résolu sur
 # le PATH au boot (`cursor-agent` puis l'alias `agent`) en chemin
-# absolu. Login préalable : `cursor-agent login` (ou `agent login`).
+# absolu, puis re-résolu à chaud à chaque `available`/spawn — une
+# install postérieure au démarrage du démon est détectée sans restart.
+# Login préalable : `cursor-agent login` (ou `agent login`).
 # Le mode/modèle demandés à la création sont appliqués via ACP après
 # session/new (pas de placeholder).
 # Surcharger la commande sans éditer ce fichier : options →
@@ -92,7 +94,8 @@ DEVIN_PERMISSION_MODE = "{mode}"
 # Codex CLI — pas d'ACP natif : via l'adaptateur officiel
 # `npm i -g @agentclientprotocol/codex-acp` (repo zed-industries archivé,
 # développement déplacé vers agentclientprotocol). Nécessite node sur le
-# PATH du démon (ensure_agent_path couvre ~/.nvm automatiquement).
+# PATH du démon (ensure_agent_path couvre les dossiers agents usuels :
+# ~/.local/bin, ~/.npm-global/bin, shims mise, cargo, nvm…).
 # CODEX_PATH doit pointer le binaire codex installé : sans lui,
 # l'adaptateur lance son @openai/codex npm embarqué (et sous npx,
 # "codex" dans PATH serait le wrapper npm, pas le vrai CLI).
