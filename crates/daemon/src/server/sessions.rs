@@ -1676,7 +1676,7 @@ fn safe_session_component(s: &str) -> bool {
 /// exact — jamais `.ac-uploads/` entier ni le workspace ; cwd, base et
 /// cible sont canonicalisés, donc un `.ac-uploads/<sid>` symlink vers
 /// l'extérieur est refusé. Absents/illisibles → no-op.
-fn purge_session_uploads(cwd: &str, session: &str) {
+pub(super) fn purge_session_uploads(cwd: &str, session: &str) {
     if !safe_session_component(session) {
         return;
     }

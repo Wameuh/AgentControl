@@ -1825,6 +1825,9 @@ pub async fn janitor(daemon: Arc<Daemon>) {
                     } else {
                         info!("session purgée (inactivité): {id}");
                     }
+                    // Pièces jointes : <cwd>/.ac-uploads/<sid>/ part
+                    // avec la session — même purge que delete_session.
+                    sessions::purge_session_uploads(&meta.cwd, &id);
                 }
             }
         }

@@ -85,6 +85,11 @@ pub(crate) fn clipboard_file_read(uri: String, offset: u64, limit: u64) -> Resul
     use base64::Engine;
     use std::io::{Read, Seek, SeekFrom};
     let p = clipboard_path(&uri)?;
+    // is_file comme stat : une URI vers une FIFO bloquerait open() en
+    // attente d'un writer — le check avant open évite le blocage.
+    if !std::fs::metadata(&p).map(|m| m.is_file()).unwrap_or(false) {
+        return Err("pas un fichier régulier".into());
+    }
     let mut f = std::fs::File::open(&p).map_err(|e| e.to_string())?;
     f.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
     let mut buf = Vec::new();

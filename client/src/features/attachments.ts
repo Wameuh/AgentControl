@@ -490,30 +490,55 @@ function suffixName(name: string, n: number): string {
   return `${name.slice(0, dot)}-${n + 1}${name.slice(dot)}`;
 }
 
-/// URI file:// présentes dans le clipboard du paste : text/uri-list et
-/// x-special/gnome-copied-files (copie gestionnaire Linux), repli
-/// text/plain pour le payload brut « copy\nfile:///… » quand le MIME
-/// dédié n'est pas exposé. Dédupliquées, ordre de découverte conservé.
+/// URI file:// présentes dans le clipboard du paste. Deux régimes :
+/// - MIME dédiés (text/uri-list, x-special/gnome-copied-files) :
+///   toute ligne file:// compte — ces types ne charrient que des
+///   fichiers/URI par construction.
+/// - text/plain/text : le format GNOME uniquement — première ligne
+///   « copy »/« cut » puis UNIQUEMENT des URI file://. Sans cette
+///   restriction, coller du texte contenant une ligne file:///
+///   détournerait le collage (texte mangé + fichier uploadé sans
+///   action explicite).
 function clipboardFileUris(cd: DataTransfer): string[] {
   const out = new Set<string>();
-  for (const mime of [
-    "text/uri-list",
-    "x-special/gnome-copied-files",
-    "text/plain",
-    "text",
-  ]) {
-    let data = "";
-    try {
-      data = cd.getData(mime);
-    } catch {
-      continue; // type non exposé par cette webview
-    }
-    for (const line of data.split(/\r?\n/)) {
-      const u = line.trim();
-      if (u.startsWith("file://")) out.add(u);
-    }
+  for (const mime of ["text/uri-list", "x-special/gnome-copied-files"]) {
+    for (const u of clipboardUriLines(cd, mime)) out.add(u);
+  }
+  for (const mime of ["text/plain", "text"]) {
+    const lines = clipboardUriLines(cd, mime, true);
+    for (const u of lines) out.add(u);
   }
   return [...out];
+}
+
+/// Lignes file:// d'un type clipboard. `strict` (text/plain) n'accepte
+/// que le payload GNOME « copy|cut\nfile://…\nfile://… » — toute autre
+/// ligne non vide rejette le payload entier (retour vide).
+function clipboardUriLines(
+  cd: DataTransfer,
+  mime: string,
+  strict = false,
+): string[] {
+  let data = "";
+  try {
+    data = cd.getData(mime);
+  } catch {
+    return []; // type non exposé par cette webview
+  }
+  const lines = data
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith("#")); // commentaire uri-list
+  if (!lines.length) return [];
+  if (strict) {
+    const head = lines[0].toLowerCase();
+    if (head !== "copy" && head !== "cut") return [];
+    lines.shift();
+    if (!lines.length || lines.some((l) => !l.startsWith("file://"))) {
+      return [];
+    }
+  }
+  return lines.filter((l) => l.startsWith("file://"));
 }
 
 /// Base64 → ArrayBuffer (réponse clipboard_file_read).
