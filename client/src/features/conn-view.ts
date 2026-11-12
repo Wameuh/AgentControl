@@ -55,6 +55,10 @@ export class ConnView {
    *  l'a fermée sans connecter — pas de réouverture forcée tant qu'aucune
    *  conn ne repasse « ok » (réarmement dans onLiveChanged). */
   private homeDismissed = false;
+  /** Une autre instance du client tourne et aucune directive --conn
+   *  explicite ne l'a lancée : l'auto-connexion est suspendue (bannière
+   *  #cv-other-inst), la connexion manuelle reste possible. */
+  private otherAlive = false;
 
   bind(conns: ConnectionManager) {
     this.conns = conns;
@@ -513,6 +517,14 @@ export class ConnView {
   onLiveChanged() {
     if (this.conns.anyUp()) this.homeDismissed = false;
     if (this.isOpen()) this.renderSavedList();
+    this.syncOtherInst();
+  }
+
+  /** Bannière « une autre instance tourne » : visible tant que
+   *  l'auto-connexion est suspendue et qu'aucune conn n'est up — dès
+   *  qu'une connexion (manuelle ou spawn) tient, elle n'a plus lieu. */
+  private syncOtherInst() {
+    $("cv-other-inst").hidden = !(this.otherAlive && !this.conns.anyUp());
   }
 
   /** Section « aucun accès configuré » (réinstall / premier lancement) :
@@ -674,6 +686,7 @@ export class ConnView {
     // Connexions sauvegardées → liste à pastilles (pas un <select>).
     this.saved = await invoke<SavedConn[]>("saved_connections").catch(() => []);
     this.renderSavedList();
+    this.syncOtherInst();
   }
 
   close() {
@@ -815,13 +828,25 @@ export class ConnView {
    *  sinon la dernière utilisée (première entrée de connections.json).
    *  Les autres connexions enregistrées restent disponibles dans la vue
    *  et aux autres instances. `saved` est préchargé par le boot. */
-  autoConnect(saved: SavedConn[], want?: string) {
+  autoConnect(saved: SavedConn[], want?: string, otherAlive = false) {
     this.saved = saved;
+    // `want` (--conn / spawn_instance) = intention explicite → jamais
+    // suspendu ; sans lui, une instance déjà vivante bloque l'auto.
+    this.otherAlive = otherAlive && want == null;
+    this.syncOtherInst();
     // Web : la conn unique (le démon qui sert la page) est vitale —
     // la préférence "autoconnect off" n'a pas de sens ici. Et `want`
     // (--conn) est une intention explicite (instance spawnée depuis une
     // autre) — pas une reconnexion passive : elle court-circuite la pref.
     if (!want && !isWeb && localStorage.getItem("ac-autoconnect") === "0") return;
+    if (this.otherAlive) {
+      // Seconde instance sans directive : pas d'auto-connexion — deux
+      // clients passifs sur la même conn se concurrencent (flap de
+      // transport, notifications doublées). La connexion MANUELLE reste
+      // possible ; la bannière de la vue garde l'avertissement visible.
+      notify("warn", t("inst_running_warn"));
+      return;
+    }
     const target =
       (want ? saved.find((c) => connKeyOf(c, isAndroid()) === want) : undefined) ??
       saved[0];

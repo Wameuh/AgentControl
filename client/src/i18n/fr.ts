@@ -59,6 +59,7 @@ export const fr: Record<Key, string> = {
   conn_h: "Connexion au démon", recent: "Connexions récentes",
   server_label: "Serveur",
   conn_spawn: "Ouvrir dans une nouvelle instance", conn_spawned: "nouvelle instance lancée",
+  inst_running_warn: "Une autre instance AgentControl tourne déjà — connexion automatique suspendue. Connectez manuellement si besoin.",
   conn_color: "Couleur de la connexion", conn_color_auto: "Accent de l'app (défaut)",
   type_label: "Type", local_sock: "Socket local (démon sur cette machine)",
   ssh_label: "SSH (serveur distant)", tcp_label: "TCP direct", host_label: "Hôte",

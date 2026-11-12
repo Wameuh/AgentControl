@@ -104,17 +104,29 @@ window.addEventListener("contextmenu", (e) => {
 // la dernière utilisée (1re entrée de connections.json). Son accent
 // éventuel est posé avant le premier rendu utile (pas de flash de la
 // couleur par défaut) ; le connect auto lui-même part en fin de boot.
-const [cliConn, savedConns] = await Promise.all([
+const [cliConn, savedConns, otherInstances] = await Promise.all([
   invoke<string | null>("cli_conn").catch(() => null),
   invoke<SavedConn[]>("saved_connections").catch(() => [] as SavedConn[]),
+  // Garde « seconde instance » : une autre instance vivante → l'auto-
+  // connexion est suspendue (deux clients passifs sur la même conn se
+  // concurrencent — flap de transport, notifications doublées). Un
+  // --conn/AGENTCONTROL_CONN explicite reste honoré : c'est le spawn
+  // délibéré de la multi-instance. Web/Android : mono-processus.
+  isWeb || isAndroid()
+    ? Promise.resolve([] as unknown[])
+    : invoke<unknown[]>("other_instances").catch(() => [] as unknown[]),
 ]);
 const bootConn =
   (cliConn ? savedConns.find((c) => connKeyOf(c, isAndroid()) === cliConn) : undefined) ??
   savedConns[0];
-// Ne teinter que si un bind va réellement suivre — avec autoconnect off et
-// sans --conn, aucune conn ne sera liée : pas de couleur mensongère.
+// Auto-connexion suspendue : instance déjà vivante et aucune directive
+// explicite — la connexion manuelle reste possible.
+const autoSuppressed = cliConn == null && otherInstances.length > 0;
+// Ne teinter que si un bind va réellement suivre — avec autoconnect off,
+// auto supprimé ou sans --conn, aucune conn ne sera liée : pas de couleur
+// mensongère.
 const willConnect =
-  cliConn != null || isWeb || localStorage.getItem("ac-autoconnect") !== "0";
+  cliConn != null || isWeb || (!autoSuppressed && localStorage.getItem("ac-autoconnect") !== "0");
 const bootAccent = accentOf(bootConn?.color);
 if (willConnect && bootAccent) applyAccent(bootAccent, false);
 
@@ -466,4 +478,4 @@ initStatus(() => {
   return conns.cap(k)?.host as HostStats | undefined;
 });
 checkBootUpdate();
-connView.autoConnect(savedConns, cliConn ?? undefined);
+connView.autoConnect(savedConns, cliConn ?? undefined, autoSuppressed);

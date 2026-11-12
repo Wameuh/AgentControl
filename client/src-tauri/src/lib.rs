@@ -174,6 +174,7 @@ pub fn run() {
             commands::system::app_version,
             commands::system::platform,
             commands::system::cli_conn,
+            commands::system::other_instances,
             commands::system::spawn_instance,
             commands::system::ssh_pubkey,
             commands::system::sys_stats,

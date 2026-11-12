@@ -46,6 +46,60 @@ fn alive(sys: &sysinfo::System, pid: u32, exe: Option<&str>) -> bool {
     }
 }
 
+/// Instances client vivantes autres que `pid` — purge au passage des
+/// fichiers périmés (process mort ou illisible). Partagé par init()
+/// (journalisation au boot) et live_others() (commande frontend).
+fn scan_others(sys: &sysinfo::System, pid: u32) -> Vec<serde_json::Value> {
+    let mut others = Vec::new();
+    let Some(dir) = instance_dir() else { return others };
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for ent in rd.flatten() {
+            let path = ent.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(txt) = std::fs::read_to_string(&path) else {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            };
+            let other_pid = v.get("pid").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+            if other_pid == 0 || other_pid == pid {
+                continue;
+            }
+            let exe = v.get("exe").and_then(|x| x.as_str()).map(String::from);
+            if alive(sys, other_pid, exe.as_deref()) {
+                others.push(v);
+            } else {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+    others
+}
+
+/// Instances vivantes autres que ce process, forme allégée pour la
+/// commande `other_instances` (le frontend n'a besoin que du signal
+/// « une autre tourne » — pid/conn suffisent au diagnostic).
+pub(crate) fn live_others() -> Vec<serde_json::Value> {
+    let sys = refresh_sys();
+    scan_others(&sys, std::process::id())
+        .into_iter()
+        .map(|v| {
+            json!({
+                "pid": v.get("pid").cloned().unwrap_or_default(),
+                "ppid": v.get("ppid").cloned().unwrap_or_default(),
+                "version": v.get("version").cloned().unwrap_or_default(),
+                "conn": v.get("conn").cloned().unwrap_or_default(),
+                "started_ms": v.get("started_ms").cloned().unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
 /// Enregistre cette instance puis journalise les autres vivantes.
 /// Appelée une fois au setup : le fichier <pid>.json survit à la mort
 /// du process mais la vérification pid/exe au prochain boot le purge.
@@ -83,33 +137,7 @@ pub(crate) fn init(cli_conn: Option<&str>) {
         ),
     );
 
-    let mut others = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(&dir) {
-        for ent in rd.flatten() {
-            let path = ent.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("json") {
-                continue;
-            }
-            let Ok(txt) = std::fs::read_to_string(&path) else {
-                let _ = std::fs::remove_file(&path);
-                continue;
-            };
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else {
-                let _ = std::fs::remove_file(&path);
-                continue;
-            };
-            let other_pid = v.get("pid").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-            if other_pid == 0 || other_pid == pid {
-                continue;
-            }
-            let exe = v.get("exe").and_then(|x| x.as_str()).map(String::from);
-            if alive(&sys, other_pid, exe.as_deref()) {
-                others.push(v);
-            } else {
-                let _ = std::fs::remove_file(&path);
-            }
-        }
-    }
+    let others = scan_others(&sys, pid);
     if others.is_empty() {
         client_core::log(Level::Info, "aucune autre instance client vivante");
         return;
