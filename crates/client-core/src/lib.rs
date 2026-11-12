@@ -852,56 +852,97 @@ struct Inflight {
     by_key: HashMap<String, u64>,
 }
 
-/// Retire l'entrée `pending` d'un `call` à la fin ou à l'annulation du
-/// future (timeout externe qui le droppe) — sinon elle fuirait jusqu'au
-/// drop du client. `try_lock` : best-effort, jamais de blocage en Drop.
-struct PendingGuard<'a> {
-    map: &'a Mutex<Inflight>,
-    abandoned: &'a AtomicU64,
-    open_light: &'a AtomicU64,
-    open_heavy: &'a AtomicU64,
+/// Solde un waiter abandonné sous le lock pending — logique commune au
+/// règlement synchrone du guard (try_lock) et à sa task de rattrapage.
+/// L'entrée n'est retirée par le reader qu'à la réponse : si le guard
+/// la solde encore, l'appel a été abandonné en vol (timeout externe,
+/// JoinSet droppé, écriture ko) — compteur exposé aux sondes pour
+/// distinguer lenteur et RPC fantôme.
+fn settle_waiter(m: &mut Inflight, c: &Client, id: u64, waiter: u64) {
+    let Some(e) = m.by_id.get_mut(&id) else {
+        return;
+    };
+    let Some(pos) = e.waiters.iter().position(|(w, _)| *w == waiter) else {
+        return;
+    };
+    e.waiters.remove(pos);
+    c.abandoned_calls.fetch_add(1, Ordering::Relaxed);
+    if !e.waiters.is_empty() {
+        return;
+    }
+    let e = m.by_id.remove(&id).unwrap();
+    if let Some(k) = e.dedup_key {
+        m.by_key.remove(&k);
+    }
+    c.dec_open(e.class, e.written);
+}
+
+/// Dispatch d'une ligne NDJSON reçue : push broadcast ou réponse RPC.
+/// Une entrée dédupliquée est possible : la réponse est clonée pour
+/// chaque waiter.
+async fn dispatch_rx_line(c: &Client, line: &str) {
+    if line.trim().is_empty() {
+        return;
+    }
+    let v: Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    if v.get("push").is_some() {
+        let _ = c.pushes.send(v);
+        return;
+    }
+    if let Ok(resp) = serde_json::from_value::<Response>(v) {
+        let entry = {
+            let mut m = c.pending.lock().await;
+            let e = m.by_id.remove(&resp.id);
+            if let Some(e) = &e {
+                if let Some(k) = &e.dedup_key {
+                    m.by_key.remove(k);
+                }
+            }
+            e
+        };
+        if let Some(e) = entry {
+            c.dec_open(e.class, e.written);
+            let result = if resp.ok {
+                Ok(resp.result.unwrap_or(Value::Null))
+            } else {
+                Err(resp.error.unwrap_or_else(|| "?".into()))
+            };
+            for (_, tx) in e.waiters {
+                let _ = tx.send(result.clone());
+            }
+        }
+    }
+}
+
+/// Garde d'un `call` en vol : retire le waiter à la fin ou à
+/// l'annulation du future (timeout externe qui le droppe) — sinon
+/// l'entrée pending fuirait jusqu'au drop du client. `try_lock` en
+/// Drop : best-effort synchrone ; en cas de contention, une task de
+/// rattrapage solde à l'identique — sans elle, un RPC écrit dont la
+/// réponse ne vient jamais laisserait open_* à +1 et affamerait les
+/// heavy jusqu'à la mort du transport.
+struct PendingGuard {
+    client: std::sync::Weak<Client>,
     id: u64,
     waiter: u64,
 }
-impl PendingGuard<'_> {
-    /// Solde un compteur d'attente si l'entrée était écrite — les
-    /// compteurs ne couvrent que le trafic réellement sur le wire.
-    fn dec_open(&self, class: ReqClass, written: bool) {
-        if !written {
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        let Some(c) = self.client.upgrade() else {
+            return;
+        };
+        if let Ok(mut m) = c.pending.try_lock() {
+            settle_waiter(&mut m, &c, self.id, self.waiter);
             return;
         }
-        let c = match class {
-            ReqClass::Light => self.open_light,
-            ReqClass::Heavy => self.open_heavy,
-        };
-        c.fetch_sub(1, Ordering::Relaxed);
-    }
-}
-impl Drop for PendingGuard<'_> {
-    fn drop(&mut self) {
-        if let Ok(mut m) = self.map.try_lock() {
-            let Some(e) = m.by_id.get_mut(&self.id) else {
-                return;
-            };
-            // L'entrée n'est retirée par le reader qu'à la réponse : si
-            // le guard la solde encore, l'appel a été abandonné en vol
-            // (timeout externe, JoinSet droppé, écriture ko) — compteur
-            // exposé aux sondes pour distinguer lenteur et RPC fantôme.
-            let Some(pos) = e.waiters.iter().position(|(w, _)| *w == self.waiter)
-            else {
-                return;
-            };
-            e.waiters.remove(pos);
-            self.abandoned.fetch_add(1, Ordering::Relaxed);
-            if !e.waiters.is_empty() {
-                return;
-            }
-            let e = m.by_id.remove(&self.id).unwrap();
-            if let Some(k) = e.dedup_key {
-                m.by_key.remove(&k);
-            }
-            self.dec_open(e.class, e.written);
-        }
+        let (id, waiter) = (self.id, self.waiter);
+        tokio::spawn(async move {
+            let mut m = c.pending.lock().await;
+            settle_waiter(&mut m, &c, id, waiter);
+        });
     }
 }
 
@@ -975,6 +1016,11 @@ pub struct Client {
     /// générique, et journalisée.
     dead_info: std::sync::Mutex<Option<String>>,
     guard: Option<Arc<SshGuard>>,
+    /// Weak self-ref pour le règlement différé du PendingGuard : son
+    /// Drop est synchrone — try_lock en échec → spawn d'une task qui
+    /// solde le waiter (sinon open_* resterait à +1 et affamerait les
+    /// heavy jusqu'à la mort du transport).
+    me: std::sync::OnceLock<std::sync::Weak<Client>>,
     /// Naissance du transport : age_ms dans les stats — un client tout
     /// juste reconnecté qui meurt immédiatement n'a pas la même lecture
     /// qu'un tunnel de plusieurs heures.
@@ -983,9 +1029,12 @@ pub struct Client {
     tx_lines: AtomicU64,
     rx_bytes: AtomicU64,
     tx_bytes: AtomicU64,
-    /// rx_bytes à la fin de la dernière ligne complète — base du calcul
-    /// `rx_partial` (octets de la ligne en cours de réception).
-    rx_line_mark: AtomicU64,
+    /// Octets reçus depuis le dernier '\n' NDJSON — taille de la
+    /// ligne en cours de vidange, maintenue par le reader à chaque
+    /// chunk (lines() la masquerait dans son buffer interne : une
+    /// ligne de 150 ko met des secondes à arriver et rx_partial
+    /// resterait à 0 pile pendant ce qu'on veut mesurer).
+    rx_partial: AtomicU64,
     /// Dernier octet JSON écrit — croisé avec silent_ms, distingue « je
     /// n'ai rien demandé » de « j'ai demandé et rien ne revient ».
     last_tx_ms: AtomicU64,
@@ -1073,10 +1122,12 @@ impl Client {
             tx_lines: AtomicU64::new(0),
             rx_bytes: AtomicU64::new(0),
             tx_bytes: AtomicU64::new(0),
-            rx_line_mark: AtomicU64::new(0),
+            rx_partial: AtomicU64::new(0),
             last_tx_ms: AtomicU64::new(now_ms()),
             abandoned_calls: AtomicU64::new(0),
+            me: std::sync::OnceLock::new(),
         });
+        let _ = client.me.set(Arc::downgrade(&client));
         log(Level::Info, format!("transport {} ouvert", client.desc));
         // Writer task : seul propriétaire du socket sortant — drain la
         // file `outq` en priorisant le trafic léger et en bornant les
@@ -1107,8 +1158,21 @@ impl Client {
                     let Some(item) = item else {
                         // File vide ou heavy retenu : réveil sur nouvel
                         // appel, mort du transport, ou fin d'espacement
-                        // (le prochain heavy devient éligible).
-                        let wait = c.heavy_gap_remaining();
+                        // (le prochain heavy devient éligible). Sans
+                        // heavy en file, pas de réveil périodique —
+                        // le notify du prochain call() suffit (idle =
+                        // zéro tick au lieu de ~10/s).
+                        let heavy_waiting = !c
+                            .outq
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .heavy
+                            .is_empty();
+                        let wait = if heavy_waiting {
+                            c.heavy_gap_remaining()
+                        } else {
+                            std::time::Duration::from_secs(3600)
+                        };
                         tokio::select! {
                             _ = c.outq_notify.notified() => {}
                             _ = dead_rx.wait_for(|d| *d) => return,
@@ -1174,61 +1238,60 @@ impl Client {
         {
             let c = Arc::clone(&client);
             let jh = tokio::spawn(async move {
-                let mut lines = BufReader::new(r).lines();
+                // fill_buf/consume plutôt que lines() : une ligne
+                // NDJSON de 150 ko arrive en centaines de chunks —
+                // lines() ne la voit qu'à sa fin et les octets en cours
+                // resteraient invisibles (rx_partial vaudrait 0 pile
+                // pendant la vidange qu'on veut mesurer).
+                let mut br = BufReader::new(r);
+                // Octets reçus depuis le dernier '\n' — la ligne en
+                // cours de vidange.
+                let mut pending: Vec<u8> = Vec::new();
                 // Ok(None) = EOF propre ; Err = erreur de lecture (RST…).
                 let mut read_err: Option<std::io::Error> = None;
                 loop {
-                    match lines.next_line().await {
-                        Ok(Some(line)) => {
-                            let n = line.len() as u64 + 1;
-                            RX_TOTAL.fetch_add(n, Ordering::Relaxed);
-                            c.rx_lines.fetch_add(1, Ordering::Relaxed);
-                            c.rx_bytes.fetch_add(n, Ordering::Relaxed);
-                            c.rx_line_mark.store(c.rx_bytes.load(Ordering::Relaxed), Ordering::Relaxed);
-                            c.last_rx_ms.store(now_ms(), Ordering::Relaxed);
-                            if line.trim().is_empty() {
-                                continue;
-                            }
-                            let v: Value = match serde_json::from_str(&line) {
-                                Ok(v) => v,
-                                Err(_) => continue,
-                            };
-                            if v.get("push").is_some() {
-                                let _ = c.pushes.send(v);
-                                continue;
-                            }
-                            if let Ok(resp) = serde_json::from_value::<Response>(v) {
-                                // Entrée dédupliquée possible : la
-                                // réponse est clonée pour chaque waiter.
-                                let entry = {
-                                    let mut m = c.pending.lock().await;
-                                    let e = m.by_id.remove(&resp.id);
-                                    if let Some(e) = &e {
-                                        if let Some(k) = &e.dedup_key {
-                                            m.by_key.remove(k);
-                                        }
-                                    }
-                                    e
-                                };
-                                if let Some(e) = entry {
-                                    c.dec_open(e.class, e.written);
-                                    let result = if resp.ok {
-                                        Ok(resp.result.unwrap_or(Value::Null))
-                                    } else {
-                                        Err(resp.error.unwrap_or_else(|| "?".into()))
-                                    };
-                                    for (_, tx) in e.waiters {
-                                        let _ = tx.send(result.clone());
-                                    }
-                                }
-                            }
-                        }
-                        Ok(None) => break,
+                    let chunk = match br.fill_buf().await {
+                        Ok(c) => c,
                         Err(e) => {
                             read_err = Some(e);
                             break;
                         }
+                    };
+                    if chunk.is_empty() {
+                        break;
                     }
+                    let n = chunk.len() as u64;
+                    RX_TOTAL.fetch_add(n, Ordering::Relaxed);
+                    c.rx_bytes.fetch_add(n, Ordering::Relaxed);
+                    // Tout octet reçu = lien vivant : pendant la vidange
+                    // d'une grosse ligne, silent_ms reste bas et c'est
+                    // rx_partial qui montre le fetch en cours.
+                    c.last_rx_ms.store(now_ms(), Ordering::Relaxed);
+                    pending.extend_from_slice(chunk);
+                    let used = chunk.len();
+                    br.consume(used);
+                    let mut start = 0usize;
+                    while let Some(rel) = pending[start..].iter().position(|&b| b == b'\n') {
+                        let end = start + rel;
+                        let mut lb = &pending[start..end];
+                        if lb.last() == Some(&b'\r') {
+                            lb = &lb[..lb.len() - 1];
+                        }
+                        let line = String::from_utf8_lossy(lb).into_owned();
+                        start = end + 1;
+                        c.rx_lines.fetch_add(1, Ordering::Relaxed);
+                        dispatch_rx_line(&c, &line).await;
+                    }
+                    if start > 0 {
+                        pending.drain(..start);
+                    }
+                    c.rx_partial.store(pending.len() as u64, Ordering::Relaxed);
+                }
+                if !pending.is_empty() {
+                    // Reliquat sans '\n' à l'EOF — lines() le rendait
+                    // comme dernière ligne ; on garde la parité.
+                    let line = String::from_utf8_lossy(&pending).into_owned();
+                    dispatch_rx_line(&c, &line).await;
                 }
                 // Fin de boucle = transport mort (EOF ou erreur de lecture).
                 // Post-mortem : cause réelle journalisée + exposée à
@@ -1300,10 +1363,7 @@ impl Client {
             dead: *self.dead.borrow(),
             silent_ms: self.silent_ms(),
             tx_age_ms: now_ms().saturating_sub(self.last_tx_ms.load(Ordering::Relaxed)),
-            rx_partial: self
-                .rx_bytes
-                .load(Ordering::Relaxed)
-                .saturating_sub(self.rx_line_mark.load(Ordering::Relaxed)),
+            rx_partial: self.rx_partial.load(Ordering::Relaxed),
         }
     }
 
@@ -1370,6 +1430,20 @@ impl Client {
             ReqClass::Heavy => &self.open_heavy,
         };
         c.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Garde d'un waiter en vol — weak self-ref pour le règlement
+    /// différé du Drop (jamais de blocage en Drop).
+    fn pending_guard(&self, id: u64, waiter: u64) -> PendingGuard {
+        PendingGuard {
+            client: self
+                .me
+                .get()
+                .cloned()
+                .unwrap_or_else(std::sync::Weak::new),
+            id,
+            waiter,
+        }
     }
 
     /// Le writer peut-il émettre la prochaine requête heavy ? Light en
@@ -1439,14 +1513,7 @@ impl Client {
                         // Follower : partage la requête du leader, ne
                         // passe ni par la file ni par un id propre.
                         drop(m);
-                        let _pending_guard = PendingGuard {
-                            map: &self.pending,
-                            abandoned: &self.abandoned_calls,
-                            open_light: &self.open_light,
-                            open_heavy: &self.open_heavy,
-                            id: lid,
-                            waiter,
-                        };
+                        let _pending_guard = self.pending_guard(lid, waiter);
                         return self.await_resp(&name, rx).await;
                     }
                 }
@@ -1469,14 +1536,7 @@ impl Client {
         // La future peut être droppée en vol (timeout externe, JoinSet) ou
         // timeout interne → sans guard l'entrée pending fuirait jusqu'au
         // drop du client.
-        let _pending_guard = PendingGuard {
-            map: &self.pending,
-            abandoned: &self.abandoned_calls,
-            open_light: &self.open_light,
-            open_heavy: &self.open_heavy,
-            id: wire_id,
-            waiter,
-        };
+        let _pending_guard = self.pending_guard(wire_id, waiter);
         // La requête part en file : le writer dédié l'émet dans l'ordre
         // light→heavy — `call` n'attend plus le mutex d'écriture.
         let mut s = serde_json::to_string(&Request { id: wire_id, req })?;

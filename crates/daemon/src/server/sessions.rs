@@ -17,7 +17,15 @@ impl Daemon {
                 let sessions = self.sessions.read().await;
                 let mut list: Vec<SessionMeta> =
                     sessions.values().map(|s| s.meta_snapshot()).collect();
-                list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                // Tie-break sur l'id : created_at a une résolution
+                // millis — deux sessions de la même ms s'ordonnaient
+                // selon l'itération du HashMap, et la pagination
+                // (offset) exige un tri déterministe.
+                list.sort_by(|a, b| {
+                    b.created_at
+                        .cmp(&a.created_at)
+                        .then_with(|| a.id.cmp(&b.id))
+                });
                 // « wait » dérivé à l'affichage : idle/asleep + waiter
                 // ac-wait vivant — la session se parque en attendant le
                 // ping du waiter, pas une action utilisateur.

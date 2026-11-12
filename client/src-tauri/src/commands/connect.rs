@@ -152,6 +152,10 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
     };
     let c = Client::connect(&t).await.map_err(|e| format!("{e:#}"))?;
     let status = c.call(ReqKind::DaemonStatus).await.map_err(|e| format!("{e:#}"))?;
+    // Nouveau client = démon possiblement upgradé depuis le dernier
+    // verdict : on oublie la capacité list_sessions_page mémorisée —
+    // un `false` hérité blacklisterait la pagination jusqu'au restart.
+    state.list_page.lock().await.remove(&key);
     // Liaison consignée : les appels suivants du cycle de vie doivent
     // pouvoir remonter à la conn qui les a portés — « transport ssh:…
     // ouvert » (client-core) ne porte pas la clé de conn du client.

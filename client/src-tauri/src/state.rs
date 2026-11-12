@@ -46,8 +46,8 @@ pub(crate) struct AppState {
 }
 
 /// Clé de connexion résolue comme `get_conn` (explicite, défaut, ou
-/// première connue) — exposée pour les appelants qui ont besoin de la
-/// clé en plus du client (cache de capacité list_page).
+/// première connue) — `list_sessions_all` s'en sert pour le cache de
+/// capacité `list_page`.
 pub(crate) async fn resolve_conn_key(
     state: &AppState,
     key: Option<&str>,

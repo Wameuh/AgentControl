@@ -54,8 +54,9 @@ async fn list_sessions_all(app: &AppHandle, k: &str, c: &Arc<Client>) -> Result<
                     .await
                     .insert(k.to_string(), true);
                 let Some(sessions) = v.get("sessions").and_then(Value::as_array) else {
-                    // Réponse hors forme page — rendue telle quelle.
-                    return Ok(v);
+                    // Réponse hors forme page : erreur franche plutôt
+                    // qu'un tableau vide silencieux dans le merge.
+                    anyhow::bail!("list_sessions_page: réponse hors forme");
                 };
                 let next = v.get("next_offset").and_then(Value::as_u64);
                 all.extend(sessions.iter().cloned());
