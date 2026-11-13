@@ -51,6 +51,12 @@ const CMD_TIMEOUT: Duration = Duration::from_secs(60);
 /// aucune PR n'est enregistrée : le watcher PR peut laguer quelques
 /// minutes derrière le `gh pr create` (cf. script — 240 s).
 pub(crate) const CLEAN_GRACE_S: f64 = 240.0;
+/// Âge d'une session worker `dead` au-delà duquel le ménage la rm et
+/// relâche ses items wip : les nudges→resume ont eu ~2 cooldowns pour
+/// la relancer — au-delà la reprise est déclarée impossible et l'item
+/// repart pending pour un worker neuf (item #250 — Backlog-W170 dead
+/// survivait indéfiniment).
+pub(crate) const DEAD_WORKER_S: f64 = 1800.0;
 
 /// Borne (caractères) de la description reprise dans le post « sorti
 /// du backlog » — le post est un résumé de présentation, pas un dump
@@ -1346,6 +1352,12 @@ impl Daemon {
         if let Err(e) = self.orch_pr_review_tick().await {
             warn!("orchestrateur: review PR: {e:#}");
         }
+        // GC des sessions `feature:pr-review` orphelines — sous les
+        // gardes enable/pause/lock comme la passe review, indépendante
+        // d'agentbacklog (périmètre réduit aux PRReview : leurs
+        // références vivent dans `pr_reviews`, pas dans la file —
+        // item #250). Le cycle refait la passe complète avec la file.
+        self.orch_gc_orphans(None, &[]).await;
         let bin = match self.orch_agentbacklog_bin().await {
             Some(b) => b,
             None => {
@@ -1470,6 +1482,13 @@ impl Daemon {
         if !self.orch.is_enabled() {
             return Ok(());
         }
+
+        // GC des sessions composant orphelines (item #250) — placée
+        // avant failover/dispatch : les sessions spawnées plus tard
+        // dans le cycle ne sont pas encore dans les métas et les
+        // références (items wip, reviews running, reviewers, PRs
+        // ouvertes) sont toutes fraîches. Best-effort, jamais fatal.
+        self.orch_gc_orphans(Some(&tasks), &prs).await;
 
         // Failover provider (server/orch_failover.rs) : sessions du
         // composant en backoff rate_limit sur un profil `*_agent` qui
@@ -1686,10 +1705,31 @@ impl Daemon {
                         }
                     }
                 }
+                // `dead_since` : âge de la mort persisté dans le
+                // ledger — survit au restart (la session repasse
+                // `interrupted` puis re-`dead` si la reprise échoue,
+                // mais l'horloge ne doit pas repartir à zéro tant que
+                // l'état n'est pas reparti de `dead`).
+                let prev_dead = st
+                    .assignments
+                    .get(sid)
+                    .and_then(|a| a.get("dead_since"))
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0);
+                let dead_since = if state == "dead" {
+                    if prev_dead > 0.0 {
+                        prev_dead
+                    } else {
+                        now
+                    }
+                } else {
+                    0.0
+                };
                 let assignment = json!({
                     "title": title, "state": state,
                     "tasks": my_items, "prs": my_prs,
                     "posted_wip": posted_wip,
+                    "dead_since": dead_since,
                 });
                 if just_posted {
                     // Le UserMessage est déjà commité au journal, mais `st`
@@ -1710,8 +1750,25 @@ impl Daemon {
                     st.clean_since.remove(sid);
                     continue;
                 }
-                // inactif : suppression seulement si TOUT est soldé.
-                if open_prs.is_empty() && my_open.is_empty() {
+                // inactif : suppression seulement si TOUT est soldé —
+                // ou si la session est `dead` depuis DEAD_WORKER_S :
+                // ses items wip sont relâchés (repartent pending pour
+                // un worker neuf) puis elle est rm'd comme une
+                // orpheline — le process est mort, plus rien à
+                // reprendre (item #250).
+                let dead_stale = dead_since > 0.0 && now - dead_since > DEAD_WORKER_S;
+                if open_prs.is_empty() && (my_open.is_empty() || dead_stale) {
+                    if dead_stale {
+                        for id in &my_open {
+                            info!(
+                                "orchestrateur: {sid} dead depuis {}s — release #{id}",
+                                (now - dead_since) as i64
+                            );
+                            let _ =
+                                run_out(&[bin, "--release", id.as_str(), "--agent-id", sid], ws)
+                                    .await;
+                        }
+                    }
                     // items done mais aucune PR enregistrée : le watcher peut
                     // laguer — grâce CLEAN_GRACE_S avant de conclure au rm.
                     let unresolved = !my_done.is_empty() && my_prs.is_empty();
@@ -1959,7 +2016,9 @@ impl Daemon {
                         slots.take();
                     } else {
                         warn!("orchestrateur: claim #{id} rc={rc} {e} → rm {sid}");
-                        let _ = self.h_delete_session(sid).await;
+                        if let Err(e2) = self.h_delete_session(sid.clone()).await {
+                            warn!("orchestrateur: rm {sid} (claim échoué): {e2:#}");
+                        }
                     }
                 }
             } else {

@@ -85,7 +85,7 @@ const REVIEW_RETRY_DELAYS: [u64; 3] = [120, 600, 1800];
 /// est programmée (`retry_at`), l'entrée ne compte ni dans le pool ni
 /// comme « en cours » pour les nouveaux triggers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EntryState {
+pub(crate) enum EntryState {
     Running,
     RetryWait,
     Done,
@@ -101,7 +101,7 @@ impl EntryState {
             EntryState::Failed => "failed",
         }
     }
-    fn of(v: &Value) -> Self {
+    pub(crate) fn of(v: &Value) -> Self {
         match v.get("state").and_then(Value::as_str) {
             Some("retry_wait") => EntryState::RetryWait,
             Some("done") => EntryState::Done,
@@ -407,15 +407,62 @@ impl Daemon {
         // (RPC concurrent sur la map vivante) n'est pas écrasé.
         let pr_snap = st.pr_reviews.clone();
         let req_snap = st.pr_review_requests.clone();
+        // Retries de suppression de sessions reviewer : un delete
+        // avorté (session encore `working`/`starting`, override
+        // catalogue en vol) laisse `rm_sid` sur l'entrée — retenté
+        // ici à chaque tick, quelle que soit la suite de la passe
+        // (mécanisme coupé compris). Session déjà partie → marqueur
+        // purgé. La GC composant (orch_gc) reste le filet si l'entrée
+        // a disparu entre-temps. Mutations portées par `st` : les
+        // write-backs de fin de passe les fusionnent et persistent.
+        let rm_pending: Vec<(String, String)> = st
+            .pr_reviews
+            .iter()
+            .filter_map(|(k, v)| {
+                v.get("rm_sid")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| (k.clone(), s.to_string()))
+            })
+            .collect();
+        // `swept_rm` : la boucle a peut-être purgé des `rm_sid` de `st`
+        // — la garde de sortie rapide ne doit pas se ré-évaluer sur un
+        // état déjà purgé, sinon la suppression ne serait jamais
+        // persistée (write-back sauté) et le marqueur revivrait au
+        // clone suivant (review #330).
+        let swept_rm = !rm_pending.is_empty();
+        for (key, sid) in rm_pending {
+            if self.get_session(&sid).await.is_err() {
+                if let Some(e) = st.pr_reviews.get_mut(&key).and_then(Value::as_object_mut) {
+                    e.remove("rm_sid");
+                }
+                continue;
+            }
+            match self.h_delete_session(sid.clone()).await {
+                Ok(_) => {
+                    info!("orchestrateur: rm reviewer {sid} (review {key}) retenté avec succès");
+                    if let Some(e) = st.pr_reviews.get_mut(&key).and_then(Value::as_object_mut) {
+                        e.remove("rm_sid");
+                    }
+                }
+                Err(e) => warn!("orchestrateur: rm reviewer {sid} (review {key}): {e:#}"),
+            }
+        }
         // Sortie rapide : mécanisme coupé et rien en vol → pas même le
         // scan des sessions à payer à chaque tick. Un retry en attente
         // compte comme du travail en vol — il doit être soldé, pas
-        // abandonné en l'état.
+        // abandonné en l'état. Idem un sweep `rm_sid` de ce tick : la
+        // purge doit passer par un write-back, cette sortie n'en fait
+        // pas — on retombe sur la branche de soldage ci-dessous.
         if !cfg.pr_review
-            && !st
-                .pr_reviews
-                .values()
-                .any(|v| matches!(EntryState::of(v), EntryState::Running | EntryState::RetryWait))
+            && !swept_rm
+            && !st.pr_reviews.values().any(|v| {
+                matches!(EntryState::of(v), EntryState::Running | EntryState::RetryWait)
+                    || v
+                        .get("rm_sid")
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.is_empty())
+            })
             && st.pr_review_requests.is_empty()
         {
             return Ok(());
@@ -451,7 +498,7 @@ impl Daemon {
                     continue;
                 };
                 if !sid.is_empty() {
-                    let _ = self.h_delete_session(sid.to_string()).await;
+                    self.pr_review_rm_session(&key, sid, &mut st).await;
                 }
                 remove_review_worktree(
                     Path::new(ws_of(&cfg, repo)),
@@ -653,7 +700,9 @@ impl Daemon {
                     self.orch_save(&st);
                     // Ressources libérées tout de suite — le retry de
                     // post n'a besoin ni de la session ni du worktree.
-                    let _ = self.h_delete_session(sid.to_string()).await;
+                    // Un delete avorté laisse `rm_sid` : retenté au
+                    // prochain tick par le sweeper (item #250).
+                    self.pr_review_rm_session(&key, sid, &mut st).await;
                     remove_review_worktree(Path::new(ws_of(&cfg, repo)), &wt);
                     self.pr_review_post_attempt(&key, repo, pr_n, sha, &mut st, &cfg, &wt)
                         .await;
@@ -755,6 +804,11 @@ impl Daemon {
             }
             // Relance : mêmes champs qu'un claim frais ; `attempts`
             // survit — il borne le total pour CE trigger.
+            let prev_sid = entry
+                .get("sid")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             if let Some(e) = st.pr_reviews.get_mut(&key).and_then(Value::as_object_mut) {
                 e.insert("state".into(), json!(EntryState::Running.as_str()));
                 e.insert("started".into(), json!(now));
@@ -763,6 +817,10 @@ impl Daemon {
                 e.remove("retry_at");
             }
             self.orch_save(&st);
+            // La tentative précédente a peut-être laissé sa session
+            // (delete avorté sans rm_sid) : la supprimer avant que la
+            // nouvelle ne la remplace — sinon orpheline (item #250).
+            self.pr_review_rm_session(&key, &prev_sid, &mut st).await;
             match self.pr_review_launch(repo, pr_n, &sha, &key, &cfg).await {
                 Ok(sid) => {
                     if let Some(e) = st.pr_reviews.get_mut(&key) {
@@ -902,6 +960,17 @@ impl Daemon {
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             st.pr_review_requests.remove(&key);
+            // Le claim écrase l'entrée existante (retry_wait soldée ou
+            // review terminée — `finish` ne purge pas `sid`) : la
+            // session de la tentative précédente, si elle a survécu,
+            // est supprimée avant la relance (item #250).
+            let prev_sid = st
+                .pr_reviews
+                .get(&key)
+                .and_then(|v| v.get("sid"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             st.pr_reviews.insert(
                 key.clone(),
                 json!({
@@ -916,6 +985,7 @@ impl Daemon {
                 }),
             );
             self.orch_save(&st);
+            self.pr_review_rm_session(&key, &prev_sid, &mut st).await;
             match self
                 .pr_review_launch(&repo, pr_n, &head_sha, &key, &cfg)
                 .await
@@ -1015,6 +1085,16 @@ impl Daemon {
             };
             // Claim-first : l'état running est persisté AVANT le spawn
             // — un crash entre les deux ne relance rien en double.
+            // L'entrée écrasée (review soldée — `finish` ne purge pas
+            // `sid`) peut encore référencer sa session : suppression
+            // avant relance, sinon orpheline (item #250).
+            let prev_sid = st
+                .pr_reviews
+                .get(&key)
+                .and_then(|v| v.get("sid"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             st.pr_reviews.insert(
                 key.clone(),
                 json!({
@@ -1027,6 +1107,7 @@ impl Daemon {
                 }),
             );
             self.orch_save(&st);
+            self.pr_review_rm_session(&key, &prev_sid, &mut st).await;
             match self
                 .pr_review_launch(&repo, pr_n, &head_sha, &key, &cfg)
                 .await
@@ -1079,6 +1160,34 @@ impl Daemon {
         Ok(())
     }
 
+    /// Suppression d'une session reviewer avec retry (item #250) : un
+    /// `h_delete_session` en échec (session encore `working`/`starting`,
+    /// override catalogue en vol) ne doit PLUS perdre le sid — l'entrée
+    /// `pr_reviews` garde `rm_sid` et le sweeper de
+    /// `orch_pr_review_tick` retente à chaque tick. Session déjà partie
+    /// → no-op silencieux (delete concurrent ou GC composant).
+    async fn pr_review_rm_session(self: &Arc<Self>, key: &str, sid: &str, st: &mut OrchPersist) {
+        if sid.is_empty() {
+            return;
+        }
+        if self.get_session(sid).await.is_err() {
+            return;
+        }
+        match self.h_delete_session(sid.to_string()).await {
+            Ok(_) => {
+                if let Some(e) = st.pr_reviews.get_mut(key).and_then(Value::as_object_mut) {
+                    e.remove("rm_sid");
+                }
+            }
+            Err(e) => {
+                warn!("orchestrateur: rm reviewer {sid} (review {key}): {e:#} — retry au prochain tick");
+                if let Some(e) = st.pr_reviews.get_mut(key).and_then(Value::as_object_mut) {
+                    e.insert("rm_sid".into(), json!(sid));
+                }
+            }
+        }
+    }
+
     /// Fin de passe d'une entrée : état terminal + session supprimée
     /// (si encore là) + worktree retiré — succès comme échec (une
     /// review terminée ne laisse ni zombie idle ni cwd supprimé).
@@ -1118,7 +1227,7 @@ impl Daemon {
             e.remove("reported_by");
         }
         if !sid.is_empty() {
-            let _ = self.h_delete_session(sid).await;
+            self.pr_review_rm_session(key, &sid, st).await;
         }
         remove_review_worktree(ws, wt);
         // Verdict/échec notifié au demandeur A2A d'une review interne
@@ -1328,6 +1437,24 @@ impl Daemon {
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
             if let Err(e) = d.h_delete_session(session.clone()).await {
                 warn!("orchestrateur: suppression reviewer {session} post-verdict: {e:#}");
+                // Delete avorté : `rm_sid` sur l'entrée encore Running
+                // (pending_body posé) → le sweeper retente au prochain
+                // tick ; la GC composant prend le relais si l'entrée a
+                // été soldée entre-temps (item #250).
+                let mut live = d.orch.state.lock().unwrap();
+                let key = live.pr_reviews.iter().find_map(|(k, v)| {
+                    (v.get("reported_by").and_then(Value::as_str)
+                        == Some(session.as_str()))
+                    .then(|| k.clone())
+                });
+                if let Some(k) = key {
+                    if let Some(e) = live.pr_reviews.get_mut(&k).and_then(Value::as_object_mut) {
+                        e.insert("rm_sid".into(), json!(session.clone()));
+                    }
+                    let snap = live.clone();
+                    drop(live);
+                    d.orch_save(&snap);
+                }
             }
         });
         Ok(json!({"received": true}))
@@ -1789,7 +1916,7 @@ impl Daemon {
 
 /// Retire un worktree de review — `worktree remove|prune` lancés
 /// depuis un clone lié (`ws`), puis suppression du répertoire restant.
-fn remove_review_worktree(ws: &Path, wt: &Path) {
+pub(super) fn remove_review_worktree(ws: &Path, wt: &Path) {
     let _ = std::process::Command::new("git")
         .arg("-C")
         .arg(ws)
@@ -1805,7 +1932,7 @@ fn remove_review_worktree(ws: &Path, wt: &Path) {
 }
 
 /// Racine des worktrees de review (hors checkout — `state_dir`).
-fn pr_reviews_root() -> PathBuf {
+pub(super) fn pr_reviews_root() -> PathBuf {
     state_dir().join("pr-reviews")
 }
 

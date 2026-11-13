@@ -34,6 +34,11 @@ pub(crate) mod orch_review;
 /// profil courant (worker/planner/reviewer ; PRReview-* dans
 /// orch_review.rs).
 pub(crate) mod orch_failover;
+/// GC des sessions composant orphelines (item #250) — filet de
+/// sécurité au tick : toute session `feature:pr-review` /
+/// `component:backlog-orchestrator` déréférencée de l'état vivant est
+/// supprimée (worktree PRReview inclus).
+pub(crate) mod orch_gc;
 /// Surface de config éditable à chaud de l'orchestrateur (schéma
 /// params, validation de patch, persistance config.toml) — partagée
 /// avec `crate::components` (params_schema/params de l'item internal).
