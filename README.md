@@ -149,14 +149,17 @@ A few concrete setups — every bullet is something you can do today:
   native PR reviews that watch your PRs, spawn read-only reviewers on the
   exact head and post the verdict as a comment. Worker and review
   concurrency, per-role agent profiles and repo routing are all tunable
-  live — and a rate-limited provider triggers an automatic failover to
-  another profile.
+  live — and sessions stalled on a rate-limited provider are
+  automatically migrated to another profile when the role's agent is
+  switched.
 - **Pilot several agent providers side by side**: Devin and Cursor ship
   as built-in profiles; any ACP-speaking agent can be declared as a
   custom `[agents.*]` profile (Claude via `claude-code-acp`, Codex via
   its adapter…). Each orchestrator role — worker, planner, reviewer,
-  PR reviewer — can run on a different profile, with its own model,
-  mode and reasoning-effort level, and an optional advisor model.
+  PR reviewer — can run on a different profile and mode; model and
+  reasoning effort are shared pipeline settings (PR reviewers get a
+  dedicated model), and sessions can carry an optional advisor model
+  declared per profile.
 - **Let agents wait without burning turns**: agents delegate long waits
   (CI checks, review verdicts, merges) to `ac-wait` — background waiters
   that wake the session the moment the condition fires, surviving even
