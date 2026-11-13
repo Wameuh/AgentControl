@@ -14,6 +14,12 @@
 # key: `<PR>: [feat|fix|perf] <note>`. Entries for already-released PRs
 # are inert — prune at release time.
 #
+# Notes are user-facing only: describe the change the user experiences,
+# never internal references — no `(#N)` suffix (the key prefix is for
+# attribution and is never displayed), no PR links, no backlog ids, no
+# internal component names. Visible feature names and technical terms
+# are fine.
+#
 182: Client updates now report progress and surface explicit errors instead of failing silently.
 183: Catalog components can declare configurable parameters, editable from the client.
 184: Component editing now exposes only the parameters declared by the catalog — internals stay read-only.
@@ -147,3 +153,4 @@ sha:71fcbdf871390152ae3de8661e3fc1da87e2e3f7: ACP-only session modes (plan/smart
 323: Session creation is now fully observable end to end — the client logs every lifecycle RPC (conn, params, outcome, duration), shows a live wait counter during creation, probes list_sessions after a failure so a session created daemon-side is recovered instead of reported as failed, and the daemon traces each ACP handshake step with timings and bounded timeouts so a silent agent is killed instead of hanging forever.
 326: The Files panel explorer column is now resizable — drag the handle between the file tree and the preview (bounded so neither side collapses), the width persists across sessions, double-click resets to the default split, and arrow keys work when the handle is focused.
 327: Components can now ship a rich plugin view — a "view" button opens a sandboxed iframe served by the daemon (/plugin/<name>/) with a bounded postMessage bridge: plugins can run their declared data queries, notify, navigate to sessions/components, resize and open https links, but never invoke free-form RPC, touch other components, sessions, files or shared storage.
+328: Release notes now list each change as a plain user-facing description — pull request numbers and other internal references are no longer displayed.
