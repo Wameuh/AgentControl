@@ -137,10 +137,45 @@ the dialog's *Paired devices* list.
 
 ## What you can do
 
+A few concrete setups — every bullet is something you can do today:
+
 - **Run many agents at once**, on one server or several. Every session
   is detached: kill the app, reboot your machine — the agents don't
   notice. If the server-side daemon itself crashes, working sessions are
   automatically resumed.
+- **Hand a queue to the orchestrator**: the built-in backlog orchestrator
+  drains the shared `agentbacklog` queue on its own — one worker session
+  per item, an optional plan → review → implementation pipeline, and
+  native PR reviews that watch your PRs, spawn read-only reviewers on the
+  exact head and post the verdict as a comment. Worker and review
+  concurrency, per-role agent profiles and repo routing are all tunable
+  live — and a rate-limited provider triggers an automatic failover to
+  another profile.
+- **Pilot several agent providers side by side**: Devin and Cursor ship
+  as built-in profiles; any ACP-speaking agent can be declared as a
+  custom `[agents.*]` profile (Claude via `claude-code-acp`, Codex via
+  its adapter…). Each orchestrator role — worker, planner, reviewer,
+  PR reviewer — can run on a different profile, with its own model,
+  mode and reasoning-effort level, and an optional advisor model.
+- **Let agents wait without burning turns**: agents delegate long waits
+  (CI checks, review verdicts, merges) to `ac-wait` — background waiters
+  that wake the session the moment the condition fires, surviving even
+  sleep. The sidebar shows an instrumented "wait-asleep" gem with the
+  waiter's age, name and timeout.
+- **Follow the PRs your agents open**: every PR is registered and synced
+  automatically — the sidebar badges each session with its PRs, the
+  Repos view shows review and CI state per PR (plus orchestrator review
+  status), and foreign or merely-cited PRs stay out of the way.
+- **Watch the live logs**: a dedicated panel tails the client and daemon
+  log streams in near real time — level filters, pause/resume,
+  auto-scroll, per-connection daemon selection.
+- **Attach files to a prompt**: a button, drag & drop or a clipboard
+  paste — files land in a per-session `.ac-uploads/` folder the daemon
+  purges when the session is deleted.
+- **Extend the app with plugins**: components can ship a rich plugin
+  view — a sandboxed iframe with a bounded postMessage bridge that can
+  run its declared queries and navigate, but never touch RPCs, sessions,
+  files or other components.
 - **Organize sessions into groups** — nested, drag & drop — filter them.
 - **Drive several servers side by side**: one window per connection, each
   tinted its own color with the host in the title bar. Spawn another
@@ -158,11 +193,12 @@ the dialog's *Paired devices* list.
 - **Answer permissions and questions wherever you are**: approval
   prompts wait for you across disconnects.
 - **Work the remote filesystem**: edit files in place (encoding-aware,
-  conflict detection on save), preview images, stream video, read
-  rendered markdown, download anything.
+  conflict detection, undo/redo), preview images, stream video, read
+  rendered markdown — with a live preview next to the editor for
+  markdown files — download anything. The explorer watches the remote
+  filesystem, so files written by an agent appear without a manual
+  refresh, and its width is resizable.
 - **Open a remote terminal** next to the chat when you need a shell.
-- **Track the pull requests** your agents opened — grouped by repo,
-  status at a glance, linked back to the session that owns each one.
 - **Search and replay everything**: the daemon journals every event, so
   history is never lost.
 - **Tune the feel**: dark & light themes, accent colors, animated
