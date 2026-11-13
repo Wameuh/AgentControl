@@ -14,6 +14,12 @@
 # key: `<PR>: [feat|fix|perf] <note>`. Entries for already-released PRs
 # are inert — prune at release time.
 #
+# Notes are user-facing only: describe the change the user experiences,
+# never internal references — no `(#N)` suffix (the key prefix is for
+# attribution and is never displayed), no PR links, no backlog ids, no
+# internal component names. Visible feature names and technical terms
+# are fine.
+#
 182: Client updates now report progress and surface explicit errors instead of failing silently.
 183: Catalog components can declare configurable parameters, editable from the client.
 184: Component editing now exposes only the parameters declared by the catalog — internals stay read-only.
