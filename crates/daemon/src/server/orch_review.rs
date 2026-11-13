@@ -425,6 +425,12 @@ impl Daemon {
                     .map(|s| (k.clone(), s.to_string()))
             })
             .collect();
+        // `swept_rm` : la boucle a peut-être purgé des `rm_sid` de `st`
+        // — la garde de sortie rapide ne doit pas se ré-évaluer sur un
+        // état déjà purgé, sinon la suppression ne serait jamais
+        // persistée (write-back sauté) et le marqueur revivrait au
+        // clone suivant (review #330).
+        let swept_rm = !rm_pending.is_empty();
         for (key, sid) in rm_pending {
             if self.get_session(&sid).await.is_err() {
                 if let Some(e) = st.pr_reviews.get_mut(&key).and_then(Value::as_object_mut) {
@@ -445,10 +451,11 @@ impl Daemon {
         // Sortie rapide : mécanisme coupé et rien en vol → pas même le
         // scan des sessions à payer à chaque tick. Un retry en attente
         // compte comme du travail en vol — il doit être soldé, pas
-        // abandonné en l'état. Idem un `rm_sid` en attente : cette
-        // sortie est SANS write-back, il faut donc passer par la
-        // branche de soldage ci-dessous pour persister la purge.
+        // abandonné en l'état. Idem un sweep `rm_sid` de ce tick : la
+        // purge doit passer par un write-back, cette sortie n'en fait
+        // pas — on retombe sur la branche de soldage ci-dessous.
         if !cfg.pr_review
+            && !swept_rm
             && !st.pr_reviews.values().any(|v| {
                 matches!(EntryState::of(v), EntryState::Running | EntryState::RetryWait)
                     || v
