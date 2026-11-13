@@ -1530,7 +1530,13 @@ impl Daemon {
                 // le worker survivant pinguerait une session morte à
                 // sa prochaine échéance (send en échec, loggé).
                 super::orch::acwait_cancel_session(&session);
-                let _ = std::fs::remove_dir_all(&s.dir);
+                // Un remove_dir_all en échec laisse meta.json sur
+                // disque → la session ressuscite « interrompue » au
+                // prochain boot du démon (orphelins post-restart,
+                // item #250). Loggé : la GC orchestrateur la reprend.
+                if let Err(e) = std::fs::remove_dir_all(&s.dir) {
+                    warn!("session {session}: remove_dir_all {}: {e}", s.dir.display());
+                }
                 // Pièces jointes du composer : <cwd>/.ac-uploads/<sid>/
                 // part avec la session (le client ne peut plus écrire —
                 // session morte). Borné au sous-dossier exact : les

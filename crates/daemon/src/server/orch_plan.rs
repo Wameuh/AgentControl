@@ -1752,10 +1752,29 @@ impl Daemon {
                 }
             }
         }
+        // `dead_since` : âge de la mort persisté dans le ledger — un
+        // worker `dead` au-delà de DEAD_WORKER_S est rm'd et ses items
+        // wip relâchés (reprise impossible déclarée — item #250).
+        let prev_dead = st
+            .assignments
+            .get(sid)
+            .and_then(|a| a.get("dead_since"))
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        let dead_since = if state == "dead" {
+            if prev_dead > 0.0 {
+                prev_dead
+            } else {
+                now
+            }
+        } else {
+            0.0
+        };
         let assignment = json!({
             "title": title, "state": state,
             "tasks": my_items, "prs": my_prs,
             "posted_wip": posted_wip,
+            "dead_since": dead_since,
         });
         if just_posted {
             self.orch.state_assign_now(sid, assignment.clone());
@@ -1765,7 +1784,27 @@ impl Daemon {
             st.clean_since.remove(sid);
             return true;
         }
-        if open_prs.is_empty() && my_open.is_empty() {
+        // Mort ancienne : rm + release des wip — mais seulement si
+        // TOUS les items ouverts sont des `wip` simples (un planner
+        // gardant un item plan_review/reviewing relève du pipeline,
+        // pas d'un release brutal).
+        let dead_stale = state == "dead"
+            && dead_since > 0.0
+            && now - dead_since > DEAD_WORKER_S
+            && my_open
+                .iter()
+                .all(|i| my_items.get(i.as_str()).map(String::as_str) == Some("wip"));
+        if open_prs.is_empty() && (my_open.is_empty() || dead_stale) {
+            if dead_stale {
+                for i in &my_open {
+                    info!(
+                        "orchestrateur: {sid} dead depuis {}s — release #{}",
+                        (now - dead_since) as i64,
+                        i.as_str()
+                    );
+                    let _ = run_out(&[bin, "--release", i.as_str(), "--agent-id", sid], ws).await;
+                }
+            }
             let unresolved = !my_done.is_empty() && my_prs.is_empty();
             let since = *st.clean_since.entry(sid.to_string()).or_insert(now);
             if unresolved && now - since < CLEAN_GRACE_S {
@@ -1843,7 +1882,9 @@ impl Daemon {
                         "orchestrateur: planner {sid} sans plan après {n} \
                          nudges → rm + release #{item_id}"
                     );
-                    let _ = self.h_delete_session(sid.to_string()).await;
+                    if let Err(e) = self.h_delete_session(sid.to_string()).await {
+                        warn!("orchestrateur: rm planner {sid} (item #{item_id}): {e:#}");
+                    }
                     let _ = run_out(
                         &[bin, "--release", &item_id.to_string(), "--agent-id", sid],
                         ws,
