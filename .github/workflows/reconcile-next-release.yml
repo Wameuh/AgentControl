@@ -26,6 +26,16 @@ name: reconcile-next-release
 #    propagé dans nr ; si ça conflict le job échoue (fail-closed —
 #    résolution manuelle requise, jamais de perte silencieuse).
 #
+# Subtilité : `delete_branch_on_merge=true` supprime la branche head de
+# la PR mergée — or la head de la release PR EST next_release, et le
+# bypass `RepositoryRole admin (always)` du ruleset rend sa règle
+# `deletion` inopérante quand un admin merge → next_release disparaît
+# à chaque release (#187, #299, #303) et ce job échouait sur
+# `git fetch origin next_release` ("couldn't find remote ref"). D'où
+# le mode 0 : branche absente → recréation sur main (équivalent du
+# reset « arbres identiques » — main contient déjà tout le contenu
+# nr publié dans le squash).
+#
 # Conséquences du reset : nr est réécrite après chaque release →
 # clones locaux à `git reset --hard origin/next_release` (pas pull)
 # et PR ouverte basée sur l'ancien nr à `git rebase --onto
@@ -69,7 +79,20 @@ jobs:
           RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
         run: |
           set -e
-          git fetch origin next_release main
+          git fetch origin main
+          # next_release a pu être supprimée par l'auto-delete on
+          # merge (cf. en-tête) : la recréer sur main — même résultat
+          # que le reset « arbres identiques », main contient déjà
+          # tout le contenu nr. Le push exige le PAT (même guard que
+          # les autres pushes de ce job).
+          if git ls-remote --exit-code origin refs/heads/next_release >/dev/null; then
+            git fetch origin next_release
+          else
+            echo "next_release absente sur origin → recréation depuis main"
+            [ -n "$RELEASE_PAT" ] || { echo "::error::secret RELEASE_PAT manquant"; exit 1; }
+            git push origin origin/main:refs/heads/next_release
+            git fetch origin next_release
+          fi
           # main déjà ancêtre de nr (rien mergé depuis le dernier
           # reconcile) → rien à faire — sortie avant le check PAT :
           # secret absent ≠ échec quand aucun push n'est nécessaire.
