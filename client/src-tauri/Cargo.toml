@@ -1,6 +1,6 @@
 [package]
 name = "agentcontrol"
-version = "0.10.1"
+version = "0.10.2"
 edition = "2021"
 build = "build.rs"
 
@@ -39,6 +39,7 @@ ureq = { version = "2.12", default-features = false, features = ["json", "tls"] 
 # Secrets au repos via Android Keystore (clé app, clés appairées,
 # connections.json) — desktop inchangé (pas de dépendance).
 tauri-plugin-ac-keystore = { path = "../../plugins/ac-keystore" }
+tauri-plugin-ac-device = { path = "../../plugins/ac-device" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_UI_Shell"] }

@@ -120,6 +120,9 @@ export class ComponentsPanel {
   private conns!: ConnectionManager;
   /** Fermer les autres overlays de #chat avant l'ouverture (injecté). */
   onOpening: () => void = () => {};
+  /** Ouvrir la vue plugin d'un composant (injecté — feature
+   *  plugin-view, évite l'import circulaire). */
+  openView: (name: string, conn: string) => void = () => {};
   private mode: Mode = "list";
   private items: ComponentItem[] = [];
   private catalog: CatalogEntry[] = [];
@@ -213,7 +216,7 @@ export class ComponentsPanel {
     }
     // L'inert ne tombe que si les autres overlays #chat sont fermés —
     // sinon #input serait ré-exposé derrière eux (frappes invisibles).
-    if ($("conn-view").hidden && $("settings-view").hidden && $("map-view").hidden)
+    if ($("conn-view").hidden && $("settings-view").hidden && $("map-view").hidden && $("logs-view").hidden && $("plugin-view").hidden)
       this.setChatInert(false);
     nav.close("components");
     if (!was) return;
@@ -370,6 +373,11 @@ export class ComponentsPanel {
     act("refresh", t("comp_restart"), () => void this.lifecycle(it.name, "restart"),
       managed && alive);
     act("terminal", t("comp_logs"), () => this.openLogs(it.name), managed);
+    // Vue plugin (option B) : iframe sandboxée servie par le démon —
+    // flag `view` calculé côté démon (spec.view_dir ou convention
+    // components/<name>/web/ existante).
+    act("panel", t("comp_view"),
+      () => this.openView(it.name, this.connKey()), it.view === true);
     // Params déclarés = la seule surface de config utilisateur
     // (catalogue) — « Configurer » ouvre le formulaire schema-driven,
     // surtout utile quand config_required bloque le démarrage.
@@ -423,7 +431,7 @@ export class ComponentsPanel {
     return [
       it.name, it.kind, st.state, st.pid, st.restarts, st.health,
       st.last_exit, st.version, st.version_min, st.version_outdated,
-      it.autostart, it.source, it.description,
+      it.autostart, it.source, it.description, it.view,
       st.config_required?.join(","),
     ].join("|");
   }

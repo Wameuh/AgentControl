@@ -193,7 +193,17 @@ pub fn log_at(level: Level, file: &str, line_no: u32, msg: impl std::fmt::Displa
     // (sortie ssh, erreur remontée) ne doit ni injecter de fausse entrée
     // ni perdre ses continuations au filtrage par niveau de l'UI.
     let msg = msg.to_string().replace(['\r', '\n'], "␤");
-    let line = format!("[{}] [{}]{} {}", proto::now_iso(), level.as_str(), src, msg);
+    // pid sur chaque ligne : plusieurs instances du client partagent le
+    // même client.log (update/relaunch, spawn_instance) — sans lui, une
+    // entrée transport ne dit pas QUEL process l'a écrite.
+    let pid = std::process::id();
+    let line = format!(
+        "[{}] [{}] [pid {pid}]{} {}",
+        proto::now_iso(),
+        level.as_str(),
+        src,
+        msg
+    );
     eprintln!("{line}");
     if let Ok(mut w) = logfile().lock() {
         w.write_line(&line);
@@ -299,6 +309,77 @@ pub fn log_tail(n: usize) -> String {
     }
     lines.reverse();
     lines.join("\n")
+}
+
+/// Lecture incrémentale de client.log pour le suiveur live du panneau
+/// logs (commande Tauri `log_read`) : `{offset, data, size}`.
+/// `offset` = position octet dans client.log ; absent ou > taille
+/// (rotation 1 MiB → fichier recréé) → dernière page bornée `limit`
+/// (défaut 64 Kio, cap 256 Kio). Lignes complètes seulement : une
+/// ligne partielle en cours d'écriture est retenue pour le poll
+/// suivant. La rotation peut théoriquement rendre un offset périmé
+/// valide par coïncidence de taille — fenêtre d'un poll, cosmétique.
+pub fn log_read(offset: Option<u64>, limit: Option<u64>) -> serde_json::Value {
+    use std::io::{Read, Seek, SeekFrom};
+    let limit = limit.unwrap_or(64 * 1024).clamp(4 * 1024, 256 * 1024);
+    let path = log_path().join("client.log");
+    let empty = || serde_json::json!({ "offset": 0, "data": "", "size": 0 });
+    let Ok(mut f) = std::fs::File::open(&path) else {
+        return empty();
+    };
+    let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+    // Incrémental réel seulement si l'offset tient dans le fichier —
+    // absent ou > taille → dernière page (drop de la 1re ligne
+    // partielle de la fenêtre).
+    let incremental = offset.is_some_and(|o| o <= size);
+    let off = offset.unwrap_or(0);
+    let (start, end) = if incremental {
+        (off, size.min(off.saturating_add(limit)))
+    } else {
+        (size.saturating_sub(limit), size)
+    };
+    if start >= end {
+        return serde_json::json!({
+            "offset": if incremental { off } else { size },
+            "data": "",
+            "size": size,
+        });
+    }
+    let mut buf = vec![0u8; (end - start) as usize];
+    let ok = f.seek(SeekFrom::Start(start)).is_ok() && f.read_exact(&mut buf).is_ok();
+    if !ok {
+        return serde_json::json!({ "offset": off, "data": "", "size": size });
+    }
+    // Lignes complètes uniquement (cf. daemon::logging::tail_slice) ;
+    // drop_head seulement si la fenêtre démarre au milieu du fichier —
+    // start == 0 est une vraie frontière de ligne.
+    let mut lo = 0usize;
+    if !incremental && start > 0 {
+        match buf.iter().position(|&b| b == b'\n') {
+            Some(i) => lo = i + 1,
+            None => {
+                return serde_json::json!({
+                    "offset": start + buf.len() as u64,
+                    "data": "",
+                    "size": size,
+                })
+            }
+        }
+    }
+    let (data, new_off) = match buf.iter().rposition(|&b| b == b'\n') {
+        Some(i) if i >= lo => (
+            String::from_utf8_lossy(&buf[lo..=i]).into_owned(),
+            start + i as u64 + 1,
+        ),
+        // Seul '\n' dans la tête purgée (ligne > limit) → on saute la
+        // fenêtre ; rien du tout en incrémental → attente de la fin de
+        // ligne (offset inchangé). Cf. daemon::logging::cut_lines.
+        _ => (
+            String::new(),
+            start + if lo > 0 { buf.len() as u64 } else { 0 },
+        ),
+    };
+    serde_json::json!({ "offset": new_off, "data": data, "size": size })
 }
 
 // ---------------------------------------------------------------------------
@@ -648,25 +729,266 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
 // Client
 // ---------------------------------------------------------------------------
 
-/// Retire l'entrée `pending` d'un `call` à la fin ou à l'annulation du
-/// future (timeout externe qui le droppe) — sinon elle fuirait jusqu'au
-/// drop du client. `try_lock` : best-effort, jamais de blocage en Drop.
-struct PendingGuard<'a> {
-    map: &'a Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
-    id: u64,
+/// Classe d'ordonnancement d'une requête. Une réponse JSON est UNE
+/// ligne NDJSON indivisible : une réponse lourde (list_sessions,
+/// blobs, logs — des dizaines de Ko) monopolisise le socket pendant
+/// son écriture et fait expirer les petits RPC derrière elle (sonde
+/// `daemon_status` incluse — blackout → down → reconnect → rafale de
+/// fetch qui re-sature le lien). Les `Heavy` ne sont écrites que quand
+/// aucune requête `Light` n'est en vol, bornées en nombre et espacées ;
+/// les `Light` passent toujours en premier (FIFO).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReqClass {
+    Light,
+    Heavy,
 }
-impl Drop for PendingGuard<'_> {
-    fn drop(&mut self) {
-        if let Ok(mut m) = self.map.try_lock() {
-            m.remove(&self.id);
+
+/// Requêtes à réponse potentiellement grosse — see ReqClass::Heavy.
+fn req_heavy(name: &str) -> bool {
+    matches!(
+        name,
+        "list_sessions"
+            | "list_sessions_page"
+            | "pr_list"
+            | "pr_sync"
+            | "events"
+            | "search_events"
+            | "get_blob"
+            | "read_file"
+            | "download_path"
+            | "component_logs"
+            | "daemon_log_tail"
+            | "backlog_metrics"
+    )
+}
+
+/// Requêtes en lecture seule dont les appels identiques en vol sont
+/// fusionnés : N callers simultanés sur la même méthode+params
+/// partagent UNE requête wire et sa réponse (4× list_sessions
+/// parallèles = 1 réponse sérialisée, pas 4). Les méthodes à effet de
+/// bord (send, new_session, subscribe…) en sont exclues : deux appels
+/// identiques ne doivent jamais fusionner en une seule mutation.
+fn req_dedupable(name: &str) -> bool {
+    matches!(
+        name,
+        "daemon_status"
+            | "list_sessions"
+            | "list_sessions_page"
+            | "list_agents"
+            | "model_costs"
+            | "model_catalog"
+            | "session_info"
+            | "events"
+            | "search_events"
+            | "first_post"
+            | "list_pinned"
+            | "queue_list"
+            | "list_dir"
+            | "find_files"
+            | "list_native_sessions"
+            | "get_blob"
+            | "read_file"
+            | "download_path"
+            | "daemon_log_tail"
+            | "list_components"
+            | "component_info"
+            | "component_logs"
+            | "component_catalog"
+            | "component_query"
+            | "forge_list"
+            | "pr_list"
+            | "pr_sync"
+            | "backlog_metrics"
+            | "subscribe"
+    )
+}
+
+/// Bornes de la file Heavy : au plus HEAVY_MAX_INFLIGHT requêtes
+/// lourdes écrites sans réponse, et au moins HEAVY_MIN_GAP_MS entre
+/// deux écritures lourdes — un reconnect qui rejoue list_sessions +
+/// pr_list + subscribe ne doit pas aligner leurs grosses réponses.
+const HEAVY_MAX_INFLIGHT: u64 = 2;
+const HEAVY_MIN_GAP_MS: u64 = 250;
+
+/// Requête en file d'écriture — sérialisée une fois, écrite par la
+/// tâche writer dédiée (miroir de l'outbox du démon : la lecture et
+/// l'écriture ne se bloquent plus mutuellement sur un flush lent).
+struct Queued {
+    /// id wire de la requête — l'entrée pending peut avoir disparu
+    /// (tous les callers abandonnés pendant l'attente en file) : le
+    /// writer la saute alors sans rien émettre.
+    id: u64,
+    line: String,
+    class: ReqClass,
+}
+
+/// File bornée des requêtes à écrire, deux classes : light drainée en
+/// premier, heavy seulement quand le seuil le permet.
+#[derive(Default)]
+struct OutQueue {
+    light: std::collections::VecDeque<Queued>,
+    heavy: std::collections::VecDeque<Queued>,
+}
+
+/// Une requête écrite sur le wire, partagée par N callers (dedup) —
+/// `waiters` = (waiter_id, sender) de chaque `call` en vol.
+struct InflightEntry {
+    /// Clé dedup (req sérialisé sans id) — retire l'entrée `by_key` à
+    /// la solde. None = appel non dédupliquable.
+    dedup_key: Option<String>,
+    class: ReqClass,
+    /// Posée par le writer à l'écriture : les compteurs d'attente ne
+    /// couvrent que le trafic réellement sur le wire (une requête
+    /// encore en file ne consomme pas encore la socket).
+    written: bool,
+    waiters: Vec<(u64, oneshot::Sender<Result<Value, String>>)>,
+}
+
+/// Table des requêtes en vol : `by_id` = routage des réponses,
+/// `by_key` = dedup (méthode+params identiques → même id wire).
+#[derive(Default)]
+struct Inflight {
+    by_id: HashMap<u64, InflightEntry>,
+    by_key: HashMap<String, u64>,
+}
+
+/// Solde un waiter abandonné sous le lock pending — logique commune au
+/// règlement synchrone du guard (try_lock) et à sa task de rattrapage.
+/// L'entrée n'est retirée par le reader qu'à la réponse : si le guard
+/// la solde encore, l'appel a été abandonné en vol (timeout externe,
+/// JoinSet droppé, écriture ko) — compteur exposé aux sondes pour
+/// distinguer lenteur et RPC fantôme.
+fn settle_waiter(m: &mut Inflight, c: &Client, id: u64, waiter: u64) {
+    let Some(e) = m.by_id.get_mut(&id) else {
+        return;
+    };
+    let Some(pos) = e.waiters.iter().position(|(w, _)| *w == waiter) else {
+        return;
+    };
+    e.waiters.remove(pos);
+    c.abandoned_calls.fetch_add(1, Ordering::Relaxed);
+    if !e.waiters.is_empty() {
+        return;
+    }
+    let e = m.by_id.remove(&id).unwrap();
+    if let Some(k) = e.dedup_key {
+        m.by_key.remove(&k);
+    }
+    c.dec_open(e.class, e.written);
+}
+
+/// Dispatch d'une ligne NDJSON reçue : push broadcast ou réponse RPC.
+/// Une entrée dédupliquée est possible : la réponse est clonée pour
+/// chaque waiter.
+async fn dispatch_rx_line(c: &Client, line: &str) {
+    if line.trim().is_empty() {
+        return;
+    }
+    let v: Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    if v.get("push").is_some() {
+        let _ = c.pushes.send(v);
+        return;
+    }
+    if let Ok(resp) = serde_json::from_value::<Response>(v) {
+        let entry = {
+            let mut m = c.pending.lock().await;
+            let e = m.by_id.remove(&resp.id);
+            if let Some(e) = &e {
+                if let Some(k) = &e.dedup_key {
+                    m.by_key.remove(k);
+                }
+            }
+            e
+        };
+        if let Some(e) = entry {
+            c.dec_open(e.class, e.written);
+            let result = if resp.ok {
+                Ok(resp.result.unwrap_or(Value::Null))
+            } else {
+                Err(resp.error.unwrap_or_else(|| "?".into()))
+            };
+            for (_, tx) in e.waiters {
+                let _ = tx.send(result.clone());
+            }
         }
     }
 }
 
+/// Garde d'un `call` en vol : retire le waiter à la fin ou à
+/// l'annulation du future (timeout externe qui le droppe) — sinon
+/// l'entrée pending fuirait jusqu'au drop du client. `try_lock` en
+/// Drop : best-effort synchrone ; en cas de contention, une task de
+/// rattrapage solde à l'identique — sans elle, un RPC écrit dont la
+/// réponse ne vient jamais laisserait open_* à +1 et affamerait les
+/// heavy jusqu'à la mort du transport.
+struct PendingGuard {
+    client: std::sync::Weak<Client>,
+    id: u64,
+    waiter: u64,
+}
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        let Some(c) = self.client.upgrade() else {
+            return;
+        };
+        if let Ok(mut m) = c.pending.try_lock() {
+            settle_waiter(&mut m, &c, self.id, self.waiter);
+            return;
+        }
+        let (id, waiter) = (self.id, self.waiter);
+        tokio::spawn(async move {
+            let mut m = c.pending.lock().await;
+            settle_waiter(&mut m, &c, id, waiter);
+        });
+    }
+}
+
+/// Instantané transport d'un client — champs `_ac_*` des sondes et
+/// payload `conn-dead` : de quoi distinguer socket morte, socket vivante
+/// sans réponse et RPC en vol abandonnés sans deviner depuis les seuls
+/// timeouts.
+#[derive(Debug, Clone, Copy)]
+pub struct ClientStats {
+    pub age_ms: u64,
+    pub rx_lines: u64,
+    pub tx_lines: u64,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    pub pending: u64,
+    pub abandoned: u64,
+    pub dead: bool,
+    pub silent_ms: u64,
+    /// Âge de la dernière écriture RPC — avec silent_ms, dit si le client
+    /// attend une réponse à une requête partie ou s'il n'a rien demandé.
+    pub tx_age_ms: u64,
+    /// Octets reçus depuis la dernière ligne NDJSON complète — taille
+    /// approximative de la ligne en cours de réception : une sonde qui
+    /// timeout pendant qu'un gros fetch se vide montre rx_partial en
+    /// hausse (réponse indivisible en vol) plutôt qu'un trou de lien.
+    pub rx_partial: u64,
+}
+
 pub struct Client {
-    w: Mutex<BoxedWriter>,
-    pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
+    /// Requêtes en vol (une entrée = une requête wire, N callers
+    /// dédupliqués la partagent) — see Inflight.
+    pending: Mutex<Inflight>,
+    /// File d'écriture : light d'abord, heavy bornée/espacée — see
+    /// ReqClass. Le writer dédié (spawné dans connect) est le seul
+    /// propriétaire du socket sortant.
+    outq: std::sync::Mutex<OutQueue>,
+    outq_notify: tokio::sync::Notify,
+    /// Requêtes écrites sans réponse par classe — seuils du writer
+    /// (pas de heavy pendant qu'un light est en vol, cap heavy).
+    open_light: AtomicU64,
+    open_heavy: AtomicU64,
+    /// Instant de la dernière écriture heavy — espacement.
+    last_heavy_tx_ms: AtomicU64,
     next_id: AtomicU64,
+    /// Séquence des waiters dedup — distincte des ids wire.
+    next_waiter: AtomicU64,
     /// Tous les push (subscribe) du démon
     pub pushes: broadcast::Sender<Value>,
     /// Signalé quand la boucle de lecture meurt (EOF/erreur transport) :
@@ -694,6 +1016,31 @@ pub struct Client {
     /// générique, et journalisée.
     dead_info: std::sync::Mutex<Option<String>>,
     guard: Option<Arc<SshGuard>>,
+    /// Weak self-ref pour le règlement différé du PendingGuard : son
+    /// Drop est synchrone — try_lock en échec → spawn d'une task qui
+    /// solde le waiter (sinon open_* resterait à +1 et affamerait les
+    /// heavy jusqu'à la mort du transport).
+    me: std::sync::OnceLock<std::sync::Weak<Client>>,
+    /// Naissance du transport : age_ms dans les stats — un client tout
+    /// juste reconnecté qui meurt immédiatement n'a pas la même lecture
+    /// qu'un tunnel de plusieurs heures.
+    created_ms: AtomicU64,
+    rx_lines: AtomicU64,
+    tx_lines: AtomicU64,
+    rx_bytes: AtomicU64,
+    tx_bytes: AtomicU64,
+    /// Octets reçus depuis le dernier '\n' NDJSON — taille de la
+    /// ligne en cours de vidange, maintenue par le reader à chaque
+    /// chunk (lines() la masquerait dans son buffer interne : une
+    /// ligne de 150 ko met des secondes à arriver et rx_partial
+    /// resterait à 0 pile pendant ce qu'on veut mesurer).
+    rx_partial: AtomicU64,
+    /// Dernier octet JSON écrit — croisé avec silent_ms, distingue « je
+    /// n'ai rien demandé » de « j'ai demandé et rien ne revient ».
+    last_tx_ms: AtomicU64,
+    /// Appels RPC soldés par abandon (timeout/drop/write ko) — compteur
+    /// monotone exposé aux sondes : un pic à la mort = RPC fantômes.
+    abandoned_calls: AtomicU64,
 }
 
 fn now_ms() -> u64 {
@@ -713,6 +1060,21 @@ fn transport_desc(t: &Transport) -> String {
         Transport::SshNative {
             host, port, user, ..
         } => format!("ssh-native:{user}@{host}:{port}"),
+    }
+}
+
+/// Classe une erreur io de lecture : distingue EOF/RST/timeout/reset pour
+/// le post-mortem — `erreur lecture` générique ne disait pas si le pair
+/// avait fermé proprement ou si le socket avait été aboyé.
+fn io_death_kind(e: &std::io::Error) -> &'static str {
+    match e.kind() {
+        std::io::ErrorKind::ConnectionReset => "reset socket (RST)",
+        std::io::ErrorKind::ConnectionAborted => "connexion avortée",
+        std::io::ErrorKind::BrokenPipe => "pipe brisé",
+        std::io::ErrorKind::UnexpectedEof => "EOF inattendu",
+        std::io::ErrorKind::TimedOut => "timeout io",
+        std::io::ErrorKind::NotConnected => "socket non connecté",
+        _ => "erreur socket",
     }
 }
 
@@ -738,9 +1100,14 @@ impl Client {
         };
         let (dead_tx, dead) = watch::channel(false);
         let client = Arc::new(Self {
-            w: Mutex::new(w),
-            pending: Mutex::new(HashMap::new()),
+            pending: Mutex::new(Inflight::default()),
+            outq: std::sync::Mutex::new(OutQueue::default()),
+            outq_notify: tokio::sync::Notify::new(),
+            open_light: AtomicU64::new(0),
+            open_heavy: AtomicU64::new(0),
+            last_heavy_tx_ms: AtomicU64::new(0),
             next_id: AtomicU64::new(1),
+            next_waiter: AtomicU64::new(1),
             pushes: broadcast::channel(512).0,
             dead,
             dead_tx,
@@ -750,46 +1117,181 @@ impl Client {
             reader_abort: std::sync::OnceLock::new(),
             dead_info: std::sync::Mutex::new(None),
             guard,
+            created_ms: AtomicU64::new(now_ms()),
+            rx_lines: AtomicU64::new(0),
+            tx_lines: AtomicU64::new(0),
+            rx_bytes: AtomicU64::new(0),
+            tx_bytes: AtomicU64::new(0),
+            rx_partial: AtomicU64::new(0),
+            last_tx_ms: AtomicU64::new(now_ms()),
+            abandoned_calls: AtomicU64::new(0),
+            me: std::sync::OnceLock::new(),
         });
+        let _ = client.me.set(Arc::downgrade(&client));
+        log(Level::Info, format!("transport {} ouvert", client.desc));
+        // Writer task : seul propriétaire du socket sortant — drain la
+        // file `outq` en priorisant le trafic léger et en bornant les
+        // requêtes lourdes (ReqClass). Sans elle, `call` écrivait sous
+        // un mutex partagé : une réponse de 150 ko en cours d'écriture
+        // côté pair faisait expirer les petits RPC (sonde) et une
+        // rafale post-reconnect ré-émettait tout en parallèle.
+        {
+            let c = Arc::clone(&client);
+            let mut w = w;
+            let mut dead_rx = client.dead.clone();
+            tokio::spawn(async move {
+                loop {
+                    // Light d'abord ; heavy seulement sous les seuils
+                    // (aucun light en vol, cap, espacement). Le
+                    // comptage `written` garantit que les requêtes
+                    // encore en file ne consomment pas la socket.
+                    let item = {
+                        let mut q = c.outq.lock().unwrap_or_else(|e| e.into_inner());
+                        q.light.pop_front().or_else(|| {
+                            if c.heavy_write_ok() {
+                                q.heavy.pop_front()
+                            } else {
+                                None
+                            }
+                        })
+                    };
+                    let Some(item) = item else {
+                        // File vide ou heavy retenu : réveil sur nouvel
+                        // appel, mort du transport, ou fin d'espacement
+                        // (le prochain heavy devient éligible). Sans
+                        // heavy en file, pas de réveil périodique —
+                        // le notify du prochain call() suffit (idle =
+                        // zéro tick au lieu de ~10/s).
+                        let heavy_waiting = !c
+                            .outq
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .heavy
+                            .is_empty();
+                        let wait = if heavy_waiting {
+                            c.heavy_gap_remaining()
+                        } else {
+                            std::time::Duration::from_secs(3600)
+                        };
+                        tokio::select! {
+                            _ = c.outq_notify.notified() => {}
+                            _ = dead_rx.wait_for(|d| *d) => return,
+                            _ = tokio::time::sleep(wait) => {}
+                        }
+                        if *dead_rx.borrow() {
+                            return;
+                        }
+                        continue;
+                    };
+                    // L'entrée a pu être soldée pendant l'attente en
+                    // file (tous les callers abandonnés/timeout) : ne
+                    // rien émettre pour un appel que plus personne
+                    // n'attend — la requête ne sert à rien et sa
+                    // réponse ne trouverait pas de pending.
+                    // `written` ET l'incrément du compteur dans le même
+                    // lock : un drain concurrent ne peut pas voir
+                    // written=true avant l'incrément (sinon dec_open
+                    // décrémenterait un compteur pas encore posé →
+                    // wrap u64::MAX → heavy affamé à jamais).
+                    let alive = {
+                        let mut m = c.pending.lock().await;
+                        match m.by_id.get_mut(&item.id) {
+                            Some(e) => {
+                                e.written = true;
+                                match item.class {
+                                    ReqClass::Light => {
+                                        c.open_light.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    ReqClass::Heavy => {
+                                        c.open_heavy.fetch_add(1, Ordering::Relaxed);
+                                        c.last_heavy_tx_ms
+                                            .store(now_ms(), Ordering::Relaxed);
+                                    }
+                                }
+                                true
+                            }
+                            None => false,
+                        }
+                    };
+                    if !alive {
+                        continue;
+                    }
+                    let n = item.line.len() as u64;
+                    TX_TOTAL.fetch_add(n, Ordering::Relaxed);
+                    c.tx_lines.fetch_add(1, Ordering::Relaxed);
+                    c.tx_bytes.fetch_add(n, Ordering::Relaxed);
+                    c.last_tx_ms.store(now_ms(), Ordering::Relaxed);
+                    if w.write_all(item.line.as_bytes()).await.is_err()
+                        || w.flush().await.is_err()
+                    {
+                        // Écriture impossible = transport mourant : le
+                        // signal dead précipite le drain des pendings
+                        // (le reader constatera l'EOF/RST symétrique).
+                        c.set_death_reason("écriture impossible (transport mort)".into());
+                        let _ = c.dead_tx.send(true);
+                        return;
+                    }
+                }
+            });
+        }
         // Reader task : dispatch responses / pushes
         {
             let c = Arc::clone(&client);
             let jh = tokio::spawn(async move {
-                let mut lines = BufReader::new(r).lines();
+                // fill_buf/consume plutôt que lines() : une ligne
+                // NDJSON de 150 ko arrive en centaines de chunks —
+                // lines() ne la voit qu'à sa fin et les octets en cours
+                // resteraient invisibles (rx_partial vaudrait 0 pile
+                // pendant la vidange qu'on veut mesurer).
+                let mut br = BufReader::new(r);
+                // Octets reçus depuis le dernier '\n' — la ligne en
+                // cours de vidange.
+                let mut pending: Vec<u8> = Vec::new();
                 // Ok(None) = EOF propre ; Err = erreur de lecture (RST…).
                 let mut read_err: Option<std::io::Error> = None;
                 loop {
-                    match lines.next_line().await {
-                        Ok(Some(line)) => {
-                            RX_TOTAL.fetch_add(line.len() as u64 + 1, Ordering::Relaxed);
-                            c.last_rx_ms.store(now_ms(), Ordering::Relaxed);
-                            if line.trim().is_empty() {
-                                continue;
-                            }
-                            let v: Value = match serde_json::from_str(&line) {
-                                Ok(v) => v,
-                                Err(_) => continue,
-                            };
-                            if v.get("push").is_some() {
-                                let _ = c.pushes.send(v);
-                                continue;
-                            }
-                            if let Ok(resp) = serde_json::from_value::<Response>(v) {
-                                if let Some(tx) = c.pending.lock().await.remove(&resp.id) {
-                                    let _ = tx.send(if resp.ok {
-                                        Ok(resp.result.unwrap_or(Value::Null))
-                                    } else {
-                                        Err(resp.error.unwrap_or_else(|| "?".into()))
-                                    });
-                                }
-                            }
-                        }
-                        Ok(None) => break,
+                    let chunk = match br.fill_buf().await {
+                        Ok(c) => c,
                         Err(e) => {
                             read_err = Some(e);
                             break;
                         }
+                    };
+                    if chunk.is_empty() {
+                        break;
                     }
+                    let n = chunk.len() as u64;
+                    RX_TOTAL.fetch_add(n, Ordering::Relaxed);
+                    c.rx_bytes.fetch_add(n, Ordering::Relaxed);
+                    // Tout octet reçu = lien vivant : pendant la vidange
+                    // d'une grosse ligne, silent_ms reste bas et c'est
+                    // rx_partial qui montre le fetch en cours.
+                    c.last_rx_ms.store(now_ms(), Ordering::Relaxed);
+                    pending.extend_from_slice(chunk);
+                    let used = chunk.len();
+                    br.consume(used);
+                    let mut start = 0usize;
+                    while let Some(rel) = pending[start..].iter().position(|&b| b == b'\n') {
+                        let end = start + rel;
+                        let mut lb = &pending[start..end];
+                        if lb.last() == Some(&b'\r') {
+                            lb = &lb[..lb.len() - 1];
+                        }
+                        let line = String::from_utf8_lossy(lb).into_owned();
+                        start = end + 1;
+                        c.rx_lines.fetch_add(1, Ordering::Relaxed);
+                        dispatch_rx_line(&c, &line).await;
+                    }
+                    if start > 0 {
+                        pending.drain(..start);
+                    }
+                    c.rx_partial.store(pending.len() as u64, Ordering::Relaxed);
+                }
+                if !pending.is_empty() {
+                    // Reliquat sans '\n' à l'EOF — lines() le rendait
+                    // comme dernière ligne ; on garde la parité.
+                    let line = String::from_utf8_lossy(&pending).into_owned();
+                    dispatch_rx_line(&c, &line).await;
                 }
                 // Fin de boucle = transport mort (EOF ou erreur de lecture).
                 // Post-mortem : cause réelle journalisée + exposée à
@@ -799,7 +1301,7 @@ impl Client {
                 // réception du signal.
                 let silent = c.silent_ms();
                 let cause = match &read_err {
-                    Some(e) => format!("erreur lecture ({e})"),
+                    Some(e) => format!("{} ({e})", io_death_kind(e)),
                     None => match &c.guard {
                         Some(g) => g.death_note(),
                         None => "eof distant (le pair a fermé)".to_string(),
@@ -818,8 +1320,17 @@ impl Client {
                 // sous le même lock ferme la fenêtre de course.
                 {
                     let mut m = c.pending.lock().await;
-                    for (_, tx) in m.drain() {
-                        let _ = tx.send(Err("connexion fermée".into()));
+                    m.by_key.clear();
+                    for (_, e) in m.by_id.drain() {
+                        c.dec_open(e.class, e.written);
+                        for (_, tx) in e.waiters {
+                            // Drain post-mortem = abandon : le guard ne le
+                            // comptera pas (entrée déjà retirée) — on le
+                            // compte ici pour que `aband=` reflète les RPC
+                            // en vol tués par la mort du transport.
+                            c.abandoned_calls.fetch_add(1, Ordering::Relaxed);
+                            let _ = tx.send(Err("connexion fermée".into()));
+                        }
                     }
                 }
             });
@@ -834,6 +1345,26 @@ impl Client {
     /// alors imputable au démon, pas au lien).
     pub fn silent_ms(&self) -> u64 {
         now_ms().saturating_sub(self.last_rx_ms.load(Ordering::Relaxed))
+    }
+
+    /// Instantané transport pour les sondes / l'event `conn-dead` :
+    /// compteurs par client + état mort + RPC en vol/abandonnés. Le
+    /// frontend s'en sert pour dire « socket morte » vs « socket
+    /// vivante, réponse absente » au lieu de deviner sur le seul timeout.
+    pub async fn stats(&self) -> ClientStats {
+        ClientStats {
+            age_ms: now_ms().saturating_sub(self.created_ms.load(Ordering::Relaxed)),
+            rx_lines: self.rx_lines.load(Ordering::Relaxed),
+            tx_lines: self.tx_lines.load(Ordering::Relaxed),
+            rx_bytes: self.rx_bytes.load(Ordering::Relaxed),
+            tx_bytes: self.tx_bytes.load(Ordering::Relaxed),
+            pending: self.pending.lock().await.by_id.len() as u64,
+            abandoned: self.abandoned_calls.load(Ordering::Relaxed),
+            dead: *self.dead.borrow(),
+            silent_ms: self.silent_ms(),
+            tx_age_ms: now_ms().saturating_sub(self.last_tx_ms.load(Ordering::Relaxed)),
+            rx_partial: self.rx_partial.load(Ordering::Relaxed),
+        }
     }
 
     /// Cause de mort du transport, posée par le reader (post-mortem) ou
@@ -873,14 +1404,67 @@ impl Client {
         for _ in 0..20 {
             match self.pending.try_lock() {
                 Ok(mut m) => {
-                    for (_, tx) in m.drain() {
-                        let _ = tx.send(Err("connexion fermée".into()));
+                    m.by_key.clear();
+                    for (_, e) in m.by_id.drain() {
+                        self.dec_open(e.class, e.written);
+                        for (_, tx) in e.waiters {
+                            self.abandoned_calls.fetch_add(1, Ordering::Relaxed);
+                            let _ = tx.send(Err("connexion fermée".into()));
+                        }
                     }
                     return;
                 }
                 Err(_) => std::thread::yield_now(),
             }
         }
+    }
+
+    /// Solde un compteur d'attente si l'entrée était écrite — les
+    /// compteurs ne couvrent que le trafic réellement sur le wire.
+    fn dec_open(&self, class: ReqClass, written: bool) {
+        if !written {
+            return;
+        }
+        let c = match class {
+            ReqClass::Light => &self.open_light,
+            ReqClass::Heavy => &self.open_heavy,
+        };
+        c.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Garde d'un waiter en vol — weak self-ref pour le règlement
+    /// différé du Drop (jamais de blocage en Drop).
+    fn pending_guard(&self, id: u64, waiter: u64) -> PendingGuard {
+        PendingGuard {
+            client: self
+                .me
+                .get()
+                .cloned()
+                .unwrap_or_else(std::sync::Weak::new),
+            id,
+            waiter,
+        }
+    }
+
+    /// Le writer peut-il émettre la prochaine requête heavy ? Light en
+    /// vol = non (la sonde et les petits RPC passent avant) ; cap et
+    /// espacement bornent la saturation résiduelle.
+    fn heavy_write_ok(&self) -> bool {
+        self.open_light.load(Ordering::Relaxed) == 0
+            && self.open_heavy.load(Ordering::Relaxed) < HEAVY_MAX_INFLIGHT
+            && now_ms().saturating_sub(self.last_heavy_tx_ms.load(Ordering::Relaxed))
+                >= HEAVY_MIN_GAP_MS
+    }
+
+    /// Attente avant la prochaine évaluation heavy : le reste de
+    /// l'espacement, plancher 100 ms — un heavy retenu par des light en
+    /// vol est re-testé périodiquement même sans notify (les réponses
+    /// ne réveillent pas la file).
+    fn heavy_gap_remaining(&self) -> std::time::Duration {
+        let elapsed =
+            now_ms().saturating_sub(self.last_heavy_tx_ms.load(Ordering::Relaxed));
+        let gap = HEAVY_MIN_GAP_MS.saturating_sub(elapsed);
+        std::time::Duration::from_millis(gap.max(100))
     }
 
     /// Appel RPC. Réponse ou erreur du démon.
@@ -890,39 +1474,95 @@ impl Client {
         if *self.dead.borrow() {
             bail!("connexion fermée");
         }
-        // Nom de la requête pour le log (le tag serde "req").
-        let name = serde_json::to_value(&req)
-            .ok()
-            .and_then(|v| v.get("req").and_then(Value::as_str).map(String::from))
-            .unwrap_or_else(|| "?".into());
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        // Requête sérialisée une fois : nom (classe + dedup) et clé de
+        // fusion des appels identiques en vol. Les fields non
+        // sérialisés (skip_serializing_if) gardent la clé stable.
+        let v = serde_json::to_value(&req)?;
+        let name = v
+            .get("req")
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_string();
+        let class = if req_heavy(&name) {
+            ReqClass::Heavy
+        } else {
+            ReqClass::Light
+        };
+        let key = if req_dedupable(&name) {
+            Some(serde_json::to_string(&v)?)
+        } else {
+            None
+        };
+        let waiter = self.next_waiter.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
-        {
+        // Insère une nouvelle entrée wire OU se rattache à l'appel
+        // identique déjà en vol — check-then-insert atomique sous le
+        // lock vs le drain des pendings (dead) et le dispatch reader.
+        let wire_id = {
             let mut m = self.pending.lock().await;
             // Revérifier dead sous le lock : le reader peut mourir entre
-            // le check en tête et cet insert — check-then-insert atomique
-            // vs le drain des pendings (sinon l'entrée s'insère après le
-            // drain et attend 60 s pour rien).
+            // le check en tête et cet insert — sinon l'entrée
+            // s'insèrerait après le drain et attendrait 60 s pour rien.
             if *self.dead.borrow() {
                 bail!("connexion fermée");
             }
-            m.insert(id, tx);
-        }
+            if let Some(k) = &key {
+                if let Some(&lid) = m.by_key.get(k) {
+                    if let Some(e) = m.by_id.get_mut(&lid) {
+                        e.waiters.push((waiter, tx));
+                        // Follower : partage la requête du leader, ne
+                        // passe ni par la file ni par un id propre.
+                        drop(m);
+                        let _pending_guard = self.pending_guard(lid, waiter);
+                        return self.await_resp(&name, rx).await;
+                    }
+                }
+            }
+            let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+            m.by_id.insert(
+                id,
+                InflightEntry {
+                    dedup_key: key.clone(),
+                    class,
+                    written: false,
+                    waiters: vec![(waiter, tx)],
+                },
+            );
+            if let Some(k) = &key {
+                m.by_key.insert(k.clone(), id);
+            }
+            id
+        };
         // La future peut être droppée en vol (timeout externe, JoinSet) ou
         // timeout interne → sans guard l'entrée pending fuirait jusqu'au
         // drop du client.
-        let _pending_guard = PendingGuard { map: &self.pending, id };
-        let mut s = serde_json::to_string(&Request { id, req })?;
+        let _pending_guard = self.pending_guard(wire_id, waiter);
+        // La requête part en file : le writer dédié l'émet dans l'ordre
+        // light→heavy — `call` n'attend plus le mutex d'écriture.
+        let mut s = serde_json::to_string(&Request { id: wire_id, req })?;
         s.push('\n');
         {
-            let mut w = self.w.lock().await;
-            TX_TOTAL.fetch_add(s.len() as u64, Ordering::Relaxed);
-            if let Err(e) = w.write_all(s.as_bytes()).await {
-                log(Level::Error, format!("daemon {name}: écriture ko {e}"));
-                return Err(e.into());
+            let mut q = self.outq.lock().unwrap_or_else(|e| e.into_inner());
+            match class {
+                ReqClass::Light => q.light.push_back(Queued {
+                    id: wire_id,
+                    line: s,
+                    class,
+                }),
+                ReqClass::Heavy => q.heavy.push_back(Queued {
+                    id: wire_id,
+                    line: s,
+                    class,
+                }),
             }
-            w.flush().await?;
         }
+        self.outq_notify.notify_one();
+        self.await_resp(&name, rx).await
+    }
+
+    /// Attend la réponse d'une entrée pending (leader ou follower
+    /// dédupliqué) — timeout interne 60 s, log par nom de méthode.
+    async fn await_resp(&self, name: &str, rx: oneshot::Receiver<Result<Value, String>>) -> Result<Value> {
         match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
             Ok(Ok(Ok(v))) => Ok(v),
             Ok(Ok(Err(e))) => {
@@ -973,6 +1613,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn req_classifiers() {
+        // Lectures mutualisables ; mutations jamais dédupliquées.
+        assert!(req_dedupable("list_sessions"));
+        assert!(req_dedupable("daemon_status"));
+        assert!(!req_dedupable("send"));
+        assert!(!req_dedupable("new_session"));
+        assert!(!req_dedupable("delete_session"));
+        assert!(!req_dedupable("term_open"));
+        // Grosses réponses = heavy ; sondes et petits RPC = light.
+        assert!(req_heavy("list_sessions"));
+        assert!(req_heavy("get_blob"));
+        assert!(!req_heavy("daemon_status"));
+        assert!(!req_heavy("session_info"));
+        assert!(!req_heavy("send"));
     }
 
     #[test]

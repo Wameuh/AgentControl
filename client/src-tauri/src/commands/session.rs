@@ -7,9 +7,103 @@ use client_core::{Client, Level};
 use proto::ReqKind;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::state::{get_conn, AppState};
+
+/// Sessions par page `list_sessions_page` — borne le poids d'une
+/// ligne NDJSON : une liste complète dépassait 150 ko sur les démons à
+/// beaucoup de sessions et faisait expirer la sonde (item #245). Les
+/// pages laissent les petits RPC s'intercaler entre les réponses.
+const LIST_PAGE_SIZE: u32 = 25;
+/// Garde-fou ~1000 sessions : au-delà on rend l'accumulé (le prochain
+/// refresh repagine) plutôt que boucler sur des pages incohérentes.
+const LIST_PAGE_MAX: u64 = 40;
+
+/// `list_sessions` paginé quand le démon connaît `list_sessions_page`,
+/// sinon la réponse unique historique — la capacité est mémorisée par
+/// clé de connexion (`AppState::list_page`) : un vieux démon répond
+/// `parse: unknown variant` une seule fois puis on reste sur
+/// ListSessions. Retourne le tableau JSON, comme `ListSessions`.
+async fn list_sessions_all(app: &AppHandle, k: &str, c: &Arc<Client>) -> Result<Value> {
+    let supported = app
+        .state::<AppState>()
+        .list_page
+        .lock()
+        .await
+        .get(k)
+        .copied()
+        .unwrap_or(true);
+    if !supported {
+        return c.call(ReqKind::ListSessions).await;
+    }
+    let mut all: Vec<Value> = Vec::new();
+    let mut offset = 0u64;
+    for _ in 0..LIST_PAGE_MAX {
+        match c
+            .call(ReqKind::ListSessionsPage {
+                limit: Some(LIST_PAGE_SIZE),
+                offset: Some(offset),
+            })
+            .await
+        {
+            Ok(v) => {
+                app.state::<AppState>()
+                    .list_page
+                    .lock()
+                    .await
+                    .insert(k.to_string(), true);
+                let Some(sessions) = v.get("sessions").and_then(Value::as_array) else {
+                    // Réponse hors forme page : erreur franche plutôt
+                    // qu'un tableau vide silencieux dans le merge.
+                    anyhow::bail!("list_sessions_page: réponse hors forme");
+                };
+                let next = v.get("next_offset").and_then(Value::as_u64);
+                all.extend(sessions.iter().cloned());
+                match next {
+                    Some(n) if n > offset => offset = n,
+                    _ => return Ok(json!(all)),
+                }
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if msg.contains("list_sessions_page") || msg.contains("unknown variant") {
+                    app.state::<AppState>()
+                        .list_page
+                        .lock()
+                        .await
+                        .insert(k.to_string(), false);
+                    return c.call(ReqKind::ListSessions).await;
+                }
+                return Err(e);
+            }
+        }
+    }
+    client_core::log(
+        Level::Warn,
+        format!("list_sessions {k}: borne de pages atteinte — liste tronquée"),
+    );
+    Ok(json!(all))
+}
+
+/// Compteurs transport exposés sous `_ac_transport` dans les sondes et
+/// les marqueurs `conn_error` — le frontend les recopie dans client.log
+/// pour reconstruire la chronologie sans deviner depuis les timeouts.
+pub(crate) fn ac_transport_json(st: &client_core::ClientStats) -> Value {
+    json!({
+        "age_ms": st.age_ms,
+        "rx_lines": st.rx_lines,
+        "tx_lines": st.tx_lines,
+        "rx_bytes": st.rx_bytes,
+        "tx_bytes": st.tx_bytes,
+        "pending": st.pending,
+        "abandoned": st.abandoned,
+        "dead": st.dead,
+        "silent_ms": st.silent_ms,
+        "tx_age_ms": st.tx_age_ms,
+        "rx_partial": st.rx_partial,
+    })
+}
 
 #[tauri::command]
 pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: String, params: Value) -> Result<Value, String> {
@@ -51,29 +145,53 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
         // Timeout par conn : 8 s pour les sondes (SILENT_KILL_MS côté
         // frontend = la fenêtre de « trafic récent » qui excuse un
         // timeout — pas le même réglage, à ne pas aligner aveuglément).
-        let secs = if method == "pr_sync" { 60 } else { 8 };
+        // list_sessions paginé = N allers-retours séquentiels : 20 s —
+        // ce n'est pas une sonde de vie (daemon_status la joue), un
+        // timeout allongé n'aggrave pas la détection des vraies morts.
+        let secs = if method == "pr_sync" {
+            60
+        } else if method == "list_sessions" {
+            20
+        } else {
+            8
+        };
+        let is_list_sessions = method == "list_sessions";
         let mut set = tokio::task::JoinSet::new();
         for (k, c) in pairs {
             let req = req.clone();
+            let app = app.clone();
             set.spawn(async move {
                 let t0 = std::time::Instant::now();
-                let r = tokio::time::timeout(std::time::Duration::from_secs(secs), c.call(req)).await;
+                // list_sessions passe par la variante paginée (filtre
+                // les grosses lignes NDJSON) — même timeout global.
+                let callfut = async {
+                    if is_list_sessions {
+                        list_sessions_all(&app, &k, &c).await
+                    } else {
+                        c.call(req).await
+                    }
+                };
+                let r = tokio::time::timeout(std::time::Duration::from_secs(secs), callfut).await;
                 // silent_ms lu au retour : du trafic entrant récent prouve
                 // le transport vivant même quand la requête a expiré.
                 let silent = c.silent_ms();
+                // Stats transport au moment de la réponse/échec : le
+                // watchdog distingue socket morte, socket vivante sans
+                // réponse et RPC fantômes sans relire client.log.
+                let st = c.stats().await;
                 // kind discrimine l'expiration (lenteur/blackhole, excusable
                 // si le transport vit) de l'erreur de transport (mort
                 // proche, strike direct) — consommé par le watchdog.
                 let kind = if r.is_err() { "timeout" } else { "error" };
                 (k, c, r.map_err(|_| anyhow::anyhow!("timeout")).and_then(|x| x),
-                    t0.elapsed().as_millis() as u64, silent, kind)
+                    t0.elapsed().as_millis() as u64, silent, kind, st)
             });
         }
         let mut all = Vec::new();
         let mut out = json!({});
         let mut n_ok = 0u64;
         while let Some(res) = set.join_next().await {
-            let Ok((k, c, r, rtt, silent, kind)) = res else { continue };
+            let Ok((k, c, r, rtt, silent, kind, st)) = res else { continue };
             // Client remplacé pendant l'appel (reconnect) : le résultat
             // appartient à l'ancienne gen — le publier marquait la
             // nouvelle conn down (sonde ko / conn_error → markDead) alors
@@ -124,7 +242,8 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
                     client_core::log(Level::Warn,
                         format!("{method} {k}: {e:#} (rtt {rtt} ms, silent {silent} ms)"));
                     out[k] = json!({"error": format!("{e:#}"), "kind": kind,
-                        "rtt_ms": rtt, "silent_ms": silent, "gen": gen});
+                        "rtt_ms": rtt, "silent_ms": silent, "gen": gen,
+                        "_ac_transport": ac_transport_json(&st)});
                 }
                 // Le frontend filtre ce marqueur → conn marquée down et
                 // sessions servies depuis le cache au lieu de disparaître.
@@ -132,7 +251,8 @@ pub(crate) async fn call(app: AppHandle, state: State<'_, AppState>, method: Str
                 // (filet si un chemin contourne le filtre ptr_eq).
                 Err(e) => {
                     client_core::log(Level::Warn, format!("{method} {k}: {e:#}"));
-                    all.push(json!({"conn": k, "conn_error": true, "gen": gen}));
+                    all.push(json!({"conn": k, "conn_error": true, "gen": gen,
+                        "_ac_transport": ac_transport_json(&st)}));
                 }
             }
         }
@@ -201,6 +321,11 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
     let so = |k: &str| p.get(k).and_then(Value::as_str).map(String::from);
     Ok(match method {
         "daemon_status" => ReqKind::DaemonStatus,
+        "daemon_log_tail" => ReqKind::DaemonLogTail {
+            file: so("file"),
+            offset: p.get("offset").and_then(Value::as_u64).unwrap_or(0),
+            limit: p.get("limit").and_then(Value::as_u64),
+        },
         "update_daemon" => ReqKind::UpdateDaemon { version: s("version") },
         "list_agents" => ReqKind::ListAgents,
         "model_costs" => ReqKind::ModelCosts { agent: s("agent") },
@@ -264,6 +389,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         "cancel" => ReqKind::Cancel { session: s("session") },
         "set_mode" => ReqKind::SetMode { session: s("session"), mode: s("mode") },
         "set_model" => ReqKind::SetModel { session: s("session"), model: s("model") },
+        "set_advisor" => ReqKind::SetAdvisor { session: s("session"), advisor: s("advisor") },
         "set_config_option" => ReqKind::SetConfigOption {
             session: s("session"),
             config_id: s("config_id"),
@@ -356,6 +482,8 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
                 .get("sync_fails")
                 .and_then(Value::as_u64)
                 .map(|v| v as u32),
+            review: so("review"),
+            ci: so("ci"),
         },
         "pr_untrack" => ReqKind::PrUntrack {
             repo: s("repo"),
@@ -371,6 +499,9 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         "list_components" => ReqKind::ListComponents,
         "component_info" => ReqKind::ComponentInfo { name: s("name") },
         "component_query" => ReqKind::ComponentQuery { name: s("name"), query: s("query") },
+        // Token de vue plugin éphémère (iframe sandboxée + bridge
+        // postMessage) — gate capability daemon_status.plugin_views.
+        "plugin_view_token" => ReqKind::PluginViewToken { name: s("name") },
         "manager_spawn" => ReqKind::ManagerSpawn { repo: s("repo") },
         "component_start" => ReqKind::ComponentStart { name: s("name") },
         "component_stop" => ReqKind::ComponentStop { name: s("name") },

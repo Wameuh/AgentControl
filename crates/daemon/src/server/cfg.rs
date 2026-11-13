@@ -28,6 +28,18 @@ pub struct AgentProfile {
     /// de l'agent ACP et le session/load quand la valeur choisie est
     /// catalogue-only. Requis pour appliquer une telle valeur.
     pub model_override_cmd: Option<String>,
+    /// Modèles sélectionnables hors annonce ACP
+    /// (`[agents.<id>.extra_models]`, ex. variantes Fable de
+    /// claude-code-acp) — fusionnés dans `available_models` au
+    /// handshake et acceptés tels quels par `session/set_model`.
+    pub extra_models: Vec<proto::ExtraModel>,
+    /// Modèles advisor proposables pour les sessions du profil
+    /// (`[agents.<id>.advisor_models]`) — non vide = le démon injecte
+    /// `advisorModel` via `_meta.claudeCode.options` au spawn
+    /// (mécanisme claude-code-acp : `extraArgs.settings`, ou
+    /// `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` pour la valeur "off").
+    /// Vide = fonctionnalité absente.
+    pub advisor_models: Vec<String>,
 }
 
 /// Plafond d'instances par profil agent quand `max_instances` n'est pas
@@ -152,6 +164,13 @@ pub struct OrchCfg {
     /// Workers `title_prefix*` simultanés max (défaut 5).
     #[serde(default = "d5")]
     pub max_workers: u32,
+    /// Workers « en activité » simultanés max — un worker garé sur un
+    /// waiter ac-wait vivant libère un slot *working* mais garde son
+    /// slot total `max_workers` ; spawn et réveil d'`asleep` exigent
+    /// du mou sur les DEUX caps. 0 = non borné → suit `max_workers`
+    /// (comportement historique). Défaut 0.
+    #[serde(default)]
+    pub max_working: u32,
     /// Période de la boucle en secondes (défaut 60, min 10).
     #[serde(default = "d60")]
     pub poll_secs: u64,
@@ -161,7 +180,11 @@ pub struct OrchCfg {
     /// Groupe sidebar des workers (défaut "AgentControl").
     #[serde(default = "dgroup")]
     pub group: String,
-    /// cwd des sessions workers ET cwd des appels `gh` (défaut /workspace).
+    /// cwd des sessions du workspace PAR DÉFAUT (items non taggés,
+    /// workers legacy sans routage, appels `gh` sans `--repo`) et cwd
+    /// des appels `agentbacklog`/`gh` de l'orchestrateur — les workers
+    /// taggés sont routés par `repo_workspaces` (workspace_for).
+    /// Défaut /workspace.
     #[serde(default = "dws")]
     pub workspace: String,
     /// Profil agent des workers (défaut "devin").
@@ -286,8 +309,11 @@ pub struct OrchCfg {
     #[serde(default = "d2700")]
     pub pr_review_timeout: u64,
     /// Routing workspace repo → cwd : une entrée = un « workspace »
-    /// porté par le backlog (tag `--repo` des items). Sert aujourd'hui
-    /// à définir les Managers proposables (un par entrée) ; défaut
+    /// porté par le backlog (tag `--repo` des items). Route les
+    /// sessions spawnées pour un item taggé (worker legacy, planner,
+    /// implémenteur, reviewer de plan — `workspace_for`), propose les
+    /// Managers (un par entrée) et adosse les reviews PR
+    /// (`orch_review::ws_of`) ; défaut
     /// `{"AgentControl": "/workspace"}` — hérité du script d'origine.
     /// Dernier champ : sous-table TOML (voir l'avertissement en tête).
     #[serde(default = "drw")]
@@ -354,6 +380,7 @@ impl Default for OrchCfg {
             auto_patchnotes: true,
             spawn_managers: true,
             max_workers: 5,
+            max_working: 0,
             poll_secs: 60,
             title_prefix: dprefix(),
             group: dgroup(),
@@ -390,6 +417,45 @@ impl Default for OrchCfg {
 }
 
 impl OrchCfg {
+    /// Cap effectif `max_working` : 0 = non borné → `max_workers`.
+    pub fn max_working_cap(&self) -> u64 {
+        u64::from(if self.max_working == 0 {
+            self.max_workers
+        } else {
+            self.max_working
+        })
+    }
+
+    /// Workspace de session pour un tag `repo` d'item backlog :
+    /// `repo_workspaces[tag]` quand le tag est routé, `workspace`
+    /// (défaut) pour les items non taggés ET pour les tags inconnus
+    /// (l'appelant filtre les non routables via `repo_routable` — un
+    /// tag sans mapping ne doit pas être travaillé dans le mauvais
+    /// cwd, il attend une déclaration de workspace).
+    pub fn workspace_for<'a>(&'a self, repo: &str) -> &'a str {
+        if repo.is_empty() {
+            return self.workspace.as_str();
+        }
+        self.repo_workspaces
+            .get(repo)
+            .map(String::as_str)
+            .unwrap_or(&self.workspace)
+    }
+
+    /// Le tag `repo` d'un item est-il routable ? Non taggé → workspace
+    /// par défaut (toujours routable) ; taggé → seulement s'il a une
+    /// entrée `repo_workspaces` (sinon l'item attend — jamais de spawn
+    /// dans le mauvais checkout).
+    pub fn repo_routable(&self, repo: &str) -> bool {
+        repo.is_empty() || self.repo_workspaces.contains_key(repo)
+    }
+
+    /// Tags `repo` effectivement routés (clés de `repo_workspaces`),
+    /// triés — exposé au client pour signaler les items non routables.
+    pub fn routed_tags(&self) -> Vec<String> {
+        self.repo_workspaces.keys().cloned().collect()
+    }
+
     /// Profil effectif d'un rôle : le param dédié (`*_agent`) s'il est
     /// posé, sinon le profil global `agent` — compat des configs
     /// mono-profil.
@@ -569,6 +635,9 @@ impl CompactPartial {
 /// Entrées de résolution du seuil par session : global `[compact]` +
 /// overrides `[agents.<id>.compact]` indexés par id d'agent. Le sidecar
 /// `compact.json` est lu par la session à l'open.
+/// Clone : chaque chargement de session parallèle (Daemon::open) en
+/// prend une copie pour le spawn_blocking.
+#[derive(Clone)]
 pub struct CompactSrc {
     pub global: CompactCfg,
     pub by_agent: HashMap<String, CompactPartial>,

@@ -4,6 +4,7 @@
 //! `tauri::mobile_entry_point`.
 
 mod commands;
+mod instance;
 mod state;
 mod stream;
 
@@ -124,6 +125,10 @@ pub fn run() {
                 // sans keystore échoue plutôt que d'être écrit en clair.
                 client_core::init_secret_box(KeystoreBox(app.handle().clone()));
             }
+            // Cycle de vie : pid/ppid/version/exe/conn + instances
+            // concurrentes — indispensable pour corréler un flap transport
+            // à un relaunch post-update ou à un spawn_instance.
+            instance::init(cli_conn_arg().as_deref());
             // Icône fenêtre = gemme générée (marche aussi avec --no-bundle,
             // là où les icônes de bundle ne sont pas installées).
             #[cfg(not(target_os = "android"))]
@@ -145,6 +150,7 @@ pub fn run() {
             net: Mutex::new(std::collections::VecDeque::new()),
             cli_conn: cli_conn_arg(),
             next_gen: std::sync::atomic::AtomicU64::new(0),
+            list_page: Mutex::new(std::collections::HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
             commands::connect::connect,
@@ -153,6 +159,8 @@ pub fn run() {
             commands::connect::ensure_daemon,
             commands::session::call,
             commands::files::write_download,
+            commands::files::clipboard_file_stat,
+            commands::files::clipboard_file_read,
             commands::saved::saved_connections,
             commands::saved::save_connection,
             commands::saved::remove_connection,
@@ -169,12 +177,15 @@ pub fn run() {
             commands::system::app_version,
             commands::system::platform,
             commands::system::cli_conn,
+            commands::system::other_instances,
             commands::system::spawn_instance,
             commands::system::ssh_pubkey,
             commands::system::sys_stats,
             commands::system::log_tail,
+            commands::system::log_read,
             commands::system::log_write,
             commands::system::set_app_icon,
+            commands::system::app_signing,
             commands::update::check_update,
             commands::update::update_client,
             commands::update::update_last_status,
@@ -182,7 +193,11 @@ pub fn run() {
     // Chiffrement au repos des secrets (clé app ed25519, clés appairées,
     // connections.json) via Android Keystore — desktop inchangé.
     #[cfg(target_os = "android")]
-    let builder = builder.plugin(tauri_plugin_ac_keystore::init());
+    let builder = builder
+        .plugin(tauri_plugin_ac_keystore::init())
+        // Verdict « update in-place possible » (signature de l'APK
+        // installé vs certificat release) — garde-fou uninstall Android.
+        .plugin(tauri_plugin_ac_device::init());
     builder
         .run(context)
         .expect("error while running tauri application");

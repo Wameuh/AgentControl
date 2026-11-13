@@ -34,6 +34,11 @@ pub(crate) mod orch_review;
 /// profil courant (worker/planner/reviewer ; PRReview-* dans
 /// orch_review.rs).
 pub(crate) mod orch_failover;
+/// GC des sessions composant orphelines (item #250) — filet de
+/// sécurité au tick : toute session `feature:pr-review` /
+/// `component:backlog-orchestrator` déréférencée de l'état vivant est
+/// supprimée (worktree PRReview inclus).
+pub(crate) mod orch_gc;
 /// Surface de config éditable à chaud de l'orchestrateur (schéma
 /// params, validation de patch, persistance config.toml) — partagée
 /// avec `crate::components` (params_schema/params de l'item internal).
@@ -316,30 +321,74 @@ impl Daemon {
         let mut resumable = Vec::new();
         let sdir = root.join("sessions");
         if sdir.exists() {
+            let mut dirs = Vec::new();
             for entry in std::fs::read_dir(&sdir)? {
                 let entry = entry?;
-                if !entry.file_type()?.is_dir() {
-                    continue;
+                if entry.file_type()?.is_dir() {
+                    dirs.push(entry.path());
                 }
-                match Session::open(entry.path(), &d.compact, Arc::clone(&d.caps)) {
-                    Ok(s) => {
-                        // État persisté lu avant reconcile (qui efface la
-                        // distinction actif/idle en passant tout à
-                        // "interrupted").
-                        let active = s.was_active();
-                        // Un agent n'est jamais vivant après un restart du
-                        // démon → interrupted + event journalisé.
-                        s.reconcile_state();
-                        let id = s.meta_snapshot().id;
-                        if active {
-                            resumable.push(id.clone());
-                        }
-                        d.watch_prs(&s);
-                        info!("session chargée: {id}");
-                        d.sessions.write().await.insert(id, s);
+            }
+            // Chargement parallèle borné : Session::open → Journal::open
+            // scanne events.jsonl EN ENTIER (index seq→offset) — N
+            // sessions × gros journaux = des minutes de blocage
+            // séquentiel avant même le bind des listeners, pendant
+            // lesquelles le client voit un flap de connexion (item
+            // #227). spawn_blocking + sémaphore : le parse reste hors
+            // de l'executor async sans ouvrir une centaine de threads
+            // de scan sur un VPS partagé.
+            let par = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .min(8);
+            let sem = Arc::new(tokio::sync::Semaphore::new(par));
+            let mut set = tokio::task::JoinSet::new();
+            for dir in dirs {
+                let dir_err = dir.clone();
+                let sem = Arc::clone(&sem);
+                let compact = d.compact.clone();
+                let caps = Arc::clone(&d.caps);
+                set.spawn(async move {
+                    let _permit = sem.acquire_owned().await.expect("semaphore jamais fermée");
+                    let r = tokio::task::spawn_blocking(move || {
+                        Session::open(dir, &compact, caps)
+                    })
+                    .await;
+                    (dir_err, r)
+                });
+            }
+            while let Some(joined) = set.join_next().await {
+                let (dir, r) = match joined {
+                    Ok(t) => t,
+                    Err(e) => {
+                        warn!("session load: tâche rejointe en erreur: {e}");
+                        continue;
                     }
-                    Err(e) => warn!("session load failed {:?}: {e:#}", entry.path()),
+                };
+                let s = match r {
+                    Ok(Ok(s)) => s,
+                    Ok(Err(e)) => {
+                        warn!("session load failed {:?}: {e:#}", dir);
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!("session load {:?}: join: {e}", dir);
+                        continue;
+                    }
+                };
+                // État persisté lu avant reconcile (qui efface la
+                // distinction actif/idle en passant tout à
+                // "interrupted").
+                let active = s.was_active();
+                // Un agent n'est jamais vivant après un restart du
+                // démon → interrupted + event journalisé.
+                s.reconcile_state();
+                let id = s.meta_snapshot().id;
+                if active {
+                    resumable.push(id.clone());
                 }
+                d.watch_prs(&s);
+                info!("session chargée: {id}");
+                d.sessions.write().await.insert(id, s);
             }
         }
         Ok((d, resumable))
@@ -435,6 +484,7 @@ impl Daemon {
                     quiet: true,
                     ..Default::default()
                 }),
+                self.spawn_hints(&profile, &meta),
             )
             .await
         {
@@ -632,6 +682,26 @@ impl Daemon {
         (cmd, envs)
     }
 
+    /// Indices de spawn dérivés du profil + meta : `_meta` ACP
+    /// additionnel (advisor — voir SpawnHints) et ids des modèles
+    /// « extra » du profil à fusionner dans available_models.
+    fn spawn_hints(
+        &self,
+        profile: &AgentProfile,
+        meta: &proto::SessionMeta,
+    ) -> crate::session::SpawnHints {
+        let acp_meta = advisor_acp_meta(profile, meta);
+        crate::session::SpawnHints {
+            acp_meta,
+            extra_models: profile
+                .extra_models
+                .iter()
+                .map(|e| e.value.clone())
+                .collect(),
+            advisor_models: profile.advisor_models.clone(),
+        }
+    }
+
     /// Entrée mcpServers injectée dans session/new|load : le serveur MCP
     /// "agentcontrol", subcommand du binaire démon courant (l'agent le
     /// spawn lui-même ; l'env identifie la session appelante).
@@ -678,6 +748,11 @@ impl Daemon {
 
     async fn handle(self: &Arc<Self>, req: ReqKind) -> Result<Value> {
         match req {
+            ReqKind::DaemonLogTail {
+                file,
+                offset,
+                limit,
+            } => self.h_daemon_log_tail(file, offset, limit).await,
             ReqKind::DaemonStatus => self.h_daemon_status().await,
             ReqKind::UpdateDaemon { version } => self.h_update_daemon(version).await,
             ReqKind::ListAgents => self.h_list_agents().await,
@@ -687,6 +762,9 @@ impl Daemon {
             }
             ReqKind::ModelCatalog { agent } => self.h_model_catalog(agent).await,
             ReqKind::ListSessions => self.h_list_sessions().await,
+            ReqKind::ListSessionsPage { limit, offset } => {
+                self.h_list_sessions_page(limit, offset).await
+            }
             ReqKind::NewSession {
                 agent,
                 cwd,
@@ -827,6 +905,9 @@ impl Daemon {
             ReqKind::SetModel { session, model } => {
                 self.h_set_model(session, model).await
             }
+            ReqKind::SetAdvisor { session, advisor } => {
+                self.h_set_advisor(session, advisor).await
+            }
             ReqKind::SetConfigOption {
                 session,
                 config_id,
@@ -872,10 +953,12 @@ impl Daemon {
                 status,
                 note,
                 sync_fails,
+                review,
+                ci,
             } => {
                 self.h_pr_track(
                     session, repo, pr, forge, host, change_id, url, branch, title,
-                    status, note, sync_fails,
+                    status, note, sync_fails, review, ci,
                 )
                 .await
             }
@@ -916,6 +999,9 @@ impl Daemon {
             ReqKind::ComponentQuery { name, query } => {
                 self.h_component_query(name, query).await
             }
+            ReqKind::PluginViewToken { name } => {
+                self.h_plugin_view_token(name).await
+            }
             ReqKind::OrchestratorSet { enabled } => {
                 self.h_orch_set(enabled).await
             }
@@ -948,6 +1034,25 @@ impl Daemon {
                 anyhow::bail!("requête bornée à la connexion hors serve_conn")
             }
         }
+    }
+
+    /// Rattrapage borné d'un subscribe hors de l'executor async :
+    /// `read_tail` fait de l'I/O disque (index mémoire vide → scan du
+    /// fichier entier, des dizaines de Mo) — inline dans la boucle de
+    /// connexion il gelait la lecture des requêtes et les events live
+    /// du subscriber, ce qui se traduisait côté client par des timeouts
+    /// sur TOUTES les méthodes puis une fermeture (flap #227). L'ordre
+    /// est préservé : la réponse et les pushes partent après l'await,
+    /// le broadcast a bufferisé le live entre-temps.
+    async fn replay_tail(s: &Arc<Session>, after: u64) -> (Vec<proto::Event>, u64) {
+        let s = Arc::clone(s);
+        tokio::task::spawn_blocking(move || {
+            s.journal.read_tail(&s.dir, after, SUBSCRIBE_REPLAY_MAX)
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default()
     }
 
     /// Sert une connexion : lit des Request en NDJSON, écrit Response/Push.
@@ -1111,10 +1216,8 @@ impl Daemon {
                                 // sinon un journal volumineux sature le
                                 // lien et fait échouer toutes les requêtes
                                 // concurrentes par timeout.
-                                let (backlog, skipped) = s
-                                    .journal
-                                    .read_tail(&s.dir, after, SUBSCRIBE_REPLAY_MAX)
-                                    .unwrap_or_default();
+                                let (backlog, skipped) =
+                                    Self::replay_tail(&s, after).await;
                                 let resp = Response::ok(req.id, json!({
                                     "subscribed": session,
                                     "last_seq": s.journal.last_seq(),
@@ -1245,10 +1348,8 @@ impl Daemon {
                                 };
                                 Self::send_push(&outbox, sid, &ev)?;
                             }
-                            let (backlog, skipped) = s
-                                .journal
-                                .read_tail(&s.dir, *last, SUBSCRIBE_REPLAY_MAX)
-                                .unwrap_or_default();
+                            let (backlog, skipped) =
+                                Self::replay_tail(&s, *last).await;
                             if skipped > 0 {
                                 warn!(session = %sid, skipped, "subscribe lagged: events sautés au-delà de la fenêtre");
                             }
@@ -1542,6 +1643,73 @@ mod tests {
         let e2 = resolve_cwd("/dir_nope_zz9").unwrap_err().to_string();
         assert!(!e2.contains("depuis"), "{e2}");
     }
+
+    fn advisor_profile(models: &[&str]) -> super::AgentProfile {
+        super::AgentProfile {
+            name: "T".into(),
+            command: vec![],
+            env: Default::default(),
+            compact: Default::default(),
+            max_instances: 0,
+            catalogue_cmd: None,
+            model_override_cmd: None,
+            extra_models: vec![],
+            advisor_models: models.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn advisor_meta(advisor: Option<&str>) -> proto::SessionMeta {
+        proto::SessionMeta {
+            id: "s-t".into(),
+            agent: "t".into(),
+            title: String::new(),
+            cwd: String::new(),
+            created_at: String::new(),
+            native_session_id: None,
+            mode: None,
+            model: None,
+            model_source: None,
+            model_override_sid: None,
+            supports_load: None,
+            available_modes: vec![],
+            available_commands: vec![],
+            available_models: vec![],
+            advisor: advisor.map(str::to_string),
+            advisor_models: vec![],
+            config_options: vec![],
+            pending_config: Default::default(),
+            desired_config: Default::default(),
+            state: "idle".into(),
+            group: None,
+            spawned_by: None,
+            origin: None,
+            context_used: None,
+            context_size: None,
+            last_error: None,
+            wait: None,
+        }
+    }
+
+    #[test]
+    fn advisor_meta_json() {
+        use super::advisor_acp_meta;
+        // Profil sans advisor_models → jamais d'injection.
+        assert!(advisor_acp_meta(&advisor_profile(&[]), &advisor_meta(Some("opus"))).is_none());
+        // advisor non posé → rien (défaut du profil/agent).
+        assert!(advisor_acp_meta(&advisor_profile(&["opus"]), &advisor_meta(None)).is_none());
+        // Valeur → advisorModel via extraArgs.settings.
+        let v = advisor_acp_meta(&advisor_profile(&["opus"]), &advisor_meta(Some("fable"))).unwrap();
+        assert_eq!(
+            v["claudeCode"]["options"]["extraArgs"]["settings"],
+            serde_json::json!("{\"advisorModel\":\"fable\"}")
+        );
+        // "off" → désactivation explicite par env.
+        let v = advisor_acp_meta(&advisor_profile(&["opus"]), &advisor_meta(Some("off"))).unwrap();
+        assert_eq!(
+            v["claudeCode"]["options"]["env"]["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"],
+            "1"
+        );
+    }
 }
 
 /// Cycle de vie d'une conn cliente : open → durée → raison de close.
@@ -1618,10 +1786,30 @@ pub async fn janitor(daemon: Arc<Daemon>) {
         let sessions: Vec<Arc<Session>> =
             daemon.sessions.read().await.values().cloned().collect();
         for s in &sessions {
-            if let Err(e) = s.journal.compact_if_needed(&s.dir, journal_max, journal_keep) {
+            // Compaction = réécriture complète du journal + rebuild de
+            // l'index : I/O disque synchrone, potentiellement des
+            // dizaines de Mo par session — hors de l'executor async
+            // (le balayage des N sessions gelait un worker à lui seul).
+            let s2 = Arc::clone(s);
+            let (jc, pb) = match tokio::task::spawn_blocking(move || {
+                (
+                    s2.journal
+                        .compact_if_needed(&s2.dir, journal_max, journal_keep),
+                    journal::purge_blobs(&s2.dir, blob_max),
+                )
+            })
+            .await
+            {
+                Ok(pair) => pair,
+                Err(e) => {
+                    warn!("janitor {}: tâche: {e}", s.meta_snapshot().id);
+                    continue;
+                }
+            };
+            if let Err(e) = jc {
                 warn!("compact {}: {e}", s.meta_snapshot().id);
             }
-            match journal::purge_blobs(&s.dir, blob_max) {
+            match pb {
                 Ok(n) if n > 0 => info!("blobs purgés {}: {n}", s.meta_snapshot().id),
                 Err(e) => warn!("purge blobs {}: {e}", s.meta_snapshot().id),
                 _ => {}
@@ -1648,6 +1836,9 @@ pub async fn janitor(daemon: Arc<Daemon>) {
                     } else {
                         info!("session purgée (inactivité): {id}");
                     }
+                    // Pièces jointes : <cwd>/.ac-uploads/<sid>/ part
+                    // avec la session — même purge que delete_session.
+                    sessions::purge_session_uploads(&meta.cwd, &id);
                 }
             }
         }
@@ -1673,5 +1864,26 @@ pub async fn watchdog(daemon: Arc<Daemon>) {
         for s in &sessions {
             s.watchdog_tick(&cfg);
         }
+    }
+}
+
+/// `_meta` ACP portant la demande advisor de la session, pour les
+/// profils qui déclarent `advisor_models` (mécanisme claude-code-acp :
+/// `advisorModel` injecté via `claudeCode.options.extraArgs.settings` ;
+/// la valeur "off" désactive explicitement via
+/// `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` dans `claudeCode.options.env`).
+/// None = rien à injecter (profil sans advisor ou choix non posé).
+fn advisor_acp_meta(profile: &AgentProfile, meta: &proto::SessionMeta) -> Option<Value> {
+    if profile.advisor_models.is_empty() {
+        return None;
+    }
+    match meta.advisor.as_deref() {
+        None | Some("") => None,
+        Some("off") => Some(json!({
+            "claudeCode": {"options": {"env": {"CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "1"}}}
+        })),
+        Some(v) => Some(json!({
+            "claudeCode": {"options": {"extraArgs": {"settings": json!({"advisorModel": v}).to_string()}}}
+        })),
     }
 }

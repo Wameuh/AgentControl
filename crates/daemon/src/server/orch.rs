@@ -51,6 +51,12 @@ const CMD_TIMEOUT: Duration = Duration::from_secs(60);
 /// aucune PR n'est enregistrée : le watcher PR peut laguer quelques
 /// minutes derrière le `gh pr create` (cf. script — 240 s).
 pub(crate) const CLEAN_GRACE_S: f64 = 240.0;
+/// Âge d'une session worker `dead` au-delà duquel le ménage la rm et
+/// relâche ses items wip : les nudges→resume ont eu ~2 cooldowns pour
+/// la relancer — au-delà la reprise est déclarée impossible et l'item
+/// repart pending pour un worker neuf (item #250 — Backlog-W170 dead
+/// survivait indéfiniment).
+pub(crate) const DEAD_WORKER_S: f64 = 1800.0;
 
 /// Borne (caractères) de la description reprise dans le post « sorti
 /// du backlog » — le post est un résumé de présentation, pas un dump
@@ -83,6 +89,41 @@ Blocage insurmontable sur une tache : agentbacklog --release <ID> --agent-id "<t
 
 Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; push uniquement sur ta branche de PR ; nettoie ton worktree a la fin (git worktree remove) ; reponds en francais."#;
 
+/// Prompt worker du dispatch PAR ITEM (agentbacklog ≥ 0.7, `--claim`) :
+/// l'orchestrateur a déjà choisi l'item et son workspace — le prompt
+/// est templé `{WS}` (cwd de la session = workspace routé du tag repo),
+/// `{REPO}` (tag de l'item, « (non taggé) » sinon), `{ID}` et `{ITEM}`
+/// (titre + description inline). `cfg.prompt` remplace ce template et
+/// reçoit les mêmes substitutions. Les chemins et le workflow PR/CI
+/// viennent de l'AGENTS.md DU WORKSPACE ROUTÉ — rien n'est codé en dur
+/// pour un repo particulier.
+const WORKER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
+
+Tu es un worker autonome sur le workspace {WS} (repo {REPO}). Commence par lire {WS}/AGENTS.md — le workflow PR/CI qu'il decrit est obligatoire ; s'il est absent, applique les conventions du depot (branche -> PR draft -> review -> checks -> merge).
+
+## ITEM ASSIGNE — ton unique tache
+{ITEM}
+
+L'orchestrateur a deja marque cet item wip a ton nom (agent_id = ta session) : tu n'as PAS a lancer `agentbacklog --pop` — un worker = un item, et un pop pourrait prendre l'item d'un autre workspace.
+
+MISSION — une seule tache :
+
+1. Ton item t'est deja associe (status wip, agent_id = ta session) : `agentbacklog --list --json` le montre avec ton agent_id — le titre et la description ci-dessus sont ton cahier des charges complet.
+
+   Cas particulier : si une de tes taches reste wip parce que sa PR n'est pas encore mergée (assignee avant cette consigne), tu n'es PAS libre — mene d'abord cette PR jusqu'au merge (etape 4), marque --done, puis seulement ensuite l'item courant. Tu t'arretes quand TOUT ce qui t'est attribue est solde — tu NE RE-POP JAMAIS : l'orchestrateur spawn un worker neuf par item pending.
+
+2. Implemente la tache en suivant sa description a la lettre : git worktree dedie (JAMAIS dans le checkout principal {WS}), base sur la branche d'integration du repo, spec, verifications demandees. Option : review locale du diff avant de pousser si un outil de review locale est disponible.
+
+3. Cycle PR (cf AGENTS.md de {WS}) : branche -> push -> PR draft -> review auto -> traiter chaque round en restant draft (corriger, push, relancer la review) -> review soldee -> passer la PR ready -> attendre les checks VERTS sur le head SHA. Toute attente > ~1 min (verdict de review, checks CI, merge, delai) passe par un waiter ac-wait si le demon AgentControl l'expose — jamais de `--watch` bloquant ni de boucle de poll dans un tool call.
+
+4. Mene ta PR jusqu'au merge : si la regle de merge du repo le permet pour un agent (derniere review auto « Verdict: APPROVED » posterieure au push du head courant, fraicheur verifiee), procede au merge toi-meme ; sinon le merge reste a l'utilisateur — surveille jusqu'au merge effectif via un waiter (`ac-wait -- bash -c 'gh pr view <N> --json state -q .state | grep -q MERGED'` — pipe enrobe dans bash -c).
+
+5. Marque la tache faite : `agentbacklog --done <ID> --agent-id "$AGENTCONTROL_SESSION"` UNIQUEMENT quand ta PR est effectivement MERGED (verifie l'etat GitHub, pas seulement ready+checks) — ou quand les criteres propres de la tache sont remplis si elle n'a pas de PR. Puis ARRETE : reponds « termine » et cesse tout travail — ne re-pop jamais, l'orchestrateur te supprime et spawn un worker neuf pour le pending suivant.
+
+Blocage insurmontable sur une tache : `agentbacklog --release <ID> --agent-id "$AGENTCONTROL_SESSION"`, explique la raison dans ta reponse, puis arrete — l'item repart pending pour un autre worker.
+
+Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; push uniquement sur ta branche de PR ; nettoie ton worktree a la fin (git worktree remove) ; reponds en francais."#;
+
 const NOTES_TITLE: &str = "[auto] Patchnotes utilisateur de la release PR + passage ready";
 const NOTES_DESC: &str = r#"[Item cree automatiquement par backlog-orchestrator : backlog vide, cloture du cycle de release.]
 
@@ -90,7 +131,7 @@ La PR de release (next_release -> main, creee par auto-release-pr.yml — retrou
 
 MISSION :
 
-1. Body = patchnotes utilisateur EN ANGLAIS couvrant TOUTES les PR mergees dans next_release sur le cycle (inventaire : git fetch origin && git log origin/main..origin/next_release --oneline, ou les commits de la PR). Le generateur automatique (auto-release-pr.yml, cf item #18 / PR #126-127) regenere le body a chaque push sur next_release : verifie qu'il est a jour vis-a-vis du head courant, EN ANGLAIS, et lisible par un utilisateur (fonctionnalites visibles, pas le detail technique interne). S'il est stale ou non anglophone, declenche la regeneration via le mecanisme du workflow ; a defaut reecris le body toi-meme (gh pr edit <N> --body). Si le generateur doit produire de l'anglais durablement, corrige-le via le cycle PR normal plutot qu'une edition manuelle.
+1. Body = patchnotes utilisateur EN ANGLAIS couvrant TOUTES les PR mergees dans next_release sur le cycle (inventaire : git fetch origin && git log origin/main..origin/next_release --oneline, ou les commits de la PR). Le generateur automatique (auto-release-pr.yml, cf item #18 / PR #126-127) regenere le body a chaque push sur next_release : verifie qu'il est a jour vis-a-vis du head courant, EN ANGLAIS, et lisible par un utilisateur (fonctionnalites visibles, pas le detail technique interne). JAMAIS de reference interne dans le texte : pas de (#NNN), pas de lien PR, pas d'id backlog — uniquement des changements vecus par l'utilisateur ; les noms de fonctionnalites visibles restent OK. S'il est stale ou non anglophone, declenche la regeneration via le mecanisme du workflow ; a defaut reecris le body toi-meme (gh pr edit <N> --body). Si le generateur doit produire de l'anglais durablement, corrige-le via le cycle PR normal plutot qu'une edition manuelle.
 2. Passe la PR en ready : gh pr ready <N> — cela declenche release-bump (tag rc.k + commit de version sur next_release), c'est voulu. Ne merge JAMAIS la release PR vers main : le merge reste a l'utilisateur.
 3. Si le generateur produit un body defectueux, corrige-le via le cycle PR normal dans un worktree separe (base origin/next_release).
 4. Quand la release PR est ready avec un body a jour : agentbacklog --done <ID> --agent-id "<ton agent-id>". La regle generique du prompt worker « --done UNIQUEMENT quand ta PR est MERGED » NE S'APPLIQUE PAS a cet item : la release PR next_release -> main n'est pas ta PR — son merge est reserve a l'utilisateur. Ton critere de fin est « release PR ready + body a jour », point.
@@ -155,6 +196,9 @@ pub(crate) struct OrchStatus {
     /// ISO-8601 du dernier cycle exécuté (phase Active).
     pub last_cycle: Option<String>,
     pub workers: usize,
+    /// Sessions worker EN ACTIVITÉ (`max_working`) — hors waiter
+    /// ac-wait vivant ; approximation du tick (snapshot + allocations).
+    pub working: usize,
     pub pending: usize,
     pub wip: usize,
     /// Compteurs du pipeline plan_review (0 en mode legacy).
@@ -325,6 +369,7 @@ impl OrchProbe {
                 detail: cfg.enabled.then(|| "démarrage — en attente du premier cycle".into()),
                 last_cycle: None,
                 workers: 0,
+                working: 0,
                 pending: 0,
                 wip: 0,
                 planners: 0,
@@ -481,6 +526,7 @@ impl OrchProbe {
             "detail": st.detail,
             "last_cycle": st.last_cycle,
             "workers": st.workers,
+            "working": st.working,
             "pending": st.pending,
             "wip": st.wip,
             "planners": st.planners,
@@ -504,6 +550,15 @@ impl OrchProbe {
                 self.is_enabled(),
                 &self.cfg.read().unwrap(),
             ),
+            // Tags repo routés (clés repo_workspaces) — exposés même
+            // quand spawn_managers est coupé : le client s'en sert
+            // pour signaler les items taggés sans workspace (non
+            // dispatchables — le routage worker les met en attente).
+            "routed_tags": if self.is_enabled() {
+                self.cfg.read().unwrap().routed_tags()
+            } else {
+                Vec::new()
+            },
         })
     }
 
@@ -788,6 +843,53 @@ pub(crate) fn counts_as_alive(state: &str, sid: &str, live: &HashSet<String>) ->
     state != "asleep" || live.contains(sid)
 }
 
+/// La session consomme-t-elle un slot `max_working` (workers EN
+/// ACTIVITÉ) ? = `counts_as_alive` SANS waiter ac-wait vivant : un
+/// `asleep`+waiter garde son slot total (#181, retour garanti) mais
+/// est garé — il libère le slot working ; symétriquement une session
+/// non-asleep avec waiter pendante est « en attente » (le ping peut
+/// la steer à tout moment) → pas working tant que le waiter vit.
+/// `live` = même scan unique que `counts_as_alive`.
+pub(crate) fn counts_as_working(state: &str, sid: &str, live: &HashSet<String>) -> bool {
+    counts_as_alive(state, sid, live) && !live.contains(sid)
+}
+
+/// Budgets de slots worker d'un tick : `total` = `max_workers` (toutes
+/// sessions Backlog-* comptées `alive`, waiter ac-wait garé inclus)
+/// ; `working` = `max_working` (en activité — `counts_as_working`).
+/// Spawn et réveil d'`asleep` consomment les DEUX : un `asleep` nudgé
+/// n'a par construction pas de waiter (garde `acwait_pending` en
+/// amont), il redevient working. Exception connue : le nudge de
+/// relance d'un reviewer de revue en vol (§A de `orch_plan`, priorité
+/// revue) est volontairement hors budget — même classe de dépassement
+/// transitoire que le ping ac-wait. `gained` compte les allocations
+/// du tick — base du compteur `working` du statut.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct WorkerSlots {
+    pub total: usize,
+    pub working: usize,
+    pub gained: usize,
+}
+
+impl WorkerSlots {
+    /// Un slot peut-il être alloué ? Les DEUX caps doivent avoir du
+    /// mou. Dépassement transitoire accepté et voulu : le ping ac-wait
+    /// va direct à la session via `acctl send` — l'orchestrateur ne
+    /// peut pas le filtrer → un réveil de waiter peut dépasser
+    /// `max_working` jusqu'au prochain park. Le cap est un contrôle
+    /// d'admission (spawn/nudge), pas un kill.
+    pub fn ok(&self) -> bool {
+        self.total > 0 && self.working > 0
+    }
+
+    /// Alloue un slot (spawn ou réveil) — les deux budgets.
+    pub fn take(&mut self) {
+        self.total = self.total.saturating_sub(1);
+        self.working = self.working.saturating_sub(1);
+        self.gained += 1;
+    }
+}
+
 /// Sids ayant au moins un waiter ac-wait vivant — scan unique du
 /// répertoire d'état (un appel par lot de sessions, ex. list_sessions,
 /// au lieu d'une relecture disque par session).
@@ -955,6 +1057,67 @@ fn acwait_live_waiters_in(dir: &std::path::Path) -> HashMap<String, AcwaitWait> 
     out
 }
 
+/// Annule les waiters ac-wait d'une session supprimée : sans ça le
+/// worker survivant finirait par `acctl send` vers une session morte
+/// (échec loggé) au lieu de s'arrêter. Même geste que `ac-wait
+/// --cancel` moins la notification — le destinataire est déjà
+/// supprimé : `.cancel` posé, groupe de process tué, `.done` écrit.
+pub(crate) fn acwait_cancel_session(sid: &str) {
+    let Some(dir) = acwait_state_dir() else {
+        return;
+    };
+    acwait_cancel_session_in(&dir, sid);
+}
+
+/// Corps testable : pour chaque `<id>.meta` dont `session=` vaut `sid`
+/// et sans `.done`, pose `.cancel`, TERM le pid (groupe d'abord —
+/// `setsid` fait du pid le pgid, comme `ac-wait --cancel`), puis écrit
+/// `.done`. Un worker pas encore booté voit `.cancel` à sa première
+/// itération et sort proprement.
+fn acwait_cancel_session_in(dir: &std::path::Path, sid: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let meta_path = e.path();
+        if meta_path.extension().and_then(|x| x.to_str()) != Some("meta") {
+            continue;
+        }
+        let base = meta_path.with_extension("");
+        if base.with_extension("done").exists() {
+            continue;
+        }
+        let Ok(meta) = std::fs::read_to_string(&meta_path) else {
+            continue;
+        };
+        let is_target = meta.lines().any(|l| {
+            l.split_once('=').is_some_and(|(k, v)| {
+                k == "session"
+                    && v.trim().trim_matches('\'').trim_matches('"') == sid
+            })
+        });
+        if !is_target {
+            continue;
+        }
+        let _ = std::fs::write(base.with_extension("cancel"), "");
+        if let Ok(content) = std::fs::read_to_string(base.with_extension("pid")) {
+            if let Ok(pid) = content.trim().parse::<i32>() {
+                if pid > 0 {
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::kill(-pid, libc::SIGTERM);
+                        libc::kill(pid, libc::SIGTERM);
+                    }
+                }
+            }
+        }
+        let _ = std::fs::write(
+            base.with_extension("done"),
+            format!("cancelled {}\n", now_secs() as u64),
+        );
+    }
+}
+
 /// Sessions du composant en retenue `rate_limit` sur un profil routé
 /// (tout `*_agent` effectif ; et le même modèle si `model` est configuré)
 /// — le quota est partagé : tant qu'une session patiente sur son
@@ -993,6 +1156,17 @@ pub(crate) fn task_status<'a>(t: &'a Task) -> &'a str {
 }
 pub(crate) fn task_agent<'a>(t: &'a Task) -> &'a str {
     t.get("agent_id").and_then(Value::as_str).unwrap_or("")
+}
+/// Tag `repo`/workspace de l'item ("" = non taggé → workspace par
+/// défaut). Routage des sessions spawnées pour cet item.
+pub(crate) fn task_repo<'a>(t: &'a Task) -> &'a str {
+    t.get("repo").and_then(Value::as_str).unwrap_or("")
+}
+/// Priorité d'item — même tri que `agentbacklog --pop`
+/// (ORDER BY priority DESC, id) pour que le dispatch claim serve la
+/// même file que le self-pop historique.
+pub(crate) fn task_priority(t: &Task) -> i64 {
+    t.get("priority").and_then(Value::as_i64).unwrap_or(0)
 }
 /// Un item `pending` est « poppable » : sans dépendance ou dépendances
 /// toutes soldées — compter les dep-bloqués ferait spawner des workers
@@ -1178,6 +1352,12 @@ impl Daemon {
         if let Err(e) = self.orch_pr_review_tick().await {
             warn!("orchestrateur: review PR: {e:#}");
         }
+        // GC des sessions `feature:pr-review` orphelines — sous les
+        // gardes enable/pause/lock comme la passe review, indépendante
+        // d'agentbacklog (périmètre réduit aux PRReview : leurs
+        // références vivent dans `pr_reviews`, pas dans la file —
+        // item #250). Le cycle refait la passe complète avec la file.
+        self.orch_gc_orphans(None, &[]).await;
         let bin = match self.orch_agentbacklog_bin().await {
             Some(b) => b,
             None => {
@@ -1273,6 +1453,20 @@ impl Daemon {
             .filter(|t| task_status(t) == "pending" && task_poppable(t))
             .cloned()
             .collect();
+        // Items taggés d'un repo SANS workspace déclaré
+        // (`repo_workspaces`) : non dispatchables — ils attendent une
+        // entrée de routing plutôt que de partir dans le mauvais cwd.
+        // Tags distincts, triés, pour le détail de statut.
+        let unrouted_tags: Vec<String> = {
+            let mut v: Vec<String> = pending
+                .iter()
+                .filter(|t| !cfg.repo_routable(task_repo(t)))
+                .map(|t| task_repo(t).to_string())
+                .collect();
+            v.sort();
+            v.dedup();
+            v
+        };
         let now = now_secs();
         let mut st = self.orch.state.lock().unwrap().clone();
         // Snapshot `pr_reviews` au clone : le write-back de fin de cycle
@@ -1289,6 +1483,13 @@ impl Daemon {
             return Ok(());
         }
 
+        // GC des sessions composant orphelines (item #250) — placée
+        // avant failover/dispatch : les sessions spawnées plus tard
+        // dans le cycle ne sont pas encore dans les métas et les
+        // références (items wip, reviews running, reviewers, PRs
+        // ouvertes) sont toutes fraîches. Best-effort, jamais fatal.
+        self.orch_gc_orphans(Some(&tasks), &prs).await;
+
         // Failover provider (server/orch_failover.rs) : sessions du
         // composant en backoff rate_limit sur un profil `*_agent` qui
         // n'est plus celui configuré pour leur rôle → remplacées sur
@@ -1304,13 +1505,13 @@ impl Daemon {
         // dédié (server/orch_plan.rs — même snapshot, même état
         // persisté partagé) ; l'autre branche est le dispatch worker
         // direct historique, inchangé.
-        let (n_workers, n_pending, n_planners, n_reviewers) = if cfg.plan_review {
+        let (n_workers, n_working, n_pending, n_planners, n_reviewers) = if cfg.plan_review {
             let oc = self
                 .orch_plan_tick(
                     bin, cfg, ws, &tasks, &metas, &session_ids, &prs, &mut st,
                 )
                 .await?;
-            (oc.workers, oc.pending, oc.planners, oc.reviewers)
+            (oc.workers, oc.working, oc.pending, oc.planners, oc.reviewers)
         } else {
             // 0. Désactivation en vol : items encore plan_review/
             //    reviewing → dégel en pending (claim-review + verdict
@@ -1504,10 +1705,31 @@ impl Daemon {
                         }
                     }
                 }
+                // `dead_since` : âge de la mort persisté dans le
+                // ledger — survit au restart (la session repasse
+                // `interrupted` puis re-`dead` si la reprise échoue,
+                // mais l'horloge ne doit pas repartir à zéro tant que
+                // l'état n'est pas reparti de `dead`).
+                let prev_dead = st
+                    .assignments
+                    .get(sid)
+                    .and_then(|a| a.get("dead_since"))
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0);
+                let dead_since = if state == "dead" {
+                    if prev_dead > 0.0 {
+                        prev_dead
+                    } else {
+                        now
+                    }
+                } else {
+                    0.0
+                };
                 let assignment = json!({
                     "title": title, "state": state,
                     "tasks": my_items, "prs": my_prs,
                     "posted_wip": posted_wip,
+                    "dead_since": dead_since,
                 });
                 if just_posted {
                     // Le UserMessage est déjà commité au journal, mais `st`
@@ -1528,8 +1750,25 @@ impl Daemon {
                     st.clean_since.remove(sid);
                     continue;
                 }
-                // inactif : suppression seulement si TOUT est soldé.
-                if open_prs.is_empty() && my_open.is_empty() {
+                // inactif : suppression seulement si TOUT est soldé —
+                // ou si la session est `dead` depuis DEAD_WORKER_S :
+                // ses items wip sont relâchés (repartent pending pour
+                // un worker neuf) puis elle est rm'd comme une
+                // orpheline — le process est mort, plus rien à
+                // reprendre (item #250).
+                let dead_stale = dead_since > 0.0 && now - dead_since > DEAD_WORKER_S;
+                if open_prs.is_empty() && (my_open.is_empty() || dead_stale) {
+                    if dead_stale {
+                        for id in &my_open {
+                            info!(
+                                "orchestrateur: {sid} dead depuis {}s — release #{id}",
+                                (now - dead_since) as i64
+                            );
+                            let _ =
+                                run_out(&[bin, "--release", id.as_str(), "--agent-id", sid], ws)
+                                    .await;
+                        }
+                    }
                     // items done mais aucune PR enregistrée : le watcher peut
                     // laguer — grâce CLEAN_GRACE_S avant de conclure au rm.
                     let unresolved = !my_done.is_empty() && my_prs.is_empty();
@@ -1623,12 +1862,23 @@ impl Daemon {
             // évite le spawn d'un remplaçant puis max+1 au ping (#181).
             // Waiter stale → compte 0, réveil budgété par `free` comme
             // avant. Aligné sur backlog_alive du pipeline plan_review.
+            // Deux budgets : `total` = max_workers (ci-dessus) et
+            // `working` = max_working — les sessions garées sur un
+            // waiter ac-wait comptent dans total mais pas working.
             let live_waiters = acwait_live_sids();
             let alive = workers
                 .iter()
                 .filter(|w| counts_as_alive(&w.state, &w.id, &live_waiters))
                 .count();
-            let mut free = (cfg.max_workers as usize).saturating_sub(alive);
+            let working = workers
+                .iter()
+                .filter(|w| counts_as_working(&w.state, &w.id, &live_waiters))
+                .count();
+            let mut slots = WorkerSlots {
+                total: (cfg.max_workers as usize).saturating_sub(alive),
+                working: (cfg.max_working_cap() as usize).saturating_sub(working),
+                gained: 0,
+            };
             // FIFO d'allocation : le plus ancien nudge différé d'abord
             // (jamais nudgé = le plus ancien).
             asleep_nudges
@@ -1639,10 +1889,10 @@ impl Daemon {
                 if my_open.is_empty() {
                     continue;
                 }
-                if free == 0 {
+                if !slots.ok() {
                     info!(
                         "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
-                         wip={my_open:?}) → nudge différé (max_workers)"
+                         wip={my_open:?}) → nudge différé (max_workers/max_working)"
                     );
                     continue;
                 }
@@ -1651,22 +1901,38 @@ impl Daemon {
                 }
                 info!(
                     "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
-                     wip={my_open:?}) → nudge wip-prioritaire (slot free={free})"
+                     wip={my_open:?}) → nudge wip-prioritaire (slots={:?})",
+                    slots
                 );
                 let open_refs: Vec<&String> = open_prs.iter().collect();
                 let wip_refs: Vec<&String> = my_open.iter().collect();
                 if self.orch_nudge(sid, &open_refs, &wip_refs).await {
                     st.nudges.insert(sid.clone(), now);
-                    free = free.saturating_sub(1);
+                    slots.take();
                 }
             }
-            // 3b. spawn pour les pending poppables — seulement sur les
-            // slots que les wips asleep n'ont pas pris.
-            // Mode sériel quota (rl > 0) : au plus UN spawn, et seulement
-            // si aucune session ne tourne — les sessions en erreur
-            // rate_limit attendent leur backoff, les idles ne sont pas
-            // réveillées. Sinon dispatch normal.
-            let to_spawn = if rl > 0 {
+            // 3b. Dispatch pending — DEUX mécanismes selon la surface
+            // CLI d'agentbacklog :
+            //  - ≥ 0.7 (`--claim`) : dispatch PAR ITEM — l'orchestrateur
+            //    choisit l'item (ordre du pop : priority DESC, id),
+            //    spawn le worker dans le workspace routé de son tag
+            //    `repo` (`repo_workspaces`, fallback `workspace` pour
+            //    les non taggés) et fait le `--claim` après le spawn
+            //    (échec → rm, item toujours pending). Routage strict :
+            //    un worker ne peut plus prendre l'item d'un autre
+            //    workspace, et les items taggés sans mapping
+            //    (`unrouted_tags`) ne sont jamais spawnés.
+            //  - plus ancien : self-`--pop` non scopé dans
+            //    `cfg.workspace` — comportement historique, dégradé
+            //    (pas de routage repo possible sans `--claim`).
+            // Mode sériel quota (rl > 0) : au plus UN spawn, et
+            // seulement si aucune session ne tourne — les sessions en
+            // erreur rate_limit attendent leur backoff, les idles ne
+            // sont pas réveillées. Sinon dispatch normal.
+            let serial_cap = |workers: &[SessionMeta], n: usize| -> usize {
+                if rl == 0 {
+                    return n;
+                }
                 let active = workers.iter().any(|w| {
                     matches!(
                         w.state.as_str(),
@@ -1681,25 +1947,107 @@ impl Daemon {
                     "{rl} session(s) en rate_limit — exécution sérialisée \
                      (1 session à la fois)"
                 ));
-                usize::from(!active && !pending.is_empty()).min(free)
-            } else {
-                pending.len().min(free)
+                usize::from(!active).min(n)
             };
-            for _ in 0..to_spawn {
-                st.counter += 1;
-                info!(
-                    "orchestrateur: pending={} active={} → spawn {}{}",
-                    pending.len(),
-                    alive,
-                    cfg.title_prefix,
-                    st.counter
-                );
-                if let Some(sid) = self.orch_spawn(st.counter).await {
-                    // Session fraîche = worker actif pour le comptage du tick.
-                    if let Ok(s) = self.get_session(&sid).await {
-                        workers.push(s.meta_snapshot());
+            // Items dispatchables : routables uniquement, triés comme
+            // le pop (priority DESC, id ASC).
+            let mut spawnable: Vec<&Task> = pending
+                .iter()
+                .filter(|t| cfg.repo_routable(task_repo(t)))
+                .collect();
+            spawnable.sort_by(|a, b| {
+                task_priority(b)
+                    .cmp(&task_priority(a))
+                    .then(task_id(a).cmp(&task_id(b)))
+            });
+            if orch_plan::cli_claim_capable(bin, ws).await {
+                let cap = serial_cap(&workers, spawnable.len())
+                    .min(slots.total)
+                    .min(slots.working);
+                for t in spawnable.iter().take(cap) {
+                    if !slots.ok() || !self.orch.is_enabled() {
+                        break;
                     }
-                    free = free.saturating_sub(1);
+                    let id = task_id(t);
+                    let repo = task_repo(t);
+                    let cwd = cfg.workspace_for(repo).to_string();
+                    let repo_label = if repo.is_empty() {
+                        "(non taggé)".to_string()
+                    } else {
+                        repo.to_string()
+                    };
+                    let prompt = orch_plan::fill(
+                        cfg.prompt.as_deref().unwrap_or(WORKER_PROMPT),
+                        &[
+                            ("WS", cwd.clone()),
+                            ("REPO", repo_label.clone()),
+                            ("ID", id.to_string()),
+                            ("ITEM", orch_plan::item_body(t)),
+                        ],
+                    );
+                    st.counter += 1;
+                    info!(
+                        "orchestrateur: pending={} unrouted={} → spawn {}{} \
+                         pour #{} (repo {}, ws {})",
+                        pending.len(),
+                        unrouted_tags.len(),
+                        cfg.title_prefix,
+                        st.counter,
+                        id,
+                        repo_label,
+                        cwd
+                    );
+                    let Some(sid) = self
+                        .orch_spawn(st.counter, &cwd, prompt)
+                        .await
+                    else {
+                        continue;
+                    };
+                    let (rc, _o, e) = run_out(
+                        &[bin, "--claim", &id.to_string(), "--agent-id", &sid],
+                        ws,
+                    )
+                    .await
+                    .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                    if rc == 0 {
+                        if let Ok(s) = self.get_session(&sid).await {
+                            workers.push(s.meta_snapshot());
+                        }
+                        slots.take();
+                    } else {
+                        warn!("orchestrateur: claim #{id} rc={rc} {e} → rm {sid}");
+                        if let Err(e2) = self.h_delete_session(sid.clone()).await {
+                            warn!("orchestrateur: rm {sid} (claim échoué): {e2:#}");
+                        }
+                    }
+                }
+            } else {
+                let cap = serial_cap(&workers, pending.len())
+                    .min(slots.total)
+                    .min(slots.working);
+                for _ in 0..cap {
+                    if !self.orch.is_enabled() {
+                        return Ok(());
+                    }
+                    st.counter += 1;
+                    info!(
+                        "orchestrateur: pending={} active={} → spawn {}{} \
+                         (self-pop, agentbacklog sans --claim)",
+                        pending.len(),
+                        alive,
+                        cfg.title_prefix,
+                        st.counter
+                    );
+                    let prompt = cfg.prompt.clone().unwrap_or_else(|| PROMPT.to_string());
+                    if let Some(sid) = self
+                        .orch_spawn(st.counter, &cfg.workspace, prompt)
+                        .await
+                    {
+                        if let Ok(s) = self.get_session(&sid).await {
+                            workers.push(s.meta_snapshot());
+                        }
+                        slots.take();
+                    }
                 }
             }
 
@@ -1711,10 +2059,10 @@ impl Daemon {
                 if !my_open.is_empty() {
                     continue;
                 }
-                if free == 0 {
+                if !slots.ok() {
                     info!(
                         "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
-                         wip={my_open:?}) → nudge différé (max_workers)"
+                         wip={my_open:?}) → nudge différé (max_workers/max_working)"
                     );
                     continue;
                 }
@@ -1725,15 +2073,22 @@ impl Daemon {
                 let wip_refs: Vec<&String> = my_open.iter().collect();
                 info!(
                     "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
-                     wip={my_open:?}) → nudge (slot free={free})"
+                     wip={my_open:?}) → nudge (slots={:?})",
+                    slots
                 );
                 if self.orch_nudge(&sid, &open_refs, &wip_refs).await {
                     st.nudges.insert(sid, now);
-                    free = free.saturating_sub(1);
+                    slots.take();
                 }
             }
 
-            (workers.len(), pending.len(), 0usize, 0usize)
+            (
+                workers.len(),
+                working + slots.gained,
+                pending.len(),
+                0usize,
+                0usize,
+            )
         };
 
         // 4. garde release PR : notes+ready quand vide, draft quand du
@@ -1826,6 +2181,7 @@ impl Daemon {
         {
             let mut stg = self.orch.status.lock().unwrap();
             stg.workers = n_workers;
+            stg.working = n_working;
             stg.pending = n_pending;
             stg.wip = tasks.iter().filter(|t| task_status(t) == "wip").count();
             stg.planners = n_planners;
@@ -1845,8 +2201,22 @@ impl Daemon {
                 })
                 .filter_map(|m| m.last_error.as_ref().map(|le| le.kind.as_str()))
                 .collect();
-            let detail = (!errs.is_empty())
-                .then(|| format!("{} session(s) en erreur : {}", errs.len(), errs.join(", ")));
+            let mut detail_parts: Vec<String> = Vec::new();
+            if !errs.is_empty() {
+                detail_parts.push(format!(
+                    "{} session(s) en erreur : {}",
+                    errs.len(),
+                    errs.join(", ")
+                ));
+            }
+            if !unrouted_tags.is_empty() {
+                detail_parts.push(format!(
+                    "items non dispatchables — tag(s) repo sans workspace \
+                     (déclarer via repo_workspaces) : {}",
+                    unrouted_tags.join(", ")
+                ));
+            }
+            let detail = (!detail_parts.is_empty()).then(|| detail_parts.join(" ; "));
             self.orch.set_status(Phase::Active, detail);
         }
         // Échantillon métriques post-cycle (server/metrics.rs) —
@@ -1880,7 +2250,14 @@ impl Daemon {
     /// l'échelle de gh ("open"/"draft" → OPEN).
     pub(crate) async fn orch_pr_state(&self, p: &proto::PrEntry, ws: &Path) -> String {
         if p.forge == "github" && p.pr > 0 {
-            return self.gh_pr_state(p.pr, ws).await;
+            // `-R` accepte [HOST/]OWNER/REPO — host préfixé seulement
+            // s'il n'est pas l'hôte GitHub par défaut (GHES).
+            let repo = if p.host.is_empty() || p.host == "github.com" {
+                p.repo.clone()
+            } else {
+                format!("{}/{}", p.host, p.repo)
+            };
+            return self.gh_pr_state(p.pr, &repo, ws).await;
         }
         match p.status.as_str() {
             "open" | "draft" => "OPEN".into(),
@@ -1890,13 +2267,29 @@ impl Daemon {
         }
     }
 
-    /// État forge d'une PR du workspace (`gh pr view`) — "UNKNOWN" en
-    /// cas d'échec, jamais OPEN : traitée comme soldée (cf. script).
-    async fn gh_pr_state(&self, pr: u64, ws: &Path) -> String {
-        run_out(
-            &["gh", "pr", "view", &pr.to_string(), "--json", "state", "-q", ".state"],
-            ws,
-        )
+    /// État forge d'une PR — "UNKNOWN" en cas d'échec, jamais OPEN :
+    /// traitée comme soldée (cf. script). `repo` = "owner/name" de
+    /// l'entrée registre : passé à `gh -R` pour sonder LA BONNE forge
+    /// quel que soit le cwd (multi-workspaces — sinon la sonde
+    /// interrogerait la PR #N du repo du cwd, une autre PR).
+    async fn gh_pr_state(&self, pr: u64, repo: &str, ws: &Path) -> String {
+        let num = pr.to_string();
+        let mut argv: Vec<String> = vec![
+            "gh".into(),
+            "pr".into(),
+            "view".into(),
+            num,
+            "--json".into(),
+            "state".into(),
+            "-q".into(),
+            ".state".into(),
+        ];
+        if !repo.is_empty() {
+            argv.push("-R".into());
+            argv.push(repo.to_string());
+        }
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        run_out(&argv, ws)
         .await
         .ok()
         .filter(|(rc, out, _)| *rc == 0 && !out.is_empty())
@@ -2010,19 +2403,21 @@ impl Daemon {
     /// `component:backlog-orchestrator` — le prompt part wrappé service
     /// et la session se raccroche au nœud du composant dans le
     /// diagramme, groupe posé à la création), puis `thought_level` par
-    /// handler. Remplace les `acctl new/setcfg`/RPC socket du script.
-    async fn orch_spawn(self: &Arc<Self>, number: u64) -> Option<String> {
+    /// handler. `cwd` = workspace routé de l'item (repo_workspaces) et
+    /// `prompt` déjà templé — le dispatch claim passe le prompt par
+    /// item, le repli self-pop le prompt générique dans cfg.workspace.
+    /// Remplace les `acctl new/setcfg`/RPC socket du script.
+    async fn orch_spawn(self: &Arc<Self>, number: u64, cwd: &str, prompt: String) -> Option<String> {
         let cfg = self.orch.cfg.read().unwrap().clone();
         let cfg = &cfg;
         let title = format!("{}{}", cfg.title_prefix, number);
-        let prompt = cfg.prompt.clone().unwrap_or_else(|| PROMPT.to_string());
         let group = (!cfg.group.is_empty()).then(|| cfg.group.clone());
         let agent = cfg.agent_or(&cfg.worker_agent);
         self.warn_spawn_cfg(agent, &cfg.model, &cfg.mode);
         let v = match self
             .h_new_session(
                 agent.to_string(),
-                cfg.workspace.clone(),
+                cwd.to_string(),
                 Some(title.clone()),
                 Some(cfg.model.clone()),
                 Some(cfg.mode.clone()),
@@ -2317,6 +2712,8 @@ mod tests {
             available_modes: Vec::new(),
             available_commands: Vec::new(),
             available_models: Vec::new(),
+            advisor: None,
+            advisor_models: Vec::new(),
             config_options: Vec::new(),
             pending_config: Default::default(),
             desired_config: Default::default(),
@@ -2436,6 +2833,8 @@ mod tests {
             note: None,
             via: "detected".into(),
             sync_fails: 0,
+            review: None,
+            ci: None,
             created_at: "t".into(),
             updated_at: "t".into(),
         };
@@ -2488,6 +2887,23 @@ mod tests {
         for st in ["idle", "working", "error"] {
             assert!(counts_as_alive(st, "s-w2", &live));
         }
+    }
+
+    #[test]
+    fn working_exclut_les_waiters_acwait() {
+        // max_working : alive SANS waiter ac-wait vivant. Un asleep+waiter
+        // garde son slot total mais est garé → pas working ; une session
+        // non-asleep avec waiter pendante est « en attente » → pas
+        // working tant que le waiter vit.
+        let mut live = HashSet::new();
+        live.insert("s-w1".to_string());
+        assert!(!counts_as_working("asleep", "s-w1", &live));
+        assert!(!counts_as_working("idle", "s-w1", &live));
+        assert!(!counts_as_working("working", "s-w1", &live));
+        // Sans waiter : non-asleep = working, asleep = ni alive ni working.
+        assert!(counts_as_working("idle", "s-w2", &live));
+        assert!(counts_as_working("working", "s-w2", &live));
+        assert!(!counts_as_working("asleep", "s-w2", &live));
     }
 
     /// Meta ac-wait minimale : `key=%q` shell-quoté — valeurs simples
@@ -2570,5 +2986,44 @@ mod tests {
         assert_eq!(w.name, "verdict PR #42"); // backslashes %q déséchappés
         assert_eq!(w.timeout, Some(1800.0));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repo_routing_workspace_for_et_routable() {
+        let mut c = cfg::OrchCfg::default();
+        // Non taggé → workspace par défaut, toujours routable.
+        assert_eq!(c.workspace_for(""), "/workspace");
+        assert!(c.repo_routable(""));
+        // Tag connu → son cwd ; tag inconnu → fallback workspace mais
+        // NON routable (l'item doit attendre, pas partir dans le
+        // mauvais checkout).
+        c.repo_workspaces
+            .insert("Taskwondo".into(), "/home/dev/taskwondo".into());
+        assert_eq!(c.workspace_for("Taskwondo"), "/home/dev/taskwondo");
+        assert!(c.repo_routable("Taskwondo"));
+        assert_eq!(c.workspace_for("Inconnu"), "/workspace");
+        assert!(!c.repo_routable("Inconnu"));
+        // routed_tags = clés triées (BTreeMap), exposé au client.
+        assert_eq!(c.routed_tags(), vec!["AgentControl", "Taskwondo"]);
+    }
+
+    #[test]
+    fn worker_prompt_remplace_les_placeholders() {
+        let p = orch_plan::fill(
+            WORKER_PROMPT,
+            &[
+                ("WS", "/w".to_string()),
+                ("REPO", "Taskwondo".to_string()),
+                ("ID", "42".to_string()),
+                ("ITEM", "#42 — titre".to_string()),
+            ],
+        );
+        assert!(p.contains("cwd /w") || p.contains("/w"));
+        assert!(p.contains("repo Taskwondo"));
+        assert!(p.contains("#42 — titre"));
+        assert!(!p.contains("{WS}") && !p.contains("{ITEM}"));
+        // Le prompt worker ne doit plus imposer le self-pop : le dispatch
+        // claim pré-assigne l'item.
+        assert!(p.contains("PAS a lancer `agentbacklog --pop`"));
     }
 }

@@ -117,6 +117,10 @@ struct AgentToml<'a> {
     catalogue_cmd: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model_override_cmd: Option<&'a str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    extra_models: &'a Vec<proto::ExtraModel>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    advisor_models: &'a Vec<String>,
     #[serde(skip_serializing_if = "super::cfg::CompactPartial::is_empty")]
     compact: &'a super::cfg::CompactPartial,
     #[serde(skip_serializing_if = "HashMap::is_empty")]
@@ -158,6 +162,8 @@ pub(crate) fn persist(root: &Path, edits: &[(String, AgentProfile)]) -> Result<(
                 .then_some(p.max_instances),
             catalogue_cmd: p.catalogue_cmd.as_deref(),
             model_override_cmd: p.model_override_cmd.as_deref(),
+            extra_models: &p.extra_models,
+            advisor_models: &p.advisor_models,
             compact: &p.compact,
             env: &p.env,
         };
@@ -225,6 +231,8 @@ mod tests {
             max_instances: super::super::DEFAULT_MAX_INSTANCES,
             catalogue_cmd: None,
             model_override_cmd: None,
+            extra_models: Vec::new(),
+            advisor_models: Vec::new(),
         }
     }
 

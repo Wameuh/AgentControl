@@ -259,6 +259,17 @@ button:disabled { opacity: .5; cursor: default; }
 /* « non résoluble » : sync jamais abouti (repo fantôme, hôte mort) —
    ligne estompée comme les terminées, pastille gold pointillée. */
 #pr-list .pr .pr-st.st-unres { color: var(--gold); border-style: dashed; border-color: color-mix(in srgb, var(--gold) 55%, transparent); }
+/* Badges secondaires : review (native prioritaire) + CI de la tête. */
+#pr-list .pr .pr-st.st-nrev { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+#pr-list .pr .pr-st.st-nrev-retry { color: var(--gold); border-style: dashed; border-color: color-mix(in srgb, var(--gold) 55%, transparent); }
+#pr-list .pr .pr-st.st-nrev-queued { color: var(--dim); border-style: dashed; }
+#pr-list .pr .pr-st.st-approved { color: var(--sage); border-color: rgba(184, 207, 174, .5); }
+#pr-list .pr .pr-st.st-changes { color: var(--err); border-color: rgba(232, 148, 134, .55); }
+#pr-list .pr .pr-st.st-requested { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+#pr-list .pr .pr-st.st-required { color: var(--dim); }
+#pr-list .pr .pr-st.st-cip { color: var(--gold); }
+#pr-list .pr .pr-st.st-cis { color: var(--sage); }
+#pr-list .pr .pr-st.st-cif { color: var(--err); border-color: rgba(232, 148, 134, .55); }
 #pr-list .pr.pr-unres { opacity: .55; }
 #pr-list .pr.pr-unres:hover { opacity: .85; }
 /* Entrées « terminées » (section historique) : estompées pour rester
@@ -393,3 +404,27 @@ button:disabled { opacity: .5; cursor: default; }
   font-size: 10px; text-transform: uppercase; letter-spacing: .4px;
   color: var(--dim);
 }
+/* Steppers orchestrateur (max_workers / reviews PR max) — patch à chaud
+   via component_set_params ; valeur lue dans spec.params de
+   list_components. */
+.bl-m-ctl {
+  display: flex; align-items: center; gap: 6px;
+  padding: 2px 1px 6px; font-size: 11px; color: var(--dim);
+}
+.bl-m-ctl .bl-m-ctl-l { flex: 1; min-width: 0; }
+.bl-m-step {
+  width: 18px; height: 18px; padding: 0; font-size: 12px; line-height: 1;
+  border: 1px solid var(--line); border-radius: 5px;
+  background: none; color: var(--ink); cursor: pointer;
+}
+.bl-m-step:hover { border-color: var(--accent); color: var(--accent); }
+.bl-m-step[disabled] { opacity: .4; cursor: default; }
+.bl-m-step-v {
+  min-width: 14px; text-align: center;
+  font-family: Mono, ui-monospace, monospace; color: var(--ink);
+}
+.bl-m-err {
+  display: flex; align-items: center; gap: 6px;
+  padding: 2px 1px 4px; font-size: 11px; color: var(--gold);
+}
+.bl-m-err .ic { width: 12px; height: 12px; flex: none; }

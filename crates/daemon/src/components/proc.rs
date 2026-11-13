@@ -939,6 +939,7 @@ mod tests {
             params_schema: Vec::new(),
             params: std::collections::HashMap::new(),
             render: None,
+            view_dir: None,
         }
     }
 

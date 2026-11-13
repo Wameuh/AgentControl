@@ -55,6 +55,10 @@ export class ConnView {
    *  l'a fermée sans connecter — pas de réouverture forcée tant qu'aucune
    *  conn ne repasse « ok » (réarmement dans onLiveChanged). */
   private homeDismissed = false;
+  /** Une autre instance du client tourne et aucune directive --conn
+   *  explicite ne l'a lancée : l'auto-connexion est suspendue (bannière
+   *  #cv-other-inst), la connexion manuelle reste possible. */
+  private otherAlive = false;
 
   bind(conns: ConnectionManager) {
     this.conns = conns;
@@ -155,7 +159,7 @@ export class ConnView {
       .catch(() => null);
     const n = sessions?.filter((s) =>
       s.conn === conn && s.state !== "dead" && s.state !== "interrupted" &&
-      s.state !== "asleep").length;
+      s.state !== "asleep" && s.state !== "wait-asleep").length;
     return this.daemonAction(
       t("dupdate_h"),
       n == null
@@ -513,6 +517,44 @@ export class ConnView {
   onLiveChanged() {
     if (this.conns.anyUp()) this.homeDismissed = false;
     if (this.isOpen()) this.renderSavedList();
+    this.syncOtherInst();
+  }
+
+  /** Bannière « une autre instance tourne » : visible tant que
+   *  l'auto-connexion est suspendue et qu'aucune conn n'est up — dès
+   *  qu'une connexion (manuelle ou spawn) tient, elle n'a plus lieu. */
+  private syncOtherInst() {
+    $("cv-other-inst").hidden = !(this.otherAlive && !this.conns.anyUp());
+  }
+
+  /** Section « aucun accès configuré » (réinstall / premier lancement) :
+   *  le pairing QR est LE chemin de récupération — les clés Keystore ne
+   *  survivent pas à une désinstallation (#160), tout repart du QR
+   *  émis par le desktop. Visible tant que saved_connections est vide. */
+  private syncWelcome() {
+    // Web : la conn servante est unique et implicite — la section
+    // « restaurer par QR » n'y a pas de sens (scanPair indisponible).
+    $("cv-welcome").hidden = isWeb || this.saved.length !== 0;
+  }
+
+  /** Scan QR (B′ v2 / endpoint H / repli A v1) → cfg → connect+save
+   *  par le chemin nominal. Partagé par le bouton du formulaire et la
+   *  section « restaurer mes accès » de l'accueil sans connexion. */
+  private async scanAndGo() {
+    try {
+      const cfg = await scanPair();
+      if (!cfg) return;
+      await this.go(cfg);
+      // La cfg vient d'être sauvegardée par go() → re-lire la liste :
+      // la nouvelle conn apparaît et la section « premier accès »
+      // disparaît sans attendre une réouverture (renderSavedList
+      // rappelle syncWelcome).
+      this.saved = await invoke<SavedConn[]>("saved_connections")
+        .catch(() => this.saved);
+      this.renderSavedList();
+    } catch (e) {
+      dlgErr("c-err", String(e));
+    }
   }
 
   /** Liste des connexions sauvegardées : pastille couleur, hôte, statut
@@ -522,6 +564,7 @@ export class ConnView {
     const ul = $("cv-saved");
     ul.innerHTML = "";
     $("cv-saved-sec").hidden = this.saved.length === 0;
+    this.syncWelcome();
     this.saved.forEach((c) => {
       const key = connKeyOf(c, isAndroid());
       const st = this.conns.state(key);
@@ -643,6 +686,7 @@ export class ConnView {
     // Connexions sauvegardées → liste à pastilles (pas un <select>).
     this.saved = await invoke<SavedConn[]>("saved_connections").catch(() => []);
     this.renderSavedList();
+    this.syncOtherInst();
   }
 
   close() {
@@ -651,7 +695,7 @@ export class ConnView {
     // Ne lever l'inert que si les autres overlays #chat sont aussi
     // fermés — sinon on ré-expose #input derrière settings-view/map-view/
     // components-view (frappes invisibles, le bug exact que l'inert prévient).
-    if ($("settings-view").hidden && $("map-view").hidden && $("components-view").hidden) {
+    if ($("settings-view").hidden && $("map-view").hidden && $("components-view").hidden && $("logs-view").hidden && $("plugin-view").hidden) {
       this.setChatInert(false);
     }
     nav.close("connview");
@@ -761,14 +805,9 @@ export class ConnView {
     if (isWeb) {
       scan.hidden = true;
     } else {
-      scan.onclick = async () => {
-        try {
-          const cfg = await scanPair();
-          if (cfg) await this.go(cfg);
-        } catch (e) {
-          dlgErr("c-err", String(e));
-        }
-      };
+      scan.onclick = () => void this.scanAndGo();
+      ($("cv-restore") as HTMLButtonElement).onclick = () =>
+        void this.scanAndGo();
     }
 
     // Le bouton vit dans la sidebar — drawer sur Android : le refermer
@@ -789,13 +828,25 @@ export class ConnView {
    *  sinon la dernière utilisée (première entrée de connections.json).
    *  Les autres connexions enregistrées restent disponibles dans la vue
    *  et aux autres instances. `saved` est préchargé par le boot. */
-  autoConnect(saved: SavedConn[], want?: string) {
+  autoConnect(saved: SavedConn[], want?: string, otherAlive = false) {
     this.saved = saved;
+    // `want` (--conn / spawn_instance) = intention explicite → jamais
+    // suspendu ; sans lui, une instance déjà vivante bloque l'auto.
+    this.otherAlive = otherAlive && want == null;
+    this.syncOtherInst();
     // Web : la conn unique (le démon qui sert la page) est vitale —
     // la préférence "autoconnect off" n'a pas de sens ici. Et `want`
     // (--conn) est une intention explicite (instance spawnée depuis une
     // autre) — pas une reconnexion passive : elle court-circuite la pref.
     if (!want && !isWeb && localStorage.getItem("ac-autoconnect") === "0") return;
+    if (this.otherAlive) {
+      // Seconde instance sans directive : pas d'auto-connexion — deux
+      // clients passifs sur la même conn se concurrencent (flap de
+      // transport, notifications doublées). La connexion MANUELLE reste
+      // possible ; la bannière de la vue garde l'avertissement visible.
+      notify("warn", t("inst_running_warn"));
+      return;
+    }
     const target =
       (want ? saved.find((c) => connKeyOf(c, isAndroid()) === want) : undefined) ??
       saved[0];

@@ -234,13 +234,14 @@ fn is_exit_plan_req(title: &str, kind: &str, detail: &str) -> bool {
 }
 
 /// Garde anti-deadlock des spawns (b)+(c) : tant qu'une revue attend
-/// un reviewer, il faut `free ≥ 2` — le slot restant garantit qu'au
+/// un reviewer, il faut 2 slots (total ET working) — le slot restant garantit qu'au
 /// prochain tick un reviewer pourra toujours débloquer l'in-flight
 /// avant que tout ne gel (5 planners en attente = revues jamais
 /// servies). Appliquée aussi aux workers `no_plan` : un slot est un
 /// slot, la priorité revue doit primer sur tout spawn.
-fn spawn_slot_ok(free: usize, unclaimed_review: bool) -> bool {
-    free >= if unclaimed_review { 2 } else { 1 }
+fn spawn_slot_ok(slots: WorkerSlots, unclaimed_review: bool) -> bool {
+    let need = if unclaimed_review { 2 } else { 1 };
+    slots.total >= need && slots.working >= need
 }
 
 /// Force sûr pour un message de contrôle orchestrateur : faux si la
@@ -272,14 +273,25 @@ fn backlog_alive(metas: &[SessionMeta], cfg: &cfg::OrchCfg, live: &HashSet<Strin
         .count()
 }
 
+/// Même comptage que `backlog_alive` mais restreint aux sessions EN
+/// ACTIVITÉ (`counts_as_working` — hors waiter ac-wait vivant) : la
+/// base du budget `max_working`, alignée sur le chemin legacy.
+fn backlog_working(metas: &[SessionMeta], cfg: &cfg::OrchCfg, live: &HashSet<String>) -> usize {
+    metas
+        .iter()
+        .filter(|m| is_backlog(m, cfg) && counts_as_working(&m.state, &m.id, live))
+        .count()
+}
+
 /// Un nudge depuis `asleep` réveille le process agent et doit donc
-/// consommer un slot `max_workers` (même budget que spawn / reuse).
-/// Idle/error/… : la session compte déjà dans `alive`, pas de slot
-/// supplémentaire. `free == 0` → le nudge est différé au prochain tick
-/// où un slot se libère (spawn prioritaire : `free` est déjà réduit
-/// par le dispatch §D avant l'entretien §E).
-fn nudge_slot_ok(free: usize, state: &str) -> bool {
-    state != "asleep" || free > 0
+/// consommer un slot worker des DEUX budgets (même règle que spawn /
+/// reuse — `slots.ok()` exige du mou sur max_workers ET max_working).
+/// Idle/error/… : la session compte déjà, pas de slot supplémentaire.
+/// `slots` vide → le nudge est différé au prochain tick où un slot se
+/// libère (spawn prioritaire : les budgets sont déjà réduits par le
+/// dispatch §D avant l'entretien §E).
+fn nudge_slot_ok(slots: WorkerSlots, state: &str) -> bool {
+    state != "asleep" || slots.ok()
 }
 
 fn nudge_consumes_slot(state: &str) -> bool {
@@ -607,6 +619,9 @@ pub(crate) fn fill(tpl: &str, pairs: &[(&str, String)]) -> String {
 pub(crate) struct PlanOutcome {
     /// Sessions Backlog-* vivantes (W+P+R) — `status.workers`.
     pub workers: usize,
+    /// Sessions Backlog-* EN ACTIVITÉ (hors waiter ac-wait) —
+    /// `status.working`, budget `max_working`.
+    pub working: usize,
     /// Items pending poppables — `status.pending`.
     pub pending: usize,
     pub planners: usize,
@@ -872,14 +887,26 @@ impl Daemon {
 
         // ---- D. Dispatch : reviewers d'abord (débloque l'in-flight),
         // puis planners/workers sous réserve anti-deadlock.
-        let alive = backlog_alive(metas, cfg, &acwait_live_sids());
-        let mut free = (cfg.max_workers as usize).saturating_sub(alive);
+        // Deux budgets (WorkerSlots) : `total` = max_workers via
+        // backlog_alive (waiter ac-wait garé inclus, #181), `working` =
+        // max_working via backlog_working — les sessions garées sur un
+        // waiter libèrent le slot actif mais gardent le slot total.
+        let live_waiters = acwait_live_sids();
+        let alive = backlog_alive(metas, cfg, &live_waiters);
+        let working = backlog_working(metas, cfg, &live_waiters);
+        let mut slots = WorkerSlots {
+            total: (cfg.max_workers as usize).saturating_sub(alive),
+            working: (cfg.max_working_cap() as usize).saturating_sub(working),
+            gained: 0,
+        };
         // Mode sériel quota : au plus une session active à la fois —
         // dispatch seulement quand rien ne tourne ; la boucle reviewer
         // ci-dessous passe la première (priorité au reviewer) et un
         // reviewer en backoff est attendu, jamais remplacé (Wait).
         if rl > 0 {
-            free = free.min(usize::from(backlog_active(metas, cfg) == 0));
+            let m = usize::from(backlog_active(metas, cfg) == 0);
+            slots.total = slots.total.min(m);
+            slots.working = slots.working.min(m);
             self.orch.set_detail(Some(format!(
                 "{rl} session(s) en rate_limit — exécution sérialisée \
                  (1 session à la fois, reviewer prioritaire)"
@@ -908,6 +935,7 @@ impl Daemon {
                 let id = task_id(t);
                 task_status(t) == "plan_review"
                     && task_reviewer(t).is_empty()
+                    && cfg.repo_routable(task_repo(t))
                     && !st.stalled_plans.contains_key(&id.to_string())
                     && !st
                         .review_retry
@@ -917,7 +945,7 @@ impl Daemon {
             .map(|t| task_id(t))
             .collect();
         for t in tasks.iter().filter(|t| eligible_ids.contains(&task_id(t))) {
-            if free == 0 || reviewers_free == 0 {
+            if !slots.ok() || reviewers_free == 0 {
                 break;
             }
             let id = task_id(t);
@@ -995,7 +1023,7 @@ impl Daemon {
                         // et `reviewers_alive` — seul un réveil (asleep)
                         // consomme un nouveau slot des deux budgets.
                         if mstate.is_none() || mstate == Some("asleep") {
-                            free -= 1;
+                            slots.take();
                             reviewers_free -= 1;
                         }
                         spawn_new = false;
@@ -1035,12 +1063,16 @@ impl Daemon {
                     "(aucune)".to_string()
                 }
             };
+            // Workspace routé de l'item (tag repo → repo_workspaces) :
+            // reviewer ET planificateur travaillent dans le checkout
+            // du repo concerné — plus de revue de plan cross-repo.
+            let iws = cfg.workspace_for(task_repo(t)).to_string();
             let prompt = fill(
                 REVIEWER_PROMPT,
                 &[
                     ("ID", key.clone()),
                     ("ITEM", item_body(t)),
-                    ("WS", cfg.workspace.clone()),
+                    ("WS", iws.clone()),
                     ("PLANNER", planner_label),
                     ("PLAN", plan_inline),
                     ("ROUND", round.to_string()),
@@ -1054,6 +1086,7 @@ impl Daemon {
                     cfg.agent_or(&cfg.reviewer_agent),
                     &cfg.reviewer_mode,
                     prompt,
+                    &iws,
                     cfg,
                 )
                 .await
@@ -1087,7 +1120,7 @@ impl Daemon {
                         // or_insert de la section A le pose au premier
                         // tick où l'item est réellement `reviewing`.
                         claimed_now.insert(id);
-                        free -= 1;
+                        slots.take();
                         reviewers_free -= 1;
                     } else {
                         warn!("orchestrateur: claim-review #{id} rc={rc} {e} → rm {rsid}");
@@ -1098,19 +1131,26 @@ impl Daemon {
             }
         }
         // Revues éligibles restées sans reviewer ce tick → réserve de
-        // slot : tout spawn planner/worker exige free ≥ 2 tant qu'il en
-        // reste (priorité globale reviewers > planners).
+        // slot : tout spawn planner/worker exige 2 slots (total ET
+        // working) tant qu'il en reste (priorité reviewers > planners).
         let unclaimed = (eligible_ids.len() - claimed_now.len()).min(reviewers_free);
 
         for t in tasks
             .iter()
             .filter(|t| task_status(t) == "pending" && task_poppable(t))
         {
-            if !spawn_slot_ok(free, unclaimed > 0) {
+            if !spawn_slot_ok(slots, unclaimed > 0) {
                 break;
             }
             let id = task_id(t);
             let key = id.to_string();
+            // Tag repo sans workspace déclaré → l'item attend (jamais
+            // de spawn dans le mauvais cwd) ; routable → cwd de la
+            // session = workspace de l'item.
+            if !cfg.repo_routable(task_repo(t)) {
+                continue;
+            }
+            let iws = cfg.workspace_for(task_repo(t)).to_string();
             let no_plan = task_no_plan(t);
             let (prefix, agent, mode, prompt) = if no_plan {
                 (
@@ -1122,7 +1162,7 @@ impl Daemon {
                         &[
                             ("ID", key.clone()),
                             ("ITEM", item_body(t)),
-                            ("WS", cfg.workspace.clone()),
+                            ("WS", iws.clone()),
                         ],
                     ),
                 )
@@ -1136,14 +1176,14 @@ impl Daemon {
                         &[
                             ("ID", key.clone()),
                             ("ITEM", item_body(t)),
-                            ("WS", cfg.workspace.clone()),
+                            ("WS", iws.clone()),
                         ],
                     ),
                 )
             };
             st.counter += 1;
             let Some(sid) = self
-                .plan_spawn(st.counter, &prefix, agent, &mode, prompt, cfg)
+                .plan_spawn(st.counter, &prefix, agent, &mode, prompt, &iws, cfg)
                 .await
             else {
                 continue;
@@ -1163,7 +1203,7 @@ impl Daemon {
                 // Journal neuf → seqs repartent à 1 : le watermark d'un
                 // précédent planner rendrait ses marqueurs invisibles.
                 st.plan_marker_seq.remove(&key);
-                free -= 1;
+                slots.take();
             } else {
                 warn!("orchestrateur: claim #{id} rc={rc} {e} → rm {sid}");
                 self.plan_rm_session(&sid, st).await;
@@ -1192,6 +1232,12 @@ impl Daemon {
             if !self.orch.is_enabled() {
                 return Ok(PlanOutcome::default());
             }
+            // working = sessions EN ACTIVITÉ sur le snapshot — les
+            // allocations du tick (spawns §D, réveils §E) arrivent via
+            // `slots.gained` en fin de boucle.
+            if counts_as_working(&m.state, &m.id, &live_waiters) {
+                outcome.working += 1;
+            }
             match role_of(&m.title, cfg) {
                 Some(Role::Reviewer) => {
                     outcome.reviewers += 1;
@@ -1210,7 +1256,7 @@ impl Daemon {
                     outcome.workers += 1;
                     self.planner_upkeep(
                         &m, bin, cfg, ws, tasks, prs, release_pr, st, now, rl > 0,
-                        &mut free,
+                        &mut slots,
                     )
                     .await;
                 }
@@ -1230,12 +1276,13 @@ impl Daemon {
                         &cfg.title_prefix,
                         None,
                         rl > 0,
-                        &mut free,
+                        &mut slots,
                     )
                     .await;
                 }
             }
         }
+        outcome.working += slots.gained;
         outcome.pending = tasks
             .iter()
             .filter(|t| task_status(t) == "pending" && task_poppable(t))
@@ -1391,6 +1438,11 @@ impl Daemon {
         let id = task_id(t);
         let key = id.to_string();
         let planner_sid = task_agent(t).to_string();
+        // Workspace routé de l'item : le planner (spawné dessus) et
+        // l'implémenteur de remplacement travaillent dans le checkout
+        // du repo taggé — le message d'approbation cite le bon
+        // AGENTS.md.
+        let iws = cfg.workspace_for(task_repo(t)).to_string();
         let planner_alive = !planner_sid.is_empty() && session_ids.contains(&planner_sid);
         // Watermark posé au claim-review du round courant : un
         // PeerMessage du round N-1 ne vaut pas livraison du verdict N.
@@ -1442,7 +1494,7 @@ impl Daemon {
                          --agent-id \"$AGENTCONTROL_SESSION\". Blocage \
                          insurmontable : --release + explication.",
                         round.saturating_sub(1).max(0),
-                        cfg.workspace,
+                        iws,
                         cmt = if comment.is_empty() {
                             String::new()
                         } else {
@@ -1469,7 +1521,7 @@ impl Daemon {
                         &[
                             ("ID", key.clone()),
                             ("ITEM", item_body(t)),
-                            ("WS", cfg.workspace.clone()),
+                            ("WS", iws.clone()),
                             ("ROUND", format!("{}", round.saturating_sub(1).max(0))),
                             ("PLAN", clip_inline(task_plan_content(t), PLAN_INLINE_MAX)),
                         ],
@@ -1481,6 +1533,7 @@ impl Daemon {
                             cfg.agent_or(&cfg.planner_agent),
                             &cfg.implement_mode,
                             prompt,
+                            &iws,
                             cfg,
                         )
                         .await
@@ -1592,9 +1645,10 @@ impl Daemon {
         title_prefix: &str,
         plan_item: Option<u64>,
         quota_serial: bool,
-        // Slots `max_workers` restants après le dispatch §D — un nudge
-        // depuis `asleep` en consomme un (réveil = process agent).
-        free: &mut usize,
+        // Slots worker restants après le dispatch §D (max_workers ET
+        // max_working) — un nudge depuis `asleep` en consomme un
+        // (réveil = process agent en activité).
+        slots: &mut WorkerSlots,
     ) -> bool {
         let sid = w.id.as_str();
         let state = w.state.as_str();
@@ -1698,10 +1752,29 @@ impl Daemon {
                 }
             }
         }
+        // `dead_since` : âge de la mort persisté dans le ledger — un
+        // worker `dead` au-delà de DEAD_WORKER_S est rm'd et ses items
+        // wip relâchés (reprise impossible déclarée — item #250).
+        let prev_dead = st
+            .assignments
+            .get(sid)
+            .and_then(|a| a.get("dead_since"))
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        let dead_since = if state == "dead" {
+            if prev_dead > 0.0 {
+                prev_dead
+            } else {
+                now
+            }
+        } else {
+            0.0
+        };
         let assignment = json!({
             "title": title, "state": state,
             "tasks": my_items, "prs": my_prs,
             "posted_wip": posted_wip,
+            "dead_since": dead_since,
         });
         if just_posted {
             self.orch.state_assign_now(sid, assignment.clone());
@@ -1711,7 +1784,27 @@ impl Daemon {
             st.clean_since.remove(sid);
             return true;
         }
-        if open_prs.is_empty() && my_open.is_empty() {
+        // Mort ancienne : rm + release des wip — mais seulement si
+        // TOUS les items ouverts sont des `wip` simples (un planner
+        // gardant un item plan_review/reviewing relève du pipeline,
+        // pas d'un release brutal).
+        let dead_stale = state == "dead"
+            && dead_since > 0.0
+            && now - dead_since > DEAD_WORKER_S
+            && my_open
+                .iter()
+                .all(|i| my_items.get(i.as_str()).map(String::as_str) == Some("wip"));
+        if open_prs.is_empty() && (my_open.is_empty() || dead_stale) {
+            if dead_stale {
+                for i in &my_open {
+                    info!(
+                        "orchestrateur: {sid} dead depuis {}s — release #{}",
+                        (now - dead_since) as i64,
+                        i.as_str()
+                    );
+                    let _ = run_out(&[bin, "--release", i.as_str(), "--agent-id", sid], ws).await;
+                }
+            }
             let unresolved = !my_done.is_empty() && my_prs.is_empty();
             let since = *st.clean_since.entry(sid.to_string()).or_insert(now);
             if unresolved && now - since < CLEAN_GRACE_S {
@@ -1771,13 +1864,13 @@ impl Daemon {
         if !idle_long {
             return true;
         }
-        // max_workers : un réveil depuis asleep consomme un slot — sans
-        // budget restant (déjà pris par le dispatch), différer. Idle
-        // compte déjà dans alive → pas de garde.
-        if !nudge_slot_ok(*free, state) {
+        // max_workers/max_working : un réveil depuis asleep consomme
+        // un slot des deux budgets — sans budget restant (déjà pris
+        // par le dispatch), différer. Idle compte déjà → pas de garde.
+        if !nudge_slot_ok(*slots, state) {
             info!(
                 "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
-                 wip={my_open:?}) → nudge différé (max_workers)"
+                 wip={my_open:?}) → nudge différé (max_workers/max_working)"
             );
             return true;
         }
@@ -1789,7 +1882,9 @@ impl Daemon {
                         "orchestrateur: planner {sid} sans plan après {n} \
                          nudges → rm + release #{item_id}"
                     );
-                    let _ = self.h_delete_session(sid.to_string()).await;
+                    if let Err(e) = self.h_delete_session(sid.to_string()).await {
+                        warn!("orchestrateur: rm planner {sid} (item #{item_id}): {e:#}");
+                    }
                     let _ = run_out(
                         &[bin, "--release", &item_id.to_string(), "--agent-id", sid],
                         ws,
@@ -1813,7 +1908,7 @@ impl Daemon {
                     st.nudges.insert(sid.to_string(), now);
                     st.plan_nudges.insert(sid.to_string(), n + 1);
                     if nudge_consumes_slot(state) {
-                        *free = free.saturating_sub(1);
+                        slots.take();
                     }
                 }
             }
@@ -1853,7 +1948,7 @@ impl Daemon {
                 {
                     st.nudges.insert(sid.to_string(), now);
                     if nudge_consumes_slot(state) {
-                        *free = free.saturating_sub(1);
+                        slots.take();
                     }
                 }
             }
@@ -1876,7 +1971,7 @@ impl Daemon {
         st: &mut OrchPersist,
         now: f64,
         quota_serial: bool,
-        free: &mut usize,
+        slots: &mut WorkerSlots,
     ) {
         let sid = w.id.as_str().to_string();
         let my_item = tasks
@@ -1911,7 +2006,7 @@ impl Daemon {
                 PLANNER_PREFIX,
                 plan_nudge,
                 quota_serial,
-                free,
+                slots,
             )
             .await;
         if !alive {
@@ -2345,7 +2440,9 @@ impl Daemon {
     /// Spawn d'une session pipeline — même mécanique que `orch_spawn`
     /// (h_new_session origin composant + apply_spawn_cfg) mais rôle
     /// paramétré : préfixe, profil agent, mode et prompt ne dépendent
-    /// plus de la cfg worker.
+    /// plus de la cfg worker. `cwd` = workspace routé de l'item
+    /// (repo_workspaces via `workspace_for`) — jamais le workspace par
+    /// défaut quand l'item est taggé.
     pub(crate) async fn plan_spawn(
         self: &Arc<Self>,
         number: u64,
@@ -2353,6 +2450,7 @@ impl Daemon {
         agent: &str,
         mode: &str,
         prompt: String,
+        cwd: &str,
         cfg: &cfg::OrchCfg,
     ) -> Option<String> {
         let title = format!("{prefix}{number}");
@@ -2361,7 +2459,7 @@ impl Daemon {
         let v = match self
             .h_new_session(
                 agent.to_string(),
-                cfg.workspace.clone(),
+                cwd.to_string(),
                 Some(title.clone()),
                 Some(cfg.model.clone()),
                 Some(mode.to_string()),
@@ -2641,6 +2739,19 @@ pub(crate) async fn cli_plan_capable(bin: &str, ws: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// `agentbacklog --help` mentionne `--claim` → le dispatch par item
+/// (routage repo/workspace) est jouable ; sinon le cycle legacy retombe
+/// sur le self-`--pop` historique non scopé (comportement dégradé,
+/// pas de blocage — un ancien agentbacklog continue de tourner).
+/// `--claim` matche aussi `--claim-review` dans l'aide — sans
+/// importance : les deux sont arrivés ensemble (≥ 0.7).
+pub(crate) async fn cli_claim_capable(bin: &str, ws: &Path) -> bool {
+    run_out(&[bin, "--help"], ws)
+        .await
+        .map(|(rc, out, _)| rc == 0 && out.contains("--claim"))
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2740,12 +2851,21 @@ mod tests {
 
     #[test]
     fn reserve_slot_reviewer() {
+        let slots = |total: usize, working: usize| WorkerSlots {
+            total,
+            working,
+            gained: 0,
+        };
         // Pas de revue en attente : 1 slot suffit.
-        assert!(spawn_slot_ok(1, false));
-        assert!(!spawn_slot_ok(0, false));
+        assert!(spawn_slot_ok(slots(1, 1), false));
+        assert!(!spawn_slot_ok(slots(0, 1), false));
         // Revue non claimée : il faut ≥ 2 pour garder un slot reviewer.
-        assert!(!spawn_slot_ok(1, true));
-        assert!(spawn_slot_ok(2, true));
+        assert!(!spawn_slot_ok(slots(1, 1), true));
+        assert!(spawn_slot_ok(slots(2, 2), true));
+        // max_working borne comme max_workers : 2 slots total mais 1
+        // working → spawn refusé tant qu'une revue est en attente.
+        assert!(!spawn_slot_ok(slots(2, 1), true));
+        assert!(spawn_slot_ok(slots(2, 1), false));
     }
 
     #[test]
@@ -2985,8 +3105,8 @@ mod tests {
 
     #[test]
     fn alive_exclut_asleep() {
-        let mk = |title: &str, state: &str| SessionMeta {
-            id: "s-x".into(),
+        let mk = |id: &str, title: &str, state: &str| SessionMeta {
+            id: id.into(),
             agent: "devin".into(),
             title: title.into(),
             cwd: "/workspace".into(),
@@ -3000,6 +3120,8 @@ mod tests {
             available_modes: Vec::new(),
             available_commands: Vec::new(),
             available_models: Vec::new(),
+            advisor: None,
+            advisor_models: Vec::new(),
             config_options: Vec::new(),
             pending_config: Default::default(),
             desired_config: Default::default(),
@@ -3014,9 +3136,9 @@ mod tests {
         };
         let c = cfg_default();
         let metas = vec![
-            mk("Backlog-P1", "idle"),
-            mk("Backlog-R2", "asleep"),
-            mk("Backlog-W3", "working"),
+            mk("s-p1", "Backlog-P1", "idle"),
+            mk("s-r2", "Backlog-R2", "asleep"),
+            mk("s-w3", "Backlog-W3", "working"),
         ];
         assert_eq!(backlog_alive(&metas, &c, &HashSet::new()), 2);
         // Un asleep sous waiter ac-wait vivant tient son slot : son
@@ -3025,30 +3147,51 @@ mod tests {
         // vivant → retour non garanti → compte 0 (comportement avant).
         let mut live = HashSet::new();
         assert_eq!(backlog_alive(&metas, &c, &live), 2);
-        live.insert("s-x".to_string());
+        live.insert("s-r2".to_string());
         assert_eq!(backlog_alive(&metas, &c, &live), 3);
+        // max_working : working = alive hors waiter ac-wait — sans
+        // live les deux non-asleep comptent ; le waiter sur s-r2 ne
+        // change rien (déjà exclu comme asleep) mais un waiter sur une
+        // session non-asleep la fait sortir du budget working.
+        assert_eq!(backlog_working(&metas, &c, &HashSet::new()), 2);
+        assert_eq!(backlog_working(&metas, &c, &live), 2);
+        live.insert("s-p1".to_string());
+        assert_eq!(backlog_working(&metas, &c, &live), 1);
         // Comptage « actif » du mode sériel : working/waiting_input
         // comptent, idle/asleep/error (backoff en attente) non.
         let metas = vec![
-            mk("Backlog-P1", "idle"),
-            mk("Backlog-R2", "error"),
-            mk("Backlog-W3", "working"),
-            mk("Backlog-P4", "waiting_input"),
-            mk("Backlog-W5", "asleep"),
+            mk("s-p1", "Backlog-P1", "idle"),
+            mk("s-r2", "Backlog-R2", "error"),
+            mk("s-w3", "Backlog-W3", "working"),
+            mk("s-p4", "Backlog-P4", "waiting_input"),
+            mk("s-w5", "Backlog-W5", "asleep"),
         ];
         assert_eq!(backlog_active(&metas, &c), 2);
     }
 
-    /// Nudge et max_workers : seul un réveil depuis `asleep` consomme
-    /// un slot ; `free == 0` bloque ce réveil, idle reste nudgeable.
+    /// Nudge et slots worker : seul un réveil depuis `asleep` consomme
+    /// un slot — et il faut du mou sur les DEUX budgets
+    /// (max_workers ET max_working) ; idle reste nudgeable.
     #[test]
     fn nudge_respecte_max_workers_slot() {
-        assert!(nudge_slot_ok(0, "idle"));
-        assert!(nudge_slot_ok(0, "waiting_input"));
-        assert!(!nudge_slot_ok(0, "asleep"));
-        assert!(nudge_slot_ok(1, "asleep"));
+        let slots = |total: usize, working: usize| WorkerSlots {
+            total,
+            working,
+            gained: 0,
+        };
+        assert!(nudge_slot_ok(slots(0, 5), "idle"));
+        assert!(nudge_slot_ok(slots(0, 5), "waiting_input"));
+        assert!(!nudge_slot_ok(slots(0, 5), "asleep"));
+        assert!(!nudge_slot_ok(slots(5, 0), "asleep")); // max_working plein
+        assert!(nudge_slot_ok(slots(1, 1), "asleep"));
         assert!(nudge_consumes_slot("asleep"));
         assert!(!nudge_consumes_slot("idle"));
         assert!(!nudge_consumes_slot("working"));
+        // spawn_slot_ok : la réserve anti-deadlock exige 2 slots sur
+        // les deux budgets quand une revue est en attente.
+        assert!(spawn_slot_ok(slots(2, 2), false));
+        assert!(!spawn_slot_ok(slots(1, 2), true));
+        assert!(!spawn_slot_ok(slots(2, 1), true)); // working borne
+        assert!(spawn_slot_ok(slots(2, 1), false));
     }
 }

@@ -79,7 +79,9 @@ DEVIN_PERMISSION_MODE = "{mode}"
 # Cursor CLI — ACP natif, preset BUILT-IN (id `cursor`, affiché dans le
 # sélecteur de session sans rien déclarer ici). argv[0] est résolu sur
 # le PATH au boot (`cursor-agent` puis l'alias `agent`) en chemin
-# absolu. Login préalable : `cursor-agent login` (ou `agent login`).
+# absolu, puis re-résolu à chaud à chaque `available`/spawn — une
+# install postérieure au démarrage du démon est détectée sans restart.
+# Login préalable : `cursor-agent login` (ou `agent login`).
 # Le mode/modèle demandés à la création sont appliqués via ACP après
 # session/new (pas de placeholder).
 # Surcharger la commande sans éditer ce fichier : options →
@@ -92,7 +94,8 @@ DEVIN_PERMISSION_MODE = "{mode}"
 # Codex CLI — pas d'ACP natif : via l'adaptateur officiel
 # `npm i -g @agentclientprotocol/codex-acp` (repo zed-industries archivé,
 # développement déplacé vers agentclientprotocol). Nécessite node sur le
-# PATH du démon (ensure_agent_path couvre ~/.nvm automatiquement).
+# PATH du démon (ensure_agent_path couvre les dossiers agents usuels :
+# ~/.local/bin, ~/.npm-global/bin, shims mise, cargo, nvm…).
 # CODEX_PATH doit pointer le binaire codex installé : sans lui,
 # l'adaptateur lance son @openai/codex npm embarqué (et sous npx,
 # "codex" dans PATH serait le wrapper npm, pas le vrai CLI).
@@ -116,6 +119,28 @@ command = ["claude-agent-acp"]
 
 # [agents.claude.env]
 # CLAUDE_CODE_OAUTH_TOKEN = "…"
+
+# Modèles « extra » hors annonce ACP : claude-code-acp (adaptateur Zed)
+# n'expose que default/sonnet/opus/haiku — les variantes Fable restent
+# sélectionnables en les déclarant ici (session/set_model accepte la
+# valeur telle quelle ; les ids complets claude-fable-5 / claude-fable-5-1
+# passent aussi). `label` = libellé affiché dans le sélecteur.
+# extra_models = [
+#   { value = "fable", label = "Fable" },
+#   { value = "fable[1m]", label = "Fable 1M" },
+# ]
+#
+# Advisor (outil de consultation facturé en crédits d'usage — la valeur
+# doit être « au moins aussi capable » que le modèle de base, sinon
+# Claude la refuse ; certains modèles de base exigent en plus
+# CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1 dans [agents.claude.env]) :
+# `advisor_models` affiche un sélecteur par session ; la valeur est
+# injectée au spawn via `_meta.claudeCode.options` — mécanisme propre à
+# l'adaptateur @zed-industries/claude-code-acp — l'adaptateur officiel
+# @agentclientprotocol/claude-agent-acp ne le connaît pas). "off" est
+# toujours proposé (désactive explicitement). Changer de valeur recycle
+# le process agent. Sans clé : aucun sélecteur.
+# advisor_models = ["fable", "opus", "sonnet"]
 
 # Exemples d'autres agents ACP (adapter la commande) :
 # [agents.gemini]

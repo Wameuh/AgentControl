@@ -385,17 +385,34 @@ impl Daemon {
             return;
         }
         let sid = s.meta_snapshot().id;
-        if let Ok(evs) = s.journal.read_page(&s.dir, None, 2000) {
-            let mut titles = HashMap::new();
-            for ev in &evs {
-                scan_pr_event(&self.pr_verify, &self.forges, s, &sid, ev, &mut titles);
-            }
-        }
         let verify = Arc::clone(&self.pr_verify);
         let forges = self.forges.clone();
         let weak = Arc::downgrade(s);
-        let mut rx = s.events_tx.subscribe();
+        let s2 = Arc::clone(s);
         tokio::spawn(async move {
+            // Receiver AVANT le backfill : les events produits pendant
+            // le scan sont bufferisés par le broadcast (cap 1024) au
+            // lieu de tomber dans le trou read_page→subscribe — et le
+            // backfill reste idempotent (le registre déduplique).
+            let mut rx = s2.events_tx.subscribe();
+            // Backfill borné (2000 events) hors de l'executor : le scan
+            // du journal ne gèle plus le worker — au chargement du
+            // démon c'était N sessions × journal (item #227).
+            {
+                let s3 = Arc::clone(&s2);
+                let sid_b = sid.clone();
+                let verify_b = Arc::clone(&verify);
+                let forges_b = forges.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Ok(evs) = s3.journal.read_page(&s3.dir, None, 2000) {
+                        let mut titles = HashMap::new();
+                        for ev in &evs {
+                            scan_pr_event(&verify_b, &forges_b, &s3, &sid_b, ev, &mut titles);
+                        }
+                    }
+                })
+                .await;
+            }
             let mut titles: HashMap<String, String> = HashMap::new();
             loop {
                 match rx.recv().await {
@@ -411,12 +428,69 @@ impl Daemon {
     }
 
 
+    /// État de la review orchestrateur pour une entrée du registre :
+    /// "running" (session PRReview-* active), "retry" (retry_wait en
+    /// backoff), "queued" (demande interne en file). None = pas de
+    /// review native connue — la review forge prend le relais.
+    /// Clés `repo#N` de `OrchPersist.pr_reviews`/`pr_review_requests`,
+    /// appariées au lower-case (le registre est insensible à la casse,
+    /// `nameWithOwner` ne l'est pas toujours).
+    fn native_review_of(
+        reviews: &HashMap<String, Value>,
+        requests: &HashMap<String, Value>,
+        repo: &str,
+        pr: u64,
+    ) -> Option<&'static str> {
+        // Les clés persistées sont `repo#N` en casse forge — comparaison
+        // insensible à la casse (le registre normalise en minuscules).
+        for (k, e) in reviews {
+            let Some((r, n)) = k.rsplit_once('#') else { continue };
+            if n.parse::<u64>() != Ok(pr) || !r.eq_ignore_ascii_case(repo) {
+                continue;
+            }
+            match e.get("state").and_then(Value::as_str) {
+                Some("running") => return Some("running"),
+                Some("retry_wait") => return Some("retry"),
+                // done/failed : pas de review native à signaler — on
+                // vérifie quand même une demande interne encore en file.
+                _ => {}
+            }
+        }
+        for k in requests.keys() {
+            let Some((r, n)) = k.rsplit_once('#') else { continue };
+            if n.parse::<u64>() == Ok(pr) && r.eq_ignore_ascii_case(repo) {
+                return Some("queued");
+            }
+        }
+        None
+    }
+
     pub(super) async fn h_pr_list(self: &Arc<Self>, session: Option<String>) -> Result<Value> {
                 let mut v = self.prs.list();
                 if let Some(sid) = session {
                     v.retain(|e| e.session == sid);
                 }
-                Ok(serde_json::to_value(v)?)
+                // Jointure review native : la file `PRReview-*` de
+                // l'orchestrateur est locale — `native_review` marque
+                // les PR en review agent même sans reviewRequest forge.
+                let (reviews, requests) = {
+                    let st = self.orch.state.lock().unwrap();
+                    (st.pr_reviews.clone(), st.pr_review_requests.clone())
+                };
+                let mut out = Vec::with_capacity(v.len());
+                for e in &v {
+                    let mut j = serde_json::to_value(e)?;
+                    // La review orchestrateur ne connaît que github.com.
+                    let gh = proto::forge_kind(&e.forge) == "github"
+                        && (e.host.is_empty() || e.host == "github.com");
+                    if gh {
+                        if let Some(nr) = Self::native_review_of(&reviews, &requests, &e.repo, e.pr) {
+                            j["native_review"] = json!(nr);
+                        }
+                    }
+                    out.push(j);
+                }
+                Ok(json!(out))
     }
     pub(super) async fn h_pr_track(
         self: &Arc<Self>,
@@ -432,6 +506,8 @@ impl Daemon {
         status: Option<String>,
         note: Option<String>,
         sync_fails: Option<u32>,
+        review: Option<String>,
+        ci: Option<String>,
     ) -> Result<Value> {
                 let e = self.prs.track(TrackIn {
                     session,
@@ -446,6 +522,8 @@ impl Daemon {
                     status,
                     note,
                     sync_fails,
+                    review,
+                    ci,
                 })?;
                 Ok(serde_json::to_value(e)?)
     }
@@ -479,8 +557,9 @@ impl Daemon {
     /// ne sanctifie pas `via`). Throttlé à PR_SYNC_MIN_INTERVAL et
     /// non réentrant : les onglets Dépôts de plusieurs clients peuvent
     /// demander en rafale sans dupliquer les appels forge. La réponse
-    /// peut prendre des dizaines de secondes (REST séquentiel à 8 s par
-    /// entrée injoignable) — les clients bornent leur attente (60 s)
+    /// peut prendre des dizaines de secondes (collecte forge bornée à
+    /// SYNC_CONCURRENCY appels simultanés — ~la lenteur max des entrées
+    /// plutôt que la somme) — les clients bornent leur attente (60 s)
     /// et relisent le registre au refresh suivant : le canal résultat
     /// est best-effort, la convergence passe par le registre.
     pub(super) async fn h_pr_sync(self: &Arc<Self>) -> Result<Value> {
@@ -522,6 +601,9 @@ impl Daemon {
                     status: Some(u.status.clone()),
                     note: None,
                     sync_fails: None,
+                    // "" efface : la forge a répondu sans review/CI.
+                    review: Some(u.review.clone()),
+                    ci: Some(u.ci.clone()),
                 }) {
                     Ok(_) => applied += 1,
                     Err(e) => warn!("pr_sync track {} {}: {e:#}", u.repo, u.pr),
@@ -703,6 +785,8 @@ mod tests {
             available_modes: vec![],
             available_commands: vec![],
             available_models: vec![],
+            advisor: None,
+            advisor_models: vec![],
             config_options: vec![],
             pending_config: Default::default(),
             desired_config: Default::default(),

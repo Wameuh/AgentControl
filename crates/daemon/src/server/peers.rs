@@ -197,6 +197,8 @@ impl Daemon {
                     available_modes: vec![],
                     available_commands: vec![],
                     available_models: vec![],
+                    advisor: None,
+                    advisor_models: profile.advisor_models.clone(),
                     config_options: vec![],
                     pending_config: Default::default(),
                     desired_config: Default::default(),

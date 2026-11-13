@@ -43,14 +43,31 @@ pub fn initialize_params() -> Value {
     })
 }
 
-pub fn session_new_params(cwd: &str, mcp_servers: Value) -> Value {
-    // capabilities.compaction : annonce le contrat compaction_update
-    // (l'agent n'émet ces updates que si le client le déclare).
-    json!({"cwd": cwd, "mcpServers": mcp_servers, "capabilities": {"compaction": {}}})
+/// `meta` : objet `_meta` additionnel fusionné dans les params
+/// (session/new|load) — ex. options propres à l'adaptateur
+/// (`claudeCode.options` pour l'advisor chez claude-code-acp). None =
+/// aucun `_meta` émis.
+fn with_meta(mut params: Value, meta: Option<&Value>) -> Value {
+    if let Some(m) = meta {
+        params["_meta"] = m.clone();
+    }
+    params
 }
 
-pub fn session_load_params(session_id: &str, cwd: &str, mcp_servers: Value) -> Value {
-    json!({"sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers, "capabilities": {"compaction": {}}})
+pub fn session_new_params(cwd: &str, mcp_servers: Value, meta: Option<&Value>) -> Value {
+    // capabilities.compaction : annonce le contrat compaction_update
+    // (l'agent n'émet ces updates que si le client le déclare).
+    with_meta(
+        json!({"cwd": cwd, "mcpServers": mcp_servers, "capabilities": {"compaction": {}}}),
+        meta,
+    )
+}
+
+pub fn session_load_params(session_id: &str, cwd: &str, mcp_servers: Value, meta: Option<&Value>) -> Value {
+    with_meta(
+        json!({"sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers, "capabilities": {"compaction": {}}}),
+        meta,
+    )
 }
 
 pub fn session_prompt_params(session_id: &str, text: &str) -> Value {

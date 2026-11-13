@@ -42,7 +42,11 @@
       status: { state: "installed", health: "ok", version: "agentbacklog 0.3.0" } },
     { name: "backlog-orchestrator", kind: "process", autostart: true,
       description: "Orchestrateur de la file", source: "components.toml",
-      spec: { name: "backlog-orchestrator", kind: "process", command: ["backlog-orch"] },
+      spec: { name: "backlog-orchestrator", kind: "process", command: ["backlog-orch"],
+        // Params éditables à chaud (comme l'interne réel — spec.params =
+        // valeurs courtes) : alimentent les steppers de la section
+        // Activité. component_set_params les mute en place.
+        params: { enabled: "true", max_workers: "5", pr_review_max_parallel: "2" } },
       status: { state: "running", health: "ok", pid: 4210, uptime_s: 3725, restarts: 1 } },
     { name: "web", kind: "internal", autostart: true,
       description: "Interface web servie par le démon", source: "internal",
@@ -203,6 +207,16 @@
       case "component_install": {
         if (args.name === "agentbacklog") window.__blHide = false;
         return { installed: true, name: args.name, state: "stopped", notes: [] };
+      }
+      case "component_set_params": {
+        // Patch partiel sur spec.params de l'item — les steppers de la
+        // vue Backlog lisent la valeur au prochain list_components.
+        window.__setParamsCalls = window.__setParamsCalls || [];
+        window.__setParamsCalls.push({ name: args.name, params: args.params });
+        const c = COMPONENTS.find((x) => x.name === args.name);
+        if (c) c.spec.params = { ...(c.spec.params ?? {}), ...(args.params ?? {}) };
+        return { name: args.name, state: "running", params: c?.spec.params ?? {},
+                 config_required: [], rendered: true, restarted: false };
       }
       // Journal métriques backlog — window.__blMetrics pilote le scénario :
       // "off" → RPC inconnue (vieux démon), [] → journal vide (orch off),

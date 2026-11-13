@@ -15,10 +15,10 @@ import { dotCls, dotIcon, setAppIcon } from "./status";
 import { icon } from "../ui/icons";
 import { bindCtx, hideSessCtx, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
-import { PrListView, prBadge, prUnresolved, repoLabel, type PrRow } from "./prs";
+import { PrListView, prBadge, prCited, prUnresolved, repoLabel, type PrRow } from "./prs";
 import { BacklogView } from "./backlog";
 import type { ChatView } from "./chat-view";
-import type { ConnectionManager } from "./connections";
+import type { AcTransport, ConnectionManager } from "./connections";
 import { grpNorm, grpParent, inSubtree } from "./groups";
 import type { GroupStore } from "./groups";
 import { stateDiff } from "./state-diff";
@@ -27,7 +27,9 @@ import type { NewSessionDialog } from "./new-session";
 import type { SettingsPanel } from "./settings";
 import type { ConnView } from "./conn-view";
 import type { ComponentsPanel } from "./components";
+import type { LogsPanel } from "./logs";
 import type { MapView } from "./map-view";
+import type { PluginView } from "./plugin-view";
 
 const DTYPE = "application/x-ac-session";
 
@@ -99,7 +101,9 @@ export class Sidebar {
   private settings!: SettingsPanel;
   private connView!: ConnView;
   private comps!: ComponentsPanel;
+  private logsPanel!: LogsPanel;
   private map!: MapView;
+  private pluginViews!: PluginView;
 
   /** PRs ouvertes par session ("conn\0sid") — rempli par refresh ;
    *  vide si le démon ne connaît pas pr_list (vieux démon → pas de badge). */
@@ -160,7 +164,7 @@ export class Sidebar {
   }
   private ctx = $("sctx");
 
-  bind(conns: ConnectionManager, groups: GroupStore, newSess: NewSessionDialog, chat: ChatView, settings: SettingsPanel, connView: ConnView, comps: ComponentsPanel, map: MapView) {
+  bind(conns: ConnectionManager, groups: GroupStore, newSess: NewSessionDialog, chat: ChatView, settings: SettingsPanel, connView: ConnView, comps: ComponentsPanel, map: MapView, logsPanel: LogsPanel, pluginViews: PluginView) {
     this.conns = conns;
     this.groups = groups;
     this.newSess = newSess;
@@ -169,6 +173,8 @@ export class Sidebar {
     this.connView = connView;
     this.comps = comps;
     this.map = map;
+    this.logsPanel = logsPanel;
+    this.pluginViews = pluginViews;
     this.prsView.bind({
       openSession: (id) => this.openSession(id),
       connState: (k) => this.conns.state(k),
@@ -195,6 +201,8 @@ export class Sidebar {
     this.connView.close();
     this.comps.close();
     this.map.close();
+    this.logsPanel.close();
+    this.pluginViews.close();
   }
 
   /** Ouvrir une session depuis la sidebar = quitter les overlays de
@@ -242,7 +250,8 @@ export class Sidebar {
       const gen = (s as { gen?: number }).gen;
       if (!this.conns.isFresh(k, gen)) return false;
       if ((this.conns.state(k) ?? "ok") === "ok") {
-        this.conns.markDead(k, "list_sessions: conn_error");
+        this.conns.markDead(k, "list_sessions: conn_error",
+          (s as { _ac_transport?: AcTransport })._ac_transport);
       }
       return false;
     });
@@ -296,7 +305,8 @@ export class Sidebar {
     this.prsView.setData(this.prRows, list, this.prFailed);
     this.renderPrBadge();
     const live = list.filter((s) =>
-      !s.offline && s.state !== "dead" && s.state !== "interrupted" && s.state !== "asleep");
+      !s.offline && s.state !== "dead" && s.state !== "interrupted" &&
+      s.state !== "asleep" && s.state !== "wait-asleep");
     setAppIcon(
       live.some((s) => s.state === "waiting_input")
         ? "red"
@@ -338,6 +348,10 @@ export class Sidebar {
       // « Non résoluble » = probable fantôme — visible dans l'onglet
       // mais pas en badge de session (rien d'actionnable dessus).
       if (prUnresolved(p)) continue;
+      // « Citées » (via weak) : pas des PR d'agent avérées — pas de
+      // badge session non plus, la section dédiée de l'onglet les
+      // garde accessibles.
+      if (prCited(p)) continue;
       const k = `${p.conn ?? "default"}${p.session}`;
       if (!this.prBySess.has(k)) this.prBySess.set(k, []);
       this.prBySess.get(k)!.push(p);
@@ -871,7 +885,8 @@ export class Sidebar {
         .catch((e) => showErr(String(e)));
     });
     sleepBtn.disabled = !!s.offline ||
-      s.state === "asleep" || s.state === "dead" || s.state === "interrupted";
+      s.state === "asleep" || s.state === "wait-asleep" ||
+      s.state === "dead" || s.state === "interrupted";
     // Exit = tue le process agent (kill_session) — la session reste, reprenable.
     // Action destructive → double-clic armé comme delete_path / sess-del.
     menuBtn(this.ctx, t("ctx_exit"), "danger", (b) => {
@@ -928,7 +943,52 @@ export class Sidebar {
         .then(() => this.refresh())
         .catch((e) => showErr(String(e)));
     });
+    // « Dissoudre et supprimer » : détruit les sessions du sous-arbre —
+    // la confirmation (nombre, états, orch, ac-wait) vit dans
+    // dlg-grpdel, pas de double-clic armé ici.
+    menuBtn(this.ctx, t("grpdel_menu"), "danger", () => {
+      hideSessCtx();
+      this.groups.openDelDlg(conn, grp);
+    });
     placeMenu(this.ctx, "sctx", x, y);
+  }
+
+  /** delete_session d'une session hors du flux « × » de ligne (ex.
+   *  dissolve+delete d'un groupe) : mêmes tombstones que la
+   *  suppression unitaire — pendingDel (events session_deleted sans
+   *  toast, liste filtrée même si le snapshot date d'avant), markGone
+   *  si la session est affichée, spawnWatch oublié. Rejette après
+   *  restauration en cas d'échec RPC — l'appelant décide du sort
+   *  (toast du flux ligne, comptage du flux groupe). */
+  async deleteSessionNow(s: SessionMeta): Promise<void> {
+    this.pendingDel.add(s.id);
+    if (app.current?.id === s.id) {
+      // Session affichée : markGone fait le ménage complet (conv
+      // cachée, current, gem, boutons, badge "gone", updateHeader).
+      // L'event session_deleted trouvera app.current déjà null → il
+      // ne repassera pas par là.
+      this.chat.markGone();
+    } else {
+      this.chat.dropConv(s.id);
+    }
+    // Suppression volontaire : même garde que kill — pas un échec de
+    // spawn à notifier (checkSpawns l'oublierait de toute façon à la
+    // sortie de liste, mais autant ne pas toaster entre-temps).
+    app.spawnWatch.delete(s.id);
+    try {
+      await call("delete_session", { session: s.id, conn: s.conn });
+    } catch (er) {
+      this.pendingDel.delete(s.id);
+      // Échec → la session existe encore : la réinjecter dans le
+      // cache liste pour qu'elle réapparaisse au refresh (même
+      // offline si la connexion est tombée entre-temps) — sauf si
+      // sa connexion a été supprimée entre-temps.
+      if (this.conns.hasCfg(s.conn ?? "local") &&
+          !app.lastSessions.some((x) => x.id === s.id)) {
+        app.lastSessions.push(s);
+      }
+      throw er;
+    }
   }
 
   /** Renommage inline du titre dans la ligne session (même pattern que le
@@ -1011,9 +1071,11 @@ export class Sidebar {
         ? `error: ${s.last_error.kind} · ${s.last_error.message} · x${s.last_error.count} · ${s.last_error.at}`
         : s.state === "asleep"
           ? `asleep · ${t("dot_asleep_tip")}`
-          : s.state === "wait"
-            ? `wait${waitTip(s)} · ${t("dot_wait_tip")}`
-            : s.state;
+          : s.state === "wait-asleep"
+            ? `asleep · wait${waitTip(s)} · ${t("dot_wait_tip")}`
+            : s.state === "wait"
+              ? `wait${waitTip(s)} · ${t("dot_wait_tip")}`
+              : s.state;
     div.innerHTML = `<span class="dot st-${dotCls(s.state, s.last_error)}" title="${q(esc(dotTip))}">${dotIcon(s.state, s.last_error)}</span><span class="t">${this.hl(s.title)}</span>${originHtml}${prHtml}<span class="a">${this.hl(s.agent)}</span><button class="sess-del" title="Supprimer">${icon("close")}</button>`;
     div.onclick = () => {
       void this.openSession(s.id);
@@ -1042,35 +1104,10 @@ export class Sidebar {
       // Optimiste : la ligne disparaît sans attendre le démon (kill de
       // l'agent + purge des fichiers peuvent durer). L'event
       // session_deleted confirmera ; en cas d'erreur la ligne revient.
-      this.pendingDel.add(s.id);
-      if (app.current?.id === s.id) {
-        // Session affichée : markGone fait le ménage complet (conv
-        // cachée, current, gem, boutons, badge "gone", updateHeader).
-        // L'event session_deleted trouvera app.current déjà null → il
-        // ne repassera pas par là.
-        this.chat.markGone();
-      } else {
-        this.chat.dropConv(s.id);
-      }
       div.remove();
-      // Suppression volontaire : même garde que kill — pas un échec de
-      // spawn à notifier (checkSpawns l'oublierait de toute façon à la
-      // sortie de liste, mais autant ne pas toaster entre-temps).
-      app.spawnWatch.delete(s.id);
       void this.refresh();
-      void call("delete_session", { session: s.id, conn: s.conn })
-        .catch((er) => {
-          showErr(String(er));
-          this.pendingDel.delete(s.id);
-          // Échec → la session existe encore : la réinjecter dans le
-          // cache liste pour qu'elle réapparaisse au refresh (même
-          // offline si la connexion est tombée entre-temps) — sauf si
-          // sa connexion a été supprimée entre-temps.
-          if (this.conns.hasCfg(s.conn ?? "local") &&
-              !app.lastSessions.some((x) => x.id === s.id)) {
-            app.lastSessions.push(s);
-          }
-        })
+      void this.deleteSessionNow(s)
+        .catch((er) => showErr(String(er)))
         .finally(() => void this.refresh());
     });
     return div;

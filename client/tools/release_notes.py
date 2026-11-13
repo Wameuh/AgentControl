@@ -4,6 +4,11 @@ lisibles par des utilisateurs (sections New features / Bug fixes /
 Improvements), construites à partir des sujets de squash mergés sur
 next_release dans le cycle courant.
 
+Chaque ligne est un changement vécu par l'utilisateur : jamais de
+référence interne — pas de suffixe `(#NNN)`, pas de lien PR, pas d'id
+backlog, pas de jargon de composant interne. Les termes techniques
+visibles (noms de fonctionnalités, commandes) restent bienvenus.
+
 Libellés anglais : le sujet de commit est rédigé en français — chaque PR
 feat/fix/perf doit donc déposer sa note utilisateur anglaise dans
 `client/tools/release_notes_en.txt` (lignes `<PR>: <note>`). À défaut le
@@ -239,7 +244,10 @@ def render(version, date, ent):
             continue
         written = True
         lines.append(f"### {name}")
-        lines += [f"- {t}" + (f" (#{p})" if p else "") for t, p in ent[name]]
+        # Notes 100 % utilisateur : jamais de suffixe `(#N)` ni de
+        # référence interne (lien PR, id backlog, nom de composant
+        # interne) — le numéro de PR ne sert qu'à la dédup/attribution.
+        lines += [f"- {t}" for t, _ in ent[name]]
         lines.append("")
     if not written:
         lines += ["This release contains internal improvements and "

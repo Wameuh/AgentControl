@@ -125,10 +125,24 @@ dialog input[type="checkbox"]:focus-visible {
   white-space: pre-wrap; word-break: break-word; user-select: text;
 }
 .dlg-status { color: var(--dim); font-size: 12.5px; }
+/* Avertissement non bloquant dans un panneau (ex. seconde instance :
+   auto-connexion suspendue, connexion manuelle requise). */
+.dlg-warn {
+  color: var(--warn); font-size: 12.5px; padding: 8px 10px; margin-top: 2px;
+  border: 1px solid rgba(232, 190, 90, .4); border-radius: 8px;
+  background: rgba(232, 190, 90, .08);
+}
 
 
 #g-name { width:100%; box-sizing:border-box; background:rgba(var(--tint-rgb),.05); color:var(--ink);
   border:1px solid var(--line); border-radius:8px; padding:8px 10px; font:inherit; margin:8px 0 }
+
+/* Dissolve+delete d'un groupe : résumé + avertissements (états
+   actifs, sessions d'orchestrateur, waiters ac-wait). */
+#gd-summary { margin: 0; font-size: 13px; }
+#gd-warns { display: flex; flex-direction: column; gap: 6px; }
+#gd-warns .gd-warn { color: var(--warn); font-size: 12.5px; margin: 0; }
+#dlg-grpdel button.danger { color: var(--red); }
 
 /* Appairage QR (B′) : la modale d'émission centre le canvas ; le warn
    rappelle le niveau d'accès offert par le code affiché. */

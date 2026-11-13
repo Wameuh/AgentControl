@@ -142,6 +142,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 params_schema: Vec::new(),
                 params: HashMap::new(),
                 render: None,
+                view_dir: None,
             },
             detect: CatalogDetect {
                 bin: Some("agentbacklog".into()),
@@ -248,6 +249,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 params_schema: Vec::new(),
                 params: HashMap::new(),
                 render: None,
+                view_dir: None,
             },
             detect: CatalogDetect {
                 bin: Some("agent-reviewer".into()),
@@ -638,6 +640,9 @@ pub(super) fn resync(spec: &mut ComponentSpec, entry: &CatalogEntry) {
     spec.min_version = cat.min_version;
     spec.params_schema = cat.params_schema;
     spec.render = cat.render;
+    // Vue plugin : catalogue-owned comme render — une entrée qui
+    // déclarerait view_dir doit être propagée au resync.
+    spec.view_dir = cat.view_dir;
     spec.catalog = cat.catalog;
     if spec.description.is_none() {
         spec.description = cat.description;

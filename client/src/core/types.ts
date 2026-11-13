@@ -27,6 +27,12 @@ export interface SessionMeta {
   available_modes: string[];
   available_commands: CmdInfo[];
   available_models: string[];
+  /** Modèle advisor choisi (profils `advisor_models`) — "off" = off
+   *  explicite ; absent = défaut du profil. Appliqué au spawn. */
+  advisor?: string;
+  /** Choix advisor déclarés par le profil — sélecteur header visible
+   *  quand non vide (ex. claude-code-acp : fable/opus/sonnet). */
+  advisor_models?: string[];
   config_options?: ConfigOption[];
   state: string;
   /** Dernier échec de tour (état "error") — kind : rate_limit | model
@@ -39,8 +45,9 @@ export interface SessionMeta {
   /** Provenance externe (session créée par un service via new_session
    *  `origin`) — badge « via » sidebar + marquage du prompt initial. */
   origin?: string;
-  /** Détail du waiter ac-wait — présent seulement quand state="wait"
-   *  (#189 : âge du waiter le plus ancien, son nom, son timeout). */
+  /** Détail du waiter ac-wait — présent quand state="wait" ou
+   *  "wait-asleep" (#189 : âge du waiter le plus ancien, son nom, son
+   *  timeout ; #222 : wait-asleep = session endormie sous waiter). */
   wait?: { secs: number; name?: string; timeout?: number };
 }
 
@@ -70,6 +77,15 @@ export interface PrEntry {
   /** Horodatages ISO du registre — tri de la section « terminées ». */
   created_at?: string;
   updated_at?: string;
+  /** Review lue sur la forge au dernier sync : approved |
+   *  changes_requested | requested | required. */
+  review?: string;
+  /** Checks CI de la tête au dernier sync : pending | success |
+   *  failure. */
+  ci?: string;
+  /** Review de l'orchestrateur local (PRReview-*) — injecté par
+   *  h_pr_list, pas persisté : running | retry | queued. */
+  native_review?: string;
 }
 
 /** État runtime d'un composant (champ `status` des items ListComponents). */
@@ -257,6 +273,9 @@ export interface ComponentSpec {
   render?: { path: string; template: string } | null;
   /** Requêtes de données déclarées (`component_query` → argv). */
   queries?: Record<string, string[]>;
+  /** Vue plugin (option B) : dossier d'assets servi sous
+   *  `/plugin/<name>/` — iframe sandboxée + bridge postMessage. */
+  view_dir?: string | null;
 }
 
 export interface ComponentStatus {
@@ -292,6 +311,9 @@ export interface ComponentItem {
   catalog?: boolean;
   spec: ComponentSpec;
   status: ComponentStatus;
+  /** Vue plugin effective (spec.view_dir ou convention
+   *  components/<name>/web/ côté démon) — bouton « ouvrir la vue ». */
+  view?: boolean;
 }
 
 /** Entrée du catalogue embarqué (ComponentCatalog) : métadonnées +

@@ -64,6 +64,37 @@ const HL_MAX = 1500 * 1024;
 /** Gouttière de numéros : recomptée à la frappe — capée pour la perf. */
 const NUMS_MAX = 300_000;
 
+// ---- Undo/redo de l'éditeur : pile custom d'états (même mécanisme que
+// le composer, #223/#304). Chaque état = valeur + sélection complètes :
+// un pas par rafale de frappe (debounce), un pas par collage/coupure/
+// dépôt, un pas par Tab. Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y interceptés
+// dans le keydown ; jamais pendant une composition IME.
+// Gardes : pile seulement quand le fichier est entièrement chargé
+// (sinon un undo restaurerait un buffer sans les tranches arrivées
+// entre-temps → save_edit amputerait la zone chargée) et sous
+// UNDO_MAX_CHARS (les gros fichiers gardent l'undo natif du textarea).
+interface EditState {
+  v: string;
+  s: number;
+  e: number;
+}
+/// Frappe : deux edits espacés de plus que ce délai ouvrent un pas
+/// d'undo distinct (sinon toute la saisie = un seul Ctrl+Z).
+const UNDO_DEBOUNCE_MS = 800;
+/// Borne de la pile — chaque pas stocke le buffer entier.
+const UNDO_MAX = 60;
+/// Au-delà, pas de pile custom (mémoire) : Ctrl+Z retombe sur l'undo
+/// natif du textarea, comme avant.
+const UNDO_MAX_CHARS = 256 * 1024;
+/// Largeur du viewer à partir de laquelle l'aperçu md passe en
+/// split vertical (côte-à-côte) plutôt qu'empilé.
+const SPLIT_ROW_MIN = 600;
+/// Splitter explorateur ↔ preview : bornes en px et clé de persistance
+/// (largeur de #ft-side en pixels, globale à toutes les sessions).
+const FT_SIDE_MIN = 150;
+const FT_VIEW_MIN = 200;
+const FT_W_KEY = "ac-ft-width";
+
 /** Fichier texte ouvert dans le viewer — chargé progressivement. */
 interface CurFile {
   rel: string;
@@ -105,9 +136,24 @@ export class FileExplorer {
   private cur: CurFile | null = null;
   private editOn = false;
   private dirty = false;
+  /** Pile d'undo / redo de l'éditeur (états {valeur, sélection}). */
+  private undoStack: EditState[] = [];
+  private redoStack: EditState[] = [];
+  /** État connu du textarea — référence « avant » pour la frappe :
+   *  l'event input arrive APRÈS la mutation. */
+  private lastKnown: EditState = { v: "", s: 0, e: 0 };
+  private lastEditAt = 0;
+  /** Contenu « propre » du buffer : valeur attendue sans édition
+   *  utilisateur (texte chargé + tranches ajoutées en édition +
+   *  dernier save) — sert à recalculer dirty après un undo/redo. */
+  private editClean = "";
   private pdf = new PdfView();
   private mdView = new MdView({
-    text: () => this.cur?.chunks.join("") ?? "",
+    // En édition, l'aperçu live lit le buffer du textarea (les chunks
+    // disque sont figés à l'entrée en édition).
+    text: () => this.editOn
+      ? ($("file-edit") as HTMLTextAreaElement).value
+      : (this.cur?.chunks.join("") ?? ""),
     done: () => this.cur?.done ?? true,
     openFile: (rel) => void this.openFilePanel(rel),
     more: () => this.maybeMore(),
@@ -129,6 +175,7 @@ export class FileExplorer {
    *  paramètres — propagée au viewer pour basculer la vue courante. */
   setMdRender(on: boolean) {
     this.mdView.setRender(on);
+    this.updateSplitLayout();
   }
 
   /** L'arbre suit le workspace de la session nouvellement ouverte. */
@@ -249,6 +296,7 @@ export class FileExplorer {
     this.cur = null;
     this.editOn = false;
     this.dirty = false;
+    this.clearEditHistory();
     this.mdView.detach();
     this.pdf.detach();
     $("file-edwrap").hidden = true;
@@ -260,6 +308,7 @@ export class FileExplorer {
     $("fv-conflict").hidden = true;
     $("fv-loadall").hidden = true;
     $("fv-status").textContent = "";
+    this.updateSplitLayout();
   }
 
   // ------------------------------------------------------------------
@@ -361,6 +410,10 @@ export class FileExplorer {
       const ta = $("file-edit") as HTMLTextAreaElement;
       // setRangeText préserve le caret — append en fond pendant la frappe.
       ta.setRangeText(text, ta.value.length, ta.value.length);
+      // L'append n'est pas une édition utilisateur : pas de pas d'undo,
+      // juste resync de la référence (le prochain geste repart de là).
+      this.lastKnown = this.editSnapshot();
+      this.editClean += text;
       this.scheduleHl();
       this.scheduleNums();
     } else {
@@ -419,9 +472,15 @@ export class FileExplorer {
     // (éditer un buffer vide sur un fichier existant = insertion en tête).
     if (!cur || !this.editable() || !cur.abs) return;
     this.editOn = true;
-    this.mdView.setEditing(true);
     const ta = $("file-edit") as HTMLTextAreaElement;
     ta.value = cur.chunks.join("");
+    // Split source/aperçu live : desktop seulement — sur mobile la
+    // place manque, on garde la bascule simple (fv-md / fv-edit).
+    this.mdView.setSplit(!isAndroid());
+    this.mdView.setEditing(true);
+    this.clearEditHistory();
+    this.editClean = ta.value;
+    this.lastKnown = this.editSnapshot();
     $("file-view").hidden = true;
     $("file-edwrap").hidden = false;
     $("fv-edit").classList.add("on");
@@ -429,6 +488,9 @@ export class FileExplorer {
     this.refreshHl();
     this.refreshNums();
     this.updateStatus();
+    this.updateSplitLayout();
+    // Aperçu md live : force le re-rendu sur le buffer courant.
+    this.mdView.changed();
     ta.focus();
   }
 
@@ -446,6 +508,7 @@ export class FileExplorer {
     const cur = this.cur;
     this.editOn = false;
     this.dirty = false;
+    this.clearEditHistory();
     $("file-edwrap").hidden = true;
     $("file-view").hidden = false;
     $("fv-edit").classList.remove("on");
@@ -463,14 +526,155 @@ export class FileExplorer {
     this.mdView.changed();
     this.mdView.setEditing(false);
     this.updateStatus();
+    this.updateSplitLayout();
   }
 
-  private onEditInput() {
+  private onEditInput(e?: InputEvent) {
     if (!this.editOn) return;
+    if (e) this.noteUserEdit(e);
     this.dirty = true;
     this.updateStatus();
     this.scheduleHl();
     this.scheduleNums();
+    // Aperçu md live : le rendu suit la frappe (debouncé côté MdView).
+    this.mdView.changed();
+  }
+
+  // ---- Undo/redo ----
+
+  private editSnapshot(): EditState {
+    const ta = $("file-edit") as HTMLTextAreaElement;
+    const s = ta.selectionStart ?? ta.value.length;
+    return { v: ta.value, s, e: ta.selectionEnd ?? s };
+  }
+
+  /** La pile custom n'a de sens que sur un buffer complet (pas de
+   *  tranche en vol) et borné — sinon on laisse l'undo natif du
+   *  textarea gérer (comportement d'avant). */
+  private undoCapable(): boolean {
+    const cur = this.cur;
+    if (!cur?.done) return false;
+    const ta = $("file-edit") as HTMLTextAreaElement;
+    return ta.value.length <= UNDO_MAX_CHARS;
+  }
+
+  /** Empile un état comme pas d'undo (sommet identique = no-op ignoré)
+   *  et vide la pile de redo — toute nouvelle édition invalide le futur. */
+  private pushState(s: EditState) {
+    const top = this.undoStack[this.undoStack.length - 1];
+    if (top && top.v === s.v) return;
+    if (this.undoStack.length >= UNDO_MAX) this.undoStack.shift();
+    this.undoStack.push(s);
+    this.redoStack = [];
+  }
+
+  /** Frappe/collage natif (event input) : un pas par rafale via debounce ;
+   *  collage, coupure et dépôt forment leur propre pas immédiat. La
+   *  composition IME et les historyUndo/Redo natifs ne passent pas par
+   *  la pile — on se contente de resynchroniser la référence. */
+  private noteUserEdit(e: InputEvent) {
+    const cur = this.editSnapshot();
+    const it = e.inputType ?? "";
+    if (
+      e.isComposing ||
+      it === "insertCompositionText" ||
+      it === "historyUndo" ||
+      it === "historyRedo" ||
+      !this.undoCapable()
+    ) {
+      this.lastKnown = cur;
+      return;
+    }
+    const ownStep =
+      it === "insertFromPaste" ||
+      it === "insertFromDrop" ||
+      it === "insertFromYank" ||
+      it === "insertReplacementText" ||
+      it === "deleteByCut" ||
+      it === "deleteByDrag" ||
+      it === "deleteByDrop";
+    if (ownStep || Date.now() - this.lastEditAt > UNDO_DEBOUNCE_MS) {
+      // lastKnown = état d'avant CET edit (mis à jour en fin de handler).
+      this.pushState(this.lastKnown);
+    }
+    this.lastEditAt = Date.now();
+    this.lastKnown = cur;
+  }
+
+  /** Écriture programmatique (Tab) : pas d'undo immédiat — le Ctrl+Z
+   *  suivant revient à l'état d'avant le Tab. */
+  private pushStep() {
+    if (this.undoCapable()) this.pushState(this.editSnapshot());
+  }
+
+  private undo() {
+    const s = this.undoStack.pop();
+    if (!s) return;
+    this.pushRedo(this.editSnapshot());
+    this.restore(s);
+  }
+
+  private redo() {
+    const s = this.redoStack.pop();
+    if (!s) return;
+    this.pushUndoRaw(this.editSnapshot());
+    this.restore(s);
+  }
+
+  /** Symétrique de pushState pour la pile de redo (pas de clear redo —
+   *  c'est la pile d'undo qui l'alimente). */
+  private pushRedo(s: EditState) {
+    if (this.redoStack.length >= UNDO_MAX) this.redoStack.shift();
+    this.redoStack.push(s);
+  }
+
+  /** Empile sur undo SANS vider redo — utilisé par redo() lui-même. */
+  private pushUndoRaw(s: EditState) {
+    if (this.undoStack.length >= UNDO_MAX) this.undoStack.shift();
+    this.undoStack.push(s);
+  }
+
+  /** Réapplique un état complet (valeur + sélection) — pas d'event
+   *  input, pas de nouveau pas d'undo. dirty est recalculé contre le
+   *  contenu « propre » : revenir pile au contenu sauvegardé/nettoie
+   *  le marqueur au lieu de le laisser sale à tort. */
+  private restore(s: EditState) {
+    const ta = $("file-edit") as HTMLTextAreaElement;
+    const st = ta.scrollTop;
+    const sl = ta.scrollLeft;
+    ta.value = s.v;
+    const len = s.v.length;
+    ta.setSelectionRange(Math.min(s.s, len), Math.min(s.e, len));
+    ta.scrollTop = st;
+    ta.scrollLeft = sl;
+    this.lastKnown = this.editSnapshot();
+    this.lastEditAt = 0; // la frappe suivante ouvre une nouvelle rafale
+    const norm = (x: string) => x.replace(/\r\n?/g, "\n");
+    this.dirty = norm(ta.value) !== norm(this.editClean);
+    this.updateStatus();
+    this.scheduleHl();
+    this.scheduleNums();
+    this.mdView.changed();
+  }
+
+  /** La pile est propre à la session d'édition : changement de fichier,
+   *  sortie ou reload → les états d'un autre buffer ne doivent ni être
+   *  restaurés ni recevoir le buffer comme pas d'undo. */
+  private clearEditHistory() {
+    this.undoStack = [];
+    this.redoStack = [];
+    this.lastEditAt = 0;
+    this.editClean = "";
+  }
+
+  /** Split source/aperçu md : deux vues visibles → le conteneur passe
+   *  en ligne (côte-à-côte) si le panneau est assez large, empilé
+   *  sinon. Hors édition ou aperçu masqué → une seule vue, colonne. */
+  private updateSplitLayout() {
+    const main = $("file-main");
+    const both = this.editOn && this.mdView.rendered;
+    main.classList.toggle("fv-split", both);
+    main.classList.toggle("fv-row", both && $("file-viewer").clientWidth >= SPLIT_ROW_MIN);
   }
 
   /** Re-coloration debouncée : highlight() est un regex global O(n) —
@@ -558,6 +762,7 @@ export class FileExplorer {
       cur.size = r.size;
       cur.loaded = bytes.length;
       cur.chunks = [ta.value];
+      this.editClean = ta.value;
       // Frontière octets neuve : une éventuelle séquence multi-octets à
       // cheval sur l'ancienne frontière ne doit pas se rejouer.
       cur.decoder = null;
@@ -923,6 +1128,9 @@ export class FileExplorer {
     // Arbre masqué : plus aucun dossier affiché → zéro watch (dirty
     // sans travail ; le re-affichage recharge de toute façon).
     if (!v) this.unwatchAll();
+    // La colonne arborescence prend/restitue de la largeur → le split
+    // md (côte-à-côte ↔ empilé) se ré-évalue.
+    this.updateSplitLayout();
   }
 
   /** Palette quick-open : révèle un dossier dans l'arbre — panneau et
@@ -1413,6 +1621,12 @@ export class FileExplorer {
 
     this.mdView.init();
     this.pdf.init();
+    // Bascule rendu/source : re-évalue le split (aperçu masqué → éditeur
+    // seul reprend toute la largeur, sans trait de séparation).
+    $("fv-md").addEventListener("click", () => this.updateSplitLayout());
+    // fv-edit = icône + label « Éditer » (affordance visible) — pas de
+    // data-icon : hydrateIcons écraserait le label au boot.
+    $("fv-edit").insertAdjacentHTML("afterbegin", icon("edit"));
     $("fv-edit").onclick = () => {
       if (this.editOn) this.exitEdit();
       else this.enterEdit();
@@ -1423,16 +1637,29 @@ export class FileExplorer {
     $("fv-overwrite").onclick = () => void this.saveEdit(true);
 
     const ta = $("file-edit") as HTMLTextAreaElement;
-    ta.addEventListener("input", () => this.onEditInput());
+    ta.addEventListener("input", (e) => this.onEditInput(e as InputEvent));
     ta.addEventListener("scroll", () => this.syncEditScroll());
     ta.addEventListener("keydown", (e) => {
       if (e.key === "Tab") {
         e.preventDefault();
+        this.pushStep();
         ta.setRangeText("\t", ta.selectionStart, ta.selectionEnd, "end");
+        this.lastKnown = this.editSnapshot();
         this.onEditInput();
-      } else if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
-        e.preventDefault();
-        void this.saveEdit();
+      } else if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.isComposing) {
+        const k = e.key.toLowerCase();
+        // Undo/redo custom tant que la pile est active — sinon on laisse
+        // le navigateur gérer (gros fichiers, buffer partiel).
+        if (k === "z" && (this.undoStack.length || this.redoStack.length || this.undoCapable())) {
+          e.preventDefault();
+          if (e.shiftKey) this.redo(); else this.undo();
+        } else if (k === "y" && (this.undoStack.length || this.redoStack.length || this.undoCapable())) {
+          e.preventDefault();
+          this.redo();
+        } else if (k === "s") {
+          e.preventDefault();
+          void this.saveEdit();
+        }
       } else if (e.key === "Escape") {
         e.preventDefault();
         this.exitEdit();
@@ -1507,6 +1734,8 @@ export class FileExplorer {
         );
         panel.style.width = `${w}px`;
         localStorage.setItem("ac-filepanel-w", String(w));
+        // Le split md (côte-à-côte ↔ empilé) dépend de la largeur.
+        this.updateSplitLayout();
       };
       const up = () => {
         window.removeEventListener("mousemove", move);
@@ -1517,6 +1746,63 @@ export class FileExplorer {
     });
     const saved = Number(localStorage.getItem("ac-filepanel-w"));
     if (saved > 240) panel.style.width = `${saved}px`;
+
+    // Splitter explorateur ↔ preview (#ft-side / #file-viewer) : drag
+    // borné (≥ FT_SIDE_MIN côté arbre, ≥ FT_VIEW_MIN côté preview),
+    // largeur persistée, dbl-clic = retour au 44 % par défaut, flèches
+    // ←/→ quand la poignée a le focus. Masqué par CSS quand #ft-side
+    // est caché ou sous body.android (layout empilé, pas de split).
+    const side = $("ft-side");
+    const sd = $("ft-split");
+    sd.setAttribute("aria-label", sd.title);
+    const applyFtW = (w: number) => {
+      const bodyW = $("file-body").clientWidth;
+      const max = Math.max(FT_SIDE_MIN, bodyW - FT_VIEW_MIN);
+      side.style.width = `${Math.min(Math.max(w, FT_SIDE_MIN), max)}px`;
+      localStorage.setItem(FT_W_KEY, String(Math.round(side.getBoundingClientRect().width)));
+      // La largeur de l'arbre change → le split md (côte-à-côte ↔
+      // empilé) se ré-évalue.
+      this.updateSplitLayout();
+    };
+    sd.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      const startX = e.clientX;
+      const startW = side.getBoundingClientRect().width;
+      const move = (ev: PointerEvent) => {
+        // Bouton/Doigt relâché hors fenêtre → up perdu : auto-relâcher.
+        if (ev.buttons === 0) {
+          up();
+          return;
+        }
+        applyFtW(startW + ev.clientX - startX);
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        window.removeEventListener("pointercancel", up);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      window.addEventListener("pointercancel", up);
+    });
+    sd.addEventListener("dblclick", () => {
+      side.style.width = "";
+      localStorage.removeItem(FT_W_KEY);
+      this.updateSplitLayout();
+    });
+    sd.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      e.preventDefault();
+      applyFtW(side.getBoundingClientRect().width + (e.key === "ArrowRight" ? 16 : -16));
+    });
+    // Largeur persistée : appliquée telle quelle — les bornes restent
+    // garanties par min-width/max-width CSS de #ft-side.
+    const savedFt = Number(localStorage.getItem(FT_W_KEY));
+    if (savedFt > 0) side.style.width = `${savedFt}px`;
+    // Redimensionnement fenêtre (rotation mobile, split desktop) :
+    // l'orientation du split md suit la place disponible.
+    window.addEventListener("resize", () => this.updateSplitLayout());
 
     // Chemins de fichiers cliquables dans les messages → panneau latéral.
     $("events").addEventListener("click", (e) => {

@@ -54,6 +54,8 @@ import { TermPanel } from "./features/terminal";
 import { SettingsPanel } from "./features/settings";
 import { Tts } from "./features/tts";
 import { ComponentsPanel } from "./features/components";
+import { LogsPanel } from "./features/logs";
+import { PluginView } from "./features/plugin-view";
 import { stateDiff } from "./features/state-diff";
 import { sounds } from "./features/sounds";
 import { notifications } from "./features/notifications";
@@ -103,17 +105,29 @@ window.addEventListener("contextmenu", (e) => {
 // la dernière utilisée (1re entrée de connections.json). Son accent
 // éventuel est posé avant le premier rendu utile (pas de flash de la
 // couleur par défaut) ; le connect auto lui-même part en fin de boot.
-const [cliConn, savedConns] = await Promise.all([
+const [cliConn, savedConns, otherInstances] = await Promise.all([
   invoke<string | null>("cli_conn").catch(() => null),
   invoke<SavedConn[]>("saved_connections").catch(() => [] as SavedConn[]),
+  // Garde « seconde instance » : une autre instance vivante → l'auto-
+  // connexion est suspendue (deux clients passifs sur la même conn se
+  // concurrencent — flap de transport, notifications doublées). Un
+  // --conn/AGENTCONTROL_CONN explicite reste honoré : c'est le spawn
+  // délibéré de la multi-instance. Web/Android : mono-processus.
+  isWeb || isAndroid()
+    ? Promise.resolve([] as unknown[])
+    : invoke<unknown[]>("other_instances").catch(() => [] as unknown[]),
 ]);
 const bootConn =
   (cliConn ? savedConns.find((c) => connKeyOf(c, isAndroid()) === cliConn) : undefined) ??
   savedConns[0];
-// Ne teinter que si un bind va réellement suivre — avec autoconnect off et
-// sans --conn, aucune conn ne sera liée : pas de couleur mensongère.
+// Auto-connexion suspendue : instance déjà vivante et aucune directive
+// explicite — la connexion manuelle reste possible.
+const autoSuppressed = cliConn == null && otherInstances.length > 0;
+// Ne teinter que si un bind va réellement suivre — avec autoconnect off,
+// auto supprimé ou sans --conn, aucune conn ne sera liée : pas de couleur
+// mensongère.
 const willConnect =
-  cliConn != null || isWeb || localStorage.getItem("ac-autoconnect") !== "0";
+  cliConn != null || isWeb || (!autoSuppressed && localStorage.getItem("ac-autoconnect") !== "0");
 const bootAccent = accentOf(bootConn?.color);
 if (willConnect && bootAccent) applyAccent(bootAccent, false);
 
@@ -134,6 +148,8 @@ const newSess = new NewSessionDialog();
 const settings = new SettingsPanel();
 const tts = new Tts();
 const comps = new ComponentsPanel();
+const logsPanel = new LogsPanel();
+const pluginViews = new PluginView();
 const search = new SessionSearch();
 const pins = new Pins();
 
@@ -207,10 +223,12 @@ notifications.bind({
     connView.close();
     map.close();
     comps.close();
+    logsPanel.close();
+    pluginViews.close();
     void chat.open(id, false, conn);
   },
 });
-sidebar.bind(conns, groups, newSess, chat, settings, connView, comps, map);
+sidebar.bind(conns, groups, newSess, chat, settings, connView, comps, map, logsPanel, pluginViews);
 composer.bind(chat);
 composer.refresh = () => sidebar.refresh();
 // Hint « modèle absent » du bouton mic → ouvre les settings directement
@@ -260,12 +278,29 @@ connView.refresh = () => sidebar.refresh();
 connView.connecting = (hosts) => chat.setConnecting(hosts);
 // Exclusion mutuelle des overlays plein #chat — chaque open() ferme
 // les autres (sinon : empilement opaque + inert, écran "figé").
-connView.onOpening = () => { settings.close(); map.close(); comps.close(); };
-settings.onOpening = () => { connView.close(); map.close(); comps.close(); };
+connView.onOpening = () => { settings.close(); map.close(); comps.close(); logsPanel.close(); pluginViews.close(); };
+settings.onOpening = () => { connView.close(); map.close(); comps.close(); logsPanel.close(); pluginViews.close(); };
 // Select « Appairer » des settings : pré-sélection sur la conn liée.
 settings.activeConnKey = () => conns.knownConns()[0] ?? null;
 comps.bind(conns);
-comps.onOpening = () => { settings.close(); connView.close(); map.close(); };
+comps.onOpening = () => { settings.close(); connView.close(); map.close(); logsPanel.close(); pluginViews.close(); };
+logsPanel.bind(conns);
+logsPanel.onOpening = () => { settings.close(); connView.close(); map.close(); comps.close(); pluginViews.close(); };
+// Vue plugin (option B) : bouton « vue » du panneau composants →
+// overlay iframe sandboxée + bridge postMessage borné. Même exclusion
+// mutuelle que les autres overlays #chat.
+pluginViews.bind(conns);
+pluginViews.onOpening = () => { settings.close(); connView.close(); map.close(); comps.close(); logsPanel.close(); };
+pluginViews.openSession = (id, conn) => {
+  settings.close();
+  connView.close();
+  map.close();
+  comps.close();
+  logsPanel.close();
+  void chat.open(id, false, conn);
+};
+pluginViews.openComponents = () => comps.open();
+comps.openView = (name, conn) => void pluginViews.open(name, conn);
 newSess.bind(groups);
 newSess.refresh = () => void sidebar.refresh();
 // Le bouton « New agent » vit dans la sidebar (hors #chat — accessible
@@ -277,10 +312,13 @@ newSess.openSession = (id, conn) => {
   connView.close();
   map.close();
   comps.close();
+  logsPanel.close();
+  pluginViews.close();
   void chat.open(id, false, conn);
 };
 newSess.knownConns = () => conns.knownConns();
 groups.refresh = () => void sidebar.refresh();
+groups.deleteSession = (s) => sidebar.deleteSessionNow(s);
 files.bind({ sysline: (txt, ic) => chat.sysline(txt, ic) });
 quick.bind({
   openFile: (p) => files.openFilePanel(p),
@@ -299,6 +337,9 @@ settings.themeChanged = () => {
   // Changement d'accent global : la couleur propre à la conn liée garde
   // la priorité (ré-appliquée ici), l'accent global s'applique sinon.
   conns.reapplyChrome();
+  // Thème dark/light → resynchronise la vue plugin ouverte (bridge
+  // `theme` — le plugin ne peut pas lire le DOM parent).
+  pluginViews.onThemeChanged();
 };
 term.bind({
   termCapable: (c) => conns.cap(c)?.terminal === true,
@@ -313,7 +354,7 @@ map.bind({
   conn: () => conns.knownConns()[0] ?? "",
   componentsCapable: (c) => conns.cap(c)?.components === true,
   openSession: (id, conn) => void chat.open(id, false, conn),
-  onOpening: () => { settings.close(); connView.close(); comps.close(); },
+  onOpening: () => { settings.close(); connView.close(); comps.close(); logsPanel.close(); pluginViews.close(); },
   onToggle: (open) => sidebar.setMapOpen(open),
 });
 
@@ -388,6 +429,7 @@ $("tb-about").onclick = async () => {
 $("tb-more").onclick = () => {
   const items: SheetItem[] = [
     { icon: "map", label: t("map_title"), fn: () => $("tb-map").click() },
+    { icon: "scroll", label: t("logs"), fn: () => $("tb-logs").click() },
   ];
   // Composants : même gate capability que le bouton titlebar masqué
   // sur mobile — pas d'entrée vers un panneau inutilisable.
@@ -440,6 +482,8 @@ map.init();
 settings.init();
 tts.init();
 comps.init();
+logsPanel.init();
+pluginViews.init();
 notifications.init();
 initFirstPost((c) => conns.cap(c)?.first_post === true);
 initModelCosts({ capable: (c) => conns.cap(c)?.model_costs === true });
@@ -457,4 +501,4 @@ initStatus(() => {
   return conns.cap(k)?.host as HostStats | undefined;
 });
 checkBootUpdate();
-connView.autoConnect(savedConns, cliConn ?? undefined);
+connView.autoConnect(savedConns, cliConn ?? undefined, autoSuppressed);

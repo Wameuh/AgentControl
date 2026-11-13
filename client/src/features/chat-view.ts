@@ -16,7 +16,15 @@ import { t } from "../i18n";
 import { icon, type IconName } from "../ui/icons";
 import { hideMenu, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
-import { fillEfforts, joinModel, splitModel } from "./modelbar";
+import {
+  fillEfforts,
+  fillThoughtLevels,
+  joinModel,
+  modelTransition,
+  rememberedEffort,
+  splitModel,
+  thoughtLevelOpt,
+} from "./modelbar";
 import { costFor, ensureCosts } from "./modelcosts";
 import { notifications } from "./notifications";
 import { catalogFor, ensureCatalog } from "./modelcatalog";
@@ -476,7 +484,7 @@ export class ChatView {
     app.current = listMeta ? { ...listMeta } : null;
     app.alive = !!app.current && !app.current.offline &&
       app.current.state !== "dead" && app.current.state !== "interrupted" &&
-      app.current.state !== "asleep";
+      app.current.state !== "asleep" && app.current.state !== "wait-asleep";
     // Session affichée différente → la recherche se ferme : ses résultats
     // indexent le journal de l'ancienne session, pas celui de la nouvelle.
     if (app.current?.id !== prevId) this.deps.onSessionChanged();
@@ -530,7 +538,8 @@ export class ChatView {
     // qu'attendre le spawn_lock derrière lui (sysline « reprise »
     // trompeuse pendant le boot normal).
     if (!app.alive && app.current.native_session_id &&
-        app.current.state !== "asleep" && app.current.state !== "starting") {
+        app.current.state !== "asleep" && app.current.state !== "wait-asleep" &&
+        app.current.state !== "starting") {
       const sys = document.createElement("div");
       sys.className = "sysline";
       sys.innerHTML = `${icon("loader")} ${esc(t("resume_wait"))}`;
@@ -791,6 +800,9 @@ export class ChatView {
     const copts = app.current.config_options ?? [];
     const modeOpt = copts.find((o) => o.id === "mode" || o.category === "mode");
     const modelOpt = copts.find((o) => o.id === "model" || o.category === "model");
+    // Effort de raisonnement annoncé à part (Devin : thought_level) —
+    // effort-select se rebinde dessus ; absent → heuristique suffixe.
+    const thoughtOpt = thoughtLevelOpt(copts);
 
     const ms = $("mode-select") as HTMLSelectElement;
     if (modeOpt || app.current.available_modes.length) {
@@ -814,6 +826,9 @@ export class ChatView {
     const md = $("model-select") as HTMLSelectElement;
     const es = $("effort-select") as HTMLSelectElement;
     const mf = $("model-free") as HTMLInputElement;
+    // config_option réellement bindée sur effort-select ce rendu (pensée
+    // pour le saut dyn-opts — pas de doublon select générique dessous).
+    let boundThought: (typeof copts)[number] | undefined;
     const rawOpts = modelOpt
       ? modelOpt.options.map((o) => ({ v: o.value, label: o.name || o.value }))
       : app.current.available_models.map((m) => ({ v: m, label: m }));
@@ -830,6 +845,12 @@ export class ChatView {
       for (const e of Object.values(cat)) {
         if (!known.has(e.value)) {
           rawOpts.push({ v: e.value, label: `${e.label} · ${t("catalog_badge")}` });
+        } else {
+          // Valeur déjà dans les annonces (extra_models du profil
+          // fusionnés à available_models) : le libellé catalogue
+          // (« Fable 5.1 ») fait foi sur la valeur brute.
+          const o = rawOpts.find((x) => x.v === e.value);
+          if (o && e.label) o.label = e.label;
         }
       }
     }
@@ -881,16 +902,81 @@ export class ChatView {
       // Bouton ⚙ : reconfigurer la fusion quand elle est déjà active
       // (re-sélectionner la même option dans un <select> ne tire pas change)
       $("btn-fusion-edit").hidden = !curIsFusion;
-      // Select d'effort : suffixes réellement présents pour la base choisie
-      // (masqué en fusion — les efforts se choisissent dans le dialogue)
-      fillEfforts(md.value, curEff);
-      es.hidden = curIsFusion || es.options.length <= 1;
+      // Select d'effort : thought_level annoncé → ses options pour le
+      // modèle courant (masqué en fusion — les efforts se choisissent dans
+      // le dialogue) ; sinon suffixes réellement présents pour la base.
+      if (thoughtOpt && !curIsFusion) {
+        fillThoughtLevels(es, thoughtOpt);
+        es.title = thoughtOpt.name || t("effort_title");
+        es.hidden = es.options.length <= 1;
+        boundThought = thoughtOpt;
+      } else {
+        es.title = t("effort_title");
+        fillEfforts(md.value, curEff);
+        es.hidden = curIsFusion || es.options.length <= 1;
+      }
     } else {
       md.hidden = true;
       es.hidden = true;
+      es.title = t("effort_title");
       $("btn-fusion-edit").hidden = true;
       mf.hidden = false;
       mf.value = app.current.model ?? "";
+    }
+
+    // Advisor (claude-code-acp) : profils déclarant advisor_models —
+    // le choix est persisté par le démon et injecté au spawn
+    // (_meta → advisorModel) ; changer recycle le process. "off" =
+    // désactivation explicite, les valeurs listées = modèles advisor.
+    const adv = $("advisor-select") as HTMLSelectElement;
+    const advModels = app.current.advisor_models ?? [];
+    if (advModels.length) {
+      adv.hidden = false;
+      adv.innerHTML = "";
+      // "" = défaut du profil/agent (aucune injection) — distinct de
+      // "off" qui désactive explicitement.
+      const dft = document.createElement("option");
+      dft.value = "";
+      dft.textContent = t("advisor_default");
+      adv.appendChild(dft);
+      const off = document.createElement("option");
+      off.value = "off";
+      off.textContent = t("advisor_off");
+      adv.appendChild(off);
+      for (const v of advModels) {
+        const o = document.createElement("option");
+        o.value = v;
+        o.textContent = v;
+        adv.appendChild(o);
+      }
+      adv.value = app.current.advisor ?? "";
+      adv.title = t("advisor_title");
+    } else {
+      adv.hidden = true;
+    }
+
+    // thought_level est PAR MODÈLE : au changement de modèle l'agent
+    // ré-annonce ses options et repart sur le défaut de CE modèle — si
+    // l'utilisateur y avait choisi un effort, on le rejoue une fois, ici
+    // (forcément après le set model : la transition n'est détectée que sur
+    // la config_options rafraîchie). Jamais ré-appliqué quand la valeur
+    // annoncée diffère des options du nouveau modèle.
+    if (thoughtOpt && boundThought && app.current.model) {
+      const curModel = modelOpt?.currentValue || app.current.model;
+      if (modelTransition(app.current.id, curModel)) {
+        const want = rememberedEffort(app.current.id, curModel);
+        if (
+          want &&
+          thoughtOpt.currentValue !== want &&
+          thoughtOpt.options.some((o) => o.value === want)
+        ) {
+          call("set_config_option", {
+            session: app.current.id,
+            config_id: thoughtOpt.id,
+            value: want,
+          }).catch((er) => showErr(String(er)));
+        }
+      }
     }
 
     // Autres options de config exposées par l'agent (ex. Devin : thought_level,
@@ -898,7 +984,7 @@ export class ChatView {
     const dyn = $("dyn-opts");
     dyn.innerHTML = "";
     for (const o of copts) {
-      if (o === modeOpt || o === modelOpt || !(o.options?.length)) continue;
+      if (o === modeOpt || o === modelOpt || o === boundThought || !(o.options?.length)) continue;
       const sel = document.createElement("select");
       sel.title = o.name || o.id;
       for (const opt of o.options) {

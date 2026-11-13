@@ -11,5 +11,6 @@
 @import "./styles/map.css";     /* vue diagramme composants/sessions */
 @import "./styles/term.css";    /* panneau terminal PTY (xterm.js) */
 @import "./styles/components.css"; /* panneau composants managés (§2.6) */
+@import "./styles/logs.css";      /* panneau logs live client + démon */
 @import "./styles/mobile.css";  /* Android : bottom sheets, drawer, tactile */
 @import "./styles/web.css";     /* navigateur : chrome masqué + modale token */

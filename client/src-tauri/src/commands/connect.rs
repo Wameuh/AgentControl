@@ -152,6 +152,17 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
     };
     let c = Client::connect(&t).await.map_err(|e| format!("{e:#}"))?;
     let status = c.call(ReqKind::DaemonStatus).await.map_err(|e| format!("{e:#}"))?;
+    // Nouveau client = démon possiblement upgradé depuis le dernier
+    // verdict : on oublie la capacité list_sessions_page mémorisée —
+    // un `false` hérité blacklisterait la pagination jusqu'au restart.
+    state.list_page.lock().await.remove(&key);
+    // Liaison consignée : les appels suivants du cycle de vie doivent
+    // pouvoir remonter à la conn qui les a portés — « transport ssh:…
+    // ouvert » (client-core) ne porte pas la clé de conn du client.
+    client_core::log(
+        Level::Info,
+        format!("conn {key}: connectée — daemon joignable"),
+    );
     let gen = {
         let mut map = state.conns.lock().await;
         // `fetch_add` SOUS le lock : l'ordre d'allocation = l'ordre
@@ -238,9 +249,15 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
                 c2.death_reason()
                     .unwrap_or_else(|| "EOF transport".into())
             };
+            // Compteurs au moment de la mort : le watchdog les journalise
+            // avec le reconnect qui suit — une mort avec N appels en vol
+            // et beaucoup de RX/TX n'est pas le même incident qu'un
+            // transport silencieux depuis sa création.
+            let stats = c2.stats().await;
             let _ = app.emit(
                 "conn-dead",
-                serde_json::json!({"conn": k, "why": why, "gen": gen}),
+                serde_json::json!({"conn": k, "why": why, "gen": gen,
+                    "_ac_transport": crate::commands::session::ac_transport_json(&stats)}),
             );
         });
     }
@@ -544,14 +561,18 @@ pub(crate) async fn ensure_daemon(
         t = tag,
         p = remote_port.unwrap_or(7331)
     );
+    let t0 = std::time::Instant::now();
     client_core::log(Level::Info, format!("ensure_daemon {host} tag={tag}"));
     // Marqueurs `step:*` du script (stderr) → event `daemon-step` : le
     // dialogue de progression les affiche au fil de l'eau. Le reste de
-    // stderr est conservé pour le rapport d'erreur.
+    // stderr est conservé pour le rapport d'erreur. Chaque étape est
+    // aussi journalisée : une installation déclenchée par une AUTRE
+    // instance doit rester corrélable dans client.log au flap transport.
     if native.unwrap_or(false) || cfg!(target_os = "android") {
         let (user, h) = split_user_host(&host, user.as_deref())?;
         let err_acc = std::sync::Mutex::new(String::new());
         let app2 = app.clone();
+        let host_step = host.clone();
         // Profil appairé → la host key est épinglée pour l'exec aussi.
         let opts = client_core::ssh_native::Opts {
             expected_hk: host_keys
@@ -569,6 +590,7 @@ pub(crate) async fn ensure_daemon(
             &script,
             Some(&mut |line: &str| {
                 if let Some(s) = line.trim().strip_prefix("step:") {
+                    client_core::log(Level::Info, format!("ensure_daemon {host_step}: step {s}"));
                     let _ = app2.emit("daemon-step", s.to_string());
                 } else {
                     let mut g = err_acc.lock().unwrap();
@@ -587,7 +609,8 @@ pub(crate) async fn ensure_daemon(
         // que dans le toast éphémère.
         client_core::log(
             if code == 0 { Level::Info } else { Level::Warn },
-            format!("ensure_daemon {host}: code={code} out={out} err={}", err_buf.trim()),
+            format!("ensure_daemon {host}: code={code} out={out} err={} ({} ms)",
+                err_buf.trim(), t0.elapsed().as_millis()),
         );
         if code != 0 {
             return Err(if err_buf.trim().is_empty() { out } else { err_buf.trim().to_string() });
@@ -620,6 +643,7 @@ pub(crate) async fn ensure_daemon(
                     match lines.next_line().await {
                         Ok(Some(l)) => {
                             if let Some(s) = l.trim().strip_prefix("step:") {
+                                client_core::log(Level::Info, format!("ensure_daemon {host2}: step {s}"));
                                 let _ = app2.emit("daemon-step", s.to_string());
                             } else {
                                 buf.push_str(&l);
@@ -662,10 +686,10 @@ pub(crate) async fn ensure_daemon(
         // script distant a répondu en erreur, déjà remontée à
         // l'utilisateur → Warn comme le chemin natif (code != 0).
         let lv = if out.status.code() == Some(255) { Level::Error } else { Level::Warn };
-        client_core::log(lv, format!("ensure_daemon {host}: {e}"));
+        client_core::log(lv, format!("ensure_daemon {host}: {e} ({} ms)", t0.elapsed().as_millis()));
         return Err(e);
     }
-    client_core::log(Level::Info, format!("ensure_daemon {host}: {stdout}"));
+    client_core::log(Level::Info, format!("ensure_daemon {host}: {stdout} ({} ms)", t0.elapsed().as_millis()));
     Ok(stdout)
 }
 

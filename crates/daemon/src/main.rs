@@ -86,6 +86,15 @@ struct AgentConf {
     /// catalogue-only côté provider (ex. "devin -r {native_sid} --model {model}").
     #[serde(default)]
     model_override_cmd: Option<String>,
+    /// Modèles sélectionnables hors annonce ACP — `[{value=…, label=…}]`
+    /// (ex. variantes Fable de claude-code-acp que l'adaptateur n'annonce pas).
+    #[serde(default)]
+    extra_models: Vec<proto::ExtraModel>,
+    /// Modèles advisor proposables pour les sessions du profil — active
+    /// l'injection `advisorModel` via `_meta.claudeCode.options` au spawn
+    /// (mécanisme claude-code-acp). Ex. ["fable", "opus", "sonnet"].
+    #[serde(default)]
+    advisor_models: Vec<String>,
 }
 
 fn default_tcp() -> String {
@@ -228,15 +237,20 @@ fn default_agents() -> HashMap<String, AgentProfile> {
             max_instances: server::DEFAULT_MAX_INSTANCES,
             catalogue_cmd: None,
             model_override_cmd: None,
+            extra_models: Vec::new(),
+            advisor_models: Vec::new(),
         },
     );
     // Cursor CLI — ACP natif (`agent acp` / `cursor-agent acp`, même
-    // binaire : `agent` est un alias d'install). argv[0] résolu en
-    // chemin absolu : `agent` est un nom générique (collision possible)
-    // — la résolution fige le binaire concret trouvé sur le PATH au
-    // boot, et `available` reflète l'existence réelle. La commande
-    // reste surchargeable : `[agents.cursor]` dans config.toml ou le
-    // composant interne `agents` (options → composants).
+    // binaire : `agent` est un alias d'install). argv[0] est résolu en
+    // chemin absolu au boot quand c'est possible : `agent` est un nom
+    // générique (collision possible) — la résolution fige le binaire
+    // concret trouvé, et `available`/spawn le re-résolvent à chaud via
+    // `command_path` (un Cursor installé APRÈS le boot reste
+    // `available` grâce au repli nu « cursor-agent » + PATH élargi).
+    // La commande reste surchargeable : `[agents.cursor]` dans
+    // config.toml ou le composant interne `agents` (options →
+    // composants).
     let cursor_bin = ["cursor-agent", "agent"]
         .iter()
         .find_map(|c| server::misc::command_path(c))
@@ -252,6 +266,8 @@ fn default_agents() -> HashMap<String, AgentProfile> {
             max_instances: server::DEFAULT_MAX_INSTANCES,
             catalogue_cmd: None,
             model_override_cmd: None,
+            extra_models: Vec::new(),
+            advisor_models: Vec::new(),
         },
     );
     m
@@ -265,54 +281,24 @@ fn home_dir() -> PathBuf {
 
 /// systemd --user démarre le démon avec un PATH minimal (/usr/bin…) qui exclut
 /// ~/.local/bin — là où sont installés le démon lui-même et les agents (devin,
-/// cursor-agent, codex…) → `spawn devin` échouait en ENOENT. On réinjecte le
-/// dossier du binaire, ~/.local/bin et le node nvm actif en tête de PATH si
-/// absents (hérité par les agents et leurs sous-processus).
+/// cursor-agent, codex…) → `spawn devin` échouait en ENOENT. On réinjecte les
+/// dossiers « agents » usuels (cf. `agent_path_dirs` : dossier du binaire,
+/// ~/.local/bin, npm-global, shims mise, cargo, nvm, /usr/local/bin,
+/// homebrew) en tête de PATH si absents — la même liste que `command_path`
+/// fouille à chaud, donc `available` et spawn résolvent le même binaire
+/// (hérité par les agents et leurs sous-processus).
 fn ensure_agent_path() {
-    let extra = [
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(PathBuf::from)),
-        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/bin")),
-        // Agents npm-globaux (codex-acp…) : shebang `#!/usr/bin/env node`, or
-        // nvm n'est pas sur le PATH systemd. Dernier ~/.nvm/versions/node/*/bin
-        // en repli, $NVM_BIN (version active) en priorité.
-        nvm_node_bin(),
-        std::env::var_os("NVM_BIN").map(PathBuf::from),
-    ];
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let mut dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
-    for dir in extra.into_iter().flatten() {
-        if !dirs.contains(&dir) {
-            dirs.insert(0, dir);
+    let mut dirs = server::misc::agent_path_dirs();
+    if let Some(path) = std::env::var_os("PATH") {
+        for d in std::env::split_paths(&path) {
+            if !dirs.contains(&d) {
+                dirs.push(d);
+            }
         }
     }
     if let Ok(joined) = std::env::join_paths(&dirs) {
         std::env::set_var("PATH", joined);
     }
-}
-
-/// `~/.nvm/versions/node/<version max>/bin` — repli quand $NVM_BIN est absent.
-fn nvm_node_bin() -> Option<PathBuf> {
-    let versions = home_dir().join(".nvm/versions/node");
-    let mut best: Option<(Vec<u64>, PathBuf)> = None;
-    for e in std::fs::read_dir(versions).ok()?.flatten() {
-        let bin = e.path().join("bin");
-        if !bin.is_dir() {
-            continue;
-        }
-        let ver: Vec<u64> = e
-            .file_name()
-            .to_string_lossy()
-            .trim_start_matches('v')
-            .split('.')
-            .map(|s| s.parse().unwrap_or(0))
-            .collect();
-        if best.as_ref().is_none_or(|(b, _)| ver > *b) {
-            best = Some((ver, bin));
-        }
-    }
-    best.map(|(_, p)| p)
 }
 
 #[tokio::main]
@@ -402,6 +388,8 @@ async fn serve(root: &std::path::Path) -> Result<()> {
                 max_instances: c.max_instances.unwrap_or(server::DEFAULT_MAX_INSTANCES),
                 catalogue_cmd: c.catalogue_cmd,
                 model_override_cmd: c.model_override_cmd,
+                extra_models: c.extra_models,
+                advisor_models: c.advisor_models,
             },
         );
     }

@@ -41,6 +41,7 @@ const KEYS: &[&str] = &[
     "spawn_managers",
     "metrics",
     "max_workers",
+    "max_working",
     "poll_secs",
     "nudge_cooldown_secs",
     "title_prefix",
@@ -310,6 +311,16 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
             Some("5"),
         ),
         ps(
+            "max_working",
+            "Workers actifs max",
+            "sessions worker EN ACTIVITÉ simultanées — un worker garé \
+             sur un waiter ac-wait (review, checks CI…) libère un slot \
+             actif mais garde son slot max_workers ; spawn et réveil \
+             exigent du mou sur les deux caps ; 0 = suit max_workers",
+            ParamKind::Int,
+            Some("0"),
+        ),
+        ps(
             "poll_secs",
             "Période de cycle (s)",
             "cadence du tick — min effectif 10 s",
@@ -343,7 +354,9 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
         ps(
             "workspace",
             "Workspace workers",
-            "cwd des sessions workers et des appels « gh »",
+            "cwd des items non taggés et des appels CLI de \
+             l'orchestrateur — les items taggés sont routés par \
+             repo_workspaces",
             ParamKind::Path,
             Some("/workspace"),
         ),
@@ -410,7 +423,10 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
         ps(
             "prompt",
             "Prompt worker",
-            "prompt sur mesure des workers — vide = prompt intégré",
+            "prompt sur mesure des workers — vide = prompt intégré ; \
+             le dispatch par item (agentbacklog ≥ 0.7) substitue \
+             {WS} {REPO} {ID} {ITEM} et pré-assigne l'item (pas de \
+             --pop)",
             ParamKind::String,
             None,
         ),
@@ -542,9 +558,10 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
         ps(
             "repo_workspaces",
             "Workspaces routés",
-            "entrées « repo=/cwd » séparées par des virgules — la liste \
-             des workspaces routés + le périmètre des Managers ; \
-             vide = défaut",
+            "entrées « repo=/cwd » séparées par des virgules — routage \
+             des sessions par tag repo des items (worker, planner, \
+             reviewer, Manager) ; un tag sans entrée = item en \
+             attente ; vide = défaut",
             ParamKind::List,
             None,
         ),
@@ -565,6 +582,7 @@ pub(crate) fn params_values(cfg: &super::cfg::OrchCfg) -> HashMap<String, String
     m.insert("spawn_managers".into(), cfg.spawn_managers.to_string());
     m.insert("metrics".into(), cfg.metrics.to_string());
     m.insert("max_workers".into(), cfg.max_workers.to_string());
+    m.insert("max_working".into(), cfg.max_working.to_string());
     m.insert("poll_secs".into(), cfg.poll_secs.to_string());
     m.insert(
         "nudge_cooldown_secs".into(),
@@ -760,6 +778,14 @@ pub(crate) fn apply_patch(
             "max_workers" => {
                 cfg.max_workers =
                     u32::try_from(val_u64(v)?).context("max_workers hors borne u32")?
+            }
+            // Vide → 0 = non borné (suit max_workers).
+            "max_working" => {
+                cfg.max_working = if is_empty(v) {
+                    0
+                } else {
+                    u32::try_from(val_u64(v)?).context("max_working hors borne u32")?
+                }
             }
             "poll_secs" => cfg.poll_secs = val_u64(v)?,
             "nudge_cooldown_secs" => cfg.nudge_cooldown_secs = val_u64(v)?,
@@ -991,6 +1017,7 @@ mod tests {
             &patch(&[
                 ("enabled", json!(true)),
                 ("max_workers", json!("7")),
+                ("max_working", json!("3")),
                 ("poll_secs", json!(30)),
                 ("watch_prs", json!("off")),
                 ("spawn_managers", json!(false)),
@@ -999,6 +1026,12 @@ mod tests {
         .unwrap();
         assert!(c.enabled && !c.watch_prs && !c.spawn_managers && c.auto_patchnotes);
         assert_eq!(c.max_workers, 7);
+        assert_eq!(c.max_working, 3);
+        assert_eq!(c.max_working_cap(), 3);
+        // 0/vide = non borné → suit max_workers.
+        apply_patch(&mut c, &patch(&[("max_working", json!(""))])).unwrap();
+        assert_eq!(c.max_working, 0);
+        assert_eq!(c.max_working_cap(), 7);
         assert_eq!(c.poll_secs, 30);
     }
 
@@ -1327,6 +1360,8 @@ mod tests {
             available_modes: vec![],
             available_commands: vec![],
             available_models: vec![],
+            advisor: None,
+            advisor_models: vec![],
             config_options: vec![],
             pending_config: Default::default(),
             desired_config: Default::default(),

@@ -18,6 +18,7 @@
 import { invoke as tauriInvoke, addPluginListener } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 import { wsClient, WEB_CONN } from "./wsclient";
+import { clientLog } from "./clientlog";
 
 export const isWeb = !(window as { __TAURI_INTERNALS__?: unknown })
   .__TAURI_INTERNALS__;
@@ -118,8 +119,16 @@ async function webInvoke<T>(cmd: string, a: Record<string, unknown>): Promise<T>
       return { rss_mb: 0, cpu: 0, rx_bps: r.rx_bps, tx_bps: r.tx_bps } as T;
     }
     case "log_tail":
-      return "" as T;
+      // Pas de client.log en web — le tampon UI tient lieu de log.
+      return clientLog.tail(Number(a.n) || 200) as T;
+    case "log_read":
+      // Même contrat que client_core::log_read (offset/data/size).
+      return clientLog.read(
+        a.offset == null ? null : Number(a.offset),
+        Number(a.limit) || 0,
+      ) as T;
     case "log_write":
+      clientLog.push(String(a.level ?? "info"), String(a.msg ?? ""));
       console.debug("[ui]", a.msg);
       return undefined as T;
     case "update_last_status":
@@ -161,6 +170,9 @@ async function webInvoke<T>(cmd: string, a: Record<string, unknown>): Promise<T>
     case "plugin:ac-stt|stt_dl_state":
     case "plugin:ac-stt|tts_dl_state":
       return { platform: "web", models: [] } as T;
+    case "app_signing":
+      // Pas d'APK en web — verdict neutre, jamais bloquant.
+      return { platform: "web", update_in_place: "unknown" } as T;
     default:
       // check_update / update_client / ensure_daemon / write_download :
       // absents du monde navigateur — la surface UI qui les invoque est

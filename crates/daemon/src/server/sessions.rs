@@ -10,35 +10,68 @@ use crate::session::SteerOutcome;
 use crate::tui;
 
 impl Daemon {
-    pub(super) async fn h_list_sessions(self: &Arc<Self>) -> Result<Value> {
+    /// Liste triée (created_at décroissant) des metas avec l'état « wait »
+    /// dérivé — partagée par list_sessions et sa variante paginée : la
+    /// pagination ne doit pas changer le contenu, seulement le découp.
+    async fn sorted_session_metas(self: &Arc<Self>) -> Result<Vec<SessionMeta>> {
                 let sessions = self.sessions.read().await;
                 let mut list: Vec<SessionMeta> =
                     sessions.values().map(|s| s.meta_snapshot()).collect();
-                list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-                // « wait » dérivé à l'affichage : idle + waiter ac-wait
-                // vivant — la session se parque en attendant le ping du
-                // waiter, pas une action utilisateur. meta.state interne
-                // reste "idle" (orchestrateur, retries, file de prompts
-                // raisonnent sur l'état réel). Le détail du waiter
-                // (âge/nom/timeout, #189) voyage dans `meta.wait`.
+                // Tie-break sur l'id : created_at a une résolution
+                // millis — deux sessions de la même ms s'ordonnaient
+                // selon l'itération du HashMap, et la pagination
+                // (offset) exige un tri déterministe.
+                list.sort_by(|a, b| {
+                    b.created_at
+                        .cmp(&a.created_at)
+                        .then_with(|| a.id.cmp(&b.id))
+                });
+                // « wait » dérivé à l'affichage : idle/asleep + waiter
+                // ac-wait vivant — la session se parque en attendant le
+                // ping du waiter, pas une action utilisateur.
+                // meta.state interne reste réel (orchestrateur, retries,
+                // file de prompts raisonnent sur l'état vrai — un asleep
+                // + waiter compte déjà dans `alive`, #181). Le détail du
+                // waiter (âge/nom/timeout, #189) voyage dans `meta.wait`.
                 let waiting = super::orch::acwait_live_waiters();
                 let now = super::orch::now_secs();
                 for m in &mut list {
-                    if m.state == "idle" {
-                        if let Some(w) = waiting.get(m.id.as_str()) {
-                            m.state = "wait".into();
-                            m.wait = Some(proto::WaitInfo {
-                                secs: w
-                                    .started
-                                    .map(|st| (now - st).max(0.0))
-                                    .unwrap_or(0.0),
-                                name: w.name.clone(),
-                                timeout: w.timeout,
-                            });
-                        }
-                    }
+                    derive_wait_state(m, &waiting, now);
                 }
-                Ok(serde_json::to_value(list)?)
+                Ok(list)
+    }
+
+    pub(super) async fn h_list_sessions(self: &Arc<Self>) -> Result<Value> {
+                Ok(serde_json::to_value(self.sorted_session_metas().await?)?)
+    }
+
+    /// Page de list_sessions : une réponse JSON est UNE ligne NDJSON
+    /// indivisible — sur un démon à beaucoup de sessions (des dizaines
+    /// de Ko), elle monopolise le socket et fait expirer les petits RPC
+    /// (sonde incluse). Le client pagine pour laisser les appels légers
+    /// s'intercaler entre les pages ; `next_offset` null = fin.
+    pub(super) async fn h_list_sessions_page(
+        self: &Arc<Self>,
+        limit: Option<u32>,
+        offset: Option<u64>,
+    ) -> Result<Value> {
+                const DEFAULT_PAGE: u64 = 25;
+                const MAX_PAGE: u64 = 200;
+                let limit = limit
+                    .map(|l| l as u64)
+                    .unwrap_or(DEFAULT_PAGE)
+                    .clamp(1, MAX_PAGE);
+                let offset = offset.unwrap_or(0);
+                let list = self.sorted_session_metas().await?;
+                let total = list.len() as u64;
+                let start = (offset as usize).min(list.len());
+                let end = start.saturating_add(limit as usize).min(list.len());
+                let next = (end < list.len()).then_some(end as u64);
+                Ok(json!({
+                    "sessions": list[start..end].to_vec(),
+                    "next_offset": next,
+                    "total": total,
+                }))
     }
 
     pub(super) async fn h_new_session(self: &Arc<Self>, agent: String, cwd: String, title: Option<String>, model: Option<String>, mode: Option<String>, prompt: Option<String>, origin: Option<String>, group: Option<String>) -> Result<Value> {
@@ -74,6 +107,8 @@ impl Daemon {
                     available_modes: vec![],
                     available_commands: vec![],
                     available_models: vec![],
+                    advisor: None,
+                    advisor_models: profile.advisor_models.clone(),
                     config_options: vec![],
                     pending_config: Default::default(),
                     desired_config: Default::default(),
@@ -159,6 +194,8 @@ impl Daemon {
                     available_modes: vec![],
                     available_commands: vec![],
                     available_models: vec![],
+                    advisor: None,
+                    advisor_models: profile.advisor_models.clone(),
                     config_options: vec![],
                     pending_config: Default::default(),
                     desired_config: Default::default(),
@@ -253,6 +290,7 @@ impl Daemon {
                                         quiet: true,
                                         ..Default::default()
                                     }),
+                                    self.spawn_hints(&profile, &meta),
                                 )
                                 .await,
                                 Ok(true)
@@ -284,6 +322,7 @@ impl Daemon {
                                     quiet: true,
                                     ..Default::default()
                                 }),
+                                self.spawn_hints(&profile, &meta),
                             )
                             .await
                         {
@@ -457,6 +496,7 @@ impl Daemon {
                             quiet: true,
                             ..Default::default()
                         }),
+                        self.spawn_hints(&profile, &meta),
                     )
                     .await
                 {
@@ -930,6 +970,7 @@ impl Daemon {
                     quiet: true,
                     ..Default::default()
                 }),
+                self.spawn_hints(&profile, &meta),
             )
             .await;
         // Rendormir seulement si rien d'externe n'a repris la session
@@ -1008,6 +1049,16 @@ impl Daemon {
                     s.set_model_meta(Some(m.to_string()), Some("catalogue".into()));
                 }
             }
+            // Profils « extra »/advisor : le hint se construit au spawn
+            // depuis le profil courant (le snapshot meta porte déjà
+            // advisor/advisor_models — voir h_set_advisor).
+            let hints = {
+                let m0 = s.meta_snapshot();
+                match d.agents.read().await.get(&m0.agent) {
+                    Some(p) => d.spawn_hints(p, &m0),
+                    None => Default::default(),
+                }
+            };
             let r = s
                 .spawn_agent(
                     &cmd,
@@ -1020,6 +1071,7 @@ impl Daemon {
                         model: if cat_hit { None } else { model.clone() },
                         quiet: false,
                     }),
+                    hints,
                 )
                 .await;
             // Supprimée pendant le spawn : tuer l'agent frais éventuel —
@@ -1122,13 +1174,21 @@ impl Daemon {
 
     pub(super) async fn h_events(self: &Arc<Self>, session: String, before_seq: Option<u64>, after_seq: Option<u64>, limit: u32) -> Result<Value> {
                 let s = self.get_session(&session).await?;
-                // after_seq présent → page ascendante (saut de recherche) ;
-                // sinon page arrière classique (pagination scroll-up).
-                let events = match after_seq {
-                    Some(a) => s.journal.read_page_after(&s.dir, a, limit as usize)?,
-                    None => s.journal.read_page(&s.dir, before_seq, limit as usize)?,
-                };
-                let last = s.journal.last_seq();
+                // Lecture disque (seek + parse JSONL) hors de l'executor :
+                // c'est LA requête de la chaîne connect→open côté client,
+                // un journal à index vide la gèlerait sinon (item #227).
+                let s2 = Arc::clone(&s);
+                let (events, last) = tokio::task::spawn_blocking(move || -> Result<(Vec<proto::Event>, u64)> {
+                    // after_seq présent → page ascendante (saut de recherche) ;
+                    // sinon page arrière classique (pagination scroll-up).
+                    let events = match after_seq {
+                        Some(a) => s2.journal.read_page_after(&s2.dir, a, limit as usize)?,
+                        None => s2.journal.read_page(&s2.dir, before_seq, limit as usize)?,
+                    };
+                    Ok((events, s2.journal.last_seq()))
+                })
+                .await
+                .context("lecture journal")??;
                 Ok(json!({"events": events, "last_seq": last}))
     }
 
@@ -1136,53 +1196,61 @@ impl Daemon {
     /// quelques aller-retours sans monopoliser la requête des minutes —
     /// le client relance avec le curseur `next_before` pour continuer.
     pub(super) async fn h_search_events(self: &Arc<Self>, session: String, query: String, before_seq: Option<u64>, limit: u32) -> Result<Value> {
-                const SEARCH_CHUNK: usize = 500;
-                const SEARCH_SCAN_CAP: u64 = 20_000;
                 let s = self.get_session(&session).await?;
                 let needle = query.trim().to_lowercase();
                 if needle.is_empty() {
                     return Ok(json!({"matches": [], "next_before": 0, "done": true, "scanned": 0}));
                 }
-                let want = (limit as usize).max(1);
-                let mut matches = Vec::new();
-                let mut cursor = before_seq.filter(|b| *b > 0).unwrap_or(u64::MAX);
-                let mut scanned = 0u64;
-                let mut done = false;
-                while !done && matches.len() < want && scanned < SEARCH_SCAN_CAP {
-                    let page = s.journal.read_page(&s.dir, Some(cursor), SEARCH_CHUNK)?;
-                    if page.is_empty() {
-                        done = true;
-                        break;
-                    }
-                    // cursor suit le dernier seq réellement examiné : arrêt
-                    // en pleine page (limit/cap) → next_before reprend sur
-                    // le reste non scanné de la page au lieu de la sauter.
-                    for ev in page.iter().rev() {
-                        scanned += 1;
-                        cursor = ev.seq;
-                        if let Some(excerpt) = match_excerpt(&ev.kind.searchable_text(), &needle, 60) {
-                            matches.push(json!({
-                                "seq": ev.seq,
-                                "ts": ev.ts,
-                                "type": ev.kind.type_tag(),
-                                "excerpt": excerpt,
-                            }));
-                        }
-                        if matches.len() >= want || scanned >= SEARCH_SCAN_CAP {
+                // Scan multi-pages (jusqu'à SEARCH_SCAN_CAP events) hors
+                // de l'executor — le parse JSONL synchrone gèlerait un
+                // worker async pendant des secondes sur gros journal.
+                let s2 = Arc::clone(&s);
+                tokio::task::spawn_blocking(move || -> Result<Value> {
+                    const SEARCH_CHUNK: usize = 500;
+                    const SEARCH_SCAN_CAP: u64 = 20_000;
+                    let want = (limit as usize).max(1);
+                    let mut matches = Vec::new();
+                    let mut cursor = before_seq.filter(|b| *b > 0).unwrap_or(u64::MAX);
+                    let mut scanned = 0u64;
+                    let mut done = false;
+                    while !done && matches.len() < want && scanned < SEARCH_SCAN_CAP {
+                        let page = s2.journal.read_page(&s2.dir, Some(cursor), SEARCH_CHUNK)?;
+                        if page.is_empty() {
+                            done = true;
                             break;
                         }
+                        // cursor suit le dernier seq réellement examiné : arrêt
+                        // en pleine page (limit/cap) → next_before reprend sur
+                        // le reste non scanné de la page au lieu de la sauter.
+                        for ev in page.iter().rev() {
+                            scanned += 1;
+                            cursor = ev.seq;
+                            if let Some(excerpt) = match_excerpt(&ev.kind.searchable_text(), &needle, 60) {
+                                matches.push(json!({
+                                    "seq": ev.seq,
+                                    "ts": ev.ts,
+                                    "type": ev.kind.type_tag(),
+                                    "excerpt": excerpt,
+                                }));
+                            }
+                            if matches.len() >= want || scanned >= SEARCH_SCAN_CAP {
+                                break;
+                            }
+                        }
+                        // Page courte entièrement examinée → début du journal.
+                        if cursor == page[0].seq && page.len() < SEARCH_CHUNK {
+                            done = true;
+                        }
                     }
-                    // Page courte entièrement examinée → début du journal.
-                    if cursor == page[0].seq && page.len() < SEARCH_CHUNK {
-                        done = true;
-                    }
-                }
-                Ok(json!({
-                    "matches": matches,
-                    "next_before": if cursor == u64::MAX { 0 } else { cursor },
-                    "done": done,
-                    "scanned": scanned,
-                }))
+                    Ok(json!({
+                        "matches": matches,
+                        "next_before": if cursor == u64::MAX { 0 } else { cursor },
+                        "done": done,
+                        "scanned": scanned,
+                    }))
+                })
+                .await
+                .context("recherche journal")?
     }
 
     /// Premier post du cycle courant : le journal ne contient que le
@@ -1198,7 +1266,15 @@ impl Daemon {
                 use crate::journal::FirstPost;
                 let s = self.get_session(&session).await?;
                 let origin = s.meta_snapshot().origin;
-                Ok(match s.journal.first_post(&s.dir, origin.as_deref())? {
+                // Scan de tête borné (FIRST_POST_SCAN_MAX lignes) hors de
+                // l'executor — même classe de blocage que events/search.
+                let s2 = Arc::clone(&s);
+                let fp = tokio::task::spawn_blocking(move || {
+                    s2.journal.first_post(&s2.dir, origin.as_deref())
+                })
+                .await
+                .context("first_post")??;
+                Ok(match fp {
                     FirstPost::Found(ev) => {
                         let proto::EventKind::UserMessage { text, steer, origin, .. } = ev.kind else {
                             unreachable!() // Found ne porte que ce kind
@@ -1300,22 +1376,11 @@ impl Daemon {
     pub(super) async fn h_session_info(self: &Arc<Self>, session: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
                 let mut meta = s.meta_snapshot();
-                // Même dérivation « wait » que list_sessions (idle +
-                // waiter ac-wait vivant) — affichage seul, avec le
+                // Même dérivation « wait » que list_sessions (idle/asleep
+                // + waiter ac-wait vivant) — affichage seul, avec le
                 // détail du waiter dans `meta.wait` (#189).
-                if meta.state == "idle" {
-                    if let Some(w) = super::orch::acwait_live_waiters().get(&meta.id) {
-                        meta.state = "wait".into();
-                        meta.wait = Some(proto::WaitInfo {
-                            secs: w
-                                .started
-                                .map(|st| (super::orch::now_secs() - st).max(0.0))
-                                .unwrap_or(0.0),
-                            name: w.name.clone(),
-                            timeout: w.timeout,
-                        });
-                    }
-                }
+                let waiting = super::orch::acwait_live_waiters();
+                derive_wait_state(&mut meta, &waiting, super::orch::now_secs());
                 Ok(json!({
                     "meta": meta,
                     "pending": s.pending_requests(),
@@ -1352,6 +1417,46 @@ impl Daemon {
                 // demande : "swe-2" → "swe-2-high").
                 let applied = s.meta_snapshot().model.unwrap_or(model);
                 Ok(json!({"model": applied}))
+    }
+
+    /// Modèle advisor de la session : persisté dans meta puis appliqué
+    /// par respawn — la valeur n'est lue par l'agent qu'au spawn
+    /// (`advisorModel` via `_meta` → `--settings`), un process vivant
+    /// doit donc être recyclé (kill + session/load). Session endormie :
+    /// le choix est persisté et s'appliquera au prochain réveil.
+    pub(super) async fn h_set_advisor(self: &Arc<Self>, session: String, advisor: String) -> Result<Value> {
+                let s = self.get_session(&session).await?;
+                let agent = s.meta_snapshot().agent;
+                let profile = self
+                    .agents
+                    .read()
+                    .await
+                    .get(&agent)
+                    .cloned()
+                    .with_context(|| format!("agent inconnu: {agent}"))?;
+                if profile.advisor_models.is_empty() {
+                    anyhow::bail!("le profil « {agent} » ne déclare pas d'advisor (advisor_models)");
+                }
+                // "" = retour au défaut du profil/agent (meta.advisor
+                // → None, aucune injection _meta) ; "off" = désactivation
+                // explicite ; sinon valeur parmi advisor_models.
+                let advisor = advisor.trim().to_string();
+                if !advisor.is_empty() && advisor != "off" && !profile.advisor_models.contains(&advisor) {
+                    anyhow::bail!(
+                        "advisor inconnu: {advisor} (attendu : défaut, off ou {:?})",
+                        profile.advisor_models
+                    );
+                }
+                s.set_advisor_meta((!advisor.is_empty()).then_some(advisor.clone()));
+                if s.is_alive() || s.is_spawning() {
+                    s.kill_for_respawn().await;
+                    self.respawn(&s, true).await?;
+                }
+                let shown = if advisor.is_empty() { "défaut" } else { advisor.as_str() };
+                s.emit(EventKind::System {
+                    text: format!("advisor → {shown}"),
+                });
+                Ok(json!({"advisor": advisor}))
     }
 
     pub(super) async fn h_set_config_option(self: &Arc<Self>, session: String, config_id: String, value: String) -> Result<Value> {
@@ -1421,7 +1526,22 @@ impl Daemon {
                 // suppression avant que le flux ne se ferme.
                 s.emit_ephemeral(proto::EventKind::SessionDeleted {});
                 self.sessions.write().await.remove(&session);
-                let _ = std::fs::remove_dir_all(&s.dir);
+                // Waiters ac-wait de la session : annulés ici — sinon
+                // le worker survivant pinguerait une session morte à
+                // sa prochaine échéance (send en échec, loggé).
+                super::orch::acwait_cancel_session(&session);
+                // Un remove_dir_all en échec laisse meta.json sur
+                // disque → la session ressuscite « interrompue » au
+                // prochain boot du démon (orphelins post-restart,
+                // item #250). Loggé : la GC orchestrateur la reprend.
+                if let Err(e) = std::fs::remove_dir_all(&s.dir) {
+                    warn!("session {session}: remove_dir_all {}: {e}", s.dir.display());
+                }
+                // Pièces jointes du composer : <cwd>/.ac-uploads/<sid>/
+                // part avec la session (le client ne peut plus écrire —
+                // session morte). Borné au sous-dossier exact : les
+                // autres sessions partagent .ac-uploads.
+                purge_session_uploads(&s.meta_snapshot().cwd, &session);
                 info!("session supprimée: {session}");
                 Ok(json!({"deleted": session}))
     }
@@ -1475,6 +1595,34 @@ pub(super) enum FreshDeliver {
     /// au drain) et il n'y a pas de session créatrice à notifier en cas
     /// d'échec du spawn.
     Service { wrapped: String },
+}
+
+/// Dérivation « wait » à l'affichage : `idle` → `wait`, `asleep` →
+/// `wait-asleep` quand un waiter ac-wait vivant existe (le ping le
+/// réveillera). L'état dérivé `wait-asleep` conserve la distinction
+/// idle/asleep : le client garde ses gardes « endormie » (pas
+/// d'auto-resume à la consultation, bouton sleep, vue Repos) tout en
+/// voyant l'attente instrumentée et son détail `meta.wait` (#222).
+/// `meta.state` interne n'est jamais touché — la dérivation vit
+/// uniquement dans les sérialisations list_sessions/session_info.
+fn derive_wait_state(
+    m: &mut SessionMeta,
+    waiting: &std::collections::HashMap<String, super::orch::AcwaitWait>,
+    now: f64,
+) {
+    let derived = match m.state.as_str() {
+        "idle" => "wait",
+        "asleep" => "wait-asleep",
+        _ => return,
+    };
+    if let Some(w) = waiting.get(m.id.as_str()) {
+        m.state = derived.into();
+        m.wait = Some(proto::WaitInfo {
+            secs: w.started.map(|st| (now - st).max(0.0)).unwrap_or(0.0),
+            name: w.name.clone(),
+            timeout: w.timeout,
+        });
+    }
 }
 
 /// Extrait ~`ctx` caractères de contexte autour de la 1re occurrence de
@@ -1559,4 +1707,234 @@ fn run_override_cmd(cmdline: &str, cwd: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// `session` utilisable comme composant de chemin unique sous
+/// `.ac-uploads/` — rejette séparateurs, `.`/`..` et NUL (un id de
+/// session hostile ne doit pas pouvoir viser ailleurs).
+fn safe_session_component(s: &str) -> bool {
+    !s.is_empty()
+        && s != "."
+        && s != ".."
+        && !s.contains('/')
+        && !s.contains('\\')
+        && !s.contains('\0')
+}
+
+/// Supprime `<cwd>/.ac-uploads/<session>/` (pièces jointes du composer)
+/// à la suppression de la session. Garde-fous : seul ce sous-dossier
+/// exact — jamais `.ac-uploads/` entier ni le workspace ; cwd, base et
+/// cible sont canonicalisés et `base` doit rester sous le cwd (un
+/// `.ac-uploads` symlink sortant est refusé) ; `<sid>` symlink — même
+/// vers un sibling — est refusé car la cible canonicalisée doit être
+/// le chemin joint lui-même. Absents/illisibles → no-op.
+pub(super) fn purge_session_uploads(cwd: &str, session: &str) {
+    if !safe_session_component(session) {
+        return;
+    }
+    let Ok(cwd) = std::fs::canonicalize(cwd) else {
+        return;
+    };
+    let Ok(base) = std::fs::canonicalize(cwd.join(".ac-uploads")) else {
+        return;
+    };
+    // `.ac-uploads` lui-même symlink sortant : sa canonicalisation
+    // mènerait hors du workspace — on ne touche à rien.
+    if !base.starts_with(&cwd) {
+        return;
+    }
+    let joined = base.join(session);
+    let Ok(target) = std::fs::canonicalize(&joined) else {
+        return;
+    };
+    // `<sid>` symlink — même vers un sibling de .ac-uploads : la cible
+    // canonicalisée diffère du chemin joint → refus. On ne supprime
+    // que le dossier réel `<sid>`, jamais ce vers quoi il pointe.
+    if target != joined || !target.is_dir() {
+        return;
+    }
+    if let Err(e) = std::fs::remove_dir_all(&target) {
+        warn!("purge .ac-uploads/{session}: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::orch::AcwaitWait;
+
+    fn meta(state: &str) -> SessionMeta {
+        SessionMeta {
+            id: "s-x".into(),
+            agent: "devin".into(),
+            title: "t".into(),
+            cwd: "/w".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            native_session_id: None,
+            mode: None,
+            model: None,
+            model_source: None,
+            model_override_sid: None,
+            supports_load: None,
+            available_modes: vec![],
+            available_commands: vec![],
+            available_models: vec![],
+            advisor: None,
+            advisor_models: vec![],
+            config_options: vec![],
+            pending_config: Default::default(),
+            desired_config: Default::default(),
+            state: state.into(),
+            group: None,
+            spawned_by: None,
+            origin: None,
+            context_used: None,
+            context_size: None,
+            last_error: None,
+            wait: None,
+        }
+    }
+
+    fn waiter() -> AcwaitWait {
+        AcwaitWait {
+            started: Some(100.0),
+            name: "checks".into(),
+            timeout: Some(600.0),
+        }
+    }
+
+    #[test]
+    fn wait_derivation_idle() {
+        let waiting = std::collections::HashMap::from([("s-x".to_string(), waiter())]);
+        let mut m = meta("idle");
+        derive_wait_state(&mut m, &waiting, 160.0);
+        assert_eq!(m.state, "wait");
+        let w = m.wait.unwrap();
+        assert_eq!(w.secs, 60.0);
+        assert_eq!(w.name, "checks");
+        assert_eq!(w.timeout, Some(600.0));
+    }
+
+    #[test]
+    fn wait_derivation_asleep() {
+        // #222 : asleep + waiter vivant → « wait-asleep » (attente
+        // visible, distinction endormie préservée côté client).
+        let waiting = std::collections::HashMap::from([("s-x".to_string(), waiter())]);
+        let mut m = meta("asleep");
+        derive_wait_state(&mut m, &waiting, 160.0);
+        assert_eq!(m.state, "wait-asleep");
+        assert!(m.wait.is_some());
+    }
+
+    #[test]
+    fn wait_derivation_passthrough() {
+        let waiting = std::collections::HashMap::new();
+        for st in ["asleep", "idle", "working", "dead"] {
+            let mut m = meta(st);
+            derive_wait_state(&mut m, &waiting, 160.0);
+            assert_eq!(m.state, st);
+            assert!(m.wait.is_none());
+        }
+        // Waiter mort (absent du scan) → asleep reste asleep.
+        let waiting = std::collections::HashMap::from([("s-y".to_string(), waiter())]);
+        let mut m = meta("asleep");
+        derive_wait_state(&mut m, &waiting, 160.0);
+        assert_eq!(m.state, "asleep");
+        assert!(m.wait.is_none());
+    }
+
+    fn tmpdir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir()
+            .join(format!("ac-purge-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn purge_uploads_ne_retire_que_le_sous_dossier_session() {
+        let cwd = tmpdir("only");
+        let up = cwd.join(".ac-uploads");
+        std::fs::create_dir_all(up.join("s-a")).unwrap();
+        std::fs::create_dir_all(up.join("s-b")).unwrap();
+        std::fs::write(up.join("s-a").join("f.bin"), b"x").unwrap();
+        std::fs::write(up.join("s-b").join("g.bin"), b"y").unwrap();
+        // Legacy : fichiers top-level sans sid — conservés (nettoyage
+        // manuel documenté, pas de migration destructive).
+        std::fs::write(up.join("ancien.bin"), b"z").unwrap();
+        std::fs::write(cwd.join("garde.txt"), b"w").unwrap();
+
+        purge_session_uploads(cwd.to_str().unwrap(), "s-a");
+
+        assert!(!up.join("s-a").exists());
+        assert!(up.join("s-b").join("g.bin").exists());
+        assert!(up.join("ancien.bin").exists());
+        assert!(cwd.join("garde.txt").exists());
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn purge_uploads_refuse_les_ids_non_simples() {
+        let cwd = tmpdir("guard");
+        let up = cwd.join(".ac-uploads");
+        std::fs::create_dir_all(up.join("victime")).unwrap();
+        std::fs::write(up.join("victime").join("f"), b"x").unwrap();
+
+        for bad in ["", ".", "..", "a/b", "a\\b", "../victime"] {
+            purge_session_uploads(cwd.to_str().unwrap(), bad);
+        }
+        assert!(up.join("victime").join("f").exists());
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn purge_uploads_refuse_un_symlink_sortant() {
+        let cwd = tmpdir("link");
+        let dehors = tmpdir("link-out");
+        let up = cwd.join(".ac-uploads");
+        std::fs::create_dir_all(&up).unwrap();
+        std::os::unix::fs::symlink(&dehors, up.join("s-evil")).unwrap();
+        std::fs::write(dehors.join("otage.txt"), b"x").unwrap();
+
+        purge_session_uploads(cwd.to_str().unwrap(), "s-evil");
+
+        assert!(dehors.join("otage.txt").exists());
+        let _ = std::fs::remove_dir_all(&cwd);
+        let _ = std::fs::remove_dir_all(&dehors);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn purge_uploads_refuse_ac_uploads_symlink_sortant() {
+        let cwd = tmpdir("linkbase");
+        let dehors = tmpdir("linkbase-out");
+        // .ac-uploads → dehors : base canonicalise hors du cwd.
+        std::os::unix::fs::symlink(&dehors, cwd.join(".ac-uploads")).unwrap();
+        std::fs::create_dir_all(dehors.join("s-a")).unwrap();
+        std::fs::write(dehors.join("s-a").join("f"), b"x").unwrap();
+
+        purge_session_uploads(cwd.to_str().unwrap(), "s-a");
+
+        assert!(dehors.join("s-a").join("f").exists());
+        let _ = std::fs::remove_dir_all(&cwd);
+        let _ = std::fs::remove_dir_all(&dehors);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn purge_uploads_refuse_un_symlink_frere() {
+        let cwd = tmpdir("linksib");
+        let up = cwd.join(".ac-uploads");
+        std::fs::create_dir_all(up.join("s-victime")).unwrap();
+        std::fs::write(up.join("s-victime").join("f"), b"x").unwrap();
+        // s-evil → s-victime (tous deux sous .ac-uploads) : la cible
+        // canonicalisée reste dans base — starts_with ne suffit pas.
+        std::os::unix::fs::symlink(up.join("s-victime"), up.join("s-evil")).unwrap();
+
+        purge_session_uploads(cwd.to_str().unwrap(), "s-evil");
+
+        assert!(up.join("s-victime").join("f").exists());
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
 }

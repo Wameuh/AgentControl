@@ -185,6 +185,9 @@ body.android #file-resize { display: none; }
 body.android #file-head { min-height: 52px; gap: 6px; }
 body.android #file-head button { min-width: 44px; min-height: 44px; font-size: 17px; }
 body.android #ft-side:not([hidden]) { flex: 1; width: auto; }
+/* Pas de split horizontal sur Android : explorateur plein écran,
+   viewer en overlay — la poignée desktop reste masquée. */
+body.android #file-body #ft-split { display: none; }
 body.android #ft-bar { padding: 8px 10px; }
 body.android #ft-ico { left: 18px; }
 body.android #ft-ico .ic { width: 15px; height: 15px; }
@@ -229,7 +232,7 @@ body.android #fv-save {
 }
 body.android #file-view { flex: 1; overflow: auto; font-size: 13px; margin: 0; padding: 12px; }
 body.android #file-hl, body.android #file-edit { font-size: 13px; padding: 12px; }
-body.android #file-nums { font-size: 13px; }
+body.android #file-nums { font-size: 13px; padding: 12px 6px 12px 12px; }
 body.android #fv-conflict { font-size: 13px; padding: 8px 12px; }
 body.android #fv-conflict button { min-height: 44px; padding: 6px 12px; font-size: 13px; }
 /* Menus contextuels (fichiers, sessions) → action sheet ancré bas. */

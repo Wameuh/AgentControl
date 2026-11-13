@@ -79,6 +79,27 @@ export async function connOp<T>(ck: string, op: () => Promise<T>): Promise<T> {
   return op();
 }
 
+/** Appels lifecycle journalisés dans client.log : la création de
+ *  session était muette — ni conn cible, ni issue de l'appel (un clic
+ *  « créer » sans retour était intraçable). Départ → issue (ok /
+ *  échec + durée) ; les autres méthodes (events, read_file, sondes)
+ *  restent hors log pour ne pas noyer le flux. */
+const TRACE_METHODS = new Set([
+  "new_session",
+  "attach_session",
+  "resume_session",
+  "fork_session",
+  "delete_session",
+]);
+
+/** Résumé des params utiles au diagnostic (agent/cwd/session/titre). */
+function traceArgs(p: Record<string, unknown>): string {
+  return ["agent", "cwd", "session", "native_id", "title"]
+    .map((k) => (p[k] != null && p[k] !== "" ? `${k}=${p[k]}` : ""))
+    .filter(Boolean)
+    .join(" ");
+}
+
 export async function call<T = unknown>(
   method: string,
   params: Record<string, unknown> = {},
@@ -87,10 +108,33 @@ export async function call<T = unknown>(
   // conn absent (undefined) → injecter celui de la session affichée ; un
   // appelant peut passer conn:"" explicitement (envois en arrière-plan).
   if (p.session && p.conn === undefined && currentConn()) p.conn = currentConn();
-  // Conn marquée down → échec rapide au lieu d'attendre le timeout RPC.
   const ck = (p.conn as string) || "";
-  if (ck && (connState(ck) ?? "ok") !== "ok") throw connLostErr();
-  return invoke<T>("call", { method, params: p });
+  const traced = TRACE_METHODS.has(method);
+  const connLabel = ck || currentConn() || "défaut";
+  const t0 = traced ? Date.now() : 0;
+  if (traced) {
+    const args = traceArgs(p);
+    logUi("info", `rpc ${method} → conn ${connLabel}${args ? ` ${args}` : ""}`);
+  }
+  try {
+    // Conn marquée down → échec rapide au lieu d'attendre le timeout
+    // RPC — tracé comme les autres issues (un fast-fail muet était
+    // indistinguable d'un clic sans effet dans client.log).
+    if (ck && (connState(ck) ?? "ok") !== "ok") throw connLostErr();
+    const r = await invoke<T>("call", { method, params: p });
+    if (traced) {
+      const sid =
+        r && typeof r === "object" && "session" in r
+          ? ` session=${(r as { session?: unknown }).session}`
+          : "";
+      logUi("info", `rpc ${method} ok — ${Date.now() - t0} ms${sid}`);
+    }
+    return r;
+  } catch (e) {
+    if (traced)
+      logUi("error", `rpc ${method} échec après ${Date.now() - t0} ms (conn ${connLabel}): ${e}`);
+    throw e;
+  }
 }
 
 /** `call` pour les loads de fond : la conn est attendue au lieu de

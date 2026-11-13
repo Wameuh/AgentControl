@@ -53,6 +53,18 @@ pub(crate) fn cli_conn(state: State<'_, AppState>) -> Option<String> {
     state.cli_conn.clone()
 }
 
+/// Instances client vivantes autres que celle-ci (registre pid
+/// `~/.agentcontrol/instances`, même détection que le log de boot).
+/// Le frontend s'en sert pour suspendre l'auto-connexion quand une
+/// seconde instance tourne déjà — deux clients passifs sur la même
+/// connexion se concurrencent (flap de transport, notifications
+/// doublées). `--conn` explicite reste honoré : c'est le spawn
+/// délibéré de la multi-instance.
+#[tauri::command]
+pub(crate) fn other_instances() -> Vec<serde_json::Value> {
+    crate::instance::live_others()
+}
+
 /// Lance une AUTRE instance du client liée à `conn` (clé connKey —
 /// `ssh{,-native}:h:p` | `tcp:addr` | `local`) : le modèle multi-instances
 /// est « 1 processus = 1 connexion », plusieurs instances en parallèle
@@ -123,6 +135,13 @@ pub(crate) fn log_tail(n: Option<usize>) -> String {
     client_core::log_tail(n.unwrap_or(200))
 }
 
+/// Tranche incrémentale de client.log pour le suiveur live du panneau
+/// logs : {offset, data, size} — offset absent/invalide → dernière page.
+#[tauri::command]
+pub(crate) fn log_read(offset: Option<u64>, limit: Option<u64>) -> Value {
+    client_core::log_read(offset, limit)
+}
+
 /// Écrit une ligne dans client.log depuis le frontend (erreurs UI,
 /// diagnostics webview — préfixées `ui:`). Niveau tolérant, info si inconnu.
 /// file vide : la callsite Rust ne dirait rien d'utile sur la source TS.
@@ -155,6 +174,33 @@ pub(crate) fn set_app_icon(window: tauri::WebviewWindow, state: &str) -> Result<
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Verdict « update in-place possible » de l'APK Android installé
+/// (plugin ac-device → PackageManager : FLAG_DEBUGGABLE + empreinte du
+/// certificat signataire comparée à celle de la release, injectée au
+/// build par AGENTCONTROL_ANDROID_CERT_SHA256). `"impossible"` = build
+/// debug-signé ou clé étrangère → le frontend affiche le garde-fou
+/// « réinstall = perte des accès » avant de télécharger l'APK.
+/// Hors Android : update in-place géré par l'updater desktop, la
+/// question ne se pose pas → "unknown".
+#[cfg(target_os = "android")]
+#[tauri::command]
+pub(crate) fn app_signing(app: tauri::AppHandle) -> Result<Value, String> {
+    // Manager requis pour app.state() — import local : le crate n'est
+    // de toute façon pas compilé sur les autres cibles.
+    use tauri::Manager;
+    let dev = app.state::<tauri_plugin_ac_device::Device<tauri::Wry>>();
+    let info = dev
+        .signing_info(option_env!("AGENTCONTROL_ANDROID_CERT_SHA256"))
+        .map_err(|e| e.to_string())?;
+    serde_json::to_value(info).map_err(|e| e.to_string())
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+pub(crate) fn app_signing() -> Result<Value, String> {
+    Ok(json!({ "platform": "desktop", "update_in_place": "unknown" }))
 }
 
 #[cfg(test)]

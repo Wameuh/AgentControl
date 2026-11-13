@@ -134,6 +134,12 @@ export class OverlayNav {
     } else if (id === "components") {
       // Idem : le ✕ du panneau composants porte le close complet.
       $("comp-close").click();
+    } else if (id === "logs") {
+      // Idem : le ✕ du panneau logs porte le close complet (poll stoppé).
+      $("logs-close").click();
+    } else if (id === "plugin") {
+      // Idem : le ✕ de la vue plugin démonte l'iframe (token éphémère).
+      $("pv-close")?.click();
     } else if (id.startsWith("dlg:")) {
       (document.getElementById(id.slice(4)) as HTMLDialogElement | null)?.close();
     }

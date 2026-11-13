@@ -64,18 +64,33 @@
   color: var(--ink); font-size: 11px; padding: 2px 8px; cursor: pointer;
 }
 #fv-conflict button:hover { border-color: var(--accent); }
+#file-main {
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
+}
+/* Édition md avec aperçu : les deux vues visibles → split. fv-row =
+   côte-à-côte (panneau large), sinon empilé. Un seul enfant visible
+   hors split → pas de classe, colonne normale. */
+#file-main.fv-split.fv-row { flex-direction: row; }
+/* En split l'éditeur garde ~60 % de la place, l'aperçu ~40 %. */
+#file-main.fv-split #file-md { flex: 2; }
+#file-main.fv-split #file-edwrap { flex: 3; }
+#file-main.fv-split.fv-row > *:not([hidden]) + *:not([hidden]) { border-left: 1px solid var(--line); }
+#file-main.fv-split:not(.fv-row) > *:not([hidden]) + *:not([hidden]) { border-top: 1px solid var(--line); }
+/* Label texte des boutons de la barre (fv-edit « Éditer ») */
+#fv-bar .fv-lbl { font-size: 11px; white-space: nowrap; }
+body.android #fv-bar .fv-lbl { font-size: 13px; }
 /* Éditeur : gouttière + overlay coloré sous la textarea transparente.
    Le pre (#file-hl) et la textarea doivent rester pixel-identiques :
    même font, line-height, padding, tab-size, white-space. */
-#file-edwrap { flex: 1; min-height: 0; display: flex; }
+#file-edwrap { flex: 1; min-height: 0; min-width: 0; display: flex; }
 #file-nums {
-  flex: none; overflow: hidden; margin: 0; padding: 12px 6px 12px 12px;
+  flex: none; overflow: hidden; margin: 0; padding: 12px 6px 22px 12px;
   font: 12px/1.5 Mono, ui-monospace, monospace; text-align: right;
   color: var(--dim); user-select: none; white-space: pre; min-width: 3ch;
 }
 #file-edscroll { position: relative; flex: 1; min-width: 0; overflow: hidden; }
 #file-hl, #file-edit {
-  position: absolute; inset: 0; margin: 0; padding: 12px;
+  position: absolute; inset: 0; margin: 0; padding: 12px 12px 22px;
   font: 12px/1.5 Mono, ui-monospace, monospace;
   white-space: pre; tab-size: 4;
 }
@@ -93,7 +108,8 @@
 }
 #file-edit::selection { background: rgba(var(--accent-rgb), .30); }
 #file-view {
-  flex: 1; min-width: 0; min-height: 0; overflow: auto; margin: 0; padding: 12px;
+  flex: 1; min-width: 0; min-height: 0; overflow: auto; margin: 0;
+  padding: 12px 12px 22px; scrollbar-width: thin;
   font: 12px/1.5 Mono, ui-monospace, monospace; white-space: pre;
   color: var(--ink); user-select: text;
 }
@@ -140,8 +156,23 @@
    barre de recherche au-dessus de l'arbre / de la liste de résultats. */
 #ft-side {
   width: 44%; min-width: 150px; flex: none; min-height: 0;
+  /* La preview garde au moins ~200 px même si une largeur persistée
+     (ou un drag) dépasse la place disponible. */
+  max-width: calc(100% - 200px);
   display: flex; flex-direction: column;
   border-right: 1px solid var(--line);
+}
+/* Poignée explorateur ↔ preview : affichée seulement quand la colonne
+   explorateur l'est (le layout Android empilé n'a pas de split). */
+#ft-split {
+  display: none; flex: none; width: 5px; margin: 0 -2px;
+  cursor: col-resize; position: relative; z-index: 3;
+  touch-action: none;
+}
+#ft-side:not([hidden]) ~ #ft-split { display: block; }
+#ft-split:hover, #ft-split:focus-visible {
+  background: rgba(var(--accent-rgb), .3);
+  outline: none;
 }
 #ft-bar {
   flex: none; position: relative; padding: 6px 8px;

@@ -388,6 +388,16 @@ pub struct PermOption {
     pub kind: String,
 }
 
+/// Modèle « extra » déclaré par un profil agent (`[agents.<id>
+/// .extra_models]`) : valeur transmise telle quelle à
+/// session/set_model, libellé affiché dans les sélecteurs.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ExtraModel {
+    pub value: String,
+    #[serde(default)]
+    pub label: String,
+}
+
 // ---------------------------------------------------------------------------
 // Métadonnées de session (meta.json)
 // ---------------------------------------------------------------------------
@@ -429,9 +439,24 @@ pub struct SessionMeta {
     /// Commandes slash annoncées par l'agent (available_commands_update)
     #[serde(default)]
     pub available_commands: Vec<CmdInfo>,
-    /// Modèles annoncés par l'agent (session/new|load → models.availableModels)
+    /// Modèles annoncés par l'agent (session/new|load → models.availableModels),
+    /// complétés au handshake par les `extra_models` du profil
+    /// (`[agents.<id>.extra_models]`) : leurs valeurs sont fusionnées ici
+    /// et `session/set_model` les accepte telles quelles — sélectionnables
+    /// même hors annonce ACP (ex. variantes Fable de claude-code-acp).
+    /// Le libellé affiché vient du profil via `model_catalog`.
     #[serde(default)]
     pub available_models: Vec<String>,
+    /// Modèle advisor demandé pour cette session (profils déclarant
+    /// `advisor_models`) — injecté via `_meta.claudeCode.options` au
+    /// spawn ; "off" = désactivation explicite. None = défaut du profil.
+    #[serde(default)]
+    pub advisor: Option<String>,
+    /// Choix advisor déclarés par le profil — snapshot de
+    /// `[agents.<id>.advisor_models]` rafraîchi à chaque spawn ;
+    /// pilote le sélecteur client, vide = fonctionnalité absente.
+    #[serde(default)]
+    pub advisor_models: Vec<String>,
     /// Options de config dynamiques (config_option_update — mode/model chez Devin)
     #[serde(default)]
     pub config_options: Vec<ConfigOption>,
@@ -450,9 +475,11 @@ pub struct SessionMeta {
     /// (asleep : agent libéré volontairement, réveil auto au prochain envoi ;
     /// error : dernier tour session/prompt en échec — cf. `last_error`,
     /// livraison suspendue jusqu'à retry ou action explicite).
-    /// `wait` n'existe qu'à la sérialisation (list_sessions/session_info) :
-    /// dérivé d'un `idle` réel ayant un waiter ac-wait vivant — affichage
-    /// seul, jamais persisté.
+    /// `wait`/`wait-asleep` n'existent qu'à la sérialisation
+    /// (list_sessions/session_info) : dérivés d'un `idle`/`asleep`
+    /// réel ayant un waiter ac-wait vivant — affichage seul, jamais
+    /// persisté. `wait-asleep` préserve la distinction endormie pour
+    /// les gardes client (auto-resume, sleep, vue Repos).
     #[serde(default = "default_state")]
     pub state: String,
     /// Groupe nommé (sidebar) — None = non groupé.
@@ -482,8 +509,9 @@ pub struct SessionMeta {
     /// réussi ou reset de cycle (spawn, /clear, set_model…).
     #[serde(default)]
     pub last_error: Option<LastError>,
-    /// Détail du waiter ac-wait — présent seulement quand `state ==
-    /// "wait"` (dérivé à la sérialisation comme `wait`, jamais persisté).
+    /// Détail du waiter ac-wait — présent seulement quand `state` est
+    /// `wait`/`wait-asleep` (dérivé à la sérialisation comme `wait`,
+    /// jamais persisté).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<WaitInfo>,
 }
@@ -594,7 +622,11 @@ pub struct PrEntry {
     pub status: String,
     #[serde(default)]
     pub note: Option<String>,
-    /// "manual" (pr_track) — prioritaire — ou "detected" (scan auto).
+    /// "manual" (pr_track) — prioritaire —, "detected" (scan auto sur
+    /// signal fort : création) ou "weak" (URL citée sans commande de
+    /// création — ex. `gh pr ready`/`view`/`merge` : PR possiblement
+    /// étrangère à l'agent, reléguée dans la section « citées » du
+    /// client tant qu'aucun signal fort ne la promeut).
     #[serde(default)]
     pub via: String,
     /// Syncs consécutifs sans lecture live (hôte/repo injoignable,
@@ -603,6 +635,15 @@ pub struct PrEntry {
     /// lecture réussie.
     #[serde(default)]
     pub sync_fails: u32,
+    /// État de review lu sur la forge au dernier sync :
+    /// "approved" | "changes_requested" | "requested" | "required".
+    /// None = pas d'info (forge muette, gerrit, jamais syncée).
+    #[serde(default)]
+    pub review: Option<String>,
+    /// État des checks CI de la tête au dernier sync :
+    /// "pending" | "success" | "failure". None = pas d'info.
+    #[serde(default)]
+    pub ci: Option<String>,
     #[serde(default)]
     pub created_at: String,
     #[serde(default)]
@@ -680,6 +721,21 @@ pub enum ReqKind {
         title: Option<String>,
     },
     ListSessions,
+    /// Variante paginée de ListSessions : réponse
+    /// `{"sessions": [...], "next_offset": n|null, "total": t}` au lieu
+    /// du tableau brut — une grosse réponse reste UNE ligne NDJSON
+    /// indivisible qui affame les petits RPC sur un lien lent ; paginer
+    /// laisse la sonde et les appels légers s'intercaler entre les
+    /// pages. Requête inconnue des vieux démons (`parse: unknown
+    /// variant`) → le client retombe sur ListSessions (réponse unique).
+    ListSessionsPage {
+        /// Taille de page (défaut côté démon : 25, plafond 200).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+        /// Décalage dans la liste triée (created_at décroissant).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<u64>,
+    },
     ListAgents,
     /// Coûts catalogue des modèles d'un profil agent (sonde provider
     /// type `devin models`, cache côté démon) — {"models": {id: {label,
@@ -947,6 +1003,12 @@ pub enum ReqKind {
         session: String,
         model: String,
     },
+    /// Modèle advisor de la session (profils `advisor_models`) — appliqué
+    /// au prochain spawn via `_meta` ACP ; "off" = désactivation explicite.
+    SetAdvisor {
+        session: String,
+        advisor: String,
+    },
     /// session/set_config_option (configId + value)
     SetConfigOption {
         session: String,
@@ -1062,6 +1124,13 @@ pub enum ReqKind {
         /// `pr sync` côté acctl — 0 = vu live). None = inchangé.
         #[serde(default)]
         sync_fails: Option<u32>,
+        /// État de review forge à écrire ("" efface — valeur calculée
+        /// par le sync, jamais une saisie manuelle).
+        #[serde(default)]
+        review: Option<String>,
+        /// État CI forge à écrire ("" efface — même convention).
+        #[serde(default)]
+        ci: Option<String>,
     },
     PrUntrack {
         repo: String,
@@ -1158,6 +1227,15 @@ pub enum ReqKind {
     /// `{code, data(b64), size, truncated, stderr?(b64)}` ; absent =
     /// composant ou query inconnue → erreur.
     ComponentQuery { name: String, query: String },
+    /// Token de vue plugin éphémère (option B — vue en iframe
+    /// sandboxée servie par le démon) : émis pour `name`, TTL ~5 min,
+    /// scopé au composant, exigé par la route HTTP `/plugin/<name>/`
+    /// (auth propre — jamais le `web.token` global) et renvoyé au
+    /// plugin par le bridge postMessage `ready`. Le composant doit
+    /// déclarer une vue (`spec.view_dir` ou convention
+    /// `components/<name>/web/`). Réponse :
+    /// `{component, token, ttl_s}`.
+    PluginViewToken { name: String },
     /// Bascule à chaud l'orchestrateur backlog natif (composant interne
     /// `backlog-orchestrator`, section `[backlog_orchestrator]` de
     /// config.toml pour l'activation par défaut) — bascule runtime
@@ -1201,6 +1279,27 @@ pub enum ReqKind {
     BacklogMetrics {
         #[serde(default)]
         window: Option<String>,
+    },
+    /// Tail incrémental du journal du démon (`<root>/logs/
+    /// daemon.log.<date>` — rotation quotidienne) pour le panneau logs
+    /// live du client : `file` = nom renvoyé par l'appel précédent
+    /// (changement = rotation jour → la réponse taille le NOUVEAU
+    /// fichier), `offset` = position octet dans ce fichier, `limit` =
+    /// fenêtre max par appel (défaut 64 Kio, cap 256 Kio). Réponse
+    /// `{file, offset, data, size}` — `data` = lignes complètes UTF-8
+    /// (une ligne partielle en fin de fichier est retenue jusqu'au
+    /// prochain poll). `file` absent ≠ nom courant ou `offset` > taille
+    /// → dernière page bornée par `limit`. Les octets du fichier
+    /// remplacé entre deux polls d'une rotation sont perdus (le fichier
+    /// daté est clos — pas de rattrapage multi-fichiers). Extension
+    /// additive : démons anciens → erreur « req inconnue ».
+    DaemonLogTail {
+        #[serde(default)]
+        file: Option<String>,
+        #[serde(default)]
+        offset: u64,
+        #[serde(default)]
+        limit: Option<u64>,
     },
     DaemonStatus,
     /// Auto-update du démon vers la release `version` demandée par le
@@ -1268,6 +1367,7 @@ impl ReqKind {
             Self::ForkSession { .. } => "fork_session",
             Self::AttachSession { .. } => "attach_session",
             Self::ListSessions => "list_sessions",
+            Self::ListSessionsPage { .. } => "list_sessions_page",
             Self::ListAgents => "list_agents",
             Self::ModelCosts { .. } => "model_costs",
             Self::ModelCatalog { .. } => "model_catalog",
@@ -1299,6 +1399,7 @@ impl ReqKind {
             Self::SessionInfo { .. } => "session_info",
             Self::SetMode { .. } => "set_mode",
             Self::SetModel { .. } => "set_model",
+            Self::SetAdvisor { .. } => "set_advisor",
             Self::SetConfigOption { .. } => "set_config_option",
             Self::DeleteSession { .. } => "delete_session",
             Self::ClearSession { .. } => "clear_session",
@@ -1329,10 +1430,12 @@ impl ReqKind {
             Self::ComponentInstall { .. } => "component_install",
             Self::ComponentSetParams { .. } => "component_set_params",
             Self::ComponentQuery { .. } => "component_query",
+            Self::PluginViewToken { .. } => "plugin_view_token",
             Self::OrchestratorSet { .. } => "orchestrator_set",
             Self::OrchestratorConfig { .. } => "orchestrator_config",
             Self::ManagerSpawn { .. } => "manager_spawn",
             Self::BacklogMetrics { .. } => "backlog_metrics",
+            Self::DaemonLogTail { .. } => "daemon_log_tail",
             Self::DaemonStatus => "daemon_status",
             Self::UpdateDaemon { .. } => "update_daemon",
             Self::RefreshAgentCaps { .. } => "refresh_agent_caps",

@@ -505,7 +505,9 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                         .as_str()
                         .map(|b| format!("  ({b})"))
                         .unwrap_or_default(),
-                    if e["via"].as_str() == Some("detected") { "  [auto]" } else { "" },
+                    if e["via"].as_str() == Some("detected") { "  [auto]" }
+                    else if e["via"].as_str() == Some("weak") { "  [cite]" }
+                    else { "" },
                 );
                 if let Some(n) = e["note"].as_str() {
                     println!("         note: {n}");
@@ -562,6 +564,12 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                     // une fiche « non résoluble » reprend un compteur
                     // propre au lieu d'attendre le prochain sync.
                     sync_fails: info.as_ref().map(|_| 0),
+                    review: info
+                        .as_ref()
+                        .and_then(|i| i["review"].as_str().map(String::from)),
+                    ci: info
+                        .as_ref()
+                        .and_then(|i| i["ci"].as_str().map(String::from)),
                 })
                 .await?;
             println!(
@@ -602,6 +610,8 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                 status: None,
                 note: Some(words.join(" ")),
                 sync_fails: None,
+                review: None,
+                ci: None,
             })
             .await?;
             println!("{}: note maj", badge_of(&e));
@@ -678,6 +688,8 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                     status: None,
                     note: None,
                     sync_fails: Some(fails),
+                    review: None,
+                    ci: None,
                 }
             };
             for u in &out.updates {
@@ -695,6 +707,9 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                         status: Some(u.status.clone()),
                         note: None,
                         sync_fails: Some(0),
+                        // "" efface : la forge a répondu sans review/CI.
+                        review: Some(u.review.clone()),
+                        ci: Some(u.ci.clone()),
                     })
                     .await;
                 println!("{}: {} -> {}", update_label(u), u.old_status, u.status);

@@ -260,9 +260,12 @@
   background: rgba(var(--tint-rgb), .1); padding: 1px 5px; border-radius: 5px;
 }
 .md .md-code {
-  margin: 8px 0; padding: 10px 12px; background: var(--code-bg);
+  margin: 8px 0; padding: 10px 12px 24px; background: var(--code-bg);
   border: 1px solid var(--line); border-radius: 10px;
-  font: 12.5px/1.5 Mono, ui-monospace, monospace; white-space: pre; overflow-x: auto;
+  font: 12.5px/1.5 Mono, ui-monospace, monospace; white-space: pre;
+  overflow-x: auto; scrollbar-width: thin;
+  /* padding-bottom généreux : la scrollbar horizontale classique
+     (non-overlay, ~17px max) ne doit jamais masquer la dernière ligne. */
 }
 /* Conteneur du bloc code + son bouton copier (incrusté en haut à droite,
    visible au survol — discret sinon). Le <pre> perd ses marges au profit
@@ -919,6 +922,21 @@ body.android #settings-body { padding-bottom: calc(20px + env(safe-area-inset-bo
   display: flex; flex-direction: column; gap: 8px;
 }
 #cv-progress-bg { align-self: flex-end; font-size: 12px; }
+
+/* Accueil sans connexion : la récupération par QR est le chemin nominal
+   (réinstall = tout effacé) — mis en avant par rapport au formulaire. */
+#cv-welcome {
+  border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 10px; align-items: flex-start;
+}
+#cv-welcome[hidden] { display: none; }
+.cv-welcome-txt { margin: 0; font-size: 13px; color: var(--muted); max-width: 52ch; }
+#cv-restore {
+  background: var(--accent); color: var(--msg-user-fg); border: none;
+  border-radius: 8px; padding: 9px 16px; font: inherit; font-weight: 600;
+  cursor: pointer;
+}
+#cv-restore:hover { filter: brightness(1.08); }
 
 /* Formulaire connexion : les styles dialog input/label ne s'appliquent
    plus (le form n'est plus dans un <dialog>) — mêmes règles ici. */

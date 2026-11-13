@@ -46,6 +46,14 @@ const DONE_MAX = 8;
 /** Sentinelle du filtre déroulant « items sans repo » — une valeur
  *  qui ne peut pas être un nom de repo taggé. */
 const REPO_UNTAGGED = "__untagged__";
+/** Steppers orchestrateur de la section Activité : param → borne haute
+ *  UI (0–{max}). Une valeur déjà au-delà (réglée via `acctl comp set`)
+ *  reste affichée et décrémentable — la borne ne borne que le pas. */
+const ORCH_STEPS: Record<string, { max: number; key: Key }> = {
+  max_workers: { max: 20, key: "bl_m_wmax" },
+  max_working: { max: 20, key: "bl_m_wactmax" },
+  pr_review_max_parallel: { max: 8, key: "bl_m_prmax" },
+};
 /** Fenêtres proposées par la RPC `backlog_metrics` (parse démon :
  *  `<n>h` / `<n>d` / `all`). Libellé affiché neutre fr/en. */
 const M_WINDOWS: [string, string][] = [
@@ -60,6 +68,7 @@ interface MetricsSample {
   pending?: number;
   wip?: number;
   workers_alive?: number;
+  working?: number;
 }
 
 /** Réponse `backlog_metrics` — agrégats calculés côté démon ; les
@@ -138,6 +147,12 @@ export class BacklogView {
   /** Workspaces routés exposés par l'orchestrateur actif (surface
    *  « Manager » — un proposable par repo sans session vivante). */
   private mgrWs: { repo: string; cwd: string }[] = [];
+  /** Tags repo routés (`orchestrator.routed_tags` du statut) — null
+   *  = orchestrateur inactif ou démon trop vieux (pas de routage
+   *  worker → pas d'avertissement « non routable »). Sert à signaler
+   *  les items taggés d'un repo sans workspace déclaré : ils
+   *  attendent au lieu de partir dans le mauvais cwd. */
+  private routedTags: string[] | null = null;
   private mgrBusy = new Set<string>();
   private mgrErr: string | null = null;
   /** Signature du dernier rendu — le poll ne rebuild le DOM que si la
@@ -153,6 +168,14 @@ export class BacklogView {
   private metricsWin = localStorage.getItem("ac-bl-metrics-win") || "7d";
   private metricsOpen = localStorage.getItem("ac-bl-metrics-open") !== "0";
   private metricsRo: ResizeObserver | null = null;
+  /** Params orchestrateur lus dans `list_components` (spec.params de
+   *  l'item backlog-orchestrator = valeurs courtes `params_values`) —
+   *  alimentent les steppers max_workers / reviews PR. Reset au
+   *  changement de conn comme le reste de l'état par-démon. */
+  private orchParams: Record<string, string> = {};
+  private orchConn: string | null = null;
+  private orchCtlBusy = new Set<string>();
+  private orchErr: string | null = null;
 
   bind(d: Partial<BacklogDeps>) {
     Object.assign(this.deps, d);
@@ -221,6 +244,12 @@ export class BacklogView {
 
   private async refresh() {
     const conn = this.deps.conn();
+    if (conn !== this.orchConn) {
+      this.orchConn = conn;
+      this.orchParams = {};
+      this.orchCtlBusy.clear();
+      this.orchErr = null;
+    }
     // Métriques : même cadence que le panneau mais en parallèle — une
     // RPC lente ne retarde jamais le rendu de la file. Onglet inactif
     // ou section repliée → pas de fetch (la série 30 j peut peser
@@ -229,6 +258,7 @@ export class BacklogView {
     if (!this.deps.componentsCapable(conn)) {
       this.state = { kind: "cap" };
       this.mgrWs = []; // vieux démon : pas de surface Manager
+      this.orchParams = {}; // ni steppers (pas de params exposés)
       this.render();
       return;
     }
@@ -245,13 +275,24 @@ export class BacklogView {
     // Surface « Manager » : workspaces routés exposés par
     // l'orchestrateur actif (status.workspaces) — détection voulue
     // = composant agentbacklog déclaré + orchestrateur actif.
-    const orch = comps.find((c) => c.name === ORCH_COMP)?.orchestrator;
+    const orchItem = comps.find((c) => c.name === ORCH_COMP);
+    const orch = orchItem?.orchestrator;
+    this.orchParams = (orchItem?.spec?.params ?? {}) as Record<
+      string,
+      string
+    >;
     this.mgrWs =
       comp && orch?.enabled
         ? (orch.workspaces ?? [])
             .filter((w): w is { repo: string; cwd?: string } => !!w.repo)
             .map((w) => ({ repo: w.repo, cwd: w.cwd ?? "" }))
         : [];
+    // routed_tags : exposé par les démons récents même spawn_managers
+    // coupé — absent sur un vieux démon → null (pas d'avertissement).
+    const rt = orch?.enabled ? orch.routed_tags : undefined;
+    this.routedTags = Array.isArray(rt)
+      ? rt.filter((x): x is string => typeof x === "string")
+      : null;
     if (!comp) {
       this.state = { kind: "absent" };
       this.render();
@@ -389,6 +430,7 @@ export class BacklogView {
       this.repoFilter +
       this.installing +
       JSON.stringify(this.mgrWs) +
+      JSON.stringify(this.routedTags) +
       JSON.stringify([...this.mgrBusy]) +
       this.mgrErr +
       JSON.stringify(
@@ -400,7 +442,12 @@ export class BacklogView {
       `${this.metricsAvail}|${this.metricsOpen}|${this.metricsWin}|` +
       (this.metrics
         ? `${this.metrics.sample_count}|${this.metrics.samples?.at(-1)?.ts}|${JSON.stringify(this.metrics.aggregates)}`
-        : "null");
+        : "null") +
+      // Steppers : seules les valeurs affichées comptent (le reste de
+      // params_values est stable et inutile à sérialiser à chaque poll).
+      `|${this.orchParams.max_workers}|${this.orchParams.pr_review_max_parallel}` +
+      JSON.stringify([...this.orchCtlBusy]) +
+      this.orchErr;
     if (sig === this.lastSig) return;
     this.lastSig = sig;
 
@@ -419,6 +466,11 @@ export class BacklogView {
       return;
     }
     const items = st.items;
+    // Avertissement « tag repo sans workspace » : les items taggés
+    // d'un repo absent de repo_workspaces ne sont pas dispatchés —
+    // le workspace se déclare dans les paramètres du composant
+    // backlog-orchestrator (champ « Workspaces routés »).
+    const unrouted = this.unroutedHtml(items);
 
     // ok : 3 sections — wip (agent résolu + depuis), pending (bloquées
     // marquées), done récentes (24 h, 8 max).
@@ -464,7 +516,7 @@ export class BacklogView {
       ...new Set(items.map((i) => i.repo).filter((r): r is string => !!r)),
     ].sort();
     const untagged = items.some((i) => !i.repo);
-    let html = mgr; // section « Managers » en tête, avant filtre et file
+    let html = mgr + unrouted; // sections fixes en tête, avant filtre et file
     if (repos.length + (untagged ? 1 : 0) >= 2) {
       html +=
         `<div class="bl-repo-filter"><select id="bl-repo-sel" title="${q(esc(t("bl_repo_filter")))}">` +
@@ -564,6 +616,29 @@ export class BacklogView {
     );
   }
 
+  /** Bandeau « tag repo sans workspace routé » — items non soldés
+   *  taggés d'un repo absent de `routed_tags` : ils attendent (le
+   *  routage worker refuse de les spawn dans le mauvais cwd). Vide
+   *  sans orchestrateur actif ou sur démon ancien (routedTags null). */
+  private unroutedHtml(items: BacklogItem[]): string {
+    if (this.routedTags === null) return "";
+    const known = new Set(this.routedTags);
+    const bad = [
+      ...new Set(
+        items
+          .filter((i) => i.repo && i.status !== "done")
+          .map((i) => i.repo as string),
+      ),
+    ]
+      .filter((r) => !known.has(r))
+      .sort();
+    if (!bad.length) return "";
+    return (
+      `<div class="sess-none warn">${icon("warn")} ` +
+      `${esc(t("bl_unrouted", { tags: bad.join(", ") }))}</div>`
+    );
+  }
+
   /** Section « Managers » : une ligne par workspace routé — bouton
    *  « Ouvrir » vers la session vivante, « Créer » sinon. Vide quand
    *  l'orchestrateur n'est pas actif (ou backlog non déclaré). */
@@ -633,6 +708,7 @@ export class BacklogView {
           `<span><i class="bl-m-dot" style="background:var(--warn)"></i>${esc(t("bl_pending"))}</span>` +
           `<span><i class="bl-m-dot" style="background:var(--accent)"></i>${esc(t("bl_wip"))}</span>` +
           `<span><i class="bl-m-dot" style="background:var(--ok)"></i>${esc(t("bl_m_workers"))}</span>` +
+          `<span><i class="bl-m-dot" style="background:var(--violet)"></i>${esc(t("bl_m_working"))}</span>` +
           `</div>` +
           this.cardsHtml(m);
       } else {
@@ -642,7 +718,7 @@ export class BacklogView {
           `<div class="sess-none">${esc(t("bl_m_none"))}</div>` +
           this.cardsHtml(m);
       }
-      body = `<div class="bl-m-body">${sel}${body}</div>`;
+      body = `<div class="bl-m-body">${sel}${this.orchCtlHtml()}${body}</div>`;
     }
     return (
       `<div class="bl-sec bl-metrics"><div class="grp-head bl-m-head" id="bl-m-tgl">` +
@@ -673,6 +749,68 @@ export class BacklogView {
     );
   }
 
+  /** Rangée de steppers orchestrateur — un par param de ORCH_STEPS
+   *  présent dans spec.params (démon exposant les params éditables ;
+   *  absent → rien, comme les autres gardes capability). La valeur
+   *  affichée est celle lue dans list_components — le prochain poll
+   *  (~4 s) la rafraîchit après un set. */
+  private orchCtlHtml(): string {
+    let rows = "";
+    for (const [param, cfg] of Object.entries(ORCH_STEPS)) {
+      const raw = this.orchParams[param];
+      const cur = raw == null ? NaN : parseInt(raw, 10);
+      if (!Number.isFinite(cur)) continue;
+      const hi = Math.max(cfg.max, cur); // valeur hors borne : seul − agit
+      const busy = this.orchCtlBusy.has(param);
+      rows +=
+        `<div class="bl-m-ctl" title="${q(esc(t("bl_m_hint")))}">` +
+        `<span class="bl-m-ctl-l">${esc(t(cfg.key))}</span>` +
+        `<button class="bl-m-step" data-orch-step="${param}:-1"${busy || cur <= 0 ? " disabled" : ""}>−</button>` +
+        `<span class="bl-m-step-v">${cur}</span>` +
+        `<button class="bl-m-step" data-orch-step="${param}:+1"${busy || cur >= hi ? " disabled" : ""}>+</button>` +
+        `</div>`;
+    }
+    if (this.orchErr) {
+      rows += `<div class="bl-m-err">${icon("warn")} ${esc(this.orchErr)}</div>`;
+    }
+    return rows;
+  }
+
+  /** Stepper → `component_set_params` (patch partiel — le démon merge
+   *  sur la cfg orchestrateur, persisté config.toml, effet au prochain
+   *  tick). En baisse, les workers vivants finissent leur item : pas
+   *  de kill (comportement du comptage `alive`, cf hint UI). */
+  private async setOrchParam(param: string, delta: number) {
+    if (this.orchCtlBusy.has(param)) return;
+    const cur = parseInt(this.orchParams[param] ?? "", 10);
+    const bound = ORCH_STEPS[param]?.max ?? 20;
+    if (!Number.isFinite(cur)) return;
+    const next = Math.min(Math.max(cur + delta, 0), Math.max(bound, cur));
+    if (next === cur) return;
+    this.orchCtlBusy.add(param);
+    this.orchErr = null;
+    this.render();
+    const conn = this.deps.conn();
+    const err = await call("component_set_params", {
+      conn,
+      name: ORCH_COMP,
+      params: { [param]: String(next) },
+    }).then(
+      () => null,
+      (e: unknown) => String(e),
+    );
+    this.orchCtlBusy.delete(param);
+    if (err) {
+      this.orchErr = `${t("bl_m_orch_err")} — ${err}`;
+    } else {
+      // Affichage optimiste — la valeur persistée remonte au prochain
+      // list_components (le refresh immédiat ci-dessous la confirme).
+      this.orchParams = { ...this.orchParams, [param]: String(next) };
+    }
+    this.render();
+    void this.refresh();
+  }
+
   /** Toggle dépliable + sélecteur de fenêtre — rebind après chaque
    *  innerHTML (comme wireMgr). */
   private wireMetrics(el: HTMLElement) {
@@ -699,6 +837,12 @@ export class BacklogView {
         void this.refreshMetrics(this.deps.conn());
       },
     );
+    el.querySelectorAll<HTMLElement>("[data-orch-step]").forEach((b) => {
+      b.onclick = () => {
+        const [param, d] = (b.dataset.orchStep ?? "").split(":");
+        void this.setOrchParam(param, d === "-1" ? -1 : 1);
+      };
+    });
   }
 
   /** Redessine quand la sidebar change de largeur — le canvas suit
@@ -747,6 +891,7 @@ export class BacklogView {
         s.pending ?? 0,
         s.wip ?? 0,
         s.workers_alive ?? 0,
+        s.working ?? 0,
       );
     }
 
@@ -775,6 +920,7 @@ export class BacklogView {
       ["pending", "--warn"],
       ["wip", "--accent"],
       ["workers_alive", "--ok"],
+      ["working", "--violet"],
     ];
     for (const [k, varName] of series) {
       const col = themeRgb(varName) ?? dim;

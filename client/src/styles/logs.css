@@ -1,0 +1,43 @@
+/* Panneau « Logs » live : overlay plein #chat (même mécanisme que
+   settings-view/conn-view/components-view) — journaux client + démon
+   en défilement follow, deux onglets, filtre niveau, pause. */
+
+#logs-view {
+  position: absolute; inset: 0; z-index: 25;
+  display: flex; flex-direction: column;
+  background: var(--bg);
+}
+#logs-view[hidden] { display: none; }
+#logs-head {
+  display: flex; align-items: center; gap: 10px; flex: none;
+  padding: 10px 16px; background: var(--glass); backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--line);
+}
+#logs-title { font-weight: 500; }
+#logs-tabs { display: flex; gap: 4px; margin-left: 8px; }
+#logs-head > select { font-size: 12px; padding: 3px 6px; max-width: 220px; }
+#logs-head > button {
+  background: none; border: none; color: var(--dim); cursor: pointer;
+  padding: 4px; border-radius: 6px;
+}
+#logs-head > button:hover { color: var(--ink); }
+#logs-head .ic { width: 15px; height: 15px; display: block; }
+#logs-body {
+  flex: 1; display: flex; flex-direction: column; min-height: 0;
+}
+.logs-note {
+  flex: none; padding: 8px 16px; color: var(--warn, var(--gold));
+  font-size: 12.5px; border-bottom: 1px solid var(--line);
+}
+/* Le <pre> occupe tout l'espace restant — .log-view de dialogs.css
+   (max-height 320px, coins arrondis) est étendu ici. */
+#logs-out {
+  flex: 1; min-height: 0; margin: 0;
+  max-height: none; border: none; border-top: 1px solid var(--line);
+  border-radius: 0; padding: 10px 16px;
+  overflow-y: auto;
+}
+#logs-out.paused { opacity: .65; }
+#logs-out .ll { display: inline; }
+body.android #logs-head button { min-height: 44px; }
+body.android #logs-head select { font-size: 15px; }

@@ -21,6 +21,16 @@ use crate::journal;
 const MAX_INLINE: usize = 32 * 1024;
 /// Taille de l'extrait conservé dans l'event quand le contenu part en blob.
 const EXCERPT: usize = 4 * 1024;
+/// Bornes du handshake ACP (initialize / session/new|load) : un agent
+/// qui ne répond jamais ne doit pas laisser le spawn pendu à vie — la
+/// session restait « starting » sans que rien ne dise à quelle étape
+/// le handshake en était (ni côté log ni côté client). Dépassé → même
+/// traitement qu'un refus : kill du process + erreur nommant l'étape,
+/// rejouée par spawn_attempts puis visible via spawn_fresh.
+const HANDSHAKE_INIT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(60);
+const HANDSHAKE_SESSION_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(180);
 
 impl Session {
     // -----------------------------------------------------------------------
@@ -49,6 +59,7 @@ impl Session {
         skip_replay: bool,
         mcp_servers: Value,
         spawn_cfg: Option<SpawnCfg>,
+        hints: SpawnHints,
     ) -> Result<bool> {
         // Un seul spawn à la fois : un sleep pendant un réveil en vol
         // libère `waking`, et un nouvel envoi peut alors lancer un
@@ -88,7 +99,7 @@ impl Session {
         // terminé — drain_queue/envois directs doivent rester en file.
         self.spawning.store(true, Ordering::SeqCst);
         let r = self
-            .spawn_attempts(command, envs, resume_native_id, skip_replay, mcp_servers)
+            .spawn_attempts(command, envs, resume_native_id, skip_replay, mcp_servers, hints)
             .await;
         // Config de création APPLIQUÉE sous le flag spawning : le drain
         // post-spawn (lancé juste après) et les envois extérieurs restent
@@ -102,6 +113,15 @@ impl Session {
                     cfg.quiet,
                 )
                 .await;
+                // Le set model final fait retomber les options
+                // PAR-MODÈLE (thought_level…) à leur défaut chez certains
+                // agents — vérifié par sonde, même à valeur identique —
+                // ce qui écraserait le niveau rejoué par le drain
+                // pending_config plus haut. Les repousser après la
+                // valeur modèle finale.
+                if cfg.model.as_deref().is_some_and(|m| !m.is_empty()) {
+                    self.replay_model_scoped_config().await;
+                }
             }
         }
         self.spawning.store(false, Ordering::SeqCst);
@@ -125,6 +145,7 @@ impl Session {
         resume_native_id: Option<String>,
         skip_replay: bool,
         mcp_servers: Value,
+        hints: SpawnHints,
     ) -> Result<bool> {
         let mut last = anyhow::anyhow!("spawn not attempted");
         let sid = self.meta_snapshot().id;
@@ -154,6 +175,7 @@ impl Session {
                     resume_native_id.clone(),
                     skip_replay,
                     mcp_servers.clone(),
+                    hints.clone(),
                 )
                 .await
             {
@@ -191,7 +213,7 @@ impl Session {
     /// re-bouclerait le warn).
     /// Appelée après chaque écriture fraîche de config_options /
     /// available_models / available_modes.
-    fn revive_rejected_config(&self) {
+    pub(super) fn revive_rejected_config(&self) {
         // Deux phases : évaluer les valeurs HORS du lock config_rejected
         // (known_config_values prend meta — le reconcile tient meta
         // puis config_rejected, ordre inverse = deadlock).
@@ -240,7 +262,7 @@ impl Session {
     /// définitif — le reconcile saute alors le re-pending (le replay
     /// la re-échouerait à chaque spawn) et garde la valeur rapportée
     /// par l'agent dans meta.
-    fn config_rejected_has(&self, k: &str, v: &str) -> bool {
+    pub(super) fn config_rejected_has(&self, k: &str, v: &str) -> bool {
         self.config_rejected
             .lock()
             .unwrap()
@@ -259,6 +281,7 @@ impl Session {
         resume_native_id: Option<String>,
         skip_replay: bool,
         mcp_servers: Value,
+        hints: SpawnHints,
     ) -> Result<bool> {
         // Nouvelle génération : tout reader d'un process précédent devient
         // périmé — son on_agent_exit ne touchera plus l'état partagé.
@@ -272,7 +295,18 @@ impl Session {
         self.loading_replay.store(false, Ordering::SeqCst);
         let meta = self.meta_snapshot();
         let (cmd, args) = command.split_first().context("commande agent vide")?;
-        let mut child = Command::new(cmd)
+        // argv[0] résolu à chaud (PATH effectif + dossiers usuels) : le
+        // spawn emprunte le même binaire que celui qu'`available` a
+        // validé — un agent installé après le boot, ou un argv[0] figé
+        // par la résolution boot de `default_agents`, reste trouvable.
+        // Repli sur le nom brut si rien ne résout (spawn → ENOENT
+        // explicite, comme avant).
+        let resolved = crate::server::misc::command_path(cmd);
+        let cmd_os = resolved
+            .as_ref()
+            .map(|p| p.as_os_str())
+            .unwrap_or_else(|| std::ffi::OsStr::new(cmd));
+        let mut child = Command::new(cmd_os)
             .args(args)
             .current_dir(&meta.cwd)
             .envs(envs)
@@ -341,6 +375,13 @@ impl Session {
             bail!("spawn supplanté (kill pendant le spawn)");
         }
 
+        // Progression visible côté client : entre le spawn et
+        // « agent started » il peut s'écouler des dizaines de secondes
+        // (initialize + session/new) — sans cette ligne le chat semble
+        // figé pendant le handshake.
+        self.emit(EventKind::System {
+            text: "agent lancé — handshake ACP…".into(),
+        });
         // ACP handshake : initialize puis session/new|load. Un échec ne
         // doit pas laisser le process vivant — sinon is_alive() ment
         // (agent initialisé mais sans session liée : les envois
@@ -348,7 +389,13 @@ impl Session {
         // « already » sans jamais réparer) → kill silencieux, l'état
         // final est décidé par l'appelant du spawn.
         let hs = self
-            .acp_handshake(&meta, resume_native_id.clone(), skip_replay, mcp_servers)
+            .acp_handshake(
+                &meta,
+                resume_native_id.clone(),
+                skip_replay,
+                mcp_servers,
+                hints.acp_meta.as_ref(),
+            )
             .await;
         let (resp, supports_load, fell_back) = match hs {
             Ok(v) => v,
@@ -420,8 +467,35 @@ impl Session {
                             .map(String::from)
                     })
                     .collect();
+                // Modèles « extra » du profil (ex. Fable de
+                // claude-code-acp, hors annonce ACP) : fusionnés à la
+                // liste rapportée — set_model les accepte tels quels.
+                for v in &hints.extra_models {
+                    if !m.available_models.contains(v) {
+                        m.available_models.push(v.clone());
+                    }
+                }
+            } else if !hints.extra_models.is_empty() {
+                // L'agent n'annonce aucune liste : les extras seuls
+                // constituent la liste affichable.
+                for v in &hints.extra_models {
+                    if !m.available_models.contains(v) {
+                        m.available_models.push(v.clone());
+                    }
+                }
             }
             self.config_gen.fetch_add(1, Ordering::SeqCst);
+        }
+        // Choix advisor du profil : resynchronisés à chaque spawn —
+        // une session créée avant l'ajout de la clé `advisor_models`
+        // (ou sur un profil retouché) voit le sélecteur sans recréation.
+        {
+            let mut m = self.meta.lock().unwrap();
+            if m.advisor_models != hints.advisor_models {
+                m.advisor_models = hints.advisor_models.clone();
+                drop(m);
+                self.save_meta();
+            }
         }
         // Options de config directement dans la réponse session/new|load
         // (Devin les envoie normalement via config_option_update, mais après
@@ -563,8 +637,18 @@ impl Session {
             }
         }
         self.save_meta();
-        let pending: Vec<(String, String)> =
+        // Ordre de rejeu : le modèle D'ABORD — certaines config_options
+        // (thought_level chez Devin) sont par-modèle : les pousser avant
+        // le set model les verrait évaluées contre l'ancien modèle (valeurs
+        // hors liste → refus, ou niveau perdu). pending_config est une
+        // HashMap : sans tri, l'ordre de drain est arbitraire.
+        let mut pending: Vec<(String, String)> =
             { self.meta.lock().unwrap().pending_config.drain().collect() };
+        pending.sort_by_key(|(k, _)| match k.as_str() {
+            "model" => 0,
+            "mode" => 1,
+            _ => 2,
+        });
         if !pending.is_empty() {
             self.save_meta(); // persiste la map vidée même si les appels échouent
         }
@@ -686,17 +770,37 @@ impl Session {
     /// masquerait un vrai conflit — et la boucle de retry du fork
     /// compte dessus.
     /// Retour : (réponse session/new|load, supports_load, fell_back).
+    /// `acp_meta` : objet `_meta` additionnel injecté dans les params
+    /// session/new|load (options propres à l'adaptateur — voir
+    /// SpawnHints, construit côté serveur depuis le profil).
+    /// Chaque étape est tracée dans le log démon (initiate → ok, durée)
+    /// et bornée : un agent muet sur session/new laissait le spawn
+    /// pendu sans trace de où il en était — le blocage est maintenant
+    /// localisable à la lecture du journal.
     async fn acp_handshake(
         &self,
         meta: &SessionMeta,
         resume_native_id: Option<String>,
         skip_replay: bool,
         mcp_servers: Value,
+        acp_meta: Option<&Value>,
     ) -> Result<(Value, bool, bool)> {
+        let t_all = std::time::Instant::now();
+        info!("[{}] handshake: initialize…", meta.id);
+        let t0 = std::time::Instant::now();
         let init = self
-            .acp_request("initialize", acp::initialize_params())
+            .acp_request_bounded(
+                "initialize",
+                acp::initialize_params(),
+                HANDSHAKE_INIT_TIMEOUT,
+            )
             .await
             .context("initialize")?;
+        info!(
+            "[{}] handshake: initialize ok en {} ms",
+            meta.id,
+            t0.elapsed().as_millis()
+        );
         let agent_caps = init.get("agentCapabilities").cloned().unwrap_or(json!({}));
         let supports_load = agent_caps
             .get("loadSession")
@@ -705,15 +809,25 @@ impl Session {
 
         if let (Some(native), true) = (resume_native_id, supports_load) {
             self.loading_replay.store(skip_replay, Ordering::SeqCst);
+            info!("[{}] handshake: session/load…", meta.id);
+            let t0 = std::time::Instant::now();
             let r = self
-                .acp_request(
+                .acp_request_bounded(
                     "session/load",
-                    acp::session_load_params(&native, &meta.cwd, mcp_servers.clone()),
+                    acp::session_load_params(&native, &meta.cwd, mcp_servers.clone(), acp_meta),
+                    HANDSHAKE_SESSION_TIMEOUT,
                 )
                 .await;
             self.loading_replay.store(false, Ordering::SeqCst);
             match r {
-                Ok(v) => Ok((v, supports_load, false)),
+                Ok(v) => {
+                    info!(
+                        "[{}] handshake: session/load ok en {} ms",
+                        meta.id,
+                        t0.elapsed().as_millis()
+                    );
+                    Ok((v, supports_load, false))
+                }
                 Err(e) => {
                     if load_err_keeps_native(&format!("{e:#}")) {
                         return Err(e).context("session/load");
@@ -727,26 +841,50 @@ impl Session {
                             "session native perdue ({e}) — agent relancé sur un contexte neuf"
                         ),
                     });
+                    info!("[{}] handshake: session/new (repli)…", meta.id);
+                    let t0 = std::time::Instant::now();
                     let v = self
-                        .acp_request(
+                        .acp_request_bounded(
                             "session/new",
-                            acp::session_new_params(&meta.cwd, mcp_servers),
+                            acp::session_new_params(&meta.cwd, mcp_servers, acp_meta),
+                            HANDSHAKE_SESSION_TIMEOUT,
                         )
                         .await
                         .context("session/new (repli après session/load)")?;
+                    info!(
+                        "[{}] handshake: session/new ok en {} ms",
+                        meta.id,
+                        t0.elapsed().as_millis()
+                    );
                     Ok((v, supports_load, true))
                 }
             }
         } else {
+            info!("[{}] handshake: session/new…", meta.id);
+            let t0 = std::time::Instant::now();
             let v = self
-                .acp_request(
+                .acp_request_bounded(
                     "session/new",
-                    acp::session_new_params(&meta.cwd, mcp_servers),
+                    acp::session_new_params(&meta.cwd, mcp_servers, acp_meta),
+                    HANDSHAKE_SESSION_TIMEOUT,
                 )
                 .await
                 .context("session/new")?;
+            info!(
+                "[{}] handshake: session/new ok en {} ms",
+                meta.id,
+                t0.elapsed().as_millis()
+            );
             Ok((v, supports_load, false))
         }
+        .map(|(v, sl, fb)| {
+            info!(
+                "[{}] handshake terminé en {} ms",
+                meta.id,
+                t_all.elapsed().as_millis()
+            );
+            (v, sl, fb)
+        })
     }
 
     /// Tue le process laissé par un handshake raté (initialize ou
@@ -855,6 +993,29 @@ impl Session {
 
     /// Envoie une requête JSON-RPC à l'agent et attend la réponse.
     pub async fn acp_request(&self, method: &str, params: Value) -> Result<Value> {
+        self.acp_request_inner(method, params, None).await
+    }
+
+    /// acp_request bornée — réservée au handshake : `session/prompt`
+    /// n'a PAS de borne (un long tour est légitime, le watchdog gère
+    /// le silence). Au timeout l'entrée `acp_pending` est retirée : une
+    /// réponse tardive serait sinon créditée à un appel soldé et la
+    /// map fuirait jusqu'à la mort du process.
+    async fn acp_request_bounded(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: std::time::Duration,
+    ) -> Result<Value> {
+        self.acp_request_inner(method, params, Some(timeout)).await
+    }
+
+    async fn acp_request_inner(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Value> {
         let id = self.acp_next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.acp_pending.lock().unwrap().insert(id, tx);
@@ -863,7 +1024,21 @@ impl Session {
             self.acp_pending.lock().unwrap().remove(&id);
             return Err(e);
         }
-        match rx.await {
+        let res = match timeout {
+            Some(t) => match tokio::time::timeout(t, rx).await {
+                Ok(r) => r,
+                Err(_) => {
+                    self.acp_pending.lock().unwrap().remove(&id);
+                    // « timeout » en tête : load_err_keeps_native classe
+                    // le message comme empêchement TRANSITOIRE — un
+                    // session/load lent garde le sid natif (repli
+                    // session/new = perte de contexte sinon).
+                    bail!("acp {method}: timeout — aucune réponse après {} s", t.as_secs());
+                }
+            },
+            None => rx.await,
+        };
+        match res {
             Ok(Ok(v)) => Ok(v),
             Ok(Err(e)) => bail!("acp {method}: {e}"),
             Err(_) => bail!("acp {method}: channel closed"),
@@ -1430,6 +1605,8 @@ mod tests {
             available_modes: vec![],
             available_commands: vec![],
             available_models: vec![],
+            advisor: None,
+            advisor_models: vec![],
             config_options: vec![],
             pending_config: Default::default(),
             desired_config: Default::default(),
@@ -1637,6 +1814,7 @@ for line in sys.stdin:
                 true,
                 json!([]),
                 None,
+                SpawnHints::default(),
             )
             .await
             .unwrap();
@@ -1687,6 +1865,7 @@ for line in sys.stdin:
                 true,
                 json!([]),
                 None,
+                SpawnHints::default(),
             )
             .await
             .unwrap();
@@ -1728,6 +1907,7 @@ for line in sys.stdin:
                 true,
                 json!([]),
                 None,
+                SpawnHints::default(),
             )
             .await;
         assert!(r.is_err());
@@ -1768,6 +1948,7 @@ for line in sys.stdin:
                 true,
                 json!([]),
                 None,
+                SpawnHints::default(),
             )
             .await
             .unwrap();

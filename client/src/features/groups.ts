@@ -52,6 +52,11 @@ export class GroupStore {
   /** Rafraîchit la sidebar après une mutation (injecté — évite la dépendance
    *  circulaire groups ↔ sidebar). */
   refresh: () => void = () => {};
+  /** Suppression d'une session du sous-arbre — injectée par la sidebar
+   *  (tombstones pendingDel, markGone, RPC delete_session) : même
+   *  pattern que refresh, la dissolution destructive reste ici. */
+  deleteSession: (s: SessionMeta) => Promise<void> = (s) =>
+    call("delete_session", { session: s.id, conn: s.conn });
 
   stored(conn: string): string[] {
     try {
@@ -179,6 +184,61 @@ export class GroupStore {
     this.remapStored(conn, p, undefined);
   }
 
+  /** Cible du dialogue « dissoudre et supprimer » en attente de
+   *  confirmation (chemin déjà normalisé). */
+  private delCtx: { conn: string; path: string } | null = null;
+
+  /** « Dissoudre et supprimer » : confirmation explicite (nombre de
+   *  sessions + états, sessions d'orchestrateur, waiters ac-wait) puis
+   *  delete_session de chaque membre du sous-arbre et oubli des
+   *  chemins/collapse. Groupe vide persisté (store seul, aucune
+   *  session) → suppression directe des chemins : rien de destructif
+   *  côté sessions, pas de dialogue. */
+  openDelDlg(conn: string, path: string) {
+    const p = grpNorm(path);
+    const members = this.subtreeMembers(conn, p);
+    if (members.length === 0) {
+      this.remapStored(conn, p, undefined);
+      this.refresh();
+      return;
+    }
+    this.delCtx = { conn, path: p };
+    const counts = new Map<string, number>();
+    for (const s of members) counts.set(s.state, (counts.get(s.state) ?? 0) + 1);
+    const states = [...counts.entries()].map(([st, n]) => `${n} ${st}`).join(", ");
+    $("gd-summary").textContent = t("grpdel_summary", { n: members.length, grp: p, states });
+    const warns = $("gd-warns");
+    warns.innerHTML = "";
+    const busy = members.filter((s) => GRPDEL_BUSY.has(s.state)).length;
+    if (busy) warns.appendChild(grpdelWarn(t("grpdel_busy", { n: busy })));
+    const orch = members.filter(isOrchSession).length;
+    if (orch) warns.appendChild(grpdelWarn(t("grpdel_orch", { n: orch })));
+    const waiting = members.filter((s) => s.state === "wait" || !!s.wait).length;
+    if (waiting) warns.appendChild(grpdelWarn(t("grpdel_acwait", { n: waiting })));
+    ($("dlg-grpdel") as HTMLDialogElement).showModal();
+  }
+
+  /** Exécute la dissolution destructive confirmée par dlg-grpdel :
+   *  delete_session de chaque membre courant du sous-arbre (re-lu à
+   *  l'exécution — un groupe a pu changer depuis l'ouverture), puis
+   *  oubli des chemins/collapse même en cas d'échecs partiels. */
+  private async runDel() {
+    const ctx = this.delCtx;
+    this.delCtx = null;
+    if (!ctx) return;
+    let failed = 0;
+    for (const s of this.subtreeMembers(ctx.conn, ctx.path)) {
+      try {
+        await this.deleteSession(s);
+      } catch {
+        failed++;
+      }
+    }
+    this.remapStored(ctx.conn, ctx.path, undefined);
+    this.refresh();
+    if (failed) showErr(t("grpdel_failed", { n: failed }));
+  }
+
   /** Renomme/déplace un sous-arbre : `to` est le nouveau CHEMIN COMPLET
    *  (rename "a/b"→"a/c" change la feuille ; "a/b"→"x" la remonte à la
    *  racine). Préfixe remplacé sur les sessions, les chemins stockés et
@@ -236,5 +296,41 @@ export class GroupStore {
     // type=button → fermeture explicite ; Enter active g-ok (seul submit restant).
     $("g-none").onclick = () => ($("dlg-group") as HTMLDialogElement).close("none");
     $("g-cancel").onclick = () => ($("dlg-group") as HTMLDialogElement).close("cancel");
+    const dd = $("dlg-grpdel") as HTMLDialogElement;
+    dd.addEventListener("close", (e) => {
+      if ((e.target as HTMLDialogElement).returnValue === "ok") void this.runDel();
+    });
+    $("gd-cancel").onclick = () => dd.close("cancel");
+    $("gd-ok").onclick = () => dd.close("ok");
   }
+}
+
+/** États « en cours » pour la confirmation dissolve+delete : la
+ *  suppression tue le process agent — l'utilisateur doit le savoir
+ *  avant de confirmer (idle/asleep/dead n'ont rien à interrompre). */
+const GRPDEL_BUSY = new Set(["working", "compacting", "waiting_input", "starting"]);
+
+/** `origin` des sessions « service » : workers/planners/implémenteurs
+ *  de l'orchestrateur (`component:backlog-orchestrator`), sessions
+ *  Manager (`feature:backlog-manager`) et reviewers de PR
+ *  (`feature:pr-review`) — constantes partagées avec le démon
+ *  (orch.rs / orch_review.rs). Le repli sur le titre couvre les
+ *  sessions spawnées avant le suivi d'origin et les préfixes
+ *  configurables. */
+const ORCH_ORIGINS = new Set([
+  "component:backlog-orchestrator",
+  "feature:backlog-manager",
+  "feature:pr-review",
+]);
+const isOrchSession = (s: SessionMeta) =>
+  ORCH_ORIGINS.has(s.origin ?? "") ||
+  /^(Backlog-|PRReview-|Manager · )/.test(s.title);
+
+/** Ligne d'avertissement du dialogue dissolve+delete (texte brut —
+ *  jamais d'HTML interpolé). */
+function grpdelWarn(msg: string): HTMLElement {
+  const p = document.createElement("p");
+  p.className = "gd-warn";
+  p.textContent = msg;
+  return p;
 }
