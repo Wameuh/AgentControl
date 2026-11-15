@@ -839,13 +839,17 @@ impl Session {
     }
 
     /// Vide la file (Stop : annule aussi le tour en cours).
-    pub fn clear_queue(&self) {
+    /// Renvoie le nombre d'entrées retirées — `queue_clear` l'expose
+    /// au client, `cancel` l'ignore. Le tour en cours n'est jamais
+    /// touché : seules les entrées en attente sont drainées.
+    pub fn clear_queue(&self) -> usize {
         let n = self.prompt_queue.lock().unwrap().drain(..).count();
         if n > 0 {
             self.emit(EventKind::System {
                 text: format!("{n} message(s) en file annulé(s)"),
             });
         }
+        n
     }
 
     /// Contenu de la file dans l'ordre d'envoi (textes seuls).

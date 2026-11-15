@@ -250,6 +250,7 @@ tts.openSettings = () => {
 settings.tts = tts;
 composer.bindAttachCapable((c) => conns.cap(c ?? "default")?.files === true);
 composer.bindQueueSteerCapable((c) => conns.cap(c ?? "default")?.queue_steer === true);
+composer.bindQueueClearCapable((c) => conns.cap(c ?? "default")?.queue_clear === true);
 conns.bind({
   refresh: () => sidebar.refresh(),
   reopenIfConn: (c) => chat.reopenIfConn(c),
