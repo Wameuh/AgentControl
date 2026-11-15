@@ -152,7 +152,7 @@ export class Attachments {
       // text/uri-list / x-special/gnome-copied-files, parfois en
       // text/plain brut « copy\nfile:///… ». La webview ne lit pas les
       // chemins locaux → commandes Tauri clipboard_file_*.
-      const uris = clipboardFileUris(cd);
+      const uris = fileUris(cd);
       if (uris.length) {
         // Web : pas de lecture de chemins locaux — laisser le collage
         // texte se faire (le payload GNOME strict reste lisible) plutôt
@@ -165,30 +165,64 @@ export class Attachments {
     // Glisser-déposer : pas de DnD fichier sur Android (bouton seul).
     if (isAndroid()) return;
     const chat = $("chat");
-    const isFiles = (e: DragEvent) =>
-      e.dataTransfer?.types.includes("Files") ?? false;
+    // Cibles de drop : « Files » (navigateur/Tauri) OU drag URI — sous
+    // Linux/WebKitGTK le gestionnaire de fichiers expose text/uri-list
+    // (voire x-special/gnome-copied-files) sans type Files et souvent
+    // sans File object dans dataTransfer.files. getData n'est lisible
+    // qu'au drop : impossible de distinguer fichier file:// et lien
+    // http(s) pendant le dragover → highlight optimiste, tranché au
+    // drop (URI non-fichier → pas de preventDefault, le texte s'insère).
+    const isDropTarget = (e: DragEvent) => {
+      const types = e.dataTransfer?.types;
+      return (
+        !!types &&
+        (types.includes("Files") ||
+          types.includes("text/uri-list") ||
+          types.includes("x-special/gnome-copied-files"))
+      );
+    };
     chat.addEventListener("dragenter", (e) => {
-      if (!isFiles(e)) return;
+      if (!isDropTarget(e)) return;
       e.preventDefault();
       this.dragDepth++;
       chat.classList.add("att-drop");
       $("drop-hint").hidden = false;
     });
     chat.addEventListener("dragover", (e) => {
-      if (!isFiles(e)) return;
+      if (!isDropTarget(e)) return;
       e.preventDefault(); // requis pour autoriser le drop
       if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
     });
     chat.addEventListener("dragleave", (e) => {
-      if (!isFiles(e)) return;
+      if (!isDropTarget(e)) return;
       if (--this.dragDepth <= 0) this.endDrag();
     });
     chat.addEventListener("drop", (e) => {
-      if (!isFiles(e)) return;
-      e.preventDefault();
+      if (!isDropTarget(e)) return;
+      const dt = e.dataTransfer;
+      const files = dt?.files;
+      if (files?.length) {
+        e.preventDefault();
+        this.endDrag();
+        this.addFiles([...files]);
+        return;
+      }
+      // Drag URI sans File objects (gestionnaire Linux) : les file://
+      // partent en pièces jointes via les commandes Tauri
+      // clipboard_file_* ; une uri-list sans file:// (lien http(s)
+      // draggé depuis un navigateur…) n'est PAS interceptée — le drop
+      // retombe sur l'insertion texte par défaut.
+      const uris = dt ? fileUris(dt) : [];
+      if (uris.length && !isWeb) {
+        e.preventDefault();
+        this.endDrag();
+        void this.addClipboardUris(uris);
+        return;
+      }
       this.endDrag();
-      const files = e.dataTransfer?.files;
-      if (files?.length) this.addFiles([...files]);
+      // Type « Files » sans liste exploitable : conserver l'ancien
+      // preventDefault (rien à insérer). Sinon (lien…) on laisse faire.
+      if (dt?.types.includes("Files")) e.preventDefault();
     });
   }
 
@@ -494,7 +528,8 @@ function suffixName(name: string, n: number): string {
   return `${name.slice(0, dot)}-${n + 1}${name.slice(dot)}`;
 }
 
-/// URI file:// présentes dans le clipboard du paste. Deux régimes :
+/// URI file:// portées par un DataTransfer (clipboard du paste ou
+/// drop). Deux régimes :
 /// - MIME dédiés (text/uri-list, x-special/gnome-copied-files) :
 ///   toute ligne file:// compte — ces types ne charrient que des
 ///   fichiers/URI par construction.
@@ -503,7 +538,7 @@ function suffixName(name: string, n: number): string {
 ///   restriction, coller du texte contenant une ligne file:///
 ///   détournerait le collage (texte mangé + fichier uploadé sans
 ///   action explicite).
-function clipboardFileUris(cd: DataTransfer): string[] {
+function fileUris(cd: DataTransfer): string[] {
   const out = new Set<string>();
   for (const mime of ["text/uri-list", "x-special/gnome-copied-files"]) {
     for (const u of clipboardUriLines(cd, mime)) out.add(u);
