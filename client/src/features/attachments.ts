@@ -219,15 +219,20 @@ export class Attachments {
         void this.addClipboardUris(uris);
         return;
       }
-      this.endDrag();
       // URI non-fichier (lien http(s)…) : le drop n'insère du texte que
       // sur une cible éditable — ailleurs le défaut UA serait une
-      // NAVIGATION de la webview vers l'URL (perte de l'UI). On ne
-      // laisse passer que là ; « Files » sans liste exploitable garde
-      // l'ancien preventDefault (rien à insérer).
-      const editable = (e.target as HTMLElement | null)?.closest?.(
-        "textarea, input, [contenteditable]",
-      );
+      // NAVIGATION de la webview vers l'URL (perte de l'UI). « Éditable »
+      // = textarea / input TEXTUEL / contenteditable réel : les
+      // checkbox/select de #settings-view et #conn-view (enfants de
+      // #chat) ne peuvent pas recevoir de texte — les y traiter comme
+      // éditables rouvre le trou de navigation. « Files » sans liste
+      // exploitable garde l'ancien preventDefault (rien à insérer).
+      const t = e.target as HTMLElement | null;
+      const editable =
+        t instanceof HTMLTextAreaElement ||
+        (t instanceof HTMLInputElement &&
+          /^(text|search|url|password|email|tel|number)$/.test(t.type)) ||
+        !!t?.isContentEditable;
       if (!editable || dt?.types.includes("Files")) e.preventDefault();
     });
   }

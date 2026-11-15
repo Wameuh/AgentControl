@@ -163,8 +163,13 @@ check("B2 drop lien sur #chat (non-éditable) preventDefault", rB2 === false);
 // Drop directement sur le textarea : non intercepté → insertion texte.
 const rB3 = await drag("drop", "text/uri-list", LINK_URI, false, "#input");
 check("B3 drop lien sur #input (éditable) NON preventDefault", rB3 === true);
+// Drop sur une checkbox des settings (enfant de #chat, non-éditable) :
+// intercepté — un input non-textuel ne peut pas recevoir de texte, le
+// défaut UA y naviguerait aussi (review #335, round 2).
+const rB4 = await drag("drop", "text/uri-list", LINK_URI, false, "#s-bganim");
+check("B4 drop lien sur checkbox settings preventDefault", rB4 === false);
 c = await clip();
-check("B4 aucune lecture clipboard pour un lien", c.stat.length === 1, JSON.stringify(c.stat));
+check("B5 aucune lecture clipboard pour un lien", c.stat.length === 1, JSON.stringify(c.stat));
 
 // ---------- C. x-special/gnome-copied-files ----------
 const rC = await drag("drop", "x-special/gnome-copied-files", FILE_URI);
