@@ -118,16 +118,18 @@ await sleep(1200);
 await p.evaluate(() => document.querySelector(".sess")?.click());
 await sleep(1200);
 
-// Dispatch d'un DragEvent sur #chat ; retourne false si preventDefault.
-const drag = (kind, mime, data, withFile = false) => p.evaluate(
-  ({ k, m, d, wf }) => {
+// Dispatch d'un DragEvent sur #chat (ou une cible précise via `on`) ;
+// retourne false si preventDefault. `on` permet de viser #input pour
+// le cas « drop sur zone éditable ».
+const drag = (kind, mime, data, withFile = false, on = "#chat") => p.evaluate(
+  ({ k, m, d, wf, sel }) => {
     const dt = new DataTransfer();
     if (wf) dt.items.add(new File(["hello"], "note.txt", { type: "text/plain" }));
     else if (m) dt.setData(m, d);
-    const chat = document.querySelector("#chat");
-    return chat.dispatchEvent(new DragEvent(k, { dataTransfer: dt, bubbles: true, cancelable: true }));
+    const el = document.querySelector(sel);
+    return el.dispatchEvent(new DragEvent(k, { dataTransfer: dt, bubbles: true, cancelable: true }));
   },
-  { k: kind, m: mime, d: data, wf: withFile },
+  { k: kind, m: mime, d: data, wf: withFile, sel: on },
 );
 const chips = () => p.evaluate(() => document.querySelectorAll("#attach-bar .att-chip").length);
 const clip = () => p.evaluate(() => window.__CLIP);
@@ -154,10 +156,15 @@ check("A6 chip visible", (await chips()) === 1, String(await chips()));
 // ---------- B. Drag URI http(s) — PAS un fichier ----------
 const rB = await drag("dragover", "text/uri-list", LINK_URI);
 check("B1 dragover lien preventDefault (highlight optimiste)", rB === false);
+// Drop hors zone éditable : intercepté — sinon le défaut UA naviguerait
+// la webview vers l'URL (régression review #335).
 const rB2 = await drag("drop", "text/uri-list", LINK_URI);
-check("B2 drop lien http(s) NON preventDefault → texte inséré", rB2 === true);
+check("B2 drop lien sur #chat (non-éditable) preventDefault", rB2 === false);
+// Drop directement sur le textarea : non intercepté → insertion texte.
+const rB3 = await drag("drop", "text/uri-list", LINK_URI, false, "#input");
+check("B3 drop lien sur #input (éditable) NON preventDefault", rB3 === true);
 c = await clip();
-check("B3 aucune lecture clipboard pour un lien", c.stat.length === 1, JSON.stringify(c.stat));
+check("B4 aucune lecture clipboard pour un lien", c.stat.length === 1, JSON.stringify(c.stat));
 
 // ---------- C. x-special/gnome-copied-files ----------
 const rC = await drag("drop", "x-special/gnome-copied-files", FILE_URI);

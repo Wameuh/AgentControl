@@ -220,9 +220,15 @@ export class Attachments {
         return;
       }
       this.endDrag();
-      // Type « Files » sans liste exploitable : conserver l'ancien
-      // preventDefault (rien à insérer). Sinon (lien…) on laisse faire.
-      if (dt?.types.includes("Files")) e.preventDefault();
+      // URI non-fichier (lien http(s)…) : le drop n'insère du texte que
+      // sur une cible éditable — ailleurs le défaut UA serait une
+      // NAVIGATION de la webview vers l'URL (perte de l'UI). On ne
+      // laisse passer que là ; « Files » sans liste exploitable garde
+      // l'ancien preventDefault (rien à insérer).
+      const editable = (e.target as HTMLElement | null)?.closest?.(
+        "textarea, input, [contenteditable]",
+      );
+      if (!editable || dt?.types.includes("Files")) e.preventDefault();
     });
   }
 
