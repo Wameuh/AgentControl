@@ -360,7 +360,7 @@ impl ProbeIo {
             if self.note(&v, stdin).await {
                 if v.get("id").and_then(Value::as_u64) == Some(id) {
                     if let Some(e) = v.get("error") {
-                        anyhow::bail!("acp {method}: {}", e.get("message").unwrap_or(e));
+                        anyhow::bail!("acp {method}: {}", acp::acp_error_string(e));
                     }
                     return Ok(v.get("result").cloned().unwrap_or(Value::Null));
                 }

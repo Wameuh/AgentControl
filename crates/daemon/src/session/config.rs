@@ -341,7 +341,11 @@ impl Session {
                 }
             };
             let want = want2.as_str();
-            let r = match self.set_config_option(id, want).await {
+            // Premier essai silencieux : l'échec est enchaîné par le
+            // fallback set_mode/set_model ci-dessous — l'event Error de
+            // set_config_option serait un faux positif quand le repli
+            // réussit (agent sans session/set_config_option).
+            let r = match self.set_config_option_quiet(id, want).await {
                 Ok(()) => Ok(()),
                 Err(e) => {
                     let r2 = match id {
@@ -566,6 +570,31 @@ impl Session {
     /// Les clés `ac.*` sont interceptées côté démon (compact auto…) —
     /// elles ne partent JAMAIS vers l'agent.
     pub async fn set_config_option(&self, config_id: &str, value: &str) -> Result<()> {
+        self.set_config_option_report(config_id, value, true).await
+    }
+
+    /// Variante silencieuse pour les rejeux internes (pending_config au
+    /// spawn, apply_spawn_config, replay_model_scoped_config) : mêmes
+    /// effets de bord méta au succès, mais AUCUN event Error —
+    /// l'appelant chaîne un repli (set_model/set_mode) et choisit son
+    /// compte-rendu. Sans ça un agent sans `session/set_config_option`
+    /// (claude-code-acp — modes/models ACP standard, pas de
+    /// configOptions) affichait une erreur rouge à chaque spawn alors
+    /// que le repli réussissait juste après.
+    pub(super) async fn set_config_option_quiet(
+        &self,
+        config_id: &str,
+        value: &str,
+    ) -> Result<()> {
+        self.set_config_option_report(config_id, value, false).await
+    }
+
+    async fn set_config_option_report(
+        &self,
+        config_id: &str,
+        value: &str,
+        report: bool,
+    ) -> Result<()> {
         if let Some(key) = config_id.strip_prefix("ac.") {
             return self.set_daemon_option(key, value);
         }
@@ -633,9 +662,11 @@ impl Session {
                         "set_config_option {config_id} ambigu « {value} » — candidats : {}",
                         c.join(", ")
                     );
-                    self.emit(EventKind::Error {
-                        message: msg.clone(),
-                    });
+                    if report {
+                        self.emit(EventKind::Error {
+                            message: msg.clone(),
+                        });
+                    }
                     anyhow::bail!("{msg}")
                 }
                 Resolve::Unknown => {
@@ -643,9 +674,11 @@ impl Session {
                         "set_config_option {config_id} inconnu « {value} » — valeurs : {}",
                         join_known(&known)
                     );
-                    self.emit(EventKind::Error {
-                        message: msg.clone(),
-                    });
+                    if report {
+                        self.emit(EventKind::Error {
+                            message: msg.clone(),
+                        });
+                    }
                     anyhow::bail!("{msg}")
                 }
             }
@@ -665,9 +698,11 @@ impl Session {
                     )
                 };
                 let msg = format!("set_config_option {config_id}={value}: {e:#}{hint}");
-                self.emit(EventKind::Error {
-                    message: msg.clone(),
-                });
+                if report {
+                    self.emit(EventKind::Error {
+                        message: msg.clone(),
+                    });
+                }
                 Err(e).with_context(|| msg)
             }
         }
@@ -680,16 +715,40 @@ impl Session {
     /// détaillé pour l'action utilisateur, warn discret pour la
     /// ré-affirmation de respawn).
     async fn push_config_option(&self, config_id: &str, value: &str) -> Result<()> {
+        // L'agent a déjà répondu « method not found » à cette méthode
+        // (claude-code-acp n'implémente pas session/set_config_option) :
+        // soldé localement — les appelants rejouent par les setters
+        // dédiés (set_model/set_mode) au lieu de payer un RPC voué à
+        // l'échec à chaque spawn.
+        if !self.config_option_supported.load(Ordering::SeqCst) {
+            anyhow::bail!("session/set_config_option non supporté par cet agent");
+        }
         let sid = self
             .meta_snapshot()
             .native_session_id
             .context("no native session id")?;
-        let resp = self
+        let resp = match self
             .acp_request(
                 "session/set_config_option",
                 json!({"sessionId": sid, "configId": config_id, "value": value}),
             )
-            .await?;
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                // « method not found »/« unknown method » (-32601) →
+                // l'adaptateur ne connaît pas la méthode : la capacité
+                // est mémorisée pour la session (comme rename_supported
+                // — un upgrade de l'agent en cours de session n'est pas
+                // un cas visé).
+                let msg = format!("{e:#}").to_lowercase();
+                if msg.contains("method not found") || msg.contains("unknown method") {
+                    self.config_option_supported
+                        .store(false, Ordering::SeqCst);
+                }
+                return Err(e);
+            }
+        };
         // L'agent joint parfois la liste configOptions COMPLÈTE dans la
         // réponse (Devin — aucun config_option_update séparé) : l'ingérer
         // évite à l'UI de garder les options de l'ANCIEN modèle — les
@@ -840,7 +899,9 @@ impl Session {
             if reported.as_deref() == Some(v.as_str()) || self.config_rejected_has(&k, &v) {
                 continue;
             }
-            match self.set_config_option(&k, &v).await {
+            // Rejeu interne : silencieux — l'échec est soldé ici
+            // (refus définitif / re-pend) avec son propre event.
+            match self.set_config_option_quiet(&k, &v).await {
                 Ok(()) => {
                     self.config_rejected.lock().unwrap().remove(&k);
                 }

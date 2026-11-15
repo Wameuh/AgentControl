@@ -176,7 +176,88 @@ pub(crate) fn persist(root: &Path, edits: &[(String, AgentProfile)]) -> Result<(
     super::orch_cfg::commit_config(root, &path, doc.to_string(), perms)
 }
 
+/// Upsert des profils parsés dans la table vivante — chaque section
+/// `[agents.<id>]` remplace (ou crée) son profil, comme au boot ;
+/// retourne les ids nouvellement ajoutés (pour le log). Pur → testable.
+fn upsert_agent_confs(
+    agents: &mut HashMap<String, AgentProfile>,
+    confs: HashMap<String, crate::server::AgentConf>,
+) -> Vec<String> {
+    let mut added = Vec::new();
+    for (id, conf) in confs {
+        if !agents.contains_key(&id) {
+            added.push(id.clone());
+        }
+        agents.insert(id.clone(), crate::server::profile_from_conf(&id, conf));
+    }
+    added.sort();
+    added
+}
+
 impl Daemon {
+    /// Re-lit `[agents.*]` de config.toml et fusionne dans la table
+    /// vivante — les profils déclarés APRÈS le boot (section ajoutée à
+    /// la main, config régénérée) deviennent utilisables sans restart
+    /// du démon. Sémantique identique au boot : chaque section
+    /// `[agents.<id>]` upserte son profil (override d'un built-in ou
+    /// nouveau profil custom) ; rien n'est retiré — supprimer une
+    /// section ne démonte pas le profil à chaud (comme un built-in,
+    /// il reste jusqu'au prochain boot). Le retrait resterait ambigu
+    /// de toute façon : `[agents.devin]` est à la fois override et
+    /// déclaration.
+    ///
+    /// Estampille (mtime, taille) : fichier inchangé → no-op, appelé
+    /// sans crainte depuis list_agents/daemon_status et les lookups
+    /// à la demande. Config absente/illisible/TOML invalide → les
+    /// profils chargés sont conservés (jamais de table vidée à chaud).
+    /// Retourne le nombre de profils déclarés dans le fichier.
+    pub async fn reload_agent_profiles(&self) -> usize {
+        let path = self.root.join("config.toml");
+        let Ok(meta) = std::fs::metadata(&path) else {
+            return 0;
+        };
+        let (Ok(mtime), len) = (meta.modified(), meta.len()) else {
+            return 0;
+        };
+        let stamp = (mtime, len);
+        if *self.agents_cfg_stamp.lock().unwrap() == Some(stamp) {
+            return 0;
+        }
+        // Estampiller AVANT le parse : un config.toml cassé serait
+        // sinon re-parsé (et re-warné) à chaque appel — le stamp
+        // change avec le fichier, donc une réparation est reprise.
+        *self.agents_cfg_stamp.lock().unwrap() = Some(stamp);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return 0;
+        };
+        let Some(confs) = crate::server::agent_confs(&text) else {
+            tracing::warn!("config.toml illisible — hot-reload [agents.*] ignoré");
+            return 0;
+        };
+        let n = confs.len();
+        let added = {
+            let mut agents = self.agents.write().await;
+            upsert_agent_confs(&mut agents, confs)
+        };
+        for id in added {
+            tracing::info!("profil agent « {id} » chargé à chaud depuis config.toml");
+        }
+        n
+    }
+
+    /// Profil par id avec rattrapage hot-reload : un `[agents.*]`
+    /// ajouté à config.toml après le boot est pris en compte au
+    /// premier usage — sans ça un `new_session`/`spawn` direct
+    /// répondait « agent inconnu » alors que list_agents (qui
+    /// recharge) l'affichait déjà.
+    pub async fn agent_profile(&self, id: &str) -> Option<AgentProfile> {
+        if let Some(p) = self.agents.read().await.get(id).cloned() {
+            return Some(p);
+        }
+        self.reload_agent_profiles().await;
+        self.agents.read().await.get(id).cloned()
+    }
+
     /// `ComponentSetParams{name:"agents"}` — même contrat de réponse que
     /// `set_params` : `{name, state, params, config_required, rendered,
     /// restarted}`. Validation → persistance config.toml → commit
@@ -287,6 +368,51 @@ mod tests {
         );
         assert!(text.contains("FOO = \"bar\""));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Hot-reload : un id nouveau est upserté ET rapporté « ajouté » ;
+    /// un id existant est remplacé sans être rapporté (override d'un
+    /// built-in = même sémantique qu'au boot).
+    #[test]
+    fn upsert_agent_confs_ajoute_et_reecrit() {
+        let mut agents = HashMap::new();
+        agents.insert("devin".to_string(), profile(&["devin", "acp"]));
+        let confs = HashMap::from([
+            (
+                "codex".to_string(),
+                crate::server::AgentConf {
+                    name: None,
+                    command: vec!["codex-acp".to_string()],
+                    env: HashMap::new(),
+                    compact: Default::default(),
+                    max_instances: None,
+                    catalogue_cmd: None,
+                    model_override_cmd: None,
+                    extra_models: Vec::new(),
+                    advisor_models: Vec::new(),
+                },
+            ),
+            (
+                "devin".to_string(),
+                crate::server::AgentConf {
+                    name: Some("Devin".into()),
+                    command: vec!["devin".to_string(), "acp".to_string(), "--new".to_string()],
+                    env: HashMap::new(),
+                    compact: Default::default(),
+                    max_instances: None,
+                    catalogue_cmd: None,
+                    model_override_cmd: None,
+                    extra_models: Vec::new(),
+                    advisor_models: Vec::new(),
+                },
+            ),
+        ]);
+        let added = upsert_agent_confs(&mut agents, confs);
+        assert_eq!(added, vec!["codex".to_string()]);
+        assert_eq!(agents["codex"].command, vec!["codex-acp"]);
+        // Override : la commande est remplacée, le nom vient de la conf.
+        assert_eq!(agents["devin"].command, vec!["devin", "acp", "--new"]);
+        assert_eq!(agents["devin"].name, "Devin");
     }
 
     #[test]

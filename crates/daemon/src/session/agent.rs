@@ -98,6 +98,10 @@ impl Session {
         // Fenêtre "pas encore prêt" : stdin posé tôt mais session/load pas
         // terminé — drain_queue/envois directs doivent rester en file.
         self.spawning.store(true, Ordering::SeqCst);
+        // Nouveau cycle : une mort annoncée par un kill() antérieur
+        // (fork, delete, sleep via kill_for_respawn) ne doit pas
+        // déteindre le crash éventuel de CE process.
+        self.expected_exit.store(false, Ordering::SeqCst);
         let r = self
             .spawn_attempts(command, envs, resume_native_id, skip_replay, mcp_servers, hints)
             .await;
@@ -660,7 +664,11 @@ impl Session {
                 // de résolution au 1er essai sur liste fraîche reste
                 // définitif même si le repli échoue pour une autre raison.
                 id @ ("model" | "mode") => {
-                    match self.set_config_option(id, &v).await {
+                    // Essai silencieux : l'échec du 1er essai est enchaîné
+                    // par le setter dédié — un agent sans
+                    // session/set_config_option (claude-code-acp) ne doit
+                    // pas laisser d'erreur rouge quand le repli réussit.
+                    match self.set_config_option_quiet(id, &v).await {
                         Ok(()) => Ok(()),
                         Err(e1) => {
                             let e1_res =
@@ -685,7 +693,11 @@ impl Session {
                         }
                     }
                 }
-                _ => self.set_config_option(&k, &v).await,
+                // Rejeu interne : silencieux — l'échec est soldé par le
+                // bloc Err ci-dessous (re-pend ou refus définitif) avec
+                // son propre event ; l'Error de set_config_option serait
+                // un doublon.
+                _ => self.set_config_option_quiet(&k, &v).await,
             };
             if let Err(e) = r {
                 // Deux classes d'échec : un refus DÉFINITIF (la valeur
@@ -975,6 +987,21 @@ impl Session {
         self.take_error_hold();
         self.set_state("dead");
         info!("[{}] agent process exited", self.meta_snapshot().id);
+        // Crash non sollicité (kill() non passé par ici — kill_for_respawn
+        // et consorts sont filtrés par la génération plus haut) :
+        // laisser une trace last_error — « dead » seul ne dit pas si
+        // l'adaptateur est mort de lui-même (OOM, panic, auth qui
+        // suicide le process) ou tué volontairement.
+        if !self.expected_exit.swap(false, Ordering::SeqCst) {
+            let count = {
+                let m = self.meta.lock().unwrap();
+                match &m.last_error {
+                    Some(le) if le.kind == "other" => le.count + 1,
+                    _ => 1,
+                }
+            };
+            self.set_last_error("other", "agent process exited", count, None);
+        }
         self.emit(EventKind::System {
             text: "agent process exited".into(),
         });
@@ -1069,7 +1096,7 @@ impl Session {
             let id = v["id"].as_u64().unwrap_or(0);
             if let Some(tx) = self.acp_pending.lock().unwrap().remove(&id) {
                 let r = if let Some(err) = v.get("error") {
-                    Err(err.get("message").and_then(Value::as_str).unwrap_or("error").to_string())
+                    Err(acp::acp_error_string(err))
                 } else {
                     Ok(v.get("result").cloned().unwrap_or(Value::Null))
                 };
@@ -1369,6 +1396,9 @@ impl Session {
     }
 
     pub async fn kill(&self) {
+        // Mort annoncée : l'exit qui suit n'est pas un crash —
+        // on_agent_exit n'y posera pas de last_error.
+        self.expected_exit.store(true, Ordering::SeqCst);
         let c = { self.child.lock().unwrap().take() };
         if let Some(mut c) = c {
             let _ = c.kill().await;

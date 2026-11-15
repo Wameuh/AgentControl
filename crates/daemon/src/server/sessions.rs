@@ -75,13 +75,12 @@ impl Daemon {
     }
 
     pub(super) async fn h_new_session(self: &Arc<Self>, agent: String, cwd: String, title: Option<String>, model: Option<String>, mode: Option<String>, prompt: Option<String>, origin: Option<String>, group: Option<String>) -> Result<Value> {
+                // agent_profile : hot-reload — un profil [agents.*]
+                // déclaré après le boot est spawnable sans restart.
                 let profile = self
-                    .agents
-                    .read()
+                    .agent_profile(&agent)
                     .await
-                    .get(&agent)
-                    .with_context(|| format!("agent inconnu: {agent}"))?
-                    .clone();
+                    .with_context(|| format!("agent inconnu: {agent}"))?;
                 let _slot = self.ensure_agent_slot(&agent).await?;
                 // `~`/`$VAR` expansés + existence validée ici — sinon le
                 // spawn échouait en tâche de fond bien après la réponse.
@@ -171,12 +170,9 @@ impl Daemon {
 
     pub(super) async fn h_attach_session(self: &Arc<Self>, agent: String, cwd: String, native_id: String, title: Option<String>) -> Result<Value> {
                 let profile = self
-                    .agents
-                    .read()
+                    .agent_profile(&agent)
                     .await
-                    .get(&agent)
-                    .with_context(|| format!("agent inconnu: {agent}"))?
-                    .clone();
+                    .with_context(|| format!("agent inconnu: {agent}"))?;
                 let _slot = self.ensure_agent_slot(&agent).await?;
                 let cwd = resolve_cwd(&cwd)?;
                 let meta = SessionMeta {

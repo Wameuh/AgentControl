@@ -4,6 +4,9 @@ use super::*;
 
 impl Daemon {
     pub(super) async fn h_daemon_status(self: &Arc<Self>) -> Result<Value> {
+        // Hot-reload des profils [agents.*] : un profil déclaré
+        // après le boot apparaît ici sans restart.
+        self.reload_agent_profiles().await;
                 let sessions = self.sessions.read().await;
                 // Métriques de l'hôte où tourne le démon — champ additif :
                 // les vieux clients l'ignorent, les nouveaux sur un vieux
@@ -115,6 +118,9 @@ impl Daemon {
             .context("self-update task")?
     }
     pub(super) async fn h_list_agents(self: &Arc<Self>) -> Result<Value> {
+        // Hot-reload : les profils ajoutés à config.toml après
+        // le boot sont listés (et spawnables) sans restart.
+        self.reload_agent_profiles().await;
                 let list: Vec<Value> = self
                     .agents
                     .read()
@@ -143,11 +149,9 @@ impl Daemon {
     /// sonde en échec). La sonde tourne hors du chemin async.
     pub(super) async fn h_model_costs(self: &Arc<Self>, agent: String) -> Result<Value> {
         let command = self
-            .agents
-            .read()
+            .agent_profile(&agent)
             .await
-            .get(&agent)
-            .map(|p| p.command.clone())
+            .map(|p| p.command)
             .ok_or_else(|| anyhow::anyhow!("agent inconnu: {agent}"))?;
         let costs = self.model_costs.get(&agent, &command).await;
         Ok(json!({ "models": costs }))
@@ -162,12 +166,9 @@ impl Daemon {
     /// sérialisé par `probe_lock`, réservé à une action explicite.
     pub(super) async fn h_refresh_agent_caps(self: &Arc<Self>, agent: String) -> Result<Value> {
         let profile = self
-            .agents
-            .read()
+            .agent_profile(&agent)
             .await
-            .get(&agent)
-            .with_context(|| format!("agent inconnu: {agent}"))?
-            .clone();
+            .with_context(|| format!("agent inconnu: {agent}"))?;
         match profile.command.first() {
             Some(c) if command_available(c) => {}
             other => {
@@ -239,11 +240,8 @@ impl Daemon {
     /// le profil n'a pas de `catalogue_cmd` ou si la sonde échoue.
     pub(super) async fn h_model_catalog(self: &Arc<Self>, agent: String) -> Result<Value> {
         let profile = self
-            .agents
-            .read()
+            .agent_profile(&agent)
             .await
-            .get(&agent)
-            .cloned()
             .ok_or_else(|| anyhow::anyhow!("agent inconnu: {agent}"))?;
         // Les deux clés sont requises pour qu'une valeur catalogue soit
         // applicable — servir le catalogue sans model_override_cmd

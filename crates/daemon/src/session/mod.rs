@@ -132,6 +132,20 @@ pub struct Session {
     /// durée de la session — l'appel est optionnel, pas la peine de
     /// retenter (et de risquer le stall) à chaque rename (#183).
     rename_supported: std::sync::atomic::AtomicBool,
+    /// `session/set_config_option` déclaré supporté : même logique que
+    /// rename_supported — les agents à modes/models ACP standard sans
+    /// configOptions (claude-code-acp) répondent « Method not found » ;
+    /// après le premier refus les appels sont soldés localement et les
+    /// valeurs model/mode passent par les setters dédiés
+    /// (session/set_model, session/set_mode) ou le repli prévu.
+    config_option_supported: std::sync::atomic::AtomicBool,
+    /// Le prochain exit du process agent est VOLONTAIRE (kill(),
+    /// delete, fork…) : on_agent_exit ne doit pas le comptabiliser
+    /// comme un crash (last_error). Posé par kill(), lu et soldé par
+    /// on_agent_exit, remis à zéro par chaque spawn_agent — les kills
+    /// supprimés par la génération (sleep/respawn) laissent le flag
+    /// jusqu'au prochain spawn, sans effet (pas de process entre-temps).
+    expected_exit: std::sync::atomic::AtomicBool,
     /// Sorties visibles du tour en vol (texte/pensée/tool call) —
     /// snapshot au départ du `session/prompt` puis comparé à la fin :
     /// inchangé = tour terminé sans rien produire → tracer (#183),
@@ -334,6 +348,8 @@ impl Session {
             active_prompts: AtomicU64::new(0),
             pending_rename: Mutex::new(None),
             rename_supported: std::sync::atomic::AtomicBool::new(true),
+            config_option_supported: std::sync::atomic::AtomicBool::new(true),
+            expected_exit: std::sync::atomic::AtomicBool::new(false),
             turn_outputs: AtomicU64::new(0),
             watch: Mutex::new(watch::TurnWatch::new()),
             tool_inflight: Mutex::new(HashSet::new()),
@@ -1186,6 +1202,13 @@ mod tests {
         assert_eq!(classify_error("resource exhausted"), "rate_limit");
         assert_eq!(classify_error("Invalid params: model foo"), "model");
         assert_eq!(classify_error("model not found"), "model");
+        // codex-acp : refus de modèle ChatGPT-account (backend 400).
+        assert_eq!(
+            classify_error(
+                "acp session/prompt: Internal error: The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account."
+            ),
+            "model"
+        );
         assert_eq!(classify_error("401 unauthorized"), "auth");
         assert_eq!(classify_error("invalid api key"), "auth");
         // auth prime sur les mots « quota »/« limit ».

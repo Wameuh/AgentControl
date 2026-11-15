@@ -12,11 +12,16 @@ impl Daemon {
     /// health?, uptime_s?, restarts, last_exit?, description?, source}
     /// pour specs components.toml + internal déclarés en code.
     pub(super) async fn h_list_components(self: &Arc<Self>) -> Result<Value> {
+        // Le composant interne `agents` lit la table vivante des
+        // profils — hot-reload pour qu'un [agents.*] ajouté après le
+        // boot y apparaisse sans restart.
+        self.reload_agent_profiles().await;
         Ok(json!(self.components.list().await))
     }
 
     /// `ComponentInfo{name}` — spec complète + état détaillé.
     pub(super) async fn h_component_info(self: &Arc<Self>, name: String) -> Result<Value> {
+        self.reload_agent_profiles().await;
         self.components.info(&name).await
     }
 
