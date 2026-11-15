@@ -780,6 +780,7 @@ export class Composer {
     if (this.qOpen) nav.close("queue");
     this.qOpen = false;
     this.qEditing = null;
+    this.disarmQueueClear();
     const panel = $("queue-panel");
     if (panel) panel.hidden = true;
     $("queue-open")?.classList.remove("on");
