@@ -24,6 +24,51 @@ pub fn error_response(id: &Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
 
+/// Message d'erreur lisible depuis un objet `error` JSON-RPC : les
+/// adaptateurs enveloppent souvent la vraie raison dans `data`
+/// (codex-acp : `data.message` = JSON string contenant `error.message`
+/// du backend, ex. « The 'gpt-5.5' model is not supported… ») — sans
+/// elle, last_error/events n'affichent que « Internal error » et le
+/// diagnostic (auth expirée, modèle refusé, rate limit) est perdu.
+/// Borné : le detail est tronqué pour tenir dans un event.
+pub fn acp_error_string(err: &Value) -> String {
+    let msg = err
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("error");
+    let detail = err
+        .get("data")
+        .and_then(|d| {
+            d.get("message")
+                .or_else(|| d.get("details"))
+                .and_then(Value::as_str)
+                .or_else(|| d.as_str())
+        })
+        .map(str::trim)
+        .filter(|d| !d.is_empty());
+    let Some(detail) = detail else {
+        return msg.to_string();
+    };
+    // data.message est parfois elle-même un JSON ({"error":{"message":…}})
+    // — on tente d'en extraire le message le plus parlant, sinon on
+    // garde la chaîne brute.
+    let inner = serde_json::from_str::<Value>(detail)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.get("message"))
+                .or_else(|| v.get("message"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    let detail = inner.as_deref().unwrap_or(detail);
+    let detail: String = detail.chars().take(300).collect();
+    if detail.is_empty() || detail == msg {
+        return msg.to_string();
+    }
+    format!("{msg}: {detail}")
+}
+
 // ---------------------------------------------------------------------------
 // Requêtes ACP côté client (nous -> agent)
 // ---------------------------------------------------------------------------
@@ -560,5 +605,65 @@ pub fn elicitation_response(answer: Option<&Value>) -> Value {
     match answer {
         Some(content) => json!({"action": "accept", "content": content}),
         None => json!({"action": "cancel"}),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn acp_error_sans_data() {
+        let e = json!({"code": -32601, "message": "Method not found"});
+        assert_eq!(acp_error_string(&e), "Method not found");
+    }
+
+    #[test]
+    fn acp_error_data_clair_et_borne() {
+        let e = json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": {"message": "quota exceeded for this account"}
+        });
+        assert_eq!(
+            acp_error_string(&e),
+            "Internal error: quota exceeded for this account"
+        );
+        // Detail identique au message → pas de doublon.
+        let e2 = json!({
+            "code": -1,
+            "message": "boom",
+            "data": {"message": "boom"}
+        });
+        assert_eq!(acp_error_string(&e2), "boom");
+        // data en string brute (pas d'objet message/details).
+        let e3 = json!({
+            "code": -1,
+            "message": "Internal error",
+            "data": "backend said no"
+        });
+        assert_eq!(acp_error_string(&e3), "Internal error: backend said no");
+    }
+
+    #[test]
+    fn acp_error_data_json_extrait_le_message_interne() {
+        // Forme réelle codex-acp : data.message = JSON string
+        // {"error":{"message":"The 'gpt-5.5' model is not supported…"}}.
+        let inner = json!({
+            "type": "error", "status": 400,
+            "error": {"type": "invalid_request_error",
+                      "message": "The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account.",
+                      "code": "model_not_found"}
+        });
+        let e = json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": {"message": inner.to_string(), "codex_error_info": "other"}
+        });
+        let s = acp_error_string(&e);
+        assert!(s.starts_with("Internal error: "));
+        assert!(s.contains("gpt-5.5"));
+        assert!(s.contains("not supported"));
+        assert!(s.len() < 400);
     }
 }

@@ -48,7 +48,7 @@ mod prs;
 mod sessions;
 mod term;
 
-pub use cfg::{A2aCfg, AgentProfile, CompactCfg, CompactPartial, CompactPolicy, CompactSrc, OrchCfg, RetentionCfg, WatchdogCfg, DEFAULT_MAX_INSTANCES};
+pub use cfg::{agent_confs, profile_from_conf, AgentConf, AgentProfile, A2aCfg, CompactCfg, CompactPartial, CompactPolicy, CompactSrc, OrchCfg, RetentionCfg, WatchdogCfg, DEFAULT_MAX_INSTANCES};
 pub(crate) use orch::OrchProbe;
 
 use anyhow::{Context, Result};
@@ -166,9 +166,15 @@ pub struct Daemon {
     pub sessions: RwLock<HashMap<String, Arc<Session>>>,
     /// Profils agents — mutable à chaud : `ComponentSetParams` sur le
     /// composant interne `agents` réécrit `[agents.*]` de config.toml
-    /// puis remplace les profils en place (agents_cfg.rs). Les lectures
-    /// passent par `.read().await`.
+    /// puis remplace les profils en place (agents_cfg.rs), et les
+    /// sections `[agents.*]` éditées à la main sont rechargées par
+    /// `reload_agent_profiles` (stamp mtime+taille — upsert seul).
+    /// Les lectures passent par `.read().await`.
     pub agents: Arc<RwLock<HashMap<String, AgentProfile>>>,
+    /// Estampille (mtime, taille) du config.toml au dernier hot-reload
+    /// des profils — évite de re-parser le fichier à chaque
+    /// list_agents/daemon_status.
+    agents_cfg_stamp: std::sync::Mutex<Option<(std::time::SystemTime, u64)>>,
     pub retention: RetentionCfg,
     pub a2a: A2aCfg,
     /// Horodatage des envois agent→agent par paire (from,to) — rate-limit.
@@ -289,6 +295,7 @@ impl Daemon {
             root: root.clone(),
             sessions: RwLock::new(HashMap::new()),
             agents: Arc::clone(&agents),
+            agents_cfg_stamp: std::sync::Mutex::new(None),
             retention,
             components: Components::open(
                 &root,

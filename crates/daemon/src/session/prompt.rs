@@ -63,6 +63,10 @@ pub(super) fn classify_error(msg: &str) -> &'static str {
         || m.contains("unknown model")
         || m.contains("model unavailable")
         || (m.contains("does not exist") && m.contains("model"))
+        // codex-acp : « The 'gpt-5.5' model is not supported when using
+        // Codex with a ChatGPT account » — un refus de modèle côté
+        // provider, la réparation attendue est un set_model.
+        || (m.contains("not supported") && m.contains("model"))
     {
         return "model";
     }

@@ -46,6 +46,77 @@ pub struct AgentProfile {
 /// précisé dans `[agents.<id>]`.
 pub const DEFAULT_MAX_INSTANCES: u32 = 6;
 
+/// Une section `[agents.<id>]` de config.toml — forme brute
+/// (désérialisation), convertie en `AgentProfile` par
+/// `profile_from_conf`. Définie ici (et non dans main.rs) pour être
+/// partagée entre le chargement au boot et le hot-reload
+/// `Daemon::reload_agent_profiles` — les profils ajoutés à config.toml
+/// APRÈS le démarrage deviennent utilisables sans restart.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AgentConf {
+    pub name: Option<String>,
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// Override du compact auto pour ce profil agent
+    /// (`[agents.<id>.compact]`) — session > agent > global.
+    #[serde(default)]
+    pub compact: CompactPartial,
+    /// Agents vivants simultanés max pour ce profil (défaut 6, 0 = illimité).
+    #[serde(default)]
+    pub max_instances: Option<u32>,
+    /// Commande liste du catalogue complet des modèles (variantes hors
+    /// annonce ACP) — ex. "devin models list".
+    #[serde(default)]
+    pub catalogue_cmd: Option<String>,
+    /// Template shell `{native_sid}`/`{model}` pour persister un modèle
+    /// catalogue-only côté provider (ex. "devin -r {native_sid} --model {model}").
+    #[serde(default)]
+    pub model_override_cmd: Option<String>,
+    /// Modèles sélectionnables hors annonce ACP — `[{value=…, label=…}]`
+    /// (ex. variantes Fable de claude-code-acp que l'adaptateur n'annonce pas).
+    #[serde(default)]
+    pub extra_models: Vec<proto::ExtraModel>,
+    /// Modèles advisor proposables pour les sessions du profil — active
+    /// l'injection `advisorModel` via `_meta.claudeCode.options` au spawn
+    /// (mécanisme claude-code-acp). Ex. ["fable", "opus", "sonnet"].
+    #[serde(default)]
+    pub advisor_models: Vec<String>,
+}
+
+/// Lit uniquement la table `[agents]` d'un config.toml — le hot-reload
+/// n'a pas besoin du reste de la config (rétention, a2a, orchestrateur
+/// restent boot-only). `None` = TOML invalide : l'appelant conserve les
+/// profils déjà chargés (un config.toml cassé ne doit ni vider la table
+/// ni empêcher le démarrage — le parse complet reste le garde-fou du
+/// boot dans main.rs). Section absente → table vide.
+pub fn agent_confs(text: &str) -> Option<HashMap<String, AgentConf>> {
+    #[derive(serde::Deserialize)]
+    struct AgentsOnly {
+        #[serde(default)]
+        agents: HashMap<String, AgentConf>,
+    }
+    toml::from_str::<AgentsOnly>(text)
+        .ok()
+        .map(|c| c.agents)
+}
+
+/// `AgentConf` (config.toml) → `AgentProfile` effectif — mapping
+/// unique partagé par le boot (main.rs) et le hot-reload.
+pub fn profile_from_conf(id: &str, c: AgentConf) -> AgentProfile {
+    AgentProfile {
+        name: c.name.unwrap_or_else(|| id.to_string()),
+        command: c.command,
+        env: c.env,
+        compact: c.compact,
+        max_instances: c.max_instances.unwrap_or(DEFAULT_MAX_INSTANCES),
+        catalogue_cmd: c.catalogue_cmd,
+        model_override_cmd: c.model_override_cmd,
+        extra_models: c.extra_models,
+        advisor_models: c.advisor_models,
+    }
+}
+
 /// Valeur de {mode} pour la ligne de commande/env de l'agent : les ids de
 /// modes de **session ACP** qui n'existent pas côté CLI (`plan`, `smart`,
 /// `ask` — chez devin, DEVIN_PERMISSION_MODE n'accepte que
@@ -796,6 +867,79 @@ mod tests {
         CompactPartial { enabled: None, at_tokens: Some(50), at_pct: Some(0.4) }.apply_to(&mut p);
         assert_eq!(p.at_tokens, Some(50));
         assert_eq!(p.at_pct, Some(0.4));
+    }
+
+    /// `agent_confs` (hot-reload) : ne lit que `[agents.*]` — le reste
+    /// de la config (sections orchestrateur, compact…) est ignoré même
+    /// s'il est présent et valide.
+    #[test]
+    fn agent_confs_ne_lit_que_agents() {
+        let text = r#"
+[agents.claude]
+command = ["claude-code-acp"]
+
+[agents.codex]
+name = "Codex"
+command = ["codex-acp"]
+max_instances = 2
+[agents.codex.env]
+FOO = "bar"
+
+[backlog_orchestrator]
+enabled = true
+agent = "devin"
+"#;
+        let confs = agent_confs(text).unwrap();
+        assert_eq!(confs.len(), 2);
+        assert_eq!(confs["claude"].command, vec!["claude-code-acp"]);
+        assert_eq!(confs["codex"].name.as_deref(), Some("Codex"));
+        assert_eq!(confs["codex"].max_instances, Some(2));
+        assert_eq!(confs["codex"].env.get("FOO").map(String::as_str), Some("bar"));
+        // Section absente → table vide (≠ None : TOML valide sans agents).
+        assert!(agent_confs("[backlog_orchestrator]\nenabled = true\n")
+            .unwrap()
+            .is_empty());
+        // TOML invalide → None (l'appelant conserve les profils).
+        assert!(agent_confs("ceci n'est pas du toml = [").is_none());
+    }
+
+    /// `profile_from_conf` : mapping AgentConf → AgentProfile — défauts
+    /// (name = id, max_instances = DEFAULT_MAX_INSTANCES) et recopie
+    /// intégrale des champs optionnels.
+    #[test]
+    fn profile_from_conf_mapping() {
+        let conf: AgentConf = toml::from_str(
+            r#"command = ["a", "b"]
+name = "Mon Agent"
+max_instances = 3
+catalogue_cmd = "cat list"
+model_override_cmd = "set -m {model}"
+advisor_models = ["opus"]
+extra_models = [{ value = "fable", label = "Fable" }]
+[compact]
+enabled = false
+"#,
+        )
+        .unwrap();
+        let p = profile_from_conf("x", conf);
+        assert_eq!(p.name, "Mon Agent");
+        assert_eq!(p.command, vec!["a", "b"]);
+        assert_eq!(p.max_instances, 3);
+        assert_eq!(p.catalogue_cmd.as_deref(), Some("cat list"));
+        assert_eq!(
+            p.model_override_cmd.as_deref(),
+            Some("set -m {model}")
+        );
+        assert_eq!(p.advisor_models, vec!["opus"]);
+        assert_eq!(p.extra_models[0].value, "fable");
+        assert!(!p.compact.enabled.unwrap_or(true));
+        // Défauts : name = id, max_instances = plafond par défaut.
+        let p = profile_from_conf(
+            "y",
+            toml::from_str::<AgentConf>(r#"command = ["c"]"#).unwrap(),
+        );
+        assert_eq!(p.name, "y");
+        assert_eq!(p.max_instances, DEFAULT_MAX_INSTANCES);
     }
 
     /// env_mode : les ids de session ACP incompatibles env/CLI sont omis

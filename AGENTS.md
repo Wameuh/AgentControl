@@ -183,7 +183,11 @@ FULL `[agents.<id>]` section of config.toml (name/env/compact/catalog
 included — a partial write would silently drop fields at next boot)
 and hot-reloaded into `Daemon.agents` (tokio RwLock — reads via
 `.read().await`). Ids are not creatable/removable this way — declare
-new profiles in config.toml.
+new profiles in config.toml; **manual `[agents.*]` edits in
+config.toml are themselves hot-reloaded** (`Daemon::reload_agent_profiles`,
+stamp mtime+size — upsert only, a removed section survives until next
+boot), picked up by `list_agents`/`daemon_status`/component views and
+by `agent_profile` lookups on spawn/attach.
 
 **Agent profile per role** (`backlog_orchestrator` params, hot-settable
 via `acctl comp set`, dropdown of the declared `[agents.*]` profiles in

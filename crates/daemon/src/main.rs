@@ -38,7 +38,7 @@ struct Config {
     #[serde(default = "default_true")]
     auto_resume: bool,
     #[serde(default)]
-    agents: HashMap<String, AgentConf>,
+    agents: HashMap<String, server::AgentConf>,
     #[serde(default)]
     retention: server::RetentionCfg,
     /// Communication agent↔agent (serveur MCP injecté dans les sessions).
@@ -63,38 +63,6 @@ struct Config {
     /// outils (voir docs/forges.md). github.com + gitlab.com implicites.
     #[serde(default)]
     forges: Vec<forges::ForgeCfg>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct AgentConf {
-    name: Option<String>,
-    command: Vec<String>,
-    #[serde(default)]
-    env: HashMap<String, String>,
-    /// Override du compact auto pour ce profil agent
-    /// (`[agents.<id>.compact]`) — session > agent > global.
-    #[serde(default)]
-    compact: server::CompactPartial,
-    /// Agents vivants simultanés max pour ce profil (défaut 6, 0 = illimité).
-    #[serde(default)]
-    max_instances: Option<u32>,
-    /// Commande liste du catalogue complet des modèles (variantes hors
-    /// annonce ACP) — ex. "devin models list".
-    #[serde(default)]
-    catalogue_cmd: Option<String>,
-    /// Template shell `{native_sid}`/`{model}` pour persister un modèle
-    /// catalogue-only côté provider (ex. "devin -r {native_sid} --model {model}").
-    #[serde(default)]
-    model_override_cmd: Option<String>,
-    /// Modèles sélectionnables hors annonce ACP — `[{value=…, label=…}]`
-    /// (ex. variantes Fable de claude-code-acp que l'adaptateur n'annonce pas).
-    #[serde(default)]
-    extra_models: Vec<proto::ExtraModel>,
-    /// Modèles advisor proposables pour les sessions du profil — active
-    /// l'injection `advisorModel` via `_meta.claudeCode.options` au spawn
-    /// (mécanisme claude-code-acp). Ex. ["fable", "opus", "sonnet"].
-    #[serde(default)]
-    advisor_models: Vec<String>,
 }
 
 fn default_tcp() -> String {
@@ -378,20 +346,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
 
     let mut agents = default_agents();
     for (id, c) in cfg.agents {
-        agents.insert(
-            id.clone(),
-            AgentProfile {
-                name: c.name.unwrap_or(id),
-                command: c.command,
-                env: c.env,
-                compact: c.compact,
-                max_instances: c.max_instances.unwrap_or(server::DEFAULT_MAX_INSTANCES),
-                catalogue_cmd: c.catalogue_cmd,
-                model_override_cmd: c.model_override_cmd,
-                extra_models: c.extra_models,
-                advisor_models: c.advisor_models,
-            },
-        );
+        agents.insert(id.clone(), server::profile_from_conf(&id, c));
     }
 
     let (daemon, resumable) = Daemon::open(

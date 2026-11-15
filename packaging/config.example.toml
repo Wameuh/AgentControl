@@ -56,6 +56,12 @@ spawn_max_sessions = 20
 # ---------------------------------------------------------------------------
 # Agents ACP. Les placeholders {model} et {mode} sont substitués à la création
 # de session (omis si vides).
+#
+# Les sections [agents.*] sont rechargées À CHAUD : une section ajoutée ou
+# modifiée dans ce fichier est prise en compte au prochain list_agents /
+# daemon_status / spawn, sans redémarrer le démon (upsert seul — retirer
+# une section ne démonte pas le profil avant le prochain boot). Les autres
+# sections de la config restent lues au démarrage uniquement.
 # ---------------------------------------------------------------------------
 
 [agents.devin]
