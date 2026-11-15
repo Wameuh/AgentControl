@@ -603,6 +603,9 @@ details.th .ic-thought { width: 12px; height: 12px; }
 }
 #qp-title { font-size: 12px; font-weight: 500; color: var(--muted); }
 #qp-count { font-size: 10.5px; }
+#qp-clear { padding: 2px 8px; font-size: 10.5px; color: var(--dim); }
+#qp-clear:hover { color: var(--err); border-color: var(--err); }
+#qp-clear.armed { color: var(--err); border-color: var(--err); }
 #qp-close { margin-left: auto; padding: 2px 7px; }
 #qp-close .ic { width: 12px; height: 12px; display: block; }
 #qp-list {

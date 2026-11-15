@@ -424,6 +424,11 @@ export class Composer {
   /** Capability `queue_steer` du démon (injectée depuis conns.cap) —
    *  le bouton steer des entrées est masqué sur les vieux démons. */
   private qSteerCapable: (conn: string | undefined) => boolean = () => false;
+  /** Capability `queue_clear` du démon — le bouton « tout vider » de
+   *  l'en-tête du panneau est masqué sur les vieux démons. */
+  private qClearCapable: (conn: string | undefined) => boolean = () => false;
+  /** Timer de désarmement du « tout vider » (confirm armé 2.5 s). */
+  private qClearTimer: ReturnType<typeof setTimeout> | undefined;
   /** Rebuild du panneau en cours : le blur d'une textarea détachée par
    *  innerHTML ne doit ni sauvegarder ni annuler (l'éditeur est recréé
    *  juste après si l'entrée est toujours là). */
@@ -533,6 +538,11 @@ export class Composer {
     const queue = this.qSnapshot;
     panel.hidden = false;
     $("qp-count").textContent = String(queue.length);
+    // « Tout vider » : masqué sur les démons sans queue_clear — le
+    // panneau n'existe que file non vide, la garde suffit.
+    const clr = $("qp-clear") as HTMLButtonElement;
+    clr.hidden = !this.qClearCapable(conn);
+    if (clr.hidden) this.disarmQueueClear();
     const list = $("qp-list");
     // Rebuild pendant une édition (refreshQueue déclenché par un nouveau
     // message en file) : la textarea va être recréée — sauvegarder le
@@ -773,6 +783,20 @@ export class Composer {
     const panel = $("queue-panel");
     if (panel) panel.hidden = true;
     $("queue-open")?.classList.remove("on");
+  }
+
+  /** Désarme le « tout vider » : libellé de base + classe armed
+   *  retirée (expiré au bout de 2.5 s ou au 2e clic). */
+  private disarmQueueClear() {
+    if (this.qClearTimer) {
+      clearTimeout(this.qClearTimer);
+      this.qClearTimer = undefined;
+    }
+    const b = $("qp-clear") as HTMLButtonElement | null;
+    if (b) {
+      b.classList.remove("armed");
+      b.textContent = t("queue_clear");
+    }
   }
 
   /** Vieux démon : ReqKind::QueueEdit inconnu → « parse: unknown
@@ -1050,6 +1074,12 @@ export class Composer {
     this.qSteerCapable = capable;
   }
 
+  /** Capacité « clear de file » du démon (injectée depuis conns.cap)
+   *  — bouton « tout vider » masqué si queue_clear est inconnu. */
+  bindQueueClearCapable(capable: (conn: string | undefined) => boolean) {
+    this.qClearCapable = capable;
+  }
+
   init() {
     this.attach.init();
     this.draftSid = app.current?.id ?? null;
@@ -1141,6 +1171,32 @@ export class Composer {
     // ✕ du panneau d'inspection de la file (aussi cliqué par le back
     // Android via nav.rawCloseOverlay).
     $("qp-close").onclick = () => this.closeQueuePanel();
+
+    // « Tout vider » : danger-armed (pattern ctxmenu/components) —
+    // 1er clic arme le libellé de confirmation, 2e clic = queue_clear
+    // (drain atomique côté démon ; le tour en cours n'est pas touché).
+    const qpClear = $("qp-clear") as HTMLButtonElement;
+    qpClear.onclick = () => {
+      if (!app.current) return;
+      if (!qpClear.classList.contains("armed")) {
+        qpClear.classList.add("armed");
+        qpClear.textContent = t("queue_clear_armed");
+        this.qClearTimer = setTimeout(() => this.disarmQueueClear(), 2500);
+        return;
+      }
+      this.disarmQueueClear();
+      const sid = app.current.id;
+      const conn = app.current.conn;
+      void call<{ cleared: number; queue?: string[] }>("queue_clear", {
+        session: sid,
+        conn,
+      })
+        .then((r) => {
+          if (Array.isArray(r.queue)) this.qSnapshot = r.queue;
+          this.refreshQueue();
+        })
+        .catch((e) => showErr(String(e)));
+    };
 
     // Bouton « N lignes » : bascule replié ↔ étendu, puis redonne le focus
     // au champ pour continuer la frappe.

@@ -921,6 +921,11 @@ pub enum ReqKind {
     /// queue} — delivered : "steer" | "sent" | "requeued" | "held" |
     /// "gone".
     QueueSteer { session: String, index: u64 },
+    /// Vide toute la file d'un coup — atomique côté démon (pas de
+    /// course avec un enqueue concurrent, contrairement à une boucle
+    /// queue_drop côté client). Ne touche JAMAIS au tour en cours ni
+    /// aux retenues : file uniquement. Réponse {cleared, queue}.
+    QueueClear { session: String },
     /// Page d'historique : les `limit` événements avant `before_seq`
     /// (before_seq absent ou 0 = depuis la fin), ou — si `after_seq` est
     /// fourni — les `limit` événements après `after_seq` en ordre croissant
@@ -1388,6 +1393,7 @@ impl ReqKind {
             Self::QueueDrop { .. } => "queue_drop",
             Self::QueuePromote { .. } => "queue_promote",
             Self::QueueSteer { .. } => "queue_steer",
+            Self::QueueClear { .. } => "queue_clear",
             Self::Events { .. } => "events",
             Self::SearchEvents { .. } => "search_events",
             Self::FirstPost { .. } => "first_post",

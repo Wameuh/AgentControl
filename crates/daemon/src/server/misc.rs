@@ -44,6 +44,9 @@ impl Daemon {
                     // de la file de prompts — injecte dans le tour en
                     // cours sans l'annuler).
                     "queue_steer": true,
+                    // Idem pour QueueClear (bouton « tout vider » de
+                    // l'en-tête du panneau file — drain atomique).
+                    "queue_clear": true,
                     // Idem pour ReqKind::ModelCosts (suffixes de prix
                     // des selects de modèles — costs.rs).
                     "model_costs": true,

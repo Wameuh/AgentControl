@@ -1366,6 +1366,21 @@ impl Daemon {
                 }))
     }
 
+    /// queue_clear : vide la file entière en une seule opération
+    /// atomique (le drain est sous le lock de prompt_queue — pas de
+    /// course avec un enqueue concurrent, contrairement à une boucle
+    /// queue_drop côté client). Le tour en cours et les retenues ne
+    /// sont pas touchés. Réponse {cleared, queue}.
+    pub(super) async fn h_queue_clear(self: &Arc<Self>, session: String) -> Result<Value> {
+                let s = self.get_session(&session).await?;
+                let cleared = s.clear_queue();
+                info!("session {session}: queue_clear → {cleared} entrée(s)");
+                Ok(json!({
+                    "cleared": cleared,
+                    "queue": s.queue_snapshot(),
+                }))
+    }
+
     pub(super) async fn h_cancel(self: &Arc<Self>, session: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
                 s.clear_queue();
