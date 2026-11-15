@@ -199,11 +199,14 @@ export class Attachments {
     });
     chat.addEventListener("drop", (e) => {
       if (!isDropTarget(e)) return;
+      // Reset inconditionnel : aucun dragleave n'est émis après un drop —
+      // sans lui, hint + .att-drop resteraient affichés (drag de lien
+      // compris, intercepté ou non).
+      this.endDrag();
       const dt = e.dataTransfer;
       const files = dt?.files;
       if (files?.length) {
         e.preventDefault();
-        this.endDrag();
         this.addFiles([...files]);
         return;
       }
@@ -215,7 +218,6 @@ export class Attachments {
       const uris = dt ? fileUris(dt) : [];
       if (uris.length && !isWeb) {
         e.preventDefault();
-        this.endDrag();
         void this.addClipboardUris(uris);
         return;
       }

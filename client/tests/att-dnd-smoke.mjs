@@ -170,6 +170,18 @@ const rB4 = await drag("drop", "text/uri-list", LINK_URI, false, "#s-bganim");
 check("B4 drop lien sur checkbox settings preventDefault", rB4 === false);
 c = await clip();
 check("B5 aucune lecture clipboard pour un lien", c.stat.length === 1, JSON.stringify(c.stat));
+// Drop de lien après un dragenter : endDrag() doit masquer le hint —
+// aucun dragleave n'est émis après un drop (review #335 round 4).
+await drag("dragenter", "text/uri-list", LINK_URI);
+const hintBefore = await p.evaluate(() => !document.querySelector("#drop-hint").hidden);
+await drag("drop", "text/uri-list", LINK_URI, false, "#input");
+const hintAfter = await p.evaluate(() => ({
+  hint: !document.querySelector("#drop-hint").hidden,
+  cls: document.querySelector("#chat").classList.contains("att-drop"),
+}));
+check("B6 drop lien → hint masqué + att-drop retiré",
+  hintBefore && !hintAfter.hint && !hintAfter.cls,
+  JSON.stringify({ hintBefore, hintAfter }));
 
 // ---------- C. x-special/gnome-copied-files ----------
 const rC = await drag("drop", "x-special/gnome-copied-files", FILE_URI);
