@@ -98,10 +98,6 @@ impl Session {
         // Fenêtre "pas encore prêt" : stdin posé tôt mais session/load pas
         // terminé — drain_queue/envois directs doivent rester en file.
         self.spawning.store(true, Ordering::SeqCst);
-        // Nouveau cycle : une mort annoncée par un kill() antérieur
-        // (fork, delete, sleep via kill_for_respawn) ne doit pas
-        // déteindre le crash éventuel de CE process.
-        self.expected_exit.store(false, Ordering::SeqCst);
         let r = self
             .spawn_attempts(command, envs, resume_native_id, skip_replay, mcp_servers, hints)
             .await;
@@ -290,6 +286,14 @@ impl Session {
         // Nouvelle génération : tout reader d'un process précédent devient
         // périmé — son on_agent_exit ne touchera plus l'état partagé.
         let gen = self.spawn_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        // Nouveau process = cycle propre : une mort annoncée par un
+        // kill() antérieur (fork, delete, sleep, ou le kill_failed_spawn
+        // de l'essai précédent — son exit sort de on_agent_exit AVANT
+        // le swap et ne consommerait jamais le flag) ne doit pas
+        // déteindre le crash éventuel de CE process. Reset PAR
+        // TENTATIVE (spawn_attempts boucle jusqu'à 2 essais) : le flag
+        // d'un kill en vol ne doit pas survivre au process suivant.
+        self.expected_exit.store(false, Ordering::SeqCst);
         // Baseline des annonces config_options : une liste jugée
         // « fraîche » au replay pending_config doit avoir été écrite
         // APRÈS ce point (réponse handshake ou event de ce spawn).

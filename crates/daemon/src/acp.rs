@@ -30,7 +30,7 @@ pub fn error_response(id: &Value, code: i64, message: &str) -> Value {
 /// du backend, ex. « The 'gpt-5.5' model is not supported… ») — sans
 /// elle, last_error/events n'affichent que « Internal error » et le
 /// diagnostic (auth expirée, modèle refusé, rate limit) est perdu.
-/// Borné : le detail est tronqué pour rester tient dans un event.
+/// Borné : le detail est tronqué pour tenir dans un event.
 pub fn acp_error_string(err: &Value) -> String {
     let msg = err
         .get("message")

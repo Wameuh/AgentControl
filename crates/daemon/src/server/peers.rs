@@ -120,13 +120,14 @@ impl Daemon {
                 }
 
                 let agent_id = agent.unwrap_or_else(|| cm.agent.clone());
-                let _slot = self.ensure_agent_slot(&agent_id).await?;
-                // agent_profile : hot-reload — un profil déclaré après
-                // le boot est spawnable par les sessions pair aussi.
+                // agent_profile AVANT ensure_agent_slot : le hot-reload
+                // doit voir le profil (et son max_instances) avant que
+                // la réservation de place ne tranche sur un id inconnu.
                 let profile = self
                     .agent_profile(&agent_id)
                     .await
                     .with_context(|| format!("agent inconnu: {agent_id}"))?;
+                let _slot = self.ensure_agent_slot(&agent_id).await?;
                 // Modèle/mode hérités seulement si même agent : leur
                 // vocabulaire est propre à chaque CLI ("bypass" devin ne
                 // veut rien dire pour claude).

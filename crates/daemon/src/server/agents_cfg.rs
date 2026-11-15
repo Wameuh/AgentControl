@@ -210,31 +210,34 @@ impl Daemon {
     /// sans crainte depuis list_agents/daemon_status et les lookups
     /// à la demande. Config absente/illisible/TOML invalide → les
     /// profils chargés sont conservés (jamais de table vidée à chaud).
-    /// Retourne le nombre de profils déclarés dans le fichier.
-    pub async fn reload_agent_profiles(&self) -> usize {
+    pub async fn reload_agent_profiles(&self) {
         let path = self.root.join("config.toml");
         let Ok(meta) = std::fs::metadata(&path) else {
-            return 0;
+            return;
         };
         let (Ok(mtime), len) = (meta.modified(), meta.len()) else {
-            return 0;
+            return;
         };
         let stamp = (mtime, len);
-        if *self.agents_cfg_stamp.lock().unwrap() == Some(stamp) {
-            return 0;
-        }
+        // Check + estampillage sous UN SEUL lock : un second appel
+        // concurrent attend la section critique — pas de double parse.
         // Estampiller AVANT le parse : un config.toml cassé serait
         // sinon re-parsé (et re-warné) à chaque appel — le stamp
         // change avec le fichier, donc une réparation est reprise.
-        *self.agents_cfg_stamp.lock().unwrap() = Some(stamp);
+        {
+            let mut guard = self.agents_cfg_stamp.lock().unwrap();
+            if *guard == Some(stamp) {
+                return;
+            }
+            *guard = Some(stamp);
+        }
         let Ok(text) = std::fs::read_to_string(&path) else {
-            return 0;
+            return;
         };
         let Some(confs) = crate::server::agent_confs(&text) else {
             tracing::warn!("config.toml illisible — hot-reload [agents.*] ignoré");
-            return 0;
+            return;
         };
-        let n = confs.len();
         let added = {
             let mut agents = self.agents.write().await;
             upsert_agent_confs(&mut agents, confs)
@@ -242,18 +245,15 @@ impl Daemon {
         for id in added {
             tracing::info!("profil agent « {id} » chargé à chaud depuis config.toml");
         }
-        n
     }
 
     /// Profil par id avec rattrapage hot-reload : un `[agents.*]`
-    /// ajouté à config.toml après le boot est pris en compte au
-    /// premier usage — sans ça un `new_session`/`spawn` direct
-    /// répondait « agent inconnu » alors que list_agents (qui
-    /// recharge) l'affichait déjà.
+    /// ajouté OU MODIFIÉ dans config.toml après le boot est pris en
+    /// compte au premier usage — sans ça un `new_session`/`spawn`
+    /// direct sur une commande éditée gardait l'ancien profil alors
+    /// que list_agents (qui recharge) affichait déjà le nouveau. Le
+    /// reload est quasi-gratuit fichier inchangé (un metadata()).
     pub async fn agent_profile(&self, id: &str) -> Option<AgentProfile> {
-        if let Some(p) = self.agents.read().await.get(id).cloned() {
-            return Some(p);
-        }
         self.reload_agent_profiles().await;
         self.agents.read().await.get(id).cloned()
     }
