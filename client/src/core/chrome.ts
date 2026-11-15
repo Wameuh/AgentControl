@@ -328,9 +328,32 @@ const appWin = isWeb ? null : getCurrentWindow();
 // dragDropEnabled:false → WebView2 garde AllowExternalDrop=true : un
 // fichier OS droppé sur la fenêtre ferait naviguer la webview vers
 // file:///… — on avale les drops de fichiers au niveau window (les
-// cibles internes ont déjà traité les leurs en amont ; restreint à
-// "Files" pour garder curseur + drop de texte natif intacts).
-const isFileDrag = (e: DragEvent) => e.dataTransfer?.types.includes("Files") ?? false;
+// cibles internes ont déjà traité les leurs en amont). Types couverts :
+// « Files » (navigateur/Tauri) ET les drags URI (text/uri-list,
+// x-special/gnome-copied-files) — le gestionnaire de fichiers Linux
+// n'expose pas « Files » (#257). Le drop n'est avalé que sur cible non
+// éditable : sur une zone texte il est laissé passer pour que l'URI
+// s'insère (comportement composer) — sans ça, un drop de lien sur
+// #sess-filter-input ou #input serait mangé.
+const ATT_DRAG_TYPES = ["Files", "text/uri-list", "x-special/gnome-copied-files"];
+const isAttDrag = (e: DragEvent) => {
+  const types = e.dataTransfer?.types;
+  return !!types && ATT_DRAG_TYPES.some((t) => types.includes(t));
+};
+
+/// Cible de drop capable de recevoir du texte : textarea, input TEXTUEL
+/// ou contenteditable réel — les checkbox/select/range (settings,
+/// conn-view…) ne peuvent pas insérer et retomberaient sur le défaut UA
+/// (navigation). Partagé avec le composer (attachments.ts).
+export function isTextDropTarget(e: DragEvent): boolean {
+  const t = e.target as HTMLElement | null;
+  return (
+    t instanceof HTMLTextAreaElement ||
+    (t instanceof HTMLInputElement &&
+      /^(text|search|url|password|email|tel|number)$/.test(t.type)) ||
+    !!t?.isContentEditable
+  );
+}
 
 export function initWindowChrome() {
   if (!appWin) return; // navigateur : la fenêtre n'est pas pilotable
@@ -338,8 +361,13 @@ export function initWindowChrome() {
   $("tb-max").onclick = () => appWin.toggleMaximize();
   $("tb-close").onclick = () => appWin.close();
 
-  window.addEventListener("dragover", (e) => { if (isFileDrag(e)) e.preventDefault(); });
-  window.addEventListener("drop", (e) => { if (isFileDrag(e)) e.preventDefault(); });
+  window.addEventListener("dragover", (e) => { if (isAttDrag(e)) e.preventDefault(); });
+  window.addEventListener("drop", (e) => {
+    if (!isAttDrag(e) || e.defaultPrevented) return;
+    if (e.dataTransfer?.types.includes("Files") || !isTextDropTarget(e)) {
+      e.preventDefault();
+    }
+  });
 
   $("titlebar").addEventListener("dblclick", (e) => {
     if (!android && !(e.target as HTMLElement).closest("button")) appWin.toggleMaximize();

@@ -16,7 +16,7 @@ import { icon, qIco } from "../ui/icons";
 import { call } from "../core/rpc";
 import { invoke, isWeb } from "../core/bridge";
 import { app } from "../core/state";
-import { isAndroid } from "../core/chrome";
+import { isAndroid, isTextDropTarget } from "../core/chrome";
 import { fmtSize } from "../core/format";
 import { t } from "../i18n";
 
@@ -224,18 +224,13 @@ export class Attachments {
       // URI non-fichier (lien http(s)…) : le drop n'insère du texte que
       // sur une cible éditable — ailleurs le défaut UA serait une
       // NAVIGATION de la webview vers l'URL (perte de l'UI). « Éditable »
-      // = textarea / input TEXTUEL / contenteditable réel : les
-      // checkbox/select de #settings-view et #conn-view (enfants de
-      // #chat) ne peuvent pas recevoir de texte — les y traiter comme
-      // éditables rouvre le trou de navigation. « Files » sans liste
-      // exploitable garde l'ancien preventDefault (rien à insérer).
-      const t = e.target as HTMLElement | null;
-      const editable =
-        t instanceof HTMLTextAreaElement ||
-        (t instanceof HTMLInputElement &&
-          /^(text|search|url|password|email|tel|number)$/.test(t.type)) ||
-        !!t?.isContentEditable;
-      if (!editable || dt?.types.includes("Files")) e.preventDefault();
+      // = isTextDropTarget (textarea / input textuel / contenteditable
+      // réel — les checkbox/select de #settings-view et #conn-view,
+      // enfants de #chat, sont exclus). « Files » sans liste exploitable
+      // garde l'ancien preventDefault (rien à insérer).
+      if (!isTextDropTarget(e) || dt?.types.includes("Files")) {
+        e.preventDefault();
+      }
     });
   }
 

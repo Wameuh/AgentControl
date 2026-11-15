@@ -182,6 +182,13 @@ const hintAfter = await p.evaluate(() => ({
 check("B6 drop lien → hint masqué + att-drop retiré",
   hintBefore && !hintAfter.hint && !hintAfter.cls,
   JSON.stringify({ hintBefore, hintAfter }));
+// Garde window (chrome.ts) : hors #chat, un drop de lien sur une cible
+// non-éditable est avalé (sinon navigation webview) ; sur un input
+// textuel il reste libre pour l'insertion.
+const rB7 = await drag("drop", "text/uri-list", LINK_URI, false, "#session-list");
+check("B7 drop lien hors #chat sur liste sessions preventDefault", rB7 === false);
+const rB8 = await drag("drop", "text/uri-list", LINK_URI, false, "#sess-filter-input");
+check("B8 drop lien sur input sidebar (éditable) NON preventDefault", rB8 === true);
 
 // ---------- C. x-special/gnome-copied-files ----------
 const rC = await drag("drop", "x-special/gnome-copied-files", FILE_URI);
