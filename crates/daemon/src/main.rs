@@ -16,7 +16,7 @@ mod tui;
 mod web;
 
 use anyhow::{Context, Result};
-use server::{AgentProfile, Daemon};
+use server::Daemon;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -191,56 +191,6 @@ fn resolve_assets(explicit: Option<&str>, root: &std::path::Path) -> Option<web:
         .map(web::Assets::Dir)
 }
 
-fn default_agents() -> HashMap<String, AgentProfile> {
-    let mut m = HashMap::new();
-    let mut devin_env = HashMap::new();
-    devin_env.insert("DEVIN_PERMISSION_MODE".to_string(), "{mode}".to_string());
-    m.insert(
-        "devin".into(),
-        AgentProfile {
-            name: "Devin CLI".into(),
-            command: vec!["devin".into(), "acp".into()],
-            env: devin_env,
-            compact: server::CompactPartial::default(),
-            max_instances: server::DEFAULT_MAX_INSTANCES,
-            catalogue_cmd: None,
-            model_override_cmd: None,
-            extra_models: Vec::new(),
-            advisor_models: Vec::new(),
-        },
-    );
-    // Cursor CLI — ACP natif (`agent acp` / `cursor-agent acp`, même
-    // binaire : `agent` est un alias d'install). argv[0] est résolu en
-    // chemin absolu au boot quand c'est possible : `agent` est un nom
-    // générique (collision possible) — la résolution fige le binaire
-    // concret trouvé, et `available`/spawn le re-résolvent à chaud via
-    // `command_path` (un Cursor installé APRÈS le boot reste
-    // `available` grâce au repli nu « cursor-agent » + PATH élargi).
-    // La commande reste surchargeable : `[agents.cursor]` dans
-    // config.toml ou le composant interne `agents` (options →
-    // composants).
-    let cursor_bin = ["cursor-agent", "agent"]
-        .iter()
-        .find_map(|c| server::misc::command_path(c))
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "cursor-agent".into());
-    m.insert(
-        "cursor".into(),
-        AgentProfile {
-            name: "Cursor CLI".into(),
-            command: vec![cursor_bin, "acp".into()],
-            env: HashMap::new(),
-            compact: server::CompactPartial::default(),
-            max_instances: server::DEFAULT_MAX_INSTANCES,
-            catalogue_cmd: None,
-            model_override_cmd: None,
-            extra_models: Vec::new(),
-            advisor_models: Vec::new(),
-        },
-    );
-    m
-}
-
 fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -344,10 +294,9 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     let bind_http = cli.bind_http.or(cfg.bind_http.clone());
     let web_dir_cfg = cli.web_dir.or(cfg.web_dir.clone());
 
-    let mut agents = default_agents();
-    for (id, c) in cfg.agents {
-        agents.insert(id.clone(), server::profile_from_conf(&id, c));
-    }
+    // Built-ins + sections `[agents.*]` de config.toml — merge unique
+    // partagé avec le hot-reload (agents_cfg.rs).
+    let agents = server::agents_cfg::merged_agent_profiles(cfg.agents);
 
     let (daemon, resumable) = Daemon::open(
         root.to_path_buf(),
@@ -447,6 +396,10 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     // Orchestrateur backlog natif : la boucle tourne toujours — la phase
     // porte l'activation (opt-in config ou bascule RPC à chaud).
     daemon.orch_boot();
+
+    // Re-scan périodique des `[agents.*]` de config.toml : profils
+    // déclarés/modifiés/supprimés à la main pris en compte à chaud.
+    daemon.agents_rescan_boot();
 
     if crashed && !resumable.is_empty() {
         if cfg.auto_resume {

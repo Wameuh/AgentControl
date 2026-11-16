@@ -172,22 +172,26 @@ reviewer session deleted, worktree removed, `review failed:
 disabled` posted so polling workers aren't left waiting.
 
 **Agent profiles**: `devin` and `cursor` are built-in presets
-(`default_agents()` in main.rs — cursor's argv[0] is resolved to an
-absolute path on the daemon PATH at boot: `cursor-agent` then the
-`agent` alias). Every `[agents.*]` profile (built-in or config.toml)
-is listed by `list_agents` — `available:false` greys it in the new
-session dialog. The internal component **`agents`** (options →
-composants, or `acctl comp set agents <id> <argv-csv>`) edits each
-profile's ACP command: one `list` param per profile, persisted as the
-FULL `[agents.<id>]` section of config.toml (name/env/compact/catalog
+(`default_agents()` in server/agents_cfg.rs — cursor's argv[0] is
+resolved to an absolute path on the daemon PATH when possible:
+`cursor-agent` then the `agent` alias). Every `[agents.*]` profile
+(built-in or config.toml) is listed by `list_agents` —
+`available:false` greys it in the new session dialog. The internal
+component **`agents`** (options → composants, or
+`acctl comp set agents <id> <argv-csv>`) edits each profile's ACP
+command: one `list` param per profile, persisted as the FULL
+`[agents.<id>]` section of config.toml (name/env/compact/catalog
 included — a partial write would silently drop fields at next boot)
 and hot-reloaded into `Daemon.agents` (tokio RwLock — reads via
 `.read().await`). Ids are not creatable/removable this way — declare
 new profiles in config.toml; **manual `[agents.*]` edits in
 config.toml are themselves hot-reloaded** (`Daemon::reload_agent_profiles`,
-stamp mtime+size — upsert only, a removed section survives until next
-boot), picked up by `list_agents`/`daemon_status`/component views and
-by `agent_profile` lookups on spawn/attach.
+stamp mtime+size — full merge built-ins + sections, so an added,
+modified OR removed section converges to the reboot state; triggered
+on `list_agents`/`daemon_status`/component views/`agent_profile`
+lookups on spawn/attach AND periodically by `agents_rescan_boot`,
+~60 s — `daemon_update` needs nothing extra: the replaced binary
+restarts under its supervisor and re-parses at boot).
 
 **Agent profile per role** (`backlog_orchestrator` params, hot-settable
 via `acctl comp set`, dropdown of the declared `[agents.*]` profiles in
