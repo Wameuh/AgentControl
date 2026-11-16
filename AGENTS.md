@@ -556,7 +556,10 @@ jamais d'écrasement d'un skill non managé (warn + skip). Désactivable :
 `provision_skills = false` global ou `[agents.<id>] provision_skills =
 false`. **Un nouveau skill livré avec le démon va dans `skills/`** — pas
 dans `.devin/skills` (répertoire de compat pour les PR en vol, et
-répertoire provisionné dans les workspaces).
+répertoire provisionné dans les workspaces — `build.rs` en exclut les
+skills listés par son `.agentcontrol-skills.json` pour éviter qu'une
+sortie provisionnée soit ré-embarquée). Les sorties provisionnées sont
+gitignorées (`.gitignore` racine).
 
 ## Known pitfalls
 

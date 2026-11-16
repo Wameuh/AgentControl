@@ -46,17 +46,45 @@ fn main() {
     // il est inséré en dernier dans la map. Le runtime les synchronise
     // dans les répertoires scannés par chaque provider (skills.rs) au
     // spawn et au boot.
-    let mut skills: std::collections::BTreeMap<String, Vec<u8>> =
-        std::collections::BTreeMap::new();
+    // Piège : `.devin/skills/` est AUSSI une sortie provisionnée — une
+    // session devin dont le cwd est ce checkout y fait écrire les
+    // skills embarqués + un manifeste `.agentcontrol-skills.json`.
+    // Relire ce répertoire comme source créerait une boucle : un skill
+    // retiré de `skills/` survivrait via sa copie provisionnée.
+    // Les skills listés par le manifeste (managés = pas des sources)
+    // sont donc exclus de l'embed.
+    let mut skills: std::collections::BTreeMap<String, Vec<u8>> = std::collections::BTreeMap::new();
     for rel in [".devin/skills", "skills"] {
         let dir = crate_dir.join("../..").join(rel);
         if dir.is_dir() {
             println!("cargo:rerun-if-changed={}", dir.display());
             let root = dir.canonicalize().unwrap();
+            // Noms de skills gérés par le provisionnement (clés de
+            // premier niveau de l'objet "skills" du manifeste).
+            let managed: std::collections::BTreeSet<String> = if rel == ".devin/skills" {
+                let mf = root.join(".agentcontrol-skills.json");
+                println!("cargo:rerun-if-changed={}", mf.display());
+                fs::read_to_string(&mf)
+                    .ok()
+                    .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                    .and_then(|v| {
+                        v.get("skills")?.as_object().map(|o| {
+                            o.keys()
+                                .filter_map(|k| k.split('/').next().map(str::to_owned))
+                                .collect()
+                        })
+                    })
+                    .unwrap_or_default()
+            } else {
+                Default::default()
+            };
             let mut entries = Vec::new();
             walk_all(&root, &root, &mut entries);
             for (p, data) in entries {
-                skills.insert(p, data);
+                let skill = p.split('/').next().unwrap_or("");
+                if !managed.contains(skill) {
+                    skills.insert(p, data);
+                }
             }
         }
     }
@@ -80,7 +108,11 @@ fn walk_all(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
         let p = e.path();
         if p.is_dir() {
             walk_all(root, &p, out);
-        } else if p.file_name().map(|n| n == ".agentcontrol-skills.json").unwrap_or(false) {
+        } else if p
+            .file_name()
+            .map(|n| n == ".agentcontrol-skills.json")
+            .unwrap_or(false)
+        {
             // Manifeste de sync écrit par le runtime dans un workspace
             // provisionné — jamais une source à embarquer.
         } else if let Ok(data) = fs::read(&p) {

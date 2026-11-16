@@ -7,6 +7,9 @@ edition = "2021"
 name = "agentcontrol-daemon"
 path = "src/main.rs"
 
+[build-dependencies]
+serde_json = { workspace = true }
+
 [dependencies]
 proto = { path = "../proto" }
 forgesync = { path = "../forgesync" }
