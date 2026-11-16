@@ -117,11 +117,6 @@ export class Steps {
     this.renderPanel();
   }
 
-  /** Vrai si la session a des étapes connues (badge header). */
-  hasSteps() {
-    return this.items.length > 0;
-  }
-
   private renderPanel() {
     this.count.textContent = this.items.length ? String(this.items.length) : "";
     this.list.innerHTML = "";

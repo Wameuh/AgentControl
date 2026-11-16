@@ -82,16 +82,12 @@ impl Session {
     /// Vide la liste (reset de cycle : /clear, rebind) — n'écrit et
     /// n'émet que si des étapes existaient. Retourne vrai si vidé.
     pub fn clear_steps(&self) -> bool {
-        let had = {
+        {
             let mut st = self.steps.lock().unwrap();
             if st.is_empty() {
                 return false;
             }
             st.clear();
-            true
-        };
-        if !had {
-            return false;
         }
         self.save_steps();
         self.emit(EventKind::Steps { steps: vec![] });
