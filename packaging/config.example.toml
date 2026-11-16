@@ -21,6 +21,38 @@ bind_tcp = "127.0.0.1:7331"
 auto_resume = true
 
 # ---------------------------------------------------------------------------
+# Skills agents embarqués (acctl, ac-wait, ac-steps…) : compilés dans le
+# binaire, le démon les synchronise dans les répertoires que chaque
+# provider scanne — .devin/skills (devin), .claude/skills (claude),
+# .agents/skills + .cursor/skills (cursor), .agents/skills (codex et
+# profils inconnus) — dans le cwd de chaque session, à chaque spawn et
+# une fois au boot. Rien à copier : une install fraîche expose les skills
+# partout.
+#
+# La sync est gérée : un manifeste .agentcontrol-skills.json par
+# répertoire suit les fichiers posés ; le contenu est réécrit quand la
+# version embarquée change (upgrade du démon = skills à jour). Un
+# répertoire de skill déjà présent SANS manifeste n'est jamais écrasé :
+# adopté s'il est identique au contenu embarqué, sinon ignoré avec un
+# warn dans le log — pour garder votre propre version d'un skill fourni,
+# renommez-le ou supprimez-le (la version embarquée prendra le nom).
+# Dans un repo git, ignorer les sorties provisionnées pour ne pas les
+# voir comme des modifications : .agentcontrol-skills.json + les
+# répertoires .devin/skills, .claude/skills, .cursor/skills,
+# .agents/skills (le .gitignore du repo AgentControl le fait déjà).
+#
+# Désactiver globalement : provision_skills = false
+# Désactiver pour un seul profil : [agents.<id>] provision_skills = false
+#
+# Skills personnalisés : un skill à vous dans <cwd>/.devin/skills/ (ou
+# l'équivalent du provider) n'est jamais écrasé tant que son nom ne
+# percute pas un skill embarqué. Pour qu'un skill soit embarqué dans le
+# démon (distribué à toutes les installs), l'ajouter dans le repo
+# AgentControl sous skills/<nom>/SKILL.md — voir AGENTS.md.
+# ---------------------------------------------------------------------------
+# provision_skills = true
+
+# ---------------------------------------------------------------------------
 # Rétention / stockage — un janitor applique ces limites périodiquement.
 # ---------------------------------------------------------------------------
 [retention]

@@ -11,6 +11,7 @@ mod prs;
 mod selfupdate;
 mod server;
 mod session;
+mod skills;
 mod term;
 mod tui;
 mod web;
@@ -58,6 +59,12 @@ struct Config {
     /// (session/watch.rs, server::watchdog).
     #[serde(default)]
     watchdog: server::WatchdogCfg,
+    /// Skills agents embarqués : synchronisés dans les répertoires
+    /// scannés par chaque provider au spawn et au boot (skills.rs) —
+    /// `false` désactive globalement, `[agents.<id>] provision_skills
+    /// = false` par profil.
+    #[serde(default = "default_true")]
+    provision_skills: bool,
     /// Forges de review au-delà de GitHub : `[[forges]]` {type, hosts,
     /// token_env} — détection des URLs GitLab/Gerrit dans les sorties
     /// outils (voir docs/forges.md). github.com + gitlab.com implicites.
@@ -86,6 +93,7 @@ impl Default for Config {
             backlog_orchestrator: server::OrchCfg::default(),
             compact: server::CompactCfg::default(),
             watchdog: server::WatchdogCfg::default(),
+            provision_skills: true,
             forges: Vec::new(),
         }
     }
@@ -308,6 +316,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
         cfg.backlog_orchestrator.clone(),
         cfg.compact.clone(),
         cfg.watchdog.clone(),
+        cfg.provision_skills,
     )
     .await?;
     tracing::info!(

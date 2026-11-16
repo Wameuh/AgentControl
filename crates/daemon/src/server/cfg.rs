@@ -69,6 +69,10 @@ pub struct AgentProfile {
     /// `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` pour la valeur "off").
     /// Vide = fonctionnalité absente.
     pub advisor_models: Vec<String>,
+    /// `false` = les skills agents embarqués ne sont PAS provisionnés
+    /// dans les répertoires scannés par ce provider (skills.rs) —
+    /// défaut true, override global `provision_skills` dans config.toml.
+    pub provision_skills: bool,
 }
 
 /// Plafond d'instances par profil agent quand `max_instances` n'est pas
@@ -132,6 +136,10 @@ pub struct AgentConf {
     /// (mécanisme claude-code-acp). Ex. ["fable", "opus", "sonnet"].
     #[serde(default)]
     pub advisor_models: Vec<String>,
+    /// `provision_skills = false` désactive la synchro des skills
+    /// agents embarqués pour ce profil (défaut : activé).
+    #[serde(default)]
+    pub provision_skills: Option<bool>,
 }
 
 /// Lit uniquement la table `[agents]` d'un config.toml — le hot-reload
@@ -165,6 +173,7 @@ pub fn profile_from_conf(id: &str, c: AgentConf) -> AgentProfile {
         model_override_cmd: c.model_override_cmd,
         extra_models: c.extra_models,
         advisor_models: c.advisor_models,
+        provision_skills: c.provision_skills.unwrap_or(true),
     }
 }
 

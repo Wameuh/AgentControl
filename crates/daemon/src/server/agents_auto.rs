@@ -99,6 +99,7 @@ fn auto_profile(spec: &AdapterSpec) -> AgentProfile {
         model_override_cmd: None,
         extra_models: Vec::new(),
         advisor_models: Vec::new(),
+        provision_skills: true,
     }
 }
 
@@ -180,6 +181,7 @@ mod tests {
             model_override_cmd: None,
             extra_models: Vec::new(),
             advisor_models: Vec::new(),
+            provision_skills: true,
         }
     }
 

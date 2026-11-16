@@ -85,6 +85,10 @@ pub(crate) struct SpawnHints {
     /// spawn (une session créée avant l'ajout de la clé voit le
     /// sélecteur sans être recréée).
     pub advisor_models: Vec<String>,
+    /// Racines de skills à synchroniser avant le spawn (chemins absolus
+    /// `<cwd>/<dir-provider>` — calculés par le serveur depuis le profil
+    /// + `provision_skills`, skills.rs). Vide = pas de provisionnement.
+    pub skills_roots: Vec<PathBuf>,
 }
 
 pub struct Session {
