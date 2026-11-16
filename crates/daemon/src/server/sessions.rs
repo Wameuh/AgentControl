@@ -420,6 +420,10 @@ impl Daemon {
                     s.emit(EventKind::System {
                         text: "session native rebindée — historique rechargé".into(),
                     });
+                    // Le rebind change de conversation : les étapes de
+                    // l'ancienne n'ont plus de sens (steps.json vidé,
+                    // event `steps` repart dans le journal frais).
+                    s.clear_steps();
                 }
                 if let Some(nid) = native_id {
                     s.set_native_id(&nid);
@@ -1281,6 +1285,19 @@ impl Daemon {
                 })
     }
 
+    /// Remplace la liste d'étapes de la tâche (skill ac-steps /
+    /// `acctl steps set`) — voir SessionSetSteps dans proto. La
+    /// réponse porte la liste normalisée stockée.
+    pub(super) async fn h_session_set_steps(
+        self: &Arc<Self>,
+        session: String,
+        steps: Vec<proto::SessionStep>,
+    ) -> Result<Value> {
+                let s = self.get_session(&session).await?;
+                let steps = s.set_steps(steps)?;
+                Ok(json!({"steps": steps}))
+    }
+
     pub(super) async fn h_queue_list(self: &Arc<Self>, session: String) -> Result<Value> {
                 let s = self.get_session(&session).await?;
                 Ok(json!({"queue": s.queue_snapshot()}))
@@ -1397,6 +1414,7 @@ impl Daemon {
                     "alive": s.is_alive(),
                     "queue": s.queue_snapshot(),
                     "last_seq": s.journal.last_seq(),
+                    "steps": s.steps_snapshot(),
                 }))
     }
 

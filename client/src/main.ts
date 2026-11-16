@@ -61,6 +61,7 @@ import { sounds } from "./features/sounds";
 import { notifications } from "./features/notifications";
 import { initFirstPost } from "./features/first-post";
 import { Pins } from "./features/pins";
+import { Steps, type SessionStep } from "./features/steps";
 import { initLang, t, applyStatic } from "./i18n";
 import type { AcEvent, SavedConn } from "./core/types";
 
@@ -152,6 +153,7 @@ const logsPanel = new LogsPanel();
 const pluginViews = new PluginView();
 const search = new SessionSearch();
 const pins = new Pins();
+const steps = new Steps();
 
 // call() a besoin de la conn courante + des états live — injectés pour éviter
 // l'import inverse core → features.
@@ -170,11 +172,13 @@ chat.bind(renderer, {
     files.onSessionOpened();
     term.onSessionSwitched();
     pins.sessionOpened();
+    steps.sessionOpened();
   },
   onSessionChanged: () => {
     search.onSessionChanged();
     composer.sessionChanged();
     pins.sessionChanged();
+    steps.sessionChanged();
     // Une voix qui commente un journal qu'on a quitté = bug UX → stop.
     tts.sessionChanged();
   },
@@ -186,6 +190,7 @@ chat.bind(renderer, {
   firstPostCapable: (c) => conns.cap(c)?.first_post === true,
   termCapable: (c) => conns.cap(c)?.terminal === true,
   pinCapable: (c) => conns.cap(c)?.pinned === true,
+  stepsCapable: (c) => conns.cap(c)?.steps === true,
   capsCapable: (c) => conns.cap(c)?.agent_caps === true,
   pinsMark: (el) => pins.markNode(el),
 });
@@ -194,6 +199,8 @@ pins.bind({
   capable: (c) => conns.cap(c)?.pinned === true,
   jumpToSeq: (seq) => chat.jumpToSeq(seq),
 });
+// Steps n'a pas besoin de deps injectées — la capability gate vit dans
+// chat.updateHeader (btn-steps) et le sheet ⋮.
 renderer.bind({
   metaChanged: () => chat.updateHeader(),
   ctxChanged: () => chat.updateCtx(),
@@ -399,6 +406,12 @@ await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
     if (app.current && session === app.current.id) void chat.convCleared();
     return;
   }
+  // Étapes de tâche publiées par l'agent : l'event porte la liste
+  // ENTIÈRE (remplacement complet, pas de delta) → application directe
+  // si c'est la session affichée.
+  if (event.type === "steps" && app.current && session === app.current.id) {
+    steps.onStepsEvent(event.steps as SessionStep[]);
+  }
   if (app.current && session === app.current.id) {
     chat.appendEvent(event, true);
   }
@@ -449,6 +462,8 @@ $("chat-more").onclick = () => {
     items.push({ icon: "top", label: t("first_post"), fn: () => $("btn-first").click() });
   if (app.current && conns.cap(app.current.conn ?? "default")?.pinned === true)
     items.push({ icon: "pin", label: t("pins_title"), fn: () => $("btn-pins").click() });
+  if (app.current && conns.cap(app.current.conn ?? "default")?.steps === true)
+    items.push({ icon: "steps", label: t("steps_title"), fn: () => $("btn-steps").click() });
   if (app.current && term.supported())
     items.push({ icon: "terminal", label: t("term_title"), fn: () => $("btn-term").click() });
   if (app.current) items.push({ icon: "folder", label: t("files_title"), fn: () => $("btn-files").click() });
@@ -490,6 +505,7 @@ initFirstPost((c) => conns.cap(c)?.first_post === true);
 initModelCosts({ capable: (c) => conns.cap(c)?.model_costs === true });
 initModelCatalog({ capable: (c) => conns.cap(c)?.model_catalog === true });
 pins.init();
+steps.init();
 initModelBar(openFusion, () => chat.updateHeader());
 initFusionDialog();
 initStatus(() => {

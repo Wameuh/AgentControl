@@ -142,6 +142,9 @@ export class ChatView {
     pinCapable: (_conn: string) => false,
     /** Marque l'état épinglé d'un nœud rendu (feature pins). */
     pinsMark: (_el: HTMLElement) => {},
+    /** Bouton « étapes » affiché seulement si le démon de la conn
+     *  connaît session_set_steps (daemon_status.steps). */
+    stepsCapable: (_conn: string) => false,
     /** L'arbre fichiers suit le workspace de la session ouverte. */
     onSessionOpened: () => {},
     /** Session affichée changée ou disparue (suppression, conn coupée,
@@ -758,6 +761,8 @@ export class ChatView {
       !app.current || !this.deps.firstPostCapable(app.current?.conn ?? "default");
     $("btn-pins").hidden =
       !app.current || !this.deps.pinCapable(app.current?.conn ?? "default");
+    $("btn-steps").hidden =
+      !app.current || !this.deps.stepsCapable(app.current?.conn ?? "default");
     $("btn-term").hidden =
       !app.current || !this.deps.termCapable(app.current?.conn ?? "default");
     $("btn-caps-refresh").hidden =

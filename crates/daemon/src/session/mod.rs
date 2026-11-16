@@ -13,6 +13,7 @@ mod compact;
 mod config;
 mod pins;
 mod prompt;
+mod steps;
 mod watch;
 
 /// Issue d'un steer_queued — le serveur la traduit en {delivered, reason}.
@@ -114,6 +115,9 @@ pub struct Session {
     tool_calls: Mutex<HashMap<String, (String, String)>>,
     /// Messages épinglés (persistés pinned.json — pins.rs).
     pinned: Mutex<Vec<proto::PinEntry>>,
+    /// Étapes de tâche publiées par l'agent (persistées steps.json —
+    /// steps.rs), remplacées en entier à chaque session_set_steps.
+    steps: Mutex<Vec<proto::SessionStep>>,
     /// Vrai pendant session/load : les updates d'historique rejoué sont
     /// ignorés (le journal local est déjà la source de vérité).
     loading_replay: std::sync::atomic::AtomicBool,
@@ -324,9 +328,11 @@ impl Session {
         )?;
         let journal = Journal::open(&dir)?;
         let last_text = seed_text_anchor(&journal, &dir);
-        // Chargé avant le struct literal : `dir` y est déplacé en premier
-        // champ — un open_pins(&dir) inline serait un borrow-after-move.
+        // Chargés avant le struct literal : `dir` y est déplacé en
+        // premier champ — un open_pins/open_steps(&dir) inline serait
+        // un borrow-after-move.
         let pinned = Self::open_pins(&dir);
+        let steps = Self::open_steps(&dir);
         let compact_base = compact_src.base_for(&meta.agent);
         let compact_override = Self::open_compact_override(&dir);
         let (events_tx, _) = broadcast::channel(1024);
@@ -343,6 +349,7 @@ impl Session {
             last_text: Mutex::new(last_text),
             tool_calls: Mutex::new(HashMap::new()),
             pinned,
+            steps,
             loading_replay: std::sync::atomic::AtomicBool::new(false),
             busy: std::sync::atomic::AtomicBool::new(false),
             active_prompts: AtomicU64::new(0),
@@ -969,6 +976,65 @@ mod tests {
         assert!(!s2.unpin(1));
         let s3 = Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
         assert!(s3.pins_snapshot().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Étapes : remplacement complet persisté dans steps.json, event
+    /// `steps` journalisé à chaque changement (sauf no-op identique),
+    /// bornes (cap, nom vide) et clear_steps au reset de cycle.
+    #[test]
+    fn steps() {
+        use proto::{SessionStep, StepStatus};
+        let step = |name: &str, status: StepStatus| SessionStep {
+            name: name.into(),
+            status,
+        };
+        let (s, dir) = tmp_session("steps");
+        assert!(s.steps_snapshot().is_empty());
+        // Set initial : liste stockée + event `steps` journalisé.
+        let stored = s
+            .set_steps(vec![
+                step("Analyser", StepStatus::Done),
+                step("Implémenter", StepStatus::InProgress),
+            ])
+            .unwrap();
+        assert_eq!(stored.len(), 2);
+        assert_eq!(s.steps_snapshot()[1].status, StepStatus::InProgress);
+        assert!(kinds(&dir).contains(&"steps"));
+        // Remplacement complet : la liste entière est repousée.
+        s.set_steps(vec![
+            step("Analyser", StepStatus::Done),
+            step("Implémenter", StepStatus::Done),
+            step("Tests", StepStatus::InProgress),
+        ])
+        .unwrap();
+        assert_eq!(s.steps_snapshot().len(), 3);
+        // Liste identique → no-op silencieux (pas d'event en double).
+        let n = kinds(&dir).iter().filter(|k| **k == "steps").count();
+        s.set_steps(s.steps_snapshot()).unwrap();
+        assert_eq!(kinds(&dir).iter().filter(|k| **k == "steps").count(), n);
+        // Nom vide → erreur ; nom trop long → tronqué à la borne.
+        assert!(s.set_steps(vec![step("  ", StepStatus::Todo)]).is_err());
+        let long = "x".repeat(steps::STEP_NAME_MAX + 50);
+        s.set_steps(vec![step(&long, StepStatus::Todo)]).unwrap();
+        assert_eq!(
+            s.steps_snapshot()[0].name.chars().count(),
+            steps::STEP_NAME_MAX
+        );
+        // Cap : > STEPS_MAX étapes → refus.
+        let too_many: Vec<_> = (0..=steps::STEPS_MAX)
+            .map(|i| step(&format!("e{i}"), StepStatus::Todo))
+            .collect();
+        assert!(s.set_steps(too_many).is_err());
+        // Persisté : la réouverture recharge steps.json.
+        let s2 = Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
+        assert_eq!(s2.steps_snapshot().len(), 1);
+        // Clear : liste vidée + event `steps` vide (resync clients).
+        assert!(s2.clear_steps());
+        assert!(s2.steps_snapshot().is_empty());
+        assert!(!s2.clear_steps()); // déjà vide → pas d'event en double
+        let s3 = Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
+        assert!(s3.steps_snapshot().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

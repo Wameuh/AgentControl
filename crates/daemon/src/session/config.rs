@@ -1010,6 +1010,10 @@ impl Session {
         self.emit(EventKind::System {
             text: "contexte effacé — nouvelle session agent".into(),
         });
+        // Les étapes de la tâche appartiennent au cycle effacé — vidé
+        // après le reset journal (l'event `steps` repart dans le
+        // journal frais pour resynchroniser les clients live).
+        self.clear_steps();
         Ok(())
     }
 

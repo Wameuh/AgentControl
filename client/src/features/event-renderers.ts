@@ -228,6 +228,15 @@ export class EventRenderer {
         d.hidden = true;
         return d;
       }
+      case "steps": {
+        // Étapes de tâche (skill ac-steps) : état interne — le panneau
+        // est alimenté en amont (main.ts) et la reconstruction passe
+        // par session_info.steps. Sysline masquée : conservation du
+        // tracking par seq sans bruit dans le chat (comme usage_update).
+        const d = mkEv("sysline", ev.seq);
+        d.hidden = true;
+        return d;
+      }
       case "commands_available": {
         const d = mkEv("sysline", ev.seq);
         const cmds = ev.commands as CmdInfo[];
