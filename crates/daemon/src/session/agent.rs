@@ -98,6 +98,11 @@ impl Session {
         // Fenêtre "pas encore prêt" : stdin posé tôt mais session/load pas
         // terminé — drain_queue/envois directs doivent rester en file.
         self.spawning.store(true, Ordering::SeqCst);
+        // Skills agents embarqués : sync gérée des répertoires scannés
+        // par le provider AVANT le process — le premier scan de skills
+        // de l'agent doit déjà les voir. Best-effort : warn seulement,
+        // jamais bloquant pour le spawn (skills.rs).
+        crate::skills::sync(&hints.skills_roots);
         let r = self
             .spawn_attempts(command, envs, resume_native_id, skip_replay, mcp_servers, hints)
             .await;

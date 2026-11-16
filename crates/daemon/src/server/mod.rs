@@ -240,6 +240,11 @@ pub struct Daemon {
     /// Catalogues complets par profil (`catalogue_cmd`) — sert les
     /// variantes hors annonce ACP via ReqKind::ModelCatalog.
     pub catalogues: CatalogueCache,
+    /// `provision_skills` global (config.toml, défaut on) — synchro des
+    /// skills agents embarqués dans les répertoires scannés par chaque
+    /// provider au spawn et au boot (skills.rs) ; combiné au flag par
+    /// profil `AgentProfile::provision_skills`.
+    pub provision_skills: bool,
 }
 
 
@@ -258,6 +263,7 @@ impl Daemon {
         orch: OrchCfg,
         compact: CompactCfg,
         watchdog: WatchdogCfg,
+        provision_skills: bool,
     ) -> Result<(Arc<Self>, Vec<String>)> {
         let web = Arc::new(RwLock::new(None));
         let orch = Arc::new(OrchProbe::open(orch));
@@ -327,6 +333,7 @@ impl Daemon {
             slot_lock: tokio::sync::Mutex::new(()),
             model_costs: CostCache::default(),
             catalogues: CatalogueCache::default(),
+            provision_skills,
         });
         d.pr_verify.spawn_worker();
         let mut resumable = Vec::new();
@@ -402,7 +409,46 @@ impl Daemon {
                 d.sessions.write().await.insert(id, s);
             }
         }
+        // Skills embarqués pour les sessions déjà connues : la sync au
+        // spawn couvre les respawns, mais un agent déjà vivant garderait
+        // un workspace sans skills jusqu'à son prochain cycle — une
+        // passe au boot rapproche tout le monde (idempotent, no-op si
+        // les fichiers sont déjà à jour).
+        d.provision_skills_boot();
         Ok((d, resumable))
+    }
+
+    /// Provisionnement initial des skills pour les sessions chargées au
+    /// boot — une sync par racine unique (plusieurs sessions peuvent
+    /// partager le même cwd).
+    fn provision_skills_boot(&self) {
+        if !self.provision_skills {
+            return;
+        }
+        // Read-locks sans await (fn sync) : try_read — au boot personne
+        // ne conteste ; en cas d'échec improbable on saute la passe
+        // (le prochain spawn reprovisionnera de toute façon).
+        let (Ok(agents), Ok(sessions)) =
+            (self.agents.try_read(), self.sessions.try_read())
+        else {
+            return;
+        };
+        let mut roots = std::collections::BTreeSet::new();
+        for s in sessions.values() {
+            let meta = s.meta_snapshot();
+            let Some(profile) = agents.get(&meta.agent) else {
+                continue;
+            };
+            if !profile.provision_skills || !std::path::Path::new(&meta.cwd).is_dir() {
+                continue;
+            }
+            for d in crate::skills::dirs_for(&meta.agent) {
+                roots.insert(std::path::Path::new(&meta.cwd).join(d));
+            }
+        }
+        if !roots.is_empty() {
+            crate::skills::sync(&roots.into_iter().collect::<Vec<_>>());
+        }
     }
 
     /// Reprise post-crash : respawn des sessions qui travaillaient quand
@@ -704,6 +750,21 @@ impl Daemon {
         meta: &proto::SessionMeta,
     ) -> crate::session::SpawnHints {
         let acp_meta = advisor_acp_meta(profile, meta);
+        // Skills embarqués : les répertoires scannés par le provider de
+        // ce profil (skills.rs) sont synchronisés avant chaque spawn —
+        // cwd inexistant → rien à provisionner (on ne recrée pas un
+        // workspace supprimé pour y déposer des skills).
+        let skills_roots = if self.provision_skills
+            && profile.provision_skills
+            && std::path::Path::new(&meta.cwd).is_dir()
+        {
+            crate::skills::dirs_for(&meta.agent)
+                .iter()
+                .map(|d| std::path::Path::new(&meta.cwd).join(d))
+                .collect()
+        } else {
+            Vec::new()
+        };
         crate::session::SpawnHints {
             acp_meta,
             extra_models: profile
@@ -712,6 +773,7 @@ impl Daemon {
                 .map(|e| e.value.clone())
                 .collect(),
             advisor_models: profile.advisor_models.clone(),
+            skills_roots,
         }
     }
 
@@ -1673,6 +1735,7 @@ mod tests {
             model_override_cmd: None,
             extra_models: vec![],
             advisor_models: models.iter().map(|s| s.to_string()).collect(),
+            provision_skills: true,
         }
     }
 

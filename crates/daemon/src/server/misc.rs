@@ -521,6 +521,7 @@ mod tests {
             model_override_cmd: None,
             extra_models: vec![],
             advisor_models: vec![],
+            provision_skills: true,
         };
         assert!(!profile_available(&p));
         p.commands[1] = vec!["sh".into()]; // /bin/sh ou /usr/bin/sh sur PATH

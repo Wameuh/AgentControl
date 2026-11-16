@@ -540,6 +540,24 @@ Manual off-PR: `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]`.
 - `acctl write <session> <path> [src|-]` = full replacement
   (`delete_len: u64::MAX`, no mtime guard).
 
+## Agent skills (provisionnement auto, #264)
+
+Les skills fournis par AgentControl (acctl, ac-wait, ac-steps…) vivent
+dans **`skills/<nom>/`** à la racine du repo — source de vérité unique,
+embarquée dans le binaire démon par `crates/daemon/build.rs`
+(`.devin/skills/` est fusionné en compat). Au spawn de chaque session
+(et une fois au boot), le démon les synchronise dans les répertoires
+scannés par le provider (`crates/daemon/src/skills.rs`) :
+`.devin/skills` (devin), `.claude/skills` (claude),
+`.agents/skills` + `.cursor/skills` (cursor), `.agents/skills`
+(codex et profils inconnus). Sync gérée par manifeste
+`.agentcontrol-skills.json` : contenu réécrit quand l'embarqué change,
+jamais d'écrasement d'un skill non managé (warn + skip). Désactivable :
+`provision_skills = false` global ou `[agents.<id>] provision_skills =
+false`. **Un nouveau skill livré avec le démon va dans `skills/`** — pas
+dans `.devin/skills` (répertoire de compat pour les PR en vol, et
+répertoire provisionné dans les workspaces).
+
 ## Known pitfalls
 
 - `anyhow::bail!` in a `Result<_, String>` function → E0308.

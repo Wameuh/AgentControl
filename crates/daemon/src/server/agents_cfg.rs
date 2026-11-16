@@ -58,6 +58,7 @@ pub(crate) fn default_agents() -> HashMap<String, AgentProfile> {
             model_override_cmd: None,
             extra_models: Vec::new(),
             advisor_models: Vec::new(),
+            provision_skills: true,
         },
     );
     // Cursor CLI — ACP natif (`agent acp` / `cursor-agent acp`, même
@@ -88,6 +89,7 @@ pub(crate) fn default_agents() -> HashMap<String, AgentProfile> {
             model_override_cmd: None,
             extra_models: Vec::new(),
             advisor_models: Vec::new(),
+            provision_skills: true,
         },
     );
     m
@@ -255,10 +257,18 @@ struct AgentToml<'a> {
     extra_models: &'a Vec<proto::ExtraModel>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     advisor_models: &'a Vec<String>,
+    /// Persisté seulement quand désactivé — `true` est le défaut lu
+    /// par AgentConf, l'omettre garde la config épurée.
+    #[serde(skip_serializing_if = "is_true")]
+    provision_skills: bool,
     #[serde(skip_serializing_if = "super::cfg::CompactPartial::is_empty")]
     compact: &'a super::cfg::CompactPartial,
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     env: &'a HashMap<String, String>,
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 /// Sérialise `commands` dans la forme lue par AgentCommand : une seule
@@ -311,6 +321,7 @@ pub(crate) fn persist(root: &Path, edits: &[(String, AgentProfile)]) -> Result<(
             model_override_cmd: p.model_override_cmd.as_deref(),
             extra_models: &p.extra_models,
             advisor_models: &p.advisor_models,
+            provision_skills: p.provision_skills,
             compact: &p.compact,
             env: &p.env,
         };
@@ -488,6 +499,7 @@ mod tests {
             model_override_cmd: None,
             extra_models: Vec::new(),
             advisor_models: Vec::new(),
+            provision_skills: true,
         }
     }
 
@@ -560,6 +572,7 @@ mod tests {
             model_override_cmd: None,
             extra_models: Vec::new(),
             advisor_models: Vec::new(),
+            provision_skills: None,
         }
     }
 

@@ -38,6 +38,60 @@ fn main() {
     }
     let out = Path::new(&env::var("OUT_DIR").unwrap()).join("web-assets.bin");
     fs::write(&out, &blob).unwrap();
+
+    // Skills agents embarqués (item #264) : `skills/` = source de
+    // vérité versionnée avec le binaire ; `.devin/skills/` est fusionné
+    // en compat (un skill y ajouté — ex. en vol sur une autre PR — est
+    // provisionné aussi). Sur conflit de chemin, `skills/` prime :
+    // il est inséré en dernier dans la map. Le runtime les synchronise
+    // dans les répertoires scannés par chaque provider (skills.rs) au
+    // spawn et au boot.
+    let mut skills: std::collections::BTreeMap<String, Vec<u8>> =
+        std::collections::BTreeMap::new();
+    for rel in [".devin/skills", "skills"] {
+        let dir = crate_dir.join("../..").join(rel);
+        if dir.is_dir() {
+            println!("cargo:rerun-if-changed={}", dir.display());
+            let root = dir.canonicalize().unwrap();
+            let mut entries = Vec::new();
+            walk_all(&root, &root, &mut entries);
+            for (p, data) in entries {
+                skills.insert(p, data);
+            }
+        }
+    }
+    let mut blob = Vec::new();
+    blob.extend_from_slice(&(skills.len() as u32).to_le_bytes());
+    for (p, data) in &skills {
+        blob.extend_from_slice(&(p.len() as u16).to_le_bytes());
+        blob.extend_from_slice(p.as_bytes());
+        blob.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        blob.extend_from_slice(data);
+    }
+    let out = Path::new(&env::var("OUT_DIR").unwrap()).join("agent-skills.bin");
+    fs::write(&out, &blob).unwrap();
+}
+
+/// Tous les fichiers (contrairement à `walk` qui filtre les
+/// sourcemaps) — un skill peut embarquer des scripts sans extension.
+fn walk_all(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            walk_all(root, &p, out);
+        } else if p.file_name().map(|n| n == ".agentcontrol-skills.json").unwrap_or(false) {
+            // Manifeste de sync écrit par le runtime dans un workspace
+            // provisionné — jamais une source à embarquer.
+        } else if let Ok(data) = fs::read(&p) {
+            let rel = p
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push((rel, data));
+        }
+    }
 }
 
 fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
