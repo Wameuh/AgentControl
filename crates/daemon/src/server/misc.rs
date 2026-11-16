@@ -127,11 +127,22 @@ impl Daemon {
                     .await
                     .iter()
                     .map(|(k, a)| {
+                        let available = profile_available(a);
                         json!({
                             "id": k,
                             "name": a.name,
-                            "command": a.command,
-                            "available": a.command.first().map(|c| command_available(c)).unwrap_or(false),
+                            // argv effectivement retenu (premier
+                            // candidat résolu, sinon le premier).
+                            "command": effective_command(&a.commands),
+                            // Toutes les commandes candidates, dans
+                            // l'ordre d'essai (fallbacks).
+                            "commands": a.commands,
+                            "via": a.via.as_str(),
+                            "available": available,
+                            // Pourquoi indisponible : binaire(s)
+                            // cherché(s) + hint d'install — affiché
+                            // dans le dialogue nouvelle session.
+                            "unavailable": (!available).then(|| unavailable_info(k, a)),
                             // Capacités moissonnées pour le profil
                             // (agent_caps.json — modes/models/config
                             // annoncés par les sessions passées et les
@@ -151,7 +162,7 @@ impl Daemon {
         let command = self
             .agent_profile(&agent)
             .await
-            .map(|p| p.command)
+            .map(|p| effective_command(&p.commands).to_vec())
             .ok_or_else(|| anyhow::anyhow!("agent inconnu: {agent}"))?;
         let costs = self.model_costs.get(&agent, &command).await;
         Ok(json!({ "models": costs }))
@@ -169,14 +180,12 @@ impl Daemon {
             .agent_profile(&agent)
             .await
             .with_context(|| format!("agent inconnu: {agent}"))?;
-        match profile.command.first() {
-            Some(c) if command_available(c) => {}
-            other => {
-                anyhow::bail!(
-                    "commande agent introuvable : {}",
-                    other.map(String::as_str).unwrap_or("(vide)")
-                )
-            }
+        if !profile_available(&profile) {
+            anyhow::bail!(
+                "commande agent introuvable : {}",
+                searched_commands(&profile)
+                    .join(", ")
+            )
         }
         let _permit = self.caps.probe_lock().lock().await;
         let cwd = self.root.join("probe");
@@ -275,6 +284,59 @@ impl Daemon {
         }
         Ok(json!({ "models": models }))
     }
+}
+
+/// `argv[0]` des commandes candidates d'un profil, dans l'ordre
+/// d'essai — liste vide si une commande est sans argv.
+fn searched_commands(p: &AgentProfile) -> Vec<String> {
+    p.commands
+        .iter()
+        .filter_map(|c| c.first().cloned())
+        .collect()
+}
+
+/// Vrai si au moins une commande candidate du profil a un argv[0]
+/// résolvable sur le PATH — `available` de list_agents.
+pub(crate) fn profile_available(p: &AgentProfile) -> bool {
+    p.commands
+        .iter()
+        .any(|c| c.first().map(|b| command_available(b)).unwrap_or(false))
+}
+
+/// Commande effective d'un profil : la première candidate dont argv[0]
+/// résout (spawn et `available` voient le même binaire) ; aucune ne
+/// résout → la première (le spawn échouera en ENOENT explicite, comme
+/// avant les fallbacks). Liste vide → slice vide.
+pub(crate) fn effective_command(commands: &[Vec<String>]) -> &[String] {
+    effective_command_if(commands, command_available)
+}
+
+/// `effective_command` avec prédicat injectable (tests).
+fn effective_command_if(
+    commands: &[Vec<String>],
+    resolves: impl Fn(&str) -> bool,
+) -> &[String] {
+    commands
+        .iter()
+        .find(|c| c.first().map(|b| resolves(b)).unwrap_or(false))
+        .or_else(|| commands.first())
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+/// Diagnostic « pourquoi indisponible » de list_agents : les argv[0]
+/// recherchés et un hint d'install quand l'id est un adaptateur connu
+/// (registre agents_auto) — sinon un hint générique PATH.
+fn unavailable_info(id: &str, p: &AgentProfile) -> Value {
+    let searched: Vec<String> = searched_commands(p);
+    let hint = crate::server::agents_auto::install_hint_for(id)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            "vérifier que la commande est installée et accessible dans le \
+             PATH du démon (~/.local/bin, npm-global, nvm, mise…)"
+                .to_string()
+        });
+    json!({ "searched": searched, "hint": hint })
 }
 
 /// `argv[0]` d'un profil agent résolvable : binaire sur le PATH du démon
@@ -422,6 +484,44 @@ mod tests {
         let found = command_path_in("ac-test-agent-xyz", &[bin_dir.clone()]);
         let _ = std::fs::remove_dir_all(&home);
         assert_eq!(found.as_deref(), Some(bin.as_path()));
+    }
+
+    /// Fallbacks : le premier candidat dont argv[0] « résout » gagne ;
+    /// aucun → le premier (spawn → ENOENT explicite) ; liste vide → vide.
+    #[test]
+    fn effective_command_ordre_des_fallbacks() {
+        let cmds = vec![
+            vec!["absent-1".to_string()],
+            vec!["present".to_string(), "acp".to_string()],
+            vec!["aussi-present".to_string()],
+        ];
+        let eff = effective_command_if(&cmds, |b| b == "present" || b == "aussi-present");
+        assert_eq!(eff, ["present", "acp"]);
+        // Rien ne résout → le premier candidat.
+        let eff = effective_command_if(&cmds, |_| false);
+        assert_eq!(eff, ["absent-1"]);
+        // Liste vide → slice vide (pas de panic).
+        assert!(effective_command_if(&[], |_| true).is_empty());
+    }
+
+    /// `profile_available` : vrai dès qu'UNE candidate résout.
+    #[test]
+    fn profile_available_une_candidate_suffit() {
+        let mut p = crate::server::AgentProfile {
+            name: "t".into(),
+            commands: vec![vec!["nope".into()], vec!["nope2".into()]],
+            via: crate::server::AgentVia::Auto,
+            env: HashMap::new(),
+            compact: Default::default(),
+            max_instances: super::DEFAULT_MAX_INSTANCES,
+            catalogue_cmd: None,
+            model_override_cmd: None,
+            extra_models: vec![],
+            advisor_models: vec![],
+        };
+        assert!(!profile_available(&p));
+        p.commands[1] = vec!["sh".into()]; // /bin/sh ou /usr/bin/sh sur PATH
+        assert!(profile_available(&p));
     }
 
     /// argv[0] avec séparateur = chemin relatif littéral, jamais cherché

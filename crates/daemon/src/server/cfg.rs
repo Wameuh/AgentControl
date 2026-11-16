@@ -4,10 +4,39 @@
 use proto::SessionMeta;
 use std::collections::HashMap;
 
+/// Provenance d'un profil agent — exposée par list_agents (`via`) :
+/// `builtin` = preset du démon (devin, cursor), `config` = section
+/// `[agents.*]` de config.toml (prime toujours, même id), `auto` =
+/// adaptateur ACP découvert sur le PATH (agents_auto.rs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentVia {
+    #[default]
+    Builtin,
+    Config,
+    Auto,
+}
+
+impl AgentVia {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Builtin => "builtin",
+            Self::Config => "config",
+            Self::Auto => "auto",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentProfile {
     pub name: String,
-    pub command: Vec<String>,
+    /// Commandes candidates, essayées dans l'ordre : la première dont
+    /// argv[0] résout sur le PATH du démon est retenue au spawn et pour
+    /// `available` (ex. `claude-code-acp` puis `claude-agent-acp`).
+    /// Si aucune ne résout, la première est utilisée (spawn → ENOENT
+    /// explicite, comme avant).
+    pub commands: Vec<Vec<String>>,
+    /// Provenance du profil (builtin / config.toml / auto-découverte).
+    pub via: AgentVia,
     /// Templates d'env : {mode}, {model} substitués ; var omise si vide.
     pub env: HashMap<String, String>,
     /// Override du seuil de compact auto `[agents.<id>.compact]` — voir
@@ -46,6 +75,27 @@ pub struct AgentProfile {
 /// précisé dans `[agents.<id>]`.
 pub const DEFAULT_MAX_INSTANCES: u32 = 6;
 
+/// `command` d'une section `[agents.<id>]` : argv simple
+/// `command = ["bin", "arg"]` (historique) ou liste de fallbacks
+/// `command = [["bin1"], ["bin2", "arg"]]` — chaque entrée est un argv
+/// complet, le premier dont argv[0] résout sur le PATH gagne.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(untagged)]
+pub enum AgentCommand {
+    Argv(Vec<String>),
+    Fallbacks(Vec<Vec<String>>),
+}
+
+impl AgentCommand {
+    /// Toutes les commandes candidates, dans l'ordre d'essai.
+    pub fn argvs(&self) -> Vec<Vec<String>> {
+        match self {
+            Self::Argv(a) => vec![a.clone()],
+            Self::Fallbacks(v) => v.clone(),
+        }
+    }
+}
+
 /// Une section `[agents.<id>]` de config.toml — forme brute
 /// (désérialisation), convertie en `AgentProfile` par
 /// `profile_from_conf`. Définie ici (et non dans main.rs) pour être
@@ -55,7 +105,7 @@ pub const DEFAULT_MAX_INSTANCES: u32 = 6;
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AgentConf {
     pub name: Option<String>,
-    pub command: Vec<String>,
+    pub command: AgentCommand,
     #[serde(default)]
     pub env: HashMap<String, String>,
     /// Override du compact auto pour ce profil agent
@@ -106,7 +156,8 @@ pub fn agent_confs(text: &str) -> Option<HashMap<String, AgentConf>> {
 pub fn profile_from_conf(id: &str, c: AgentConf) -> AgentProfile {
     AgentProfile {
         name: c.name.unwrap_or_else(|| id.to_string()),
-        command: c.command,
+        commands: c.command.argvs(),
+        via: AgentVia::Config,
         env: c.env,
         compact: c.compact,
         max_instances: c.max_instances.unwrap_or(DEFAULT_MAX_INSTANCES),
@@ -139,8 +190,11 @@ pub(super) fn spawn_args(profile: &AgentProfile, meta: &SessionMeta) -> (Vec<Str
         meta.model.as_deref().unwrap_or(""),
         env_mode(meta.mode.as_deref().unwrap_or("")),
     );
-    let cmd = profile
-        .command
+    // Fallbacks : la première commande dont argv[0] résout est
+    // retenue ; aucune ne résout → la première (spawn → ENOENT
+    // explicite). Le repli sur le nom brut reste dans agent.rs.
+    let argv = crate::server::misc::effective_command(&profile.commands);
+    let cmd = argv
         .iter()
         .map(|a| a.replace("{model}", m).replace("{mode}", mo))
         .filter(|a| !a.is_empty())
@@ -891,7 +945,7 @@ agent = "devin"
 "#;
         let confs = agent_confs(text).unwrap();
         assert_eq!(confs.len(), 2);
-        assert_eq!(confs["claude"].command, vec!["claude-code-acp"]);
+        assert_eq!(confs["claude"].command.argvs(), vec![vec!["claude-code-acp"]]);
         assert_eq!(confs["codex"].name.as_deref(), Some("Codex"));
         assert_eq!(confs["codex"].max_instances, Some(2));
         assert_eq!(confs["codex"].env.get("FOO").map(String::as_str), Some("bar"));
@@ -901,6 +955,33 @@ agent = "devin"
             .is_empty());
         // TOML invalide → None (l'appelant conserve les profils).
         assert!(agent_confs("ceci n'est pas du toml = [").is_none());
+    }
+
+    /// `command` en fallbacks : `[[argv], [argv]]` → plusieurs
+    /// candidates dans l'ordre ; la forme plate reste un seul argv.
+    #[test]
+    fn agent_command_fallbacks() {
+        let confs = agent_confs(
+            r#"[agents.claude]
+command = [["claude-code-acp"], ["claude-agent-acp"]]
+
+[agents.devin]
+command = ["devin", "acp"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            confs["claude"].command.argvs(),
+            vec![vec!["claude-code-acp"], vec!["claude-agent-acp"]]
+        );
+        assert_eq!(
+            confs["devin"].command.argvs(),
+            vec![vec!["devin", "acp"]]
+        );
+        // profile_from_conf reporte les candidates telles quelles.
+        let p = profile_from_conf("claude", confs["claude"].clone());
+        assert_eq!(p.commands.len(), 2);
+        assert_eq!(p.via, AgentVia::Config);
     }
 
     /// `profile_from_conf` : mapping AgentConf → AgentProfile — défauts
@@ -923,7 +1004,8 @@ enabled = false
         .unwrap();
         let p = profile_from_conf("x", conf);
         assert_eq!(p.name, "Mon Agent");
-        assert_eq!(p.command, vec!["a", "b"]);
+        assert_eq!(p.commands, vec![vec!["a", "b"]]);
+        assert_eq!(p.via, AgentVia::Config);
         assert_eq!(p.max_instances, 3);
         assert_eq!(p.catalogue_cmd.as_deref(), Some("cat list"));
         assert_eq!(

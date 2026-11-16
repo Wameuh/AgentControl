@@ -57,6 +57,20 @@ spawn_max_sessions = 20
 # Agents ACP. Les placeholders {model} et {mode} sont substitués à la création
 # de session (omis si vides).
 #
+# Auto-découverte : le démon sonde le PATH à chaque list_agents /
+# daemon_status / spawn et enregistre seul les adaptateurs ACP connus
+# (claude-code-acp / claude-agent-acp, codex-acp, gemini, opencode) —
+# profils marqués `via: "auto"` dans list_agents, sans restart ni
+# déclaration. Un profil `[agents.*]` déclaré ICI prime toujours sur
+# l'auto-détection (même id → la config gagne). Quand l'outil est
+# installé mais pas l'adaptateur (ex. CLI `claude` sans claude-code-acp),
+# le profil apparaît indisponible avec le motif + le hint d'install.
+#
+# `command` accepte aussi des fallbacks : une liste de commandes
+# candidates essayées dans l'ordre, la première dont le binaire
+# (argv[0]) résout sur le PATH gagne — ex.
+#   command = [["claude-code-acp"], ["claude-agent-acp"]]
+#
 # Les sections [agents.*] sont rechargées À CHAUD : une section ajoutée ou
 # modifiée dans ce fichier est prise en compte au prochain list_agents /
 # daemon_status / spawn, sans redémarrer le démon (upsert seul — retirer
@@ -99,7 +113,13 @@ DEVIN_PERMISSION_MODE = "{mode}"
 
 # Codex CLI — pas d'ACP natif : via l'adaptateur officiel
 # `npm i -g @agentclientprotocol/codex-acp` (repo zed-industries archivé,
-# développement déplacé vers agentclientprotocol). Nécessite node sur le
+# développement déplacé vers agentclientprotocol). Le CLI `codex`
+# seul ne parle PAS ACP — installer codex sans l'adaptateur laisse le
+# profil indisponible (auto-découverte : `codex` détecté → profil
+# « Codex CLI » grisé + hint d'install). Sans déclaration, le profil
+# `codex` est de toute façon auto-enregistré dès que `codex-acp`
+# est sur le PATH — cette section ne sert qu'à surcharger
+# (name/env/max_instances…). Nécessite node sur le
 # PATH du démon (ensure_agent_path couvre les dossiers agents usuels :
 # ~/.local/bin, ~/.npm-global/bin, shims mise, cargo, nvm…).
 # CODEX_PATH doit pointer le binaire codex installé : sans lui,
@@ -112,10 +132,21 @@ command = ["codex-acp"]
 [agents.codex.env]
 CODEX_PATH = "/home/wameuh/.local/bin/codex" # adapter : chemin absolu du codex standalone
 
-# Claude — pas d'ACP natif non plus : via l'adaptateur officiel
-# `npm i -g @agentclientprotocol/claude-agent-acp` (embarque le Claude
-# Agent SDK → le CLI `claude` n'est PAS requis). Auth requise — l'une
-# des deux variables ci-dessous, ou OAuth existant dans ~/.claude :
+# Claude — pas d'ACP natif : via un adaptateur séparé. Le CLI `claude`
+# (installeur natif → ~/.local/bin/claude) ne fournit PAS l'adaptateur :
+#   - `npm i -g @zed-industries/claude-code-acp` → binaire `claude-code-acp`
+#     (celui-ci connaît `_meta.claudeCode.options` : advisorModels,
+#     extra_models Fable — voir plus bas)
+#   - `npm i -g @agentclientprotocol/claude-agent-acp` → binaire
+#     `claude-agent-acp` (embarque le Claude Agent SDK → le CLI `claude`
+#     n'est PAS requis non plus)
+# L'auto-découverte essaie les deux dans cet ordre : installer l'un des
+# deux adaptateurs fait apparaître le profil `claude` sans rien déclarer
+# ici ; `claude` seul installé → profil grisé « non installé » avec le
+# hint d'install. Déclarer [agents.claude] prime sur l'auto (ex. pour
+# fixer un seul adaptateur, ajouter des env ou des extra_models).
+# Auth requise — l'une des deux variables ci-dessous, ou OAuth existant
+# dans ~/.claude :
 #   - ANTHROPIC_API_KEY (facturation API)
 #   - CLAUDE_CODE_OAUTH_TOKEN : `npm i -g @anthropic-ai/claude-code`
 #     puis `claude setup-token` (marche en headless : URL → code).

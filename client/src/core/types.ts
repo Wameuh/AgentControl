@@ -163,7 +163,21 @@ export interface AcEvent {
 
 export interface DirEntry { name: string; dir: boolean; size: number }
 
-export type AgentOpt = { id: string; name: string; available?: boolean; caps?: AgentCaps };
+export type AgentOpt = {
+  id: string;
+  name: string;
+  available?: boolean;
+  caps?: AgentCaps;
+  /** Provenance du profil : builtin | config ([agents.*]) | auto (adaptateur ACP découvert sur le PATH). */
+  via?: string;
+  /** Commande effective (premier candidat résolu) + toutes les
+   *  candidates essayées dans l'ordre (fallbacks). */
+  command?: string[];
+  commands?: string[][];
+  /** Présent quand available === false : pourquoi indisponible —
+   *  argv[0] recherchés + hint d'install. */
+  unavailable?: { searched?: string[]; hint?: string } | null;
+};
 
 /** Coût catalogue d'un modèle (RPC model_costs) : `label` compact pour
  *  le libellé d'option (« Free », « $1/$5 »), `detail` = texte brut du

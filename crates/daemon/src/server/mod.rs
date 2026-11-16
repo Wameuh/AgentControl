@@ -7,6 +7,9 @@ mod cfg;
 /// Profils agents éditables à chaud (composant interne `agents` —
 /// params → `[agents.*]` de config.toml, hot-reload du profil).
 pub(crate) mod agents_cfg;
+/// Auto-découverte des adaptateurs ACP connus sur le PATH
+/// (`via:auto` dans list_agents — item #261).
+pub(crate) mod agents_auto;
 mod components;
 /// Watch FS de l'explorateur (auto-refresh) — cycle de vie borné à la
 /// connexion, debounce+coalesce anti-rafale, jamais journalisé.
@@ -48,7 +51,7 @@ mod prs;
 mod sessions;
 mod term;
 
-pub use cfg::{AgentConf, AgentProfile, A2aCfg, CompactCfg, CompactPartial, CompactPolicy, CompactSrc, OrchCfg, RetentionCfg, WatchdogCfg, DEFAULT_MAX_INSTANCES};
+pub use cfg::{AgentConf, AgentProfile, AgentVia, A2aCfg, CompactCfg, CompactPartial, CompactPolicy, CompactSrc, OrchCfg, RetentionCfg, WatchdogCfg, DEFAULT_MAX_INSTANCES};
 pub(crate) use orch::OrchProbe;
 
 use anyhow::{Context, Result};
@@ -663,8 +666,10 @@ impl Daemon {
         session_id: &str,
     ) -> (Vec<String>, HashMap<String, String>) {
         let (m, md) = (model.unwrap_or(""), cfg::env_mode(mode.unwrap_or("")));
-        let cmd: Vec<String> = profile
-            .command
+        // Fallbacks : premier candidat dont argv[0] résout (même
+        // sélection que `available`/spawn_effective).
+        let argv = misc::effective_command(&profile.commands);
+        let cmd: Vec<String> = argv
             .iter()
             .map(|a| a.replace("{model}", m).replace("{mode}", md))
             .filter(|a| !a.is_empty())
@@ -1656,7 +1661,8 @@ mod tests {
     fn advisor_profile(models: &[&str]) -> super::AgentProfile {
         super::AgentProfile {
             name: "T".into(),
-            command: vec![],
+            commands: vec![],
+            via: super::AgentVia::Builtin,
             env: Default::default(),
             compact: Default::default(),
             max_instances: 0,
