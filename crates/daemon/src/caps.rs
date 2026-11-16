@@ -244,8 +244,7 @@ pub(crate) fn caps_from_new_resp(resp: &Value) -> proto::AgentCaps {
 /// `probe_lock`).
 pub async fn probe(profile: &AgentProfile, cwd: &Path) -> Result<proto::AgentCaps> {
     let subst = |s: &str| s.replace("{model}", "").replace("{mode}", "");
-    let argv: Vec<String> = profile
-        .command
+    let argv: Vec<String> = crate::server::misc::effective_command(&profile.commands)
         .iter()
         .map(|a| subst(a))
         .filter(|a| !a.is_empty())

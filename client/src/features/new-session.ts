@@ -185,6 +185,17 @@ export class NewSessionDialog {
       o.value = a.id;
       o.textContent = a.name + (a.available === false ? ` (${t("agent_missing")})` : "");
       o.disabled = a.available === false;
+      // Pourquoi indisponible : binaires recherchés + hint d'install,
+      // en tooltip de l'option grisée.
+      if (a.available === false && a.unavailable) {
+        const u = a.unavailable;
+        o.title = [
+          u.searched?.length ? `${t("agent_searched")}: ${u.searched.join(", ")}` : "",
+          u.hint ?? "",
+        ]
+          .filter(Boolean)
+          .join(" — ");
+      }
       sel.appendChild(o);
     }
     if (!agents.length) this.agentPlaceholder(t("agents_failed"));

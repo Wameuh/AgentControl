@@ -193,6 +193,23 @@ lookups on spawn/attach AND periodically by `agents_rescan_boot`,
 ~60 s — `daemon_update` needs nothing extra: the replaced binary
 restarts under its supervisor and re-parses at boot).
 
+**Auto-discovered agent profiles** (`server/agents_auto.rs`, #261):
+the daemon embeds a registry of known ACP adapters (claude →
+`claude-code-acp`/`claude-agent-acp`, codex → `codex-acp`, gemini,
+opencode) and re-syncs it on every `reload_agent_profiles` call —
+an adapter installed after boot appears as a `via:"auto"` profile
+without restart or config; a declared `[agents.*]` always wins (same
+id → `via:"config"`). A profile whose tool is installed but whose
+adapter is missing (e.g. `claude` CLI without `claude-code-acp`) is
+still listed, `available:false` — `list_agents` then exposes
+`unavailable:{searched, hint}` (install hint per known adapter,
+generic PATH hint otherwise) shown as a tooltip in the new-session
+dialog. `command` accepts ordered fallbacks:
+`command = [["bin1"], ["bin2", "arg"]]` — `AgentProfile.commands` is
+the candidate list, `misc::effective_command` picks the first whose
+argv[0] resolves (used by spawn, `available`, caps probe, costs,
+catalogue); `via` is `builtin`/`config`/`auto`.
+
 **Agent profile per role** (`backlog_orchestrator` params, hot-settable
 via `acctl comp set`, dropdown of the declared `[agents.*]` profiles in
 the config UI): `worker_agent` (`Backlog-W*`), `planner_agent`

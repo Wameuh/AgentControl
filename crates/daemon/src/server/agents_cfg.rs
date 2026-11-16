@@ -49,7 +49,8 @@ pub(crate) fn default_agents() -> HashMap<String, AgentProfile> {
         "devin".into(),
         AgentProfile {
             name: "Devin CLI".into(),
-            command: vec!["devin".into(), "acp".into()],
+            commands: vec![vec!["devin".into(), "acp".into()]],
+            via: super::AgentVia::Builtin,
             env: devin_env,
             compact: CompactPartial::default(),
             max_instances: DEFAULT_MAX_INSTANCES,
@@ -78,7 +79,8 @@ pub(crate) fn default_agents() -> HashMap<String, AgentProfile> {
         "cursor".into(),
         AgentProfile {
             name: "Cursor CLI".into(),
-            command: vec![cursor_bin, "acp".into()],
+            commands: vec![vec![cursor_bin, "acp".into()]],
+            via: super::AgentVia::Builtin,
             env: HashMap::new(),
             compact: CompactPartial::default(),
             max_instances: DEFAULT_MAX_INSTANCES,
@@ -102,6 +104,21 @@ pub(crate) fn merged_agent_profiles(
     for (id, c) in confs {
         agents.insert(id.clone(), profile_from_conf(&id, c));
     }
+    agents
+}
+
+/// Merge complet + auto-découverte PATH (agents_auto.rs) — l'état
+/// effectif des profils, partagé par le boot (main.rs) et le
+/// hot-reload : les `via:auto` détectés rejoignent built-ins +
+/// `[agents.*]`, et un id déclaré en config n'est jamais remplacé
+/// par l'auto (via:config dans le merge, sync = no-op dessus).
+pub(crate) fn full_agent_profiles(
+    confs: HashMap<String, AgentConf>,
+) -> HashMap<String, AgentProfile> {
+    let mut agents = merged_agent_profiles(confs);
+    super::agents_auto::sync_auto_agents(&mut agents, &|b| {
+        super::misc::command_available(b)
+    });
     agents
 }
 
@@ -167,7 +184,15 @@ pub(crate) fn params_values(
 ) -> HashMap<String, String> {
     agents
         .iter()
-        .map(|(id, p)| (id.clone(), p.command.join(",")))
+        .map(|(id, p)| {
+            // La commande affichée/éditée = celle qui tournerait
+            // (premier candidat résolu, sinon le premier) — les
+            // fallbacks restent un réglage config.toml-only.
+            (
+                id.clone(),
+                super::misc::effective_command(&p.commands).join(","),
+            )
+        })
         .collect()
 }
 
@@ -196,7 +221,12 @@ pub(crate) fn apply_edits(
             "« {id} » : commande vide — au moins un argument requis"
         );
         let mut next = profile.clone();
-        next.command = argv;
+        // L'édition remplace TOUTES les commandes candidates par
+        // l'argv saisi — les fallbacks se règlent dans config.toml
+        // (`command = [[…], […]]`), pas par ce formulaire.
+        next.commands = vec![argv];
+        // Persisté en [agents.<id>] → provenance config.
+        next.via = super::AgentVia::Config;
         edits.push((id.clone(), next));
     }
     edits.sort_by(|a, b| a.0.cmp(&b.0));
@@ -210,7 +240,11 @@ pub(crate) fn apply_edits(
 #[derive(Serialize)]
 struct AgentToml<'a> {
     name: &'a str,
-    command: &'a [String],
+    /// `command` : argv simple si une seule candidate, liste de
+    /// fallbacks `[[…], […]]` sinon — mêmes deux formes qu'en lecture
+    /// (AgentCommand non tagué).
+    #[serde(serialize_with = "serialize_commands")]
+    command: &'a [Vec<String>],
     #[serde(skip_serializing_if = "Option::is_none")]
     max_instances: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -225,6 +259,19 @@ struct AgentToml<'a> {
     compact: &'a super::cfg::CompactPartial,
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     env: &'a HashMap<String, String>,
+}
+
+/// Sérialise `commands` dans la forme lue par AgentCommand : une seule
+/// candidate → `command = ["a", "b"]` ; plusieurs → `command = [[…],…]`.
+fn serialize_commands<S: serde::Serializer>(
+    commands: &[Vec<String>],
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    use serde::Serialize;
+    match commands {
+        [one] => one.serialize(s),
+        many => many.serialize(s),
+    }
 }
 
 /// Réécrit `[agents.<id>]` pour chaque édit en UNE passe toml_edit +
@@ -255,7 +302,7 @@ pub(crate) fn persist(root: &Path, edits: &[(String, AgentProfile)]) -> Result<(
     for (id, p) in edits {
         let view = AgentToml {
             name: &p.name,
-            command: &p.command,
+            command: &p.commands,
             // max_instances : omis quand c'est le défaut — la valeur
             // effective est identique, la config reste épurée.
             max_instances: (p.max_instances != super::DEFAULT_MAX_INSTANCES)
@@ -305,6 +352,24 @@ impl Daemon {
     /// est idempotent : il persiste PUIS hot-applique le même profil
     /// → merge identique → diff vide, aucun log.
     pub async fn reload_agent_profiles(&self) {
+        // Auto-découverte d'abord, HORS estampille : un adaptateur ACP
+        // installé sur le PATH doit apparaître même quand config.toml
+        // n'a pas changé (le re-scan périodique #260 tombe ici). Le
+        // merge ci-dessous repasse par full_agent_profiles → les
+        // via:auto sont préservés/recalculés de la même façon.
+        {
+            let mut agents = self.agents.write().await;
+            let (added, removed) =
+                super::agents_auto::sync_auto_agents(&mut agents, &|b| {
+                    super::misc::command_available(b)
+                });
+            for id in added {
+                tracing::info!("profil agent « {id} » auto-découvert (adaptateur ACP sur le PATH)");
+            }
+            for id in removed {
+                tracing::info!("profil agent « {id} » auto-découvert retiré (adaptateur disparu du PATH)");
+            }
+        }
         let path = self.root.join("config.toml");
         let Ok(meta) = std::fs::metadata(&path) else {
             return;
@@ -332,7 +397,7 @@ impl Daemon {
             tracing::warn!("config.toml illisible — hot-reload [agents.*] ignoré");
             return;
         };
-        let merged = merged_agent_profiles(confs);
+        let merged = full_agent_profiles(confs);
         let mut agents = self.agents.write().await;
         // Re-validation de l'estampille SOUS le write-lock : un
         // `comp set` (persist + hot-apply sous ce même lock) a pu
@@ -414,7 +479,8 @@ mod tests {
     fn profile(command: &[&str]) -> AgentProfile {
         AgentProfile {
             name: "Test".into(),
-            command: command.iter().map(|s| s.to_string()).collect(),
+            commands: vec![command.iter().map(|s| s.to_string()).collect()],
+            via: super::super::AgentVia::Builtin,
             env: HashMap::new(),
             compact: Default::default(),
             max_instances: super::super::DEFAULT_MAX_INSTANCES,
@@ -432,9 +498,12 @@ mod tests {
         let params = HashMap::from([("cursor".to_string(), "agent,acp".to_string())]);
         let edits = apply_edits(&agents, &params).unwrap();
         assert_eq!(edits.len(), 1);
-        assert_eq!(edits[0].1.command, vec!["agent", "acp"]);
+        assert_eq!(edits[0].1.commands, vec![vec!["agent", "acp"]]);
         // L'original n'est pas muté.
-        assert_eq!(agents["cursor"].command, vec!["cursor-agent", "acp"]);
+        assert_eq!(
+            agents["cursor"].commands,
+            vec![vec!["cursor-agent", "acp"]]
+        );
     }
 
     #[test]
@@ -481,7 +550,9 @@ mod tests {
     fn conf(command: &[&str]) -> AgentConf {
         AgentConf {
             name: None,
-            command: command.iter().map(|s| s.to_string()).collect(),
+            command: super::super::cfg::AgentCommand::Argv(
+                command.iter().map(|s| s.to_string()).collect(),
+            ),
             env: HashMap::new(),
             compact: Default::default(),
             max_instances: None,
@@ -505,14 +576,23 @@ mod tests {
         let m = merged_agent_profiles(confs);
         assert!(m.contains_key("devin"));
         // Override : la section remplace le built-in entier.
-        assert_eq!(m["cursor"].command, vec!["my-cursor", "acp"]);
-        assert_eq!(m["codex"].command, vec!["codex-acp"]);
+        assert_eq!(
+            m["cursor"].commands,
+            vec![vec!["my-cursor".to_string(), "acp".to_string()]]
+        );
+        assert_eq!(m["codex"].commands, vec![vec!["codex-acp".to_string()]]);
         // Section retirée de la config → le custom disparaît, le
         // built-in revient à sa définition d'origine.
         let m2 = merged_agent_profiles(HashMap::new());
         assert!(!m2.contains_key("codex"));
-        assert_ne!(m2["cursor"].command, vec!["my-cursor", "acp"]);
-        assert_eq!(m2["cursor"].command.last().map(String::as_str), Some("acp"));
+        assert_ne!(
+            m2["cursor"].commands,
+            vec![vec!["my-cursor".to_string(), "acp".to_string()]]
+        );
+        assert_eq!(
+            m2["cursor"].commands.last().unwrap().last().map(String::as_str),
+            Some("acp")
+        );
     }
 
     /// Une ligne de log par changement : ajout, retrait, modification.
@@ -523,7 +603,7 @@ mod tests {
         old.insert("b".to_string(), profile(&["b"]));
         let mut new = old.clone();
         new.insert("c".to_string(), profile(&["c"]));
-        new.get_mut("b").unwrap().command = vec!["b2".to_string()];
+        new.get_mut("b").unwrap().commands = vec![vec!["b2".to_string()]];
         new.remove("a");
         let lines = diff_agent_maps(&old, &new);
         assert_eq!(lines.len(), 3, "{lines:?}");
@@ -544,10 +624,33 @@ mod tests {
         let mut p = profile(&["agent", "acp"]);
         p.name = "Cursor CLI".into();
         p.env.insert("FOO".into(), "bar".into());
+        // Persisté en [agents.*] → relu via:config.
+        p.via = super::super::AgentVia::Config;
         persist(&dir, &[("cursor".to_string(), p.clone())]).unwrap();
         let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
         let merged = merged_agent_profiles(agent_confs(&text).unwrap());
         assert_eq!(merged["cursor"], p);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Un profil multi-commandes (fallbacks) est persisté en
+    /// `command = [[…], […]]` et relu tel quel par AgentConf.
+    #[test]
+    fn persist_command_fallbacks() {
+        let dir = std::env::temp_dir().join(format!("ac-agents-fb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut p = profile(&["claude-code-acp"]);
+        p.commands.push(vec!["claude-agent-acp".to_string()]);
+        persist(&dir, &[("claude".to_string(), p)]).unwrap();
+        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        assert!(text.contains("[[\"claude-code-acp\"], [\"claude-agent-acp\"]]")
+            || text.contains("[[ \"claude-code-acp\" ], [ \"claude-agent-acp\" ]]"));
+        // Relisible : AgentConf::command → deux candidates dans l'ordre.
+        let conf = agent_confs(&text).unwrap();
+        assert_eq!(
+            conf["claude"].command.argvs(),
+            vec![vec!["claude-code-acp"], vec!["claude-agent-acp"]]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

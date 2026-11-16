@@ -381,6 +381,7 @@ export const en = {
   session_gone: "session deleted on the server",
   peer_from: "from", peer_to: "to",
   agent_missing: "not installed",
+  agent_searched: "looked for",
   um_expand: "Show more", um_collapse: "Show less",
   win_min: "Minimize", win_max: "Maximize",
   search_title: "Search in history",

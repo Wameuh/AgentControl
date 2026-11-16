@@ -384,6 +384,7 @@ export const de: Record<Key, string> = {
   session_gone: "Sitzung auf dem Server gelöscht",
   peer_from: "von", peer_to: "an",
   agent_missing: "nicht installiert",
+  agent_searched: "gesucht",
   um_expand: "Mehr anzeigen", um_collapse: "Weniger anzeigen",
   win_min: "Minimieren", win_max: "Maximieren",
   search_title: "Im Verlauf suchen",

@@ -249,8 +249,7 @@ impl Daemon {
                     .get(&meta.agent)
                     .with_context(|| format!("agent inconnu: {}", meta.agent))?
                     .clone();
-                let bin = profile
-                    .command
+                let bin = crate::server::misc::effective_command(&profile.commands)
                     .first()
                     .cloned()
                     .context("commande agent vide")?;

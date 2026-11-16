@@ -294,9 +294,9 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     let bind_http = cli.bind_http.or(cfg.bind_http.clone());
     let web_dir_cfg = cli.web_dir.or(cfg.web_dir.clone());
 
-    // Built-ins + sections `[agents.*]` de config.toml — merge unique
-    // partagé avec le hot-reload (agents_cfg.rs).
-    let agents = server::agents_cfg::merged_agent_profiles(cfg.agents);
+    // Merge built-ins + [agents.*] + auto-découverte PATH — la même
+    // fonction que le hot-reload (agents_cfg.rs).
+    let agents = server::agents_cfg::full_agent_profiles(cfg.agents);
 
     let (daemon, resumable) = Daemon::open(
         root.to_path_buf(),
