@@ -48,7 +48,7 @@ mod prs;
 mod sessions;
 mod term;
 
-pub use cfg::{agent_confs, profile_from_conf, AgentConf, AgentProfile, A2aCfg, CompactCfg, CompactPartial, CompactPolicy, CompactSrc, OrchCfg, RetentionCfg, WatchdogCfg, DEFAULT_MAX_INSTANCES};
+pub use cfg::{AgentConf, AgentProfile, A2aCfg, CompactCfg, CompactPartial, CompactPolicy, CompactSrc, OrchCfg, RetentionCfg, WatchdogCfg, DEFAULT_MAX_INSTANCES};
 pub(crate) use orch::OrchProbe;
 
 use anyhow::{Context, Result};
@@ -168,7 +168,9 @@ pub struct Daemon {
     /// composant interne `agents` réécrit `[agents.*]` de config.toml
     /// puis remplace les profils en place (agents_cfg.rs), et les
     /// sections `[agents.*]` éditées à la main sont rechargées par
-    /// `reload_agent_profiles` (stamp mtime+taille — upsert seul).
+    /// `reload_agent_profiles` (stamp mtime+taille — merge complet
+    /// built-ins + sections : ajout, modification ET retrait, comme
+    /// au boot) + re-scan périodique `agents_rescan_boot`.
     /// Les lectures passent par `.read().await`.
     pub agents: Arc<RwLock<HashMap<String, AgentProfile>>>,
     /// Estampille (mtime, taille) du config.toml au dernier hot-reload
@@ -287,9 +289,9 @@ impl Daemon {
         let pr_verify = Arc::new(prs::PrVerifier::new(Arc::clone(&prs), move |t| {
             forgesync::verify_ref(&forge_set, t)
         }));
-        let agent_ids: Vec<String> = agents.keys().cloned().collect();
         // Profils partagés avec Components (params du composant interne
-        // `agents`) — mutabilité à chaud voir agents_cfg.rs.
+        // `agents` + dropdowns `*_agent` de l'orchestrateur — lus à
+        // live) — mutabilité à chaud voir agents_cfg.rs.
         let agents = Arc::new(RwLock::new(agents));
         let d = Arc::new(Self {
             root: root.clone(),
@@ -303,7 +305,6 @@ impl Daemon {
                 a2a.enabled,
                 Arc::clone(&web),
                 Arc::clone(&orch),
-                agent_ids,
                 Arc::clone(&agents),
             ),
             orch,

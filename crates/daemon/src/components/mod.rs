@@ -121,11 +121,10 @@ pub struct Components {
     /// Orchestrateur backlog natif — l'état du composant interne
     /// `backlog-orchestrator` suit sa phase (server/orch.rs).
     orch: Arc<OrchProbe>,
-    /// Ids des profils `[agents.*]` déclarés — alimente les dropdowns
-    /// `*_agent` du schéma orchestrateur.
-    agent_ids: Vec<String>,
     /// Profils agents vivants (partagé avec `Daemon.agents`) — alimente
-    /// le schéma/valeurs du composant interne `agents`.
+    /// le schéma/valeurs du composant interne `agents` ET les dropdowns
+    /// `*_agent` du schéma orchestrateur (lus à live : un profil
+    /// `[agents.*]` ajouté à chaud y apparaît sans restart).
     agents: Arc<RwLock<HashMap<String, crate::server::AgentProfile>>>,
     /// Cache des sondes upstream du catalogue (tag+notes par repo,
     /// TTL ~5 min) — voir catalog.rs. Mutex std : sections courtes
@@ -147,7 +146,6 @@ impl Components {
         a2a_enabled: bool,
         web: Arc<RwLock<Option<Value>>>,
         orch: Arc<OrchProbe>,
-        agent_ids: Vec<String>,
         agents: Arc<RwLock<HashMap<String, crate::server::AgentProfile>>>,
     ) -> Arc<Self> {
         let dir = root.join("components");
@@ -196,7 +194,6 @@ impl Components {
             web,
             down: Arc::new(AtomicBool::new(false)),
             orch,
-            agent_ids,
             agents,
             upstream: Mutex::new(HashMap::new()),
             view_tokens: Mutex::new(HashMap::new()),
@@ -302,6 +299,15 @@ impl Components {
             // couvrent chaque profil routé par rôle.
             let role_agents = cfg.role_agents();
             let dyn_ = crate::server::orch_cfg::dyn_choices_multi(&self.root, &role_agents);
+            // Ids des profils vivants, triés — lus dans la map partagée
+            // (hot-reload des `[agents.*]` inclus) : un profil déclaré
+            // à chaud est proposable dans les dropdowns `*_agent`.
+            let agent_ids = {
+                let agents = self.agents.read().await;
+                let mut v: Vec<String> = agents.keys().cloned().collect();
+                v.sort();
+                v
+            };
             let spec = ComponentSpec {
                 name: name.to_string(),
                 kind: ComponentKind::Internal,
@@ -317,7 +323,7 @@ impl Components {
                 description: Some(i.description.to_string()),
                 queries: HashMap::new(),
                 catalog: None,
-                params_schema: crate::server::orch_cfg::params_schema(&dyn_, &self.agent_ids),
+                params_schema: crate::server::orch_cfg::params_schema(&dyn_, &agent_ids),
                 params: crate::server::orch_cfg::params_values(&cfg),
                 render: None,
                 view_dir: None,

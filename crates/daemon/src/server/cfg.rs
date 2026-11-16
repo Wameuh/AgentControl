@@ -4,7 +4,7 @@
 use proto::SessionMeta;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AgentProfile {
     pub name: String,
     pub command: Vec<String>,
@@ -649,7 +649,7 @@ impl Default for CompactCfg {
 /// le niveau inférieur (session > agent > global) ; tout None = hérité
 /// intégral ; `0` (ou hors borne pour le %) = règle retirée — un
 /// override peut donc « décocher » un seuil hérité.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CompactPartial {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,

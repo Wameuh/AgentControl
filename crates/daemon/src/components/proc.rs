@@ -977,7 +977,6 @@ mod tests {
             Arc::new(crate::server::OrchProbe::open(
                 crate::server::OrchCfg::default(),
             )),
-            Vec::new(),
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         );
         let absent = tool_spec(&["ac-tool-inexistant-xyz"]);
@@ -1013,7 +1012,6 @@ mod tests {
             Arc::new(crate::server::OrchProbe::open(
                 crate::server::OrchCfg::default(),
             )),
-            Vec::new(),
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         );
         let mut spec = tool_spec(&["sh", "-c", "echo 0.2.0"]);
@@ -1051,7 +1049,6 @@ mod tests {
             Arc::new(crate::server::OrchProbe::open(
                 crate::server::OrchCfg::default(),
             )),
-            Vec::new(),
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         );
         c.upsert("t", tool_spec(&["sh"])).await.unwrap();

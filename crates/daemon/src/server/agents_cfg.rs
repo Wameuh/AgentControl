@@ -15,7 +15,10 @@
 //! document (autres sections, commentaires) ; écriture atomique
 //! `.part` + rename comme `orch_cfg::persist`.
 
-use super::cfg::AgentProfile;
+use super::cfg::{
+    agent_confs, profile_from_conf, AgentConf, AgentProfile, CompactPartial,
+    DEFAULT_MAX_INSTANCES,
+};
 use super::Daemon;
 use anyhow::{Context, Result};
 use proto::{ParamKind, ParamSpec};
@@ -27,6 +30,103 @@ use std::sync::Arc;
 
 /// Nom du composant interne exposant les profils agents.
 pub(crate) const COMPONENT_NAME: &str = "agents";
+
+/// Période du re-scan de config.toml (`agents_rescan_boot`) — un `stat`
+/// par période tant que le fichier n'a pas changé (l'estampille de
+/// `reload_agent_profiles` rend l'appel quasi-gratuit).
+const RESCAN_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Profils built-in du démon — `devin` et `cursor` sont toujours
+/// présents ; une section `[agents.<id>]` de config.toml les remplace
+/// ENTIÈRE (override complet, pas de merge par champ). Partagé par le
+/// boot (main.rs) et le hot-reload : un profil construit ici est
+/// identique à celui d'un restart.
+pub(crate) fn default_agents() -> HashMap<String, AgentProfile> {
+    let mut m = HashMap::new();
+    let mut devin_env = HashMap::new();
+    devin_env.insert("DEVIN_PERMISSION_MODE".to_string(), "{mode}".to_string());
+    m.insert(
+        "devin".into(),
+        AgentProfile {
+            name: "Devin CLI".into(),
+            command: vec!["devin".into(), "acp".into()],
+            env: devin_env,
+            compact: CompactPartial::default(),
+            max_instances: DEFAULT_MAX_INSTANCES,
+            catalogue_cmd: None,
+            model_override_cmd: None,
+            extra_models: Vec::new(),
+            advisor_models: Vec::new(),
+        },
+    );
+    // Cursor CLI — ACP natif (`agent acp` / `cursor-agent acp`, même
+    // binaire : `agent` est un alias d'install). argv[0] est résolu en
+    // chemin absolu quand c'est possible : `agent` est un nom
+    // générique (collision possible) — la résolution fige le binaire
+    // concret trouvé, et `available`/spawn le re-résolvent à chaud via
+    // `command_path` (un Cursor installé APRÈS le boot reste
+    // `available` grâce au repli nu « cursor-agent » + PATH élargi).
+    // La commande reste surchargeable : `[agents.cursor]` dans
+    // config.toml ou le composant interne `agents` (options →
+    // composants).
+    let cursor_bin = ["cursor-agent", "agent"]
+        .iter()
+        .find_map(|c| super::misc::command_path(c))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "cursor-agent".into());
+    m.insert(
+        "cursor".into(),
+        AgentProfile {
+            name: "Cursor CLI".into(),
+            command: vec![cursor_bin, "acp".into()],
+            env: HashMap::new(),
+            compact: CompactPartial::default(),
+            max_instances: DEFAULT_MAX_INSTANCES,
+            catalogue_cmd: None,
+            model_override_cmd: None,
+            extra_models: Vec::new(),
+            advisor_models: Vec::new(),
+        },
+    );
+    m
+}
+
+/// Built-ins + sections `[agents.*]` → map de profils effective : la
+/// sémantique unique du boot et du hot-reload — chaque section upserte
+/// son profil et un id présent ni dans les built-ins ni dans la config
+/// disparaît (retrait à chaud, comme au prochain boot).
+pub(crate) fn merged_agent_profiles(
+    confs: HashMap<String, AgentConf>,
+) -> HashMap<String, AgentProfile> {
+    let mut agents = default_agents();
+    for (id, c) in confs {
+        agents.insert(id.clone(), profile_from_conf(&id, c));
+    }
+    agents
+}
+
+/// Diff old→new pour le log du hot-reload : une ligne par profil
+/// ajouté / retiré / modifié (ids triés — sortie stable).
+fn diff_agent_maps(
+    old: &HashMap<String, AgentProfile>,
+    new: &HashMap<String, AgentProfile>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for (id, p) in new {
+        match old.get(id) {
+            None => out.push(format!("profil agent « {id} » ajouté")),
+            Some(o) if o != p => out.push(format!("profil agent « {id} » mis à jour")),
+            _ => {}
+        }
+    }
+    for id in old.keys() {
+        if !new.contains_key(id) {
+            out.push(format!("profil agent « {id} » retiré"));
+        }
+    }
+    out.sort();
+    out
+}
 
 /// Schéma déclaratif : un param `list` par profil, clé = id du profil,
 /// valeur courante = argv joint en CSV (préremplit le formulaire).
@@ -176,40 +276,34 @@ pub(crate) fn persist(root: &Path, edits: &[(String, AgentProfile)]) -> Result<(
     super::orch_cfg::commit_config(root, &path, doc.to_string(), perms)
 }
 
-/// Upsert des profils parsés dans la table vivante — chaque section
-/// `[agents.<id>]` remplace (ou crée) son profil, comme au boot ;
-/// retourne les ids nouvellement ajoutés (pour le log). Pur → testable.
-fn upsert_agent_confs(
-    agents: &mut HashMap<String, AgentProfile>,
-    confs: HashMap<String, crate::server::AgentConf>,
-) -> Vec<String> {
-    let mut added = Vec::new();
-    for (id, conf) in confs {
-        if !agents.contains_key(&id) {
-            added.push(id.clone());
-        }
-        agents.insert(id.clone(), crate::server::profile_from_conf(&id, conf));
-    }
-    added.sort();
-    added
-}
-
 impl Daemon {
-    /// Re-lit `[agents.*]` de config.toml et fusionne dans la table
-    /// vivante — les profils déclarés APRÈS le boot (section ajoutée à
-    /// la main, config régénérée) deviennent utilisables sans restart
-    /// du démon. Sémantique identique au boot : chaque section
-    /// `[agents.<id>]` upserte son profil (override d'un built-in ou
-    /// nouveau profil custom) ; rien n'est retiré — supprimer une
-    /// section ne démonte pas le profil à chaud (comme un built-in,
-    /// il reste jusqu'au prochain boot). Le retrait resterait ambigu
-    /// de toute façon : `[agents.devin]` est à la fois override et
-    /// déclaration.
+    /// Re-scan périodique des `[agents.*]` de config.toml — garantit la
+    /// convergence même sans appel client (list_agents/daemon_status/
+    /// agent_profile rechargent déjà à la demande). `daemon_update`
+    /// n'a pas besoin de voie dédiée : le binaire remplacé redémarre
+    /// sous son superviseur → re-parse complet au boot.
+    pub(crate) fn agents_rescan_boot(self: &Arc<Self>) {
+        let d = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(RESCAN_EVERY).await;
+                d.reload_agent_profiles().await;
+            }
+        });
+    }
+
+    /// Re-lit `[agents.*]` de config.toml et REMPLACE la table vivante
+    /// par le merge built-ins + sections — un profil déclaré, modifié
+    /// ou supprimé APRÈS le boot converge vers l'état qu'aurait un
+    /// restart, sans restart (item #260). Appelé à la demande
+    /// (list_agents/daemon_status/agent_profile) et périodiquement par
+    /// `agents_rescan_boot`.
     ///
-    /// Estampille (mtime, taille) : fichier inchangé → no-op, appelé
-    /// sans crainte depuis list_agents/daemon_status et les lookups
-    /// à la demande. Config absente/illisible/TOML invalide → les
-    /// profils chargés sont conservés (jamais de table vidée à chaud).
+    /// Estampille (mtime, taille) : fichier inchangé → no-op. Config
+    /// absente/illisible/TOML invalide → les profils chargés sont
+    /// conservés (jamais de table vidée à chaud). `comp set agents`
+    /// est idempotent : il persiste PUIS hot-applique le même profil
+    /// → merge identique → diff vide, aucun log.
     pub async fn reload_agent_profiles(&self) {
         let path = self.root.join("config.toml");
         let Ok(meta) = std::fs::metadata(&path) else {
@@ -234,22 +328,36 @@ impl Daemon {
         let Ok(text) = std::fs::read_to_string(&path) else {
             return;
         };
-        let Some(confs) = crate::server::agent_confs(&text) else {
+        let Some(confs) = agent_confs(&text) else {
             tracing::warn!("config.toml illisible — hot-reload [agents.*] ignoré");
             return;
         };
-        let added = {
-            let mut agents = self.agents.write().await;
-            upsert_agent_confs(&mut agents, confs)
-        };
-        for id in added {
-            tracing::info!("profil agent « {id} » chargé à chaud depuis config.toml");
+        let merged = merged_agent_profiles(confs);
+        let mut agents = self.agents.write().await;
+        // Re-validation de l'estampille SOUS le write-lock : un
+        // `comp set` (persist + hot-apply sous ce même lock) a pu
+        // commiter entre notre stat initial et l'acquisition — notre
+        // parse serait périmé et le replace annulerait son hot-apply.
+        // Abandon : l'estampille stockée est plus vieille que le
+        // fichier → le prochain appel relit la version fraîche.
+        let fresh = std::fs::metadata(&path)
+            .ok()
+            .and_then(|m| m.modified().ok().map(|t| (t, m.len())));
+        if fresh != Some(stamp) {
+            return;
         }
+        if *agents == merged {
+            return;
+        }
+        for line in diff_agent_maps(&agents, &merged) {
+            tracing::info!("agents: {line}");
+        }
+        *agents = merged;
     }
 
     /// Profil par id avec rattrapage hot-reload : un `[agents.*]`
-    /// ajouté OU MODIFIÉ dans config.toml après le boot est pris en
-    /// compte au premier usage — sans ça un `new_session`/`spawn`
+    /// ajouté, MODIFIÉ ou retiré de config.toml après le boot est pris
+    /// en compte au premier usage — sans ça un `new_session`/`spawn`
     /// direct sur une commande éditée gardait l'ancien profil alors
     /// que list_agents (qui recharge) affichait déjà le nouveau. Le
     /// reload est quasi-gratuit fichier inchangé (un metadata()).
@@ -370,49 +478,77 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Hot-reload : un id nouveau est upserté ET rapporté « ajouté » ;
-    /// un id existant est remplacé sans être rapporté (override d'un
-    /// built-in = même sémantique qu'au boot).
+    fn conf(command: &[&str]) -> AgentConf {
+        AgentConf {
+            name: None,
+            command: command.iter().map(|s| s.to_string()).collect(),
+            env: HashMap::new(),
+            compact: Default::default(),
+            max_instances: None,
+            catalogue_cmd: None,
+            model_override_cmd: None,
+            extra_models: Vec::new(),
+            advisor_models: Vec::new(),
+        }
+    }
+
+    /// Merge hot-reload : built-ins toujours présents, une section
+    /// `[agents.*]` upserte son profil (override d'un built-in ou
+    /// nouveau custom) et un id absent des deux sources disparaît —
+    /// le résultat est exactement ce qu'aurait un boot.
     #[test]
-    fn upsert_agent_confs_ajoute_et_reecrit() {
-        let mut agents = HashMap::new();
-        agents.insert("devin".to_string(), profile(&["devin", "acp"]));
+    fn merged_agent_profiles_reflete_la_config() {
         let confs = HashMap::from([
-            (
-                "codex".to_string(),
-                crate::server::AgentConf {
-                    name: None,
-                    command: vec!["codex-acp".to_string()],
-                    env: HashMap::new(),
-                    compact: Default::default(),
-                    max_instances: None,
-                    catalogue_cmd: None,
-                    model_override_cmd: None,
-                    extra_models: Vec::new(),
-                    advisor_models: Vec::new(),
-                },
-            ),
-            (
-                "devin".to_string(),
-                crate::server::AgentConf {
-                    name: Some("Devin".into()),
-                    command: vec!["devin".to_string(), "acp".to_string(), "--new".to_string()],
-                    env: HashMap::new(),
-                    compact: Default::default(),
-                    max_instances: None,
-                    catalogue_cmd: None,
-                    model_override_cmd: None,
-                    extra_models: Vec::new(),
-                    advisor_models: Vec::new(),
-                },
-            ),
+            ("cursor".to_string(), conf(&["my-cursor", "acp"])),
+            ("codex".to_string(), conf(&["codex-acp"])),
         ]);
-        let added = upsert_agent_confs(&mut agents, confs);
-        assert_eq!(added, vec!["codex".to_string()]);
-        assert_eq!(agents["codex"].command, vec!["codex-acp"]);
-        // Override : la commande est remplacée, le nom vient de la conf.
-        assert_eq!(agents["devin"].command, vec!["devin", "acp", "--new"]);
-        assert_eq!(agents["devin"].name, "Devin");
+        let m = merged_agent_profiles(confs);
+        assert!(m.contains_key("devin"));
+        // Override : la section remplace le built-in entier.
+        assert_eq!(m["cursor"].command, vec!["my-cursor", "acp"]);
+        assert_eq!(m["codex"].command, vec!["codex-acp"]);
+        // Section retirée de la config → le custom disparaît, le
+        // built-in revient à sa définition d'origine.
+        let m2 = merged_agent_profiles(HashMap::new());
+        assert!(!m2.contains_key("codex"));
+        assert_ne!(m2["cursor"].command, vec!["my-cursor", "acp"]);
+        assert_eq!(m2["cursor"].command.last().map(String::as_str), Some("acp"));
+    }
+
+    /// Une ligne de log par changement : ajout, retrait, modification.
+    #[test]
+    fn diff_agent_maps_une_ligne_par_changement() {
+        let mut old = HashMap::new();
+        old.insert("a".to_string(), profile(&["a"]));
+        old.insert("b".to_string(), profile(&["b"]));
+        let mut new = old.clone();
+        new.insert("c".to_string(), profile(&["c"]));
+        new.get_mut("b").unwrap().command = vec!["b2".to_string()];
+        new.remove("a");
+        let lines = diff_agent_maps(&old, &new);
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("« a » retiré")));
+        assert!(lines.iter().any(|l| l.contains("« b » mis à jour")));
+        assert!(lines.iter().any(|l| l.contains("« c » ajouté")));
+        // Identique → silencieux.
+        assert!(diff_agent_maps(&old, &old).is_empty());
+    }
+
+    /// `comp set` persiste la section PUIS hot-applique : le profil
+    /// relu via agent_confs + profile_from_conf doit être IDENTIQUE —
+    /// sinon chaque set déclencherait un replace + log au reload.
+    #[test]
+    fn persist_puis_merged_est_idempotent() {
+        let dir = std::env::temp_dir().join(format!("ac-agents-idem-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut p = profile(&["agent", "acp"]);
+        p.name = "Cursor CLI".into();
+        p.env.insert("FOO".into(), "bar".into());
+        persist(&dir, &[("cursor".to_string(), p.clone())]).unwrap();
+        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        let merged = merged_agent_profiles(agent_confs(&text).unwrap());
+        assert_eq!(merged["cursor"], p);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
