@@ -116,6 +116,12 @@ const SHAPES: Record<string, string> = {
     '<path d="M8.5 6h12M8.5 12h12M8.5 18h12"/>' +
     '<path d="m3 5.9 1.2 1.2 2.3-2.4"/><path d="m3 11.9 1.2 1.2 2.3-2.4"/>' +
     '<path d="m3 17.9 1.2 1.2 2.3-2.4"/>',
+  // Liste d'étapes de tâche (cases + traits — progression agent)
+  steps:
+    '<rect x="4" y="4.5" width="3.2" height="3.2" rx="0.8"/>' +
+    '<rect x="4" y="10.4" width="3.2" height="3.2" rx="0.8"/>' +
+    '<rect x="4" y="16.3" width="3.2" height="3.2" rx="0.8"/>' +
+    '<path d="M10.5 6h9.5M10.5 12h9.5M10.5 18h9.5"/>',
   // Panneau logs live (journaux client + démon)
   scroll:
     '<path d="M6 3.5h12A1.5 1.5 0 0 1 19.5 5v15.5l-3-2-3.5 2-3.5-2-3 2V5A1.5 1.5 0 0 1 6 3.5Z"/>' +

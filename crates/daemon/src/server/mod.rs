@@ -922,6 +922,9 @@ impl Daemon {
             ReqKind::SetAdvisor { session, advisor } => {
                 self.h_set_advisor(session, advisor).await
             }
+            ReqKind::SessionSetSteps { session, steps } => {
+                self.h_session_set_steps(session, steps).await
+            }
             ReqKind::SetConfigOption {
                 session,
                 config_id,

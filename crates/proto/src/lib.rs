@@ -139,6 +139,13 @@ pub enum EventKind {
         #[serde(skip_serializing_if = "Option::is_none")]
         currency: Option<String>,
     },
+    /// Étapes de la tâche publiées par l'agent (session_set_steps) :
+    /// remplacement complet de la liste — l'event porte l'état entier
+    /// pour que le client reconstruise sans replay. Persistée dans
+    /// steps.json (sidecar) et relue par session_info (`steps`).
+    Steps {
+        steps: Vec<SessionStep>,
+    },
     /// État du run : idle | working | waiting_input | dead
     StatusChanged {
         state: String,
@@ -188,6 +195,7 @@ impl EventKind {
             Self::CommandsAvailable { .. } => "commands_available",
             Self::ConfigOptions { .. } => "config_options",
             Self::UsageUpdate { .. } => "usage_update",
+            Self::Steps { .. } => "steps",
             Self::StatusChanged { .. } => "status_changed",
             Self::Error { .. } => "error",
             Self::System { .. } => "system",
@@ -260,6 +268,11 @@ impl EventKind {
             Self::CommandsAvailable { commands } => commands
                 .iter()
                 .map(|c| format!("{} {}", c.name(), c.description()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Self::Steps { steps } => steps
+                .iter()
+                .map(|s| format!("{} {}", s.status.as_str(), s.name))
                 .collect::<Vec<_>>()
                 .join("\n"),
             Self::ConfigOptions { .. }
@@ -396,6 +409,41 @@ pub struct ExtraModel {
     pub value: String,
     #[serde(default)]
     pub label: String,
+}
+
+// ---------------------------------------------------------------------------
+// Étapes de tâche (skill ac-steps / session_set_steps)
+// ---------------------------------------------------------------------------
+
+/// Statut d'une étape — vocabulaire minimal voulu (pas de sous-tâches,
+/// pas de descriptions) : todo | in_progress | done | abandoned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepStatus {
+    Todo,
+    InProgress,
+    Done,
+    Abandoned,
+}
+
+impl StepStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Todo => "todo",
+            Self::InProgress => "in_progress",
+            Self::Done => "done",
+            Self::Abandoned => "abandoned",
+        }
+    }
+}
+
+/// Une étape de la liste publiée par l'agent : nom court + statut.
+/// La liste est remplacée ENTIÈRE à chaque `session_set_steps` (état
+/// borné côté démon, ~100 étapes max).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionStep {
+    pub name: String,
+    pub status: StepStatus,
 }
 
 // ---------------------------------------------------------------------------
@@ -1020,6 +1068,20 @@ pub enum ReqKind {
         config_id: String,
         value: String,
     },
+    /// Remplace la liste d'étapes de la tâche de la session (publiée
+    /// par l'agent via `acctl steps set`, skill ac-steps) : nom +
+    /// statut ∈ todo|in_progress|done|abandoned, ≤ ~100 étapes, liste
+    /// entière à chaque appel (idempotent — l'agent garde sa liste et
+    /// repousse tout). Persistée dans steps.json (sidecar, pattern
+    /// pinned.json) et journalisée en event `steps` (live update +
+    /// reconstruction à l'ouverture) — relue par session_info
+    /// (`steps`).
+    /// Réponse : `{steps: [..]}` — la liste normalisée stockée.
+    /// Extension additive : démons anciens → erreur « req inconnue ».
+    SessionSetSteps {
+        session: String,
+        steps: Vec<SessionStep>,
+    },
     /// Tue l'agent et supprime la session + ses fichiers (journal/blobs).
     DeleteSession { session: String },
     /// /clear — vide le journal et repart sur une session native neuve
@@ -1407,6 +1469,7 @@ impl ReqKind {
             Self::SetModel { .. } => "set_model",
             Self::SetAdvisor { .. } => "set_advisor",
             Self::SetConfigOption { .. } => "set_config_option",
+            Self::SessionSetSteps { .. } => "session_set_steps",
             Self::DeleteSession { .. } => "delete_session",
             Self::ClearSession { .. } => "clear_session",
             Self::SleepSession { .. } => "sleep_session",
@@ -1622,5 +1685,48 @@ mod tests {
             panic!("variant inattendue");
         };
         assert!(group.is_none());
+    }
+
+    /// Étapes : session_set_steps / event steps traversent le fil en
+    /// snake_case, et le type_tag de l'event est bien "steps" (routage
+    /// client + acctl print_event).
+    #[test]
+    fn steps_wire() {
+        let req = Request {
+            id: 1,
+            req: ReqKind::SessionSetSteps {
+                session: "s-1".into(),
+                steps: vec![
+                    SessionStep {
+                        name: "Analyser".into(),
+                        status: StepStatus::Done,
+                    },
+                    SessionStep {
+                        name: "Implémenter".into(),
+                        status: StepStatus::InProgress,
+                    },
+                ],
+            },
+        };
+        let txt = serde_json::to_string(&req).unwrap();
+        assert!(txt.contains("session_set_steps"));
+        assert!(txt.contains("in_progress"));
+        let back: Request = serde_json::from_str(&txt).unwrap();
+        let ReqKind::SessionSetSteps { steps, .. } = back.req else {
+            panic!("variant inattendue");
+        };
+        assert_eq!(steps[1].status, StepStatus::InProgress);
+        assert_eq!(req.req.kind_name(), "session_set_steps");
+
+        let ev = EventKind::Steps {
+            steps: vec![SessionStep {
+                name: "PR".into(),
+                status: StepStatus::Todo,
+            }],
+        };
+        assert_eq!(ev.type_tag(), "steps");
+        let evj = serde_json::to_value(&ev).unwrap();
+        assert_eq!(evj["type"], "steps");
+        assert_eq!(evj["steps"][0]["status"], "todo");
     }
 }

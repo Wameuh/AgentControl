@@ -64,6 +64,9 @@ impl Daemon {
                     // hors annonce ACP — catalogue.rs, clés
                     // catalogue_cmd/model_override_cmd des profils).
                     "model_catalog": true,
+                    // Idem pour ReqKind::SessionSetSteps (étapes de
+                    // tâche publiées par l'agent — panneau du client).
+                    "steps": true,
                     // Idem pour ReqKind::PluginViewToken + la route
                     // /plugin/<name>/ (vues plugin en iframe
                     // sandboxée — option B).

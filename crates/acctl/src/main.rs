@@ -26,6 +26,9 @@
 //!   acctl pr review <N> [--repo R]       — review native (pr_review du
 //!       démon) : même pipeline que `/mr review`, verdict notifié en
 //!       message si lancé depuis une session agent
+//!   acctl steps set [--session S] "a:todo,b:wip,…" | steps get [--session S]
+//!                                     — étapes de la tâche (skill ac-steps ;
+//!                                     session = $AGENTCONTROL_SESSION sinon)
 //!   acctl comp [ls] [--json] | info <n> | start|stop|restart <n>
 //!       | logs <n> [--tail N] | catalog [--json] [--refresh]
 //!       | install <n> | add <n> [--kind K] [--cmd "<argv>"] [--hc S]
@@ -210,6 +213,18 @@ fn print_event(ev: &Value) {
             println!("[{seq}] commandes: {}", names.join(" "));
         }
         "status_changed" => println!("\x1b[90m[{seq}] état → {}\x1b[0m", ev["state"].as_str().unwrap_or("")),
+        "steps" => {
+            let n = ev["steps"].as_array().map(|a| a.len()).unwrap_or(0);
+            let cur = ev["steps"].as_array().and_then(|a| {
+                a.iter().find(|s| s["status"].as_str() == Some("in_progress"))
+            });
+            println!(
+                "\x1b[36m[{seq}] ▤ étapes: {n}{}\x1b[0m",
+                cur.and_then(|s| s["name"].as_str())
+                    .map(|n| format!(" — en cours: {n}"))
+                    .unwrap_or_default()
+            );
+        }
         "session_cleared" => println!("\x1b[90m[{seq}] ── contexte effacé ──\x1b[0m"),
         "error" => println!("\x1b[31m[{seq}] ERREUR {}\x1b[0m", ev["message"].as_str().unwrap_or("")),
         "system" => println!("\x1b[90m[{seq}] ⦿ {}\x1b[0m", ev["text"].as_str().unwrap_or("")),
@@ -221,7 +236,7 @@ fn print_event(ev: &Value) {
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|search|find|create|resume|attach|fork|cancel|kill|clear|sleep|mode|respond|blob|download|write|pr|comp|orch|daemon-update");
+        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|search|find|create|resume|attach|fork|cancel|kill|clear|sleep|mode|respond|blob|download|write|pr|comp|orch|steps|daemon-update");
         std::process::exit(2);
     }
     let mut c = connect().await?;
@@ -564,6 +579,56 @@ async fn main() -> Result<()> {
             config_id: args[2].clone(),
             value: args[3].clone(),
         }).await?),
+        "steps" => {
+            // acctl steps set [--session S] <spec>   — spec = "a:todo,b:wip,…"
+            //   (statuts todo|in_progress|wip|done|abandoned|abandon) ou JSON
+            //   '[{"name":..,"status":..}]' ; "-" ou "[]" vide la liste.
+            // acctl steps get [--session S]  — liste courante.
+            // Session = --session ou $AGENTCONTROL_SESSION.
+            if args.len() < 2 {
+                bail!("steps set [--session S] <spec> | steps get [--session S]");
+            }
+            let mut session = None;
+            let mut rest: Vec<String> = Vec::new();
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--session" => { session = args.get(i + 1).cloned(); i += 2; }
+                    _ => { rest.push(args[i].clone()); i += 1; }
+                }
+            }
+            let session = session
+                .or_else(|| std::env::var("AGENTCONTROL_SESSION").ok())
+                .context("pas de session : --session S ou AGENTCONTROL_SESSION")?;
+            match args[1].as_str() {
+                "set" => {
+                    let spec = rest.join(" ");
+                    if spec.is_empty() {
+                        bail!("steps set [--session S] <spec>");
+                    }
+                    let steps = parse_steps_spec(&spec)?;
+                    let v = c
+                        .call(proto::ReqKind::SessionSetSteps {
+                            session,
+                            steps,
+                        })
+                        .await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                "get" => {
+                    // Pas de req dédiée : session_info porte `steps`.
+                    let v = c
+                        .call(proto::ReqKind::SessionInfo { session })
+                        .await?;
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&v["steps"])
+                            .unwrap_or_else(|_| "null".into())
+                    );
+                }
+                other => bail!("steps : sous-commande inconnue «{other}» (set|get)"),
+            }
+        }
         "respond" => {
             // respond <session> <request_id> [option_id | --answer JSON]
             let mut option_id = None;
@@ -737,4 +802,70 @@ async fn main() -> Result<()> {
         other => bail!("commande inconnue: {other}"),
     }
     Ok(())
+}
+
+/// Parse le spec de `acctl steps set` en Vec<SessionStep> :
+///   "-" ou "[]"            → liste vide (clear)
+///   '[{"name":..,"status":..}]' → JSON complet (statuts canoniques
+///                               snake_case, tolère les alias)
+///   "a:todo,b:wip,…"       → forme compacte, `nom:statut` séparés par
+///                            des virgules ; le statut est après le
+///                            DERNIER ':' (un nom peut contenir ':').
+/// Alias de statut acceptés : wip|in-progress → in_progress,
+/// done|complete → done, abandon|skip|skipped → abandoned.
+fn parse_steps_spec(spec: &str) -> Result<Vec<proto::SessionStep>> {
+    let spec = spec.trim();
+    if spec == "-" || spec == "[]" {
+        return Ok(Vec::new());
+    }
+    if spec.starts_with('[') {
+        let raw: Vec<Value> = serde_json::from_str(spec)
+            .context("spec JSON invalide — attendu [{\"name\":..,\"status\":..}]")?;
+        return raw
+            .iter()
+            .map(|v| {
+                let name = v["name"]
+                    .as_str()
+                    .context("étape JSON sans \"name\"")?
+                    .to_string();
+                let status = parse_step_status(
+                    v["status"].as_str().context("étape JSON sans \"status\"")?,
+                )?;
+                Ok(proto::SessionStep { name, status })
+            })
+            .collect();
+    }
+    spec.split(',')
+        .map(|part| {
+            let part = part.trim();
+            if part.is_empty() {
+                bail!("entrée d'étape vide dans «{spec}»");
+            }
+            let (name, st) = part
+                .rsplit_once(':')
+                .with_context(|| format!("étape «{part}» sans statut — forme attendue nom:statut"))?;
+            let name = name.trim();
+            if name.is_empty() {
+                bail!("étape sans nom dans «{part}»");
+            }
+            Ok(proto::SessionStep {
+                name: name.to_string(),
+                status: parse_step_status(st.trim())?,
+            })
+        })
+        .collect()
+}
+
+fn parse_step_status(s: &str) -> Result<proto::StepStatus> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "todo" | "to_do" => Ok(proto::StepStatus::Todo),
+        "in_progress" | "in-progress" | "wip" | "progress" | "doing" => {
+            Ok(proto::StepStatus::InProgress)
+        }
+        "done" | "complete" | "completed" | "finished" => Ok(proto::StepStatus::Done),
+        "abandoned" | "abandon" | "skip" | "skipped" => Ok(proto::StepStatus::Abandoned),
+        other => bail!(
+            "statut d'étape inconnu «{other}» — attendu todo|in_progress|done|abandoned"
+        ),
+    }
 }

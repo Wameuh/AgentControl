@@ -46,6 +46,7 @@ body.android #composer,
 body.android #queue-bar,
 body.android #queue-panel,
 body.android #pins-panel,
+body.android #steps-panel,
 body.android .toast {
   background: var(--panel-solid);
 }
