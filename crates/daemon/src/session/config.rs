@@ -969,7 +969,7 @@ impl Session {
         let eff = self.compact_policy();
         self.emit(EventKind::System {
             text: format!(
-                "ac.{key}={value} — seuil compact effectif : {}",
+                "ac.{key}={value} — effective compact threshold: {}",
                 describe_policy(&eff)
             ),
         });

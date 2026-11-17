@@ -281,8 +281,8 @@ def main():
         sy = [e for e in evs if e["type"] == "system"]
         check("user_message steer=true « second » au journal",
               len(um) == 1 and um[0].get("steer") is True, str(um))
-        check("event « promu en steer par l'utilisateur » au journal",
-              any("promu en steer" in (e.get("text") or "") for e in sy),
+        check("event « promoted to steer » au journal",
+              any("promoted to steer" in (e.get("text") or "") for e in sy),
               str([e.get("text") for e in sy]))
         check("« second » absent de queue_list",
               c.result("queue_list", session=sid)["queue"] == [])
@@ -297,8 +297,8 @@ def main():
         check("requeued : entrée remise en file", r.get("queue") == ["third"], str(r))
         time.sleep(0.3)
         evs = c.result("events", session=sid, limit=50)["events"]
-        check("event « steer refusé — message remis en file »",
-              any(e["type"] == "system" and "remis en file" in (e.get("text") or "")
+        check("event « steer refused — put back in queue »",
+              any(e["type"] == "system" and "put back in queue" in (e.get("text") or "")
                   for e in evs),
               str([e.get("text") for e in evs if e["type"] == "system"]))
 
