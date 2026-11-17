@@ -69,6 +69,13 @@ jobs:
       # (Debian 11/12, Ubuntu 20.04/22.04/24.04…), là où un build
       # ubuntu-latest (glibc 2.39) refuse de tourner sur glibc < 2.39.
       - run: cargo build --release --target ${{ matrix.target }} -p agentcontrol-daemon -p acctl
+        env:
+          # cc résout aarch64-linux-musl-gcc pour les cibles
+          # aarch64-*-musl — absent : musl-tools ne fournit que
+          # `musl-gcc`. Forcer le compilateur (sur le runner arm64 il
+          # produit bien du aarch64-musl) ; sans effet sur x86_64.
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          AR_aarch64_unknown_linux_musl: ar
       - name: package
         run: |
           mkdir -p dist
@@ -77,17 +84,20 @@ jobs:
           cp -r packaging dist/
           tar czf agentcontrol-server-${{ matrix.arch }}-linux.tar.gz -C dist .
       # Critère d'acceptation : les binaires tournent sur une vieille
-      # glibc. `ldd` doit dire « not a dynamic executable » et `acctl`
+      # glibc. `ldd` doit dire « statically linked » (static-PIE x86_64)
+      # ou « not a dynamic executable » (ET_EXEC aarch64) et `acctl`
       # sans argument doit afficher son usage dans debian:bookworm
       # (glibc 2.36) — image native de l'arch du runner.
       - name: Vérif portabilité (debian:bookworm)
         run: |
-          # NB : `ldd` sort en code 1 sur un binaire statique — le
-          # `|| true` évite que set -e avorte le step pile dans le cas
-          # de succès ; le grep sur le contenu fait foi.
-          ldd_out=$(docker run --rm -v "$PWD/dist:/ac" debian:bookworm ldd /ac/acctl 2>&1 || true)
-          echo "$ldd_out"
-          echo "$ldd_out" | grep -q "not a dynamic executable"
+          for bin in acctl agentcontrol-daemon; do
+            # NB : `ldd` sort en code 1 sur un ET_EXEC statique — le
+            # `|| true` évite que set -e avorte le step ; le grep sur
+            # le contenu fait foi.
+            ldd_out=$(docker run --rm -v "$PWD/dist:/ac" debian:bookworm ldd /ac/$bin 2>&1 || true)
+            echo "== $bin"; echo "$ldd_out"
+            echo "$ldd_out" | grep -qE 'statically linked|not a dynamic executable'
+          done
           set +e
           help_out=$(docker run --rm -v "$PWD/dist:/ac" debian:bookworm /ac/acctl 2>&1)
           code=$?

@@ -266,6 +266,10 @@ fn edit_distance(a: &str, b: &str) -> usize {
 /// longueur pour les noms longs — en dessous on préfère ne rien
 /// suggérer plutôt qu'une piste trompeuse.
 fn suggest_command(input: &str) -> Option<&'static str> {
+    // Un flag (« -v ») n'est pas une commande — ne rien suggérer.
+    if input.starts_with('-') {
+        return None;
+    }
     let mut best: Option<(&'static str, usize)> = None;
     for &cmd in COMMANDS {
         let d = edit_distance(input, cmd);
