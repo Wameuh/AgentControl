@@ -37,6 +37,10 @@ jobs:
           - os: ubuntu-24.04-arm
             arch: aarch64
             target: aarch64-unknown-linux-musl
+    # Nom de check figé : la ruleset next_release exige les contextes
+    # « daemon-linux (<os>, <arch>) » — sans `name:` la matrix
+    # ajouterait la cible au nom et les required checks ne matchent plus.
+    name: daemon-linux (${{ matrix.os }}, ${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
