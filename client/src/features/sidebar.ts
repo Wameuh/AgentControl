@@ -239,26 +239,40 @@ export class Sidebar {
     ]);
     this.applyPrRows(prRes.rows, prRes.failed);
     // Marqueur Rust `conn_error` : la sonde list_sessions d'une conn a
-    // échoué (timeout 8 s) → la marquer down (une seule fois : déjà down,
-    // markDead re-rendererait refresh en boucle). Gen périmée = résultat
-    // d'un client remplacé au reconnect → ignoré (sinon down immédiat
-    // après « reconnect ok » avec le why par défaut trompeur).
+    // échoué → probeListError applique la même politique que les sondes
+    // (strikes + excuse « transport vivant ») : UN timeout de la sonde
+    // lourde paginée sur un démon lent ne doit plus tuer la conn —
+    // c'était le cycle down/reconnect → badge « déconnecté » persistant
+    // après un « reconnect ok » alors que le transport était vivant.
+    // Gen périmée = résultat d'un client remplacé au reconnect → ni
+    // strike ni repli (isFresh dans probeFailed).
+    // Les conns en conn_error rejoignent le repli cache ci-dessous :
+    // la conn peut rester « ok » (transport vivant) sans que ses
+    // sessions arrivent — sans ça elles disparaîtraient de la liste.
+    const errConns = new Set<string>();
     const list = raw.filter((s) => {
       if (this.pendingDel.has(s.id)) return false;
       if (!(s as { conn_error?: boolean }).conn_error) return true;
       const k = s.conn ?? "";
       const gen = (s as { gen?: number }).gen;
+      // Gen périmée = client remplacé au reconnect : ni strike ni repli
+      // (la gen fraîche a sa propre sonde).
       if (!this.conns.isFresh(k, gen)) return false;
+      errConns.add(k);
       if ((this.conns.state(k) ?? "ok") === "ok") {
-        this.conns.markDead(k, "list_sessions: conn_error",
+        this.conns.probeListError(k, gen,
           (s as { _ac_transport?: AcTransport })._ac_transport);
       }
       return false;
     });
-    // Conn down : ses sessions n'arrivent plus — réafficher le dernier cache
-    // connu (grisé) au lieu de faire disparaître le serveur.
+    // Conn down ou list_sessions en échec (conn_error) : ses sessions
+    // n'arrivent plus — réafficher le dernier cache connu (grisé) au
+    // lieu de faire disparaître le serveur. `offline` garde l'état
+    // connu pour stateDiff/spawnWatch — une transition pendant la
+    // fenêtre n'est pas perdue au retour de la sonde.
     for (const [k, st] of this.conns.liveEntries()) {
-      if (st !== "ok" && !list.some((s) => (s.conn ?? "default") === k)) {
+      if ((st !== "ok" || errConns.has(k)) &&
+          !list.some((s) => (s.conn ?? "default") === k)) {
         for (const s of app.lastSessions.filter(
           (x) => (x.conn ?? "default") === k && !this.pendingDel.has(x.id),
         )) {
