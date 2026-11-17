@@ -292,7 +292,10 @@ await p.evaluate(() => {
 });
 check("t8 conn-dead périmé logué", await waitLog("conn-dead périmé", l8c));
 check("t8 conn-dead périmé → ok", (await st()) === "ok", await segCls());
-// conn-dead frais (gen 3) → down légitime.
+// conn-dead frais (gen 3) → down légitime. La sonde passe en échec
+// AVANT le conn-dead : sinon le watchdog sain la répare au tick
+// suivant (~300 ms) et waitSeg rate la fenêtre « bad » — flaky.
+await setDs({ error: "connexion fermée", kind: "error", rtt_ms: 5, gen: 3 });
 const l8d = await logLen();
 await p.evaluate(() => {
   const id = window.__acListeners["conn-dead"];
@@ -340,9 +343,18 @@ await drain();
 // que le transport est vivant — l'ancien markDead direct produisait le
 // cycle down/reconnect → badge « déconnecté » persistant.
 // t9a — transport vivant (silent 200 ms) : excuse « lent mais vivant »,
-// jamais de strike, jamais de retry.
+// jamais de strike, jamais de retry. La session seedée vérifie le
+// repli cache : conn « ok » + conn_error → lignes grisées offline,
+// pas disparues.
 check("t9a conn revenue ok", await waitSeg("ok"));
 const calls9 = await connectCalls();
+const SESS9 = { conn: "local", id: "s-t9", agent: "devin", title: "t9",
+  cwd: "/tmp", created_at: "2026-01-01T00:00:00Z", state: "working",
+  available_modes: [], available_commands: [], available_models: [] };
+await p.evaluate((s) => { window.__listSessions = [s]; }, SESS9);
+await sleep(400);
+check("t9 seed session rendue",
+  await p.evaluate(() => !!document.querySelector("#session-list .sess")));
 const l9a = await logLen();
 await p.evaluate(() => {
   window.__listSessions = [{ conn: "local", conn_error: true,
@@ -355,9 +367,21 @@ check("t9a badge sidebar ok",
   (await p.evaluate(() =>
     document.querySelector("#session-list .grp-head .conn-st")?.className ?? "none"))
     .includes("ok"));
+check("t9a session conservée grisée",
+  await p.evaluate(() => {
+    const r = document.querySelector("#session-list .sess");
+    return !!r && r.className.includes("offline");
+  }));
 check("t9a conn_error vivant : aucun retry",
   (await connectCalls()) === calls9, "calls=" + (await connectCalls()));
-await p.evaluate(() => { window.__listSessions = []; });
+// Sonde redevenue saine → session resservie live (hors offline).
+await p.evaluate((s) => { window.__listSessions = [s]; }, SESS9);
+await sleep(400);
+check("t9a session de nouveau live",
+  await p.evaluate(() => {
+    const r = document.querySelector("#session-list .sess");
+    return !!r && !r.className.includes("offline");
+  }));
 
 // t9b — socket morte (dead:true) : un SEUL marker ne déclare plus down
 // non plus — strike ×1, down seulement au 2ᵉ groupé. L'ancien code
@@ -370,9 +394,11 @@ await p.evaluate(() => {
 check("t9b strike1 loggé", await waitLog("sonde ko ×1", l9b, 4000));
 await sleep(300);
 check("t9b un marker ≠ down", (await st()) === "ok", await segCls());
+check("t9b session toujours servie",
+  await p.evaluate(() => !!document.querySelector("#session-list .sess")));
 check("t9b marker mort : aucun retry",
   (await connectCalls()) === calls9, "calls=" + (await connectCalls()));
-await p.evaluate(() => { window.__listSessions = []; });
+await p.evaluate((s) => { window.__listSessions = [s]; }, SESS9);
 await setDs({ version: "9.9.9", sessions: 1, _ac_gen: 6 });
 await sleep(500); // tick watchdog : strikes/ignored purgés
 

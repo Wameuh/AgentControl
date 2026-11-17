@@ -501,8 +501,12 @@ export class ConnectionManager {
     } catch (e) {
       // Seul un échec du connect lui-même (ou un throw post-markAlive
       // imprévu) arrive ici : si markAlive a déjà rendu la conn ok,
-      // le retry/log « ko » serait un faux négatif — ne rien faire.
-      if (this.live.get(key) !== "reconnecting") return;
+      // le retry/log « ko » serait un faux négatif — journaliser pour
+      // le diagnostic sans re-planifier de retry fantôme.
+      if (this.live.get(key) !== "reconnecting") {
+        logUi("warn", `conn ${key}: reconnect #${attempt} post-ok throw — ${e}`);
+        return;
+      }
       this.live.set(key, "down");
       logUi("warn",
         `conn ${key}: reconnect #${attempt} ko gen=${genBefore ?? "?"}` +
