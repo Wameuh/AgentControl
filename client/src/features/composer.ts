@@ -352,41 +352,169 @@ export class Composer {
   /** Dialogue : sessions natives de l'agent (ACP session/list) → reprise. */
   private async openNativePicker() {
     if (!app.current) return;
-    const box = $("native-list");
+    type Sess = { sessionId: string; title?: string; updatedAt?: string; cwd?: string };
+    const dlg = $("dlg-resume") as HTMLDialogElement;
+    const box = $("native-list") as HTMLElement;
+    const filter = $("native-filter") as HTMLInputElement;
+    const track = $("native-scrollbar") as HTMLElement;
+    const thumb = $("native-scroll-thumb") as HTMLElement;
     box.innerHTML = "…";
-    ($("dlg-resume") as HTMLDialogElement).showModal();
-    try {
-      const r = await call<{ sessions?: { sessionId: string; title?: string; updatedAt?: string; cwd?: string }[] }>(
-        "list_native_sessions",
-        { session: app.current.id },
-      );
-      const list = r.sessions ?? [];
-      box.innerHTML = list.length
-        ? ""
-        : t("no_native");
+    filter.value = "";
+    track.classList.remove("on");
+    dlg.showModal();
+    filter.focus();
+
+    let all: Sess[] = [];
+    let shown: Sess[] = [];
+    let sel = -1;
+    let rows: HTMLElement[] = [];
+
+    const matches = (s: Sess, q: string) => {
+      const hay = `${s.sessionId} ${s.title ?? ""} ${s.cwd ?? ""} ${(s.updatedAt ?? "").slice(0, 16)}`.toLowerCase();
+      return hay.includes(q);
+    };
+
+    const pick = (s: Sess | undefined) => {
+      if (!s) return;
+      dlg.close();
+      notify("info", t("resume_wait"));
+      void call("resume_session", { session: app.current!.id, native_id: s.sessionId })
+        .catch((e) => showErr(String(e)))
+        .then(() => this.chat.open(app.current!.id));
+    };
+
+    const syncThumb = () => {
+      const h = box.clientHeight;
+      const sh = box.scrollHeight;
+      if (sh <= h) { track.classList.remove("on"); return; }
+      track.classList.add("on");
+      const th = Math.max(24, (h / sh) * h);
+      const top = box.scrollTop / (sh - h) * (h - th);
+      thumb.style.height = th + "px";
+      thumb.style.top = top + "px";
+    };
+
+    const render = () => {
+      const q = filter.value.trim().toLowerCase();
+      const list = q ? all.filter((s) => matches(s, q)) : all;
+      shown = list;
+      rows = [];
+      sel = -1;
+      box.innerHTML = "";
+      if (!list.length) {
+        box.textContent = all.length ? t("resume_no_match") : t("no_native");
+      }
       for (const s of list) {
         const row = document.createElement("div");
         row.className = "ac-item";
         row.innerHTML = `<span class="n">${esc(s.sessionId.slice(0, 12))}</span>` +
           `<span class="d">${esc(s.title || s.cwd || "")}</span>` +
           `<span class="h">${esc((s.updatedAt || "").slice(0, 16).replace("T", " "))}</span>`;
-        row.onclick = async () => {
-          ($("dlg-resume") as HTMLDialogElement).close();
-          notify("info", t("resume_wait"));
-          await call("resume_session", { session: app.current!.id, native_id: s.sessionId })
-            .catch((e) => showErr(String(e)));
-          await this.chat.open(app.current!.id);
-        };
+        const idx = rows.length;
+        row.onclick = () => pick(s);
+        row.onmouseenter = () => { sel = idx; syncSel(); };
         box.appendChild(row);
+        rows.push(row);
       }
+      box.scrollTop = 0;
+      sel = rows.length ? 0 : -1;
+      syncSel();
+      syncThumb();
+    };
+
+    const syncSel = () => {
+      rows.forEach((r, i) => r.classList.toggle("sel", i === sel));
+    };
+
+    // Navigation clavier : ↑/↓ sur les entrées, Entrée pour choisir,
+    // Échap vide le filtre puis ferme (comme les pickers natifs).
+    filter.onkeydown = (e) => {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        if (!rows.length) return;
+        e.preventDefault();
+        sel = (sel + (e.key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length;
+        rows[sel].scrollIntoView({ block: "nearest" });
+        syncSel();
+      } else if (e.key === "Enter") {
+        if (sel >= 0 && shown[sel]) {
+          e.preventDefault();
+          pick(shown[sel]);
+        }
+      } else if (e.key === "Escape") {
+        if (filter.value) {
+          e.preventDefault();
+          filter.value = "";
+          render();
+        } else {
+          dlg.close();
+        }
+      }
+    };
+
+    filter.oninput = render;
+    box.onscroll = syncThumb;
+    // window resize pendant le dialogue → recalcul du thumb.
+    const onResize = () => syncThumb();
+    window.addEventListener("resize", onResize);
+    dlg.addEventListener("close", () => window.removeEventListener("resize", onResize), { once: true });
+
+    // Scrollbar custom : la piste native (overlay fine) ne grab pas
+    // dans <dialog> — thumb DOM draggable via pointer events.
+    thumb.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      thumb.setPointerCapture(e.pointerId);
+      const startY = e.clientY;
+      const startTop = box.scrollTop;
+      const trackH = box.clientHeight;
+      const range = box.scrollHeight - trackH;
+      const thumbH = thumb.offsetHeight;
+      const move = (ev: PointerEvent) => {
+        const dy = ev.clientY - startY;
+        const dScroll = (dy / Math.max(1, trackH - thumbH)) * range;
+        box.scrollTop = startTop + dScroll;
+        syncThumb();
+      };
+      const up = () => {
+        thumb.removeEventListener("pointermove", move);
+        thumb.removeEventListener("pointerup", up);
+        thumb.removeEventListener("pointercancel", up);
+      };
+      thumb.addEventListener("pointermove", move);
+      thumb.addEventListener("pointerup", up);
+      thumb.addEventListener("pointercancel", up);
+    });
+    // Clic sur la piste (hors thumb) : sauter à la position cliquée.
+    // Molette au-dessus de la piste = scroll aussi (la piste n'est pas
+    // dans #native-list, le wheel ne la traverserait pas).
+    track.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      box.scrollTop += e.deltaY;
+      syncThumb();
+    }, { passive: false });
+    track.addEventListener("pointerdown", (e) => {
+      if (e.target !== track) return;
+      const r = track.getBoundingClientRect();
+      const frac = (e.clientY - r.top - thumb.offsetHeight / 2) / Math.max(1, r.height - thumb.offsetHeight);
+      box.scrollTop = Math.max(0, Math.min(1, frac)) * (box.scrollHeight - box.clientHeight);
+      syncThumb();
+    });
+
+    try {
+      const r = await call<{ sessions?: Sess[] }>(
+        "list_native_sessions",
+        { session: app.current.id },
+      );
+      all = r.sessions ?? [];
+      render();
     } catch (e) {
       // Agent mort → impossible de lister ; proposer la reprise de la session courante
+      all = [];
       box.innerHTML = `<div class="errline">${esc(String(e))}</div>`;
       const row = document.createElement("div");
       row.className = "ac-item";
       row.innerHTML = `<span class="n">${icon("play")}</span><span class="d">${t("resume_current")}</span>`;
       row.onclick = async () => {
-        ($("dlg-resume") as HTMLDialogElement).close();
+        dlg.close();
         notify("info", t("resume_wait"));
         await call("resume_session", { session: app.current!.id }).catch((er) => showErr(String(er)));
         await this.chat.open(app.current!.id);

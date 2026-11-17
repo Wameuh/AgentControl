@@ -122,6 +122,7 @@ export const en = {
   fusion_h: "Fusion — two models in parallel", main_model: "Main model",
   main_effort: "Main effort", sidekick: "Sidekick", sidekick_effort: "Sidekick effort",
   apply: "Apply", resume_h: "Agent sessions to resume", close: "Close",
+  resume_filter_ph: "Filter…", resume_no_match: "No matching session",
   settings_h: "Settings", theme_label: "Theme", theme_dark: "Dark", theme_light: "Light",
   "s-accent": "Accent color", "s-accent-int": "Accent intensity",
   "s-bg-anim": "Animated background",
