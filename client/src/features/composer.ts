@@ -365,7 +365,11 @@ export class Composer {
     filter.focus();
 
     let all: Sess[] = [];
-    let shown: Sess[] = [];
+    let loaded = false;
+    let failed = false;
+    // Actions parallèles à `rows` : Enter/↑↓ agissent via `acts[sel]`
+    // (la ligne fallback d'erreur n'est pas une Sess).
+    let acts: (() => void)[] = [];
     let sel = -1;
     let rows: HTMLElement[] = [];
 
@@ -395,14 +399,15 @@ export class Composer {
     };
 
     const render = () => {
+      if (failed) return; // état d'erreur : la ligne fallback reste
       const q = filter.value.trim().toLowerCase();
       const list = q ? all.filter((s) => matches(s, q)) : all;
-      shown = list;
+      acts = [];
       rows = [];
       sel = -1;
       box.innerHTML = "";
       if (!list.length) {
-        box.textContent = all.length ? t("resume_no_match") : t("no_native");
+        box.textContent = !loaded ? "…" : all.length ? t("resume_no_match") : t("no_native");
       }
       for (const s of list) {
         const row = document.createElement("div");
@@ -415,6 +420,7 @@ export class Composer {
         row.onmouseenter = () => { sel = idx; syncSel(); };
         box.appendChild(row);
         rows.push(row);
+        acts.push(() => pick(s));
       }
       box.scrollTop = 0;
       sel = rows.length ? 0 : -1;
@@ -436,10 +442,8 @@ export class Composer {
         rows[sel].scrollIntoView({ block: "nearest" });
         syncSel();
       } else if (e.key === "Enter") {
-        if (sel >= 0 && shown[sel]) {
-          e.preventDefault();
-          pick(shown[sel]);
-        }
+        e.preventDefault(); // pas de submit implicite du <form method=dialog>
+        acts[sel]?.();
       } else if (e.key === "Escape") {
         if (filter.value) {
           e.preventDefault();
@@ -455,12 +459,12 @@ export class Composer {
     box.onscroll = syncThumb;
     // window resize pendant le dialogue → recalcul du thumb.
     const onResize = () => syncThumb();
-    window.addEventListener("resize", onResize);
-    dlg.addEventListener("close", () => window.removeEventListener("resize", onResize), { once: true });
 
     // Scrollbar custom : la piste native (overlay fine) ne grab pas
-    // dans <dialog> — thumb DOM draggable via pointer events.
-    thumb.addEventListener("pointerdown", (e) => {
+    // dans <dialog> — thumb DOM draggable via pointer events. Handlers
+    // nommés et retirés au close : thumb/track sont du DOM statique,
+    // les re-attacher à chaque ouverture les cumulerait (wheel ×N).
+    const onThumbDown = (e: PointerEvent) => {
       e.preventDefault();
       thumb.setPointerCapture(e.pointerId);
       const startY = e.clientY;
@@ -482,22 +486,34 @@ export class Composer {
       thumb.addEventListener("pointermove", move);
       thumb.addEventListener("pointerup", up);
       thumb.addEventListener("pointercancel", up);
-    });
+    };
     // Clic sur la piste (hors thumb) : sauter à la position cliquée.
     // Molette au-dessus de la piste = scroll aussi (la piste n'est pas
     // dans #native-list, le wheel ne la traverserait pas).
-    track.addEventListener("wheel", (e) => {
+    const onTrackWheel = (e: WheelEvent) => {
       e.preventDefault();
       box.scrollTop += e.deltaY;
       syncThumb();
-    }, { passive: false });
-    track.addEventListener("pointerdown", (e) => {
+    };
+    const onTrackDown = (e: PointerEvent) => {
       if (e.target !== track) return;
+      e.preventDefault(); // garder le focus dans le filtre (↑/↓/Entrée)
       const r = track.getBoundingClientRect();
       const frac = (e.clientY - r.top - thumb.offsetHeight / 2) / Math.max(1, r.height - thumb.offsetHeight);
       box.scrollTop = Math.max(0, Math.min(1, frac)) * (box.scrollHeight - box.clientHeight);
       syncThumb();
-    });
+    };
+    thumb.addEventListener("pointerdown", onThumbDown);
+    track.addEventListener("wheel", onTrackWheel, { passive: false });
+    track.addEventListener("pointerdown", onTrackDown);
+    window.addEventListener("resize", onResize);
+    dlg.addEventListener("close", () => {
+      window.removeEventListener("resize", onResize);
+      thumb.removeEventListener("pointerdown", onThumbDown);
+      track.removeEventListener("wheel", onTrackWheel);
+      track.removeEventListener("pointerdown", onTrackDown);
+      filter.onkeydown = filter.oninput = box.onscroll = null;
+    }, { once: true });
 
     try {
       const r = await call<{ sessions?: Sess[] }>(
@@ -505,21 +521,30 @@ export class Composer {
         { session: app.current.id },
       );
       all = r.sessions ?? [];
+      loaded = true;
       render();
     } catch (e) {
       // Agent mort → impossible de lister ; proposer la reprise de la session courante
+      loaded = true;
+      failed = true;
       all = [];
       box.innerHTML = `<div class="errline">${esc(String(e))}</div>`;
       const row = document.createElement("div");
       row.className = "ac-item";
       row.innerHTML = `<span class="n">${icon("play")}</span><span class="d">${t("resume_current")}</span>`;
-      row.onclick = async () => {
+      const act = async () => {
         dlg.close();
         notify("info", t("resume_wait"));
         await call("resume_session", { session: app.current!.id }).catch((er) => showErr(String(er)));
         await this.chat.open(app.current!.id);
       };
+      row.onclick = () => void act();
+      row.onmouseenter = () => { sel = 0; syncSel(); };
       box.appendChild(row);
+      rows = [row];
+      acts = [act];
+      sel = 0;
+      syncSel();
     }
   }
 
