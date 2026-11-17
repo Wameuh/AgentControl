@@ -19,8 +19,10 @@ workspace d'une session, gérer le registre PR.
 - sinon socket Unix `~/.agentcontrol/daemon.sock`
 - `AGENTCONTROL_SESSION` = id de la session courante (injecté quand on tourne
   dans une session AgentControl — utile comme `from` pour `spawn`/`msg`)
-- Bruit stderr : le binaire installé peut imprimer un warning
-  `GLIBC_2.39 not found` inoffensif → ajouter `2>/dev/null` aux pipes.
+- Bruit stderr : les binaires des releases ≤ 0.10.4 peuvent imprimer un
+  warning `GLIBC_2.39 not found` inoffensif (liés à la glibc du runner
+  CI — corrigé en statique musl depuis #266) → ajouter `2>/dev/null`
+  aux pipes si le warning apparaît.
 
 ## Commandes
 

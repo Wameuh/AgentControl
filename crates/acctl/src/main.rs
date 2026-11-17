@@ -232,6 +232,56 @@ fn print_event(ev: &Value) {
     }
 }
 
+/// Commandes top-level canoniques — source de la suggestion
+/// « vouliez-vous dire … » sur nom inconnu (les alias wr/dl/
+/// components/orchestrator restent valides mais ne sont pas
+/// suggérés : la forme canonique est à privilégier).
+const COMMANDS: &[&str] = &[
+    "status", "daemon-update", "agents", "list", "new", "send", "msg",
+    "spawn", "events", "tail", "search", "find", "create", "resume",
+    "attach", "fork", "cancel", "kill", "clear", "sleep", "rm", "mode",
+    "model", "setcfg", "steps", "respond", "blob", "download", "write",
+    "pr", "comp", "orch",
+];
+
+/// Distance d'édition de Levenshtein (deux rangées, noms courts).
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            cur[j + 1] = (prev[j + 1] + 1)
+                .min(cur[j] + 1)
+                .min(prev[j] + usize::from(ca != cb));
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// Commande la plus proche de `input`, si elle est assez proche :
+/// ≤ 2 fautes (ex. transposition « daemon-uptate ») ou ≤ 1/3 de la
+/// longueur pour les noms longs — en dessous on préfère ne rien
+/// suggérer plutôt qu'une piste trompeuse.
+fn suggest_command(input: &str) -> Option<&'static str> {
+    // Un flag (« -v ») n'est pas une commande — ne rien suggérer.
+    if input.starts_with('-') {
+        return None;
+    }
+    let mut best: Option<(&'static str, usize)> = None;
+    for &cmd in COMMANDS {
+        let d = edit_distance(input, cmd);
+        if best.is_none_or(|(_, bd)| d < bd) {
+            best = Some((cmd, d));
+        }
+    }
+    let (cmd, d) = best?;
+    let len = input.chars().count().max(cmd.len());
+    (d <= 2 || d * 3 <= len).then_some(cmd)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -799,7 +849,12 @@ async fn main() -> Result<()> {
                 other => bail!("usage: acctl orch [on|off|status|config|set <clé> <val>…|metrics [--window W]] (inconnu: {other})"),
             }
         }
-        other => bail!("commande inconnue: {other}"),
+        other => bail!(
+            "commande inconnue: {other}{}",
+            suggest_command(other)
+                .map(|c| format!(" — vouliez-vous dire « {c} » ?"))
+                .unwrap_or_default()
+        ),
     }
     Ok(())
 }
