@@ -227,7 +227,9 @@ impl EventKind {
                 to_title,
                 text,
                 ..
-            } => joined([Some(from_title), Some(to_title), Some(text)].map(|o| o.map(String::as_str))),
+            } => joined(
+                [Some(from_title), Some(to_title), Some(text)].map(|o| o.map(String::as_str)),
+            ),
             Self::ToolCall {
                 title,
                 kind,
@@ -761,12 +763,16 @@ pub enum ReqKind {
     },
     /// Liste les sessions natives de l'agent (ACP session/list) via une
     /// session vivante de cet agent.
-    ListNativeSessions { session: String },
+    ListNativeSessions {
+        session: String,
+    },
     /// Fork la session native (pas de méthode ACP — on pilote le TUI de
     /// l'agent dans un PTY : `devin -r` + /fork), puis attache la session
     /// forkée dans une nouvelle session AgentControl (même groupe, titre
     /// suffixé "_fork"). La source est libérée puis ré-ouverte.
-    ForkSession { session: String },
+    ForkSession {
+        session: String,
+    },
     /// Attache une session native de l'agent (créée hors AgentControl) :
     /// respawn + session/load sur l'ID natif fourni.
     AttachSession {
@@ -796,12 +802,16 @@ pub enum ReqKind {
     /// Coûts catalogue des modèles d'un profil agent (sonde provider
     /// type `devin models`, cache côté démon) — {"models": {id: {label,
     /// detail}}}. Map vide quand le provider n'expose pas de coût.
-    ModelCosts { agent: String },
+    ModelCosts {
+        agent: String,
+    },
     /// Catalogue complet des modèles d'un profil agent (clés
     /// `catalogue_cmd`/`model_override_cmd` de `[agents.*]`) —
     /// {"models": [{value, label}]} ; vide quand le profil n'a pas de
     /// commande catalogue ou si la sonde échoue.
-    ModelCatalog { agent: String },
+    ModelCatalog {
+        agent: String,
+    },
     Send {
         session: String,
         text: String,
@@ -874,8 +884,8 @@ pub enum ReqKind {
     /// offset+delete_len) — `delete_len` est clampé à la fin du fichier
     /// (u64::MAX = « remplacer tout »). `if_mtime_ms` : garde
     /// anti-écrasement — la mtime disque doit égaler celle lue par le
-    /// client, sinon erreur préfixée "conflit: <mtime_ms>" (fichier
-    /// supprimé entre-temps → conflit aussi). Écriture atomique
+    /// client, sinon erreur préfixée "conflict: <mtime_ms>" (fichier
+    /// supprimé entre-temps → conflict aussi). Écriture atomique
     /// (.part + rename, mode unix préservé). Réponse
     /// {path, size, mtime_ms} — la nouvelle mtime réarme la garde.
     WriteFile {
@@ -965,23 +975,40 @@ pub enum ReqKind {
         path: Option<String>,
     },
     /// Gestion de la file de prompts (index = position dans la file).
-    QueueList { session: String },
-    QueueEdit { session: String, index: u64, text: String },
-    QueueDrop { session: String, index: u64 },
+    QueueList {
+        session: String,
+    },
+    QueueEdit {
+        session: String,
+        index: u64,
+        text: String,
+    },
+    QueueDrop {
+        session: String,
+        index: u64,
+    },
     /// Tête de file + annulation du tour courant = envoi forcé.
-    QueuePromote { session: String, index: u64 },
+    QueuePromote {
+        session: String,
+        index: u64,
+    },
     /// Retire l'entrée `index` de la file et tente de l'injecter en
     /// steer dans le tour en cours (session/prompt concurrent, SANS
     /// annuler le tour — ≠ QueuePromote). Refus ou impossibilité →
     /// l'entrée est remise à sa position. Réponse {delivered, reason?,
     /// queue} — delivered : "steer" | "sent" | "requeued" | "held" |
     /// "gone".
-    QueueSteer { session: String, index: u64 },
+    QueueSteer {
+        session: String,
+        index: u64,
+    },
     /// Vide toute la file d'un coup — atomique côté démon (pas de
     /// course avec un enqueue concurrent, contrairement à une boucle
     /// queue_drop côté client). Ne touche JAMAIS au tour en cours ni
     /// aux retenues : file uniquement. Réponse {cleared, queue}.
-    QueueClear { session: String },
+    QueueClear {
+        session: String,
+    },
     /// Page d'historique : les `limit` événements avant `before_seq`
     /// (before_seq absent ou 0 = depuis la fin), ou — si `after_seq` est
     /// fourni — les `limit` événements après `after_seq` en ordre croissant
@@ -1091,16 +1118,22 @@ pub enum ReqKind {
         steps: Vec<SessionStep>,
     },
     /// Tue l'agent et supprime la session + ses fichiers (journal/blobs).
-    DeleteSession { session: String },
+    DeleteSession {
+        session: String,
+    },
     /// /clear — vide le journal et repart sur une session native neuve
     /// (session/new), même session AgentControl (id, titre, groupe, cwd).
-    ClearSession { session: String },
+    ClearSession {
+        session: String,
+    },
     /// Endort la session : le process agent est libéré mais la session
     /// native (et le journal) sont conservés — état persisté "asleep".
     /// Le prochain prompt (user ou peer) la réveille via session/load ;
     /// un resume explicite la réveille aussi. ≠ KillSession (crash-like :
     /// "dead" + pas de réveil implicite sur envoi user).
-    SleepSession { session: String },
+    SleepSession {
+        session: String,
+    },
     /// Renomme la session (meta local + session/rename chez l'agent si dispo).
     RenameSession {
         session: String,
@@ -1235,12 +1268,20 @@ pub enum ReqKind {
     /// last_exit/description/source.
     ListComponents,
     /// Spec complète + état détaillé d'un composant.
-    ComponentInfo { name: String },
+    ComponentInfo {
+        name: String,
+    },
     /// Cycle de vie — `process` managés seulement : internal/external/
     /// tool sont refusés (pas de process à piloter). Réponse {name,state}.
-    ComponentStart { name: String },
-    ComponentStop { name: String },
-    ComponentRestart { name: String },
+    ComponentStart {
+        name: String,
+    },
+    ComponentStop {
+        name: String,
+    },
+    ComponentRestart {
+        name: String,
+    },
     /// Tail paginé du log `<root>/components/<name>.log` : `offset`
     /// (absent = dernière page) + `limit` (défaut 64 Kio, cap 256 Kio) →
     /// {data(b64), offset, size, truncated} (`truncated` = il reste
@@ -1264,7 +1305,9 @@ pub enum ReqKind {
     /// Retire une spec déclarée (un `process` vivant est arrêté
     /// proprement d'abord). Les `internal`, déclarés en code, sont
     /// inatteignables → « composant inconnu ».
-    ComponentRemove { name: String },
+    ComponentRemove {
+        name: String,
+    },
     /// Catalogue embarqué (§2.5) : métadonnées + `installed`/`version`
     /// détectés + `latest_version`/`latest_notes` upstream — cache
     /// ~5 min, `refresh:true` force le refetch ; échec réseau → champs
@@ -1301,7 +1344,10 @@ pub enum ReqKind {
     /// `agentbacklog --list --json`). Réponse :
     /// `{code, data(b64), size, truncated, stderr?(b64)}` ; absent =
     /// composant ou query inconnue → erreur.
-    ComponentQuery { name: String, query: String },
+    ComponentQuery {
+        name: String,
+        query: String,
+    },
     /// Token de vue plugin éphémère (option B — vue en iframe
     /// sandboxée servie par le démon) : émis pour `name`, TTL ~5 min,
     /// scopé au composant, exigé par la route HTTP `/plugin/<name>/`
@@ -1310,14 +1356,18 @@ pub enum ReqKind {
     /// déclarer une vue (`spec.view_dir` ou convention
     /// `components/<name>/web/`). Réponse :
     /// `{component, token, ttl_s}`.
-    PluginViewToken { name: String },
+    PluginViewToken {
+        name: String,
+    },
     /// Bascule à chaud l'orchestrateur backlog natif (composant interne
     /// `backlog-orchestrator`, section `[backlog_orchestrator]` de
     /// config.toml pour l'activation par défaut) — bascule runtime
     /// seulement, la config n'est pas réécrite. Réponse :
     /// `{enabled, status}` — status = instantané exposé aussi dans
     /// `ListComponents`/`ComponentInfo`.
-    OrchestratorSet { enabled: bool },
+    OrchestratorSet {
+        enabled: bool,
+    },
     /// Lecture/édition à chaud de la config de l'orchestrateur backlog.
     /// `patch` absent = get → `{config, status}` ; `patch` présent =
     /// merge partiel validé par champ (clés = celles de
@@ -1342,7 +1392,9 @@ pub enum ReqKind {
     /// `orchestrator.workspaces` dans le status). Idempotent : un
     /// Manager vivant pour ce repo est renvoyé tel quel. Réponse :
     /// `{session, repo, cwd, title, existing}`.
-    ManagerSpawn { repo: String },
+    ManagerSpawn {
+        repo: String,
+    },
     /// Métriques backlog : série temporelle échantillonnée par le tick
     /// de l'orchestrateur natif (`~/.agentbacklog/metrics.jsonl`) +
     /// agrégats calculés à la volée sur les timestamps des items
@@ -1389,7 +1441,9 @@ pub enum ReqKind {
     /// (acctl sans arg) résout la dernière release publiée ; si elle
     /// n'est pas plus récente que le binaire courant, réponse
     /// `{noop: true, version, current, restarting:false}` sans update.
-    UpdateDaemon { version: String },
+    UpdateDaemon {
+        version: String,
+    },
     /// Moissonne les capacités d'un profil agent par un spawn jetable
     /// (initialize + session/new dans un cwd scratch, drain bref des
     /// notifications, kill) puis met à jour le cache `agent_caps.json`
@@ -1398,7 +1452,9 @@ pub enum ReqKind {
     /// (bouton refresh du client), jamais en boucle. Réponse :
     /// `{agent, caps, sessions:[ids rafraîchis]}`. Extension additive :
     /// démons anciens → erreur « req inconnue ».
-    RefreshAgentCaps { agent: String },
+    RefreshAgentCaps {
+        agent: String,
+    },
     /// Verdict de review de PR rendu en A2A par la session reviewer
     /// (pont MCP `agentcontrol_report_verdict`) : push direct au démon,
     /// qui poste lui-même le commentaire GitHub — la sortie de review
@@ -1571,8 +1627,7 @@ pub fn forge_badge(forge: &str, pr: u64, change_id: Option<&str>) -> String {
             if pr > 0 {
                 format!("c#{pr}")
             } else {
-                let short: String =
-                    change_id.unwrap_or("").chars().take(9).collect();
+                let short: String = change_id.unwrap_or("").chars().take(9).collect();
                 format!("c#{short}")
             }
         }
@@ -1710,7 +1765,7 @@ mod tests {
                         status: StepStatus::Done,
                     },
                     SessionStep {
-                        name: "Implémenter".into(),
+                        name: "Implement".into(),
                         status: StepStatus::InProgress,
                     },
                 ],

@@ -104,14 +104,14 @@ impl Forges {
         for c in cfgs {
             let kind = c.kind.trim().to_lowercase();
             if kind == "github" {
-                tracing::warn!("[[forges]] type=github implicite — entrée ignorée");
+                tracing::warn!("[[forges]] implicit type=github — entry skipped");
                 continue;
             }
             let list = match kind.as_str() {
                 "gitlab" => &mut f.gitlab,
                 "gerrit" => &mut f.gerrit,
                 _ => {
-                    tracing::warn!("[[forges]] type inconnu « {} » — ignoré", c.kind);
+                    tracing::warn!("[[forges]] unknown type « {} » — skipped", c.kind);
                     continue;
                 }
             };
@@ -204,14 +204,60 @@ impl Forges {
 /// que si TOUS ses segments sont génériques — un segment réel
 /// (`acme/widgets`) suffit à garder la référence.
 const PLACEHOLDER_WORDS: &[&str] = &[
-    "o", "r", "owner", "repo", "repository", "repos", "g", "p", "group",
-    "grp", "sub", "subgroup", "proj", "project", "projects", "a", "b",
-    "x", "y", "foo", "bar", "baz", "qux", "user", "username", "user-name",
-    "name", "org", "organisation", "organization", "myorg", "my-org",
-    "your-org", "your_org", "yourorg", "your-repo", "your_project",
-    "exemple", "example", "placeholder", "sample", "demo", "dummy",
-    "test", "namespace", "path", "votre", "projet", "depot", "repo-name",
-    "owner-name", "project-name", "my-project", "mon-projet",
+    "o",
+    "r",
+    "owner",
+    "repo",
+    "repository",
+    "repos",
+    "g",
+    "p",
+    "group",
+    "grp",
+    "sub",
+    "subgroup",
+    "proj",
+    "project",
+    "projects",
+    "a",
+    "b",
+    "x",
+    "y",
+    "foo",
+    "bar",
+    "baz",
+    "qux",
+    "user",
+    "username",
+    "user-name",
+    "name",
+    "org",
+    "organisation",
+    "organization",
+    "myorg",
+    "my-org",
+    "your-org",
+    "your_org",
+    "yourorg",
+    "your-repo",
+    "your_project",
+    "exemple",
+    "example",
+    "placeholder",
+    "sample",
+    "demo",
+    "dummy",
+    "test",
+    "namespace",
+    "path",
+    "votre",
+    "projet",
+    "depot",
+    "repo-name",
+    "owner-name",
+    "project-name",
+    "my-project",
+    "mon-projet",
 ];
 
 /// `true` si `repo` est un placeholder documentaire : chaque segment
@@ -273,12 +319,7 @@ fn url_end(path: &str) -> usize {
 ///  - github  : `<o>/<r>/pull/<N>`
 ///  - gitlab  : `<g>(/sous)*/-/merge_requests/<N>`
 ///  - gerrit  : `[#/](c|r)/<projet>/+/<N>` ou `q/<Change-Id>`
-fn parse_path(
-    host: &str,
-    forge: &'static str,
-    path: &str,
-    out: &mut Vec<PrRef>,
-) {
+fn parse_path(host: &str, forge: &'static str, path: &str, out: &mut Vec<PrRef>) {
     match forge {
         "github" => {
             let mut parts = path.split('/');
@@ -477,10 +518,16 @@ mod tests {
             .len(),
             2
         );
-        assert!(f.extract_refs("https://github.com/acme/widgets/issues/3").is_empty());
+        assert!(f
+            .extract_refs("https://github.com/acme/widgets/issues/3")
+            .is_empty());
         // Pas de faux hôte : xgithub.com / github.com.evil non reconnus.
-        assert!(f.extract_refs("https://xgithub.com/acme/widgets/pull/3").is_empty());
-        assert!(f.extract_refs("https://github.com.evil/acme/widgets/pull/3").is_empty());
+        assert!(f
+            .extract_refs("https://xgithub.com/acme/widgets/pull/3")
+            .is_empty());
+        assert!(f
+            .extract_refs("https://github.com.evil/acme/widgets/pull/3")
+            .is_empty());
     }
 
     #[test]
@@ -502,17 +549,23 @@ mod tests {
             "https://gerrit.internal:8080/c/p/+/9",
             "https://gerrit.internal:8080/c/proj/+/9",
         ] {
-            assert!(f.extract_refs(txt).is_empty(), "refusé attendu : {txt}");
+            assert!(f.extract_refs(txt).is_empty(), "expected refusal: {txt}");
         }
         // Un seul segment réel suffit : le placeholder n'est que
         // partiel → la référence est conservée.
         for (txt, repo) in [
             ("https://github.com/acme/widgets/pull/9", "acme/widgets"),
-            ("https://gitlab.com/corp/tools/-/merge_requests/42", "corp/tools"),
-            ("https://gerrit.internal:8080/c/platform/build/+/9", "platform/build"),
+            (
+                "https://gitlab.com/corp/tools/-/merge_requests/42",
+                "corp/tools",
+            ),
+            (
+                "https://gerrit.internal:8080/c/platform/build/+/9",
+                "platform/build",
+            ),
         ] {
             let r = f.extract_refs(txt);
-            assert_eq!(r.len(), 1, "conservé attendu : {txt}");
+            assert_eq!(r.len(), 1, "expected kept: {txt}");
             assert_eq!(r[0].repo, repo);
         }
     }
@@ -531,18 +584,23 @@ mod tests {
             "https://gitlab.com/infra-team/deploy/tool/-/merge_requests/42"
         );
         // Hôte auto-hébergé déclaré.
-        let r = f.extract_refs("voir https://gitlab.example.com/corp/tools/-/merge_requests/7/diffs");
+        let r =
+            f.extract_refs("voir https://gitlab.example.com/corp/tools/-/merge_requests/7/diffs");
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].host, "gitlab.example.com");
         assert_eq!(r[0].pr, 7);
         // Hôte gitlab NON déclaré → pas de détection.
-        assert!(f.extract_refs("https://gitlab.inconnu.io/corp/tools/-/merge_requests/7").is_empty());
+        assert!(f
+            .extract_refs("https://gitlab.inconnu.io/corp/tools/-/merge_requests/7")
+            .is_empty());
         // Borne : notgitlab.example.com ne matche pas gitlab.example.com.
         assert!(f
             .extract_refs("https://notgitlab.example.com/corp/tools/-/merge_requests/7")
             .is_empty());
         // Issue ≠ MR.
-        assert!(f.extract_refs("https://gitlab.com/corp/tools/-/issues/7").is_empty());
+        assert!(f
+            .extract_refs("https://gitlab.com/corp/tools/-/issues/7")
+            .is_empty());
     }
 
     #[test]
@@ -656,6 +714,9 @@ mod tests {
         let cid39 = format!("I{}é", "a".repeat(39));
         assert_eq!(take_change_id(&cid39), None);
         let cid40 = format!("I{}zzz", "a".repeat(40));
-        assert_eq!(take_change_id(&cid40).as_deref(), Some(cid40[..41].to_string().as_str()));
+        assert_eq!(
+            take_change_id(&cid40).as_deref(),
+            Some(cid40[..41].to_string().as_str())
+        );
     }
 }

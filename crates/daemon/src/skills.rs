@@ -146,11 +146,8 @@ fn write_manifest(root: &Path, skills: &Manifest) {
         version: u32,
         skills: &'a Manifest,
     }
-    let body = serde_json::to_string_pretty(&M {
-        version: 1,
-        skills,
-    })
-    .unwrap_or_else(|_| "{\"version\":1,\"skills\":{}}".into());
+    let body = serde_json::to_string_pretty(&M { version: 1, skills })
+        .unwrap_or_else(|_| "{\"version\":1,\"skills\":{}}".into());
     let tmp = root.join(format!("{MANIFEST}.part"));
     if std::fs::write(&tmp, body).is_ok() {
         let _ = std::fs::rename(&tmp, manifest_path(root));
@@ -169,7 +166,9 @@ fn sha1_hex(data: &[u8]) -> String {
 /// commite ses propres skills au même contenu.
 fn adoptable(dest: &Path, skill: &Skill) -> bool {
     skill.files.iter().all(|(rel, bytes)| {
-        std::fs::read(dest.join(rel)).map(|d| d == *bytes).unwrap_or(false)
+        std::fs::read(dest.join(rel))
+            .map(|d| d == *bytes)
+            .unwrap_or(false)
     })
 }
 
@@ -188,9 +187,9 @@ fn sync_root(root: &Path, skills: &[Skill]) {
                 // gestion (entrera dans le manifeste ci-dessous).
             } else {
                 tracing::warn!(
-                    "skills: « {} » existe déjà dans {} sans provenance \
-                     agentcontrol — ignoré (supprimez-le pour prendre la \
-                     version embarquée, ou renommez le vôtre)",
+                    "skills: « {} » already exists in {} without agentcontrol \
+                     provenance — skipped (delete it to take the embedded \
+                     version, or rename yours)",
                     skill.name,
                     root.display()
                 );
@@ -207,12 +206,12 @@ fn sync_root(root: &Path, skills: &[Skill]) {
             if fresh {
                 continue;
             }
-            let Some(parent) = target.parent() else { continue };
-            if std::fs::create_dir_all(parent).is_err()
-                || std::fs::write(&target, bytes).is_err()
-            {
+            let Some(parent) = target.parent() else {
+                continue;
+            };
+            if std::fs::create_dir_all(parent).is_err() || std::fs::write(&target, bytes).is_err() {
                 tracing::warn!(
-                    "skills: écriture {} impossible — skill « {} » ignoré",
+                    "skills: write {} failed — skill « {} » skipped",
                     target.display(),
                     skill.name
                 );
@@ -235,9 +234,7 @@ fn sync_root(root: &Path, skills: &[Skill]) {
                 if skill.files.iter().any(|(r, _)| r == rel) {
                     continue;
                 }
-                if rel.starts_with('/')
-                    || rel.split('/').any(|c| c.is_empty() || c == "..")
-                {
+                if rel.starts_with('/') || rel.split('/').any(|c| c.is_empty() || c == "..") {
                     continue;
                 }
                 let _ = std::fs::remove_file(dest.join(rel));
@@ -255,7 +252,7 @@ fn sync_root(root: &Path, skills: &[Skill]) {
         }
         if written > 0 {
             tracing::info!(
-                "skills: « {} » provisionné dans {} ({} fichier(s) écrit(s))",
+                "skills: « {} » provisioned into {} ({} file(s) written)",
                 skill.name,
                 root.display(),
                 written
@@ -326,7 +323,7 @@ mod tests {
         let f = root.join("ac-x/SKILL.md");
         let before = mtime(&f);
         sync_root(&root, &skills);
-        assert_eq!(mtime(&f), before, "fichier réécrit à l'identique");
+        assert_eq!(mtime(&f), before, "file rewritten identically");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -352,7 +349,7 @@ mod tests {
         let dest = root.join("ac-x");
         std::fs::create_dir_all(&dest).unwrap();
         std::fs::write(dest.join("SKILL.md"), "mien").unwrap();
-        sync_root(&root, &[skill("ac-x", &[("SKILL.md", "embarqué")])]);
+        sync_root(&root, &[skill("ac-x", &[("SKILL.md", "embedded")])]);
         assert_eq!(
             std::fs::read_to_string(dest.join("SKILL.md")).unwrap(),
             "mien"
@@ -366,8 +363,8 @@ mod tests {
         let root = tmpdir("adopt");
         let dest = root.join("ac-x");
         std::fs::create_dir_all(&dest).unwrap();
-        std::fs::write(dest.join("SKILL.md"), "embarqué").unwrap();
-        sync_root(&root, &[skill("ac-x", &[("SKILL.md", "embarqué")])]);
+        std::fs::write(dest.join("SKILL.md"), "embedded").unwrap();
+        sync_root(&root, &[skill("ac-x", &[("SKILL.md", "embedded")])]);
         // Adopté → manifesté managé : une version ultérieure embarquée
         // different sera appliquée (preuve de gestion).
         assert!(read_manifest(&root).contains_key("ac-x"));
@@ -382,7 +379,10 @@ mod tests {
     #[test]
     fn fichier_perime_purge_conserve_extra() {
         let root = tmpdir("purge");
-        sync_root(&root, &[skill("ac-x", &[("SKILL.md", "v1"), ("old.md", "o")])]);
+        sync_root(
+            &root,
+            &[skill("ac-x", &[("SKILL.md", "v1"), ("old.md", "o")])],
+        );
         // Fichier ajouté à la main dans le skill managé.
         std::fs::write(root.join("ac-x/mine.md"), "m").unwrap();
         sync_root(&root, &[skill("ac-x", &[("SKILL.md", "v1")])]);

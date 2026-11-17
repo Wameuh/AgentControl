@@ -158,7 +158,7 @@ impl PrVerifier {
                 }
                 None => {
                     if g.len() >= VERIFY_PENDING_CAP {
-                        warn!("[{sid}] prs verify: file pleine — {} ignorée", r.display());
+                        warn!("[{sid}] prs verify: queue full — {} skipped", r.display());
                         return Ok(Submit::Rejected);
                     }
                     g.insert(
@@ -253,7 +253,7 @@ impl PrVerifier {
                 self.emit(
                     &p,
                     format!(
-                        "PR {} ignorée — PR de release (hors registre)",
+                        "PR {} skipped — release PR (out of registry)",
                         p.r.display()
                     ),
                 );
@@ -262,11 +262,7 @@ impl PrVerifier {
                 self.negative_add(key);
                 self.emit(
                     &p,
-                    format!(
-                        "PR {} ignorée — introuvable sur {}",
-                        p.r.display(),
-                        p.r.forge
-                    ),
+                    format!("PR {} skipped — not found on {}", p.r.display(), p.r.forge),
                 );
             }
             // Erreur de join = panic du checker : même destin qu'un
@@ -279,7 +275,7 @@ impl PrVerifier {
     /// registre et l'event de confirmation de la session.
     fn apply(&self, p: &PendingRef) {
         match self.prs.detected(&p.sid, &p.r, p.strong) {
-            Ok(true) => self.emit(p, format!("PR détectée et enregistrée : {}", p.r.display())),
+            Ok(true) => self.emit(p, format!("PR detected and registered: {}", p.r.display())),
             Ok(false) => {}
             Err(e) => warn!("[{}] prs.detected: {e:#}", p.sid),
         }
@@ -309,14 +305,14 @@ impl PrVerifier {
             self.notify.notify_one();
         } else {
             warn!(
-                "[{}] PR {} non enregistrée — forge injoignable après {} tentatives",
+                "[{}] PR {} not registered — forge unreachable after {} attempts",
                 p.sid,
                 p.r.display(),
                 p.attempts
             );
             self.emit(
                 &p,
-                format!("PR {} non enregistrée — forge injoignable", p.r.display()),
+                format!("PR {} not registered — forge unreachable", p.r.display()),
             );
         }
     }
@@ -427,7 +423,6 @@ impl Daemon {
         });
     }
 
-
     /// État de la review orchestrateur pour une entrée du registre :
     /// "running" (session PRReview-* active), "retry" (retry_wait en
     /// backoff), "queued" (demande interne en file). None = pas de
@@ -444,7 +439,9 @@ impl Daemon {
         // Les clés persistées sont `repo#N` en casse forge — comparaison
         // insensible à la casse (le registre normalise en minuscules).
         for (k, e) in reviews {
-            let Some((r, n)) = k.rsplit_once('#') else { continue };
+            let Some((r, n)) = k.rsplit_once('#') else {
+                continue;
+            };
             if n.parse::<u64>() != Ok(pr) || !r.eq_ignore_ascii_case(repo) {
                 continue;
             }
@@ -457,7 +454,9 @@ impl Daemon {
             }
         }
         for k in requests.keys() {
-            let Some((r, n)) = k.rsplit_once('#') else { continue };
+            let Some((r, n)) = k.rsplit_once('#') else {
+                continue;
+            };
             if n.parse::<u64>() == Ok(pr) && r.eq_ignore_ascii_case(repo) {
                 return Some("queued");
             }
@@ -466,31 +465,31 @@ impl Daemon {
     }
 
     pub(super) async fn h_pr_list(self: &Arc<Self>, session: Option<String>) -> Result<Value> {
-                let mut v = self.prs.list();
-                if let Some(sid) = session {
-                    v.retain(|e| e.session == sid);
+        let mut v = self.prs.list();
+        if let Some(sid) = session {
+            v.retain(|e| e.session == sid);
+        }
+        // Jointure review native : la file `PRReview-*` de
+        // l'orchestrateur est locale — `native_review` marque
+        // les PR en review agent même sans reviewRequest forge.
+        let (reviews, requests) = {
+            let st = self.orch.state.lock().unwrap();
+            (st.pr_reviews.clone(), st.pr_review_requests.clone())
+        };
+        let mut out = Vec::with_capacity(v.len());
+        for e in &v {
+            let mut j = serde_json::to_value(e)?;
+            // La review orchestrateur ne connaît que github.com.
+            let gh = proto::forge_kind(&e.forge) == "github"
+                && (e.host.is_empty() || e.host == "github.com");
+            if gh {
+                if let Some(nr) = Self::native_review_of(&reviews, &requests, &e.repo, e.pr) {
+                    j["native_review"] = json!(nr);
                 }
-                // Jointure review native : la file `PRReview-*` de
-                // l'orchestrateur est locale — `native_review` marque
-                // les PR en review agent même sans reviewRequest forge.
-                let (reviews, requests) = {
-                    let st = self.orch.state.lock().unwrap();
-                    (st.pr_reviews.clone(), st.pr_review_requests.clone())
-                };
-                let mut out = Vec::with_capacity(v.len());
-                for e in &v {
-                    let mut j = serde_json::to_value(e)?;
-                    // La review orchestrateur ne connaît que github.com.
-                    let gh = proto::forge_kind(&e.forge) == "github"
-                        && (e.host.is_empty() || e.host == "github.com");
-                    if gh {
-                        if let Some(nr) = Self::native_review_of(&reviews, &requests, &e.repo, e.pr) {
-                            j["native_review"] = json!(nr);
-                        }
-                    }
-                    out.push(j);
-                }
-                Ok(json!(out))
+            }
+            out.push(j);
+        }
+        Ok(json!(out))
     }
     pub(super) async fn h_pr_track(
         self: &Arc<Self>,
@@ -509,23 +508,23 @@ impl Daemon {
         review: Option<String>,
         ci: Option<String>,
     ) -> Result<Value> {
-                let e = self.prs.track(TrackIn {
-                    session,
-                    repo,
-                    pr,
-                    forge: forge.unwrap_or_default(),
-                    host: host.unwrap_or_default(),
-                    change_id,
-                    url,
-                    branch,
-                    title,
-                    status,
-                    note,
-                    sync_fails,
-                    review,
-                    ci,
-                })?;
-                Ok(serde_json::to_value(e)?)
+        let e = self.prs.track(TrackIn {
+            session,
+            repo,
+            pr,
+            forge: forge.unwrap_or_default(),
+            host: host.unwrap_or_default(),
+            change_id,
+            url,
+            branch,
+            title,
+            status,
+            note,
+            sync_fails,
+            review,
+            ci,
+        })?;
+        Ok(serde_json::to_value(e)?)
     }
     pub(super) async fn h_pr_untrack(
         self: &Arc<Self>,
@@ -535,7 +534,7 @@ impl Daemon {
         host: Option<String>,
         change_id: Option<String>,
     ) -> Result<Value> {
-                Ok(json!({ "removed": self.prs.remove(
+        Ok(json!({ "removed": self.prs.remove(
                     forge.as_deref().unwrap_or(""),
                     host.as_deref().unwrap_or(""),
                     &repo,
@@ -547,7 +546,7 @@ impl Daemon {
     /// gitlab.com implicites + `[[forges]]` de la config. `token_env` est
     /// un nom de variable d'environnement, jamais le token.
     pub(super) async fn h_forge_list(self: &Arc<Self>) -> Result<Value> {
-                Ok(self.forges.list_json())
+        Ok(self.forges.list_json())
     }
 
     /// `pr_sync` : resynchronise les statuts du registre depuis les
@@ -570,7 +569,9 @@ impl Daemon {
             }
             // Un run « coincé » (> PR_SYNC_STUCK) n'exclut plus — ses
             // updates tardives restent idempotentes si elles atterrissent.
-            if c.last_done.is_some_and(|t| t.elapsed() < PR_SYNC_MIN_INTERVAL) {
+            if c.last_done
+                .is_some_and(|t| t.elapsed() < PR_SYNC_MIN_INTERVAL)
+            {
                 return Ok(json!({ "synced": false, "throttled": true }));
             }
             c.running_since = Some(std::time::Instant::now());
@@ -713,7 +714,7 @@ fn scan_pr_event(
         let disp = r.display();
         match verifier.submit(s, sid, r, strong) {
             Ok(Submit::Applied(true)) => s.emit(EventKind::System {
-                text: format!("PR détectée et enregistrée : {disp}"),
+                text: format!("PR detected and registered: {disp}"),
             }),
             Ok(_) => {}
             Err(e) => warn!("[{sid}] prs.detected: {e:#}"),
@@ -804,10 +805,14 @@ mod tests {
             serde_json::to_string_pretty(&meta).unwrap(),
         )
         .unwrap();
-        Session::open(dir, &CompactSrc {
-            global: crate::server::CompactCfg::default(),
-            by_agent: Default::default(),
-        }, crate::caps::CapsRegistry::in_memory())
+        Session::open(
+            dir,
+            &CompactSrc {
+                global: crate::server::CompactCfg::default(),
+                by_agent: Default::default(),
+            },
+            crate::caps::CapsRegistry::in_memory(),
+        )
         .unwrap()
     }
 
@@ -844,8 +849,7 @@ mod tests {
 
     /// Poll borné — le worker est async, attendre fixe serait flaky.
     async fn until(timeout_ms: u64, mut f: impl FnMut() -> bool) -> bool {
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
         while std::time::Instant::now() < deadline {
             if f() {
                 return true;
@@ -943,7 +947,8 @@ mod tests {
         let v = verifier(&r, |_| forgesync::Verify::Exists);
         let s = sess("dedup");
         assert!(matches!(
-            v.submit(&s, "s-faible", gh("corp/tools", 7), false).unwrap(),
+            v.submit(&s, "s-faible", gh("corp/tools", 7), false)
+                .unwrap(),
             Submit::Queued
         ));
         assert!(matches!(

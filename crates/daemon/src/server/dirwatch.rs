@@ -271,7 +271,8 @@ impl DirWatches {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             >= MAX_DIR_WATCHES
         {
-            self.count.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            self.count
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             return Ok(false);
         }
         let res = (|| -> Result<()> {
@@ -295,7 +296,8 @@ impl DirWatches {
             Ok(())
         })();
         if let Err(e) = res {
-            self.count.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            self.count
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             return Err(e);
         }
         self.subs
@@ -317,9 +319,7 @@ impl DirWatches {
             let mut subs = self.subs.lock().unwrap();
             subs.retain(|abs, list| {
                 let before = list.len();
-                list.retain(|s| {
-                    !(s.session == session && rel.is_none_or(|r| s.rel == r))
-                });
+                list.retain(|s| !(s.session == session && rel.is_none_or(|r| s.rel == r)));
                 removed += before - list.len();
                 if list.is_empty() {
                     dead.push(abs.clone());
@@ -384,22 +384,15 @@ impl Daemon {
                     .and_then(|s| files::resolve_in_cwd(&s, path))
                 {
                     Ok(abs) if !abs.is_dir() => {
-                        Response::err(req.id, format!("pas un dossier: {path}"))
+                        Response::err(req.id, format!("not a directory: {path}"))
                     }
-                    Ok(abs) => match watches.watch(
-                        &abs,
-                        session.clone(),
-                        path.clone(),
-                        outbox,
-                    ) {
+                    Ok(abs) => match watches.watch(&abs, session.clone(), path.clone(), outbox) {
                         Ok(true) => Response::ok(
                             req.id,
                             json!({"watching": true,
                                    "dir": abs.display().to_string()}),
                         ),
-                        Ok(false) => {
-                            Response::ok(req.id, json!({"watching": false}))
-                        }
+                        Ok(false) => Response::ok(req.id, json!({"watching": false})),
                         Err(e) => Response::err(req.id, format!("{e:#}")),
                     },
                     Err(e) => Response::err(req.id, format!("{e:#}")),
@@ -425,7 +418,10 @@ mod tests {
     fn due_windows() {
         let t0 = Instant::now();
         // Event isolé, jamais émis : emit à +600 ms (debounce seul).
-        let p = Pend { first: t0, latest: t0 };
+        let p = Pend {
+            first: t0,
+            latest: t0,
+        };
         assert_eq!(due_at(&p, None, t0), t0 + DEBOUNCE);
         // Event 1 s après un emit : le cap repousse à +2 s pile.
         let floor = t0 - Duration::from_secs(1);
@@ -441,7 +437,15 @@ mod tests {
 
     #[test]
     fn noise() {
-        for n in [".git", "node_modules", ".#a", "b~", ".f.swp", "x.tmp", ".a.part-1-2"] {
+        for n in [
+            ".git",
+            "node_modules",
+            ".#a",
+            "b~",
+            ".f.swp",
+            "x.tmp",
+            ".a.part-1-2",
+        ] {
             assert!(noisy_name(n), "{n}");
         }
         for n in ["a.rs", ".gitignore", "Cargo.lock", "tmp", "README"] {
@@ -459,29 +463,27 @@ mod tests {
             std::sync::Mutex::new(HashMap::new());
         subs.lock().unwrap().insert(
             dir.clone(),
-            vec![Sub { session: "s".into(), rel: "n".into() }],
+            vec![Sub {
+                session: "s".into(),
+                rel: "n".into(),
+            }],
         );
         let mut pend = HashMap::new();
-        let ev = notify::Event::new(EventKind::Remove(RemoveKind::Folder))
-            .add_path(dir.clone());
+        let ev = notify::Event::new(EventKind::Remove(RemoveKind::Folder)).add_path(dir.clone());
         mark_pending(&ev, &subs, &mut pend, Instant::now());
-        assert!(pend.contains_key(&dir), "fin du dossier suivi ignorée");
+        assert!(pend.contains_key(&dir), "tracked dir end ignored");
 
         pend.clear();
-        let ev = notify::Event::new(EventKind::Access(AccessKind::Close(
-            AccessMode::Write,
-        )))
-        .add_path(dir.join("f"));
+        let ev = notify::Event::new(EventKind::Access(AccessKind::Close(AccessMode::Write)))
+            .add_path(dir.join("f"));
         mark_pending(&ev, &subs, &mut pend, Instant::now());
-        assert!(pend.contains_key(&dir), "écriture mmap ignorée");
+        assert!(pend.contains_key(&dir), "mmap write ignored");
 
         pend.clear();
-        let ev = notify::Event::new(EventKind::Modify(ModifyKind::Metadata(
-            MetadataKind::Any,
-        )))
-        .add_path(dir.join("f"));
+        let ev = notify::Event::new(EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)))
+            .add_path(dir.join("f"));
         mark_pending(&ev, &subs, &mut pend, Instant::now());
-        assert!(pend.is_empty(), "chmod pur a marqué le dossier");
+        assert!(pend.is_empty(), "bare chmod flagged the dir");
     }
 
     /// Outbox factice : la voie pushes (`lo`) est lisible par le test
@@ -522,7 +524,7 @@ mod tests {
             }
             let line = tokio::time::timeout(Duration::from_secs(5), lo.recv())
                 .await
-                .expect("aucun push dir_changed en 5 s")
+                .expect("no dir_changed push within 5 s")
                 .unwrap();
             let v: serde_json::Value = serde_json::from_str(&line).unwrap();
             assert_eq!(v["push"], "dir_changed");
@@ -535,7 +537,7 @@ mod tests {
                 tokio::time::timeout(Duration::from_millis(900), lo.recv())
                     .await
                     .is_err(),
-                "le burst a produit plus d'un push"
+                "the burst produced more than one push"
             );
 
             // Désabonnement : compteur rendu, events suivants ignorés.
@@ -546,7 +548,7 @@ mod tests {
                 tokio::time::timeout(Duration::from_millis(1200), lo.recv())
                     .await
                     .is_err(),
-                "un push est arrivé après unwatch"
+                "a push arrived after unwatch"
             );
         }
         // Drop (conn morte) : aucun état résiduel côté compteur.
@@ -574,7 +576,7 @@ mod tests {
         for _ in 0..2 {
             let line = tokio::time::timeout(Duration::from_secs(5), lo.recv())
                 .await
-                .expect("un push par rel attendu")
+                .expect("one push per rel expected")
                 .unwrap();
             let v: serde_json::Value = serde_json::from_str(&line).unwrap();
             assert_eq!(v["push"], "dir_changed");
@@ -589,7 +591,7 @@ mod tests {
         std::fs::write(base.join("y"), b"1").unwrap();
         let line = tokio::time::timeout(Duration::from_secs(5), lo.recv())
             .await
-            .expect("le rel restant doit encore pousser")
+            .expect("the remaining rel should still push")
             .unwrap();
         let v: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["path"], "b");

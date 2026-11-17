@@ -157,7 +157,7 @@ fn verdict_body_ok(body: &str) -> bool {
 /// contient pas le mot Verdict — le hook de merge ne doit jamais le
 /// lire comme une review.
 fn fail_comment(kind: &str) -> String {
-    format!("review failed: {kind} — reposter le déclencheur ({TRIGGER_ESCAPED}) pour relancer")
+    format!("review failed: {kind} — repost the trigger ({TRIGGER_ESCAPED}) to relaunch")
 }
 
 /// Note de reprogrammation postée quand un retry est armé — même
@@ -165,7 +165,7 @@ fn fail_comment(kind: &str) -> String {
 /// review ni pour un échec définitif par les workers qui pollent.
 fn retry_comment(kind: &str, delay_secs: u64) -> String {
     format!(
-        "review retry scheduled in ~{} min ({kind}) — déclencheur déjà consommé, relance automatique",
+        "review retry scheduled in ~{} min ({kind}) — trigger already consumed, auto relaunch",
         delay_secs.div_ceil(60)
     )
 }
@@ -190,9 +190,9 @@ fn verdict_comment(body: &str, sha: &str, head: Option<&str>) -> String {
     } else {
         format!(
             "## Verdict: stale — head changed, re-run \
-             {TRIGGER_ESCAPED}\n\n(review rendue pour \
-             {sha}, head courant {})",
-            head.unwrap_or("inconnu")
+             {TRIGGER_ESCAPED}\n\n(review rendered for \
+             {sha}, current head {})",
+            head.unwrap_or("unknown")
         )
     }
 }
@@ -354,7 +354,7 @@ impl Daemon {
         let stale_set: HashSet<&str> = stale.iter().map(String::as_str).collect();
         for sid in &stale {
             if let Err(e) = self.h_delete_session(sid.clone()).await {
-                warn!("orchestrateur: failover rm {sid}: {e:#}");
+                warn!("orchestrator: failover rm {sid}: {e:#}");
             }
         }
         // Entrées running dont la session vient d'être détruite →
@@ -378,10 +378,7 @@ impl Daemon {
             let sha = entry.get("sha").and_then(Value::as_str).unwrap_or("");
             if let Some((repo, pr)) = key.split_once('#') {
                 if let Ok(pr_n) = pr.parse::<u64>() {
-                    remove_review_worktree(
-                        Path::new(ws_of(cfg, repo)),
-                        &pr_review_dir(pr_n, sha),
-                    );
+                    remove_review_worktree(Path::new(ws_of(cfg, repo)), &pr_review_dir(pr_n, sha));
                 }
             }
             if let Some(e) = entry.as_object_mut() {
@@ -390,7 +387,7 @@ impl Daemon {
                 e.insert("sid".into(), json!(""));
                 e.insert("denied".into(), json!(0));
             }
-            info!("orchestrateur: review PR {key} — failover provider, retry sur « {effective} »");
+            info!("orchestrator: PR review {key} — provider failover, retry on « {effective} »");
         }
     }
 
@@ -440,12 +437,12 @@ impl Daemon {
             }
             match self.h_delete_session(sid.clone()).await {
                 Ok(_) => {
-                    info!("orchestrateur: rm reviewer {sid} (review {key}) retenté avec succès");
+                    info!("orchestrator: rm reviewer {sid} (review {key}) retry succeeded");
                     if let Some(e) = st.pr_reviews.get_mut(&key).and_then(Value::as_object_mut) {
                         e.remove("rm_sid");
                     }
                 }
-                Err(e) => warn!("orchestrateur: rm reviewer {sid} (review {key}): {e:#}"),
+                Err(e) => warn!("orchestrator: rm reviewer {sid} (review {key}): {e:#}"),
             }
         }
         // Sortie rapide : mécanisme coupé et rien en vol → pas même le
@@ -457,11 +454,13 @@ impl Daemon {
         if !cfg.pr_review
             && !swept_rm
             && !st.pr_reviews.values().any(|v| {
-                matches!(EntryState::of(v), EntryState::Running | EntryState::RetryWait)
-                    || v
-                        .get("rm_sid")
-                        .and_then(Value::as_str)
-                        .is_some_and(|s| !s.is_empty())
+                matches!(
+                    EntryState::of(v),
+                    EntryState::Running | EntryState::RetryWait
+                ) || v
+                    .get("rm_sid")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty())
             })
             && st.pr_review_requests.is_empty()
         {
@@ -484,7 +483,10 @@ impl Daemon {
                 .pr_reviews
                 .iter()
                 .filter(|(_, v)| {
-                    matches!(EntryState::of(v), EntryState::Running | EntryState::RetryWait)
+                    matches!(
+                        EntryState::of(v),
+                        EntryState::Running | EntryState::RetryWait
+                    )
                 })
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
@@ -500,16 +502,13 @@ impl Daemon {
                 if !sid.is_empty() {
                     self.pr_review_rm_session(&key, sid, &mut st).await;
                 }
-                remove_review_worktree(
-                    Path::new(ws_of(&cfg, repo)),
-                    &pr_review_dir(pr_n, sha),
-                );
+                remove_review_worktree(Path::new(ws_of(&cfg, repo)), &pr_review_dir(pr_n, sha));
                 self.gh_comment(repo, pr_n, &fail_comment("disabled"), &cfg)
                     .await;
                 if let Some(e) = st.pr_reviews.get_mut(&key) {
                     e["state"] = json!(EntryState::Failed.as_str());
                 }
-                info!("orchestrateur: review PR {key} soldée (pr_review off)");
+                info!("orchestrator: PR review {key} settled (pr_review off)");
                 let by = entry
                     .get("requested_by")
                     .and_then(Value::as_str)
@@ -518,7 +517,7 @@ impl Daemon {
                 if !by.is_empty() {
                     self.pr_review_notify(
                         &by,
-                        format!("[AgentControl] review {key} soldée — pr_review désactivé"),
+                        format!("[AgentControl] review {key} settled — pr_review disabled"),
                     )
                     .await;
                 }
@@ -532,7 +531,10 @@ impl Daemon {
                 .map(|(k, v)| {
                     (
                         k.clone(),
-                        v.get("by").and_then(Value::as_str).unwrap_or("").to_string(),
+                        v.get("by")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
                     )
                 })
                 .collect();
@@ -541,7 +543,7 @@ impl Daemon {
                 if !by.is_empty() {
                     self.pr_review_notify(
                         &by,
-                        format!("[AgentControl] review {key} refusée — pr_review désactivé"),
+                        format!("[AgentControl] review {key} refused — pr_review disabled"),
                     )
                     .await;
                 }
@@ -588,11 +590,7 @@ impl Daemon {
             // retry borné. Le body brut est persisté : le texte final
             // est RECONSTRUIT à chaque tentative (head re-vérifié —
             // un APPROVED sur head déplacé devient stale, jamais posté).
-            if entry
-                .get("pending_body")
-                .and_then(Value::as_str)
-                .is_some()
-            {
+            if entry.get("pending_body").and_then(Value::as_str).is_some() {
                 self.pr_review_post_attempt(&key, repo, pr_n, sha, &mut st, &cfg, &wt)
                     .await;
                 continue;
@@ -619,21 +617,11 @@ impl Daemon {
             // souvent un symptôme de rate limit ambiant). Une session
             // en `error` (rate limit) attend sa reprise : le temps de
             // backoff ne compte pas dans le timeout.
-            let rate_limited = metas
-                .iter()
-                .any(|m| m.id == sid && m.state == "error");
+            let rate_limited = metas.iter().any(|m| m.id == sid && m.state == "error");
             if !rate_limited && now - started > cfg.pr_review_timeout as f64 {
-                warn!("orchestrateur: review PR {key} timeout → retry");
-                self.pr_review_transient_fail(
-                    &key,
-                    "timeout",
-                    repo,
-                    pr_n,
-                    &mut st,
-                    &wt,
-                    &cfg,
-                )
-                .await;
+                warn!("orchestrator: review PR {key} timeout → retry");
+                self.pr_review_transient_fail(&key, "timeout", repo, pr_n, &mut st, &wt, &cfg)
+                    .await;
                 self.orch_save(&st);
                 continue;
             }
@@ -648,7 +636,7 @@ impl Daemon {
                 let pending = s.pending_requests();
                 if !pending.is_empty() {
                     if denied >= 2 {
-                        warn!("orchestrateur: review PR {key} bloquée sur requête → failed");
+                        warn!("orchestrator: PR review {key} blocked on request → failed");
                         self.gh_comment(repo, pr_n, &fail_comment("blocked on request"), &cfg)
                             .await;
                         self.pr_review_finish(
@@ -708,7 +696,7 @@ impl Daemon {
                         .await;
                 }
                 Some(_) => {
-                    warn!("orchestrateur: review PR {key} bloc verdict malformé → retry");
+                    warn!("orchestrator: PR review {key} malformed verdict block → retry");
                     self.pr_review_transient_fail(
                         &key,
                         "malformed verdict block",
@@ -732,11 +720,11 @@ impl Daemon {
                         .filter(|le| le.kind == "rate_limit")
                         .map(|_| "rate_limit")
                         .unwrap_or("no verdict block");
-                    info!("orchestrateur: review PR {key} idle sans bloc verdict ({kind}) → retry");
-                    self.pr_review_transient_fail(
-                        &key, kind, repo, pr_n, &mut st, &wt, &cfg,
-                    )
-                    .await;
+                    info!(
+                        "orchestrator: PR review {key} idle without verdict block ({kind}) → retry"
+                    );
+                    self.pr_review_transient_fail(&key, kind, repo, pr_n, &mut st, &wt, &cfg)
+                        .await;
                     self.orch_save(&st);
                 }
             }
@@ -844,7 +832,7 @@ impl Daemon {
                     free -= 1;
                 }
                 Err(e) => {
-                    warn!("orchestrateur: retry launch review {key}: {e:#}");
+                    warn!("orchestrator: retry launch review {key}: {e:#}");
                     remove_review_worktree(
                         Path::new(ws_of(&cfg, repo)),
                         &pr_review_dir(pr_n, &sha),
@@ -913,14 +901,10 @@ impl Daemon {
             // couvre déjà (trigger commentaire ou autre voie entre-temps)
             // — la solder sans relancer une review/redondante.
             let req_at = req.get("at").and_then(Value::as_f64).unwrap_or(0.0);
-            if st
-                .pr_reviews
-                .get(&key)
-                .is_some_and(|e| {
-                    EntryState::of(e) == EntryState::Done
-                        && e.get("started").and_then(Value::as_f64).unwrap_or(0.0) >= req_at
-                })
-            {
+            if st.pr_reviews.get(&key).is_some_and(|e| {
+                EntryState::of(e) == EntryState::Done
+                    && e.get("started").and_then(Value::as_f64).unwrap_or(0.0) >= req_at
+            }) {
                 st.pr_review_requests.remove(&key);
                 continue;
             }
@@ -936,7 +920,7 @@ impl Daemon {
                 st.pr_review_requests.remove(&key);
                 self.pr_review_notify(
                     &by,
-                    format!("[AgentControl] review {key} refusée — pr_rereview désactivé, verdict déjà posté"),
+                    format!("[AgentControl] review {key} refused — pr_rereview disabled, verdict already posted"),
                 )
                 .await;
                 continue;
@@ -945,7 +929,7 @@ impl Daemon {
                 st.pr_review_requests.remove(&key);
                 self.pr_review_notify(
                     &by,
-                    format!("[AgentControl] review {key} refusée — PR introuvable ou fermée"),
+                    format!("[AgentControl] review {key} refused — PR not found or closed"),
                 )
                 .await;
                 continue;
@@ -1012,8 +996,8 @@ impl Daemon {
                     self.pr_review_notify(
                         &by,
                         format!(
-                            "[AgentControl] review {key} acceptée — session {sid} lancée \
-                             (worktree au head {})",
+                            "[AgentControl] review {key} accepted — session {sid} launched \
+                             (worktree at head {})",
                             &head_sha[..head_sha.len().min(7)]
                         ),
                     )
@@ -1021,7 +1005,7 @@ impl Daemon {
                     free -= 1;
                 }
                 Err(e) => {
-                    warn!("orchestrateur: launch review {key} (demande interne): {e:#}");
+                    warn!("orchestrator: launch review {key} (internal request): {e:#}");
                     remove_review_worktree(
                         Path::new(ws_of(&cfg, &repo)),
                         &pr_review_dir(pr_n, &head_sha),
@@ -1134,7 +1118,7 @@ impl Daemon {
                     free -= 1;
                 }
                 Err(e) => {
-                    warn!("orchestrateur: launch review {key}: {e:#}");
+                    warn!("orchestrator: launch review {key}: {e:#}");
                     // Worktree éventuellement créé avant l'échec (ex.
                     // h_new_session KO) — sinon « already exists » au
                     // retry sur le même sha jusqu'au sweep.
@@ -1180,7 +1164,7 @@ impl Daemon {
                 }
             }
             Err(e) => {
-                warn!("orchestrateur: rm reviewer {sid} (review {key}): {e:#} — retry au prochain tick");
+                warn!("orchestrator: rm reviewer {sid} (review {key}): {e:#} — retry next tick");
                 if let Some(e) = st.pr_reviews.get_mut(key).and_then(Value::as_object_mut) {
                     e.insert("rm_sid".into(), json!(sid));
                 }
@@ -1236,11 +1220,9 @@ impl Daemon {
         // une session disparue ne casse jamais la review.
         if !by.is_empty() && matches!(end, EntryState::Done | EntryState::Failed) {
             let text = if end == EntryState::Done {
-                format!("[AgentControl] review {key} terminée — verdict posté sur la PR : {verdict}")
+                format!("[AgentControl] review {key} done — verdict posted on the PR: {verdict}")
             } else {
-                format!(
-                    "[AgentControl] review {key} échouée — voir le commentaire d'échec sur la PR"
-                )
+                format!("[AgentControl] review {key} failed — see the failure comment on the PR")
             };
             self.pr_review_notify(&by, text).await;
         }
@@ -1277,8 +1259,14 @@ impl Daemon {
                 .get((attempts - 1) as usize)
                 .copied()
                 .unwrap_or(REVIEW_RETRY_DELAYS[REVIEW_RETRY_DELAYS.len() - 1]);
-            self.pr_review_finish(key, EntryState::RetryWait, st, wt, Path::new(ws_of(cfg, repo)))
-                .await;
+            self.pr_review_finish(
+                key,
+                EntryState::RetryWait,
+                st,
+                wt,
+                Path::new(ws_of(cfg, repo)),
+            )
+            .await;
             if let Some(e) = st.pr_reviews.get_mut(key).and_then(Value::as_object_mut) {
                 e.insert("attempts".into(), json!(attempts));
                 e.insert("retry_at".into(), json!(now_secs() + delay as f64));
@@ -1287,18 +1275,12 @@ impl Daemon {
             }
             self.gh_comment(repo, pr_n, &retry_comment(kind, delay), cfg)
                 .await;
-            info!("orchestrateur: review PR {key} {kind} → retry #{attempts} dans {delay}s");
+            info!("orchestrator: PR review {key} {kind} → retry #{attempts} in {delay}s");
         } else {
-            warn!("orchestrateur: review PR {key} {kind} — tentatives épuisées → failed");
+            warn!("orchestrator: PR review {key} {kind} — attempts exhausted → failed");
             self.gh_comment(repo, pr_n, &fail_comment(kind), cfg).await;
-            self.pr_review_finish(
-                key,
-                EntryState::Failed,
-                st,
-                wt,
-                Path::new(ws_of(cfg, repo)),
-            )
-            .await;
+            self.pr_review_finish(key, EntryState::Failed, st, wt, Path::new(ws_of(cfg, repo)))
+                .await;
         }
     }
 
@@ -1328,15 +1310,9 @@ impl Daemon {
         let head = self.gh_pr_head(repo, pr_n, cfg).await;
         let text = verdict_comment(&body, sha, head.as_deref());
         if self.gh_comment(repo, pr_n, &text, cfg).await {
-            info!("orchestrateur: verdict review PR {key} posté");
-            self.pr_review_finish(
-                key,
-                EntryState::Done,
-                st,
-                wt,
-                Path::new(ws_of(cfg, repo)),
-            )
-            .await;
+            info!("orchestrator: PR review {key} verdict posted");
+            self.pr_review_finish(key, EntryState::Done, st, wt, Path::new(ws_of(cfg, repo)))
+                .await;
         } else {
             let tries = st
                 .pr_reviews
@@ -1345,18 +1321,12 @@ impl Daemon {
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             if tries >= 3 {
-                warn!("orchestrateur: verdict PR {key} impossible à poster → failed");
+                warn!("orchestrator: PR {key} verdict could not be posted → failed");
                 let _ = self
                     .gh_comment(repo, pr_n, &fail_comment("verdict post failed"), cfg)
                     .await;
-                self.pr_review_finish(
-                    key,
-                    EntryState::Failed,
-                    st,
-                    wt,
-                    Path::new(ws_of(cfg, repo)),
-                )
-                .await;
+                self.pr_review_finish(key, EntryState::Failed, st, wt, Path::new(ws_of(cfg, repo)))
+                    .await;
             } else if let Some(e) = st.pr_reviews.get_mut(key) {
                 e["post_tries"] = json!(tries + 1);
             }
@@ -1387,24 +1357,23 @@ impl Daemon {
         let meta = s.meta_snapshot();
         anyhow::ensure!(
             meta.origin.as_deref() == Some(PR_REVIEW_ORIGIN),
-            "verdict refusé : {session} hors pipeline pr-review"
+            "verdict refused: {session} outside the pr-review pipeline"
         );
         anyhow::ensure!(
             verdict == "APPROVED" || verdict == "CHANGES_REQUESTED",
-            "verdict inconnu: {verdict}"
+            "unknown verdict: {verdict}"
         );
         let body = format!("## Verdict: {verdict}\n\n{body}");
         {
             let mut live = self.orch.state.lock().unwrap();
             let found = live.pr_reviews.iter().find_map(|(k, v)| {
                 let mine = v.get("sid").and_then(Value::as_str) == Some(session.as_str())
-                    || v.get("reported_by").and_then(Value::as_str)
-                        == Some(session.as_str());
+                    || v.get("reported_by").and_then(Value::as_str) == Some(session.as_str());
                 (EntryState::of(v) == EntryState::Running && mine)
                     .then(|| (k.clone(), v.get("pending_body").is_some()))
             });
             let Some((key, duplicate)) = found else {
-                anyhow::bail!("aucune review en cours pour {session}");
+                anyhow::bail!("no review in progress for {session}");
             };
             if duplicate {
                 // Verdict déjà posé (journal ou premier appel) —
@@ -1436,16 +1405,15 @@ impl Daemon {
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
             if let Err(e) = d.h_delete_session(session.clone()).await {
-                warn!("orchestrateur: suppression reviewer {session} post-verdict: {e:#}");
+                warn!("orchestrator: post-verdict reviewer removal {session}: {e:#}");
                 // Delete avorté : `rm_sid` sur l'entrée encore Running
                 // (pending_body posé) → le sweeper retente au prochain
                 // tick ; la GC composant prend le relais si l'entrée a
                 // été soldée entre-temps (item #250).
                 let mut live = d.orch.state.lock().unwrap();
                 let key = live.pr_reviews.iter().find_map(|(k, v)| {
-                    (v.get("reported_by").and_then(Value::as_str)
-                        == Some(session.as_str()))
-                    .then(|| k.clone())
+                    (v.get("reported_by").and_then(Value::as_str) == Some(session.as_str()))
+                        .then(|| k.clone())
                 });
                 if let Some(k) = key {
                     if let Some(e) = live.pr_reviews.get_mut(&k).and_then(Value::as_object_mut) {
@@ -1478,11 +1446,11 @@ impl Daemon {
         pr: u64,
     ) -> Result<Value> {
         let cfg = self.orch.cfg.read().unwrap().clone();
-        anyhow::ensure!(cfg.pr_review, "pr_review désactivé (orchestrateur)");
-        anyhow::ensure!(pr > 0, "numéro de PR invalide");
+        anyhow::ensure!(cfg.pr_review, "pr_review disabled (orchestrator)");
+        anyhow::ensure!(pr > 0, "invalid PR number");
         anyhow::ensure!(
             repo.contains('/') && !repo.contains(char::is_whitespace),
-            "repo attendu au format owner/name"
+            "repo expected in owner/name format"
         );
         // Demandeur A2A : la session doit exister (traçabilité de la
         // notification verdict — jamais de notification vers un
@@ -1493,12 +1461,12 @@ impl Daemon {
         // PR cible : ouverte + base allowlistée — les mêmes gardes
         // que le chemin commentaire (jamais `main`).
         let Some((state, base, _head)) = self.gh_pr_info(&repo, pr, &cfg).await else {
-            anyhow::bail!("PR {repo}#{pr} introuvable");
+            anyhow::bail!("PR {repo}#{pr} not found");
         };
-        anyhow::ensure!(state == "OPEN", "PR {repo}#{pr} fermée ({state})");
+        anyhow::ensure!(state == "OPEN", "PR {repo}#{pr} closed ({state})");
         anyhow::ensure!(
             base == ALLOWED_BASE,
-            "PR {repo}#{pr} : base «{base}» ≠ {ALLOWED_BASE} — review refusée"
+            "PR {repo}#{pr}: base «{base}» ≠ {ALLOWED_BASE} — review refused"
         );
         let key = format!("{repo}#{pr}");
         let by = session.unwrap_or_default();
@@ -1513,9 +1481,7 @@ impl Daemon {
                     .get(&key)
                     .is_some_and(|v| EntryState::of(v) == EntryState::Done)
             {
-                anyhow::bail!(
-                    "pr_rereview désactivé — une review a déjà été rendue sur {key}"
-                );
+                anyhow::bail!("pr_rereview disabled — a review was already delivered on {key}");
             }
             // Upsert : le plus récent gagne (même règle que les
             // triggers commentaire) — une demande en file est
@@ -1601,7 +1567,11 @@ impl Daemon {
         {
             return;
         }
-        if self.h_resume_session(by.to_string(), None, false).await.is_ok() {
+        if self
+            .h_resume_session(by.to_string(), None, false)
+            .await
+            .is_ok()
+        {
             let _ = self.h_send(by.to_string(), text, false, false).await;
         }
     }
@@ -1765,9 +1735,9 @@ impl Daemon {
             Path::new(&cfg.workspace),
         )
         .await
-        .unwrap_or((-1, String::new(), "spawn impossible".into()));
+        .unwrap_or((-1, String::new(), "spawn failed".into()));
         if rc != 0 {
-            warn!("orchestrateur: comment {repo}#{pr_n} rc={rc} {e}");
+            warn!("orchestrator: comment {repo}#{pr_n} rc={rc} {e}");
         }
         rc == 0
     }
@@ -1882,10 +1852,10 @@ impl Daemon {
         let sid = v
             .get("session")
             .and_then(Value::as_str)
-            .context("spawn sans session")?
+            .context("spawn without session")?
             .to_string();
         info!(
-            "orchestrateur: review PR {key} → {sid} (sha {})",
+            "orchestrator: review PR {key} → {sid} (sha {})",
             &sha[..7.min(sha.len())]
         );
         Ok(sid)

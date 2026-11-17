@@ -52,15 +52,13 @@ pub fn acp_error_string(err: &Value) -> String {
     // data.message est parfois elle-même un JSON ({"error":{"message":…}})
     // — on tente d'en extraire le message le plus parlant, sinon on
     // garde la chaîne brute.
-    let inner = serde_json::from_str::<Value>(detail)
-        .ok()
-        .and_then(|v| {
-            v.get("error")
-                .and_then(|e| e.get("message"))
-                .or_else(|| v.get("message"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        });
+    let inner = serde_json::from_str::<Value>(detail).ok().and_then(|v| {
+        v.get("error")
+            .and_then(|e| e.get("message"))
+            .or_else(|| v.get("message"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
     let detail = inner.as_deref().unwrap_or(detail);
     let detail: String = detail.chars().take(300).collect();
     if detail.is_empty() || detail == msg {
@@ -108,7 +106,12 @@ pub fn session_new_params(cwd: &str, mcp_servers: Value, meta: Option<&Value>) -
     )
 }
 
-pub fn session_load_params(session_id: &str, cwd: &str, mcp_servers: Value, meta: Option<&Value>) -> Value {
+pub fn session_load_params(
+    session_id: &str,
+    cwd: &str,
+    mcp_servers: Value,
+    meta: Option<&Value>,
+) -> Value {
     with_meta(
         json!({"sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers, "capabilities": {"compaction": {}}}),
         meta,
@@ -164,7 +167,10 @@ pub enum Mapped {
 /// Mappe une notification `session/update` vers notre modèle.
 /// `update` = la valeur `params.update`.
 pub fn map_update(update: &Value) -> Mapped {
-    let su = update.get("sessionUpdate").and_then(Value::as_str).unwrap_or("");
+    let su = update
+        .get("sessionUpdate")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     match su {
         "agent_message_chunk" | "agent_thought_chunk" | "user_message_chunk" => {
             let text = extract_text(&update["content"]);
@@ -231,7 +237,10 @@ pub fn map_update(update: &Value) -> Mapped {
                 status,
                 text,
                 diff,
-                title: update.get("title").and_then(Value::as_str).map(String::from),
+                title: update
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .map(String::from),
                 kind: update.get("kind").and_then(Value::as_str).map(String::from),
                 locations: None,
                 input: update.get("rawInput").and_then(fmt_input),
@@ -288,7 +297,9 @@ pub fn map_update(update: &Value) -> Mapped {
                 .and_then(Value::as_array)
                 .map(|a| {
                     a.iter()
-                        .filter_map(|o| serde_json::from_value::<proto::ConfigOption>(o.clone()).ok())
+                        .filter_map(|o| {
+                            serde_json::from_value::<proto::ConfigOption>(o.clone()).ok()
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
@@ -417,7 +428,14 @@ fn extract_content(content: Option<&Value>) -> (String, Option<String>) {
             }
         }
     }
-    (text, if diffs.is_empty() { None } else { Some(diffs.join("\n")) })
+    (
+        text,
+        if diffs.is_empty() {
+            None
+        } else {
+            Some(diffs.join("\n"))
+        },
+    )
 }
 
 fn map_status(s: Option<&str>) -> ToolStatus {
@@ -472,9 +490,24 @@ fn fmt_raw_input(v: &Value, single: usize, field: usize, json: usize) -> Option<
         Value::String(s) if !s.is_empty() => Some(clip(s, single)),
         Value::Object(m) => {
             const KEYS: [&str; 18] = [
-                "command", "cmd", "file_path", "path", "file", "url", "uri",
-                "query", "pattern", "regex", "description", "prompt",
-                "question", "reason", "message", "content", "text", "code",
+                "command",
+                "cmd",
+                "file_path",
+                "path",
+                "file",
+                "url",
+                "uri",
+                "query",
+                "pattern",
+                "regex",
+                "description",
+                "prompt",
+                "question",
+                "reason",
+                "message",
+                "content",
+                "text",
+                "code",
             ];
             let mut lines: Vec<(&str, String)> = Vec::new();
             for k in KEYS {
@@ -542,7 +575,10 @@ pub fn parse_permission(params: &Value) -> PermissionReq {
     {
         parts.push(d);
     }
-    if let Some(locs) = tc.and_then(|t| t.get("locations")).and_then(Value::as_array) {
+    if let Some(locs) = tc
+        .and_then(|t| t.get("locations"))
+        .and_then(Value::as_array)
+    {
         let paths: Vec<&str> = locs
             .iter()
             .filter_map(|l| l.get("path").and_then(Value::as_str))
@@ -577,8 +613,16 @@ pub fn parse_permission(params: &Value) -> PermissionReq {
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .to_string(),
-                    name: o.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
-                    kind: o.get("kind").and_then(Value::as_str).unwrap_or("").to_string(),
+                    name: o
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    kind: o
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
                 })
                 .collect()
         })
@@ -588,7 +632,11 @@ pub fn parse_permission(params: &Value) -> PermissionReq {
         options,
         kind,
         call_id,
-        detail: if detail.is_empty() { None } else { Some(detail) },
+        detail: if detail.is_empty() {
+            None
+        } else {
+            Some(detail)
+        },
     }
 }
 

@@ -157,7 +157,7 @@ export type IconName = keyof typeof SHAPES;
 export function icon(name: IconName, cls = ""): string {
   let safe = name;
   if (!(name in SHAPES)) {
-    console.warn(`[icons] nom d'icône inconnu: ${name}`);
+    console.warn(`[icons] unknown icon name: ${name}`);
     safe = "sys";
   }
   return (

@@ -669,7 +669,7 @@ impl Daemon {
                 continue;
             }
             if !session_ids.contains(&rsid) {
-                info!("orchestrateur: reviewer {rsid} disparu → --unclaim-review #{id}");
+                info!("orchestrator: reviewer {rsid} gone → --unclaim-review #{id}");
                 let _ = run_out(&[bin, "--unclaim-review", &key], ws).await;
                 st.review_started.remove(&key);
                 st.reviewers.remove(&key);
@@ -701,10 +701,10 @@ impl Daemon {
                     ws,
                 )
                 .await
-                .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                .unwrap_or((-1, String::new(), "spawn failed".into()));
                 if rc == 0 {
                     info!(
-                        "orchestrateur: verdict {outcome} #{id} posté d'après \
+                        "orchestrator: verdict {outcome} #{id} posted from \
                          le marqueur de {rsid}"
                     );
                     // Snapshot pré-verdict : round + 1 = la valeur
@@ -743,7 +743,7 @@ impl Daemon {
                 } else {
                     // Le reviewer a sans doute posté entre-temps — le
                     // chemin « verdict frais » (B) traitera au prochain tick.
-                    warn!("orchestrateur: --verdict #{id} (marqueur) rc={rc} {e}");
+                    warn!("orchestrator: --verdict #{id} (marker) rc={rc} {e}");
                 }
                 continue;
             }
@@ -870,8 +870,8 @@ impl Daemon {
                 let aid = task_agent(t);
                 if aid.starts_with("s-") && !session_ids.contains(aid) {
                     info!(
-                        "orchestrateur: tâche #{} orpheline (owner {aid} \
-                         disparue) → release",
+                        "orchestrator: orphaned task #{} (owner {aid} \
+                         gone) → release",
                         task_id(t)
                     );
                     let _ = run_out(
@@ -908,8 +908,8 @@ impl Daemon {
             slots.total = slots.total.min(m);
             slots.working = slots.working.min(m);
             self.orch.set_detail(Some(format!(
-                "{rl} session(s) en rate_limit — exécution sérialisée \
-                 (1 session à la fois, reviewer prioritaire)"
+                "{rl} session(s) in rate_limit — serialized execution \
+                 (1 session at a time, reviewer prioritized)"
             )));
         }
         // Un reviewer persistant endormi ne tient pas le slot : il ne
@@ -952,17 +952,14 @@ impl Daemon {
             let key = id.to_string();
             let planner = task_agent(t);
             let planner_label = if planner.is_empty() {
-                "le planner (inconnu)".to_string()
+                "the planner (unknown)".to_string()
             } else {
                 planner.to_string()
             };
             let plan_inline = {
                 let p = task_plan_content(t);
                 if p.is_empty() {
-                    format!(
-                        "(plan non stocké — fichier déclaré : {})",
-                        task_plan_file(t)
-                    )
+                    format!("(plan not stored — declared file: {})", task_plan_file(t))
                 } else {
                     clip_inline(p, PLAN_INLINE_MAX)
                 }
@@ -999,9 +996,9 @@ impl Daemon {
                 }
                 let (rc, _o, e) = run_out(&[bin, "--claim-review", &key, "--reviewer", &rsid], ws)
                     .await
-                    .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                    .unwrap_or((-1, String::new(), "spawn failed".into()));
                 if rc == 0 {
-                    info!("orchestrateur: reviewer {rsid} réutilisé → #{id} (round {round})");
+                    info!("orchestrator: reviewer {rsid} reused → #{id} (round {round})");
                     self.reviewer_claim_reset(&rsid, planner, &key, st).await;
                     let msg = fill(
                         REVIEWER_ROUND_MSG,
@@ -1031,7 +1028,7 @@ impl Daemon {
                         // Réveil impossible : session morte entre le
                         // snapshot et le send → unclaim (l'item est déjà
                         // `reviewing`) + rm + spawn de secours.
-                        warn!("orchestrateur: send reviewer réutilisé {rsid} KO → unclaim + rm");
+                        warn!("orchestrator: reused reviewer send {rsid} KO → unclaim + rm");
                         let _ = run_out(&[bin, "--unclaim-review", &key], ws).await;
                         self.plan_rm_session(&rsid, st).await;
                         st.reviewers.remove(&key);
@@ -1041,7 +1038,7 @@ impl Daemon {
                 } else {
                     // Claim KO sur une session existante : elle reste
                     // endormie/mappée — retry au prochain tick, pas de rm.
-                    warn!("orchestrateur: claim-review #{id} reuse {rsid} rc={rc} {e}");
+                    warn!("orchestrator: claim-review #{id} reuse {rsid} rc={rc} {e}");
                     spawn_new = false;
                 }
             }
@@ -1060,7 +1057,7 @@ impl Daemon {
                 if rc == 0 && !out.is_empty() && out != "[]" {
                     clip_inline(out, 8000)
                 } else {
-                    "(aucune)".to_string()
+                    "(none)".to_string()
                 }
             };
             // Workspace routé de l'item (tag repo → repo_workspaces) :
@@ -1095,9 +1092,9 @@ impl Daemon {
                     let (rc, _o, e) =
                         run_out(&[bin, "--claim-review", &key, "--reviewer", &rsid], ws)
                             .await
-                            .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                            .unwrap_or((-1, String::new(), "spawn failed".into()));
                     if rc == 0 {
-                        info!("orchestrateur: reviewer {rsid} → #{id} (claim-review)");
+                        info!("orchestrator: reviewer {rsid} → #{id} (claim-review)");
                         // L'ancien reviewer mappé est supprimé avant
                         // l'écrasement du mapping — sinon il devient
                         // orphelin définitif (la sweep ne voit que les
@@ -1107,9 +1104,7 @@ impl Daemon {
                         // rate_limit (sain → `Reuse`, backoff → `Wait`)
                         // — dans les deux cas injoignable, le rm est
                         // sans risque (session déjà partie → warn).
-                        if let Some(old) =
-                            st.reviewers.get(&key).cloned().filter(|o| *o != rsid)
-                        {
+                        if let Some(old) = st.reviewers.get(&key).cloned().filter(|o| *o != rsid) {
                             self.plan_rm_session(&old, st).await;
                         }
                         st.reviewers.insert(key.clone(), rsid.clone());
@@ -1123,11 +1118,11 @@ impl Daemon {
                         slots.take();
                         reviewers_free -= 1;
                     } else {
-                        warn!("orchestrateur: claim-review #{id} rc={rc} {e} → rm {rsid}");
+                        warn!("orchestrator: claim-review #{id} rc={rc} {e} → rm {rsid}");
                         self.plan_rm_session(&rsid, st).await;
                     }
                 }
-                None => warn!("orchestrateur: spawn reviewer #{id} échoué"),
+                None => warn!("orchestrator: reviewer #{id} spawn failed"),
             }
         }
         // Revues éligibles restées sans reviewer ce tick → réserve de
@@ -1190,10 +1185,10 @@ impl Daemon {
             };
             let (rc, _o, e) = run_out(&[bin, "--claim", &key, "--agent-id", &sid], ws)
                 .await
-                .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                .unwrap_or((-1, String::new(), "spawn failed".into()));
             if rc == 0 {
                 info!(
-                    "orchestrateur: {} → #{id} (claim, no_plan={})",
+                    "orchestrator: {} → #{id} (claim, no_plan={})",
                     sid, no_plan as u8
                 );
                 if !no_plan {
@@ -1205,7 +1200,7 @@ impl Daemon {
                 st.plan_marker_seq.remove(&key);
                 slots.take();
             } else {
-                warn!("orchestrateur: claim #{id} rc={rc} {e} → rm {sid}");
+                warn!("orchestrator: claim #{id} rc={rc} {e} → rm {sid}");
                 self.plan_rm_session(&sid, st).await;
             }
         }
@@ -1255,7 +1250,16 @@ impl Daemon {
                     outcome.planners += 1;
                     outcome.workers += 1;
                     self.planner_upkeep(
-                        &m, bin, cfg, ws, tasks, prs, release_pr, st, now, rl > 0,
+                        &m,
+                        bin,
+                        cfg,
+                        ws,
+                        tasks,
+                        prs,
+                        release_pr,
+                        st,
+                        now,
+                        rl > 0,
                         &mut slots,
                     )
                     .await;
@@ -1375,7 +1379,7 @@ impl Daemon {
                 cfg.reviewer_reuse,
             ) {
                 SweepAction::Rm => {
-                    info!("orchestrateur: reviewer {rsid} soldé → rm (item {key})");
+                    info!("orchestrator: reviewer {rsid} settled → rm (item {key})");
                     self.plan_rm_session(&rsid, st).await;
                     st.reviewers.remove(&key);
                     st.reviewer_seq.remove(&key);
@@ -1403,8 +1407,8 @@ impl Daemon {
                 .unwrap_or("");
             if reviewer_sleep_ok(ostate) {
                 match self.h_sleep_session(owner.clone()).await {
-                    Ok(_) => info!("orchestrateur: planner gelé {owner} endormi (#{key})"),
-                    Err(e) => warn!("orchestrateur: sleep planner gelé {owner}: {e:#}"),
+                    Ok(_) => info!("orchestrator: frozen planner {owner} put to sleep (#{key})"),
+                    Err(e) => warn!("orchestrator: sleep frozen planner {owner}: {e:#}"),
                 }
             }
         }
@@ -1452,7 +1456,7 @@ impl Daemon {
                 rsid,
                 &planner_sid,
                 &format!(
-                    "[backlog] revue du plan de l'item #{id} : {} — {}",
+                    "[backlog] plan review of item #{id}: {} — {}",
                     outcome.to_uppercase(),
                     comment
                 ),
@@ -1464,7 +1468,7 @@ impl Daemon {
                 st.item_phase
                     .insert(key.clone(), ItemPhase::Implementing.as_str().into());
                 if planner_alive {
-                    info!("orchestrateur: plan #{id} approuvé → implémentation par {planner_sid}");
+                    info!("orchestrator: plan #{id} approved → implementation by {planner_sid}");
                     // /compact en force (tête de file) : la compaction
                     // s'arme AVANT les messages déjà en attente, pour
                     // implémenter sur contexte frais — interrompre un
@@ -1498,10 +1502,7 @@ impl Daemon {
                         cmt = if comment.is_empty() {
                             String::new()
                         } else {
-                            format!(
-                                " — commentaire du reviewer : {}",
-                                clip_inline(comment, 2000)
-                            )
+                            format!(" — reviewer comment: {}", clip_inline(comment, 2000))
                         },
                     );
                     // Brief en file classique : la retenue compact le
@@ -1512,7 +1513,7 @@ impl Daemon {
                         .h_set_mode(planner_sid.clone(), cfg.implement_mode.clone())
                         .await
                     {
-                        warn!("orchestrateur: set_mode {planner_sid}: {e:#}");
+                        warn!("orchestrator: set_mode {planner_sid}: {e:#}");
                     }
                 } else {
                     st.counter += 1;
@@ -1541,12 +1542,12 @@ impl Daemon {
                         let (rc, _o, e) =
                             run_out(&[bin, "--reassign", &key, "--agent-id", &nsid], ws)
                                 .await
-                                .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                                .unwrap_or((-1, String::new(), "spawn failed".into()));
                         if rc == 0 {
-                            info!("orchestrateur: #{id} réassigné à l'implémenteur {nsid}");
+                            info!("orchestrator: #{id} reassigned to implementer {nsid}");
                             st.plan_marker_seq.remove(&key);
                         } else {
-                            warn!("orchestrateur: reassign #{id} rc={rc} {e} → rm {nsid}");
+                            warn!("orchestrator: reassign #{id} rc={rc} {e} → rm {nsid}");
                             self.plan_rm_session(&nsid, st).await;
                         }
                     }
@@ -1574,12 +1575,12 @@ impl Daemon {
                         ws,
                     )
                     .await
-                    .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                    .unwrap_or((-1, String::new(), "spawn failed".into()));
                     if rc == 0 && !st.stalled_plans.contains_key(&key) {
                         st.stalled_plans.insert(key.clone(), planner_sid.clone());
                         info!(
-                            "orchestrateur: plan_review stalled #{id} (round \
-                             {round} ≥ {}) — revue humaine requise",
+                            "orchestrator: plan_review stalled #{id} (round \
+                             {round} ≥ {}) — human review required",
                             review_round_cap(cfg)
                         );
                         // Le planner n'a plus rien à faire : la passe
@@ -1592,7 +1593,7 @@ impl Daemon {
                         // verdict ci-dessus peut l'avoir laissé
                         // working.
                     } else if rc != 0 {
-                        warn!("orchestrateur: stall re-submit #{id} rc={rc} {e}");
+                        warn!("orchestrator: stall re-submit #{id} rc={rc} {e}");
                         // Re-submit impossible : retirer le gel posé par
                         // un précédent stall — sinon l'item (wip + owner
                         // peut-être mort) est figé hors de tout
@@ -1606,8 +1607,8 @@ impl Daemon {
                     .insert(key.clone(), ItemPhase::Planning.as_str().into());
                 if !planner_alive {
                     info!(
-                        "orchestrateur: verdict {outcome} #{id} + planner \
-                         {planner_sid} disparu → release"
+                        "orchestrator: verdict {outcome} #{id} + planner \
+                         {planner_sid} gone → release"
                     );
                     let _ =
                         run_out(&[bin, "--release", &key, "--agent-id", &planner_sid], ws).await;
@@ -1696,7 +1697,7 @@ impl Daemon {
                     let (sid2, want2) = (sid.to_string(), want.clone());
                     tokio::spawn(async move {
                         if let Err(e) = d.h_rename_session(sid2, want2).await {
-                            warn!("orchestrateur: rename: {e:#}");
+                            warn!("orchestrator: rename: {e:#}");
                         }
                     });
                     want
@@ -1798,7 +1799,7 @@ impl Daemon {
             if dead_stale {
                 for i in &my_open {
                     info!(
-                        "orchestrateur: {sid} dead depuis {}s — release #{}",
+                        "orchestrator: {sid} dead for {}s — release #{}",
                         (now - dead_since) as i64,
                         i.as_str()
                     );
@@ -1810,9 +1811,9 @@ impl Daemon {
             if unresolved && now - since < CLEAN_GRACE_S {
                 return true;
             }
-            info!("orchestrateur: {sid} inactive, tout soldé → rm");
+            info!("orchestrator: {sid} inactive, all settled → rm");
             if let Err(e) = self.h_delete_session(sid.to_string()).await {
-                warn!("orchestrateur: rm {sid}: {e:#}");
+                warn!("orchestrator: rm {sid}: {e:#}");
             }
             st.nudges.remove(sid);
             st.clean_since.remove(sid);
@@ -1829,7 +1830,7 @@ impl Daemon {
             let d = Arc::clone(self);
             tokio::spawn(async move {
                 if let Err(e) = d.h_pr_sync().await {
-                    warn!("orchestrateur: pr_sync pré-ménage: {e:#}");
+                    warn!("orchestrator: pr_sync pre-cleanup: {e:#}");
                 }
             });
         }
@@ -1869,8 +1870,8 @@ impl Daemon {
         // par le dispatch), différer. Idle compte déjà → pas de garde.
         if !nudge_slot_ok(*slots, state) {
             info!(
-                "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
-                 wip={my_open:?}) → nudge différé (max_workers/max_working)"
+                "orchestrator: {sid} asleep (open_prs={open_prs:?} \
+                 wip={my_open:?}) → nudge deferred (max_workers/max_working)"
             );
             return true;
         }
@@ -1879,11 +1880,11 @@ impl Daemon {
                 let n = st.plan_nudges.get(sid).copied().unwrap_or(0);
                 if n >= PLAN_MAX_NUDGES {
                     info!(
-                        "orchestrateur: planner {sid} sans plan après {n} \
+                        "orchestrator: planner {sid} without plan after {n} \
                          nudges → rm + release #{item_id}"
                     );
                     if let Err(e) = self.h_delete_session(sid.to_string()).await {
-                        warn!("orchestrateur: rm planner {sid} (item #{item_id}): {e:#}");
+                        warn!("orchestrator: rm planner {sid} (item #{item_id}): {e:#}");
                     }
                     let _ = run_out(
                         &[bin, "--release", &item_id.to_string(), "--agent-id", sid],
@@ -2053,13 +2054,13 @@ impl Daemon {
                         .unwrap_or((
                             -1,
                             String::new(),
-                            "spawn impossible".into(),
+                            "spawn failed".into(),
                         ));
                         if rc == 0 {
-                            info!("orchestrateur: plan #{id} soumis par {sid} → plan_review");
+                            info!("orchestrator: plan #{id} submitted by {sid} → plan_review");
                             st.plan_marker_seq.insert(key.clone(), seq);
                         } else {
-                            warn!("orchestrateur: submit-plan #{id} rc={rc} {e}");
+                            warn!("orchestrator: submit-plan #{id} rc={rc} {e}");
                         }
                     }
                     Err(e) => {
@@ -2067,7 +2068,7 @@ impl Daemon {
                         // ne doit pas re-déclencher à chaque tick — le
                         // planner est prévenu et corrigera le chemin.
                         st.plan_marker_seq.insert(key.clone(), seq);
-                        warn!("orchestrateur: PLAN_FILE #{id} illisible ({e})");
+                        warn!("orchestrator: PLAN_FILE #{id} unreadable ({e})");
                         // Pas de force : cette section n'est pas gardée
                         // par l'état — le feedback peut partir pendant
                         // un tour et cancel() l'annulerait ; la file
@@ -2108,17 +2109,17 @@ impl Daemon {
                 ws,
             )
             .await
-            .unwrap_or((-1, String::new(), "spawn impossible".into()));
+            .unwrap_or((-1, String::new(), "spawn failed".into()));
             if rc == 0 {
                 info!(
-                    "orchestrateur: plan #{id} soumis (fallback exit-plan \
+                    "orchestrator: plan #{id} submitted (exit-plan fallback \
                      {req_id}) → plan_review"
                 );
                 // « rester en plan » : refus poli — l'agent ne quitte pas
                 // le mode plan, le prochain prompt arbitre.
                 let _ = s.respond(&req_id, None, None);
             } else {
-                warn!("orchestrateur: submit-plan #{id} (exit-plan) rc={rc} {e}");
+                warn!("orchestrator: submit-plan #{id} (exit-plan) rc={rc} {e}");
             }
             return;
         }
@@ -2136,7 +2137,7 @@ impl Daemon {
             let (sid, want) = (m.id.clone(), want);
             tokio::spawn(async move {
                 if let Err(e) = d.h_rename_session(sid, want).await {
-                    warn!("orchestrateur: rename reviewer: {e:#}");
+                    warn!("orchestrator: rename reviewer: {e:#}");
                 }
             });
         }
@@ -2149,7 +2150,11 @@ impl Daemon {
     /// Dernier marqueur `PLAN_FILE:` du journal (AgentText) → (seq,
     /// chemin résolu). `~` et relatif sont normalisés sur le cwd de la
     /// session.
-    pub(crate) async fn plan_marker(&self, s: &Arc<Session>, m: &SessionMeta) -> Option<(u64, PathBuf)> {
+    pub(crate) async fn plan_marker(
+        &self,
+        s: &Arc<Session>,
+        m: &SessionMeta,
+    ) -> Option<(u64, PathBuf)> {
         let events = s.journal.read_page(&s.dir, None, JOURNAL_SCAN).ok()?;
         for ev in events.iter().rev() {
             let EventKind::AgentText { text } = &ev.kind else {
@@ -2242,11 +2247,11 @@ impl Daemon {
         }
         match self.h_sleep_session(sid.to_string()).await {
             Ok(_) => {
-                info!("orchestrateur: {sid} endormi");
+                info!("orchestrator: {sid} asleep");
                 true
             }
             Err(e) => {
-                warn!("orchestrateur: sleep {sid}: {e:#} → rm");
+                warn!("orchestrator: sleep {sid}: {e:#} → rm");
                 self.plan_rm_session(sid, st).await;
                 true
             }
@@ -2340,9 +2345,9 @@ impl Daemon {
                         .or_else(|| options.first())
                         .map(|o| o.option_id.clone());
                     if let Err(e) = s.respond(&rid, opt.as_deref(), None) {
-                        warn!("orchestrateur: respond {rid} ({sid}): {e:#}");
+                        warn!("orchestrator: respond {rid} ({sid}): {e:#}");
                     } else {
-                        info!("orchestrateur: permission {rid} ({sid}) auto-répondue");
+                        info!("orchestrator: permission {rid} ({sid}) auto-answered");
                         st.pending_req_seen.remove(&rid);
                     }
                 }
@@ -2353,9 +2358,9 @@ impl Daemon {
                     }
                     let a = serde_json::json!("procède au mieux de ton jugement");
                     if let Err(e) = s.respond(&rid, None, Some(&a)) {
-                        warn!("orchestrateur: respond {rid} ({sid}): {e:#}");
+                        warn!("orchestrator: respond {rid} ({sid}): {e:#}");
                     } else {
-                        info!("orchestrateur: question {rid} ({sid}) auto-répondue");
+                        info!("orchestrator: question {rid} ({sid}) auto-answered");
                         st.pending_req_seen.remove(&rid);
                     }
                 }
@@ -2426,7 +2431,7 @@ impl Daemon {
             tokio::spawn(async move {
                 if let Err(e) = d.resume_and_deliver(&sid, wrapped, true).await {
                     t.emit(EventKind::Error {
-                        message: format!("peer relay: resume échoué — {e:#}"),
+                        message: format!("peer relay: resume failed — {e:#}"),
                     });
                 }
             });
@@ -2471,13 +2476,13 @@ impl Daemon {
         {
             Ok(v) => v,
             Err(e) => {
-                warn!("orchestrateur: spawn {title}: {e:#}");
+                warn!("orchestrator: spawn {title}: {e:#}");
                 return None;
             }
         };
         let sid = v.get("session").and_then(Value::as_str)?.to_string();
         self.apply_spawn_cfg(&sid).await;
-        info!("orchestrateur: spawned {title} = {sid}");
+        info!("orchestrator: spawned {title} = {sid}");
         Some(sid)
     }
 
@@ -2498,7 +2503,7 @@ impl Daemon {
         // explicite, retry échue) reste livrable.
         if let Ok(s) = self.get_session(sid).await {
             if s.error_held() {
-                info!("orchestrateur: {sid} en retenue d'erreur — nudge abandonné");
+                info!("orchestrator: {sid} in error hold — nudge dropped");
                 return false;
             }
         }
@@ -2509,7 +2514,11 @@ impl Daemon {
         {
             return true;
         }
-        if self.h_resume_session(sid.to_string(), None, false).await.is_ok() {
+        if self
+            .h_resume_session(sid.to_string(), None, false)
+            .await
+            .is_ok()
+        {
             return self
                 .h_send(sid.to_string(), msg, force, false)
                 .await
@@ -2538,7 +2547,7 @@ impl Daemon {
     /// persistés la concernant.
     pub(crate) async fn plan_rm_session(self: &Arc<Self>, sid: &str, st: &mut OrchPersist) {
         if let Err(e) = self.h_delete_session(sid.to_string()).await {
-            warn!("orchestrateur: rm {sid}: {e:#}");
+            warn!("orchestrator: rm {sid}: {e:#}");
         }
         st.nudges.remove(sid);
         st.plan_nudges.remove(sid);
@@ -2578,7 +2587,7 @@ impl Daemon {
                 .collect::<String>()
         ));
         if let Err(e) = std::fs::write(&path, content) {
-            warn!("orchestrateur: write plan {}: {e}", path.display());
+            warn!("orchestrator: write plan {}: {e}", path.display());
         }
         path.display().to_string()
     }
@@ -2624,7 +2633,10 @@ impl Daemon {
             .filter(|t| {
                 matches!(task_status(t), "plan_review" | "reviewing")
                     || (task_status(t) == "wip"
-                        && st.item_phase.get(&task_id(t).to_string()).map(String::as_str)
+                        && st
+                            .item_phase
+                            .get(&task_id(t).to_string())
+                            .map(String::as_str)
                             == Some("planning"))
             })
             .cloned()
@@ -2652,9 +2664,9 @@ impl Daemon {
                     ws,
                 )
                 .await
-                .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                .unwrap_or((-1, String::new(), "spawn failed".into()));
                 if rc != 0 {
-                    warn!("orchestrateur: dégel #{key}: --claim-review rc={rc} {e}");
+                    warn!("orchestrator: unfreeze #{key}: --claim-review rc={rc} {e}");
                     continue;
                 }
             }
@@ -2674,15 +2686,15 @@ impl Daemon {
                         "--outcome",
                         "approved",
                         "--comment",
-                        "plan_review désactivé — passage direct en implémentation",
+                        "plan_review disabled — going straight to implementation",
                         "--force",
                     ],
                     ws,
                 )
                 .await
-                .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                .unwrap_or((-1, String::new(), "spawn failed".into()));
                 if rc != 0 {
-                    warn!("orchestrateur: dégel #{key}: --verdict rc={rc} {e}");
+                    warn!("orchestrator: unfreeze #{key}: --verdict rc={rc} {e}");
                     continue;
                 }
                 // Le verdict technique a bumpé review_round en base :
@@ -2697,7 +2709,7 @@ impl Daemon {
                 ws,
             )
             .await;
-            info!("orchestrateur: #{key} dégelé (plan_review off) → pending");
+            info!("orchestrator: #{key} unfrozen (plan_review off) → pending");
             for sid in reviewer_sids {
                 self.plan_rm_session(&sid, st).await;
             }
@@ -3009,9 +3021,15 @@ mod tests {
     #[test]
     fn sweep_decisions() {
         // Item absent / done / pending / implementing → Rm.
-        assert_eq!(reviewer_sweep(None, false, true, false, true), SweepAction::Rm);
+        assert_eq!(
+            reviewer_sweep(None, false, true, false, true),
+            SweepAction::Rm
+        );
         for st in ["done", "pending"] {
-            assert_eq!(reviewer_sweep(Some(st), false, true, true, true), SweepAction::Rm);
+            assert_eq!(
+                reviewer_sweep(Some(st), false, true, true, true),
+                SweepAction::Rm
+            );
         }
         assert_eq!(
             reviewer_sweep(Some("wip"), true, true, true, true),
@@ -3060,7 +3078,11 @@ mod tests {
         }
         assert!(!reviewer_alive_for_sweep(true, Some("error"), None));
         // error + rate_limit → backoff transitoire, conservé (Wait).
-        assert!(reviewer_alive_for_sweep(true, Some("error"), Some("rate_limit")));
+        assert!(reviewer_alive_for_sweep(
+            true,
+            Some("error"),
+            Some("rate_limit")
+        ));
     }
 
     #[test]

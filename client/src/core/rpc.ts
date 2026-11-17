@@ -46,7 +46,7 @@ function connLostErr(): Error {
 export function isConnLost(e: unknown, ck = ""): boolean {
   if ((e as { connLost?: boolean } | null)?.connLost) return true;
   if (ck && (connState(ck) ?? "ok") !== "ok") return true;
-  return /connexion ferm[ée]e|connection lost|connexion perdue/i.test(String(e));
+  return /connexion ferm[ée]e|connection lost|connexion perdue|connection closed/i.test(String(e));
 }
 
 // Attente bornée du retour « conn prête » : le backoff du
@@ -132,7 +132,7 @@ export async function call<T = unknown>(
     return r;
   } catch (e) {
     if (traced)
-      logUi("error", `rpc ${method} échec après ${Date.now() - t0} ms (conn ${connLabel}): ${e}`);
+      logUi("error", `rpc ${method} failed after ${Date.now() - t0} ms (conn ${connLabel}): ${e}`);
     throw e;
   }
 }
@@ -155,7 +155,7 @@ export function callBg<T = unknown>(
  *  échec applicatif → toast comme ailleurs. */
 export function bgErr(prefix: string, e: unknown, ck = "") {
   if (isConnLost(e, ck)) {
-    logUi("warn", `${prefix}: ${e} — transitoire conn`);
+    logUi("warn", `${prefix}: ${e} — transient conn`);
     return;
   }
   showErr(`${prefix}: ${e}`);

@@ -26,7 +26,7 @@ fn main() {
         walk(&root, &root, &mut entries);
         entries.sort();
     } else {
-        println!("cargo:warning=client/dist absent — web UI non embarquée");
+        println!("cargo:warning=client/dist missing — web UI not embedded");
     }
     let mut blob = Vec::new();
     blob.extend_from_slice(&(entries.len() as u32).to_le_bytes());

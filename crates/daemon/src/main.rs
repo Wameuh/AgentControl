@@ -120,7 +120,7 @@ fn parse_cli() -> Result<Cli> {
             "--web-dir" => {
                 cli.web_dir = Some(it.next().context("--web-dir <path>")?);
             }
-            other => anyhow::bail!("argument inconnu: {other}"),
+            other => anyhow::bail!("unknown argument: {other}"),
         }
     }
     Ok(cli)
@@ -135,8 +135,8 @@ fn check_loopback(addr: &str) -> Result<()> {
         .unwrap_or_default();
     anyhow::ensure!(
         matches!(host, "127.0.0.1" | "localhost" | "::1"),
-        "bind_http « {addr} » n'est pas loopback — utilisez 127.0.0.1 / ::1 \
-         (l'accès distant se fait via ssh -L, jamais par exposition réseau)"
+        "bind_http « {addr} » is not loopback — use 127.0.0.1 / ::1 \
+         (remote access goes through ssh -L, never network exposure)"
     );
     Ok(())
 }
@@ -153,7 +153,7 @@ fn gen_web_token(root: &std::path::Path) -> Result<String> {
         .read_exact(&mut b)?;
     let token: String = b.iter().map(|x| format!("{x:02x}")).collect();
     let p = root.join("web.token");
-    std::fs::write(&p, &token).context("écriture web.token")?;
+    std::fs::write(&p, &token).context("writing web.token")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -173,7 +173,7 @@ fn resolve_assets(explicit: Option<&str>, root: &std::path::Path) -> Option<web:
         if p.join("index.html").is_file() {
             return Some(web::Assets::Dir(p));
         }
-        tracing::warn!("web_dir {d}: index.html absent — ignoré");
+        tracing::warn!("web_dir {d}: index.html missing — ignored");
     }
     if let Some(m) = web::embedded_assets() {
         return Some(web::Assets::Embed(m));
@@ -261,14 +261,14 @@ async fn run() -> Result<()> {
     // fichier — y compris l'erreur fatale, émise AVANT son drop.
     let _guard = logging::init(&root);
     tracing::info!(
-        "=== agentcontrol-daemon v{} démarré (pid {}) — logs: {} ===",
+        "=== agentcontrol-daemon v{} started (pid {}) — logs: {} ===",
         env!("CARGO_PKG_VERSION"),
         std::process::id(),
         root.join("logs").display()
     );
     let res = serve(&root).await;
     if let Err(e) = &res {
-        tracing::error!("arrêt sur erreur fatale: {e:#}");
+        tracing::error!("stopped on fatal error: {e:#}");
     }
     res
 }
@@ -284,7 +284,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     let crashed = match read_pid_marker(&pid_path)? {
         PidMarker::Absent => false,
         PidMarker::Running(pid) => {
-            anyhow::bail!("une autre instance agentcontrol-daemon tourne déjà (pid {pid})");
+            anyhow::bail!("another agentcontrol-daemon instance is already running (pid {pid})");
         }
         PidMarker::Stale => true,
     };
@@ -292,7 +292,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     // Config optionnelle
     let cfg_path = root.join("config.toml");
     let cfg: Config = if cfg_path.exists() {
-        toml::from_str(&std::fs::read_to_string(&cfg_path)?).context("config.toml invalide")?
+        toml::from_str(&std::fs::read_to_string(&cfg_path)?).context("invalid config.toml")?
     } else {
         Config::default()
     };
@@ -320,10 +320,17 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     )
     .await?;
     tracing::info!(
-        "{} session(s) chargée(s), root={}, agents: {}",
+        "{} session(s) loaded, root={}, agents: {}",
         daemon.sessions.read().await.len(),
         root.display(),
-        daemon.agents.read().await.keys().cloned().collect::<Vec<_>>().join(", ")
+        daemon
+            .agents
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
     );
 
     // Socket Unix
@@ -352,12 +359,12 @@ async fn serve(root: &std::path::Path) -> Result<()> {
         let assets = resolve_assets(web_dir_cfg.as_deref(), root);
         match &assets {
             Some(web::Assets::Embed(m)) => {
-                tracing::info!("web assets: {} fichier(s) embarqué(s)", m.len())
+                tracing::info!("web assets: {} embedded file(s)", m.len())
             }
             Some(web::Assets::Dir(d)) => tracing::info!("web assets: {}", d.display()),
             None => tracing::warn!(
-                "assets web introuvables (ni embed, ni root/web, ni exe/web, \
-                 ni client/dist) — page placeholder servie"
+                "web assets not found (neither embed, nor root/web, nor exe/web, \
+                 nor client/dist) — serving placeholder page"
             ),
         }
         let http_listener = tokio::net::TcpListener::bind(addr)
@@ -374,7 +381,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     }
 
     tracing::info!(
-        "listening: unix:{} + {} | rétention: journal>{}MB→{}MB, blobs<{}MB, purge_days={}",
+        "listening: unix:{} + {} | retention: journal>{}MB→{}MB, blobs<{}MB, purge_days={}",
         sock_path.display(),
         cfg.bind_tcp,
         cfg.retention.journal_max_mb,
@@ -385,8 +392,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
 
     // Listeners bindés → l'instance est la nôtre : le marqueur nous
     // représente jusqu'à un arrêt propre (voir la branche signal).
-    std::fs::write(&pid_path, std::process::id().to_string())
-        .context("écriture daemon.pid")?;
+    std::fs::write(&pid_path, std::process::id().to_string()).context("writing daemon.pid")?;
 
     let d1 = daemon.clone();
     let d2 = daemon.clone();
@@ -422,7 +428,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
             tokio::spawn(async move { d3.auto_resume(resumable).await });
         } else {
             tracing::info!(
-                "arrêt précédent brutal — {} session(s) active(s), reprise auto désactivée (auto_resume=false)",
+                "previous unclean shutdown — {} active session(s), auto resume disabled (auto_resume=false)",
                 resumable.len()
             );
         }
@@ -436,16 +442,16 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     let d_shutdown = daemon.clone();
     let clean = tokio::select! {
         _ = server::accept_unix(d1, unix_listener) => {
-            tracing::error!("accept_unix a retourné — arrêt inattendu");
+            tracing::error!("accept_unix returned — unexpected stop");
             false
         }
         _ = server::accept_tcp(daemon, tcp_listener) => {
-            tracing::error!("accept_tcp a retourné — arrêt inattendu");
+            tracing::error!("accept_tcp returned — unexpected stop");
             false
         }
         sig = shutdown_signal() => {
             tracing::info!(
-                "signal {sig} reçu — arrêt (les sessions restent journalisées sur disque)"
+                "signal {sig} received — stopping (sessions stay journaled on disk)"
             );
             true
         }
@@ -458,7 +464,10 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     if clean {
         let _ = std::fs::remove_file(&pid_path);
     }
-    tracing::info!("=== agentcontrol-daemon arrêté (pid {}) ===", std::process::id());
+    tracing::info!(
+        "=== agentcontrol-daemon stopped (pid {}) ===",
+        std::process::id()
+    );
     Ok(())
 }
 
@@ -476,7 +485,7 @@ fn read_pid_marker(path: &std::path::Path) -> Result<PidMarker> {
     let txt = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(PidMarker::Absent),
-        Err(e) => return Err(e).context("lecture daemon.pid"),
+        Err(e) => return Err(e).context("reading daemon.pid"),
     };
     let Ok(pid) = txt.trim().parse::<u32>() else {
         // Contenu illisible : écriture interrompue → arrêt brutal aussi.
@@ -509,7 +518,7 @@ async fn shutdown_signal() -> &'static str {
             _ = term.recv() => "SIGTERM",
         },
         Err(e) => {
-            tracing::warn!("handler SIGTERM indisponible: {e}");
+            tracing::warn!("SIGTERM handler unavailable: {e}");
             let _ = tokio::signal::ctrl_c().await;
             "SIGINT"
         }

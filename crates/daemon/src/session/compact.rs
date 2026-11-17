@@ -30,11 +30,32 @@ pub(super) fn compact_done_text(text: &str) -> bool {
         compact |= w.starts_with("compact");
         done |= matches!(
             w,
-            "compacted" | "compacté" | "compactée" | "cancel" | "cancelled" | "canceled"
-                | "annulé" | "annulée" | "abort" | "aborted" | "finish" | "finished" | "done"
-                | "interrupt" | "interrupted" | "error" | "errors" | "fail" | "failed"
-                | "failure" | "échoué" | "cancellation" | "complete" | "completed"
-                | "terminé" | "terminée"
+            "compacted"
+                | "compacté"
+                | "compactée"
+                | "cancel"
+                | "cancelled"
+                | "canceled"
+                | "annulé"
+                | "annulée"
+                | "abort"
+                | "aborted"
+                | "finish"
+                | "finished"
+                | "done"
+                | "interrupt"
+                | "interrupted"
+                | "error"
+                | "errors"
+                | "fail"
+                | "failed"
+                | "échoué"
+                | "failure"
+                | "cancellation"
+                | "complete"
+                | "completed"
+                | "terminé"
+                | "terminée"
         );
     }
     compact && done
@@ -62,7 +83,7 @@ impl Session {
                 drop(m);
                 self.emit(EventKind::System {
                     text: format!(
-                        "seuil de contexte atteint ({}) — compact auto impossible : /compact non supporté par l'agent",
+                        "context threshold reached ({}) — auto compact impossible: /compact not supported by the agent",
                         describe_usage(used, size)
                     ),
                 });
@@ -83,7 +104,7 @@ impl Session {
         }
         self.emit(EventKind::System {
             text: format!(
-                "seuil de contexte atteint ({}) — compact automatique",
+                "context threshold reached ({}) — automatic compact",
                 describe_usage(used, size)
             ),
         });
@@ -145,11 +166,11 @@ impl Session {
             return;
         };
         self.emit(EventKind::System {
-            text: format!("compact terminé — {reason}"),
+            text: format!("compact done — {reason}"),
         });
         if h.auto && !cancelled {
             self.emit(EventKind::System {
-                text: "reprise — envoi « continue your task »".into(),
+                text: "resumed — sending « continue your task »".into(),
             });
             self.enqueue_prompt("continue your task", true, PromptSrc::Auto);
         }
@@ -158,7 +179,6 @@ impl Session {
             self.spawn_drain();
         }
     }
-
 }
 
 /// `184 000/200 000 tokens` pour les messages de seuil.

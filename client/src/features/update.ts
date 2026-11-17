@@ -189,7 +189,7 @@ export async function performDaemonUpdate(o: {
   // Corrélation client.log : une mise à jour démon (surtout ensure_daemon
   // ssh) peut coïncider avec un flap transport — la ligne porte conn +
   // versions pour la retrouver sans fouiller les toasts.
-  logUi("info", `daemon update conn=${o.conn} ${o.current}->${o.target} confirmé`);
+  logUi("info", `daemon update conn=${o.conn} ${o.current}->${o.target} confirmed`);
   // Capacité fraîche (le statut du check peut dater) : self_update
   // annonce que le démon connaît ReqKind::UpdateDaemon — un plus vieux
   // répondrait `parse: unknown variant` en id=0, droppé par le routage

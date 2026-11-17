@@ -2,8 +2,8 @@
 //! envoi de prompts, file d'attente, historique, configuration, réponses
 //! aux demandes de l'agent, cycle de vie (kill/delete/subscribe).
 
-use super::*;
 use super::cfg::spawn_args;
+use super::*;
 use proto::{EventKind, SessionMeta};
 
 use crate::session::SteerOutcome;
@@ -14,35 +14,34 @@ impl Daemon {
     /// dérivé — partagée par list_sessions et sa variante paginée : la
     /// pagination ne doit pas changer le contenu, seulement le découp.
     async fn sorted_session_metas(self: &Arc<Self>) -> Result<Vec<SessionMeta>> {
-                let sessions = self.sessions.read().await;
-                let mut list: Vec<SessionMeta> =
-                    sessions.values().map(|s| s.meta_snapshot()).collect();
-                // Tie-break sur l'id : created_at a une résolution
-                // millis — deux sessions de la même ms s'ordonnaient
-                // selon l'itération du HashMap, et la pagination
-                // (offset) exige un tri déterministe.
-                list.sort_by(|a, b| {
-                    b.created_at
-                        .cmp(&a.created_at)
-                        .then_with(|| a.id.cmp(&b.id))
-                });
-                // « wait » dérivé à l'affichage : idle/asleep + waiter
-                // ac-wait vivant — la session se parque en attendant le
-                // ping du waiter, pas une action utilisateur.
-                // meta.state interne reste réel (orchestrateur, retries,
-                // file de prompts raisonnent sur l'état vrai — un asleep
-                // + waiter compte déjà dans `alive`, #181). Le détail du
-                // waiter (âge/nom/timeout, #189) voyage dans `meta.wait`.
-                let waiting = super::orch::acwait_live_waiters();
-                let now = super::orch::now_secs();
-                for m in &mut list {
-                    derive_wait_state(m, &waiting, now);
-                }
-                Ok(list)
+        let sessions = self.sessions.read().await;
+        let mut list: Vec<SessionMeta> = sessions.values().map(|s| s.meta_snapshot()).collect();
+        // Tie-break sur l'id : created_at a une résolution
+        // millis — deux sessions de la même ms s'ordonnaient
+        // selon l'itération du HashMap, et la pagination
+        // (offset) exige un tri déterministe.
+        list.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        // « wait » dérivé à l'affichage : idle/asleep + waiter
+        // ac-wait vivant — la session se parque en attendant le
+        // ping du waiter, pas une action utilisateur.
+        // meta.state interne reste réel (orchestrateur, retries,
+        // file de prompts raisonnent sur l'état vrai — un asleep
+        // + waiter compte déjà dans `alive`, #181). Le détail du
+        // waiter (âge/nom/timeout, #189) voyage dans `meta.wait`.
+        let waiting = super::orch::acwait_live_waiters();
+        let now = super::orch::now_secs();
+        for m in &mut list {
+            derive_wait_state(m, &waiting, now);
+        }
+        Ok(list)
     }
 
     pub(super) async fn h_list_sessions(self: &Arc<Self>) -> Result<Value> {
-                Ok(serde_json::to_value(self.sorted_session_metas().await?)?)
+        Ok(serde_json::to_value(self.sorted_session_metas().await?)?)
     }
 
     /// Page de list_sessions : une réponse JSON est UNE ligne NDJSON
@@ -55,464 +54,288 @@ impl Daemon {
         limit: Option<u32>,
         offset: Option<u64>,
     ) -> Result<Value> {
-                const DEFAULT_PAGE: u64 = 25;
-                const MAX_PAGE: u64 = 200;
-                let limit = limit
-                    .map(|l| l as u64)
-                    .unwrap_or(DEFAULT_PAGE)
-                    .clamp(1, MAX_PAGE);
-                let offset = offset.unwrap_or(0);
-                let list = self.sorted_session_metas().await?;
-                let total = list.len() as u64;
-                let start = (offset as usize).min(list.len());
-                let end = start.saturating_add(limit as usize).min(list.len());
-                let next = (end < list.len()).then_some(end as u64);
-                Ok(json!({
-                    "sessions": list[start..end].to_vec(),
-                    "next_offset": next,
-                    "total": total,
-                }))
+        const DEFAULT_PAGE: u64 = 25;
+        const MAX_PAGE: u64 = 200;
+        let limit = limit
+            .map(|l| l as u64)
+            .unwrap_or(DEFAULT_PAGE)
+            .clamp(1, MAX_PAGE);
+        let offset = offset.unwrap_or(0);
+        let list = self.sorted_session_metas().await?;
+        let total = list.len() as u64;
+        let start = (offset as usize).min(list.len());
+        let end = start.saturating_add(limit as usize).min(list.len());
+        let next = (end < list.len()).then_some(end as u64);
+        Ok(json!({
+            "sessions": list[start..end].to_vec(),
+            "next_offset": next,
+            "total": total,
+        }))
     }
 
-    pub(super) async fn h_new_session(self: &Arc<Self>, agent: String, cwd: String, title: Option<String>, model: Option<String>, mode: Option<String>, prompt: Option<String>, origin: Option<String>, group: Option<String>) -> Result<Value> {
-                // agent_profile : hot-reload — un profil [agents.*]
-                // déclaré après le boot est spawnable sans restart.
-                let profile = self
-                    .agent_profile(&agent)
-                    .await
-                    .with_context(|| format!("agent inconnu: {agent}"))?;
-                let _slot = self.ensure_agent_slot(&agent).await?;
-                // `~`/`$VAR` expansés + existence validée ici — sinon le
-                // spawn échouait en tâche de fond bien après la réponse.
-                let cwd = resolve_cwd(&cwd)?;
-                // Provenance externe (service) : forme libre — on normalise
-                // juste (ligne unique, taille bornée) pour rester un badge.
-                let origin = origin
-                    .map(|o| o.split_whitespace().collect::<Vec<_>>().join(" "))
-                    .filter(|o| !o.is_empty())
-                    .map(|o| o.chars().take(80).collect::<String>());
-                let meta = SessionMeta {
-                    id: proto::new_id("s"),
-                    agent: agent.clone(),
-                    title: title.unwrap_or_else(|| "session".into()),
-                    cwd,
-                    created_at: proto::now_iso(),
-                    native_session_id: None,
-                    mode: mode.clone(),
-                    model: model.clone(),
-                    model_source: model.as_ref().map(|_| "announced".to_string()),
-                    model_override_sid: None,
-                    supports_load: None,
-                    available_modes: vec![],
-                    available_commands: vec![],
-                    available_models: vec![],
-                    advisor: None,
-                    advisor_models: profile.advisor_models.clone(),
-                    config_options: vec![],
-                    pending_config: Default::default(),
-                    desired_config: Default::default(),
-                    state: "starting".into(),
-                    // Même normalisation que set_group : blank → None.
-                    group: group.filter(|g| !g.trim().is_empty()),
-                    spawned_by: None,
-                    origin: origin.clone(),
-                    context_used: None,
-                    context_size: None,
-                    last_error: None,
-                    wait: None,
-                };
-                let dir = Session::create_dir(&self.root, &meta)?;
-                let session = Session::open(dir, &self.compact, Arc::clone(&self.caps))?;
-                let sid = meta.id.clone();
-                self.watch_prs(&session);
-                self.sessions.write().await.insert(sid.clone(), session.clone());
-                // La création par un service est tracée dans le journal —
-                // pendant du "session créée par « parent »" de peer_spawn.
-                if let Some(o) = &origin {
-                    session.emit(EventKind::System {
-                        text: format!("session créée par le service « {o} »"),
-                    });
-                }
+    pub(super) async fn h_new_session(
+        self: &Arc<Self>,
+        agent: String,
+        cwd: String,
+        title: Option<String>,
+        model: Option<String>,
+        mode: Option<String>,
+        prompt: Option<String>,
+        origin: Option<String>,
+        group: Option<String>,
+    ) -> Result<Value> {
+        // agent_profile : hot-reload — un profil [agents.*]
+        // déclaré après le boot est spawnable sans restart.
+        let profile = self
+            .agent_profile(&agent)
+            .await
+            .with_context(|| format!("unknown agent: {agent}"))?;
+        let _slot = self.ensure_agent_slot(&agent).await?;
+        // `~`/`$VAR` expansés + existence validée ici — sinon le
+        // spawn échouait en tâche de fond bien après la réponse.
+        let cwd = resolve_cwd(&cwd)?;
+        // Provenance externe (service) : forme libre — on normalise
+        // juste (ligne unique, taille bornée) pour rester un badge.
+        let origin = origin
+            .map(|o| o.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|o| !o.is_empty())
+            .map(|o| o.chars().take(80).collect::<String>());
+        let meta = SessionMeta {
+            id: proto::new_id("s"),
+            agent: agent.clone(),
+            title: title.unwrap_or_else(|| "session".into()),
+            cwd,
+            created_at: proto::now_iso(),
+            native_session_id: None,
+            mode: mode.clone(),
+            model: model.clone(),
+            model_source: model.as_ref().map(|_| "announced".to_string()),
+            model_override_sid: None,
+            supports_load: None,
+            available_modes: vec![],
+            available_commands: vec![],
+            available_models: vec![],
+            advisor: None,
+            advisor_models: profile.advisor_models.clone(),
+            config_options: vec![],
+            pending_config: Default::default(),
+            desired_config: Default::default(),
+            state: "starting".into(),
+            // Même normalisation que set_group : blank → None.
+            group: group.filter(|g| !g.trim().is_empty()),
+            spawned_by: None,
+            origin: origin.clone(),
+            context_used: None,
+            context_size: None,
+            last_error: None,
+            wait: None,
+        };
+        let dir = Session::create_dir(&self.root, &meta)?;
+        let session = Session::open(dir, &self.compact, Arc::clone(&self.caps))?;
+        let sid = meta.id.clone();
+        self.watch_prs(&session);
+        self.sessions
+            .write()
+            .await
+            .insert(sid.clone(), session.clone());
+        // La création par un service est tracée dans le journal —
+        // pendant du "session créée par « parent »" de peer_spawn.
+        if let Some(o) = &origin {
+            session.emit(EventKind::System {
+                text: format!("session created by service « {o} »"),
+            });
+        }
 
-                // Réponse immédiate : la session est visible en "starting",
-                // le spawn (process + handshake) tourne en tâche de fond —
-                // le dialogue client n'attend plus les secondes de l'init.
-                let (cmd, envs) =
-                    self.agent_parts(&profile, model.as_deref(), mode.as_deref(), &sid);
-                let deliver = match (prompt, &origin) {
-                    (Some(p), Some(o)) => {
-                        // Prompt initial d'un service : journalisé comme un
-                        // user_message portant la provenance (badge « via »
-                        // côté client — pas un faux PeerMessage d'une
-                        // session hôte), et livré wrappé pour que l'agent
-                        // sache qu'il répond à un programme.
-                        session.emit(EventKind::UserMessage {
-                            text: p.clone(),
-                            steer: false,
-                            origin: Some(o.clone()),
-                            spawn_prompt: true,
-                        });
-                        let wrapped = format!(
-                            "[AgentControl] tu es la session {sid}, créée par \
+        // Réponse immédiate : la session est visible en "starting",
+        // le spawn (process + handshake) tourne en tâche de fond —
+        // le dialogue client n'attend plus les secondes de l'init.
+        let (cmd, envs) = self.agent_parts(&profile, model.as_deref(), mode.as_deref(), &sid);
+        let deliver = match (prompt, &origin) {
+            (Some(p), Some(o)) => {
+                // Prompt initial d'un service : journalisé comme un
+                // user_message portant la provenance (badge « via »
+                // côté client — pas un faux PeerMessage d'une
+                // session hôte), et livré wrappé pour que l'agent
+                // sache qu'il répond à un programme.
+                session.emit(EventKind::UserMessage {
+                    text: p.clone(),
+                    steer: false,
+                    origin: Some(o.clone()),
+                    spawn_prompt: true,
+                });
+                let wrapped = format!(
+                    "[AgentControl] tu es la session {sid}, créée par \
                             le service externe « {o} » — la tâche ci-dessous \
                             t'est confiée par ce programme (pas par un humain \
                             ni une autre session).\n\
                             ---\n{p}\n---",
-                        );
-                        FreshDeliver::Service { wrapped }
-                    }
-                    (p, _) => p.map_or(FreshDeliver::None, FreshDeliver::UserPrompt),
-                };
-                self.spawn_fresh(&session, cmd, envs, None, true, mode, model, deliver);
-                info!("session créée: {sid} (agent={agent}) — spawn en tâche de fond");
-                Ok(json!({"session": sid}))
+                );
+                FreshDeliver::Service { wrapped }
+            }
+            (p, _) => p.map_or(FreshDeliver::None, FreshDeliver::UserPrompt),
+        };
+        self.spawn_fresh(&session, cmd, envs, None, true, mode, model, deliver);
+        info!("session created: {sid} (agent={agent}) — spawning in background");
+        Ok(json!({"session": sid}))
     }
 
-    pub(super) async fn h_attach_session(self: &Arc<Self>, agent: String, cwd: String, native_id: String, title: Option<String>) -> Result<Value> {
-                let profile = self
-                    .agent_profile(&agent)
-                    .await
-                    .with_context(|| format!("agent inconnu: {agent}"))?;
-                let _slot = self.ensure_agent_slot(&agent).await?;
-                let cwd = resolve_cwd(&cwd)?;
-                let meta = SessionMeta {
-                    id: proto::new_id("s"),
-                    agent: agent.clone(),
-                    title: title.unwrap_or_else(|| format!("attach:{native_id}")),
-                    cwd,
-                    created_at: proto::now_iso(),
-                    native_session_id: Some(native_id),
-                    mode: None,
-                    model: None,
-                    model_source: None,
-                    model_override_sid: None,
-                    supports_load: None,
-                    available_modes: vec![],
-                    available_commands: vec![],
-                    available_models: vec![],
-                    advisor: None,
-                    advisor_models: profile.advisor_models.clone(),
-                    config_options: vec![],
-                    pending_config: Default::default(),
-                    desired_config: Default::default(),
-                    state: "starting".into(),
-                    group: None,
-                    spawned_by: None,
-                    origin: None,
-                    context_used: None,
-                    context_size: None,
-                    last_error: None,
-                    wait: None,
-                };
-                let dir = Session::create_dir(&self.root, &meta)?;
-                let session = Session::open(dir, &self.compact, Arc::clone(&self.caps))?;
-                let sid = meta.id.clone();
-                self.watch_prs(&session);
-                self.sessions.write().await.insert(sid.clone(), session.clone());
-                let (cmd, envs) = self.agent_parts(&profile, None, None, &sid);
-                let natif = meta.native_session_id.clone();
-                // Même traitement que new_session : réponse dès l'insert,
-                // spawn + session/load en tâche de fond.
-                self.spawn_fresh(
-                    &session, cmd, envs, natif.clone(), true, None, None,
-                    FreshDeliver::None,
-                );
-                info!(
-                    "session attachée: {sid} (agent={agent}, natif={}) — spawn en tâche de fond",
-                    natif.as_deref().unwrap_or_default()
-                );
-                Ok(json!({"session": sid}))
+    pub(super) async fn h_attach_session(
+        self: &Arc<Self>,
+        agent: String,
+        cwd: String,
+        native_id: String,
+        title: Option<String>,
+    ) -> Result<Value> {
+        let profile = self
+            .agent_profile(&agent)
+            .await
+            .with_context(|| format!("unknown agent: {agent}"))?;
+        let _slot = self.ensure_agent_slot(&agent).await?;
+        let cwd = resolve_cwd(&cwd)?;
+        let meta = SessionMeta {
+            id: proto::new_id("s"),
+            agent: agent.clone(),
+            title: title.unwrap_or_else(|| format!("attach:{native_id}")),
+            cwd,
+            created_at: proto::now_iso(),
+            native_session_id: Some(native_id),
+            mode: None,
+            model: None,
+            model_source: None,
+            model_override_sid: None,
+            supports_load: None,
+            available_modes: vec![],
+            available_commands: vec![],
+            available_models: vec![],
+            advisor: None,
+            advisor_models: profile.advisor_models.clone(),
+            config_options: vec![],
+            pending_config: Default::default(),
+            desired_config: Default::default(),
+            state: "starting".into(),
+            group: None,
+            spawned_by: None,
+            origin: None,
+            context_used: None,
+            context_size: None,
+            last_error: None,
+            wait: None,
+        };
+        let dir = Session::create_dir(&self.root, &meta)?;
+        let session = Session::open(dir, &self.compact, Arc::clone(&self.caps))?;
+        let sid = meta.id.clone();
+        self.watch_prs(&session);
+        self.sessions
+            .write()
+            .await
+            .insert(sid.clone(), session.clone());
+        let (cmd, envs) = self.agent_parts(&profile, None, None, &sid);
+        let natif = meta.native_session_id.clone();
+        // Même traitement que new_session : réponse dès l'insert,
+        // spawn + session/load en tâche de fond.
+        self.spawn_fresh(
+            &session,
+            cmd,
+            envs,
+            natif.clone(),
+            true,
+            None,
+            None,
+            FreshDeliver::None,
+        );
+        info!(
+            "session attached: {sid} (agent={agent}, native={}) — spawning in background",
+            natif.as_deref().unwrap_or_default()
+        );
+        Ok(json!({"session": sid}))
     }
 
     pub(super) async fn h_list_native_sessions(self: &Arc<Self>, session: String) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                s.list_native_sessions().await
+        let s = self.get_session(&session).await?;
+        s.list_native_sessions().await
     }
 
     pub(super) async fn h_fork_session(self: &Arc<Self>, session: String) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                // Le TUI fork mute le même sid natif que `devin -r` —
-                // double mutation concurrente du store provider.
-                if s.catalogue_override_active() {
-                    anyhow::bail!("override catalogue en cours — réessayez dans un instant");
-                }
-                let meta = s.meta_snapshot();
-                let _slot = self.ensure_agent_slot(&meta.agent).await?;
-                let native = meta
-                    .native_session_id
-                    .clone()
-                    .context("fork : la session n'a pas d'id natif")?;
-                let profile = self
-                    .agents
-                    .read()
-                    .await
-                    .get(&meta.agent)
-                    .with_context(|| format!("agent inconnu: {}", meta.agent))?
-                    .clone();
-                let bin = crate::server::misc::effective_command(&profile.commands)
-                    .first()
-                    .cloned()
-                    .context("commande agent vide")?;
-                // /fork n'existe que dans le TUI Devin (pas de méthode ACP).
-                if !bin.to_lowercase().contains("devin") {
-                    anyhow::bail!("fork non supporté pour l'agent '{}'", meta.agent);
-                }
-                // Le TUI refuse d'ouvrir une session native verrouillée :
-                // l'agent acp la tient → kill, puis respawn après le fork.
-                let was_alive = s.is_alive();
-                if was_alive {
-                    s.emit(EventKind::System {
-                        text: "fork : libération de la session native…".into(),
-                    });
-                    s.kill().await;
-                    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-                }
-                let new_native = match tui::fork_via_tui(&bin, &meta.cwd, &native).await {
-                    Ok(id) => id,
-                    Err(e) => {
-                        // Restaure la source si on l'avait tuée.
-                        if was_alive {
-                            let (cmd, envs) = spawn_args(&profile, &meta);
-                            if matches!(
-                                s.spawn_agent(
-                                    &cmd,
-                                    &envs,
-                                    meta.native_session_id.clone(),
-                                    true,
-                                    self.mcp_servers(&session),
-                                    Some(crate::session::SpawnCfg {
-                                        model: meta.model.clone(),
-                                        quiet: true,
-                                        ..Default::default()
-                                    }),
-                                    self.spawn_hints(&profile, &meta),
-                                )
-                                .await,
-                                Ok(true)
-                            ) {
-                                self.reapply_catalogue_if_new_sid(&s).await;
-                            }
-                        }
-                        return Err(e.context("fork via le TUI de l'agent"));
-                    }
-                };
-                s.emit(EventKind::System {
-                    text: format!("session native forkée → {new_native}"),
-                });
-                // Ré-ouvre la source si elle vivait. Le lock natif peut
-                // traîner le temps que le TUI meure → retry sur le cas
-                // "already open in another process".
+        let s = self.get_session(&session).await?;
+        // Le TUI fork mute le même sid natif que `devin -r` —
+        // double mutation concurrente du store provider.
+        if s.catalogue_override_active() {
+            anyhow::bail!("catalogue override in progress — try again in a moment");
+        }
+        let meta = s.meta_snapshot();
+        let _slot = self.ensure_agent_slot(&meta.agent).await?;
+        let native = meta
+            .native_session_id
+            .clone()
+            .context("fork: session has no native id")?;
+        let profile = self
+            .agents
+            .read()
+            .await
+            .get(&meta.agent)
+            .with_context(|| format!("unknown agent: {}", meta.agent))?
+            .clone();
+        let bin = crate::server::misc::effective_command(&profile.commands)
+            .first()
+            .cloned()
+            .context("empty agent command")?;
+        // /fork n'existe que dans le TUI Devin (pas de méthode ACP).
+        if !bin.to_lowercase().contains("devin") {
+            anyhow::bail!("fork not supported for agent '{}'", meta.agent);
+        }
+        // Le TUI refuse d'ouvrir une session native verrouillée :
+        // l'agent acp la tient → kill, puis respawn après le fork.
+        let was_alive = s.is_alive();
+        if was_alive {
+            s.emit(EventKind::System {
+                text: "fork: releasing the native session…".into(),
+            });
+            s.kill().await;
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        }
+        let new_native = match tui::fork_via_tui(&bin, &meta.cwd, &native).await {
+            Ok(id) => id,
+            Err(e) => {
+                // Restaure la source si on l'avait tuée.
                 if was_alive {
                     let (cmd, envs) = spawn_args(&profile, &meta);
-                    for attempt in 0..8 {
-                        match s
-                            .spawn_agent(
-                                &cmd,
-                                &envs,
-                                meta.native_session_id.clone(),
-                                true,
-                                self.mcp_servers(&session),
-                                Some(crate::session::SpawnCfg {
-                                    model: meta.model.clone(),
-                                    quiet: true,
-                                    ..Default::default()
-                                }),
-                                self.spawn_hints(&profile, &meta),
-                            )
-                            .await
-                        {
-                            Ok(true) => {
-                                self.reapply_catalogue_if_new_sid(&s).await;
-                                break;
-                            }
-                            Ok(false) => break,
-                            Err(e) => {
-                                if attempt == 7 || !format!("{e:#}").contains("already open") {
-                                    s.emit(EventKind::System {
-                                        text: format!(
-                                            "source non restaurée ({e:#}) — resume dispo"
-                                        ),
-                                    });
-                                    break;
-                                }
-                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                            }
-                        }
+                    if matches!(
+                        s.spawn_agent(
+                            &cmd,
+                            &envs,
+                            meta.native_session_id.clone(),
+                            true,
+                            self.mcp_servers(&session),
+                            Some(crate::session::SpawnCfg {
+                                model: meta.model.clone(),
+                                quiet: true,
+                                ..Default::default()
+                            }),
+                            self.spawn_hints(&profile, &meta),
+                        )
+                        .await,
+                        Ok(true)
+                    ) {
+                        self.reapply_catalogue_if_new_sid(&s).await;
                     }
                 }
-                // Session AgentControl pour le fork : clone du meta source
-                // (même groupe, agent, cwd, mode/model), id/titre/natif
-                // remplacés, historique rejoué (skip_replay=false).
-                let mut meta2 = meta.clone();
-                meta2.id = proto::new_id("s");
-                meta2.title = format!("{}_fork", meta.title);
-                meta2.native_session_id = Some(new_native);
-                meta2.created_at = proto::now_iso();
-                meta2.state = "starting".into();
-                meta2.pending_config.clear();
-                meta2.context_used = None;
-                meta2.context_size = None;
-                let dir = Session::create_dir(&self.root, &meta2)?;
-                let session2 = Session::open(dir, &self.compact, Arc::clone(&self.caps))?;
-                let sid2 = meta2.id.clone();
-                self.watch_prs(&session2);
-                self.sessions
-                    .write()
-                    .await
-                    .insert(sid2.clone(), session2.clone());
-                let (cmd2, envs2) = spawn_args(&profile, &meta2);
-                // Même traitement async que new/attach : la session
-                // forkée apparaît en "starting" tout de suite, l'attache
-                // (session/load + replay du journal) tourne en tâche de
-                // fond — skip_replay=false pour journaliser le replay.
-                self.spawn_fresh(
-                    &session2,
-                    cmd2,
-                    envs2,
-                    meta2.native_session_id.clone(),
-                    false,
-                    meta2.mode.clone(),
-                    meta2.model.clone(),
-                    FreshDeliver::None,
-                );
-                info!("session forkée: {sid2} (source={session}) — spawn en tâche de fond");
-                Ok(json!({ "session": sid2 }))
-    }
-
-    pub(super) async fn h_resume_session(self: &Arc<Self>, session: String, native_id: Option<String>, fresh: bool) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                // Rebind pendant l'override : process déjà mort (kill
-                // sauté) mais journal.reset + set_native_id
-                // s'exécuteraient — le respawn final d'apply repartirait
-                // sur le sid étranger avec un journal vidé. Même garde
-                // que fork/clear/delete/kill.
-                if s.catalogue_override_active() {
-                    anyhow::bail!("override catalogue en cours — réessayez dans un instant");
-                }
-                // Abandon du contexte natif (« resume --fresh », bouton
-                // client pendant un long chargement) : le prochain spawn
-                // part en session/new — journal local conservé. Le flag
-                // force_new_context couvre aussi un spawn déjà en file
-                // derrière le spawn_lock qui aurait capturé l'ancien id.
-                if fresh {
-                    if native_id.is_some() {
-                        anyhow::bail!("fresh et native_id sont exclusifs");
-                    }
-                    s.force_new_context();
-                    // Avorte un spawn/session/load en vol : le kill
-                    // invalide la génération — l'essai courant se solde
-                    // « supplanté » et libère le spawn_lock.
-                    if s.is_alive() || s.is_spawning() {
-                        s.kill_for_respawn().await;
-                    }
-                    s.clear_native_id();
-                    s.emit(EventKind::System {
-                        text: "contexte natif abandonné — session repartie sur un contexte neuf".into(),
-                    });
-                    // respawn gère la transition asleep → starting → idle.
-                    self.respawn(&s, true).await?;
-                    info!("session reprise (contexte neuf): {session}");
-                    return Ok(json!({"session": session, "fresh": true}));
-                }
-                if s.is_alive() && native_id.is_none() {
-                    return Ok(json!({"session": session, "already": true}));
-                }
-                // Rebind vers une AUTRE session native : le journal local
-                // reflète l'ancienne conversation → reset, puis le replay de
-                // session/load le re-remplit (skip_replay=false).
-                let rebind = match &native_id {
-                    Some(nid) => {
-                        s.meta_snapshot().native_session_id.as_deref() != Some(nid.as_str())
-                    }
-                    None => false,
-                };
-                if rebind {
-                    // Rebind sur un agent vivant OU un spawn en vol
-                    // (spawning sans stdin_tx encore posé : le kill est
-                    // sans effet direct, mais le bump de génération fait
-                    // bayer l'essai en cours) — sinon la garde
-                    // anti-doublon de spawn_agent (is_alive après
-                    // spawn_lock) sauterait le respawn et la session
-                    // resterait sur l'ancienne session native.
-                    if s.is_alive() || s.is_spawning() {
-                        s.kill_for_respawn().await;
-                    }
-                    // Comme clear_context : l'event de contrôle part
-                    // dans l'ancienne numérotation, avant le reset.
-                    s.reset_text_anchor();
-                    s.emit_ephemeral(EventKind::SessionCleared {});
-                    s.journal.reset(&s.dir)?;
-                    s.emit(EventKind::System {
-                        text: "session native rebindée — historique rechargé".into(),
-                    });
-                    // Le rebind change de conversation : les étapes de
-                    // l'ancienne n'ont plus de sens (steps.json vidé,
-                    // event `steps` repart dans le journal frais).
-                    s.clear_steps();
-                }
-                if let Some(nid) = native_id {
-                    s.set_native_id(&nid);
-                }
-                // respawn gère la transition asleep → starting → idle
-                // (resume explicite = réveil d'une session endormie).
-                self.respawn(&s, !rebind).await?;
-                info!("session reprise: {session}");
-                Ok(json!({"session": session}))
-    }
-
-    pub(super) async fn h_clear_session(self: &Arc<Self>, session: String) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                // /clear tuerait le process puis son spawn_agent
-                // bailerait sur le flag — journal effacé + mark_dead
-                // pour un clear qui n'a pas abouti. Refus propre.
-                if s.catalogue_override_active() {
-                    anyhow::bail!("override catalogue en cours — réessayez dans un instant");
-                }
-                // Session endormie/morte : le clear relance un agent, donc
-                // il faut une place (une session vivante la garde déjà).
-                let slot = if s.is_alive() {
-                    None
-                } else {
-                    Some(self.ensure_agent_slot(&s.meta_snapshot().agent).await?)
-                };
-                // Kill silencieux (gen invalidée) puis journal vidé — les
-                // events de mort du vieux process n'atterrissent nulle part.
-                s.kill_for_respawn().await;
-                s.clear_context()?;
-                // File d'attente : les prompts appartenaient au contexte
-                // effacé — clear_queue APRÈS le reset journalise l'annulation
-                // dans le journal frais (visible, pas perdue en silence).
-                s.clear_queue();
-                let meta = s.meta_snapshot();
-                let profile = self
-                    .agents
-                    .read()
-                    .await
-                    .get(&meta.agent)
-                    .with_context(|| format!("agent inconnu: {}", meta.agent))?
-                    .clone();
-                let (cmd, envs) = self.agent_parts(
-                    &profile,
-                    meta.model.as_deref(),
-                    meta.mode.as_deref(),
-                    &session,
-                );
-                // /clear sur une session endormie : la sortir d'abord —
-                // sinon le garde asleep de spawn_agent stopperait le
-                // respawn (contexte effacé → échec = dead, pas asleep).
-                s.leave_asleep();
-                if slot.is_some() {
-                    s.mark_spawning();
-                }
-                drop(slot);
-                // resume_native_id=None → session/new : contexte agent vide.
-                // Comme au respawn, le modèle de meta est ré-affirmé via
-                // ACP (l'env seule ne garantit pas l'application réelle).
-                if let Err(e) = s
+                return Err(e.context("fork via the agent's TUI"));
+            }
+        };
+        s.emit(EventKind::System {
+            text: format!("native session forked → {new_native}"),
+        });
+        // Ré-ouvre la source si elle vivait. Le lock natif peut
+        // traîner le temps que le TUI meure → retry sur le cas
+        // "already open in another process".
+        if was_alive {
+            let (cmd, envs) = spawn_args(&profile, &meta);
+            for attempt in 0..8 {
+                match s
                     .spawn_agent(
                         &cmd,
                         &envs,
-                        None,
+                        meta.native_session_id.clone(),
                         true,
                         self.mcp_servers(&session),
                         Some(crate::session::SpawnCfg {
@@ -524,78 +347,284 @@ impl Daemon {
                     )
                     .await
                 {
-                    // État cohérent avec la réalité : l'agent n'a pas
-                    // redémarré (meta garderait working/waiting_input).
-                    s.mark_dead();
-                    return Err(e.context("respawn après clear"));
+                    Ok(true) => {
+                        self.reapply_catalogue_if_new_sid(&s).await;
+                        break;
+                    }
+                    Ok(false) => break,
+                    Err(e) => {
+                        if attempt == 7 || !format!("{e:#}").contains("already open") {
+                            s.emit(EventKind::System {
+                                text: format!("source not restored ({e:#}) — resume available"),
+                            });
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
                 }
-                // /clear a créé un nouveau sid natif : l'override
-                // catalogue du sid effacé ne s'y applique pas — rejouer.
-                // Action explicite : nouvelle chaîne de rejeu bornée.
-                s.reset_catalogue_reapply();
-                self.reapply_catalogue_if_new_sid(&s).await;
-                info!("contexte effacé: {session}");
-                Ok(json!({"session": session}))
+            }
+        }
+        // Session AgentControl pour le fork : clone du meta source
+        // (même groupe, agent, cwd, mode/model), id/titre/natif
+        // remplacés, historique rejoué (skip_replay=false).
+        let mut meta2 = meta.clone();
+        meta2.id = proto::new_id("s");
+        meta2.title = format!("{}_fork", meta.title);
+        meta2.native_session_id = Some(new_native);
+        meta2.created_at = proto::now_iso();
+        meta2.state = "starting".into();
+        meta2.pending_config.clear();
+        meta2.context_used = None;
+        meta2.context_size = None;
+        let dir = Session::create_dir(&self.root, &meta2)?;
+        let session2 = Session::open(dir, &self.compact, Arc::clone(&self.caps))?;
+        let sid2 = meta2.id.clone();
+        self.watch_prs(&session2);
+        self.sessions
+            .write()
+            .await
+            .insert(sid2.clone(), session2.clone());
+        let (cmd2, envs2) = spawn_args(&profile, &meta2);
+        // Même traitement async que new/attach : la session
+        // forkée apparaît en "starting" tout de suite, l'attache
+        // (session/load + replay du journal) tourne en tâche de
+        // fond — skip_replay=false pour journaliser le replay.
+        self.spawn_fresh(
+            &session2,
+            cmd2,
+            envs2,
+            meta2.native_session_id.clone(),
+            false,
+            meta2.mode.clone(),
+            meta2.model.clone(),
+            FreshDeliver::None,
+        );
+        info!("session forked: {sid2} (source={session}) — spawning in background");
+        Ok(json!({ "session": sid2 }))
     }
 
-    pub(super) async fn h_send(self: &Arc<Self>, session: String, text: String, force: bool, steer: bool) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                if !s.accepting_prompts() {
-                    if s.meta_snapshot().state != "asleep" && !s.is_waking()
-                        && !s.is_spawning()
-                    {
-                        anyhow::bail!("agent not running — resume_session d'abord");
-                    }
-                    // Session endormie, réveil en cours, ou spawn en vol
-                    // (init/resume//clear) : le prompt s'enfile sans drain —
-                    // le spawn en cours livrera la file à son succès
-                    // (user_message journalisé à la livraison).
-                    if s.is_spawning() && !s.is_waking()
-                        && s.meta_snapshot().state != "asleep"
-                    {
-                        s.enqueue_for_spawn(&text, force);
-                    } else {
-                        // Endormie ou réveil en vol : enfiler puis
-                        // déclencher le réveil — spawn_wake dédoublonne
-                        // (wake_begin en interne), un appel doublé est
-                        // un no-op.
-                        s.enqueue_for_wake(&text, force);
-                        self.spawn_wake(&s, &session);
-                    }
-                    return Ok(json!({
-                        "queued": true,
-                        "resuming": true,
-                        "queue": s.queue_snapshot(),
-                    }));
-                }
-                // send_prompt ne fait qu'enfiler (livraison en tâche de
-                // fond) : l'attendre garantit une file à jour quand le
-                // client la relit après la réponse. Le booléen couvre la
-                // course "endormie entre le check ci-dessus et ici".
-                if s.send_prompt(&text, force, steer).await? {
-                    self.spawn_wake(&s, &session);
-                }
-                Ok(json!({"queued": true, "queue": s.queue_snapshot()}))
+    pub(super) async fn h_resume_session(
+        self: &Arc<Self>,
+        session: String,
+        native_id: Option<String>,
+        fresh: bool,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        // Rebind pendant l'override : process déjà mort (kill
+        // sauté) mais journal.reset + set_native_id
+        // s'exécuteraient — le respawn final d'apply repartirait
+        // sur le sid étranger avec un journal vidé. Même garde
+        // que fork/clear/delete/kill.
+        if s.catalogue_override_active() {
+            anyhow::bail!("catalogue override in progress — try again in a moment");
+        }
+        // Abandon du contexte natif (« resume --fresh », bouton
+        // client pendant un long chargement) : le prochain spawn
+        // part en session/new — journal local conservé. Le flag
+        // force_new_context couvre aussi un spawn déjà en file
+        // derrière le spawn_lock qui aurait capturé l'ancien id.
+        if fresh {
+            if native_id.is_some() {
+                anyhow::bail!("fresh and native_id are mutually exclusive");
+            }
+            s.force_new_context();
+            // Avorte un spawn/session/load en vol : le kill
+            // invalide la génération — l'essai courant se solde
+            // « supplanté » et libère le spawn_lock.
+            if s.is_alive() || s.is_spawning() {
+                s.kill_for_respawn().await;
+            }
+            s.clear_native_id();
+            s.emit(EventKind::System {
+                text: "native context dropped — session restarted on a fresh context".into(),
+            });
+            // respawn gère la transition asleep → starting → idle.
+            self.respawn(&s, true).await?;
+            info!("session resumed (fresh context): {session}");
+            return Ok(json!({"session": session, "fresh": true}));
+        }
+        if s.is_alive() && native_id.is_none() {
+            return Ok(json!({"session": session, "already": true}));
+        }
+        // Rebind vers une AUTRE session native : le journal local
+        // reflète l'ancienne conversation → reset, puis le replay de
+        // session/load le re-remplit (skip_replay=false).
+        let rebind = match &native_id {
+            Some(nid) => s.meta_snapshot().native_session_id.as_deref() != Some(nid.as_str()),
+            None => false,
+        };
+        if rebind {
+            // Rebind sur un agent vivant OU un spawn en vol
+            // (spawning sans stdin_tx encore posé : le kill est
+            // sans effet direct, mais le bump de génération fait
+            // bayer l'essai en cours) — sinon la garde
+            // anti-doublon de spawn_agent (is_alive après
+            // spawn_lock) sauterait le respawn et la session
+            // resterait sur l'ancienne session native.
+            if s.is_alive() || s.is_spawning() {
+                s.kill_for_respawn().await;
+            }
+            // Comme clear_context : l'event de contrôle part
+            // dans l'ancienne numérotation, avant le reset.
+            s.reset_text_anchor();
+            s.emit_ephemeral(EventKind::SessionCleared {});
+            s.journal.reset(&s.dir)?;
+            s.emit(EventKind::System {
+                text: "native session rebound — history reloaded".into(),
+            });
+            // Le rebind change de conversation : les étapes de
+            // l'ancienne n'ont plus de sens (steps.json vidé,
+            // event `steps` repart dans le journal frais).
+            s.clear_steps();
+        }
+        if let Some(nid) = native_id {
+            s.set_native_id(&nid);
+        }
+        // respawn gère la transition asleep → starting → idle
+        // (resume explicite = réveil d'une session endormie).
+        self.respawn(&s, !rebind).await?;
+        info!("session resumed: {session}");
+        Ok(json!({"session": session}))
+    }
+
+    pub(super) async fn h_clear_session(self: &Arc<Self>, session: String) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        // /clear tuerait le process puis son spawn_agent
+        // bailerait sur le flag — journal effacé + mark_dead
+        // pour un clear qui n'a pas abouti. Refus propre.
+        if s.catalogue_override_active() {
+            anyhow::bail!("catalogue override in progress — try again in a moment");
+        }
+        // Session endormie/morte : le clear relance un agent, donc
+        // il faut une place (une session vivante la garde déjà).
+        let slot = if s.is_alive() {
+            None
+        } else {
+            Some(self.ensure_agent_slot(&s.meta_snapshot().agent).await?)
+        };
+        // Kill silencieux (gen invalidée) puis journal vidé — les
+        // events de mort du vieux process n'atterrissent nulle part.
+        s.kill_for_respawn().await;
+        s.clear_context()?;
+        // File d'attente : les prompts appartenaient au contexte
+        // effacé — clear_queue APRÈS le reset journalise l'annulation
+        // dans le journal frais (visible, pas perdue en silence).
+        s.clear_queue();
+        let meta = s.meta_snapshot();
+        let profile = self
+            .agents
+            .read()
+            .await
+            .get(&meta.agent)
+            .with_context(|| format!("unknown agent: {}", meta.agent))?
+            .clone();
+        let (cmd, envs) = self.agent_parts(
+            &profile,
+            meta.model.as_deref(),
+            meta.mode.as_deref(),
+            &session,
+        );
+        // /clear sur une session endormie : la sortir d'abord —
+        // sinon le garde asleep de spawn_agent stopperait le
+        // respawn (contexte effacé → échec = dead, pas asleep).
+        s.leave_asleep();
+        if slot.is_some() {
+            s.mark_spawning();
+        }
+        drop(slot);
+        // resume_native_id=None → session/new : contexte agent vide.
+        // Comme au respawn, le modèle de meta est ré-affirmé via
+        // ACP (l'env seule ne garantit pas l'application réelle).
+        if let Err(e) = s
+            .spawn_agent(
+                &cmd,
+                &envs,
+                None,
+                true,
+                self.mcp_servers(&session),
+                Some(crate::session::SpawnCfg {
+                    model: meta.model.clone(),
+                    quiet: true,
+                    ..Default::default()
+                }),
+                self.spawn_hints(&profile, &meta),
+            )
+            .await
+        {
+            // État cohérent avec la réalité : l'agent n'a pas
+            // redémarré (meta garderait working/waiting_input).
+            s.mark_dead();
+            return Err(e.context("respawn after clear"));
+        }
+        // /clear a créé un nouveau sid natif : l'override
+        // catalogue du sid effacé ne s'y applique pas — rejouer.
+        // Action explicite : nouvelle chaîne de rejeu bornée.
+        s.reset_catalogue_reapply();
+        self.reapply_catalogue_if_new_sid(&s).await;
+        info!("context cleared: {session}");
+        Ok(json!({"session": session}))
+    }
+
+    pub(super) async fn h_send(
+        self: &Arc<Self>,
+        session: String,
+        text: String,
+        force: bool,
+        steer: bool,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        if !s.accepting_prompts() {
+            if s.meta_snapshot().state != "asleep" && !s.is_waking() && !s.is_spawning() {
+                anyhow::bail!("agent not running — resume_session first");
+            }
+            // Session endormie, réveil en cours, ou spawn en vol
+            // (init/resume//clear) : le prompt s'enfile sans drain —
+            // le spawn en cours livrera la file à son succès
+            // (user_message journalisé à la livraison).
+            if s.is_spawning() && !s.is_waking() && s.meta_snapshot().state != "asleep" {
+                s.enqueue_for_spawn(&text, force);
+            } else {
+                // Endormie ou réveil en vol : enfiler puis
+                // déclencher le réveil — spawn_wake dédoublonne
+                // (wake_begin en interne), un appel doublé est
+                // un no-op.
+                s.enqueue_for_wake(&text, force);
+                self.spawn_wake(&s, &session);
+            }
+            return Ok(json!({
+                "queued": true,
+                "resuming": true,
+                "queue": s.queue_snapshot(),
+            }));
+        }
+        // send_prompt ne fait qu'enfiler (livraison en tâche de
+        // fond) : l'attendre garantit une file à jour quand le
+        // client la relit après la réponse. Le booléen couvre la
+        // course "endormie entre le check ci-dessus et ici".
+        if s.send_prompt(&text, force, steer).await? {
+            self.spawn_wake(&s, &session);
+        }
+        Ok(json!({"queued": true, "queue": s.queue_snapshot()}))
     }
 
     /// Endort une session : le process agent est libéré, la session native
     /// reste reprenable — réveil auto au prochain envoi (ou resume).
     pub(super) async fn h_sleep_session(self: &Arc<Self>, session: String) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                if s.meta_snapshot().state == "asleep" {
-                    return Ok(json!({"session": session, "already": true}));
-                }
-                // Rien à endormir sans process (dead/interrupted) : dead →
-                // asleep rendrait une session tuée volontairement
-                // auto-réveillable au prochain envoi — ça contournerait la
-                // sémantique de kill_session, en particulier via l'outil
-                // MCP utilisable par un pair.
-                if !s.is_alive() && !s.is_spawning() && !s.is_waking() {
-                    anyhow::bail!("agent not running — rien à endormir");
-                }
-                s.sleep().await;
-                info!("session endormie: {session}");
-                Ok(json!({"session": session}))
+        let s = self.get_session(&session).await?;
+        if s.meta_snapshot().state == "asleep" {
+            return Ok(json!({"session": session, "already": true}));
+        }
+        // Rien à endormir sans process (dead/interrupted) : dead →
+        // asleep rendrait une session tuée volontairement
+        // auto-réveillable au prochain envoi — ça contournerait la
+        // sémantique de kill_session, en particulier via l'outil
+        // MCP utilisable par un pair.
+        if !s.is_alive() && !s.is_spawning() && !s.is_waking() {
+            anyhow::bail!("agent not running — nothing to put to sleep");
+        }
+        s.sleep().await;
+        info!("session put to sleep: {session}");
+        Ok(json!({"session": session}))
     }
 
     /// Déclenche le réveil d'une session endormie en tâche de fond.
@@ -632,17 +661,17 @@ impl Daemon {
             let r = d.wake_session(&sid).await;
             t.wake_done();
             if let Err(e) = &r {
-                if format!("{e:#}").contains("endormie") {
+                if format!("{e:#}").contains("went to sleep during spawn") {
                     // Rendormie pendant le réveil — la ligne
                     // "session endormie" l'explique.
                     t.emit(EventKind::System {
-                        text: "réveil interrompu — session rendormie".into(),
+                        text: "wake interrupted — session put back to sleep".into(),
                     });
                 } else {
                     // Retour à "asleep" (fait par respawn) → le
                     // prochain envoi retentera.
                     t.emit(EventKind::Error {
-                        message: format!("réveil impossible: {e:#}"),
+                        message: format!("wake failed: {e:#}"),
                     });
                 }
             }
@@ -651,10 +680,7 @@ impl Daemon {
             // avec une file non vide, enchaîner un réveil (le flag est
             // libre — chaque chaîne consomme pending une fois, donc un
             // échec persistant ne boucle pas sans nouvel envoi).
-            if t.take_wake_pending()
-                && t.meta_snapshot().state == "asleep"
-                && t.has_queued()
-            {
+            if t.take_wake_pending() && t.meta_snapshot().state == "asleep" && t.has_queued() {
                 d.spawn_wake(&t, &sid);
             }
         });
@@ -736,7 +762,7 @@ impl Daemon {
         // l'override viserait un sid mort né — refus explicite plutôt
         // qu'un cycle voué à l'échec.
         if meta.supports_load == Some(false) {
-            let msg = "agent sans session/load — variante catalogue non applicable";
+            let msg = "agent without session/load — catalogue variant not applicable";
             s.emit(EventKind::Error {
                 message: msg.into(),
             });
@@ -745,18 +771,18 @@ impl Daemon {
         let native = meta
             .native_session_id
             .clone()
-            .context("session sans id natif — override catalogue impossible")?;
+            .context("session without native id — catalogue override impossible")?;
         let profile = self
             .agents
             .read()
             .await
             .get(&meta.agent)
-            .with_context(|| format!("agent inconnu: {}", meta.agent))?
+            .with_context(|| format!("unknown agent: {}", meta.agent))?
             .clone();
         let tpl = profile
             .model_override_cmd
             .clone()
-            .context("profil sans model_override_cmd")?;
+            .context("profile without model_override_cmd")?;
         let prev = (
             meta.model.clone(),
             meta.model_source.clone(),
@@ -772,8 +798,12 @@ impl Daemon {
         s.set_model_meta(Some(model.to_string()), Some("catalogue".into()));
         s.emit(EventKind::System {
             text: format!(
-                "modèle catalogue « {model} » — application via side-channel{}…",
-                if busy { " (le tour en cours sera interrompu)" } else { "" }
+                "catalogue model « {model} » — applying via side-channel{}…",
+                if busy {
+                    " (the current turn will be interrupted)"
+                } else {
+                    ""
+                }
             ),
         });
         // Fenêtre critique : process acp mort, `devin -r` en cours —
@@ -803,8 +833,8 @@ impl Daemon {
             // afficherait une valeur jamais appliquée — on pose None :
             // le handshake du respawn écrira la valeur clampée
             // réellement retenue par l'agent.
-            let creation = prev.0.as_deref() == Some(model)
-                && prev.1.as_deref() == Some("catalogue");
+            let creation =
+                prev.0.as_deref() == Some(model) && prev.1.as_deref() == Some("catalogue");
             if creation {
                 s.set_model_meta(None, Some("announced".into()));
             } else {
@@ -813,11 +843,11 @@ impl Daemon {
             s.clear_pending_model();
             s.emit(EventKind::Error {
                 message: format!(
-                    "override modèle « {model} » échoué: {e:#} — {}",
+                    "model override « {model} » failed: {e:#} — {}",
                     if creation {
-                        "valeur annoncée par l'agent conservée"
+                        "value announced by the agent kept"
                     } else {
-                        "valeur précédente conservée"
+                        "previous value kept"
                     }
                 ),
             });
@@ -830,8 +860,7 @@ impl Daemon {
         // ne serait jamais appliquée alors que meta l'affiche.
         let still_applied = {
             let m = s.meta_snapshot();
-            m.model.as_deref() == Some(model)
-                && m.model_source.as_deref() == Some("catalogue")
+            m.model.as_deref() == Some(model) && m.model_source.as_deref() == Some("catalogue")
         };
         if still_applied {
             s.set_model_override_sid(Some(native));
@@ -896,14 +925,14 @@ impl Daemon {
             // ne tire que si le sid correspond VRAIMENT).
             s.emit(EventKind::Error {
                 message: format!(
-                    "rejeu de l'override catalogue « {model} » abandonné — le sid natif change à chaque spawn ({sid})"
+                    "catalogue override « {model} » replay aborted — the native sid changes on every spawn ({sid})"
                 ),
             });
             return;
         }
         s.bump_catalogue_reapply();
         s.emit(EventKind::System {
-            text: format!("nouveau sid natif {sid} — rejeu de l'override modèle « {model} »…"),
+            text: format!("new native sid {sid} — replaying model override « {model} »…"),
         });
         // Box::pin : apply_catalogue_model → respawn → reapply est une
         // récursion async — l'indirection évite un futur de taille infinie.
@@ -935,7 +964,7 @@ impl Daemon {
     async fn wake_session(self: &Arc<Self>, session: &str) -> Result<()> {
         let s = self.get_session(session).await?;
         s.emit(EventKind::System {
-            text: "réveil de la session…".into(),
+            text: "waking the session…".into(),
         });
         self.respawn(&s, true).await
     }
@@ -945,7 +974,11 @@ impl Daemon {
     /// anti-respawn de spawn_agent (state==asleep → bail) stopperait le
     /// réveil ; en cas d'échec la session retourne à "asleep" pour que le
     /// prochain envoi retente (une session morte, elle, reste morte).
-    pub(super) async fn respawn(self: &Arc<Self>, s: &Arc<Session>, skip_replay: bool) -> Result<()> {
+    pub(super) async fn respawn(
+        self: &Arc<Self>,
+        s: &Arc<Session>,
+        skip_replay: bool,
+    ) -> Result<()> {
         let meta = s.meta_snapshot();
         // Avant leave_asleep : un refus laisse la session endormie/morte,
         // pas bloquée en « starting ». Une session déjà vivante ne compte
@@ -965,7 +998,7 @@ impl Daemon {
             .read()
             .await
             .get(&meta.agent)
-            .with_context(|| format!("agent inconnu: {}", meta.agent))?
+            .with_context(|| format!("unknown agent: {}", meta.agent))?
             .clone();
         let (cmd, envs) = self.agent_parts(
             &profile,
@@ -1151,14 +1184,13 @@ impl Daemon {
                                 d.spawn_wake(&s, &sid);
                             }
                         }
-                        FreshDeliver::Peer { wrapped, .. }
-                        | FreshDeliver::Service { wrapped } => {
+                        FreshDeliver::Peer { wrapped, .. } | FreshDeliver::Service { wrapped } => {
                             match s.send_peer_prompt(&wrapped, false).await {
                                 // Endormie entre-temps → en file + réveil.
                                 Ok(true) => d.spawn_wake(&s, &sid),
                                 Ok(false) => {}
                                 Err(e) => s.emit(EventKind::Error {
-                                    message: format!("tâche déléguée: {e:#}"),
+                                    message: format!("delegated task: {e:#}"),
                                 }),
                             }
                         }
@@ -1183,12 +1215,12 @@ impl Daemon {
                     // exited" — l'erreur de handshake apporte le pourquoi
                     // et s'émet quand même (mark_dead no-op si déjà dead).
                     s.emit(EventKind::Error {
-                        message: format!("spawn impossible: {msg}"),
+                        message: format!("spawn failed: {msg}"),
                     });
                     s.mark_dead();
                     if let FreshDeliver::Peer { creator, .. } = deliver {
                         creator.emit(EventKind::Error {
-                            message: format!("la session fille {sid} n'a pas démarré: {msg}"),
+                            message: format!("child session {sid} failed to start: {msg}"),
                         });
                     }
                 }
@@ -1196,85 +1228,98 @@ impl Daemon {
         });
     }
 
-    pub(super) async fn h_events(self: &Arc<Self>, session: String, before_seq: Option<u64>, after_seq: Option<u64>, limit: u32) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                // Lecture disque (seek + parse JSONL) hors de l'executor :
-                // c'est LA requête de la chaîne connect→open côté client,
-                // un journal à index vide la gèlerait sinon (item #227).
-                let s2 = Arc::clone(&s);
-                let (events, last) = tokio::task::spawn_blocking(move || -> Result<(Vec<proto::Event>, u64)> {
-                    // after_seq présent → page ascendante (saut de recherche) ;
-                    // sinon page arrière classique (pagination scroll-up).
-                    let events = match after_seq {
-                        Some(a) => s2.journal.read_page_after(&s2.dir, a, limit as usize)?,
-                        None => s2.journal.read_page(&s2.dir, before_seq, limit as usize)?,
-                    };
-                    Ok((events, s2.journal.last_seq()))
-                })
-                .await
-                .context("lecture journal")??;
-                Ok(json!({"events": events, "last_seq": last}))
+    pub(super) async fn h_events(
+        self: &Arc<Self>,
+        session: String,
+        before_seq: Option<u64>,
+        after_seq: Option<u64>,
+        limit: u32,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        // Lecture disque (seek + parse JSONL) hors de l'executor :
+        // c'est LA requête de la chaîne connect→open côté client,
+        // un journal à index vide la gèlerait sinon (item #227).
+        let s2 = Arc::clone(&s);
+        let (events, last) =
+            tokio::task::spawn_blocking(move || -> Result<(Vec<proto::Event>, u64)> {
+                // after_seq présent → page ascendante (saut de recherche) ;
+                // sinon page arrière classique (pagination scroll-up).
+                let events = match after_seq {
+                    Some(a) => s2.journal.read_page_after(&s2.dir, a, limit as usize)?,
+                    None => s2.journal.read_page(&s2.dir, before_seq, limit as usize)?,
+                };
+                Ok((events, s2.journal.last_seq()))
+            })
+            .await
+            .context("reading journal")??;
+        Ok(json!({"events": events, "last_seq": last}))
     }
 
     /// Plafonds du scan par appel : assez pour couvrir un gros journal en
     /// quelques aller-retours sans monopoliser la requête des minutes —
     /// le client relance avec le curseur `next_before` pour continuer.
-    pub(super) async fn h_search_events(self: &Arc<Self>, session: String, query: String, before_seq: Option<u64>, limit: u32) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                let needle = query.trim().to_lowercase();
-                if needle.is_empty() {
-                    return Ok(json!({"matches": [], "next_before": 0, "done": true, "scanned": 0}));
+    pub(super) async fn h_search_events(
+        self: &Arc<Self>,
+        session: String,
+        query: String,
+        before_seq: Option<u64>,
+        limit: u32,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() {
+            return Ok(json!({"matches": [], "next_before": 0, "done": true, "scanned": 0}));
+        }
+        // Scan multi-pages (jusqu'à SEARCH_SCAN_CAP events) hors
+        // de l'executor — le parse JSONL synchrone gèlerait un
+        // worker async pendant des secondes sur gros journal.
+        let s2 = Arc::clone(&s);
+        tokio::task::spawn_blocking(move || -> Result<Value> {
+            const SEARCH_CHUNK: usize = 500;
+            const SEARCH_SCAN_CAP: u64 = 20_000;
+            let want = (limit as usize).max(1);
+            let mut matches = Vec::new();
+            let mut cursor = before_seq.filter(|b| *b > 0).unwrap_or(u64::MAX);
+            let mut scanned = 0u64;
+            let mut done = false;
+            while !done && matches.len() < want && scanned < SEARCH_SCAN_CAP {
+                let page = s2.journal.read_page(&s2.dir, Some(cursor), SEARCH_CHUNK)?;
+                if page.is_empty() {
+                    done = true;
+                    break;
                 }
-                // Scan multi-pages (jusqu'à SEARCH_SCAN_CAP events) hors
-                // de l'executor — le parse JSONL synchrone gèlerait un
-                // worker async pendant des secondes sur gros journal.
-                let s2 = Arc::clone(&s);
-                tokio::task::spawn_blocking(move || -> Result<Value> {
-                    const SEARCH_CHUNK: usize = 500;
-                    const SEARCH_SCAN_CAP: u64 = 20_000;
-                    let want = (limit as usize).max(1);
-                    let mut matches = Vec::new();
-                    let mut cursor = before_seq.filter(|b| *b > 0).unwrap_or(u64::MAX);
-                    let mut scanned = 0u64;
-                    let mut done = false;
-                    while !done && matches.len() < want && scanned < SEARCH_SCAN_CAP {
-                        let page = s2.journal.read_page(&s2.dir, Some(cursor), SEARCH_CHUNK)?;
-                        if page.is_empty() {
-                            done = true;
-                            break;
-                        }
-                        // cursor suit le dernier seq réellement examiné : arrêt
-                        // en pleine page (limit/cap) → next_before reprend sur
-                        // le reste non scanné de la page au lieu de la sauter.
-                        for ev in page.iter().rev() {
-                            scanned += 1;
-                            cursor = ev.seq;
-                            if let Some(excerpt) = match_excerpt(&ev.kind.searchable_text(), &needle, 60) {
-                                matches.push(json!({
-                                    "seq": ev.seq,
-                                    "ts": ev.ts,
-                                    "type": ev.kind.type_tag(),
-                                    "excerpt": excerpt,
-                                }));
-                            }
-                            if matches.len() >= want || scanned >= SEARCH_SCAN_CAP {
-                                break;
-                            }
-                        }
-                        // Page courte entièrement examinée → début du journal.
-                        if cursor == page[0].seq && page.len() < SEARCH_CHUNK {
-                            done = true;
-                        }
+                // cursor suit le dernier seq réellement examiné : arrêt
+                // en pleine page (limit/cap) → next_before reprend sur
+                // le reste non scanné de la page au lieu de la sauter.
+                for ev in page.iter().rev() {
+                    scanned += 1;
+                    cursor = ev.seq;
+                    if let Some(excerpt) = match_excerpt(&ev.kind.searchable_text(), &needle, 60) {
+                        matches.push(json!({
+                            "seq": ev.seq,
+                            "ts": ev.ts,
+                            "type": ev.kind.type_tag(),
+                            "excerpt": excerpt,
+                        }));
                     }
-                    Ok(json!({
-                        "matches": matches,
-                        "next_before": if cursor == u64::MAX { 0 } else { cursor },
-                        "done": done,
-                        "scanned": scanned,
-                    }))
-                })
-                .await
-                .context("recherche journal")?
+                    if matches.len() >= want || scanned >= SEARCH_SCAN_CAP {
+                        break;
+                    }
+                }
+                // Page courte entièrement examinée → début du journal.
+                if cursor == page[0].seq && page.len() < SEARCH_CHUNK {
+                    done = true;
+                }
+            }
+            Ok(json!({
+                "matches": matches,
+                "next_before": if cursor == u64::MAX { 0 } else { cursor },
+                "done": done,
+                "scanned": scanned,
+            }))
+        })
+        .await
+        .context("searching journal")?
     }
 
     /// Premier post du cycle courant : le journal ne contient que le
@@ -1287,27 +1332,32 @@ impl Daemon {
     /// `truncated: true` = la compaction a coupé la tête — le
     /// vrai premier post n'existe plus.
     pub(super) async fn h_first_post(self: &Arc<Self>, session: String) -> Result<Value> {
-                use crate::journal::FirstPost;
-                let s = self.get_session(&session).await?;
-                let origin = s.meta_snapshot().origin;
-                // Scan de tête borné (FIRST_POST_SCAN_MAX lignes) hors de
-                // l'executor — même classe de blocage que events/search.
-                let s2 = Arc::clone(&s);
-                let fp = tokio::task::spawn_blocking(move || {
-                    s2.journal.first_post(&s2.dir, origin.as_deref())
-                })
+        use crate::journal::FirstPost;
+        let s = self.get_session(&session).await?;
+        let origin = s.meta_snapshot().origin;
+        // Scan de tête borné (FIRST_POST_SCAN_MAX lignes) hors de
+        // l'executor — même classe de blocage que events/search.
+        let s2 = Arc::clone(&s);
+        let fp =
+            tokio::task::spawn_blocking(move || s2.journal.first_post(&s2.dir, origin.as_deref()))
                 .await
                 .context("first_post")??;
-                Ok(match fp {
-                    FirstPost::Found(ev) => {
-                        let proto::EventKind::UserMessage { text, steer, origin, .. } = ev.kind else {
-                            unreachable!() // Found ne porte que ce kind
-                        };
-                        json!({"post": {"seq": ev.seq, "ts": ev.ts, "text": text, "steer": steer, "origin": origin}})
-                    }
-                    FirstPost::Truncated => json!({"post": null, "truncated": true}),
-                    FirstPost::Empty => json!({"post": null}),
-                })
+        Ok(match fp {
+            FirstPost::Found(ev) => {
+                let proto::EventKind::UserMessage {
+                    text,
+                    steer,
+                    origin,
+                    ..
+                } = ev.kind
+                else {
+                    unreachable!() // Found ne porte que ce kind
+                };
+                json!({"post": {"seq": ev.seq, "ts": ev.ts, "text": text, "steer": steer, "origin": origin}})
+            }
+            FirstPost::Truncated => json!({"post": null, "truncated": true}),
+            FirstPost::Empty => json!({"post": null}),
+        })
     }
 
     /// Remplace la liste d'étapes de la tâche (skill ac-steps /
@@ -1318,56 +1368,77 @@ impl Daemon {
         session: String,
         steps: Vec<proto::SessionStep>,
     ) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                let steps = s.set_steps(steps)?;
-                Ok(json!({"steps": steps}))
+        let s = self.get_session(&session).await?;
+        let steps = s.set_steps(steps)?;
+        Ok(json!({"steps": steps}))
     }
 
     pub(super) async fn h_queue_list(self: &Arc<Self>, session: String) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                Ok(json!({"queue": s.queue_snapshot()}))
+        let s = self.get_session(&session).await?;
+        Ok(json!({"queue": s.queue_snapshot()}))
     }
 
     /// Épinglés : pin idempotent + liste complète renvoyée dans chaque
     /// réponse (le client met à jour sans second appel — la liste est
     /// bornée à PINS_MAX, pas de pagination).
-    pub(super) async fn h_pin_message(self: &Arc<Self>, session: String, seq: u64) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                let e = s.pin(seq)?;
-                info!("session {session}: message #{seq} épinglé");
-                Ok(json!({"pin": e, "pinned": s.pins_snapshot()}))
+    pub(super) async fn h_pin_message(
+        self: &Arc<Self>,
+        session: String,
+        seq: u64,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        let e = s.pin(seq)?;
+        info!("session {session}: message #{seq} pinned");
+        Ok(json!({"pin": e, "pinned": s.pins_snapshot()}))
     }
 
-    pub(super) async fn h_unpin_message(self: &Arc<Self>, session: String, seq: u64) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                let ok = s.unpin(seq);
-                Ok(json!({"ok": ok, "pinned": s.pins_snapshot()}))
+    pub(super) async fn h_unpin_message(
+        self: &Arc<Self>,
+        session: String,
+        seq: u64,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        let ok = s.unpin(seq);
+        Ok(json!({"ok": ok, "pinned": s.pins_snapshot()}))
     }
 
     pub(super) async fn h_list_pinned(self: &Arc<Self>, session: String) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                Ok(json!({"pinned": s.pins_snapshot()}))
+        let s = self.get_session(&session).await?;
+        Ok(json!({"pinned": s.pins_snapshot()}))
     }
 
-    pub(super) async fn h_queue_edit(self: &Arc<Self>, session: String, index: u64, text: String) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                Ok(json!({"ok": s.queue_edit(index as usize, &text)}))
+    pub(super) async fn h_queue_edit(
+        self: &Arc<Self>,
+        session: String,
+        index: u64,
+        text: String,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        Ok(json!({"ok": s.queue_edit(index as usize, &text)}))
     }
 
-    pub(super) async fn h_queue_drop(self: &Arc<Self>, session: String, index: u64) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                Ok(json!({"ok": s.queue_remove(index as usize)}))
+    pub(super) async fn h_queue_drop(
+        self: &Arc<Self>,
+        session: String,
+        index: u64,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        Ok(json!({"ok": s.queue_remove(index as usize)}))
     }
 
     // Promote : tête de file + annule le tour courant = envoi forcé,
     // mais le reste de la file est préservé (≠ Cancel qui vide tout).
-    pub(super) async fn h_queue_promote(self: &Arc<Self>, session: String, index: u64) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                let ok = s.queue_promote(index as usize);
-                if ok {
-                    let _ = s.cancel().await;
-                }
-                Ok(json!({"ok": ok}))
+    pub(super) async fn h_queue_promote(
+        self: &Arc<Self>,
+        session: String,
+        index: u64,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        let ok = s.queue_promote(index as usize);
+        if ok {
+            let _ = s.cancel().await;
+        }
+        Ok(json!({"ok": ok}))
     }
 
     /// queue_steer : sort l'entrée de la file et tente de l'injecter en
@@ -1378,29 +1449,33 @@ impl Daemon {
     /// (refus rapide → remise à sa position), "held" (retenue — reason :
     /// compact|asleep|waking|spawning|not_ready), "gone" (index périmé).
     /// `queue` est renvoyée à jour dans tous les cas.
-    pub(super) async fn h_queue_steer(self: &Arc<Self>, session: String, index: u64) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                let (delivered, reason) = match s.steer_queued(index as usize).await {
-                    SteerOutcome::Steer => ("steer", None),
-                    SteerOutcome::Sent => ("sent", None),
-                    SteerOutcome::Requeued(e) => ("requeued", Some(e)),
-                    SteerOutcome::Held(r) => {
-                        // Session endormie : la promotion vaut intention
-                        // de livraison — le réveil normal drainera la
-                        // file (spawn_wake dédoublonne).
-                        if r == "asleep" {
-                            self.spawn_wake(&s, &session);
-                        }
-                        ("held", Some(r.to_string()))
-                    }
-                    SteerOutcome::Gone => ("gone", None),
-                };
-                info!("session {session}: queue_steer[{index}] → {delivered}");
-                Ok(json!({
-                    "delivered": delivered,
-                    "reason": reason,
-                    "queue": s.queue_snapshot(),
-                }))
+    pub(super) async fn h_queue_steer(
+        self: &Arc<Self>,
+        session: String,
+        index: u64,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        let (delivered, reason) = match s.steer_queued(index as usize).await {
+            SteerOutcome::Steer => ("steer", None),
+            SteerOutcome::Sent => ("sent", None),
+            SteerOutcome::Requeued(e) => ("requeued", Some(e)),
+            SteerOutcome::Held(r) => {
+                // Session endormie : la promotion vaut intention
+                // de livraison — le réveil normal drainera la
+                // file (spawn_wake dédoublonne).
+                if r == "asleep" {
+                    self.spawn_wake(&s, &session);
+                }
+                ("held", Some(r.to_string()))
+            }
+            SteerOutcome::Gone => ("gone", None),
+        };
+        info!("session {session}: queue_steer[{index}] → {delivered}");
+        Ok(json!({
+            "delivered": delivered,
+            "reason": reason,
+            "queue": s.queue_snapshot(),
+        }))
     }
 
     /// queue_clear : vide la file entière en une seule opération
@@ -1409,67 +1484,75 @@ impl Daemon {
     /// queue_drop côté client). Le tour en cours et les retenues ne
     /// sont pas touchés. Réponse {cleared, queue}.
     pub(super) async fn h_queue_clear(self: &Arc<Self>, session: String) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                let cleared = s.clear_queue();
-                info!("session {session}: queue_clear → {cleared} entrée(s)");
-                Ok(json!({
-                    "cleared": cleared,
-                    "queue": s.queue_snapshot(),
-                }))
+        let s = self.get_session(&session).await?;
+        let cleared = s.clear_queue();
+        info!("session {session}: queue_clear → {cleared} entrie(s)");
+        Ok(json!({
+            "cleared": cleared,
+            "queue": s.queue_snapshot(),
+        }))
     }
 
     pub(super) async fn h_cancel(self: &Arc<Self>, session: String) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                s.clear_queue();
-                s.cancel().await?;
-                Ok(json!({"cancelled": true}))
+        let s = self.get_session(&session).await?;
+        s.clear_queue();
+        s.cancel().await?;
+        Ok(json!({"cancelled": true}))
     }
 
     pub(super) async fn h_session_info(self: &Arc<Self>, session: String) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                let mut meta = s.meta_snapshot();
-                // Même dérivation « wait » que list_sessions (idle/asleep
-                // + waiter ac-wait vivant) — affichage seul, avec le
-                // détail du waiter dans `meta.wait` (#189).
-                let waiting = super::orch::acwait_live_waiters();
-                derive_wait_state(&mut meta, &waiting, super::orch::now_secs());
-                Ok(json!({
-                    "meta": meta,
-                    "pending": s.pending_requests(),
-                    "alive": s.is_alive(),
-                    "queue": s.queue_snapshot(),
-                    "last_seq": s.journal.last_seq(),
-                    "steps": s.steps_snapshot(),
-                }))
+        let s = self.get_session(&session).await?;
+        let mut meta = s.meta_snapshot();
+        // Même dérivation « wait » que list_sessions (idle/asleep
+        // + waiter ac-wait vivant) — affichage seul, avec le
+        // détail du waiter dans `meta.wait` (#189).
+        let waiting = super::orch::acwait_live_waiters();
+        derive_wait_state(&mut meta, &waiting, super::orch::now_secs());
+        Ok(json!({
+            "meta": meta,
+            "pending": s.pending_requests(),
+            "alive": s.is_alive(),
+            "queue": s.queue_snapshot(),
+            "last_seq": s.journal.last_seq(),
+            "steps": s.steps_snapshot(),
+        }))
     }
 
-    pub(super) async fn h_set_mode(self: &Arc<Self>, session: String, mode: String) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                s.set_mode(&mode).await?;
-                Ok(json!({"mode": mode}))
+    pub(super) async fn h_set_mode(
+        self: &Arc<Self>,
+        session: String,
+        mode: String,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        s.set_mode(&mode).await?;
+        Ok(json!({"mode": mode}))
     }
 
-    pub(super) async fn h_set_model(self: &Arc<Self>, session: String, model: String) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                if self.catalogue_only(&s, &model).await {
-                    // Action explicite : nouvelle chaîne de rejeu bornée.
-                    s.reset_catalogue_reapply();
-                    if s.is_alive() {
-                        self.apply_catalogue_model(&s, &model).await?;
-                    } else {
-                        // Endormie/morte : stage — le prochain respawn
-                        // rejoue l'override (comme les valeurs
-                        // annoncées qui attendent le réveil).
-                        self.stage_catalogue_model(&s, &model);
-                    }
-                    let applied = s.meta_snapshot().model.unwrap_or(model);
-                    return Ok(json!({"model": applied}));
-                }
-                s.set_model(&model).await?;
-                // Valeur effective post-résolution (peut différer de la
-                // demande : "swe-2" → "swe-2-high").
-                let applied = s.meta_snapshot().model.unwrap_or(model);
-                Ok(json!({"model": applied}))
+    pub(super) async fn h_set_model(
+        self: &Arc<Self>,
+        session: String,
+        model: String,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        if self.catalogue_only(&s, &model).await {
+            // Action explicite : nouvelle chaîne de rejeu bornée.
+            s.reset_catalogue_reapply();
+            if s.is_alive() {
+                self.apply_catalogue_model(&s, &model).await?;
+            } else {
+                // Endormie/morte : stage — le prochain respawn
+                // rejoue l'override (comme les valeurs
+                // annoncées qui attendent le réveil).
+                self.stage_catalogue_model(&s, &model);
+            }
+            let applied = s.meta_snapshot().model.unwrap_or(model);
+            return Ok(json!({"model": applied}));
+        }
+        s.set_model(&model).await?;
+        // Valeur effective post-résolution (peut différer de la
+        // demande : "swe-2" → "swe-2-high").
+        let applied = s.meta_snapshot().model.unwrap_or(model);
+        Ok(json!({"model": applied}))
     }
 
     /// Modèle advisor de la session : persisté dans meta puis appliqué
@@ -1477,157 +1560,188 @@ impl Daemon {
     /// (`advisorModel` via `_meta` → `--settings`), un process vivant
     /// doit donc être recyclé (kill + session/load). Session endormie :
     /// le choix est persisté et s'appliquera au prochain réveil.
-    pub(super) async fn h_set_advisor(self: &Arc<Self>, session: String, advisor: String) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                let agent = s.meta_snapshot().agent;
-                let profile = self
-                    .agents
-                    .read()
-                    .await
-                    .get(&agent)
-                    .cloned()
-                    .with_context(|| format!("agent inconnu: {agent}"))?;
-                if profile.advisor_models.is_empty() {
-                    anyhow::bail!("le profil « {agent} » ne déclare pas d'advisor (advisor_models)");
-                }
-                // "" = retour au défaut du profil/agent (meta.advisor
-                // → None, aucune injection _meta) ; "off" = désactivation
-                // explicite ; sinon valeur parmi advisor_models.
-                let advisor = advisor.trim().to_string();
-                if !advisor.is_empty() && advisor != "off" && !profile.advisor_models.contains(&advisor) {
-                    anyhow::bail!(
-                        "advisor inconnu: {advisor} (attendu : défaut, off ou {:?})",
-                        profile.advisor_models
-                    );
-                }
-                s.set_advisor_meta((!advisor.is_empty()).then_some(advisor.clone()));
-                if s.is_alive() || s.is_spawning() {
-                    s.kill_for_respawn().await;
-                    self.respawn(&s, true).await?;
-                }
-                let shown = if advisor.is_empty() { "défaut" } else { advisor.as_str() };
-                s.emit(EventKind::System {
-                    text: format!("advisor → {shown}"),
-                });
-                Ok(json!({"advisor": advisor}))
+    pub(super) async fn h_set_advisor(
+        self: &Arc<Self>,
+        session: String,
+        advisor: String,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        let agent = s.meta_snapshot().agent;
+        let profile = self
+            .agents
+            .read()
+            .await
+            .get(&agent)
+            .cloned()
+            .with_context(|| format!("unknown agent: {agent}"))?;
+        if profile.advisor_models.is_empty() {
+            anyhow::bail!("profile « {agent} » does not declare an advisor (advisor_models)");
+        }
+        // "" = retour au défaut du profil/agent (meta.advisor
+        // → None, aucune injection _meta) ; "off" = désactivation
+        // explicite ; sinon valeur parmi advisor_models.
+        let advisor = advisor.trim().to_string();
+        if !advisor.is_empty() && advisor != "off" && !profile.advisor_models.contains(&advisor) {
+            anyhow::bail!(
+                "unknown advisor: {advisor} (expected: default, off or {:?})",
+                profile.advisor_models
+            );
+        }
+        s.set_advisor_meta((!advisor.is_empty()).then_some(advisor.clone()));
+        if s.is_alive() || s.is_spawning() {
+            s.kill_for_respawn().await;
+            self.respawn(&s, true).await?;
+        }
+        let shown = if advisor.is_empty() {
+            "default"
+        } else {
+            advisor.as_str()
+        };
+        s.emit(EventKind::System {
+            text: format!("advisor → {shown}"),
+        });
+        Ok(json!({"advisor": advisor}))
     }
 
-    pub(super) async fn h_set_config_option(self: &Arc<Self>, session: String, config_id: String, value: String) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                // Les valeurs catalogue-only passent par le side-channel,
-                // jamais par session/set_config_option (refus ACP garanti).
-                // L'option modèle peut être adressée par son id ACP ou sa
-                // catégorie « model » — les deux déclenchent l'override.
-                let is_model_cfg = config_id == "model" || {
-                    let m = s.meta_snapshot();
-                    m.config_options.iter().any(|o| {
-                        (o.id == config_id || o.category == config_id)
-                            && (o.id == "model" || o.category == "model")
-                    })
-                };
-                if is_model_cfg && self.catalogue_only(&s, &value).await {
-                    s.reset_catalogue_reapply();
-                    if s.is_alive() {
-                        self.apply_catalogue_model(&s, &value).await?;
-                    } else {
-                        self.stage_catalogue_model(&s, &value);
-                    }
-                    let applied = s.meta_snapshot().model.unwrap_or(value);
-                    return Ok(json!({"config": config_id, "value": applied}));
-                }
-                s.set_config_option(&config_id, &value).await?;
-                Ok(json!({"config": config_id, "value": value}))
+    pub(super) async fn h_set_config_option(
+        self: &Arc<Self>,
+        session: String,
+        config_id: String,
+        value: String,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        // Les valeurs catalogue-only passent par le side-channel,
+        // jamais par session/set_config_option (refus ACP garanti).
+        // L'option modèle peut être adressée par son id ACP ou sa
+        // catégorie « model » — les deux déclenchent l'override.
+        let is_model_cfg = config_id == "model" || {
+            let m = s.meta_snapshot();
+            m.config_options.iter().any(|o| {
+                (o.id == config_id || o.category == config_id)
+                    && (o.id == "model" || o.category == "model")
+            })
+        };
+        if is_model_cfg && self.catalogue_only(&s, &value).await {
+            s.reset_catalogue_reapply();
+            if s.is_alive() {
+                self.apply_catalogue_model(&s, &value).await?;
+            } else {
+                self.stage_catalogue_model(&s, &value);
+            }
+            let applied = s.meta_snapshot().model.unwrap_or(value);
+            return Ok(json!({"config": config_id, "value": applied}));
+        }
+        s.set_config_option(&config_id, &value).await?;
+        Ok(json!({"config": config_id, "value": value}))
     }
 
-    pub(super) async fn h_respond(self: &Arc<Self>, session: String, request_id: String, option_id: Option<String>, answer: Option<Value>) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                s.respond(&request_id, option_id.as_deref(), answer.as_ref())?;
-                Ok(json!({"responded": request_id}))
+    pub(super) async fn h_respond(
+        self: &Arc<Self>,
+        session: String,
+        request_id: String,
+        option_id: Option<String>,
+        answer: Option<Value>,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        s.respond(&request_id, option_id.as_deref(), answer.as_ref())?;
+        Ok(json!({"responded": request_id}))
     }
 
-    pub(super) async fn h_rename_session(self: &Arc<Self>, session: String, title: String) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                s.rename(&title).await;
-                Ok(json!({"title": title}))
+    pub(super) async fn h_rename_session(
+        self: &Arc<Self>,
+        session: String,
+        title: String,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        s.rename(&title).await;
+        Ok(json!({"title": title}))
     }
 
-    pub(super) async fn h_set_session_group(self: &Arc<Self>, session: String, group: Option<String>) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                s.set_group(group.clone()).await;
-                Ok(json!({"group": group}))
+    pub(super) async fn h_set_session_group(
+        self: &Arc<Self>,
+        session: String,
+        group: Option<String>,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        s.set_group(group.clone()).await;
+        Ok(json!({"group": group}))
     }
 
     pub(super) async fn h_delete_session(self: &Arc<Self>, session: String) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                // Suppression pendant l'override : le respawn final
-                // d'apply spawnerait un process orphelin (session
-                // sortie du registre, dir supprimé). Refus propre —
-                // apply vérifie aussi contains_key avant de respawner.
-                if s.catalogue_override_active() {
-                    anyhow::bail!("override catalogue en cours — réessayez dans un instant");
-                }
-                // Spawn en vol : invalider la génération fait avorter le
-                // handshake immédiatement (kill simple = rien à tuer tant
-                // que l'enfant n'est pas posé — il finirait session/new
-                // pour être tué après coup).
-                if s.is_spawning() {
-                    s.kill_for_respawn().await;
-                } else {
-                    s.kill().await;
-                }
-                // Event terminal : les clients abonnés apprennent la
-                // suppression avant que le flux ne se ferme.
-                s.emit_ephemeral(proto::EventKind::SessionDeleted {});
-                self.sessions.write().await.remove(&session);
-                // Waiters ac-wait de la session : annulés ici — sinon
-                // le worker survivant pinguerait une session morte à
-                // sa prochaine échéance (send en échec, loggé).
-                super::orch::acwait_cancel_session(&session);
-                // Un remove_dir_all en échec laisse meta.json sur
-                // disque → la session ressuscite « interrompue » au
-                // prochain boot du démon (orphelins post-restart,
-                // item #250). Loggé : la GC orchestrateur la reprend.
-                if let Err(e) = std::fs::remove_dir_all(&s.dir) {
-                    warn!("session {session}: remove_dir_all {}: {e}", s.dir.display());
-                }
-                // Pièces jointes du composer : <cwd>/.ac-uploads/<sid>/
-                // part avec la session (le client ne peut plus écrire —
-                // session morte). Borné au sous-dossier exact : les
-                // autres sessions partagent .ac-uploads.
-                purge_session_uploads(&s.meta_snapshot().cwd, &session);
-                info!("session supprimée: {session}");
-                Ok(json!({"deleted": session}))
+        let s = self.get_session(&session).await?;
+        // Suppression pendant l'override : le respawn final
+        // d'apply spawnerait un process orphelin (session
+        // sortie du registre, dir supprimé). Refus propre —
+        // apply vérifie aussi contains_key avant de respawner.
+        if s.catalogue_override_active() {
+            anyhow::bail!("catalogue override in progress — try again in a moment");
+        }
+        // Spawn en vol : invalider la génération fait avorter le
+        // handshake immédiatement (kill simple = rien à tuer tant
+        // que l'enfant n'est pas posé — il finirait session/new
+        // pour être tué après coup).
+        if s.is_spawning() {
+            s.kill_for_respawn().await;
+        } else {
+            s.kill().await;
+        }
+        // Event terminal : les clients abonnés apprennent la
+        // suppression avant que le flux ne se ferme.
+        s.emit_ephemeral(proto::EventKind::SessionDeleted {});
+        self.sessions.write().await.remove(&session);
+        // Waiters ac-wait de la session : annulés ici — sinon
+        // le worker survivant pinguerait une session morte à
+        // sa prochaine échéance (send en échec, loggé).
+        super::orch::acwait_cancel_session(&session);
+        // Un remove_dir_all en échec laisse meta.json sur
+        // disque → la session ressuscite « interrompue » au
+        // prochain boot du démon (orphelins post-restart,
+        // item #250). Loggé : la GC orchestrateur la reprend.
+        if let Err(e) = std::fs::remove_dir_all(&s.dir) {
+            warn!("session {session}: remove_dir_all {}: {e}", s.dir.display());
+        }
+        // Pièces jointes du composer : <cwd>/.ac-uploads/<sid>/
+        // part avec la session (le client ne peut plus écrire —
+        // session morte). Borné au sous-dossier exact : les
+        // autres sessions partagent .ac-uploads.
+        purge_session_uploads(&s.meta_snapshot().cwd, &session);
+        info!("session deleted: {session}");
+        Ok(json!({"deleted": session}))
     }
 
     pub(super) async fn h_kill_session(self: &Arc<Self>, session: String) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                // Kill pendant l'override : no-op sur process déjà mort
-                // puis le respawn final de apply ressusciterait la
-                // session — kill silencieusement annulé.
-                if s.catalogue_override_active() {
-                    anyhow::bail!("override catalogue en cours — réessayez dans un instant");
-                }
-                if s.is_spawning() {
-                    // Kill pendant un spawn en vol (création async,
-                    // réveil, resume) : aucun enfant à tuer ou handshake
-                    // en cours — le kill simple laisserait le spawn
-                    // livrer un agent vivant après l'ordre de mort.
-                    // Invalider la génération fait échouer le spawn
-                    // ("supplanté") ; on_agent_exit se taira donc →
-                    // l'état dead est posé ici explicitement.
-                    s.kill_for_respawn().await;
-                    s.mark_dead();
-                } else {
-                    s.kill().await;
-                }
-                info!("agent tué: {session}");
-                Ok(json!({"killed": session}))
+        let s = self.get_session(&session).await?;
+        // Kill pendant l'override : no-op sur process déjà mort
+        // puis le respawn final de apply ressusciterait la
+        // session — kill silencieusement annulé.
+        if s.catalogue_override_active() {
+            anyhow::bail!("catalogue override in progress — try again in a moment");
+        }
+        if s.is_spawning() {
+            // Kill pendant un spawn en vol (création async,
+            // réveil, resume) : aucun enfant à tuer ou handshake
+            // en cours — le kill simple laisserait le spawn
+            // livrer un agent vivant après l'ordre de mort.
+            // Invalider la génération fait échouer le spawn
+            // ("supplanté") ; on_agent_exit se taira donc →
+            // l'état dead est posé ici explicitement.
+            s.kill_for_respawn().await;
+            s.mark_dead();
+        } else {
+            s.kill().await;
+        }
+        info!("agent killed: {session}");
+        Ok(json!({"killed": session}))
     }
 
     // Subscribe est géré par la couche connexion (streaming)
-    pub(super) async fn h_subscribe(self: &Arc<Self>, session: String, after_seq: u64) -> Result<Value> {
-                let s = self.get_session(&session).await?;
-                Ok(json!({"subscribed": session, "after_seq": after_seq, "last_seq": s.journal.last_seq()}))
+    pub(super) async fn h_subscribe(
+        self: &Arc<Self>,
+        session: String,
+        after_seq: u64,
+    ) -> Result<Value> {
+        let s = self.get_session(&session).await?;
+        Ok(json!({"subscribed": session, "after_seq": after_seq, "last_seq": s.journal.last_seq()}))
     }
 }
 
@@ -1641,7 +1755,10 @@ pub(super) enum FreshDeliver {
     UserPrompt(String),
     /// Délégation peer_spawn : message pair déjà wrappé (provenance
     /// incluse) ; la créatrice est notifiée en cas d'échec du spawn.
-    Peer { wrapped: String, creator: Arc<Session> },
+    Peer {
+        wrapped: String,
+        creator: Arc<Session>,
+    },
     /// Prompt initial d'une session « service » (origin) : wrappé de la
     /// provenance comme un message pair, même livraison — mais le
     /// user_message badgé est journalisé à la création (rien à réémettre
@@ -1713,7 +1830,10 @@ fn run_override_cmd(cmdline: &str, cwd: &str) -> Result<()> {
     use std::io::Read;
     use std::process::{Command, Stdio};
     let argv: Vec<String> = cmdline.split_whitespace().map(String::from).collect();
-    anyhow::ensure!(!argv.is_empty(), "model_override_cmd vide après substitution");
+    anyhow::ensure!(
+        !argv.is_empty(),
+        "model_override_cmd empty after substitution"
+    );
     let mut child = Command::new(&argv[0])
         .args(&argv[1..])
         .current_dir(cwd)
@@ -1813,8 +1933,8 @@ pub(super) fn purge_session_uploads(cwd: &str, session: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::orch::AcwaitWait;
+    use super::*;
 
     fn meta(state: &str) -> SessionMeta {
         SessionMeta {
@@ -1897,8 +2017,7 @@ mod tests {
     }
 
     fn tmpdir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir()
-            .join(format!("ac-purge-{}-{tag}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("ac-purge-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

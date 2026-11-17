@@ -108,22 +108,19 @@ impl Session {
         if log {
             let text = if tools > 0 {
                 format!(
-                    "watchdog: tour ouvert sans event depuis {} s — {} tool call(s) en cours, attente normale",
+                    "watchdog: open turn without events for {} s — {} tool call(s) in flight, normal wait",
                     age.as_secs(),
                     tools
                 )
             } else {
-                format!(
-                    "watchdog: tour ouvert sans event depuis {} s",
-                    age.as_secs()
-                )
+                format!("watchdog: open turn without events for {} s", age.as_secs())
             };
             warn!("[{sid}] {text}");
             self.emit(EventKind::System { text });
         }
         if nudge {
             self.emit(EventKind::System {
-                text: "watchdog: silence prolongé — envoi « continue your task »".into(),
+                text: "watchdog: prolonged silence — sending « continue your task »".into(),
             });
             // Derrière le tour en vol : le runner le livrera à la fin
             // du prompt courant. Si `busy` est faux (état working sans

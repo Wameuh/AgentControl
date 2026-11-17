@@ -391,7 +391,7 @@ export class Attachments {
           dir: true,
           conn,
         }).catch((e) => {
-          if (!/existe déjà/i.test(String(e))) throw e;
+          if (!/existe déjà|already exists/i.test(String(e))) throw e;
         });
       }
       // Nom unique : .ac-uploads/<sid>/<ts>-<nom> ; collision → suffixe
@@ -410,7 +410,7 @@ export class Attachments {
           a.abs = r.path;
           break;
         } catch (e) {
-          if (!/existe déjà/i.test(String(e))) throw e;
+          if (!/existe déjà|already exists/i.test(String(e))) throw e;
           if (n >= 99) throw e;
         }
       }

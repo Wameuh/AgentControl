@@ -424,7 +424,7 @@ await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
   // d'état — refresh immédiat, restreint aux textes liés à la file
   // (un queue_list par event sinon, gratuit mais inutile).
   if (event.type === "system" && app.current?.id === session
-      && /file|steer|compact/i.test((event.text as string) ?? "")) {
+      && /queue|steer|compact|file/i.test((event.text as string) ?? "")) {
     void composer.refreshQueue();
   }
   if (event.type === "status_changed") void sidebar.refresh();

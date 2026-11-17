@@ -77,10 +77,7 @@ impl CostCache {
 /// de coût connue → comportement inchangé.
 fn catalog_argv(command: &[String]) -> Option<Vec<String>> {
     let bin = command.first()?;
-    let base = Path::new(bin)
-        .file_name()?
-        .to_string_lossy()
-        .to_lowercase();
+    let base = Path::new(bin).file_name()?.to_string_lossy().to_lowercase();
     match base.as_str() {
         "devin" => Some(vec![bin.clone(), "models".into()]),
         _ => None,
@@ -146,13 +143,14 @@ fn parse_devin_models(out: &str) -> CostMap {
             continue; // « aliases: », « Pass a family slug… » & co.
         }
         let Some(lb) = t.rfind('[') else { continue };
-        let Some(rb) = t[lb..].rfind(']') else { continue };
+        let Some(rb) = t[lb..].rfind(']') else {
+            continue;
+        };
         let detail = t[lb + 1..lb + rb].trim().to_string();
-        let Some(label) = price_of(&detail) else { continue };
-        map.insert(
-            uid.to_string(),
-            ModelCost { label, detail },
-        );
+        let Some(label) = price_of(&detail) else {
+            continue;
+        };
+        map.insert(uid.to_string(), ModelCost { label, detail });
     }
     map
 }
@@ -217,8 +215,6 @@ Pass a family slug, alias, or model UID to `--model`.
         assert_eq!(m["swe-2-medium-lightning"].label, "$1/$5");
         assert_eq!(m["fusion-a-sidekick-b"].label, "$4/$20");
         assert_eq!(m.len(), 3);
-        assert!(m["swe-2-medium-lightning"]
-            .detail
-            .contains("Cached input"));
+        assert!(m["swe-2-medium-lightning"].detail.contains("Cached input"));
     }
 }

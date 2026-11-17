@@ -34,10 +34,10 @@ pub async fn serve_media(
     query: &[(String, String)],
 ) -> Result<()> {
     let Some(session) = http::qparam(query, "session") else {
-        return http::respond_err(stream, 400, "session manquante").await;
+        return http::respond_err(stream, 400, "missing session").await;
     };
     let Some(path) = http::qparam(query, "path") else {
-        return http::respond_err(stream, 400, "path manquant").await;
+        return http::respond_err(stream, 400, "missing path").await;
     };
     let p = match resolve_ws_path(daemon, session, path).await {
         Ok(p) => p,
@@ -45,8 +45,8 @@ pub async fn serve_media(
     };
     let meta = match std::fs::metadata(&p) {
         Ok(m) if m.is_file() => m,
-        Ok(_) => return http::respond_err(stream, 400, "pas un fichier").await,
-        Err(_) => return http::respond_err(stream, 404, "introuvable").await,
+        Ok(_) => return http::respond_err(stream, 400, "not a file").await,
+        Err(_) => return http::respond_err(stream, 404, "not found").await,
     };
     let total = meta.len();
     // Range: bytes=start-end | start- | -count — une seule plage, comme
@@ -54,7 +54,7 @@ pub async fn serve_media(
     let range = match head.header("range").map(|r| parse_range(r, total)) {
         Some(Ok(r)) => r,
         Some(Err(())) => {
-            return http::respond_err(stream, 416, "plage invalide").await;
+            return http::respond_err(stream, 416, "invalid range").await;
         }
         None => None,
     };
@@ -65,19 +65,13 @@ pub async fn serve_media(
         range,
         total,
         &[
-            (
-                "Content-Type".into(),
-                mime_for(&p).into(),
-            ),
+            ("Content-Type".into(), mime_for(&p).into()),
             ("Accept-Ranges".into(), "bytes".into()),
             // Fichiers workspace rendus sous notre origine authentifiée :
             // un .svg/.html navigué directement exécuterait ses scripts
             // ici → sandbox coupe tout script/plugin, les balises
             // <img>/<video> ne sont pas affectées.
-            (
-                "Content-Security-Policy".into(),
-                "sandbox".into(),
-            ),
+            ("Content-Security-Policy".into(), "sandbox".into()),
         ],
     )
     .await
@@ -93,10 +87,10 @@ pub async fn serve_download(
     query: &[(String, String)],
 ) -> Result<()> {
     let Some(session) = http::qparam(query, "session") else {
-        return http::respond_err(stream, 400, "session manquante").await;
+        return http::respond_err(stream, 400, "missing session").await;
     };
     let Some(path) = http::qparam(query, "path") else {
-        return http::respond_err(stream, 400, "path manquant").await;
+        return http::respond_err(stream, 400, "missing path").await;
     };
     let s = match daemon.get_session(session).await {
         Ok(s) => s,
@@ -108,7 +102,7 @@ pub async fn serve_download(
     };
     let meta = match std::fs::metadata(&p) {
         Ok(m) => m,
-        Err(_) => return http::respond_err(stream, 404, "introuvable").await,
+        Err(_) => return http::respond_err(stream, 404, "not found").await,
     };
     let name = p
         .file_name()
@@ -118,9 +112,7 @@ pub async fn serve_download(
     let (file, fname, size) = if meta.is_dir() {
         let (zp, _zn) = match download_archive(&s, &p).await {
             Ok(v) => v,
-            Err(e) => {
-                return http::respond_err(stream, 500, &format!("zip: {e:#}")).await
-            }
+            Err(e) => return http::respond_err(stream, 500, &format!("zip: {e:#}")).await,
         };
         let size = std::fs::metadata(&zp).map(|m| m.len()).unwrap_or(0);
         // Le nom servi reprend celui du dossier, pas le hash dl-*.
@@ -276,4 +268,3 @@ fn mime_for(p: &std::path::Path) -> &'static str {
         _ => "application/octet-stream",
     }
 }
-

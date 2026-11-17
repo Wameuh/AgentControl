@@ -32,7 +32,7 @@ impl Daemon {
     pub(super) async fn h_component_start(self: &Arc<Self>, name: String) -> Result<Value> {
         if name == crate::server::orch::COMPONENT_NAME {
             self.orch.set_enabled(true);
-            info!("orchestrateur: démarré via component_start");
+            info!("orchestrator: started via component_start");
             return Ok(json!({ "name": name, "state": self.orch.component_state() }));
         }
         let st = self.components.start(&name).await?;
@@ -44,7 +44,7 @@ impl Daemon {
     pub(super) async fn h_component_stop(self: &Arc<Self>, name: String) -> Result<Value> {
         if name == crate::server::orch::COMPONENT_NAME {
             self.orch.set_enabled(false);
-            info!("orchestrateur: arrêté via component_stop");
+            info!("orchestrator: stopped via component_stop");
             return Ok(json!({ "name": name, "state": self.orch.component_state() }));
         }
         let st = self.components.stop(&name).await?;
@@ -56,7 +56,7 @@ impl Daemon {
     pub(super) async fn h_component_restart(self: &Arc<Self>, name: String) -> Result<Value> {
         if name == crate::server::orch::COMPONENT_NAME {
             self.orch.set_enabled(true);
-            info!("orchestrateur: redémarré via component_restart");
+            info!("orchestrator: restarted via component_restart");
             return Ok(json!({ "name": name, "state": self.orch.component_state() }));
         }
         let st = self.components.restart(&name).await?;

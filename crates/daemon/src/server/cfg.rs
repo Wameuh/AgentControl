@@ -154,9 +154,7 @@ pub fn agent_confs(text: &str) -> Option<HashMap<String, AgentConf>> {
         #[serde(default)]
         agents: HashMap<String, AgentConf>,
     }
-    toml::from_str::<AgentsOnly>(text)
-        .ok()
-        .map(|c| c.agents)
+    toml::from_str::<AgentsOnly>(text).ok().map(|c| c.agents)
 }
 
 /// `AgentConf` (config.toml) → `AgentProfile` effectif — mapping
@@ -194,7 +192,10 @@ pub(crate) fn env_mode(mode: &str) -> &str {
 
 /// Substitution {model}/{mode} du profil avec les valeurs courantes de la
 /// session (mêmes règles que new_session/resume : entrée vide → omise).
-pub(super) fn spawn_args(profile: &AgentProfile, meta: &SessionMeta) -> (Vec<String>, HashMap<String, String>) {
+pub(super) fn spawn_args(
+    profile: &AgentProfile,
+    meta: &SessionMeta,
+) -> (Vec<String>, HashMap<String, String>) {
     let (m, mo) = (
         meta.model.as_deref().unwrap_or(""),
         env_mode(meta.mode.as_deref().unwrap_or("")),
@@ -849,7 +850,11 @@ mod tests {
     use super::*;
 
     fn policy(enabled: bool, at_tokens: Option<u64>, at_pct: Option<f64>) -> CompactPolicy {
-        CompactPolicy { enabled, at_tokens, at_pct }
+        CompactPolicy {
+            enabled,
+            at_tokens,
+            at_pct,
+        }
     }
 
     /// exceeds : OU des deux règles — seuil tokens, seuil % (fenêtre
@@ -868,9 +873,9 @@ mod tests {
         // OU : l'un des deux suffit.
         let p = policy(true, Some(50_000), Some(0.9));
         assert!(p.exceeds(50_000, 1_000_000)); // tokens seuls
-        assert!(!p.exceeds(0, 0));             // aucun — used 0 sous les seuils
+        assert!(!p.exceeds(0, 0)); // aucun — used 0 sous les seuils
         assert!(p.exceeds(950_000, 1_000_000)); // pct seul
-        // Désactivé → jamais de déclenchement.
+                                                // Désactivé → jamais de déclenchement.
         let p = policy(false, Some(1), Some(0.01));
         assert!(!p.exceeds(u64::MAX, u64::MAX));
     }
@@ -882,14 +887,26 @@ mod tests {
         let mut by_agent = HashMap::new();
         by_agent.insert(
             "devin".to_string(),
-            CompactPartial { enabled: None, at_tokens: Some(10_000), at_pct: None },
+            CompactPartial {
+                enabled: None,
+                at_tokens: Some(10_000),
+                at_pct: None,
+            },
         );
         by_agent.insert(
             "codex".to_string(),
-            CompactPartial { enabled: Some(false), at_tokens: None, at_pct: None },
+            CompactPartial {
+                enabled: Some(false),
+                at_tokens: None,
+                at_pct: None,
+            },
         );
         let src = CompactSrc {
-            global: CompactCfg { enabled: true, at_tokens: None, at_pct: Some(0.8) },
+            global: CompactCfg {
+                enabled: true,
+                at_tokens: None,
+                at_pct: Some(0.8),
+            },
             by_agent,
         };
         // Agent sans override → global intégral.
@@ -912,22 +929,40 @@ mod tests {
     fn compact_bounds() {
         // Global : 0 = off, hors borne ignoré.
         let src = CompactSrc {
-            global: CompactCfg { enabled: true, at_tokens: Some(0), at_pct: Some(0.0) },
+            global: CompactCfg {
+                enabled: true,
+                at_tokens: Some(0),
+                at_pct: Some(0.0),
+            },
             by_agent: HashMap::new(),
         };
         let p = src.base_for("x");
         assert!(p.enabled && p.at_tokens.is_none() && p.at_pct.is_none());
         assert!(!p.exceeds(u64::MAX, u64::MAX)); // inerte, jamais de trigger
         let src = CompactSrc {
-            global: CompactCfg { enabled: true, at_tokens: None, at_pct: Some(1.5) },
+            global: CompactCfg {
+                enabled: true,
+                at_tokens: None,
+                at_pct: Some(1.5),
+            },
             by_agent: HashMap::new(),
         };
         assert!(src.base_for("x").at_pct.is_none());
         // Override : Some(0)/hors borne retire la règle héritée.
         let mut p = policy(true, Some(100), Some(0.5));
-        CompactPartial { enabled: None, at_tokens: Some(0), at_pct: Some(1.5) }.apply_to(&mut p);
+        CompactPartial {
+            enabled: None,
+            at_tokens: Some(0),
+            at_pct: Some(1.5),
+        }
+        .apply_to(&mut p);
         assert!(p.at_tokens.is_none() && p.at_pct.is_none());
-        CompactPartial { enabled: None, at_tokens: Some(50), at_pct: Some(0.4) }.apply_to(&mut p);
+        CompactPartial {
+            enabled: None,
+            at_tokens: Some(50),
+            at_pct: Some(0.4),
+        }
+        .apply_to(&mut p);
         assert_eq!(p.at_tokens, Some(50));
         assert_eq!(p.at_pct, Some(0.4));
     }
@@ -954,10 +989,16 @@ agent = "devin"
 "#;
         let confs = agent_confs(text).unwrap();
         assert_eq!(confs.len(), 2);
-        assert_eq!(confs["claude"].command.argvs(), vec![vec!["claude-code-acp"]]);
+        assert_eq!(
+            confs["claude"].command.argvs(),
+            vec![vec!["claude-code-acp"]]
+        );
         assert_eq!(confs["codex"].name.as_deref(), Some("Codex"));
         assert_eq!(confs["codex"].max_instances, Some(2));
-        assert_eq!(confs["codex"].env.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(
+            confs["codex"].env.get("FOO").map(String::as_str),
+            Some("bar")
+        );
         // Section absente → table vide (≠ None : TOML valide sans agents).
         assert!(agent_confs("[backlog_orchestrator]\nenabled = true\n")
             .unwrap()
@@ -983,10 +1024,7 @@ command = ["devin", "acp"]
             confs["claude"].command.argvs(),
             vec![vec!["claude-code-acp"], vec!["claude-agent-acp"]]
         );
-        assert_eq!(
-            confs["devin"].command.argvs(),
-            vec![vec!["devin", "acp"]]
-        );
+        assert_eq!(confs["devin"].command.argvs(), vec![vec!["devin", "acp"]]);
         // profile_from_conf reporte les candidates telles quelles.
         let p = profile_from_conf("claude", confs["claude"].clone());
         assert_eq!(p.commands.len(), 2);
@@ -1017,10 +1055,7 @@ enabled = false
         assert_eq!(p.via, AgentVia::Config);
         assert_eq!(p.max_instances, 3);
         assert_eq!(p.catalogue_cmd.as_deref(), Some("cat list"));
-        assert_eq!(
-            p.model_override_cmd.as_deref(),
-            Some("set -m {model}")
-        );
+        assert_eq!(p.model_override_cmd.as_deref(), Some("set -m {model}"));
         assert_eq!(p.advisor_models, vec!["opus"]);
         assert_eq!(p.extra_models[0].value, "fable");
         assert!(!p.compact.enabled.unwrap_or(true));
@@ -1040,7 +1075,15 @@ enabled = false
         for acp_only in ["plan", "smart", "ask"] {
             assert_eq!(env_mode(acp_only), "", "{acp_only} doit être omis de l'env");
         }
-        for cli_ok in ["bypass", "dangerous", "normal", "accept-edits", "autonomous", "yolo", ""] {
+        for cli_ok in [
+            "bypass",
+            "dangerous",
+            "normal",
+            "accept-edits",
+            "autonomous",
+            "yolo",
+            "",
+        ] {
             assert_eq!(env_mode(cli_ok), cli_ok, "{cli_ok} doit passer tel quel");
         }
         // Valeur arbitraire (autre agent, autre vocab) : conservée — le

@@ -318,7 +318,7 @@ export class ConnectionManager {
       // « de retour » n'a de sens que sur une vraie panne — au premier
       // connect (was undefined) le log serait du bruit.
       if (was !== undefined)
-        logUi("info", `conn ${key} de retour (était ${was})`);
+        logUi("info", `conn ${key} back (was ${was})`);
       this.renderState();
     }
   }
@@ -343,7 +343,7 @@ export class ConnectionManager {
     // la gen courante (silent/rtt « vieux » typiques de ce cas).
     if (!this.isFresh(key, v.gen)) {
       logUi("info",
-        `conn ${key}: sonde périmée (gen ${v.gen}≠${this.gens.get(key)}) — ignorée`);
+        `conn ${key}: stale probe (gen ${v.gen}≠${this.gens.get(key)}) — ignored`);
       return true; // transport considéré joignable : la gen fraîche l'est
     }
     if (v._ac_transport) this.lastTransport.set(key, v._ac_transport);
@@ -366,9 +366,9 @@ export class ConnectionManager {
       if (ni < IGNORED_STRIKE_MAX) {
         this.ignored.set(key, ni);
         logUi("warn",
-          `conn ${key}: sonde timeout mais transport vivant (${tstate}) ` +
+          `conn ${key}: probe timeout but transport alive (${tstate}) ` +
           `(silent ${v.silent_ms} ms, rtt ${v.rtt_ms ?? "?"} ms)` +
-          fmtAcTransport(v._ac_transport) + ` — ignoré ×${ni}`);
+          fmtAcTransport(v._ac_transport) + ` — ignored ×${ni}`);
         return true;
       }
       // Plafond : le RPC est durablement bloqué malgré un transport
@@ -376,8 +376,8 @@ export class ConnectionManager {
       // injouable à jamais sans être recyclée.
       this.ignored.delete(key);
       logUi("warn",
-        `conn ${key}: ${ni} timeouts d'affilée malgré un transport ` +
-        `vivant — RPC bloqué durablement → strike` +
+        `conn ${key}: ${ni} consecutive timeouts despite an alive ` +
+        `transport — RPC durably blocked → strike` +
         fmtAcTransport(v._ac_transport));
     }
     const n = (this.strikes.get(key) ?? 0) + 1;
@@ -463,8 +463,8 @@ export class ConnectionManager {
     const downMs = downSince != null ? Date.now() - downSince : null;
     const lastT = this.lastTransport.get(key);
     logUi("info",
-      `conn ${key}: reconnect #${attempt} début gen=${genBefore ?? "?"}` +
-      `${downMs != null ? ` transport-mort=${downMs}ms` : ""}` +
+      `conn ${key}: reconnect #${attempt} start gen=${genBefore ?? "?"}` +
+      `${downMs != null ? ` transport-dead=${downMs}ms` : ""}` +
       fmtAcTransport(lastT));
     this.renderState();
     const t0 = Date.now();
@@ -486,7 +486,7 @@ export class ConnectionManager {
       this.markAlive(key);
       logUi("info",
         `conn ${key}: reconnect #${attempt} ok gen=${genAfter ?? "?"}` +
-        `${deadMs != null ? ` transport-mort=${deadMs}ms` : ""} ` +
+        `${deadMs != null ? ` transport-dead=${deadMs}ms` : ""} ` +
         `(${Date.now() - t0} ms)` + fmtAcTransport(lastT));
       // connect retourne déjà daemon_status → capabilities à jour sans RTT.
       if (st && !st.error) this.setCaps(key, st);
@@ -497,20 +497,20 @@ export class ConnectionManager {
       // journaliser en « reconnect ko » (sinon cycle down/retry
       // auto-entretenu alors que le transport est vivant).
       await this.deps.refresh().catch((e) =>
-        logUi("warn", `conn ${key}: refresh post-reconnect ko — ${e}`));
+        logUi("warn", `conn ${key}: post-reconnect refresh failed — ${e}`));
     } catch (e) {
       // Seul un échec du connect lui-même (ou un throw post-markAlive
       // imprévu) arrive ici : si markAlive a déjà rendu la conn ok,
       // le retry/log « ko » serait un faux négatif — journaliser pour
       // le diagnostic sans re-planifier de retry fantôme.
       if (this.live.get(key) !== "reconnecting") {
-        logUi("warn", `conn ${key}: reconnect #${attempt} post-ok throw — ${e}`);
+        logUi("warn", `conn ${key}: post-ok throw on reconnect #${attempt} — ${e}`);
         return;
       }
       this.live.set(key, "down");
       logUi("warn",
-        `conn ${key}: reconnect #${attempt} ko gen=${genBefore ?? "?"}` +
-        `${downMs != null ? ` transport-mort=${downMs}ms` : ""} ` +
+        `conn ${key}: reconnect #${attempt} failed gen=${genBefore ?? "?"}` +
+        `${downMs != null ? ` transport-dead=${downMs}ms` : ""} ` +
         `(${Date.now() - t0} ms) — ${e}` + fmtAcTransport(lastT));
       this.scheduleRetry(key);
       this.renderState();
@@ -733,7 +733,7 @@ export class ConnectionManager {
       if (typeof p === "string") return this.markDead(p);
       if (!this.isFresh(p.conn, p.gen)) {
         logUi("info",
-          `conn ${p.conn}: conn-dead périmé (gen ${p.gen}≠${this.gens.get(p.conn)}) — ignoré`);
+          `conn ${p.conn}: stale conn-dead (gen ${p.gen}≠${this.gens.get(p.conn)}) — ignored`);
         return;
       }
       this.markDead(p.conn, p.why ?? "conn-dead (EOF transport)", p._ac_transport);

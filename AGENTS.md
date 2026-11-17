@@ -523,7 +523,7 @@ Manual off-PR: `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]`.
 - `write_file{path, offset, delete_len, data(base64), if_mtime_ms?}`:
   splice bounded to the workspace (`resolve_in_cwd_create` — parent
   canonicalized, absent leaf OK, `..`/symlink escaping refused);
-  `delete_len` clamped; `if_mtime_ms` ≠ disk mtime → `conflit:` error
+  `delete_len` clamped; `if_mtime_ms` ≠ disk mtime → `conflict:` error
   (the client offers `Reload`/`Overwrite` — `Recharger`/`Écraser` in
   the fr locale); atomic `.part`+`rename`
   write in `spawn_blocking`, unix mode preserved; `data` cap 16 MiB
