@@ -236,7 +236,12 @@ pub fn conn_key_json(cfg: &serde_json::Value) -> String {
             let nat = cfg.get("native").and_then(|v| v.as_bool()).unwrap_or(false)
                 || cfg!(target_os = "android");
             let port = cfg.get("port").and_then(|v| v.as_u64()).unwrap_or(22);
-            format!("{}:{}:{}", if nat { "ssh-native" } else { "ssh" }, s("host"), port)
+            format!(
+                "{}:{}:{}",
+                if nat { "ssh-native" } else { "ssh" },
+                s("host"),
+                port
+            )
         }
         "tcp" => format!("tcp:{}", s("addr")),
         "web" => "web".into(),
@@ -262,7 +267,7 @@ fn load_connections_for_write() -> Option<Vec<serde_json::Value>> {
 /// Ajoute une connexion en tête (dédupliquée par conn_key), max 10.
 pub fn save_connection(cfg: &serde_json::Value) {
     let Some(mut list) = load_connections_for_write() else {
-        log(Level::Warn, "connections.json illisible — sauvegarde refusée");
+        log(Level::Warn, "unreadable connections.json — save refused");
         return;
     };
     let key = conn_key_json(cfg);
@@ -278,7 +283,7 @@ pub fn save_connection(cfg: &serde_json::Value) {
 /// Retire une connexion de la liste (même clé de dédup que save).
 pub fn remove_connection(cfg: &serde_json::Value) {
     let Some(mut list) = load_connections_for_write() else {
-        log(Level::Warn, "connections.json illisible — suppression refusée");
+        log(Level::Warn, "unreadable connections.json — delete refused");
         return;
     };
     let key = conn_key_json(cfg);
@@ -305,7 +310,7 @@ pub fn log_tail(n: usize) -> String {
         lines = older;
     }
     if lines.is_empty() {
-        return "(pas de log)".into();
+        return "(no log)".into();
     }
     lines.reverse();
     lines.join("\n")
@@ -457,7 +462,7 @@ impl SshGuard {
                 killed,
             } => {
                 if killed.load(Ordering::SeqCst) {
-                    return "ssh tué localement (déconnexion/remplacement)".into();
+                    return "ssh killed locally (disconnect/replace)".into();
                 }
                 let st = child
                     .try_lock()
@@ -472,24 +477,18 @@ impl SshGuard {
                     // mort : le serveur a fermé ce seul canal (sshd a
                     // lâché la session ou le forward refusé côté distant).
                     return format!(
-                        "canal forwardé fermé — process ssh encore vivant{}",
+                        "forwarded channel closed — ssh process still alive{}",
                         tail_suffix(&tail)
                     );
                 };
-                let cls = if tail.contains("Timeout, server")
-                    && tail.contains("not responding")
-                {
-                    "keepalive-timeout local (serveur/réseau muet ~90-120 s)"
-                } else if tail.contains("Connection reset")
-                    || tail.contains("reset by peer")
-                {
-                    "RST distant (connexion réinitialisée)"
-                } else if tail.contains("closed by remote")
-                    || tail.contains("Connection to ")
-                {
-                    "EOF distant (le serveur a fermé la session)"
+                let cls = if tail.contains("Timeout, server") && tail.contains("not responding") {
+                    "local keepalive-timeout (server/network silent ~90-120 s)"
+                } else if tail.contains("Connection reset") || tail.contains("reset by peer") {
+                    "remote RST (connection reset)"
+                } else if tail.contains("closed by remote") || tail.contains("Connection to ") {
+                    "remote EOF (the server closed the session)"
                 } else {
-                    "ssh quitté"
+                    "ssh exited"
                 };
                 format!("{cls} [{status}]{}", tail_suffix(&tail))
             }
@@ -559,7 +558,10 @@ pub fn hide_console(cmd: &mut Command) {
 }
 
 async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<Arc<SshGuard>>)> {
-    log(Level::Debug, format!("connect transport={:?}", std::mem::discriminant(t)));
+    log(
+        Level::Debug,
+        format!("connect transport={:?}", std::mem::discriminant(t)),
+    );
     match t {
         Transport::Unix(path) => {
             #[cfg(unix)]
@@ -573,11 +575,13 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
             #[cfg(not(unix))]
             {
                 let _ = path;
-                bail!("socket unix non supporté sur cette plateforme — utilisez ssh ou tcp")
+                bail!("unix socket not supported on this platform — use ssh or tcp")
             }
         }
         Transport::Tcp(addr) => {
-            let s = TcpStream::connect(addr).await.with_context(|| format!("tcp {addr}"))?;
+            let s = TcpStream::connect(addr)
+                .await
+                .with_context(|| format!("tcp {addr}"))?;
             let (r, w) = s.into_split();
             Ok((Box::new(r), Box::new(w), None))
         }
@@ -588,10 +592,13 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
         } => {
             let local = free_port()?;
             let spec = format!("{local}:127.0.0.1:{remote_port}");
-            log(Level::Debug, format!(
-                "ssh -N -L {spec} {host} args={args:?} SSH_AUTH_SOCK={:?}",
-                std::env::var("SSH_AUTH_SOCK").unwrap_or_else(|_| "<absent>".into())
-            ));
+            log(
+                Level::Debug,
+                format!(
+                    "ssh -N -L {spec} {host} args={args:?} SSH_AUTH_SOCK={:?}",
+                    std::env::var("SSH_AUTH_SOCK").unwrap_or_else(|_| "<absent>".into())
+                ),
+            );
             let mut cmd = Command::new("ssh");
             cmd.args([
                 "-N",
@@ -627,7 +634,7 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
             hide_console(&mut cmd);
-            let mut child = cmd.spawn().context("spawn ssh — openssh installé ?")?;
+            let mut child = cmd.spawn().context("spawn ssh — is openssh installed?")?;
             let stderr_tail = Arc::new(std::sync::Mutex::new(String::new()));
             // stderr drainé en continu, borné aux ~4 Kio finaux : lu au
             // post-mortem (cause de mort) et le lecteur permanent évite
@@ -675,8 +682,15 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                         };
                         if let Some(st) = dead {
                             let e = guard_err_tail(&guard);
-                            log(Level::Error, format!("ssh mort ({st}): {e}"));
-                            bail!("ssh a quitté ({st}){}", if e.is_empty() { String::new() } else { format!(" : {e}") });
+                            log(Level::Error, format!("ssh dead ({st}): {e}"));
+                            bail!(
+                                "ssh exited ({st}){}",
+                                if e.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" : {e}")
+                                }
+                            );
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await
                     }
@@ -689,8 +703,18 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                 }
             }
             let e = guard_err_tail(&guard);
-            log(Level::Error, format!("tunnel ssh {host} timeout (stderr: {e})"));
-            bail!("tunnel ssh {host} timeout{}", if e.is_empty() { String::new() } else { format!(" : {e}") })
+            log(
+                Level::Error,
+                format!("tunnel ssh {host} timeout (stderr: {e})"),
+            );
+            bail!(
+                "tunnel ssh {host} timeout{}",
+                if e.is_empty() {
+                    String::new()
+                } else {
+                    format!(" : {e}")
+                }
+            )
         }
         Transport::SshNative {
             host,
@@ -1069,11 +1093,11 @@ fn transport_desc(t: &Transport) -> String {
 fn io_death_kind(e: &std::io::Error) -> &'static str {
     match e.kind() {
         std::io::ErrorKind::ConnectionReset => "reset socket (RST)",
-        std::io::ErrorKind::ConnectionAborted => "connexion avortée",
-        std::io::ErrorKind::BrokenPipe => "pipe brisé",
+        std::io::ErrorKind::ConnectionAborted => "connection aborted",
+        std::io::ErrorKind::BrokenPipe => "broken pipe",
         std::io::ErrorKind::UnexpectedEof => "EOF inattendu",
         std::io::ErrorKind::TimedOut => "timeout io",
-        std::io::ErrorKind::NotConnected => "socket non connecté",
+        std::io::ErrorKind::NotConnected => "socket not connected",
         _ => "erreur socket",
     }
 }
@@ -1089,11 +1113,15 @@ impl Client {
                 Ok(x) => break x,
                 Err(e) => {
                     let m = format!("{e:#}");
-                    let busy = m.contains("Address already in use") || m.contains("cannot listen to port");
+                    let busy =
+                        m.contains("Address already in use") || m.contains("cannot listen to port");
                     if !busy || attempt >= 4 {
                         return Err(e);
                     }
-                    log(Level::Warn, format!("port local occupé — retry tunnel {attempt}/3"));
+                    log(
+                        Level::Warn,
+                        format!("local port busy — tunnel retry {attempt}/3"),
+                    );
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 }
             }
@@ -1128,7 +1156,7 @@ impl Client {
             me: std::sync::OnceLock::new(),
         });
         let _ = client.me.set(Arc::downgrade(&client));
-        log(Level::Info, format!("transport {} ouvert", client.desc));
+        log(Level::Info, format!("transport {} open", client.desc));
         // Writer task : seul propriétaire du socket sortant — drain la
         // file `outq` en priorisant le trafic léger et en bornant les
         // requêtes lourdes (ReqClass). Sans elle, `call` écrivait sous
@@ -1204,8 +1232,7 @@ impl Client {
                                     }
                                     ReqClass::Heavy => {
                                         c.open_heavy.fetch_add(1, Ordering::Relaxed);
-                                        c.last_heavy_tx_ms
-                                            .store(now_ms(), Ordering::Relaxed);
+                                        c.last_heavy_tx_ms.store(now_ms(), Ordering::Relaxed);
                                     }
                                 }
                                 true
@@ -1221,13 +1248,12 @@ impl Client {
                     c.tx_lines.fetch_add(1, Ordering::Relaxed);
                     c.tx_bytes.fetch_add(n, Ordering::Relaxed);
                     c.last_tx_ms.store(now_ms(), Ordering::Relaxed);
-                    if w.write_all(item.line.as_bytes()).await.is_err()
-                        || w.flush().await.is_err()
+                    if w.write_all(item.line.as_bytes()).await.is_err() || w.flush().await.is_err()
                     {
                         // Écriture impossible = transport mourant : le
                         // signal dead précipite le drain des pendings
                         // (le reader constatera l'EOF/RST symétrique).
-                        c.set_death_reason("écriture impossible (transport mort)".into());
+                        c.set_death_reason("write impossible (dead transport)".into());
                         let _ = c.dead_tx.send(true);
                         return;
                     }
@@ -1304,11 +1330,17 @@ impl Client {
                     Some(e) => format!("{} ({e})", io_death_kind(e)),
                     None => match &c.guard {
                         Some(g) => g.death_note(),
-                        None => "eof distant (le pair a fermé)".to_string(),
+                        None => "remote eof (the peer closed)".to_string(),
                     },
                 };
                 c.set_death_reason(format!("{cause}, silent {silent} ms"));
-                log(Level::Warn, format!("conn {}: transport mort — {cause} (silent {silent} ms)", c.desc));
+                log(
+                    Level::Warn,
+                    format!(
+                        "conn {}: transport dead — {cause} (silent {silent} ms)",
+                        c.desc
+                    ),
+                );
                 // dead D'ABORD : un call() qui vérifie entre le drain et
                 // le signal s'insérerait après lui → timeout 60 s, la
                 // classe de bug corrigée ici.
@@ -1329,7 +1361,7 @@ impl Client {
                             // compte ici pour que `aband=` reflète les RPC
                             // en vol tués par la mort du transport.
                             c.abandoned_calls.fetch_add(1, Ordering::Relaxed);
-                            let _ = tx.send(Err("connexion fermée".into()));
+                            let _ = tx.send(Err("connection closed".into()));
                         }
                     }
                 }
@@ -1392,7 +1424,7 @@ impl Client {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
-        self.set_death_reason("fermeture demandée (déconnexion/remplacement)".into());
+        self.set_death_reason("close requested (disconnect/replace)".into());
         let _ = self.dead_tx.send(true);
         if let Some(h) = self.reader_abort.get() {
             h.abort();
@@ -1409,7 +1441,7 @@ impl Client {
                         self.dec_open(e.class, e.written);
                         for (_, tx) in e.waiters {
                             self.abandoned_calls.fetch_add(1, Ordering::Relaxed);
-                            let _ = tx.send(Err("connexion fermée".into()));
+                            let _ = tx.send(Err("connection closed".into()));
                         }
                     }
                     return;
@@ -1436,11 +1468,7 @@ impl Client {
     /// différé du Drop (jamais de blocage en Drop).
     fn pending_guard(&self, id: u64, waiter: u64) -> PendingGuard {
         PendingGuard {
-            client: self
-                .me
-                .get()
-                .cloned()
-                .unwrap_or_else(std::sync::Weak::new),
+            client: self.me.get().cloned().unwrap_or_else(std::sync::Weak::new),
             id,
             waiter,
         }
@@ -1461,8 +1489,7 @@ impl Client {
     /// vol est re-testé périodiquement même sans notify (les réponses
     /// ne réveillent pas la file).
     fn heavy_gap_remaining(&self) -> std::time::Duration {
-        let elapsed =
-            now_ms().saturating_sub(self.last_heavy_tx_ms.load(Ordering::Relaxed));
+        let elapsed = now_ms().saturating_sub(self.last_heavy_tx_ms.load(Ordering::Relaxed));
         let gap = HEAVY_MIN_GAP_MS.saturating_sub(elapsed);
         std::time::Duration::from_millis(gap.max(100))
     }
@@ -1472,7 +1499,7 @@ impl Client {
         // Reader mort : pas la peine d'écrire — la réponse ne viendra
         // jamais. Échec immédiat plutôt qu'un timeout de 60 s.
         if *self.dead.borrow() {
-            bail!("connexion fermée");
+            bail!("connection closed");
         }
         // Requête sérialisée une fois : nom (classe + dedup) et clé de
         // fusion des appels identiques en vol. Les fields non
@@ -1504,7 +1531,7 @@ impl Client {
             // le check en tête et cet insert — sinon l'entrée
             // s'insèrerait après le drain et attendrait 60 s pour rien.
             if *self.dead.borrow() {
-                bail!("connexion fermée");
+                bail!("connection closed");
             }
             if let Some(k) = &key {
                 if let Some(&lid) = m.by_key.get(k) {
@@ -1562,7 +1589,11 @@ impl Client {
 
     /// Attend la réponse d'une entrée pending (leader ou follower
     /// dédupliqué) — timeout interne 60 s, log par nom de méthode.
-    async fn await_resp(&self, name: &str, rx: oneshot::Receiver<Result<Value, String>>) -> Result<Value> {
+    async fn await_resp(
+        &self,
+        name: &str,
+        rx: oneshot::Receiver<Result<Value, String>>,
+    ) -> Result<Value> {
         match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
             Ok(Ok(Ok(v))) => Ok(v),
             Ok(Ok(Err(e))) => {
@@ -1570,12 +1601,12 @@ impl Client {
                 bail!(e)
             }
             Ok(Err(_)) => {
-                log(Level::Error, format!("daemon {name}: connexion fermée"));
-                bail!("connexion fermée")
+                log(Level::Error, format!("daemon {name}: connection closed"));
+                bail!("connection closed")
             }
             Err(_) => {
                 log(Level::Error, format!("daemon {name}: timeout"));
-                bail!("timeout démon")
+                bail!("daemon timeout")
             }
         }
     }
@@ -1583,7 +1614,11 @@ impl Client {
     /// Souscrit sur la connexion principale — le démon n'a qu'un sub par
     /// connexion, un nouvel appel remplace l'ancien (un seul flux live,
     /// celui de la session ouverte). Plus de tunnel/process ssh dédié.
-    pub async fn subscribe(&self, session: &str, after_seq: u64) -> Result<broadcast::Receiver<Value>> {
+    pub async fn subscribe(
+        &self,
+        session: &str,
+        after_seq: u64,
+    ) -> Result<broadcast::Receiver<Value>> {
         let rx = self.pushes.subscribe();
         let resp = self
             .call(ReqKind::Subscribe {
@@ -1662,7 +1697,9 @@ mod tests {
         assert_eq!(Level::parse(" warning "), Some(Level::Warn));
         assert_eq!(Level::parse("err"), Some(Level::Error));
         assert_eq!(Level::parse("nope"), None);
-        assert!(Level::Debug < Level::Info && Level::Info < Level::Warn && Level::Warn < Level::Error);
+        assert!(
+            Level::Debug < Level::Info && Level::Info < Level::Warn && Level::Warn < Level::Error
+        );
     }
 
     #[test]
@@ -1674,8 +1711,14 @@ mod tests {
             rotate_logs(&d, 3);
         }
         // .1/.2/.3 existent, .4 a été supprimé → contenu borné
-        assert_eq!(std::fs::read_to_string(d.join("client.log.1")).unwrap(), "gen 4\n");
-        assert_eq!(std::fs::read_to_string(d.join("client.log.3")).unwrap(), "gen 2\n");
+        assert_eq!(
+            std::fs::read_to_string(d.join("client.log.1")).unwrap(),
+            "gen 4\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(d.join("client.log.3")).unwrap(),
+            "gen 2\n"
+        );
         assert!(!d.join("client.log.4").exists());
     }
 

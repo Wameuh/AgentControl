@@ -365,8 +365,14 @@ impl OrchProbe {
         Self {
             enabled: AtomicBool::new(cfg.enabled),
             status: Mutex::new(OrchStatus {
-                phase: if cfg.enabled { Phase::Waiting } else { Phase::Disabled },
-                detail: cfg.enabled.then(|| "démarrage — en attente du premier cycle".into()),
+                phase: if cfg.enabled {
+                    Phase::Waiting
+                } else {
+                    Phase::Disabled
+                },
+                detail: cfg
+                    .enabled
+                    .then(|| "startup — waiting for the first cycle".into()),
                 last_cycle: None,
                 workers: 0,
                 working: 0,
@@ -398,7 +404,7 @@ impl OrchProbe {
             // périmé pour une demande d'activation.
             self.set_status(
                 Phase::Waiting,
-                Some("activé — en attente du prochain cycle".into()),
+                Some("enabled — waiting for the next cycle".into()),
             );
         }
         self.wake.notify_one();
@@ -508,8 +514,7 @@ impl OrchProbe {
             LockHolder::None => ("none", None),
             LockHolder::Unknown => ("unknown", None),
         };
-        let (item_post, item_post_detail) =
-            item_post_state(self.is_enabled(), holder);
+        let (item_post, item_post_detail) = item_post_state(self.is_enabled(), holder);
         let st = self.status.lock().unwrap();
         let persist = self.state.lock().unwrap();
         let phase = match st.phase {
@@ -585,7 +590,11 @@ impl OrchProbe {
                 return LockState::Error(format!("mkdir {}: {e}", dir.display()));
             }
             let path = dir.join("orchestrator.lock");
-            let f = match std::fs::OpenOptions::new().create(true).write(true).open(&path) {
+            let f = match std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(&path)
+            {
                 Ok(f) => f,
                 Err(e) => return LockState::Error(format!("open {}: {e}", path.display())),
             };
@@ -597,9 +606,7 @@ impl OrchProbe {
                 return match e.raw_os_error() {
                     // EWOULDBLOCK == EAGAIN sur Linux — le guard
                     // évite le pattern dupliqué.
-                    Some(c) if c == libc::EWOULDBLOCK || c == libc::EAGAIN => {
-                        LockState::Busy
-                    }
+                    Some(c) if c == libc::EWOULDBLOCK || c == libc::EAGAIN => LockState::Busy,
                     _ => LockState::Error(format!("flock {}: {e}", path.display())),
                 };
             }
@@ -700,8 +707,7 @@ fn lock_holder() -> LockHolder {
             continue;
         }
         let mut d = devino.split(':');
-        let (Some(maj), Some(min), Some(ino), None) =
-            (d.next(), d.next(), d.next(), d.next())
+        let (Some(maj), Some(min), Some(ino), None) = (d.next(), d.next(), d.next(), d.next())
         else {
             continue;
         };
@@ -734,24 +740,24 @@ fn lock_holder() -> LockHolder {
 /// Tout autre détenteur ou sonde en échec retombe sur le message
 /// générique (jamais d'affirmation « legacy » sans preuve).
 fn blocked_detail() -> String {
-    let generic = "flock ~/.agentbacklog/orchestrator.lock détenu par une \
-                   autre instance (script Python encore actif ?) — le natif \
-                   prend le relais dès qu'il se libère";
+    let generic = "flock ~/.agentbacklog/orchestrator.lock held by another \
+                   instance (legacy Python script still active?) — the native \
+                   takes over as soon as it is released";
     match lock_holder() {
         LockHolder::Legacy(pid) => format!(
-            "flock ~/.agentbacklog/orchestrator.lock détenu par l'orchestrateur \
-             Python legacy (backlog-orchestrator.py, pid {pid}) : post \
-             « [Backlog] item » indisponible, seul le natif le journalise — \
-             retirer le programme supervisord pour qu'il prenne le relais"
+            "flock ~/.agentbacklog/orchestrator.lock held by the legacy \
+             Python orchestrator (backlog-orchestrator.py, pid {pid}): \
+             « [Backlog] item » post unavailable, only the native one \
+             journals it — remove the supervisord program so it takes over"
         ),
         LockHolder::Native(pid) => format!(
-            "flock ~/.agentbacklog/orchestrator.lock détenu par un autre \
-             démon natif (pid {pid}) — c'est lui qui orchestre"
+            "flock ~/.agentbacklog/orchestrator.lock held by another \
+             native daemon (pid {pid}) — it is the one orchestrating"
         ),
         LockHolder::Foreign(pid) => format!(
-            "flock ~/.agentbacklog/orchestrator.lock détenu par le pid {pid} \
-             (non identifié) — si c'est le script Python legacy, le post \
-             « [Backlog] item » n'est pas émis"
+            "flock ~/.agentbacklog/orchestrator.lock held by pid {pid} \
+             (unidentified) — if it is the legacy Python script, the \
+             « [Backlog] item » post is not emitted"
         ),
         _ => generic.into(),
     }
@@ -768,17 +774,17 @@ fn item_post_state(enabled: bool, holder: LockHolder) -> (&'static str, Option<S
         LockHolder::Legacy(pid) => (
             "unavailable",
             Some(format!(
-                "post « [Backlog] item » indisponible — l'orchestrateur Python \
-                 legacy (backlog-orchestrator.py, pid {pid}) détient le flock \
-                 et ne le journalise pas : retirer le programme supervisord \
-                 pour que le natif prenne le relais"
+                "« [Backlog] item » post unavailable — the legacy Python \
+                 orchestrator (backlog-orchestrator.py, pid {pid}) holds the flock \
+                 and does not journal it: remove the supervisord program \
+                 so the native one takes over"
             )),
         ),
         LockHolder::Foreign(pid) => (
             "unknown",
             Some(format!(
-                "détenteur du flock non identifié (pid {pid}) — si c'est le \
-                 script Python legacy, le post « [Backlog] item » n'est pas émis"
+                "flock holder unidentified (pid {pid}) — if it is the \
+                 legacy Python script, the « [Backlog] item » post is not emitted"
             )),
         ),
         LockHolder::Unknown => ("unknown", None),
@@ -958,7 +964,9 @@ fn acwait_live_waiters_in(dir: &std::path::Path) -> HashMap<String, AcwaitWait> 
     /// le meta est tout frais.
     const START_GRACE_S: f64 = 30.0;
     let mut out = HashMap::new();
-    let Ok(entries) = std::fs::read_dir(dir) else { return out };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
     let now = now_secs();
     for e in entries.flatten() {
         let meta_path = e.path();
@@ -978,12 +986,7 @@ fn acwait_live_waiters_in(dir: &std::path::Path) -> HashMap<String, AcwaitWait> 
         let field = |k: &str| -> Option<String> {
             meta.lines().find_map(|l| {
                 let (k2, v) = l.split_once('=')?;
-                (k2 == k).then(|| {
-                    v.trim()
-                        .trim_matches('\'')
-                        .trim_matches('"')
-                        .to_string()
-                })
+                (k2 == k).then(|| v.trim().trim_matches('\'').trim_matches('"').to_string())
             })
         };
         let Some(sid) = field("session") else {
@@ -1007,9 +1010,7 @@ fn acwait_live_waiters_in(dir: &std::path::Path) -> HashMap<String, AcwaitWait> 
                 #[cfg(unix)]
                 let alive = pid > 0 && {
                     let rc = unsafe { libc::kill(pid, 0) };
-                    rc == 0
-                        || std::io::Error::last_os_error().raw_os_error()
-                            == Some(libc::EPERM)
+                    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
                 };
                 #[cfg(not(unix))]
                 let alive = pid > 0;
@@ -1046,9 +1047,7 @@ fn acwait_live_waiters_in(dir: &std::path::Path) -> HashMap<String, AcwaitWait> 
                 v.insert(w);
             }
             std::collections::hash_map::Entry::Occupied(mut o) => {
-                if w.started.unwrap_or(f64::MAX)
-                    < o.get().started.unwrap_or(f64::MAX)
-                {
+                if w.started.unwrap_or(f64::MAX) < o.get().started.unwrap_or(f64::MAX) {
                     o.insert(w);
                 }
             }
@@ -1092,8 +1091,7 @@ fn acwait_cancel_session_in(dir: &std::path::Path, sid: &str) {
         };
         let is_target = meta.lines().any(|l| {
             l.split_once('=').is_some_and(|(k, v)| {
-                k == "session"
-                    && v.trim().trim_matches('\'').trim_matches('"') == sid
+                k == "session" && v.trim().trim_matches('\'').trim_matches('"') == sid
             })
         });
         if !is_target {
@@ -1230,7 +1228,11 @@ fn clean_task_title(t: &Task) -> String {
 /// natif (et inverse) ne déclenche aucun ping-pong de renommages.
 /// `None` = base `<préfixe><N>` introuvable dans le titre courant
 /// (session renommée à la main → on n'y touche plus).
-pub(crate) fn orch_desired_title(prefix: &str, current: &str, wip: Option<&Task>) -> Option<String> {
+pub(crate) fn orch_desired_title(
+    prefix: &str,
+    current: &str,
+    wip: Option<&Task>,
+) -> Option<String> {
     let digits = current
         .strip_prefix(prefix)?
         .bytes()
@@ -1257,7 +1259,7 @@ pub(crate) async fn run_out(argv: &[&str], cwd: &Path) -> Result<(i64, String, S
     let out = tokio::time::timeout(CMD_TIMEOUT, cmd.output())
         .await
         .with_context(|| format!("`{}` : timeout {}s", argv[0], CMD_TIMEOUT.as_secs()))?
-        .with_context(|| format!("`{}` : spawn impossible", argv[0]))?;
+        .with_context(|| format!("`{}` : spawn failed", argv[0]))?;
     Ok((
         out.status.code().map(i64::from).unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout).trim().to_string(),
@@ -1340,7 +1342,8 @@ impl Daemon {
                 return;
             }
             LockState::Error(e) => {
-                self.orch.set_status(Phase::Error, Some(format!("lock: {e}")));
+                self.orch
+                    .set_status(Phase::Error, Some(format!("lock: {e}")));
                 return;
             }
         }
@@ -1350,7 +1353,7 @@ impl Daemon {
         // Appelée même `pr_review=false` : une bascule en vol laisse des
         // entrées Running à solder (session + worktree à libérer).
         if let Err(e) = self.orch_pr_review_tick().await {
-            warn!("orchestrateur: review PR: {e:#}");
+            warn!("orchestrator: review PR: {e:#}");
         }
         // GC des sessions `feature:pr-review` orphelines — sous les
         // gardes enable/pause/lock comme la passe review, indépendante
@@ -1361,10 +1364,8 @@ impl Daemon {
         let bin = match self.orch_agentbacklog_bin().await {
             Some(b) => b,
             None => {
-                self.orch.set_status(
-                    Phase::Waiting,
-                    Some("waiting: agentbacklog manquant".into()),
-                );
+                self.orch
+                    .set_status(Phase::Waiting, Some("waiting: agentbacklog missing".into()));
                 return;
             }
         };
@@ -1379,15 +1380,15 @@ impl Daemon {
             self.orch.set_status(
                 Phase::Waiting,
                 Some(
-                    "waiting: plan_review nécessite agentbacklog ≥ 0.7 \
-                     (--claim-review absent du CLI résolu)"
+                    "waiting: plan_review requires agentbacklog ≥ 0.7 \
+                     (--claim-review missing from the resolved CLI)"
                         .into(),
                 ),
             );
             return;
         }
         if let Err(e) = self.orch_cycle(&bin).await {
-            warn!("orchestrateur: cycle échoué: {e:#}");
+            warn!("orchestrator: cycle failed: {e:#}");
             self.orch.set_status(Phase::Error, Some(format!("{e:#}")));
         }
     }
@@ -1427,11 +1428,10 @@ impl Daemon {
         let tasks = self
             .orch_tasks(bin, ws)
             .await
-            .context("agentbacklog --list a échoué")?;
+            .context("agentbacklog --list failed")?;
         let (metas, session_ids): (Vec<SessionMeta>, HashSet<String>) = {
             let sessions = self.sessions.read().await;
-            let metas: Vec<SessionMeta> =
-                sessions.values().map(|s| s.meta_snapshot()).collect();
+            let metas: Vec<SessionMeta> = sessions.values().map(|s| s.meta_snapshot()).collect();
             let ids = metas.iter().map(|m| m.id.clone()).collect();
             (metas, ids)
         };
@@ -1507,11 +1507,15 @@ impl Daemon {
         // direct historique, inchangé.
         let (n_workers, n_working, n_pending, n_planners, n_reviewers) = if cfg.plan_review {
             let oc = self
-                .orch_plan_tick(
-                    bin, cfg, ws, &tasks, &metas, &session_ids, &prs, &mut st,
-                )
+                .orch_plan_tick(bin, cfg, ws, &tasks, &metas, &session_ids, &prs, &mut st)
                 .await?;
-            (oc.workers, oc.working, oc.pending, oc.planners, oc.reviewers)
+            (
+                oc.workers,
+                oc.working,
+                oc.pending,
+                oc.planners,
+                oc.reviewers,
+            )
         } else {
             // 0. Désactivation en vol : items encore plan_review/
             //    reviewing → dégel en pending (claim-review + verdict
@@ -1528,7 +1532,7 @@ impl Daemon {
                     let aid = task_agent(t);
                     if aid.starts_with("s-") && !session_ids.contains(aid) {
                         info!(
-                            "orchestrateur: tâche #{} orpheline (owner {aid} disparue) → release",
+                            "orchestrator: task #{} orphaned (owner {aid} gone) → release",
                             task_id(t)
                         );
                         let _ = run_out(
@@ -1602,9 +1606,8 @@ impl Daemon {
                         p.session == sid && !matches!(p.status.as_str(), "closed" | "merged")
                     }) {
                         if release_num.is_none() {
-                            release_num = Some(
-                                self.gh_release_pr(ws).await.map(|r| r.0).unwrap_or(0),
-                            );
+                            release_num =
+                                Some(self.gh_release_pr(ws).await.map(|r| r.0).unwrap_or(0));
                         }
                         if release_pr_entry(p, release_num.unwrap_or(0)) {
                             continue;
@@ -1635,12 +1638,12 @@ impl Daemon {
                     .filter(|_| !about_to_delete)
                 {
                     Some(want) if want != w.title => {
-                        info!("orchestrateur: rename {sid} : {:?} → {want:?}", w.title);
+                        info!("orchestrator: rename {sid}: {:?} → {want:?}", w.title);
                         let d = Arc::clone(self);
                         let (sid2, want2) = (sid.to_string(), want.clone());
                         tokio::spawn(async move {
                             if let Err(e) = d.h_rename_session(sid2, want2).await {
-                                warn!("orchestrateur: rename: {e:#}");
+                                warn!("orchestrator: rename: {e:#}");
                             }
                         });
                         want
@@ -1761,7 +1764,7 @@ impl Daemon {
                     if dead_stale {
                         for id in &my_open {
                             info!(
-                                "orchestrateur: {sid} dead depuis {}s — release #{id}",
+                                "orchestrator: {sid} dead for {}s — release #{id}",
                                 (now - dead_since) as i64
                             );
                             let _ =
@@ -1775,18 +1778,18 @@ impl Daemon {
                     let since = *st.clean_since.entry(sid.to_string()).or_insert(now);
                     if unresolved && now - since < CLEAN_GRACE_S {
                         info!(
-                            "orchestrateur: {sid} propre sauf PR non enregistrées \
-                             (done={my_done:?}) — grâce {}s",
+                            "orchestrator: {sid} clean except unregistered PRs \
+                             (done={my_done:?}) — {}s grace",
                             (now - since) as i64
                         );
                         continue;
                     }
                     info!(
-                        "orchestrateur: {sid} inactive, items soldés \
+                        "orchestrator: {sid} inactive, items settled \
                          (done={my_done:?}), prs={my_prs:?} → rm"
                     );
                     if let Err(e) = self.h_delete_session(sid.to_string()).await {
-                        warn!("orchestrateur: rm {sid}: {e:#}");
+                        warn!("orchestrator: rm {sid}: {e:#}");
                     }
                     st.nudges.remove(sid);
                     st.clean_since.remove(sid);
@@ -1805,7 +1808,7 @@ impl Daemon {
                     let d = Arc::clone(self);
                     tokio::spawn(async move {
                         if let Err(e) = d.h_pr_sync().await {
-                            warn!("orchestrateur: pr_sync pré-ménage: {e:#}");
+                            warn!("orchestrator: pr_sync pre-cleanup: {e:#}");
                         }
                     });
                 }
@@ -1838,7 +1841,7 @@ impl Daemon {
                         continue;
                     }
                     info!(
-                        "orchestrateur: {sid} idle (open_prs={open_prs:?} \
+                        "orchestrator: {sid} idle (open_prs={open_prs:?} \
                          wip={my_open:?}) → nudge"
                     );
                     if self.orch_nudge(sid, &open_prs, &my_open).await {
@@ -1891,8 +1894,8 @@ impl Daemon {
                 }
                 if !slots.ok() {
                     info!(
-                        "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
-                         wip={my_open:?}) → nudge différé (max_workers/max_working)"
+                        "orchestrator: {sid} asleep (open_prs={open_prs:?} \
+                         wip={my_open:?}) → nudge deferred (max_workers/max_working)"
                     );
                     continue;
                 }
@@ -1900,7 +1903,7 @@ impl Daemon {
                     return Ok(());
                 }
                 info!(
-                    "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
+                    "orchestrator: {sid} asleep (open_prs={open_prs:?} \
                      wip={my_open:?}) → nudge wip-prioritaire (slots={:?})",
                     slots
                 );
@@ -1940,12 +1943,12 @@ impl Daemon {
                     )
                 });
                 info!(
-                    "orchestrateur: {rl} session(s) en rate_limit — mode sériel \
+                    "orchestrator: {rl} session(s) in rate_limit — serial mode \
                      (active={active})"
                 );
                 self.orch.status.lock().unwrap().detail = Some(format!(
-                    "{rl} session(s) en rate_limit — exécution sérialisée \
-                     (1 session à la fois)"
+                    "{rl} session(s) in rate_limit — serialized execution \
+                     (1 session at a time)"
                 ));
                 usize::from(!active).min(n)
             };
@@ -1972,7 +1975,7 @@ impl Daemon {
                     let repo = task_repo(t);
                     let cwd = cfg.workspace_for(repo).to_string();
                     let repo_label = if repo.is_empty() {
-                        "(non taggé)".to_string()
+                        "(untagged)".to_string()
                     } else {
                         repo.to_string()
                     };
@@ -1987,8 +1990,8 @@ impl Daemon {
                     );
                     st.counter += 1;
                     info!(
-                        "orchestrateur: pending={} unrouted={} → spawn {}{} \
-                         pour #{} (repo {}, ws {})",
+                        "orchestrator: pending={} unrouted={} → spawn {}{} \
+                         for #{} (repo {}, ws {})",
                         pending.len(),
                         unrouted_tags.len(),
                         cfg.title_prefix,
@@ -1997,27 +2000,22 @@ impl Daemon {
                         repo_label,
                         cwd
                     );
-                    let Some(sid) = self
-                        .orch_spawn(st.counter, &cwd, prompt)
-                        .await
-                    else {
+                    let Some(sid) = self.orch_spawn(st.counter, &cwd, prompt).await else {
                         continue;
                     };
-                    let (rc, _o, e) = run_out(
-                        &[bin, "--claim", &id.to_string(), "--agent-id", &sid],
-                        ws,
-                    )
-                    .await
-                    .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                    let (rc, _o, e) =
+                        run_out(&[bin, "--claim", &id.to_string(), "--agent-id", &sid], ws)
+                            .await
+                            .unwrap_or((-1, String::new(), "spawn failed".into()));
                     if rc == 0 {
                         if let Ok(s) = self.get_session(&sid).await {
                             workers.push(s.meta_snapshot());
                         }
                         slots.take();
                     } else {
-                        warn!("orchestrateur: claim #{id} rc={rc} {e} → rm {sid}");
+                        warn!("orchestrator: claim #{id} rc={rc} {e} → rm {sid}");
                         if let Err(e2) = self.h_delete_session(sid.clone()).await {
-                            warn!("orchestrateur: rm {sid} (claim échoué): {e2:#}");
+                            warn!("orchestrator: rm {sid} (claim failed): {e2:#}");
                         }
                     }
                 }
@@ -2031,18 +2029,15 @@ impl Daemon {
                     }
                     st.counter += 1;
                     info!(
-                        "orchestrateur: pending={} active={} → spawn {}{} \
-                         (self-pop, agentbacklog sans --claim)",
+                        "orchestrator: pending={} active={} → spawn {}{} \
+                         (self-pop, agentbacklog without --claim)",
                         pending.len(),
                         alive,
                         cfg.title_prefix,
                         st.counter
                     );
                     let prompt = cfg.prompt.clone().unwrap_or_else(|| PROMPT.to_string());
-                    if let Some(sid) = self
-                        .orch_spawn(st.counter, &cfg.workspace, prompt)
-                        .await
-                    {
+                    if let Some(sid) = self.orch_spawn(st.counter, &cfg.workspace, prompt).await {
                         if let Ok(s) = self.get_session(&sid).await {
                             workers.push(s.meta_snapshot());
                         }
@@ -2061,8 +2056,8 @@ impl Daemon {
                 }
                 if !slots.ok() {
                     info!(
-                        "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
-                         wip={my_open:?}) → nudge différé (max_workers/max_working)"
+                        "orchestrator: {sid} asleep (open_prs={open_prs:?} \
+                         wip={my_open:?}) → nudge deferred (max_workers/max_working)"
                     );
                     continue;
                 }
@@ -2072,7 +2067,7 @@ impl Daemon {
                 let open_refs: Vec<&String> = open_prs.iter().collect();
                 let wip_refs: Vec<&String> = my_open.iter().collect();
                 info!(
-                    "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
+                    "orchestrator: {sid} asleep (open_prs={open_prs:?} \
                      wip={my_open:?}) → nudge (slots={:?})",
                     slots
                 );
@@ -2106,23 +2101,22 @@ impl Daemon {
             // doit pas passer ready pendant qu'elle tourne).
             let in_flight = |t: &Task| {
                 matches!(task_status(t), "pending" | "wip")
-                    || (cfg.plan_review
-                        && matches!(task_status(t), "plan_review" | "reviewing"))
+                    || (cfg.plan_review && matches!(task_status(t), "plan_review" | "reviewing"))
             };
-            let active_notes = tasks.iter().any(|t| {
-                notes_ids.contains(&task_id(t)) && in_flight(t)
-            });
-            let active_other = tasks.iter().any(|t| {
-                !notes_ids.contains(&task_id(t)) && in_flight(t)
-            });
+            let active_notes = tasks
+                .iter()
+                .any(|t| notes_ids.contains(&task_id(t)) && in_flight(t));
+            let active_other = tasks
+                .iter()
+                .any(|t| !notes_ids.contains(&task_id(t)) && in_flight(t));
             let rpr = self.gh_release_pr(ws).await;
             if active_other {
                 st.notes_cycle_done = false; // nouveau cycle de travail
                 if let Some(r) = rpr {
                     if !r.1 {
                         info!(
-                            "orchestrateur: release PR #{} ready mais backlog non \
-                             vide → repasse draft",
+                            "orchestrator: release PR #{} ready but backlog not \
+                             empty → back to draft",
                             r.0
                         );
                         let _ =
@@ -2152,13 +2146,13 @@ impl Daemon {
                     }
                     if !open_any.is_empty() {
                         info!(
-                            "orchestrateur: backlog vide mais PRs encore ouvertes \
-                             {open_any:?} → patchnotes en attente"
+                            "orchestrator: backlog empty but PRs still open \
+                             {open_any:?} → patchnotes pending"
                         );
                     } else {
                         info!(
-                            "orchestrateur: backlog vide + release PR #{} draft → \
-                             création item patchnotes",
+                            "orchestrator: backlog empty + release PR #{} draft → \
+                             creating patchnotes item",
                             r.0
                         );
                         if let Some(nid) = self.orch_add_notes(bin, ws, cfg.plan_review).await {
@@ -2196,23 +2190,21 @@ impl Daemon {
             // — visible via `acctl status` / comp info.
             let errs: Vec<&str> = metas
                 .iter()
-                .filter(|m| {
-                    m.origin.as_deref() == Some(COMPONENT_ORIGIN) && m.state == "error"
-                })
+                .filter(|m| m.origin.as_deref() == Some(COMPONENT_ORIGIN) && m.state == "error")
                 .filter_map(|m| m.last_error.as_ref().map(|le| le.kind.as_str()))
                 .collect();
             let mut detail_parts: Vec<String> = Vec::new();
             if !errs.is_empty() {
                 detail_parts.push(format!(
-                    "{} session(s) en erreur : {}",
+                    "{} session(s) in error: {}",
                     errs.len(),
                     errs.join(", ")
                 ));
             }
             if !unrouted_tags.is_empty() {
                 detail_parts.push(format!(
-                    "items non dispatchables — tag(s) repo sans workspace \
-                     (déclarer via repo_workspaces) : {}",
+                    "undispatchable items — repo tag(s) without a workspace \
+                     (declare via repo_workspaces): {}",
                     unrouted_tags.join(", ")
                 ));
             }
@@ -2230,14 +2222,11 @@ impl Daemon {
     /// `agentbacklog --list --all --json` → items, None si la lecture
     /// a échoué (le cycle avorte : aucune décision sur du flou).
     pub(crate) async fn orch_tasks(&self, bin: &str, ws: &Path) -> Option<Vec<Task>> {
-        let (rc, out, err) = run_out(
-            &[bin, "--list", "--all", "--json"],
-            ws,
-        )
-        .await
-        .ok()?;
+        let (rc, out, err) = run_out(&[bin, "--list", "--all", "--json"], ws)
+            .await
+            .ok()?;
         if rc != 0 {
-            warn!("orchestrateur: agentbacklog --list rc={rc} err={err}");
+            warn!("orchestrator: agentbacklog --list rc={rc} err={err}");
             return None;
         }
         serde_json::from_str(&out).ok()
@@ -2290,19 +2279,32 @@ impl Daemon {
         }
         let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
         run_out(&argv, ws)
-        .await
-        .ok()
-        .filter(|(rc, out, _)| *rc == 0 && !out.is_empty())
-        .map(|(_, out, _)| out)
-        .unwrap_or_else(|| "UNKNOWN".into())
+            .await
+            .ok()
+            .filter(|(rc, out, _)| *rc == 0 && !out.is_empty())
+            .map(|(_, out, _)| out)
+            .unwrap_or_else(|| "UNKNOWN".into())
     }
 
     /// PR de release auto (`next_release` → `main`) si ouverte :
     /// Some((number, isDraft)).
     pub(crate) async fn gh_release_pr(&self, ws: &Path) -> Option<(u64, bool)> {
         let (rc, out, _) = run_out(
-            &["gh", "pr", "list", "--head", "next_release", "--base", "main",
-              "--state", "open", "--json", "number,isDraft", "--limit", "1"],
+            &[
+                "gh",
+                "pr",
+                "list",
+                "--head",
+                "next_release",
+                "--base",
+                "main",
+                "--state",
+                "open",
+                "--json",
+                "number,isDraft",
+                "--limit",
+                "1",
+            ],
             ws,
         )
         .await
@@ -2336,7 +2338,7 @@ impl Daemon {
         argv.push("--json");
         let (rc, out, _) = run_out(&argv, ws).await.ok()?;
         if rc != 0 {
-            warn!("orchestrateur: notes item add rc={rc} out={out}");
+            warn!("orchestrator: item note add rc={rc} out={out}");
             return None;
         }
         let id = serde_json::from_str::<Value>(&out)
@@ -2351,7 +2353,7 @@ impl Daemon {
                     .and_then(|s| s.parse().ok())
             })
             .unwrap_or_else(|| {
-                warn!("orchestrateur: notes item créé mais id non parsé (out={out})");
+                warn!("orchestrator: item note created but id not parsed (out={out})");
                 0
             });
         Some(id)
@@ -2361,7 +2363,12 @@ impl Daemon {
     /// prend plus de prompts (morte/interrompue — h_send enfile + réveille
     /// les `asleep` tout seul, seul le cas « agent not running » exige le
     /// respawn explicite).
-    async fn orch_nudge(self: &Arc<Self>, sid: &str, open_prs: &[&String], wip: &[&String]) -> bool {
+    async fn orch_nudge(
+        self: &Arc<Self>,
+        sid: &str,
+        open_prs: &[&String],
+        wip: &[&String],
+    ) -> bool {
         let mut parts: Vec<String> = Vec::new();
         if !open_prs.is_empty() {
             parts.push(format!(
@@ -2370,7 +2377,11 @@ impl Daemon {
                  ses criteres sont reunis (verdict APPROVED posterieur au push \
                  du head courant, fraicheur verifiee via PushEvents), procede \
                  au merge toi-meme ; sinon surveille jusqu'au merge utilisateur.",
-                open_prs.iter().map(|p| format!("#{p}")).collect::<Vec<_>>().join(", ")
+                open_prs
+                    .iter()
+                    .map(|p| format!("#{p}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         if !wip.is_empty() {
@@ -2378,7 +2389,10 @@ impl Daemon {
                 "Tes taches encore wip : {}. Si tu les as abandonnees, \
                  release-les : agentbacklog --release <ID> --agent-id \
                  \"$AGENTCONTROL_SESSION\". Sinon reprends le travail dessus.",
-                wip.iter().map(|t| format!("#{t}")).collect::<Vec<_>>().join(", ")
+                wip.iter()
+                    .map(|t| format!("#{t}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         parts.push(
@@ -2390,10 +2404,18 @@ impl Daemon {
         );
         let msg = parts.join(" ");
         let sid = sid.to_string();
-        if self.h_send(sid.clone(), msg.clone(), false, false).await.is_ok() {
+        if self
+            .h_send(sid.clone(), msg.clone(), false, false)
+            .await
+            .is_ok()
+        {
             return true;
         }
-        if self.h_resume_session(sid.clone(), None, false).await.is_ok() {
+        if self
+            .h_resume_session(sid.clone(), None, false)
+            .await
+            .is_ok()
+        {
             return self.h_send(sid, msg, false, false).await.is_ok();
         }
         false
@@ -2407,7 +2429,12 @@ impl Daemon {
     /// `prompt` déjà templé — le dispatch claim passe le prompt par
     /// item, le repli self-pop le prompt générique dans cfg.workspace.
     /// Remplace les `acctl new/setcfg`/RPC socket du script.
-    async fn orch_spawn(self: &Arc<Self>, number: u64, cwd: &str, prompt: String) -> Option<String> {
+    async fn orch_spawn(
+        self: &Arc<Self>,
+        number: u64,
+        cwd: &str,
+        prompt: String,
+    ) -> Option<String> {
         let cfg = self.orch.cfg.read().unwrap().clone();
         let cfg = &cfg;
         let title = format!("{}{}", cfg.title_prefix, number);
@@ -2429,13 +2456,13 @@ impl Daemon {
         {
             Ok(v) => v,
             Err(e) => {
-                warn!("orchestrateur: spawn {title}: {e:#}");
+                warn!("orchestrator: spawn {title}: {e:#}");
                 return None;
             }
         };
         let sid = v.get("session").and_then(Value::as_str)?.to_string();
         self.apply_spawn_cfg(&sid).await;
-        info!("orchestrateur: spawned {title} = {sid}");
+        info!("orchestrator: spawned {title} = {sid}");
         Some(sid)
     }
 
@@ -2452,14 +2479,12 @@ impl Daemon {
             agent.to_string()
         };
         let dyn_ = orch_cfg::dyn_choices(&self.root, &agent);
-        for (key, val, known) in [
-            ("model", model, &dyn_.models),
-            ("mode", mode, &dyn_.modes),
-        ] {
-            if !val.is_empty() && !known.is_empty() && !known.iter().any(|(v, _)| v.as_str() == val) {
+        for (key, val, known) in [("model", model, &dyn_.models), ("mode", mode, &dyn_.modes)] {
+            if !val.is_empty() && !known.is_empty() && !known.iter().any(|(v, _)| v.as_str() == val)
+            {
                 warn!(
-                    "orchestrateur: {key} « {val} » hors liste annoncée \
-                     par l'agent « {agent} » — valeurs : {}",
+                    "orchestrator: {key} « {val} » outside the list announced \
+                     by agent « {agent} » — values: {}",
                     known
                         .iter()
                         .map(|(v, _)| v.as_str())
@@ -2487,7 +2512,7 @@ impl Daemon {
                 )
                 .await
             {
-                warn!("orchestrateur: thought_level {sid}: {e:#}");
+                warn!("orchestrator: thought_level {sid}: {e:#}");
             }
         }
     }
@@ -2500,24 +2525,28 @@ impl Daemon {
     pub(super) async fn h_manager_spawn(self: &Arc<Self>, repo: &str) -> Result<Value> {
         anyhow::ensure!(
             self.orch.is_enabled(),
-            "orchestrateur désactivé — la surface « Manager » n'est \
-             proposée que quand il est actif"
+            "orchestrator disabled — the « Manager » surface is \
+             only offered when it is active"
         );
         let cfg = self.orch.cfg.read().unwrap().clone();
         let cfg = &cfg;
         anyhow::ensure!(
             cfg.spawn_managers,
-            "spawn_managers désactivé — la surface « Manager » est coupée"
+            "spawn_managers disabled — the « Manager » surface is off"
         );
         anyhow::ensure!(
             self.orch_agentbacklog_bin().await.is_some(),
-            "agentbacklog non résolvable — un Manager sans file à gérer \
-             ne sert à rien"
+            "agentbacklog not resolvable — a Manager with no queue to \
+             manage is useless"
         );
         let cwd = cfg.repo_workspaces.get(repo).cloned().with_context(|| {
             format!(
-                "workspace inconnu: {repo} — routés : {}",
-                cfg.repo_workspaces.keys().cloned().collect::<Vec<_>>().join(", ")
+                "unknown workspace: {repo} — routed: {}",
+                cfg.repo_workspaces
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
         })?;
         let title = format!("{MANAGER_TITLE_PREFIX}{repo}");
@@ -2557,7 +2586,7 @@ impl Daemon {
         let sid = v
             .get("session")
             .and_then(Value::as_str)
-            .context("spawn Manager: pas de session dans la réponse")?
+            .context("spawn Manager: no session in the response")?
             .to_string();
         self.apply_spawn_cfg(&sid).await;
         info!("manager: spawned {title} = {sid} (workspace {repo} → {cwd})");
@@ -2573,20 +2602,19 @@ impl Daemon {
     pub(crate) fn orch_save(&self, st: &OrchPersist) {
         let dir = state_dir();
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            warn!("orchestrateur: mkdir {}: {e}", dir.display());
+            warn!("orchestrator: mkdir {}: {e}", dir.display());
             return;
         }
         let tmp = dir.join("orchestrator-state.json.part");
         let dst = dir.join("orchestrator-state.json");
         match serde_json::to_string_pretty(st) {
             Ok(txt) => {
-                if let Err(e) = std::fs::write(&tmp, txt)
-                    .and_then(|_| std::fs::rename(&tmp, &dst))
+                if let Err(e) = std::fs::write(&tmp, txt).and_then(|_| std::fs::rename(&tmp, &dst))
                 {
-                    warn!("orchestrateur: save state: {e}");
+                    warn!("orchestrator: save state: {e}");
                 }
             }
-            Err(e) => warn!("orchestrateur: sérialisation state: {e}"),
+            Err(e) => warn!("orchestrator: state serialization: {e}"),
         }
     }
 
@@ -2595,7 +2623,7 @@ impl Daemon {
     /// *persistée* : `OrchestratorConfig{patch:{enabled:…}}`).
     pub(super) async fn h_orch_set(self: &Arc<Self>, enabled: bool) -> Result<Value> {
         self.orch.set_enabled(enabled);
-        info!("orchestrateur: bascule RPC enabled={enabled}");
+        info!("orchestrator: RPC toggle enabled={enabled}");
         Ok(json!({
             "enabled": enabled,
             "status": self.orch.status_json(),
@@ -2621,7 +2649,7 @@ impl Daemon {
             }));
         };
         let applied = self.orch_patch(patch)?;
-        info!("orchestrateur: config persistée ({applied:?})");
+        info!("orchestrator: config persisted ({applied:?})");
         Ok(json!({
             "config": orch_cfg::cfg_json(
                 &self.orch.cfg.read().unwrap(),
@@ -2647,7 +2675,7 @@ impl Daemon {
             .map(|(k, v)| (k.clone(), Value::String(v.clone())))
             .collect();
         let applied = self.orch_patch(patch)?;
-        info!("orchestrateur: params persistés ({applied:?})");
+        info!("orchestrator: params persisted ({applied:?})");
         Ok(json!({
             "name": COMPONENT_NAME,
             "state": self.orch.component_state(),
@@ -2677,8 +2705,7 @@ impl Daemon {
             let mut next = guard.clone();
             let applied = orch_cfg::apply_patch(&mut next, &patch)?;
             orch_cfg::persist(&self.root, &next)?;
-            let flip = patch.contains_key("enabled")
-                && next.enabled != self.orch.is_enabled();
+            let flip = patch.contains_key("enabled") && next.enabled != self.orch.is_enabled();
             let en = next.enabled;
             *guard = next;
             (applied, flip, en)
@@ -2737,7 +2764,7 @@ mod tests {
         ));
         // Mauvais repo → pas le nôtre.
         assert!(!is_live_manager(
-            &meta(Some(MANAGER_ORIGIN), "Manager · Autre", "idle"),
+            &meta(Some(MANAGER_ORIGIN), "Manager · Other", "idle"),
             "AgentControl"
         ));
         // États terminaux → respawn proposable.
@@ -2859,7 +2886,7 @@ mod tests {
         let ws = workspaces_json(true, &cfg);
         assert_eq!(ws.len(), 1);
         assert_eq!(ws[0]["repo"], "AgentControl");
-        cfg.repo_workspaces.insert("Autre".into(), "/tmp/x".into());
+        cfg.repo_workspaces.insert("Other".into(), "/tmp/x".into());
         assert_eq!(workspaces_json(true, &cfg).len(), 2);
         cfg.repo_workspaces.clear();
         assert!(workspaces_json(true, &cfg).is_empty());
@@ -2956,8 +2983,7 @@ mod tests {
 
     #[test]
     fn acwait_waiters_retient_le_plus_ancien() {
-        let dir =
-            std::env::temp_dir().join(format!("ac-wait-test-multi-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ac-wait-test-multi-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let now = now_secs();
@@ -2981,7 +3007,7 @@ mod tests {
         );
         std::fs::write(dir.join("w-old.pid"), &pid).unwrap();
         let ws = acwait_live_waiters_in(&dir);
-        let w = ws.get("s-multi").expect("waiter vivant attendu");
+        let w = ws.get("s-multi").expect("live waiter expected");
         assert_eq!(w.started, Some(now - 900.0));
         assert_eq!(w.name, "verdict PR #42"); // backslashes %q déséchappés
         assert_eq!(w.timeout, Some(1800.0));

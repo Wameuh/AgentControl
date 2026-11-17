@@ -12,12 +12,12 @@ mod proc;
 mod render;
 mod version;
 
+use crate::server::{orch, OrchProbe};
 use anyhow::{Context, Result};
 use proto::{
-    ComponentKind, ComponentSpec, ComponentState, ComponentStatus, ComponentsFile,
-    Healthcheck, RestartPolicy,
+    ComponentKind, ComponentSpec, ComponentState, ComponentStatus, ComponentsFile, Healthcheck,
+    RestartPolicy,
 };
-use crate::server::{orch, OrchProbe};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -50,8 +50,7 @@ const QUERY_ERR_MAX: usize = 8 * 1024;
 /// Token de vue plugin (route `/plugin/<name>/` + bootstrap du bridge
 /// postMessage) : TTL court, scopé au composant — éphémère par
 /// construction, jamais persisté ni le `web.token` global.
-pub(crate) const VIEW_TOKEN_TTL: std::time::Duration =
-    std::time::Duration::from_secs(300);
+pub(crate) const VIEW_TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Une feature interne exposée comme composant : état déduit de la
 /// config/runtime du démon, jamais de cycle de vie.
@@ -152,7 +151,7 @@ impl Components {
         let specs = match read_specs(&root.join("components.toml")) {
             Ok(s) => s,
             Err(e) => {
-                warn!("components.toml illisible ({e:#}) — aucune spec chargée");
+                warn!("unreadable components.toml ({e:#}) — no spec loaded");
                 Vec::new()
             }
         };
@@ -168,14 +167,14 @@ impl Components {
             }
             expand_home_fields(&mut spec);
             if let Err(e) = check_usable(&spec) {
-                warn!("composant « {} » ignoré: {e}", spec.name);
+                warn!("component « {} » skipped: {e}", spec.name);
                 continue;
             }
             // Le backoff plafonne à 60 s — un restart_sec au-delà est
             // ramené à la borne plutôt que silencieusement ignoré.
             if spec.restart_sec > BACKOFF_CAP_SECS {
                 warn!(
-                    "composant « {} »: restart_sec {} > {BACKOFF_CAP_SECS} — ramené à {BACKOFF_CAP_SECS}",
+                    "component « {} »: restart_sec {} > {BACKOFF_CAP_SECS} — clamped to {BACKOFF_CAP_SECS}",
                     spec.name, spec.restart_sec
                 );
                 spec.restart_sec = BACKOFF_CAP_SECS;
@@ -204,22 +203,22 @@ impl Components {
     /// `.part` + rename (même pattern que `write_file`), utilisée par
     /// les RPC d'édition (upsert/remove/install).
     pub async fn save(&self) -> Result<()> {
-        let specs: Vec<ComponentSpec> =
-            self.specs.read().await.values().cloned().collect();
+        let specs: Vec<ComponentSpec> = self.specs.read().await.values().cloned().collect();
         let txt = toml::to_string_pretty(&ComponentsFile { components: specs })
-            .context("sérialisation specs")?;
+            .context("serializing specs")?;
         let tmp = self.root.join("components.toml.part");
         let dst = self.root.join("components.toml");
-        tokio::fs::write(&tmp, txt).await.context("écriture .part")?;
-        tokio::fs::rename(&tmp, &dst).await.context("rename atomique")?;
+        tokio::fs::write(&tmp, txt).await.context("writing .part")?;
+        tokio::fs::rename(&tmp, &dst)
+            .await
+            .context("atomic rename")?;
         Ok(())
     }
 
     /// Démarrage : orphelins d'un crash éventuel, autostarts, puis la
     /// boucle de sondes périodiques.
     pub async fn boot(self: &Arc<Self>) {
-        let specs: Vec<ComponentSpec> =
-            self.specs.read().await.values().cloned().collect();
+        let specs: Vec<ComponentSpec> = self.specs.read().await.values().cloned().collect();
         for spec in &specs {
             if spec.kind != ComponentKind::Process {
                 continue;
@@ -227,7 +226,7 @@ impl Components {
             self.reap_orphan(spec).await;
             if spec.autostart {
                 if let Err(e) = self.autostart(spec).await {
-                    warn!("composant « {} »: autostart impossible: {e:#}", spec.name);
+                    warn!("component « {} »: autostart impossible: {e:#}", spec.name);
                 }
             }
         }
@@ -249,7 +248,10 @@ impl Components {
             return;
         };
         if proc::is_our_orphan(pid, spec) {
-            info!("composant « {} »: orphelin pid {pid} — arrêt avant respawn", spec.name);
+            info!(
+                "component « {} »: orphan pid {pid} — stopping before respawn",
+                spec.name
+            );
             proc::terminate_pid(pid).await;
         }
         let _ = std::fs::remove_file(&pidfile);
@@ -274,11 +276,7 @@ impl Components {
     async fn item_of(&self, name: &str) -> Option<Value> {
         if let Some(spec) = self.specs.read().await.get(name).cloned() {
             let st = self.status_of(&spec).await;
-            let mut item = item_json(
-                &render::masked_spec(&spec),
-                &st,
-                "components.toml",
-            );
+            let mut item = item_json(&render::masked_spec(&spec), &st, "components.toml");
             // Vue plugin effective (spec.view_dir ou convention
             // components/<name>/web/) — le client n'affiche le bouton
             // « ouvrir la vue » que si ce flag est vrai.
@@ -424,7 +422,7 @@ impl Components {
     pub async fn info(&self, name: &str) -> Result<Value> {
         self.item_of(name)
             .await
-            .with_context(|| format!("composant inconnu: {name}"))
+            .with_context(|| format!("unknown component: {name}"))
     }
 
     // -------------------------------------------------------------------
@@ -459,10 +457,10 @@ impl Components {
             .await
             .get(name)
             .cloned()
-            .with_context(|| format!("composant inconnu: {name}"))?;
+            .with_context(|| format!("unknown component: {name}"))?;
         anyhow::ensure!(
             spec.kind == ComponentKind::Process,
-            "« {name} » est kind={} — seul un `process` a un cycle de vie managé",
+            "« {name} » is kind={} — only a `process` has a managed lifecycle",
             kind_name(spec.kind),
         );
         Ok(spec)
@@ -487,7 +485,11 @@ impl Components {
     /// Chemin interne (recette `upsert_spec`, params à venir) — la
     /// garde « spec scellée » des entrées catalogue n'est appliquée
     /// que sur la surface d'édition utilisateur (`upsert_edit`).
-    pub async fn upsert(self: &Arc<Self>, name: &str, spec: ComponentSpec) -> Result<ComponentStatus> {
+    pub async fn upsert(
+        self: &Arc<Self>,
+        name: &str,
+        spec: ComponentSpec,
+    ) -> Result<ComponentStatus> {
         self.upsert_inner(name, spec, false).await
     }
 
@@ -498,14 +500,23 @@ impl Components {
     /// `description` (et demain les params déclarés) relèvent de
     /// l'utilisateur ; tout autre champ modifié est refusé avec la
     /// liste des champs scellés.
-    pub async fn upsert_edit(self: &Arc<Self>, name: &str, spec: ComponentSpec) -> Result<ComponentStatus> {
+    pub async fn upsert_edit(
+        self: &Arc<Self>,
+        name: &str,
+        spec: ComponentSpec,
+    ) -> Result<ComponentStatus> {
         self.upsert_inner(name, spec, true).await
     }
 
-    async fn upsert_inner(self: &Arc<Self>, name: &str, mut spec: ComponentSpec, edit_bound: bool) -> Result<ComponentStatus> {
+    async fn upsert_inner(
+        self: &Arc<Self>,
+        name: &str,
+        mut spec: ComponentSpec,
+        edit_bound: bool,
+    ) -> Result<ComponentStatus> {
         anyhow::ensure!(
             spec.name == name,
-            "spec.name « {} » ≠ name « {name} » — la clé d'édition est le nom déclaré",
+            "spec.name « {} » ≠ name « {name} » — the edit key is the declared name",
             spec.name
         );
         expand_home_fields(&mut spec);
@@ -561,7 +572,7 @@ impl Components {
             self.shutdown_proc(name).await?;
         }
         if let Err(e) = self.save().await {
-            warn!("composant « {name} » upsert en mémoire mais save() a échoué — runtime diverge du toml jusqu'au prochain boot: {e:#}");
+            warn!("component « {name} » upserted in memory but save() failed — runtime diverges from toml until next boot: {e:#}");
             return Err(e);
         }
         Ok(self.status_of(&spec).await)
@@ -580,17 +591,17 @@ impl Components {
         let cur = self.specs.read().await.get(&spec.name).cloned();
         let Some(cur) = cur else {
             anyhow::bail!(
-                "« {} » est une entrée du catalogue — installer via \
-                 ComponentInstall ; la spec interne n'est pas éditable",
+                "« {} » is a catalog entry — install via \
+                 ComponentInstall; the internal spec is not editable",
                 spec.name
             );
         };
         let sealed = sealed_fields_changed(spec, &cur);
         anyhow::ensure!(
             sealed.is_empty(),
-            "« {} » : spec interne scellée par le catalogue — champs \
-             refusés : {} (seuls autostart/description et les params \
-             déclarés sont éditables)",
+            "« {} »: internal spec sealed by the catalog — rejected \
+             fields: {} (only autostart/description and declared \
+             params are editable)",
             spec.name,
             sealed.join(", ")
         );
@@ -610,7 +621,7 @@ impl Components {
             .await
             .get(name)
             .cloned()
-            .with_context(|| format!("composant inconnu: {name}"))?;
+            .with_context(|| format!("unknown component: {name}"))?;
         // Retrait de la spec AVANT le cycle de vie : tout start/stop/
         // respawn concurrent échoue alors « composant inconnu »
         // (require_process/spec_of) — pas de process démarré puis
@@ -624,7 +635,7 @@ impl Components {
         self.observed.write().await.remove(name);
         self.versions.write().await.remove(name);
         if let Err(e) = self.save().await {
-            warn!("composant « {name} » retiré en mémoire mais save() a échoué — il ressuscitera au prochain boot: {e:#}");
+            warn!("component « {name} » removed in memory but save() failed — it will resurrect at next boot: {e:#}");
             return Err(e);
         }
         Ok(())
@@ -648,7 +659,7 @@ impl Components {
             .await
             .get(name)
             .cloned()
-            .with_context(|| format!("composant inconnu: {name}"))?;
+            .with_context(|| format!("unknown component: {name}"))?;
         // Validation AVANT toute mutation — une valeur fautive ne doit
         // pas corrompre la moitié d'une fusion.
         let mut canon: Vec<(String, String)> = Vec::with_capacity(updates.len());
@@ -658,17 +669,14 @@ impl Components {
                     if v.is_empty() {
                         canon.push((k.clone(), String::new()));
                     } else {
-                        canon.push((
-                            k.clone(),
-                            render::validate_value(ps, v)?,
-                        ));
+                        canon.push((k.clone(), render::validate_value(ps, v)?));
                     }
                 }
                 None if spec.params_schema.is_empty() => {
                     canon.push((k.clone(), v.clone()));
                 }
                 None => anyhow::bail!(
-                    "paramètre « {k} » non déclaré — connus : {}",
+                    "undeclared parameter « {k} » — known: {}",
                     spec.params_schema
                         .iter()
                         .map(|p| p.key.as_str())
@@ -689,7 +697,7 @@ impl Components {
             .await
             .insert(name.to_string(), spec.clone());
         if let Err(e) = self.save().await {
-            warn!("composant « {name} » params en mémoire mais save() a échoué: {e:#}");
+            warn!("component « {name} » params set in memory but save() failed: {e:#}");
             return Err(e);
         }
         let rendered = render::render_if_ready(&spec).await?;
@@ -705,7 +713,7 @@ impl Components {
             match self.restart(name).await {
                 Ok(_) => true,
                 Err(e) => {
-                    warn!("composant « {name} » : restart après set_params en échec: {e:#}");
+                    warn!("component « {name} »: restart after set_params failed: {e:#}");
                     false
                 }
             }
@@ -734,19 +742,21 @@ impl Components {
             .await
             .get(name)
             .cloned()
-            .with_context(|| format!("composant inconnu: {name}"))?;
+            .with_context(|| format!("unknown component: {name}"))?;
         anyhow::ensure!(
             spec.kind == ComponentKind::Process,
-            "« {name} » (kind={}) n'a pas de log managé",
+            "« {name} » (kind={}) has no managed log",
             kind_name(spec.kind),
         );
         let limit = limit.unwrap_or(64 * 1024).clamp(1, 256 * 1024);
         let path = self.dir.join(format!("{}.log", name));
         let data = tokio::fs::read(&path)
             .await
-            .with_context(|| format!("pas de log pour « {name} » ({})", path.display()))?;
+            .with_context(|| format!("no log for « {name} » ({})", path.display()))?;
         let size = data.len() as u64;
-        let offset = offset.unwrap_or_else(|| size.saturating_sub(limit)).min(size);
+        let offset = offset
+            .unwrap_or_else(|| size.saturating_sub(limit))
+            .min(size);
         let end = (offset + limit).min(size);
         let slice = &data[offset as usize..end as usize];
         use base64::Engine;
@@ -772,13 +782,13 @@ impl Components {
             .await
             .get(name)
             .cloned()
-            .with_context(|| format!("composant inconnu: {name}"))?;
+            .with_context(|| format!("unknown component: {name}"))?;
         let argv = spec
             .queries
             .get(query)
-            .with_context(|| format!("pas de query « {query} » déclarée pour « {name} »"))?
+            .with_context(|| format!("no query « {query} » declared for « {name} »"))?
             .clone();
-        let argv0 = argv.first().context("query déclarée vide")?;
+        let argv0 = argv.first().context("declared query is empty")?;
         let mut cmd = tokio::process::Command::new(catalog::expand_home(argv0));
         cmd.args(argv[1..].iter().map(|a| catalog::expand_home(a)))
             .envs(&spec.env)
@@ -794,7 +804,7 @@ impl Components {
         let out = tokio::time::timeout(QUERY_TIMEOUT, cmd.output())
             .await
             .with_context(|| format!("query `{argv0}` : timeout {}s", QUERY_TIMEOUT.as_secs()))?
-            .with_context(|| format!("query `{argv0}` : spawn impossible"))?;
+            .with_context(|| format!("query `{argv0}` : spawn failed"))?;
         let size = out.stdout.len() as u64;
         let slice = &out.stdout[..(size as usize).min(QUERY_MAX)];
         use base64::Engine;
@@ -850,11 +860,11 @@ impl Components {
         let spec = self
             .spec_of(name)
             .await
-            .with_context(|| format!("composant inconnu: {name}"))?;
+            .with_context(|| format!("unknown component: {name}"))?;
         anyhow::ensure!(
             self.plugin_view_dir(&spec).await.is_some(),
-            "« {name} » n'a pas de vue plugin — déclarer spec.view_dir \
-             ou déposer les assets dans components/{name}/web/"
+            "« {name} » has no plugin view — declare spec.view_dir \
+             or drop assets in components/{name}/web/"
         );
         let token = rand_hex()?;
         let exp = std::time::Instant::now() + VIEW_TOKEN_TTL;
@@ -1025,7 +1035,7 @@ fn read_specs(path: &Path) -> Result<Vec<ComponentSpec>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e).context("lecture components.toml"),
     };
-    let file: ComponentsFile = toml::from_str(&txt).context("components.toml invalide")?;
+    let file: ComponentsFile = toml::from_str(&txt).context("invalid components.toml")?;
     Ok(file.components)
 }
 
@@ -1085,16 +1095,10 @@ fn expand_home_fields(spec: &mut ComponentSpec) {
         .map(|(k, v)| (k.clone(), catalog::expand_home_str(v)))
         .collect();
     if let Healthcheck::Command { argv } = &mut spec.healthcheck {
-        *argv = argv
-            .iter()
-            .map(|a| catalog::expand_home_str(a))
-            .collect();
+        *argv = argv.iter().map(|a| catalog::expand_home_str(a)).collect();
     }
     if let Some(argv) = &mut spec.version_argv {
-        *argv = argv
-            .iter()
-            .map(|a| catalog::expand_home_str(a))
-            .collect();
+        *argv = argv.iter().map(|a| catalog::expand_home_str(a)).collect();
     }
     spec.queries = spec
         .queries
@@ -1125,23 +1129,23 @@ fn check_usable(spec: &ComponentSpec) -> Result<()> {
                 .name
                 .chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
-        "nom invalide « {} » ([a-z0-9-]+ attendu)",
+        "invalid name « {} » (expected [a-z0-9-]+)",
         spec.name
     );
     anyhow::ensure!(
         spec.kind != ComponentKind::Internal,
-        "kind=internal ne se déclare pas dans components.toml"
+        "kind=internal cannot be declared in components.toml"
     );
     anyhow::ensure!(
         !INTERNALS.iter().any(|i| i.name == spec.name),
-        "nom « {} » réservé à un composant interne",
+        "name « {} » reserved for an internal component",
         spec.name
     );
     if matches!(spec.kind, ComponentKind::Process | ComponentKind::Tool) {
         let argv0 = spec
             .command
             .first()
-            .with_context(|| format!("spec `{}` sans commande", kind_name(spec.kind)))?;
+            .with_context(|| format!("spec `{}` without a command", kind_name(spec.kind)))?;
         check_not_supervisor(argv0)?;
     }
     // Même garde sur la sonde `command` — elle tourne toutes les 30 s,
@@ -1155,7 +1159,7 @@ fn check_usable(spec: &ComponentSpec) -> Result<()> {
     if let Some(argv) = &spec.version_argv {
         let argv0 = argv
             .first()
-            .context("version_argv vide — déclarer l'argv de la sonde")?;
+            .context("empty version_argv — declare the probe argv")?;
         check_not_supervisor(argv0)?;
     }
     // Un seuil sans composante numérique ne pourrait jamais être
@@ -1164,11 +1168,11 @@ fn check_usable(spec: &ComponentSpec) -> Result<()> {
     if let Some(min) = &spec.min_version {
         anyhow::ensure!(
             version::nums(min).is_some(),
-            "min_version « {min} » sans composante numérique"
+            "min_version « {min} » has no numeric component"
         );
         anyhow::ensure!(
             version::version_argv(spec).is_some(),
-            "min_version sans sonde de version — déclarer version_argv"
+            "min_version without a version probe — declare version_argv"
         );
     }
     // Schéma de params : clés uniques et bien formées, enum exige ses
@@ -1178,39 +1182,37 @@ fn check_usable(spec: &ComponentSpec) -> Result<()> {
     for p in &spec.params_schema {
         anyhow::ensure!(
             !p.key.is_empty()
-                && p.key
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()
-                        || matches!(c, '.' | '_' | '-')),
-            "param « {} » invalide ([a-z0-9_.-]+ attendu)",
+                && p.key.chars().all(|c| c.is_ascii_lowercase()
+                    || c.is_ascii_digit()
+                    || matches!(c, '.' | '_' | '-')),
+            "invalid param « {} » (expected [a-z0-9_.-]+)",
             p.key
         );
-        anyhow::ensure!(seen.insert(p.key.as_str()), "param « {} » dupliqué", p.key);
+        anyhow::ensure!(seen.insert(p.key.as_str()), "duplicate param « {} »", p.key);
         if p.kind == proto::ParamKind::Enum {
             anyhow::ensure!(
                 !p.choices.is_empty(),
-                "param « {} » : kind=enum exige `choices`",
+                "param « {} »: kind=enum requires `choices`",
                 p.key
             );
         }
         if let Some(re) = &p.validation {
             regex::Regex::new(re)
-                .with_context(|| format!("param « {} » : validation regex invalide", p.key))?;
+                .with_context(|| format!("param « {} »: invalid validation regex", p.key))?;
         }
         // Un défaut invalide se ferait refuser à chaque set/rendu —
         // valider à l'enregistrement plutôt.
         if let Some(d) = &p.default {
             if !d.is_empty() {
-                render::validate_value(p, d).with_context(|| {
-                    format!("param « {} » : défaut invalide", p.key)
-                })?;
+                render::validate_value(p, d)
+                    .with_context(|| format!("param « {} »: invalid default", p.key))?;
             }
         }
         // `secret` sans défaut : le schéma part en clair dans
         // `component_catalog`/`component_info` — un défaut y fuiterait.
         anyhow::ensure!(
             !(p.secret && p.default.as_deref().is_some_and(|d| !d.is_empty())),
-            "param « {} » : un secret ne déclare pas de défaut",
+            "param « {} »: a secret declares no default",
             p.key
         );
         // `secret` + `json` : le masque « •••••• » n'est pas du JSON —
@@ -1218,7 +1220,7 @@ fn check_usable(spec: &ComponentSpec) -> Result<()> {
         // kind, le combo est refusé tant qu'aucun besoin ne l'exige.
         anyhow::ensure!(
             !(p.secret && p.kind == proto::ParamKind::Json),
-            "param « {} » : secret+json non supporté",
+            "param « {} »: secret+json not supported",
             p.key
         );
     }
@@ -1232,11 +1234,11 @@ fn check_usable(spec: &ComponentSpec) -> Result<()> {
         }
         if let Some(ps) = spec.params_schema.iter().find(|p| &p.key == k) {
             render::validate_value(ps, v)
-                .with_context(|| format!("param « {k} » : valeur invalide"))?;
+                .with_context(|| format!("param « {k} »: invalid value"))?;
         }
     }
     if let Some(d) = &spec.view_dir {
-        anyhow::ensure!(!d.trim().is_empty(), "view_dir vide");
+        anyhow::ensure!(!d.trim().is_empty(), "empty view_dir");
     }
     // Queries déclarées : nom [a-z0-9-]+, argv non vide, argv0 jamais
     // superviseur — `ComponentQuery` les exécute sans audit au runtime.
@@ -1246,9 +1248,9 @@ fn check_usable(spec: &ComponentSpec) -> Result<()> {
                 && qname
                     .chars()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
-            "query « {qname} » invalide ([a-z0-9-]+ attendu)"
+            "invalid query « {qname} » (expected [a-z0-9-]+)"
         );
-        anyhow::ensure!(!qargv.is_empty(), "query « {qname} » : argv vide");
+        anyhow::ensure!(!qargv.is_empty(), "query « {qname} »: empty argv");
         check_not_supervisor(&qargv[0])?;
     }
     Ok(())
@@ -1263,8 +1265,11 @@ fn check_not_supervisor(argv0: &str) -> Result<()> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| argv0.to_string());
     anyhow::ensure!(
-        !matches!(base.as_str(), "agentcontrol-daemon" | "supervisord" | "systemctl"),
-        "commande interdite « {argv0} » — un composant ne gère ni le démon ni son superviseur"
+        !matches!(
+            base.as_str(),
+            "agentcontrol-daemon" | "supervisord" | "systemctl"
+        ),
+        "forbidden command « {argv0} » — a component manages neither the daemon nor its supervisor"
     );
     Ok(())
 }
@@ -1277,9 +1282,8 @@ fn check_not_supervisor(argv0: &str) -> Result<()> {
 fn check_editable(spec: &ComponentSpec) -> Result<()> {
     check_usable(spec)?;
     anyhow::ensure!(
-        spec.kind == ComponentKind::Process
-            || !matches!(spec.healthcheck, Healthcheck::Process),
-        "healthcheck kind=process sans pid managé — « {} » est kind={}",
+        spec.kind == ComponentKind::Process || !matches!(spec.healthcheck, Healthcheck::Process),
+        "healthcheck kind=process without a managed pid — « {} » is kind={}",
         spec.name,
         kind_name(spec.kind)
     );
@@ -1351,7 +1355,7 @@ fn preserve_catalog_meta(cur: &ComponentSpec, spec: &mut ComponentSpec) -> Resul
         };
     }
     *spec = serde_json::from_value(Value::Object(std::mem::take(new)))
-        .context("métadonnées catalogue incohérentes avec la spec")?;
+        .context("catalog metadata inconsistent with the spec")?;
     Ok(())
 }
 
@@ -1400,7 +1404,9 @@ mod tests {
         k.kind = ComponentKind::External;
         assert_eq!(sealed_fields_changed(&k, &cur), ["kind"]);
         let mut hc = cur.clone();
-        hc.healthcheck = Healthcheck::Tcp { addr: "127.0.0.1:1".into() };
+        hc.healthcheck = Healthcheck::Tcp {
+            addr: "127.0.0.1:1".into(),
+        };
         assert_eq!(sealed_fields_changed(&hc, &cur), ["healthcheck"]);
         let mut env = cur.clone();
         env.env.insert("FOO".into(), "bar".into());
@@ -1424,7 +1430,8 @@ mod tests {
         // ou forgées) sont recopiées de la courante — ni effacées ni
         // forgées par un upsert.
         let mut cur = base_spec();
-        cur.params.insert("repo".into(), "Wameuh/AgentReviewer".into());
+        cur.params
+            .insert("repo".into(), "Wameuh/AgentReviewer".into());
         cur.params_schema.push(proto::ParamSpec {
             key: "repo".into(),
             label: "Repo".into(),

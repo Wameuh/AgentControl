@@ -770,7 +770,7 @@ export class FileExplorer {
       $("fv-conflict").hidden = true;
       saved = true;
     } catch (e) {
-      if (String(e).includes("conflit:")) {
+      if (String(e).includes("conflict:")) {
         $("fv-conflict").hidden = false;
       } else {
         showErr(String(e));

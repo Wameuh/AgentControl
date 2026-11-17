@@ -99,7 +99,7 @@ class OsNotifications {
     try {
       await onAction((e) => void this.clicked(e));
     } catch (e) {
-      logUi("warn", `notif: listener d'actions indisponible: ${e}`);
+      logUi("warn", `notif: action listener unavailable: ${e}`);
       return; // pas de listener = notifs non cliquables → canal coupé
     }
     if (isAndroid()) {
@@ -114,7 +114,7 @@ class OsNotifications {
       } catch (e) {
         // Canal absent → les envois retombent sur le canal « default »
         // du plugin (importance moindre, mais livré).
-        logUi("warn", `notif: création du canal Android: ${e}`);
+        logUi("warn", `notif: Android channel creation: ${e}`);
       }
     }
     this.ready = true;
@@ -170,7 +170,7 @@ class OsNotifications {
       if (!force && this.granted === false) return false;
       this.granted = (await requestPermission()) === "granted";
     } catch (e) {
-      logUi("warn", `notif: permission illisible: ${e}`);
+      logUi("warn", `notif: permission unreadable: ${e}`);
       this.granted = false;
     }
     return this.granted;
@@ -221,7 +221,7 @@ class OsNotifications {
       this.ids.set(key, { id, conn: conn || "default", sid: s.id, kind });
       return true;
     } catch (e) {
-      logUi("error", `notif: envoi impossible: ${e}`);
+      logUi("error", `notif: send impossible: ${e}`);
       return false;
     }
   }

@@ -48,19 +48,16 @@ pub async fn read_head(stream: &mut TcpStream) -> Result<Head> {
     let mut buf = Vec::with_capacity(4096);
     let mut chunk = [0u8; 4096];
     let end = loop {
-        let n = stream
-            .read(&mut chunk)
-            .await
-            .context("lecture requête")?;
+        let n = stream.read(&mut chunk).await.context("reading request")?;
         if n == 0 {
-            anyhow::bail!("connexion fermée avant la fin de la tête");
+            anyhow::bail!("connection closed before end of head");
         }
         buf.extend_from_slice(&chunk[..n]);
         if let Some(i) = find_head_end(&buf) {
             break i;
         }
         if buf.len() > HEAD_MAX {
-            anyhow::bail!("tête trop grande (> {HEAD_MAX} o)");
+            anyhow::bail!("head too large (> {HEAD_MAX} bytes)");
         }
     };
     let rest = buf.split_off(end + 4);
@@ -100,14 +97,14 @@ pub async fn read_body(stream: &mut TcpStream, head: &Head) -> Result<Vec<u8>> {
         .header("transfer-encoding")
         .is_some_and(|v| v.to_ascii_lowercase().contains("chunked"))
     {
-        anyhow::bail!("chunked non supporté — envoyez Content-Length");
+        anyhow::bail!("chunked not supported — send Content-Length");
     }
     let want = head
         .header("content-length")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0);
     if want > BODY_MAX {
-        anyhow::bail!("corps trop grand (> {BODY_MAX} o)");
+        anyhow::bail!("body too large (> {BODY_MAX} bytes)");
     }
     let mut body = head.rest.clone();
     body.truncate(want);
@@ -117,9 +114,9 @@ pub async fn read_body(stream: &mut TcpStream, head: &Head) -> Result<Vec<u8>> {
         let n = stream
             .read(&mut chunk[..room])
             .await
-            .context("lecture corps")?;
+            .context("reading body")?;
         if n == 0 {
-            anyhow::bail!("corps tronqué");
+            anyhow::bail!("truncated body");
         }
         body.extend_from_slice(&chunk[..n]);
     }
@@ -139,9 +136,7 @@ pub fn query_params(q: &str) -> Vec<(String, String)> {
 
 /// Paramètre de query unique.
 pub fn qparam<'a>(q: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    q.iter()
-        .find(|(k, _)| k == name)
-        .map(|(_, v)| v.as_str())
+    q.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
 }
 
 fn pct_decode(s: &str) -> String {

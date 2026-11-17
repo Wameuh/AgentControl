@@ -112,8 +112,11 @@ impl WebCtx {
 /// close (ou une session WS pour /ws). Loopback only : le bind est
 /// validé en amont (cfg::validate_web_addr).
 pub async fn accept_http(daemon: Arc<Daemon>, listener: TcpListener, ctx: Arc<WebCtx>) {
-    let local = listener.local_addr().map(|a| a.to_string()).unwrap_or_default();
-    info!("web ui sur http://{local}/ (token dans web.token)");
+    let local = listener
+        .local_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_default();
+    info!("web ui on http://{local}/ (token in web.token)");
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(v) => v,
@@ -155,7 +158,7 @@ async fn serve_http(daemon: Arc<Daemon>, mut stream: TcpStream, ctx: Arc<WebCtx>
             if !authed(&head, &q, &ctx) {
                 http::respond_err(&mut stream, 401, "token invalide").await?;
             } else if !origin_ok(&head) {
-                http::respond_err(&mut stream, 403, "origine refusée").await?;
+                http::respond_err(&mut stream, 403, "origin refused").await?;
             } else {
                 ws::upgrade_and_serve(daemon, stream, &head).await?;
             }
@@ -164,7 +167,7 @@ async fn serve_http(daemon: Arc<Daemon>, mut stream: TcpStream, ctx: Arc<WebCtx>
             if !authed(&head, &q, &ctx) {
                 http::respond_err(&mut stream, 401, "token invalide").await?;
             } else if !origin_ok(&head) {
-                http::respond_err(&mut stream, 403, "origine refusée").await?;
+                http::respond_err(&mut stream, 403, "origin refused").await?;
             } else {
                 rpc(&daemon, &mut stream, &head).await?;
             }
@@ -241,7 +244,10 @@ fn const_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 /// Anti-CSWSH/CSRF sur les endpoints mutables (WS, RPC) : si le client
@@ -303,14 +309,10 @@ async fn serve_static(
             });
             match f {
                 Some(f) => send_static_file(stream, head.method == "HEAD", &f).await,
-                None => {
-                    http::respond(stream, 200, &html_headers(), PLACEHOLDER.as_bytes()).await
-                }
+                None => http::respond(stream, 200, &html_headers(), PLACEHOLDER.as_bytes()).await,
             }
         }
-        None => {
-            http::respond(stream, 200, &html_headers(), PLACEHOLDER.as_bytes()).await
-        }
+        None => http::respond(stream, 200, &html_headers(), PLACEHOLDER.as_bytes()).await,
     }
 }
 
@@ -365,7 +367,9 @@ fn hex(c: u8) -> Option<u8> {
 /// Fichier statique complet en mémoire (les assets SPA sont petits —
 /// vite les bornes à ~1 Mio), puis Content-Type + CSP.
 async fn send_static_file(stream: &mut TcpStream, head_only: bool, p: &PathBuf) -> Result<()> {
-    let body = tokio::fs::read(p).await.with_context(|| format!("{}", p.display()))?;
+    let body = tokio::fs::read(p)
+        .await
+        .with_context(|| format!("{}", p.display()))?;
     let name = p.file_name().unwrap_or_default().to_string_lossy();
     let mut headers: Vec<(String, String)> = vec![
         ("Content-Type".into(), mime_by_ext(&name).into()),

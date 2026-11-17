@@ -27,10 +27,8 @@ const EXCERPT: usize = 4 * 1024;
 /// le handshake en était (ni côté log ni côté client). Dépassé → même
 /// traitement qu'un refus : kill du process + erreur nommant l'étape,
 /// rejouée par spawn_attempts puis visible via spawn_fresh.
-const HANDSHAKE_INIT_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(60);
-const HANDSHAKE_SESSION_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(180);
+const HANDSHAKE_INIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const HANDSHAKE_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 /// session/load d'une très longue session native : le replay ACP peut
 /// durer plusieurs minutes en émettant des session/update en continu.
 /// L'attente devient GLISSANTE — chaque ligne reçue de l'agent
@@ -39,10 +37,8 @@ const HANDSHAKE_SESSION_TIMEOUT: std::time::Duration =
 /// Le plafond est large (30 min) : un journal de ~400 Mo / ~85k events
 /// rejoués peut mettre plusieurs minutes à 10 — la progression est
 /// visible via les syslines « N events rejoués » (#271).
-const HANDSHAKE_SESSION_IDLE: std::time::Duration =
-    std::time::Duration::from_secs(90);
-const HANDSHAKE_SESSION_MAX: std::time::Duration =
-    std::time::Duration::from_secs(1800);
+const HANDSHAKE_SESSION_IDLE: std::time::Duration = std::time::Duration::from_secs(90);
+const HANDSHAKE_SESSION_MAX: std::time::Duration = std::time::Duration::from_secs(1800);
 
 impl Session {
     // -----------------------------------------------------------------------
@@ -83,7 +79,7 @@ impl Session {
         // le process acp est mort — un spawn ici créerait un acp
         // concurrent, exactement ce que le side-channel interdit.
         if self.catalogue_override_active() {
-            return Err(anyhow::anyhow!("override catalogue en cours"));
+            return Err(anyhow::anyhow!("catalogue override in progress"));
         }
         // Le spawn attendu derrière le lock a livré un agent vivant :
         // respawner par-dessus le tuerait pour rien (deuxième réveil,
@@ -126,7 +122,14 @@ impl Session {
             resume_native_id
         };
         let r = self
-            .spawn_attempts(command, envs, resume_native_id, skip_replay, mcp_servers, hints)
+            .spawn_attempts(
+                command,
+                envs,
+                resume_native_id,
+                skip_replay,
+                mcp_servers,
+                hints,
+            )
             .await;
         // Config de création APPLIQUÉE sous le flag spawning : le drain
         // post-spawn (lancé juste après) et les envois extérieurs restent
@@ -134,12 +137,8 @@ impl Session {
         // sous le mode par défaut devant la config demandée.
         if matches!(r, Ok(true)) {
             if let Some(cfg) = &spawn_cfg {
-                self.apply_spawn_config(
-                    cfg.mode.as_deref(),
-                    cfg.model.as_deref(),
-                    cfg.quiet,
-                )
-                .await;
+                self.apply_spawn_config(cfg.mode.as_deref(), cfg.model.as_deref(), cfg.quiet)
+                    .await;
                 // Le set model final fait retomber les options
                 // PAR-MODÈLE (thought_level…) à leur défaut chez certains
                 // agents — vérifié par sonde, même à valeur identique —
@@ -189,11 +188,11 @@ impl Session {
             // pour les reprises (session/load) : un /clear sur session
             // endormie doit repartir sur un contexte neuf.
             if resume_native_id.is_some() && self.meta_snapshot().state == "asleep" {
-                return Err(anyhow::anyhow!("session endormie pendant le spawn"));
+                return Err(anyhow::anyhow!("session went to sleep during spawn"));
             }
             expect += 1;
             if self.spawn_gen.load(Ordering::SeqCst) >= expect {
-                return Err(anyhow::anyhow!("spawn supplanté par un kill/rebind"));
+                return Err(anyhow::anyhow!("spawn superseded by a kill/rebind"));
             }
             match self
                 .spawn_agent_once(
@@ -208,25 +207,23 @@ impl Session {
             {
                 Ok(delivered) => return Ok(delivered),
                 Err(e) => {
-                    warn!("[{sid}] spawn échoué (essai {}): {e:#}", attempt + 1);
+                    warn!("[{sid}] spawn failed (attempt {}): {e:#}", attempt + 1);
                     last = e;
                     if attempt == 0 {
                         // Endormie pendant l'essai : pas de ligne "retry"
                         // trompeuse ni d'attente pour un arrêt volontaire.
                         if self.meta_snapshot().state == "asleep" {
-                            return Err(anyhow::anyhow!(
-                                "session endormie pendant le spawn"
-                            ));
+                            return Err(anyhow::anyhow!("session went to sleep during spawn"));
                         }
                         self.emit(EventKind::System {
-                            text: format!("agent exited au init — retry ({last:#})"),
+                            text: format!("agent exited during init — retry ({last:#})"),
                         });
                         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
                     }
                 }
             }
         }
-        error!("[{sid}] spawn abandonné après 2 essais: {last:#}");
+        error!("[{sid}] spawn aborted after 2 attempts: {last:#}");
         Err(last)
     }
 
@@ -334,7 +331,7 @@ impl Session {
         self.flush_meta_save();
         self.caps.resume_persist();
         let meta = self.meta_snapshot();
-        let (cmd, args) = command.split_first().context("commande agent vide")?;
+        let (cmd, args) = command.split_first().context("empty agent command")?;
         // argv[0] résolu à chaud (PATH effectif + dossiers usuels) : le
         // spawn emprunte le même binaire que celui qu'`available` a
         // validé — un agent installé après le boot, ou un argv[0] figé
@@ -412,7 +409,7 @@ impl Session {
         // génération en tête).
         if self.spawn_gen.load(Ordering::SeqCst) != gen {
             self.kill_for_respawn().await;
-            bail!("spawn supplanté (kill pendant le spawn)");
+            bail!("spawn superseded (kill during spawn)");
         }
 
         // Progression visible côté client : entre le spawn et
@@ -420,7 +417,7 @@ impl Session {
         // (initialize + session/new) — sans cette ligne le chat semble
         // figé pendant le handshake.
         self.emit(EventKind::System {
-            text: "agent lancé — handshake ACP…".into(),
+            text: "agent launched — ACP handshake…".into(),
         });
         // ACP handshake : initialize puis session/new|load. Un échec ne
         // doit pas laisser le process vivant — sinon is_alive() ment
@@ -565,9 +562,7 @@ impl Session {
                 // client voie la valeur réellement demandée.
                 if m.model_source.as_deref() == Some("catalogue") {
                     if let Some(want) = m.model.clone() {
-                        if let Some(o) =
-                            m.config_options.iter_mut().find(|o| o.id == "model")
-                        {
+                        if let Some(o) = m.config_options.iter_mut().find(|o| o.id == "model") {
                             o.current_value = want;
                         }
                     }
@@ -600,12 +595,12 @@ impl Session {
         }
         self.emit(EventKind::System {
             text: match (resume_native_id.is_some(), fell_back) {
-                (_, true) => "agent respawned (session native perdue — contexte neuf)".into(),
+                (_, true) => "agent respawned (native session lost — fresh context)".into(),
                 (true, false) => {
                     let n = self.replay_seen.load(Ordering::SeqCst);
                     if n > 0 {
                         format!(
-                            "agent respawned (session/load={supports_load}, resumed — {n} events rejoués)"
+                            "agent respawned (session/load={supports_load}, resumed — {n} events replayed)"
                         )
                     } else {
                         format!("agent respawned (session/load={supports_load}, resumed)")
@@ -714,8 +709,7 @@ impl Session {
                     match self.set_config_option_quiet(id, &v).await {
                         Ok(()) => Ok(()),
                         Err(e1) => {
-                            let e1_res =
-                                config::is_resolution_error(&format!("{e1:#}"));
+                            let e1_res = config::is_resolution_error(&format!("{e1:#}"));
                             let fb = if id == "model" {
                                 self.set_model(&v).await.map(|_| ())
                             } else {
@@ -724,8 +718,7 @@ impl Session {
                             match fb {
                                 Ok(()) => Ok(()),
                                 Err(e2) => {
-                                    let fresh =
-                                        self.config_gen.load(Ordering::SeqCst) != cfg_gen0;
+                                    let fresh = self.config_gen.load(Ordering::SeqCst) != cfg_gen0;
                                     if fresh && e1_res {
                                         Err(e1)
                                     } else {
@@ -751,8 +744,7 @@ impl Session {
                 // (agent pas prêt, transport, rate-limit, liste périmée
                 // non rafraîchie ce spawn) garde le re-pending.
                 let fresh = self.config_gen.load(Ordering::SeqCst) != cfg_gen0;
-                let definitive =
-                    fresh && config::is_resolution_error(&format!("{e:#}"));
+                let definitive = fresh && config::is_resolution_error(&format!("{e:#}"));
                 if definitive {
                     // meta.mode/model reflètent la valeur DEMANDÉE (le
                     // reconcile la restaure) — resynchroniser sur le
@@ -782,14 +774,14 @@ impl Session {
                         drop(rej);
                         self.emit(EventKind::System {
                             text: format!(
-                                "config {k}={v} abandonnée — refus définitif de l'agent \
-                                 (valeur hors liste annoncée) : {e:#}"
+                                "config {k}={v} dropped — definitive agent refusal \
+                                 (value outside announced list): {e:#}"
                             ),
                         });
                     }
                 } else {
                     self.emit(EventKind::Error {
-                        message: format!("config différée {k}={v}: {e:#}"),
+                        message: format!("deferred config {k}={v}: {e:#}"),
                     });
                     // Re-mise en pending : un échec transitoire ne doit pas
                     // perdre la condition voulue — retentée au prochain spawn.
@@ -837,9 +829,7 @@ impl Session {
         *at = std::time::Instant::now();
         drop(at);
         self.emit(EventKind::System {
-            text: format!(
-                "session native très longue — chargement du contexte… {n} events rejoués"
-            ),
+            text: format!("very long native session — loading context… {n} events replayed"),
         });
     }
 
@@ -892,7 +882,7 @@ impl Session {
             .await
             .context("initialize")?;
         info!(
-            "[{}] handshake: initialize ok en {} ms",
+            "[{}] handshake: initialize ok in {} ms",
             meta.id,
             t0.elapsed().as_millis()
         );
@@ -915,7 +905,7 @@ impl Session {
             // chat figé sur « starting » pendant des minutes (#269) —
             // le compteur d'updates rejoués (#271) précise l'avancement.
             self.emit(EventKind::System {
-                text: "reprise de la session native — chargement du contexte…".into(),
+                text: "resuming the native session — loading context…".into(),
             });
             let t0 = std::time::Instant::now();
             let r = self
@@ -930,7 +920,7 @@ impl Session {
             match r {
                 Ok(v) => {
                     info!(
-                        "[{}] handshake: session/load ok en {} ms",
+                        "[{}] handshake: session/load ok in {} ms",
                         meta.id,
                         t0.elapsed().as_millis()
                     );
@@ -941,12 +931,12 @@ impl Session {
                         return Err(e).context("session/load");
                     }
                     warn!(
-                        "[{}] session/load impossible ({e:#}) — repli session/new",
+                        "[{}] session/load impossible ({e:#}) — falling back to session/new",
                         meta.id
                     );
                     self.emit(EventKind::System {
                         text: format!(
-                            "session native perdue ({e}) — agent relancé sur un contexte neuf"
+                            "native session lost ({e}) — agent relaunched on a fresh context"
                         ),
                     });
                     info!("[{}] handshake: session/new (repli)…", meta.id);
@@ -958,9 +948,9 @@ impl Session {
                             HANDSHAKE_SESSION_TIMEOUT,
                         )
                         .await
-                        .context("session/new (repli après session/load)")?;
+                        .context("session/new (fallback after session/load)")?;
                     info!(
-                        "[{}] handshake: session/new ok en {} ms",
+                        "[{}] handshake: session/new ok in {} ms",
                         meta.id,
                         t0.elapsed().as_millis()
                     );
@@ -979,7 +969,7 @@ impl Session {
                 .await
                 .context("session/new")?;
             info!(
-                "[{}] handshake: session/new ok en {} ms",
+                "[{}] handshake: session/new ok in {} ms",
                 meta.id,
                 t0.elapsed().as_millis()
             );
@@ -987,7 +977,7 @@ impl Session {
         }
         .map(|(v, sl, fb)| {
             info!(
-                "[{}] handshake terminé en {} ms",
+                "[{}] handshake done in {} ms",
                 meta.id,
                 t_all.elapsed().as_millis()
             );
@@ -1073,7 +1063,7 @@ impl Session {
             .is_ok()
         {
             info!(
-                "[{}] process de handshake raté tué (gen {gen})",
+                "[{}] failed handshake process killed (gen {gen})",
                 self.meta_snapshot().id
             );
             return;
@@ -1186,7 +1176,7 @@ impl Session {
                 // message comme empêchement TRANSITOIRE — le sid natif
                 // est conservé pour une tentative ultérieure.
                 bail!(
-                    "acp {method}: timeout — {} s sans activité agent (max {} s)",
+                    "acp {method}: timeout — {} s without agent activity (max {} s)",
                     idle.as_secs(),
                     max.as_secs()
                 );
@@ -1222,7 +1212,10 @@ impl Session {
                     // le message comme empêchement TRANSITOIRE — un
                     // session/load lent garde le sid natif (repli
                     // session/new = perte de contexte sinon).
-                    bail!("acp {method}: timeout — aucune réponse après {} s", t.as_secs());
+                    bail!(
+                        "acp {method}: timeout — no response after {} s",
+                        t.as_secs()
+                    );
                 }
             },
             None => rx.await,
@@ -1395,8 +1388,7 @@ impl Session {
                                     // Idem handshake : ne pas écraser
                                     // l'uid catalogue par la valeur
                                     // clampée rapportée par l'agent.
-                                    "model" if m.model_source.as_deref()
-                                        == Some("catalogue") => {}
+                                    "model" if m.model_source.as_deref() == Some("catalogue") => {}
                                     "model" => m.model = Some(o.current_value.clone()),
                                     _ => {}
                                 }
@@ -1405,10 +1397,8 @@ impl Session {
                             // aligner sur l'uid catalogue demandé.
                             if m.model_source.as_deref() == Some("catalogue") {
                                 if let Some(want) = m.model.clone() {
-                                    if let Some(o) = m
-                                        .config_options
-                                        .iter_mut()
-                                        .find(|o| o.id == "model")
+                                    if let Some(o) =
+                                        m.config_options.iter_mut().find(|o| o.id == "model")
                                     {
                                         o.current_value = want;
                                     }
@@ -1459,9 +1449,8 @@ impl Session {
                             let over = pol.exceeds(*used, *size);
                             let seen = self.usage_seen.swap(true, Ordering::SeqCst);
                             let was = seen
-                                && prev_used.is_some_and(|u| {
-                                    pol.exceeds(u, prev_size.unwrap_or(*size))
-                                });
+                                && prev_used
+                                    .is_some_and(|u| pol.exceeds(u, prev_size.unwrap_or(*size)));
                             if over && !was {
                                 auto_compact = Some((*used, *size));
                             }
@@ -1473,7 +1462,7 @@ impl Session {
                     self.emit(kind);
                 }
                 if compact_done {
-                    self.end_compact("contexte réduit", false);
+                    self.end_compact("context compacted", false);
                 }
                 if let Some((u, s)) = auto_compact {
                     self.request_auto_compact(u, s);
@@ -1544,7 +1533,11 @@ impl Session {
                     Some(text.chars().take(EXCERPT).collect()),
                     Some(text.len() as u64),
                 ),
-                Err(_) => (None, Some(text.chars().take(EXCERPT).collect()), Some(text.len() as u64)),
+                Err(_) => (
+                    None,
+                    Some(text.chars().take(EXCERPT).collect()),
+                    Some(text.len() as u64),
+                ),
             }
         } else {
             (None, if text.is_empty() { None } else { Some(text) }, None)
@@ -1557,7 +1550,12 @@ impl Session {
                 .unwrap()
                 .get(&call_id)
                 .cloned()
-                .unwrap_or_else(|| (title.unwrap_or_else(|| "tool call".into()), kind.unwrap_or_else(|| "other".into())));
+                .unwrap_or_else(|| {
+                    (
+                        title.unwrap_or_else(|| "tool call".into()),
+                        kind.unwrap_or_else(|| "other".into()),
+                    )
+                });
             self.emit(EventKind::ToolCall {
                 call_id,
                 title: t,
@@ -1598,7 +1596,7 @@ impl Session {
     /// Les requêtes ACP en vol sont soldées en erreur, sinon leurs
     /// appelants resteraient suspendus indéfiniment.
     pub async fn kill_for_respawn(&self) {
-        debug!("[{}] kill pour respawn", self.meta_snapshot().id);
+        debug!("[{}] kill for respawn", self.meta_snapshot().id);
         // supplant_mark = génération invalidée : un spawn concurrent la
         // compare à sa génération de départ — > départ = kill/rebind
         // intervenu PENDANT son spawn (signal typé, indépendant des
@@ -1659,17 +1657,16 @@ impl Session {
     /// (sinon un nouvel envoi ré-acquerrait le flag pendant que
     /// l'ancienne tâche le libère aussi — double relâchement croisé).
     pub async fn sleep(&self) {
-        self.sleep_inner(
-            "session endormie — l'agent sera relancé au prochain message",
-        )
-        .await;
+        self.sleep_inner("session put to sleep — the agent will be relaunched on the next message")
+            .await;
     }
 
     /// Sleep pour l'override catalogue : le relaunch est immédiat
     /// (override → respawn dans la même opération) — le message
     /// « relancé au prochain message » de sleep() serait trompeur.
     pub async fn sleep_for_override(&self) {
-        self.sleep_inner("session suspendue — application du modèle catalogue…").await;
+        self.sleep_inner("session suspended — applying catalogue model…")
+            .await;
     }
 
     async fn sleep_inner(&self, msg: &'static str) {
@@ -2017,7 +2014,7 @@ for line in sys.stdin:
     #[tokio::test]
     async fn spawn_load_falls_back_to_new() {
         let Some(py) = python() else {
-            eprintln!("python absent — test ignoré");
+            eprintln!("python missing — test skipped");
             return;
         };
         let (s, dir) = tmp_session("fallback", "gone-native");
@@ -2044,8 +2041,8 @@ for line in sys.stdin:
         );
         let texts = script_texts(&dir);
         assert!(
-            texts.iter().any(|t| t.contains("session native perdue")),
-            "sysline de repli absente: {texts:?}"
+            texts.iter().any(|t| t.contains("native session lost")),
+            "fallback sysline missing: {texts:?}"
         );
         // La session reste utilisable : un prompt part, aucun
         // « prompt failed » ne retombe (le faux agent répond end_turn).
@@ -2054,7 +2051,7 @@ for line in sys.stdin:
         let texts = script_texts(&dir);
         assert!(
             !texts.iter().any(|t| t.contains("prompt failed")),
-            "prompt en échec après repli: {texts:?}"
+            "prompt failed after fallback: {texts:?}"
         );
         s.kill().await;
         let _ = std::fs::remove_dir_all(&dir);
@@ -2068,7 +2065,7 @@ for line in sys.stdin:
     #[tokio::test]
     async fn load_mode_mismatch_is_repushed() {
         let Some(py) = python() else {
-            eprintln!("python absent — test ignoré");
+            eprintln!("python missing — test skipped");
             return;
         };
         let (s, dir) = tmp_session_cfg("modefix", "native-mode", Some("bypass"), None);
@@ -2097,7 +2094,7 @@ for line in sys.stdin:
         assert!(
             log.contains("\"session/set_config_option\"") && log.contains("\"bypass\"")
                 || log.contains("\"session/set_mode\"") && log.contains("\"bypass\""),
-            "mode non re-poussé: {log}"
+            "mode not re-pushed: {log}"
         );
         s.kill().await;
         let _ = std::fs::remove_dir_all(&dir);
@@ -2110,7 +2107,7 @@ for line in sys.stdin:
     #[tokio::test]
     async fn failed_handshake_leaves_no_zombie() {
         let Some(py) = python() else {
-            eprintln!("python absent — test ignoré");
+            eprintln!("python missing — test skipped");
             return;
         };
         let (s, dir) = tmp_session("zombie", "gone-native");
@@ -2138,7 +2135,7 @@ for line in sys.stdin:
         let texts = script_texts(&dir);
         assert!(
             !texts.iter().any(|t| t.contains("agent process exited")),
-            "exit non supprimé: {texts:?}"
+            "exit not suppressed: {texts:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2151,7 +2148,7 @@ for line in sys.stdin:
     #[tokio::test]
     async fn lost_binding_kills_process() {
         let Some(py) = python() else {
-            eprintln!("python absent — test ignoré");
+            eprintln!("python missing — test skipped");
             return;
         };
         let (s, dir) = tmp_session("binding", "live-native");
@@ -2177,7 +2174,7 @@ for line in sys.stdin:
         let texts = script_texts(&dir);
         assert!(
             texts.iter().any(|t| t.contains("prompt failed")),
-            "échec du prompt non journalisé: {texts:?}"
+            "prompt failure not journaled: {texts:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2189,7 +2186,7 @@ for line in sys.stdin:
             "acp session/prompt: Session not found",
             "acp session/load: unknown session",
             "no such session abc",
-            "la session est introuvable",
+            "the session is not found",
             "acp session/prompt: session does not exist",
             "Session not found",
         ] {

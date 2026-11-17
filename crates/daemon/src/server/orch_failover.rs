@@ -162,16 +162,12 @@ impl Daemon {
                 return;
             }
             info!(
-                "orchestrateur: failover provider — {} ({}) rate_limit sur « {} » → « {} »",
+                "orchestrator: provider failover — {} ({}) rate_limit on « {} » → « {} »",
                 m.title, m.id, m.agent, effective
             );
             match role {
-                FailRole::Worker => {
-                    self.failover_worker(bin, cfg, ws, &m, tasks, prs, st).await
-                }
-                FailRole::Planner => {
-                    self.failover_planner(bin, cfg, ws, &m, tasks, st).await
-                }
+                FailRole::Worker => self.failover_worker(bin, cfg, ws, &m, tasks, prs, st).await,
+                FailRole::Planner => self.failover_planner(bin, cfg, ws, &m, tasks, st).await,
                 FailRole::Reviewer => self.failover_reviewer(bin, ws, &m, tasks, st).await,
             }
         }
@@ -182,7 +178,7 @@ impl Daemon {
     /// watermarks par item sont gérés par l'appelant).
     async fn failover_rm(self: &Arc<Self>, sid: &str, st: &mut OrchPersist) {
         if let Err(e) = self.h_delete_session(sid.to_string()).await {
-            warn!("orchestrateur: failover rm {sid}: {e:#}");
+            warn!("orchestrator: failover rm {sid}: {e:#}");
         }
         st.nudges.remove(sid);
         st.plan_nudges.remove(sid);
@@ -222,7 +218,7 @@ impl Daemon {
             return;
         }
         let items_txt = if my_wip.is_empty() {
-            "(aucun — items soldes)".to_string()
+            "(none — items settled)".to_string()
         } else {
             my_wip
                 .iter()
@@ -231,7 +227,7 @@ impl Daemon {
                 .join("\n")
         };
         let prs_txt = if my_prs.is_empty() {
-            "(aucune)".to_string()
+            "(none)".to_string()
         } else {
             my_prs
                 .iter()
@@ -284,19 +280,19 @@ impl Daemon {
             // Spawn refusé : on NE touche pas à l'ancienne session —
             // elle reste en backoff et le prochain tick réessaiera
             // (spawn refusé = souvent quota/profile → attendre).
-            warn!(
-                "orchestrateur: failover worker {sid} — spawn {new_agent} refusé, session conservée"
-            );
+            warn!("orchestrator: worker failover {sid} — spawn {new_agent} refused, session kept");
             return;
         };
         for t in &my_wip {
             let id = task_id(t).to_string();
-            let (rc, _o, e) =
-                run_out(&[bin, "--reassign", &id, "--agent-id", &nsid, "--force"], ws)
-                    .await
-                    .unwrap_or((-1, String::new(), "run_out failed".into()));
+            let (rc, _o, e) = run_out(
+                &[bin, "--reassign", &id, "--agent-id", &nsid, "--force"],
+                ws,
+            )
+            .await
+            .unwrap_or((-1, String::new(), "run_out failed".into()));
             if rc != 0 {
-                warn!("orchestrateur: failover --reassign #{id} → {nsid} rc={rc} {e}");
+                warn!("orchestrator: failover --reassign #{id} → {nsid} rc={rc} {e}");
             }
         }
         // Réattribution registre PR : `session: Some` = upsert
@@ -321,7 +317,7 @@ impl Daemon {
             });
         }
         info!(
-            "orchestrateur: failover worker {sid} → {nsid} ({} items, {} PRs)",
+            "orchestrator: failover worker {sid} → {nsid} ({} items, {} PRs)",
             my_wip.len(),
             my_prs.len()
         );
@@ -424,17 +420,19 @@ impl Daemon {
                 .await
             else {
                 warn!(
-                    "orchestrateur: failover planner {sid} — spawn {new_agent} refusé pour #{key}, session conservée pour retry"
+                    "orchestrator: planner failover {sid} — spawn {new_agent} refused for #{key}, session kept for retry"
                 );
                 all_replaced = false;
                 continue;
             };
-            let (rc, _o, e) =
-                run_out(&[bin, "--reassign", &key, "--agent-id", &nsid, "--force"], ws)
-                    .await
-                    .unwrap_or((-1, String::new(), "run_out failed".into()));
+            let (rc, _o, e) = run_out(
+                &[bin, "--reassign", &key, "--agent-id", &nsid, "--force"],
+                ws,
+            )
+            .await
+            .unwrap_or((-1, String::new(), "run_out failed".into()));
             if rc != 0 {
-                warn!("orchestrateur: failover --reassign #{key} → {nsid} rc={rc} {e}");
+                warn!("orchestrator: failover --reassign #{key} → {nsid} rc={rc} {e}");
                 self.plan_rm_session(&nsid, st).await;
                 all_replaced = false;
                 continue;
@@ -445,7 +443,7 @@ impl Daemon {
             st.plan_marker_seq.remove(&key);
             st.reviewer_seq.remove(&key);
             st.planner_seq.remove(&key);
-            info!("orchestrateur: failover planner {sid} → {nsid} pour #{key}");
+            info!("orchestrator: planner failover {sid} → {nsid} for #{key}");
         }
         if all_replaced {
             self.failover_rm(sid, st).await;
@@ -475,7 +473,7 @@ impl Daemon {
                 .await
                 .unwrap_or((-1, String::new(), "run_out failed".into()));
             if rc != 0 {
-                warn!("orchestrateur: failover --unclaim-review #{key} rc={rc} {e}");
+                warn!("orchestrator: failover --unclaim-review #{key} rc={rc} {e}");
             }
             keys.push(key);
         }

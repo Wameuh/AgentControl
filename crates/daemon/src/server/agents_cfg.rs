@@ -16,8 +16,7 @@
 //! `.part` + rename comme `orch_cfg::persist`.
 
 use super::cfg::{
-    agent_confs, profile_from_conf, AgentConf, AgentProfile, CompactPartial,
-    DEFAULT_MAX_INSTANCES,
+    agent_confs, profile_from_conf, AgentConf, AgentProfile, CompactPartial, DEFAULT_MAX_INSTANCES,
 };
 use super::Daemon;
 use anyhow::{Context, Result};
@@ -169,9 +168,7 @@ pub(crate) fn full_agent_profiles(
     confs: HashMap<String, AgentConf>,
 ) -> HashMap<String, AgentProfile> {
     let mut agents = merged_agent_profiles(confs);
-    super::agents_auto::sync_auto_agents(&mut agents, &|b| {
-        super::misc::command_available(b)
-    });
+    super::agents_auto::sync_auto_agents(&mut agents, &|b| super::misc::command_available(b));
     agents
 }
 
@@ -184,14 +181,14 @@ fn diff_agent_maps(
     let mut out = Vec::new();
     for (id, p) in new {
         match old.get(id) {
-            None => out.push(format!("profil agent « {id} » ajouté")),
-            Some(o) if o != p => out.push(format!("profil agent « {id} » mis à jour")),
+            None => out.push(format!("agent profile « {id} » added")),
+            Some(o) if o != p => out.push(format!("agent profile « {id} » updated")),
             _ => {}
         }
     }
     for id in old.keys() {
         if !new.contains_key(id) {
-            out.push(format!("profil agent « {id} » retiré"));
+            out.push(format!("agent profile « {id} » removed"));
         }
     }
     out.sort();
@@ -201,9 +198,7 @@ fn diff_agent_maps(
 /// Schéma déclaratif : un param `list` par profil, clé = id du profil,
 /// valeur courante = argv joint en CSV (préremplit le formulaire).
 /// Tri par id pour un affichage stable.
-pub(crate) fn params_schema(
-    agents: &HashMap<String, AgentProfile>,
-) -> Vec<ParamSpec> {
+pub(crate) fn params_schema(agents: &HashMap<String, AgentProfile>) -> Vec<ParamSpec> {
     let mut ids: Vec<&String> = agents.keys().collect();
     ids.sort();
     ids.into_iter()
@@ -232,9 +227,7 @@ pub(crate) fn params_schema(
 
 /// Valeurs courantes sous forme chaîne — `spec.params` de l'item
 /// `agents` (argv CSV par profil).
-pub(crate) fn params_values(
-    agents: &HashMap<String, AgentProfile>,
-) -> HashMap<String, String> {
+pub(crate) fn params_values(agents: &HashMap<String, AgentProfile>) -> HashMap<String, String> {
     agents
         .iter()
         .map(|(id, p)| {
@@ -262,7 +255,7 @@ pub(crate) fn apply_edits(
     for (id, csv) in params {
         let profile = agents
             .get(id)
-            .with_context(|| format!("profil agent inconnu « {id} »"))?;
+            .with_context(|| format!("unknown agent profile « {id} »"))?;
         let argv: Vec<String> = csv
             .split(',')
             .map(str::trim)
@@ -271,7 +264,7 @@ pub(crate) fn apply_edits(
             .collect();
         anyhow::ensure!(
             !argv.is_empty(),
-            "« {id} » : commande vide — au moins un argument requis"
+            "« {id} »: empty command — at least one argument required"
         );
         let mut next = profile.clone();
         // L'édition remplace TOUTES les commandes candidates par
@@ -353,13 +346,13 @@ pub(crate) fn persist(root: &Path, edits: &[(String, AgentProfile)]) -> Result<(
     };
     let mut doc = text
         .parse::<toml_edit::DocumentMut>()
-        .context("config.toml illisible — [agents.*] non réécrite")?;
+        .context("unreadable config.toml — [agents.*] left unchanged")?;
     if doc.get("agents").is_none() {
         doc["agents"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
     let agents_tbl = doc["agents"]
         .as_table_mut()
-        .context("clé « agents » de config.toml n'est pas une table")?;
+        .context("config.toml « agents » key is not a table")?;
     for (id, p) in edits {
         let view = AgentToml {
             name: &p.name,
@@ -376,10 +369,10 @@ pub(crate) fn persist(root: &Path, edits: &[(String, AgentProfile)]) -> Result<(
             compact: &p.compact,
             env: &p.env,
         };
-        let frag = toml::to_string(&view).context("sérialisation profil agent")?;
+        let frag = toml::to_string(&view).context("serializing agent profile")?;
         let sub = frag
             .parse::<toml_edit::DocumentMut>()
-            .context("re-parse profil agent")?;
+            .context("re-parsing agent profile")?;
         agents_tbl.insert(id, toml_edit::Item::Table(sub.as_table().clone()));
     }
     super::orch_cfg::commit_config(root, &path, doc.to_string(), perms)
@@ -484,16 +477,18 @@ impl Daemon {
         match self.probe_agent_caps(&id).await {
             Ok((_, touched)) => {
                 fails.remove(&id);
-                tracing::info!("caps sweep: {id} re-sondé ({} session(s) rafraîchie(s))", touched.len());
+                tracing::info!(
+                    "caps sweep: {id} re-probed ({} session(s) refreshed)",
+                    touched.len()
+                );
             }
             Err(e) => {
-                let f = fails.entry(id.clone()).or_insert((0, std::time::Instant::now()));
+                let f = fails
+                    .entry(id.clone())
+                    .or_insert((0, std::time::Instant::now()));
                 f.0 = f.0.saturating_add(1);
                 f.1 = std::time::Instant::now();
-                tracing::warn!(
-                    "caps sweep: probe {id} en échec (essai {}): {e:#}",
-                    f.0
-                );
+                tracing::warn!("caps sweep: probe {id} failed (attempt {}): {e:#}", f.0);
             }
         }
     }
@@ -518,15 +513,16 @@ impl Daemon {
         // via:auto sont préservés/recalculés de la même façon.
         {
             let mut agents = self.agents.write().await;
-            let (added, removed) =
-                super::agents_auto::sync_auto_agents(&mut agents, &|b| {
-                    super::misc::command_available(b)
-                });
+            let (added, removed) = super::agents_auto::sync_auto_agents(&mut agents, &|b| {
+                super::misc::command_available(b)
+            });
             for id in added {
-                tracing::info!("profil agent « {id} » auto-découvert (adaptateur ACP sur le PATH)");
+                tracing::info!("agent profile « {id} » auto-discovered (ACP adapter on PATH)");
             }
             for id in removed {
-                tracing::info!("profil agent « {id} » auto-découvert retiré (adaptateur disparu du PATH)");
+                tracing::info!(
+                    "agent profile « {id} » auto-discovered removed (adapter gone from PATH)"
+                );
             }
         }
         let path = self.root.join("config.toml");
@@ -553,7 +549,7 @@ impl Daemon {
             return;
         };
         let Some(confs) = agent_confs(&text) else {
-            tracing::warn!("config.toml illisible — hot-reload [agents.*] ignoré");
+            tracing::warn!("unreadable config.toml — [agents.*] hot-reload skipped");
             return;
         };
         let merged = full_agent_profiles(confs);
@@ -660,10 +656,7 @@ mod tests {
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].1.commands, vec![vec!["agent", "acp"]]);
         // L'original n'est pas muté.
-        assert_eq!(
-            agents["cursor"].commands,
-            vec![vec!["cursor-agent", "acp"]]
-        );
+        assert_eq!(agents["cursor"].commands, vec![vec!["cursor-agent", "acp"]]);
     }
 
     #[test]
@@ -687,7 +680,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("config.toml"),
-            "# commentaire global\n[agents.devin.env]\nDEVIN_PERMISSION_MODE = \"{mode}\"\n\n[backlog_orchestrator]\nenabled = true\n",
+            "# user comment\n[agents.devin.env]\nDEVIN_PERMISSION_MODE = \"{mode}\"\n\n[backlog_orchestrator]\nenabled = true\n",
         )
         .unwrap();
         let mut p = profile(&["agent", "acp"]);
@@ -695,7 +688,7 @@ mod tests {
         p.env.insert("FOO".into(), "bar".into());
         persist(&dir, &[("cursor".to_string(), p)]).unwrap();
         let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
-        assert!(text.contains("# commentaire global"));
+        assert!(text.contains("# user comment"));
         assert!(text.contains("DEVIN_PERMISSION_MODE"));
         assert!(text.contains("enabled = true"));
         assert!(text.contains("[agents.cursor]"));
@@ -751,7 +744,12 @@ mod tests {
             vec![vec!["my-cursor".to_string(), "acp".to_string()]]
         );
         assert_eq!(
-            m2["cursor"].commands.last().unwrap().last().map(String::as_str),
+            m2["cursor"]
+                .commands
+                .last()
+                .unwrap()
+                .last()
+                .map(String::as_str),
             Some("acp")
         );
     }
@@ -768,9 +766,9 @@ mod tests {
         new.remove("a");
         let lines = diff_agent_maps(&old, &new);
         assert_eq!(lines.len(), 3, "{lines:?}");
-        assert!(lines.iter().any(|l| l.contains("« a » retiré")));
-        assert!(lines.iter().any(|l| l.contains("« b » mis à jour")));
-        assert!(lines.iter().any(|l| l.contains("« c » ajouté")));
+        assert!(lines.iter().any(|l| l.contains("« a » removed")));
+        assert!(lines.iter().any(|l| l.contains("« b » updated")));
+        assert!(lines.iter().any(|l| l.contains("« c » added")));
         // Identique → silencieux.
         assert!(diff_agent_maps(&old, &old).is_empty());
     }
@@ -804,8 +802,10 @@ mod tests {
         p.commands.push(vec!["claude-agent-acp".to_string()]);
         persist(&dir, &[("claude".to_string(), p)]).unwrap();
         let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
-        assert!(text.contains("[[\"claude-code-acp\"], [\"claude-agent-acp\"]]")
-            || text.contains("[[ \"claude-code-acp\" ], [ \"claude-agent-acp\" ]]"));
+        assert!(
+            text.contains("[[\"claude-code-acp\"], [\"claude-agent-acp\"]]")
+                || text.contains("[[ \"claude-code-acp\" ], [ \"claude-agent-acp\" ]]")
+        );
         // Relisible : AgentConf::command → deux candidates dans l'ordre.
         let conf = agent_confs(&text).unwrap();
         assert_eq!(
@@ -848,8 +848,7 @@ mod tests {
         let never = caps_stale_at(None, now).unwrap();
         assert_eq!(never.timestamp(), 0);
         // Frais (< CAPS_STALE_AFTER) : rien à faire.
-        let fresh = (now - chrono::Duration::hours(1))
-            .to_rfc3339();
+        let fresh = (now - chrono::Duration::hours(1)).to_rfc3339();
         assert_eq!(caps_stale_at(Some(&fresh), now), None);
         // Périmé (> CAPS_STALE_AFTER) : stale au timestamp lu.
         let old = (now - chrono::Duration::hours(25)).to_rfc3339();

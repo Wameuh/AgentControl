@@ -104,7 +104,7 @@ pub async fn serve_plugin(
         rel.push_str("index.html");
     }
     let Some(dir) = daemon.components.plugin_view_dir_of(name).await else {
-        return http::respond_err(stream, 404, "pas de vue pour ce composant").await;
+        return http::respond_err(stream, 404, "no view for this component").await;
     };
     let Some(file) = safe_join(&dir, &rel) else {
         return http::respond_err(stream, 404, "introuvable").await;
@@ -135,7 +135,7 @@ pub async fn serve_plugin(
     if is_doc {
         let token = http::qparam(q, "token").unwrap_or_default();
         if !daemon.components.view_token_valid(name, token) {
-            return http::respond_err(stream, 401, "token de vue invalide").await;
+            return http::respond_err(stream, 401, "invalid view token").await;
         }
     }
     let meta = match tokio::fs::metadata(&file).await {
@@ -143,7 +143,7 @@ pub async fn serve_plugin(
         _ => return http::respond_err(stream, 404, "introuvable").await,
     };
     if meta.len() > ASSET_MAX {
-        return http::respond_err(stream, 413, "asset trop gros").await;
+        return http::respond_err(stream, 413, "asset too large").await;
     }
     // Origine concrète de la requête pour la CSP (cf. plugin_csp) —
     // Host absent (HTTP/1.0) → 'self' seul. IPv6 : ne bracket que le

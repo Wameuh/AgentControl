@@ -48,8 +48,7 @@ impl rand_core::TryCryptoRng for OsRng {}
 /// Paire ed25519 en mémoire — clé jetable du pairing (jamais écrite
 /// sur disque : elle vit dans le QR puis est scrubbée à l'usage).
 pub fn gen_ed25519() -> Result<ssh_key::PrivateKey> {
-    ssh_key::PrivateKey::random(&mut OsRng, ssh_key::Algorithm::Ed25519)
-        .context("keygen ed25519")
+    ssh_key::PrivateKey::random(&mut OsRng, ssh_key::Algorithm::Ed25519).context("keygen ed25519")
 }
 
 /// (PEM privé, "<type> <b64>" public) d'une paire ed25519 jetable —
@@ -73,18 +72,23 @@ pub fn ensure_keypair() -> Result<PathBuf> {
     }
     let _ = std::fs::create_dir_all(base_dir());
     let key = gen_ed25519()?;
-    let pem = key.to_openssh(ssh_key::LineEnding::LF).context("openssh pem")?;
+    let pem = key
+        .to_openssh(ssh_key::LineEnding::LF)
+        .context("openssh pem")?;
     write_secret(&p, pem.as_bytes())?;
-    let pub_line = format!("{} agentcontrol", key.public_key().to_openssh().unwrap_or_default());
+    let pub_line = format!(
+        "{} agentcontrol",
+        key.public_key().to_openssh().unwrap_or_default()
+    );
     std::fs::write(p.with_extension("pub"), &pub_line)?;
-    log(Level::Info, format!("clé ssh app générée : {}", pub_line));
+    log(Level::Info, format!("app ssh key generated: {}", pub_line));
     Ok(p)
 }
 
 /// Ligne authorized_keys à ajouter côté serveur ("ssh-ed25519 AAAA… agentcontrol").
 pub fn pubkey_line() -> Result<String> {
     let p = ensure_keypair()?;
-    let key = load_private_key(&p).context("clé privée")?;
+    let key = load_private_key(&p).context("private key")?;
     Ok(format!(
         "{} agentcontrol",
         key.public_key().to_openssh().unwrap_or_default()
@@ -100,7 +104,7 @@ pub fn pubkey_line() -> Result<String> {
 /// tronqué ou malformé est refusé ici plutôt qu'au premier connect.
 pub fn check_key_pem(pem: &str) -> Result<()> {
     russh::keys::decode_secret_key(pem, None)
-        .context("clé privée illisible (format OpenSSH attendu)")?;
+        .context("private key unreadable (OpenSSH format expected)")?;
     Ok(())
 }
 
@@ -108,8 +112,8 @@ pub fn check_key_pem(pem: &str) -> Result<()> {
 /// par l'appelant). Erreur contextualisée si absent ou illisible.
 pub fn read_key_pem(path: &Path) -> Result<String> {
     let bytes = crate::secrets::read_secret_file(path)
-        .with_context(|| format!("clé {}", path.display()))?;
-    let pem = String::from_utf8(bytes).context("clé non texte (utf8)")?;
+        .with_context(|| format!("key {}", path.display()))?;
+    let pem = String::from_utf8(bytes).context("non-text key (utf8)")?;
     check_key_pem(&pem)?;
     Ok(pem)
 }
@@ -118,7 +122,7 @@ pub fn read_key_pem(path: &Path) -> Result<String> {
 /// (fichier scellé keystore déchiffré, clair hérité accepté).
 fn load_private_key(path: &Path) -> Result<russh::keys::PrivateKey> {
     let pem = read_key_pem(path)?;
-    russh::keys::decode_secret_key(&pem, None).with_context(|| format!("clé {}", path.display()))
+    russh::keys::decode_secret_key(&pem, None).with_context(|| format!("key {}", path.display()))
 }
 
 /// Clé privée reçue par appairage : écrite dans paired_keys/ (jamais
@@ -143,8 +147,7 @@ pub fn import_paired_key(pem: &str, name: &str) -> Result<PathBuf> {
     let dir = base_dir().join("paired_keys");
     std::fs::create_dir_all(&dir).context("paired_keys")?;
     let p = dir.join(if safe.is_empty() { "paired" } else { &safe });
-    write_secret(&p, pem.as_bytes())
-        .with_context(|| format!("écriture {}", p.display()))?;
+    write_secret(&p, pem.as_bytes()).with_context(|| format!("write {}", p.display()))?;
     Ok(p)
 }
 
@@ -195,9 +198,7 @@ impl client::Handler for Handler {
     ) -> Result<bool, Self::Error> {
         match key {
             PublicKeyOrCertificate::PublicKey { key, .. } => {
-                let fp = key
-                    .fingerprint(russh::keys::HashAlg::Sha256)
-                    .to_string();
+                let fp = key.fingerprint(russh::keys::HashAlg::Sha256).to_string();
                 if let Ok(mut g) = self.seen_fp.lock() {
                     *g = Some(fp.clone());
                 }
@@ -206,7 +207,14 @@ impl client::Handler for Handler {
                         let ok = hk.contains(&fp);
                         log(
                             if ok { Level::Info } else { Level::Warn },
-                            format!("ssh host key: {fp}{}", if ok { "" } else { " — REFUSÉE (hors pinning)" }),
+                            format!(
+                                "ssh host key: {fp}{}",
+                                if ok {
+                                    ""
+                                } else {
+                                    " — REFUSED (outside pinning)"
+                                }
+                            ),
                         );
                         Ok(ok)
                     }
@@ -225,7 +233,14 @@ impl client::Handler for Handler {
                 let pinned = self.expected_hk.is_some();
                 log(
                     if pinned { Level::Warn } else { Level::Info },
-                    format!("ssh host key: certificate{}", if pinned { " — refusé (pinning actif)" } else { "" }),
+                    format!(
+                        "ssh host key: certificate{}",
+                        if pinned {
+                            " — refused (pinning active)"
+                        } else {
+                            ""
+                        }
+                    ),
                 );
                 Ok(!pinned)
             }
@@ -243,14 +258,14 @@ impl client::Handler for Handler {
         use client::DisconnectReason;
         let desc = match &reason {
             DisconnectReason::ReceivedDisconnect(d) => format!(
-                "déconnexion annoncée par le serveur ({:?} : {})",
+                "disconnect announced by the server ({:?}: {})",
                 d.reason_code, d.message
             ),
             DisconnectReason::Error(russh::Error::KeepaliveTimeout) => {
-                "keepalive-timeout local (serveur muet aux keepalives)".into()
+                "local keepalive-timeout (server silent on keepalives)".into()
             }
             DisconnectReason::Error(russh::Error::IO(e)) => {
-                format!("erreur réseau locale ({e})")
+                format!("local network error ({e})")
             }
             DisconnectReason::Error(e) => format!("erreur session ({e})"),
         };
@@ -282,9 +297,9 @@ impl NativeGuard {
             return r;
         }
         if self.h.is_closed() {
-            "session ssh morte (sans raison capturée)".into()
+            "ssh session dead (no captured reason)".into()
         } else {
-            "canal direct-tcpip fermé — session ssh encore vivante".into()
+            "direct-tcpip channel closed — ssh session still alive".into()
         }
     }
 }
@@ -338,20 +353,19 @@ async fn connect_auth(
             .await;
         return match auth {
             Ok(r) if r.success() => Ok(h),
-            _ => bail!("clé jetable refusée — QR expiré ou appairage annulé"),
+            _ => bail!("disposable key refused — QR expired or pairing cancelled"),
         };
     }
     let kp = key.map(PathBuf::from).unwrap_or_else(key_path);
     if kp.exists() {
-        let key = load_private_key(&kp)
-            .with_context(|| format!("clé {}", kp.display()))?;
+        let key = load_private_key(&kp).with_context(|| format!("key {}", kp.display()))?;
         let auth = h
             .authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), None))
             .await;
         match auth {
             Ok(r) if r.success() => return Ok(h),
-            Ok(_) => log(Level::Warn, "clé refusée (auth partielle) — essai mot de passe"),
-            Err(e) => log(Level::Warn, format!("auth clé: {e} — essai mot de passe")),
+            Ok(_) => log(Level::Warn, "key refused (partial auth) — trying password"),
+            Err(e) => log(Level::Warn, format!("key auth: {e} — trying password")),
         }
     }
     if let Some(pw) = password.filter(|p| !p.is_empty()) {
@@ -362,9 +376,9 @@ async fn connect_auth(
         if r.success() {
             return Ok(h);
         }
-        bail!("mot de passe refusé");
+        bail!("password refused");
     }
-    bail!("auth impossible — ajoutez la clé publique de l'app dans authorized_keys du serveur");
+    bail!("auth impossible — add the app's public key to the server's authorized_keys");
 }
 
 /// `ssh host <script>` sans binaire : canal exec → stdout/stderr
@@ -463,7 +477,7 @@ pub async fn open_direct_tcpip(
     )
     .await
     .context("direct-tcpip timeout")?
-    .context("direct-tcpip — le démon écoute-t-il sur le port distant ?")?;
+    .context("direct-tcpip — is the daemon listening on the remote port?")?;
     Ok((NativeGuard { h, disc }, ch.into_stream()))
 }
 
@@ -483,7 +497,7 @@ pub async fn pair_attempt(
     label: &str,
 ) -> Result<String> {
     let kp = ensure_keypair()?;
-    let own = load_private_key(&kp).context("clé app")?;
+    let own = load_private_key(&kp).context("app key")?;
     let own_pub = own.public_key().to_openssh().unwrap_or_default();
     let own_fp = own
         .public_key()
@@ -495,7 +509,7 @@ pub async fn pair_attempt(
         bail!("pubkey app illisible");
     }
     let key = russh::keys::decode_secret_key(k_pem, None)
-        .context("clé jetable K illisible — QR incomplet ?")?;
+        .context("disposable K key unreadable — incomplete QR?")?;
     let opts = Opts {
         expected_hk: Some(Arc::new(hk)),
         key: Some(Arc::new(key)),
@@ -503,7 +517,7 @@ pub async fn pair_attempt(
     };
     let h = connect_auth(host, port, user, None, None, &opts)
         .await
-        .context("connexion K — QR expiré ou hôte injoignable")?;
+        .context("K connection — QR expired or host unreachable")?;
     let cmd = format!("agentcontrol-pair {ty} {b64} {label}");
     let (code, out, err) = exec_on(&h, &cmd, None).await?;
     let fp = out
@@ -512,7 +526,7 @@ pub async fn pair_attempt(
         .map(str::trim)
         .with_context(|| {
             format!(
-                "pair.sh a refusé (code {code}){}",
+                "pair.sh refused (code {code}){}",
                 if err.trim().is_empty() {
                     String::new()
                 } else {
@@ -521,7 +535,7 @@ pub async fn pair_attempt(
             )
         })?;
     if fp != own_fp {
-        bail!("pair-ok incohérent — la clé installée n'est pas la nôtre");
+        bail!("inconsistent pair-ok — the installed key is not ours");
     }
     Ok(fp.to_string())
 }

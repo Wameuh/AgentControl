@@ -262,7 +262,7 @@ class WsClient {
         // Même télémétrie que la fusion Tauri : silent_ms prouve le
         // transport vivant (trafic entrant récent) → le watchdog
         // distingue lenteur démon et blackhole.
-        const isTimeout = e instanceof Error && e.message === "timeout démon";
+        const isTimeout = e instanceof Error && e.message === "daemon timeout";
         return {
           [WEB_CONN]: {
             error: isTimeout ? "timeout" : String(e),
@@ -315,7 +315,7 @@ class WsClient {
     const p = new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error("timeout démon"));
+        reject(new Error("daemon timeout"));
       }, CALL_TIMEOUT);
       this.pending.set(id, {
         resolve: resolve as (v: unknown) => void,

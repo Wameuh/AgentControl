@@ -125,18 +125,12 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 restart: RestartPolicy::Never,
                 restart_sec: 0,
                 healthcheck: Healthcheck::None,
-                description: Some(
-                    "File FIFO de features partagée entre agents".into(),
-                ),
+                description: Some("Shared feature FIFO between agents".into()),
                 // Le composant expose la file : `component_query
                 // {name:"agentbacklog", query:"list"}` → items JSON.
                 queries: HashMap::from([(
                     "list".into(),
-                    vec![
-                        "agentbacklog".into(),
-                        "--list".into(),
-                        "--json".into(),
-                    ],
+                    vec!["agentbacklog".into(), "--list".into(), "--json".into()],
                 )]),
                 catalog: None,
                 params_schema: Vec::new(),
@@ -191,10 +185,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 // multi-repo (param `repos` ci-dessous) : un 0.2
                 // installé doit se voir proposer la mise à jour plutôt
                 // qu'échouer en silence sur la config rendue.
-                version_argv: Some(vec![
-                    "agent-reviewer".into(),
-                    "--version".into(),
-                ]),
+                version_argv: Some(vec!["agent-reviewer".into(), "--version".into()]),
                 min_version: Some("0.3".into()),
                 env: HashMap::new(),
                 cwd: None,
@@ -223,10 +214,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                             .into(),
                     ],
                 },
-                description: Some(
-                    "Watcher GitHub → reviews de PR en sessions du démon"
-                        .into(),
-                ),
+                description: Some("GitHub watcher → PR reviews in daemon sessions".into()),
                 queries: HashMap::from([
                     (
                         "state".into(),
@@ -264,28 +252,28 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
             params: vec![
                 ParamSpec {
                     key: "repo".into(),
-                    label: "Dépôt GitHub".into(),
+                    label: "GitHub repository".into(),
                     description: Some(
-                        "« owner/name » surveillé pour les commentaires \
-                         trigger".into(),
+                        "« owner/name » watched for trigger \
+                         comments"
+                            .into(),
                     ),
                     required: true,
                     kind: ParamKind::String,
                     default: None,
                     secret: false,
-                    validation: Some(
-                        r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$".into(),
-                    ),
+                    validation: Some(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$".into()),
                     choices: Vec::new(),
                     choice_labels: Vec::new(),
                     open_enum: false,
                 },
                 ParamSpec {
                     key: "repo_dir".into(),
-                    label: "Clone local".into(),
+                    label: "Local clone".into(),
                     description: Some(
                         "clone du dépôt — les worktrees de review y \
-                         sont créés (origin → GitHub)".into(),
+                         sont créés (origin → GitHub)"
+                            .into(),
                     ),
                     required: true,
                     kind: ParamKind::Path,
@@ -298,16 +286,15 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 },
                 ParamSpec {
                     key: "worktree_root".into(),
-                    label: "Racine des worktrees".into(),
+                    label: "Worktrees root".into(),
                     description: Some(
-                        "un worktree frais par review, retiré en fin \
-                         de passe".into(),
+                        "a fresh worktree per review, removed at the \
+                         end of the pass"
+                            .into(),
                     ),
                     required: false,
                     kind: ParamKind::Path,
-                    default: Some(
-                        "~/.local/state/agentreviewer/worktrees".into(),
-                    ),
+                    default: Some("~/.local/state/agentreviewer/worktrees".into()),
                     secret: false,
                     validation: None,
                     choices: Vec::new(),
@@ -316,16 +303,16 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 },
                 ParamSpec {
                     key: "repos".into(),
-                    label: "Dépôts supplémentaires".into(),
+                    label: "Additional repositories".into(),
                     description: Some(
-                        "JSON — liste d'objets {repo, repo_dir, \
+                        "JSON — list of objects {repo, repo_dir, \
                          worktree_root?, trigger?, group?, \
-                         max_parallel?, agent?, …} : chaque entrée \
-                         ajoute un dépôt surveillé en plus du dépôt \
-                         principal (multi-repo, agent-reviewer ≥ 0.3 — \
-                         toute clé globale y est overridable ; `~` est \
-                         expansé par le watcher, pas ici). Ex. \
-                         [{\"repo\": \"o/r\", \"repo_dir\": \"/chemin/clone\"}]"
+                         max_parallel?, agent?, …}: each entry adds a \
+                         watched repo on top of the main one (multi-repo, \
+                         agent-reviewer ≥ 0.3 — any global key is \
+                         overridable there; `~` is expanded by the watcher, \
+                         not here). E.g. \
+                         [{\"repo\": \"o/r\", \"repo_dir\": \"/path/clone\"}]"
                             .into(),
                     ),
                     required: false,
@@ -339,10 +326,8 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 },
                 ParamSpec {
                     key: "trigger".into(),
-                    label: "Commentaire trigger".into(),
-                    description: Some(
-                        "commentaire nu demandant une review".into(),
-                    ),
+                    label: "Trigger comment".into(),
+                    description: Some("bare comment requesting a review".into()),
                     required: false,
                     kind: ParamKind::String,
                     default: Some("/mr review".into()),
@@ -354,10 +339,8 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 },
                 ParamSpec {
                     key: "group".into(),
-                    label: "Groupe des sessions".into(),
-                    description: Some(
-                        "groupe sidebar affecté aux reviews".into(),
-                    ),
+                    label: "Session group".into(),
+                    description: Some("sidebar group assigned to reviews".into()),
                     required: false,
                     kind: ParamKind::String,
                     default: Some("AgentReviewer".into()),
@@ -369,7 +352,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 },
                 ParamSpec {
                     key: "max_parallel".into(),
-                    label: "Reviews en parallèle".into(),
+                    label: "Parallel reviews".into(),
                     description: None,
                     required: false,
                     kind: ParamKind::Int,
@@ -382,11 +365,8 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 },
                 ParamSpec {
                     key: "review_timeout".into(),
-                    label: "Timeout par review".into(),
-                    description: Some(
-                        "durée max d'une review (« 3h », « 90min »…)"
-                            .into(),
-                    ),
+                    label: "Per-review timeout".into(),
+                    description: Some("max review duration (« 3h », « 90min »…)".into()),
                     required: false,
                     kind: ParamKind::Duration,
                     default: Some("3h".into()),
@@ -398,10 +378,11 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 },
                 ParamSpec {
                     key: "keep_sessions".into(),
-                    label: "Conserver les sessions".into(),
+                    label: "Keep sessions".into(),
                     description: Some(
-                        "garde le journal après la review — sinon \
-                         supprimé (le verdict vit sur GitHub)".into(),
+                        "keeps the journal after the review — otherwise \
+                         deleted (the verdict lives on GitHub)"
+                            .into(),
                     ),
                     required: false,
                     kind: ParamKind::Bool,
@@ -414,10 +395,11 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 },
                 ParamSpec {
                     key: "mode".into(),
-                    label: "Backend de spawn".into(),
+                    label: "Spawn backend".into(),
                     description: Some(
-                        "vide = auto (démon si un endpoint est \
-                         configuré, systemd sinon)".into(),
+                        "empty = auto (daemon if an endpoint is \
+                         configured, systemd otherwise)"
+                            .into(),
                     ),
                     required: false,
                     kind: ParamKind::Enum,
@@ -430,10 +412,11 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 },
                 ParamSpec {
                     key: "daemon".into(),
-                    label: "Endpoint démon".into(),
+                    label: "Daemon endpoint".into(),
                     description: Some(
                         "« unix », « unix:/path », « tcp:host:port » — \
-                         vide = env AGENTCONTROL_* injectée".into(),
+                         empty = injected AGENTCONTROL_* env"
+                            .into(),
                     ),
                     required: false,
                     kind: ParamKind::String,
@@ -446,10 +429,8 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 },
                 ParamSpec {
                     key: "agent.command".into(),
-                    label: "Agent de review".into(),
-                    description: Some(
-                        "exécutable/agent lancé pour la review".into(),
-                    ),
+                    label: "Review agent".into(),
+                    description: Some("executable/agent launched for the review".into()),
                     required: false,
                     kind: ParamKind::String,
                     default: Some("devin".into()),
@@ -464,7 +445,8 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                     label: "Profil agent".into(),
                     description: Some(
                         "profil du démon — vide = basename de \
-                         agent.command".into(),
+                         agent.command"
+                            .into(),
                     ),
                     required: false,
                     kind: ParamKind::String,
@@ -477,10 +459,8 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 },
                 ParamSpec {
                     key: "agent.model".into(),
-                    label: "Modèle".into(),
-                    description: Some(
-                        "champ libre — modèle passé à l'agent".into(),
-                    ),
+                    label: "Model".into(),
+                    description: Some("free-form — model passed to the agent".into()),
                     required: false,
                     kind: ParamKind::String,
                     default: Some("swe-2-max".into()),
@@ -605,7 +585,7 @@ pub(super) fn resync(spec: &mut ComponentSpec, entry: &CatalogEntry) {
             .collect();
         for k in orphans {
             warn!(
-                "composant « {} » : param « {k} » retiré du catalogue — valeur purgée",
+                "component « {} »: param « {k} » removed from the catalog — value purged",
                 spec.name
             );
             spec.params.remove(&k);
@@ -618,8 +598,8 @@ pub(super) fn resync(spec: &mut ComponentSpec, entry: &CatalogEntry) {
             .is_some_and(|v| !v.is_empty() && super::render::validate_value(p, v).is_err());
         if bad {
             warn!(
-                "composant « {} » : param « {} » rejeté par le schéma \
-                 catalogue — valeur retirée (à ressaisir via comp set)",
+                "component « {} »: param « {} » rejected by the catalog \
+                 schema — value removed (re-enter via comp set)",
                 spec.name, p.key
             );
             spec.params.remove(&p.key);
@@ -649,7 +629,7 @@ pub(super) fn resync(spec: &mut ComponentSpec, entry: &CatalogEntry) {
     }
     if serde_json::to_value(&*spec).ok() != before {
         info!(
-            "composant « {} » : spec resynchronisée depuis l'entrée catalogue « {} »",
+            "component « {} »: spec resynced from catalog entry « {} »",
             spec.name, entry.name
         );
     }
@@ -752,8 +732,7 @@ impl Components {
         name: &str,
         params: Option<HashMap<String, String>>,
     ) -> Result<Value> {
-        let entry = entry_named(name)
-            .with_context(|| format!("entrée catalogue inconnue: {name}"))?;
+        let entry = entry_named(name).with_context(|| format!("unknown catalog entry: {name}"))?;
         let mut values: HashMap<String, String> = HashMap::new();
         if let Some(provided) = params {
             for (k, v) in provided {
@@ -761,9 +740,7 @@ impl Components {
                     .params
                     .iter()
                     .find(|p| p.key == k)
-                    .with_context(|| {
-                        format!("paramètre « {k} » non déclaré pour « {name} »")
-                    })?;
+                    .with_context(|| format!("undeclared parameter « {k} » for « {name} »"))?;
                 if !v.is_empty() {
                     values.insert(k, super::render::validate_value(ps, &v)?);
                 }
@@ -771,7 +748,7 @@ impl Components {
         }
         let mut notes: Vec<String> = Vec::new();
         for (i, step) in entry.recipe.iter().enumerate() {
-            let step_ctx = format!("recette « {name} » étape {}/{}", i + 1, entry.recipe.len());
+            let step_ctx = format!("recipe « {name} » step {}/{}", i + 1, entry.recipe.len());
             match step {
                 RecipeStep::Run { argv } => {
                     run_step(argv).await.with_context(|| step_ctx.clone())?;
@@ -785,7 +762,7 @@ impl Components {
                     let p = expand_home(path);
                     anyhow::ensure!(
                         p.exists(),
-                        "{step_ctx} — {hint} (fichier attendu : {})",
+                        "{step_ctx} — {hint} (expected file: {})",
                         p.display()
                     );
                 }
@@ -839,7 +816,10 @@ struct UpstreamOut {
 /// que `command_available` pour les profils agents) ou `path` présent.
 fn detected(d: &CatalogDetect) -> bool {
     d.bin.as_deref().map(command_available).unwrap_or(false)
-        || d.path.as_deref().map(|p| expand_home(p).is_file()).unwrap_or(false)
+        || d.path
+            .as_deref()
+            .map(|p| expand_home(p).is_file())
+            .unwrap_or(false)
 }
 
 /// Sonde de version : `version_argv` de la spec suggérée si déclaré,
@@ -927,13 +907,21 @@ fn fetch_upstream(repo: &str) -> Option<Upstream> {
     if let Some(v) = get(format!("{base}/releases/latest")) {
         answered = true;
         if let Some((tag, notes)) = release(&v) {
-            return Some(Upstream { tag: Some(tag), notes, at: Instant::now() });
+            return Some(Upstream {
+                tag: Some(tag),
+                notes,
+                at: Instant::now(),
+            });
         }
     }
     if let Some(v) = get(format!("{base}/releases?per_page=1")) {
         answered = true;
         if let Some((tag, notes)) = v.as_array().and_then(|a| a.first()).and_then(release) {
-            return Some(Upstream { tag: Some(tag), notes, at: Instant::now() });
+            return Some(Upstream {
+                tag: Some(tag),
+                notes,
+                at: Instant::now(),
+            });
         }
     }
     if let Some(v) = get(format!("{base}/tags?per_page=1")) {
@@ -967,7 +955,7 @@ fn fetch_upstream(repo: &str) -> Option<Upstream> {
 /// dans les recettes. Échec → Err avec code + queue de sortie
 /// (stderr sinon stdout), bornée `STEP_TAIL`.
 async fn run_step(argv: &[String]) -> Result<()> {
-    let argv0 = argv.first().context("run: argv vide")?;
+    let argv0 = argv.first().context("run: empty argv")?;
     let argv0 = expand_home_str(argv0);
     let args: Vec<String> = argv[1..].iter().map(|a| expand_home_str(a)).collect();
     let out = tokio::time::timeout(
@@ -979,7 +967,7 @@ async fn run_step(argv: &[String]) -> Result<()> {
     )
     .await
     .with_context(|| format!("run `{argv0}` : timeout {}s", RUN_TIMEOUT.as_secs()))?
-    .with_context(|| format!("run `{argv0}` : spawn impossible"))?;
+    .with_context(|| format!("run `{argv0}`: spawn failed"))?;
     if !out.status.success() {
         let tail = tail_str(&out.stderr, &out.stdout);
         anyhow::bail!("run `{argv0}` → {:?} : {}", out.status.code(), tail);
@@ -995,7 +983,7 @@ async fn run_step(argv: &[String]) -> Result<()> {
 /// `resolve_in_cwd_create`. Écriture atomique `.part` + rename.
 /// `pub(super)` : réutilisée par le rendu de config (`render.rs`).
 pub(super) async fn write_home_file(path: &str, content: &str) -> Result<()> {
-    let home = home_dir().context("HOME du démon absent")?;
+    let home = home_dir().context("daemon HOME unset")?;
     let home = std::fs::canonicalize(&home).unwrap_or(home);
     // `~`/relatif ancré sur le HOME *canonicalisé* — sinon un HOME
     // symlinké ferait échouer la garde lexicale à tort.
@@ -1017,25 +1005,25 @@ pub(super) async fn write_home_file(path: &str, content: &str) -> Result<()> {
     anyhow::ensure!(
         !p.components()
             .any(|c| matches!(c, std::path::Component::ParentDir)),
-        "« .. » refusé dans write_file : {}",
+        "« .. » refused in write_file: {}",
         p.display()
     );
     anyhow::ensure!(
         p.starts_with(&home),
-        "chemin hors HOME refusé : {}",
+        "path outside HOME refused: {}",
         p.display()
     );
-    let parent = p.parent().context("chemin sans parent")?;
+    let parent = p.parent().context("path without parent")?;
     tokio::fs::create_dir_all(parent).await?;
     let base = std::fs::canonicalize(parent)
-        .with_context(|| format!("parent inexistant {}", parent.display()))?;
+        .with_context(|| format!("missing parent {}", parent.display()))?;
     // Sortie par symlink : le parent résolu doit rester sous HOME.
     anyhow::ensure!(
         base.starts_with(&home),
-        "chemin hors HOME refusé (symlink) : {}",
+        "path outside HOME refused (symlink): {}",
         p.display()
     );
-    let leaf = p.file_name().context("chemin sans nom de fichier")?;
+    let leaf = p.file_name().context("path without file name")?;
     let dst = base.join(leaf);
     let tmp = base.join(format!(".{}.part", leaf.to_string_lossy()));
     tokio::fs::write(&tmp, content).await?;
@@ -1050,10 +1038,7 @@ pub(super) async fn write_home_file(path: &str, content: &str) -> Result<()> {
 /// schéma de params, de la cible de rendu et de l'origine catalogue
 /// de l'entrée — elle est alors auto-porteuse (validation `comp set`,
 /// re-rendu) sans reconsulter l'entrée.
-fn materialize_spec(
-    e: &CatalogEntry,
-    params: &HashMap<String, String>,
-) -> ComponentSpec {
+fn materialize_spec(e: &CatalogEntry, params: &HashMap<String, String>) -> ComponentSpec {
     let mut s = e.suggested_spec.clone();
     s.catalog = Some(e.name.clone());
     s.params_schema = e.params.clone();
@@ -1087,7 +1072,7 @@ pub(super) fn expand_home_str(path: &str) -> String {
 fn home_dir() -> Result<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
-        .context("HOME absent de l'environnement du démon")
+        .context("HOME missing from the daemon environment")
 }
 
 #[cfg(test)]
@@ -1101,12 +1086,12 @@ mod tests {
     fn les_specs_du_catalogue_sont_upsertables() {
         for e in CATALOG.iter() {
             super::super::check_editable(&e.suggested_spec)
-                .unwrap_or_else(|err| panic!("spec catalogue « {} » : {err}", e.name));
+                .unwrap_or_else(|err| panic!("catalog spec « {} »: {err}", e.name));
         }
         let ar = CATALOG
             .iter()
             .find(|e| e.name == "agentreviewer")
-            .expect("entrée agentreviewer absente du catalogue");
+            .expect("agentreviewer entry missing from the catalog");
         assert_eq!(ar.suggested_spec.kind, ComponentKind::Process);
         assert!(!ar.suggested_spec.command.is_empty());
         // Le `process` managé découvre le démon via l'env injectée —
@@ -1138,7 +1123,7 @@ mod tests {
         spec.version_argv = None;
         spec.min_version = Some("9.9".into());
         spec.autostart = true;
-        spec.description = Some("ma description".into());
+        spec.description = Some("my description".into());
         spec.params = HashMap::from([
             ("repo".to_string(), "Wameuh/AgentControl".to_string()),
             ("zombie".to_string(), "x".to_string()),
@@ -1156,7 +1141,7 @@ mod tests {
         assert_eq!(spec.min_version, entry.suggested_spec.min_version);
         // Choix utilisateur préservés ; zombie + invalide purgés.
         assert!(spec.autostart);
-        assert_eq!(spec.description.as_deref(), Some("ma description"));
+        assert_eq!(spec.description.as_deref(), Some("my description"));
         assert_eq!(spec.params["repo"], "Wameuh/AgentControl");
         assert!(!spec.params.contains_key("zombie"));
         assert!(!spec.params.contains_key("max_parallel"));
@@ -1209,11 +1194,11 @@ mod tests {
             let mut rest = render.template.as_str();
             while let Some(s) = rest.find("{{") {
                 let after = &rest[s + 2..];
-                let end = after.find("}}").expect("placeholder {{ non fermé");
+                let end = after.find("}}").expect("unclosed {{ placeholder");
                 let key = after[..end].trim();
                 assert!(
                     e.params.iter().any(|p| p.key == key),
-                    "entrée « {} » : placeholder {{{{{key}}}}} hors schéma",
+                    "entry « {} »: placeholder {{{{{key}}}}} outside the schema",
                     e.name
                 );
                 rest = &after[end + 2..];

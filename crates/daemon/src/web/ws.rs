@@ -86,7 +86,7 @@ pub async fn upgrade_and_serve(
         let r = d.serve_conn(tokio::io::join(srv_in, srv_out)).await;
         let secs = t0.elapsed().as_secs();
         match &r {
-            Ok(()) => tracing::info!("conn ws {peer} close ({secs}s) — client parti"),
+            Ok(()) => tracing::info!("conn ws {peer} closed ({secs}s) — client gone"),
             Err(e) => tracing::info!("conn ws {peer} close ({secs}s): {e:#}"),
         }
         r
@@ -135,16 +135,16 @@ async fn read_frames(
         }
         if !masked {
             let _ = out.try_send((0x8, close_payload(1002)));
-            anyhow::bail!("frame non masquée (RFC : client → serveur masque toujours)");
+            anyhow::bail!("unmasked frame (RFC: client → server always masks)");
         }
         // Frames de contrôle : payload ≤ 125 octets, jamais fragmentées.
         if op >= 0x8 && (len > 125 || !fin) {
             let _ = out.try_send((0x8, close_payload(1002)));
-            anyhow::bail!("frame de contrôle invalide");
+            anyhow::bail!("invalid control frame");
         }
         if len > FRAME_MAX {
             let _ = out.try_send((0x8, close_payload(1009)));
-            anyhow::bail!("frame trop grande ({len} o)");
+            anyhow::bail!("frame too large ({len} bytes)");
         }
         let mut mask = [0u8; 4];
         rd.read_exact(&mut mask).await?;
@@ -159,7 +159,7 @@ async fn read_frames(
                 msg.extend_from_slice(&payload);
                 if msg.len() > MSG_MAX {
                     let _ = out.try_send((0x8, close_payload(1009)));
-                    anyhow::bail!("message trop grand (> {MSG_MAX} o)");
+                    anyhow::bail!("message too large (> {MSG_MAX} bytes)");
                 }
                 if fin {
                     // Une ligne JSON par message — le client n'envoie
@@ -179,7 +179,7 @@ async fn read_frames(
             0xA => {}
             _ => {
                 let _ = out.try_send((0x8, close_payload(1002)));
-                anyhow::bail!("opcode inconnu {op:#x}");
+                anyhow::bail!("unknown opcode {op:#x}");
             }
         }
     }

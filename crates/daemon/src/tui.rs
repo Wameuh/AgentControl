@@ -37,9 +37,9 @@ pub async fn fork_via_tui(bin: &str, cwd: &str, native_id: &str) -> Result<Strin
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
         .spawn()
-        .context("spawn script(1) — util-linux requis pour le fork TUI")?;
-    let mut stdin = child.stdin.take().context("stdin du PTY")?;
-    let mut stdout = child.stdout.take().context("stdout du PTY")?;
+        .context("spawn script(1) — util-linux required for the TUI fork")?;
+    let mut stdin = child.stdin.take().context("PTY stdin")?;
+    let mut stdout = child.stdout.take().context("PTY stdout")?;
 
     let mut raw: Vec<u8> = Vec::new();
     // Sortie reçue APRÈS l'envoi de /fork — c'est là seulement qu'on cherche
@@ -54,14 +54,14 @@ pub async fn fork_via_tui(bin: &str, cwd: &str, native_id: &str) -> Result<Strin
     let result = loop {
         let now = Instant::now();
         if now >= deadline {
-            break Err(anyhow!("timeout du fork TUI"));
+            break Err(anyhow!("TUI fork timeout"));
         }
         if sent && now.duration_since(sent_at) > FORK_REPLY_TIMEOUT {
-            break Err(anyhow!("pas de réponse au /fork (timeout)"));
+            break Err(anyhow!("no /fork response (timeout)"));
         }
         let slice = (deadline - now).min(Duration::from_millis(400));
         match tokio::time::timeout(slice, stdout.read(&mut buf)).await {
-            Ok(Ok(0)) => break Err(anyhow!("le TUI s'est terminé sans fork")),
+            Ok(Ok(0)) => break Err(anyhow!("the TUI exited without forking")),
             Ok(Ok(n)) => {
                 raw.extend_from_slice(&buf[..n]);
                 if sent {
@@ -74,9 +74,7 @@ pub async fn fork_via_tui(bin: &str, cwd: &str, native_id: &str) -> Result<Strin
 
         // Prompt prêt : le TUI émet OSC 133;A à chaque cycle de saisie.
         // (fallback 25 s si le marqueur n'arrive jamais.)
-        if !sent
-            && (memmem(&raw, b"133;A") || now.duration_since(t0) > PROMPT_FALLBACK)
-        {
+        if !sent && (memmem(&raw, b"133;A") || now.duration_since(t0) > PROMPT_FALLBACK) {
             for b in b"/fork" {
                 stdin.write_all(&[*b]).await?;
                 tokio::time::sleep(Duration::from_millis(60)).await;
@@ -105,14 +103,14 @@ pub async fn fork_via_tui(bin: &str, cwd: &str, native_id: &str) -> Result<Strin
 /// Erreur de fork reconnaissable dans la sortie TUI nettoyée.
 fn fork_error(clean: &str) -> Option<&'static str> {
     [
-        ("Failed to fork", "le TUI a refusé le fork"),
+        ("Failed to fork", "the TUI refused the fork"),
         (
             "already open in another process",
-            "session native verrouillée par un autre processus",
+            "native session locked by another process",
         ),
         (
             "Unknown command: /fork",
-            "cette version de l'agent ne connaît pas /fork",
+            "this agent version does not know /fork",
         ),
     ]
     .iter()
@@ -126,10 +124,8 @@ fn find_forked_id(clean: &str) -> Option<String> {
     let rest = &clean[start..];
     let end = rest.find(" to launch forked")?;
     let id = rest[..end].trim();
-    (!id.is_empty()
-        && id.len() < 64
-        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
-    .then(|| id.to_string())
+    (!id.is_empty() && id.len() < 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        .then(|| id.to_string())
 }
 
 /// `needle` dans `hay` (memmem minimal, pas de dépendance).
@@ -189,10 +185,7 @@ mod tests {
         let clean = " ✓ Session forked\r\n   Run devin -r elite-anise to launch forked session\r\n";
         assert_eq!(find_forked_id(clean).as_deref(), Some("elite-anise"));
         assert_eq!(find_forked_id("no fork here"), None);
-        assert_eq!(
-            find_forked_id("devin -r bogus id! to launch forked"),
-            None
-        );
+        assert_eq!(find_forked_id("devin -r bogus id! to launch forked"), None);
     }
 
     #[test]

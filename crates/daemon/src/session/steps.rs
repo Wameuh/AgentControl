@@ -48,13 +48,13 @@ impl Session {
     pub fn set_steps(&self, mut steps: Vec<SessionStep>) -> Result<Vec<SessionStep>> {
         if steps.len() > STEPS_MAX {
             anyhow::bail!(
-                "trop d'étapes : {} > {STEPS_MAX} — fusionne ou abandonne les étapes soldées",
+                "too many steps: {} > {STEPS_MAX} — merge or drop settled steps",
                 steps.len()
             );
         }
         for s in &mut steps {
             s.name = s.name.trim().to_string();
-            anyhow::ensure!(!s.name.is_empty(), "étape sans nom");
+            anyhow::ensure!(!s.name.is_empty(), "step without a name");
             if s.name.chars().count() > STEP_NAME_MAX {
                 s.name = s.name.chars().take(STEP_NAME_MAX).collect();
             }

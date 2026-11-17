@@ -137,7 +137,12 @@ impl Journal {
 
     /// Les `limit` derniers événements avec seq < before_seq
     /// (before_seq None/0 → depuis la fin).
-    pub fn read_page(&self, dir: &Path, before_seq: Option<u64>, limit: usize) -> Result<Vec<Event>> {
+    pub fn read_page(
+        &self,
+        dir: &Path,
+        before_seq: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<Event>> {
         let before = before_seq.filter(|b| *b > 0).unwrap_or(u64::MAX);
         let (start_off, n) = {
             let g = self.inner.lock().unwrap();
@@ -152,7 +157,11 @@ impl Journal {
             // nb d'events avec seq < before
             let n = g.offsets.partition_point(|(s, _)| *s < before);
             let start = n.saturating_sub(limit);
-            let off = if start < n { g.offsets[start].1 } else { return Ok(vec![]) };
+            let off = if start < n {
+                g.offsets[start].1
+            } else {
+                return Ok(vec![]);
+            };
             (off, n - start)
         };
         Self::read_from(dir, start_off, before, n)
@@ -471,7 +480,7 @@ impl Journal {
         g.offsets = new_offsets;
         g.end = pos;
         g.file = OpenOptions::new().append(true).open(&path)?;
-        info!("journal compacté : -{removed} events, {len} -> {pos} octets");
+        info!("journal compacted: -{removed} events, {len} -> {pos} bytes");
         Ok(true)
     }
 }
@@ -483,7 +492,13 @@ pub fn write_blob(dir: &Path, name: &str, data: &[u8]) -> Result<String> {
     // Sanitize : pas de traversal
     let safe: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let path = bdir.join(&safe);
     let mut f = OpenOptions::new().create(true).append(true).open(&path)?;
@@ -494,7 +509,8 @@ pub fn write_blob(dir: &Path, name: &str, data: &[u8]) -> Result<String> {
 /// Lit une tranche de blob [offset, offset+limit). Retourne (data, total_size).
 pub fn read_blob(dir: &Path, rel: &str, offset: u64, limit: u64) -> Result<(Vec<u8>, u64)> {
     let path = dir.join(rel);
-    let meta = std::fs::metadata(&path).with_context(|| format!("blob absent ou purgé: {rel}"))?;
+    let meta =
+        std::fs::metadata(&path).with_context(|| format!("missing or purged blob: {rel}"))?;
     let total = meta.len();
     let mut f = File::open(&path)?;
     f.seek(SeekFrom::Start(offset))?;
@@ -518,7 +534,11 @@ pub fn purge_blobs(dir: &Path, max_bytes: u64) -> Result<usize> {
         if let Ok(m) = e.metadata() {
             if m.is_file() {
                 total += m.len();
-                files.push((m.len(), m.modified().unwrap_or(std::time::UNIX_EPOCH), e.path()));
+                files.push((
+                    m.len(),
+                    m.modified().unwrap_or(std::time::UNIX_EPOCH),
+                    e.path(),
+                ));
             }
         }
     }
@@ -548,11 +568,8 @@ mod tests {
     use super::*;
 
     fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "ac-journal-test-{}-{}",
-            std::process::id(),
-            tag
-        ));
+        let d =
+            std::env::temp_dir().join(format!("ac-journal-test-{}-{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -561,7 +578,10 @@ mod tests {
     fn fill(dir: &Path, texts: &[&str]) -> Journal {
         let j = Journal::open(dir).unwrap();
         for t in texts {
-            j.append(EventKind::AgentText { text: t.to_string() }).unwrap();
+            j.append(EventKind::AgentText {
+                text: t.to_string(),
+            })
+            .unwrap();
         }
         j
     }
@@ -604,10 +624,15 @@ mod tests {
         // post [Backlog] → le post est le premier utile.
         let dir = tmpdir("fp-svc");
         let j = Journal::open(&dir).unwrap();
-        j.append(EventKind::System { text: "créée par svc".into() }).unwrap();
-        j.append(um("MISSION boilerplate", Some(svc), true)).unwrap();
+        j.append(EventKind::System {
+            text: "créée par svc".into(),
+        })
+        .unwrap();
+        j.append(um("MISSION boilerplate", Some(svc), true))
+            .unwrap();
         j.append(EventKind::AgentText { text: "…".into() }).unwrap();
-        j.append(um("[Backlog] item #105 — bug", Some(svc), false)).unwrap();
+        j.append(um("[Backlog] item #105 — bug", Some(svc), false))
+            .unwrap();
         let t = found_text(j.first_post(&dir, Some(svc)).unwrap());
         assert!(t.contains("#105"), "{t}");
 
@@ -617,8 +642,12 @@ mod tests {
         // Session service avec SEUL le prompt → Empty, pas le boilerplate.
         let dir = tmpdir("fp-svc-empty");
         let j = Journal::open(&dir).unwrap();
-        j.append(EventKind::System { text: "créée".into() }).unwrap();
-        j.append(um("MISSION boilerplate", Some(svc), true)).unwrap();
+        j.append(EventKind::System {
+            text: "créée".into(),
+        })
+        .unwrap();
+        j.append(um("MISSION boilerplate", Some(svc), true))
+            .unwrap();
         j.append(EventKind::AgentText { text: "…".into() }).unwrap();
         assert!(matches!(
             j.first_post(&dir, Some(svc)).unwrap(),
@@ -654,12 +683,11 @@ mod tests {
         // porte pas l'origin de CELLE-CI).
         let dir = tmpdir("fp-foreign");
         let j = Journal::open(&dir).unwrap();
-        j.append(um("nudge", Some("component:autre"), false)).unwrap();
-        j.append(um("[Backlog] item #9 — x", Some(svc), false)).unwrap();
-        assert_eq!(
-            found_text(j.first_post(&dir, Some(svc)).unwrap()),
-            "nudge"
-        );
+        j.append(um("nudge", Some("component:autre"), false))
+            .unwrap();
+        j.append(um("[Backlog] item #9 — x", Some(svc), false))
+            .unwrap();
+        assert_eq!(found_text(j.first_post(&dir, Some(svc)).unwrap()), "nudge");
 
         // Tête coupée par la compaction (premier seq != 1) → Truncated,
         // même pour une session service.

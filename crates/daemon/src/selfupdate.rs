@@ -36,7 +36,7 @@ pub fn self_update(version: &str) -> Result<Value> {
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
-        bail!("update déjà en cours");
+        bail!("update already in progress");
     }
     let _guard = UpdateGuard;
 
@@ -53,7 +53,7 @@ pub fn self_update(version: &str) -> Result<Value> {
     // `../` traverserait vers un asset arbitraire (tout client du
     // socket peut appeler, agents et listener TCP sans auth compris).
     if !valid_version(&ver) {
-        bail!("version cible invalide (semver attendu, ex. \"0.5.0\")");
+        bail!("invalid target version (semver expected, e.g. \"0.5.0\")");
     }
     // No-op sur le chemin `latest` quand la cible n'est pas plus
     // récente que le binaire courant : un branch build (ex. 0.10.0
@@ -72,7 +72,7 @@ pub fn self_update(version: &str) -> Result<Value> {
     let arch = match std::env::consts::ARCH {
         "x86_64" => "x86_64",
         "aarch64" => "aarch64",
-        a => bail!("arch non supportée: {a}"),
+        a => bail!("unsupported arch: {a}"),
     };
     let exe = std::env::current_exe().context("current_exe")?;
     // Après un update non redémarré, /proc/self/exe pointe l'inode
@@ -80,18 +80,17 @@ pub fn self_update(version: &str) -> Result<Value> {
     // un fichier littéralement " (deleted)" → le nom réel ne serait
     // jamais recréé, prochain démarrage cassé.
     if !exe.exists() {
-        bail!("binaire courant déjà remplacé — redémarrer le démon avant un nouvel update");
+        bail!("current binary already replaced — restart the daemon before a new update");
     }
     let dir = exe
         .parent()
-        .context("binaire sans dossier parent")?
+        .context("binary has no parent dir")?
         .to_path_buf();
     // Le rename atomique exige l'écriture sur le DOSSIER (pas le
     // fichier) — un binaire installé par image/système (/usr/local/bin
     // root) refuse ici plutôt qu'à moitié.
-    probe_dir_writable(&dir).with_context(|| {
-        format!("binaire non inscriptible ({}) — géré par le système ?", exe.display())
-    })?;
+    probe_dir_writable(&dir)
+        .with_context(|| format!("binary not writable ({}) — system-managed?", exe.display()))?;
 
     let url = format!(
         "https://github.com/{REPO}/releases/download/v{ver}/agentcontrol-server-{arch}-linux.tar.gz"
@@ -99,9 +98,7 @@ pub fn self_update(version: &str) -> Result<Value> {
     let tgz = match http_get(&url) {
         Ok(b) => b,
         Err(HttpError::Status(404)) => bail!("{}", release_not_found(&ver)),
-        Err(e) => {
-            return Err(anyhow::Error::from(e)).with_context(|| format!("téléchargement {url}"))
-        }
+        Err(e) => return Err(anyhow::Error::from(e)).with_context(|| format!("downloading {url}")),
     };
     let staging = dir.join(format!(".ac-upd-{}", std::process::id()));
     std::fs::create_dir_all(&staging).context("staging")?;
@@ -210,7 +207,7 @@ fn gh_api(path: &str) -> Result<Value> {
         .call()
         .with_context(|| format!("GET {url}"))?;
     serde_json::from_reader(resp.into_reader().take(8 * 1024 * 1024))
-        .context("décodage JSON GitHub")
+        .context("decoding GitHub JSON")
 }
 
 /// Dernière release publiée : `releases/latest` d'abord — la release
@@ -221,7 +218,9 @@ fn gh_api(path: &str) -> Result<Value> {
 /// en passant son tag explicitement).
 fn latest_release() -> Result<String> {
     if let Ok(v) = gh_api("releases/latest") {
-        if let Some(t) = v["tag_name"].as_str().map(|t| t.trim().trim_start_matches('v'))
+        if let Some(t) = v["tag_name"]
+            .as_str()
+            .map(|t| t.trim().trim_start_matches('v'))
         {
             if valid_version(t) {
                 return Ok(t.to_string());
@@ -235,7 +234,7 @@ fn latest_release() -> Result<String> {
     let mut best_stable = String::new();
     for page in 1..=3 {
         let rels = gh_api(&format!("releases?per_page=100&page={page}"))?;
-        let arr = rels.as_array().context("réponse releases inattendue")?;
+        let arr = rels.as_array().context("unexpected releases response")?;
         if arr.is_empty() {
             break;
         }
@@ -250,8 +249,7 @@ fn latest_release() -> Result<String> {
             if !valid_version(v) {
                 continue;
             }
-            if best_any.is_empty() || semver_cmp(v, &best_any) == std::cmp::Ordering::Greater
-            {
+            if best_any.is_empty() || semver_cmp(v, &best_any) == std::cmp::Ordering::Greater {
                 best_any = v.to_string();
             }
             if !r["prerelease"].as_bool().unwrap_or(false)
@@ -271,7 +269,7 @@ fn latest_release() -> Result<String> {
         best_stable
     };
     if best.is_empty() {
-        bail!("aucune release publiée trouvée pour {REPO}");
+        bail!("no published release found for {REPO}");
     }
     Ok(best)
 }
@@ -279,7 +277,7 @@ fn latest_release() -> Result<String> {
 /// Message d'erreur 404 orienté utilisateur : la release demandée
 /// n'existe pas — suggère un tag existant et liste les récents.
 fn release_not_found(ver: &str) -> String {
-    let hint = "préciser un tag existant, ex. acctl daemon-update vX.Y.Z";
+    let hint = "specify an existing tag, e.g. acctl daemon-update vX.Y.Z";
     match gh_api("releases?per_page=100") {
         Ok(rels) => {
             let tags: Vec<&str> = rels
@@ -296,7 +294,7 @@ fn release_not_found(ver: &str) -> String {
             } else {
                 let ex = tags[0];
                 format!(
-                    "release v{ver} introuvable — préciser un tag existant, \
+                    "release v{ver} not found — specify an existing tag, \
                      ex. acctl daemon-update {ex} ; tags : {}",
                     tags.join(", ")
                 )
@@ -324,7 +322,11 @@ fn semver_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     let (an, ap) = parse(a);
     let (bn, bp) = parse(b);
     for i in 0..3 {
-        let d = an.get(i).copied().unwrap_or(0).cmp(&bn.get(i).copied().unwrap_or(0));
+        let d = an
+            .get(i)
+            .copied()
+            .unwrap_or(0)
+            .cmp(&bn.get(i).copied().unwrap_or(0));
         if d != Equal {
             return d;
         }
@@ -362,13 +364,13 @@ fn swap_binaries(tgz: &[u8], staging: &Path, dir: &Path, exe: &Path) -> Result<(
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(tgz));
     archive
         .unpack(staging)
-        .context("extraction de l'archive release")?;
+        .context("extracting release archive")?;
 
     for name in ["agentcontrol-daemon", "acctl"] {
         let src = staging.join(name);
         if !src.is_file() {
             if name == "agentcontrol-daemon" {
-                bail!("{name} absent de l'archive release");
+                bail!("{name} missing from the release archive");
             }
             continue;
         }
@@ -383,12 +385,12 @@ fn swap_binaries(tgz: &[u8], staging: &Path, dir: &Path, exe: &Path) -> Result<(
         }
         let staged = stage_executable(&src, &dir, name)?;
         if let Err(e) = std::fs::rename(&staged, &target)
-            .with_context(|| format!("remplacement de {}", target.display()))
+            .with_context(|| format!("replacing {}", target.display()))
         {
             let _ = std::fs::remove_file(&staged);
             return Err(e);
         }
-        tracing::info!("self-update: {} remplacé", target.display());
+        tracing::info!("self-update: {} replaced", target.display());
     }
     Ok(())
 }

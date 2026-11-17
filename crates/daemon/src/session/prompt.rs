@@ -1,8 +1,8 @@
 //! Envoi de prompts : file FIFO (user/peer), runner séquentiel, steer,
 //! réponses aux permissions/questions de l'agent, snapshot de la file.
 
-use super::*;
 use super::compact::is_compact_cmd;
+use super::*;
 use anyhow::{bail, Context, Result};
 use proto::EventKind;
 use serde_json::Value;
@@ -183,7 +183,9 @@ pub(super) fn parse_reset_at(
         if b.len() < 5 || !b[0].is_ascii_digit() {
             continue;
         }
-        let Some(colon) = rest.find(':') else { continue };
+        let Some(colon) = rest.find(':') else {
+            continue;
+        };
         let (Ok(hh), Ok(mm)) = (
             rest[..colon].parse::<u32>(),
             rest[colon + 1..].get(..2).unwrap_or("").parse::<u32>(),
@@ -236,7 +238,7 @@ impl Session {
                 self.enqueue_prompt(text, false, PromptSrc::User);
                 drop(c);
                 self.emit(EventKind::System {
-                    text: "compact en cours — message en file".into(),
+                    text: "compact in progress — message queued".into(),
                 });
                 return Ok(false);
             }
@@ -256,8 +258,7 @@ impl Session {
             if kind == "rate_limit" {
                 self.enqueue_prompt(text, false, PromptSrc::User);
                 self.emit(EventKind::System {
-                    text: "session en erreur (rate limit) — message en file, retry programmé"
-                        .into(),
+                    text: "session in error (rate limit) — message queued, retry scheduled".into(),
                 });
                 return Ok(false);
             }
@@ -327,7 +328,7 @@ impl Session {
                             s.set_state("idle");
                         }
                         s.emit(EventKind::System {
-                            text: format!("steer refusé ({e}) — message en file"),
+                            text: format!("steer refused ({e}) — message queued"),
                         });
                         // Remise en file inconditionnelle (la condition
                         // de drain ne doit pas la sauter — un /compact
@@ -337,8 +338,7 @@ impl Session {
                         // busy) : après désarmement, le « runner déjà
                         // là » supposé par enqueue_prompt est faux —
                         // drain explicite pour ne pas orpheliner la file.
-                        let already =
-                            s.enqueue_prompt(&text, false, PromptSrc::UserJournaled);
+                        let already = s.enqueue_prompt(&text, false, PromptSrc::UserJournaled);
                         if disarmed || !already {
                             s.drain_queue().await;
                         }
@@ -353,7 +353,7 @@ impl Session {
             let held = self.take_compact_hold();
             if held {
                 self.emit(EventKind::System {
-                    text: "compact interrompu — envoi forcé".into(),
+                    text: "compact interrupted — forced send".into(),
                 });
             }
             // La retenue d'erreur tombe aussi — la trace last_error
@@ -374,7 +374,7 @@ impl Session {
         let already = self.enqueue_prompt(text, false, PromptSrc::User);
         if already {
             self.emit(EventKind::System {
-                text: "message en file — envoyé à la fin du tour".into(),
+                text: "message queued — sent at end of turn".into(),
             });
             return Ok(false); // un runner existe déjà
         }
@@ -395,7 +395,7 @@ impl Session {
                 self.enqueue_prompt(wrapped, false, PromptSrc::Peer);
                 drop(c);
                 self.emit(EventKind::System {
-                    text: "compact en cours — message en file".into(),
+                    text: "compact in progress — message queued".into(),
                 });
                 return Ok(false);
             }
@@ -421,7 +421,7 @@ impl Session {
         if steer && self.busy.load(Ordering::SeqCst) {
             // (retenue compact exclue ci-dessus : busy vrai ⇒ vrai tour)
             self.emit(EventKind::System {
-                text: "steer → envoyé au tour en cours".into(),
+                text: "steer → sent to the current turn".into(),
             });
             let gen = self.spawn_gen.load(Ordering::SeqCst);
             if let Err(e) = self.prompt_rpc(wrapped).await {
@@ -431,7 +431,7 @@ impl Session {
                     return Ok(false);
                 }
                 self.emit(EventKind::System {
-                    text: format!("steer refusé ({e}) — message en file"),
+                    text: format!("steer refused ({e}) — message queued"),
                 });
                 if !self.enqueue_prompt(wrapped, false, PromptSrc::Peer) {
                     self.drain_queue().await;
@@ -442,7 +442,7 @@ impl Session {
         let already = self.enqueue_prompt(wrapped, false, PromptSrc::Peer);
         if already {
             self.emit(EventKind::System {
-                text: "message en file — envoyé à la fin du tour".into(),
+                text: "message queued — sent at end of turn".into(),
             });
             return Ok(false); // un runner existe déjà
         }
@@ -523,9 +523,7 @@ impl Session {
     /// state "asleep" précède le kill dans sleep() — sans ce check un
     /// envoi dans la fenêtre serait livré à un agent en train de mourir).
     pub fn accepting_prompts(&self) -> bool {
-        self.is_alive()
-            && !self.is_spawning()
-            && self.meta.lock().unwrap().state != "asleep"
+        self.is_alive() && !self.is_spawning() && self.meta.lock().unwrap().state != "asleep"
     }
 
     /// Enfile un prompt pendant un spawn déjà en vol (init, resume,
@@ -612,9 +610,7 @@ impl Session {
                         // leur intention : l'utilisateur sait ce qu'il
                         // demande, un drop silencieux l'effacerait.
                         if is_compact_cmd(&t.0) {
-                            q.retain(|(t2, s2)| {
-                                !(is_compact_cmd(t2) && *s2 == PromptSrc::Auto)
-                            });
+                            q.retain(|(t2, s2)| !(is_compact_cmd(t2) && *s2 == PromptSrc::Auto));
                         }
                         t
                     }
@@ -644,7 +640,7 @@ impl Session {
                         // compaction ne tourne — désarmer plutôt que
                         // retenir les envois jusqu'au timeout.
                         self.emit(EventKind::System {
-                            text: "compact terminé — échec de la commande".into(),
+                            text: "compact done — command failed".into(),
                         });
                     }
                     // Le prompt fautif retourne en tête de file :
@@ -808,7 +804,7 @@ impl Session {
                         if self.turn_outputs.load(Ordering::SeqCst) == out0 {
                             self.emit(EventKind::System {
                                 text: format!(
-                                    "tour terminé sans sortie (stopReason: {})",
+                                    "turn ended with no output (stopReason: {})",
                                     sr.unwrap_or("?")
                                 ),
                             });
@@ -850,7 +846,7 @@ impl Session {
         let n = self.prompt_queue.lock().unwrap().drain(..).count();
         if n > 0 {
             self.emit(EventKind::System {
-                text: format!("{n} message(s) en file annulé(s)"),
+                text: format!("{n} queued message(s) cancelled"),
             });
         }
         n
@@ -998,7 +994,7 @@ impl Session {
                 s.arm_compact(src == PromptSrc::Auto);
             }
             s.emit(EventKind::System {
-                text: "message en file promu en steer par l'utilisateur".into(),
+                text: "queued message promoted to steer by the user".into(),
             });
             // User → user_message steer journalisé à la remise (comme
             // send_prompt). Peer/Auto : déjà tracés par leur émetteur.
@@ -1036,7 +1032,7 @@ impl Session {
                         s.set_state("idle");
                     }
                     s.emit(EventKind::System {
-                        text: format!("steer refusé ({e}) — message remis en file"),
+                        text: format!("steer refused ({e}) — message put back in queue"),
                     });
                     // User → UserJournaled : le user_message steer est
                     // déjà visible, le drain ne doit pas le réémettre.
@@ -1095,10 +1091,9 @@ impl Session {
         // échoué (agent mort : la retenue ne survivrait qu'au timeout).
         // Le drain relancé livre les messages encore en file (le Stop
         // serveur les a vidés, le promote les garde).
-        self.end_compact("annulé", true);
+        self.end_compact("cancelled", true);
         res
     }
-
 
     /// Répond à une permission ou question pending.
     pub fn respond(
@@ -1137,7 +1132,6 @@ impl Session {
     pub fn pending_requests(&self) -> Vec<String> {
         self.pending_agent.lock().unwrap().keys().cloned().collect()
     }
-
 }
 
 /// L'agent répond que l'id de session native n'existe plus chez lui
@@ -1163,7 +1157,7 @@ pub(super) fn session_binding_lost(msg: &str) -> bool {
         "could not find session",
         "can not find session",
         "session introuvable",
-        "session est introuvable",
+        "session not found",
         "session inexistante",
     ]
     .iter()

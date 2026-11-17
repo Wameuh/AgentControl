@@ -25,7 +25,7 @@ impl Session {
             drop(m);
             self.save_meta();
             self.emit(EventKind::System {
-                text: format!("mode={mode} mémorisé — appliqué à la reprise"),
+                text: format!("mode={mode} stored — applied on resume"),
             });
             return Ok(());
         }
@@ -91,13 +91,13 @@ impl Session {
             Resolve::Hit(v) => v,
             Resolve::Ambiguous(c) => {
                 anyhow::bail!(
-                    "{config_id} ambigu « {want} » — candidats : {}",
+                    "ambiguous {config_id} « {want} » — candidates: {}",
                     c.join(", ")
                 )
             }
             Resolve::Unknown => {
                 anyhow::bail!(
-                    "{config_id} inconnu « {want} » — valeurs : {}",
+                    "unknown {config_id} « {want} » — values: {}",
                     join_known(&known)
                 )
             }
@@ -112,7 +112,7 @@ impl Session {
         let text = if applied == wanted {
             format!("model → {applied}")
         } else {
-            format!("model → {applied} (résolu depuis « {wanted} »)")
+            format!("model → {applied} (resolved from « {wanted} »)")
         };
         self.emit(EventKind::System { text });
     }
@@ -139,7 +139,7 @@ impl Session {
             drop(m);
             self.save_meta();
             self.emit(EventKind::System {
-                text: format!("model={model} mémorisé — appliqué à la reprise"),
+                text: format!("model={model} stored — applied on resume"),
             });
             return Ok(());
         }
@@ -155,7 +155,7 @@ impl Session {
                     self.emit_model_applied(&v, model);
                     return Ok(());
                 }
-                Ok(None) => unreachable!("option non vide"),
+                Ok(None) => unreachable!("non-empty option"),
                 Err(e) => {
                     self.emit(EventKind::Error {
                         message: format!("{e:#}"),
@@ -171,20 +171,16 @@ impl Session {
                 match resolve_config_value(&known, model) {
                     Resolve::Hit(v) => v,
                     Resolve::Ambiguous(c) => {
-                        let msg = format!(
-                            "model ambigu « {model} » — candidats : {}",
-                            c.join(", ")
-                        );
+                        let msg =
+                            format!("ambiguous model « {model} » — candidates: {}", c.join(", "));
                         self.emit(EventKind::Error {
                             message: msg.clone(),
                         });
                         anyhow::bail!("{msg}")
                     }
                     Resolve::Unknown => {
-                        let msg = format!(
-                            "model inconnu « {model} » — valeurs : {}",
-                            join_known(&known)
-                        );
+                        let msg =
+                            format!("unknown model « {model} » — values: {}", join_known(&known));
                         self.emit(EventKind::Error {
                             message: msg.clone(),
                         });
@@ -199,7 +195,10 @@ impl Session {
             .native_session_id
             .context("no native session id")?;
         match self
-            .acp_request("session/set_model", acp::session_set_model_params(&sid, model))
+            .acp_request(
+                "session/set_model",
+                acp::session_set_model_params(&sid, model),
+            )
             .await
         {
             Ok(_) => {
@@ -278,8 +277,7 @@ impl Session {
                 // annoncées — la re-pousser via set_config_option serait
                 // un refus ACP ou une réécriture de l'override.
                 if id == "model"
-                    && self.meta.lock().unwrap().model_source.as_deref()
-                        == Some("catalogue")
+                    && self.meta.lock().unwrap().model_source.as_deref() == Some("catalogue")
                 {
                     continue;
                 }
@@ -297,7 +295,7 @@ impl Session {
                 };
                 if let Err(e) = self.push_config_option(id, &v).await {
                     self.emit(EventKind::System {
-                        text: format!("{id}={v} non ré-affirmé au resume: {e:#}"),
+                        text: format!("{id}={v} not re-asserted on resume: {e:#}"),
                     });
                 }
                 continue;
@@ -320,7 +318,7 @@ impl Session {
                         if id == "model" {
                             self.emit(EventKind::System {
                                 text: format!(
-                                    "model={want} (demandé à la création) ambigu — candidats : {}",
+                                    "model={want} (requested at creation) ambiguous — candidates: {}",
                                     c.join(", ")
                                 ),
                             });
@@ -331,7 +329,7 @@ impl Session {
                         if id == "model" {
                             self.emit(EventKind::System {
                                 text: format!(
-                                    "model={want} (demandé à la création) absent des options annoncées — valeurs : {}",
+                                    "model={want} (requested at creation) absent from announced options — values: {}",
                                     join_known(&known)
                                 ),
                             });
@@ -357,7 +355,7 @@ impl Session {
             };
             if let Err(e) = r {
                 self.emit(EventKind::System {
-                    text: format!("{id}={want} (demandé à la création) non appliqué: {e:#}"),
+                    text: format!("{id}={want} (requested at creation) not applied: {e:#}"),
                 });
             }
         }
@@ -398,7 +396,8 @@ impl Session {
     pub const CATALOGUE_REAPPLY_MAX: u64 = 2;
 
     pub fn catalogue_reapply_streak(&self) -> u64 {
-        self.catalogue_reapply_streak.load(std::sync::atomic::Ordering::Relaxed)
+        self.catalogue_reapply_streak
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn bump_catalogue_reapply(&self) {
@@ -528,10 +527,7 @@ impl Session {
             return;
         }
         if let Some(sid) = self.meta_snapshot().native_session_id {
-            let req = self.acp_request(
-                "session/rename",
-                json!({"sessionId": sid, "title": title}),
-            );
+            let req = self.acp_request("session/rename", json!({"sessionId": sid, "title": title}));
             let err = match tokio::time::timeout(std::time::Duration::from_secs(10), req).await {
                 Ok(Ok(_)) => None,
                 Ok(Err(e)) => Some(format!("{e:#}").to_lowercase()),
@@ -593,11 +589,7 @@ impl Session {
     /// (claude-code-acp — modes/models ACP standard, pas de
     /// configOptions) affichait une erreur rouge à chaque spawn alors
     /// que le repli réussissait juste après.
-    pub(super) async fn set_config_option_quiet(
-        &self,
-        config_id: &str,
-        value: &str,
-    ) -> Result<()> {
+    pub(super) async fn set_config_option_quiet(&self, config_id: &str, value: &str) -> Result<()> {
         self.set_config_option_report(config_id, value, false).await
     }
 
@@ -613,10 +605,7 @@ impl Session {
         if !self.is_alive() {
             // Demande explicite → purge la marque de refus définitif
             // (le replay retentera et le drop réémettra son event).
-            self.config_rejected
-                .lock()
-                .unwrap()
-                .remove(config_id);
+            self.config_rejected.lock().unwrap().remove(config_id);
             let opts = {
                 let mut m = self.meta.lock().unwrap();
                 m.pending_config.insert(config_id.into(), value.into());
@@ -651,7 +640,7 @@ impl Session {
             };
             self.save_meta();
             self.emit(EventKind::System {
-                text: format!("{config_id}={value} mémorisé — appliqué à la reprise"),
+                text: format!("{config_id}={value} stored — applied on resume"),
             });
             self.emit(EventKind::ConfigOptions { options: opts });
             return Ok(());
@@ -671,7 +660,7 @@ impl Session {
                 Resolve::Hit(v) => v,
                 Resolve::Ambiguous(c) => {
                     let msg = format!(
-                        "set_config_option {config_id} ambigu « {value} » — candidats : {}",
+                        "set_config_option {config_id} ambiguous « {value} » — candidates: {}",
                         c.join(", ")
                     );
                     if report {
@@ -683,7 +672,7 @@ impl Session {
                 }
                 Resolve::Unknown => {
                     let msg = format!(
-                        "set_config_option {config_id} inconnu « {value} » — valeurs : {}",
+                        "set_config_option {config_id} unknown « {value} » — values: {}",
                         join_known(&known)
                     );
                     if report {
@@ -704,7 +693,7 @@ impl Session {
                     String::new()
                 } else {
                     format!(
-                        " (valeurs connues: {}{})",
+                        " (known values: {}{})",
                         known.iter().take(8).cloned().collect::<Vec<_>>().join(", "),
                         if known.len() > 8 { ", …" } else { "" }
                     )
@@ -733,7 +722,7 @@ impl Session {
         // dédiés (set_model/set_mode) au lieu de payer un RPC voué à
         // l'échec à chaque spawn.
         if !self.config_option_supported.load(Ordering::SeqCst) {
-            anyhow::bail!("session/set_config_option non supporté par cet agent");
+            anyhow::bail!("session/set_config_option not supported by this agent");
         }
         let sid = self
             .meta_snapshot()
@@ -755,8 +744,7 @@ impl Session {
                 // un cas visé).
                 let msg = format!("{e:#}").to_lowercase();
                 if msg.contains("method not found") || msg.contains("unknown method") {
-                    self.config_option_supported
-                        .store(false, Ordering::SeqCst);
+                    self.config_option_supported.store(false, Ordering::SeqCst);
                 }
                 return Err(e);
             }
@@ -785,9 +773,7 @@ impl Session {
         let opts = {
             let mut m = self.meta.lock().unwrap();
             if fresh.is_empty() {
-                if let Some(opt) =
-                    m.config_options.iter_mut().find(|o| o.id == config_id)
-                {
+                if let Some(opt) = m.config_options.iter_mut().find(|o| o.id == config_id) {
                     opt.current_value = value.into();
                 }
             } else {
@@ -810,9 +796,7 @@ impl Session {
                 // (modèle→effort) se cléent sur le mauvais id.
                 if m.model_source.as_deref() == Some("catalogue") {
                     if let Some(want) = m.model.clone() {
-                        if let Some(o) =
-                            m.config_options.iter_mut().find(|o| o.id == "model")
-                        {
+                        if let Some(o) = m.config_options.iter_mut().find(|o| o.id == "model") {
                             o.current_value = want;
                         }
                     }
@@ -929,24 +913,20 @@ impl Session {
                             drop(rej);
                             self.emit(EventKind::System {
                                 text: format!(
-                                    "config {k}={v} abandonnée — refus définitif de l'agent \
-                                     (valeur hors liste annoncée) : {e:#}"
+                                    "config {k}={v} dropped — definitive agent refusal \
+                                     (value outside announced list): {e:#}"
                                 ),
                             });
                         }
                     } else {
                         self.emit(EventKind::Error {
-                            message: format!("config différée {k}={v}: {e:#}"),
+                            message: format!("deferred config {k}={v}: {e:#}"),
                         });
                         // Re-pend : la valeur reste due — retentée au
                         // prochain spawn (desired_config la rejouera de
                         // toute façon, pending couvre les valeurs
                         // ré-armées par revive_rejected_config).
-                        self.meta
-                            .lock()
-                            .unwrap()
-                            .pending_config
-                            .insert(k, v);
+                        self.meta.lock().unwrap().pending_config.insert(k, v);
                     }
                 }
             }
@@ -974,13 +954,13 @@ impl Session {
             "compact_enabled" => o.enabled = Some(parse_on_off(value)?),
             "compact_at_tokens" => o.at_tokens = parse_opt_u64(value)?,
             "compact_at_pct" => o.at_pct = parse_opt_pct(value)?,
-            _ => anyhow::bail!("option démon inconnue : ac.{key}"),
+            _ => anyhow::bail!("unknown daemon option: ac.{key}"),
         }
         // .tmp + rename : pas de compact.json tronqué si le démon meurt
         // en pleine écriture (même convention que pinned.json).
         let tmp = self.dir.join("compact.json.tmp");
         std::fs::write(&tmp, serde_json::to_string_pretty(&o)?)
-            .context("compact.json illisible en écriture")?;
+            .context("compact.json unreadable for writing")?;
         std::fs::rename(&tmp, self.dir.join("compact.json"))?;
         *guard = o;
         drop(guard);
@@ -1020,7 +1000,7 @@ impl Session {
         }
         self.save_meta();
         self.emit(EventKind::System {
-            text: "contexte effacé — nouvelle session agent".into(),
+            text: "context cleared — new agent session".into(),
         });
         // Les étapes de la tâche appartiennent au cycle effacé — vidé
         // après le reset journal (l'event `steps` repart dans le
@@ -1043,7 +1023,7 @@ impl Session {
         if let Some(v) = o.at_pct {
             if !(0.0..=1.0).contains(&v) {
                 tracing::warn!(
-                    "{}: compact.json at_pct={v} hors borne (0<p≤1) — règle % ignorée",
+                    "{}: compact.json at_pct={v} out of range (0<p≤1) — % rule ignored",
                     dir.display()
                 );
             }
@@ -1076,8 +1056,7 @@ impl Session {
             // ignorée, les extras seuls ne reconstituent pas une
             // liste (l'agent n'a simplement rien annoncé ce coup-là).
             if !caps.models.is_empty() {
-                let mut models: Vec<String> =
-                    caps.models.iter().map(|o| o.value.clone()).collect();
+                let mut models: Vec<String> = caps.models.iter().map(|o| o.value.clone()).collect();
                 for v in extra_models {
                     if !models.contains(v) {
                         models.push(v.clone());
@@ -1100,9 +1079,7 @@ impl Session {
                     // rafraîchie — la valeur courante reste celle que la
                     // session a rapportée/choisie.
                     Some(o) => {
-                        if o.options != co.options
-                            || o.name != co.name
-                            || o.category != co.category
+                        if o.options != co.options || o.name != co.name || o.category != co.category
                         {
                             o.name = co.name.clone();
                             o.category = co.category.clone();
@@ -1172,8 +1149,9 @@ pub(super) fn resolve_config_value(known: &[(String, String)], want: &str) -> Re
 /// l'agent n'annonce pas d'autres options. Un Invalid params ACP ou
 /// une erreur transport n'a pas ces marqueurs → transitoire.
 pub(super) fn is_resolution_error(msg: &str) -> bool {
-    (msg.contains("inconnu «") || msg.contains("ambigu «"))
-        && (msg.contains("— valeurs") || msg.contains("— candidats"))
+    (msg.contains("unknown") || msg.contains("ambiguous"))
+        && msg.contains('«')
+        && (msg.contains("— values:") || msg.contains("— candidates:"))
 }
 
 /// « a, b, c, … » — tronqué à 8 entrées pour les messages d'erreur.
@@ -1192,7 +1170,7 @@ fn parse_on_off(v: &str) -> Result<bool> {
     match v.trim().to_ascii_lowercase().as_str() {
         "on" | "true" | "1" | "yes" => Ok(true),
         "off" | "false" | "0" | "no" => Ok(false),
-        _ => anyhow::bail!("booléen attendu (on|off), reçu « {v} »"),
+        _ => anyhow::bail!("expected boolean (on|off), got « {v} »"),
     }
 }
 
@@ -1205,7 +1183,7 @@ fn parse_opt_u64(v: &str) -> Result<Option<u64>> {
     }
     let n: u64 = v
         .parse()
-        .with_context(|| format!("entier attendu, reçu « {v} »"))?;
+        .with_context(|| format!("expected integer, got « {v} »"))?;
     Ok(Some(n))
 }
 
@@ -1217,9 +1195,9 @@ fn parse_opt_pct(v: &str) -> Result<Option<f64>> {
     }
     let p: f64 = v
         .parse()
-        .with_context(|| format!("fraction attendue (0≤p≤1), reçu « {v} »"))?;
+        .with_context(|| format!("expected fraction (0≤p≤1), got « {v} »"))?;
     if !(0.0..=1.0).contains(&p) {
-        anyhow::bail!("pourcentage hors borne (0≤p≤1) : {p}");
+        anyhow::bail!("percentage out of range (0≤p≤1): {p}");
     }
     Ok(Some(p))
 }
@@ -1227,10 +1205,10 @@ fn parse_opt_pct(v: &str) -> Result<Option<f64>> {
 /// Libellé lisible du seuil effectif pour les accusés `ac.*`.
 fn describe_policy(p: &CompactPolicy) -> String {
     if !p.enabled {
-        return "désactivé".into();
+        return "disabled".into();
     }
     match (p.at_tokens, p.at_pct) {
-        (None, None) => "actif mais aucun seuil posé (inerte)".into(),
+        (None, None) => "active but no threshold set (inert)".into(),
         (t, pct) => [
             t.map(|n| format!("{n} tokens")),
             pct.map(|f| format!("{}%", (f * 100.0).round() as u64)),
@@ -1238,7 +1216,7 @@ fn describe_policy(p: &CompactPolicy) -> String {
         .into_iter()
         .flatten()
         .collect::<Vec<_>>()
-        .join(" ou "),
+        .join(" or "),
     }
 }
 
@@ -1257,13 +1235,13 @@ mod tests {
     fn resolution_error_is_definitive_only() {
         // Garde-fou de résolution (valeur hors liste / ambiguë) → définitif.
         assert!(is_resolution_error(
-            "set_config_option model inconnu « swe-2-flash-max » — valeurs : swe-2-medium"
+            "set_config_option model unknown « swe-2-flash-max » — values: swe-2-medium"
         ));
         assert!(is_resolution_error(
-            "model ambigu « swe » — candidats : swe-2-high, swe-2-low"
+            "ambiguous model « swe » — candidates: swe-2-high, swe-2-low"
         ));
         assert!(is_resolution_error(
-            "mode inconnu « yolo » — valeurs : normal, plan"
+            "unknown mode « yolo » — values: normal, plan"
         ));
         // Transitoire : transport, agent pas prêt, Invalid params ACP.
         assert!(!is_resolution_error("no native session id"));
@@ -1273,7 +1251,7 @@ mod tests {
         assert!(!is_resolution_error("agent exited"));
         // « inconnu » sans la signature complète (ex. option daemon) → pas
         // assimilé : trop fragile pour un drop définitif.
-        assert!(!is_resolution_error("option démon inconnue : ac.foo"));
+        assert!(!is_resolution_error("unknown daemon option: ac.foo"));
         assert!(!is_resolution_error("valeur inconnue"));
     }
 
@@ -1310,7 +1288,11 @@ mod tests {
     fn resolve_prefix() {
         // Préfixe univoque → résolu ("swe-2" → "swe-2-high" quand la liste
         // ACP n'annonce que cette variante).
-        let k = known(&[("swe-2-high", ""), ("adaptive", ""), ("claude-fable-5-1-medium", "")]);
+        let k = known(&[
+            ("swe-2-high", ""),
+            ("adaptive", ""),
+            ("claude-fable-5-1-medium", ""),
+        ]);
         assert_eq!(
             resolve_config_value(&k, "swe-2"),
             Resolve::Hit("swe-2-high".into())
@@ -1320,7 +1302,10 @@ mod tests {
             Resolve::Hit("swe-2-high".into())
         );
         // Préfixe univoque sur le nom affiché.
-        let k2 = known(&[("gpt-6[medium]", "GPT 6 medium"), ("gpt-6[high]", "GPT 6 high")]);
+        let k2 = known(&[
+            ("gpt-6[medium]", "GPT 6 medium"),
+            ("gpt-6[high]", "GPT 6 high"),
+        ]);
         assert_eq!(
             resolve_config_value(&k2, "gpt 6 m"),
             Resolve::Hit("gpt-6[medium]".into())
@@ -1396,8 +1381,15 @@ mod tests {
     #[test]
     fn join_known_truncates() {
         let k = known(&[
-            ("a", ""), ("b", ""), ("c", ""), ("d", ""), ("e", ""),
-            ("f", ""), ("g", ""), ("h", ""), ("i", ""),
+            ("a", ""),
+            ("b", ""),
+            ("c", ""),
+            ("d", ""),
+            ("e", ""),
+            ("f", ""),
+            ("g", ""),
+            ("h", ""),
+            ("i", ""),
         ]);
         assert_eq!(join_known(&k), "a, b, c, d, e, f, g, h, …");
         assert_eq!(join_known(&k[..2]), "a, b");

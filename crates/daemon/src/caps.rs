@@ -109,7 +109,10 @@ impl CapsRegistry {
             if !caps.current_model.is_empty() {
                 e.current_model = caps.current_model.clone();
             }
-            for (kind, cur) in [("mode", &mut e.current_mode), ("model", &mut e.current_model)] {
+            for (kind, cur) in [
+                ("mode", &mut e.current_mode),
+                ("model", &mut e.current_model),
+            ] {
                 if let Some(o) = caps
                     .config_options
                     .iter()
@@ -138,11 +141,11 @@ impl CapsRegistry {
             e.config_options = options.to_vec();
             // La notification porte aussi les valeurs courantes — les
             // indices de présélection restent frais entre deux probes.
-            for (kind, cur) in [("mode", &mut e.current_mode), ("model", &mut e.current_model)] {
-                if let Some(o) = options
-                    .iter()
-                    .find(|o| o.id == kind || o.category == kind)
-                {
+            for (kind, cur) in [
+                ("mode", &mut e.current_mode),
+                ("model", &mut e.current_model),
+            ] {
+                if let Some(o) = options.iter().find(|o| o.id == kind || o.category == kind) {
                     if !o.current_value.is_empty() {
                         *cur = o.current_value.clone();
                     }
@@ -280,7 +283,7 @@ pub async fn probe(profile: &AgentProfile, cwd: &Path) -> Result<proto::AgentCap
         .map(|a| subst(a))
         .filter(|a| !a.is_empty())
         .collect();
-    let (cmd, args) = argv.split_first().context("commande agent vide")?;
+    let (cmd, args) = argv.split_first().context("empty agent command")?;
     let envs: HashMap<String, String> = profile
         .env
         .iter()
@@ -434,7 +437,9 @@ impl ProbeIo {
         let deadline = std::time::Instant::now() + DRAIN_MAX;
         let mut quiet = std::time::Instant::now() + DRAIN_QUIET;
         loop {
-            let budget = quiet.min(deadline).saturating_duration_since(std::time::Instant::now());
+            let budget = quiet
+                .min(deadline)
+                .saturating_duration_since(std::time::Instant::now());
             if budget.is_zero() {
                 return;
             }
