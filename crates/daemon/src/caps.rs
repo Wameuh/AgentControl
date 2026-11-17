@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -38,6 +39,12 @@ pub struct CapsRegistry {
     /// Sérialise les probes (un spawn d'agent chacun) : le refresh est
     /// explicite et rare — jamais deux moissons en parallèle.
     probe_lock: tokio::sync::Mutex<()>,
+    /// Persist suspendue pendant un session/load : les
+    /// `config_option_update` rejoués arrivent en rafale — la map est
+    /// tenue à jour en mémoire et une seule écriture a lieu au
+    /// `resume_persist` final (#271, même logique que save_meta).
+    persist_paused: AtomicBool,
+    persist_dirty: AtomicBool,
 }
 
 impl CapsRegistry {
@@ -51,6 +58,8 @@ impl CapsRegistry {
             map: Mutex::new(map),
             path: Some(path),
             probe_lock: tokio::sync::Mutex::new(()),
+            persist_paused: AtomicBool::new(false),
+            persist_dirty: AtomicBool::new(false),
         })
     }
 
@@ -61,6 +70,8 @@ impl CapsRegistry {
             map: Mutex::new(HashMap::new()),
             path: None,
             probe_lock: tokio::sync::Mutex::new(()),
+            persist_paused: AtomicBool::new(false),
+            persist_dirty: AtomicBool::new(false),
         })
     }
 
@@ -156,9 +167,29 @@ impl CapsRegistry {
         &self.probe_lock
     }
 
+    /// Suspendre les écritures `agent_caps.json` — appelé au début d'un
+    /// session/load : la map reste à jour en mémoire, `persist()` ne
+    /// fait que marquer dirty. `resume_persist` écrit une fois.
+    pub fn pause_persist(&self) {
+        self.persist_paused.store(true, Ordering::SeqCst);
+    }
+
+    /// Reprendre les écritures — une seule persist si du contenu a
+    /// été moissonné pendant la suspension.
+    pub fn resume_persist(&self) {
+        self.persist_paused.store(false, Ordering::SeqCst);
+        if self.persist_dirty.swap(false, Ordering::SeqCst) {
+            self.persist();
+        }
+    }
+
     /// `.tmp` + rename : pas de json tronqué si le démon meurt en
     /// pleine écriture (même convention que pinned/compact).
     fn persist(&self) {
+        if self.persist_paused.load(Ordering::SeqCst) {
+            self.persist_dirty.store(true, Ordering::SeqCst);
+            return;
+        }
         let Some(path) = &self.path else { return };
         let map = self.map.lock().unwrap();
         let Ok(s) = serde_json::to_string_pretty(&*map) else {

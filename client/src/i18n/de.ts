@@ -16,7 +16,7 @@ export const de: Record<Key, string> = {
   web_token_err: "ungültiges Token",
   conn_off: "getrennt — klicken zum Neuverbinden",
   new_session: "Neuer Agent", send: "Senden", cancel: "Abbrechen", stop: "Stoppen",
-  resume: "Fortsetzen", refresh_title: "Sitzung neu laden",
+  resume: "Fortsetzen", fresh_ctx: "Neuer Kontext", fresh_ctx_title: "Nativen Kontext aufgeben und mit einem frischen neu starten (Journal bleibt)", refresh_title: "Sitzung neu laden",
   input_ph: "Nachricht… (Eingabe = senden, Alt+Eingabe = mitten im Turn einfügen, {mod}+Eingabe = erzwingen, / = Befehle)",
   input_ph_steer: "Nachricht… (Eingabe = steer mitten im Turn, Alt+Eingabe = Warteschlange, {mod}+Eingabe = erzwingen, / = Befehle)",
   input_ph_mobile: "Nachricht an den Agenten…",

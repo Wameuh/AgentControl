@@ -16,7 +16,7 @@ export const es: Record<Key, string> = {
   web_token_err: "token inválido",
   conn_off: "desconectado — clic para reconectar",
   new_session: "Nuevo agente", send: "Enviar", cancel: "Cancelar", stop: "Detener",
-  resume: "Reanudar", refresh_title: "Recargar la sesión",
+  resume: "Reanudar", fresh_ctx: "Contexto nuevo", fresh_ctx_title: "Abandonar el contexto nativo y reiniciar con uno nuevo (diario conservado)", refresh_title: "Recargar la sesión",
   input_ph: "Mensaje… (Intro = enviar, Alt+Intro = inyectar en el turno, {mod}+Intro = forzar, / = cmds)",
   input_ph_steer: "Mensaje… (Intro = steer en el turno, Alt+Intro = cola, {mod}+Intro = forzar, / = cmds)",
   input_ph_mobile: "Mensaje al agente…",

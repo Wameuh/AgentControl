@@ -12,7 +12,11 @@
 //!               [--mode M] [--model X] [--group G]   (session agent→agent)
 //!   acctl events <session> [before_seq] [limit]
 //!   acctl tail <session> [after_seq]
-//!   acctl resume|cancel|kill|clear|sleep <session>
+//!   acctl resume [--fresh] <session> [native_id]
+//!       (resume = respawn + session/load ; --fresh = abandonne le
+//!        contexte natif → session/new, journal conservé — utile quand
+//!        le replay d'une très longue session native est trop long)
+//!   acctl cancel|kill|clear|sleep <session>
 //!       (sleep = libère le process, la session reste — réveil auto au
 //!        prochain envoi)
 //!   acctl mode <session> <mode>
@@ -604,10 +608,27 @@ async fn main() -> Result<()> {
                 if dir { "/" } else { "" },
             );
         }
-        "resume" => println!("{}", c.call(proto::ReqKind::ResumeSession {
-            session: args[1].clone(),
-            native_id: args.get(2).cloned(),
-        }).await?),
+        "resume" => {
+            // acctl resume [--fresh] <session> [native_id] — --fresh
+            // abandonne le contexte natif (session/new, journal conservé).
+            let mut fresh = false;
+            let mut pos: Vec<String> = Vec::new();
+            for a in args.iter().skip(1) {
+                if a == "--fresh" {
+                    fresh = true;
+                } else {
+                    pos.push(a.clone());
+                }
+            }
+            if pos.is_empty() {
+                bail!("resume [--fresh] <session> [native_id]");
+            }
+            println!("{}", c.call(proto::ReqKind::ResumeSession {
+                session: pos[0].clone(),
+                native_id: pos.get(1).cloned(),
+                fresh,
+            }).await?)
+        }
         "attach" => println!("{}", c.call(proto::ReqKind::AttachSession {
             agent: args[1].clone(),
             cwd: args[2].clone(),

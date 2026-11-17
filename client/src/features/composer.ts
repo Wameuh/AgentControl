@@ -1385,6 +1385,25 @@ export class Composer {
       }
     };
 
+    // « Contexte neuf » pendant un long chargement : abandonne la
+    // session native (session/new, journal conservé) — issue explicite
+    // quand le replay d'une très longue session est trop long (#271).
+    const freshBtn = $("btn-fresh") as HTMLButtonElement;
+    freshBtn.onclick = async () => {
+      if (!app.current) return;
+      freshBtn.disabled = true;
+      freshBtn.classList.add("spin");
+      try {
+        await call("resume_session", { session: app.current.id, fresh: true });
+        await this.chat.open(app.current.id);
+      } catch (e) {
+        showErr(String(e));
+      } finally {
+        freshBtn.disabled = false;
+        freshBtn.classList.remove("spin");
+      }
+    };
+
     // 💤 = endort la session (libère le process ; réveil auto au prochain
     // envoi) — cachée du header sur desktop, utilisée par le menu ⋮ mobile.
     $("btn-sleep").onclick = () =>

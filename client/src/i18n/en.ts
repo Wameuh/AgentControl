@@ -13,7 +13,7 @@ export const en = {
   web_token_err: "invalid token",
   conn_off: "disconnected — click to reconnect",
   new_session: "New agent", send: "Send", cancel: "Cancel", stop: "Stop",
-  resume: "Resume", refresh_title: "Reload session",
+  resume: "Resume", fresh_ctx: "New context", fresh_ctx_title: "Abandon the native context and restart on a fresh one (journal kept)", refresh_title: "Reload session",
   input_ph: "Message… (Enter = send, Alt+Enter = inject mid-turn, {mod}+Enter = force, / = cmds)",
   input_ph_steer: "Message… (Enter = steer mid-turn, Alt+Enter = queue, {mod}+Enter = force, / = cmds)",
   input_ph_mobile: "Message to the agent…",

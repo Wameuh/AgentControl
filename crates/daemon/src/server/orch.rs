@@ -2393,7 +2393,7 @@ impl Daemon {
         if self.h_send(sid.clone(), msg.clone(), false, false).await.is_ok() {
             return true;
         }
-        if self.h_resume_session(sid.clone(), None).await.is_ok() {
+        if self.h_resume_session(sid.clone(), None, false).await.is_ok() {
             return self.h_send(sid, msg, false, false).await.is_ok();
         }
         false

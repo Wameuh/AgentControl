@@ -125,6 +125,24 @@ pub struct Session {
     /// Vrai pendant session/load : les updates d'historique rejoué sont
     /// ignorés (le journal local est déjà la source de vérité).
     loading_replay: std::sync::atomic::AtomicBool,
+    /// Vrai pendant TOUT session/load (skip_replay ou non) — pilote le
+    /// compteur de progression « N events rejoués » et le debounce des
+    /// save_meta (les events méta rejoués ne doivent pas écrire
+    /// meta.json par event — I/O amplifiée sur un replay de ~85k
+    /// updates, #271).
+    load_active: std::sync::atomic::AtomicBool,
+    /// Updates session/update vus depuis le début du load courant.
+    replay_seen: AtomicU64,
+    /// Throttle du sysline de progression (un report toutes les ~10 s).
+    replay_report_at: Mutex<std::time::Instant>,
+    /// meta.json sale pendant load_active — persisté une seule fois à
+    /// la fin du load (end_load_replay → flush_meta_save).
+    meta_dirty: std::sync::atomic::AtomicBool,
+    /// « resume --fresh » / abandon du contexte natif : le prochain
+    /// spawn_agent repart en session/new quoi qu'il arrive — y compris
+    /// un spawn déjà en file derrière le spawn_lock qui aurait capturé
+    /// l'ancien native_session_id avant le clear.
+    force_new_context: std::sync::atomic::AtomicBool,
     /// Un tour session/prompt en cours (le runner draine la file).
     busy: std::sync::atomic::AtomicBool,
     /// Requêtes session/prompt en vol (runner + steer concurrents) —
@@ -355,6 +373,11 @@ impl Session {
             pinned,
             steps,
             loading_replay: std::sync::atomic::AtomicBool::new(false),
+            load_active: std::sync::atomic::AtomicBool::new(false),
+            replay_seen: AtomicU64::new(0),
+            replay_report_at: Mutex::new(std::time::Instant::now()),
+            meta_dirty: std::sync::atomic::AtomicBool::new(false),
+            force_new_context: std::sync::atomic::AtomicBool::new(false),
             busy: std::sync::atomic::AtomicBool::new(false),
             active_prompts: AtomicU64::new(0),
             pending_rename: Mutex::new(None),
@@ -399,11 +422,37 @@ impl Session {
     }
 
     fn save_meta(&self) {
+        // Pendant un session/load, les events méta rejoués (mode,
+        // config, usage, commandes) arrivent en rafale — écrire
+        // meta.json à chaque event sur un replay de ~85k updates
+        // serait de l'I/O amplifiée (#271). On marque dirty et le
+        // flush unique a lieu en fin de load (end_load_replay).
+        if self.load_active.load(Ordering::SeqCst) {
+            self.meta_dirty.store(true, Ordering::SeqCst);
+            return;
+        }
+        self.write_meta();
+    }
+
+    fn write_meta(&self) {
         if let Ok(m) = self.meta.lock() {
             let _ = std::fs::write(
                 self.dir.join("meta.json"),
                 serde_json::to_string_pretty(&*m).unwrap_or_default(),
             );
+        }
+    }
+
+    /// Persiste meta.json si des écritures ont été différées pendant un
+    /// load — appelé en fin de session/load (agent.rs) et au reset des
+    /// flags de spawn. No-op tant qu'un load est encore en vol (sa fin
+    /// flushera) ou si rien n'est dirty.
+    pub(super) fn flush_meta_save(&self) {
+        if self.load_active.load(Ordering::SeqCst) {
+            return;
+        }
+        if self.meta_dirty.swap(false, Ordering::SeqCst) {
+            self.write_meta();
         }
     }
 

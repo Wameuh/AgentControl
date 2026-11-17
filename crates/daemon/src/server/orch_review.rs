@@ -1601,7 +1601,7 @@ impl Daemon {
         {
             return;
         }
-        if self.h_resume_session(by.to_string(), None).await.is_ok() {
+        if self.h_resume_session(by.to_string(), None, false).await.is_ok() {
             let _ = self.h_send(by.to_string(), text, false, false).await;
         }
     }

@@ -475,6 +475,18 @@ impl Session {
         self.save_meta();
     }
 
+    /// Détache la session native (abandon du contexte côté agent —
+    /// « resume --fresh ») : le prochain spawn partira en session/new.
+    /// Le journal local est CONSERVÉ — l'historique affiché reste,
+    /// seule la mémoire de l'agent repart à zéro.
+    pub fn clear_native_id(&self) {
+        let mut m = self.meta.lock().unwrap();
+        if m.native_session_id.take().is_some() {
+            drop(m);
+            self.save_meta();
+        }
+    }
+
     /// Renomme : meta local + tentative session/rename chez l'agent (optionnel).
     pub async fn set_group(&self, group: Option<String>) {
         self.meta.lock().unwrap().group = group.filter(|g| !g.trim().is_empty());

@@ -473,6 +473,8 @@ $("chat-more").onclick = () => {
   if (app.current) items.push({ icon: "search", label: t("qo_open_path"), fn: () => quick.open("path") });
   if (app.current && !app.alive && app.current.state !== "starting")
     items.push({ icon: "play", label: t("resume"), fn: () => $("btn-resume").click() });
+  if (app.current && app.current.state === "starting" && app.current.native_session_id)
+    items.push({ icon: "refresh", label: t("fresh_ctx"), fn: () => $("btn-fresh").click() });
   if (app.current && app.alive)
     items.push({ icon: "sleep", label: t("ctx_sleep"), fn: () => $("btn-sleep").click() });
   items.push({ icon: "refresh", label: t("refresh_title"), fn: () => $("btn-refresh").click() });
