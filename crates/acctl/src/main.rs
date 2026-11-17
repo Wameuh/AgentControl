@@ -269,7 +269,7 @@ fn suggest_command(input: &str) -> Option<&'static str> {
     let mut best: Option<(&'static str, usize)> = None;
     for &cmd in COMMANDS {
         let d = edit_distance(input, cmd);
-        if best.map_or(true, |(_, bd)| d < bd) {
+        if best.is_none_or(|(_, bd)| d < bd) {
             best = Some((cmd, d));
         }
     }

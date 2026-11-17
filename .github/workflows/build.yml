@@ -82,7 +82,10 @@ jobs:
       # (glibc 2.36) — image native de l'arch du runner.
       - name: Vérif portabilité (debian:bookworm)
         run: |
-          ldd_out=$(docker run --rm -v "$PWD/dist:/ac" debian:bookworm ldd /ac/acctl 2>&1)
+          # NB : `ldd` sort en code 1 sur un binaire statique — le
+          # `|| true` évite que set -e avorte le step pile dans le cas
+          # de succès ; le grep sur le contenu fait foi.
+          ldd_out=$(docker run --rm -v "$PWD/dist:/ac" debian:bookworm ldd /ac/acctl 2>&1 || true)
           echo "$ldd_out"
           echo "$ldd_out" | grep -q "not a dynamic executable"
           set +e
