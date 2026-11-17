@@ -61,6 +61,8 @@ const MOCK = `(function () {
         case "call": return p.then(() => rpc(args.method, args.params ?? {}));
         case "subscribe": return p.then(() => null);
         case "saved_connections": return p.then(() => [{ kind: "local" }]);
+        case "cli_conn": return p.then(() => null);
+        case "other_instances": return p.then(() => []);
         case "ssh_hosts": return p.then(() => []);
         case "ssh_pubkey": return p.then(() => "ssh-ed25519 AAAA x");
         case "check_update": return p.then(() => { throw new Error("offline"); });
@@ -331,6 +333,48 @@ check("t8b gen>cur why",
   JSON.stringify(await logs("conn local down")));
 await setDs({ version: "9.9.9", sessions: 1, _ac_gen: 6 });
 await drain();
+
+// t9 — régression #270 : un marqueur `conn_error` de list_sessions ne
+// doit PLUS tuer la conn instantanément. La sonde lourde paginée
+// (timeout 20 s) peut expirer sur un démon lent post-reconnect alors
+// que le transport est vivant — l'ancien markDead direct produisait le
+// cycle down/reconnect → badge « déconnecté » persistant.
+// t9a — transport vivant (silent 200 ms) : excuse « lent mais vivant »,
+// jamais de strike, jamais de retry.
+check("t9a conn revenue ok", await waitSeg("ok"));
+const calls9 = await connectCalls();
+const l9a = await logLen();
+await p.evaluate(() => {
+  window.__listSessions = [{ conn: "local", conn_error: true,
+    _ac_transport: { silent_ms: 200, dead: false, rx_lines: 40 } }];
+});
+check("t9a excuse transport vivant", await waitLog("transport vivant", l9a, 4000));
+await sleep(500);
+check("t9a conn_error vivant → ok", (await st()) === "ok", await segCls());
+check("t9a badge sidebar ok",
+  (await p.evaluate(() =>
+    document.querySelector("#session-list .grp-head .conn-st")?.className ?? "none"))
+    .includes("ok"));
+check("t9a conn_error vivant : aucun retry",
+  (await connectCalls()) === calls9, "calls=" + (await connectCalls()));
+await p.evaluate(() => { window.__listSessions = []; });
+
+// t9b — socket morte (dead:true) : un SEUL marker ne déclare plus down
+// non plus — strike ×1, down seulement au 2ᵉ groupé. L'ancien code
+// passait en bad dès le premier marker.
+const l9b = await logLen();
+await p.evaluate(() => {
+  window.__listSessions = [{ conn: "local", conn_error: true,
+    _ac_transport: { dead: true, silent_ms: 60000 } }];
+});
+check("t9b strike1 loggé", await waitLog("sonde ko ×1", l9b, 4000));
+await sleep(300);
+check("t9b un marker ≠ down", (await st()) === "ok", await segCls());
+check("t9b marker mort : aucun retry",
+  (await connectCalls()) === calls9, "calls=" + (await connectCalls()));
+await p.evaluate(() => { window.__listSessions = []; });
+await setDs({ version: "9.9.9", sessions: 1, _ac_gen: 6 });
+await sleep(500); // tick watchdog : strikes/ignored purgés
 
 console.log(`${pass} PASS, ${fail} FAIL`);
 if (fail) {

@@ -239,18 +239,19 @@ export class Sidebar {
     ]);
     this.applyPrRows(prRes.rows, prRes.failed);
     // Marqueur Rust `conn_error` : la sonde list_sessions d'une conn a
-    // échoué (timeout 8 s) → la marquer down (une seule fois : déjà down,
-    // markDead re-rendererait refresh en boucle). Gen périmée = résultat
-    // d'un client remplacé au reconnect → ignoré (sinon down immédiat
-    // après « reconnect ok » avec le why par défaut trompeur).
+    // échoué → probeListError applique la même politique que les sondes
+    // (strikes + excuse « transport vivant ») : UN timeout de la sonde
+    // lourde paginée sur un démon lent ne doit plus tuer la conn —
+    // c'était le cycle down/reconnect → badge « déconnecté » persistant
+    // après un « reconnect ok » alors que le transport était vivant.
+    // Gen périmée = résultat d'un client remplacé au reconnect →
+    // ignoré dans probeFailed (isFresh).
     const list = raw.filter((s) => {
       if (this.pendingDel.has(s.id)) return false;
       if (!(s as { conn_error?: boolean }).conn_error) return true;
       const k = s.conn ?? "";
-      const gen = (s as { gen?: number }).gen;
-      if (!this.conns.isFresh(k, gen)) return false;
       if ((this.conns.state(k) ?? "ok") === "ok") {
-        this.conns.markDead(k, "list_sessions: conn_error",
+        this.conns.probeListError(k, (s as { gen?: number }).gen,
           (s as { _ac_transport?: AcTransport })._ac_transport);
       }
       return false;

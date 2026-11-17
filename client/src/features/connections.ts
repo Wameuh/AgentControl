@@ -391,6 +391,29 @@ export class ConnectionManager {
     return false;
   }
 
+  /** Marqueur `conn_error` de list_sessions (sidebar.refresh) : la sonde
+   * lourde paginée a son propre timeout (20 s) et peut expirer sur un
+   * démon lent SANS que le transport soit mort — avant, UN marker tuait
+   * la conn instantanément (markDead direct) → cycle down/reconnect en
+   * boucle, badge « déconnecté » persistant alors que les appels
+   * passaient. Même politique que les sondes : socket morte (dead) =
+   * strike franc ; socket vivante + trafic récent = lenteur excusée
+   * (bornée par IGNORED_STRIKE_MAX) ; sinon strikes → down au 2ᵉ. */
+  probeListError(key: string, gen: number | undefined, stats?: AcTransport) {
+    const dead = stats?.dead === true;
+    // Le marker ne porte ni kind ni silent_ms/rtt_ms de premier niveau
+    // (tout est dans _ac_transport) : dead explicite = échec de
+    // transport franc ; sinon on rejoue la logique « timeout » — une
+    // erreur démon sur un lien vivant n'est pas une mort non plus.
+    return this.probeFailed(key, {
+      error: "list_sessions: conn_error",
+      kind: dead ? "error" : "timeout",
+      silent_ms: stats?.silent_ms,
+      gen,
+      _ac_transport: stats,
+    });
+  }
+
   markDead(key: string, why = "conn-dead (EOF transport)", stats?: AcTransport) {
     // cfg n'est posée qu'à la fin d'un connect réussi — une conn dont
     // le tout premier connect a échoué en route n'est pas suivie (fenêtre
@@ -469,9 +492,18 @@ export class ConnectionManager {
       if (st && !st.error) this.setCaps(key, st);
       // Réouvrir la session affichée si elle vivait sur cette connexion.
       this.deps.reopenIfConn(key);
-      await this.deps.refresh();
+      // Un refresh en échec APRÈS markAlive n'est pas un échec de
+      // reconnexion : la conn est ok — ne pas la re-planifier ni la
+      // journaliser en « reconnect ko » (sinon cycle down/retry
+      // auto-entretenu alors que le transport est vivant).
+      await this.deps.refresh().catch((e) =>
+        logUi("warn", `conn ${key}: refresh post-reconnect ko — ${e}`));
     } catch (e) {
-      if (this.live.get(key) === "reconnecting") this.live.set(key, "down");
+      // Seul un échec du connect lui-même (ou un throw post-markAlive
+      // imprévu) arrive ici : si markAlive a déjà rendu la conn ok,
+      // le retry/log « ko » serait un faux négatif — ne rien faire.
+      if (this.live.get(key) !== "reconnecting") return;
+      this.live.set(key, "down");
       logUi("warn",
         `conn ${key}: reconnect #${attempt} ko gen=${genBefore ?? "?"}` +
         `${downMs != null ? ` transport-mort=${downMs}ms` : ""} ` +
