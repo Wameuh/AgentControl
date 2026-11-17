@@ -47,6 +47,28 @@ const CAPS_SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(30 
 /// ajoutés/retirés), une journée de retard reste invisible côté UX.
 const CAPS_STALE_AFTER: chrono::Duration = chrono::Duration::hours(24);
 
+/// Plafond du backoff de retry d'un profil dont le probe échoue — au-delà,
+/// on retente une fois par jour (le tick reste à 1 probe, le backoff
+/// garantit qu'un profil cassé ne peut pas affamer les autres).
+const CAPS_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+/// Backoff après `failures` échecs consécutifs de probe : 30 min, 1 h,
+/// 2 h… (doublement par échec) plafonné à `CAPS_RETRY_MAX`. Sans ça, un
+/// profil « available mais cassé » (adaptateur installé, agent non
+/// authentifié, initialize qui pend) garde le timestamp le plus stale
+/// pour toujours — caps jamais enregistrées → `epoch` à chaque tick →
+/// il monopoliserait le sweep indéfiniment.
+fn caps_retry_after(failures: u32) -> std::time::Duration {
+    CAPS_SWEEP_EVERY
+        .saturating_mul(1u32 << failures.saturating_sub(1).min(10))
+        .min(CAPS_RETRY_MAX)
+}
+
+/// Échecs de probe consécutifs par profil, tenus en mémoire par la
+/// tâche de sweep : `(nb échecs, instant du dernier)`. Un succès ou un
+/// restart du démon remet le compteur à zéro.
+type CapsProbeFails = HashMap<String, (u32, std::time::Instant)>;
+
 /// Fraîcheur d'un instantané agent_caps pour le sweep : `None` =
 /// frais (rien à faire), `Some(t)` = à re-sonder — plus `t` est
 /// ancien, plus le profil est prioritaire. Caps absentes → epoch
@@ -403,8 +425,12 @@ impl Daemon {
             // restaurées, premiers handshakes moissonnent déjà) avant
             // de dépenser un spawn de probe.
             tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+            // Échecs de probe par profil : sans ce bookkeeping, un
+            // profil cassé garderait les caps les plus stales à jamais
+            // et accaparerait chaque tick (starvation des autres).
+            let mut fails: CapsProbeFails = HashMap::new();
             loop {
-                d.sweep_agent_caps_once().await;
+                d.sweep_agent_caps_once(&mut fails).await;
                 tokio::time::sleep(CAPS_SWEEP_EVERY).await;
             }
         });
@@ -413,10 +439,13 @@ impl Daemon {
     /// Un passage du sweep : choisit le profil disponible le plus
     /// « stale » (caps absentes = le plus urgent, sinon updated_at le
     /// plus ancien au-delà de `CAPS_STALE_AFTER`) et le re-sonde.
-    /// Jamais bloquant pour le reste du démon : probe_lock sérialise
-    /// avec un refresh_agent_caps explicite, et une erreur de probe
-    /// est loguée puis oubliée (le prochain tick retentera).
-    async fn sweep_agent_caps_once(self: &Arc<Self>) {
+    /// `fails` porte le backoff par profil : un échec repousse le
+    /// prochain essai de `caps_retry_after(n)` (30 min → ×2 → 24 h max)
+    /// pour que les autres profils stale ne restent pas affamés ; un
+    /// succès remet le compteur à zéro. Jamais bloquant pour le reste
+    /// du démon : probe_lock sérialise avec un refresh_agent_caps
+    /// explicite, et une erreur de probe est loguée puis oubliée.
+    async fn sweep_agent_caps_once(self: &Arc<Self>, fails: &mut CapsProbeFails) {
         self.reload_agent_profiles().await;
         let now = chrono::Utc::now();
         let mut best: Option<(String, chrono::DateTime<chrono::Utc>)> = None;
@@ -425,6 +454,14 @@ impl Daemon {
             for (id, p) in agents.iter() {
                 if !super::misc::profile_available(p) {
                     continue;
+                }
+                // Backoff : un profil en échec récent est sauté tant que
+                // `caps_retry_after` n'est pas écoulé — les caps restent
+                // stale, il redevient éligible à son tour.
+                if let Some(&(n, last)) = fails.get(id) {
+                    if last.elapsed() < caps_retry_after(n) {
+                        continue;
+                    }
                 }
                 let caps = self.caps.get(id);
                 let Some(t) = caps_stale_at(caps.as_ref().map(|c| c.updated_at.as_str()), now)
@@ -446,10 +483,17 @@ impl Daemon {
         }
         match self.probe_agent_caps(&id).await {
             Ok((_, touched)) => {
+                fails.remove(&id);
                 tracing::info!("caps sweep: {id} re-sondé ({} session(s) rafraîchie(s))", touched.len());
             }
             Err(e) => {
-                tracing::warn!("caps sweep: probe {id} en échec: {e:#}");
+                let f = fails.entry(id.clone()).or_insert((0, std::time::Instant::now()));
+                f.0 = f.0.saturating_add(1);
+                f.1 = std::time::Instant::now();
+                tracing::warn!(
+                    "caps sweep: probe {id} en échec (essai {}): {e:#}",
+                    f.0
+                );
             }
         }
     }
@@ -816,5 +860,17 @@ mod tests {
         // Frontière : pile CAPS_STALE_AFTER → stale (>=).
         let edge = (now - CAPS_STALE_AFTER).to_rfc3339();
         assert!(caps_stale_at(Some(&edge), now).is_some());
+    }
+
+    /// caps_retry_after (sweep #268) : backoff ×2 par échec, plafonné —
+    /// un profil en échec permanent ne doit pas affamer les autres.
+    #[test]
+    fn caps_retry_after_backoff() {
+        assert_eq!(caps_retry_after(1), CAPS_SWEEP_EVERY);
+        assert_eq!(caps_retry_after(2), CAPS_SWEEP_EVERY * 2);
+        assert_eq!(caps_retry_after(4), CAPS_SWEEP_EVERY * 8);
+        // Plafond 24 h quel que soit le nombre d'échecs.
+        assert_eq!(caps_retry_after(100), CAPS_RETRY_MAX);
+        assert!(caps_retry_after(u32::MAX) <= CAPS_RETRY_MAX);
     }
 }
