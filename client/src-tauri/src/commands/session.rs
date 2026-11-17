@@ -346,6 +346,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         "resume_session" => ReqKind::ResumeSession {
             session: s("session"),
             native_id: so("native_id"),
+            fresh: p.get("fresh").and_then(Value::as_bool).unwrap_or(false),
         },
         "list_native_sessions" => ReqKind::ListNativeSessions { session: s("session") },
         "attach_session" => ReqKind::AttachSession {

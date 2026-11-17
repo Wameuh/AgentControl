@@ -261,6 +261,7 @@ body.android #chat-header #btn-term,
 body.android #chat-header #btn-files,
 body.android #chat-header #btn-refresh,
 body.android #chat-header #btn-resume,
+body.android #chat-header #btn-fresh,
 body.android #chat-header #btn-search,
 body.android #chat-header #btn-pins { display: none !important; }
 body.android #chat-more { display: inline-block; font-size: 20px; min-width: 44px; min-height: 44px; }

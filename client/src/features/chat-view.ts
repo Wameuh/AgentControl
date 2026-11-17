@@ -706,7 +706,7 @@ export class ChatView {
     this.unseenBelow = 0;
     $("btn-bottom").hidden = true;
     $("chat-gem").hidden = true;
-    for (const b of ["btn-resume", "btn-cancel", "btn-alt"]) $(b).hidden = true;
+    for (const b of ["btn-resume", "btn-fresh", "btn-cancel", "btn-alt"]) $(b).hidden = true;
     const st = $("chat-state");
     st.textContent = "gone";
     st.className = "badge st-dead";
@@ -770,6 +770,7 @@ export class ChatView {
     if (!app.current) {
       $("chat-ctx").hidden = true;
       $("chat-opts").hidden = true;
+      $("btn-fresh").hidden = true;
       this.deps.syncAltBtn(); // sans session → bouton alternatif caché
       return;
     }
@@ -792,6 +793,13 @@ export class ChatView {
     // meta.json — sauf "starting" : le spawn tourne déjà (afficher
     // Reprendre suggérerait un échec alors que le boot est en cours).
     $("btn-resume").hidden = app.alive || app.current.state === "starting";
+    // « starting » + sid natif = spawn en vol sur un contexte à
+    // reprendre (session/load, initialize) : proposer l'abandon du
+    // contexte natif — le replay d'une très longue session peut durer
+    // des dizaines de minutes (#271). Sans sid natif (session/new en
+    // cours) il n'y a rien à abandonner.
+    $("btn-fresh").hidden =
+      !(app.current.state === "starting" && !!app.current.native_session_id);
     const busySt =
       app.current.state === "working" ||
       app.current.state === "waiting_input" ||

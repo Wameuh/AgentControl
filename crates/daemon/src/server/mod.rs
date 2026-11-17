@@ -873,9 +873,11 @@ impl Daemon {
                 self.h_list_native_sessions(session).await
             }
             ReqKind::ForkSession { session } => self.h_fork_session(session).await,
-            ReqKind::ResumeSession { session, native_id } => {
-                self.h_resume_session(session, native_id).await
-            }
+            ReqKind::ResumeSession {
+                session,
+                native_id,
+                fresh,
+            } => self.h_resume_session(session, native_id, fresh).await,
             ReqKind::ClearSession { session } => self.h_clear_session(session).await,
             ReqKind::SleepSession { session } => self.h_sleep_session(session).await,
             ReqKind::Send {

@@ -15,7 +15,7 @@ export const fr: Record<Key, string> = {
   web_token_err: "token invalide",
   conn_off: "déconnectée — clic pour reconnecter",
   new_session: "Nouvel agent", send: "Envoyer", cancel: "Annuler", stop: "Stop",
-  resume: "Reprendre", refresh_title: "Recharger la session",
+  resume: "Reprendre", fresh_ctx: "Contexte neuf", fresh_ctx_title: "Abandonner le contexte natif et repartir sur un contexte vide (journal conservé)", refresh_title: "Recharger la session",
   input_ph: "Message… (Entrée = envoyer, Alt+Entrée = injecter, {mod}+Entrée = forcer, / = cmds)",
   input_ph_steer: "Message… (Entrée = steer, Alt+Entrée = file, {mod}+Entrée = forcer, / = cmds)",
   input_ph_mobile: "Message à l'agent…",

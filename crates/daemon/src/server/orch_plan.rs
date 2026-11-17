@@ -2509,7 +2509,7 @@ impl Daemon {
         {
             return true;
         }
-        if self.h_resume_session(sid.to_string(), None).await.is_ok() {
+        if self.h_resume_session(sid.to_string(), None, false).await.is_ok() {
             return self
                 .h_send(sid.to_string(), msg, force, false)
                 .await

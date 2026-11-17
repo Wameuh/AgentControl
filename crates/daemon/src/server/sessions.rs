@@ -379,7 +379,7 @@ impl Daemon {
                 Ok(json!({ "session": sid2 }))
     }
 
-    pub(super) async fn h_resume_session(self: &Arc<Self>, session: String, native_id: Option<String>) -> Result<Value> {
+    pub(super) async fn h_resume_session(self: &Arc<Self>, session: String, native_id: Option<String>, fresh: bool) -> Result<Value> {
                 let s = self.get_session(&session).await?;
                 // Rebind pendant l'override : process déjà mort (kill
                 // sauté) mais journal.reset + set_native_id
@@ -388,6 +388,31 @@ impl Daemon {
                 // que fork/clear/delete/kill.
                 if s.catalogue_override_active() {
                     anyhow::bail!("override catalogue en cours — réessayez dans un instant");
+                }
+                // Abandon du contexte natif (« resume --fresh », bouton
+                // client pendant un long chargement) : le prochain spawn
+                // part en session/new — journal local conservé. Le flag
+                // force_new_context couvre aussi un spawn déjà en file
+                // derrière le spawn_lock qui aurait capturé l'ancien id.
+                if fresh {
+                    if native_id.is_some() {
+                        anyhow::bail!("fresh et native_id sont exclusifs");
+                    }
+                    s.force_new_context();
+                    // Avorte un spawn/session/load en vol : le kill
+                    // invalide la génération — l'essai courant se solde
+                    // « supplanté » et libère le spawn_lock.
+                    if s.is_alive() || s.is_spawning() {
+                        s.kill_for_respawn().await;
+                    }
+                    s.clear_native_id();
+                    s.emit(EventKind::System {
+                        text: "contexte natif abandonné — session repartie sur un contexte neuf".into(),
+                    });
+                    // respawn gère la transition asleep → starting → idle.
+                    self.respawn(&s, true).await?;
+                    info!("session reprise (contexte neuf): {session}");
+                    return Ok(json!({"session": session, "fresh": true}));
                 }
                 if s.is_alive() && native_id.is_none() {
                     return Ok(json!({"session": session, "already": true}));

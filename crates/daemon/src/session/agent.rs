@@ -36,10 +36,13 @@ const HANDSHAKE_SESSION_TIMEOUT: std::time::Duration =
 /// L'attente devient GLISSANTE — chaque ligne reçue de l'agent
 /// (note_agent_event → watch.last_event) la prolonge — avec un plafond
 /// total : un agent muet > IDLE ou un load > MAX reste borné (#269).
+/// Le plafond est large (30 min) : un journal de ~400 Mo / ~85k events
+/// rejoués peut mettre plusieurs minutes à 10 — la progression est
+/// visible via les syslines « N events rejoués » (#271).
 const HANDSHAKE_SESSION_IDLE: std::time::Duration =
     std::time::Duration::from_secs(90);
 const HANDSHAKE_SESSION_MAX: std::time::Duration =
-    std::time::Duration::from_secs(600);
+    std::time::Duration::from_secs(1800);
 
 impl Session {
     // -----------------------------------------------------------------------
@@ -112,6 +115,16 @@ impl Session {
         // de l'agent doit déjà les voir. Best-effort : warn seulement,
         // jamais bloquant pour le spawn (skills.rs).
         crate::skills::sync(&hints.skills_roots);
+        // Abandon du contexte natif demandé (« resume --fresh », bouton
+        // client) : tout spawn repart en session/new — y compris un
+        // spawn qui n'aurait capturé que plus tard l'ancien
+        // native_session_id (file derrière le spawn_lock). Consommé
+        // ici, sous le lock : une seule transition par demande.
+        let resume_native_id = if self.force_new_context.swap(false, Ordering::SeqCst) {
+            None
+        } else {
+            resume_native_id
+        };
         let r = self
             .spawn_attempts(command, envs, resume_native_id, skip_replay, mcp_servers, hints)
             .await;
@@ -313,8 +326,13 @@ impl Session {
         // APRÈS ce point (réponse handshake ou event de ce spawn).
         let cfg_gen0 = self.config_gen.load(Ordering::SeqCst);
         // Un load tué en vol laisserait le flag vrai → les updates de la
-        // session suivante seraient ignorées comme du replay.
+        // session suivante seraient ignorées comme du replay. Idem pour
+        // load_active (compteur + debounce meta) — un load avorté ne doit
+        // pas laisser la session en mode « load » pour le spawn suivant.
         self.loading_replay.store(false, Ordering::SeqCst);
+        self.load_active.store(false, Ordering::SeqCst);
+        self.flush_meta_save();
+        self.caps.resume_persist();
         let meta = self.meta_snapshot();
         let (cmd, args) = command.split_first().context("commande agent vide")?;
         // argv[0] résolu à chaud (PATH effectif + dossiers usuels) : le
@@ -584,7 +602,14 @@ impl Session {
             text: match (resume_native_id.is_some(), fell_back) {
                 (_, true) => "agent respawned (session native perdue — contexte neuf)".into(),
                 (true, false) => {
-                    format!("agent respawned (session/load={}, resumed)", supports_load)
+                    let n = self.replay_seen.load(Ordering::SeqCst);
+                    if n > 0 {
+                        format!(
+                            "agent respawned (session/load={supports_load}, resumed — {n} events rejoués)"
+                        )
+                    } else {
+                        format!("agent respawned (session/load={supports_load}, resumed)")
+                    }
                 }
                 (false, _) => "agent started".into(),
             },
@@ -786,6 +811,46 @@ impl Session {
         Ok(true)
     }
 
+    /// Fin du session/load (succès, erreur ou kill) : sort du mode
+    /// replay + load, puis solde les meta sales accumulées pendant le
+    /// load — une seule écriture meta.json finale au lieu d'une par
+    /// event méta rejoué (#271).
+    fn end_load_replay(&self) {
+        self.load_active.store(false, Ordering::SeqCst);
+        self.loading_replay.store(false, Ordering::SeqCst);
+        self.flush_meta_save();
+        self.caps.resume_persist();
+    }
+
+    /// Un update session/update de plus pendant le load : progression
+    /// visible côté utilisateur — sysline « … N events rejoués » toutes
+    /// les ~10 s. L'état « starting » seul ne dit rien pendant un
+    /// chargement de plusieurs minutes ; l'utilisateur doit voir que ça
+    /// avance (et pouvoir choisir d'abandonner le contexte natif,
+    /// #271).
+    fn note_load_progress(&self) {
+        let n = self.replay_seen.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut at = self.replay_report_at.lock().unwrap();
+        if at.elapsed() < std::time::Duration::from_secs(10) {
+            return;
+        }
+        *at = std::time::Instant::now();
+        drop(at);
+        self.emit(EventKind::System {
+            text: format!(
+                "session native très longue — chargement du contexte… {n} events rejoués"
+            ),
+        });
+    }
+
+    /// Abandon du contexte natif demandé (« resume --fresh », bouton
+    /// client) : le prochain spawn_agent repart en session/new quoi
+    /// qu'il arrive — y compris un spawn déjà en file derrière le
+    /// spawn_lock qui aurait capturé l'ancien native_session_id.
+    pub fn force_new_context(&self) {
+        self.force_new_context.store(true, Ordering::SeqCst);
+    }
+
     /// Handshake ACP d'un process frais : `initialize`, puis
     /// `session/load` quand une session native est à reprendre et que
     /// l'agent l'annonce, sinon `session/new`.
@@ -839,9 +904,16 @@ impl Session {
 
         if let (Some(native), true) = (resume_native_id, supports_load) {
             self.loading_replay.store(skip_replay, Ordering::SeqCst);
+            // Load en vol : progression comptée + meta saves différées
+            // (end_load_replay les solde — une seule écriture finale).
+            self.load_active.store(true, Ordering::SeqCst);
+            self.replay_seen.store(0, Ordering::SeqCst);
+            self.caps.pause_persist();
+            *self.replay_report_at.lock().unwrap() = std::time::Instant::now();
             info!("[{}] handshake: session/load…", meta.id);
             // Progression visible : un load long ne doit pas laisser le
-            // chat figé sur « starting » pendant des minutes (#269).
+            // chat figé sur « starting » pendant des minutes (#269) —
+            // le compteur d'updates rejoués (#271) précise l'avancement.
             self.emit(EventKind::System {
                 text: "reprise de la session native — chargement du contexte…".into(),
             });
@@ -854,7 +926,7 @@ impl Session {
                     HANDSHAKE_SESSION_MAX,
                 )
                 .await;
-            self.loading_replay.store(false, Ordering::SeqCst);
+            self.end_load_replay();
             match r {
                 Ok(v) => {
                     info!(
@@ -1255,6 +1327,31 @@ impl Session {
             Some(u) => u,
             None => return,
         };
+        if self.load_active.load(Ordering::SeqCst) {
+            self.note_load_progress();
+            // Rejeu ignoré (skip_replay) : seuls les updates à effet de
+            // bord méta (mode, config, usage, commandes) justifient le
+            // mapping complet — chunks, tool calls, plans et notices
+            // sont sautés AVANT map_update (extraction de texte, diffs,
+            // allocs) : sur ~85k updates rejoués le traitement ligne à
+            // ligne reste cheap et n'étrangle pas l'executor partagé
+            // (#271).
+            if self.loading_replay.load(Ordering::SeqCst) {
+                let su = update
+                    .get("sessionUpdate")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if !matches!(
+                    su,
+                    "current_mode_update"
+                        | "config_option_update"
+                        | "usage_update"
+                        | "available_commands_update"
+                ) {
+                    return;
+                }
+            }
+        }
         match acp::map_update(update) {
             acp::Mapped::Chunk(kind, text) => {
                 if !self.loading_replay.load(Ordering::SeqCst) {

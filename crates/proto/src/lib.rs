@@ -746,10 +746,18 @@ pub enum ReqKind {
     },
     /// Reprend une session existante (respawn agent + session/load).
     /// native_id : reprendre une AUTRE session native de l'agent.
+    /// fresh : abandonner le contexte natif et repartir en session/new
+    /// (journal local conservé) — issue explicite quand le replay d'une
+    /// très longue session native est trop long ou voué à l'échec
+    /// (« resume --fresh », bouton client pendant le chargement).
+    /// Ignoré par les démons anciens (dégradation douce : resume
+    /// normal sur le contexte natif).
     ResumeSession {
         session: String,
         #[serde(default)]
         native_id: Option<String>,
+        #[serde(default)]
+        fresh: bool,
     },
     /// Liste les sessions natives de l'agent (ACP session/list) via une
     /// session vivante de cet agent.
