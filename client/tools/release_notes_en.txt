@@ -170,3 +170,4 @@ sha:71fcbdf871390152ae3de8661e3fc1da87e2e3f7: ACP-only session modes (plan/smart
 346: Loading very large sessions is now more robust — replay payloads are bounded and the client waits with a sliding timeout instead of failing outright.
 347: The connection status badge no longer stays stuck on "disconnected" after a successful reconnect — a single slow session-list probe on a live transport no longer flips the connection back to down.
 349: Resuming very long sessions is now smoother — the client shows resume progress, input/output is debounced and a new "fresh context" option drops the oversized native context instead of failing.
+351: Operational logs and client-facing error messages are now reported in English.
