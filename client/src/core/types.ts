@@ -177,6 +177,12 @@ export type AgentOpt = {
   /** Présent quand available === false : pourquoi indisponible —
    *  argv[0] recherchés + hint d'install. */
   unavailable?: { searched?: string[]; hint?: string } | null;
+  /** Modèles sélectionnables hors annonce ACP du profil
+   *  ([agents.<id>.extra_models] / registre auto — ex. opus de
+   *  claude) : le client les fusionne à caps.models dans la vue des
+   *  capacités ; au spawn ils rejoignent available_models via le
+   *  handshake (session/set_model les accepte tels quels). */
+  extra_models?: { value: string; label?: string }[];
 };
 
 /** Coût catalogue d'un modèle (RPC model_costs) : `label` compact pour

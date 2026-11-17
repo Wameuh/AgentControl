@@ -410,6 +410,12 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     // déclarés/modifiés/supprimés à la main pris en compte à chaud.
     daemon.agents_rescan_boot();
 
+    // Fraîcheur des capacités par profil (item #268) : re-sonde
+    // périodique des profils dont l'instantané agent_caps.json est
+    // absent ou périmé — un profil auto-découvert post-boot (#260) ou
+    // une annonce provider périmée sont rattrapés sans action manuelle.
+    daemon.caps_sweep_boot();
+
     if crashed && !resumable.is_empty() {
         if cfg.auto_resume {
             let d3 = daemon.clone();

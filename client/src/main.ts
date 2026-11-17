@@ -40,6 +40,7 @@ import { initModelCatalog } from "./features/modelcatalog";
 import { initFusionDialog, openFusion } from "./features/fusion-dialog";
 import { GroupStore } from "./features/groups";
 import { NewSessionDialog } from "./features/new-session";
+import { AgentCapsDialog } from "./features/agentcaps";
 import { ConnectionManager } from "./features/connections";
 import { ConnView } from "./features/conn-view";
 import { EventRenderer } from "./features/event-renderers";
@@ -146,6 +147,7 @@ const map = new MapView();
 const term = new TermPanel();
 const connView = new ConnView();
 const newSess = new NewSessionDialog();
+const agentCaps = new AgentCapsDialog();
 const settings = new SettingsPanel();
 const tts = new Tts();
 const comps = new ComponentsPanel();
@@ -325,6 +327,7 @@ newSess.openSession = (id, conn) => {
   void chat.open(id, false, conn);
 };
 newSess.knownConns = () => conns.knownConns();
+agentCaps.knownConns = () => conns.knownConns();
 groups.refresh = () => void sidebar.refresh();
 groups.deleteSession = (s) => sidebar.deleteSessionNow(s);
 files.bind({ sysline: (txt, ic) => chat.sysline(txt, ic) });
@@ -485,6 +488,9 @@ $("about-gh").addEventListener("click", (e) => {
 hydrateIcons();
 groups.init();
 newSess.init();
+agentCaps.init();
+$("btn-agent-caps").onclick = () =>
+  agentCaps.open(app.current?.conn ?? conns.knownConns()[0]);
 conns.init();
 connView.init();
 chat.init();
@@ -509,6 +515,12 @@ steps.init();
 initModelBar(openFusion, () => chat.updateHeader());
 initFusionDialog();
 initStatus(() => {
+  // Bouton « capacités agents » : visible dès qu'une conn connaît la
+  // capability agent_caps (vieux démon → masqué, comme les autres
+  // boutons à gate).
+  $("btn-agent-caps").hidden = !conns
+    .knownConns()
+    .some((c) => conns.cap(c)?.agent_caps === true);
   // Bloc host du démon de la conn affichée (session ouverte), sinon de
   // la conn liée — absent sur vieux démon → segment masqué.
   const k = app.current?.conn ?? conns.knownConns()[0] ?? "default";

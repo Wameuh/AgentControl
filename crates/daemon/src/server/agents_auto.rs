@@ -19,6 +19,7 @@
 //! invisible.
 
 use super::cfg::{AgentProfile, AgentVia, DEFAULT_MAX_INSTANCES};
+use proto::ExtraModel;
 use std::collections::HashMap;
 
 /// Un adaptateur ACP connu du registre.
@@ -36,6 +37,11 @@ pub(crate) struct AdapterSpec {
     pub detect: &'static [&'static str],
     /// Hint affiché quand le profil est indisponible.
     pub install_hint: &'static str,
+    /// Modèles sélectionnables hors annonce ACP pour ce profil —
+    /// paires (value, label) fusionnées dans `extra_models` du profil
+    /// auto (ex. opus de claude-code-acp, absent de availableModels
+    /// alors que session/set_model l'accepte). Vide = rien à ajouter.
+    pub extra_models: &'static [(&'static str, &'static str)],
 }
 
 /// Registre des adaptateurs ACP connus. `claude` : le CLI `claude`
@@ -53,6 +59,13 @@ pub(crate) const KNOWN_ADAPTERS: &[AdapterSpec] = &[
         install_hint: "npm i -g @zed-industries/claude-code-acp \
              (ou @agentclientprotocol/claude-agent-acp) — le CLI `claude` \
              seul n'expose pas ACP",
+        // claude-code-acp (0.16.x, dernière) n'annonce que
+        // default/sonnet/haiku dans availableModels — « default » EST
+        // Opus, mais aucun modèle « opus » explicite. L'adaptateur
+        // accepte session/set_model avec n'importe quel id (alias CLI
+        // claude : opus, claude-opus-4-5…) → opus proposé en extra,
+        // fusionné dans available_models au handshake (session/agent.rs).
+        extra_models: &[("opus", "Opus")],
     },
     AdapterSpec {
         id: "codex",
@@ -62,6 +75,7 @@ pub(crate) const KNOWN_ADAPTERS: &[AdapterSpec] = &[
         install_hint: "npm i -g @zed-industries/codex-acp \
              (ou @agentclientprotocol/codex-acp) — le CLI `codex` \
              seul n'expose pas ACP",
+        extra_models: &[],
     },
     AdapterSpec {
         id: "gemini",
@@ -69,6 +83,7 @@ pub(crate) const KNOWN_ADAPTERS: &[AdapterSpec] = &[
         commands: &[&["gemini", "--experimental-acp"]],
         detect: &[],
         install_hint: "npm i -g @google/gemini-cli",
+        extra_models: &[],
     },
     AdapterSpec {
         id: "opencode",
@@ -76,13 +91,15 @@ pub(crate) const KNOWN_ADAPTERS: &[AdapterSpec] = &[
         commands: &[&["opencode", "acp"]],
         detect: &[],
         install_hint: "npm i -g opencode-ai",
+        extra_models: &[],
     },
 ];
 
 /// Profil auto d'un adaptateur du registre — `commands` = tous les
 /// candidats (la résolution à chaud choisit le premier présent),
-/// `via:Auto`. Pas d'extra_models/advisor : ces réglages fins restent
-/// l'affaire d'une section `[agents.<id>]` qui prime sur l'auto.
+/// `via:Auto`. `extra_models` est repris du spec (compléments
+/// d'annonce du registre) ; advisor reste l'affaire d'une section
+/// `[agents.<id>]` qui prime sur l'auto.
 fn auto_profile(spec: &AdapterSpec) -> AgentProfile {
     AgentProfile {
         name: spec.name.to_string(),
@@ -97,7 +114,19 @@ fn auto_profile(spec: &AdapterSpec) -> AgentProfile {
         max_instances: DEFAULT_MAX_INSTANCES,
         catalogue_cmd: None,
         model_override_cmd: None,
-        extra_models: Vec::new(),
+        // Les extra_models du spec sont des compléments d'annonce
+        // contrôlés par le registre (ex. opus de claude-code-acp,
+        // absent d'availableModels alors que session/set_model
+        // l'accepte — vérifié sur l'adaptateur 0.16.x) ; advisor
+        // reste réservé à une section [agents.<id>] explicite.
+        extra_models: spec
+            .extra_models
+            .iter()
+            .map(|(v, l)| ExtraModel {
+                value: (*v).to_string(),
+                label: (*l).to_string(),
+            })
+            .collect(),
         advisor_models: Vec::new(),
         provision_skills: true,
     }
@@ -199,6 +228,10 @@ mod tests {
         let p = &agents["claude"];
         assert_eq!(p.via, AgentVia::Auto);
         assert_eq!(p.commands.len(), 2);
+        // opus : absent d'availableModels chez claude-code-acp, mais
+        // session/set_model l'accepte → extra_models du registre.
+        assert_eq!(p.extra_models.len(), 1);
+        assert_eq!(p.extra_models[0].value, "opus");
         // Second scan idempotent : ni ajout ni retrait.
         let (a2, r2) = sync_auto_agents(&mut agents, &|b| b == "claude-code-acp");
         assert!(a2.is_empty() && r2.is_empty());

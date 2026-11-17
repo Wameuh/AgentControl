@@ -578,6 +578,12 @@ export const en = {
   pv_unsupported: "Plugin views need a recent daemon — update it first.",
   pv_noweb: "This daemon doesn't expose its web UI — plugin views unavailable.",
   pv_nav_unknown: "navigate: unknown target « {target} »",
+  agent_caps_h: "Agent capabilities",
+  agent_caps_title: "Agent capabilities — modes, models, config options per profile",
+  caps_modes: "Modes", caps_models: "Models", caps_config: "Config options",
+  caps_current: "current", caps_none: "none announced", caps_never: "never probed",
+  caps_reprobe: "Re-probe", caps_probing: "Probing…", caps_extra: "extra",
+  caps_updated: "last probe",
 } as const;
 
 export type Key = keyof typeof en;

@@ -581,4 +581,10 @@ export const es: Record<Key, string> = {
   pv_unsupported: "Las vistas de plugin requieren un demonio reciente — actualízalo.",
   pv_noweb: "Este demonio no expone su interfaz web — vistas de plugin no disponibles.",
   pv_nav_unknown: "navigate: destino desconocido « {target} »",
+  agent_caps_h: "Capacidades de los agentes",
+  agent_caps_title: "Capacidades de los agentes — modos, modelos, opciones de config por perfil",
+  caps_modes: "Modos", caps_models: "Modelos", caps_config: "Opciones de config",
+  caps_current: "actual", caps_none: "nada anunciado", caps_never: "nunca sondeado",
+  caps_reprobe: "Ressondear", caps_probing: "Sondeando…", caps_extra: "extra",
+  caps_updated: "última sonda",
 };

@@ -298,6 +298,7 @@ body.android .froot { min-height: 44px; }
    (boîte transparente, l'icône reste petite). */
 body.android #sess-filter input { min-height: 44px; font-size: 15px; padding-right: 46px; }
 body.android #sess-filter-clear { min-width: 44px; min-height: 44px; padding: 0; }
+body.android #btn-agent-caps { min-width: 44px; min-height: 44px; }
 /* Headers pliables des tool calls + boutons « voir plus » */
 body.android .tool-head { min-height: 44px; }
 body.android .btn-more, body.android .btn-cmd { min-height: 44px; }
