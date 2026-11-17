@@ -1184,7 +1184,7 @@ impl Daemon {
                         // EOF propre (client parti) vs erreur de lecture :
                         // le log de fermeture distingue les deux.
                         Ok(None) => return Ok(()),
-                        Err(e) => return Err(e).context("lecture conn"),
+                        Err(e) => return Err(e).context("reading conn"),
                     };
                     if line.trim().is_empty() {
                         continue;

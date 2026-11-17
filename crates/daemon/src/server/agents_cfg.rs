@@ -342,7 +342,7 @@ pub(crate) fn persist(root: &Path, edits: &[(String, AgentProfile)]) -> Result<(
     let (text, perms) = match std::fs::read_to_string(&path) {
         Ok(t) => (t, std::fs::metadata(&path).ok().map(|m| m.permissions())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), None),
-        Err(e) => return Err(e).context("lecture config.toml"),
+        Err(e) => return Err(e).context("reading config.toml"),
     };
     let mut doc = text
         .parse::<toml_edit::DocumentMut>()

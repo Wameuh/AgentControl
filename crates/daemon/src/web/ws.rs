@@ -212,7 +212,7 @@ async fn write_frames(
                 }
             }
             l = lines.next_line() => {
-                match l.context("lecture serve_conn")? {
+                match l.context("reading serve_conn")? {
                     Some(line) => write_frame(&mut wr, 0x1, line.as_bytes()).await?,
                     None => {
                         // serve_conn terminé → close propre côté WS.

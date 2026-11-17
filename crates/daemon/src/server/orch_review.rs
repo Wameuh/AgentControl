@@ -996,8 +996,8 @@ impl Daemon {
                     self.pr_review_notify(
                         &by,
                         format!(
-                            "[AgentControl] review {key} acceptée — session {sid} lancée \
-                             (worktree au head {})",
+                            "[AgentControl] review {key} accepted — session {sid} launched \
+                             (worktree at head {})",
                             &head_sha[..head_sha.len().min(7)]
                         ),
                     )

@@ -78,15 +78,14 @@ const INTERNALS: &[Internal] = &[
     },
     Internal {
         name: "backlog-orchestrator",
-        description: "Orchestrateur backlog AgentBacklog — boucle interne \
-                      opt-in (workers, nudges, release orphelins, garde \
-                      release PR ; ex-script Python)",
+        description: "AgentBacklog backlog orchestrator — opt-in internal \
+                      loop (workers, nudges, orphan release, release-PR \
+                      guard; ex-Python script)",
     },
     Internal {
         name: "agents",
-        description: "Profils agents ACP — commande de chaque profil \
-                      [agents.*] éditable (persistée dans config.toml, \
-                      hot-reload)",
+        description: "ACP agent profiles — per-profile [agents.*] command \
+                      editable (persisted in config.toml, hot-reload)",
     },
 ];
 
@@ -1033,7 +1032,7 @@ fn read_specs(path: &Path) -> Result<Vec<ComponentSpec>> {
     let txt = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e).context("lecture components.toml"),
+        Err(e) => return Err(e).context("reading components.toml"),
     };
     let file: ComponentsFile = toml::from_str(&txt).context("invalid components.toml")?;
     Ok(file.components)

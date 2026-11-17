@@ -68,7 +68,7 @@ pub async fn fork_via_tui(bin: &str, cwd: &str, native_id: &str) -> Result<Strin
                     post.extend_from_slice(&buf[..n]);
                 }
             }
-            Ok(Err(e)) => break Err(anyhow!("lecture PTY: {e}")),
+            Ok(Err(e)) => break Err(anyhow!("reading PTY: {e}")),
             Err(_) => {}
         }
 

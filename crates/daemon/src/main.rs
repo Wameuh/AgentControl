@@ -485,7 +485,7 @@ fn read_pid_marker(path: &std::path::Path) -> Result<PidMarker> {
     let txt = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(PidMarker::Absent),
-        Err(e) => return Err(e).context("lecture daemon.pid"),
+        Err(e) => return Err(e).context("reading daemon.pid"),
     };
     let Ok(pid) = txt.trim().parse::<u32>() else {
         // Contenu illisible : écriture interrompue → arrêt brutal aussi.

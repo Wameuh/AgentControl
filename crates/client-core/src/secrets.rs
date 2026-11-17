@@ -92,7 +92,7 @@ pub(crate) fn write_secret_file(path: &Path, data: &[u8]) -> io::Result<()> {
 /// re-scellement opportuniste des fichiers gérés par l'app sous
 /// `base_dir()`.
 pub(crate) fn read_secret_file(path: &Path) -> Result<Vec<u8>> {
-    let raw = std::fs::read(path).with_context(|| format!("lecture {}", path.display()))?;
+    let raw = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     if raw.starts_with(MAGIC) {
         let b = boxed().context("encrypted file without keystore backend")?;
         return b

@@ -261,7 +261,7 @@ impl Daemon {
         let (data, total) =
             tokio::task::spawn_blocking(move || journal::read_blob(&dir, &blob, offset, limit))
                 .await
-                .context("lecture blob")??;
+                .context("reading blob")??;
         Ok(json!({
             "data": String::from_utf8_lossy(&data),
             "total": total,
