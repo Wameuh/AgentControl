@@ -125,6 +125,7 @@ export const de: Record<Key, string> = {
   fusion_h: "Fusion — zwei Modelle parallel", main_model: "Hauptmodell",
   main_effort: "Haupt-Effort", sidekick: "Sidekick", sidekick_effort: "Sidekick-Effort",
   apply: "Anwenden", resume_h: "Fortzusetzende Agentensitzungen", close: "Schließen",
+  resume_filter_ph: "Filtern…", resume_no_match: "Keine passende Sitzung",
   settings_h: "Einstellungen", theme_label: "Design", theme_dark: "Dunkel", theme_light: "Hell",
   "s-accent": "Akzentfarbe", "s-accent-int": "Akzentintensität",
   "s-bg-anim": "Animierter Hintergrund",

@@ -798,7 +798,12 @@
     <dialog id="dlg-resume">
       <form method="dialog">
         <h3 data-i18n="resume_h">Agent sessions to resume</h3>
-        <div id="native-list">…</div>
+        <input id="native-filter" type="text" autocomplete="off"
+               spellcheck="false" data-i18n-ph="resume_filter_ph" placeholder="Filter…" />
+        <div id="native-scroll">
+          <div id="native-list">…</div>
+          <div id="native-scrollbar"><div id="native-scroll-thumb"></div></div>
+        </div>
         <menu><button value="cancel" data-i18n="close">Close</button></menu>
       </form>
     </dialog>

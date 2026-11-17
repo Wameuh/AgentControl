@@ -123,6 +123,7 @@ export const fr: Record<Key, string> = {
   fusion_h: "Fusion — deux modèles en parallèle", main_model: "Modèle principal",
   main_effort: "Effort principal", sidekick: "Sidekick", sidekick_effort: "Effort sidekick",
   apply: "Appliquer", resume_h: "Sessions de l'agent à reprendre", close: "Fermer",
+  resume_filter_ph: "Filtrer…", resume_no_match: "Aucune session correspondante",
   settings_h: "Paramètres", theme_label: "Thème", theme_dark: "Sombre", theme_light: "Clair",
   "s-accent": "Couleur d'accent", "s-accent-int": "Intensité d'accent",
   "s-bg-anim": "Fond animé",
