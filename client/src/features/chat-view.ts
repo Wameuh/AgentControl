@@ -66,13 +66,18 @@ interface ConvCache {
   renderedCount: number;
   hasMoreHistory: boolean;
   /** Vue ancrée en plein journal (saut de recherche) : du contenu plus
-   *  récent existe après le dernier seq rendu. */
+   *  récent existe après le dernier seq rendu. En vue ancrée le
+   *  sticky-bottom est INERTE : l'utilisateur y navigue explicitement,
+   *  les events live sont tamponnés (pendingLive) et ⇥ ramène au
+   *  présent — le retour au bas réarme le stick (scrollBottom). */
   hasMoreNewer: boolean;
   /** Events live tamponnés pendant que la vue est ancrée. */
   pendingLive: AcEvent[];
   unseenBelow: number;
   lastSeq: number;
   scrollTop: number;
+  /** « Stuck » au moment du stash : l'utilisateur était collé en bas —
+   *  la restauration réépingle (et guérit l'écart de croissance async). */
   atBottom: boolean;
   ts: number;
 }
@@ -99,6 +104,9 @@ export class ChatView {
   private renderedSeqs = new Set<number>();
   private loadingPage = false;
   private hasMoreHistory = true;
+  // Vue ancrée : le sticky-bottom est inerte (navigation explicite de
+  // l'utilisateur, events live tamponnés) — ⇥ ramène au présent et
+  // réarme le stick via scrollBottom.
   private hasMoreNewer = false;
   private pendingLive: AcEvent[] = [];
   /** Events live en attente de rendu — flushés groupés sur le prochain
@@ -107,9 +115,23 @@ export class ChatView {
   private liveQueue: AcEvent[] = [];
   private liveRaf = 0;
   /** Batch du flushLive en cours : position lue une fois par frame
-   *  (nearBottom/scrollBottom par event = un layout synchrone chacun),
+   *  (stick/scrollBottom par event = un layout synchrone chacun),
    *  comptage des bulles ajoutées pour le badge « nouveaux ». */
   private liveBatch: { near: boolean; appended: number } | null = null;
+  /** « Stuck » — l'utilisateur est collé en bas et veut y rester
+   *  (comportement chat/Slack). Posé quand le scroll atteint le bas,
+   *  levé dès que la position affichée n'est plus en bas (scroll
+   *  volontaire vers le haut, saut de recherche, pagination). C'est un
+   *  FLAG et non un nearBottom() réévalué : une croissance async du
+   *  contenu (image lazy, <details> ouvert, highlight différé) après le
+   *  dernier append ne doit pas décoller le suivi — le ResizeObserver
+   *  réépingle tant que le flag tient. */
+  private stickBottom = true;
+  /** Enfants de #events suivis par le ResizeObserver du sticky-bottom
+   *  (un RO sur le scrollport ne tire pas sur scrollHeight). Synchronisé
+   *  par MutationObserver — aucune liste manuelle à tenir à jour. */
+  private stickObserved = new Set<Element>();
+  private stickRO: ResizeObserver | null = null;
   private jumpSeq = 0; // invalidation des sauts de recherche en vol
   private loadSeq = 0; // propriété du load en cours : un finally périmé ne doit pas libérer le flag d'un load plus récent
   /** open() en vol : les events live sont tamponnés (pendingLive) —
@@ -311,6 +333,7 @@ export class ChatView {
     }
     this.loadingPage = false;
     this.unseenBelow = 0;
+    this.stickBottom = true; // conversation neuve → collée en bas
     this.jumpSeq++; // un saut de recherche en vol ne doit plus réinjecter sa fenêtre
     $("btn-bottom").hidden = true;
   }
@@ -327,7 +350,10 @@ export class ChatView {
     const frag = document.createDocumentFragment();
     let lastSeq = 0;
     let n0 = 0;
-    const atBottom = this.nearBottom();
+    // Le flag « stuck » est stashé, pas un nearBottom() instantané :
+    // une croissance async post-append peut laisser un écart > 120 px
+    // sans que l'utilisateur ait rien demandé — il reste collé en bas.
+    const atBottom = this.stickBottom;
     const scroll = this.eventsEl.scrollTop; // lu avant détachement (clamp après)
     for (const n of [...this.eventsEl.children]) {
       if (this.isDecor(n) || n === this.convLoadingEl) continue;
@@ -397,6 +423,7 @@ export class ChatView {
     this.pendingLive = c.pendingLive;
     this.loadingPage = false;
     this.unseenBelow = c.unseenBelow;
+    this.stickBottom = c.atBottom;
     if (c.atBottom) this.scrollBottom();
     else this.eventsEl.scrollTop = c.scrollTop;
     this.updateBottomBtn();
@@ -1081,10 +1108,11 @@ export class ChatView {
       const ev = q[i];
       if (ev.type === "tool_call_update") lastUpd.set(ev.call_id as string, i);
     }
-    // nearBottom lu UNE fois avant la frame : le scroll ne peut pas
-    // bouger pendant la boucle (single thread) — le relire par event
-    // forçait un layout synchrone par event (lag de frappe en stream).
-    const batch = { near: this.nearBottom(), appended: 0 };
+    // « Stuck » lu UNE fois avant la frame : le flag ne bouge que sur
+    // scroll (jamais pendant la boucle, single thread) — nearBottom()
+    // réévalué ici perdrait l'état dès qu'une croissance async a ouvert
+    // un écart > 120 px sans scroll de l'utilisateur.
+    const batch = { near: this.stickBottom, appended: 0 };
     this.liveBatch = batch;
     try {
       for (let i = 0; i < q.length; i++) {
@@ -1184,9 +1212,10 @@ export class ChatView {
         this.eventsEl.getBoundingClientRect().top
     ) {
       this.eventsEl.scrollTop += this.eventsEl.scrollHeight - sh;
-      // La compensation a bougé scrollTop : la position mise en cache
-      // pour la frame n'est plus fiable (cas rare — trou comblé live).
-      if (this.liveBatch) this.liveBatch.near = this.nearBottom();
+      // La compensation a bougé scrollTop : le flag « stuck » reste la
+      // référence (sa sémantique ne dépend pas de la géométrie
+      // instantanée — voir son commentaire de déclaration).
+      if (this.liveBatch) this.liveBatch.near = this.stickBottom;
     }
     this.deps.pinsMark(node);
     // lastText reste ancré sur le dernier texte de la vue — un nœud
@@ -1213,13 +1242,11 @@ export class ChatView {
     if (live && !insertAt) {
       if (this.liveBatch) {
         this.liveBatch.appended++;
+      } else if (this.stickBottom) {
+        this.scrollBottom();
       } else {
-        const nearBottom = this.nearBottom();
-        if (nearBottom) this.scrollBottom();
-        else {
-          this.unseenBelow++;
-          this.updateBottomBtn();
-        }
+        this.unseenBelow++;
+        this.updateBottomBtn();
       }
     }
     if (!this.liveBatch) this.trimRendered();
@@ -1590,7 +1617,41 @@ export class ChatView {
     }
   }
 
+  /** Aligne les cibles du ResizeObserver sticky sur les enfants
+   *  actuels de #events (ajouts ET retraits — unobserve des nœuds
+   *  détachés, sinon le RO les garderait vivants indéfiniment). */
+  private syncStickTargets() {
+    if (!this.stickRO) return;
+    const cur = new Set<Element>(Array.from(this.eventsEl.children));
+    for (const n of this.stickObserved) {
+      if (!cur.has(n)) {
+        this.stickRO.unobserve(n);
+        this.stickObserved.delete(n);
+      }
+    }
+    for (const n of cur) {
+      if (!this.stickObserved.has(n)) {
+        this.stickRO.observe(n);
+        this.stickObserved.add(n);
+      }
+    }
+  }
+
   init() {
+    // Sticky-bottom : croissance async du contenu (images lazy, <details>,
+    // rendu différé) APRÈS le scrollBottom du batch — le scrollport ne
+    // change pas de taille, seuls ses enfants grandissent : on les
+    // observe un par un. Le MutationObserver maintient la liste des
+    // cibles sans instrumentation des points d'insertion/suppression.
+    this.stickRO = new ResizeObserver(() => {
+      // Vue ancrée : pas de suivi automatique (cf. hasMoreNewer).
+      if (this.stickBottom && !this.hasMoreNewer) this.scrollBottom();
+    });
+    new MutationObserver(() => this.syncStickTargets()).observe(this.eventsEl, {
+      childList: true,
+    });
+    this.syncStickTargets();
+
     // Scroll : chargement des pages anciennes via sentinel
     const observer = new IntersectionObserver((entries) => {
       if (entries[0].isIntersecting) void this.loadOlderPages();
@@ -1599,6 +1660,13 @@ export class ChatView {
 
     this.eventsEl.addEventListener("scroll", () => {
       this.updateBottomBtn();
+      // Le flag « stuck » suit la position AFFICHÉE : tout scroll qui
+      // finit en bas (manuel, scrollBottom, compensation de trim/prepend
+      // qui préserve le bas) re-sticke ; tout scroll qui n'y finit pas
+      // (remontée volontaire, saut de recherche) décolle. Les événements
+      // scroll sont dispatchés après layout → la géométrie lue ici est
+      // déjà la position finale du geste.
+      this.stickBottom = this.nearBottom();
       // Pagination avant (vue ancrée) : le fond de la fenêtre est atteint
       // et du contenu plus récent existe → charger la page suivante.
       if (this.hasMoreNewer && this.nearBottom()) void this.loadNewerPage();
