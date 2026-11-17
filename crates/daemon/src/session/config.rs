@@ -1044,9 +1044,13 @@ impl Session {
     /// (available_modes/models, options de chaque configId) mais la
     /// valeur courante de la session est conservée — `current_value`
     /// et `meta.mode`/`meta.model` sont un état par session que le
-    /// spawn jetable ne connaît pas. Push ConfigOptions aux abonnés
-    /// quand les options ont bougé. Retour : vrai si la méta a changé.
-    pub fn apply_caps(&self, caps: &proto::AgentCaps) -> bool {
+    /// spawn jetable ne connaît pas. `extra_models` = compléments
+    /// d'annonce du profil (idem au handshake, agent.rs) : fusionnés
+    /// à la liste de modèles pour ne pas perdre les valeurs hors
+    /// annonce ACP (ex. opus de claude) à chaque re-sonde.
+    /// Push ConfigOptions aux abonnés quand les options ont bougé.
+    /// Retour : vrai si la méta a changé.
+    pub fn apply_caps(&self, caps: &proto::AgentCaps, extra_models: &[String]) -> bool {
         let (changed, opts) = {
             let mut m = self.meta.lock().unwrap();
             let mut changed = false;
@@ -1055,10 +1059,22 @@ impl Session {
                 m.available_modes = modes;
                 changed = true;
             }
-            let models: Vec<String> = caps.models.iter().map(|o| o.value.clone()).collect();
-            if !models.is_empty() && m.available_models != models {
-                m.available_models = models;
-                changed = true;
+            // Annonce models non vide → remplacement + extras du
+            // profil (même fusion qu'au handshake) ; annonce vide →
+            // ignorée, les extras seuls ne reconstituent pas une
+            // liste (l'agent n'a simplement rien annoncé ce coup-là).
+            if !caps.models.is_empty() {
+                let mut models: Vec<String> =
+                    caps.models.iter().map(|o| o.value.clone()).collect();
+                for v in extra_models {
+                    if !models.contains(v) {
+                        models.push(v.clone());
+                    }
+                }
+                if m.available_models != models {
+                    m.available_models = models;
+                    changed = true;
+                }
             }
             for co in &caps.config_options {
                 match m.config_options.iter_mut().find(|o| o.id == co.id) {

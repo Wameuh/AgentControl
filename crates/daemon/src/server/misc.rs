@@ -152,6 +152,12 @@ impl Daemon {
                             // probes). null tant que rien n'a été
                             // annoncé → le client garde la saisie libre.
                             "caps": self.caps.get(k),
+                            // Modèles sélectionnables hors annonce ACP
+                            // du profil ([agents.<id>.extra_models] ou
+                            // registre auto — ex. opus de claude) :
+                            // le client les fusionne à caps.models
+                            // dans la vue des capacités.
+                            "extra_models": a.extra_models,
                         })
                     })
                     .collect();
@@ -179,8 +185,29 @@ impl Daemon {
     /// chaque session est conservée). Cher (un spawn d'agent complet) :
     /// sérialisé par `probe_lock`, réservé à une action explicite.
     pub(super) async fn h_refresh_agent_caps(self: &Arc<Self>, agent: String) -> Result<Value> {
+        let (caps, touched) = self.probe_agent_caps(&agent).await?;
+        Ok(json!({
+            "agent": agent,
+            "caps": caps,
+            "sessions": touched,
+        }))
+    }
+
+    /// Sonde les capacités d'un profil et les applique : spawn jetable
+    /// (session/new dans un cwd scratch, drain bref des notifications,
+    /// kill — caps::probe), remplacement de l'instantané du cache et
+    /// ré-application aux sessions du profil (listes fraîches
+    /// sélectionnables sans recréer la session ; la valeur courante de
+    /// chaque session est conservée). Partagé entre le RPC explicite
+    /// `refresh_agent_caps` et le sweep périodique de fraîcheur
+    /// (`caps_sweep_boot`, item #268). Sérialisé par `probe_lock` —
+    /// un spawn d'agent complet à la fois, jamais en boucle.
+    pub(crate) async fn probe_agent_caps(
+        self: &Arc<Self>,
+        agent: &str,
+    ) -> Result<(proto::AgentCaps, Vec<String>)> {
         let profile = self
-            .agent_profile(&agent)
+            .agent_profile(agent)
             .await
             .with_context(|| format!("agent inconnu: {agent}"))?;
         if !profile_available(&profile) {
@@ -194,24 +221,23 @@ impl Daemon {
         let cwd = self.root.join("probe");
         std::fs::create_dir_all(&cwd).context("cwd du probe")?;
         let caps = crate::caps::probe(&profile, &cwd).await?;
-        self.caps.set(&agent, caps.clone());
+        self.caps.set(agent, caps.clone());
         // Ré-application aux sessions du profil — meta + push
-        // ConfigOptions aux clients abonnés.
+        // ConfigOptions aux clients abonnés. Les extra_models du
+        // profil rejoignent available_models (fusion handshake).
+        let extra_models: Vec<String> =
+            profile.extra_models.iter().map(|e| e.value.clone()).collect();
         let sessions = self.sessions.read().await;
         let mut touched = Vec::new();
         for s in sessions.values() {
             if s.meta_snapshot().agent != agent {
                 continue;
             }
-            if s.apply_caps(&caps) {
+            if s.apply_caps(&caps, &extra_models) {
                 touched.push(s.meta_snapshot().id);
             }
         }
-        Ok(json!({
-            "agent": agent,
-            "caps": caps,
-            "sessions": touched,
-        }))
+        Ok((caps, touched))
     }
 
     /// `DaemonLogTail{file?, offset?, limit?}` — tail incrémental du

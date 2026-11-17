@@ -581,4 +581,10 @@ export const de: Record<Key, string> = {
   pv_unsupported: "Plugin-Ansichten erfordern einen aktuellen Daemon — bitte aktualisieren.",
   pv_noweb: "Dieser Daemon stellt seine Weboberfläche nicht bereit — Plugin-Ansichten nicht verfügbar.",
   pv_nav_unknown: "navigate: unbekanntes Ziel « {target} »",
+  agent_caps_h: "Agent-Fähigkeiten",
+  agent_caps_title: "Agent-Fähigkeiten — Modi, Modelle, Konfigurationsoptionen pro Profil",
+  caps_modes: "Modi", caps_models: "Modelle", caps_config: "Konfigurationsoptionen",
+  caps_current: "aktuell", caps_none: "nichts gemeldet", caps_never: "nie sondiert",
+  caps_reprobe: "Neu sondieren", caps_probing: "Sondiere…", caps_extra: "extra",
+  caps_updated: "letzte Sonde",
 };

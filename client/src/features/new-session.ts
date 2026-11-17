@@ -53,13 +53,23 @@ export class NewSessionDialog {
     vals: { v: string; label: string }[];
     cur?: string;
   } {
-    const caps: AgentCaps | undefined = this.agents.find(
+    const agent = this.agents.find(
       (a) => a.id === ($("f-agent") as HTMLSelectElement).value,
-    )?.caps;
+    );
+    const caps: AgentCaps | undefined = agent?.caps;
     const co = caps?.config_options?.find((o) => o.id === kind || o.category === kind);
     const vals = (co?.options ?? []).map((o) => ({ v: o.value, label: o.name || o.value }));
     for (const o of (kind === "mode" ? caps?.modes : caps?.models) ?? []) {
       if (!vals.some((x) => x.v === o.value)) vals.push({ v: o.value, label: o.name || o.value });
+    }
+    // extra_models du profil (ex. opus de claude, hors annonce ACP) :
+    // sélectionnables au spawn — le handshake les fusionne dans
+    // available_models et session/set_model les accepte tels quels.
+    if (kind === "model") {
+      for (const e of agent?.extra_models ?? []) {
+        if (!vals.some((x) => x.v === e.value))
+          vals.push({ v: e.value, label: e.label || e.value });
+      }
     }
     return {
       vals,

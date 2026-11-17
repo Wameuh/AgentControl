@@ -40,6 +40,7 @@
           <div id="sess-filter">
             <input id="sess-filter-input" data-i18n-ph="sess_filter_ph" data-i18n-title="sess_filter_title" placeholder="Filter sessions…" />
             <button id="sess-filter-clear" hidden data-icon="close" data-i18n-title="sess_filter_clear" title="Clear the filter"></button>
+            <button id="btn-agent-caps" hidden data-icon="sliders" data-i18n-title="agent_caps_title" title="Agent capabilities"></button>
           </div>
           <div id="session-list"></div>
           <div id="pr-list" hidden></div>
@@ -756,6 +757,19 @@
     <div class="resize-edge" id="re-right" data-dir="East"></div>
     <div class="resize-edge" id="re-bottom" data-dir="South"></div>
     <div class="resize-edge" id="re-corner" data-dir="SouthEast"></div>
+
+    <dialog id="dlg-agentcaps">
+      <form method="dialog">
+        <h3 data-i18n="agent_caps_h">Agent capabilities</h3>
+        <label id="ac-conn-wrap"><span data-i18n="server_label">Server</span> <select id="ac-conn"></select></label>
+        <div id="ac-list"></div>
+        <div id="ac-err" class="dlg-err" role="alert" hidden></div>
+        <menu>
+          <button type="button" id="ac-refresh" data-i18n="comp_refresh">Refresh</button>
+          <button id="ac-close" value="cancel" data-i18n="close">Close</button>
+        </menu>
+      </form>
+    </dialog>
 
     <dialog id="dlg-new">
       <form method="dialog" id="form-new">

@@ -578,4 +578,10 @@ export const fr: Record<Key, string> = {
   pv_unsupported: "Les vues plugin exigent un démon récent — mettez-le à jour.",
   pv_noweb: "Ce démon n'expose pas son interface web — vues plugin indisponibles.",
   pv_nav_unknown: "navigate : cible inconnue « {target} »",
+  agent_caps_h: "Capacités des agents",
+  agent_caps_title: "Capacités des agents — modes, modèles, options de config par profil",
+  caps_modes: "Modes", caps_models: "Modèles", caps_config: "Options de config",
+  caps_current: "courant", caps_none: "rien d'annoncé", caps_never: "jamais sondé",
+  caps_reprobe: "Re-sonder", caps_probing: "Sonde…", caps_extra: "extra",
+  caps_updated: "dernier probe",
 };

@@ -36,6 +36,35 @@ pub(crate) const COMPONENT_NAME: &str = "agents";
 /// `reload_agent_profiles` rend l'appel quasi-gratuit).
 const RESCAN_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Période du sweep de fraîcheur des capacités agent (item #268) —
+/// un profil re-sondé par tick au plus, le profil le plus stale
+/// d'abord. 30 min : les annonces provider (nouveaux modèles) sont
+/// rattrapées dans la journée sans spawn en rafale.
+const CAPS_SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Âge au-delà duquel l'instantané agent_caps.json d'un profil est
+/// re-sondé par le sweep — les catalogues provider évoluent (modèles
+/// ajoutés/retirés), une journée de retard reste invisible côté UX.
+const CAPS_STALE_AFTER: chrono::Duration = chrono::Duration::hours(24);
+
+/// Fraîcheur d'un instantané agent_caps pour le sweep : `None` =
+/// frais (rien à faire), `Some(t)` = à re-sonder — plus `t` est
+/// ancien, plus le profil est prioritaire. Caps absentes → epoch
+/// (jamais sondé = le plus urgent) ; `updated_at` illisible → `None`
+/// (on ne re-sonde pas en boucle sur une donnée corrompue).
+fn caps_stale_at(
+    updated_at: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let Some(s) = updated_at else {
+        return chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0);
+    };
+    let t = chrono::DateTime::parse_from_rfc3339(s)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    (now - t >= CAPS_STALE_AFTER).then_some(t)
+}
+
 /// Profils built-in du démon — `devin` et `cursor` sont toujours
 /// présents ; une section `[agents.<id>]` de config.toml les remplace
 /// ENTIÈRE (override complet, pas de merge par champ). Partagé par le
@@ -348,6 +377,81 @@ impl Daemon {
                 d.reload_agent_profiles().await;
             }
         });
+    }
+
+    /// Fraîcheur des capacités par profil (item #268) : tant que les
+    /// caps n'étaient moissonnées qu'aux handshakes session/new|load et
+    /// au probe explicite `refresh_agent_caps`, un profil jamais
+    /// spawmé (codex auto-découvert post-boot, #260) restait sans
+    /// annonce, et une annonce provider périmée (nouveau modèle chez
+    /// cursor/devin) n'était jamais rattrapée.
+    ///
+    /// Sweep périodique : à chaque `CAPS_SWEEP_EVERY`, UN profil
+    /// disponible dont l'instantané est absent ou plus vieux que
+    /// `CAPS_STALE_AFTER` est re-sondé via `probe_agent_caps` (le même
+    /// chemin que le RPC explicite — spawn jetable, drain des
+    /// notifications, kill, ré-application aux sessions). Un seul par
+    /// tick : les probes spawnent un agent complet chacun et sont
+    /// sérialisés par `probe_lock` — la boucle converge en quelques
+    /// ticks sans rafale. Un `daemon_update` n'a pas besoin de voie
+    /// dédiée non plus : le binaire remplacé redémarre → le premier
+    /// sweep reprend les profils absents/périmés.
+    pub(crate) fn caps_sweep_boot(self: &Arc<Self>) {
+        let d = Arc::clone(self);
+        tokio::spawn(async move {
+            // Premier passage différé : laisser le boot finir (sessions
+            // restaurées, premiers handshakes moissonnent déjà) avant
+            // de dépenser un spawn de probe.
+            tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+            loop {
+                d.sweep_agent_caps_once().await;
+                tokio::time::sleep(CAPS_SWEEP_EVERY).await;
+            }
+        });
+    }
+
+    /// Un passage du sweep : choisit le profil disponible le plus
+    /// « stale » (caps absentes = le plus urgent, sinon updated_at le
+    /// plus ancien au-delà de `CAPS_STALE_AFTER`) et le re-sonde.
+    /// Jamais bloquant pour le reste du démon : probe_lock sérialise
+    /// avec un refresh_agent_caps explicite, et une erreur de probe
+    /// est loguée puis oubliée (le prochain tick retentera).
+    async fn sweep_agent_caps_once(self: &Arc<Self>) {
+        self.reload_agent_profiles().await;
+        let now = chrono::Utc::now();
+        let mut best: Option<(String, chrono::DateTime<chrono::Utc>)> = None;
+        {
+            let agents = self.agents.read().await;
+            for (id, p) in agents.iter() {
+                if !super::misc::profile_available(p) {
+                    continue;
+                }
+                let caps = self.caps.get(id);
+                let Some(t) = caps_stale_at(caps.as_ref().map(|c| c.updated_at.as_str()), now)
+                else {
+                    continue;
+                };
+                if best.as_ref().map(|(_, b)| t < *b).unwrap_or(true) {
+                    best = Some((id.clone(), t));
+                }
+            }
+        }
+        let Some((id, _)) = best else { return };
+        // Probe déjà en cours (refresh explicite ou sweep précédent
+        // encore en vol) → on saute ce tick plutôt que d'attendre :
+        // le sweep n'est pas urgent. Le guard try_lock est relâché à
+        // la fin du if — probe_agent_caps reprend le lock ensuite.
+        if self.caps.probe_lock().try_lock().is_err() {
+            return;
+        }
+        match self.probe_agent_caps(&id).await {
+            Ok((_, touched)) => {
+                tracing::info!("caps sweep: {id} re-sondé ({} session(s) rafraîchie(s))", touched.len());
+            }
+            Err(e) => {
+                tracing::warn!("caps sweep: probe {id} en échec: {e:#}");
+            }
+        }
     }
 
     /// Re-lit `[agents.*]` de config.toml et REMPLACE la table vivante
@@ -687,5 +791,30 @@ mod tests {
         let c: C = toml::from_str(&text).unwrap();
         assert_eq!(c.agents["cursor"].command, vec!["agent", "acp"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// caps_stale_at (sweep #268) : absent → epoch (priorité max),
+    /// frais → None, périmé → son timestamp, illisible → None.
+    #[test]
+    fn caps_stale_at_classes_les_profils() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-17T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        // Jamais sondé : epoch → toujours stale.
+        let never = caps_stale_at(None, now).unwrap();
+        assert_eq!(never.timestamp(), 0);
+        // Frais (< CAPS_STALE_AFTER) : rien à faire.
+        let fresh = (now - chrono::Duration::hours(1))
+            .to_rfc3339();
+        assert_eq!(caps_stale_at(Some(&fresh), now), None);
+        // Périmé (> CAPS_STALE_AFTER) : stale au timestamp lu.
+        let old = (now - chrono::Duration::hours(25)).to_rfc3339();
+        let t = caps_stale_at(Some(&old), now).unwrap();
+        assert!(now - t >= CAPS_STALE_AFTER);
+        // Illisible : None — pas de re-probe en boucle sur corruption.
+        assert_eq!(caps_stale_at(Some("pas-une-date"), now), None);
+        // Frontière : pile CAPS_STALE_AFTER → stale (>=).
+        let edge = (now - CAPS_STALE_AFTER).to_rfc3339();
+        assert!(caps_stale_at(Some(&edge), now).is_some());
     }
 }
