@@ -31,6 +31,15 @@ const HANDSHAKE_INIT_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(60);
 const HANDSHAKE_SESSION_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(180);
+/// session/load d'une très longue session native : le replay ACP peut
+/// durer plusieurs minutes en émettant des session/update en continu.
+/// L'attente devient GLISSANTE — chaque ligne reçue de l'agent
+/// (note_agent_event → watch.last_event) la prolonge — avec un plafond
+/// total : un agent muet > IDLE ou un load > MAX reste borné (#269).
+const HANDSHAKE_SESSION_IDLE: std::time::Duration =
+    std::time::Duration::from_secs(90);
+const HANDSHAKE_SESSION_MAX: std::time::Duration =
+    std::time::Duration::from_secs(600);
 
 impl Session {
     // -----------------------------------------------------------------------
@@ -831,12 +840,18 @@ impl Session {
         if let (Some(native), true) = (resume_native_id, supports_load) {
             self.loading_replay.store(skip_replay, Ordering::SeqCst);
             info!("[{}] handshake: session/load…", meta.id);
+            // Progression visible : un load long ne doit pas laisser le
+            // chat figé sur « starting » pendant des minutes (#269).
+            self.emit(EventKind::System {
+                text: "reprise de la session native — chargement du contexte…".into(),
+            });
             let t0 = std::time::Instant::now();
             let r = self
-                .acp_request_bounded(
+                .acp_request_active(
                     "session/load",
                     acp::session_load_params(&native, &meta.cwd, mcp_servers.clone(), acp_meta),
-                    HANDSHAKE_SESSION_TIMEOUT,
+                    HANDSHAKE_SESSION_IDLE,
+                    HANDSHAKE_SESSION_MAX,
                 )
                 .await;
             self.loading_replay.store(false, Ordering::SeqCst);
@@ -1044,6 +1059,72 @@ impl Session {
         timeout: std::time::Duration,
     ) -> Result<Value> {
         self.acp_request_inner(method, params, Some(timeout)).await
+    }
+
+    /// Requête ACP à attente GLISSANTE : le délai court (`idle`) est
+    /// recalé à chaque ligne reçue de l'agent (watch.last_event, alimenté
+    /// par note_agent_event), plafonné à `max` au total. Réservée au
+    /// session/load : une très longue session native rejoue son
+    /// historique en notifications continues — une borne fixe tuait le
+    /// spawn en pleine progression alors que le flux était vivant
+    /// (#269). Un agent réellement muet échoue toujours sur `idle`, un
+    /// load infini sur `max`.
+    async fn acp_request_active(
+        &self,
+        method: &str,
+        params: Value,
+        idle: std::time::Duration,
+        max: std::time::Duration,
+    ) -> Result<Value> {
+        let id = self.acp_next_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, mut rx) = oneshot::channel();
+        self.acp_pending.lock().unwrap().insert(id, tx);
+        let msg = acp::request(id, method, params);
+        if let Err(e) = self.write_line(&msg) {
+            self.acp_pending.lock().unwrap().remove(&id);
+            return Err(e);
+        }
+        let start = std::time::Instant::now();
+        let res = loop {
+            let last = self.watch.lock().unwrap().last_event;
+            let slice = idle
+                .saturating_sub(last.elapsed())
+                .min(max.saturating_sub(start.elapsed()))
+                .min(std::time::Duration::from_secs(5));
+            if slice.is_zero() {
+                break Err(());
+            }
+            match tokio::time::timeout(slice, &mut rx).await {
+                Ok(r) => break Ok(r),
+                Err(_) => {
+                    if start.elapsed() >= max {
+                        break Err(());
+                    }
+                    if self.watch.lock().unwrap().last_event.elapsed() >= idle {
+                        break Err(());
+                    }
+                }
+            }
+        };
+        let res = match res {
+            Ok(r) => r,
+            Err(()) => {
+                self.acp_pending.lock().unwrap().remove(&id);
+                // « timeout » en tête : load_err_keeps_native classe le
+                // message comme empêchement TRANSITOIRE — le sid natif
+                // est conservé pour une tentative ultérieure.
+                bail!(
+                    "acp {method}: timeout — {} s sans activité agent (max {} s)",
+                    idle.as_secs(),
+                    max.as_secs()
+                );
+            }
+        };
+        match res {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => bail!("acp {method}: {e}"),
+            Err(_) => bail!("acp {method}: channel closed"),
+        }
     }
 
     async fn acp_request_inner(

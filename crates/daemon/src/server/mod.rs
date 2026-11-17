@@ -71,6 +71,14 @@ use tracing::{debug, info, warn};
 /// paginable via `ReqKind::Events`). Borne la bande passante du replay —
 /// un journal très volumineux saturait sinon le lien pendant des minutes.
 pub(crate) const SUBSCRIBE_REPLAY_MAX: usize = 500;
+/// Budget OCTETS du même rattrapage : 500 events peuvent faire ~15 Mo
+/// (gros diffs, longues sorties) — la borne « events » seule ne suffit
+/// pas sur un lien lent (sonde affamée → down/reconnect → re-replay,
+/// #269). Le replay reste le suffixe le plus récent : `skipped` compte
+/// les events plus vieux omis, toujours paginables via `Events`.
+/// Les réponses RPC passent par la voie prioritaire de l'Outbox : une
+/// trame push de replay ne peut pas affamer un appel interactif.
+pub(crate) const SUBSCRIBE_REPLAY_MAX_BYTES: u64 = 512 * 1024;
 
 use crate::components::Components;
 use crate::forges::Forges;
@@ -1123,10 +1131,11 @@ impl Daemon {
     /// sur TOUTES les méthodes puis une fermeture (flap #227). L'ordre
     /// est préservé : la réponse et les pushes partent après l'await,
     /// le broadcast a bufferisé le live entre-temps.
-    async fn replay_tail(s: &Arc<Session>, after: u64) -> (Vec<proto::Event>, u64) {
+    async fn replay_tail(s: &Arc<Session>, after: u64) -> (Vec<proto::Event>, u64, u64) {
         let s = Arc::clone(s);
         tokio::task::spawn_blocking(move || {
-            s.journal.read_tail(&s.dir, after, SUBSCRIBE_REPLAY_MAX)
+            s.journal
+                .read_tail(&s.dir, after, SUBSCRIBE_REPLAY_MAX, SUBSCRIBE_REPLAY_MAX_BYTES)
         })
         .await
         .ok()
@@ -1295,12 +1304,24 @@ impl Daemon {
                                 // sinon un journal volumineux sature le
                                 // lien et fait échouer toutes les requêtes
                                 // concurrentes par timeout.
-                                let (backlog, skipped) =
+                                let (backlog, skipped, replay_bytes) =
                                     Self::replay_tail(&s, after).await;
+                                if replay_bytes > 0 {
+                                    info!(
+                                        session = %session,
+                                        after_seq = after,
+                                        events = backlog.len(),
+                                        bytes = replay_bytes,
+                                        skipped,
+                                        "subscribe replay"
+                                    );
+                                }
                                 let resp = Response::ok(req.id, json!({
                                     "subscribed": session,
                                     "last_seq": s.journal.last_seq(),
                                     "skipped": skipped,
+                                    "replay_events": backlog.len(),
+                                    "replay_bytes": replay_bytes,
                                 }));
                                 Self::send_resp(&outbox, &resp)?;
                                 // Le signal de reset part avant le
@@ -1427,10 +1448,10 @@ impl Daemon {
                                 };
                                 Self::send_push(&outbox, sid, &ev)?;
                             }
-                            let (backlog, skipped) =
+                            let (backlog, skipped, replay_bytes) =
                                 Self::replay_tail(&s, *last).await;
-                            if skipped > 0 {
-                                warn!(session = %sid, skipped, "subscribe lagged: events sautés au-delà de la fenêtre");
+                            if skipped > 0 || replay_bytes > 0 {
+                                warn!(session = %sid, skipped, events = backlog.len(), bytes = replay_bytes, "subscribe lagged: events sautés au-delà de la fenêtre");
                             }
                             for event in backlog {
                                 *last = event.seq;

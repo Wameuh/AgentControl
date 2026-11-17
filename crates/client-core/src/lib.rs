@@ -1585,11 +1585,35 @@ impl Client {
     /// celui de la session ouverte). Plus de tunnel/process ssh dédié.
     pub async fn subscribe(&self, session: &str, after_seq: u64) -> Result<broadcast::Receiver<Value>> {
         let rx = self.pushes.subscribe();
-        self.call(ReqKind::Subscribe {
-            session: session.into(),
-            after_seq,
-        })
-        .await?;
+        let resp = self
+            .call(ReqKind::Subscribe {
+                session: session.into(),
+                after_seq,
+            })
+            .await?;
+        // Instrumentation du rattrapage (#269) : le démon borne le replay
+        // en events ET en octets — la taille réellement envoyée est
+        // journalisée ici pour corréler les gros transferts aux flaps.
+        let events = resp.get("replay_events").and_then(Value::as_u64);
+        let bytes = resp.get("replay_bytes").and_then(Value::as_u64);
+        if events.unwrap_or(0) > 0 || bytes.unwrap_or(0) > 0 {
+            // Gros rattrapage = le cas à surveiller (lien lent → flap) :
+            // Info seulement au-delà d'un seuil, Debug sinon.
+            let lvl = if bytes.unwrap_or(0) >= 128 * 1024 {
+                Level::Info
+            } else {
+                Level::Debug
+            };
+            log(
+                lvl,
+                format!(
+                    "subscribe {session}: replay {} events / {} o (skipped={})",
+                    events.unwrap_or(0),
+                    bytes.unwrap_or(0),
+                    resp.get("skipped").and_then(Value::as_u64).unwrap_or(0),
+                ),
+            );
+        }
         Ok(rx)
     }
 }
