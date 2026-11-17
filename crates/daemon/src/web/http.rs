@@ -68,7 +68,7 @@ pub async fn read_head(stream: &mut TcpStream) -> Result<Head> {
     let method = it.next().unwrap_or_default().to_ascii_uppercase();
     let target = it.next().unwrap_or_default().to_string();
     if method.is_empty() || target.is_empty() {
-        anyhow::bail!("request line invalide: {req}");
+        anyhow::bail!("invalid request line: {req}");
     }
     let mut headers = Vec::new();
     for line in lines {

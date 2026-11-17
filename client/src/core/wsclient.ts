@@ -229,7 +229,7 @@ class WsClient {
     if (ws !== this.ws) return;
     this.ws = null;
     this.failAll(new Error(t("conn_offline")));
-    this.emit("conn-dead", { conn: WEB_CONN, why: "websocket fermée" });
+    this.emit("conn-dead", { conn: WEB_CONN, why: "websocket closed" });
     void this.reverifyToken();
   }
 

@@ -208,9 +208,9 @@ pub(crate) fn params_schema(agents: &HashMap<String, AgentProfile>) -> Vec<Param
                 key: id.clone(),
                 label: p.name.clone(),
                 description: Some(format!(
-                    "commande ACP du profil « {id} » — un argument par \
-                     ligne (ex. « cursor-agent » puis « acp ») ; \
-                     persistée dans [agents.{id}] de config.toml"
+                    "ACP command of profile « {id} » — one argument per \
+                     line (e.g. « cursor-agent » then « acp »); \
+                     persisted in [agents.{id}] of config.toml"
                 )),
                 required: false,
                 kind: ParamKind::List,

@@ -596,7 +596,7 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                 Level::Debug,
                 format!(
                     "ssh -N -L {spec} {host} args={args:?} SSH_AUTH_SOCK={:?}",
-                    std::env::var("SSH_AUTH_SOCK").unwrap_or_else(|_| "<absent>".into())
+                    std::env::var("SSH_AUTH_SOCK").unwrap_or_else(|_| "<missing>".into())
                 ),
             );
             let mut cmd = Command::new("ssh");

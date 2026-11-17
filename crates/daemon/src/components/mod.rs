@@ -62,19 +62,19 @@ struct Internal {
 const INTERNALS: &[Internal] = &[
     Internal {
         name: "mcp-serve",
-        description: "Serveur MCP agent↔agent injecté dans les sessions (a2a)",
+        description: "Agent↔agent MCP server injected into sessions (a2a)",
     },
     Internal {
         name: "prs-registry",
-        description: "Registre PR ↔ session (prs.json, watchers des sorties outil)",
+        description: "PR ↔ session registry (prs.json, tool-output watchers)",
     },
     Internal {
         name: "web-ui",
-        description: "Interface web servie par le démon (bind_http)",
+        description: "Web UI served by the daemon (bind_http)",
     },
     Internal {
         name: "janitor",
-        description: "Maintenance périodique (compaction journaux, purge blobs/sessions)",
+        description: "Periodic maintenance (journal compaction, blob/session purge)",
     },
     Internal {
         name: "backlog-orchestrator",

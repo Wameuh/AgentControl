@@ -151,12 +151,12 @@ async fn serve_http(daemon: Arc<Daemon>, mut stream: TcpStream, ctx: Arc<WebCtx>
             if authed(&head, &q, &ctx) {
                 http::respond(&mut stream, 204, &[], &[]).await?;
             } else {
-                http::respond_err(&mut stream, 401, "token invalide").await?;
+                http::respond_err(&mut stream, 401, "invalid token").await?;
             }
         }
         ("GET", "/ws") => {
             if !authed(&head, &q, &ctx) {
-                http::respond_err(&mut stream, 401, "token invalide").await?;
+                http::respond_err(&mut stream, 401, "invalid token").await?;
             } else if !origin_ok(&head) {
                 http::respond_err(&mut stream, 403, "origin refused").await?;
             } else {
@@ -165,7 +165,7 @@ async fn serve_http(daemon: Arc<Daemon>, mut stream: TcpStream, ctx: Arc<WebCtx>
         }
         ("POST", "/rpc") => {
             if !authed(&head, &q, &ctx) {
-                http::respond_err(&mut stream, 401, "token invalide").await?;
+                http::respond_err(&mut stream, 401, "invalid token").await?;
             } else if !origin_ok(&head) {
                 http::respond_err(&mut stream, 403, "origin refused").await?;
             } else {
@@ -174,14 +174,14 @@ async fn serve_http(daemon: Arc<Daemon>, mut stream: TcpStream, ctx: Arc<WebCtx>
         }
         ("GET" | "HEAD", "/media") => {
             if !authed(&head, &q, &ctx) {
-                http::respond_err(&mut stream, 401, "token invalide").await?;
+                http::respond_err(&mut stream, 401, "invalid token").await?;
             } else {
                 media::serve_media(&daemon, &mut stream, &head, &q).await?;
             }
         }
         ("GET" | "HEAD", "/download") => {
             if !authed(&head, &q, &ctx) {
-                http::respond_err(&mut stream, 401, "token invalide").await?;
+                http::respond_err(&mut stream, 401, "invalid token").await?;
             } else {
                 media::serve_download(&daemon, &mut stream, &head, &q).await?;
             }

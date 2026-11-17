@@ -107,7 +107,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
     vec![
         CatalogEntry {
             name: "agentbacklog".into(),
-            description: "File FIFO de features partagée entre agents \
+            description: "Feature FIFO queue shared between agents \
                           (SQLite ~/.agentbacklog/backlog.db)"
                 .into(),
             repo: Some("Wameuh/AgentBacklog".into()),
@@ -164,9 +164,9 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
         },
         CatalogEntry {
             name: "agentreviewer".into(),
-            description: "Watcher GitHub → reviews de PR en sessions du \
-                          démon (détecte les comments trigger, file \
-                          d'attente, spawn groupé « AgentReviewer »)"
+            description: "GitHub watcher → PR reviews in daemon \
+                          sessions (detects trigger comments, queue, \
+                          batched « AgentReviewer » spawn)"
                 .into(),
             repo: Some("Wameuh/AgentReviewer".into()),
             homepage: Some("https://github.com/Wameuh/AgentReviewer".into()),
@@ -271,8 +271,8 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                     key: "repo_dir".into(),
                     label: "Local clone".into(),
                     description: Some(
-                        "clone du dépôt — les worktrees de review y \
-                         sont créés (origin → GitHub)"
+                        "clone of the repo — review worktrees are \
+                         created there (origin → GitHub)"
                             .into(),
                     ),
                     required: true,
@@ -442,9 +442,9 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 },
                 ParamSpec {
                     key: "agent.profile".into(),
-                    label: "Profil agent".into(),
+                    label: "Agent profile".into(),
                     description: Some(
-                        "profil du démon — vide = basename de \
+                        "daemon profile — empty = basename of \
                          agent.command"
                             .into(),
                     ),
@@ -501,26 +501,23 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 // le composant « degraded ».
                 RecipeStep::UpsertSpec,
                 RecipeStep::Note {
-                    text: "Renseignez les paramètres du composant \
-                           (`acctl comp set agentreviewer <clé> \
-                           <valeur>`, ou la carte du panneau \
-                           Composants) : `repo` et `repo_dir` sont \
-                           requis — tant qu'ils manquent le statut \
-                           affiche « configuration requise » et le \
-                           démarrage est bloqué. La config \
-                           ~/.config/agentreviewer/config.toml est \
-                           rendue par le démon — inutile de l'éditer à \
-                           la main. En `process` managé le watcher \
-                           reçoit AGENTCONTROL_SOCK/TCP injectés et \
-                           crée ses reviews en sessions du démon \
+                    text: "Fill in the component parameters \
+                           (`acctl comp set agentreviewer <key> \
+                           <value>`, or the Components panel card): \
+                           `repo` and `repo_dir` are required — while \
+                           missing, the status shows « configuration required » and startup is blocked. The \
+                           ~/.config/agentreviewer/config.toml config \
+                           is rendered by the daemon — no need to edit \
+                           it by hand. Under managed `process` the \
+                           watcher receives injected AGENTCONTROL_SOCK/TCP \
+                           and creates its reviews as daemon sessions \
                            (origin component:agentreviewer, group \
-                           AgentReviewer). Si le timer systemd upstream \
-                           était activé, désactivez-le \
+                           AgentReviewer). If the upstream systemd timer \
+                           was enabled, disable it \
                            (`systemctl --user disable --now \
-                           agentreviewer-watch.timer`) pour éviter un \
-                           double polling — le flock interne les \
-                           sérialiserait mais gaspillerait des appels \
-                           API GitHub."
+                           agentreviewer-watch.timer`) to avoid double \
+                           polling — the internal flock would serialize \
+                           them but waste GitHub API calls."
                         .into(),
                 },
             ],

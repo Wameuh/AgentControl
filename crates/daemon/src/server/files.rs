@@ -487,7 +487,7 @@ async fn download_path(
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-')
         {
-            anyhow::bail!("archive invalide: {a}");
+            anyhow::bail!("invalid archive: {a}");
         }
         a.to_string()
     };

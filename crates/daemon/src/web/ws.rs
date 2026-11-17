@@ -60,7 +60,7 @@ pub async fn upgrade_and_serve(
         .header("connection")
         .is_some_and(|v| v.to_ascii_lowercase().contains("upgrade"));
     if !upgrade || !version_ok || !conn_hdr {
-        anyhow::bail!("upgrade websocket invalide");
+        anyhow::bail!("invalid websocket upgrade");
     }
     let rsp = format!(
         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",

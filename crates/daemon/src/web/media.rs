@@ -54,7 +54,7 @@ pub async fn serve_media(
     let range = match head.header("range").map(|r| parse_range(r, total)) {
         Some(Ok(r)) => r,
         Some(Err(())) => {
-            return http::respond_err(stream, 416, "plage invalide").await;
+            return http::respond_err(stream, 416, "invalid range").await;
         }
         None => None,
     };

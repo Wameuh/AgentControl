@@ -30,7 +30,7 @@ pub fn init(root: &Path) -> Option<tracing_appender::non_blocking::WorkerGuard> 
             )
         }
         Err(e) => {
-            eprintln!("agentcontrol-daemon: log file indisponible ({e}) — stderr only");
+            eprintln!("agentcontrol-daemon: log file unavailable ({e}) — stderr only");
             (None, None)
         }
     };

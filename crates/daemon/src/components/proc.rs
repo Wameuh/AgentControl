@@ -667,7 +667,7 @@ impl LogWriter {
             .create(true)
             .append(true)
             .open(&path)
-            .with_context(|| format!("ouverture {}", path.display()))?;
+            .with_context(|| format!("opening {}", path.display()))?;
         let written = file.metadata().map(|m| m.len()).unwrap_or(0);
         Ok(Self {
             path,
