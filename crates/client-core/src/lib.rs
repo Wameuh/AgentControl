@@ -1095,10 +1095,10 @@ fn io_death_kind(e: &std::io::Error) -> &'static str {
         std::io::ErrorKind::ConnectionReset => "reset socket (RST)",
         std::io::ErrorKind::ConnectionAborted => "connection aborted",
         std::io::ErrorKind::BrokenPipe => "broken pipe",
-        std::io::ErrorKind::UnexpectedEof => "EOF inattendu",
+        std::io::ErrorKind::UnexpectedEof => "unexpected EOF",
         std::io::ErrorKind::TimedOut => "timeout io",
         std::io::ErrorKind::NotConnected => "socket not connected",
-        _ => "erreur socket",
+        _ => "socket error",
     }
 }
 
@@ -1253,7 +1253,7 @@ impl Client {
                         // Écriture impossible = transport mourant : le
                         // signal dead précipite le drain des pendings
                         // (le reader constatera l'EOF/RST symétrique).
-                        c.set_death_reason("write impossible (dead transport)".into());
+                        c.set_death_reason("write failed (dead transport)".into());
                         let _ = c.dead_tx.send(true);
                         return;
                     }

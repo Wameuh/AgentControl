@@ -198,7 +198,7 @@ async fn serve_http(daemon: Arc<Daemon>, mut stream: TcpStream, ctx: Arc<WebCtx>
             serve_static(&mut stream, &head, path, &ctx).await?;
         }
         _ => {
-            http::respond_err(&mut stream, 404, "introuvable").await?;
+            http::respond_err(&mut stream, 404, "not found").await?;
         }
     }
     Ok(())

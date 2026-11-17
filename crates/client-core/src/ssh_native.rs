@@ -267,9 +267,9 @@ impl client::Handler for Handler {
             DisconnectReason::Error(russh::Error::IO(e)) => {
                 format!("local network error ({e})")
             }
-            DisconnectReason::Error(e) => format!("erreur session ({e})"),
+            DisconnectReason::Error(e) => format!("session error ({e})"),
         };
-        log(Level::Warn, format!("ssh natif : {desc}"));
+        log(Level::Warn, format!("native ssh: {desc}"));
         if let Ok(mut g) = self.disc.lock() {
             *g = Some(desc);
         }
@@ -378,7 +378,7 @@ async fn connect_auth(
         }
         bail!("password refused");
     }
-    bail!("auth impossible — add the app's public key to the server's authorized_keys");
+    bail!("auth failed — add the app's public key to the server's authorized_keys");
 }
 
 /// `ssh host <script>` sans binaire : canal exec → stdout/stderr
@@ -506,7 +506,7 @@ pub async fn pair_attempt(
     let mut it = own_pub.split_whitespace();
     let (ty, b64) = (it.next().unwrap_or(""), it.next().unwrap_or(""));
     if ty.is_empty() || b64.is_empty() {
-        bail!("pubkey app illisible");
+        bail!("unreadable app pubkey");
     }
     let key = russh::keys::decode_secret_key(k_pem, None)
         .context("disposable K key unreadable — incomplete QR?")?;

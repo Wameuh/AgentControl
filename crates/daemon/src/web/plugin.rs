@@ -94,7 +94,7 @@ pub async fn serve_plugin(
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
     {
-        return http::respond_err(stream, 404, "introuvable").await;
+        return http::respond_err(stream, 404, "not found").await;
     }
     // "" ou "/" → index.html ; pas de listing de dossier.
     let mut rel = rel.to_string();
@@ -107,13 +107,13 @@ pub async fn serve_plugin(
         return http::respond_err(stream, 404, "no view for this component").await;
     };
     let Some(file) = safe_join(&dir, &rel) else {
-        return http::respond_err(stream, 404, "introuvable").await;
+        return http::respond_err(stream, 404, "not found").await;
     };
     // La racine est canonicalisée mais pas la cible : un symlink posé
     // dans le dossier de vue ne doit pas servir hors de la racine.
     let file = match file.canonicalize() {
         Ok(f) if f.starts_with(&dir) => f,
-        _ => return http::respond_err(stream, 404, "introuvable").await,
+        _ => return http::respond_err(stream, 404, "not found").await,
     };
     // Un `view_dir` large (`.`/root, `~`, `..`) est une config de
     // confiance, mais les fichiers porteurs de secrets du démon ne
@@ -122,7 +122,7 @@ pub async fn serve_plugin(
         .file_name()
         .is_some_and(|n| is_sensitive_name(&n.to_string_lossy()))
     {
-        return http::respond_err(stream, 404, "introuvable").await;
+        return http::respond_err(stream, 404, "not found").await;
     }
     // Tout document HTML exige le token de vue (le chemin direct
     // `/plugin/<name>/index.html` compris — pas seulement l'URL
@@ -140,7 +140,7 @@ pub async fn serve_plugin(
     }
     let meta = match tokio::fs::metadata(&file).await {
         Ok(m) if m.is_file() => m,
-        _ => return http::respond_err(stream, 404, "introuvable").await,
+        _ => return http::respond_err(stream, 404, "not found").await,
     };
     if meta.len() > ASSET_MAX {
         return http::respond_err(stream, 413, "asset too large").await;

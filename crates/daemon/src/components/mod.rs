@@ -226,7 +226,7 @@ impl Components {
             self.reap_orphan(spec).await;
             if spec.autostart {
                 if let Err(e) = self.autostart(spec).await {
-                    warn!("component « {} »: autostart impossible: {e:#}", spec.name);
+                    warn!("component « {} »: autostart failed: {e:#}", spec.name);
                 }
             }
         }

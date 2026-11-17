@@ -34,10 +34,10 @@ pub async fn serve_media(
     query: &[(String, String)],
 ) -> Result<()> {
     let Some(session) = http::qparam(query, "session") else {
-        return http::respond_err(stream, 400, "session manquante").await;
+        return http::respond_err(stream, 400, "missing session").await;
     };
     let Some(path) = http::qparam(query, "path") else {
-        return http::respond_err(stream, 400, "path manquant").await;
+        return http::respond_err(stream, 400, "missing path").await;
     };
     let p = match resolve_ws_path(daemon, session, path).await {
         Ok(p) => p,
@@ -46,7 +46,7 @@ pub async fn serve_media(
     let meta = match std::fs::metadata(&p) {
         Ok(m) if m.is_file() => m,
         Ok(_) => return http::respond_err(stream, 400, "not a file").await,
-        Err(_) => return http::respond_err(stream, 404, "introuvable").await,
+        Err(_) => return http::respond_err(stream, 404, "not found").await,
     };
     let total = meta.len();
     // Range: bytes=start-end | start- | -count — une seule plage, comme
@@ -87,10 +87,10 @@ pub async fn serve_download(
     query: &[(String, String)],
 ) -> Result<()> {
     let Some(session) = http::qparam(query, "session") else {
-        return http::respond_err(stream, 400, "session manquante").await;
+        return http::respond_err(stream, 400, "missing session").await;
     };
     let Some(path) = http::qparam(query, "path") else {
-        return http::respond_err(stream, 400, "path manquant").await;
+        return http::respond_err(stream, 400, "missing path").await;
     };
     let s = match daemon.get_session(session).await {
         Ok(s) => s,
@@ -102,7 +102,7 @@ pub async fn serve_download(
     };
     let meta = match std::fs::metadata(&p) {
         Ok(m) => m,
-        Err(_) => return http::respond_err(stream, 404, "introuvable").await,
+        Err(_) => return http::respond_err(stream, 404, "not found").await,
     };
     let name = p
         .file_name()

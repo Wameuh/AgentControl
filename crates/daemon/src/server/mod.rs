@@ -1547,9 +1547,9 @@ fn expand_cwd(raw: &str) -> Result<String> {
         };
         let home = home.with_context(|| {
             if user.is_empty() {
-                "`~` expansion impossible: HOME unset".to_string()
+                "cannot expand `~`: HOME unset".to_string()
             } else {
-                format!("`~{user}` expansion impossible: unknown user")
+                format!("cannot expand `~{user}`: unknown user")
             }
         })?;
         s = format!("{}{}", home.to_string_lossy(), tail);

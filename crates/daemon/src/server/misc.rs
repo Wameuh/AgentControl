@@ -211,7 +211,7 @@ impl Daemon {
             .with_context(|| format!("unknown agent: {agent}"))?;
         if !profile_available(&profile) {
             anyhow::bail!(
-                "commande agent introuvable : {}",
+                "agent command not found: {}",
                 searched_commands(&profile).join(", ")
             )
         }

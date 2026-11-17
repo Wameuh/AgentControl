@@ -190,8 +190,8 @@ fn verdict_comment(body: &str, sha: &str, head: Option<&str>) -> String {
     } else {
         format!(
             "## Verdict: stale — head changed, re-run \
-             {TRIGGER_ESCAPED}\n\n(review rendue pour \
-             {sha}, head courant {})",
+             {TRIGGER_ESCAPED}\n\n(review rendered for \
+             {sha}, current head {})",
             head.unwrap_or("unknown")
         )
     }
@@ -1461,7 +1461,7 @@ impl Daemon {
         // PR cible : ouverte + base allowlistée — les mêmes gardes
         // que le chemin commentaire (jamais `main`).
         let Some((state, base, _head)) = self.gh_pr_info(&repo, pr, &cfg).await else {
-            anyhow::bail!("PR {repo}#{pr} introuvable");
+            anyhow::bail!("PR {repo}#{pr} not found");
         };
         anyhow::ensure!(state == "OPEN", "PR {repo}#{pr} closed ({state})");
         anyhow::ensure!(

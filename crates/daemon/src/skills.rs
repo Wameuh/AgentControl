@@ -211,7 +211,7 @@ fn sync_root(root: &Path, skills: &[Skill]) {
             };
             if std::fs::create_dir_all(parent).is_err() || std::fs::write(&target, bytes).is_err() {
                 tracing::warn!(
-                    "skills: write {} impossible — skill « {} » skipped",
+                    "skills: write {} failed — skill « {} » skipped",
                     target.display(),
                     skill.name
                 );

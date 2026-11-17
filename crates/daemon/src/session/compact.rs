@@ -31,10 +31,12 @@ pub(super) fn compact_done_text(text: &str) -> bool {
         done |= matches!(
             w,
             "compacted"
+                | "compacté"
                 | "compactée"
                 | "cancel"
                 | "cancelled"
                 | "canceled"
+                | "annulé"
                 | "annulée"
                 | "abort"
                 | "aborted"
@@ -47,10 +49,12 @@ pub(super) fn compact_done_text(text: &str) -> bool {
                 | "errors"
                 | "fail"
                 | "failed"
+                | "échoué"
                 | "failure"
                 | "cancellation"
                 | "complete"
                 | "completed"
+                | "terminé"
                 | "terminée"
         );
     }

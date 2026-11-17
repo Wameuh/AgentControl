@@ -290,7 +290,7 @@ fn release_not_found(ver: &str) -> String {
                 })
                 .unwrap_or_default();
             if tags.is_empty() {
-                format!("release v{ver} introuvable — {hint}")
+                format!("release v{ver} not found — {hint}")
             } else {
                 let ex = tags[0];
                 format!(
@@ -300,7 +300,7 @@ fn release_not_found(ver: &str) -> String {
                 )
             }
         }
-        Err(_) => format!("release v{ver} introuvable (HTTP 404) — {hint}"),
+        Err(_) => format!("release v{ver} not found (HTTP 404) — {hint}"),
     }
 }
 

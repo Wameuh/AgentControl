@@ -155,7 +155,7 @@ impl Daemon {
             None => {
                 let c = cm.cwd.clone();
                 if !std::path::Path::new(&c).is_dir() {
-                    anyhow::bail!("cwd introuvable : {c}");
+                    anyhow::bail!("cwd not found: {c}");
                 }
                 c
             }

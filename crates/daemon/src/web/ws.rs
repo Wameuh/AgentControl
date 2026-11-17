@@ -51,7 +51,7 @@ pub async fn upgrade_and_serve(
 ) -> Result<()> {
     let key = head
         .header("sec-websocket-key")
-        .context("Sec-WebSocket-Key manquant")?;
+        .context("missing Sec-WebSocket-Key")?;
     let upgrade = head
         .header("upgrade")
         .is_some_and(|v| v.eq_ignore_ascii_case("websocket"));

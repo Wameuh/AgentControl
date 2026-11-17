@@ -46,7 +46,7 @@ function connLostErr(): Error {
 export function isConnLost(e: unknown, ck = ""): boolean {
   if ((e as { connLost?: boolean } | null)?.connLost) return true;
   if (ck && (connState(ck) ?? "ok") !== "ok") return true;
-  return /connexion ferm[ée]e|connection lost|connexion perdue/i.test(String(e));
+  return /connexion ferm[ée]e|connection lost|connexion perdue|connection closed/i.test(String(e));
 }
 
 // Attente bornée du retour « conn prête » : le backoff du
