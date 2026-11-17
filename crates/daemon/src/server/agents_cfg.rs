@@ -476,8 +476,8 @@ impl Daemon {
         let Some((id, _)) = best else { return };
         // Probe déjà en cours (refresh explicite ou sweep précédent
         // encore en vol) → on saute ce tick plutôt que d'attendre :
-        // le sweep n'est pas urgent. Le guard try_lock est relâché à
-        // la fin du if — probe_agent_caps reprend le lock ensuite.
+        // le sweep n'est pas urgent. Le guard try_lock est droppé dès
+        // la fin de la condition — probe_agent_caps reprend le lock.
         if self.caps.probe_lock().try_lock().is_err() {
             return;
         }
