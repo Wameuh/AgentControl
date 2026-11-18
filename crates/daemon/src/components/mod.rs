@@ -1443,6 +1443,7 @@ mod tests {
             choices: Vec::new(),
             choice_labels: Vec::new(),
             open_enum: false,
+            group: None,
         });
         cur.render = Some(proto::ConfigRender {
             path: "~/x.toml".into(),

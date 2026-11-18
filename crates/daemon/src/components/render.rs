@@ -394,6 +394,7 @@ mod tests {
             choices: vec![],
             choice_labels: Vec::new(),
             open_enum: false,
+            group: None,
         }
     }
 

@@ -266,6 +266,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                     choices: Vec::new(),
                     choice_labels: Vec::new(),
                     open_enum: false,
+                    group: None,
                 },
                 ParamSpec {
                     key: "repo_dir".into(),
@@ -283,6 +284,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                     choices: Vec::new(),
                     choice_labels: Vec::new(),
                     open_enum: false,
+                    group: None,
                 },
                 ParamSpec {
                     key: "worktree_root".into(),
@@ -300,6 +302,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                     choices: Vec::new(),
                     choice_labels: Vec::new(),
                     open_enum: false,
+                    group: None,
                 },
                 ParamSpec {
                     key: "repos".into(),
@@ -323,6 +326,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                     choices: Vec::new(),
                     choice_labels: Vec::new(),
                     open_enum: false,
+                    group: None,
                 },
                 ParamSpec {
                     key: "trigger".into(),
@@ -336,6 +340,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                     choices: Vec::new(),
                     choice_labels: Vec::new(),
                     open_enum: false,
+                    group: None,
                 },
                 ParamSpec {
                     key: "group".into(),
@@ -349,6 +354,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                     choices: Vec::new(),
                     choice_labels: Vec::new(),
                     open_enum: false,
+                    group: None,
                 },
                 ParamSpec {
                     key: "max_parallel".into(),
@@ -362,6 +368,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                     choices: Vec::new(),
                     choice_labels: Vec::new(),
                     open_enum: false,
+                    group: None,
                 },
                 ParamSpec {
                     key: "review_timeout".into(),
@@ -375,6 +382,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                     choices: Vec::new(),
                     choice_labels: Vec::new(),
                     open_enum: false,
+                    group: None,
                 },
                 ParamSpec {
                     key: "keep_sessions".into(),
@@ -392,6 +400,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                     choices: Vec::new(),
                     choice_labels: Vec::new(),
                     open_enum: false,
+                    group: None,
                 },
                 ParamSpec {
                     key: "mode".into(),
@@ -409,6 +418,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                     choices: vec!["daemon".into(), "systemd".into()],
                     choice_labels: Vec::new(),
                     open_enum: false,
+                    group: None,
                 },
                 ParamSpec {
                     key: "daemon".into(),
@@ -426,6 +436,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                     choices: Vec::new(),
                     choice_labels: Vec::new(),
                     open_enum: false,
+                    group: None,
                 },
                 ParamSpec {
                     key: "agent.command".into(),
@@ -439,6 +450,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                     choices: Vec::new(),
                     choice_labels: Vec::new(),
                     open_enum: false,
+                    group: None,
                 },
                 ParamSpec {
                     key: "agent.profile".into(),
@@ -456,6 +468,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                     choices: Vec::new(),
                     choice_labels: Vec::new(),
                     open_enum: false,
+                    group: None,
                 },
                 ParamSpec {
                     key: "agent.model".into(),
@@ -469,6 +482,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                     choices: Vec::new(),
                     choice_labels: Vec::new(),
                     open_enum: false,
+                    group: None,
                 },
             ],
             // Config utilisateur rendue depuis les params — couvre

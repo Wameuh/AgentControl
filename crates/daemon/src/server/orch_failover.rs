@@ -79,10 +79,15 @@ enum FailRole {
     Reviewer,
 }
 
-/// La session est-elle un candidat failover ? Retourne le rôle et
-/// l'agent effectif attendu — `None` sinon. Voir l'en-tête de module
-/// pour la liste exhaustive des critères.
-fn fail_role<'a>(m: &SessionMeta, cfg: &'a cfg::OrchCfg) -> Option<(FailRole, &'a str)> {
+/// La session est-elle un candidat failover ? Retourne le rôle, les
+/// profils acceptés pour ce rôle et le profil de remplacement —
+/// `None` sinon. Voir l'en-tête de module pour la liste exhaustive
+/// des critères. Pour un worker, `expected` = profils des entrées du
+/// `worker_pool` (count > 0) : un worker légitimement sur l'entrée 2
+/// ne dérive PAS ; son entrée disparue du pool → failover vers la
+/// 1re entrée restante. Sans pool : singleton `agent_or(worker_agent)`
+/// — comportement historique inchangé.
+fn fail_role(m: &SessionMeta, cfg: &cfg::OrchCfg) -> Option<(FailRole, Vec<String>, String)> {
     if m.origin.as_deref() != Some(COMPONENT_ORIGIN)
         || m.state != "error"
         || !m
@@ -93,19 +98,40 @@ fn fail_role<'a>(m: &SessionMeta, cfg: &'a cfg::OrchCfg) -> Option<(FailRole, &'
     {
         return None;
     }
-    let (role, effective) = if m.title.starts_with(orch_plan::REVIEWER_PREFIX) {
-        (FailRole::Reviewer, cfg.agent_or(&cfg.reviewer_agent))
+    let (role, expected, replacement) = if m.title.starts_with(orch_plan::REVIEWER_PREFIX) {
+        let a = cfg.agent_or(&cfg.reviewer_agent).to_string();
+        (FailRole::Reviewer, vec![a.clone()], a)
     } else if m.title.starts_with(orch_plan::PLANNER_PREFIX) {
-        (FailRole::Planner, cfg.agent_or(&cfg.planner_agent))
+        let a = cfg.agent_or(&cfg.planner_agent).to_string();
+        (FailRole::Planner, vec![a.clone()], a)
     } else if m.title.starts_with(&cfg.title_prefix) {
-        (FailRole::Worker, cfg.agent_or(&cfg.worker_agent))
+        if cfg.worker_pool.is_empty() {
+            let a = cfg.agent_or(&cfg.worker_agent).to_string();
+            (FailRole::Worker, vec![a.clone()], a)
+        } else {
+            // Entrées effectives (repli profil worker), count > 0
+            // seuls : une entrée à 0 slot n'est pas un profil attendu.
+            let entries = cfg.worker_entries();
+            let expected: Vec<String> = entries
+                .iter()
+                .filter(|e| e.count > 0)
+                .map(|e| e.profile.clone())
+                .collect();
+            // Remplacement = 1re entrée du pool (ordre déclaré).
+            let replacement = entries
+                .iter()
+                .find(|e| e.count > 0)
+                .map(|e| e.profile.clone())
+                .unwrap_or_else(|| cfg.agent_or(&cfg.worker_agent).to_string());
+            (FailRole::Worker, expected, replacement)
+        }
     } else {
         return None;
     };
-    if effective.is_empty() || m.agent == effective {
+    if expected.is_empty() || expected.iter().any(|a| a == &m.agent) {
         return None;
     }
-    Some((role, effective))
+    Some((role, expected, replacement))
 }
 
 /// Prompt du worker de reprise : le contexte de l'ancienne session
@@ -155,7 +181,7 @@ impl Daemon {
         // `self.sessions` mais pas `metas` — itérer la liste figée.
         let targets: Vec<(SessionMeta, FailRole, String)> = metas
             .iter()
-            .filter_map(|m| fail_role(m, cfg).map(|(r, a)| (m.clone(), r, a.to_string())))
+            .filter_map(|m| fail_role(m, cfg).map(|(r, _expected, repl)| (m.clone(), r, repl)))
             .collect();
         for (m, role, effective) in targets {
             if !self.orch.is_enabled() {
@@ -200,7 +226,22 @@ impl Daemon {
         st: &mut OrchPersist,
     ) {
         let sid = m.id.as_str();
-        let new_agent = cfg.agent_or(&cfg.worker_agent).to_string();
+        // Remplaçant = 1re entrée du pool (count > 0) — son profil,
+        // modèle et effort sont propagés au spawn de reprise ; sans
+        // pool, l'entrée implicite legacy = worker_agent + valeurs
+        // globales, strictement identique à avant.
+        let entry = cfg
+            .worker_entries()
+            .into_iter()
+            .find(|e| e.count > 0)
+            .unwrap_or_else(|| cfg::WorkerPoolEntry {
+                profile: cfg.agent_or(&cfg.worker_agent).to_string(),
+                count: 1,
+                model: cfg.model.clone(),
+                effort: cfg.thought_level.clone(),
+                mode: cfg.mode.clone(),
+            });
+        let new_agent = entry.profile.clone();
         let my_wip: Vec<Task> = tasks
             .iter()
             .filter(|t| task_agent(t) == sid && task_status(t) == "wip")
@@ -271,6 +312,8 @@ impl Daemon {
                 &cfg.title_prefix,
                 &new_agent,
                 mode,
+                &entry.model,
+                &entry.effort,
                 prompt,
                 &fo_ws,
                 cfg,
@@ -413,6 +456,8 @@ impl Daemon {
                     orch_plan::PLANNER_PREFIX,
                     &new_agent,
                     mode,
+                    cfg.model_or(&cfg.planner_model),
+                    cfg.effort_or(&cfg.planner_effort),
                     prompt,
                     &iws,
                     cfg,
@@ -563,14 +608,72 @@ mod tests {
         // Worker sur « devin » (ancien worker_agent ou fallback agent)
         // → worker, effectif cursor.
         let m = meta("s-1", "Backlog-W1 #42 · t", "devin");
-        assert_eq!(fail_role(&m, &c), Some((FailRole::Worker, "cursor")));
+        assert_eq!(
+            fail_role(&m, &c),
+            Some((
+                FailRole::Worker,
+                vec!["cursor".to_string()],
+                "cursor".to_string()
+            ))
+        );
         // Planner : planner_agent vide → fallback agent=devin ; session
         // sur cursor → planner, effectif devin.
         let m = meta("s-2", "Backlog-P3", "cursor");
-        assert_eq!(fail_role(&m, &c), Some((FailRole::Planner, "devin")));
+        assert_eq!(
+            fail_role(&m, &c),
+            Some((
+                FailRole::Planner,
+                vec!["devin".to_string()],
+                "devin".to_string()
+            ))
+        );
         // Reviewer : reviewer_agent=claude ; session sur devin → drift.
         let m = meta("s-3", "Backlog-R2", "devin");
-        assert_eq!(fail_role(&m, &c), Some((FailRole::Reviewer, "claude")));
+        assert_eq!(
+            fail_role(&m, &c),
+            Some((
+                FailRole::Reviewer,
+                vec!["claude".to_string()],
+                "claude".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn fail_role_worker_pool_profils_attendus() {
+        let mut c = cfg();
+        // Pool : devin×1 + claude×1 — cursor n'est plus un profil
+        // worker attendu.
+        c.worker_pool = vec![
+            cfg::WorkerPoolEntry {
+                profile: "devin".into(),
+                count: 1,
+                ..Default::default()
+            },
+            cfg::WorkerPoolEntry {
+                profile: "claude".into(),
+                count: 1,
+                ..Default::default()
+            },
+        ];
+        // Worker sur claude = entrée 2 du pool → PAS de drift.
+        let m = meta("s-1", "Backlog-W1", "claude");
+        assert!(fail_role(&m, &c).is_none());
+        // Worker sur cursor (worker_agent legacy) → drift vers la
+        // 1re entrée du pool (devin).
+        let m = meta("s-2", "Backlog-W2", "cursor");
+        assert_eq!(
+            fail_role(&m, &c),
+            Some((
+                FailRole::Worker,
+                vec!["devin".to_string(), "claude".to_string()],
+                "devin".to_string()
+            ))
+        );
+        // Entrée à count=0 : son profil ne compte plus comme attendu.
+        c.worker_pool[1].count = 0;
+        let m = meta("s-3", "Backlog-W3", "claude");
+        assert!(fail_role(&m, &c).is_some());
     }
 
     #[test]

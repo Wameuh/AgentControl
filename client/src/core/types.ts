@@ -269,6 +269,10 @@ export interface ParamSpec {
    *  l'agent) — une valeur hors liste reste enregistrable, le client
    *  la signale « (?) » au lieu de bloquer. */
   open_enum?: boolean;
+  /** Section d'affichage du formulaire — les params d'un même groupe
+   *  sont rendus sous un titre (ex. orchestrateur : workers /
+   *  pipeline / pr_reviews / general). Absent = flux continu. */
+  group?: string | null;
 }
 
 /** Spec [[components]] de components.toml — lue et écrite telle quelle. */

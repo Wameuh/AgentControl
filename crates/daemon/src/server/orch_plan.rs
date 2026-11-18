@@ -895,10 +895,23 @@ impl Daemon {
         let alive = backlog_alive(metas, cfg, &live_waiters);
         let working = backlog_working(metas, cfg, &live_waiters);
         let mut slots = WorkerSlots {
-            total: (cfg.max_workers as usize).saturating_sub(alive),
+            // Capacité workers = somme du pool (`worker_capacity` =
+            // `max_workers` sans pool — legacy inchangé).
+            total: (cfg.worker_capacity() as usize).saturating_sub(alive),
             working: (cfg.max_working_cap() as usize).saturating_sub(working),
             gained: 0,
         };
+        // Pool workers pour les spawns no_plan : entrées normalisées +
+        // metas des sessions `Backlog-W*` (les planners ne consomment
+        // pas de slot d'entrée même s'ils partagent le profil) +
+        // profils déjà spawnés ce tick (metas = snapshot pré-spawn).
+        let entries = cfg.worker_entries();
+        let worker_metas: Vec<SessionMeta> = metas
+            .iter()
+            .filter(|m| m.title.starts_with(&cfg.title_prefix))
+            .cloned()
+            .collect();
+        let mut spawned_profiles: Vec<String> = Vec::new();
         // Mode sériel quota : au plus une session active à la fois —
         // dispatch seulement quand rien ne tourne ; la boucle reviewer
         // ci-dessous passe la première (priorité au reviewer) et un
@@ -1082,6 +1095,8 @@ impl Daemon {
                     REVIEWER_PREFIX,
                     cfg.agent_or(&cfg.reviewer_agent),
                     &cfg.reviewer_mode,
+                    cfg.model_or(&cfg.reviewer_model),
+                    cfg.effort_or(&cfg.reviewer_effort),
                     prompt,
                     &iws,
                     cfg,
@@ -1147,11 +1162,25 @@ impl Daemon {
             }
             let iws = cfg.workspace_for(task_repo(t)).to_string();
             let no_plan = task_no_plan(t);
-            let (prefix, agent, mode, prompt) = if no_plan {
+            // no_plan = worker du pool (profil + model/effort de son
+            // entrée — `implement_mode` reste le mode pipeline) ;
+            // sinon planner/implementer sur `planner_agent` avec
+            // `planner_model`/`planner_effort` (repli global).
+            let (prefix, agent, mode, model, effort, prompt) = if no_plan {
+                let Some(entry) =
+                    pool_next_entry(&entries, &worker_metas, &live_waiters, &spawned_profiles)
+                else {
+                    // Pool workers complet — l'item attend le prochain
+                    // tick (les planners, non poolés, restent
+                    // dispatchables).
+                    continue;
+                };
                 (
                     cfg.title_prefix.clone(),
-                    cfg.agent_or(&cfg.worker_agent),
+                    entry.profile.clone(),
                     cfg.implement_mode.clone(),
+                    entry.model.clone(),
+                    entry.effort.clone(),
                     fill(
                         CLAIMED_WORKER_PROMPT,
                         &[
@@ -1164,8 +1193,10 @@ impl Daemon {
             } else {
                 (
                     PLANNER_PREFIX.to_string(),
-                    cfg.agent_or(&cfg.planner_agent),
+                    cfg.agent_or(&cfg.planner_agent).to_string(),
                     cfg.planner_mode.clone(),
+                    cfg.model_or(&cfg.planner_model).to_string(),
+                    cfg.effort_or(&cfg.planner_effort).to_string(),
                     fill(
                         PLANNER_PROMPT,
                         &[
@@ -1178,7 +1209,9 @@ impl Daemon {
             };
             st.counter += 1;
             let Some(sid) = self
-                .plan_spawn(st.counter, &prefix, agent, &mode, prompt, &iws, cfg)
+                .plan_spawn(
+                    st.counter, &prefix, &agent, &mode, &model, &effort, prompt, &iws, cfg,
+                )
                 .await
             else {
                 continue;
@@ -1198,6 +1231,12 @@ impl Daemon {
                 // Journal neuf → seqs repartent à 1 : le watermark d'un
                 // précédent planner rendrait ses marqueurs invisibles.
                 st.plan_marker_seq.remove(&key);
+                if no_plan {
+                    // Slot d'entrée consommé ce tick — metas est un
+                    // snapshot pré-spawn, le profil doit être compté
+                    // pour les items suivants de la même passe.
+                    spawned_profiles.push(agent.clone());
+                }
                 slots.take();
             } else {
                 warn!("orchestrator: claim #{id} rc={rc} {e} → rm {sid}");
@@ -1533,6 +1572,8 @@ impl Daemon {
                             PLANNER_PREFIX,
                             cfg.agent_or(&cfg.planner_agent),
                             &cfg.implement_mode,
+                            cfg.model_or(&cfg.planner_model),
+                            cfg.effort_or(&cfg.planner_effort),
                             prompt,
                             &iws,
                             cfg,
@@ -2444,29 +2485,32 @@ impl Daemon {
 
     /// Spawn d'une session pipeline — même mécanique que `orch_spawn`
     /// (h_new_session origin composant + apply_spawn_cfg) mais rôle
-    /// paramétré : préfixe, profil agent, mode et prompt ne dépendent
-    /// plus de la cfg worker. `cwd` = workspace routé de l'item
-    /// (repo_workspaces via `workspace_for`) — jamais le workspace par
-    /// défaut quand l'item est taggé.
+    /// paramétré : préfixe, profil agent, mode, modèle et effort ne
+    /// dépendent plus de la cfg worker. `cwd` = workspace routé de
+    /// l'item (repo_workspaces via `workspace_for`) — jamais le
+    /// workspace par défaut quand l'item est taggé.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn plan_spawn(
         self: &Arc<Self>,
         number: u64,
         prefix: &str,
         agent: &str,
         mode: &str,
+        model: &str,
+        effort: &str,
         prompt: String,
         cwd: &str,
         cfg: &cfg::OrchCfg,
     ) -> Option<String> {
         let title = format!("{prefix}{number}");
         let group = (!cfg.group.is_empty()).then(|| cfg.group.clone());
-        self.warn_spawn_cfg(agent, &cfg.model, mode);
+        self.warn_spawn_cfg(agent, model, mode);
         let v = match self
             .h_new_session(
                 agent.to_string(),
                 cwd.to_string(),
                 Some(title.clone()),
-                Some(cfg.model.clone()),
+                Some(model.to_string()),
                 Some(mode.to_string()),
                 Some(prompt),
                 Some(COMPONENT_ORIGIN.to_string()),
@@ -2481,7 +2525,7 @@ impl Daemon {
             }
         };
         let sid = v.get("session").and_then(Value::as_str)?.to_string();
-        self.apply_spawn_cfg(&sid).await;
+        self.apply_spawn_cfg(&sid, effort).await;
         info!("orchestrator: spawned {title} = {sid}");
         Some(sid)
     }
