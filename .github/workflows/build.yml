@@ -72,7 +72,7 @@ jobs:
       # — les tarballs release démarrent sur n'importe quelle distro
       # (Debian 11/12, Ubuntu 20.04/22.04/24.04…), là où un build
       # ubuntu-latest (glibc 2.39) refuse de tourner sur glibc < 2.39.
-      - run: cargo build --release --target ${{ matrix.target }} -p agentcontrol-daemon -p acctl
+      - run: cargo build --release --target ${{ matrix.target }} -p agentcontrol-daemon -p acctl -p acp-claude
         env:
           # cc résout aarch64-linux-musl-gcc pour les cibles
           # aarch64-*-musl — absent : musl-tools ne fournit que
@@ -84,7 +84,8 @@ jobs:
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/agentcontrol-daemon \
-             target/${{ matrix.target }}/release/acctl dist/
+             target/${{ matrix.target }}/release/acctl \
+             target/${{ matrix.target }}/release/acp-claude dist/
           cp -r packaging dist/
           tar czf agentcontrol-server-${{ matrix.arch }}-linux.tar.gz -C dist .
       # Critère d'acceptation : les binaires tournent sur une vieille

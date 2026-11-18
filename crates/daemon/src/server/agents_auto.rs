@@ -50,21 +50,30 @@ pub(crate) struct AdapterSpec {
     pub extra_models: &'static [(&'static str, &'static str)],
 }
 
-/// Registre des adaptateurs ACP connus. `claude` : le CLI `claude`
-/// (installeur natif → ~/.local/bin/claude) n'est PAS un adaptateur —
-/// il faut `claude-code-acp` (@zed-industries) ou `claude-agent-acp`
-/// (@agentclientprotocol). `codex` : idem, `codex` seul ne parle pas
+/// Registre des adaptateurs ACP connus. `claude` : `acp-claude`
+/// (#280, binaire Rust livré dans le tarball) est l'adaptateur
+/// maison — les npm `claude-code-acp`/`claude-agent-acp` restent en
+/// repli. `codex` : idem, `codex` seul ne parle pas
 /// ACP — l'adaptateur `codex-acp` est requis. `gemini` et `opencode`
 /// portent leur mode ACP dans leurs propres flags/sous-commandes.
 pub(crate) const KNOWN_ADAPTERS: &[AdapterSpec] = &[
     AdapterSpec {
         id: "claude",
         name: "Claude",
-        commands: &[&["claude-code-acp"], &["claude-agent-acp"]],
+        // acp-claude (#280) : adaptateur Rust maison livré dans le
+        // tarball à côté du démon — spawn `claude -p --input-format
+        // stream-json`, pas de dépendance node. Essayé en premier ;
+        // les adaptateurs npm restent le repli si le binaire maison
+        // n'est pas dans le PATH (vieil install, PATH minimal).
+        commands: &[
+            &["acp-claude"],
+            &["claude-code-acp"],
+            &["claude-agent-acp"],
+        ],
         detect: &["claude"],
-        install_hint: "npm i -g @zed-industries/claude-code-acp \
-             (ou @agentclientprotocol/claude-agent-acp) — le CLI `claude` \
-             seul n'expose pas ACP",
+        install_hint: "installer Claude Code — l'adaptateur acp-claude \
+             est livré avec AgentControl ; sinon npm i -g \
+             @zed-industries/claude-code-acp",
         install: &[
             &["npm", "i", "-g", "@zed-industries/claude-code-acp"],
             &["npm", "i", "-g", "@agentclientprotocol/claude-agent-acp"],
