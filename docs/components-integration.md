@@ -554,6 +554,48 @@ pipeline, still on the same tick/persist/lock substrate (item #139,
   caveat: any `acctl orch set`/`comp set` on a pre-#139 daemon rewrites
   the section from the old schema and silently drops the staged key.
 
+### 2.12 Worker pool per profile — `worker_pool` (#282)
+
+`[backlog_orchestrator] worker_pool` replaces the flat
+`worker_agent` + `max_workers` worker surface with a structured team —
+TOML array-of-tables, one entry per profile:
+
+```toml
+[[backlog_orchestrator.worker_pool]]
+profile = "devin"   # [agents.*] id — empty = worker_agent → agent
+count   = 2         # slots of this profile (0 = inert entry)
+model   = "default" # empty = global `model`
+effort  = "high"    # thought_level post-spawn — empty = global
+mode    = "agent"   # empty = global `mode`
+```
+
+- **Capacity** — the sum of `count` replaces `max_workers` for worker
+  slots (`max_working` stays the independent active cap; `max_workers`
+  is ignored for workers once the pool is set). Empty/absent pool =
+  implicit single entry `worker_agent` + `max_workers` + global
+  values — legacy configs unchanged.
+- **Spawn order** — entries fill in declaration order: the first entry
+  whose slots aren't all occupied by live `Backlog-W*` sessions of its
+  profile wins (no round-robin); same-tick spawns count via the
+  `extra` profile list. A worker whose profile vanished from the pool
+  occupies no entry slot.
+- **Set syntax** — `acctl comp set backlog-orchestrator worker_pool …`
+  accepts the JSON array, its string form, or the shorthand
+  `devin:2,claude=1` (`profile=count` also accepted); `[]`/`{}`/empty
+  clears back to legacy. Values outside a profile's announced
+  model/mode/effort vocabularies warn at spawn, never refuse.
+- **Failover** — rate-limit drift compares `meta.agent` against ALL
+  pool profiles (count > 0): a worker legitimately on entry 2 doesn't
+  drift; a drifted worker is replaced on the FIRST pool entry with its
+  model/effort. Planner/reviewer/PR-reviewer roles gained the same
+  per-role `*_model`/`*_effort` fields (empty = global fallback).
+- **UI** — the component form groups params into sections
+  (`ParamSpec.group`): Worker team / Planning & plan reviews / PR
+  reviews / General. `worker_pool` renders as an editable table —
+  profile dropdown + slots + model/effort/mode inputs whose datalists
+  come from that row's profile caps (`list_agents`), plus a live
+  « N slots · max M active » total.
+
 ---
 
 ## 3. Risks & constraints

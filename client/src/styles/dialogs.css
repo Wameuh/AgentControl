@@ -52,6 +52,42 @@ dialog label.chk-row { flex-direction: row; align-items: center; gap: 10px; curs
 .cp-desc { color: var(--muted); font-size: 11px; }
 #cp-fields { display: flex; flex-direction: column; gap: 10px; max-height: 55vh; overflow: auto; }
 #cp-fields label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+/* Titre de section du formulaire params (groupes ParamSpec.group —
+   ex. orchestrateur : workers / pipeline / pr_reviews / general). */
+.cp-sec {
+  margin-top: 6px; padding-top: 8px;
+  border-top: 1px solid var(--border);
+  color: var(--muted); font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.cp-sec:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+/* Widget « worker_pool » : table profil/slots/modèle/effort/mode. */
+.wp { display: flex; flex-direction: column; gap: 6px; }
+.wp-rows { display: flex; flex-direction: column; gap: 6px; }
+.wp-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 1.2fr) 52px repeat(3, minmax(80px, 1fr)) 26px;
+  gap: 6px; align-items: center;
+}
+.wp-row input, .wp-row select {
+  width: 100%; box-sizing: border-box; min-width: 0;
+}
+.wp-del {
+  border: 0; background: none; color: var(--muted); cursor: pointer;
+  font-size: 13px; padding: 2px 4px; border-radius: 4px;
+}
+.wp-del:hover { color: var(--danger, #e5534b); }
+.wp-add {
+  align-self: flex-start; border: 1px dashed var(--border);
+  background: none; color: var(--muted); border-radius: 6px;
+  padding: 4px 10px; font-size: 12px; cursor: pointer;
+}
+.wp-add:hover { color: var(--accent); border-color: var(--accent); }
+.wp-total { color: var(--muted); font-size: 11px; }
+@media (max-width: 560px) {
+  .wp-row { grid-template-columns: 1fr 52px; }
+  .wp-row .wp-model, .wp-row .wp-effort, .wp-row .wp-mode { grid-column: 1 / -1; }
+}
 dialog input[type="checkbox"] {
   width: 15px; height: 15px; flex: none; margin: 0; padding: 0;
   border: 0; background: none; accent-color: var(--accent);

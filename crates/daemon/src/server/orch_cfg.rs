@@ -42,6 +42,7 @@ const KEYS: &[&str] = &[
     "metrics",
     "max_workers",
     "max_working",
+    "worker_pool",
     "poll_secs",
     "nudge_cooldown_secs",
     "title_prefix",
@@ -69,6 +70,11 @@ const KEYS: &[&str] = &[
     "pr_review_trigger",
     "pr_reviewer_mode",
     "pr_reviewer_model",
+    "pr_reviewer_effort",
+    "planner_model",
+    "planner_effort",
+    "reviewer_model",
+    "reviewer_effort",
     "pr_review_max_parallel",
     "pr_review_timeout",
     "repo_workspaces",
@@ -87,6 +93,7 @@ fn ps(key: &str, label: &str, desc: &str, kind: ParamKind, default: Option<&str>
         choices: Vec::new(),
         choice_labels: Vec::new(),
         open_enum: false,
+        group: None,
     }
 }
 
@@ -255,7 +262,7 @@ fn agent_ps(
 /// modes, thought levels) — les params correspondants deviennent des
 /// menus déroulants ouverts au lieu de champs texte libres.
 pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSpec> {
-    vec![
+    let mut v = vec![
         ps(
             "enabled",
             "Enabled at boot",
@@ -320,6 +327,24 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
             ParamKind::Int,
             Some("0"),
         ),
+        {
+            // Pool workers par profil : JSON `[{profile,count,model,
+            // effort,mode}]` — `choices` porte les profils déclarés
+            // pour la colonne profil du widget « équipe » côté client.
+            let mut p = ps(
+                "worker_pool",
+                "Worker pool",
+                "worker team — one row per profile: count slots + own \
+                 model/effort/mode (empty = global values); when set, \
+                 the sum of counts replaces max_workers for worker \
+                 capacity (max_working still applies); empty = legacy \
+                 worker_agent + max_workers",
+                ParamKind::Json,
+                Some("[]"),
+            );
+            p.choices = agents.to_vec();
+            p
+        },
         ps(
             "poll_secs",
             "Cycle period (s)",
@@ -471,6 +496,38 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
             Some("bypass"),
             &dyn_.modes,
         ),
+        dyn_ps(
+            "planner_model",
+            "Planner model",
+            "model requested at Backlog-P* spawn (planners AND \
+             implementers); empty = the global model param",
+            None,
+            &dyn_.models,
+        ),
+        dyn_ps(
+            "planner_effort",
+            "Planner effort",
+            "thought_level applied after Backlog-P* spawn; \
+             empty = the global thought_level",
+            None,
+            &dyn_.thought_levels,
+        ),
+        dyn_ps(
+            "reviewer_model",
+            "Reviewer model",
+            "model requested at Backlog-R* spawn (plan reviewers); \
+             empty = the global model param",
+            None,
+            &dyn_.models,
+        ),
+        dyn_ps(
+            "reviewer_effort",
+            "Reviewer effort",
+            "thought_level applied after Backlog-R* spawn; \
+             empty = the global thought_level",
+            None,
+            &dyn_.thought_levels,
+        ),
         ps(
             "max_review_rounds",
             "Max review rounds",
@@ -538,6 +595,14 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
             None,
             &dyn_.models,
         ),
+        dyn_ps(
+            "pr_reviewer_effort",
+            "PR reviewer effort",
+            "thought_level applied after PRReview-<N> spawn; \
+             empty = the global thought_level",
+            None,
+            &dyn_.thought_levels,
+        ),
         ps(
             "pr_review_max_parallel",
             "Parallel PR reviews",
@@ -564,7 +629,56 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
             ParamKind::List,
             None,
         ),
-    ]
+    ];
+    // Sections du formulaire « équipe » : le client regroupe les
+    // params de même `group` sous un titre — l'orchestrateur passe de
+    // ~40 champs à plat à 4 sections lisibles. Tri stable par rang :
+    // workers d'abord (l'équipe se lit en premier), puis pipeline,
+    // revues PR, général ; l'ordre de déclaration est préservé dans
+    // chaque section.
+    for p in &mut v {
+        p.group = group_of(&p.key).map(Into::into);
+    }
+    v.sort_by_key(|p| group_rank(p.group.as_deref()));
+    v
+}
+
+/// Rang d'affichage d'une section — `None`/inconnu en dernier.
+fn group_rank(g: Option<&str>) -> u8 {
+    match g {
+        Some("workers") => 0,
+        Some("pipeline") => 1,
+        Some("pr_reviews") => 2,
+        Some("general") => 3,
+        _ => 4,
+    }
+}
+
+/// Section d'affichage d'un param orchestrateur — ordre = ordre
+/// d'apparition dans `params_schema`.
+fn group_of(key: &str) -> Option<&'static str> {
+    Some(match key {
+        // Équipe workers : pool + capacité + identité des sessions W*.
+        "worker_pool" | "max_workers" | "max_working" | "worker_agent" | "title_prefix"
+        | "prompt" => "workers",
+        // Planification & reviews de plan : pipeline P*/R*.
+        "plan_review" | "planner_agent" | "planner_mode" | "planner_model" | "planner_effort"
+        | "implement_mode" | "reviewer_agent" | "reviewer_mode" | "reviewer_model"
+        | "reviewer_effort" | "max_review_rounds" | "plan_rereview" | "reviewer_reuse" => {
+            "pipeline"
+        }
+        // Revues PR : pool PRReview-* dédié.
+        "pr_review"
+        | "pr_rereview"
+        | "pr_review_trigger"
+        | "pr_reviewer_agent"
+        | "pr_reviewer_mode"
+        | "pr_reviewer_model"
+        | "pr_reviewer_effort"
+        | "pr_review_max_parallel"
+        | "pr_review_timeout" => "pr_reviews",
+        _ => "general",
+    })
 }
 
 /// Valeurs courantes sous forme chaîne — `spec.params` de l'item
@@ -582,6 +696,10 @@ pub(crate) fn params_values(cfg: &super::cfg::OrchCfg) -> HashMap<String, String
     m.insert("metrics".into(), cfg.metrics.to_string());
     m.insert("max_workers".into(), cfg.max_workers.to_string());
     m.insert("max_working".into(), cfg.max_working.to_string());
+    m.insert(
+        "worker_pool".into(),
+        serde_json::to_string(&cfg.worker_pool).unwrap_or_else(|_| "[]".into()),
+    );
     m.insert("poll_secs".into(), cfg.poll_secs.to_string());
     m.insert(
         "nudge_cooldown_secs".into(),
@@ -618,6 +736,11 @@ pub(crate) fn params_values(cfg: &super::cfg::OrchCfg) -> HashMap<String, String
     m.insert("pr_review_trigger".into(), cfg.pr_review_trigger.clone());
     m.insert("pr_reviewer_mode".into(), cfg.pr_reviewer_mode.clone());
     m.insert("pr_reviewer_model".into(), cfg.pr_reviewer_model.clone());
+    m.insert("pr_reviewer_effort".into(), cfg.pr_reviewer_effort.clone());
+    m.insert("planner_model".into(), cfg.planner_model.clone());
+    m.insert("planner_effort".into(), cfg.planner_effort.clone());
+    m.insert("reviewer_model".into(), cfg.reviewer_model.clone());
+    m.insert("reviewer_effort".into(), cfg.reviewer_effort.clone());
     m.insert(
         "pr_review_max_parallel".into(),
         cfg.pr_review_max_parallel.to_string(),
@@ -738,6 +861,79 @@ fn val_map(v: &Value) -> Result<BTreeMap<String, String>> {
     Ok(out)
 }
 
+/// Pool workers — tableau JSON `[{profile,count,model,effort,mode}]`
+/// (forme native `component_set_params`/`orchestrator_config`), chaîne
+/// JSON équivalente, ou CSV `profil:count` (`profil=count` accepté) :
+/// `devin:2,claude:1`. `{}`/`[]`/vide = pool vidé → retour au mode
+/// legacy `worker_agent` + `max_workers`. Les champs `model`/`effort`/
+/// `mode` d'une entrée restent optionnels (repli global au spawn) ;
+/// un `count` à 0 est toléré (entrée inerte) — les valeurs hors
+/// vocabulaire du profil ne sont PAS refusées ici : le spawn warn
+/// comme pour les autres params dynamiques.
+fn val_pool(v: &Value) -> Result<Vec<super::cfg::WorkerPoolEntry>> {
+    use super::cfg::WorkerPoolEntry;
+    fn shorthand(s: &str) -> Result<WorkerPoolEntry> {
+        let s = s.trim();
+        let (profile, count_s) = s
+            .split_once(':')
+            .or_else(|| s.split_once('='))
+            .with_context(|| format!("worker_pool entry « {s} » — expected « profile:count »"))?;
+        let count = count_s
+            .trim()
+            .parse::<u32>()
+            .with_context(|| format!("worker_pool « {s} »: count must be an integer"))?;
+        Ok(WorkerPoolEntry {
+            profile: profile.trim().to_string(),
+            count,
+            ..Default::default()
+        })
+    }
+    fn from_value(v: &Value) -> Result<WorkerPoolEntry> {
+        match v {
+            Value::Object(_) => {
+                let get = |k: &str| -> Result<String> {
+                    Ok(v.get(k).map(val_string).transpose()?.unwrap_or_default())
+                };
+                let count = match v.get("count") {
+                    Some(c) => {
+                        u32::try_from(val_u64(c)?).context("worker_pool count out of u32 range")?
+                    }
+                    None => 0,
+                };
+                Ok(WorkerPoolEntry {
+                    profile: get("profile")?,
+                    count,
+                    model: get("model")?,
+                    effort: get("effort")?,
+                    mode: get("mode")?,
+                })
+            }
+            Value::String(s) => shorthand(s),
+            other => anyhow::bail!(
+                "worker_pool entry: expected object or « profile:count », got {other}"
+            ),
+        }
+    }
+    match v {
+        Value::Array(a) => a.iter().map(from_value).collect(),
+        // `{}` natif = pool vidé (même sémantique que la chaîne).
+        Value::Object(o) if o.is_empty() => Ok(Vec::new()),
+        Value::String(s) => {
+            let s = s.trim();
+            if s.is_empty() || s == "[]" || s == "{}" {
+                return Ok(Vec::new());
+            }
+            if s.starts_with('[') {
+                let a: Value =
+                    serde_json::from_str(s).context("worker_pool: invalid JSON array")?;
+                return val_pool(&a);
+            }
+            s.split(',').map(shorthand).collect()
+        }
+        _ => anyhow::bail!("expected JSON array or « profile:count,… », got {v}"),
+    }
+}
+
 /// `true` si `v` est une chaîne vide — « champ vidé = défaut/vide »
 /// (le formulaire envoie `""` pour un champ effacé).
 fn is_empty(v: &Value) -> bool {
@@ -774,6 +970,8 @@ pub(crate) fn apply_patch(
                     u32::try_from(val_u64(v)?).context("max_working out of u32 range")?
                 }
             }
+            // Vide/{}/[] = pool vidé → mode legacy worker_agent+max_workers.
+            "worker_pool" => cfg.worker_pool = val_pool(v)?,
             "poll_secs" => cfg.poll_secs = val_u64(v)?,
             "nudge_cooldown_secs" => cfg.nudge_cooldown_secs = val_u64(v)?,
             // Vide → défaut : un champ cassant ne peut pas être « vidé »,
@@ -886,6 +1084,14 @@ pub(crate) fn apply_patch(
                     val_string(v)?
                 }
             }
+            // Model/effort par rôle : vide = repli sur `model` /
+            // `thought_level` globaux (sémantique du champ, pas un
+            // défaut fixe — un "" explicite est la valeur « héritée »).
+            "pr_reviewer_effort" => cfg.pr_reviewer_effort = val_string(v)?,
+            "planner_model" => cfg.planner_model = val_string(v)?,
+            "planner_effort" => cfg.planner_effort = val_string(v)?,
+            "reviewer_model" => cfg.reviewer_model = val_string(v)?,
+            "reviewer_effort" => cfg.reviewer_effort = val_string(v)?,
             "pr_review_max_parallel" => {
                 cfg.pr_review_max_parallel = u32::try_from(val_u64(v)?)
                     .context("pr_review_max_parallel out of u32 range")?
@@ -1258,10 +1464,13 @@ mod tests {
     #[test]
     fn schema_couvre_les_cles_et_valeurs() {
         let schema = params_schema(&DynChoices::default(), &[]);
-        assert_eq!(
-            schema.iter().map(|p| p.key.as_str()).collect::<Vec<_>>(),
-            KEYS.to_vec()
-        );
+        // Le schéma est trié par section d'affichage (`group`) — pas
+        // dans l'ordre canonique KEYS : même ensemble, autre ordre.
+        let mut got: Vec<&str> = schema.iter().map(|p| p.key.as_str()).collect();
+        let mut want = KEYS.to_vec();
+        got.sort_unstable();
+        want.sort_unstable();
+        assert_eq!(got, want);
         let c = super::super::cfg::OrchCfg::default();
         let vals = params_values(&c);
         for p in &schema {
@@ -1443,5 +1652,153 @@ mod tests {
         assert!(dyn_choices(&dir, "nope").models.is_empty());
         assert!(dyn_choices(&dir, "").models.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn patch_worker_pool_json_shorthand_et_replis() {
+        use super::super::cfg::OrchCfg;
+        let mut c = OrchCfg::default();
+        // Défaut : pool vide → capacité = max_workers (legacy).
+        assert!(c.worker_pool.is_empty());
+        assert_eq!(c.worker_capacity(), u64::from(c.max_workers));
+        let es = c.worker_entries();
+        assert_eq!(es.len(), 1);
+        assert_eq!(es[0].count, c.max_workers);
+        assert_eq!(es[0].model, c.model);
+        assert_eq!(es[0].effort, c.thought_level);
+        assert_eq!(es[0].mode, c.mode);
+
+        // JSON natif (array d'objets) — champs vides = replis globaux.
+        apply_patch(
+            &mut c,
+            &patch(&[(
+                "worker_pool",
+                json!([
+                    {"profile": "devin", "count": 2, "model": "default",
+                     "effort": "high", "mode": "agent"},
+                    {"profile": "claude", "count": 1},
+                ]),
+            )]),
+        )
+        .unwrap();
+        assert_eq!(c.worker_pool.len(), 2);
+        assert_eq!(c.worker_capacity(), 3);
+        // max_working = 0 → suit la capacité du pool.
+        assert_eq!(c.max_working_cap(), 3);
+        // worker_entries normalise : claude hérite model/effort/mode.
+        let es = c.worker_entries();
+        assert_eq!(es[1].model, c.model);
+        assert_eq!(es[1].effort, c.thought_level);
+        assert_eq!(es[1].mode, c.mode);
+        // role_agents inclut les profils du pool.
+        assert!(c.role_agents().contains(&"devin"));
+        assert!(c.role_agents().contains(&"claude"));
+
+        // Shorthand « profile:count » et « profile=count ».
+        apply_patch(
+            &mut c,
+            &patch(&[("worker_pool", json!("devin:2,claude=1"))]),
+        )
+        .unwrap();
+        assert_eq!(c.worker_pool.len(), 2);
+        assert_eq!(c.worker_pool[0].count, 2);
+        assert_eq!(c.worker_pool[1].profile, "claude");
+        assert_eq!(c.worker_capacity(), 3);
+
+        // Entrées tolérantes : count 0 et champs vides ne cassent rien.
+        apply_patch(
+            &mut c,
+            &patch(&[(
+                "worker_pool",
+                json!([{"profile": "", "count": 0}, {"count": 2}]),
+            )]),
+        )
+        .unwrap();
+        assert_eq!(c.worker_capacity(), 2);
+        // Profil vide → repli worker_agent→agent.
+        assert_eq!(c.worker_entries()[0].profile, c.agent_or(&c.worker_agent));
+
+        // « [] » / « {} » / vide = retour au mode legacy.
+        for v in [json!("[]"), json!("{}"), json!("")] {
+            apply_patch(&mut c, &patch(&[("worker_pool", v)])).unwrap();
+            assert!(c.worker_pool.is_empty());
+            assert_eq!(c.worker_capacity(), u64::from(c.max_workers));
+        }
+
+        // Roundtrip TOML : `worker_pool` sérialise en array-of-tables
+        // `[[worker_pool]]` (persist → config.toml → relecture).
+        apply_patch(
+            &mut c,
+            &patch(&[(
+                "worker_pool",
+                json!([{"profile": "devin", "count": 2, "effort": "high"}]),
+            )]),
+        )
+        .unwrap();
+        let frag = toml::to_string(&c).unwrap();
+        assert!(frag.contains("worker_pool"), "{frag}");
+        let back: OrchCfg = toml::from_str(&frag).unwrap();
+        assert_eq!(back.worker_pool, c.worker_pool);
+        assert_eq!(back.worker_capacity(), 2);
+    }
+
+    #[test]
+    fn patch_model_effort_par_role() {
+        use super::super::cfg::OrchCfg;
+        let mut c = OrchCfg::default();
+        apply_patch(
+            &mut c,
+            &patch(&[
+                ("planner_model", json!("opus")),
+                ("planner_effort", json!("high")),
+                ("reviewer_model", json!("sonnet")),
+                ("pr_reviewer_effort", json!("max")),
+            ]),
+        )
+        .unwrap();
+        // Posé → utilisé ; vide → repli global.
+        assert_eq!(c.model_or(&c.planner_model), "opus");
+        assert_eq!(c.effort_or(&c.planner_effort), "high");
+        assert_eq!(c.model_or(&c.reviewer_model), "sonnet");
+        assert_eq!(c.model_or(&c.pr_reviewer_model), c.model);
+        assert_eq!(c.effort_or(&c.pr_reviewer_effort), "max");
+        assert_eq!(c.effort_or(&c.reviewer_effort), c.thought_level);
+        // Le schéma expose les nouveaux champs (enum ouvertes).
+        let schema = params_schema(&DynChoices::default(), &[]);
+        for key in [
+            "planner_model",
+            "planner_effort",
+            "reviewer_model",
+            "reviewer_effort",
+            "pr_reviewer_effort",
+        ] {
+            assert!(schema.iter().any(|p| p.key == key), "{key} missing");
+        }
+    }
+
+    #[test]
+    fn schema_sections_groupees() {
+        let agents = vec!["devin".to_string(), "claude".to_string()];
+        let schema = params_schema(&DynChoices::default(), &agents);
+        // Groupes contigus et ordonnés : workers → pipeline →
+        // pr_reviews → general.
+        let groups: Vec<Option<&str>> = schema.iter().map(|p| p.group.as_deref()).collect();
+        let rank = |g: Option<&str>| match g {
+            Some("workers") => 0,
+            Some("pipeline") => 1,
+            Some("pr_reviews") => 2,
+            _ => 3,
+        };
+        assert!(groups.windows(2).all(|w| rank(w[0]) <= rank(w[1])));
+        // workers en premier, et worker_pool y figure avec les
+        // profils déclarés en choices (colonnes du widget « équipe »).
+        assert_eq!(groups[0], Some("workers"));
+        let wp = schema.iter().find(|p| p.key == "worker_pool").unwrap();
+        assert_eq!(wp.group.as_deref(), Some("workers"));
+        assert_eq!(wp.choices, agents);
+        assert!(schema.iter().any(|p| p.key == "max_workers"));
+        assert!(schema
+            .iter()
+            .any(|p| p.key == "pr_reviewer_effort" && p.group.as_deref() == Some("pr_reviews")));
     }
 }

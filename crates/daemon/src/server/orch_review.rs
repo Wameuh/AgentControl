@@ -818,14 +818,7 @@ impl Daemon {
                     self.gh_comment(
                         repo,
                         pr_n,
-                        &ack_comment(
-                            if cfg.pr_reviewer_model.is_empty() {
-                                &cfg.model
-                            } else {
-                                &cfg.pr_reviewer_model
-                            },
-                            &sid,
-                        ),
+                        &ack_comment(cfg.model_or(&cfg.pr_reviewer_model), &sid),
                         &cfg,
                     )
                     .await;
@@ -982,14 +975,7 @@ impl Daemon {
                     self.gh_comment(
                         &repo,
                         pr_n,
-                        &ack_comment(
-                            if cfg.pr_reviewer_model.is_empty() {
-                                &cfg.model
-                            } else {
-                                &cfg.pr_reviewer_model
-                            },
-                            &sid,
-                        ),
+                        &ack_comment(cfg.model_or(&cfg.pr_reviewer_model), &sid),
                         &cfg,
                     )
                     .await;
@@ -1104,14 +1090,7 @@ impl Daemon {
                     self.gh_comment(
                         &repo,
                         pr_n,
-                        &ack_comment(
-                            if cfg.pr_reviewer_model.is_empty() {
-                                &cfg.model
-                            } else {
-                                &cfg.pr_reviewer_model
-                            },
-                            &sid,
-                        ),
+                        &ack_comment(cfg.model_or(&cfg.pr_reviewer_model), &sid),
                         &cfg,
                     )
                     .await;
@@ -1828,11 +1807,10 @@ impl Daemon {
             ],
         );
         let n: u64 = st_counter(&key);
-        let model = if cfg.pr_reviewer_model.is_empty() {
-            cfg.model.clone()
-        } else {
-            cfg.pr_reviewer_model.clone()
-        };
+        // `*_model`/`*_effort` par rôle : vide → repli global (même
+        // sémantique que les autres rôles pipeline).
+        let model = cfg.model_or(&cfg.pr_reviewer_model).to_string();
+        let effort = cfg.effort_or(&cfg.pr_reviewer_effort).to_string();
         let group = (!cfg.group.is_empty()).then(|| cfg.group.clone());
         let agent = cfg.agent_or(&cfg.pr_reviewer_agent);
         self.warn_spawn_cfg(agent, &model, &cfg.pr_reviewer_mode);
@@ -1854,6 +1832,7 @@ impl Daemon {
             .and_then(Value::as_str)
             .context("spawn without session")?
             .to_string();
+        self.apply_spawn_cfg(&sid, &effort).await;
         info!(
             "orchestrator: review PR {key} → {sid} (sha {})",
             &sha[..7.min(sha.len())]

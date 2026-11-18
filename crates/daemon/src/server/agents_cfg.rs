@@ -220,6 +220,7 @@ pub(crate) fn params_schema(agents: &HashMap<String, AgentProfile>) -> Vec<Param
                 choices: Vec::new(),
                 choice_labels: Vec::new(),
                 open_enum: false,
+                group: None,
             }
         })
         .collect()

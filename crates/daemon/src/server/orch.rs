@@ -896,6 +896,46 @@ impl WorkerSlots {
     }
 }
 
+/// Prochaine entrée du `worker_pool` à pourvoir : la PREMIÈRE entrée
+/// (ordre déclaré) dont les `count` slots ne sont pas tous occupés —
+/// politique de remplissage déterministe et séquentielle (pas de
+/// round-robin : l'équipe se compose dans l'ordre configuré).
+/// Appariement worker→entrée : `meta.agent == entry.profile`, rempli
+/// dans l'ordre déclaré — un worker dont le profil a disparu du pool
+/// n'occupe aucun slot (le failover le réassigne à la 1re entrée).
+/// `extra` = profils déjà spawnés ce tick mais absents des metas
+/// (snapshot pris avant les spawns — évite la double allocation
+/// intra-tick). `None` = pool complet → ne pas spawner.
+pub(crate) fn pool_next_entry<'a>(
+    entries: &'a [cfg::WorkerPoolEntry],
+    workers: &[SessionMeta],
+    live: &HashSet<String>,
+    extra: &[String],
+) -> Option<&'a cfg::WorkerPoolEntry> {
+    fn occupy(entries: &[cfg::WorkerPoolEntry], remaining: &mut [u32], agent: &str) {
+        for (i, e) in entries.iter().enumerate() {
+            if remaining[i] > 0 && e.profile == agent {
+                remaining[i] -= 1;
+                return;
+            }
+        }
+    }
+    let mut remaining: Vec<u32> = entries.iter().map(|e| e.count).collect();
+    for w in workers {
+        if counts_as_alive(&w.state, &w.id, live) {
+            occupy(entries, &mut remaining, &w.agent);
+        }
+    }
+    for a in extra {
+        occupy(entries, &mut remaining, a);
+    }
+    entries
+        .iter()
+        .zip(remaining.iter())
+        .find(|(_, r)| **r > 0)
+        .map(|(e, _)| e)
+}
+
 /// Sids ayant au moins un waiter ac-wait vivant — scan unique du
 /// répertoire d'état (un appel par lot de sessions, ex. list_sessions,
 /// au lieu d'une relecture disque par session).
@@ -1129,6 +1169,18 @@ fn acwait_cancel_session_in(dir: &std::path::Path, sid: &str) {
 /// par profil.
 pub(crate) fn rate_limited_count(metas: &[SessionMeta], cfg: &cfg::OrchCfg) -> usize {
     let agents = cfg.role_agents();
+    // Modèles effectifs par rôle + entrées du pool : un worker sur le
+    // modèle de SON entrée compte même si `cfg.model` global diffère.
+    // Ensemble vide (aucun modèle configuré nulle part) = tout modèle.
+    let mut models: Vec<String> = vec![
+        cfg.model_or(&cfg.planner_model).to_string(),
+        cfg.model_or(&cfg.reviewer_model).to_string(),
+        cfg.model_or(&cfg.pr_reviewer_model).to_string(),
+    ];
+    for e in cfg.worker_entries() {
+        models.push(e.model);
+    }
+    models.retain(|m| !m.is_empty());
     metas
         .iter()
         .filter(|m| {
@@ -1138,7 +1190,10 @@ pub(crate) fn rate_limited_count(metas: &[SessionMeta], cfg: &cfg::OrchCfg) -> u
                     .as_ref()
                     .is_some_and(|le| le.kind == "rate_limit")
                 && agents.contains(&m.agent.as_str())
-                && (cfg.model.is_empty() || m.model.as_deref() == Some(cfg.model.as_str()))
+                && (models.is_empty()
+                    || m.model
+                        .as_deref()
+                        .is_some_and(|mm| models.iter().any(|x| x == mm)))
         })
         .count()
 }
@@ -1878,7 +1933,10 @@ impl Daemon {
                 .filter(|w| counts_as_working(&w.state, &w.id, &live_waiters))
                 .count();
             let mut slots = WorkerSlots {
-                total: (cfg.max_workers as usize).saturating_sub(alive),
+                // Capacité workers = somme du pool (`worker_capacity`
+                // = `max_workers` quand worker_pool est vide — legacy
+                // inchangé) ; `max_working` reste le second seuil.
+                total: (cfg.worker_capacity() as usize).saturating_sub(alive),
                 working: (cfg.max_working_cap() as usize).saturating_sub(working),
                 gained: 0,
             };
@@ -1963,6 +2021,11 @@ impl Daemon {
                     .cmp(&task_priority(a))
                     .then(task_id(a).cmp(&task_id(b)))
             });
+            // Pool effectif : `worker_entries` = worker_pool configuré
+            // ou pool implicite legacy (worker_agent + max_workers +
+            // valeurs globales) — `pool_next_entry` choisit la 1re
+            // entrée non pleine dans l'ordre déclaré.
+            let entries = cfg.worker_entries();
             if orch_plan::cli_claim_capable(bin, ws).await {
                 let cap = serial_cap(&workers, spawnable.len())
                     .min(slots.total)
@@ -2000,7 +2063,14 @@ impl Daemon {
                         repo_label,
                         cwd
                     );
-                    let Some(sid) = self.orch_spawn(st.counter, &cwd, prompt).await else {
+                    let Some(entry) = pool_next_entry(&entries, &workers, &live_waiters, &[])
+                    else {
+                        // Pool complet pour CE tick (les slots globaux
+                        // ont du mou mais chaque entrée est pleine —
+                        // workers non appariés au pool) : ne pas spawner.
+                        break;
+                    };
+                    let Some(sid) = self.orch_spawn(st.counter, &cwd, prompt, entry).await else {
                         continue;
                     };
                     let (rc, _o, e) =
@@ -2037,7 +2107,14 @@ impl Daemon {
                         st.counter
                     );
                     let prompt = cfg.prompt.clone().unwrap_or_else(|| PROMPT.to_string());
-                    if let Some(sid) = self.orch_spawn(st.counter, &cfg.workspace, prompt).await {
+                    let Some(entry) = pool_next_entry(&entries, &workers, &live_waiters, &[])
+                    else {
+                        break;
+                    };
+                    if let Some(sid) = self
+                        .orch_spawn(st.counter, &cfg.workspace, prompt, entry)
+                        .await
+                    {
                         if let Ok(s) = self.get_session(&sid).await {
                             workers.push(s.meta_snapshot());
                         }
@@ -2434,20 +2511,29 @@ impl Daemon {
         number: u64,
         cwd: &str,
         prompt: String,
+        entry: &cfg::WorkerPoolEntry,
     ) -> Option<String> {
         let cfg = self.orch.cfg.read().unwrap().clone();
         let cfg = &cfg;
         let title = format!("{}{}", cfg.title_prefix, number);
         let group = (!cfg.group.is_empty()).then(|| cfg.group.clone());
-        let agent = cfg.agent_or(&cfg.worker_agent);
-        self.warn_spawn_cfg(agent, &cfg.model, &cfg.mode);
+        // `worker_entries` porte déjà les replis globalaux (profil
+        // worker_agent/agent, model/mode/thought_level) — pool vide =
+        // entrée implicite legacy, comportement inchangé.
+        let (agent, model, mode, effort) = (
+            entry.profile.as_str(),
+            entry.model.as_str(),
+            entry.mode.as_str(),
+            entry.effort.as_str(),
+        );
+        self.warn_spawn_cfg(agent, model, mode);
         let v = match self
             .h_new_session(
                 agent.to_string(),
                 cwd.to_string(),
                 Some(title.clone()),
-                Some(cfg.model.clone()),
-                Some(cfg.mode.clone()),
+                Some(model.to_string()),
+                Some(mode.to_string()),
                 Some(prompt),
                 Some(COMPONENT_ORIGIN.to_string()),
                 group,
@@ -2461,7 +2547,7 @@ impl Daemon {
             }
         };
         let sid = v.get("session").and_then(Value::as_str)?.to_string();
-        self.apply_spawn_cfg(&sid).await;
+        self.apply_spawn_cfg(&sid, effort).await;
         info!("orchestrator: spawned {title} = {sid}");
         Some(sid)
     }
@@ -2499,16 +2585,17 @@ impl Daemon {
     /// `thought_level` de la config — best-effort, les échecs sont
     /// loggés sans faire échouer le spawn. (Le groupe sidebar est posé
     /// à la création via le param `group` de `h_new_session`.)
-    pub(crate) async fn apply_spawn_cfg(self: &Arc<Self>, sid: &str) {
-        let cfg = self.orch.cfg.read().unwrap().clone();
-        if !cfg.thought_level.is_empty() {
+    /// `effort` = `thought_level` à poser — l'appelant a déjà résolu
+    /// le repli (entrée du pool ou `*_effort` de rôle → global).
+    pub(crate) async fn apply_spawn_cfg(self: &Arc<Self>, sid: &str, effort: &str) {
+        if !effort.is_empty() {
             // Posée en pending_config tant que l'agent n'est pas prêt —
             // rejouée au spawn (comme `acctl setcfg` juste après `new`).
             if let Err(e) = self
                 .h_set_config_option(
                     sid.to_string(),
                     "thought_level".to_string(),
-                    cfg.thought_level.clone(),
+                    effort.to_string(),
                 )
                 .await
             {
@@ -2588,7 +2675,7 @@ impl Daemon {
             .and_then(Value::as_str)
             .context("spawn Manager: no session in the response")?
             .to_string();
-        self.apply_spawn_cfg(&sid).await;
+        self.apply_spawn_cfg(&sid, &cfg.thought_level).await;
         info!("manager: spawned {title} = {sid} (workspace {repo} → {cwd})");
         Ok(json!({
             "session": sid, "repo": repo, "cwd": cwd,
@@ -3051,5 +3138,81 @@ mod tests {
         // Le prompt worker ne doit plus imposer le self-pop : le dispatch
         // claim pré-assigne l'item.
         assert!(p.contains("PAS a lancer `agentbacklog --pop`"));
+    }
+
+    fn worker_meta(id: &str, agent: &str) -> SessionMeta {
+        let mut m = meta(Some(COMPONENT_ORIGIN), "Backlog-W1", "idle");
+        m.id = id.into();
+        m.agent = agent.into();
+        m
+    }
+
+    fn pool_entry(profile: &str, count: u32) -> cfg::WorkerPoolEntry {
+        cfg::WorkerPoolEntry {
+            profile: profile.into(),
+            count,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pool_next_entry_ordre_comptage_et_extra() {
+        let entries = vec![pool_entry("devin", 2), pool_entry("claude", 1)];
+        let live = HashSet::new();
+        let w: Vec<SessionMeta> = Vec::new();
+        // Ordre déclaré : devin d'abord tant qu'un slot reste.
+        assert_eq!(
+            pool_next_entry(&entries, &w, &live, &[]).unwrap().profile,
+            "devin"
+        );
+        // 1 worker devin vivant → encore devin (count=2).
+        let w = vec![worker_meta("s-1", "devin")];
+        assert_eq!(
+            pool_next_entry(&entries, &w, &live, &[]).unwrap().profile,
+            "devin"
+        );
+        // 2 devin vivants → claude.
+        let w = vec![worker_meta("s-1", "devin"), worker_meta("s-2", "devin")];
+        assert_eq!(
+            pool_next_entry(&entries, &w, &live, &[]).unwrap().profile,
+            "claude"
+        );
+        // Pool plein → None (ne pas spawner).
+        let w = vec![
+            worker_meta("s-1", "devin"),
+            worker_meta("s-2", "devin"),
+            worker_meta("s-3", "claude"),
+        ];
+        assert!(pool_next_entry(&entries, &w, &live, &[]).is_none());
+        // `extra` = profils spawnés ce tick hors snapshot metas.
+        let w2 = vec![worker_meta("s-1", "devin"), worker_meta("s-2", "devin")];
+        assert_eq!(
+            pool_next_entry(&entries, &w2, &live, &["claude".to_string()])
+                .map(|e| e.profile.as_str()),
+            None
+        );
+        // Worker dont le profil a DISPARU du pool : n'occupe aucun
+        // slot d'entrée (le failover le réassigne) — mais il compte
+        // dans la capacité globale ailleurs.
+        let w3 = vec![worker_meta("s-9", "cursor")];
+        assert_eq!(
+            pool_next_entry(&entries, &w3, &live, &[]).unwrap().profile,
+            "devin"
+        );
+        // Session `asleep` SANS waiter vivant : `counts_as_alive` la
+        // dit morte pour le slot — ne consomme pas d'entrée.
+        let mut parked = worker_meta("s-8", "devin");
+        parked.state = "asleep".into();
+        let w4 = vec![parked];
+        assert_eq!(
+            pool_next_entry(&entries, &w4, &live, &[]).unwrap().profile,
+            "devin"
+        );
+        // `asleep` + waiter vivant : slot conservé (retour garanti).
+        let mut parked = worker_meta("s-8", "devin");
+        parked.state = "asleep".into();
+        let live_waiter: HashSet<String> = ["s-8".to_string()].into_iter().collect();
+        let entries1 = vec![pool_entry("devin", 1)];
+        assert!(pool_next_entry(&entries1, &[parked], &live_waiter, &[]).is_none());
     }
 }

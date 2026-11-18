@@ -263,6 +263,32 @@ impl Default for RetentionCfg {
     }
 }
 
+/// Une entrée du pool de workers (`[[worker_pool]]`) : `count` slots
+/// du profil `profile`, chacun avec modèle/effort/mode propres —
+/// vides = repli sur les valeurs globales (`model`/`thought_level`/
+/// `mode`). Le spawn remplit les entrées dans l'ordre déclaré : la
+/// première entrée dont les slots ne sont pas tous occupés gagne.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WorkerPoolEntry {
+    /// Profil `[agents.*]` de l'entrée — vide = `agent_or(worker_agent)`.
+    #[serde(default)]
+    pub profile: String,
+    /// Slots workers de ce profil — 0 = entrée inerte (tolérée : un
+    /// count à 0 dans une config éditée à la main ne casse rien).
+    #[serde(default)]
+    pub count: u32,
+    /// Modèle demandé au spawn — vide = `model` global.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    /// Niveau d'effort (`thought_level` posé post-spawn) — vide =
+    /// `thought_level` global.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub effort: String,
+    /// Mode demandé au spawn — vide = `mode` global.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mode: String,
+}
+
 /// Orchestrateur backlog natif (section [backlog_orchestrator] de
 /// config.toml) — port interne du service `backlog-orchestrator.py`
 /// (voir server/orch.rs). **Désactivé par défaut** (opt-in explicite) ;
@@ -434,6 +460,22 @@ pub struct OrchCfg {
     /// Modèle demandé au spawn des reviewers PR — vide = `model`.
     #[serde(default)]
     pub pr_reviewer_model: String,
+    /// Niveau d'effort (`thought_level`) des reviewers PR — vide =
+    /// `thought_level` global.
+    #[serde(default)]
+    pub pr_reviewer_effort: String,
+    /// Modèle des planificateurs/implémenteurs `Backlog-P*` — vide = `model`.
+    #[serde(default)]
+    pub planner_model: String,
+    /// Niveau d'effort (`thought_level`) des planificateurs — vide = `thought_level`.
+    #[serde(default)]
+    pub planner_effort: String,
+    /// Modèle des reviewers de plan `Backlog-R*` — vide = `model`.
+    #[serde(default)]
+    pub reviewer_model: String,
+    /// Niveau d'effort (`thought_level`) des reviewers de plan — vide = `thought_level`.
+    #[serde(default)]
+    pub reviewer_effort: String,
     /// Reviews PR simultanées max — pool SÉPARÉ de `max_workers` (les
     /// workers en attente d'une review ne doivent jamais affamer les
     /// reviews qu'ils attendent). Défaut 2.
@@ -443,6 +485,16 @@ pub struct OrchCfg {
     /// « review failed » au-delà. Défaut 2700 s (45 min).
     #[serde(default = "d2700")]
     pub pr_review_timeout: u64,
+    /// Pool de workers structurés (`[[worker_pool]]` dans config.toml) —
+    /// présent non vide = la somme des `count` remplace `max_workers`
+    /// pour la capacité workers et chaque entrée porte profil +
+    /// modèle/effort/mode propres ; vide = comportement legacy
+    /// (`worker_agent`/`agent` + `max_workers` + `model`/`mode`/
+    /// `thought_level` = pool implicite à une entrée). Placé juste
+    /// avant `repo_workspaces` : les deux sont des sous-structures TOML
+    /// (array-of-tables / table) — jamais de clé scalaire après elles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worker_pool: Vec<WorkerPoolEntry>,
     /// Routing workspace repo → cwd : une entrée = un « workspace »
     /// porté par le backlog (tag `--repo` des items). Route les
     /// sessions spawnées pour un item taggé (worker legacy, planner,
@@ -544,21 +596,29 @@ impl Default for OrchCfg {
             pr_review_trigger: dtrigger(),
             pr_reviewer_mode: dsmart(),
             pr_reviewer_model: String::new(),
+            pr_reviewer_effort: String::new(),
+            planner_model: String::new(),
+            planner_effort: String::new(),
+            reviewer_model: String::new(),
+            reviewer_effort: String::new(),
             pr_review_max_parallel: d2(),
             pr_review_timeout: d2700(),
+            worker_pool: Vec::new(),
             repo_workspaces: drw(),
         }
     }
 }
 
 impl OrchCfg {
-    /// Cap effectif `max_working` : 0 = non borné → `max_workers`.
+    /// Cap effectif `max_working` : 0 = non borné → capacité workers
+    /// (`worker_capacity` — somme du pool, ou `max_workers` en mode
+    /// legacy sans pool).
     pub fn max_working_cap(&self) -> u64 {
-        u64::from(if self.max_working == 0 {
-            self.max_workers
+        if self.max_working == 0 {
+            self.worker_capacity()
         } else {
-            self.max_working
-        })
+            u64::from(self.max_working)
+        }
     }
 
     /// Workspace de session pour un tag `repo` d'item backlog :
@@ -604,20 +664,112 @@ impl OrchCfg {
 
     /// Profils effectifs de tous les rôles spawnés par l'orchestrateur
     /// (worker, planner, reviewer, reviewer PR), dédoublonnés — le
-    /// périmètre « quota » du mode sériel rate_limit.
+    /// périmètre « quota » du mode sériel rate_limit. Avec un
+    /// `worker_pool`, les profils workers sont ceux des entrées du
+    /// pool (pas seulement `worker_agent`).
     pub fn role_agents(&self) -> Vec<&str> {
         let mut out: Vec<&str> = Vec::new();
-        for a in [
-            self.agent_or(&self.worker_agent),
+        // Profils workers : ceux du pool quand configuré (vide =
+        // worker_agent/agent, comme worker_entries).
+        let workers: Vec<&str> = if self.worker_pool.is_empty() {
+            vec![self.agent_or(&self.worker_agent)]
+        } else {
+            self.worker_pool
+                .iter()
+                .map(|e| {
+                    if e.profile.is_empty() {
+                        self.agent_or(&self.worker_agent)
+                    } else {
+                        e.profile.as_str()
+                    }
+                })
+                .collect()
+        };
+        for a in workers.into_iter().chain([
             self.agent_or(&self.planner_agent),
             self.agent_or(&self.reviewer_agent),
             self.agent_or(&self.pr_reviewer_agent),
-        ] {
+        ]) {
             if !a.is_empty() && !out.contains(&a) {
                 out.push(a);
             }
         }
         out
+    }
+
+    /// Pool effectif des workers, entrées normalisées : `worker_pool`
+    /// non vide → chaque entrée avec repli sur le profil worker
+    /// (`agent_or(worker_agent)` quand `profile` est vide) ; vide →
+    /// pool implicite legacy à une entrée portant `max_workers` slots
+    /// et les valeurs globales `model`/`thought_level`/`mode` —
+    /// aucune config existante ne change de comportement.
+    pub fn worker_entries(&self) -> Vec<WorkerPoolEntry> {
+        if self.worker_pool.is_empty() {
+            return vec![WorkerPoolEntry {
+                profile: self.agent_or(&self.worker_agent).to_string(),
+                count: self.max_workers,
+                model: self.model.clone(),
+                effort: self.thought_level.clone(),
+                mode: self.mode.clone(),
+            }];
+        }
+        self.worker_pool
+            .iter()
+            .map(|e| WorkerPoolEntry {
+                profile: if e.profile.is_empty() {
+                    self.agent_or(&self.worker_agent).to_string()
+                } else {
+                    e.profile.clone()
+                },
+                count: e.count,
+                model: if e.model.is_empty() {
+                    self.model.clone()
+                } else {
+                    e.model.clone()
+                },
+                effort: if e.effort.is_empty() {
+                    self.thought_level.clone()
+                } else {
+                    e.effort.clone()
+                },
+                mode: if e.mode.is_empty() {
+                    self.mode.clone()
+                } else {
+                    e.mode.clone()
+                },
+            })
+            .collect()
+    }
+
+    /// Capacité totale workers : somme des `count` du pool effectif.
+    /// `max_working` reste le second seuil (`max_working_cap`),
+    /// indépendant — un `max_workers` résiduel est ignoré dès que le
+    /// pool est configuré.
+    pub fn worker_capacity(&self) -> u64 {
+        self.worker_entries()
+            .iter()
+            .map(|e| u64::from(e.count))
+            .sum()
+    }
+
+    /// Modèle effectif d'un rôle : champ `*_model` posé → sinon le
+    /// `model` global.
+    pub fn model_or<'a>(&'a self, role_model: &'a str) -> &'a str {
+        if role_model.is_empty() {
+            self.model.as_str()
+        } else {
+            role_model
+        }
+    }
+
+    /// Effort (`thought_level`) effectif d'un rôle : champ `*_effort`
+    /// posé → sinon le `thought_level` global.
+    pub fn effort_or<'a>(&'a self, role_effort: &'a str) -> &'a str {
+        if role_effort.is_empty() {
+            self.thought_level.as_str()
+        } else {
+            role_effort
+        }
     }
 }
 
