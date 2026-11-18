@@ -210,6 +210,20 @@ the candidate list, `misc::effective_command` picks the first whose
 argv[0] resolves (used by spawn, `available`, caps probe, costs,
 catalogue); `via` is `builtin`/`config`/`auto`.
 
+**Adapter provisioning** (`server/agents_install.rs`, #277): each
+registry spec also declares `install` — ordered `npm i -g <pkg>`
+candidates. The `install_agent_adapter` RPC (button « Install » of
+the agent-capabilities dialog on `available:false` +
+`unavailable.installable`, or `acctl agents install <id>`) runs them
+daemon-side, user-triggered only: no shell, never sudo, 300 s timeout,
+serialized, user-namespace only — when npm's global prefix is outside
+HOME the command gets `--prefix ~/.npm-global` (already in
+`agent_path_dirs`), with the same fallback on EACCES; an already
+resolvable adapter is a `{already:true}` no-op and candidates are
+tried in order until a `commands` binary resolves. Success triggers
+`reload_agent_profiles` → `available:true` without restart.
+`daemon_status.agent_install` advertises the capability.
+
 **Agent profile per role** (`backlog_orchestrator` params, hot-settable
 via `acctl comp set`, dropdown of the declared `[agents.*]` profiles in
 the config UI): `worker_agent` (`Backlog-W*`), `planner_agent`

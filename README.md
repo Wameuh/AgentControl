@@ -157,7 +157,9 @@ A few concrete setups — every bullet is something you can do today:
   Codex via `codex-acp`, Gemini, OpenCode…) are auto-discovered on the
   daemon's PATH — installing one makes its profile appear with no config
   and no restart, and unavailable profiles say why (binary looked for +
-  install hint). Any ACP-speaking agent can also be declared as a
+  install hint) — the daemon can even run the install itself
+  (`install_agent_adapter`: the agents dialog's Install button or
+  `acctl agents install <id>`, user npm prefix only, never sudo). Any ACP-speaking agent can also be declared as a
   custom `[agents.*]` profile, which always wins over auto-detection —
   `command` even accepts ordered fallbacks (`[["bin1"], ["bin2", "arg"]]`).
   Each orchestrator role — worker, planner, reviewer,

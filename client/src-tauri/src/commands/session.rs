@@ -330,6 +330,9 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         "list_agents" => ReqKind::ListAgents,
         "model_costs" => ReqKind::ModelCosts { agent: s("agent") },
         "refresh_agent_caps" => ReqKind::RefreshAgentCaps { agent: s("agent") },
+        // Provisioning adaptateur ACP côté démon (agents_auto registry,
+        // #277) — bouton « installer » du dialogue nouvelle session.
+        "install_agent_adapter" => ReqKind::InstallAgentAdapter { agent: s("agent") },
         "model_catalog" => ReqKind::ModelCatalog { agent: s("agent") },
         "list_sessions" => ReqKind::ListSessions,
         "session_info" => ReqKind::SessionInfo { session: s("session") },
