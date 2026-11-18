@@ -172,3 +172,4 @@ sha:71fcbdf871390152ae3de8661e3fc1da87e2e3f7: ACP-only session modes (plan/smart
 349: Resuming very long sessions is now smoother — the client shows resume progress, input/output is debounced and a new "fresh context" option drops the oversized native context instead of failing.
 351: Operational logs and client-facing error messages are now reported in English.
 354: Missing agent adapters can now be installed from the app — an "Install" button in the agents view (or `acctl agents install <id>`) runs the registry's npm install on the daemon side, user prefix only, never sudo.
+353: The new-session dialog now opens instantly — agent and session lists load in the background behind a skeleton placeholder, and the daemon caches agent lookups briefly so agent lists stay snappy.
