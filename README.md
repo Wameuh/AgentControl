@@ -153,7 +153,7 @@ A few concrete setups — every bullet is something you can do today:
   automatically migrated to another profile when the role's agent is
   switched.
 - **Pilot several agent providers side by side**: Devin and Cursor ship
-  as built-in profiles; known ACP adapters (Claude via `claude-code-acp`,
+  as built-in profiles; known ACP adapters (Claude via `acp-claude`/`claude-code-acp`,
   Codex via `codex-acp`, Gemini, OpenCode…) are auto-discovered on the
   daemon's PATH — installing one makes its profile appear with no config
   and no restart, and unavailable profiles say why (binary looked for +

@@ -66,18 +66,24 @@ pub(crate) struct Conn {
 
 async fn connect() -> Result<Conn> {
     if let Ok(addr) = std::env::var("AGENTCONTROL_TCP") {
-        let s = TcpStream::connect(&addr).await.with_context(|| format!("tcp {addr}"))?;
+        let s = TcpStream::connect(&addr)
+            .await
+            .with_context(|| format!("tcp {addr}"))?;
         let (r, w) = s.into_split();
         return Ok(Conn {
             w: Box::new(w),
-            lines: BufReader::new(Box::new(r) as Box<dyn tokio::io::AsyncRead + Unpin + Send>).lines(),
+            lines: BufReader::new(Box::new(r) as Box<dyn tokio::io::AsyncRead + Unpin + Send>)
+                .lines(),
             next_id: 1,
         });
     }
     #[cfg(unix)]
     {
         let path = std::env::var("AGENTCONTROL_SOCK").unwrap_or_else(|_| {
-            format!("{}/.agentcontrol/daemon.sock", std::env::var("HOME").unwrap_or_else(|_| ".".into()))
+            format!(
+                "{}/.agentcontrol/daemon.sock",
+                std::env::var("HOME").unwrap_or_else(|_| ".".into())
+            )
         });
         let s = tokio::net::UnixStream::connect(&path)
             .await
@@ -85,7 +91,8 @@ async fn connect() -> Result<Conn> {
         let (r, w) = s.into_split();
         return Ok(Conn {
             w: Box::new(w),
-            lines: BufReader::new(Box::new(r) as Box<dyn tokio::io::AsyncRead + Unpin + Send>).lines(),
+            lines: BufReader::new(Box::new(r) as Box<dyn tokio::io::AsyncRead + Unpin + Send>)
+                .lines(),
             next_id: 1,
         });
     }
@@ -174,9 +181,14 @@ fn print_event(ev: &Value) {
             ev["text"].as_str().unwrap_or("")
         ),
         "agent_text" => println!("[{seq}] {}", ev["text"].as_str().unwrap_or("")),
-        "agent_thought" => println!("\x1b[90m[{seq}] (pensée) {}\x1b[0m", ev["text"].as_str().unwrap_or("")),
+        "agent_thought" => println!(
+            "\x1b[90m[{seq}] (pensée) {}\x1b[0m",
+            ev["text"].as_str().unwrap_or("")
+        ),
         "tool_call" | "tool_call_update" => {
-            let title = ev["title"].as_str().unwrap_or_else(|| ev["call_id"].as_str().unwrap_or("?"));
+            let title = ev["title"]
+                .as_str()
+                .unwrap_or_else(|| ev["call_id"].as_str().unwrap_or("?"));
             let status = ev["status"].as_str().unwrap_or("?");
             println!("\x1b[33m[{seq}] ⚙ {title} — {status}\x1b[0m");
             if let Some(x) = ev["excerpt"].as_str() {
@@ -185,42 +197,86 @@ fn print_event(ev: &Value) {
                 }
             }
             if let Some(b) = ev["blob"].as_str() {
-                println!("    \x1b[90m[sortie complète: {b}, {} o]\x1b[0m", ev["size"].as_u64().unwrap_or(0));
+                println!(
+                    "    \x1b[90m[sortie complète: {b}, {} o]\x1b[0m",
+                    ev["size"].as_u64().unwrap_or(0)
+                );
             }
         }
         "permission_request" => {
-            println!("\x1b[31m[{seq}] PERMISSION {}\x1b[0m", ev["title"].as_str().unwrap_or(""));
+            println!(
+                "\x1b[31m[{seq}] PERMISSION {}\x1b[0m",
+                ev["title"].as_str().unwrap_or("")
+            );
             if let Some(d) = ev["detail"].as_str() {
                 for l in d.lines().take(10) {
                     println!("    \x1b[90m{l}\x1b[0m");
                 }
             }
-            for o in ev["options"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
-                println!("    - {} ({})", o["option_id"].as_str().unwrap_or(""), o["name"].as_str().unwrap_or(""));
+            for o in ev["options"]
+                .as_array()
+                .map(|a| a.as_slice())
+                .unwrap_or(&[])
+            {
+                println!(
+                    "    - {} ({})",
+                    o["option_id"].as_str().unwrap_or(""),
+                    o["name"].as_str().unwrap_or("")
+                );
             }
-            println!("    → acctl respond <session> {} <option_id>", ev["request_id"].as_str().unwrap_or(""));
+            println!(
+                "    → acctl respond <session> {} <option_id>",
+                ev["request_id"].as_str().unwrap_or("")
+            );
         }
         "question_request" => {
-            println!("\x1b[35m[{seq}] QUESTION {}\x1b[0m", ev["message"].as_str().unwrap_or(""));
-            println!("    → acctl respond <session> {} --answer '{{...}}'", ev["request_id"].as_str().unwrap_or(""));
+            println!(
+                "\x1b[35m[{seq}] QUESTION {}\x1b[0m",
+                ev["message"].as_str().unwrap_or("")
+            );
+            println!(
+                "    → acctl respond <session> {} --answer '{{...}}'",
+                ev["request_id"].as_str().unwrap_or("")
+            );
         }
         "permission_resolved" | "question_resolved" => {
-            println!("[{seq}] résolu: {}", ev["outcome"].as_str().or_else(|| ev["answer"].as_str()).unwrap_or(""));
+            println!(
+                "[{seq}] résolu: {}",
+                ev["outcome"]
+                    .as_str()
+                    .or_else(|| ev["answer"].as_str())
+                    .unwrap_or("")
+            );
         }
         "mode_changed" => println!("[{seq}] mode → {}", ev["mode"].as_str().unwrap_or("")),
         "commands_available" => {
-            let names: Vec<String> = ev["commands"].as_array().map(|a| {
-                a.iter().map(|c| {
-                    format!("/{}", c.get("name").and_then(Value::as_str).or_else(|| c.as_str()).unwrap_or(""))
-                }).collect()
-            }).unwrap_or_default();
+            let names: Vec<String> = ev["commands"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .map(|c| {
+                            format!(
+                                "/{}",
+                                c.get("name")
+                                    .and_then(Value::as_str)
+                                    .or_else(|| c.as_str())
+                                    .unwrap_or("")
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             println!("[{seq}] commandes: {}", names.join(" "));
         }
-        "status_changed" => println!("\x1b[90m[{seq}] état → {}\x1b[0m", ev["state"].as_str().unwrap_or("")),
+        "status_changed" => println!(
+            "\x1b[90m[{seq}] état → {}\x1b[0m",
+            ev["state"].as_str().unwrap_or("")
+        ),
         "steps" => {
             let n = ev["steps"].as_array().map(|a| a.len()).unwrap_or(0);
             let cur = ev["steps"].as_array().and_then(|a| {
-                a.iter().find(|s| s["status"].as_str() == Some("in_progress"))
+                a.iter()
+                    .find(|s| s["status"].as_str() == Some("in_progress"))
             });
             println!(
                 "\x1b[36m[{seq}] ▤ étapes: {n}{}\x1b[0m",
@@ -230,8 +286,14 @@ fn print_event(ev: &Value) {
             );
         }
         "session_cleared" => println!("\x1b[90m[{seq}] ── contexte effacé ──\x1b[0m"),
-        "error" => println!("\x1b[31m[{seq}] ERREUR {}\x1b[0m", ev["message"].as_str().unwrap_or("")),
-        "system" => println!("\x1b[90m[{seq}] ⦿ {}\x1b[0m", ev["text"].as_str().unwrap_or("")),
+        "error" => println!(
+            "\x1b[31m[{seq}] ERREUR {}\x1b[0m",
+            ev["message"].as_str().unwrap_or("")
+        ),
+        "system" => println!(
+            "\x1b[90m[{seq}] ⦿ {}\x1b[0m",
+            ev["text"].as_str().unwrap_or("")
+        ),
         _ => println!("[{seq}] {ty} {ev}"),
     }
 }
@@ -241,11 +303,38 @@ fn print_event(ev: &Value) {
 /// components/orchestrator restent valides mais ne sont pas
 /// suggérés : la forme canonique est à privilégier).
 const COMMANDS: &[&str] = &[
-    "status", "daemon-update", "agents", "list", "new", "send", "msg",
-    "spawn", "events", "tail", "search", "find", "create", "resume",
-    "attach", "fork", "cancel", "kill", "clear", "sleep", "rm", "mode",
-    "model", "setcfg", "steps", "respond", "blob", "download", "write",
-    "pr", "comp", "orch",
+    "status",
+    "daemon-update",
+    "agents",
+    "list",
+    "new",
+    "send",
+    "msg",
+    "spawn",
+    "events",
+    "tail",
+    "search",
+    "find",
+    "create",
+    "resume",
+    "attach",
+    "fork",
+    "cancel",
+    "kill",
+    "clear",
+    "sleep",
+    "rm",
+    "mode",
+    "model",
+    "setcfg",
+    "steps",
+    "respond",
+    "blob",
+    "download",
+    "write",
+    "pr",
+    "comp",
+    "orch",
 ];
 
 /// Distance d'édition de Levenshtein (deux rangées, noms courts).
@@ -313,15 +402,11 @@ async fn main() -> Result<()> {
             // côté démon (npm i -g déclaré par le registre — #277) ;
             // sans argument → liste des profils comme avant.
             if args.get(1).map(String::as_str) == Some("install") {
-                let id = args
-                    .get(2)
-                    .context("usage: acctl agents install <id>")?;
+                let id = args.get(2).context("usage: acctl agents install <id>")?;
                 println!(
                     "{}",
-                    c.call(proto::ReqKind::InstallAgentAdapter {
-                        agent: id.clone(),
-                    })
-                    .await?
+                    c.call(proto::ReqKind::InstallAgentAdapter { agent: id.clone() })
+                        .await?
                 );
             } else {
                 println!("{}", c.call(proto::ReqKind::ListAgents).await?);
@@ -336,8 +421,7 @@ async fn main() -> Result<()> {
                 .ok()
                 .and_then(|v| v.as_array().cloned())
                 .unwrap_or_default();
-            let rows: Vec<&Value> =
-                v.as_array().map(|a| a.iter().collect()).unwrap_or_default();
+            let rows: Vec<&Value> = v.as_array().map(|a| a.iter().collect()).unwrap_or_default();
             // Sous-agents : spawned_by pointant une ligne de la liste →
             // la session s'imprime sous sa créatrice, indentée (↳,
             // estompée). Les orphelines restent racines.
@@ -348,8 +432,7 @@ async fn main() -> Result<()> {
                 .filter_map(|s| s["id"].as_str())
                 .filter(|i| !i.is_empty())
                 .collect();
-            let mut children: std::collections::HashMap<&str, Vec<&Value>> =
-                Default::default();
+            let mut children: std::collections::HashMap<&str, Vec<&Value>> = Default::default();
             let mut roots: Vec<&Value> = Vec::new();
             for s in &rows {
                 match s["spawned_by"].as_str().filter(|p| ids.contains(p)) {
@@ -418,7 +501,11 @@ async fn main() -> Result<()> {
                         sid,
                         state,
                         s["agent"].as_str().unwrap_or(""),
-                        s["created_at"].as_str().unwrap_or("").get(..16).unwrap_or(""),
+                        s["created_at"]
+                            .as_str()
+                            .unwrap_or("")
+                            .get(..16)
+                            .unwrap_or(""),
                         s["title"].as_str().unwrap_or(""),
                         if badge.is_empty() {
                             String::new()
@@ -462,23 +549,55 @@ async fn main() -> Result<()> {
             let mut i = 3;
             while i < args.len() {
                 match args[i].as_str() {
-                    "--title" => { title = args.get(i + 1).cloned(); i += 2; }
-                    "--mode" => { mode = args.get(i + 1).cloned(); i += 2; }
-                    "--model" => { model = args.get(i + 1).cloned(); i += 2; }
-                    "--origin" => { origin = args.get(i + 1).cloned(); i += 2; }
-                    "--group" => { group = args.get(i + 1).cloned(); i += 2; }
-                    p => { prompt_parts.push(p.to_string()); i += 1; }
+                    "--title" => {
+                        title = args.get(i + 1).cloned();
+                        i += 2;
+                    }
+                    "--mode" => {
+                        mode = args.get(i + 1).cloned();
+                        i += 2;
+                    }
+                    "--model" => {
+                        model = args.get(i + 1).cloned();
+                        i += 2;
+                    }
+                    "--origin" => {
+                        origin = args.get(i + 1).cloned();
+                        i += 2;
+                    }
+                    "--group" => {
+                        group = args.get(i + 1).cloned();
+                        i += 2;
+                    }
+                    p => {
+                        prompt_parts.push(p.to_string());
+                        i += 1;
+                    }
                 }
             }
-            let v = c.call(proto::ReqKind::NewSession {
-                agent, cwd, title, model, mode, origin, group,
-                prompt: if prompt_parts.is_empty() { None } else { Some(prompt_parts.join(" ")) },
-            }).await?;
+            let v = c
+                .call(proto::ReqKind::NewSession {
+                    agent,
+                    cwd,
+                    title,
+                    model,
+                    mode,
+                    origin,
+                    group,
+                    prompt: if prompt_parts.is_empty() {
+                        None
+                    } else {
+                        Some(prompt_parts.join(" "))
+                    },
+                })
+                .await?;
             println!("{}", v["session"].as_str().unwrap_or(""));
         }
         "send" => {
             // acctl send <session> [--steer|--force] <text...>
-            if args.len() < 3 { bail!("send <session> [--steer|--force] <text...>"); }
+            if args.len() < 3 {
+                bail!("send <session> [--steer|--force] <text...>");
+            }
             let mut steer = false;
             let mut force = false;
             let mut parts = Vec::new();
@@ -494,63 +613,122 @@ async fn main() -> Result<()> {
                 text: parts.join(" "),
                 force,
                 steer,
-            }).await?;
+            })
+            .await?;
         }
         "msg" => {
             // acctl msg <from> <to> [--queue|--steer] <text...>
             // steer est le défaut agent→agent — --steer reste accepté
             // (compat scripts) mais n'a plus d'effet. Flags en tête
             // seulement : « --queue » dans le corps reste du texte.
-            if args.len() < 4 { bail!("msg <from> <to> [--queue|--steer] <text...>"); }
+            if args.len() < 4 {
+                bail!("msg <from> <to> [--queue|--steer] <text...>");
+            }
             let mut queue = false;
             let mut i = 3;
             while i < args.len() {
                 match args[i].as_str() {
                     "--steer" => i += 1,
-                    "--queue" => { queue = true; i += 1; }
+                    "--queue" => {
+                        queue = true;
+                        i += 1;
+                    }
                     _ => break,
                 }
             }
-            if i >= args.len() { bail!("msg <from> <to> [--queue|--steer] <text...>"); }
-            println!("{}", c.call(proto::ReqKind::PeerSend {
-                from: args[1].clone(),
-                session: args[2].clone(),
-                text: args[i..].join(" "),
-                delivery: if queue { "queue".into() } else { "steer".into() },
-            }).await?);
+            if i >= args.len() {
+                bail!("msg <from> <to> [--queue|--steer] <text...>");
+            }
+            println!(
+                "{}",
+                c.call(proto::ReqKind::PeerSend {
+                    from: args[1].clone(),
+                    session: args[2].clone(),
+                    text: args[i..].join(" "),
+                    delivery: if queue {
+                        "queue".into()
+                    } else {
+                        "steer".into()
+                    },
+                })
+                .await?
+            );
         }
         "spawn" => {
             // acctl spawn <from> [task...] [--agent A] [--cwd C] [--title T]
             //             [--mode M] [--model X] [--group G]
-            if args.len() < 2 { bail!("spawn <from> [task...] [--agent A] [--cwd C] [--title T] [--mode M] [--model X] [--group G]"); }
+            if args.len() < 2 {
+                bail!("spawn <from> [task...] [--agent A] [--cwd C] [--title T] [--mode M] [--model X] [--group G]");
+            }
             let mut prompt_parts = Vec::new();
             let (mut agent, mut cwd, mut title, mut mode, mut model, mut group) =
                 (None, None, None, None, None, None);
             let mut i = 2;
             while i < args.len() {
                 match args[i].as_str() {
-                    "--agent" => { agent = args.get(i + 1).cloned(); i += 2; }
-                    "--cwd" => { cwd = args.get(i + 1).cloned(); i += 2; }
-                    "--title" => { title = args.get(i + 1).cloned(); i += 2; }
-                    "--mode" => { mode = args.get(i + 1).cloned(); i += 2; }
-                    "--model" => { model = args.get(i + 1).cloned(); i += 2; }
-                    "--group" => { group = args.get(i + 1).cloned(); i += 2; }
-                    p => { prompt_parts.push(p.to_string()); i += 1; }
+                    "--agent" => {
+                        agent = args.get(i + 1).cloned();
+                        i += 2;
+                    }
+                    "--cwd" => {
+                        cwd = args.get(i + 1).cloned();
+                        i += 2;
+                    }
+                    "--title" => {
+                        title = args.get(i + 1).cloned();
+                        i += 2;
+                    }
+                    "--mode" => {
+                        mode = args.get(i + 1).cloned();
+                        i += 2;
+                    }
+                    "--model" => {
+                        model = args.get(i + 1).cloned();
+                        i += 2;
+                    }
+                    "--group" => {
+                        group = args.get(i + 1).cloned();
+                        i += 2;
+                    }
+                    p => {
+                        prompt_parts.push(p.to_string());
+                        i += 1;
+                    }
                 }
             }
-            println!("{}", c.call(proto::ReqKind::PeerSpawn {
-                from: args[1].clone(),
-                agent, cwd, title, model, mode,
-                prompt: if prompt_parts.is_empty() { None } else { Some(prompt_parts.join(" ")) },
-                group,
-            }).await?);
+            println!(
+                "{}",
+                c.call(proto::ReqKind::PeerSpawn {
+                    from: args[1].clone(),
+                    agent,
+                    cwd,
+                    title,
+                    model,
+                    mode,
+                    prompt: if prompt_parts.is_empty() {
+                        None
+                    } else {
+                        Some(prompt_parts.join(" "))
+                    },
+                    group,
+                })
+                .await?
+            );
         }
         "events" => {
-            let before = args.get(2).and_then(|s| s.parse().ok()).filter(|n: &u64| *n > 0);
+            let before = args
+                .get(2)
+                .and_then(|s| s.parse().ok())
+                .filter(|n: &u64| *n > 0);
             let limit = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(200);
-            let v = c.call(proto::ReqKind::Events {
-                session: args[1].clone(), before_seq: before, after_seq: None, limit,
-            }).await?;
+            let v = c
+                .call(proto::ReqKind::Events {
+                    session: args[1].clone(),
+                    before_seq: before,
+                    after_seq: None,
+                    limit,
+                })
+                .await?;
             for ev in v["events"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
                 print_event(ev);
             }
@@ -567,12 +745,14 @@ async fn main() -> Result<()> {
             if args.len() < 3 {
                 bail!("search <session> <query...>");
             }
-            let v = c.call(proto::ReqKind::SearchEvents {
-                session: args[1].clone(),
-                query: args[2..].join(" "),
-                before_seq: None,
-                limit: 50,
-            }).await?;
+            let v = c
+                .call(proto::ReqKind::SearchEvents {
+                    session: args[1].clone(),
+                    query: args[2..].join(" "),
+                    before_seq: None,
+                    limit: 50,
+                })
+                .await?;
             for m in v["matches"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
                 println!(
                     "[{}] {} {}",
@@ -582,7 +762,10 @@ async fn main() -> Result<()> {
                 );
             }
             if !v["done"].as_bool().unwrap_or(true) {
-                eprintln!("(scan partiel — {} events parcourus)", v["scanned"].as_u64().unwrap_or(0));
+                eprintln!(
+                    "(scan partiel — {} events parcourus)",
+                    v["scanned"].as_u64().unwrap_or(0)
+                );
             }
         }
         "find" => {
@@ -591,21 +774,30 @@ async fn main() -> Result<()> {
             if args.len() < 3 {
                 bail!("find <session> <query...>");
             }
-            let v = c.call(proto::ReqKind::FindFiles {
-                session: args[1].clone(),
-                path: String::new(),
-                query: args[2..].join(" "),
-                limit: None,
-            }).await?;
+            let v = c
+                .call(proto::ReqKind::FindFiles {
+                    session: args[1].clone(),
+                    path: String::new(),
+                    query: args[2..].join(" "),
+                    limit: None,
+                })
+                .await?;
             for m in v["matches"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
                 println!(
                     "{}{}",
                     m["path"].as_str().unwrap_or(""),
-                    if m["dir"].as_bool().unwrap_or(false) { "/" } else { "" },
+                    if m["dir"].as_bool().unwrap_or(false) {
+                        "/"
+                    } else {
+                        ""
+                    },
                 );
             }
             if v["truncated"].as_bool().unwrap_or(false) {
-                eprintln!("(résultats tronqués — {} entrées scannées)", v["scanned"].as_u64().unwrap_or(0));
+                eprintln!(
+                    "(résultats tronqués — {} entrées scannées)",
+                    v["scanned"].as_u64().unwrap_or(0)
+                );
             }
         }
         "create" => {
@@ -615,11 +807,13 @@ async fn main() -> Result<()> {
                 bail!("create <session> <path> [--dir]");
             }
             let dir = args[3..].iter().any(|a| a == "--dir" || a == "-d");
-            let v = c.call(proto::ReqKind::CreatePath {
-                session: args[1].clone(),
-                path: args[2].clone(),
-                dir,
-            }).await?;
+            let v = c
+                .call(proto::ReqKind::CreatePath {
+                    session: args[1].clone(),
+                    path: args[2].clone(),
+                    dir,
+                })
+                .await?;
             println!(
                 "{}{}",
                 v["path"].as_str().unwrap_or(""),
@@ -641,33 +835,93 @@ async fn main() -> Result<()> {
             if pos.is_empty() {
                 bail!("resume [--fresh] <session> [native_id]");
             }
-            println!("{}", c.call(proto::ReqKind::ResumeSession {
-                session: pos[0].clone(),
-                native_id: pos.get(1).cloned(),
-                fresh,
-            }).await?)
+            println!(
+                "{}",
+                c.call(proto::ReqKind::ResumeSession {
+                    session: pos[0].clone(),
+                    native_id: pos.get(1).cloned(),
+                    fresh,
+                })
+                .await?
+            )
         }
-        "attach" => println!("{}", c.call(proto::ReqKind::AttachSession {
-            agent: args[1].clone(),
-            cwd: args[2].clone(),
-            native_id: args[3].clone(),
-            title: args.get(4).cloned(),
-        }).await?),
-        "fork" => println!("{}", c.call(proto::ReqKind::ForkSession {
-            session: args[1].clone(),
-        }).await?),
-        "cancel" => println!("{}", c.call(proto::ReqKind::Cancel { session: args[1].clone() }).await?),
-        "kill" => println!("{}", c.call(proto::ReqKind::KillSession { session: args[1].clone() }).await?),
-        "clear" => println!("{}", c.call(proto::ReqKind::ClearSession { session: args[1].clone() }).await?),
-        "sleep" => println!("{}", c.call(proto::ReqKind::SleepSession { session: args[1].clone() }).await?),
-        "rm" => println!("{}", c.call(proto::ReqKind::DeleteSession { session: args[1].clone() }).await?),
-        "mode" => println!("{}", c.call(proto::ReqKind::SetMode { session: args[1].clone(), mode: args[2].clone() }).await?),
-        "model" => println!("{}", c.call(proto::ReqKind::SetModel { session: args[1].clone(), model: args[2].clone() }).await?),
-        "setcfg" => println!("{}", c.call(proto::ReqKind::SetConfigOption {
-            session: args[1].clone(),
-            config_id: args[2].clone(),
-            value: args[3].clone(),
-        }).await?),
+        "attach" => println!(
+            "{}",
+            c.call(proto::ReqKind::AttachSession {
+                agent: args[1].clone(),
+                cwd: args[2].clone(),
+                native_id: args[3].clone(),
+                title: args.get(4).cloned(),
+            })
+            .await?
+        ),
+        "fork" => println!(
+            "{}",
+            c.call(proto::ReqKind::ForkSession {
+                session: args[1].clone(),
+            })
+            .await?
+        ),
+        "cancel" => println!(
+            "{}",
+            c.call(proto::ReqKind::Cancel {
+                session: args[1].clone()
+            })
+            .await?
+        ),
+        "kill" => println!(
+            "{}",
+            c.call(proto::ReqKind::KillSession {
+                session: args[1].clone()
+            })
+            .await?
+        ),
+        "clear" => println!(
+            "{}",
+            c.call(proto::ReqKind::ClearSession {
+                session: args[1].clone()
+            })
+            .await?
+        ),
+        "sleep" => println!(
+            "{}",
+            c.call(proto::ReqKind::SleepSession {
+                session: args[1].clone()
+            })
+            .await?
+        ),
+        "rm" => println!(
+            "{}",
+            c.call(proto::ReqKind::DeleteSession {
+                session: args[1].clone()
+            })
+            .await?
+        ),
+        "mode" => println!(
+            "{}",
+            c.call(proto::ReqKind::SetMode {
+                session: args[1].clone(),
+                mode: args[2].clone()
+            })
+            .await?
+        ),
+        "model" => println!(
+            "{}",
+            c.call(proto::ReqKind::SetModel {
+                session: args[1].clone(),
+                model: args[2].clone()
+            })
+            .await?
+        ),
+        "setcfg" => println!(
+            "{}",
+            c.call(proto::ReqKind::SetConfigOption {
+                session: args[1].clone(),
+                config_id: args[2].clone(),
+                value: args[3].clone(),
+            })
+            .await?
+        ),
         "steps" => {
             // acctl steps set [--session S] <spec>   — spec = "a:todo,b:wip,…"
             //   (statuts todo|in_progress|wip|done|abandoned|abandon) ou JSON
@@ -682,8 +936,14 @@ async fn main() -> Result<()> {
             let mut i = 2;
             while i < args.len() {
                 match args[i].as_str() {
-                    "--session" => { session = args.get(i + 1).cloned(); i += 2; }
-                    _ => { rest.push(args[i].clone()); i += 1; }
+                    "--session" => {
+                        session = args.get(i + 1).cloned();
+                        i += 2;
+                    }
+                    _ => {
+                        rest.push(args[i].clone());
+                        i += 1;
+                    }
                 }
             }
             let session = session
@@ -697,22 +957,16 @@ async fn main() -> Result<()> {
                     }
                     let steps = parse_steps_spec(&spec)?;
                     let v = c
-                        .call(proto::ReqKind::SessionSetSteps {
-                            session,
-                            steps,
-                        })
+                        .call(proto::ReqKind::SessionSetSteps { session, steps })
                         .await?;
                     println!("{}", serde_json::to_string_pretty(&v)?);
                 }
                 "get" => {
                     // Pas de req dédiée : session_info porte `steps`.
-                    let v = c
-                        .call(proto::ReqKind::SessionInfo { session })
-                        .await?;
+                    let v = c.call(proto::ReqKind::SessionInfo { session }).await?;
                     println!(
                         "{}",
-                        serde_json::to_string_pretty(&v["steps"])
-                            .unwrap_or_else(|_| "null".into())
+                        serde_json::to_string_pretty(&v["steps"]).unwrap_or_else(|_| "null".into())
                     );
                 }
                 other => bail!("steps : sous-commande inconnue «{other}» (set|get)"),
@@ -724,36 +978,56 @@ async fn main() -> Result<()> {
             let mut answer = None;
             if args.len() > 3 {
                 if args[3] == "--answer" {
-                    answer = Some(serde_json::from_str(args.get(4).map(String::as_str).unwrap_or("null"))?);
+                    answer = Some(serde_json::from_str(
+                        args.get(4).map(String::as_str).unwrap_or("null"),
+                    )?);
                 } else {
                     option_id = Some(args[3].clone());
                 }
             }
-            println!("{}", c.call(proto::ReqKind::Respond {
-                session: args[1].clone(),
-                request_id: args[2].clone(),
-                option_id,
-                answer,
-            }).await?);
+            println!(
+                "{}",
+                c.call(proto::ReqKind::Respond {
+                    session: args[1].clone(),
+                    request_id: args[2].clone(),
+                    option_id,
+                    answer,
+                })
+                .await?
+            );
         }
         "blob" => {
             let offset = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
             let limit = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(65536);
-            let v = c.call(proto::ReqKind::GetBlob {
-                session: args[1].clone(), blob: args[2].clone(), offset, limit,
-            }).await?;
+            let v = c
+                .call(proto::ReqKind::GetBlob {
+                    session: args[1].clone(),
+                    blob: args[2].clone(),
+                    offset,
+                    limit,
+                })
+                .await?;
             print!("{}", v["data"].as_str().unwrap_or(""));
             eprintln!("(total={} offset={})", v["total"], v["offset"]);
         }
         "download" | "dl" => {
             // acctl download <session> <path> [dest] — dossier → zip côté démon
-            if args.len() < 3 { bail!("download <session> <path> [dest]"); }
+            if args.len() < 3 {
+                bail!("download <session> <path> [dest]");
+            }
             let (session, path) = (args[1].clone(), args[2].clone());
-            let info = c.call(proto::ReqKind::DownloadPath {
-                session: session.clone(), path: path.clone(),
-                offset: 0, limit: 0, archive: None,
-            }).await?;
-            let dest = args.get(3).cloned()
+            let info = c
+                .call(proto::ReqKind::DownloadPath {
+                    session: session.clone(),
+                    path: path.clone(),
+                    offset: 0,
+                    limit: 0,
+                    archive: None,
+                })
+                .await?;
+            let dest = args
+                .get(3)
+                .cloned()
                 .unwrap_or_else(|| info["name"].as_str().unwrap_or("download").to_string());
             if std::path::Path::new(&dest).is_dir() {
                 bail!("destinataire est un dossier: {dest}");
@@ -764,10 +1038,15 @@ async fn main() -> Result<()> {
             use base64::Engine;
             use std::io::Write;
             loop {
-                let v = c.call(proto::ReqKind::DownloadPath {
-                    session: session.clone(), path: path.clone(),
-                    offset, limit: 1 << 20, archive: archive.clone(),
-                }).await?;
+                let v = c
+                    .call(proto::ReqKind::DownloadPath {
+                        session: session.clone(),
+                        path: path.clone(),
+                        offset,
+                        limit: 1 << 20,
+                        archive: archive.clone(),
+                    })
+                    .await?;
                 if archive.is_none() {
                     archive = v["archive"].as_str().map(String::from);
                 }
@@ -782,32 +1061,37 @@ async fn main() -> Result<()> {
                 out.as_mut().unwrap().write_all(&data)?;
                 offset += data.len() as u64;
                 eprint!("\r{offset}/{total} o");
-                if offset >= total { break; }
+                if offset >= total {
+                    break;
+                }
             }
             eprintln!("\n→ {dest} ({offset} o)");
         }
         "write" | "wr" => {
             // acctl write <session> <path> [src] — src absent ou "-" = stdin.
             // Remplace tout le fichier (delete_len clampé serveur) ou le crée.
-            if args.len() < 3 { bail!("write <session> <path> [src]"); }
+            if args.len() < 3 {
+                bail!("write <session> <path> [src]");
+            }
             let bytes = match args.get(3).map(String::as_str) {
                 None | Some("-") => {
                     let mut b = Vec::new();
                     std::io::Read::read_to_end(&mut std::io::stdin(), &mut b)?;
                     b
                 }
-                Some(src) => std::fs::read(src)
-                    .with_context(|| format!("source: {src}"))?,
+                Some(src) => std::fs::read(src).with_context(|| format!("source: {src}"))?,
             };
             use base64::Engine;
-            let v = c.call(proto::ReqKind::WriteFile {
-                session: args[1].clone(),
-                path: args[2].clone(),
-                offset: 0,
-                delete_len: u64::MAX,
-                data: base64::engine::general_purpose::STANDARD.encode(&bytes),
-                if_mtime_ms: None,
-            }).await?;
+            let v = c
+                .call(proto::ReqKind::WriteFile {
+                    session: args[1].clone(),
+                    path: args[2].clone(),
+                    offset: 0,
+                    delete_len: u64::MAX,
+                    data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                    if_mtime_ms: None,
+                })
+                .await?;
             eprintln!(
                 "→ {} ({} o)",
                 v["path"].as_str().unwrap_or(""),
@@ -922,9 +1206,8 @@ fn parse_steps_spec(spec: &str) -> Result<Vec<proto::SessionStep>> {
                     .as_str()
                     .context("étape JSON sans \"name\"")?
                     .to_string();
-                let status = parse_step_status(
-                    v["status"].as_str().context("étape JSON sans \"status\"")?,
-                )?;
+                let status =
+                    parse_step_status(v["status"].as_str().context("étape JSON sans \"status\"")?)?;
                 Ok(proto::SessionStep { name, status })
             })
             .collect();
@@ -935,9 +1218,9 @@ fn parse_steps_spec(spec: &str) -> Result<Vec<proto::SessionStep>> {
             if part.is_empty() {
                 bail!("entrée d'étape vide dans «{spec}»");
             }
-            let (name, st) = part
-                .rsplit_once(':')
-                .with_context(|| format!("étape «{part}» sans statut — forme attendue nom:statut"))?;
+            let (name, st) = part.rsplit_once(':').with_context(|| {
+                format!("étape «{part}» sans statut — forme attendue nom:statut")
+            })?;
             let name = name.trim();
             if name.is_empty() {
                 bail!("étape sans nom dans «{part}»");
@@ -958,8 +1241,8 @@ fn parse_step_status(s: &str) -> Result<proto::StepStatus> {
         }
         "done" | "complete" | "completed" | "finished" => Ok(proto::StepStatus::Done),
         "abandoned" | "abandon" | "skip" | "skipped" => Ok(proto::StepStatus::Abandoned),
-        other => bail!(
-            "statut d'étape inconnu «{other}» — attendu todo|in_progress|done|abandoned"
-        ),
+        other => {
+            bail!("statut d'étape inconnu «{other}» — attendu todo|in_progress|done|abandoned")
+        }
     }
 }

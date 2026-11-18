@@ -65,15 +65,11 @@ pub(crate) const KNOWN_ADAPTERS: &[AdapterSpec] = &[
         // stream-json`, pas de dépendance node. Essayé en premier ;
         // les adaptateurs npm restent le repli si le binaire maison
         // n'est pas dans le PATH (vieil install, PATH minimal).
-        commands: &[
-            &["acp-claude"],
-            &["claude-code-acp"],
-            &["claude-agent-acp"],
-        ],
+        commands: &[&["acp-claude"], &["claude-code-acp"], &["claude-agent-acp"]],
         detect: &["claude"],
-        install_hint: "installer Claude Code — l'adaptateur acp-claude \
-             est livré avec AgentControl ; sinon npm i -g \
-             @zed-industries/claude-code-acp",
+        install_hint: "acp-claude est livré avec AgentControl (exige le \
+             CLI `claude` — l'installer si absent) ; sinon adaptateur npm : \
+             npm i -g @zed-industries/claude-code-acp",
         install: &[
             &["npm", "i", "-g", "@zed-industries/claude-code-acp"],
             &["npm", "i", "-g", "@agentclientprotocol/claude-agent-acp"],
@@ -267,7 +263,7 @@ mod tests {
         assert_eq!(a, vec!["claude".to_string()]);
         let p = &agents["claude"];
         assert_eq!(p.via, AgentVia::Auto);
-        assert_eq!(p.commands.len(), 2);
+        assert_eq!(p.commands.len(), 3);
         // opus : absent d'availableModels chez claude-code-acp, mais
         // session/set_model l'accepte → extra_models du registre.
         assert_eq!(p.extra_models.len(), 1);
@@ -288,10 +284,7 @@ mod tests {
         let mut agents = HashMap::new();
         sync_auto_agents(&mut agents, &|b| b == "claude");
         assert!(agents.contains_key("claude"));
-        assert_eq!(
-            agents["claude"].commands[0],
-            vec!["claude-code-acp".to_string()]
-        );
+        assert_eq!(agents["claude"].commands[0], vec!["acp-claude".to_string()]);
     }
 
     /// `[agents.claude]` déclaré (via:config) → l'auto ne l'écrase

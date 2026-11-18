@@ -11,7 +11,9 @@ async fn main() -> anyhow::Result<()> {
     let pk = ssh_native::ensure_keypair()?;
     println!("clé: {} → {}", pk.display(), ssh_native::pubkey_line()?);
 
-    let arg = std::env::args().nth(1).context("usage: ssh_native <user@host[:port]>")?;
+    let arg = std::env::args()
+        .nth(1)
+        .context("usage: ssh_native <user@host[:port]>")?;
     let (auth, port) = match arg.rsplit_once(':') {
         Some((a, p)) if p.chars().all(|c| c.is_ascii_digit()) => (a.to_string(), p.parse::<u16>()?),
         _ => (arg.clone(), 22),
@@ -35,9 +37,14 @@ async fn main() -> anyhow::Result<()> {
     println!("DaemonStatus: {r:?}");
 
     let (code, out, err) = ssh_native::ssh_exec(
-        std::env::var("SSH_HOST").ok().as_deref().unwrap_or("127.0.0.1"),
+        std::env::var("SSH_HOST")
+            .ok()
+            .as_deref()
+            .unwrap_or("127.0.0.1"),
         port,
-        std::env::var("USER").unwrap_or_else(|_| "user".into()).as_str(),
+        std::env::var("USER")
+            .unwrap_or_else(|_| "user".into())
+            .as_str(),
         None,
         None,
         "echo native-exec-ok && uname -m && echo warn >&2",

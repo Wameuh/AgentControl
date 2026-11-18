@@ -23,7 +23,6 @@ if _pidfile:
 turns = list(scenario.get("turns", []))
 default_turn = scenario.get("default_turn", [])
 on_interrupt = scenario.get("on_interrupt", [])
-perm_wait_rid = None
 pending_users = []
 
 
@@ -32,8 +31,6 @@ def emit(evt):
         time.sleep(evt["_sleep"])
         return
     if "_perm_wait" in evt:
-        global perm_wait_rid
-        perm_wait_rid = evt["_perm_wait"]
         return
     sys.stdout.write(json.dumps(evt) + "\n")
     sys.stdout.flush()

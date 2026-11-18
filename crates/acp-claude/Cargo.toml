@@ -10,7 +10,6 @@ path = "src/main.rs"
 
 [dependencies]
 acp-core = { path = "../acp-core" }
-serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }

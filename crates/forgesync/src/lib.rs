@@ -77,7 +77,11 @@ fn gh_run(args: &[&str]) -> Option<String> {
 /// (`gh repo view`) hors sync.
 pub fn gh_out(args: &[&str]) -> Option<String> {
     let s = gh_run(args)?;
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 /// `true` si `gh` a répondu (exit 0) — probe pour les commandes qui
@@ -131,7 +135,9 @@ fn http_status(url: &str, headers: &[(&str, String)]) -> Http {
             let body = body.strip_prefix(")]}'").map_or(body.as_str(), |b| {
                 b.trim_start_matches(|c: char| c == '\n' || c == '\'')
             });
-            serde_json::from_str(body).map(Http::Ok).unwrap_or(Http::Down)
+            serde_json::from_str(body)
+                .map(Http::Ok)
+                .unwrap_or(Http::Down)
         }
         Err(ureq::Error::Status(code, _)) => Http::Code(code),
         Err(_) => Http::Down,
@@ -256,7 +262,9 @@ fn forge_hosts<'a>(set: &'a [Value], kind: &str) -> Vec<(&'a str, Option<&'a str
                 .iter()
                 .map(|h| {
                     (
-                        h["host"].as_str().unwrap_or_else(|| h.as_str().unwrap_or("")),
+                        h["host"]
+                            .as_str()
+                            .unwrap_or_else(|| h.as_str().unwrap_or("")),
                         h["token_env"].as_str(),
                     )
                 })
@@ -382,8 +390,8 @@ fn gh_ci_state(v: &Value) -> String {
             // NEUTRAL/SKIPPED : ni succès ni échec (draft sans CI,
             // check sauté) — seuls, ils ne signalent rien.
             "NEUTRAL" | "SKIPPED" => {}
-            "FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED"
-            | "STARTUP_FAILURE" | "STALE" | "ERROR" => failed = true,
+            "FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE"
+            | "STALE" | "ERROR" => failed = true,
             // En cours (status ≠ COMPLETED), EXPECTED/PENDING, ou
             // conclusion illisible → pending par prudence.
             _ => pending = true,
@@ -421,8 +429,9 @@ fn glab_ci_state(v: &Value) -> String {
     {
         "success" => "success".into(),
         "failed" | "canceled" | "skipped" => "failure".into(),
-        "created" | "waiting_for_resource" | "preparing" | "pending"
-        | "running" | "scheduled" => "pending".into(),
+        "created" | "waiting_for_resource" | "preparing" | "pending" | "running" | "scheduled" => {
+            "pending".into()
+        }
         _ => String::new(),
     }
 }
@@ -442,10 +451,7 @@ pub struct RefTarget {
 /// la référence était un Change-Id Gerrit.
 pub fn live_ref(set: &[Value], t: &RefTarget) -> Option<Value> {
     let auth = forge_auth(set, &t.forge, &t.host);
-    let headers: Vec<(&str, String)> = auth
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.clone()))
-        .collect();
+    let headers: Vec<(&str, String)> = auth.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
     match t.forge.as_str() {
         "github" => {
             let n = t.pr;
@@ -602,18 +608,12 @@ fn verify_github(t: &RefTarget) -> Verify {
 /// vecteur de requêtes vers un hôte arbitraire). 401/403 sur un hôte
 /// déclaré = le démon ne pourra jamais la relire → `Missing`.
 fn verify_gitlab(set: &[Value], t: &RefTarget) -> Verify {
-    let declared: Vec<&str> = forge_hosts(set, "gitlab")
-        .iter()
-        .map(|(h, _)| *h)
-        .collect();
+    let declared: Vec<&str> = forge_hosts(set, "gitlab").iter().map(|(h, _)| *h).collect();
     if !declared.contains(&t.host.as_str()) {
         return Verify::Missing;
     }
     let auth = forge_auth(set, "gitlab", &t.host);
-    let headers: Vec<(&str, String)> = auth
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.clone()))
-        .collect();
+    let headers: Vec<(&str, String)> = auth.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
     let base = host_base(&t.host);
     let url = format!(
         "{base}/api/v4/projects/{}/merge_requests/{}",
@@ -631,10 +631,7 @@ fn verify_gitlab(set: &[Value], t: &RefTarget) -> Verify {
 /// seulement. 404 = change inconnu ; 401/403 = non lisible sans auth
 /// (la collecte est anonyme aussi → non résoluble par construction).
 fn verify_gerrit(set: &[Value], t: &RefTarget) -> Verify {
-    let declared: Vec<&str> = forge_hosts(set, "gerrit")
-        .iter()
-        .map(|(h, _)| *h)
-        .collect();
+    let declared: Vec<&str> = forge_hosts(set, "gerrit").iter().map(|(h, _)| *h).collect();
     if !declared.contains(&t.host.as_str()) {
         return Verify::Missing;
     }
@@ -896,8 +893,15 @@ pub fn collect_updates(set: &[Value], entries: &[Value]) -> SyncOutcome {
 fn github_repo_sync(repo: &str, gh_up: bool, entries: &[Value]) -> SyncPartial {
     let mut p = SyncPartial::default();
     let live = gh_out(&[
-        "pr", "list", "--repo", repo, "--state", "all",
-        "--limit", "200", "--json",
+        "pr",
+        "list",
+        "--repo",
+        repo,
+        "--state",
+        "all",
+        "--limit",
+        "200",
+        "--json",
         "number,title,state,isDraft,headRefName,reviewRequests,reviewDecision,statusCheckRollup",
     ])
     .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok());
@@ -915,8 +919,9 @@ fn github_repo_sync(repo: &str, gh_up: bool, entries: &[Value]) -> SyncPartial {
                 p.fail(e);
             }
         } else {
-            p.notes
-                .push(format!("github {repo}: gh indisponible — statuts inchangés"));
+            p.notes.push(format!(
+                "github {repo}: gh indisponible — statuts inchangés"
+            ));
         }
         return p;
     };
@@ -1008,10 +1013,7 @@ fn gitlab_entry_sync(set: &[Value], e: &Value) -> SyncPartial {
     let host = e["host"].as_str().unwrap_or("gitlab.com");
     let repo = e["repo"].as_str().unwrap_or("");
     let n = e["pr"].as_u64().unwrap_or(0);
-    let declared: Vec<&str> = forge_hosts(set, "gitlab")
-        .iter()
-        .map(|(h, _)| *h)
-        .collect();
+    let declared: Vec<&str> = forge_hosts(set, "gitlab").iter().map(|(h, _)| *h).collect();
     if !declared.contains(&host) {
         p.notes.push(format!(
             "gitlab {host} {repo}!{n}: hôte non déclaré — statut inchangé"
@@ -1022,15 +1024,9 @@ fn gitlab_entry_sync(set: &[Value], e: &Value) -> SyncPartial {
         return p;
     }
     let auth = forge_auth(set, "gitlab", host);
-    let headers: Vec<(&str, String)> = auth
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.clone()))
-        .collect();
+    let headers: Vec<(&str, String)> = auth.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
     let base = host_base(host);
-    let url = format!(
-        "{base}/api/v4/projects/{}/merge_requests/{n}",
-        urlenc(repo)
-    );
+    let url = format!("{base}/api/v4/projects/{}/merge_requests/{n}", urlenc(repo));
     let Some(v) = http_json(&url, &headers) else {
         p.notes.push(format!(
             "gitlab {host} {repo}!{n}: indisponible — statut inchangé"
@@ -1084,10 +1080,7 @@ fn gerrit_entry_sync(set: &[Value], e: &Value) -> SyncPartial {
     let n = e["pr"].as_u64().unwrap_or(0);
     let n_str = n.to_string();
     let q = cid.unwrap_or(&n_str);
-    let declared: Vec<&str> = forge_hosts(set, "gerrit")
-        .iter()
-        .map(|(h, _)| *h)
-        .collect();
+    let declared: Vec<&str> = forge_hosts(set, "gerrit").iter().map(|(h, _)| *h).collect();
     if !declared.contains(&host) {
         p.notes.push(format!(
             "gerrit {host} {q}: hôte non déclaré — statut inchangé"
@@ -1098,9 +1091,8 @@ fn gerrit_entry_sync(set: &[Value], e: &Value) -> SyncPartial {
     let base = host_base(host);
     let url = format!("{base}/changes/{q}");
     let Some(v) = http_json(&url, &[]) else {
-        p.notes.push(format!(
-            "gerrit {host} {q}: indisponible — statut inchangé"
-        ));
+        p.notes
+            .push(format!("gerrit {host} {q}: indisponible — statut inchangé"));
         p.fail(e);
         return p;
     };
@@ -1154,7 +1146,10 @@ mod tests {
     #[test]
     fn gh_state_maps() {
         assert_eq!(gh_state(&json!({"state": "OPEN"})), "open");
-        assert_eq!(gh_state(&json!({"state": "OPEN", "isDraft": true})), "draft");
+        assert_eq!(
+            gh_state(&json!({"state": "OPEN", "isDraft": true})),
+            "draft"
+        );
         assert_eq!(gh_state(&json!({"state": "MERGED"})), "merged");
         assert_eq!(gh_state(&json!({"state": "CLOSED"})), "closed");
         assert_eq!(gh_state(&json!({})), "");
@@ -1271,7 +1266,10 @@ mod tests {
     #[test]
     fn glab_state_maps() {
         assert_eq!(glab_state(&json!({"state": "opened"})), "open");
-        assert_eq!(glab_state(&json!({"state": "opened", "draft": true})), "draft");
+        assert_eq!(
+            glab_state(&json!({"state": "opened", "draft": true})),
+            "draft"
+        );
         assert_eq!(
             glab_state(&json!({"state": "opened", "work_in_progress": true})),
             "draft"
@@ -1357,13 +1355,13 @@ mod tests {
             {"forge": "gerrit", "host": "gr.evil.example", "repo": "a", "pr": 9, "status": "open"},
             {"forge": "github", "host": "hub.evil.example", "repo": "a/b", "pr": 3, "status": "open"},
         ]);
-        let out = collect_updates(
-            set.as_array().unwrap(),
-            entries.as_array().unwrap(),
-        );
+        let out = collect_updates(set.as_array().unwrap(), entries.as_array().unwrap());
         assert_eq!(out.checked, 0);
         assert!(out.updates.is_empty());
         assert_eq!(out.notes.len(), 3);
-        assert!(out.notes.iter().all(|n| n.contains("non déclaré") || n.contains("non géré")));
+        assert!(out
+            .notes
+            .iter()
+            .all(|n| n.contains("non déclaré") || n.contains("non géré")));
     }
 }

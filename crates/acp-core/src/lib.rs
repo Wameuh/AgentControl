@@ -53,12 +53,6 @@ pub enum InMsg {
     },
     /// Notification client → agent : {method, params} (session/cancel…)
     Notification { method: String, params: Value },
-    /// Réponse à une requête qu'on a émise via `Conn::call`
-    /// (permission, elicitation…).
-    Response {
-        id: Value,
-        result: Result<Value, RpcError>,
-    },
 }
 
 /// Connexion ACP : moitié écriture (stdout) + corrélation des réponses.
@@ -106,7 +100,6 @@ impl Conn {
                                 continue;
                             };
                             match classify(v, &pending) {
-                                Some(InMsg::Response { .. }) => {}
                                 Some(m) => {
                                     if itx.send(m).await.is_err() {
                                         break;

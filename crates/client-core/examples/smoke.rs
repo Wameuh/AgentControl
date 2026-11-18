@@ -24,7 +24,10 @@ async fn main() -> anyhow::Result<()> {
     if let Some(sid) = std::env::args().nth(1) {
         println!(
             "info: {}",
-            c.call(ReqKind::SessionInfo { session: sid.clone() }).await?
+            c.call(ReqKind::SessionInfo {
+                session: sid.clone()
+            })
+            .await?
         );
         let v = c
             .call(ReqKind::Events {

@@ -275,8 +275,15 @@ pub fn claude_bin() -> String {
     std::env::var("ACPD_CLAUDE_BIN").unwrap_or_else(|_| "claude".into())
 }
 
+#[cfg(unix)]
 fn is_root() -> bool {
+    // SAFETY: geteuid ne prend pas d'argument et est toujours sûre.
     (unsafe { libc::geteuid() }) == 0
+}
+
+#[cfg(not(unix))]
+fn is_root() -> bool {
+    false
 }
 
 /// Convertit les mcpServers ACP vers le `--mcp-config` de claude.
@@ -627,7 +634,16 @@ async fn handle_system(shared: &Arc<Shared>, v: &Value) {
                 "status": "completed",
             }));
             if post > 0 {
-                let size = shared.info.lock().unwrap().usage_size;
+                // usage_size peut être 0 avant le premier result →
+                // même fallback 200k que context_usage.
+                let size = {
+                    let s = shared.info.lock().unwrap().usage_size;
+                    if s > 0 {
+                        s
+                    } else {
+                        200_000
+                    }
+                };
                 shared.emit_usage(post, size, shared.info.lock().unwrap().cost_total);
             }
         }
@@ -808,6 +824,15 @@ async fn handle_user(shared: &Arc<Shared>, v: &Value) {
 
 /// `result` : résout le plus vieux prompt en attente (FIFO) + usage/cost.
 async fn handle_result(shared: &Arc<Shared>, v: &Value) {
+    // modelUsage → contextWindow pour size : AVANT l'emit, sinon le
+    // premier usage_update du process rapporte le défaut 200k.
+    if let Some(mu) = v.get("modelUsage").and_then(Value::as_object) {
+        for (_, m) in mu {
+            if let Some(cw) = m.get("contextWindow").and_then(Value::as_u64) {
+                shared.info.lock().unwrap().usage_size = cw;
+            }
+        }
+    }
     // usage/cost globaux du tour (total_cost_usd = cumul process).
     if let Some(usage) = v.get("usage") {
         if let Some(u) = usage_of(Some(usage)) {
@@ -820,14 +845,6 @@ async fn handle_result(shared: &Arc<Shared>, v: &Value) {
                 shared.info.lock().unwrap().cost_total = c;
             }
             shared.emit_usage(used, size, cost);
-        }
-    }
-    // modelUsage → contextWindow pour size.
-    if let Some(mu) = v.get("modelUsage").and_then(Value::as_object) {
-        for (_, m) in mu {
-            if let Some(cw) = m.get("contextWindow").and_then(Value::as_u64) {
-                shared.info.lock().unwrap().usage_size = cw;
-            }
         }
     }
 

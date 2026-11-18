@@ -22,7 +22,6 @@ dependencies = [
  "acp-core",
  "anyhow",
  "libc",
- "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -36,7 +35,6 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "tokio",
- "tracing",
 ]
 
 [[package]]

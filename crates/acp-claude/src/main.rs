@@ -62,7 +62,6 @@ async fn main() {
                 // Autres notifications (session/cancel est la seule
                 // utilisée par le démon) : ignorées.
             }
-            InMsg::Response { .. } => {}
         }
     }
 }
@@ -341,8 +340,14 @@ async fn handle_load(app: &Arc<App>, params: &Value) -> Result<Value, RpcError> 
 
     // Transcript absent → erreur « not found » : le démon retombe
     // sur session/new (load_err_keeps_native = false).
-    let transcript = replay::find_transcript(&sid, &cwd.display().to_string())
-        .ok_or_else(|| RpcError::invalid_params(format!("Session not found: {sid}")))?;
+    // Scan des transcripts (tous les projets) → spawn_blocking.
+    let sid_scan = sid.clone();
+    let cwd_scan = cwd.display().to_string();
+    let transcript =
+        tokio::task::spawn_blocking(move || replay::find_transcript(&sid_scan, &cwd_scan))
+            .await
+            .map_err(|e| RpcError::internal(format!("transcript scan: {e}")))?
+            .ok_or_else(|| RpcError::invalid_params(format!("Session not found: {sid}")))?;
 
     let session = claude::spawn(&sid, &cwd, &mcp, app.conn.clone(), Some(&sid))
         .await
@@ -397,12 +402,23 @@ fn prompt_content(params: &Value) -> Vec<Value> {
                         }
                     }
                 }
-                "resource" | "resource_link" => {
-                    // Embedded context : on conserve le texte/uri sous
-                    // forme lisible plutôt que de perdre le bloc.
-                    let text = b
+                "resource" => {
+                    // Blocs ACP : {type:"resource", resource:{uri,text|blob}}
+                    // — les champs utiles sont sous `resource`, pas au
+                    // niveau du bloc.
+                    let r = b.get("resource").unwrap_or(b);
+                    let text = r
                         .get("text")
-                        .or_else(|| b.get("uri"))
+                        .or_else(|| r.get("uri"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    if !text.is_empty() {
+                        out.push(json!({"type":"text","text":format!("[resource] {text}")}));
+                    }
+                }
+                "resource_link" => {
+                    let text = b
+                        .get("uri")
                         .or_else(|| b.get("name"))
                         .and_then(Value::as_str)
                         .unwrap_or("");
