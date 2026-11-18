@@ -1466,9 +1466,7 @@ pub enum ReqKind {
     /// dans l'ordre jusqu'à ce qu'un binaire du profil resolve.
     /// Réponse : `{agent, installed, already?, command?, resolved?}`.
     /// Extension additive : démons anciens → erreur « req inconnue ».
-    InstallAgentAdapter {
-        agent: String,
-    },
+    InstallAgentAdapter { agent: String },
     /// Verdict de review de PR rendu en A2A par la session reviewer
     /// (pont MCP `agentcontrol_report_verdict`) : push direct au démon,
     /// qui poste lui-même le commentaire GitHub — la sortie de review

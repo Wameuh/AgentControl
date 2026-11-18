@@ -29,14 +29,13 @@ struct PrTarget {
 
 /// `I<40 hex>` → Change-Id Gerrit, sinon numéro de référence.
 fn parse_ref_arg(s: &str) -> Result<(u64, Option<String>)> {
-    if s.len() == 41 && s.starts_with('I') && s[1..].chars().all(|c| c.is_ascii_hexdigit()) {
+    if s.len() == 41
+        && s.starts_with('I')
+        && s[1..].chars().all(|c| c.is_ascii_hexdigit())
+    {
         return Ok((0, Some(s.to_string())));
     }
-    Ok((
-        s.parse()
-            .context("numéro de référence invalide (ou I<Change-Id>)")?,
-        None,
-    ))
+    Ok((s.parse().context("numéro de référence invalide (ou I<Change-Id>)")?, None))
 }
 
 /// Découpe une valeur `--repo` : URL complète → (host, repo) ; forme
@@ -174,12 +173,7 @@ fn entry_matches(e: &Value, sel: &PrSel) -> bool {
 
 /// Libellé court d'une entrée candidate (message d'ambiguïté).
 fn entry_label(e: &Value) -> String {
-    format!(
-        "{} {} {}",
-        badge_of(e),
-        repo_label(e),
-        e["session"].as_str().unwrap_or("")
-    )
+    format!("{} {} {}", badge_of(e), repo_label(e), e["session"].as_str().unwrap_or(""))
 }
 
 /// Résout le sélecteur dans le registre listé : numéro/Change-Id +
@@ -195,9 +189,7 @@ fn resolve_in(entries: &[Value], sel: &PrSel) -> Result<Option<Value>> {
             let pref: Vec<&Value> = cands
                 .iter()
                 .filter(|e| {
-                    e["repo"]
-                        .as_str()
-                        .is_some_and(|r| r.eq_ignore_ascii_case(&rp))
+                    e["repo"].as_str().is_some_and(|r| r.eq_ignore_ascii_case(&rp))
                         && {
                             let f = proto::forge_kind(e["forge"].as_str().unwrap_or(""));
                             match f {
@@ -220,11 +212,7 @@ fn resolve_in(entries: &[Value], sel: &PrSel) -> Result<Option<Value>> {
         _ => anyhow::bail!(
             "{} entrées correspondent — précisez --forge/--host/--repo :\n  {}",
             cands.len(),
-            cands
-                .iter()
-                .map(|e| entry_label(e))
-                .collect::<Vec<_>>()
-                .join("\n  ")
+            cands.iter().map(|e| entry_label(e)).collect::<Vec<_>>().join("\n  ")
         ),
     }
 }
@@ -251,9 +239,7 @@ fn forge_hosts<'a>(set: &'a [Value], kind: &str) -> Vec<(&'a str, Option<&'a str
                 .iter()
                 .map(|h| {
                     (
-                        h["host"]
-                            .as_str()
-                            .unwrap_or_else(|| h.as_str().unwrap_or("")),
+                        h["host"].as_str().unwrap_or_else(|| h.as_str().unwrap_or("")),
                         h["token_env"].as_str(),
                     )
                 })
@@ -264,12 +250,7 @@ fn forge_hosts<'a>(set: &'a [Value], kind: &str) -> Vec<(&'a str, Option<&'a str
 
 /// Hostname d'une entrée de forge (`host[:port][/prefix]` → `host`).
 fn host_part(h: &str) -> &str {
-    h.split(':')
-        .next()
-        .unwrap_or(h)
-        .split('/')
-        .next()
-        .unwrap_or(h)
+    h.split(':').next().unwrap_or(h).split('/').next().unwrap_or(h)
 }
 
 /// Remote git du cwd : (hostname sans port, path sans .git). Formes
@@ -285,13 +266,7 @@ fn git_remote() -> Option<(String, String)> {
     // user@ est strippé pour TOUTES les formes (ssh://git@gerrit:29418/p
     // est le remote canonique de git review).
     let userless = |h: &str| -> String {
-        h.rsplit('@')
-            .next()
-            .unwrap_or(h)
-            .split(':')
-            .next()
-            .unwrap_or(h)
-            .to_lowercase()
+        h.rsplit('@').next().unwrap_or(h).split(':').next().unwrap_or(h).to_lowercase()
     };
     let (host, path) = if let Some(rest) = out.strip_prefix("ssh://") {
         let (h, p) = rest.split_once('/')?;
@@ -307,10 +282,7 @@ fn git_remote() -> Option<(String, String)> {
         let (h, p) = out.rsplit_once(':').or_else(|| out.split_once(':'))?;
         (userless(h), p.to_string())
     };
-    let path = path
-        .trim_start_matches('/')
-        .trim_end_matches(".git")
-        .to_string();
+    let path = path.trim_start_matches('/').trim_end_matches(".git").to_string();
     (!host.is_empty() && !path.is_empty()).then_some((host, path))
 }
 
@@ -353,7 +325,10 @@ async fn detect_target(args: &[String], c: &mut Conn, from: usize) -> Result<PrT
 
     // `--repo` en URL ou `host:path` donne host+path (lien PR/MR/change
     // ou libellé d'affichage collé).
-    let (mut repo, host_from_url) = repo_flag.as_deref().map(split_repo_arg).unwrap_or_default();
+    let (mut repo, host_from_url) = repo_flag
+        .as_deref()
+        .map(split_repo_arg)
+        .unwrap_or_default();
 
     // Match du hostname du remote contre les hôtes configurés →
     // (type, hôte web déclaré). Couvre ssh≠web port.
@@ -373,14 +348,16 @@ async fn detect_target(args: &[String], c: &mut Conn, from: usize) -> Result<PrT
     let forge = forge_flag
         .or_else(|| matched.as_ref().map(|m| m.0.clone()))
         .unwrap_or_else(|| "github".into());
-    let mut host = host_flag.or(host_from_url).or_else(|| {
-        // Un hôte matché ne s'applique que s'il est DE la forge
-        // résolue — `matched` github + `--forge gitlab` ≠ hôte.
-        matched
-            .as_ref()
-            .filter(|m| m.0 == forge)
-            .map(|m| m.1.clone())
-    });
+    let mut host = host_flag
+        .or(host_from_url)
+        .or_else(|| {
+            // Un hôte matché ne s'applique que s'il est DE la forge
+            // résolue — `matched` github + `--forge gitlab` ≠ hôte.
+            matched
+                .as_ref()
+                .filter(|m| m.0 == forge)
+                .map(|m| m.1.clone())
+        });
     if repo.is_empty() && change_id.is_none() {
         if let Some((_, p)) = &remote {
             // Gerrit : le préfixe « a/ » d'auth http n'est pas du path.
@@ -490,15 +467,14 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
         "ls" | "--all" | "--json" => {
             let all = args.iter().any(|a| a == "--all");
             let js = args.iter().any(|a| a == "--json");
-            let v = c.call(proto::ReqKind::PrList { session: None }).await?;
+            let v = c
+                .call(proto::ReqKind::PrList { session: None })
+                .await?;
             if js {
                 println!("{v}");
                 return Ok(());
             }
-            let sessions = c
-                .call(proto::ReqKind::ListSessions)
-                .await
-                .unwrap_or(json!([]));
+            let sessions = c.call(proto::ReqKind::ListSessions).await.unwrap_or(json!([]));
             let me = std::env::var("AGENTCONTROL_SESSION").ok();
             for e in v.as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
                 let st = e["status"].as_str().unwrap_or("");
@@ -509,7 +485,8 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                 // un « open » trompeur éternel (les statuts finaux
                 // merged/closed gardent leur vérité).
                 let st = if !matches!(st, "merged" | "closed")
-                    && e["sync_fails"].as_u64().unwrap_or(0) >= proto::PR_UNRESOLVED_AFTER as u64
+                    && e["sync_fails"].as_u64().unwrap_or(0)
+                        >= proto::PR_UNRESOLVED_AFTER as u64
                 {
                     "unresolved"
                 } else {
@@ -528,13 +505,9 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                         .as_str()
                         .map(|b| format!("  ({b})"))
                         .unwrap_or_default(),
-                    if e["via"].as_str() == Some("detected") {
-                        "  [auto]"
-                    } else if e["via"].as_str() == Some("weak") {
-                        "  [cite]"
-                    } else {
-                        ""
-                    },
+                    if e["via"].as_str() == Some("detected") { "  [auto]" }
+                    else if e["via"].as_str() == Some("weak") { "  [cite]" }
+                    else { "" },
                 );
                 if let Some(n) = e["note"].as_str() {
                     println!("         note: {n}");
@@ -567,7 +540,10 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                         .as_ref()
                         .and_then(|i| i["repo"].as_str().map(String::from))
                         .unwrap_or_else(|| t.repo.clone()),
-                    pr: info.as_ref().and_then(|i| i["pr"].as_u64()).unwrap_or(t.pr),
+                    pr: info
+                        .as_ref()
+                        .and_then(|i| i["pr"].as_u64())
+                        .unwrap_or(t.pr),
                     forge: Some(t.forge.clone()),
                     host: Some(t.host.clone()),
                     change_id: t.change_id.clone(),
@@ -678,7 +654,8 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             // pr_track puisque acctl est un client du registre.
             let set = forge_set(c).await;
             let v = c.call(proto::ReqKind::PrList { session: None }).await?;
-            let entries: Vec<Value> = v.as_array().map(|a| a.clone()).unwrap_or_default();
+            let entries: Vec<Value> =
+                v.as_array().map(|a| a.clone()).unwrap_or_default();
             let out = forgesync::collect_updates(&set, &entries);
             // Compteur d'échecs du registre : vu live → 0, injoignable
             // → +1 (les updates sont des « vues » — Some(0) en même
@@ -686,27 +663,18 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             let cur_fails = |s: &forgesync::PrSeen| -> u32 {
                 entries
                     .iter()
-                    .find(|e| {
-                        entry_matches(
-                            e,
-                            &PrSel {
-                                pr: s.pr,
-                                change_id: s.change_id.clone(),
-                                forge: Some(s.forge.clone()),
-                                host: Some(s.host.clone()),
-                                repo: Some(s.repo.clone()),
-                            },
-                        )
-                    })
+                    .find(|e| entry_matches(e, &PrSel {
+                        pr: s.pr,
+                        change_id: s.change_id.clone(),
+                        forge: Some(s.forge.clone()),
+                        host: Some(s.host.clone()),
+                        repo: Some(s.repo.clone()),
+                    }))
                     .and_then(|e| e["sync_fails"].as_u64())
                     .unwrap_or(0) as u32
             };
-            let track_fails = |repo: &str,
-                               pr: u64,
-                               forge: &str,
-                               host: &str,
-                               change_id: Option<String>,
-                               fails: u32| {
+            let track_fails = |repo: &str, pr: u64, forge: &str, host: &str,
+                              change_id: Option<String>, fails: u32| {
                 proto::ReqKind::PrTrack {
                     session: None,
                     repo: repo.to_string(),
@@ -752,10 +720,8 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             // pour chaque entrée à chaque sync.
             for s in &out.seen {
                 if out.updates.iter().any(|u| {
-                    u.forge == s.forge
-                        && u.host == s.host
-                        && u.repo.eq_ignore_ascii_case(&s.repo)
-                        && u.pr == s.pr
+                    u.forge == s.forge && u.host == s.host
+                        && u.repo.eq_ignore_ascii_case(&s.repo) && u.pr == s.pr
                 }) {
                     continue;
                 }
@@ -763,27 +729,13 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
                     continue;
                 }
                 let _ = c
-                    .call(track_fails(
-                        &s.repo,
-                        s.pr,
-                        &s.forge,
-                        &s.host,
-                        s.change_id.clone(),
-                        0,
-                    ))
+                    .call(track_fails(&s.repo, s.pr, &s.forge, &s.host, s.change_id.clone(), 0))
                     .await;
             }
             for s in &out.failed {
                 let nf = cur_fails(s).saturating_add(1);
                 let _ = c
-                    .call(track_fails(
-                        &s.repo,
-                        s.pr,
-                        &s.forge,
-                        &s.host,
-                        s.change_id.clone(),
-                        nf,
-                    ))
+                    .call(track_fails(&s.repo, s.pr, &s.forge, &s.host, s.change_id.clone(), nf))
                     .await;
                 if nf == proto::PR_UNRESOLVED_AFTER {
                     let mark = match s.forge.as_str() {
@@ -800,11 +752,7 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             for n in &out.notes {
                 println!("{n}");
             }
-            println!(
-                "sync ok ({} vérifiées, {} maj)",
-                out.checked,
-                out.updates.len()
-            );
+            println!("sync ok ({} vérifiées, {} maj)", out.checked, out.updates.len());
         }
         "review" => {
             // Review native de la PR (pr_review de l'orchestrateur) :
@@ -847,10 +795,7 @@ mod tests {
     }
 
     fn sel(pr: u64) -> PrSel {
-        PrSel {
-            pr,
-            ..Default::default()
-        }
+        PrSel { pr, ..Default::default() }
     }
 
     #[test]
@@ -919,38 +864,17 @@ mod tests {
             ent("gitlab", "gitlab.corp", "y/two", 42),
         ];
         match resolve_in(&entries, &sel(42)) {
-            Err(e) => {
-                assert!(e.to_string().contains("ambigu") || e.to_string().contains("entrées"))
-            }
+            Err(e) => assert!(e.to_string().contains("ambigu") || e.to_string().contains("entrées")),
             _ => panic!("ambiguïté attendue"),
         }
         // --forge lève l'ambiguïté.
-        let s = PrSel {
-            pr: 42,
-            forge: Some("gitlab".into()),
-            host: Some("gitlab.corp".into()),
-            ..Default::default()
-        };
-        assert_eq!(
-            resolve_in(&entries, &s).unwrap().unwrap()["host"],
-            "gitlab.corp"
-        );
+        let s = PrSel { pr: 42, forge: Some("gitlab".into()), host: Some("gitlab.corp".into()), ..Default::default() };
+        assert_eq!(resolve_in(&entries, &s).unwrap().unwrap()["host"], "gitlab.corp");
         // --repo aussi (insensible à la casse).
-        let s = PrSel {
-            pr: 42,
-            repo: Some("Y/TWO".into()),
-            ..Default::default()
-        };
-        assert_eq!(
-            resolve_in(&entries, &s).unwrap().unwrap()["host"],
-            "gitlab.corp"
-        );
+        let s = PrSel { pr: 42, repo: Some("Y/TWO".into()), ..Default::default() };
+        assert_eq!(resolve_in(&entries, &s).unwrap().unwrap()["host"], "gitlab.corp");
         // --repo host:path copié depuis l'affichage.
-        let s = PrSel {
-            pr: 42,
-            repo: Some("two".into()),
-            ..Default::default()
-        };
+        let s = PrSel { pr: 42, repo: Some("two".into()), ..Default::default() };
         assert!(resolve_in(&entries, &s).unwrap().is_none());
     }
 
@@ -960,11 +884,7 @@ mod tests {
         let mut e = ent("gerrit", "gerrit.corp:8080", "", 0);
         e["change_id"] = json!(cid);
         let entries = vec![e];
-        let s = PrSel {
-            pr: 0,
-            change_id: Some(cid.to_uppercase()),
-            ..Default::default()
-        };
+        let s = PrSel { pr: 0, change_id: Some(cid.to_uppercase()), ..Default::default() };
         assert!(resolve_in(&entries, &s).unwrap().is_some());
     }
 }

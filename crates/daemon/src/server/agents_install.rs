@@ -44,7 +44,10 @@ impl Daemon {
     /// (id du registre agents_auto — profil auto, builtin ou
     /// `[agents.*]` déclaré pour un adaptateur connu). Voir
     /// l'en-tête du module pour les garde-fous.
-    pub(super) async fn h_install_agent_adapter(self: &Arc<Self>, agent: String) -> Result<Value> {
+    pub(super) async fn h_install_agent_adapter(
+        self: &Arc<Self>,
+        agent: String,
+    ) -> Result<Value> {
         let spec = KNOWN_ADAPTERS
             .iter()
             .find(|s| s.id == agent)
@@ -111,11 +114,9 @@ impl Daemon {
 /// Vrai si au moins une commande candidate du spec a un argv[0]
 /// résolvable — l'adaptateur est déjà là, rien à installer.
 fn adapter_resolved(spec: &AdapterSpec) -> bool {
-    spec.commands.iter().any(|c| {
-        c.first()
-            .map(|b| command_path(b).is_some())
-            .unwrap_or(false)
-    })
+    spec.commands
+        .iter()
+        .any(|c| c.first().map(|b| command_path(b).is_some()).unwrap_or(false))
 }
 
 /// Binaire d'adaptateur résolu après install (pour la réponse).
@@ -210,8 +211,8 @@ async fn npm_prefix_args() -> Vec<String> {
     // Préfixe déjà utilisateur (sous HOME — ex. nvm, ou ~/.npm-global
     // même si HOME n'est pas son parent lexical, home symlinké) →
     // `npm i -g` standard. Sinon forcer le préfixe user.
-    let under_home =
-        p.starts_with(&home) || user_npm_prefix().is_some_and(|u| p == u || p.starts_with(&u));
+    let under_home = p.starts_with(&home)
+        || user_npm_prefix().is_some_and(|u| p == u || p.starts_with(&u));
     if under_home {
         Vec::new()
     } else {
@@ -293,9 +294,7 @@ mod tests {
         assert!(looks_like_permission(
             "EACCES: permission denied, mkdir '/usr/lib'"
         ));
-        assert!(looks_like_permission(
-            "Error: EPERM operation not permitted"
-        ));
+        assert!(looks_like_permission("Error: EPERM operation not permitted"));
         assert!(!looks_like_permission("npm ERR! 404 Not Found"));
     }
 }

@@ -430,10 +430,7 @@ pub(crate) fn command_path(cmd: &str) -> Option<std::path::PathBuf> {
     cmd_path_cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(
-            cmd.to_string(),
-            (std::time::Instant::now(), resolved.clone()),
-        );
+        .insert(cmd.to_string(), (std::time::Instant::now(), resolved.clone()));
     resolved
 }
 

@@ -6,12 +6,12 @@
 /// Auto-découverte des adaptateurs ACP connus sur le PATH
 /// (`via:auto` dans list_agents — item #261).
 pub(crate) mod agents_auto;
-/// Profils agents éditables à chaud (composant interne `agents` —
-/// params → `[agents.*]` de config.toml, hot-reload du profil).
-pub(crate) mod agents_cfg;
 /// Provisioning à la demande des adaptateurs du registre
 /// (`install_agent_adapter` — npm i -g côté démon, #277).
 mod agents_install;
+/// Profils agents éditables à chaud (composant interne `agents` —
+/// params → `[agents.*]` de config.toml, hot-reload du profil).
+pub(crate) mod agents_cfg;
 mod cfg;
 mod components;
 /// Watch FS de l'explorateur (auto-refresh) — cycle de vie borné à la
@@ -826,7 +826,9 @@ impl Daemon {
             ReqKind::ListAgents => self.h_list_agents().await,
             ReqKind::ModelCosts { agent } => self.h_model_costs(agent).await,
             ReqKind::RefreshAgentCaps { agent } => self.h_refresh_agent_caps(agent).await,
-            ReqKind::InstallAgentAdapter { agent } => self.h_install_agent_adapter(agent).await,
+            ReqKind::InstallAgentAdapter { agent } => {
+                self.h_install_agent_adapter(agent).await
+            }
             ReqKind::ModelCatalog { agent } => self.h_model_catalog(agent).await,
             ReqKind::ListSessions => self.h_list_sessions().await,
             ReqKind::ListSessionsPage { limit, offset } => {
