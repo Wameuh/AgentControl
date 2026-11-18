@@ -48,13 +48,13 @@ pub struct Shared {
     /// Écrit une ligne NDJSON vers stdin de claude (via la tâche writer).
     pub write_tx: mpsc::UnboundedSender<String>,
     /// control_request en vol → oneshot de la réponse `control_response`.
-    pub ctrl_pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>,
+    pub ctrl_pending: Mutex<HashMap<String, oneshot::Sender<Result<Value, RpcError>>>>,
     pub ctrl_next: AtomicU64,
     /// Prompts `session/prompt` en attente de leur `result` (FIFO —
     /// claude traite les user messages dans l'ordre d'arrivée).
     pub prompts: Mutex<VecDeque<oneshot::Sender<Result<Value, RpcError>>>>,
     /// Permission requests ACP en vol : cancel → deny interrupt.
-    pub perm_cancel: Mutex<Vec<(u64, oneshot::Sender<()>)>>,
+    pub perm_cancel: Mutex<Vec<(String, oneshot::Sender<()>)>>,
     pub perm_next: AtomicU64,
     pub info: Mutex<Info>,
     /// Process claude — tué via `kill()` sur erreur post-spawn ou
@@ -70,9 +70,12 @@ impl Shared {
 
     /// control_request vers claude, attend la control_response.
     pub async fn ctrl_call(&self, request: Value) -> Result<Value, RpcError> {
-        let rid = self.ctrl_next.fetch_add(1, Ordering::SeqCst);
+        // Id string `req_N` (le schéma claude attend des ids string —
+        // numériques tolérés mais pas le format canonique).
+        let n = self.ctrl_next.fetch_add(1, Ordering::SeqCst);
+        let rid = format!("req_{n}");
         let (tx, rx) = oneshot::channel();
-        self.ctrl_pending.lock().unwrap().insert(rid, tx);
+        self.ctrl_pending.lock().unwrap().insert(rid.clone(), tx);
         self.send_line(json!({
             "type": "control_request",
             "request_id": rid,
@@ -90,10 +93,10 @@ impl Shared {
 
     /// control_request vers claude SANS attendre (interrupt…).
     pub fn ctrl_cast(&self, request: Value) {
-        let rid = self.ctrl_next.fetch_add(1, Ordering::SeqCst);
+        let n = self.ctrl_next.fetch_add(1, Ordering::SeqCst);
         self.send_line(json!({
             "type": "control_request",
-            "request_id": rid,
+            "request_id": format!("req_{n}"),
             "request": request,
         }));
     }
@@ -177,6 +180,9 @@ impl Shared {
             "sessionUpdate": "current_mode_update",
             "currentModeId": mode,
         }));
+        // configOptions["mode"].currentValue doit suivre sinon meta
+        // garde une valeur périmée jusqu'à la prochaine annonce.
+        self.emit_config_options();
     }
 
     /// Met à jour modèle + annonce config_option_update.
@@ -507,8 +513,9 @@ async fn handle_claude_msg(shared: &Arc<Shared>, v: &Value) {
             // {"type":"control_response","response":{"subtype":..,
             //  "request_id":N,"response":{...}|"error":..}}
             if let Some(resp) = v.get("response") {
-                if let Some(rid) = resp.get("request_id").and_then(Value::as_u64) {
-                    if let Some(tx) = shared.ctrl_pending.lock().unwrap().remove(&rid) {
+                if let Some(rid) = resp.get("request_id") {
+                    let key = ctrl_id_key(rid);
+                    if let Some(tx) = shared.ctrl_pending.lock().unwrap().remove(&key) {
                         let out = if let Some(e) = resp.get("error") {
                             let msg = e
                                 .as_str()
@@ -531,7 +538,9 @@ async fn handle_claude_msg(shared: &Arc<Shared>, v: &Value) {
         }
         "control_request" => {
             let req = v.get("request").cloned().unwrap_or(Value::Null);
-            let rid = v.get("request_id").and_then(Value::as_u64).unwrap_or(0);
+            // request_id propagé VERBATIM (string `req_*` côté claude)
+            // — la control_response doit porter le même id.
+            let rid = v.get("request_id").cloned().unwrap_or(Value::Null);
             let subtype = req.get("subtype").and_then(Value::as_str).unwrap_or("");
             match subtype {
                 "can_use_tool" => {
@@ -832,10 +841,17 @@ async fn handle_result(shared: &Arc<Shared>, v: &Value) {
         let _ = tx.send(Err(RpcError::internal(msg)));
         return;
     }
+    // Un tour interrompu (cancel) peut ne pas porter stop_reason :
+    // terminal_reason aborted_* → cancelled pour le journal.
+    let terminal = v
+        .get("terminal_reason")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let stop = match v.get("stop_reason").and_then(Value::as_str) {
         Some("cancelled") | Some("canceled") => "cancelled",
         Some("max_tokens") | Some("max_turn_requests") => "max_tokens",
         Some("refusal") => "refusal",
+        _ if terminal.starts_with("aborted") => "cancelled",
         _ => "end_turn",
     };
     let _ = tx.send(Ok(json!({"stopReason": stop})));
@@ -892,4 +908,13 @@ fn context_usage(shared: &Shared, u: &Usage) -> (u64, u64) {
         }
     };
     (used, size)
+}
+
+/// Clé de corrélation d'un request_id JSON-RPC/contrôle : string →
+/// tel quel, nombre → sa forme décimale (ids sortants `req_N` et
+/// entrants `req_*` coexistent sans collision).
+pub(crate) fn ctrl_id_key(v: &Value) -> String {
+    v.as_str()
+        .map(String::from)
+        .unwrap_or_else(|| v.to_string())
 }

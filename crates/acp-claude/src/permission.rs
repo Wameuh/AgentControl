@@ -6,7 +6,6 @@
 use crate::claude::Shared;
 use crate::tools;
 use serde_json::{json, Value};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
@@ -14,7 +13,7 @@ use tokio::sync::oneshot;
 // Permissions : control_request can_use_tool → session/request_permission
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn handle_permission(shared: &Arc<Shared>, ctrl_rid: u64, req: &Value) {
+pub(crate) async fn handle_permission(shared: &Arc<Shared>, ctrl_rid: Value, req: &Value) {
     let tool_name = req.get("tool_name").and_then(Value::as_str).unwrap_or("");
     let input = req.get("input").cloned().unwrap_or(json!({}));
     let tool_use_id = req
@@ -31,7 +30,7 @@ pub(crate) async fn handle_permission(shared: &Arc<Shared>, ctrl_rid: u64, req: 
     if mode == "bypassPermissions" {
         respond_permission(
             shared,
-            ctrl_rid,
+            &ctrl_rid,
             tool_name,
             &input,
             suggestions.as_ref(),
@@ -42,7 +41,7 @@ pub(crate) async fn handle_permission(shared: &Arc<Shared>, ctrl_rid: u64, req: 
     if mode == "acceptEdits" && tools::is_edit_tool(tool_name) {
         respond_permission(
             shared,
-            ctrl_rid,
+            &ctrl_rid,
             tool_name,
             &input,
             suggestions.as_ref(),
@@ -53,7 +52,7 @@ pub(crate) async fn handle_permission(shared: &Arc<Shared>, ctrl_rid: u64, req: 
 
     let (title, kind, locations, content) = tools::tool_call_info(tool_name, &input);
     let tool_call = json!({
-        "toolCallId": if tool_use_id.is_empty() { format!("ctrl-{ctrl_rid}") } else { tool_use_id },
+        "toolCallId": if tool_use_id.is_empty() { format!("ctrl-{}", crate::claude::ctrl_id_key(&ctrl_rid)) } else { tool_use_id },
         "title": title,
         "kind": kind,
         "status": "pending",
@@ -80,13 +79,18 @@ pub(crate) async fn handle_permission(shared: &Arc<Shared>, ctrl_rid: u64, req: 
 
     // Race cancel : si session/cancel arrive pendant que le client
     // réfléchit, on nie la permission → claude n'attend plus.
-    let cancel_id = shared.perm_next.fetch_add(1, Ordering::SeqCst);
+    let cancel_id = format!(
+        "perm_{}",
+        shared
+            .perm_next
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    );
     let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
     shared
         .perm_cancel
         .lock()
         .unwrap()
-        .push((cancel_id, cancel_tx));
+        .push((cancel_id.clone(), cancel_tx));
 
     let call = shared.conn.call(
         "session/request_permission",
@@ -101,12 +105,12 @@ pub(crate) async fn handle_permission(shared: &Arc<Shared>, ctrl_rid: u64, req: 
         r = &mut call => r,
         _ = &mut cancel_rx => {
             // cancel pendant permission : deny interrupt + nettoyage.
-            remove_perm_cancel(shared, cancel_id);
-            send_deny(shared, ctrl_rid, "cancelled by user");
+            remove_perm_cancel(shared, &cancel_id);
+            send_deny(shared, &ctrl_rid, "cancelled by user");
             return;
         }
     };
-    remove_perm_cancel(shared, cancel_id);
+    remove_perm_cancel(shared, &cancel_id);
 
     let selected = match &outcome {
         Ok(v) => v
@@ -131,7 +135,7 @@ pub(crate) async fn handle_permission(shared: &Arc<Shared>, ctrl_rid: u64, req: 
         (Some("selected"), "allow_always") => {
             respond_permission(
                 shared,
-                ctrl_rid,
+                &ctrl_rid,
                 tool_name,
                 &input,
                 suggestions.as_ref(),
@@ -156,7 +160,7 @@ pub(crate) async fn handle_permission(shared: &Arc<Shared>, ctrl_rid: u64, req: 
             }
             respond_permission(
                 shared,
-                ctrl_rid,
+                &ctrl_rid,
                 tool_name,
                 &input,
                 suggestions.as_ref(),
@@ -166,7 +170,7 @@ pub(crate) async fn handle_permission(shared: &Arc<Shared>, ctrl_rid: u64, req: 
         (Some("selected"), "allow") => {
             respond_permission(
                 shared,
-                ctrl_rid,
+                &ctrl_rid,
                 tool_name,
                 &input,
                 suggestions.as_ref(),
@@ -175,20 +179,20 @@ pub(crate) async fn handle_permission(shared: &Arc<Shared>, ctrl_rid: u64, req: 
         }
         (Some("selected"), "plan") => {
             // ExitPlanMode → « keep planning » : deny + interrupt.
-            send_deny(shared, ctrl_rid, "user chose to keep planning");
+            send_deny(shared, &ctrl_rid, "user chose to keep planning");
         }
         (Some("selected"), _) | (Some("cancelled"), _) | _ => {
             // reject / cancelled / erreur client → deny interrupt.
-            send_deny(shared, ctrl_rid, "user refused permission");
+            send_deny(shared, &ctrl_rid, "user refused permission");
         }
     }
 }
 
-fn remove_perm_cancel(shared: &Shared, id: u64) {
-    shared.perm_cancel.lock().unwrap().retain(|(k, _)| *k != id);
+fn remove_perm_cancel(shared: &Shared, id: &str) {
+    shared.perm_cancel.lock().unwrap().retain(|(k, _)| k != id);
 }
 
-fn send_deny(shared: &Shared, ctrl_rid: u64, message: &str) {
+fn send_deny(shared: &Shared, ctrl_rid: &Value, message: &str) {
     shared.send_line(json!({
         "type": "control_response",
         "response": {
@@ -208,7 +212,7 @@ fn send_deny(shared: &Shared, ctrl_rid: u64, message: &str) {
 /// n'ajoute aucune règle.
 fn respond_permission(
     shared: &Shared,
-    ctrl_rid: u64,
+    ctrl_rid: &Value,
     tool_name: &str,
     input: &Value,
     suggestions: Option<&Value>,

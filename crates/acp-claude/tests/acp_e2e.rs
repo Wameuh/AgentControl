@@ -285,11 +285,11 @@ async fn permission_roundtrip() {
         {"type":"assistant","message":{"role":"assistant","content":[
             {"type":"tool_use","id":"toolu_p","name":"Write","input":{"file_path":"/tmp/x","content":"hi"}}
         ]}},
-        {"type":"control_request","request_id":77,"request":{
+        {"type":"control_request","request_id":"req_77","request":{
             "subtype":"can_use_tool","tool_name":"Write",
             "input":{"file_path":"/tmp/x","content":"hi"},
             "tool_use_id":"toolu_p"}},
-        {"_perm_wait":77},
+        {"_perm_wait":"req_77"},
         {"type":"user","message":{"role":"user","content":[
             {"type":"tool_result","tool_use_id":"toolu_p","is_error":false,"content":[{"type":"text","text":"ok"}]}
         ]}},
@@ -564,9 +564,9 @@ async fn prompt_during_open_permission_is_queued() {
     // claude le met en file, on répond permission puis les deux
     // results arrivent dans l'ordre.
     let turn1 = json!([
-        {"type":"control_request","request_id":50,"request":{
+        {"type":"control_request","request_id":"req_50","request":{
             "subtype":"can_use_tool","tool_name":"Bash","input":{"command":"rm -rf /"},"tool_use_id":"t1"}},
-        {"_perm_wait":50},
+        {"_perm_wait":"req_50"},
         {"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn",
          "usage":{"input_tokens":1,"output_tokens":1},"total_cost_usd":0.0}
     ]);
@@ -640,7 +640,8 @@ async fn duplicate_new_and_stdin_close() {
         .await
         .expect("acp-claude ne sort pas à la fermeture stdin")
         .unwrap();
-    assert!(status.success() || !status.success()); // juste : il est mort
+    // mort = n'importe quel statut (success ou non) — l'essentiel est qu'il a fini.
+    let _ = status;
 }
 
 #[tokio::test]
