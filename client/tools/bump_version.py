@@ -21,7 +21,7 @@ FILES = [
     os.path.join(ROOT, "client", "src-tauri", "tauri.conf.json"),
     os.path.join(ROOT, "client", "package.json"),
 ]
-CRATES = ["proto", "forgesync", "daemon", "acctl", "client-core"]
+CRATES = ["proto", "forgesync", "daemon", "acctl", "client-core", "acp-core", "acp-claude"]
 FILES += [os.path.join(ROOT, "crates", c, "Cargo.toml") for c in CRATES]
 FILES.append(os.path.join(ROOT, "client", "src-tauri", "Cargo.toml"))
 

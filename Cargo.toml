@@ -1,6 +1,14 @@
 [workspace]
 resolver = "2"
-members = ["crates/proto", "crates/forgesync", "crates/daemon", "crates/acctl", "crates/client-core"]
+members = [
+    "crates/proto",
+    "crates/forgesync",
+    "crates/daemon",
+    "crates/acctl",
+    "crates/client-core",
+    "crates/acp-core",
+    "crates/acp-claude",
+]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
