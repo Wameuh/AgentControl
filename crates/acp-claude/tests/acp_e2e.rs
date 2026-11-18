@@ -30,6 +30,7 @@ async fn start(scenario: Value) -> (Client, tempfile::TempDir) {
     let mut child = Command::new(bin)
         .env("ACPD_CLAUDE_BIN", FAKE)
         .env("FAKE_SCENARIO", &scen)
+        .env("FAKE_PIDFILE", dir.path().join("fake.pid"))
         .env("HOME", dir.path())
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .stdin(std::process::Stdio::piped())
@@ -640,4 +641,49 @@ async fn duplicate_new_and_stdin_close() {
         .expect("acp-claude ne sort pas à la fermeture stdin")
         .unwrap();
     assert!(status.success() || !status.success()); // juste : il est mort
+}
+
+#[tokio::test]
+async fn ctrl_init_failure_kills_claude_no_orphan() {
+    // ctrl initialize en échec → session/new erreur ET le process
+    // claude est tué (pas d'orphelin attendant stdin).
+    let scen = json!({"init_error": true, "turns": []});
+    let (mut c, dir) = start(scen).await;
+    c.call("initialize", json!({"protocolVersion":1})).await;
+    let id = c.next_id;
+    c.next_id += 1;
+    c.send(
+        json!({"jsonrpc":"2.0","id":id,"method":"session/new","params":{
+        "cwd":"/tmp","mcpServers":[]}}),
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let v = c.recv(deadline).await;
+        if v.get("id") == Some(&json!(id)) {
+            assert!(v.get("error").is_some(), "session/new aurait dû échouer");
+            break;
+        }
+    }
+    // Le pid du fake claude est mort.
+    let pidfile = dir.path().join("fake.pid");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut pid: Option<i32> = None;
+    while pid.is_none() {
+        if let Ok(s) = std::fs::read_to_string(&pidfile) {
+            pid = s.trim().parse().ok();
+        } else {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("fake.pid jamais écrit");
+        }
+    }
+    // kill(pid, 0) → erreur = process mort ; EPERM = vivant.
+    let alive = unsafe { libc::kill(pid.unwrap(), 0) } == 0;
+    assert!(
+        !alive,
+        "claude orphelin : pid {} encore vivant",
+        pid.unwrap()
+    );
 }

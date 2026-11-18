@@ -297,8 +297,15 @@ async fn handle_new(app: &Arc<App>, params: &Value) -> Result<Value, RpcError> {
     let shared = session.shared.clone();
 
     // control initialize : commandes + modèles (borné à 180 s dans
-    // ctrl_call — démarrage MCP lent possible).
-    let init = ctrl_initialize(&shared).await?;
+    // ctrl_call — démarrage MCP lent possible). Échec → kill du
+    // process : sans ça le claude orphelin attend stdin indéfiniment.
+    let init = match ctrl_initialize(&shared).await {
+        Ok(i) => i,
+        Err(e) => {
+            shared.kill().await;
+            return Err(e);
+        }
+    };
     apply_init_info(&shared, &init);
 
     let mut resp = session_caps(&shared);
@@ -341,16 +348,31 @@ async fn handle_load(app: &Arc<App>, params: &Value) -> Result<Value, RpcError> 
         .await
         .map_err(|e| RpcError::internal(format!("{e:#}")))?;
     let shared = session.shared.clone();
-    let init = ctrl_initialize(&shared).await?;
+    // Même garde que handle_new : un ctrl initialize en échec ne
+    // doit pas laisser le claude --resume orphelin.
+    let init = match ctrl_initialize(&shared).await {
+        Ok(i) => i,
+        Err(e) => {
+            shared.kill().await;
+            return Err(e);
+        }
+    };
     apply_init_info(&shared, &init);
 
     // Replay AVANT la réponse : les updates de l'historique
     // précèdent strictement celles du premier prompt.
+    // Replay potentiellement long (gros transcripts) → spawn_blocking ;
+    // les updates sont émises dans l'ordre du fichier.
     let conn = app.conn.clone();
     let acp = sid.clone();
-    let _ = replay::replay_transcript(&transcript, &sid, move |u| {
-        conn.session_update(&acp, u);
-    });
+    let tp = transcript.clone();
+    let rsid = sid.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        replay::replay_transcript(&tp, &rsid, move |u| {
+            conn.session_update(&acp, u);
+        })
+    })
+    .await;
 
     let mut resp = session_caps(&shared);
     resp["sessionId"] = json!(sid);
@@ -373,6 +395,19 @@ fn prompt_content(params: &Value) -> Vec<Value> {
                         if !t.is_empty() {
                             out.push(json!({"type": "text", "text": t}));
                         }
+                    }
+                }
+                "resource" | "resource_link" => {
+                    // Embedded context : on conserve le texte/uri sous
+                    // forme lisible plutôt que de perdre le bloc.
+                    let text = b
+                        .get("text")
+                        .or_else(|| b.get("uri"))
+                        .or_else(|| b.get("name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    if !text.is_empty() {
+                        out.push(json!({"type":"text","text":format!("[resource] {text}")}));
                     }
                 }
                 "image" => {
@@ -519,8 +554,10 @@ async fn handle_set_config(app: &Arc<App>, params: &Value) -> Result<Value, RpcE
 }
 
 async fn handle_list(app: &Arc<App>) -> Result<Value, RpcError> {
-    let _ = app;
-    let sessions = replay::list_sessions();
+    // Scan des transcripts potentiellement gros → hors executor.
+    let sessions = tokio::task::spawn_blocking(replay::list_sessions)
+        .await
+        .unwrap_or_default();
     // Titres runtime prioritaires (rename récent non persisté).
     let titles = app.titles.lock().unwrap();
     let sessions: Vec<Value> = sessions

@@ -195,7 +195,9 @@ restarts under its supervisor and re-parses at boot).
 
 **Auto-discovered agent profiles** (`server/agents_auto.rs`, #261):
 the daemon embeds a registry of known ACP adapters (claude →
-`claude-code-acp`/`claude-agent-acp`, codex → `codex-acp`, gemini,
+`acp-claude` first — the in-house Rust binary shipped in the tarball,
+#280 — then `claude-code-acp`/`claude-agent-acp` npm fallbacks;
+codex → `codex-acp`, gemini,
 opencode) and re-syncs it on every `reload_agent_profiles` call —
 an adapter installed after boot appears as a `via:"auto"` profile
 without restart or config; a declared `[agents.*]` always wins (same
@@ -597,9 +599,11 @@ gitignorées (`.gitignore` racine).
   required to the standalone codex binary: otherwise the adapter takes
   its bundled `@openai/codex` npm (optional dep missing on arm64), and
   via npx `codex` in PATH is the npm wrapper, not the real CLI.
-- Claude: `@agentclientprotocol/claude-agent-acp` bundles the Claude
-  Agent SDK → `claude` CLI unneeded. Auth: ANTHROPIC_API_KEY or
-  CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`, headless OK).
+- Claude: `acp-claude` (in-house, #280) spawns the real `claude` CLI
+  (`-p --input-format stream-json`) → the CLI must be installed
+  (unlike `claude-agent-acp`, which bundles the Agent SDK). Auth:
+  ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`,
+  headless OK).
 - Minimal systemd PATH: `ensure_agent_path` (main.rs) injects the
   binary's dir + the usual agent dirs (`~/.local/bin`,
   `~/.npm-global/bin`, `~/.local/share/mise/shims`, `~/.cargo/bin`,

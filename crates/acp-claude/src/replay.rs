@@ -300,7 +300,7 @@ fn first_user_info(path: &Path) -> (String, String) {
     (title, cwd)
 }
 
-/// epoch → ISO-8601 UTC (secondes suffice — pas de dep chrono).
+/// epoch → ISO-8601 UTC (secondes suffisent — pas de dep chrono).
 fn chrono_lite(epoch: u64) -> String {
     // Algorithme civil-from-days (Howard Hinnant).
     let secs = epoch;

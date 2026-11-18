@@ -17,10 +17,14 @@ import sys
 import time
 
 scenario = json.load(open(os.environ["FAKE_SCENARIO"]))
+_pidfile = os.environ.get("FAKE_PIDFILE")
+if _pidfile:
+    open(_pidfile, "w").write(str(os.getpid()))
 turns = list(scenario.get("turns", []))
 default_turn = scenario.get("default_turn", [])
 on_interrupt = scenario.get("on_interrupt", [])
 perm_wait_rid = None
+pending_users = []
 
 
 def emit(evt):
@@ -57,7 +61,9 @@ def run_turn():
     for evt in script:
         if "_perm_wait" in evt:
             # Bloque jusqu'à la control_response du control_request
-            # can_use_tool émis juste avant (lu sur stdin).
+            # can_use_tool émis juste avant. Les messages user reçus
+            # pendant l'attente sont mis en file (comme claude les
+            # queue en queued_turns) — jamais perdus.
             target = evt["_perm_wait"]
             for line in sys.stdin:
                 try:
@@ -69,15 +75,23 @@ def run_turn():
                     if r.get("request_id") == target:
                         break
                 elif m.get("type") == "user":
-                    # message user pendant la permission : on le
-                    # traite après (injecté en file simple — le test
-                    # de race s'en charge via un second tour).
-                    pass
+                    pending_users.append(line)
             continue
         emit(evt)
 
 
-for line in sys.stdin:
+def input_lines():
+    while True:
+        if pending_users:
+            yield pending_users.pop(0)
+        else:
+            l = sys.stdin.readline()
+            if not l:
+                return
+            yield l
+
+
+for line in input_lines():
     line = line.strip()
     if not line:
         continue
@@ -91,7 +105,23 @@ for line in sys.stdin:
         req = msg.get("request", {})
         sub = req.get("subtype")
         if sub == "initialize":
-            ctrl_response(rid, scenario.get("init", {}))
+            if scenario.get("init_error"):
+                sys.stdout.write(
+                    json.dumps(
+                        {
+                            "type": "control_response",
+                            "response": {
+                                "subtype": "error",
+                                "request_id": rid,
+                                "error": "init failed",
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+                sys.stdout.flush()
+            else:
+                ctrl_response(rid, scenario.get("init", {}))
         elif sub == "interrupt":
             for evt in on_interrupt:
                 emit(evt)

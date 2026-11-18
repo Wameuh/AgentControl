@@ -57,6 +57,10 @@ pub struct Shared {
     pub perm_cancel: Mutex<Vec<(u64, oneshot::Sender<()>)>>,
     pub perm_next: AtomicU64,
     pub info: Mutex<Info>,
+    /// Process claude — tué via `kill()` sur erreur post-spawn ou
+    /// mort détectée ; `wait()` y est fait pour ne pas laisser de
+    /// zombie. `kill_on_drop` en garde-fou.
+    pub child: tokio::sync::Mutex<Child>,
 }
 
 impl Shared {
@@ -127,6 +131,35 @@ impl Shared {
 
     pub fn is_dead(&self) -> bool {
         self.info.lock().unwrap().dead
+    }
+
+    /// Tue le process claude et échoue tout ce qui était en vol —
+    /// appelé sur erreur post-spawn (ctrl initialize…) ou à la mort
+    /// du process. Idempotent.
+    pub async fn kill(&self) {
+        {
+            let mut i = self.info.lock().unwrap();
+            i.dead = true;
+        }
+        let err = || RpcError::internal("claude process killed");
+        let prompts: Vec<_> = self.prompts.lock().unwrap().drain(..).collect();
+        for tx in prompts {
+            let _ = tx.send(Err(err()));
+        }
+        let ctrls: Vec<_> = self
+            .ctrl_pending
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, t)| t)
+            .collect();
+        for tx in ctrls {
+            let _ = tx.send(Err(err()));
+        }
+        self.cancel();
+        let mut c = self.child.lock().await;
+        let _ = c.start_kill();
+        let _ = c.wait().await;
     }
 
     /// session/update typé.
@@ -394,6 +427,7 @@ pub async fn spawn(
     let shared_placeholder = Arc::new(Shared {
         acp_id: acp_id.to_string(),
         conn,
+        child: tokio::sync::Mutex::new(child),
         write_tx,
         ctrl_pending: Mutex::new(HashMap::new()),
         ctrl_next: AtomicU64::new(1),
@@ -413,7 +447,7 @@ pub async fn spawn(
     });
     let shared = shared_placeholder.clone();
     let lines = BufReader::new(stdout).lines();
-    tokio::spawn(run_actor(shared.clone(), lines, child));
+    tokio::spawn(run_actor(shared.clone(), lines));
 
     Ok(Session { shared })
 }
@@ -425,7 +459,6 @@ pub async fn spawn(
 async fn run_actor<R: tokio::io::AsyncRead + Unpin>(
     shared: Arc<Shared>,
     mut lines: tokio::io::Lines<BufReader<R>>,
-    mut child: Child,
 ) {
     while let Ok(Some(line)) = lines.next_line().await {
         let line = line.trim().to_string();
@@ -439,7 +472,7 @@ async fn run_actor<R: tokio::io::AsyncRead + Unpin>(
     }
     // stdout fermé : process mort ou stdin côté claude fermé.
     finish_dead(&shared).await;
-    let _ = child.kill().await;
+    shared.kill().await;
 }
 
 /// Marque la session morte et échoue tout ce qui était en vol.
@@ -477,13 +510,17 @@ async fn handle_claude_msg(shared: &Arc<Shared>, v: &Value) {
                 if let Some(rid) = resp.get("request_id").and_then(Value::as_u64) {
                     if let Some(tx) = shared.ctrl_pending.lock().unwrap().remove(&rid) {
                         let out = if let Some(e) = resp.get("error") {
-                            Err(RpcError::internal(
-                                e.get("message")
-                                    .or_else(|| e.get("error"))
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("claude control error")
-                                    .to_string(),
-                            ))
+                            let msg = e
+                                .as_str()
+                                .map(String::from)
+                                .or_else(|| {
+                                    e.get("message")
+                                        .or_else(|| e.get("error"))
+                                        .and_then(Value::as_str)
+                                        .map(String::from)
+                                })
+                                .unwrap_or_else(|| "claude control error".into());
+                            Err(RpcError::internal(msg))
                         } else {
                             Ok(resp.get("response").cloned().unwrap_or(Value::Null))
                         };
@@ -620,6 +657,9 @@ async fn handle_system(shared: &Arc<Shared>, v: &Value) {
 }
 
 fn handle_stream_event(shared: &Arc<Shared>, v: &Value) {
+    if v.get("isReplay").and_then(Value::as_bool).unwrap_or(false) {
+        return;
+    }
     let event = match v.get("event") {
         Some(e) => e,
         None => return,
@@ -650,6 +690,9 @@ fn handle_stream_event(shared: &Arc<Shared>, v: &Value) {
 /// Contenu d'un message assistant : tool_use → tool_call ; texte et
 /// thinking sont déjà streamés via stream_event (sinon doublon).
 async fn handle_assistant(shared: &Arc<Shared>, v: &Value) {
+    if v.get("isReplay").and_then(Value::as_bool).unwrap_or(false) {
+        return;
+    }
     let msg = match v.get("message") {
         Some(m) => m,
         None => return,
