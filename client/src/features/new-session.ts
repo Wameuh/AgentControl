@@ -213,17 +213,50 @@ export class NewSessionDialog {
     this.applyAgentCaps();
   }
 
-  /** Remplit le select : placeholder "chargement…" pendant l'appel ;
-   *  erreur → zone interne du dialogue (un toast passerait sous le modal). */
-  private async fillAgents(conn: string, keep?: string) {
-    this.agentPlaceholder(t("agents_loading"));
-    try {
-      this.renderAgents(await this.listAgents(conn), keep);
-    } catch (e) {
-      this.agentPlaceholder(`⚠ ${t("agents_failed")}`);
-      dlgErr("f-err", String(e));
-    }
+  /** Remplit le select agent : cache de la connexion d'abord
+   *  (instantané à la réouverture), squelette « chargement… » + spinner
+   *  sinon, fetch en fond — la réponse ne remplace le select que si
+   *  sa requête est encore la plus récente (token `agentsReq`). */
+  private loadAgents(conn: string, keep?: string) {
+    const req = ++this.agentsReq;
+    const spin = $("f-agent-spin") as HTMLElement;
+    spin.hidden = false;
+    const cached = this.agentsCache.get(conn);
+    if (cached) this.renderAgents(cached, keep);
+    else this.agentPlaceholder(t("agents_loading"));
+    const settle = () => {
+      if (req === this.agentsReq) spin.hidden = true;
+    };
+    this.listAgents(conn).then(
+      (agents) => {
+        this.agentsCache.set(conn, agents);
+        if (req !== this.agentsReq) return settle();
+        // keep explicite (ref.agent d'un groupe « + ») prime ; sinon
+        // une sélection déjà faite sur le cache survit au refresh si
+        // l'agent existe toujours dans la liste fraîche.
+        const cur = ($("f-agent") as HTMLSelectElement).value;
+        const keepNow =
+          keep ?? (this.agents.some((a) => a.id === cur) ? cur : undefined);
+        this.renderAgents(agents, keepNow);
+        settle();
+      },
+      (e) => {
+        settle();
+        if (req !== this.agentsReq) return;
+        // Échec d'un refresh sur cache affiché → silencieux (la liste
+        // des agents change peu) ; premier chargement → erreur dans
+        // la zone du dialogue (un toast passerait sous le modal).
+        if (!cached) {
+          this.agentPlaceholder(`⚠ ${t("agents_failed")}`);
+          dlgErr("f-err", String(e));
+        }
+      },
+    );
   }
+
+  /** Derniers agents chargés par connexion — affichés instantanément
+   *  à la réouverture du dialogue puis rafraîchis en fond. */
+  private agentsCache = new Map<string, AgentOpt[]>();
 
   /** Dialogue "nouvelle session". `conn` route list_agents/new_session vers le
    *  bon serveur (groupe "+" → imposé, select désactivé) ; `ref` préremplit
@@ -246,13 +279,22 @@ export class NewSessionDialog {
     ($("f-conn-wrap") as HTMLElement).hidden = conns.length < 2;
     dlgErr("f-err", null); // chaque ouverture repart d'une zone propre
     $("f-status").hidden = true; // bandeau d'attente d'un appel encore en vol
-    const effConn = cs.disabled ? (conn ?? "") : cs.value;
-    await this.fillAgents(effConn, ref?.agent);
     if (ref) ($("f-cwd") as HTMLInputElement).value = ref.cwd;
-    // Suggestions de modèles : union des config_options connues des sessions
-    this.modelSessions = await call<SessionMeta[]>("list_sessions").catch(() => [] as SessionMeta[]);
-    this.renderModelList();
-    ($("dlg-new") as HTMLDialogElement).showModal();
+    // Ouverture immédiate : list_agents et list_sessions partent en
+    // parallèle APRÈS showModal — sur un lien SSH congestionné, les
+    // awaits en série coûtaient 2 RTT (sinon plus) avant le modal.
+    const dlg = $("dlg-new") as HTMLDialogElement;
+    if (!dlg.open) dlg.showModal();
+    const effConn = cs.disabled ? (conn ?? "") : cs.value;
+    this.loadAgents(effConn, ref?.agent);
+    // Suggestions de modèles : union des config_options connues des
+    // sessions — le datalist se remplit à l'arrivée, sans bloquer.
+    void call<SessionMeta[]>("list_sessions")
+      .then((sessions) => {
+        this.modelSessions = sessions;
+        this.renderModelList();
+      })
+      .catch(() => {});
   }
 
   /** Sessions sources des suggestions de modèles (union des
@@ -348,23 +390,14 @@ export class NewSessionDialog {
     return cands[0]?.id ?? null;
   }
 
-  // Changement de serveur cible → recharger les agents de ce serveur. Token de
-  // séquence : un changement plus récent invalide la réponse encore en vol.
+  // Jeton de séquence des chargements d'agents (open + changement de
+  // serveur) : une réponse plus ancienne n'écrase jamais la plus
+  // récente, et le spinner ne s'arrête que sur la dernière en vol.
   private agentsReq = 0;
 
   init() {
-    $("f-conn").addEventListener("change", async () => {
-      const req = ++this.agentsReq;
-      const conn = ($("f-conn") as HTMLSelectElement).value;
-      this.agentPlaceholder(t("agents_loading"));
-      try {
-        const agents = await this.listAgents(conn);
-        if (req === this.agentsReq) this.renderAgents(agents);
-      } catch (e) {
-        if (req !== this.agentsReq) return;
-        this.agentPlaceholder(`⚠ ${t("agents_failed")}`);
-        dlgErr("f-err", String(e));
-      }
+    $("f-conn").addEventListener("change", () => {
+      this.loadAgents(($("f-conn") as HTMLSelectElement).value);
     });
 
     $("f-agent").addEventListener("change", () => this.applyAgentCaps());

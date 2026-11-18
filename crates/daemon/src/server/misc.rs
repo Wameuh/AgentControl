@@ -373,16 +373,54 @@ pub(crate) fn command_available(cmd: &str) -> bool {
     command_path(cmd).is_some()
 }
 
+/// TTL du cache de `command_path` : chaque `list_agents` (et chaque
+/// `daemon_status`, `agent_profile`, auto-discovery) re-sonde la
+/// disponibilité de chaque binaire — un `stat` par dossier PATH par
+/// candidat, plus le `read_dir` de `nvm_node_bin` — des centaines de
+/// syscalls bloquants sur le runtime async à chaque appel, et
+/// `daemon_status` est pollé en continu par les clients. 10 s : un
+/// binaire installé après le boot devient `available` au plus 10 s
+/// plus tard — très en dessous de la cadence de re-scan des profils
+/// (60 s) et invisible à l'échelle d'un spawn.
+const CMD_PATH_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Cache court `argv[0] → résolution` partagé par tous les appelants
+/// de `command_path` (`available`, `effective_command`,
+/// auto-discovery, spawn). Les misses (binaire absent) sont cachés
+/// aussi — ce sont eux qui coûtent le plus : le scan balaaye tous
+/// les dossiers. Borné par la variété des argv[0] vus (~dizaines).
+fn cmd_path_cache(
+) -> &'static std::sync::Mutex<HashMap<String, (std::time::Instant, Option<PathBuf>)>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<String, (std::time::Instant, Option<PathBuf>)>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 /// Résout `argv[0]` en chemin concret : absolu existant+exécutable, ou
 /// premier hit sur le PATH effectif du démon — `agent_path_dirs()`
 /// (dossiers usuels injectés par `ensure_agent_path` au boot) puis le
 /// PATH process. La recherche refait ses stats à chaque appel : un
 /// binaire installé APRÈS le démarrage dans l'un de ces dossiers est
-/// `available` sans restart. `None` = introuvable — `available:false`
-/// côté list_agents. Le chemin absolu retourné lève l'ambiguïté d'un
-/// nom générique (`agent` peut désigner autre chose selon la machine).
+/// `available` sans restart (borné par `CMD_PATH_TTL`). `None` =
+/// introuvable — `available:false` côté list_agents. Le chemin absolu
+/// retourné lève l'ambiguïté d'un nom générique (`agent` peut désigner
+/// autre chose selon la machine).
 pub(crate) fn command_path(cmd: &str) -> Option<std::path::PathBuf> {
-    command_path_in(cmd, &search_dirs())
+    {
+        let cache = cmd_path_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, hit)) = cache.get(cmd) {
+            if at.elapsed() < CMD_PATH_TTL {
+                return hit.clone();
+            }
+        }
+    }
+    let resolved = command_path_in(cmd, &search_dirs());
+    cmd_path_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(cmd.to_string(), (std::time::Instant::now(), resolved.clone()));
+    resolved
 }
 
 /// Dossiers fouillés par `command_path`, dans l'ordre : `agent_path_dirs()`
