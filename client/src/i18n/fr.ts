@@ -383,6 +383,7 @@ export const fr: Record<Key, string> = {
   peer_from: "de", peer_to: "vers",
   agent_missing: "non installé",
   agent_searched: "recherche de",
+  agent_install: "Installer", agent_installing: "Installation…",
   um_expand: "Afficher tout", um_collapse: "Réduire",
   win_min: "Réduire", win_max: "Agrandir",
   search_title: "Rechercher dans l'historique",

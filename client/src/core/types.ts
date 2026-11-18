@@ -175,8 +175,14 @@ export type AgentOpt = {
   command?: string[];
   commands?: string[][];
   /** Présent quand available === false : pourquoi indisponible —
-   *  argv[0] recherchés + hint d'install. */
-  unavailable?: { searched?: string[]; hint?: string } | null;
+   *  argv[0] recherchés + hint d'install. `installable` = le registre
+   *  connaît une commande d'installation (install_agent_adapter, #277)
+   *  → le client propose le bouton « installer ». */
+  unavailable?: {
+    searched?: string[];
+    hint?: string;
+    installable?: boolean;
+  } | null;
   /** Modèles sélectionnables hors annonce ACP du profil
    *  ([agents.<id>.extra_models] / registre auto — ex. opus de
    *  claude) : le client les fusionne à caps.models dans la vue des

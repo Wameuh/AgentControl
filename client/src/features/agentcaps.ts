@@ -76,6 +76,7 @@ export class AgentCapsDialog {
   private agents: AgentOpt[] = [];
   private conn = "";
   private probing = new Set<string>();
+  private installing = new Set<string>();
 
   open(conn?: string) {
     const dlg = $("dlg-agentcaps") as HTMLDialogElement;
@@ -126,15 +127,24 @@ export class AgentCapsDialog {
       const card = document.createElement("section");
       card.className = "ac-card";
       const badges: string[] = [];
+      const installable =
+        a.available === false && a.unavailable?.installable === true;
       if (a.available === false)
         badges.push(`<span class="badge warn">${esc(t("agent_missing"))}</span>`);
       if (a.via) badges.push(`<span class="badge">${esc(a.via)}</span>`);
       const models = mergedModels(a);
+      // Profil indisponible mais installable (registre agents_auto,
+      // #277) : bouton « installer » — le démon exécute le npm i -g
+      // déclaré (install_agent_adapter), le rescan le voit ensuite.
+      const installBtn = installable
+        ? `<button type="button" class="ac-probe ac-install" ${this.installing.has(a.id) ? "disabled" : ""}>${esc(this.installing.has(a.id) ? t("agent_installing") : t("agent_install"))}</button>`
+        : "";
       card.innerHTML = `
         <header class="ac-head">
           <strong>${esc(a.name)}</strong> <code>${esc(a.id)}</code>
           ${badges.join(" ")}
           <span class="ac-sp"></span>
+          ${installBtn}
           <button type="button" class="ac-probe" ${this.probing.has(a.id) || a.available === false ? "disabled" : ""}>
             ${esc(this.probing.has(a.id) ? t("caps_probing") : t("caps_reprobe"))}
           </button>
@@ -147,8 +157,21 @@ export class AgentCapsDialog {
           </div>
           <div class="ac-co-wrap"><h5>${esc(t("caps_config"))}</h5>${fmtConfigOptions(caps?.config_options)}</div>
         </div>`;
-      const btn = card.querySelector<HTMLButtonElement>(".ac-probe");
+      const btn = card.querySelector<HTMLButtonElement>(".ac-probe:not(.ac-install)");
       if (btn) btn.onclick = () => void this.probe(a.id);
+      const ibtn = card.querySelector<HTMLButtonElement>(".ac-install");
+      if (ibtn)
+        ibtn.onclick = () => {
+          ibtn.title = [
+            a.unavailable?.searched?.length
+              ? `${t("agent_searched")}: ${a.unavailable.searched.join(", ")}`
+              : "",
+            a.unavailable?.hint ?? "",
+          ]
+            .filter(Boolean)
+            .join(" — ");
+          void this.install(a.id);
+        };
       list.appendChild(card);
     }
   }
@@ -176,6 +199,30 @@ export class AgentCapsDialog {
     await this.reload();
   }
 
+  /** Installe l'adaptateur ACP du profil côté démon
+   *  (install_agent_adapter — npm i -g du registre, #277) puis
+   *  recharge : le rescan PATH rend le profil available sans
+   *  restart. Erreur (npm absent, EACCES, réseau) → ac-err. */
+  private async install(agent: string) {
+    if (this.installing.has(agent)) return;
+    this.installing.add(agent);
+    this.render();
+    dlgErr("ac-err", null);
+    try {
+      await call("install_agent_adapter", {
+        agent,
+        ...(this.conn ? { conn: this.conn } : {}),
+      });
+    } catch (e) {
+      dlgErr("ac-err", String(e));
+      this.installing.delete(agent);
+      this.render();
+      return;
+    }
+    this.installing.delete(agent);
+    await this.reload();
+  }
+
   init() {
     const dlg = $("dlg-agentcaps") as HTMLDialogElement;
     $("ac-close").onclick = () => dlg.close();
@@ -186,6 +233,7 @@ export class AgentCapsDialog {
     };
     dlg.addEventListener("close", () => {
       this.probing.clear();
+      this.installing.clear();
       this.agents = [];
     });
   }

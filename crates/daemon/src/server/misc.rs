@@ -60,6 +60,10 @@ impl Daemon {
             // Idem pour ReqKind::DaemonLogTail (panneau logs
             // live — onglet « Démon »).
             "daemon_logs": true,
+            // Idem pour ReqKind::InstallAgentAdapter (bouton
+            // « installer » du dialogue nouvelle session —
+            // agents_install.rs, #277).
+            "agent_install": true,
             // Idem pour ReqKind::ModelCatalog (variantes modèle
             // hors annonce ACP — catalogue.rs, clés
             // catalogue_cmd/model_override_cmd des profils).
@@ -363,7 +367,14 @@ fn unavailable_info(id: &str, p: &AgentProfile) -> Value {
              daemon PATH (~/.local/bin, npm-global, nvm, mise…)"
                 .to_string()
         });
-    json!({ "searched": searched, "hint": hint })
+    json!({
+        "searched": searched,
+        "hint": hint,
+        // Vrai quand le registre connaît une commande d'installation
+        // pour cet id → le client propose le bouton « installer »
+        // (install_agent_adapter, #277). Additif : absent = false.
+        "installable": crate::server::agents_auto::install_cmds_for(id).is_some(),
+    })
 }
 
 /// `argv[0]` d'un profil agent résolvable : binaire sur le PATH du démon

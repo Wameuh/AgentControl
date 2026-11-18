@@ -1455,6 +1455,18 @@ pub enum ReqKind {
     RefreshAgentCaps {
         agent: String,
     },
+    /// Provisionne l'adaptateur ACP d'un agent du registre
+    /// (agents_auto) côté démon — exécute les commandes d'installation
+    /// déclarées (`npm i -g …`, dans le HOME de l'utilisateur, jamais
+    /// de sudo, timeout borné ; `unavailable.installable` de
+    /// list_agents annonce la capacité). Déclenché par l'utilisateur
+    /// (bouton « installer » du dialogue nouvelle session,
+    /// `acctl agents install <id>`). No-op `{already:true}` quand un
+    /// adaptateur est déjà résolvable ; les candidates sont essayées
+    /// dans l'ordre jusqu'à ce qu'un binaire du profil resolve.
+    /// Réponse : `{agent, installed, already?, command?, resolved?}`.
+    /// Extension additive : démons anciens → erreur « req inconnue ».
+    InstallAgentAdapter { agent: String },
     /// Verdict de review de PR rendu en A2A par la session reviewer
     /// (pont MCP `agentcontrol_report_verdict`) : push direct au démon,
     /// qui poste lui-même le commentaire GitHub — la sortie de review
@@ -1572,6 +1584,7 @@ impl ReqKind {
             Self::DaemonStatus => "daemon_status",
             Self::UpdateDaemon { .. } => "update_daemon",
             Self::RefreshAgentCaps { .. } => "refresh_agent_caps",
+            Self::InstallAgentAdapter { .. } => "install_agent_adapter",
             Self::ReviewReport { .. } => "review_report",
             Self::PrReviewRequest { .. } => "pr_review_request",
         }

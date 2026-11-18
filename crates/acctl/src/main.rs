@@ -1,7 +1,7 @@
 //! acctl — client CLI de test pour agentcontrol-daemon.
 //!
 //! Usage :
-//!   acctl status | agents | list
+//!   acctl status | agents [install <id>] | list
 //!   acctl new <agent> <cwd> [prompt...] [--title T] [--mode M] [--model X]
 //!               [--origin O]   (provenance service — badge « via » client ;
 //!               ex. --origin service:backlog-orchestrator)
@@ -308,7 +308,25 @@ async fn main() -> Result<()> {
                 c.call(proto::ReqKind::UpdateDaemon { version }).await?
             );
         }
-        "agents" => println!("{}", c.call(proto::ReqKind::ListAgents).await?),
+        "agents" => {
+            // `agents install <id>` : provisioning de l'adaptateur ACP
+            // côté démon (npm i -g déclaré par le registre — #277) ;
+            // sans argument → liste des profils comme avant.
+            if args.get(1).map(String::as_str) == Some("install") {
+                let id = args
+                    .get(2)
+                    .context("usage: acctl agents install <id>")?;
+                println!(
+                    "{}",
+                    c.call(proto::ReqKind::InstallAgentAdapter {
+                        agent: id.clone(),
+                    })
+                    .await?
+                );
+            } else {
+                println!("{}", c.call(proto::ReqKind::ListAgents).await?);
+            }
+        }
         "list" => {
             let v = c.call(proto::ReqKind::ListSessions).await?;
             // Registre PR (tolère un vieux démon qui n'a pas pr_list).

@@ -386,6 +386,7 @@ export const es: Record<Key, string> = {
   peer_from: "de", peer_to: "a",
   agent_missing: "no instalado",
   agent_searched: "buscado",
+  agent_install: "Instalar", agent_installing: "Instalando…",
   um_expand: "Mostrar más", um_collapse: "Mostrar menos",
   win_min: "Minimizar", win_max: "Maximizar",
   search_title: "Buscar en el historial",

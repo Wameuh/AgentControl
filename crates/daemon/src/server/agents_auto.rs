@@ -37,6 +37,12 @@ pub(crate) struct AdapterSpec {
     pub detect: &'static [&'static str],
     /// Hint affiché quand le profil est indisponible.
     pub install_hint: &'static str,
+    /// Commandes d'installation candidates (argv complets, sans shell),
+    /// essayées dans l'ordre par `install_agent_adapter` (#277) jusqu'à
+    /// ce qu'un binaire de `commands` resolve — `npm i -g <pkg>` pour
+    /// tous les adaptateurs du registre. Vide = pas de provisioning
+    /// automatique (hint manuel seul).
+    pub install: &'static [&'static [&'static str]],
     /// Modèles sélectionnables hors annonce ACP pour ce profil —
     /// paires (value, label) fusionnées dans `extra_models` du profil
     /// auto (ex. opus de claude-code-acp, absent de availableModels
@@ -59,6 +65,10 @@ pub(crate) const KNOWN_ADAPTERS: &[AdapterSpec] = &[
         install_hint: "npm i -g @zed-industries/claude-code-acp \
              (ou @agentclientprotocol/claude-agent-acp) — le CLI `claude` \
              seul n'expose pas ACP",
+        install: &[
+            &["npm", "i", "-g", "@zed-industries/claude-code-acp"],
+            &["npm", "i", "-g", "@agentclientprotocol/claude-agent-acp"],
+        ],
         // claude-code-acp (0.16.x, dernière) n'annonce que
         // default/sonnet/haiku dans availableModels — « default » EST
         // Opus, mais aucun modèle « opus » explicite. L'adaptateur
@@ -72,9 +82,16 @@ pub(crate) const KNOWN_ADAPTERS: &[AdapterSpec] = &[
         name: "Codex CLI",
         commands: &[&["codex-acp"]],
         detect: &["codex"],
-        install_hint: "npm i -g @zed-industries/codex-acp \
-             (ou @agentclientprotocol/codex-acp) — le CLI `codex` \
+        install_hint: "npm i -g @agentclientprotocol/codex-acp \
+             (ou @zed-industries/codex-acp, archivé) — le CLI `codex` \
              seul n'expose pas ACP",
+        // zed-industries/codex-acp est archivé — @agentclientprotocol
+        // est l'adaptateur vivant (cf. Known pitfalls AGENTS.md) :
+        // essayée en premier, la candidate zed reste en repli.
+        install: &[
+            &["npm", "i", "-g", "@agentclientprotocol/codex-acp"],
+            &["npm", "i", "-g", "@zed-industries/codex-acp"],
+        ],
         extra_models: &[],
     },
     AdapterSpec {
@@ -83,6 +100,7 @@ pub(crate) const KNOWN_ADAPTERS: &[AdapterSpec] = &[
         commands: &[&["gemini", "--experimental-acp"]],
         detect: &[],
         install_hint: "npm i -g @google/gemini-cli",
+        install: &[&["npm", "i", "-g", "@google/gemini-cli"]],
         extra_models: &[],
     },
     AdapterSpec {
@@ -91,6 +109,7 @@ pub(crate) const KNOWN_ADAPTERS: &[AdapterSpec] = &[
         commands: &[&["opencode", "acp"]],
         detect: &[],
         install_hint: "npm i -g opencode-ai",
+        install: &[&["npm", "i", "-g", "opencode-ai"]],
         extra_models: &[],
     },
 ];
@@ -191,6 +210,18 @@ pub(crate) fn install_hint_for(id: &str) -> Option<&'static str> {
         .map(|s| s.install_hint)
 }
 
+/// Commandes d'installation candidates d'un id du registre — `None`
+/// quand l'adaptateur n'a pas de provisioning automatique (id hors
+/// registre, ou spec sans `install`). Couvre les profils auto ET les
+/// `[agents.<id>]` déclarés à la main pour un adaptateur connu.
+pub(crate) fn install_cmds_for(id: &str) -> Option<&'static [&'static [&'static str]]> {
+    KNOWN_ADAPTERS
+        .iter()
+        .find(|s| s.id == id)
+        .map(|s| s.install)
+        .filter(|i| !i.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,5 +310,19 @@ mod tests {
             .contains("claude-code-acp"));
         assert!(install_hint_for("codex").is_some());
         assert!(install_hint_for("devin").is_none());
+    }
+
+    /// `install_cmds_for` : chaque spec du registre déclare au moins
+    /// une commande d'install npm, les ids hors registre n'en ont pas.
+    #[test]
+    fn install_cmds_pour_les_specs_connus() {
+        for id in ["claude", "codex", "gemini", "opencode"] {
+            let cmds = install_cmds_for(id).expect(id);
+            assert!(cmds.iter().all(|c| c.first() == Some(&"npm")), "{id}");
+        }
+        // claude/codex ont des packages candidats de repli.
+        assert!(install_cmds_for("claude").unwrap().len() > 1);
+        assert!(install_cmds_for("devin").is_none());
+        assert!(install_cmds_for("inconnu").is_none());
     }
 }
