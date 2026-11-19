@@ -206,8 +206,8 @@ CODEX_PATH = "/home/wameuh/.local/bin/codex" # adapter : chemin absolu du codex 
 # l'adaptateur @zed-industries/claude-code-acp, que `acp-claude`
 # n'implémente pas : pour l'utiliser, déclarer [agents.claude] avec
 # `command = ["claude-code-acp"]` (npm i -g @zed-industries/claude-code-acp)
-# ou l'adaptateur officiel @agentclientprotocol/claude-agent-acp ne le
-# connaît pas non plus). "off" est toujours proposé (désactive
+# — l'adaptateur officiel @agentclientprotocol/claude-agent-acp ne le
+# connaît pas non plus. "off" est toujours proposé (désactive
 # explicitement). Changer de valeur recycle le process agent. Sans
 # clé : aucun sélecteur.
 # advisor_models = ["fable", "opus", "sonnet"]

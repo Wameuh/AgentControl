@@ -144,10 +144,9 @@ fn auto_profile(spec: &AdapterSpec) -> AgentProfile {
         catalogue_cmd: None,
         model_override_cmd: None,
         // Les extra_models du spec sont des compléments d'annonce
-        // contrôlés par le registre (ex. opus de claude-code-acp,
-        // absent d'availableModels alors que session/set_model
-        // l'accepte — vérifié sur l'adaptateur 0.16.x) ; advisor
-        // reste réservé à une section [agents.<id>] explicite.
+        // contrôlés par le registre (ex. opus de claude, absent
+        // d'availableModels alors que session/set_model l'accepte) ;
+        // advisor reste réservé à une section [agents.<id>] explicite.
         extra_models: spec
             .extra_models
             .iter()
