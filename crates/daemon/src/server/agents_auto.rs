@@ -11,8 +11,9 @@
 //! l'auto-détection (même id → `via:config`, upsert du hot-reload) ;
 //! les presets built-in (devin, cursor) ne sont pas dans le registre.
 //!
-//! `commands` = fallbacks essayés dans l'ordre (ex. claude-code-acp
-//! puis claude-agent-acp) ; `detect` = binaires « outil » dont la
+//! `commands` = fallbacks essayés dans l'ordre — pour `claude` il n'y
+//! a plus qu'`acp-claude` (les adaptateurs npm ne sont plus proposés
+//! automatiquement, #285) ; `detect` = binaires « outil » dont la
 //! présence suffit à lister le profil même sans adaptateur — c'est le
 //! cas « Claude Code installé mais adaptateur absent » : le profil
 //! apparaît `available:false` avec le hint d'install au lieu de rester
@@ -40,46 +41,50 @@ pub(crate) struct AdapterSpec {
     /// Commandes d'installation candidates (argv complets, sans shell),
     /// essayées dans l'ordre par `install_agent_adapter` (#277) jusqu'à
     /// ce qu'un binaire de `commands` resolve — `npm i -g <pkg>` pour
-    /// tous les adaptateurs du registre. Vide = pas de provisioning
-    /// automatique (hint manuel seul).
+    /// les adaptateurs tiers du registre. Vide = pas de provisioning
+    /// automatique : l'install renvoie l'erreur « no automatic install
+    /// known » + `install_hint` (cas `claude` : `acp-claude` est livré
+    /// avec le démon, il faut le mettre à jour — #285).
     pub install: &'static [&'static [&'static str]],
     /// Modèles sélectionnables hors annonce ACP pour ce profil —
     /// paires (value, label) fusionnées dans `extra_models` du profil
-    /// auto (ex. opus de claude-code-acp, absent de availableModels
-    /// alors que session/set_model l'accepte). Vide = rien à ajouter.
+    /// auto (ex. opus de claude, absent d'availableModels alors que
+    /// session/set_model l'accepte). Vide = rien à ajouter.
     pub extra_models: &'static [(&'static str, &'static str)],
 }
 
 /// Registre des adaptateurs ACP connus. `claude` : `acp-claude`
-/// (#280, binaire Rust livré dans le tarball) est l'adaptateur
-/// maison — les npm `claude-code-acp`/`claude-agent-acp` restent en
-/// repli. `codex` : idem, `codex` seul ne parle pas
-/// ACP — l'adaptateur `codex-acp` est requis. `gemini` et `opencode`
-/// portent leur mode ACP dans leurs propres flags/sous-commandes.
+/// (#280, binaire Rust livré dans le tarball) est l'UNIQUE chemin
+/// automatique — les adaptateurs npm `claude-code-acp`/
+/// `claude-agent-acp` ne sont plus proposés ni installés par le
+/// démon (#285 ; un `[agents.claude]` manuel peut toujours les
+/// viser, override explicite de l'utilisateur). `codex` : `codex`
+/// seul ne parle pas ACP — l'adaptateur npm `codex-acp` reste le
+/// chemin en attendant `acp-codex`. `gemini` et `opencode` portent
+/// leur mode ACP dans leurs propres flags/sous-commandes.
 pub(crate) const KNOWN_ADAPTERS: &[AdapterSpec] = &[
     AdapterSpec {
         id: "claude",
         name: "Claude",
         // acp-claude (#280) : adaptateur Rust maison livré dans le
         // tarball à côté du démon — spawn `claude -p --input-format
-        // stream-json`, pas de dépendance node. Essayé en premier ;
-        // les adaptateurs npm restent le repli si le binaire maison
-        // n'est pas dans le PATH (vieil install, PATH minimal).
-        commands: &[&["acp-claude"], &["claude-code-acp"], &["claude-agent-acp"]],
+        // stream-json`, pas de dépendance node. Unique candidat
+        // automatique (#285) : les adaptateurs npm claude-code-acp /
+        // claude-agent-acp ne sont plus essayés — un `[agents.claude]`
+        // déclaré à la main peut toujours les viser explicitement.
+        commands: &[&["acp-claude"]],
         detect: &["claude"],
-        install_hint: "acp-claude est livré avec AgentControl (exige le \
-             CLI `claude` — l'installer si absent) ; sinon adaptateur npm : \
-             npm i -g @zed-industries/claude-code-acp",
-        install: &[
-            &["npm", "i", "-g", "@zed-industries/claude-code-acp"],
-            &["npm", "i", "-g", "@agentclientprotocol/claude-agent-acp"],
-        ],
-        // claude-code-acp (0.16.x, dernière) n'annonce que
-        // default/sonnet/haiku dans availableModels — « default » EST
-        // Opus, mais aucun modèle « opus » explicite. L'adaptateur
-        // accepte session/set_model avec n'importe quel id (alias CLI
-        // claude : opus, claude-opus-4-5…) → opus proposé en extra,
-        // fusionné dans available_models au handshake (session/agent.rs).
+        install_hint: "acp-claude est livré avec AgentControl — \
+             réinstaller ou mettre à jour le démon (et installer le \
+             CLI `claude` s'il est absent)",
+        // Pas de provisioning npm pour claude : acp-claude arrive avec
+        // le démon (daemon-update le pose depuis #284) — « installer »
+        // renvoie l'erreur no-automatic-install + le hint ci-dessus.
+        install: &[],
+        // « opus » reste proposé en extra : session/set_model accepte
+        // les alias CLI claude (opus, claude-opus-4-5…) même quand
+        // l'annonce ne les liste pas — fusion dédupliquée dans
+        // available_models au handshake (session/agent.rs).
         extra_models: &[("opus", "Opus")],
     },
     AdapterSpec {
@@ -258,23 +263,49 @@ mod tests {
         let (a, r) = sync_auto_agents(&mut agents, &|_| false);
         assert!(a.is_empty() && r.is_empty() && agents.is_empty());
 
-        // claude-code-acp présent → profil claude auto.
-        let (a, _) = sync_auto_agents(&mut agents, &|b| b == "claude-code-acp");
+        // acp-claude présent → profil claude auto, unique commande.
+        let (a, _) = sync_auto_agents(&mut agents, &|b| b == "acp-claude");
         assert_eq!(a, vec!["claude".to_string()]);
         let p = &agents["claude"];
         assert_eq!(p.via, AgentVia::Auto);
-        assert_eq!(p.commands.len(), 3);
-        // opus : absent d'availableModels chez claude-code-acp, mais
-        // session/set_model l'accepte → extra_models du registre.
+        assert_eq!(p.commands, vec![vec!["acp-claude".to_string()]]);
+        // opus : session/set_model accepte les alias CLI même hors
+        // annonce → extra_models du registre.
         assert_eq!(p.extra_models.len(), 1);
         assert_eq!(p.extra_models[0].value, "opus");
         // Second scan idempotent : ni ajout ni retrait.
-        let (a2, r2) = sync_auto_agents(&mut agents, &|b| b == "claude-code-acp");
+        let (a2, r2) = sync_auto_agents(&mut agents, &|b| b == "acp-claude");
         assert!(a2.is_empty() && r2.is_empty());
         // Adaptateur disparu → profil auto retiré.
         let (_, r3) = sync_auto_agents(&mut agents, &|_| false);
         assert_eq!(r3, vec!["claude".to_string()]);
         assert!(!agents.contains_key("claude"));
+    }
+
+    /// #285 : les adaptateurs npm claude-code-acp / claude-agent-acp
+    /// ne sont plus des candidats automatiques — même installés, ils
+    /// ne font ni apparaître ni basculer le profil claude (qui reste
+    /// listé via `detect` quand le CLI `claude` est là, indisponible
+    /// avec le hint « mettre à jour le démon »).
+    #[test]
+    fn npm_adapters_ne_sont_plus_des_candidats() {
+        let mut agents = HashMap::new();
+        // Seuls les npm sont présents (pas de CLI claude, pas
+        // d'acp-claude) → aucun profil auto.
+        let (a, _) = sync_auto_agents(&mut agents, &|b| {
+            b == "claude-code-acp" || b == "claude-agent-acp"
+        });
+        assert!(a.is_empty() && agents.is_empty());
+        // CLI claude + npm résiduels, acp-claude absent → profil listé
+        // (detect) mais commands = acp-claude seul : pas de bascule.
+        let (a, _) = sync_auto_agents(&mut agents, &|b| {
+            b == "claude" || b == "claude-code-acp" || b == "claude-agent-acp"
+        });
+        assert_eq!(a, vec!["claude".to_string()]);
+        assert_eq!(
+            agents["claude"].commands,
+            vec![vec!["acp-claude".to_string()]]
+        );
     }
 
     /// Outil présent sans adaptateur (claude CLI seul) → profil listé
@@ -299,7 +330,7 @@ mod tests {
                 ..profile(&[&["mon-adaptateur"]])
             },
         );
-        let (a, r) = sync_auto_agents(&mut agents, &|b| b == "claude-code-acp");
+        let (a, r) = sync_auto_agents(&mut agents, &|b| b == "acp-claude");
         assert!(a.is_empty() && r.is_empty());
         assert_eq!(agents["claude"].commands[0], vec!["mon-adaptateur"]);
     }
@@ -307,23 +338,26 @@ mod tests {
     /// `install_hint_for` couvre les ids du registre (auto et déclarés).
     #[test]
     fn hint_pour_les_ids_connus() {
-        assert!(install_hint_for("claude")
-            .unwrap()
-            .contains("claude-code-acp"));
+        // claude : acp-claude livré avec le démon → hint « update »,
+        // plus aucune suggestion npm (#285).
+        let hint = install_hint_for("claude").unwrap();
+        assert!(hint.contains("acp-claude") && hint.contains("mettre à jour"));
+        assert!(!hint.contains("npm"));
         assert!(install_hint_for("codex").is_some());
         assert!(install_hint_for("devin").is_none());
     }
 
-    /// `install_cmds_for` : chaque spec du registre déclare au moins
-    /// une commande d'install npm, les ids hors registre n'en ont pas.
+    /// `install_cmds_for` : codex/gemini/opencode gardent leur
+    /// provisioning npm ; claude n'en a plus (acp-claude arrive avec
+    /// le démon — #285) ; les ids hors registre n'en ont pas.
     #[test]
     fn install_cmds_pour_les_specs_connus() {
-        for id in ["claude", "codex", "gemini", "opencode"] {
+        for id in ["codex", "gemini", "opencode"] {
             let cmds = install_cmds_for(id).expect(id);
             assert!(cmds.iter().all(|c| c.first() == Some(&"npm")), "{id}");
         }
-        // claude/codex ont des packages candidats de repli.
-        assert!(install_cmds_for("claude").unwrap().len() > 1);
+        assert!(install_cmds_for("claude").is_none());
+        assert!(install_cmds_for("codex").unwrap().len() > 1);
         assert!(install_cmds_for("devin").is_none());
         assert!(install_cmds_for("inconnu").is_none());
     }

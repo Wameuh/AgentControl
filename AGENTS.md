@@ -195,14 +195,16 @@ restarts under its supervisor and re-parses at boot).
 
 **Auto-discovered agent profiles** (`server/agents_auto.rs`, #261):
 the daemon embeds a registry of known ACP adapters (claude →
-`acp-claude` first — the in-house Rust binary shipped in the tarball,
-#280 — then `claude-code-acp`/`claude-agent-acp` npm fallbacks;
-codex → `codex-acp`, gemini,
+`acp-claude` — the in-house Rust binary shipped in the tarball,
+#280 — as the ONLY automatic path since #285; the npm
+`claude-code-acp`/`claude-agent-acp` are no longer tried, though a
+manual `[agents.claude]` may still point at them; codex → `codex-acp`
+npm until `acp-codex` exists, gemini,
 opencode) and re-syncs it on every `reload_agent_profiles` call —
 an adapter installed after boot appears as a `via:"auto"` profile
 without restart or config; a declared `[agents.*]` always wins (same
 id → `via:"config"`). A profile whose tool is installed but whose
-adapter is missing (e.g. `claude` CLI without `claude-code-acp`) is
+adapter is missing (e.g. `claude` CLI without `acp-claude`) is
 still listed, `available:false` — `list_agents` then exposes
 `unavailable:{searched, hint}` (install hint per known adapter,
 generic PATH hint otherwise) shown as a tooltip in the new-session
@@ -214,7 +216,10 @@ catalogue); `via` is `builtin`/`config`/`auto`.
 
 **Adapter provisioning** (`server/agents_install.rs`, #277): each
 registry spec also declares `install` — ordered `npm i -g <pkg>`
-candidates. The `install_agent_adapter` RPC (button « Install » of
+candidates for the third-party adapters (codex, gemini, opencode);
+`claude` declares none since #285 (`acp-claude` ships with the
+daemon — the Install action fails with the « update the daemon »
+hint instead of `npm i -g`). The `install_agent_adapter` RPC (button « Install » of
 the agent-capabilities dialog on `available:false` +
 `unavailable.installable`, or `acctl agents install <id>`) runs them
 daemon-side, user-triggered only: no shell, never sudo, 300 s timeout,
@@ -599,7 +604,8 @@ gitignorées (`.gitignore` racine).
   required to the standalone codex binary: otherwise the adapter takes
   its bundled `@openai/codex` npm (optional dep missing on arm64), and
   via npx `codex` in PATH is the npm wrapper, not the real CLI.
-- Claude: `acp-claude` (in-house, #280) spawns the real `claude` CLI
+- Claude: `acp-claude` (in-house, #280, sole automatic adapter since
+  #285) spawns the real `claude` CLI
   (`-p --input-format stream-json`) → the CLI must be installed
   (unlike `claude-agent-acp`, which bundles the Agent SDK). Auth:
   ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`,

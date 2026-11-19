@@ -91,17 +91,17 @@ spawn_max_sessions = 20
 #
 # Auto-découverte : le démon sonde le PATH à chaque list_agents /
 # daemon_status / spawn et enregistre seul les adaptateurs ACP connus
-# (claude-code-acp / claude-agent-acp, codex-acp, gemini, opencode) —
+# (claude via `acp-claude`, codex via `codex-acp`, gemini, opencode) —
 # profils marqués `via: "auto"` dans list_agents, sans restart ni
 # déclaration. Un profil `[agents.*]` déclaré ICI prime toujours sur
 # l'auto-détection (même id → la config gagne). Quand l'outil est
-# installé mais pas l'adaptateur (ex. CLI `claude` sans claude-code-acp),
+# installé mais pas l'adaptateur (ex. CLI `claude` sans `acp-claude`),
 # le profil apparaît indisponible avec le motif + le hint d'install.
 #
 # `command` accepte aussi des fallbacks : une liste de commandes
 # candidates essayées dans l'ordre, la première dont le binaire
 # (argv[0]) résout sur le PATH gagne — ex.
-#   command = [["claude-code-acp"], ["claude-agent-acp"]]
+#   command = [["mon-adaptateur"], ["mon-adaptateur", "--acp"]]
 #
 # Les sections [agents.*] sont rechargées À CHAUD : une section ajoutée ou
 # modifiée dans ce fichier est prise en compte au prochain list_agents /
@@ -164,36 +164,34 @@ command = ["codex-acp"]
 [agents.codex.env]
 CODEX_PATH = "/home/wameuh/.local/bin/codex" # adapter : chemin absolu du codex standalone
 
-# Claude — pas d'ACP natif : via un adaptateur séparé. Le CLI `claude`
-# (installeur natif → ~/.local/bin/claude) ne fournit PAS l'adaptateur :
-#   - `npm i -g @zed-industries/claude-code-acp` → binaire `claude-code-acp`
-#     (celui-ci connaît `_meta.claudeCode.options` : advisorModels,
-#     extra_models Fable — voir plus bas)
-#   - `npm i -g @agentclientprotocol/claude-agent-acp` → binaire
-#     `claude-agent-acp` (embarque le Claude Agent SDK → le CLI `claude`
-#     n'est PAS requis non plus)
-# L'auto-découverte essaie les deux dans cet ordre : installer l'un des
-# deux adaptateurs fait apparaître le profil `claude` sans rien déclarer
-# ici ; `claude` seul installé → profil grisé « non installé » avec le
-# hint d'install. Déclarer [agents.claude] prime sur l'auto (ex. pour
-# fixer un seul adaptateur, ajouter des env ou des extra_models).
+# Claude — adaptateur maison `acp-claude`, livré dans le tarball à
+# côté du démon (et posé par daemon-update) : aucun npm requis, le
+# profil `claude` s'auto-enregistre dès que `acp-claude` ET le CLI
+# `claude` (installeur natif → ~/.local/bin/claude) sont sur le PATH.
+# `acp-claude` absent → profil grisé avec le hint « mettre à jour le
+# démon » — les adaptateurs npm historiques (claude-code-acp /
+# claude-agent-acp) ne sont plus essayés automatiquement (#285), mais
+# un [agents.claude] déclaré à la main peut toujours les viser
+# explicitement (ex. pour l'advisor `_meta.claudeCode.options`, voir
+# plus bas). Déclarer [agents.claude] prime sur l'auto (env,
+# extra_models, max_instances…).
 # Auth requise — l'une des deux variables ci-dessous, ou OAuth existant
 # dans ~/.claude :
 #   - ANTHROPIC_API_KEY (facturation API)
 #   - CLAUDE_CODE_OAUTH_TOKEN : `npm i -g @anthropic-ai/claude-code`
 #     puis `claude setup-token` (marche en headless : URL → code).
-[agents.claude]
-name = "Claude"
-command = ["claude-agent-acp"]
+# [agents.claude]
+# name = "Claude"
+# command = ["acp-claude"]
 
 # [agents.claude.env]
 # CLAUDE_CODE_OAUTH_TOKEN = "…"
 
-# Modèles « extra » hors annonce ACP : claude-code-acp (adaptateur Zed)
-# n'expose que default/sonnet/opus/haiku — les variantes Fable restent
-# sélectionnables en les déclarant ici (session/set_model accepte la
-# valeur telle quelle ; les ids complets claude-fable-5 / claude-fable-5-1
-# passent aussi). `label` = libellé affiché dans le sélecteur.
+# Modèles « extra » hors annonce ACP : fusionnés dans la liste
+# affichée quand l'adaptateur ne les annonce pas (session/set_model
+# accepte la valeur telle quelle ; les ids complets claude-fable-5 /
+# claude-fable-5-1 passent aussi). `label` = libellé affiché dans le
+# sélecteur.
 # extra_models = [
 #   { value = "fable", label = "Fable" },
 #   { value = "fable[1m]", label = "Fable 1M" },
@@ -204,11 +202,14 @@ command = ["claude-agent-acp"]
 # Claude la refuse ; certains modèles de base exigent en plus
 # CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1 dans [agents.claude.env]) :
 # `advisor_models` affiche un sélecteur par session ; la valeur est
-# injectée au spawn via `_meta.claudeCode.options` — mécanisme propre à
-# l'adaptateur @zed-industries/claude-code-acp — l'adaptateur officiel
-# @agentclientprotocol/claude-agent-acp ne le connaît pas). "off" est
-# toujours proposé (désactive explicitement). Changer de valeur recycle
-# le process agent. Sans clé : aucun sélecteur.
+# injectée au spawn via `_meta.claudeCode.options` — mécanisme de
+# l'adaptateur @zed-industries/claude-code-acp, que `acp-claude`
+# n'implémente pas : pour l'utiliser, déclarer [agents.claude] avec
+# `command = ["claude-code-acp"]` (npm i -g @zed-industries/claude-code-acp)
+# ou l'adaptateur officiel @agentclientprotocol/claude-agent-acp ne le
+# connaît pas non plus). "off" est toujours proposé (désactive
+# explicitement). Changer de valeur recycle le process agent. Sans
+# clé : aucun sélecteur.
 # advisor_models = ["fable", "opus", "sonnet"]
 
 # Exemples d'autres agents ACP (adapter la commande) :
