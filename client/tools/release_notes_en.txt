@@ -175,4 +175,4 @@ sha:71fcbdf871390152ae3de8661e3fc1da87e2e3f7: ACP-only session modes (plan/smart
 353: The new-session dialog now opens instantly — agent and session lists load in the background behind a skeleton placeholder, and the daemon caches agent lookups briefly so agent lists stay snappy.
 357: Claude sessions now run through a first-party adapter bundled with the daemon — streamed replies, permission prompts, /compact and session resume work out of the box, with the npm adapter kept as fallback.
 359: The backlog orchestrator can now run a pool of workers split across agent profiles — each pool entry declares its own slot count, model, effort and mode (e.g. Devin and Claude workers side by side), and the orchestrator settings UI groups the team, planning and review options into dedicated sections with an editable worker table.
-361: Daemon self-updates now install the bundled ACP adapters (e.g. the Claude adapter) next to the daemon, so newly added agent adapters work immediately after updating.
+361: Fresh daemon installs and self-updates now install the bundled ACP adapters (e.g. the Claude adapter), so new agent adapters work immediately without a manual copy.
