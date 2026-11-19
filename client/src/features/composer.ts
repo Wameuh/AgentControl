@@ -1433,6 +1433,20 @@ export class Composer {
         }
       }).observe(chatEl);
     }
+    // Largeur du champ : #chat ne bouge pas quand les boutons du
+    // composer (alt/mic/attach) apparaissent — #input-wrap, si.
+    const wrapEl = $("input-wrap");
+    let wrapW = wrapEl?.clientWidth ?? 0;
+    if (wrapEl) {
+      new ResizeObserver(() => {
+        const w = wrapEl.clientWidth;
+        if (w > 0 && w !== wrapW) {
+          wrapW = w;
+          this.fitStale = true;
+          this.fitInput();
+        }
+      }).observe(wrapEl);
+    }
     window.addEventListener("resize", () => {
       this.fitStale = true; // largeur changée → le contenu re-wrappé
       this.fitInput();

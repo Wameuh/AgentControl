@@ -664,8 +664,11 @@ details.th .ic-thought { width: 12px; height: 12px; }
 
 /* Messages épinglés : indicateur + action au survol, panneau d'accès. */
 .msg { position: relative; }
+/* Le badge reste DANS la boîte de .ev : content-visibility:auto sur
+   les events impose contain:paint — un débordement (-7px) serait
+   clippé en permanence, pas seulement hors viewport. */
 .pin-tag {
-  position: absolute; top: -7px; right: -7px; z-index: 3;
+  position: absolute; top: 2px; right: 2px; z-index: 3;
   width: 20px; height: 20px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
   border-radius: 50%; border: 1px solid var(--line);
