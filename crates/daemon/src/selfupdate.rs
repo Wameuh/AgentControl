@@ -69,11 +69,6 @@ pub fn self_update(version: &str) -> Result<Value> {
             "restarting": false,
         }));
     }
-    let arch = match std::env::consts::ARCH {
-        "x86_64" => "x86_64",
-        "aarch64" => "aarch64",
-        a => bail!("unsupported arch: {a}"),
-    };
     let exe = std::env::current_exe().context("current_exe")?;
     // Après un update non redémarré, /proc/self/exe pointe l'inode
     // supprimé ("<chemin> (deleted)") : laisser faire renommerait vers
@@ -92,9 +87,7 @@ pub fn self_update(version: &str) -> Result<Value> {
     probe_dir_writable(&dir)
         .with_context(|| format!("binary not writable ({}) — system-managed?", exe.display()))?;
 
-    let url = format!(
-        "https://github.com/{REPO}/releases/download/v{ver}/agentcontrol-server-{arch}-linux.tar.gz"
-    );
+    let url = release_asset_url(&ver)?;
     let tgz = match http_get(&url) {
         Ok(b) => b,
         Err(HttpError::Status(404)) => bail!("{}", release_not_found(&ver)),
@@ -125,6 +118,114 @@ pub fn self_update(version: &str) -> Result<Value> {
         "path": exe.display().to_string(),
         "restarting": restarting,
     }))
+}
+
+/// Rattrapage au boot (item #289) : le swap des `acp-*` de #361
+/// s'exécute dans l'ANCIEN démon pendant l'update — un serveur qui
+/// update depuis un updater buggé (≤ 0.10.4-rc.9) vers une version
+/// fixée ne reçoit donc jamais les adaptateurs maison. Le nouveau
+/// démon vérifie au boot que les `acp-*` attendus (argv[0] `acp-*`
+/// du registre `agents_auto`) sont bien à côté de l'exe ; si l'un
+/// manque, il télécharge l'asset de SA PROPRE version et pose les
+/// `acp-*` absents — une seule commande d'update par serveur.
+///
+/// Gardes :
+/// - tous les `acp-*` attendus présents → retour immédiat, zéro
+///   réseau (cas normal post-install) ;
+/// - version sans asset publié (404) ou archive sans `acp-*` →
+///   marker `<root>/.acp-bootstrap-<version>` : un essai par version,
+///   retry automatique à la suivante ;
+/// - erreur transitoire (réseau, extraction, rename) → warn, pas de
+///   marker → retry au boot suivant ;
+/// - jamais bloquant : appelé via `spawn_blocking`, timeout HTTP
+///   borné (120 s), toute erreur → warn log + on continue (le profil
+///   reste `available:false` avec son hint) ;
+/// - `acp-*` déjà présents jamais écrasés ; dossier de l'exe non
+///   writable → warn + skip.
+pub fn acp_bootstrap(root: &Path) {
+    if let Err(e) = acp_bootstrap_inner(root) {
+        tracing::warn!("self-update: acp bootstrap failed: {e:#}");
+    }
+}
+
+fn acp_bootstrap_inner(root: &Path) -> Result<()> {
+    let expected = crate::server::agents_auto::shipped_acp_names();
+    if expected.is_empty() {
+        return Ok(());
+    }
+    let exe = std::env::current_exe().context("current_exe")?;
+    let dir = exe
+        .parent()
+        .context("binary has no parent dir")?
+        .to_path_buf();
+    if expected.iter().all(|n| dir.join(n).is_file()) {
+        return Ok(());
+    }
+    let ver = env!("CARGO_PKG_VERSION");
+    let marker = root.join(format!(".acp-bootstrap-{ver}"));
+    if marker.exists() {
+        return Ok(());
+    }
+    // Rename atomique = écriture sur le dossier — read-only → warn +
+    // skip (le hint installable du profil reste le recours).
+    probe_dir_writable(&dir).with_context(|| {
+        format!(
+            "acp bootstrap skipped — binary dir not writable ({})",
+            dir.display()
+        )
+    })?;
+    let url = release_asset_url(ver)?;
+    let tgz = match http_get(&url) {
+        Ok(b) => b,
+        Err(HttpError::Status(404)) => {
+            // Version dev / tag non publié : la réponse ne changera
+            // pas → un seul essai pour cette version.
+            let _ = std::fs::write(&marker, "");
+            tracing::info!("self-update: no published asset for v{ver} — acp bootstrap skipped");
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(anyhow::Error::from(e)).with_context(|| format!("downloading {url}"));
+        }
+    };
+    let staging = dir.join(format!(".ac-bt-{}", std::process::id()));
+    std::fs::create_dir_all(&staging).context("staging")?;
+    let res = (|| -> Result<Vec<String>> {
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(&tgz[..]));
+        archive
+            .unpack(&staging)
+            .context("extracting release archive")?;
+        install_staged_acp(&staging, &dir, true)
+    })();
+    let _ = std::fs::remove_dir_all(&staging);
+    let installed = res?;
+    // Réponse définitive obtenue (archive traitée, qu'elle ait posé
+    // des acp-* ou non) → pas de nouvel essai pour cette version.
+    let _ = std::fs::write(&marker, "");
+    if installed.is_empty() {
+        tracing::info!("self-update: no acp-* in v{ver} archive — nothing to install");
+    }
+    for name in &installed {
+        tracing::info!("self-update: installed {name} beside daemon (bootstrap catch-up)");
+    }
+    Ok(())
+}
+
+/// Arch de l'asset `agentcontrol-server-{arch}-linux.tar.gz`.
+fn asset_arch() -> Result<&'static str> {
+    match std::env::consts::ARCH {
+        "x86_64" => Ok("x86_64"),
+        "aarch64" => Ok("aarch64"),
+        a => bail!("unsupported arch: {a}"),
+    }
+}
+
+/// URL de l'asset serveur de la release `ver` (tag `v{ver}`).
+fn release_asset_url(ver: &str) -> Result<String> {
+    Ok(format!(
+        "https://github.com/{REPO}/releases/download/v{ver}/agentcontrol-server-{}-linux.tar.gz",
+        asset_arch()?
+    ))
 }
 
 /// Semver strict `X.Y.Z` (+ suffixe `-pre`/`+meta` alphanumérique) —
@@ -390,12 +491,27 @@ fn swap_binaries(tgz: &[u8], staging: &Path, dir: &Path, exe: &Path) -> Result<(
     // inconditionnelle, archive sans `acp-*` tolérée. Les anciens
     // `acp-*` absents de la nouvelle archive ne sont pas purgés —
     // retrait hors scope de l'update (KISS).
-    for name in staged_acp_binaries(staging)? {
-        let src = staging.join(&name);
-        let target = dir.join(&name);
-        replace_extracted(&src, dir, &target, &name)?;
-    }
+    install_staged_acp(staging, dir, false)?;
     Ok(())
+}
+
+/// Installe les `acp-*` racine de l'archive extraite dans `dir` par
+/// rename atomique. `skip_existing` = ne pas écraser un adaptateur
+/// déjà présent (rattrapage boot #289 — un acp-* en place, même
+/// ancien, n'est pas touché : l'update normal le remplacera via
+/// `swap_binaries`) ; `false` = comportement update (#361).
+/// Retourne les noms installés, triés.
+fn install_staged_acp(staging: &Path, dir: &Path, skip_existing: bool) -> Result<Vec<String>> {
+    let mut installed = Vec::new();
+    for name in staged_acp_binaries(staging)? {
+        let target = dir.join(&name);
+        if skip_existing && target.exists() {
+            continue;
+        }
+        replace_extracted(&staging.join(&name), dir, &target, &name)?;
+        installed.push(name);
+    }
+    Ok(installed)
 }
 
 /// Binaires `acp-*` à la racine de l'archive extraite, triés pour un
@@ -524,6 +640,46 @@ mod tests {
 
         assert!(!dir.join("acp-claude").exists());
         assert_eq!(std::fs::read(dir.join("acp-old")).unwrap(), b"old-adapter");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Rattrapage boot (#289) : `skip_existing` n'écrase pas un acp-*
+    /// déjà présent et n'installe que les absents.
+    #[test]
+    fn bootstrap_installe_seulement_les_acp_manquants() {
+        let (root, dir, staging) = fixture("skip");
+        let archive = tgz(&[
+            ("agentcontrol-daemon", &b"daemon"[..]),
+            ("acp-claude", &b"new"[..]),
+            ("acp-codex", &b"codex"[..]),
+        ]);
+        tar::Archive::new(flate2::read::GzDecoder::new(&archive[..]))
+            .unpack(&staging)
+            .unwrap();
+        std::fs::write(dir.join("acp-claude"), b"old").unwrap();
+
+        let installed = install_staged_acp(&staging, &dir, true).unwrap();
+
+        assert_eq!(installed, vec!["acp-codex".to_string()]);
+        assert_eq!(std::fs::read(dir.join("acp-claude")).unwrap(), b"old");
+        assert_eq!(std::fs::read(dir.join("acp-codex")).unwrap(), b"codex");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `skip_existing=false` (update #361) écrase bien l'existant.
+    #[test]
+    fn update_ecrase_les_acp_existants() {
+        let (root, dir, staging) = fixture("overwrite");
+        let archive = tgz(&[("acp-claude", &b"new"[..])]);
+        tar::Archive::new(flate2::read::GzDecoder::new(&archive[..]))
+            .unpack(&staging)
+            .unwrap();
+        std::fs::write(dir.join("acp-claude"), b"old").unwrap();
+
+        let installed = install_staged_acp(&staging, &dir, false).unwrap();
+
+        assert_eq!(installed, vec!["acp-claude".to_string()]);
+        assert_eq!(std::fs::read(dir.join("acp-claude")).unwrap(), b"new");
         let _ = std::fs::remove_dir_all(&root);
     }
 

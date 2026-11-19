@@ -422,6 +422,17 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     // une annonce provider périmée sont rattrapés sans action manuelle.
     daemon.caps_sweep_boot();
 
+    // Rattrapage acp-* au boot (item #289) : un update depuis un
+    // updater buggé (≤ 0.10.4-rc.9) n'a pas posé les adaptateurs
+    // maison — le nouveau démon les installe depuis sa propre
+    // release, une fois par version. Non bloquant : spawn_blocking,
+    // agent_path_dirs() rescanne le dossier de l'exe à chaque
+    // list_agents → effet immédiat sans restart.
+    {
+        let root = root.to_path_buf();
+        tokio::task::spawn_blocking(move || selfupdate::acp_bootstrap(&root));
+    }
+
     if crashed && !resumable.is_empty() {
         if cfg.auto_resume {
             let d3 = daemon.clone();
