@@ -141,7 +141,7 @@ MISSION :
 /// connu au spawn, la règle renvoie au champ `done_when` lu via
 /// `--list --json` (deliverable = critères propres, jamais d'attente
 /// de merge ; pr_merged = PR mergée).
-const LEGACY_DOD: &str = "agentbacklog --done <ID> --agent-id \"$AGENTCONTROL_SESSION\" selon le done_when de l'item (cf. la regle ci-dessus)";
+const LEGACY_DOD: &str = "agentbacklog --done <ID> --agent-id \"$AGENTCONTROL_SESSION\" selon le done_when de l'item (regle detaillee ci-dessous)";
 
 /// `origin` des sessions Manager — rôle d'intendance backlog proposé
 /// par le client (un par workspace routé), distinct des workers : le
@@ -2102,8 +2102,13 @@ impl Daemon {
                 let cap = serial_cap(&workers, spawnable.len())
                     .min(slots.total)
                     .min(slots.working);
-                for t in spawnable.iter().take(cap) {
-                    if !slots.ok() || !self.orch.is_enabled() {
+                // `cap` borne les SPAWNS effectifs, pas les items
+                // examinés : un item spec'd sauté (pas d'entrée de
+                // pool compatible) ne doit pas consommer le budget —
+                // sinon il gèlerait les items non-spec'd derrière.
+                let mut spawned = 0usize;
+                for t in spawnable.iter() {
+                    if spawned >= cap || !slots.ok() || !self.orch.is_enabled() {
                         break;
                     }
                     let id = task_id(t);
@@ -2181,6 +2186,7 @@ impl Daemon {
                             workers.push(s.meta_snapshot());
                         }
                         slots.take();
+                        spawned += 1;
                     } else {
                         warn!("orchestrator: claim #{id} rc={rc} {e} → rm {sid}");
                         if let Err(e2) = self.h_delete_session(sid.clone()).await {
@@ -3256,12 +3262,14 @@ mod tests {
                 ("REPO", "Taskwondo".to_string()),
                 ("ID", "42".to_string()),
                 ("ITEM", "#42 — titre".to_string()),
+                ("DOD", "RULE-DONE".to_string()),
             ],
         );
         assert!(p.contains("cwd /w") || p.contains("/w"));
         assert!(p.contains("repo Taskwondo"));
         assert!(p.contains("#42 — titre"));
-        assert!(!p.contains("{WS}") && !p.contains("{ITEM}"));
+        assert!(p.contains("RULE-DONE"));
+        assert!(!p.contains("{WS}") && !p.contains("{ITEM}") && !p.contains("{DOD}"));
         // Le prompt worker ne doit plus imposer le self-pop : le dispatch
         // claim pré-assigne l'item.
         assert!(p.contains("PAS a lancer `agentbacklog --pop`"));

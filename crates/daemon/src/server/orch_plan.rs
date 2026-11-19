@@ -1296,6 +1296,15 @@ impl Daemon {
                 )
                 .await
             else {
+                // Spawn refusé sur un item spec'd (ex. profil `agent=`
+                // inconnu de l'agent) : exposé comme les items sans
+                // slot compatible plutôt qu'un warn récurrent muet.
+                let sa = task_spec_agent(t);
+                if !sa.is_empty() {
+                    spec_waiting.push(format!(
+                        "item #{id} requires agent={sa} (spawn refused)"
+                    ));
+                }
                 continue;
             };
             let (rc, _o, e) = run_out(&[bin, "--claim", &key, "--agent-id", &sid], ws)
@@ -1630,8 +1639,19 @@ impl Daemon {
                     // retient pendant la compaction, le drain le livre
                     // après — ordre « compact → brief » garanti.
                     self.plan_send(&planner_sid, msg, false).await;
+                    // Spec `mode` de l'item : la transition
+                    // planner→implémenteur in-place doit viser le même
+                    // mode qu'un spawn d'implémenteur frais.
+                    let impl_mode = {
+                        let sm = task_spec_mode(t);
+                        if sm.is_empty() {
+                            cfg.implement_mode.clone()
+                        } else {
+                            sm.to_string()
+                        }
+                    };
                     if let Err(e) = self
-                        .h_set_mode(planner_sid.clone(), cfg.implement_mode.clone())
+                        .h_set_mode(planner_sid.clone(), impl_mode)
                         .await
                     {
                         warn!("orchestrator: set_mode {planner_sid}: {e:#}");
