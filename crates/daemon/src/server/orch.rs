@@ -83,7 +83,7 @@ MISSION — une seule tache (un worker = un item, pas de boucle) :
 
 4. Mene ta PR jusqu'au merge : si la regle de merge de /workspace/AGENTS.md le permet pour un agent (derniere review auto « Verdict: APPROVED » posterieure au push du head courant, fraicheur verifiee via les PushEvents du repo), procede au merge toi-meme (`gh pr merge <N> --squash --delete-branch` — squash = convention du repo, delete-branch = menage de la branche head au merge) ; sinon le merge reste a l'utilisateur — surveille jusqu'au merge effectif via un waiter (`ac-wait -- bash -c 'gh pr view <N> --json state -q .state | grep -q MERGED'` — pipe enrobe dans bash -c, un `|` nu couperait la commande).
 
-5. Marque la tache faite : agentbacklog --done <ID> --agent-id "<ton agent-id>" UNIQUEMENT quand ta PR est effectivement MERGED (verifie l'etat GitHub, pas seulement ready+checks) — cette regle vise TA PR de feature vers next_release. Pour une tache sans PR propre (ex. item patchnotes auto, dont la release PR appartient a l'utilisateur) : --done quand les criteres propres de la tache sont remplis, sans jamais attendre un merge qui n'est pas le tien. Puis ARRETE : reponds « termine » et cesse tout travail — ne re-pop jamais, l'orchestrateur te supprime et spawn un worker neuf pour le pending suivant.
+5. Marque la tache faite : {DOD} La regle --done depend du champ done_when de l'item (agentbacklog --list --json) : 'pr_merged' = ta PR de feature MERGED ; 'deliverable' = les criteres propres de l'item remplis, jamais d'attente de merge. Puis ARRETE : reponds « termine » et cesse tout travail — ne re-pop jamais, l'orchestrateur te supprime et spawn un worker neuf pour le pending suivant.
 
 Blocage insurmontable sur une tache : agentbacklog --release <ID> --agent-id "<ton agent-id>", explique la raison dans ta reponse, puis arrete — l'item repart pending pour un autre worker.
 
@@ -118,7 +118,7 @@ MISSION — une seule tache :
 
 4. Mene ta PR jusqu'au merge : si la regle de merge du repo le permet pour un agent (derniere review auto « Verdict: APPROVED » posterieure au push du head courant, fraicheur verifiee), procede au merge toi-meme ; sinon le merge reste a l'utilisateur — surveille jusqu'au merge effectif via un waiter (`ac-wait -- bash -c 'gh pr view <N> --json state -q .state | grep -q MERGED'` — pipe enrobe dans bash -c).
 
-5. Marque la tache faite : `agentbacklog --done <ID> --agent-id "$AGENTCONTROL_SESSION"` UNIQUEMENT quand ta PR est effectivement MERGED (verifie l'etat GitHub, pas seulement ready+checks) — ou quand les criteres propres de la tache sont remplis si elle n'a pas de PR. Puis ARRETE : reponds « termine » et cesse tout travail — ne re-pop jamais, l'orchestrateur te supprime et spawn un worker neuf pour le pending suivant.
+5. Marque la tache faite : {DOD} Puis ARRETE : reponds « termine » et cesse tout travail — ne re-pop jamais, l'orchestrateur te supprime et spawn un worker neuf pour le pending suivant.
 
 Blocage insurmontable sur une tache : `agentbacklog --release <ID> --agent-id "$AGENTCONTROL_SESSION"`, explique la raison dans ta reponse, puis arrete — l'item repart pending pour un autre worker.
 
@@ -134,8 +134,14 @@ MISSION :
 1. Body = patchnotes utilisateur EN ANGLAIS couvrant TOUTES les PR mergees dans next_release sur le cycle (inventaire : git fetch origin && git log origin/main..origin/next_release --oneline, ou les commits de la PR). Le generateur automatique (auto-release-pr.yml, cf item #18 / PR #126-127) regenere le body a chaque push sur next_release : verifie qu'il est a jour vis-a-vis du head courant, EN ANGLAIS, et lisible par un utilisateur (fonctionnalites visibles, pas le detail technique interne). JAMAIS de reference interne dans le texte : pas de (#NNN), pas de lien PR, pas d'id backlog — uniquement des changements vecus par l'utilisateur ; les noms de fonctionnalites visibles restent OK. S'il est stale ou non anglophone, declenche la regeneration via le mecanisme du workflow ; a defaut reecris le body toi-meme (gh pr edit <N> --body). Si le generateur doit produire de l'anglais durablement, corrige-le via le cycle PR normal plutot qu'une edition manuelle.
 2. Passe la PR en ready : gh pr ready <N> — cela declenche release-bump (tag rc.k + commit de version sur next_release), c'est voulu. Ne merge JAMAIS la release PR vers main : le merge reste a l'utilisateur.
 3. Si le generateur produit un body defectueux, corrige-le via le cycle PR normal dans un worktree separe (base origin/next_release).
-4. Quand la release PR est ready avec un body a jour : agentbacklog --done <ID> --agent-id "<ton agent-id>". La regle generique du prompt worker « --done UNIQUEMENT quand ta PR est MERGED » NE S'APPLIQUE PAS a cet item : la release PR next_release -> main n'est pas ta PR — son merge est reserve a l'utilisateur. Ton critere de fin est « release PR ready + body a jour », point.
+4. Quand la release PR est ready avec un body a jour : agentbacklog --done <ID> --agent-id "<ton agent-id>". La release PR next_release -> main n'est pas ta PR — son merge est reserve a l'utilisateur ; ton critere de fin est « release PR ready + body a jour », jamais l'attente du merge (item cree avec done_when=deliverable).
 5. Apres ton --done, si du nouveau travail arrive dans le backlog, l'orchestrateur repasse lui-meme la release PR en draft (garde open_any / notes_cycle_done se reinitialise en presence de travail) et un nouvel item patchnotes sera cree au prochain cycle vide — rien a faire de ton cote."#;
+
+/// Variante {DOD} du prompt self-pop legacy : l'item poppé n'est pas
+/// connu au spawn, la règle renvoie au champ `done_when` lu via
+/// `--list --json` (deliverable = critères propres, jamais d'attente
+/// de merge ; pr_merged = PR mergée).
+const LEGACY_DOD: &str = "agentbacklog --done <ID> --agent-id \"$AGENTCONTROL_SESSION\" selon le done_when de l'item (regle detaillee ci-dessous)";
 
 /// `origin` des sessions Manager — rôle d'intendance backlog proposé
 /// par le client (un par workspace routé), distinct des workers : le
@@ -912,6 +918,21 @@ pub(crate) fn pool_next_entry<'a>(
     live: &HashSet<String>,
     extra: &[String],
 ) -> Option<&'a cfg::WorkerPoolEntry> {
+    pool_next_entry_for(entries, workers, live, extra, "")
+}
+
+/// Variante contrainte par la spec `agent` de l'item : `req_agent`
+/// non vide ne retient que les entrées `profile == req_agent` ayant
+/// un slot libre — `None` = aucune entrée compatible ce tick (profil
+/// absent du pool ou slots pleins), l'item est sauté sans geler les
+/// items non spec'd derrière lui.
+pub(crate) fn pool_next_entry_for<'a>(
+    entries: &'a [cfg::WorkerPoolEntry],
+    workers: &[SessionMeta],
+    live: &HashSet<String>,
+    extra: &[String],
+    req_agent: &str,
+) -> Option<&'a cfg::WorkerPoolEntry> {
     fn occupy(entries: &[cfg::WorkerPoolEntry], remaining: &mut [u32], agent: &str) {
         for (i, e) in entries.iter().enumerate() {
             if remaining[i] > 0 && e.profile == agent {
@@ -932,7 +953,7 @@ pub(crate) fn pool_next_entry<'a>(
     entries
         .iter()
         .zip(remaining.iter())
-        .find(|(_, r)| **r > 0)
+        .find(|(e, r)| **r > 0 && (req_agent.is_empty() || e.profile == req_agent))
         .map(|(e, _)| e)
 }
 
@@ -1220,6 +1241,52 @@ pub(crate) fn task_repo<'a>(t: &'a Task) -> &'a str {
 /// même file que le self-pop historique.
 pub(crate) fn task_priority(t: &Task) -> i64 {
     t.get("priority").and_then(Value::as_i64).unwrap_or(0)
+}
+/// Profil `[agents.*]` EXIGÉ par l'item (colonne `agent` de
+/// agentbacklog ≥ 0.9, NULL = sans contrainte) — distinct de
+/// `agent_id` (session owner, `task_agent`). L'orchestrateur ne
+/// dispatche l'item que sur une entrée du `worker_pool` (ou le rôle
+/// planner en mode plan_review) à ce profil ; absent → item en
+/// attente, jamais re-cueilli par un autre profil.
+pub(crate) fn task_spec_agent<'a>(t: &'a Task) -> &'a str {
+    t.get("agent").and_then(Value::as_str).unwrap_or("")
+}
+/// Override modèle au spawn — priorité item > entrée pool > cfg rôle.
+pub(crate) fn task_spec_model<'a>(t: &'a Task) -> &'a str {
+    t.get("model").and_then(Value::as_str).unwrap_or("")
+}
+/// Override effort (`thought_level`) au spawn — même priorité.
+pub(crate) fn task_spec_effort<'a>(t: &'a Task) -> &'a str {
+    t.get("effort").and_then(Value::as_str).unwrap_or("")
+}
+/// Override mode de session au spawn — même priorité.
+pub(crate) fn task_spec_mode<'a>(t: &'a Task) -> &'a str {
+    t.get("mode").and_then(Value::as_str).unwrap_or("")
+}
+/// `done_when` de l'item : `pr_merged` (défaut — `--done` à la PR de
+/// l'item MERGED) ou `deliverable` (`--done` aux critères propres de
+/// l'item, jamais d'attente de merge). Texte libre extensible côté
+/// CLI ; une valeur inconnue retombe sur le contrat historique.
+pub(crate) fn task_done_when(t: &Task) -> &'static str {
+    match t.get("done_when").and_then(Value::as_str) {
+        Some("deliverable") => "deliverable",
+        _ => "pr_merged",
+    }
+}
+/// Règle « done » substituée dans les prompts worker ({DOD}) selon
+/// `done_when` — `deliverable` lève l'attente de merge ; `pr_merged`
+/// (et toute valeur inconnue) garde le contrat PR mergée.
+pub(crate) fn task_dod(t: &Task) -> &'static str {
+    if task_done_when(t) == "deliverable" {
+        "agentbacklog --done <ID> --agent-id \"$AGENTCONTROL_SESSION\" \
+         des que les criteres propres de l'item sont remplis \
+         (done_when=deliverable) — jamais d'attente de merge."
+    } else {
+        "agentbacklog --done <ID> --agent-id \"$AGENTCONTROL_SESSION\" \
+         UNIQUEMENT quand ta PR est effectivement MERGED (verifie \
+         l'etat GitHub, pas seulement ready+checks) — ou quand les \
+         criteres propres de la tache sont remplis si elle n'a pas de PR."
+    }
 }
 /// Un item `pending` est « poppable » : sans dépendance ou dépendances
 /// toutes soldées — compter les dep-bloqués ferait spawner des workers
@@ -1556,6 +1623,10 @@ impl Daemon {
         self.orch_failover_tick(bin, cfg, ws, &tasks, &metas, &prs, &mut st)
             .await;
 
+        // Items spec'd (agent=) sautés ce tick faute d'entrée de pool
+        // compatible — remplis par la branche legacy ou le tick
+        // plan_review, remontés dans le détail de statut.
+        let mut spec_waiting: Vec<String> = Vec::new();
         // plan_review (opt-in) : pipeline plan→review→implémentation
         // dédié (server/orch_plan.rs — même snapshot, même état
         // persisté partagé) ; l'autre branche est le dispatch worker
@@ -1564,6 +1635,7 @@ impl Daemon {
             let oc = self
                 .orch_plan_tick(bin, cfg, ws, &tasks, &metas, &session_ids, &prs, &mut st)
                 .await?;
+            spec_waiting = oc.spec_waiting;
             (
                 oc.workers,
                 oc.working,
@@ -2030,8 +2102,13 @@ impl Daemon {
                 let cap = serial_cap(&workers, spawnable.len())
                     .min(slots.total)
                     .min(slots.working);
-                for t in spawnable.iter().take(cap) {
-                    if !slots.ok() || !self.orch.is_enabled() {
+                // `cap` borne les SPAWNS effectifs, pas les items
+                // examinés : un item spec'd sauté (pas d'entrée de
+                // pool compatible) ne doit pas consommer le budget —
+                // sinon il gèlerait les items non-spec'd derrière.
+                let mut spawned = 0usize;
+                for t in spawnable.iter() {
+                    if spawned >= cap || !slots.ok() || !self.orch.is_enabled() {
                         break;
                     }
                     let id = task_id(t);
@@ -2049,6 +2126,7 @@ impl Daemon {
                             ("REPO", repo_label.clone()),
                             ("ID", id.to_string()),
                             ("ITEM", orch_plan::item_body(t)),
+                            ("DOD", task_dod(t).replace("<ID>", &id.to_string())),
                         ],
                     );
                     st.counter += 1;
@@ -2063,14 +2141,40 @@ impl Daemon {
                         repo_label,
                         cwd
                     );
-                    let Some(entry) = pool_next_entry(&entries, &workers, &live_waiters, &[])
+                    // Spec `agent` de l'item : seules les entrées du
+                    // pool à ce profil sont candidates — sans slot
+                    // compatible l'item est sauté CE tick (un item
+                    // spec'd en tête ne gèle pas les non-spec'd).
+                    let req_agent = task_spec_agent(t);
+                    let Some(entry) =
+                        pool_next_entry_for(&entries, &workers, &live_waiters, &[], req_agent)
                     else {
-                        // Pool complet pour CE tick (les slots globaux
-                        // ont du mou mais chaque entrée est pleine —
-                        // workers non appariés au pool) : ne pas spawner.
-                        break;
+                        if req_agent.is_empty() {
+                            // Pool complet pour CE tick (les slots
+                            // globaux ont du mou mais chaque entrée est
+                            // pleine — workers non appariés au pool) :
+                            // ne pas spawner.
+                            break;
+                        }
+                        spec_waiting.push(format!(
+                            "item #{} requires agent={req_agent} \
+                             (no matching slot)",
+                            id
+                        ));
+                        continue;
                     };
-                    let Some(sid) = self.orch_spawn(st.counter, &cwd, prompt, entry).await else {
+                    // Overrides item > entrée pool (model/effort/mode).
+                    let mut eff = entry.clone();
+                    for (dst, src) in [
+                        (&mut eff.model, task_spec_model(t)),
+                        (&mut eff.effort, task_spec_effort(t)),
+                        (&mut eff.mode, task_spec_mode(t)),
+                    ] {
+                        if !src.is_empty() {
+                            *dst = src.to_string();
+                        }
+                    }
+                    let Some(sid) = self.orch_spawn(st.counter, &cwd, prompt, &eff).await else {
                         continue;
                     };
                     let (rc, _o, e) =
@@ -2082,6 +2186,7 @@ impl Daemon {
                             workers.push(s.meta_snapshot());
                         }
                         slots.take();
+                        spawned += 1;
                     } else {
                         warn!("orchestrator: claim #{id} rc={rc} {e} → rm {sid}");
                         if let Err(e2) = self.h_delete_session(sid.clone()).await {
@@ -2106,7 +2211,15 @@ impl Daemon {
                         cfg.title_prefix,
                         st.counter
                     );
-                    let prompt = cfg.prompt.clone().unwrap_or_else(|| PROMPT.to_string());
+                    // Self-pop legacy : l'item n'est pas connu au spawn
+                    // (le worker le --pop lui-même) — {DOD} est remplacé
+                    // par la règle générique done_when, le détail par
+                    // item reste dans le --list que le worker consultera.
+                    let prompt = cfg
+                        .prompt
+                        .clone()
+                        .unwrap_or_else(|| PROMPT.to_string())
+                        .replace("{DOD}", LEGACY_DOD);
                     let Some(entry) = pool_next_entry(&entries, &workers, &live_waiters, &[])
                     else {
                         break;
@@ -2285,8 +2398,20 @@ impl Daemon {
                     unrouted_tags.join(", ")
                 ));
             }
+            if !spec_waiting.is_empty() {
+                detail_parts.push(format!("waiting: {}", spec_waiting.join(" ; ")));
+            }
             let detail = (!detail_parts.is_empty()).then(|| detail_parts.join(" ; "));
-            self.orch.set_status(Phase::Active, detail);
+            // Items spec'd en attente d'un slot compatible sans rien
+            // d'autre en vol → Waiting explicite plutôt qu'une
+            // starvation silencieuse ; du travail actif garde Active
+            // (le détail « waiting: … » reste visible dans les deux cas).
+            let phase = if !spec_waiting.is_empty() && n_working == 0 {
+                Phase::Waiting
+            } else {
+                Phase::Active
+            };
+            self.orch.set_status(phase, detail);
         }
         // Échantillon métriques post-cycle (server/metrics.rs) —
         // best-effort : un journal inscriptible ne casse jamais le tick.
@@ -2411,6 +2536,14 @@ impl Daemon {
         let mut argv = vec![bin, "--add", NOTES_TITLE, "--desc", NOTES_DESC];
         if no_plan {
             argv.push("--no-plan");
+        }
+        // done_when=deliverable (agentbacklog ≥ 0.9) : l'item n'attend
+        // pas le merge de la release PR — le prompt worker reçoit la
+        // règle « critères propres » via {DOD}. CLI plus ancien → pas
+        // de flag, la description porte le critère de fin.
+        if orch_plan::cli_done_when_capable(bin, ws).await {
+            argv.push("--done-when");
+            argv.push("deliverable");
         }
         argv.push("--json");
         let (rc, out, _) = run_out(&argv, ws).await.ok()?;
@@ -3129,12 +3262,14 @@ mod tests {
                 ("REPO", "Taskwondo".to_string()),
                 ("ID", "42".to_string()),
                 ("ITEM", "#42 — titre".to_string()),
+                ("DOD", "RULE-DONE".to_string()),
             ],
         );
         assert!(p.contains("cwd /w") || p.contains("/w"));
         assert!(p.contains("repo Taskwondo"));
         assert!(p.contains("#42 — titre"));
-        assert!(!p.contains("{WS}") && !p.contains("{ITEM}"));
+        assert!(p.contains("RULE-DONE"));
+        assert!(!p.contains("{WS}") && !p.contains("{ITEM}") && !p.contains("{DOD}"));
         // Le prompt worker ne doit plus imposer le self-pop : le dispatch
         // claim pré-assigne l'item.
         assert!(p.contains("PAS a lancer `agentbacklog --pop`"));
@@ -3214,5 +3349,83 @@ mod tests {
         let live_waiter: HashSet<String> = ["s-8".to_string()].into_iter().collect();
         let entries1 = vec![pool_entry("devin", 1)];
         assert!(pool_next_entry(&entries1, &[parked], &live_waiter, &[]).is_none());
+    }
+
+    #[test]
+    fn task_spec_accessors_tolérants() {
+        // JSON ancien agentbacklog (sans les colonnes) → chaînes vides,
+        // jamais de panic ni de contrainte fantôme.
+        let old: Task = serde_json::from_str(r#"{"id": 1, "status": "pending"}"#).unwrap();
+        assert_eq!(task_spec_agent(&old), "");
+        assert_eq!(task_spec_model(&old), "");
+        assert_eq!(task_spec_effort(&old), "");
+        assert_eq!(task_spec_mode(&old), "");
+        assert_eq!(task_done_when(&old), "pr_merged");
+        // Valeurs non-string / null → idem.
+        let weird: Task =
+            serde_json::from_str(r#"{"id": 1, "agent": 5, "done_when": null}"#).unwrap();
+        assert_eq!(task_spec_agent(&weird), "");
+        assert_eq!(task_done_when(&weird), "pr_merged");
+        // Spec complète.
+        let t: Task = serde_json::from_str(
+            r#"{"id": 1, "agent": "claude", "model": "opus",
+                "effort": "high", "mode": "smart", "done_when": "deliverable"}"#,
+        )
+        .unwrap();
+        assert_eq!(task_spec_agent(&t), "claude");
+        assert_eq!(task_spec_model(&t), "opus");
+        assert_eq!(task_spec_effort(&t), "high");
+        assert_eq!(task_spec_mode(&t), "smart");
+        assert_eq!(task_done_when(&t), "deliverable");
+        // done_when inconnu → contrat historique (extensible, pas de gate).
+        let u: Task = serde_json::from_str(r#"{"id": 1, "done_when": "pr_open"}"#).unwrap();
+        assert_eq!(task_done_when(&u), "pr_merged");
+    }
+
+    #[test]
+    fn task_dod_selon_done_when() {
+        let merged: Task = serde_json::from_str(r#"{"id": 1}"#).unwrap();
+        assert!(task_dod(&merged).contains("MERGED"));
+        let deliv: Task = serde_json::from_str(r#"{"id": 1, "done_when": "deliverable"}"#).unwrap();
+        assert!(!task_dod(&deliv).contains("MERGED"));
+        assert!(task_dod(&deliv).contains("deliverable"));
+    }
+
+    #[test]
+    fn pool_next_entry_for_spec_agent() {
+        let entries = vec![pool_entry("devin", 1), pool_entry("claude", 1)];
+        let live = HashSet::new();
+        let w: Vec<SessionMeta> = Vec::new();
+        // Sans contrainte : 1re entrée libre (comportement inchangé).
+        assert_eq!(
+            pool_next_entry_for(&entries, &w, &live, &[], "")
+                .unwrap()
+                .profile,
+            "devin"
+        );
+        // agent=claude → seule l'entrée claude, même si devin est libre.
+        assert_eq!(
+            pool_next_entry_for(&entries, &w, &live, &[], "claude")
+                .unwrap()
+                .profile,
+            "claude"
+        );
+        // Slot claude occupé → None (item sauté, pas de repli devin).
+        let w = vec![worker_meta("s-1", "claude")];
+        assert!(pool_next_entry_for(&entries, &w, &live, &[], "claude").is_none());
+        // …alors que l'item non spec'd prend encore devin.
+        assert_eq!(
+            pool_next_entry_for(&entries, &w, &live, &[], "")
+                .unwrap()
+                .profile,
+            "devin"
+        );
+        // Profil absent du pool → None.
+        assert!(pool_next_entry_for(&entries, &w, &live, &[], "cursor").is_none());
+        // `extra` (spawns intra-tick) consomme le slot claude.
+        let w2: Vec<SessionMeta> = Vec::new();
+        assert!(
+            pool_next_entry_for(&entries, &w2, &live, &["claude".to_string()], "claude").is_none()
+        );
     }
 }

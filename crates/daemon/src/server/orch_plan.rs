@@ -156,8 +156,33 @@ pub(crate) fn item_body(t: &Task) -> String {
         .trim();
     let mut dc = desc.chars();
     let body: String = dc.by_ref().take(DESC_INLINE_MAX).collect();
+    // Spec de l'item (agentbacklog ≥ 0.9) + contrat de done —
+    // tolérant aux anciens JSON sans ces clés.
+    let mut spec: Vec<String> = Vec::new();
+    for (k, v) in [
+        ("agent", t.get("agent")),
+        ("model", t.get("model")),
+        ("effort", t.get("effort")),
+        ("mode", t.get("mode")),
+    ] {
+        if let Some(s) = v.and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            spec.push(format!("{k}={s}"));
+        }
+    }
+    if let Some(dw) = t
+        .get("done_when")
+        .and_then(Value::as_str)
+        .filter(|s| *s != "pr_merged" && !s.is_empty())
+    {
+        spec.push(format!("done_when={dw}"));
+    }
+    let spec = if spec.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nspec: {}", spec.join(" "))
+    };
     format!(
-        "#{id} — {title}\n\n{body}{cut}",
+        "#{id} — {title}\n\n{body}{cut}{spec}",
         id = task_id(t),
         cut = if dc.next().is_some() { "\n…" } else { "" }
     )
@@ -584,7 +609,7 @@ Tu es l'IMPLEMENTEUR de l'item backlog ci-dessous (session $AGENTCONTROL_SESSION
 
 Implemente le plan en suivant le workflow PR/CI de {WS}/AGENTS.md a la lettre : worktree dedie base sur origin/next_release (JAMAIS dans le checkout principal {WS}) -> branche -> push -> gh pr create --base next_release --draft -> review auto -> iterations en draft -> review soldee -> gh pr ready au moins 30 s apres le dernier push -> checks requis VERTS -> merge selon la regle de merge AGENTS.md. Toute attente > ~1 min (verdict, checks, merge) passe par un waiter ac-wait (regle « Waiting » d'AGENTS.md) — jamais de --watch bloquant ni de boucle de poll dans un tool call.
 
-Quand la PR est effectivement MERGED : agentbacklog --done {ID} --agent-id "$AGENTCONTROL_SESSION". Blocage insurmontable : agentbacklog --release {ID} --agent-id "$AGENTCONTROL_SESSION", explique pourquoi, puis arrete.
+{DOD} Blocage insurmontable : agentbacklog --release {ID} --agent-id "$AGENTCONTROL_SESSION", explique pourquoi, puis arrete.
 
 Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; push uniquement sur ta branche de PR ; nettoie ton worktree a la fin (git worktree remove) ; reponds en francais."#;
 
@@ -597,7 +622,7 @@ Tu es un worker autonome sur le repo (cwd {WS}). Lis {WS}/AGENTS.md — le workf
 
 1. Implemente en suivant la description a la lettre : worktree dedie base sur origin/next_release (JAMAIS dans le checkout principal {WS}), spec, verifications demandees.
 2. Cycle PR (cf AGENTS.md) : branche -> push -> gh pr create --base next_release --draft -> review auto (iterations en draft) -> review soldee -> gh pr ready au moins 30 s apres le dernier push -> checks requis VERTS sur le head SHA -> merge (regle de merge AGENTS.md). Toute attente > ~1 min (verdict, checks, merge) passe par un waiter ac-wait (regle « Waiting » d'AGENTS.md) — jamais de --watch bloquant ni de boucle de poll dans un tool call.
-3. agentbacklog --done {ID} --agent-id "$AGENTCONTROL_SESSION" UNIQUEMENT quand ta PR est effectivement MERGED (ou quand les criteres de la tache sont remplis si elle n'a pas de PR).
+3. {DOD}
 
 Blocage insurmontable : agentbacklog --release {ID} --agent-id "$AGENTCONTROL_SESSION", explique la raison, puis arrete.
 
@@ -615,7 +640,7 @@ pub(crate) fn fill(tpl: &str, pairs: &[(&str, String)]) -> String {
 // Résultat du tick remonté au cycle partagé (compteurs de statut).
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct PlanOutcome {
     /// Sessions Backlog-* vivantes (W+P+R) — `status.workers`.
     pub workers: usize,
@@ -626,6 +651,9 @@ pub(crate) struct PlanOutcome {
     pub pending: usize,
     pub planners: usize,
     pub reviewers: usize,
+    /// Items `no_plan` spec'd (agent=) sautés ce tick faute d'entrée
+    /// de pool compatible — détail « waiting » du statut composant.
+    pub spec_waiting: Vec<String>,
 }
 
 impl Daemon {
@@ -1145,6 +1173,9 @@ impl Daemon {
         // working) tant qu'il en reste (priorité reviewers > planners).
         let unclaimed = (eligible_ids.len() - claimed_now.len()).min(reviewers_free);
 
+        // Items `no_plan` spec'd (agent=) sautés faute d'entrée de
+        // pool compatible — détail « waiting » du statut composant.
+        let mut spec_waiting: Vec<String> = Vec::new();
         for t in tasks
             .iter()
             .filter(|t| task_status(t) == "pending" && task_poppable(t))
@@ -1163,40 +1194,91 @@ impl Daemon {
             let iws = cfg.workspace_for(task_repo(t)).to_string();
             let no_plan = task_no_plan(t);
             // no_plan = worker du pool (profil + model/effort de son
-            // entrée — `implement_mode` reste le mode pipeline) ;
-            // sinon planner/implementer sur `planner_agent` avec
-            // `planner_model`/`planner_effort` (repli global).
+            // entrée — `implement_mode` reste le mode pipeline, la
+            // spec `mode` de l'item prime) ; sinon planner/implementer
+            // sur `planner_agent` avec `planner_model`/`planner_effort`
+            // (repli global) — la spec de l'item s'applique au
+            // planner ET à l'implémenteur (même exécutant), prioritaire
+            // sur les valeurs de rôle.
             let (prefix, agent, mode, model, effort, prompt) = if no_plan {
-                let Some(entry) =
-                    pool_next_entry(&entries, &worker_metas, &live_waiters, &spawned_profiles)
-                else {
-                    // Pool workers complet — l'item attend le prochain
-                    // tick (les planners, non poolés, restent
-                    // dispatchables).
+                // Spec `agent` : seules les entrées du pool à ce
+                // profil sont candidates — sans slot compatible
+                // l'item est sauté CE tick sans geler les suivants.
+                let req_agent = task_spec_agent(t);
+                let Some(entry) = pool_next_entry_for(
+                    &entries,
+                    &worker_metas,
+                    &live_waiters,
+                    &spawned_profiles,
+                    req_agent,
+                ) else {
+                    if !req_agent.is_empty() {
+                        spec_waiting.push(format!(
+                            "item #{id} requires agent={req_agent} \
+                             (no matching slot)"
+                        ));
+                    }
                     continue;
                 };
+                // Overrides item > entrée pool (model/effort) ; le
+                // mode de l'item prime sur `implement_mode`.
+                let mut eff = entry.clone();
+                for (dst, src) in [
+                    (&mut eff.model, task_spec_model(t)),
+                    (&mut eff.effort, task_spec_effort(t)),
+                ] {
+                    if !src.is_empty() {
+                        *dst = src.to_string();
+                    }
+                }
+                let spec_mode = task_spec_mode(t);
                 (
                     cfg.title_prefix.clone(),
                     entry.profile.clone(),
-                    cfg.implement_mode.clone(),
-                    entry.model.clone(),
-                    entry.effort.clone(),
+                    if spec_mode.is_empty() {
+                        cfg.implement_mode.clone()
+                    } else {
+                        spec_mode.to_string()
+                    },
+                    eff.model.clone(),
+                    eff.effort.clone(),
                     fill(
                         CLAIMED_WORKER_PROMPT,
                         &[
                             ("ID", key.clone()),
                             ("ITEM", item_body(t)),
                             ("WS", iws.clone()),
+                            ("DOD", task_dod(t).replace("<ID>", &key)),
                         ],
                     ),
                 )
             } else {
+                let spec_agent = task_spec_agent(t);
+                let spec_mode = task_spec_mode(t);
+                let spec_model = task_spec_model(t);
+                let spec_effort = task_spec_effort(t);
                 (
                     PLANNER_PREFIX.to_string(),
-                    cfg.agent_or(&cfg.planner_agent).to_string(),
-                    cfg.planner_mode.clone(),
-                    cfg.model_or(&cfg.planner_model).to_string(),
-                    cfg.effort_or(&cfg.planner_effort).to_string(),
+                    if spec_agent.is_empty() {
+                        cfg.agent_or(&cfg.planner_agent).to_string()
+                    } else {
+                        spec_agent.to_string()
+                    },
+                    if spec_mode.is_empty() {
+                        cfg.planner_mode.clone()
+                    } else {
+                        spec_mode.to_string()
+                    },
+                    if spec_model.is_empty() {
+                        cfg.model_or(&cfg.planner_model).to_string()
+                    } else {
+                        spec_model.to_string()
+                    },
+                    if spec_effort.is_empty() {
+                        cfg.effort_or(&cfg.planner_effort).to_string()
+                    } else {
+                        spec_effort.to_string()
+                    },
                     fill(
                         PLANNER_PROMPT,
                         &[
@@ -1214,6 +1296,15 @@ impl Daemon {
                 )
                 .await
             else {
+                // Spawn refusé sur un item spec'd (ex. profil `agent=`
+                // inconnu de l'agent) : exposé comme les items sans
+                // slot compatible plutôt qu'un warn récurrent muet.
+                let sa = task_spec_agent(t);
+                if !sa.is_empty() {
+                    spec_waiting.push(format!(
+                        "item #{id} requires agent={sa} (spawn refused)"
+                    ));
+                }
                 continue;
             };
             let (rc, _o, e) = run_out(&[bin, "--claim", &key, "--agent-id", &sid], ws)
@@ -1451,6 +1542,7 @@ impl Daemon {
                 }
             }
         }
+        outcome.spec_waiting = spec_waiting;
         Ok(outcome)
     }
 
@@ -1532,12 +1624,11 @@ impl Daemon {
                          Tu passes en implémentation : suis-le en appliquant \
                          le workflow PR/CI de {}/AGENTS.md (worktree dédié \
                          basé sur origin/next_release → PR draft → review → \
-                         ready → checks verts → merge). Quand la PR est \
-                         effectivement mergée : agentbacklog --done {id} \
-                         --agent-id \"$AGENTCONTROL_SESSION\". Blocage \
+                         ready → checks verts → merge). {} Blocage \
                          insurmontable : --release + explication.",
                         round.saturating_sub(1).max(0),
                         iws,
+                        task_dod(t).replace("<ID>", &id.to_string()),
                         cmt = if comment.is_empty() {
                             String::new()
                         } else {
@@ -1548,14 +1639,32 @@ impl Daemon {
                     // retient pendant la compaction, le drain le livre
                     // après — ordre « compact → brief » garanti.
                     self.plan_send(&planner_sid, msg, false).await;
+                    // Spec `mode` de l'item : la transition
+                    // planner→implémenteur in-place doit viser le même
+                    // mode qu'un spawn d'implémenteur frais.
+                    let impl_mode = {
+                        let sm = task_spec_mode(t);
+                        if sm.is_empty() {
+                            cfg.implement_mode.clone()
+                        } else {
+                            sm.to_string()
+                        }
+                    };
                     if let Err(e) = self
-                        .h_set_mode(planner_sid.clone(), cfg.implement_mode.clone())
+                        .h_set_mode(planner_sid.clone(), impl_mode)
                         .await
                     {
                         warn!("orchestrator: set_mode {planner_sid}: {e:#}");
                     }
                 } else {
                     st.counter += 1;
+                    // Spec de l'item : même exécutant que le planner
+                    // aurait été — agent/model/effort/mode priment sur
+                    // les valeurs de rôle.
+                    let spec_agent = task_spec_agent(t);
+                    let spec_mode = task_spec_mode(t);
+                    let spec_model = task_spec_model(t);
+                    let spec_effort = task_spec_effort(t);
                     let prompt = fill(
                         IMPLEMENTER_PROMPT,
                         &[
@@ -1564,16 +1673,33 @@ impl Daemon {
                             ("WS", iws.clone()),
                             ("ROUND", format!("{}", round.saturating_sub(1).max(0))),
                             ("PLAN", clip_inline(task_plan_content(t), PLAN_INLINE_MAX)),
+                            ("DOD", task_dod(t).replace("<ID>", &key)),
                         ],
                     );
                     if let Some(nsid) = self
                         .plan_spawn(
                             st.counter,
                             PLANNER_PREFIX,
-                            cfg.agent_or(&cfg.planner_agent),
-                            &cfg.implement_mode,
-                            cfg.model_or(&cfg.planner_model),
-                            cfg.effort_or(&cfg.planner_effort),
+                            if spec_agent.is_empty() {
+                                cfg.agent_or(&cfg.planner_agent)
+                            } else {
+                                spec_agent
+                            },
+                            if spec_mode.is_empty() {
+                                cfg.implement_mode.as_str()
+                            } else {
+                                spec_mode
+                            },
+                            if spec_model.is_empty() {
+                                cfg.model_or(&cfg.planner_model)
+                            } else {
+                                spec_model
+                            },
+                            if spec_effort.is_empty() {
+                                cfg.effort_or(&cfg.planner_effort)
+                            } else {
+                                spec_effort
+                            },
                             prompt,
                             &iws,
                             cfg,
@@ -2808,6 +2934,16 @@ pub(crate) async fn cli_claim_capable(bin: &str, ws: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// `agentbacklog --help` mentionne `--done-when` → la definition of
+/// done par item (≥ 0.9) est jouable ; sinon l'item patchnotes auto
+/// garde l'ancien contrat et sa description porte le critère de fin.
+pub(crate) async fn cli_done_when_capable(bin: &str, ws: &Path) -> bool {
+    run_out(&[bin, "--help"], ws)
+        .await
+        .map(|(rc, out, _)| rc == 0 && out.contains("--done-when"))
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3259,5 +3395,34 @@ mod tests {
         assert!(!spawn_slot_ok(slots(1, 2), true));
         assert!(!spawn_slot_ok(slots(2, 1), true)); // working borne
         assert!(spawn_slot_ok(slots(2, 1), false));
+    }
+
+    /// {ITEM} expose la spec de l'item (agent/model/effort/mode +
+    /// done_when ≠ défaut) et reste identique pour un JSON ancien
+    /// sans ces clés.
+    #[test]
+    fn item_body_spec_meta() {
+        let plain = item_body(&json!({"id": 3, "title": "T", "description": "d"}));
+        assert!(!plain.contains("spec:"));
+        let specd = item_body(&json!({
+            "id": 3, "title": "T", "description": "d",
+            "agent": "claude", "model": "opus", "effort": "high",
+            "mode": "smart", "done_when": "deliverable"
+        }));
+        for frag in [
+            "agent=claude",
+            "model=opus",
+            "effort=high",
+            "mode=smart",
+            "done_when=deliverable",
+        ] {
+            assert!(specd.contains(frag), "{frag} manquant dans {specd}");
+        }
+        // done_when au défaut et champs vides → rien d'affiché.
+        let default_dw = item_body(&json!({
+            "id": 3, "title": "T", "description": "d",
+            "agent": "", "done_when": "pr_merged"
+        }));
+        assert!(!default_dw.contains("spec:"));
     }
 }

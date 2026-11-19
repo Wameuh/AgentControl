@@ -87,7 +87,11 @@ enum FailRole {
 /// ne dérive PAS ; son entrée disparue du pool → failover vers la
 /// 1re entrée restante. Sans pool : singleton `agent_or(worker_agent)`
 /// — comportement historique inchangé.
-fn fail_role(m: &SessionMeta, cfg: &cfg::OrchCfg) -> Option<(FailRole, Vec<String>, String)> {
+fn fail_role(
+    m: &SessionMeta,
+    cfg: &cfg::OrchCfg,
+    tasks: &[Task],
+) -> Option<(FailRole, Vec<String>, String)> {
     if m.origin.as_deref() != Some(COMPONENT_ORIGIN)
         || m.state != "error"
         || !m
@@ -98,26 +102,46 @@ fn fail_role(m: &SessionMeta, cfg: &cfg::OrchCfg) -> Option<(FailRole, Vec<Strin
     {
         return None;
     }
-    let (role, expected, replacement) = if m.title.starts_with(orch_plan::REVIEWER_PREFIX) {
+    // Profils exigés par la spec `agent` des items wip possédés : un
+    // exécutant spawné SUR le profil requis par l'item n'est pas en
+    // drift (sinon un item spec'd claude sous planner_agent=devin
+    // bouclerait en failover à chaque tick). La spec concerne
+    // l'exécution — le reviewer garde `reviewer_agent`.
+    let mut spec_agents: Vec<String> = tasks
+        .iter()
+        .filter(|t| task_agent(t) == m.id && task_status(t) == "wip")
+        .map(task_spec_agent)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    spec_agents.sort();
+    spec_agents.dedup();
+    let (role, mut expected, replacement) = if m.title.starts_with(orch_plan::REVIEWER_PREFIX) {
         let a = cfg.agent_or(&cfg.reviewer_agent).to_string();
         (FailRole::Reviewer, vec![a.clone()], a)
     } else if m.title.starts_with(orch_plan::PLANNER_PREFIX) {
         let a = cfg.agent_or(&cfg.planner_agent).to_string();
-        (FailRole::Planner, vec![a.clone()], a)
+        let mut e = vec![a.clone()];
+        e.extend(spec_agents.iter().cloned());
+        (FailRole::Planner, e, a)
     } else if m.title.starts_with(&cfg.title_prefix) {
         if cfg.worker_pool.is_empty() {
             let a = cfg.agent_or(&cfg.worker_agent).to_string();
-            (FailRole::Worker, vec![a.clone()], a)
+            let mut e = vec![a.clone()];
+            e.extend(spec_agents.iter().cloned());
+            (FailRole::Worker, e, a)
         } else {
             // Entrées effectives (repli profil worker), count > 0
             // seuls : une entrée à 0 slot n'est pas un profil attendu.
             let entries = cfg.worker_entries();
-            let expected: Vec<String> = entries
+            let mut expected: Vec<String> = entries
                 .iter()
                 .filter(|e| e.count > 0)
                 .map(|e| e.profile.clone())
                 .collect();
-            // Remplacement = 1re entrée du pool (ordre déclaré).
+            expected.extend(spec_agents.iter().cloned());
+            // Remplacement = 1re entrée du pool (ordre déclaré) —
+            // failover_worker raffine par la spec des items.
             let replacement = entries
                 .iter()
                 .find(|e| e.count > 0)
@@ -128,6 +152,8 @@ fn fail_role(m: &SessionMeta, cfg: &cfg::OrchCfg) -> Option<(FailRole, Vec<Strin
     } else {
         return None;
     };
+    expected.sort();
+    expected.dedup();
     if expected.is_empty() || expected.iter().any(|a| a == &m.agent) {
         return None;
     }
@@ -151,7 +177,7 @@ Commence par lire {WS}/AGENTS.md — le workflow PR/CI qu'il decrit est obligato
 ## MISSION
 1. Pour chaque item ci-dessus : verifie son etat (`agentbacklog --list --json`), retrouve ou cree le worktree dedie (`git worktree add ~/worktrees/ac-<feat> -b <branch> origin/next_release` — JAMAIS dans le checkout principal), continue le travail et mene la PR selon le cycle complet de AGENTS.md.
 2. Continue jusqu'a ce que tes items soient `--done` et tes PRs soldees (mergees ou cloturees), puis ARRETE-toi purement et simplement. Tu NE LANCES JAMAIS `agentbacklog --pop` toi-meme : l'orchestrateur dispatche le travail suivant (un worker = un item ; un pop contournerait la revue de plan en mode plan_review et l'invariant « contexte frais par item »).
-3. `agentbacklog --done <ID> --agent-id "$AGENTCONTROL_SESSION"` UNIQUEMENT quand ta PR est effectivement MERGED ; blocage insurmontable : `agentbacklog --release <ID> --agent-id "$AGENTCONTROL_SESSION"`, explique la raison, puis arrete.
+3. `agentbacklog --done <ID> --agent-id "$AGENTCONTROL_SESSION"` selon le done_when de chaque item (`agentbacklog --list --json` : 'pr_merged' = ta PR de l'item MERGED, 'deliverable' = ses criteres propres remplis, jamais d'attente de merge) ; blocage insurmontable : `agentbacklog --release <ID> --agent-id "$AGENTCONTROL_SESSION"`, explique la raison, puis arrete.
 
 Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; push uniquement sur ta branche de PR ; nettoie ton worktree a la fin ; reponds en francais."#;
 
@@ -181,7 +207,7 @@ impl Daemon {
         // `self.sessions` mais pas `metas` — itérer la liste figée.
         let targets: Vec<(SessionMeta, FailRole, String)> = metas
             .iter()
-            .filter_map(|m| fail_role(m, cfg).map(|(r, _expected, repl)| (m.clone(), r, repl)))
+            .filter_map(|m| fail_role(m, cfg, tasks).map(|(r, _e, repl)| (m.clone(), r, repl)))
             .collect();
         for (m, role, effective) in targets {
             if !self.orch.is_enabled() {
@@ -226,27 +252,81 @@ impl Daemon {
         st: &mut OrchPersist,
     ) {
         let sid = m.id.as_str();
-        // Remplaçant = 1re entrée du pool (count > 0) — son profil,
-        // modèle et effort sont propagés au spawn de reprise ; sans
-        // pool, l'entrée implicite legacy = worker_agent + valeurs
-        // globales, strictement identique à avant.
-        let entry = cfg
-            .worker_entries()
-            .into_iter()
-            .find(|e| e.count > 0)
-            .unwrap_or_else(|| cfg::WorkerPoolEntry {
-                profile: cfg.agent_or(&cfg.worker_agent).to_string(),
-                count: 1,
-                model: cfg.model.clone(),
-                effort: cfg.thought_level.clone(),
-                mode: cfg.mode.clone(),
-            });
-        let new_agent = entry.profile.clone();
         let my_wip: Vec<Task> = tasks
             .iter()
             .filter(|t| task_agent(t) == sid && task_status(t) == "wip")
             .cloned()
             .collect();
+        // Spec `agent` des items wip : un item spec'd n'est re-cueilli
+        // que par une entrée de pool à ce profil — jamais reassigné à
+        // un slot d'un autre agent. Specs contradictoires ou profil
+        // absent du pool → session conservée (backoff), réessai au
+        // prochain tick comme un spawn refusé.
+        let mut spec_agents: Vec<&str> = my_wip
+            .iter()
+            .map(task_spec_agent)
+            .filter(|s| !s.is_empty())
+            .collect();
+        spec_agents.sort();
+        spec_agents.dedup();
+        if spec_agents.len() > 1 {
+            warn!(
+                "orchestrator: worker failover {sid} — wip items require \
+                 conflicting agents {spec_agents:?}, session kept"
+            );
+            return;
+        }
+        let entry = if let Some(req) = spec_agents.first() {
+            match cfg
+                .worker_entries()
+                .into_iter()
+                .find(|e| e.count > 0 && e.profile == *req)
+            {
+                Some(e) => e,
+                None => {
+                    warn!(
+                        "orchestrator: worker failover {sid} — no pool \
+                         entry for agent={req}, session kept"
+                    );
+                    return;
+                }
+            }
+        } else {
+            // Remplaçant = 1re entrée du pool (count > 0) — son
+            // profil, modèle et effort sont propagés au spawn de
+            // reprise ; sans pool, l'entrée implicite legacy =
+            // worker_agent + valeurs globales, strictement identique
+            // à avant.
+            cfg.worker_entries()
+                .into_iter()
+                .find(|e| e.count > 0)
+                .unwrap_or_else(|| cfg::WorkerPoolEntry {
+                    profile: cfg.agent_or(&cfg.worker_agent).to_string(),
+                    count: 1,
+                    model: cfg.model.clone(),
+                    effort: cfg.thought_level.clone(),
+                    mode: cfg.mode.clone(),
+                })
+        };
+        // Overrides model/effort de l'item (un worker = un item
+        // en pratique ; le 1er wip spec'd fait foi pour le spawn) —
+        // `mode` est résolu plus bas avec la spec en priorité.
+        let mut eff = entry.clone();
+        if let Some(t) = my_wip
+            .iter()
+            .find(|t| !task_spec_model(t).is_empty() || !task_spec_effort(t).is_empty())
+        {
+            for (dst, src) in [
+                (&mut eff.model, task_spec_model(t)),
+                (&mut eff.effort, task_spec_effort(t)),
+            ] {
+                if !src.is_empty() {
+                    *dst = src.to_string();
+                }
+            }
+        }
+        let entry = eff;
+        let new_agent = entry.profile.clone();
         let my_prs: Vec<proto::PrEntry> = prs
             .iter()
             .filter(|p| p.session == sid && !matches!(p.status.as_str(), "closed" | "merged"))
@@ -299,12 +379,17 @@ impl Daemon {
             ],
         );
         // plan_review : les workers implémentent → implement_mode ;
-        // sinon le mode historique du rôle.
-        let mode = if cfg.plan_review {
-            cfg.implement_mode.as_str()
-        } else {
-            cfg.mode.as_str()
-        };
+        // sinon le mode historique du rôle — la spec `mode` de l'item
+        // prime (premier wip spec'd, un worker = un item en pratique).
+        let mode = my_wip
+            .iter()
+            .map(task_spec_mode)
+            .find(|s| !s.is_empty())
+            .unwrap_or(if cfg.plan_review {
+                cfg.implement_mode.as_str()
+            } else {
+                cfg.mode.as_str()
+            });
         st.counter += 1;
         let Some(nsid) = self
             .plan_spawn(
@@ -404,10 +489,28 @@ impl Daemon {
             }
             let key = task_id(t).to_string();
             let implementing = st.item_phase.get(&key).is_some_and(|p| p == "implementing");
+            // Spec de l'item : le remplaçant reprend le profil exigé
+            // (planner ET implémenteur = même exécutant) avec les
+            // overrides model/effort/mode — prioritaire sur les valeurs
+            // de rôle.
+            let spec_agent = task_spec_agent(t);
+            let spec_mode = task_spec_mode(t);
+            let spec_model = task_spec_model(t);
+            let spec_effort = task_spec_effort(t);
+            let agent = if spec_agent.is_empty() {
+                new_agent.as_str()
+            } else {
+                spec_agent
+            };
             let (tpl, mode) = if implementing {
                 (orch_plan::IMPLEMENTER_PROMPT, cfg.implement_mode.as_str())
             } else {
                 (orch_plan::PLANNER_PROMPT, cfg.planner_mode.as_str())
+            };
+            let mode = if spec_mode.is_empty() {
+                mode
+            } else {
+                spec_mode
             };
             // Workspace routé de l'item repris (tag repo →
             // repo_workspaces) — le remplaçant travaille dans le bon
@@ -433,6 +536,7 @@ impl Daemon {
                             orch_plan::PLAN_INLINE_MAX,
                         ),
                     ),
+                    ("DOD", task_dod(t).replace("<ID>", &key)),
                 ],
             );
             // Brouillon de plan déjà déposé par l'ancienne session :
@@ -454,10 +558,18 @@ impl Daemon {
                 .plan_spawn(
                     st.counter,
                     orch_plan::PLANNER_PREFIX,
-                    &new_agent,
+                    agent,
                     mode,
-                    cfg.model_or(&cfg.planner_model),
-                    cfg.effort_or(&cfg.planner_effort),
+                    if spec_model.is_empty() {
+                        cfg.model_or(&cfg.planner_model)
+                    } else {
+                        spec_model
+                    },
+                    if spec_effort.is_empty() {
+                        cfg.effort_or(&cfg.planner_effort)
+                    } else {
+                        spec_effort
+                    },
                     prompt,
                     &iws,
                     cfg,
@@ -465,7 +577,7 @@ impl Daemon {
                 .await
             else {
                 warn!(
-                    "orchestrator: planner failover {sid} — spawn {new_agent} refused for #{key}, session kept for retry"
+                    "orchestrator: planner failover {sid} — spawn {agent} refused for #{key}, session kept for retry"
                 );
                 all_replaced = false;
                 continue;
@@ -604,12 +716,12 @@ mod tests {
         let c = cfg();
         // Worker sur « cursor » = worker_agent → pas de drift.
         let m = meta("s-1", "Backlog-W1 #42 · t", "cursor");
-        assert!(fail_role(&m, &c).is_none());
+        assert!(fail_role(&m, &c, &[]).is_none());
         // Worker sur « devin » (ancien worker_agent ou fallback agent)
         // → worker, effectif cursor.
         let m = meta("s-1", "Backlog-W1 #42 · t", "devin");
         assert_eq!(
-            fail_role(&m, &c),
+            fail_role(&m, &c, &[]),
             Some((
                 FailRole::Worker,
                 vec!["cursor".to_string()],
@@ -620,7 +732,7 @@ mod tests {
         // sur cursor → planner, effectif devin.
         let m = meta("s-2", "Backlog-P3", "cursor");
         assert_eq!(
-            fail_role(&m, &c),
+            fail_role(&m, &c, &[]),
             Some((
                 FailRole::Planner,
                 vec!["devin".to_string()],
@@ -630,7 +742,7 @@ mod tests {
         // Reviewer : reviewer_agent=claude ; session sur devin → drift.
         let m = meta("s-3", "Backlog-R2", "devin");
         assert_eq!(
-            fail_role(&m, &c),
+            fail_role(&m, &c, &[]),
             Some((
                 FailRole::Reviewer,
                 vec!["claude".to_string()],
@@ -658,22 +770,22 @@ mod tests {
         ];
         // Worker sur claude = entrée 2 du pool → PAS de drift.
         let m = meta("s-1", "Backlog-W1", "claude");
-        assert!(fail_role(&m, &c).is_none());
+        assert!(fail_role(&m, &c, &[]).is_none());
         // Worker sur cursor (worker_agent legacy) → drift vers la
         // 1re entrée du pool (devin).
         let m = meta("s-2", "Backlog-W2", "cursor");
         assert_eq!(
-            fail_role(&m, &c),
+            fail_role(&m, &c, &[]),
             Some((
                 FailRole::Worker,
-                vec!["devin".to_string(), "claude".to_string()],
+                vec!["claude".to_string(), "devin".to_string()],
                 "devin".to_string()
             ))
         );
         // Entrée à count=0 : son profil ne compte plus comme attendu.
         c.worker_pool[1].count = 0;
         let m = meta("s-3", "Backlog-W3", "claude");
-        assert!(fail_role(&m, &c).is_some());
+        assert!(fail_role(&m, &c, &[]).is_some());
     }
 
     #[test]
@@ -688,20 +800,62 @@ mod tests {
             count: 1,
             retry_at: None,
         });
-        assert!(fail_role(&m, &c).is_none());
+        assert!(fail_role(&m, &c, &[]).is_none());
         // Session active (working) → pas de drift même si agent diffère.
         let mut m = meta("s-1", "Backlog-W1", "devin");
         m.state = "working".into();
-        assert!(fail_role(&m, &c).is_none());
+        assert!(fail_role(&m, &c, &[]).is_none());
         // Origin manager → exclue.
         let mut m = meta("s-1", "Backlog-W1", "devin");
         m.origin = Some(MANAGER_ORIGIN.into());
-        assert!(fail_role(&m, &c).is_none());
+        assert!(fail_role(&m, &c, &[]).is_none());
         // Origin PRReview → hors périmètre de cette passe (gérée par
         // orch_review) — le titre PRReview-* ne matcherait aucun
         // préfixe de toute façon.
         let mut m = meta("s-4", "PRReview-12", "devin");
         m.origin = Some(PR_REVIEW_ORIGIN.into());
-        assert!(fail_role(&m, &c).is_none());
+        assert!(fail_role(&m, &c, &[]).is_none());
+    }
+
+    #[test]
+    fn fail_role_spec_agent_des_items_wip() {
+        let c = cfg(); // worker_agent=cursor, planner→devin, reviewer=claude
+                       // Worker spawné SUR le profil exigé par son item wip
+                       // (agent=claude) : pas de drift même hors worker_agent —
+                       // sinon il bouclerait en failover à chaque tick.
+        let wip_spec = vec![serde_json::json!({
+            "id": 7, "status": "wip", "agent_id": "s-1",
+            "agent": "claude"
+        })];
+        let m = meta("s-1", "Backlog-W1 #7", "claude");
+        assert!(fail_role(&m, &c, &wip_spec).is_none());
+        // …mais sur un AUTRE profil que la spec → drift, et le
+        // profil spec'd entre dans les attendus.
+        let m = meta("s-1", "Backlog-W1 #7", "devin");
+        let r = fail_role(&m, &c, &wip_spec).unwrap();
+        assert_eq!(r.0, FailRole::Worker);
+        assert!(r.1.contains(&"claude".to_string()));
+        // Planner idem : item spec'd planner_agent → exécutant = spec.
+        let m = meta("s-2", "Backlog-P3", "claude");
+        let wip_p = vec![serde_json::json!({
+            "id": 8, "status": "wip", "agent_id": "s-2",
+            "agent": "claude"
+        })];
+        assert!(fail_role(&m, &c, &wip_p).is_none());
+        // Reviewer : la spec d'exécution ne s'applique PAS — même un
+        // item spec'd agent=devin ne sort pas le reviewer du drift
+        // (reviewer_agent=claude reste la seule référence).
+        let m = meta("s-3", "Backlog-R2", "devin");
+        let reviewing = vec![serde_json::json!({
+            "id": 9, "status": "reviewing", "agent_id": "s-3",
+            "reviewer_id": "s-3", "agent": "devin"
+        })];
+        assert!(fail_role(&m, &c, &reviewing).is_some());
+        // Item non wip / non possédé → spec ignorée.
+        let m = meta("s-1", "Backlog-W1 #7", "devin");
+        let done_item = vec![serde_json::json!({
+            "id": 7, "status": "done", "agent_id": "s-1", "agent": "claude"
+        })];
+        assert!(fail_role(&m, &c, &done_item).is_some());
     }
 }
