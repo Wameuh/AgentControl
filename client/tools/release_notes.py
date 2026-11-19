@@ -52,11 +52,11 @@ MARK_END = "<!-- release-notes:end -->"
 # `Merge pull request #N`. Section optionnelle `[feat|fix|perf]` juste
 # après la clé — requise pour les sujets de commit non conventionnels
 # (sans préfixe feat:/fix:/perf:), seule façon de les catégoriser ;
-# ignorée sinon.
+# `skip` exclut la PR des notes (fix interne sans valeur utilisateur).
 EN_NOTES = os.path.join(ROOT, "client", "tools", "release_notes_en.txt")
 EN_LINE = re.compile(
     r"\s*(?:(\d+)|sha:([0-9a-fA-F]{7,40}))\s*:\s*"
-    r"(?:\[(feat|fix|perf)\]\s*)?(.+?)\s*$")
+    r"(?:\[(feat|fix|perf|skip)\]\s*)?(.+?)\s*$")
 
 # type conventional -> section user-facing ; les autres types (docs,
 # test, chore, ci, build, refactor, style, …) sont internes et exclus.
@@ -207,6 +207,8 @@ def entries(rev_range):
             pr = fb.group(1) if fb else None
             if (hit := note_for(en, pr, sha)):
                 sec, note = hit
+                if sec == "skip":
+                    continue
                 if sec and note and (note, pr or sha) not in seen:
                     seen.add((note, pr or sha))
                     out[types[sec]].append((note, pr))
@@ -219,7 +221,10 @@ def entries(rev_range):
         if m.group(1) not in types:
             continue
         pr = m.group(3) or owner.get(sha)
-        title = ((note_for(en, pr, sha) or (None, ""))[1]).strip() or None
+        hit = note_for(en, pr, sha)
+        if hit and hit[0] == "skip":
+            continue
+        title = (hit[1] if hit else "").strip() or None
         if title is None:
             title = INNER_PR.sub("", KEYWORD.sub("", m.group(2))).strip()
             if not title:
