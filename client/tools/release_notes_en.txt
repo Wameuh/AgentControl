@@ -11,8 +11,10 @@
 # `Merge pull request #N` ancestor). `#` lines are comments; no inline
 # comments. For non-conventional commit subjects (no
 # feat:/fix:/perf: prefix) the section must be tagged right after the
-# key: `<PR>: [feat|fix|perf] <note>`. Entries for already-released PRs
-# are inert — prune at release time.
+# key: `<PR>: [feat|fix|perf] <note>`. A PR with no user-facing value
+# (internal tooling fix) gets `<PR>: [skip] <reason>` — it is dropped
+# from the notes instead of falling back to the raw commit subject.
+# Entries for already-released PRs are inert — prune at release time.
 #
 # Notes are user-facing only: describe the change the user experiences,
 # never internal references — no `(#N)` suffix (the key prefix is for
@@ -181,3 +183,4 @@ sha:71fcbdf871390152ae3de8661e3fc1da87e2e3f7: ACP-only session modes (plan/smart
 367: Orchestrator-spawned sessions (workers, planners, reviewers, manager) are now instructed to publish their task steps via `acctl steps set`, so the client "Steps" panel fills in live during their runs.
 365: ACP agent adapters now heal themselves — on startup the daemon verifies the bundled acp-* binaries sit next to its executable and, if one is missing (e.g. after updating from an older version), downloads its own published release archive once to restore it, without overwriting existing binaries or ever blocking boot.
 366: Typing in the composer no longer lags behind your keystrokes on long conversations — the input field is sized natively by the browser and the message thread skips layout work for off-screen messages, so input and streaming output stay smooth.
+368: [skip] internal release-notes tooling fix, no user-facing change
