@@ -529,6 +529,7 @@ pub(crate) async fn ensure_daemon(
          echo step:install >&2; \
          install -Dm755 agentcontrol-daemon $bin; \
          install -Dm755 acctl $HOME/.local/bin/acctl; \
+         for f in acp-*; do [ -f \"$f\" ] && install -Dm755 \"$f\" \"$HOME/.local/bin/$f\"; done; \
          echo step:service >&2; \
          confs=\"/etc/supervisor/conf.d/*.conf /etc/supervisord.d/*.conf $HOME/.supervisor/conf.d/*.conf\"; \
          ef=\"\"; for f in $confs; do [ -f \"$f\" ] && ef=\"$ef $f\"; done; \

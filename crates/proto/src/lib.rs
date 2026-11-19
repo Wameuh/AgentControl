@@ -1433,7 +1433,8 @@ pub enum ReqKind {
     /// client (ex. "0.5.0" → tag v0.5.0 — jamais « latest » : le démon
     /// doit coller à la version du client, pas la dépasser). Le démon
     /// télécharge `agentcontrol-server-<arch>-linux.tar.gz`, remplace
-    /// son binaire (rename atomique) puis sort pour être relancé par
+    /// ses binaires (démon + adaptateurs `acp-*`, rename atomique)
+    /// puis sort pour être relancé par
     /// son superviseur — le marqueur pid conservé déclenche la reprise
     /// auto des sessions au boot. Réponse : `{updated, path,
     /// restarting}` — `restarting:false` = binaire remplacé mais aucun
