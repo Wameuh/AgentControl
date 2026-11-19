@@ -85,6 +85,8 @@ MISSION — une seule tache (un worker = un item, pas de boucle) :
 
 5. Marque la tache faite : {DOD} La regle --done depend du champ done_when de l'item (agentbacklog --list --json) : 'pr_merged' = ta PR de feature MERGED ; 'deliverable' = les criteres propres de l'item remplis, jamais d'attente de merge. Puis ARRETE : reponds « termine » et cesse tout travail — ne re-pop jamais, l'orchestrateur te supprime et spawn un worker neuf pour le pending suivant.
 
+Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
+
 Blocage insurmontable sur une tache : agentbacklog --release <ID> --agent-id "<ton agent-id>", explique la raison dans ta reponse, puis arrete — l'item repart pending pour un autre worker.
 
 Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; push uniquement sur ta branche de PR ; nettoie ton worktree a la fin (git worktree remove) ; reponds en francais."#;
@@ -120,6 +122,8 @@ MISSION — une seule tache :
 
 5. Marque la tache faite : {DOD} Puis ARRETE : reponds « termine » et cesse tout travail — ne re-pop jamais, l'orchestrateur te supprime et spawn un worker neuf pour le pending suivant.
 
+Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
+
 Blocage insurmontable sur une tache : `agentbacklog --release <ID> --agent-id "$AGENTCONTROL_SESSION"`, explique la raison dans ta reponse, puis arrete — l'item repart pending pour un autre worker.
 
 Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; push uniquement sur ta branche de PR ; nettoie ton worktree a la fin (git worktree remove) ; reponds en francais."#;
@@ -130,6 +134,8 @@ const NOTES_DESC: &str = r#"[Item cree automatiquement par backlog-orchestrator 
 La PR de release (next_release -> main, creee par auto-release-pr.yml — retrouve-la via `gh pr list --head next_release --base main --state open --json number,isDraft`) doit etre prete a etre shippee par l'utilisateur.
 
 MISSION :
+
+Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
 
 1. Body = patchnotes utilisateur EN ANGLAIS couvrant TOUTES les PR mergees dans next_release sur le cycle (inventaire : git fetch origin && git log origin/main..origin/next_release --oneline, ou les commits de la PR). Le generateur automatique (auto-release-pr.yml, cf item #18 / PR #126-127) regenere le body a chaque push sur next_release : verifie qu'il est a jour vis-a-vis du head courant, EN ANGLAIS, et lisible par un utilisateur (fonctionnalites visibles, pas le detail technique interne). JAMAIS de reference interne dans le texte : pas de (#NNN), pas de lien PR, pas d'id backlog — uniquement des changements vecus par l'utilisateur ; les noms de fonctionnalites visibles restent OK. S'il est stale ou non anglophone, declenche la regeneration via le mecanisme du workflow ; a defaut reecris le body toi-meme (gh pr edit <N> --body). Si le generateur doit produire de l'anglais durablement, corrige-le via le cycle PR normal plutot qu'une edition manuelle.
 2. Passe la PR en ready : gh pr ready <N> — cela declenche release-bump (tag rc.k + commit de version sur next_release), c'est voulu. Ne merge JAMAIS la release PR vers main : le merge reste a l'utilisateur.
@@ -173,6 +179,8 @@ MISSIONS :
 2. REPONDRE AUX QUESTIONS D'ETAT — file (agentbacklog --list --json, --all pour l'historique), items wip/pending/bloques, workers actifs (acctl list), PRs en cours (acctl pr ls --all). Reponses concises, en francais.
 
 3. AJUSTER LA FILE SUR DEMANDE — priorite : agentbacklog --bump <ID> ; dependance : agentbacklog --depend <ID> <DEP> (DEP=0 retire) ; rendre un item wip abandonne : agentbacklog --release <ID> --force. Refuse toute demande qui depasse ton role.
+
+4. ETAPES : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
 
 JAMAIS : --pop (tu n'implementes pas), --done (sauf item que TU as toi-meme cree par erreur et qu'il faut retirer — prefere --release + --depend sinon), pas de code a ecrire, pas de PR a mener. Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; reponds en francais."#;
 

@@ -555,6 +555,8 @@ Tu es en mode plan : tu n'implementes RIEN, tu ne modifies aucun fichier du repo
 4. Un reviewer relira ton plan : si tu recois un verdict DENIED ou CONDITIONAL (message d'une session Backlog-R*), revise le plan en tenant compte du commentaire, recris le fichier et termine par une nouvelle ligne « PLAN_FILE: <chemin> ».
 5. Si le plan est approuve, l'orchestrateur compacte ton contexte, te passe en mode implementation et t'ordonne d'implementer — attends son message.
 
+Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
+
 Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; reponds en francais."#;
 
 const REVIEWER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
@@ -571,6 +573,8 @@ Tu es le REVIEWER du plan de l'item backlog ci-dessous (session $AGENTCONTROL_SE
 {HISTORY}
 
 ## ROLE
+
+Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
 
 Verifie la faisabilite, la completude et les risques du plan EN REGARDANT LE CODE dans {WS} (les chemins/API du plan peuvent etre inexacts — c'est a toi de trancher). Verdicts : APPROVED si le plan est implementable tel quel ; CONDITIONAL s'il l'est moyennant des ajustements precis ; DENIED s'il est faux, incomplet ou dangereux.
 
@@ -589,6 +593,8 @@ const REVIEWER_ROUND_MSG: &str = r#"Plan resoumis pour l'item #{ID} — round {R
 
 ## PLAN — round {ROUND}
 {PLAN}
+
+Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
 
 Quand ton verdict est pret, dans l'ordre :
   a) agentbacklog --verdict {ID} --reviewer "$AGENTCONTROL_SESSION" --outcome APPROVED|DENIED|CONDITIONAL --comment "<ton commentaire>"
@@ -611,6 +617,8 @@ Implemente le plan en suivant le workflow PR/CI de {WS}/AGENTS.md a la lettre : 
 
 {DOD} Blocage insurmontable : agentbacklog --release {ID} --agent-id "$AGENTCONTROL_SESSION", explique pourquoi, puis arrete.
 
+Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
+
 Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; push uniquement sur ta branche de PR ; nettoie ton worktree a la fin (git worktree remove) ; reponds en francais."#;
 
 const CLAIMED_WORKER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
@@ -623,6 +631,8 @@ Tu es un worker autonome sur le repo (cwd {WS}). Lis {WS}/AGENTS.md — le workf
 1. Implemente en suivant la description a la lettre : worktree dedie base sur origin/next_release (JAMAIS dans le checkout principal {WS}), spec, verifications demandees.
 2. Cycle PR (cf AGENTS.md) : branche -> push -> gh pr create --base next_release --draft -> review auto (iterations en draft) -> review soldee -> gh pr ready au moins 30 s apres le dernier push -> checks requis VERTS sur le head SHA -> merge (regle de merge AGENTS.md). Toute attente > ~1 min (verdict, checks, merge) passe par un waiter ac-wait (regle « Waiting » d'AGENTS.md) — jamais de --watch bloquant ni de boucle de poll dans un tool call.
 3. {DOD}
+
+Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
 
 Blocage insurmontable : agentbacklog --release {ID} --agent-id "$AGENTCONTROL_SESSION", explique la raison, puis arrete.
 
