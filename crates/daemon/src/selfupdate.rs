@@ -357,9 +357,9 @@ fn semver_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     Equal
 }
 
-/// Extrait `agentcontrol-daemon` (+ `acctl` si présent dans le même
-/// dossier que le binaire courant) dans `staging`, puis remplace les
-/// cibles par rename atomique.
+/// Extrait l'archive dans `staging`, remplace `agentcontrol-daemon`
+/// (+ `acctl` s'il cohabite déjà avec le démon) et installe chaque
+/// binaire `acp-*` racine à côté du démon par rename atomique.
 fn swap_binaries(tgz: &[u8], staging: &Path, dir: &Path, exe: &Path) -> Result<()> {
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(tgz));
     archive
@@ -383,15 +383,50 @@ fn swap_binaries(tgz: &[u8], staging: &Path, dir: &Path, exe: &Path) -> Result<(
         if name == "acctl" && !target.exists() {
             continue;
         }
-        let staged = stage_executable(&src, &dir, name)?;
-        if let Err(e) = std::fs::rename(&staged, &target)
-            .with_context(|| format!("replacing {}", target.display()))
-        {
-            let _ = std::fs::remove_file(&staged);
-            return Err(e);
-        }
-        tracing::info!("self-update: {} replaced", target.display());
+        replace_extracted(&src, dir, &target, name)?;
     }
+
+    // Adaptateurs ACP livrés dans la release : installation
+    // inconditionnelle, archive sans `acp-*` tolérée. Les anciens
+    // `acp-*` absents de la nouvelle archive ne sont pas purgés —
+    // retrait hors scope de l'update (KISS).
+    for name in staged_acp_binaries(staging)? {
+        let src = staging.join(&name);
+        let target = dir.join(&name);
+        replace_extracted(&src, dir, &target, &name)?;
+    }
+    Ok(())
+}
+
+/// Binaires `acp-*` à la racine de l'archive extraite, triés pour un
+/// ordre déterministe.
+fn staged_acp_binaries(staging: &Path) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(staging).context("listing staged binaries")? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if name.len() > 4 && name.starts_with("acp-") {
+            names.push(name);
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+fn replace_extracted(src: &Path, dir: &Path, target: &Path, name: &str) -> Result<()> {
+    let staged = stage_executable(src, dir, name)?;
+    if let Err(e) =
+        std::fs::rename(&staged, target).with_context(|| format!("replacing {}", target.display()))
+    {
+        let _ = std::fs::remove_file(&staged);
+        return Err(e);
+    }
+    tracing::info!("self-update: {} replaced", target.display());
     Ok(())
 }
 
@@ -414,6 +449,83 @@ fn stage_executable(src: &Path, dir: &Path, name: &str) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use std::cmp::Ordering::*;
+
+    fn tgz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        {
+            let mut builder = tar::Builder::new(&mut enc);
+            for (name, data) in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(data.len() as u64);
+                header.set_mode(0o755);
+                header.set_cksum();
+                builder.append_data(&mut header, name, *data).unwrap();
+            }
+            builder.finish().unwrap();
+        }
+        enc.finish().unwrap()
+    }
+
+    fn fixture(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "ac-swap-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let dir = root.join("bin");
+        let staging = root.join("staging");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&staging).unwrap();
+        (root, dir, staging)
+    }
+
+    #[test]
+    fn swap_installe_les_acp_de_la_release() {
+        let (root, dir, staging) = fixture("acp");
+        let exe = dir.join("agentcontrol-daemon");
+        std::fs::write(&exe, b"old").unwrap();
+        let archive = tgz(&[
+            ("agentcontrol-daemon", &b"daemon"[..]),
+            ("acp-claude", &b"claude"[..]),
+            ("acp-codex", &b"codex"[..]),
+        ]);
+
+        swap_binaries(&archive, &staging, &dir, &exe).unwrap();
+
+        assert_eq!(std::fs::read(dir.join("acp-claude")).unwrap(), b"claude");
+        assert_eq!(std::fs::read(dir.join("acp-codex")).unwrap(), b"codex");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(dir.join("acp-claude"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn swap_tolere_archive_sans_acp_et_conserve_les_anciens() {
+        let (root, dir, staging) = fixture("noacp");
+        let exe = dir.join("agentcontrol-daemon");
+        std::fs::write(&exe, b"old").unwrap();
+        std::fs::write(dir.join("acp-old"), b"old-adapter").unwrap();
+        let archive = tgz(&[("agentcontrol-daemon", &b"daemon"[..])]);
+
+        swap_binaries(&archive, &staging, &dir, &exe).unwrap();
+
+        assert!(!dir.join("acp-claude").exists());
+        assert_eq!(std::fs::read(dir.join("acp-old")).unwrap(), b"old-adapter");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn semver_cmp_orders_core_and_prerelease() {
