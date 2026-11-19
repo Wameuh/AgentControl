@@ -40,6 +40,13 @@ const UNDO_DEBOUNCE_MS = 800;
 /// l'infini — 100 pas × un prompt reste raisonnable en mémoire).
 const UNDO_MAX = 100;
 
+/// `field-sizing: content` laisse le navigateur dimensionner #input
+/// tout seul (max-height borne) — plus de mesure JS (scrollHeight =
+/// reflow forcé) à chaque frappe. Repli : fitInput manuel (vieux
+/// WebView Android, Safari < 18).
+const FIELD_SIZING =
+  typeof CSS !== "undefined" && CSS.supports("field-sizing", "content");
+
 // ---- Commandes built-in (toujours dispo, exécutées côté client) ----
 const BUILTINS = (): { name: string; description: string; hint: string }[] => [
   { name: "model", description: t("builtin_model"), hint: "<model>" },
@@ -243,38 +250,88 @@ export class Composer {
     this.lastGroup = null;
   }
 
-  fitInput() {
+  /** Hauteur/largeur du fil (#chat) pilotant les caps et le wrapping
+   *  du champ — suivies par ResizeObserver (pas de lecture de layout
+   *  dans le chemin chaud). */
+  private chatH = 0;
+  private chatW = 0;
+  /** fitInput saute la mesure tant que ni la valeur ni la géométrie
+   *  (resize → fitStale) n'ont changé : les scheduleUi sans contenu
+   *  nouveau (setInput identique, restore, IME) ne paient pas de reflow. */
+  private lastFitVal: string | null = null;
+  private fitStale = true;
+  /** padding/line-height du champ — stables (pas de réglage de fonte
+   *  dans le client), lus une fois pour le libellé « N lignes ». */
+  private fitMetrics: { padV: number; lh: number } | null = null;
+  /** Dernier rendu de la pill « N lignes » — innerHTML n'est réécrit
+   *  que si le compte, l'état expandé ou le titre (langue) changent :
+   *  la frappe dans un champ overflowing ne doit pas muter le DOM à
+   *  chaque frame. */
+  private lastBtnLines = -1;
+  private lastBtnExp: boolean | null = null;
+
+  fitInput(force = false) {
     const inp = $("input") as HTMLTextAreaElement;
     const wrap = $("input-wrap");
     const btn = $("btn-expand");
-    // Mesure : retour à la hauteur naturelle (rows=2) puis scrollHeight
-    // = hauteur nécessaire. +2 pour les bordures (box-sizing border-box).
-    inp.style.height = "auto";
-    const need = inp.scrollHeight + 2;
+    if (!force && !this.fitStale && inp.value === this.lastFitVal) return;
+    this.lastFitVal = inp.value;
+    this.fitStale = false;
+    // Mesure : hauteur nécessaire au contenu. scrollHeight rend le
+    // contenu complet même quand la boîte est cappée — en field-sizing
+    // le navigateur dimensionne via max-height, pas de reset nécessaire.
+    // Repli : retour à la hauteur naturelle (rows=2) puis scrollHeight.
+    // +2 pour les bordures (box-sizing border-box).
+    let need: number;
+    if (FIELD_SIZING) {
+      need = inp.scrollHeight + 2;
+    } else {
+      inp.style.height = "auto";
+      need = inp.scrollHeight + 2;
+    }
     // Référence stable : la colonne #chat (hauteur fixée par le viewport)
     // — pas #events, qui rétrécit quand le champ grandit (cap mouvant).
-    const chatH = $("chat")?.clientHeight || window.innerHeight;
+    const chatH = this.chatH || window.innerHeight;
     const small = Math.max(100, Math.round(chatH * 0.33));
     const big = Math.max(small + 80, Math.round(chatH * 0.66));
     const over = need > small;
     if (!over) this.inpExpanded = false;
     const cap = this.inpExpanded ? big : small;
-    inp.style.height = Math.min(need, cap) + "px";
+    if (FIELD_SIZING) {
+      // Cap via custom property : la règle landscape Android
+      // (max-height:54px, spécificité supérieure) n'est pas écrasée.
+      inp.style.setProperty("--fit-cap", cap + "px");
+    } else {
+      inp.style.height = Math.min(need, cap) + "px";
+    }
     wrap.classList.toggle("over", over);
     btn.hidden = !over;
     if (over) {
-      const cs = getComputedStyle(inp);
-      const padV = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
-      const lh = parseFloat(cs.lineHeight) || 21;
+      if (!this.fitMetrics) {
+        const cs = getComputedStyle(inp);
+        this.fitMetrics = {
+          padV: parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom),
+          lh: parseFloat(cs.lineHeight) || 21,
+        };
+      }
       const lines = Math.max(
         inp.value.split("\n").length,
-        Math.round((need - padV) / lh),
+        Math.round((need - this.fitMetrics.padV) / this.fitMetrics.lh),
       );
-      btn.innerHTML =
-        icon(this.inpExpanded ? "chev-down" : "chev-up") +
-        `<span class="n">${lines}</span>`;
-      btn.title = t(this.inpExpanded ? "input_collapse" : "input_expand");
-      btn.setAttribute("aria-label", btn.title);
+      const title = t(this.inpExpanded ? "input_collapse" : "input_expand");
+      if (
+        lines !== this.lastBtnLines ||
+        this.inpExpanded !== this.lastBtnExp ||
+        title !== btn.title
+      ) {
+        this.lastBtnLines = lines;
+        this.lastBtnExp = this.inpExpanded;
+        btn.innerHTML =
+          icon(this.inpExpanded ? "chev-down" : "chev-up") +
+          `<span class="n">${lines}</span>`;
+        btn.title = title;
+        btn.setAttribute("aria-label", title);
+      }
     }
   }
 
@@ -1166,7 +1223,7 @@ export class Composer {
   refreshHints() {
     // Un placeholder plus long peut wrapper → refit, et le titre de la
     // pill suit la langue courante.
-    this.fitInput();
+    this.fitInput(true);
     this.syncAltBtn(); // bouton alternatif : suit la préférence/langue
     if (isAndroid()) return; // placeholder mobile sans raccourcis
     ($("input") as HTMLTextAreaElement).placeholder =
@@ -1356,11 +1413,44 @@ export class Composer {
     // au champ pour continuer la frappe.
     $("btn-expand").onclick = () => {
       this.inpExpanded = !this.inpExpanded;
-      this.fitInput();
+      this.fitInput(true);
       ($("input") as HTMLTextAreaElement).focus();
     };
-    // Les caps dépendent de la hauteur du fil (resize, rotation mobile).
-    window.addEventListener("resize", () => this.fitInput());
+    // Les caps dépendent de la hauteur du fil (resize, rotation mobile,
+    // panneaux) — #chat la suit sans reflow côté fitInput.
+    const chatEl = $("chat");
+    this.chatH = chatEl?.clientHeight || window.innerHeight;
+    this.chatW = chatEl?.clientWidth || window.innerWidth;
+    if (chatEl) {
+      new ResizeObserver(() => {
+        const h = chatEl.clientHeight;
+        const w = chatEl.clientWidth;
+        if (h > 0 && (h !== this.chatH || w !== this.chatW)) {
+          this.chatH = h;
+          this.chatW = w;
+          this.fitStale = true;
+          this.fitInput();
+        }
+      }).observe(chatEl);
+    }
+    // Largeur du champ : #chat ne bouge pas quand les boutons du
+    // composer (alt/mic/attach) apparaissent — #input-wrap, si.
+    const wrapEl = $("input-wrap");
+    let wrapW = wrapEl?.clientWidth ?? 0;
+    if (wrapEl) {
+      new ResizeObserver(() => {
+        const w = wrapEl.clientWidth;
+        if (w > 0 && w !== wrapW) {
+          wrapW = w;
+          this.fitStale = true;
+          this.fitInput();
+        }
+      }).observe(wrapEl);
+    }
+    window.addEventListener("resize", () => {
+      this.fitStale = true; // largeur changée → le contenu re-wrappé
+      this.fitInput();
+    });
     this.fitInput();
 
     $("btn-cancel").onclick = () =>

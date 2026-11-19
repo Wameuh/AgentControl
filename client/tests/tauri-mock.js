@@ -331,6 +331,7 @@
           return p.then(() => null);
         case "pair_attempt": return p.then(() => "SHA256:DemoFingerprintOfPairedKey");
         case "check_update": return p.then(() => { throw new Error("offline"); });
+        case "other_instances": return p.then(() => []);
         case "ensure_daemon": case "save_connection": case "update_client":
           return p.then(() => null);
         default: return p.then(() => null);
