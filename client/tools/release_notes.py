@@ -74,6 +74,10 @@ FALLBACK_PR = re.compile(r"\(#(\d+)\)\s*$")
 SEMVER = re.compile(r"^v\d+\.\d+\.\d+$")
 # Mots-clés de bump : info pipeline, jamais montrée à l'utilisateur.
 KEYWORD = re.compile(r"\s*\((?:major|minor|sync|patch)\)", re.IGNORECASE)
+# Références `(#N)` internes éventuellement nichées dans le titre
+# (« … (#item) (#PR) ») : le suffixe final est capturé par SUBJECT,
+# ceux de l'intérieur doivent être retirés du repli sujet brut.
+INNER_PR = re.compile(r"\s*\(#\d+\)")
 
 # Bloc process interne, replié : comment la release se publie. Miroir du
 # commentaire d'en-tête de auto-release-pr.yml.
@@ -217,7 +221,7 @@ def entries(rev_range):
         pr = m.group(3) or owner.get(sha)
         title = ((note_for(en, pr, sha) or (None, ""))[1]).strip() or None
         if title is None:
-            title = KEYWORD.sub("", m.group(2)).strip()
+            title = INNER_PR.sub("", KEYWORD.sub("", m.group(2))).strip()
             if not title:
                 continue
             title = title[0].upper() + title[1:]
