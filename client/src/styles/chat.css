@@ -472,6 +472,21 @@ img.md-img {
   border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; font: inherit;
 }
 #input:focus { border-color: var(--accent); outline: none; }
+/* field-sizing:content = le navigateur dimensionne le champ sur son
+   contenu (max-height posé par fitInput) — fini la mesure JS
+   (scrollHeight = reflow forcé à chaque frappe). min-height reproduit
+   rows=2 : 2 lignes × line-height 1.55 + padding 18px + bordures 2px.
+   Navigateurs sans support → fitInput manuel (repli JS). */
+@supports (field-sizing: content) {
+  #input {
+    field-sizing: content;
+    min-height: calc(3.1em + 20px);
+    /* Cap posé par fitInput via --fit-cap : la règle landscape Android
+       (body.android #input, spécificité supérieure) prime toujours —
+       un max-height inline l'écraserait. */
+    max-height: var(--fit-cap, none);
+  }
+}
 /* Champ long : scrollable + place réservée à la pill « N lignes » */
 #input-wrap.over #input { overflow-y: auto; padding-right: 62px; }
 #btn-expand {
@@ -559,6 +574,16 @@ details.th .ic-thought { width: 12px; height: 12px; }
    écrasait chaque bloc verticalement quand le contenu débordait (barres
    compressées illisibles). flex-shrink:0 = hauteur naturelle + scroll. */
 #events > .ev { flex-shrink: 0; }
+/* Containment du fil : un event hors viewport n'est ni layouté ni peint
+   (content-visibility:auto) — le coût d'un reflow forcé (fitInput à la
+   frappe, chunks de streaming) ne croît plus avec la longueur du fil.
+   contain-intrinsic-height = hauteur estimée du placeholder ; `auto`
+   mémorise la taille réelle après le premier rendu. Navigateurs sans
+   support → déclaration ignorée, rendu normal. */
+#events > .ev {
+  content-visibility: auto;
+  contain-intrinsic-height: auto 120px;
+}
 
 
 /* File d'attente des prompts */
