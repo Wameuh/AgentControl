@@ -231,6 +231,23 @@ pub(crate) fn install_cmds_for(id: &str) -> Option<&'static [&'static [&'static 
         .filter(|i| !i.is_empty())
 }
 
+/// Binaires `acp-*` que la release est censée livrer à côté du démon
+/// — dérivés des argv[0] des specs du registre (`acp-claude`
+/// aujourd'hui). Sert au rattrapage boot de `selfupdate::acp_bootstrap`
+/// (#289) : « un acp-* attendu manque » = l'un de ces noms absent du
+/// dossier de l'exe.
+pub(crate) fn shipped_acp_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = KNOWN_ADAPTERS
+        .iter()
+        .flat_map(|s| s.commands.iter().filter_map(|c| c.first()))
+        .filter(|b| b.starts_with("acp-"))
+        .copied()
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,5 +376,13 @@ mod tests {
         assert!(install_cmds_for("codex").unwrap().len() > 1);
         assert!(install_cmds_for("devin").is_none());
         assert!(install_cmds_for("inconnu").is_none());
+    }
+
+    /// `shipped_acp_names` : seuls les argv[0] `acp-*` du registre —
+    /// acp-claude aujourd'hui (codex/gemini/opencode sont des
+    /// adaptateurs npm ou des flags, pas des binaires livrés).
+    #[test]
+    fn shipped_acp_names_reflete_le_registre() {
+        assert_eq!(shipped_acp_names(), vec!["acp-claude"]);
     }
 }
