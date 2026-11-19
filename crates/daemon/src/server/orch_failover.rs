@@ -179,6 +179,8 @@ Commence par lire {WS}/AGENTS.md — le workflow PR/CI qu'il decrit est obligato
 2. Continue jusqu'a ce que tes items soient `--done` et tes PRs soldees (mergees ou cloturees), puis ARRETE-toi purement et simplement. Tu NE LANCES JAMAIS `agentbacklog --pop` toi-meme : l'orchestrateur dispatche le travail suivant (un worker = un item ; un pop contournerait la revue de plan en mode plan_review et l'invariant « contexte frais par item »).
 3. `agentbacklog --done <ID> --agent-id "$AGENTCONTROL_SESSION"` selon le done_when de chaque item (`agentbacklog --list --json` : 'pr_merged' = ta PR de l'item MERGED, 'deliverable' = ses criteres propres remplis, jamais d'attente de merge) ; blocage insurmontable : `agentbacklog --release <ID> --agent-id "$AGENTCONTROL_SESSION"`, explique la raison, puis arrete.
 
+Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
+
 Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; push uniquement sur ta branche de PR ; nettoie ton worktree a la fin ; reponds en francais."#;
 
 /// Note ajoutée aux prompts planner/implementer pour expliciter la

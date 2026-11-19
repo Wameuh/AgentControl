@@ -273,6 +273,8 @@ Ton travail est la RELISE du diff et du code environnant. La compilation et les 
 
 Verdicts : APPROVED si la PR est mergeable en l'etat ; CHANGES_REQUESTED s'il y a des findings bloquants (precis, actionnables, references fichier:ligne).
 
+Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
+
 ## SORTIE OBLIGATOIRE
 
 Quand ton analyse est finie, rends ton verdict via l'outil MCP `agentcontrol_report_verdict` :
