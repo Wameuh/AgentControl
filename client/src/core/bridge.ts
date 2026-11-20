@@ -19,6 +19,7 @@ import { invoke as tauriInvoke, addPluginListener } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 import { wsClient, WEB_CONN } from "./wsclient";
 import { clientLog } from "./clientlog";
+import { perfProbes } from "./probe";
 
 export const isWeb = !(window as { __TAURI_INTERNALS__?: unknown })
   .__TAURI_INTERNALS__;
@@ -46,7 +47,14 @@ export function listen<T>(
   event: string,
   cb: (e: { payload: T }) => void,
 ): Promise<() => void> {
-  if (!isWeb) return tauriListen<T>(event, cb) as Promise<() => void>;
+  if (!isWeb) {
+    // Sonde télémétrie (#297) : chaque livraison d'event Tauri compte
+    // comme un message reçu (l'équivalent desktop des frames WS).
+    return tauriListen<T>(event, (e) => {
+      perfProbes.push?.();
+      cb(e);
+    }) as Promise<() => void>;
+  }
   return Promise.resolve(wsClient.on(event, (p) => cb({ payload: p as T })));
 }
 

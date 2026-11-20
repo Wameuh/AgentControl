@@ -64,6 +64,7 @@ import { notifications } from "./features/notifications";
 import { initFirstPost } from "./features/first-post";
 import { Pins } from "./features/pins";
 import { Steps, type SessionStep } from "./features/steps";
+import { initTelemetry } from "./features/telemetry";
 import { initLang, t, applyStatic } from "./i18n";
 import { engineReport, debugNoCv } from "./core/engine";
 import type { AcEvent, SavedConn } from "./core/types";
@@ -549,5 +550,9 @@ initStatus(() => {
   return conns.cap(k)?.host as HostStats | undefined;
 });
 initMemDialog();
+// Télémétrie perf locale (#297) : collecteur singleton — ligne agrégée
+// dans client.log toutes les 5 min + window.__telemetry() pour le debug.
+// Démarré tôt pour couvrir tout le boot ; la préférence OFF le désarme.
+initTelemetry();
 checkBootUpdate();
 connView.autoConnect(savedConns, cliConn ?? undefined, autoSuppressed);

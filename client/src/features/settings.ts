@@ -37,6 +37,7 @@ import { PRESETS } from "./sound-presets";
 import { SttModelsPanel } from "./stt-models";
 import { DlModelsPanel } from "./dl-models";
 import type { Tts } from "./tts";
+import { setTelemetryPref, telemetryPref } from "./telemetry";
 
 /** Préférence d'envoi : "queue" (file FIFO, défaut) | "steer" (injection
  *  mid-turn quand l'agent tourne ; idle → envoi normal côté démon). */
@@ -188,6 +189,7 @@ export class SettingsPanel {
     ($("s-encoding") as HTMLSelectElement).value = defaultEncoding();
     ($("s-mdrender") as HTMLInputElement).checked =
       localStorage.getItem("ac-md-render") !== "0";
+    ($("s-telemetry") as HTMLInputElement).checked = telemetryPref();
     ($("s-snd") as HTMLInputElement).checked = sndEnabled();
     for (const k of ["done", "question", "error"] as SoundKind[]) {
       ($(`s-snd-${k}`) as HTMLInputElement).checked = sndTypeOn(k);
@@ -594,6 +596,13 @@ export class SettingsPanel {
           localStorage.getItem("ac-md-render") !== "0";
       },
     });
+    this.stage("s-telemetry", {
+      apply: () =>
+        setTelemetryPref(($("s-telemetry") as HTMLInputElement).checked),
+      reset: () => {
+        ($("s-telemetry") as HTMLInputElement).checked = telemetryPref();
+      },
+    });
     this.stage("s-snd", {
       apply: () => {
         localStorage.setItem(
@@ -760,6 +769,10 @@ export class SettingsPanel {
       : t("st_off");
     $("s-st-update").textContent = $("s-version").textContent;
     $("s-st-files").textContent = opt("s-encoding");
+    $("s-st-diag").textContent = ($("s-telemetry") as HTMLInputElement)
+      .checked
+      ? t("st_on")
+      : t("st_off");
   }
 
   /** Master off → les sous-options sons sont grisées/inertes — sauf les

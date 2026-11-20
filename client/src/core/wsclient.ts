@@ -14,6 +14,7 @@
 
 import { t } from "../i18n";
 import { $, esc } from "./dom";
+import { perfProbes } from "./probe";
 
 type Pending = {
   resolve: (v: unknown) => void;
@@ -332,12 +333,16 @@ class WsClient {
     const data = typeof m.data === "string" ? m.data : "";
     this.rxTotal += data.length;
     this.lastRxAt = Date.now();
+    // Sonde télémétrie (#297) : octets + coût du JSON.parse par message.
+    const probe = perfProbes.wsMsg;
+    const t0 = probe ? performance.now() : 0;
     let v: Record<string, unknown>;
     try {
       v = JSON.parse(data);
     } catch {
       return;
     }
+    probe?.(data.length, performance.now() - t0);
     if (v.push) {
       // Push démon → nom d'event Tauri équivalent (le payload conserve
       // la forme brute : {session, event} / {term, data} / {term, code}

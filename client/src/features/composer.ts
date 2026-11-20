@@ -17,6 +17,12 @@ import { cmdDesc, cmdHint, cmdName } from "./modelbar";
 import { sendPref } from "./settings";
 import { Attachments } from "./attachments";
 import { SttMic } from "./stt-mic";
+import {
+  probeFitInput,
+  probeInputHandler,
+  probeInputPaint,
+  telemetryActive,
+} from "./telemetry";
 import type { ChatView } from "./chat-view";
 
 // ---- Undo/redo du composer : pile custom d'états ----
@@ -417,12 +423,17 @@ export class Composer {
   }
 
   fitInput(force = false) {
+    // Sonde télémétrie (#297) : la mesure propre (scrollHeight = reflow
+    // forcé) est le suspect n°1 des lag de frappe — chronométrée seulement
+    // quand la collecte est active, skip précoce non compté (coût ~0).
+    const t0 = telemetryActive() ? performance.now() : -1;
     const inp = $("input") as HTMLTextAreaElement;
     // Moteur sans field-sizing : le miroir #input-ghost dimensionne le
     // wrap en flux normal — aucune mesure JS (scrollHeight = reflow
     // synchrone proportionnel au fil sur les vieux webview).
     if (!FIELD_SIZING) {
       this.fitInputGhost(force);
+      if (t0 >= 0) probeFitInput(performance.now() - t0);
       return;
     }
     if (!force && !this.fitStale && inp.value === this.lastFitVal) return;
@@ -438,6 +449,7 @@ export class Composer {
     // (max-height:54px, spécificité supérieure) n'est pas écrasée.
     inp.style.setProperty("--fit-cap", this.fitCap() + "px");
     this.paintFit(over, need);
+    if (t0 >= 0) probeFitInput(performance.now() - t0);
   }
 
   private async runBuiltin(name: string, arg: string): Promise<boolean> {
@@ -1484,6 +1496,10 @@ export class Composer {
       }
     });
     $("input").addEventListener("input", (e) => {
+      // Sondes télémétrie (#297) : durée du handler + délai event→paint.
+      // t0 = début du traitement ; le rAF de sonde est enregistré APRÈS
+      // celui de scheduleUi → il mesure la frame complète.
+      const t0 = telemetryActive() ? performance.now() : -1;
       // En dictée : la frappe ne doit pas être écrasée par le prochain
       // partial — le segment live se ré-ancre au curseur (hors
       // composition IME, sinon chaque lettre committerait l'autocorrect).
@@ -1492,6 +1508,10 @@ export class Composer {
       this.acStale = true;
       this.acDismissed = false;
       this.scheduleUi();
+      if (t0 >= 0) {
+        probeInputHandler(performance.now() - t0);
+        probeInputPaint(t0);
+      }
     });
     $("input").addEventListener("blur", () => {
       // délai pour laisser le click sur un item passer — le masquage
