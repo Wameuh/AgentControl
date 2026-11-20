@@ -74,8 +74,13 @@ interface Agg {
   parse: Reservoir; // durée JSON.parse (ms)
   pushN: number; // deliveries d'events Tauri (desktop/Android)
   rpc: Map<string, { n: number; res: Reservoir }>;
-  jankN: number; // frames > 50 ms
-  jankWorst: number; // pire intervalle de frame (ms)
+  // FPS/frametime — frames échantillonnées par fenêtres bornées.
+  frameN: number;
+  frameMs: number; // somme des deltas inter-frames (ms)
+  frameRes: Reservoir; // deltas de frame (ms)
+  j16: number; // frames > 16.7 ms
+  j33: number; // frames > 33 ms
+  j50: number; // frames > 50 ms
 }
 
 const freshAgg = (): Agg => ({
@@ -93,16 +98,18 @@ const freshAgg = (): Agg => ({
   parse: new Reservoir(),
   pushN: 0,
   rpc: new Map(),
-  jankN: 0,
-  jankWorst: 0,
+  frameN: 0,
+  frameMs: 0,
+  frameRes: new Reservoir(),
+  j16: 0,
+  j33: 0,
+  j50: 0,
 });
 
 let agg = freshAgg();
 let enabled = false;
 let timer = 0;
 let po: PerformanceObserver | null = null;
-let jankRaf = 0;
-let lastFrame = -1;
 
 // ---- Sonde temps réel (chemin chaud : une fonction + un push) -------------
 
@@ -189,18 +196,91 @@ function attachLongtask() {
   }
 }
 
-/** Jank frame : deltas entre rAF consécutifs — une boucle rAF par frame,
- *  un timestamp et un compteur, rien d'autre. */
-function jankTick(t: number) {
-  jankRaf = requestAnimationFrame(jankTick);
-  if (lastFrame >= 0) {
-    const d = t - lastFrame;
-    if (d > 50) {
-      agg.jankN++;
-      if (d > agg.jankWorst) agg.jankWorst = d;
+// ---- Échantillonnage FPS/frametime ----------------------------------------
+// ⚠️ Une boucle rAF permanente entretiendrait la présentation de frames en
+// continu (GPU/batterie) et fausserait la mesure sur machine chargée —
+// le lag recherché. On échantillonne donc par fenêtres bornées :
+// ~FPS_ON_MS de deltas inter-frames puis FPS_OFF_MS de pause (~17 % de
+// duty cycle), uniquement onglet visible + toggle ON. Un rAF pending ne
+// doit jamais survivre à un passage hidden (son delta géant au retour
+// polluerait les stats) → la boucle est arrêtée net sur visibilitychange.
+const FPS_ON_MS = 5_000;
+const FPS_OFF_MS = 25_000;
+
+let fpsRaf = 0;
+let fpsWake = 0;
+let fpsBudget = 0;
+let lastFrame = -1;
+
+const fpsVisible = () => document.visibilityState === "visible";
+
+function fpsStartWindow() {
+  if (fpsRaf || fpsWake || !enabled || !fpsVisible()) return;
+  fpsBudget = FPS_ON_MS;
+  lastFrame = -1;
+  fpsRaf = requestAnimationFrame(fpsTick);
+}
+
+function fpsKick() {
+  if (!enabled || !fpsVisible() || fpsRaf || fpsWake) return;
+  fpsStartWindow();
+}
+
+function fpsStopLoop() {
+  if (fpsRaf) cancelAnimationFrame(fpsRaf);
+  fpsRaf = 0;
+}
+
+/** Fin de fenêtre ON → pause OFF, puis nouvelle fenêtre (tant que
+ *  visible + ON). */
+function fpsPause() {
+  fpsStopLoop();
+  if (!fpsWake) {
+    fpsWake = window.setTimeout(() => {
+      fpsWake = 0;
+      fpsStartWindow();
+    }, FPS_OFF_MS);
+  }
+}
+
+function onVisibility() {
+  if (!enabled) return;
+  if (fpsVisible()) {
+    fpsKick();
+  } else {
+    fpsStopLoop();
+    if (fpsWake) {
+      window.clearTimeout(fpsWake);
+      fpsWake = 0;
     }
   }
-  lastFrame = t;
+}
+
+function recordFrame(d: number) {
+  const a = agg;
+  a.frameN++;
+  a.frameMs += d;
+  a.frameRes.add(d);
+  if (d > 16.7) a.j16++;
+  if (d > 33) a.j33++;
+  if (d > 50) a.j50++;
+}
+
+function fpsTick(t: number) {
+  fpsRaf = 0;
+  if (lastFrame >= 0) {
+    const d = t - lastFrame;
+    lastFrame = t;
+    fpsBudget -= d;
+    recordFrame(d);
+    if (fpsBudget <= 0) {
+      fpsPause();
+      return;
+    }
+  } else {
+    lastFrame = t;
+  }
+  fpsRaf = requestAnimationFrame(fpsTick);
 }
 
 // ---- Formatage ------------------------------------------------------------
@@ -258,7 +338,22 @@ function buildLine(tag: string): string {
   p.push(`nodes=${cnt(document.getElementsByTagName("*").length)}`);
   const ev = document.getElementById("events");
   if (ev) p.push(`ev_children=${cnt(ev.childElementCount)}`);
-  p.push(`jank=${a.jankN}/${Math.round(a.jankWorst)}ms`);
+  // FPS/frametime sur les fenêtres échantillonnées : fps moyen,
+  // low1 = 1000/p99 frametime (le « 1 % bas »), p95 frametime, part de
+  // frames >16.7/>33/>50 ms. frame_n donne la taille d'échantillon.
+  if (a.frameN) {
+    const p99 = a.frameRes.pct(99);
+    const pct = (n: number) => `${Math.round((100 * n) / a.frameN)}%`;
+    p.push(
+      `fps=${Math.round((a.frameN * 1000) / a.frameMs)}`,
+      `low1=${p99 > 0 ? Math.round(1000 / p99) : 0}`,
+      `frame_p95=${ms(a.frameRes.pct(95))}ms`,
+      `frame_n=${a.frameN}`,
+      `j16=${pct(a.j16)}`,
+      `j33=${pct(a.j33)}`,
+      `j50=${pct(a.j50)}`,
+    );
+  }
   return p.join(" ");
 }
 
@@ -273,8 +368,8 @@ function start() {
   if (timer) return;
   wireCoreProbes();
   attachLongtask();
-  lastFrame = -1;
-  jankRaf = requestAnimationFrame(jankTick);
+  document.addEventListener("visibilitychange", onVisibility);
+  fpsKick();
   timer = window.setInterval(finish, FLUSH_MS);
 }
 
@@ -282,10 +377,14 @@ function stop() {
   if (!timer) return;
   window.clearInterval(timer);
   timer = 0;
+  document.removeEventListener("visibilitychange", onVisibility);
+  fpsStopLoop();
+  if (fpsWake) {
+    window.clearTimeout(fpsWake);
+    fpsWake = 0;
+  }
   po?.disconnect();
   po = null;
-  if (jankRaf) cancelAnimationFrame(jankRaf);
-  jankRaf = 0;
   perfProbes.rpc = perfProbes.wsMsg = perfProbes.push = null;
   agg = freshAgg();
 }
