@@ -279,6 +279,9 @@ body.android #composer {
 }
 body.android #composer button { min-height: 46px; font-size: 15px; padding: 8px 16px; }
 body.android #input { font-size: 16px; min-height: 46px; }
+/* Repli miroir (#input-wrap.grow, sans field-sizing) : les métriques
+   #input ci-dessus se reportent sur le wrap/le miroir — voir chat.css. */
+body.android #input-wrap.grow { min-height: 46px; }
 /* Pill « N lignes » : cible tactile correcte, alignée sur le coin champ */
 body.android #composer button#btn-expand {
   min-width: 44px; min-height: 44px; font-size: 12px; padding: 3px 10px; top: 1px;
@@ -417,6 +420,11 @@ body.android #qp-title { font-size: 14px; }
     min-height: 44px; max-height: 54px; padding: 5px 11px; overflow-y: auto;
   }
   body.android #input-wrap.over #input { padding-right: 11px; }
+  /* Miroir autosize : cap 54px sur le wrap (prime sur --fit-cap),
+     padding du miroir aligné sur #input (5px 11px / 11px en .over). */
+  body.android #input-wrap.grow { min-height: 44px; max-height: 54px; }
+  body.android #input-wrap.grow #input-ghost { padding: 5px 11px; }
+  body.android #input-wrap.grow.over #input-ghost { padding-right: 11px; }
   body.android #composer button#btn-expand { display: none !important; }
   /* La dropdown des slash-commandes ne doit pas couvrir tout le fil. */
   body.android #cmd-ac { max-height: 180px; }

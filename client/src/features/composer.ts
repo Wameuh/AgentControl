@@ -10,6 +10,7 @@ import { nav } from "../ui/nav";
 import { call, callBg, isConnLost } from "../core/rpc";
 import { app } from "../core/state";
 import { isAndroid } from "../core/chrome";
+import { engineCaps, debugNoFs } from "../core/engine";
 import type { CmdInfo, SendMode } from "../core/types";
 import { t } from "../i18n";
 import { cmdDesc, cmdHint, cmdName } from "./modelbar";
@@ -42,10 +43,10 @@ const UNDO_MAX = 100;
 
 /// `field-sizing: content` laisse le navigateur dimensionner #input
 /// tout seul (max-height borne) — plus de mesure JS (scrollHeight =
-/// reflow forcé) à chaque frappe. Repli : fitInput manuel (vieux
-/// WebView Android, Safari < 18).
-const FIELD_SIZING =
-  typeof CSS !== "undefined" && CSS.supports("field-sizing", "content");
+/// reflow forcé) à chaque frappe. Repli : miroir #input-ghost en flux
+/// (fitInputGhost — aucune lecture de layout dans le chemin chaud).
+/// `ac-nofs` en localStorage force le repli pour test A/B.
+const FIELD_SIZING = engineCaps.fieldSizing && !debugNoFs();
 
 // ---- Commandes built-in (toujours dispo, exécutées côté client) ----
 const BUILTINS = (): { name: string; description: string; hint: string }[] => [
@@ -270,69 +271,173 @@ export class Composer {
   private lastBtnLines = -1;
   private lastBtnExp: boolean | null = null;
 
-  fitInput(force = false) {
-    const inp = $("input") as HTMLTextAreaElement;
+  // ---- Repli sans field-sizing : miroir #input-ghost ----
+  // Le div pré-wrap (mêmes métriques texte que #input) est le SEUL
+  // enfant en flux de #input-wrap.grow : sa hauteur intrinsèque
+  // dimensionne le wrap, #input est posé en absolute inset:0. Le
+  // navigateur fait la mise en page — aucune lecture forcée
+  // (scrollHeight = reflow synchrone proportionnel au fil sur les
+  // vieux webview sans content-visibility, cause du lag #294).
+  private ghostEl: HTMLElement | null = null;
+  private ghostVal: string | null = null;
+  /** Sonde « overflow » coalescée : lecture de ghost.offsetHeight
+   *  APRÈS le layout de la frame (setTimeout post-rAF) — pas de
+   *  reflow forcé dans le chemin de frappe. */
+  private overTimer: number | undefined;
+
+  /** Cap « petit » (~1/3 du fil) — même formule qu'avant, référence
+   *  #chat (hauteur fixée par le viewport, suivie par ResizeObserver). */
+  private smallCap(): number {
+    const chatH = this.chatH || window.innerHeight;
+    return Math.max(100, Math.round(chatH * 0.33));
+  }
+
+  private bigCap(): number {
+    const small = this.smallCap();
+    const chatH = this.chatH || window.innerHeight;
+    return Math.max(small + 80, Math.round(chatH * 0.66));
+  }
+
+  /** Cap actif : étendu ↔ replié (inpExpanded). */
+  private fitCap(): number {
+    return this.inpExpanded ? this.bigCap() : this.smallCap();
+  }
+
+  /** État « déborde » + pill « N lignes » — partagé par les deux
+   *  chemins de mesure (field-sizing et miroir). `need` = hauteur
+   *  contenu nécessaire (px). */
+  private paintFit(over: boolean, need: number) {
     const wrap = $("input-wrap");
     const btn = $("btn-expand");
+    const inp = $("input") as HTMLTextAreaElement;
+    wrap.classList.toggle("over", over);
+    btn.hidden = !over;
+    if (!over) return;
+    if (!this.fitMetrics) {
+      const cs = getComputedStyle(inp);
+      this.fitMetrics = {
+        padV: parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom),
+        lh: parseFloat(cs.lineHeight) || 21,
+      };
+    }
+    const lines = Math.max(
+      inp.value.split("\n").length,
+      Math.round((need - this.fitMetrics.padV) / this.fitMetrics.lh),
+    );
+    const title = t(this.inpExpanded ? "input_collapse" : "input_expand");
+    if (
+      lines !== this.lastBtnLines ||
+      this.inpExpanded !== this.lastBtnExp ||
+      title !== btn.title
+    ) {
+      this.lastBtnLines = lines;
+      this.lastBtnExp = this.inpExpanded;
+      btn.innerHTML =
+        icon(this.inpExpanded ? "chev-down" : "chev-up") +
+        `<span class="n">${lines}</span>`;
+      btn.title = title;
+      btn.setAttribute("aria-label", title);
+    }
+  }
+
+  /** fitInput du chemin miroir : synchro du texte du miroir (une
+   *  écriture par frame via le rAF amont), maj du cap seulement si
+   *  géométrie/état a changé, sonde overflow différée. */
+  private fitInputGhost(force: boolean) {
+    const wrap = $("input-wrap");
+    const inp = $("input") as HTMLTextAreaElement;
+    wrap.classList.add("grow");
+    const v = inp.value;
+    if (v !== this.ghostVal && this.ghostEl) {
+      this.ghostVal = v;
+      // \n terminal : une div pre-wrap ne matérialise pas la dernière
+      // ligne vide — la ZWSP (largeur nulle) la force, comme le curseur
+      // du textarea sur sa ligne vide.
+      this.ghostEl.textContent = v.endsWith("\n") ? v + "\u200B" : v;
+    }
+    if (force || this.fitStale) {
+      this.fitStale = false;
+      // Cap sur le WRAP (le chemin field-sizing le pose sur #input) ;
+      // la règle landscape Android (max-height:54px, plus spécifique)
+      // prime toujours. Resync des métriques : un changement de fonte
+      // (thème, zoom) ne déclenche pas toujours un fitStale.
+      this.syncGhostStyle();
+      wrap.style.setProperty("--fit-cap", this.fitCap() + "px");
+    }
+    this.scheduleOverCheck();
+  }
+
+  private scheduleOverCheck() {
+    if (this.overTimer !== undefined) return;
+    this.overTimer = window.setTimeout(() => {
+      this.overTimer = undefined;
+      this.updateOver();
+    }, 0);
+  }
+
+  /** Sonde post-layout : ghost.offsetHeight = hauteur contenu non
+   *  cappée (le miroir déborde du wrap cappé, sa propre hauteur reste
+   *  complète). Lecture à layout propre → quasi-gratuite. */
+  private updateOver() {
+    const g = this.ghostEl;
+    const wrap = $("input-wrap");
+    if (!g || !wrap) return;
+    const need = g.offsetHeight;
+    const over = need > this.smallCap();
+    if (!over && this.inpExpanded) {
+      // Rétracté : le cap doit redescendre petit sans attendre un
+      // fitInput forcé (il n'y a plus de mesure périodique ici).
+      this.inpExpanded = false;
+      wrap.style.setProperty("--fit-cap", this.fitCap() + "px");
+    }
+    this.paintFit(over, need);
+  }
+
+  /** Recopie les métriques texte du champ sur le miroir — le miroir
+   *  doit wrapper à l'identique (font, chasse, césure). Le padding
+   *  reste en CSS : les règles .over partagées #input/#input-ghost
+   *  doivent rester synchrones (commentaire dans chat.css). */
+  private syncGhostStyle() {
+    const g = this.ghostEl;
+    const inp = $("input") as HTMLTextAreaElement;
+    if (!g) return;
+    const cs = getComputedStyle(inp);
+    const PROPS = [
+      "fontStyle", "fontVariant", "fontWeight", "fontStretch",
+      "fontSize", "lineHeight", "fontFamily", "letterSpacing",
+      "wordSpacing", "fontKerning", "fontFeatureSettings",
+      "fontVariationSettings", "whiteSpace", "overflowWrap",
+      "wordBreak", "hyphens", "tabSize", "direction", "unicodeBidi",
+    ] as const;
+    const gs = g.style as unknown as Record<string, string>;
+    const c = cs as unknown as Record<string, string>;
+    for (const p of PROPS) {
+      if (c[p]) gs[p] = c[p];
+    }
+  }
+
+  fitInput(force = false) {
+    const inp = $("input") as HTMLTextAreaElement;
+    // Moteur sans field-sizing : le miroir #input-ghost dimensionne le
+    // wrap en flux normal — aucune mesure JS (scrollHeight = reflow
+    // synchrone proportionnel au fil sur les vieux webview).
+    if (!FIELD_SIZING) {
+      this.fitInputGhost(force);
+      return;
+    }
     if (!force && !this.fitStale && inp.value === this.lastFitVal) return;
     this.lastFitVal = inp.value;
     this.fitStale = false;
-    // Mesure : hauteur nécessaire au contenu. scrollHeight rend le
-    // contenu complet même quand la boîte est cappée — en field-sizing
-    // le navigateur dimensionne via max-height, pas de reset nécessaire.
-    // Repli : retour à la hauteur naturelle (rows=2) puis scrollHeight.
-    // +2 pour les bordures (box-sizing border-box).
-    let need: number;
-    if (FIELD_SIZING) {
-      need = inp.scrollHeight + 2;
-    } else {
-      inp.style.height = "auto";
-      need = inp.scrollHeight + 2;
-    }
-    // Référence stable : la colonne #chat (hauteur fixée par le viewport)
-    // — pas #events, qui rétrécit quand le champ grandit (cap mouvant).
-    const chatH = this.chatH || window.innerHeight;
-    const small = Math.max(100, Math.round(chatH * 0.33));
-    const big = Math.max(small + 80, Math.round(chatH * 0.66));
-    const over = need > small;
+    // Mesure : hauteur nécessaire au contenu. En field-sizing le
+    // navigateur dimensionne via max-height — scrollHeight lit le
+    // contenu complet même cappé, pas de reset nécessaire.
+    const need = inp.scrollHeight + 2;
+    const over = need > this.smallCap();
     if (!over) this.inpExpanded = false;
-    const cap = this.inpExpanded ? big : small;
-    if (FIELD_SIZING) {
-      // Cap via custom property : la règle landscape Android
-      // (max-height:54px, spécificité supérieure) n'est pas écrasée.
-      inp.style.setProperty("--fit-cap", cap + "px");
-    } else {
-      inp.style.height = Math.min(need, cap) + "px";
-    }
-    wrap.classList.toggle("over", over);
-    btn.hidden = !over;
-    if (over) {
-      if (!this.fitMetrics) {
-        const cs = getComputedStyle(inp);
-        this.fitMetrics = {
-          padV: parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom),
-          lh: parseFloat(cs.lineHeight) || 21,
-        };
-      }
-      const lines = Math.max(
-        inp.value.split("\n").length,
-        Math.round((need - this.fitMetrics.padV) / this.fitMetrics.lh),
-      );
-      const title = t(this.inpExpanded ? "input_collapse" : "input_expand");
-      if (
-        lines !== this.lastBtnLines ||
-        this.inpExpanded !== this.lastBtnExp ||
-        title !== btn.title
-      ) {
-        this.lastBtnLines = lines;
-        this.lastBtnExp = this.inpExpanded;
-        btn.innerHTML =
-          icon(this.inpExpanded ? "chev-down" : "chev-up") +
-          `<span class="n">${lines}</span>`;
-        btn.title = title;
-        btn.setAttribute("aria-label", title);
-      }
-    }
+    // Cap via custom property : la règle landscape Android
+    // (max-height:54px, spécificité supérieure) n'est pas écrasée.
+    inp.style.setProperty("--fit-cap", this.fitCap() + "px");
+    this.paintFit(over, need);
   }
 
   private async runBuiltin(name: string, arg: string): Promise<boolean> {
@@ -1473,6 +1578,10 @@ export class Composer {
       this.fitStale = true; // largeur changée → le contenu re-wrappé
       this.fitInput();
     });
+    // Miroir autosize (repli sans field-sizing) : métriques texte
+    // recopiées une fois — le padding reste porté par le CSS partagé.
+    this.ghostEl = document.getElementById("input-ghost");
+    if (!FIELD_SIZING) this.syncGhostStyle();
     this.fitInput();
 
     $("btn-cancel").onclick = () =>

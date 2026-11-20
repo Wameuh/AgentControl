@@ -493,6 +493,43 @@ img.md-img {
 }
 /* Champ long : scrollable + place réservée à la pill « N lignes » */
 #input-wrap.over #input { overflow-y: auto; padding-right: 62px; }
+/* ---- Repli autosize sans field-sizing : miroir #input-ghost ----
+   #input-wrap.grow : le div miroir (mêmes métriques texte, voir
+   syncGhostStyle) est le seul enfant en flux → sa hauteur intrinsèque
+   dimensionne le wrap (cap --fit-cap), #input est posé en absolute
+   et remplit le wrap. Zéro lecture de layout côté JS.
+   ⚠️ Le padding du miroir DOIT suivre celui de #input : les règles
+   padding de #input (base, .over, body.android) ont leur jumeau
+   #input-ghost — les garder synchrones. */
+#input-ghost { display: none; }
+#input-wrap.grow {
+  min-height: calc(3.1em + 20px); /* = min-height field-sizing (2 lignes) */
+  max-height: var(--fit-cap, none);
+  overflow: hidden;
+}
+#input-wrap.grow #input {
+  /* Longhands, pas `inset` : shorthand Safari ≥14.1, absents de
+     certains WebKitGTK embarqués — pileau exact du bug #294. */
+  position: absolute; top: 0; right: 0; bottom: 0; left: 0;
+  width: 100%; height: 100%;
+  /* ac-nofs sur un moteur à field-sizing : la règle @supports
+     s'appliquerait encore à #input — on la neutralise ici. */
+  field-sizing: normal;
+  max-height: none; min-height: 0;
+  overflow-y: auto; overflow-x: hidden;
+}
+#input-wrap.grow #input-ghost {
+  display: block; visibility: hidden; pointer-events: none;
+  user-select: none; box-sizing: border-box; width: 100%;
+  /* flex item du wrap : sans ça, align-items:stretch lui donne la
+     hauteur du wrap CAPPÉ — offsetHeight ne mesurerait plus le
+     contenu et la détection d'overflow serait aveugle. */
+  align-self: flex-start; flex: none;
+  overflow: hidden; border: 1px solid transparent; border-radius: 10px;
+  font: inherit; white-space: pre-wrap; overflow-wrap: break-word;
+  padding: 9px 11px; /* = padding de #input (chat.css) — synchroniser */
+}
+#input-wrap.grow.over #input-ghost { padding-right: 62px; } /* = .over #input */
 #btn-expand {
   /* right:18px dégage la pill de la scrollbar classique Windows (~14-17px) */
   position: absolute; top: 5px; right: 18px; z-index: 2;
@@ -587,6 +624,22 @@ details.th .ic-thought { width: 12px; height: 12px; }
 #events > .ev {
   content-visibility: auto;
   contain-intrinsic-height: auto 120px;
+}
+/* Repli containment pour les moteurs SANS content-visibility (vieux
+   WebKitGTK/WKWebView — pileau typique du lag #294) : contain:layout
+   isole la mise en page interne de chaque event — un reflow ancêtre
+   (hauteur du composer à la frappe) ne redescend pas dans les sous-
+   arbres propres. Pas de size/paint : la hauteur reste intrinsèque et
+   rien n'est clippé (pin-tag, menus). Supporté depuis Safari 15.4. */
+@supports not (content-visibility: auto) {
+  #events > .ev { contain: layout; }
+}
+/* Debug `ac-nocv` (localStorage) : neutralise content-visibility pour
+   reproduire le webview affecté sur un navigateur moderne — le repli
+   contain:layout ci-dessus prend alors le relais. */
+html.nocv #events > .ev {
+  content-visibility: visible;
+  contain: layout;
 }
 
 

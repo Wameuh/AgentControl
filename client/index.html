@@ -143,6 +143,7 @@
             <input id="attach-pick" type="file" multiple hidden>
             <div id="mic-hint" hidden></div>
             <div id="input-wrap">
+              <div id="input-ghost" aria-hidden="true"></div>
               <textarea id="input" data-i18n-ph="input_ph" placeholder="Message… (Enter = send)" rows="2"></textarea>
               <button id="btn-expand" type="button" hidden></button>
             </div>
@@ -976,6 +977,7 @@
           <div>
             <div><b>AgentControl</b> <span id="about-version">v0.0.1</span></div>
             <div><a id="about-gh" href="https://github.com/Wameuh/AgentControl">github.com/Wameuh/AgentControl</a></div>
+            <div class="about-eng" id="about-engine"></div>
             <div><span data-i18n="license_label">License</span> : MIT</div>
           </div>
         </div>

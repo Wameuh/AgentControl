@@ -9,7 +9,7 @@
 import "./styles.css";
 import "./mesh-bg.ts";
 import { invoke, listen, getVersion, isWeb } from "./core/bridge";
-import { $, notify } from "./core/dom";
+import { $, logUi, notify } from "./core/dom";
 import { app } from "./core/state";
 import { initRpc } from "./core/rpc";
 import { initModalGuard } from "./core/modal";
@@ -64,6 +64,7 @@ import { initFirstPost } from "./features/first-post";
 import { Pins } from "./features/pins";
 import { Steps, type SessionStep } from "./features/steps";
 import { initLang, t, applyStatic } from "./i18n";
+import { engineReport, debugNoCv } from "./core/engine";
 import type { AcEvent, SavedConn } from "./core/types";
 
 // Thème + langue persistés (localStorage), appliqués au boot
@@ -74,6 +75,13 @@ applyAccent(accentPref());
 // Intensité d'accent — dimension orthogonale, classe accent-strong.
 applyAccentStrong(accentStrongPref(), false);
 applyStatic();
+// Capacités du moteur de rendu (field-sizing / content-visibility /
+// contain) — détectées au boot, loguées et affichées dans « À propos »
+// : indispensable pour trancher « le fix est-il actif sur CE webview ? »
+// (#294). `ac-nocv` (localStorage) neutralise content-visibility pour
+// reproduire un vieux WebKitGTK sur un navigateur moderne.
+if (debugNoCv()) document.documentElement.classList.add("nocv");
+logUi("info", `engine: ${engineReport()}`);
 initGems();
 initPlatform();
 initWindowChrome();
@@ -439,6 +447,7 @@ $("tb-about").onclick = async () => {
   } catch {
     /* dev */
   }
+  $("about-engine").textContent = engineReport();
   ($("dlg-about") as HTMLDialogElement).showModal();
 };
 // Menus ⋮ (Android) : l'app-level ouvre Settings/About, celui du chat les

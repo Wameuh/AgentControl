@@ -10,7 +10,7 @@ import { call } from "../core/rpc";
 import { app } from "../core/state";
 import { isAndroid, meshSetMood } from "../core/chrome";
 import type { PrEntry, SessionMeta } from "../core/types";
-import { t } from "../i18n";
+import { getLang, t } from "../i18n";
 import { dotCls, dotIcon, setAppIcon } from "./status";
 import { icon } from "../ui/icons";
 import { bindCtx, hideSessCtx, menuBtn, placeMenu } from "../ui/ctxmenu";
@@ -597,6 +597,53 @@ export class Sidebar {
       esc(txt.slice(i + f.length));
   }
 
+  /** Signature du dernier rendu de renderList() — voir renderSig(). */
+  private listSig: string | null = null;
+
+  /** Tous les intrants dont dépend le HTML produit par renderList(),
+   *  sérialisés : sessions (champs réellement affichés — ni cwd ni
+   *  timestamps), état/nom des conns, groupes stockés, badges PR,
+   *  tombstones de suppression, clés de pliage `ac-grp-*`, langue et
+   *  filtre. refresh() est rappelé à chaque status_changed et par le
+   *  watchdog des conns : sans ce garde-fou chaque tick reconstruisait
+   *  tout le DOM de la liste (innerHTML + N nœuds + listeners) — le
+   *  plus gros chunk de main-thread récurrent hors frappe (#294). */
+  private renderSig(): string {
+    const sess = app.lastSessions.map((s) => [
+      s.conn ?? "", s.id, s.title, s.agent, s.group ?? "", s.state,
+      s.offline ? 1 : 0, s.origin ?? "", s.spawned_by ?? "",
+      s.last_error ?? null, s.wait ?? null,
+    ]);
+    const connKeys = [
+      ...new Set([
+        ...this.conns.knownConns(),
+        ...app.lastSessions.map((s) => s.conn ?? "default"),
+      ]),
+    ].sort();
+    const conns = connKeys.map((k) => {
+      const st = this.conns.state(k) ?? "ok";
+      return [k, st, this.conns.hasCfg(k), this.conns.tip(st, k)];
+    });
+    const groups = connKeys.map((k) => [k, this.groups.stored(k)]);
+    const prs = [...this.prBySess.entries()].map(([k, v]) => [
+      k,
+      v.map((p) => [
+        p.repo, p.host ?? "", p.forge ?? "", p.pr, p.change_id ?? "",
+        p.title ?? "", p.status ?? "", p.url ?? "",
+      ]),
+    ]);
+    const fold: Record<string, string> = {};
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith("ac-grp-")) fold[k] = localStorage.getItem(k) ?? "";
+    }
+    return JSON.stringify([
+      this.filter, getLang(), app.current?.id ?? "", sess, conns,
+      groups, prs, [...this.pendingDel].sort(), fold,
+      isAndroid() ? 1 : 0,
+    ]);
+  }
+
   /** Rendu de #session-list depuis app.lastSessions — appelé par refresh()
    *  et à chaque frappe du filtre (pas de RPC : la donnée est déjà là).
    *  Filtre actif : seules les branches avec ≥1 session visible survivent,
@@ -613,7 +660,10 @@ export class Sidebar {
       this.rebuildPending = true;
       return;
     }
+    const sig = this.renderSig();
     this.rebuildPending = false;
+    if (sig === this.listSig) return; // DOM déjà à jour — rien à refaire
+    this.listSig = sig;
     const el = $("session-list");
     el.innerHTML = "";
     const f = this.filter;

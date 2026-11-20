@@ -114,14 +114,18 @@ async function updateStatusbar() {
     // n'affiche que le trafic de la WebSocket vers le démon.
     const el = $("sb-stats");
     const host = hostPart();
-    el.textContent = (isWeb
+    const txt = (isWeb
       ? `↓${fmt(s.rx_bps)} ↑${fmt(s.tx_bps)}`
       : `mem ${Math.round(s.rss_mb)} MB · cpu ${s.cpu.toFixed(1)}% · ↓${fmt(s.rx_bps)} ↑${fmt(s.tx_bps)}`)
       + host;
+    // Sonde 3 s : n'écrire que si le texte a changé — textContent= le
+    // remplace même à l'identique (mutation DOM → invalidation pour rien).
+    if (el.textContent !== txt) el.textContent = txt;
     // Tooltip : l'espace est trop compté pour expliciter chaque
     // métrique inline — la portée (client / hôte entier / process
     // démon) est détaillée au survol.
-    el.title = t("sb_stats_tip") + (host ? `\n${t("sb_srv_tip")}` : "");
+    const tip = t("sb_stats_tip") + (host ? `\n${t("sb_srv_tip")}` : "");
+    if (el.title !== tip) el.title = tip;
   } catch { /* silencieux */ }
 }
 
