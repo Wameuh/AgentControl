@@ -189,6 +189,7 @@ export const fr: Record<Key, string> = {
   delete_armed: "suppr ?", loading: "chargement…", load_full: "charger la sortie complète…", cmd_full: "afficher la commande complète…",
   thought: "pensée", resolved: "résolu — ", mode_arrow: "mode → ",
   cmds_avail: "{n} commandes disponibles", state_arrow: "état → ",
+  history_replayed: "contexte chargé — {n} événements rejoués",
   perm_title: "demande de permission", answer_ph: "réponse (JSON ou texte)",
   answer_btn: "Répondre", ignore_btn: "Ignorer",
   no_native: "Aucune session native (ou session/list non supporté par l'agent).",

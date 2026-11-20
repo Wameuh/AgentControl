@@ -472,7 +472,31 @@ impl Session {
     // Journalisation
     // -----------------------------------------------------------------------
 
+    /// Vrai pendant un session/load « refill » (skip_replay=false —
+    /// fork, rebind, attach natif : le journal est à reconstruire
+    /// depuis l'historique rejoué). Les events sont alors journalisés
+    /// normalement mais le push live aux abonnés est supprimé : un
+    /// replay de ~85k updates ne doit ni flooder le DOM client ni
+    /// saturer le lien — le client recharge sa queue au marqueur
+    /// `history_replayed` de fin de load (#300). Le resume normal
+    /// (skip_replay=true) n'est pas concerné : ses updates sont
+    /// droppés avant tout emit.
+    fn replay_journal_only(&self) -> bool {
+        self.load_active.load(Ordering::SeqCst) && !self.loading_replay.load(Ordering::SeqCst)
+    }
+
     pub fn emit(&self, kind: EventKind) {
+        self.emit_inner(kind, false);
+    }
+
+    /// emit() dont le broadcast est garanti même pendant un replay
+    /// « refill » — réservé aux syslines de progression et au marqueur
+    /// de fin (le contenu rejoué, lui, reste journal-only, #300).
+    fn emit_live(&self, kind: EventKind) {
+        self.emit_inner(kind, true);
+    }
+
+    fn emit_inner(&self, kind: EventKind, live: bool) {
         // Flush un éventuel texte accumulé avant tout event non-chunk.
         self.flush_text();
         // Même anti-doublon que flush_text pour les textes émis en
@@ -491,7 +515,9 @@ impl Session {
                 if Self::is_agent_output(&ev.kind) {
                     self.turn_outputs.fetch_add(1, Ordering::SeqCst);
                 }
-                let _ = self.events_tx.send(ev);
+                if live || !self.replay_journal_only() {
+                    let _ = self.events_tx.send(ev);
+                }
             }
             Err(e) => error!("[{}] journal append failed: {e}", self.meta_snapshot().id),
         }
@@ -616,7 +642,12 @@ impl Session {
                     if Self::is_agent_output(&ev.kind) {
                         self.turn_outputs.fetch_add(1, Ordering::SeqCst);
                     }
-                    let _ = self.events_tx.send(ev);
+                    // Replay « refill » : journalisé mais pas poussé
+                    // live — le client le récupère via la queue
+                    // rechargée au marqueur history_replayed (#300).
+                    if !self.replay_journal_only() {
+                        let _ = self.events_tx.send(ev);
+                    }
                 }
                 Err(e) => error!("journal append failed: {e}"),
             }
@@ -1618,5 +1649,61 @@ mod tests {
         ] {
             assert!(!Session::is_agent_output(&k));
         }
+    }
+
+    /// Replay « refill » (session/load skip_replay=false — fork,
+    /// rebind, attach natif) : les events rejoués sont journalisés
+    /// pour compléter le journal (paging `events`, recherche) mais
+    /// PAS broadcastés aux abonnés — le client recharge sa queue au
+    /// marqueur `history_replayed` de fin de load (#300). Ni le
+    /// resume normal (loading_replay, skip_replay=true) ni le live
+    /// ne sont concernés.
+    #[tokio::test]
+    async fn replay_refill_journal_only() {
+        let (s, dir) = tmp_session("replay-refill");
+        let mut rx = s.events_tx.subscribe();
+        // Load refill en vol : load actif SANS loading_replay
+        // (skip_replay=false — journal à reconstruire).
+        s.load_active.store(true, Ordering::SeqCst);
+        s.loading_replay.store(false, Ordering::SeqCst);
+        s.handle_session_update(&serde_json::json!({
+            "update": {"sessionUpdate": "agent_message_chunk",
+                       "content": {"type": "text", "text": "historique rejoué"}}
+        }))
+        .await;
+        // L'update non-chunk flush le texte accumulé puis s'auto-émet.
+        s.handle_session_update(&serde_json::json!({
+            "update": {"sessionUpdate": "usage_update", "used": 10, "size": 100}
+        }))
+        .await;
+        // Journal complet…
+        assert!(kinds(&dir).contains(&"agent_text"));
+        assert!(kinds(&dir).contains(&"usage_update"));
+        // …mais rien n'a été poussé aux abonnés.
+        assert!(rx.try_recv().is_err());
+        // Les syslines de progression passent quand même (emit_live).
+        *s.replay_report_at.lock().unwrap() =
+            std::time::Instant::now() - std::time::Duration::from_secs(11);
+        s.note_load_progress();
+        assert!(matches!(
+            rx.try_recv().map(|e| e.kind),
+            Ok(EventKind::System { .. })
+        ));
+        // Fin du load : le marqueur est journalisé ET broadcasté.
+        s.end_load_replay();
+        assert!(kinds(&dir).contains(&"history_replayed"));
+        assert!(matches!(
+            rx.try_recv().map(|e| e.kind),
+            Ok(EventKind::HistoryReplayed { events: _ })
+        ));
+        // Après le load, le live repasse normalement.
+        s.emit(EventKind::System {
+            text: "live".into(),
+        });
+        assert!(matches!(
+            rx.try_recv().map(|e| e.kind),
+            Ok(EventKind::System { .. })
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

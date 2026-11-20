@@ -189,6 +189,7 @@ export const en = {
   delete_armed: "del ?", loading: "loading…", load_full: "load full output…", cmd_full: "show full command…",
   thought: "thought", resolved: "resolved — ", mode_arrow: "mode → ",
   cmds_avail: "{n} commands available", state_arrow: "state → ",
+  history_replayed: "context loaded — {n} events replayed",
   perm_title: "permission request", answer_ph: "answer (JSON or text)",
   answer_btn: "Answer", ignore_btn: "Dismiss",
   no_native: "No native sessions (or session/list unsupported by this agent).",

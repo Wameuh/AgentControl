@@ -807,11 +807,30 @@ impl Session {
     /// replay + load, puis solde les meta sales accumulées pendant le
     /// load — une seule écriture meta.json finale au lieu d'une par
     /// event méta rejoué (#271).
-    fn end_load_replay(&self) {
+    /// Un load « refill » (skip_replay=false — fork/rebind/attach :
+    /// le journal a été reconstruit depuis le replay, ses events
+    /// n'ayant PAS été broadcastés, #300) se termine par le marqueur
+    /// `history_replayed` : les clients abonnés rechargent la queue
+    /// du journal au lieu d'avoir rendu le transcript au fil de l'eau.
+    pub(super) fn end_load_replay(&self) {
+        // Refill = load actif SANS skip_replay : le journal a été
+        // rempli par le replay (capturé AVANT de lever les flags).
+        let refill =
+            self.load_active.load(Ordering::SeqCst) && !self.loading_replay.load(Ordering::SeqCst);
+        // Flush du texte rejoué tamponné PENDANT que la suppression
+        // broadcast est encore active : il est journalisé mais pas
+        // poussé — le client le récupère via la queue rechargée au
+        // marqueur (sinon ce dernier chunk Live arriverait juste
+        // avant le reload).
+        self.flush_text();
         self.load_active.store(false, Ordering::SeqCst);
         self.loading_replay.store(false, Ordering::SeqCst);
         self.flush_meta_save();
         self.caps.resume_persist();
+        if refill {
+            let n = self.replay_seen.load(Ordering::SeqCst);
+            self.emit(EventKind::HistoryReplayed { events: n });
+        }
     }
 
     /// Un update session/update de plus pendant le load : progression
@@ -820,7 +839,7 @@ impl Session {
     /// chargement de plusieurs minutes ; l'utilisateur doit voir que ça
     /// avance (et pouvoir choisir d'abandonner le contexte natif,
     /// #271).
-    fn note_load_progress(&self) {
+    pub(super) fn note_load_progress(&self) {
         let n = self.replay_seen.fetch_add(1, Ordering::SeqCst) + 1;
         let mut at = self.replay_report_at.lock().unwrap();
         if at.elapsed() < std::time::Duration::from_secs(10) {
@@ -828,7 +847,9 @@ impl Session {
         }
         *at = std::time::Instant::now();
         drop(at);
-        self.emit(EventKind::System {
+        // emit_live : pendant un replay « refill » le contenu est
+        // journal-only (#300) mais la progression, elle, reste visible.
+        self.emit_live(EventKind::System {
             text: format!("very long native session — loading context… {n} events replayed"),
         });
     }
@@ -904,7 +925,9 @@ impl Session {
             // Progression visible : un load long ne doit pas laisser le
             // chat figé sur « starting » pendant des minutes (#269) —
             // le compteur d'updates rejoués (#271) précise l'avancement.
-            self.emit(EventKind::System {
+            // emit_live : elle doit passer même en replay « refill »
+            // (le contenu, lui, est journal-only — #300).
+            self.emit_live(EventKind::System {
                 text: "resuming the native session — loading context…".into(),
             });
             let t0 = std::time::Instant::now();

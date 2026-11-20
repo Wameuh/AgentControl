@@ -414,6 +414,34 @@ impl Daemon {
                 match rx.recv().await {
                     Ok(ev) => {
                         let Some(s) = weak.upgrade() else { break };
+                        // Fin d'un replay « refill » (#300) : les events
+                        // rejoués ont été journalisés SANS broadcast —
+                        // les PR citées dans l'historique re-journalisé
+                        // échapperaient au scan live. Re-scan borné du
+                        // journal (idempotent : le registre déduplique).
+                        if matches!(ev.kind, proto::EventKind::HistoryReplayed { .. }) {
+                            let s3 = Arc::clone(&s);
+                            let sid_b = sid.clone();
+                            let verify_b = Arc::clone(&verify);
+                            let forges_b = forges.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                if let Ok(evs) = s3.journal.read_page(&s3.dir, None, 2000) {
+                                    let mut titles = HashMap::new();
+                                    for ev in &evs {
+                                        scan_pr_event(
+                                            &verify_b,
+                                            &forges_b,
+                                            &s3,
+                                            &sid_b,
+                                            ev,
+                                            &mut titles,
+                                        );
+                                    }
+                                }
+                            })
+                            .await;
+                            continue;
+                        }
                         scan_pr_event(&verify, &forges, &s, &sid, &ev, &mut titles);
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,

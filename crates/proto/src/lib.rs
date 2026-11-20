@@ -176,6 +176,18 @@ pub enum EventKind {
     /// terminal, jamais journalisé : poussé sur le flux juste avant
     /// fermeture pour prévenir les clients abonnés.
     SessionDeleted {},
+    /// Fin d'un session/load « refill » (skip_replay=false — fork,
+    /// rebind, attach natif : le journal est reconstruit depuis
+    /// l'historique rejoué). Les events rejoués ont été journalisés
+    /// mais volontairement PAS broadcastés un par un (#300) — ce
+    /// marqueur terminal dit aux clients abonnés de recharger la
+    /// queue du journal plutôt que le DOM n'a vu que les syslines
+    /// de progression. Journalisé (seq stable, visible dans le
+    /// paging) ; `events` = updates session/update vues pendant le
+    /// load.
+    HistoryReplayed {
+        events: u64,
+    },
 }
 
 impl EventKind {
@@ -202,6 +214,7 @@ impl EventKind {
             Self::PeerMessage { .. } => "peer_message",
             Self::SessionCleared {} => "session_cleared",
             Self::SessionDeleted {} => "session_deleted",
+            Self::HistoryReplayed { .. } => "history_replayed",
         }
     }
 
@@ -283,7 +296,8 @@ impl EventKind {
             | Self::StatusChanged { .. }
             | Self::PermissionResolved { .. }
             | Self::SessionCleared {}
-            | Self::SessionDeleted {} => String::new(),
+            | Self::SessionDeleted {}
+            | Self::HistoryReplayed { .. } => String::new(),
         }
     }
 }
