@@ -114,17 +114,25 @@ async function updateStatusbar() {
     // n'affiche que le trafic de la WebSocket vers le démon.
     const el = $("sb-stats");
     const host = hostPart();
-    const txt = (isWeb
+    // Le segment `mem` est cliquable → dialogue de répartition
+    // (features/meminfo.ts). Web : pas de RSS process → le span est
+    // absent et c'est #sb-stats entier qui ouvre le dialogue.
+    const memSeg = isWeb
+      ? ""
+      : `<span id="sb-mem" class="clk">mem ${Math.round(s.rss_mb)} MB</span>`;
+    const body = isWeb
       ? `↓${fmt(s.rx_bps)} ↑${fmt(s.tx_bps)}`
-      : `mem ${Math.round(s.rss_mb)} MB · cpu ${s.cpu.toFixed(1)}% · ↓${fmt(s.rx_bps)} ↑${fmt(s.tx_bps)}`)
-      + host;
-    // Sonde 3 s : n'écrire que si le texte a changé — textContent= le
+      : `${memSeg} · cpu ${s.cpu.toFixed(1)}% · ↓${fmt(s.rx_bps)} ↑${fmt(s.tx_bps)}`;
+    const txt = body + host;
+    // Sonde 3 s : n'écrire que si le texte a changé — innerHTML= le
     // remplace même à l'identique (mutation DOM → invalidation pour rien).
-    if (el.textContent !== txt) el.textContent = txt;
+    if (el.innerHTML !== txt) el.innerHTML = txt;
     // Tooltip : l'espace est trop compté pour expliciter chaque
     // métrique inline — la portée (client / hôte entier / process
-    // démon) est détaillée au survol.
-    const tip = t("sb_stats_tip") + (host ? `\n${t("sb_srv_tip")}` : "");
+    // démon) est détaillée au survol, + le hint du clic mémoire.
+    const tip =
+      `${t("sb_stats_tip")} · ${t("sb_mem_click")}` +
+      (host ? `\n${t("sb_srv_tip")}` : "");
     if (el.title !== tip) el.title = tip;
   } catch { /* silencieux */ }
 }

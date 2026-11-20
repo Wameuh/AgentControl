@@ -33,6 +33,7 @@ import {
 import { nav, type SheetItem } from "./ui/nav";
 import { hydrateIcons } from "./ui/icons";
 import { initStatus, type HostStats } from "./features/status";
+import { initMemDialog } from "./features/meminfo";
 import { checkBootUpdate, openAbout } from "./features/update";
 import { initModelBar } from "./features/modelbar";
 import { initModelCosts } from "./features/modelcosts";
@@ -537,5 +538,6 @@ initStatus(() => {
   if ((conns.state(k) ?? "ok") !== "ok") return undefined;
   return conns.cap(k)?.host as HostStats | undefined;
 });
+initMemDialog();
 checkBootUpdate();
 connView.autoConnect(savedConns, cliConn ?? undefined, autoSuppressed);
