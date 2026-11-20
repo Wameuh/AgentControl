@@ -1789,7 +1789,7 @@ export class ChatView {
     try {
       while (this.hasMoreHistory && this.sentinelVisible()) {
         const prevMin = this.minRendered;
-        const page = await callBg<{ events: AcEvent[] }>("events", {
+        const page = await callBg<{ events: AcEvent[]; more?: boolean }>("events", {
           session: sid,
           before_seq: this.minRendered,
           limit: PAGE,
@@ -1800,8 +1800,9 @@ export class ChatView {
         this.prependEvents(page.events);
         // Page courte = tête du journal atteinte (trous de compaction
         // inclus : le démon rend ce qui reste, jamais plus) — rien de
-        // plus ancien à chercher.
-        if (page.events.length < PAGE) this.hasMoreHistory = false;
+        // plus ancien à chercher. `more` = troncature par borne
+        // d'octets côté démon (#302) : la suite existe, on continue.
+        if (page.events.length < PAGE && !page.more) this.hasMoreHistory = false;
         // Garde-fou : la progression repose sur le contrat « page
         // strictement < before_seq » → minRendered décroît à chaque
         // tour ; sans ça la boucle enverrait des RPC à l'infini.

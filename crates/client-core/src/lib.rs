@@ -901,12 +901,24 @@ fn settle_waiter(m: &mut Inflight, c: &Client, id: u64, waiter: u64) {
     c.dec_open(e.class, e.written);
 }
 
+/// Seuil du warn « giant line » à la réception — symétrique de la borne
+/// outbox côté démon : au-delà, la frame monopolisait le fil NDJSON
+/// (head-of-line) et son diagnostic ne doit pas coûter une analyse des
+/// compteurs rx/tx (#302).
+const GIANT_RX_LINE_BYTES: usize = 256 * 1024;
+
 /// Dispatch d'une ligne NDJSON reçue : push broadcast ou réponse RPC.
 /// Une entrée dédupliquée est possible : la réponse est clonée pour
 /// chaque waiter.
 async fn dispatch_rx_line(c: &Client, line: &str) {
     if line.trim().is_empty() {
         return;
+    }
+    if line.len() > GIANT_RX_LINE_BYTES {
+        log(
+            Level::Warn,
+            format!("conn {}: giant line {} bytes", c.desc, line.len()),
+        );
     }
     let v: Value = match serde_json::from_str(line) {
         Ok(v) => v,

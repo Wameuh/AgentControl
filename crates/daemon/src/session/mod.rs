@@ -1634,6 +1634,8 @@ mod tests {
             blob: None,
             size: None,
             diff: None,
+            diff_blob: None,
+            diff_size: None,
         }));
         for k in [
             EventKind::System { text: "s".into() },

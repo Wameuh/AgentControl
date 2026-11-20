@@ -1240,19 +1240,27 @@ impl Daemon {
         // c'est LA requête de la chaîne connect→open côté client,
         // un journal à index vide la gèlerait sinon (item #227).
         let s2 = Arc::clone(&s);
-        let (events, last) =
-            tokio::task::spawn_blocking(move || -> Result<(Vec<proto::Event>, u64)> {
+        let (events, last, more) =
+            tokio::task::spawn_blocking(move || -> Result<(Vec<proto::Event>, u64, bool)> {
                 // after_seq présent → page ascendante (saut de recherche) ;
                 // sinon page arrière classique (pagination scroll-up).
                 let events = match after_seq {
                     Some(a) => s2.journal.read_page_after(&s2.dir, a, limit as usize)?,
                     None => s2.journal.read_page(&s2.dir, before_seq, limit as usize)?,
                 };
-                Ok((events, s2.journal.last_seq()))
+                // Borne OCTETS en plus du count : des events journalisés
+                // avec de gros diffs/sorties (journaux d'avant
+                // l'externalisation, #302) produisaient une réponse hi de
+                // ~2 Mo qui monopolisait le fil NDJSON — head-of-line
+                // blocking de tous les RPC de la connexion. La troncature
+                // garde les events les plus proches du curseur et rend
+                // `more` pour que le client continue sa pagination.
+                let (events, more) = bound_events_page(events, after_seq.is_some());
+                Ok((events, s2.journal.last_seq(), more))
             })
             .await
             .context("reading journal")??;
-        Ok(json!({"events": events, "last_seq": last}))
+        Ok(json!({"events": events, "last_seq": last, "more": more}))
     }
 
     /// Plafonds du scan par appel : assez pour couvrir un gros journal en
@@ -1792,6 +1800,60 @@ fn derive_wait_state(
             name: w.name.clone(),
             timeout: w.timeout,
         });
+    }
+}
+
+/// Borne OCTETS d'une page `events` en plus du count (~256 ko de JSON) :
+/// le count seul laissait passer des pages de plusieurs Mo quand le
+/// journal contient de gros diffs/sorties — une réponse hi de cette
+/// taille monopolise le fil NDJSON et affame tous les autres RPC de la
+/// connexion (head-of-line blocking, #302). Toujours au moins un event
+/// (le plus proche du curseur) : une frame unique indivisible reste
+/// admise, comme pour le replay borné de subscribe.
+///
+/// `asc` = page `after_seq` (ordre croissant vers le présent) : on garde
+/// le PRÉFIXE et la suite reste paginable via after_seq=dernier rendu.
+/// Sinon (page `before_seq` ou queue du journal) : on garde le SUFFIXE
+/// le plus proche du curseur — l'amont omis reste paginable via
+/// before_seq=plus vieux seq rendu. Retourne (page, more).
+fn bound_events_page(events: Vec<proto::Event>, asc: bool) -> (Vec<proto::Event>, bool) {
+    const MAX_BYTES: usize = 256 * 1024;
+    if events.len() <= 1 {
+        return (events, false);
+    }
+    // Taille fil de chaque event ≈ sa ligne JSONL + enveloppe — le
+    // surcoût de sérialisation est déjà payé par le spawn_blocking.
+    let sizes: Vec<usize> = events
+        .iter()
+        .map(|e| serde_json::to_string(e).map(|s| s.len() + 1).unwrap_or(0))
+        .collect();
+    let total: usize = sizes.iter().sum();
+    if total <= MAX_BYTES {
+        return (events, false);
+    }
+    // Index de coupure : asc → on garde events[..k] ; sinon events[k..].
+    let mut k = events.len();
+    let mut acc = 0usize;
+    if asc {
+        for (i, &sz) in sizes.iter().enumerate() {
+            if i > 0 && acc + sz > MAX_BYTES {
+                k = i;
+                break;
+            }
+            acc += sz;
+        }
+        (events[..k].to_vec(), k < events.len())
+    } else {
+        for i in (0..events.len()).rev() {
+            let sz = sizes[i];
+            if events.len() - i > 1 && acc + sz > MAX_BYTES {
+                k = i + 1;
+                break;
+            }
+            acc += sz;
+            k = i;
+        }
+        (events[k..].to_vec(), k > 0)
     }
 }
 

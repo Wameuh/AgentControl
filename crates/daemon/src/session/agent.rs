@@ -1566,6 +1566,24 @@ impl Session {
             (None, if text.is_empty() { None } else { Some(text) }, None)
         };
 
+        // Même politique pour le diff : un Write/Edit d'un gros fichier
+        // produit un diff de plusieurs Mo — journalisé ET poussé tel quel,
+        // il monopolisait le fil NDJSON (head-of-line blocking de tous les
+        // RPC, #302). Au-delà de MAX_INLINE le diff part en blob
+        // `{call_id}.diff` et l'event ne garde qu'un extrait ; le complet
+        // reste récupérable via get_blob (pas de troncature sèche).
+        let (diff, diff_blob, diff_size) = match diff {
+            Some(d) if d.len() > MAX_INLINE => {
+                let excerpt: String = d.chars().take(EXCERPT).collect();
+                let size = d.len() as u64;
+                match journal::write_blob(&self.dir, &format!("{call_id}.diff"), d.as_bytes()) {
+                    Ok(rel) => (Some(excerpt), Some(rel), Some(size)),
+                    Err(_) => (Some(excerpt), None, Some(size)),
+                }
+            }
+            other => (other, None, None),
+        };
+
         if is_new {
             let (t, k) = self
                 .tool_calls
@@ -1588,6 +1606,8 @@ impl Session {
                 excerpt,
                 size,
                 diff,
+                diff_blob,
+                diff_size,
                 locations,
                 input,
             });
@@ -1599,6 +1619,8 @@ impl Session {
                 blob,
                 size,
                 diff,
+                diff_blob,
+                diff_size,
             });
         }
     }

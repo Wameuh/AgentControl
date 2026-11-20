@@ -346,6 +346,9 @@ export class ConnectionManager {
         `conn ${key}: stale probe (gen ${v.gen}≠${this.gens.get(key)}) — ignored`);
       return true; // transport considéré joignable : la gen fraîche l'est
     }
+    // rx_partial de la sonde PRÉCÉDENTE, lu avant l'écrasement par
+    // lastTransport.set — sert à détecter une ligne géante en vidange.
+    const prevRxPartial = this.lastTransport.get(key)?.rx_partial;
     if (v._ac_transport) this.lastTransport.set(key, v._ac_transport);
     const err = v.error ?? "?";
     // kind champ structuré (fusion ≥ cette version) ; repli sur le
@@ -362,6 +365,20 @@ export class ConnectionManager {
           : "socket silencieuse")
         : "transport incertain";
     if (isTimeout && (v.silent_ms ?? Infinity) < SILENT_KILL_MS) {
+      // rx_partial croissant entre deux sondes = une ligne NDJSON
+      // géante est en cours de réception : le démon écrit activement —
+      // preuve de vie plus forte que silent_ms, et le RPC bloqué est
+      // juste en file derrière cette frame (head-of-line). Ni excuse
+      // comptée ni strike : le drain aboutit, la conn reste « up ».
+      // rxpart figé/nul avec RPC bloqués → chemin normal ci-dessous.
+      const rxp = v._ac_transport?.rx_partial;
+      if (rxp != null && prevRxPartial != null && rxp > prevRxPartial) {
+        logUi("info",
+          `conn ${key}: giant line in flight (rxpart=${rxp}B, ` +
+          `was ${prevRxPartial}B) — transport alive, drain in progress` +
+          fmtAcTransport(v._ac_transport));
+        return true;
+      }
       const ni = (this.ignored.get(key) ?? 0) + 1;
       if (ni < IGNORED_STRIKE_MAX) {
         this.ignored.set(key, ni);
