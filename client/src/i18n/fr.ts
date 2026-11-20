@@ -384,7 +384,7 @@ export const fr: Record<Key, string> = {
   agent_missing: "non installé",
   agent_searched: "recherche de",
   agent_install: "Installer", agent_installing: "Installation…",
-  um_expand: "Afficher tout", um_collapse: "Réduire",
+  um_expand: "Afficher tout", um_collapse: "Réduire", um_pending: "Envoi en cours…",
   win_min: "Réduire", win_max: "Agrandir",
   search_title: "Rechercher dans l'historique",
   search_ph: "Rechercher dans cette session…",

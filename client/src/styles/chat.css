@@ -170,6 +170,10 @@
   background: var(--msg-user-bg); color: var(--msg-user-fg); align-self: flex-end;
   border-radius: 14px 14px 4px 14px; font-weight: 500;
 }
+/* Écho optimiste d'un envoi (user_message pas encore journalisé —
+   file, réveil) : opacité réduite tant que le vrai event n'est pas
+   arrivé et n'a pas remplacé le nœud pending. */
+.msg.user.um-pending { opacity: .55; }
 /* liens/chemins dans une bulle user : le fond est --accent, --violet/--sage y
    sont invisibles → couleur dédiée par thème */
 .msg.user .flink, .msg.user a { color: var(--msg-user-link); }

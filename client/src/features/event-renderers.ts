@@ -104,7 +104,6 @@ export class EventRenderer {
     if (ev.seq === 1) this.headSeen = true;
     switch (ev.type) {
       case "user_message": {
-        const d = mkEv("msg user", ev.seq);
         const txt = ev.text as string;
         // Prompt de spawn d'une session « service » (origin) = le 1er
         // user_message DU JOURNAL : identifiable seulement quand la
@@ -116,36 +115,12 @@ export class EventRenderer {
         const servicePrompt =
           !!ev.origin && this.userMsgs === 0 && this.headSeen;
         this.userMsgs += 1;
-        const body = document.createElement("div");
-        body.className = "um-body";
-        body.innerHTML =
+        const badges =
           (ev.origin
             ? `<span class="origin-badge">${esc(t("via"))} ${esc(ev.origin as string)}</span> `
             : "") +
-          (ev.steer ? `<span class="steer-badge">${t("steer_badge")}</span> ` : "") +
-          linkify(esc(txt));
-        d.appendChild(body);
-        // Prompt long → replié par défaut, bouton pour déplier/replier.
-        if (
-          servicePrompt ||
-          txt.length > USER_FOLD_CHARS ||
-          txt.split("\n").length > USER_FOLD_LINES
-        ) {
-          d.classList.add("um-collapsed");
-          if (servicePrompt) d.classList.add("um-service");
-          const btn = document.createElement("button");
-          btn.type = "button";
-          btn.className = "um-toggle";
-          const setLabel = (collapsed: boolean) => {
-            btn.innerHTML = `${icon("chev-down", "ic-caret")} ${esc(t(collapsed ? "um_expand" : "um_collapse"))}`;
-          };
-          setLabel(true);
-          btn.addEventListener("click", () => {
-            setLabel(d.classList.toggle("um-collapsed"));
-          });
-          d.appendChild(btn);
-        }
-        return d;
+          (ev.steer ? `<span class="steer-badge">${t("steer_badge")}</span> ` : "");
+        return this.userBubble(mkEv("msg user", ev.seq), txt, badges, servicePrompt);
       }
       case "agent_text": {
         const d = mkEv("msg agent", ev.seq);
@@ -278,6 +253,55 @@ export class EventRenderer {
         return d;
       }
     }
+  }
+
+  /// Bulle user commune au rendu confirmé et à l'écho optimiste :
+  /// corps (badges + texte linkifié) + repli des prompts longs.
+  private userBubble(
+    d: HTMLElement,
+    txt: string,
+    badgesHtml: string,
+    servicePrompt = false,
+  ): HTMLElement {
+    const body = document.createElement("div");
+    body.className = "um-body";
+    body.innerHTML = badgesHtml + linkify(esc(txt));
+    d.appendChild(body);
+    // Prompt long → replié par défaut, bouton pour déplier/replier.
+    if (
+      servicePrompt ||
+      txt.length > USER_FOLD_CHARS ||
+      txt.split("\n").length > USER_FOLD_LINES
+    ) {
+      d.classList.add("um-collapsed");
+      if (servicePrompt) d.classList.add("um-service");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "um-toggle";
+      const setLabel = (collapsed: boolean) => {
+        btn.innerHTML = `${icon("chev-down", "ic-caret")} ${esc(t(collapsed ? "um_expand" : "um_collapse"))}`;
+      };
+      setLabel(true);
+      btn.addEventListener("click", () => {
+        setLabel(d.classList.toggle("um-collapsed"));
+      });
+      d.appendChild(btn);
+    }
+    return d;
+  }
+
+  /// Écho optimiste d'un envoi (composer.sendInput) : bulle user
+  /// identique au rendu confirmé mais marquée `um-pending` — opacité
+  /// réduite tant que le user_message du journal n'est pas arrivé
+  /// (file d'attente, réveil…). Pas de data-seq : le nœud n'est pas un
+  /// event, il est retiré à la réconciliation.
+  renderUserEcho(text: string, steer: boolean): HTMLElement {
+    const d = document.createElement("div");
+    d.className = "ev msg user um-pending";
+    d.dataset.pending = "1";
+    d.title = t("um_pending");
+    const badges = steer ? `<span class="steer-badge">${t("steer_badge")}</span> ` : "";
+    return this.userBubble(d, text, badges);
   }
 
   /// Bouton « copier » en surimpression de chaque bloc de code markdown.

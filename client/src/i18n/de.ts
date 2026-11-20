@@ -387,7 +387,7 @@ export const de: Record<Key, string> = {
   agent_missing: "nicht installiert",
   agent_searched: "gesucht",
   agent_install: "Installieren", agent_installing: "Installiere…",
-  um_expand: "Mehr anzeigen", um_collapse: "Weniger anzeigen",
+  um_expand: "Mehr anzeigen", um_collapse: "Weniger anzeigen", um_pending: "Wird gesendet…",
   win_min: "Minimieren", win_max: "Maximieren",
   search_title: "Im Verlauf suchen",
   search_ph: "In dieser Sitzung suchen…",
