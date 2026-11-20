@@ -181,6 +181,7 @@ pub fn run() {
             commands::system::spawn_instance,
             commands::system::ssh_pubkey,
             commands::system::sys_stats,
+            commands::system::mem_breakdown,
             commands::system::log_tail,
             commands::system::log_read,
             commands::system::log_write,

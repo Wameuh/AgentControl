@@ -129,6 +129,186 @@ pub(crate) async fn sys_stats(state: State<'_, AppState>) -> Result<Value, Strin
     }))
 }
 
+/// Rôle d'un process enfant du client, deviné du nom + cmdline.
+/// WebKitGTK : `WebKitWebProcess` / `WebKitNetworkProcess` /
+/// `WebKitGPUProcess` ; WKWebView (macOS) : `com.apple.WebKit.*` ;
+/// WebView2 (Windows) : tous les enfants partagent l'exe
+/// `msedgewebview2.exe`, le rôle est dans `--type=`/`--utility-sub-type`.
+fn mem_role(name: &str, cmdline: &str) -> &'static str {
+    let n = name.to_lowercase();
+    let c = cmdline.to_lowercase();
+    if n.contains("webkitwebprocess")
+        || n.contains("webkit.webcontent")
+        || c.contains("--type=renderer")
+    {
+        return "web";
+    }
+    if n.contains("webkitnetworkprocess")
+        || n.contains("webkit.network")
+        || c.contains("networkservice")
+        || c.contains("network.mojom")
+    {
+        return "network";
+    }
+    if n.contains("webkitgpuprocess")
+        || n.contains("webkit.gpu")
+        || c.contains("gpu-process")
+        || c.contains("--type=gpu")
+    {
+        return "gpu";
+    }
+    "other"
+}
+
+/// `/proc/<pid>/smaps_rollup` → champs kB convertis en Mo (1 décimale).
+/// `None` hors Linux, si le fichier est illisible (permissions, noyau
+/// sans CONFIG_*) ou si le process a disparu entre-temps.
+fn smaps_rollup(pid: u32) -> Option<Value> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup")).ok()?;
+    let mut m = std::collections::HashMap::new();
+    for line in text.lines() {
+        let Some((k, v)) = line.split_once(':') else { continue };
+        let Ok(kb) = v
+            .trim()
+            .trim_end_matches("kB")
+            .trim()
+            .parse::<f64>()
+        else {
+            continue;
+        };
+        m.insert(k.trim().to_string(), kb);
+    }
+    if m.is_empty() {
+        return None;
+    }
+    let mb = |k: &str| {
+        m.get(k).map(|kb| ((kb / 1024.0) * 10.0).round() / 10.0)
+    };
+    let pair = |a: &str, b: &str| match (mb(a), mb(b)) {
+        (Some(x), Some(y)) => Some(x + y),
+        (Some(x), None) => Some(x),
+        (None, Some(y)) => Some(y),
+        _ => None,
+    };
+    Some(json!({
+        "rss_mb": mb("Rss"),
+        "anon_mb": mb("Anonymous"),
+        "shared_mb": pair("Shared_Clean", "Shared_Dirty"),
+        "private_mb": pair("Private_Clean", "Private_Dirty"),
+        "swap_mb": mb("Swap"),
+    }))
+}
+
+/// Répartition mémoire du client, calculée À L'APPEL (clic sur
+/// l'indicateur `mem` de la barre d'état — aucun polling) : RSS du
+/// process hôte + descendants directs/indirects classés par rôle
+/// (web content / network / gpu / autres), avec `smaps_rollup` par
+/// groupe quand lisible (Linux — `/proc/<pid>/smaps_rollup`). Le web
+/// process est typiquement le plus gros : c'est LA réponse au « 400
+/// MB » de la barre, qui n'affiche que le RSS du process hôte.
+/// Hors Linux ou sans enfant identifiable : `procs` ne contient que
+/// `app` — dégradé gracieux, jamais d'erreur.
+#[tauri::command]
+pub(crate) async fn mem_breakdown(state: State<'_, AppState>) -> Result<Value, String> {
+    let pid = sysinfo::get_current_pid().map_err(|e| e.to_string())?;
+    let mut sys = state.sys.lock().await;
+    // Refresh `All` à la demande : la barre sonde déjà le pid hôte
+    // toutes les 3 s ; ici on veut l'arbre complet — un refresh global
+    // reste <50 ms et ne part qu'au clic.
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+
+    // Descendants du pid courant via parent() (sysinfo 0.32 n'expose
+    // pas children() — on reconstruit l'arbre depuis la map complète).
+    let mut kids: std::collections::HashMap<u32, Vec<u32>> = Default::default();
+    for (p, pr) in sys.processes() {
+        if let Some(pp) = pr.parent() {
+            kids.entry(pp.as_u32()).or_default().push(p.as_u32());
+        }
+    }
+    let mut desc = Vec::new();
+    let mut stack = vec![pid.as_u32()];
+    while let Some(p) = stack.pop() {
+        if let Some(cs) = kids.get(&p) {
+            for &c in cs {
+                desc.push(c);
+                stack.push(c);
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct Group {
+        count: usize,
+        rss: u64,
+        biggest: Option<(u32, String, u64)>,
+        members: Vec<Value>,
+    }
+    let mut groups: std::collections::HashMap<&'static str, Group> = Default::default();
+    for dp in desc {
+        let Some(pr) = sys.process(sysinfo::Pid::from_u32(dp)) else {
+            continue;
+        };
+        let name = pr.name().to_string_lossy().into_owned();
+        let cmdline = pr
+            .cmd()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let role = mem_role(&name, &cmdline);
+        let rss = pr.memory();
+        let g = groups.entry(role).or_default();
+        g.count += 1;
+        g.rss += rss;
+        if g.biggest.as_ref().map(|&(_, _, r)| rss > r).unwrap_or(true) {
+            g.biggest = Some((dp, name.clone(), rss));
+        }
+        g.members.push(json!({
+            "pid": dp,
+            "name": name,
+            "rss_mb": (rss as f64 / 1_048_576.0 * 10.0).round() / 10.0,
+        }));
+    }
+
+    // Une ligne par groupe, triée par RSS décroissante — le plus gros
+    // process (typiquement le web content) est lu en premier.
+    let host = sys.process(pid).ok_or("process introuvable")?;
+    let mut procs = vec![json!({
+        "role": "app",
+        "count": 1,
+        "rss_mb": (host.memory() as f64 / 1_048_576.0 * 10.0).round() / 10.0,
+        "name": host.name().to_string_lossy(),
+        "smaps": smaps_rollup(pid.as_u32()),
+        "members": [],
+    })];
+    let mut rest: Vec<(&'static str, Group)> = groups.into_iter().collect();
+    rest.sort_by_key(|(_, g)| std::cmp::Reverse(g.rss));
+    for (role, mut g) in rest {
+        let (big_pid, big_name, _) = g.biggest.take().unwrap_or((0, String::new(), 0));
+        g.members.sort_by(|a, b| {
+            b["rss_mb"]
+                .as_f64()
+                .partial_cmp(&a["rss_mb"].as_f64())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        procs.push(json!({
+            "role": role,
+            "count": g.count,
+            "rss_mb": (g.rss as f64 / 1_048_576.0 * 10.0).round() / 10.0,
+            "name": big_name,
+            "smaps": if big_pid != 0 { smaps_rollup(big_pid) } else { None },
+            "members": g.members,
+        }));
+    }
+    procs.sort_by(|a, b| {
+        b["rss_mb"]
+            .as_f64()
+            .partial_cmp(&a["rss_mb"].as_f64())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(json!({ "procs": procs }))
+}
+
 /// Les N dernières lignes du log client.
 #[tauri::command]
 pub(crate) fn log_tail(n: Option<usize>) -> String {

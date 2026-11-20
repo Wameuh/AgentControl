@@ -279,3 +279,26 @@ dialog input[type="checkbox"]:focus-visible {
 .ac-err { color: var(--err); }
 .ac-co summary { cursor: pointer; color: var(--ink); }
 .ac-co ul { margin-top: 4px; }
+
+/* Répartition mémoire (#dlg-mem — clic sur l'indicateur `mem` de la
+   barre d'état) : sections par source, lignes rôle → valeur. */
+#dlg-mem { min-width: 420px; }
+#mem-body { display: flex; flex-direction: column; gap: 12px; max-height: 65vh; overflow-y: auto; }
+.mem-sec { display: flex; flex-direction: column; gap: 3px; }
+.mem-sec-h {
+  color: var(--muted); font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .04em;
+  border-bottom: 1px solid var(--line); padding-bottom: 4px;
+}
+.mem-row {
+  display: flex; align-items: baseline; justify-content: space-between;
+  flex-wrap: wrap; gap: 2px 12px; font-size: 12.5px;
+}
+.mem-row > .mem-sub { flex: 0 0 100%; }
+.mem-row .mem-role { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mem-row .mem-val { flex: none; font-family: Mono, ui-monospace, monospace; font-size: 12px; }
+.mem-sub { color: var(--dim); font-size: 11px; padding-left: 2px; }
+.mem-member { padding-left: 14px; }
+.mem-member .mem-role { color: var(--dim); font-size: 11.5px; }
+.mem-smaps { font-family: Mono, ui-monospace, monospace; }
+.mem-note { color: var(--dim); font-size: 12.5px; }
