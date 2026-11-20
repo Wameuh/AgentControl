@@ -189,3 +189,5 @@ sha:71fcbdf871390152ae3de8661e3fc1da87e2e3f7: ACP-only session modes (plan/smart
 374: Dragging a session or a group to a new place now moves it instantly — the sidebar updates before the server round-trip finishes, and group renames/moves fire all member updates in parallel instead of one by one.
 376: Clicking the memory figure in the status bar now opens a breakdown — per-process RSS (web content, network, gpu, app) plus smaps, JS heap and DOM node counts, computed on demand.
 375: Local perf telemetry — the client now writes an aggregated metrics line (typing latency, long tasks, DOM flushes, frame rate, RPC timings) to its local log every 5 minutes, toggleable in Settings → Diagnostics; useful for diagnosing UI lag.
+373: A new About dialog now shows client, daemon and latest-release versions side by side, with one-click update buttons for the app and the daemon.
+377: Forking or rebinding a session with a long history no longer floods the chat — the replayed history is journaled quietly and the conversation reloads once at the end instead of streaming every old event live.
