@@ -26,6 +26,8 @@
 #about-version { color: var(--dim); font-family: Mono, ui-monospace, monospace; font-size: 12px; }
 #about-gh { color: var(--violet); }
 :root.light #about-gh { color: var(--violet); }
+/* Ligne moteur/capabilities (diagnostic webview pour le support #294) */
+.about-eng { color: var(--dim); font-family: Mono, ui-monospace, monospace; font-size: 10.5px; word-break: break-all; }
 
 /* Dialogs */
 dialog {

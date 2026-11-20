@@ -223,8 +223,14 @@
   function frame(time) {
     const dt = Math.min(64, time - lastTime || 16);
     lastTime = time;
-    update(time, dt);
-    draw();
+    // Frappe en cours → la scène gèle : ~600 tris canvas à 60 i/s
+    // volaient les frames de saisie (lag de frappe même session idle,
+    // #294). update() est sauté aussi → la reprise est continue, sans
+    // saut de phase ; le dernier frame reste affiché.
+    if (time >= yieldUntil) {
+      update(time, dt);
+      draw();
+    }
     frameId = window.requestAnimationFrame(frame);
   }
 
@@ -293,6 +299,17 @@
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) stop();
     else start();
+  });
+  // Fenêtre sans focus (autre app, autre bureau) : le rendu continu
+  // continuait pour rien — on gèle, le retour focus reprend.
+  window.addEventListener("blur", stop);
+  window.addEventListener("focus", start);
+  // Rendement à la saisie : tout event `input` (champ message, renommage,
+  // filtre…) repousse l'échéance — le fond décoratif s'efface tant que
+  // l'utilisateur tape, reprend ~1.2 s après la dernière frappe.
+  let yieldUntil = 0;
+  document.addEventListener("input", () => {
+    yieldUntil = performance.now() + 1200;
   });
   const onMotionPreference = () => {
     // Sans préférence explicite, l'état suit le réglage OS.
