@@ -82,6 +82,24 @@ interface ConvCache {
   ts: number;
 }
 
+/** Écho optimiste d'un envoi (composer.sendInput) : le RPC `send`
+ *  n'enfile que le prompt — le user_message du journal n'arrive
+ *  qu'à la livraison (file d'attente, réveil, steer). Le client affiche
+ *  une bulle « pending » dès l'Enter, réconciliée à l'arrivée du vrai
+ *  event. Par session : l'écho reste attaché au journal émetteur même
+ *  si l'utilisateur change de session entre-temps (son nœud voyage
+ *  avec le fragment de conversation, ou est recréé à la réouverture). */
+interface EchoPending {
+  id: number;
+  text: string;
+  steer: boolean;
+  /** maxRendered au moment de l'envoi : borne la réconciliation —
+   *  un replay d'historique (seq ≤ afterSeq) ne doit pas consommer
+   *  l'écho. */
+  afterSeq: number;
+  node: HTMLElement | null;
+}
+
 export class ChatView {
   private renderer!: EventRenderer;
   private eventsEl = $("events");
@@ -141,6 +159,10 @@ export class ChatView {
   private opening = false;
   private unseenBelow = 0;
   private convLoadingEl: HTMLElement | null = null;
+  /** Échos optimistes par session (FIFO — l'ordre d'envoi est celui de
+   *  la file du démon). Voir EchoPending. */
+  private pendingEchoes = new Map<string, EchoPending[]>();
+  private echoSeq = 0;
   /** Hôtes en cours d'auto-connexion (écran vide "connexion à…"). */
   private connectingHosts: string[] = [];
   /** Callback stable pour ensureCosts — dédupliqué côté modelcosts. */
@@ -429,10 +451,14 @@ export class ChatView {
     this.updateBottomBtn();
   }
 
-  /** Oublie la conversation cachée d'une session (suppression). */
+  /** Oublie la conversation cachée d'une session (suppression, journal
+   *  vidé) — ses échos pending partent avec elle (file purgée côté
+   *  démon : plus rien ne les réconciliera). */
   dropConv(id: string) {
     this.convCache.delete(id);
     this.tailCache.delete(id);
+    for (const e of this.pendingEchoes.get(id) ?? []) e.node?.remove();
+    this.pendingEchoes.delete(id);
   }
 
   /** Purge les conversations cachées des sessions d'une connexion. */
@@ -658,6 +684,10 @@ export class ChatView {
       }
     }
 
+    // Journal reparti (nouveau cycle natif) : les échos pending de
+    // l'ancien cycle ne seront jamais réconciliés (file purgée au
+    // respawn, seqs reparties à 1) — les retirer avec le rendu.
+    if (journalReset) this.pendingEchoes.delete(id);
     // Subscribe live à partir du dernier event connu
     if (stale()) return;
     const subConn = app.current?.conn ?? connHint;
@@ -671,6 +701,9 @@ export class ChatView {
     // Journal réinitialisé (native changé) → les résultats de recherche
     // indexent l'ancien journal (seqs reparties à 1) → fermer la recherche.
     if (journalReset) this.deps.onSessionChanged();
+    // Échos pending de cette session : recrée les nœuds perdus avec la
+    // vue (fresh load, cache expiré, clear) — no-op si déjà montés.
+    this.ensureEchoNodes(id);
     void this.deps.refresh();
     // L'arbre suit le workspace de la session nouvellement ouverte
     this.deps.onSessionOpened();
@@ -1181,6 +1214,12 @@ export class ChatView {
       this.renderer.updateToolBlock(ev);
       return;
     }
+    // Écho optimiste : le user_message confirmé consomme le pending
+    // correspondant (envoi encore en file ou livré pendant un trou) —
+    // le retrait du nœud pending et l'insertion du confirmé se font
+    // dans la même frame, jamais de doublon. Les prompts « service »
+    // (origin) ne sont pas des envois du composer : ignorés.
+    if (ev.type === "user_message" && !ev.origin) this.consumeEcho(ev);
     // Replay de resubscribe : un seq ≤ dernier rendu (et absent de
     // renderedSeqs — le cas couvert juste au-dessus) est un trou d'une
     // resync : inséré à sa position plutôt qu'en queue. Le test doit
@@ -1553,6 +1592,9 @@ export class ChatView {
     } finally {
       this.suppressAutoRead = false;
     }
+    // Retour au présent : les échos envoyés depuis la vue ancrée
+    // n'avaient pas de nœud — les monter en bas du fil.
+    if (app.current) this.ensureEchoNodes(app.current.id);
   }
 
   /** Menu contextuel « Copier » sur la sélection du fil (même composant
@@ -1575,6 +1617,145 @@ export class ChatView {
     this.eventsEl.appendChild(d);
     this.scrollBottom();
     return d;
+  }
+
+  // -------------------------------------------------------------------------
+  // Échos optimistes des envois (composer.sendInput)
+  // -------------------------------------------------------------------------
+
+  private normEcho(s: string) {
+    return s.replace(/\s+/g, " ").trim();
+  }
+
+  /** Enregistre l'écho optimiste d'un envoi ; si la session est
+   *  affichée en vue directe, le nœud est inséré en bas du fil
+   *  immédiatement — sinon il sera monté au retour au présent
+   *  (ensureEchoNodes via openInner/flushPendingLive). Retourne l'id
+   *  pour dropEcho (envoi refusé). */
+  addEcho(sid: string, text: string, opts: { steer?: boolean } = {}): number {
+    const id = ++this.echoSeq;
+    // Filigrane = plus haut seq CONNU à l'envoi (rendu + tamponnés non
+    // encore rendus) : un user_message plus ancien (replay d'historique,
+    // event bufferisé pendant une vue ancrée) ne doit pas consommer
+    // l'écho — seuls les events postérieurs à l'envoi le réconcilient.
+    const afterSeq = Math.max(
+      this.maxRendered,
+      this.pendingLive[this.pendingLive.length - 1]?.seq ?? 0,
+      this.liveQueue[this.liveQueue.length - 1]?.seq ?? 0,
+    );
+    const e: EchoPending = {
+      id,
+      text,
+      steer: !!opts.steer,
+      afterSeq,
+      node: null,
+    };
+    const l = this.pendingEchoes.get(sid) ?? [];
+    l.push(e);
+    this.pendingEchoes.set(sid, l);
+    if (app.current?.id === sid && !this.hasMoreNewer && !this.opening) {
+      this.mountEcho(e);
+    }
+    return id;
+  }
+
+  private mountEcho(e: EchoPending) {
+    if (e.node?.isConnected) return;
+    e.node = this.renderer.renderUserEcho(e.text, e.steer);
+    this.eventsEl.appendChild(e.node);
+    if (this.stickBottom) this.scrollBottom();
+    else this.updateBottomBtn();
+  }
+
+  /** Recrée les nœuds d'écho absents du DOM — la vue a été reconstruite
+   *  (ouverture fraîche, cache expiré, clear, retour au présent après
+   *  une vue ancrée). Idempotent ; les échos déjà connectés gardent
+   *  leur place (et leur nœud stashé/restitué). */
+  private ensureEchoNodes(sid: string) {
+    const l = this.pendingEchoes.get(sid);
+    if (!l?.length || app.current?.id !== sid || this.hasMoreNewer) return;
+    if (l.every((e) => e.node?.isConnected)) return;
+    // Un nœud manquant → re-monter TOUS les échos de la session dans
+    // l'ordre d'envoi (un append unitaire casserait l'ordre FIFO).
+    for (const e of l) e.node?.remove();
+    for (const e of l) {
+      e.node = null;
+      this.mountEcho(e);
+    }
+  }
+
+  /** Retire l'écho #id — envoi refusé (RPC en erreur). */
+  dropEcho(sid: string, id: number) {
+    const l = this.pendingEchoes.get(sid);
+    if (!l) return;
+    const i = l.findIndex((e) => e.id === id);
+    if (i < 0) return;
+    l[i].node?.remove();
+    l.splice(i, 1);
+    if (!l.length) this.pendingEchoes.delete(sid);
+  }
+
+  /** Retire les échos dont le texte correspond — queue_drop : le
+   *  message retiré de la file ne sera jamais journalisé. Toutes les
+   *  occurrences : avec des doublons stricts, retirer un seul écho
+   *  laisserait un pending orphelin pour le message supprimé. */
+  dropEchoesByText(sid: string, text: string) {
+    const l = this.pendingEchoes.get(sid);
+    if (!l) return;
+    const norm = this.normEcho(text);
+    for (let i = l.length - 1; i >= 0; i--) {
+      if (this.normEcho(l[i].text) !== norm) continue;
+      l[i].node?.remove();
+      l.splice(i, 1);
+    }
+    if (!l.length) this.pendingEchoes.delete(sid);
+  }
+
+  /** Vide les échos d'une session — queue_clear côté client. */
+  clearEchoes(sid: string) {
+    const l = this.pendingEchoes.get(sid);
+    if (!l) return;
+    for (const e of l) e.node?.remove();
+    this.pendingEchoes.delete(sid);
+  }
+
+  /** queue_edit : suit le renommage du texte en file — l'écho pending
+   *  du message édité doit porter le texte qui sera journalisé. Un
+   *  seul candidat exact : avec des doublons, toucher le mauvais
+   *  écho désalignerait la réconciliation. */
+  retextEcho(sid: string, oldText: string, newText: string) {
+    const l = this.pendingEchoes.get(sid);
+    if (!l) return;
+    const norm = this.normEcho(oldText);
+    const hits = l.filter((e) => this.normEcho(e.text) === norm);
+    if (hits.length !== 1) return;
+    const e = hits[0];
+    e.text = newText;
+    const wasMounted = e.node != null;
+    e.node?.remove();
+    e.node = null;
+    if (wasMounted && app.current?.id === sid && !this.hasMoreNewer && !this.opening) {
+      this.mountEcho(e);
+    }
+  }
+
+  /** user_message confirmé : consomme l'écho pending correspondant
+   *  (texte normalisé + seq postérieur à l'envoi) — jamais de doublon.
+   *  Sans match (édition de file, envoi par un autre client), l'écho
+   *  reste : il se réconciliera à sa propre livraison. */
+  private consumeEcho(ev: AcEvent) {
+    const sid = app.current?.id;
+    const l = sid ? this.pendingEchoes.get(sid) : undefined;
+    if (!sid || !l?.length) return;
+    const norm = this.normEcho(String(ev.text ?? ""));
+    if (!norm) return;
+    const i = l.findIndex(
+      (e) => e.afterSeq < ev.seq && this.normEcho(e.text) === norm,
+    );
+    if (i < 0) return;
+    const [e] = l.splice(i, 1);
+    if (!l.length) this.pendingEchoes.delete(sid);
+    e.node?.remove();
   }
 
   /** La sentinelle (tête de #events) est-elle dans le scrollport ? */

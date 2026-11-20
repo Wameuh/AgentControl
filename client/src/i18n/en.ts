@@ -384,7 +384,7 @@ export const en = {
   agent_missing: "not installed",
   agent_searched: "looked for",
   agent_install: "Install", agent_installing: "Installing…",
-  um_expand: "Show more", um_collapse: "Show less",
+  um_expand: "Show more", um_collapse: "Show less", um_pending: "Sending…",
   win_min: "Minimize", win_max: "Maximize",
   search_title: "Search in history",
   search_ph: "Search in this session…",

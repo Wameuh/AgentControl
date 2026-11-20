@@ -829,8 +829,18 @@ export class Composer {
   /** queue_* puis re-render : l'erreur part en toast plutôt que de
    *  finir en unhandled rejection (conn down, index périmé…). */
   private queueCall(method: string, params: Record<string, unknown>) {
+    // queue_drop : le message retiré ne sera jamais journalisé —
+    // retirer l'écho pending correspondant (sinon bulle orpheline).
+    const dropped =
+      method === "queue_drop"
+        ? this.qSnapshot[params.index as number]
+        : undefined;
+    const sid = params.session as string;
     void call(method, params)
-      .then(() => this.refreshQueue())
+      .then(() => {
+        if (dropped != null) this.chat.dropEchoesByText(sid, dropped);
+        return this.refreshQueue();
+      })
       .catch((e) => showErr(String(e)));
   }
 
@@ -936,6 +946,9 @@ export class Composer {
         .then((r) => {
           // Index périmé (entrée déplacée/supprimée par ailleurs).
           if (!r.ok) notify("warn", t("queue_edit_failed"));
+          // L'écho pending du message édité doit porter le texte qui
+          // sera journalisé à la livraison (réconciliation par texte).
+          else this.chat.retextEcho(sid, ed.orig, text);
         })
         .catch((e) => {
           this.markQueueEditBroken(conn ?? "default", e);
@@ -1073,6 +1086,11 @@ export class Composer {
       : atLines;
     const sid = app.current.id; // peut changer pendant l'await
     this.setInput("");
+    // Écho optimiste : la bulle user apparaît dès l'Enter — le
+    // user_message du journal n'arrive qu'à la livraison (file,
+    // réveil), le RPC send n'enfile que le prompt. Le pending est
+    // réconcilié à l'arrivée du vrai event ; retiré si le RPC échoue.
+    const echoId = this.chat.addEcho(sid, payload, { steer: mode === "steer" });
     try {
       await call("send", {
         session: sid,
@@ -1082,6 +1100,7 @@ export class Composer {
       });
       this.attach.sent(sid);
     } catch (e) {
+      this.chat.dropEcho(sid, echoId);
       showErr(String(e));
       // Envoi refusé : le brouillon n'est vidé que sur succès — rendre
       // le texte à SA session (champ, ou draft garé si l'utilisateur a
@@ -1404,6 +1423,9 @@ export class Composer {
       })
         .then((r) => {
           if (Array.isArray(r.queue)) this.qSnapshot = r.queue;
+          // File purgée : les échos pending de ces messages ne seront
+          // jamais journalisés — les retirer (bulles orphelines).
+          this.chat.clearEchoes(sid);
           this.refreshQueue();
         })
         .catch((e) => showErr(String(e)));
