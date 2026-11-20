@@ -974,8 +974,19 @@
         <h3 data-i18n="about_h">About</h3>
         <div id="about-body">
           <span id="about-gem"></span>
-          <div>
-            <div><b>AgentControl</b> <span id="about-version">v0.0.1</span></div>
+          <div id="about-info">
+            <div><b>AgentControl</b></div>
+            <div class="about-row" id="about-client-row">
+              <span><span data-i18n="about_client">Client</span> : <b id="about-version" class="about-ver">v0.0.1</b></span>
+              <button id="about-update-app" type="button" hidden data-i18n="about_update_app">Update app</button>
+            </div>
+            <div class="about-row" id="about-daemon-row" hidden>
+              <span><span data-i18n="about_daemon">Daemon</span> : <b id="about-daemon-ver" class="about-ver">—</b><span id="about-daemon-host"></span></span>
+              <button id="about-update-daemon" type="button" hidden data-i18n="daemon_update_now">Update daemon</button>
+            </div>
+            <div class="about-row" id="about-release-row" hidden>
+              <span><span data-i18n="about_release">Latest release</span> : <b id="about-remote-ver" class="about-ver"></b></span>
+            </div>
             <div><a id="about-gh" href="https://github.com/Wameuh/AgentControl">github.com/Wameuh/AgentControl</a></div>
             <div class="about-eng" id="about-engine"></div>
             <div><span data-i18n="license_label">License</span> : MIT</div>

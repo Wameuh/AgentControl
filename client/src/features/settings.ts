@@ -16,7 +16,7 @@ import { setLang, getLang, t, LANGS, type Lang } from "../i18n";
 import { nav } from "../ui/nav";
 import type { SavedConn } from "../core/types";
 import { renderAccesses, shareQr } from "./pairing";
-import { checkUpdate, performClientUpdate, performDaemonUpdate, rcChannel } from "./update";
+import { checkUpdate, daemonCfgFor, performClientUpdate, performDaemonUpdate, rcChannel } from "./update";
 import {
   sounds,
   sndEnabled,
@@ -378,7 +378,7 @@ export class SettingsPanel {
               conn: ck,
               target: dTarget,
               current: dv,
-              cfg: await this.daemonCfgFor(ck),
+              cfg: await daemonCfgFor(ck),
             });
           } finally {
             dbtn.disabled = false;
@@ -392,14 +392,6 @@ export class SettingsPanel {
     } finally {
       btn.disabled = false;
     }
-  }
-
-  /** Config sauvegardée correspondant à la clé conn active — nécessaire
-   *  au repli ssh d'ensure_daemon (credentials, host_keys, port…). */
-  private async daemonCfgFor(ck: string): Promise<SavedConn | null> {
-    const list = await invoke<SavedConn[]>("saved_connections")
-      .catch(() => [] as SavedConn[]);
-    return list.find((c) => connKeyOf(c, isAndroid()) === ck) ?? null;
   }
 
   init() {
