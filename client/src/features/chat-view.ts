@@ -29,6 +29,7 @@ import { costFor, ensureCosts } from "./modelcosts";
 import { notifications } from "./notifications";
 import { catalogFor, ensureCatalog } from "./modelcatalog";
 import type { EventRenderer } from "./event-renderers";
+import { probeDomFlush, telemetryActive } from "./telemetry";
 
 const MAX_RENDERED = 400;
 const PAGE = 50; // paquets au scroll
@@ -1139,6 +1140,10 @@ export class ChatView {
     const q = this.liveQueue;
     this.liveQueue = [];
     if (!q.length) return;
+    // Sonde télémétrie (#297) : ce batch est LE point de mutation du fil
+    // — sa durée + le nombre de nœuds rendus sont la métrique « DOM
+    // flush » (le coût perçu pendant le stream).
+    const t0 = telemetryActive() ? performance.now() : -1;
     // Coalescing par frame : les tool_call_update d'un même call_id sont
     // des snapshots cumulés de la sortie — seul le dernier est jamais
     // visible, rendre les intermédiaires coûtetrait un layout chacun
@@ -1179,6 +1184,7 @@ export class ChatView {
       }
     }
     this.trimRendered();
+    if (t0 >= 0) probeDomFlush(performance.now() - t0, batch.appended);
   }
 
   private appendEventNow(ev: AcEvent, live: boolean) {
@@ -1586,6 +1592,7 @@ export class ChatView {
   private flushPendingLive() {
     const rest = this.pendingLive.filter((e) => e.seq > this.maxRendered);
     this.pendingLive = [];
+    const t0 = telemetryActive() ? performance.now() : -1;
     this.suppressAutoRead = true;
     try {
       for (const ev of rest) this.appendEventNow(ev, true);
@@ -1595,6 +1602,7 @@ export class ChatView {
     // Retour au présent : les échos envoyés depuis la vue ancrée
     // n'avaient pas de nœud — les monter en bas du fil.
     if (app.current) this.ensureEchoNodes(app.current.id);
+    if (t0 >= 0) probeDomFlush(performance.now() - t0, rest.length);
   }
 
   /** Menu contextuel « Copier » sur la sélection du fil (même composant
