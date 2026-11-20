@@ -8,7 +8,7 @@ import { invoke, getVersion, isWeb } from "../core/bridge";
 import { $, esc, logUi, notify } from "../core/dom";
 import { icon } from "../ui/icons";
 import { isAndroid, shellOpen } from "../core/chrome";
-import { cmpVer, connLabel, daemonParams } from "../core/conn";
+import { cmpVer, connKeyOf, connLabel, daemonParams } from "../core/conn";
 import { call } from "../core/rpc";
 import { t } from "../i18n";
 import { confirmPair } from "./pairing";
@@ -175,8 +175,12 @@ export async function performDaemonUpdate(o: {
   // conn-view (ni dead ni interrupted ni asleep). Échec → compteur inconnu.
   const sessions = await call<SessionMeta[]>("list_sessions", { conn: o.conn })
     .catch(() => null);
+  // Sessions sans champ conn (réponse brute mono-serveur, ex. web) ne
+  // peuvent appartenir qu'à la conn "web" — les clés desktop sont
+  // toujours préfixées ssh/tcp/local.
   const n = sessions?.filter((s) =>
-    s.conn === o.conn && s.state !== "dead" && s.state !== "interrupted" &&
+    (s.conn ?? "web") === o.conn && s.state !== "dead" &&
+    s.state !== "interrupted" &&
     s.state !== "asleep" && s.state !== "wait-asleep").length;
   const ok = await confirmPair(
     t("dupdate_h"),
@@ -261,6 +265,132 @@ async function daemonViaScript(
   } catch (e) {
     notify("error", String(e));
   }
+}
+
+/// Config sauvegardée correspondant à la clé conn — nécessaire au repli
+/// ssh d'ensure_daemon (credentials, host_keys, port…). Partagée entre
+/// le panneau settings et le dialogue « À propos ».
+export async function daemonCfgFor(ck: string): Promise<SavedConn | null> {
+  const list = await invoke<SavedConn[]>("saved_connections")
+    .catch(() => [] as SavedConn[]);
+  return list.find((c) => connKeyOf(c, isAndroid()) === ck) ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Dialogue « À propos » : point central des versions — client, démon de
+// la connexion active, dernière release — avec un bouton d'update par
+// cible. showModal() part AVANT tout fetch (ouverture <100 ms, rien de
+// synchrone) ; les versions arrivent ensuite et une ligne en échec est
+// masquée, jamais d'état d'erreur.
+// ---------------------------------------------------------------------------
+
+/// Remplit la ligne « Daemon » + le bouton d'update associé pour la
+/// version `dv` ("" = statut illisible → « — »). `remote` = dernière
+/// release connue ("" si inconnue → jamais de bouton).
+function fillDaemonLine(
+  ck: string, dv: string, remote: string,
+  dBtn: HTMLButtonElement,
+) {
+  $("about-daemon-row").hidden = false;
+  $("about-daemon-ver").textContent = dv ? `v${dv}` : "—";
+  // "web" = le démon qui sert la SPA — pas de label d'hôte à montrer.
+  $("about-daemon-host").textContent =
+    ck && ck !== "web" ? ` — ${connLabel(ck)}` : "";
+  const newer = !!(dv && remote && cmpVer(remote, dv) > 0);
+  dBtn.hidden = !newer;
+  if (newer) {
+    dBtn.onclick = async () => {
+      dBtn.disabled = true;
+      try {
+        await performDaemonUpdate({
+          conn: ck,
+          target: remote,
+          current: dv,
+          cfg: await daemonCfgFor(ck),
+        });
+      } finally {
+        dBtn.disabled = false;
+      }
+      await refreshDaemonLine(ck, remote, dBtn);
+    };
+  }
+}
+
+/// Après un update démon : le restart coupe la socket — « redémarrage… »
+/// tant que daemon_status ne répond pas, puis la version courante dès
+/// qu'elle revient (update appliquée ou non, le statut fait foi).
+/// Boucle bornée ; le dialogue refermé arrête les polls.
+async function refreshDaemonLine(
+  ck: string, remote: string, dBtn: HTMLButtonElement,
+) {
+  const dlg = $("dlg-about") as HTMLDialogElement;
+  for (let i = 0; i < 15; i++) {
+    const st = await call<Record<string, unknown>>("daemon_status", {
+      conn: ck,
+    }).catch(() => null);
+    const v = typeof st?.version === "string" ? st.version : "";
+    if (v || !dlg.open) {
+      if (dlg.open) fillDaemonLine(ck, v, remote, dBtn);
+      return;
+    }
+    $("about-daemon-ver").textContent = t("about_daemon_restarting");
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  if (dlg.open) $("about-daemon-ver").textContent = "—";
+}
+
+/// Ouvre le dialogue « À propos » : reset des lignes dynamiques, modal
+/// immédiate, puis remplissage async (version locale, release distante
+/// après showModal, daemon_status de la conn active). `connKey` est
+/// résolu à l'ouverture — la conn liée peut changer entre deux ouvertures.
+export function openAbout(connKey: () => string | null) {
+  const dlg = $("dlg-about") as HTMLDialogElement;
+  if (dlg.open) return;
+  const appBtn = $("about-update-app") as HTMLButtonElement;
+  const dBtn = $("about-update-daemon") as HTMLButtonElement;
+  // Reset complet : réouverture après update ou changement de conn.
+  $("about-client-row").hidden = isWeb;
+  $("about-release-row").hidden = true;
+  $("about-daemon-row").hidden = true;
+  appBtn.hidden = true;
+  dBtn.hidden = true;
+  dlg.showModal();
+  void (async () => {
+    const ck = connKey();
+    const [lv, remote, dst] = await Promise.all([
+      // Web : la « version client » est celle du démon — ligne masquée,
+      // inutile de la requêter.
+      isWeb ? Promise.resolve("") : getVersion().catch(() => ""),
+      remoteVersion().catch(() => ""),
+      ck
+        ? call<Record<string, unknown>>("daemon_status", { conn: ck })
+            .catch(() => null)
+        : Promise.resolve(null),
+    ]);
+    if (!dlg.open) return;
+    // Web : « client » = le démon qui sert la SPA — ligne masquée, la
+    // version démon suffit (cf. checkBootUpdate qui skip en web).
+    if (!isWeb && lv) $("about-version").textContent = `v${lv}`;
+    if (remote) {
+      $("about-remote-ver").textContent = `v${remote}`;
+      $("about-release-row").hidden = false;
+      if (!isWeb && lv && cmpVer(remote, lv) > 0) {
+        appBtn.hidden = false;
+        appBtn.onclick = async () => {
+          appBtn.disabled = true;
+          try {
+            await performClientUpdate(remote);
+          } finally {
+            appBtn.disabled = false;
+          }
+        };
+      }
+    }
+    if (ck) {
+      const dv = typeof dst?.version === "string" ? dst.version : "";
+      fillDaemonLine(ck, dv, remote, dBtn);
+    }
+  })();
 }
 
 /** Client plus vieux que le démon (minor) : le démon n'est PAS touché —

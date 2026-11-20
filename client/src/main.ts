@@ -8,7 +8,7 @@
 
 import "./styles.css";
 import "./mesh-bg.ts";
-import { invoke, listen, getVersion, isWeb } from "./core/bridge";
+import { invoke, listen, isWeb } from "./core/bridge";
 import { $, logUi, notify } from "./core/dom";
 import { app } from "./core/state";
 import { initRpc } from "./core/rpc";
@@ -33,7 +33,7 @@ import {
 import { nav, type SheetItem } from "./ui/nav";
 import { hydrateIcons } from "./ui/icons";
 import { initStatus, type HostStats } from "./features/status";
-import { checkBootUpdate } from "./features/update";
+import { checkBootUpdate, openAbout } from "./features/update";
 import { initModelBar } from "./features/modelbar";
 import { initModelCosts } from "./features/modelcosts";
 import { initModelCatalog } from "./features/modelcatalog";
@@ -440,15 +440,12 @@ await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
 
 // --- Settings / About / menus ⋮ ----------------------------------------------
 
-// About : version réelle + lien GitHub via le plugin shell
-$("tb-about").onclick = async () => {
-  try {
-    $("about-version").textContent = "v" + (await getVersion());
-  } catch {
-    /* dev */
-  }
+// About : point central des versions (client/démon/release) + updates —
+// openAbout ouvre la modale d'abord puis remplit en async ; le moteur
+// reste synchrone (report local, pas de réseau).
+$("tb-about").onclick = () => {
   $("about-engine").textContent = engineReport();
-  ($("dlg-about") as HTMLDialogElement).showModal();
+  openAbout(() => conns.knownConns()[0] ?? null);
 };
 // Menus ⋮ (Android) : l'app-level ouvre Settings/About, celui du chat les
 // actions de session (cachées du header sur mobile).
