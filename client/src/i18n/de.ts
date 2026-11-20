@@ -192,6 +192,7 @@ export const de: Record<Key, string> = {
   delete_armed: "löschen ?", loading: "lädt…", load_full: "vollständige Ausgabe laden…", cmd_full: "vollständigen Befehl anzeigen…",
   thought: "Gedanke", resolved: "gelöst — ", mode_arrow: "Modus → ",
   cmds_avail: "{n} Befehle verfügbar", state_arrow: "Status → ",
+  history_replayed: "Kontext geladen — {n} Events wiedergegeben",
   perm_title: "Berechtigungsanfrage", answer_ph: "Antwort (JSON oder Text)",
   answer_btn: "Antworten", ignore_btn: "Verwerfen",
   no_native: "Keine nativen Sitzungen (oder session/list von diesem Agenten nicht unterstützt).",

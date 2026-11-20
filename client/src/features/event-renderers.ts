@@ -247,6 +247,17 @@ export class EventRenderer {
         d.innerHTML = `${icon("sys")} ${esc(ev.text as string)}`;
         return d;
       }
+      case "history_replayed": {
+        // Fin d'un replay session/load « refill » (fork/rebind) : le journal a été reconstruit sans broadcast live —
+        // la queue affichée a été rechargée en amont (main.ts → open
+        // forcé), cet event journalisé marque la fin du contexte
+        // rejoué dans l'historique.
+        const d = mkEv("sysline", ev.seq);
+        d.textContent = t("history_replayed", {
+          n: (ev.events as number) ?? 0,
+        });
+        return d;
+      }
       default: {
         const d = mkEv("sysline", ev.seq);
         d.textContent = ev.type;

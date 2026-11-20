@@ -192,6 +192,7 @@ export const es: Record<Key, string> = {
   delete_armed: "¿elim ?", loading: "cargando…", load_full: "cargar la salida completa…", cmd_full: "mostrar el comando completo…",
   thought: "pensamiento", resolved: "resuelto — ", mode_arrow: "modo → ",
   cmds_avail: "{n} comandos disponibles", state_arrow: "estado → ",
+  history_replayed: "contexto cargado — {n} eventos reproducidos",
   perm_title: "solicitud de permiso", answer_ph: "respuesta (JSON o texto)",
   answer_btn: "Responder", ignore_btn: "Ignorar",
   no_native: "No hay sesiones nativas (o session/list no soportado por este agente).",
