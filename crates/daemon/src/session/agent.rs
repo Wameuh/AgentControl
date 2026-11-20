@@ -807,7 +807,7 @@ impl Session {
     /// replay + load, puis solde les meta sales accumulées pendant le
     /// load — une seule écriture meta.json finale au lieu d'une par
     /// event méta rejoué (#271).
-    /// Un load « refill » (skip_replay=false — fork/rebind/attach :
+    /// Un load « refill » (skip_replay=false — fork/rebind :
     /// le journal a été reconstruit depuis le replay, ses events
     /// n'ayant PAS été broadcastés, #300) se termine par le marqueur
     /// `history_replayed` : les clients abonnés rechargent la queue

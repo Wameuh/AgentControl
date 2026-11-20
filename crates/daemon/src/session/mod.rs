@@ -473,8 +473,8 @@ impl Session {
     // -----------------------------------------------------------------------
 
     /// Vrai pendant un session/load « refill » (skip_replay=false —
-    /// fork, rebind, attach natif : le journal est à reconstruire
-    /// depuis l'historique rejoué). Les events sont alors journalisés
+    /// fork, rebind : le journal est à reconstruire depuis l'historique
+    /// rejoué). Les events sont alors journalisés
     /// normalement mais le push live aux abonnés est supprimé : un
     /// replay de ~85k updates ne doit ni flooder le DOM client ni
     /// saturer le lien — le client recharge sa queue au marqueur
@@ -1652,7 +1652,7 @@ mod tests {
     }
 
     /// Replay « refill » (session/load skip_replay=false — fork,
-    /// rebind, attach natif) : les events rejoués sont journalisés
+    /// rebind) : les events rejoués sont journalisés
     /// pour compléter le journal (paging `events`, recherche) mais
     /// PAS broadcastés aux abonnés — le client recharge sa queue au
     /// marqueur `history_replayed` de fin de load (#300). Ni le

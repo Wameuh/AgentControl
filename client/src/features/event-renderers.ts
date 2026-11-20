@@ -248,8 +248,7 @@ export class EventRenderer {
         return d;
       }
       case "history_replayed": {
-        // Fin d'un replay session/load « refill » (fork/rebind/attach
-        // natif) : le journal a été reconstruit sans broadcast live —
+        // Fin d'un replay session/load « refill » (fork/rebind) : le journal a été reconstruit sans broadcast live —
         // la queue affichée a été rechargée en amont (main.ts → open
         // forcé), cet event journalisé marque la fin du contexte
         // rejoué dans l'historique.

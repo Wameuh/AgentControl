@@ -418,8 +418,8 @@ await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
     if (app.current && session === app.current.id) void chat.convCleared();
     return;
   }
-  // Fin d'un replay session/load « refill » (fork/rebind/attach natif)
-  // : le démon a journalisé l'historique SANS le broadcaster — le DOM
+  // Fin d'un replay session/load « refill » (fork/rebind) : le démon
+  // a journalisé l'historique SANS le broadcaster — le DOM
   // n'a vu que les syslines de progression. On recharge la queue du
   // journal (open forcé : cache jeté, dernière page, resubscribe) au
   // lieu d'avoir rendu le transcript entier au fil de l'eau (#300).

@@ -177,7 +177,7 @@ pub enum EventKind {
     /// fermeture pour prévenir les clients abonnés.
     SessionDeleted {},
     /// Fin d'un session/load « refill » (skip_replay=false — fork,
-    /// rebind, attach natif : le journal est reconstruit depuis
+    /// rebind : le journal est reconstruit depuis
     /// l'historique rejoué). Les events rejoués ont été journalisés
     /// mais volontairement PAS broadcastés un par un (#300) — ce
     /// marqueur terminal dit aux clients abonnés de recharger la
