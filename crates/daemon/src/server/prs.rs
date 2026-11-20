@@ -869,6 +869,8 @@ mod tests {
                 excerpt: Some(excerpt.into()),
                 size: None,
                 diff: None,
+                diff_blob: None,
+                diff_size: None,
                 locations: None,
                 input: None,
             },

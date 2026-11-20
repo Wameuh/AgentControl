@@ -498,6 +498,7 @@ mod tests {
                 lo,
                 dead,
                 queued: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                giant_warn: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             },
             lo_rx,
         )

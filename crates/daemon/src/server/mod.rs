@@ -94,12 +94,41 @@ use crate::forges::Forges;
 /// term_data) et les micro-coupures sans geler la lecture des requêtes.
 /// Backlog ≥ borne = client durablement plus lent que la production →
 /// la connexion est refermée (un push ne doit jamais bloquer un req).
-/// Ne borne QUE le backlog : une frame unique plus grosse (aperçu
-/// binaire ~17 Mio) est admise — sinon elle tuerait la conn à coup sûr.
+/// Ne borne QUE le backlog : une frame unique plus grosse (les plus
+/// grosses sources sont désormais bornées — diff externalisé, page
+/// events ≤ 256 ko, aperçu binaire ~2 Mio — mais un cas non prévu
+/// resterait possible) est admise — sinon elle tuerait la conn à coup sûr.
 const WRITE_QUEUE_BYTES: usize = 8 << 20; // 8 Mio
+/// Seuil du warn « ligne géante » à l'enfilement outbox — le même ordre
+/// que la borne de page `events` : au-delà, la frame monopolise le fil
+/// assez longtemps pour timeout les RPC légers d'une connexion lente.
+const GIANT_LINE_BYTES: usize = 256 * 1024;
 /// Un flush qui ne s'écoule pas en 30 s = lien noir : la connexion meurt
 /// au lieu de rester zombie avec sa file qui gonfle.
 const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Étiquette cheap d'une ligne géante déjà sérialisée : push →
+/// `push=<genre>` + type_tag de l'event quand présent ; réponse →
+/// `resp id=<id> ok=<bool>`. Le nom de méthode RPC n'est pas
+/// récupérable de la réponse (seul l'id y figure) — len+lane suffisent.
+fn giant_line_label(s: &str) -> String {
+    let Ok(v) = serde_json::from_str::<Value>(s) else {
+        return String::new();
+    };
+    if let Some(p) = v.get("push").and_then(Value::as_str) {
+        let ev_ty = v
+            .get("event")
+            .and_then(|e| e.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let sess = v.get("session").and_then(Value::as_str).unwrap_or("");
+        return format!(" push={p} type={ev_ty} session={sess}");
+    }
+    match (v.get("id"), v.get("ok")) {
+        (Some(id), Some(ok)) => format!(" resp id={id} ok={ok}"),
+        _ => String::new(),
+    }
+}
 
 /// Extrémité émission d'une connexion : les réponses/pushes sérialisés
 /// partent dans la file drainée par la tâche d'écriture dédiée —
@@ -118,6 +147,8 @@ pub(crate) struct Outbox {
     /// tâche d'écriture à chaque ligne drainée (comptage approximatif
     /// suffisant : il ne sert qu'à borner la mémoire par connexion).
     queued: Arc<std::sync::atomic::AtomicUsize>,
+    /// Epoch (s) du dernier warn « ligne géante » — rate-limit 1/min/conn.
+    giant_warn: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Outbox {
@@ -142,13 +173,23 @@ impl Outbox {
         let len = s.len();
         // La borne couvre le BACKLOG (client durablement plus lent que la
         // production), pas la frame isolée : une ligne unique > capacité
-        // (aperçu binaire ~17 Mio) est admise sur file quasi vide —
-        // sinon toute grosse réponse tuerait la connexion à coup sûr.
+        // est admise sur file quasi vide — sinon toute grosse réponse
+        // tuerait la connexion à coup sûr (le warn `giant line` ci-dessous
+        // la rend visible).
         // fetch_add préalable = réservation atomique entre producteurs.
         if self.queued.fetch_add(len, Ordering::Relaxed) >= WRITE_QUEUE_BYTES {
             self.queued.fetch_sub(len, Ordering::Relaxed);
             let _ = self.dead.send(true);
             anyhow::bail!("outbound queue saturated");
+        }
+        // Ligne géante enfilée : elle va monopoliser le fil pendant sa
+        // vidange (head-of-line — les réponses hi attendent derrière).
+        // Warn rate-limité 1/min/conn avec le type cheap à extraire —
+        // le diagnostic d'un incident de ce type ne doit plus coûter
+        // une analyse manuelle des compteurs rx/tx (#302).
+        if len > GIANT_LINE_BYTES && self.giant_warn_allowed() {
+            let lane = if ch.same_channel(&self.hi) { "resp" } else { "push" };
+            warn!("outbox: giant line {len} B ({lane}{})", giant_line_label(&s));
         }
         if ch.send(s).is_err() {
             self.queued.fetch_sub(len, Ordering::Relaxed);
@@ -156,6 +197,30 @@ impl Outbox {
             anyhow::bail!("outbound queue closed");
         }
         Ok(())
+    }
+
+    /// Rate-limit du warn « ligne géante » : 1/min/conn — au-delà, les
+    /// lignes géantes sont déjà connues et le warn ne dit plus rien.
+    fn giant_warn_allowed(&self) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut last = self.giant_warn.load(std::sync::atomic::Ordering::Relaxed);
+        loop {
+            if now.saturating_sub(last) < 60 {
+                return false;
+            }
+            match self.giant_warn.compare_exchange_weak(
+                last,
+                now,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(cur) => last = cur,
+            }
+        }
     }
 }
 
@@ -1114,6 +1179,7 @@ impl Daemon {
             lo: wtx,
             dead: dead_tx.clone(),
             queued: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            giant_warn: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         // Guard : au retour de serve_conn (client parti, dead signalé,
         // erreur) le writer est avorté — dead = fermer maintenant, pas

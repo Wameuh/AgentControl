@@ -355,7 +355,8 @@ export class EventRenderer {
         ${ev.input ? '<pre class="tool-cmd"></pre>' : ""}
         <pre class="tool-out"></pre>
         ${ev.blob ? '<button class="btn-more">charger la sortie complète…</button>' : ""}
-        ${ev.diff ? `<pre class="tool-diff">${esc(ev.diff as string)}</pre>` : ""}
+        ${ev.diff ? `<pre class="tool-diff"></pre>` : ""}
+        ${ev.diff_blob ? '<button class="btn-diffmore"></button>' : ""}
       </div>`;
     const body = d.querySelector<HTMLElement>(".tool-body")!;
     const cmd = d.querySelector<HTMLElement>(".tool-cmd");
@@ -384,6 +385,8 @@ export class EventRenderer {
       pre.textContent = ev.excerpt as string;
       lastToolExcerpt.set(pre, ev.excerpt as string);
     }
+    const diffPre = d.querySelector<HTMLElement>(".tool-diff");
+    if (diffPre && ev.diff != null) diffPre.textContent = ev.diff as string;
     d.querySelector(".tool-head")!.addEventListener("click", () => {
       body.hidden = !body.hidden;
       d.classList.toggle("open", !body.hidden);
@@ -401,6 +404,44 @@ export class EventRenderer {
         });
         pre.textContent = r.data + (r.total > r.data.length ? `\n… (${r.total} o total)` : "");
         btn.remove();
+      });
+    }
+    // Diff externalisé (gros Write/Edit, #302) : `diff` ne porte que
+    // l'extrait — le patch complet se récupère du blob à la demande.
+    const dbtn = d.querySelector<HTMLButtonElement>(".btn-diffmore");
+    if (dbtn && diffPre && ev.diff_blob) {
+      dbtn.textContent = t("load_diff");
+      dbtn.addEventListener("click", async () => {
+        dbtn.disabled = true;
+        dbtn.textContent = t("loading");
+        try {
+          // Le blob peut faire plusieurs Mo — tranches de 1 Mio ;
+          // `size` = octets lus (data est du texte lossy, sa longueur
+          // ne mesure pas la tranche).
+          let out = "";
+          let off = 0;
+          let total = Infinity;
+          for (let i = 0; i < 16 && off < total; i++) {
+            const r = await call<{ data: string; total: number; size?: number }>("get_blob", {
+              session: app.current!.id,
+              blob: ev.diff_blob,
+              offset: off,
+              limit: 1 << 20,
+            });
+            total = r.total;
+            out += r.data;
+            off += r.size ?? r.data.length;
+            if (!r.data.length) break;
+          }
+          diffPre.textContent =
+            out + (off < total ? `\n… (${total} o total)` : "");
+        } catch (e) {
+          showErr(String(e));
+          dbtn.disabled = false;
+          dbtn.textContent = t("load_diff");
+          return;
+        }
+        dbtn.remove();
       });
     }
     return d;

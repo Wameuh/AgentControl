@@ -64,6 +64,14 @@ pub enum EventKind {
         size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         diff: Option<String>,
+        /// Blob du diff complet quand `diff` ne porte qu'un extrait
+        /// (diff > MAX_INLINE externalisé — un Write/Edit de gros
+        /// fichier ne doit pas produire de ligne NDJSON géante, #302).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        diff_blob: Option<String>,
+        /// Taille totale du diff en octets quand il est externalisé.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        diff_size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         locations: Option<Vec<String>>,
         /// Paramètres d'appel formatés (`rawInput` ACP : commande exec,
@@ -84,6 +92,12 @@ pub enum EventKind {
         size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         diff: Option<String>,
+        /// Blob du diff complet quand `diff` ne porte qu'un extrait —
+        /// même politique d'externalisation que ToolCall (#302).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        diff_blob: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        diff_size: Option<u64>,
     },
     /// L'agent demande la permission d'exécuter quelque chose.
     PermissionRequest {

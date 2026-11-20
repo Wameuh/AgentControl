@@ -47,9 +47,15 @@ impl Daemon {
             }));
         }
         if binary {
-            // Aperçu image : ~16 Mio de JSON base64 max ; `data` omis
-            // si tronqué (le client n'affiche que « trop grosse »).
-            const CAP: u64 = 12 * 1024 * 1024;
+            // Aperçu image : la réponse part en base64 sur le fil NDJSON —
+            // le plafond couvre le payload ENCODÉ (~2 Mio de base64 =
+            // ~1,5 Mio bruts). L'ancien cap de 12 Mio produisait des
+            // frames de ~16 Mio : une ligne NDJSON géante monopolise le
+            // lien des secondes et affame tous les RPC (head-of-line
+            // blocking, #302). `data` omis si tronqué (le client
+            // n'affiche que « trop grosse » — une image partielle ne se
+            // rendrait pas de toute façon).
+            const CAP: u64 = 1536 * 1024;
             let (data, size) =
                 read_slice(&full, 0, CAP).with_context(|| format!("{}", full.display()))?;
             let mut resp = json!({
@@ -262,10 +268,15 @@ impl Daemon {
             tokio::task::spawn_blocking(move || journal::read_blob(&dir, &blob, offset, limit))
                 .await
                 .context("reading blob")??;
+        // `size` = octets réellement lus (data est du texte lossy — sa
+        // longueur ne permet pas de déduire la tranche couverte) : le
+        // client avance son curseur offset dessus (#302, diff blobs).
+        let size = data.len() as u64;
         Ok(json!({
             "data": String::from_utf8_lossy(&data),
             "total": total,
             "offset": offset,
+            "size": size,
         }))
     }
 }
