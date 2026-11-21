@@ -47,11 +47,12 @@ body.android .resize-edge, body.android #sidebar-resize {
   font-size: 18px; padding: 4px 10px; flex: none;
 }
 body.android #tb-menu { font-size: 24px; min-width: 44px; min-height: 44px; }
-body.android .tb-update { font-size: 12px; }
 /* Barre d'app mobile : un seul ⋮ au lieu des boutons fenêtre/settings —
-   #tb-logs aussi (l'entrée vit dans la feuille ⋮). */
+   #tb-logs aussi (l'entrée vit dans la feuille ⋮), et la pill update
+   (elle mange la place du titre d'accueil — l'entrée vit dans ⋮). */
 body.android #tb-settings, body.android #tb-about,
 body.android #tb-logs, body.android #tb-components,
+body.android .tb-update,
 body.android #tb-map { display: none; }
 /* Hors accueil, #chat (fixed inset:0) recouvre la titlebar : la masquer
    évite qu'elle ne transparaisse sous les overlays transparents (#map-view). */

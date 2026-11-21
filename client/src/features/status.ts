@@ -40,6 +40,12 @@ export function dotIcon(state: string, lastError?: LastError | null): string {
   return gemSVG(DOT_ROLE[dotKey(state, lastError)] ?? "slate");
 }
 
+/** Rôle de gemme d'un état (`DOT_ROLE[dotKey]` ou "slate") — sert au
+ *  regroupement « par état » de l'accueil mobile (N3). */
+export function dotRole(state: string, lastError?: LastError | null): string {
+  return DOT_ROLE[dotKey(state, lastError)] ?? "slate";
+}
+
 /** Classe `st-*` whitelistée pour l'attribut class : un état arbitraire
  *  (jamais prévu côté démon, mais la confiance n'est pas un filtre)
  *  retombe sur "dead" plutôt que d'être interpolé brut. */

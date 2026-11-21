@@ -24,6 +24,19 @@ const USER_FOLD_LINES = 5;
 // le DOM. WeakMap : libéré avec le nœud.
 const lastToolExcerpt = new WeakMap<HTMLElement, string>();
 
+/** Réponse à une question_request : JSON si possible, sinon `{answer: val}`,
+ *  `null` si vide. Partagé avec les cartes « À traiter » de l'accueil (N3). */
+export function parseAnswer(val: string | null): unknown {
+  if (val) {
+    try {
+      return JSON.parse(val);
+    } catch {
+      return { answer: val };
+    }
+  }
+  return null;
+}
+
 export class EventRenderer {
   // Réassignés au swap de session (cache par conversation) — publics pour
   // que ChatView puisse les stash/restaurer.
@@ -610,14 +623,7 @@ export class EventRenderer {
     const input = d.querySelector<HTMLInputElement>(".q-input")!;
     const answer = async (val: string | null) => {
       if (this.answered.has(ev.request_id as string)) return;
-      let parsed: unknown = null;
-      if (val) {
-        try {
-          parsed = JSON.parse(val);
-        } catch {
-          parsed = { answer: val };
-        }
-      }
+      const parsed = parseAnswer(val);
       await call("respond", {
         session: app.current!.id,
         request_id: ev.request_id,

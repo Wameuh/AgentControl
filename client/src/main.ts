@@ -66,6 +66,8 @@ import { initSessionBar, renderSessionBar } from "./mobile/session-bar";
 import { initSessionSheet, openSessionSheet } from "./mobile/session-sheet";
 import { initConnSheet } from "./mobile/conn-sheet";
 import { initHomeShell, syncHomeConn } from "./mobile/shell";
+import { initInbox } from "./mobile/inbox";
+import { initGestures } from "./mobile/gestures";
 import { initPermDock } from "./mobile/perm-dock";
 import { initComposerMobile } from "./mobile/composer-mobile";
 import { initToolRuns } from "./mobile/tool-runs";
@@ -540,6 +542,9 @@ initConnSheet({
   },
 });
 initHomeShell(conns);
+// Accueil « par état » + glisser des lignes (N3/N4) — no-ops hors Android.
+initInbox(sidebar);
+initGestures(sidebar);
 // Dock de permission (S3) + composer pilule (C1) — no-ops hors Android.
 initPermDock((seq) => chat.jumpToSeq(seq));
 initComposerMobile(composer);

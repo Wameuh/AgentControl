@@ -28,8 +28,11 @@
     { id: "s4", conn: CONN, agent: "mock", title: "Reduce context usage",
       cwd: "/home/agent/infra", created_at: "2026-10-21T07:30:00Z",
       origin: "component:backlog-orchestrator",
-      available_modes: [], available_models: [], available_commands: [], state: "compacting" },
+      available_modes: [], available_models: [], available_commands: [], state: "waiting_input" },
   ];
+  /** Demandes en attente par session — session_info les lit, respond les
+   *  solde (la carte « À traiter » de l'accueil se vide au refresh). */
+  const PEND = new Map();
   const COMPONENTS = [
     { name: "acctl", kind: "tool", autostart: false,
       description: "CLI de contrôle du démon", source: "components.toml",
@@ -165,7 +168,17 @@
       case "list_agents": return [{ id: "devin", name: "Devin" }, { id: "mock", name: "Mock agent" }];
       case "session_info": {
         const m = SESSIONS.find((x) => x.id === args.session) ?? SESSIONS[0];
-        return { meta: m, pending: ["r1"], alive: true, last_seq: EVENTS.length };
+        return { meta: m, pending: PEND.get(args.session) ?? ["r1"],
+                 alive: true, last_seq: EVENTS.length };
+      }
+      case "respond": {
+        // La réponse solde la demande de CETTE session seulement —
+        // une session waiting_input repart « working » au refresh.
+        PEND.set(args.session, (PEND.get(args.session) ?? ["r1"])
+          .filter((x) => x !== args.request_id));
+        const s = SESSIONS.find((x) => x.id === args.session);
+        if (s?.state === "waiting_input") s.state = "working";
+        return { answered: true };
       }
       case "events": return { events: EVENTS, last_seq: EVENTS.length };
       case "queue_list": return { queue: ["Compile aussi la doc quand tu as fini"] };

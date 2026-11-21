@@ -48,3 +48,16 @@ export async function findPending(s: SessionMeta): Promise<PendingReq[]> {
   }
   return out;
 }
+
+/** Répond à une demande en attente, session ouverte ou non — `conn` est
+ *  obligatoire : sans lui call() viserait la connexion courante. Signature
+ *  légère (id + conn) réutilisable par les actions de notification (P4). */
+export function respondPending(
+  s: { id: string; conn?: string },
+  requestId: string,
+  reply: { option_id: string } | { answer: unknown },
+): Promise<unknown> {
+  return call("respond", {
+    session: s.id, conn: s.conn, request_id: requestId, ...reply,
+  });
+}
