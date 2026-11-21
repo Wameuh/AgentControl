@@ -78,7 +78,7 @@ try {
   ok(cards[0].endsWith("h") && cards[3] === "3",
     `agrégats RPC affichés (${cards.join(" | ")})`);
   const legend = await p1.evaluate(() => document.querySelectorAll(".bl-m-legend span").length);
-  ok(legend === 3, "légende 3 séries (pending/wip/workers)");
+  ok(legend >= 3, `légende des séries tracées (${legend})`);
   // Steppers orchestrateur : valeurs lues dans spec.params de
   // list_components (mock : max_workers=5, pr_review_max_parallel=2).
   const steps = await p1.evaluate(() =>

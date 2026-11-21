@@ -420,6 +420,30 @@ await step("a05c-map", async () => {
     V("a05c-map", "nav", "body.m-map absent — barre basse masquée ?");
   if (!(await visible("#side-view")))
     V("a05c-map", "nav", "barre basse non visible par-dessus le diagramme");
+  // N5 : pan au doigt (viewBox bouge sans ouvrir de session), double tap
+  // = retour à la vue de référence.
+  const vb0 = await ev(() => document.getElementById("map-svg")?.getAttribute("viewBox"));
+  const box = await ev(() => {
+    const r = document.getElementById("map-svg")?.getBoundingClientRect();
+    return r ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
+  });
+  if (vb0 && box) {
+    await page.touchscreen.touchStart(box.x, box.y);
+    for (let i = 1; i <= 5; i++)
+      await page.touchscreen.touchMove(box.x + i * 12, box.y - i * 8);
+    await page.touchscreen.touchEnd();
+    await sleep(200);
+    const vb1 = await ev(() => document.getElementById("map-svg")?.getAttribute("viewBox"));
+    if (vb1 === vb0) V("a05c-map", "nav", "glisser sur le diagramme n'a pas déplacé le viewBox");
+    if (await ev(() => document.body.classList.contains("m-in-session")))
+      V("a05c-map", "nav", "le glisser a ouvert une session");
+    await page.touchscreen.tap(box.x, box.y);
+    await sleep(120);
+    await page.touchscreen.tap(box.x, box.y);
+    await sleep(250);
+    const vb2 = await ev(() => document.getElementById("map-svg")?.getAttribute("viewBox"));
+    if (vb2 !== vb0) V("a05c-map", "nav", "double tap n'a pas restauré la vue de référence");
+  }
   await ev(() => document.getElementById("map-close")?.click());
   await sleep(300);
 });
