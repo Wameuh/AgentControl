@@ -12,5 +12,10 @@
 @import "./styles/term.css";    /* panneau terminal PTY (xterm.js) */
 @import "./styles/components.css"; /* panneau composants managés (§2.6) */
 @import "./styles/logs.css";      /* panneau logs live client + démon */
-@import "./styles/mobile.css";  /* Android : bottom sheets, drawer, tactile */
+@import "./styles/mobile/base.css";    /* Android : chrome, scrim, cibles tactiles */
+@import "./styles/mobile/sheets.css";  /* Android : dialogs en bottom-sheet, menus */
+@import "./styles/mobile/sidebar.css"; /* Android : drawer sessions, groupes, PR */
+@import "./styles/mobile/files.css";   /* Android : explorateur + viewer fichiers */
+@import "./styles/mobile/session.css"; /* Android : écran Session, composer, terminal */
+@import "./styles/mobile/views.css";   /* Android : réglages, vue connexion, accueil */
 @import "./styles/web.css";     /* navigateur : chrome masqué + modale token */

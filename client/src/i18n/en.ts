@@ -634,6 +634,11 @@ export const en = {
   caps_current: "current", caps_none: "none announced", caps_never: "never probed",
   caps_reprobe: "Re-probe", caps_probing: "Probing…", caps_extra: "extra",
   caps_updated: "last probe",
+  ss_open: "Session settings and actions",
+  ss_mode: "Mode", ss_model: "Model", ss_effort: "Effort", ss_advisor: "Advisor",
+  ss_actions: "Actions", ss_app: "Application",
+  ss_apply: "Apply", ss_fusion: "Configure fusion",
+  ss_kill_confirm: "confirm stop?",
 } as const;
 
 export type Key = keyof typeof en;

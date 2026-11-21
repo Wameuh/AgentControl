@@ -179,6 +179,9 @@ export class ChatView {
     /** Bouton d'envoi alternatif (steer ↔ file selon la préférence) —
      *  icône + visibilité resynchronisés par updateHeader. */
     syncAltBtn: () => {},
+    /** Barre de session mobile (S1) — resynchronisée à la fin de
+     *  updateHeader + setChatTitle (no-op hors Android). */
+    afterHeader: () => {},
     /** Bouton « premier post » affiché seulement si le démon de la conn
      *  connaît first_post. */
     firstPostCapable: (_conn: string) => false,
@@ -813,6 +816,7 @@ export class ChatView {
   setChatTitle() {
     const tl = document.getElementById("chat-title");
     if (tl && app.current) tl.textContent = `${app.current.title} — ${app.current.agent}`;
+    this.deps.afterHeader();
   }
 
   updateHeader() {
@@ -833,6 +837,7 @@ export class ChatView {
       $("chat-opts").hidden = true;
       $("btn-fresh").hidden = true;
       this.deps.syncAltBtn(); // sans session → bouton alternatif caché
+      this.deps.afterHeader();
       return;
     }
     this.deps.refreshQueue();
@@ -1083,6 +1088,7 @@ export class ChatView {
       ms.hidden && md.hidden && es.hidden && mf.hidden &&
       $("btn-fusion-edit").hidden && $("btn-caps-refresh").hidden &&
       dyn.children.length === 0;
+    this.deps.afterHeader();
   }
 
   private nearBottom() {

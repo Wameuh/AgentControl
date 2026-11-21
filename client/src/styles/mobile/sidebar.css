@@ -1,0 +1,59 @@
+/* ── Android — drawer sidebar : sessions, groupes, onglets, PR ────────── */
+body.android #sidebar {
+  position: fixed; z-index: 40; top: 0; bottom: 0; left: 0;
+  width: min(84vw, 340px); min-width: 0;
+  padding-top: max(10px, env(safe-area-inset-top));
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
+  transform: translateX(-105%); transition: transform .2s ease;
+}
+body.android #sidebar.open { transform: translateX(0); }
+body.android #conn-bar button {
+  min-height: 44px; font-size: 15px; padding: 8px 14px;
+}
+body.android #session-list .sess {
+  padding: 13px 10px; font-size: 15px;
+}
+/* Sous-agent : plus petit qu'une session racine mais cible tactile
+   conservée (~44px de hauteur de ligne). */
+body.android #session-list .sess.sub {
+  padding: 10px; font-size: 13px;
+}
+body.android #session-list .sess.sub .dot { width: 14px; height: 14px; }
+body.android #session-list .sess.sub::before { margin-top: -6px; height: 14px; }
+/* Plus de ✕ par ligne : la suppression vit dans le menu d'appui long
+   (ctx_delete_sess) — le DOM garde le bouton pour le desktop. */
+body.android #session-list .sess .sess-del { display: none; }
+/* Lisibilité : contenu lu ≥ 12px — badges d'état/compteurs ornementaux
+   (.badge.st-*, #sv-count, .steer-badge, .pr-st, .sr-type, .perm-kind,
+   .farrow) exclus du seuil. */
+body.android #session-list .sess .a,
+body.android #session-list .sess .sess-pr,
+body.android #session-list .sess .sess-origin { font-size: 12px; }
+body.android .grp-head .grp-name, body.android .grp-sub .grp-name,
+body.android .grp-add-lbl { font-size: 12px; }
+body.android #btn-new-session { min-height: 46px; font-size: 15px; }
+/* Sélecteur de vue + liste PR : cibles tactiles ≥44px */
+body.android #side-view .sv { min-height: 44px; font-size: 14px; }
+body.android #side-view .sv .ic { width: 15px; height: 15px; }
+body.android #pr-list .pr { padding: 11px 10px; }
+body.android #pr-list .pr .pr-t { font-size: 14px; }
+body.android #pr-list .pr .pr-st { font-size: 10px; }
+body.android #pr-list .pr .pr-sub { font-size: 12px; margin-top: 6px; }
+body.android #pr-list .pr .pr-num,
+body.android #pr-list .pr .pr-branch,
+body.android #pr-list .pr .pr-repo-lbl { font-size: 12px; }
+body.android #pr-list .pr .pr-sess { min-height: 44px; font-size: 12px; }
+body.android #pr-list .pr-note { font-size: 12px; padding: 8px 10px; }
+body.android .pr-repo { font-size: 12px; }
+body.android .pr-repo .pr-n { font-size: 12px; }
+
+/* Boutons « + groupe » / « + agent » des headers de groupes : le texte
+   reste compact, la boîte (sans fond) monte à 44px → lignes ~50px. */
+body.android .grp-head .grp-add, body.android .grp-sub .grp-add {
+  min-height: 44px;
+}
+/* Filtre de sessions : champ pleine hauteur + croix d'effacement 44px
+   (boîte transparente, l'icône reste petite). */
+body.android #sess-filter input { min-height: 44px; font-size: 15px; padding-right: 46px; }
+body.android #sess-filter-clear { min-width: 44px; min-height: 44px; padding: 0; }
+body.android #btn-agent-caps { min-width: 44px; min-height: 44px; }

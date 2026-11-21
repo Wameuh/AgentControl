@@ -150,14 +150,14 @@ async function openSession(p, frag = "Refactor") {
   await openSession(p);
   await shot("android-chat");
 
-  // Drawer (sessions + groupes + actions).
-  await tap("#tb-menu", 500);
+  // Drawer (sessions + groupes + actions) — ☰ dans la barre session.
+  await tap("#m-sbar-nav", 500);
   await shot("android-drawer");
-  // Retour chat puis fichiers plein écran via le sheet ⋮.
+  // Retour chat puis fichiers plein écran via la feuille Session.
   await p.evaluate(() => document.getElementById("scrim")?.click());
   await sleep(350);
-  await tap("#chat-more", 350);
-  await clickText(p, "#omenu .om-item", "fichier|files");
+  await tap("#m-sbar-title", 350);
+  await clickText(p, "#dlg-session .ss-act", "fichier|files");
   await sleep(700);
   await shot("android-files");
 
