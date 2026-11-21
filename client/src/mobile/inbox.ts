@@ -12,7 +12,8 @@ import { dotRole } from "../features/status";
 import { parseAnswer } from "../features/event-renderers";
 import type { SessionMeta } from "../core/types";
 import type { Sidebar } from "../features/sidebar";
-import { findPending, respondPending, type PendingReq } from "./pending";
+import { findPending, respondPending, sortPermOptions, type PendingReq } from "./pending";
+import { hintOnce } from "./hints";
 
 const PENDING_TTL = 30_000;
 
@@ -26,7 +27,9 @@ const SECTIONS: { id: string; label: Parameters<typeof t>[0]; roles: string[] }[
 ];
 
 let sb: Sidebar;
-let mode: "state" | "group" = "group";
+/** « État » par défaut : l'accueil s'ouvre sur ce qui attend
+ *  l'utilisateur (N3). « Groupes » n'est retenu que s'il a été choisi. */
+let mode: "state" | "group" = "state";
 let agents = true;
 let lastList: SessionMeta[] = [];
 /** Cache des demandes par conn:sid — invalidé quand l'état change ou
@@ -37,7 +40,7 @@ export function initInbox(sidebar: Sidebar) {
   if (!isAndroid()) return;
   sb = sidebar;
   try {
-    if (localStorage.getItem("ac-home-mode") === "state") mode = "state";
+    if (localStorage.getItem("ac-home-mode") === "group") mode = "group";
   } catch { /* stockage indisponible : mode par défaut */ }
 
   // Contrôle segmenté — au-dessus des deux listes pour rester visible
@@ -64,12 +67,24 @@ export function initInbox(sidebar: Sidebar) {
   sb.onListRendered = (list) => {
     lastList = list;
     if (mode === "state" && agents) render(lastList);
+    hintRowActions();
   };
   sb.onViewChanged = (a) => {
     agents = a;
     sync();
   };
   sync();
+}
+
+/** Indice de découverte (N4, une seule fois) : les actions d'une ligne —
+ *  suppression comprise — vivent dans l'appui long. Montré dès que
+ *  l'accueil Agents est affiché avec des sessions (il l'était à
+ *  l'ouverture du drawer, disparu avec la phase 3). Appelé à chaque rendu
+ *  de la liste ET à chaque retour à l'accueil (shell.ts) : la liste peut
+ *  être rendue sous un overlay (vue connexion) puis ne plus changer. */
+export function hintRowActions() {
+  if (lastList.length && agents && document.body.classList.contains("m-home"))
+    hintOnce("longpress", t("hint_longpress"));
 }
 
 /** Visibilités croisées : la liste classique et la vue par état ne
@@ -159,7 +174,11 @@ function todoCard(s: SessionMeta): HTMLElement {
   body.className = "mh-card-body";
   card.appendChild(body);
   if (s.state === "waiting_input") {
-    void fillPending(body, s, row);
+    // Différé d'une microtâche : la carte n'est insérée dans #m-home-state
+    // qu'à la fin de render(). Sur un succès de cache, fillPending ne fait
+    // aucun await et verrait un body détaché (isConnected faux) — la
+    // carte resterait vide jusqu'au prochain rendu.
+    queueMicrotask(() => void fillPending(body, s, row));
   } else {
     // failed / error hors rate_limit : message tronqué + Ouvrir.
     body.innerHTML =
@@ -174,10 +193,16 @@ function todoCard(s: SessionMeta): HTMLElement {
 async function fillPending(body: HTMLElement, s: SessionMeta, row: HTMLElement) {
   const key = `${s.conn ?? "default"}:${s.id}`;
   const c = reqCache.get(key);
-  const reqs = c && c.st === s.state && Date.now() - c.at < PENDING_TTL
-    ? c.reqs
-    : await findPending(s).catch(() => [] as PendingReq[]);
-  reqCache.set(key, { at: Date.now(), st: s.state ?? "", reqs });
+  let reqs: PendingReq[];
+  if (c && c.st === s.state && Date.now() - c.at < PENDING_TTL) {
+    reqs = c.reqs;
+  } else {
+    reqs = await findPending(s).catch(() => [] as PendingReq[]);
+    // Horodaté à la lecture seulement : un succès de cache ne prolonge
+    // pas le TTL (sinon des re-rendus rapprochés ne relisent jamais).
+    reqCache.set(key, { at: Date.now(), st: s.state ?? "", reqs });
+  }
+  // Carte remplacée par un re-rendu pendant la lecture : abandon.
   if (!body.isConnected) return;
   const req = reqs[0];
   if (!req) {
@@ -194,7 +219,7 @@ async function fillPending(body: HTMLElement, s: SessionMeta, row: HTMLElement) 
       (req.kind ? `<div class="mh-card-k">${esc(req.kind)}</div>` : "") +
       `<div class="mh-card-acts"></div>`;
     const acts = body.querySelector<HTMLElement>(".mh-card-acts")!;
-    for (const o of sortOpts(req.options)) {
+    for (const o of sortPermOptions(req.options)) {
       const b = document.createElement("button");
       b.className = "btn " + (o.kind.startsWith("reject")
         ? "btn-reject"
@@ -222,12 +247,4 @@ async function fillPending(body: HTMLElement, s: SessionMeta, row: HTMLElement) 
       .then(() => sb.refresh())
       .catch((e) => showErr(String(e)));
   };
-}
-
-/** Options d'une permission : reject_* d'abord (rouge, à gauche), puis
- *  allow_always, allow_once en dernier (primaire). */
-function sortOpts(opts: PendingReq["options"]) {
-  const rank = (k: string) =>
-    k.startsWith("reject") ? 0 : k === "allow_always" ? 1 : 2;
-  return [...opts].sort((a, b) => rank(a.kind) - rank(b.kind));
 }

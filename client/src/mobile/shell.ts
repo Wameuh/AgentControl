@@ -16,6 +16,7 @@ import { gemSVG } from "../crystal";
 import type { ConnectionManager } from "../features/connections";
 import { renderSessionBar } from "./session-bar";
 import { openConnSheet } from "./conn-sheet";
+import { hintRowActions } from "./inbox";
 
 let conns: ConnectionManager;
 
@@ -24,7 +25,10 @@ export function initHomeShell(c: ConnectionManager) {
   conns = c;
   // m-in-session = session chargée + écran Session affiché : re-rendu à
   // chaque bascule de pile (push/pop « session », overlays, map).
-  nav.onHomeChange = () => renderSessionBar();
+  nav.onHomeChange = () => {
+    renderSessionBar();
+    hintRowActions();
+  };
   $("m-conn").onclick = () => openConnSheet();
   // Loupe → ligne de filtre (partagée par les trois vues de l'accueil).
   $("m-search").onclick = () => {
