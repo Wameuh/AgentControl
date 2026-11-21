@@ -166,7 +166,7 @@ const WORKER_FAILOVER_PROMPT: &str = r#"[Session creee automatiquement par le se
 
 Tu es un worker sur le repo (cwd {WS}) — tu remplaces une session detruite car bloquee en rate_limit sur l'ancien profil. Son contexte est perdu ; le travail est recoverable via la file AgentBacklog, les worktrees et le registre PR.
 
-Commence par lire {WS}/AGENTS.md — le workflow PR/CI qu'il decrit est obligatoire.
+Commence par lire {WS}/AGENTS.md (ou {WS}/CLAUDE.md a defaut) — les regles de branches, PR, review, CI et merge du repo s'y trouvent et priment.
 
 ## ITEMS A REPRENDRE (wip, deja assignes a toi)
 {ITEMS}
@@ -175,7 +175,7 @@ Commence par lire {WS}/AGENTS.md — le workflow PR/CI qu'il decrit est obligato
 {PRS}
 
 ## MISSION
-1. Pour chaque item ci-dessus : verifie son etat (`agentbacklog --list --json`), retrouve ou cree le worktree dedie (`git worktree add ~/worktrees/ac-<feat> -b <branch> origin/{BASE}` — JAMAIS dans le checkout principal), continue le travail et mene la PR selon le cycle complet de AGENTS.md.
+1. Pour chaque item ci-dessus : verifie son etat (`agentbacklog --list --json`), retrouve ou cree le worktree dedie sous {WORKTREE_DIR} (ex. `git worktree add {WORKTREE_DIR}/<feat> -b <branch> origin/{BASE}` — JAMAIS dans le checkout principal {WS} ; la convention precise est celle des regles du repo), continue le travail et mene la PR selon le cycle complet des regles du repo (merge : {MERGE_RULE}).
 2. Continue jusqu'a ce que tes items soient `--done` et tes PRs soldees (mergees ou cloturees), puis ARRETE-toi purement et simplement. Tu NE LANCES JAMAIS `agentbacklog --pop` toi-meme : l'orchestrateur dispatche le travail suivant (un worker = un item ; un pop contournerait la revue de plan en mode plan_review et l'invariant « contexte frais par item »).
 3. `agentbacklog --done <ID> --agent-id "$AGENTCONTROL_SESSION"` selon le done_when de chaque item (`agentbacklog --list --json` : 'pr_merged' = ta PR de l'item MERGED, 'deliverable' = ses criteres propres remplis, jamais d'attente de merge) ; blocage insurmontable : `agentbacklog --release <ID> --agent-id "$AGENTCONTROL_SESSION"`, explique la raison, puis arrete.
 
@@ -372,15 +372,15 @@ impl Daemon {
             .first()
             .map(|t| cfg.workspace_for(task_repo(t)).to_string())
             .unwrap_or_else(|| cfg.workspace.clone());
-        let prompt = orch_plan::fill(
-            WORKER_FAILOVER_PROMPT,
-            &[
-                ("WS", fo_ws.clone()),
-                ("ITEMS", items_txt),
-                ("PRS", prs_txt),
-                ("BASE", cfg.pr_base().to_string()),
-            ],
-        );
+        let pairs: Vec<(&str, String)> = [
+            ("WS", fo_ws.clone()),
+            ("ITEMS", items_txt),
+            ("PRS", prs_txt),
+        ]
+        .into_iter()
+        .chain(orch_plan::workflow_pairs(cfg))
+        .collect();
+        let prompt = orch_plan::fill(WORKER_FAILOVER_PROMPT, &pairs);
         // plan_review : les workers implémentent → implement_mode ;
         // sinon le mode historique du rôle — la spec `mode` de l'item
         // prime (premier wip spec'd, un worker = un item en pratique).
@@ -519,30 +519,30 @@ impl Daemon {
             // repo_workspaces) — le remplaçant travaille dans le bon
             // checkout.
             let iws = cfg.workspace_for(task_repo(t)).to_string();
-            let mut prompt = orch_plan::fill(
-                tpl,
-                &[
-                    ("ID", key.clone()),
-                    ("ITEM", orch_plan::item_body(t)),
-                    ("WS", iws.clone()),
-                    (
-                        "ROUND",
-                        t.get("review_round")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0)
-                            .to_string(),
+            let pairs: Vec<(&str, String)> = [
+                ("ID", key.clone()),
+                ("ITEM", orch_plan::item_body(t)),
+                ("WS", iws.clone()),
+                (
+                    "ROUND",
+                    t.get("review_round")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0)
+                        .to_string(),
+                ),
+                (
+                    "PLAN",
+                    orch_plan::clip_inline(
+                        orch_plan::task_plan_content(t),
+                        orch_plan::PLAN_INLINE_MAX,
                     ),
-                    (
-                        "PLAN",
-                        orch_plan::clip_inline(
-                            orch_plan::task_plan_content(t),
-                            orch_plan::PLAN_INLINE_MAX,
-                        ),
-                    ),
-                    ("DOD", task_dod(t).replace("<ID>", &key)),
-                    ("BASE", cfg.pr_base().to_string()),
-                ],
-            );
+                ),
+                ("DOD", task_dod(t).replace("<ID>", &key)),
+            ]
+            .into_iter()
+            .chain(orch_plan::workflow_pairs(cfg))
+            .collect();
+            let mut prompt = orch_plan::fill(tpl, &pairs);
             // Brouillon de plan déjà déposé par l'ancienne session :
             // le nouveau planner repart de ce fichier plutôt que de
             // zéro (marqueur PLAN_FILE retrouvé dans son journal).
@@ -712,6 +712,25 @@ mod tests {
             pr_reviewer_agent: String::new(),
             title_prefix: "Backlog-W".into(),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn prompt_failover_sans_workflow_en_dur() {
+        // Item #319 : le prompt de reprise ne récite aucune règle
+        // propre à un repo (branche, forge, convention de worktree).
+        for tpl in [WORKER_FAILOVER_PROMPT, FAILOVER_NOTE] {
+            for b in [
+                "next_release",
+                "gh pr",
+                "gh api",
+                "/mr review",
+                "Verdict:",
+                "ac-<feat>",
+                "worktrees/ac",
+            ] {
+                assert!(!tpl.contains(b), "« {b} » dans un prompt intégré");
+            }
         }
     }
 

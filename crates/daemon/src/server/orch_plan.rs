@@ -531,10 +531,11 @@ impl ItemPhase {
 }
 
 // ---------------------------------------------------------------------------
-// Prompts pipeline — {ID} {ITEM} {WS} {PLANNER} {PLAN} {ROUND} {BASE}
-// ({BASE} = branche d'intégration configurée `integration_branch` ;
-// l'id de session propre s'y lit via $AGENTCONTROL_SESSION, injecté au
-// spawn quand a2a est actif — pas de placeholder dédié).
+// Prompts pipeline — {ID} {ITEM} {WS} {PLANNER} {PLAN} {ROUND} {DOD}
+// plus les placeholders « workflow repo » substitués depuis la config
+// par `workflow_pairs` : {BASE} {REVIEW_TRIGGER} {WORKTREE_DIR}
+// {MERGE_RULE}. L'id de session propre se lit via $AGENTCONTROL_SESSION
+// (injecté au spawn quand a2a est actif — pas de placeholder dédié).
 // ---------------------------------------------------------------------------
 
 pub(crate) const PLANNER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
@@ -548,7 +549,7 @@ Tu es le PLANIFICATEUR de l'item backlog ci-dessous (session $AGENTCONTROL_SESSI
 
 Tu es en mode plan : tu n'implementes RIEN, tu ne modifies aucun fichier du repo.
 
-1. Lis {WS}/AGENTS.md : le workflow PR/CI qu'il decrit s'appliquera a l'implementation (worktree dedie base sur origin/{BASE}, PR draft -> review auto -> ready -> checks verts -> merge).
+1. Lis {WS}/AGENTS.md (ou {WS}/CLAUDE.md a defaut) : les regles de contribution du repo s'y trouvent et s'appliqueront a l'implementation — worktree dedie sous {WORKTREE_DIR} base sur {BASE}, cycle defini par ces regles.
 2. Explore le code concerne dans {WS} et redige un plan d'implementation concret : fichiers a toucher, etapes ordonnees, points de vigilance/risques, verifications a demander. Ecris-le dans un fichier HORS du checkout git (ex. /tmp/backlog-plan-{ID}.md).
 3. Termine ton tour par une ligne exactement :
    PLAN_FILE: <chemin absolu du fichier plan>
@@ -614,7 +615,7 @@ Tu es l'IMPLEMENTEUR de l'item backlog ci-dessous (session $AGENTCONTROL_SESSION
 
 ## MISSION
 
-Implemente le plan en suivant le workflow PR/CI de {WS}/AGENTS.md a la lettre : worktree dedie base sur origin/{BASE} (JAMAIS dans le checkout principal {WS}) -> branche -> push -> gh pr create --base {BASE} --draft -> review auto -> iterations en draft -> review soldee -> gh pr ready au moins 30 s apres le dernier push -> checks requis VERTS -> merge selon la regle de merge AGENTS.md. Toute attente > ~1 min (verdict, checks, merge) passe par un waiter ac-wait (regle « Waiting » d'AGENTS.md) — jamais de --watch bloquant ni de boucle de poll dans un tool call.
+Implemente le plan en suivant le workflow de contribution de {WS}/AGENTS.md (ou {WS}/CLAUDE.md a defaut) a la lettre : worktree dedie sous {WORKTREE_DIR} base sur {BASE} (JAMAIS dans le checkout principal {WS}) -> branche -> push -> PR draft -> demande la review ({REVIEW_TRIGGER}) -> iterations -> review soldee -> PR prete -> checks requis VERTS -> merge : {MERGE_RULE}. Toute attente > ~1 min (verdict, checks, merge) passe par un waiter ac-wait — jamais de --watch bloquant ni de boucle de poll dans un tool call.
 
 {DOD} Blocage insurmontable : agentbacklog --release {ID} --agent-id "$AGENTCONTROL_SESSION", explique pourquoi, puis arrete.
 
@@ -624,13 +625,13 @@ Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-da
 
 const CLAIMED_WORKER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
 
-Tu es un worker autonome sur le repo (cwd {WS}). Lis {WS}/AGENTS.md — le workflow PR/CI qu'il decrit est obligatoire.
+Tu es un worker autonome sur le repo (cwd {WS}). Lis {WS}/AGENTS.md (ou {WS}/CLAUDE.md a defaut) — les regles de branches, PR, review, CI et merge du repo s'y trouvent et priment.
 
 ## MISSION — une seule tache, deja assignee (item backlog)
 {ITEM}
 
-1. Implemente en suivant la description a la lettre : worktree dedie base sur origin/{BASE} (JAMAIS dans le checkout principal {WS}), spec, verifications demandees.
-2. Cycle PR (cf AGENTS.md) : branche -> push -> gh pr create --base {BASE} --draft -> review auto (iterations en draft) -> review soldee -> gh pr ready au moins 30 s apres le dernier push -> checks requis VERTS sur le head SHA -> merge (regle de merge AGENTS.md). Toute attente > ~1 min (verdict, checks, merge) passe par un waiter ac-wait (regle « Waiting » d'AGENTS.md) — jamais de --watch bloquant ni de boucle de poll dans un tool call.
+1. Implemente en suivant la description a la lettre : worktree dedie sous {WORKTREE_DIR} base sur {BASE} (JAMAIS dans le checkout principal {WS}), spec, verifications demandees.
+2. Cycle de contribution (selon les regles du repo) : branche -> push -> PR draft -> demande la review ({REVIEW_TRIGGER}) -> iterations -> review soldee -> PR prete -> checks requis VERTS sur le head -> merge : {MERGE_RULE}. Toute attente > ~1 min (verdict, checks, merge) passe par un waiter ac-wait — jamais de --watch bloquant ni de boucle de poll dans un tool call.
 3. {DOD}
 
 Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
@@ -645,6 +646,60 @@ pub(crate) fn fill(tpl: &str, pairs: &[(&str, String)]) -> String {
         s = s.replace(&format!("{{{k}}}"), v);
     }
     s
+}
+
+// ---------------------------------------------------------------------------
+// Placeholders « workflow repo » — substitués depuis la config à chaque
+// fill, en plus des clés propres de chaque template ({ID}/{ITEM}/…) :
+// {BASE} branche d'intégration (`integration_branch`), {REVIEW_TRIGGER}
+// comment demander la review, {WORKTREE_DIR} racine des worktrees
+// dédiés (`worktree_dir`), {MERGE_RULE} règle de merge (`merge_rule`).
+// Le détail du workflow vit dans le fichier de règles du workspace
+// (AGENTS.md/CLAUDE.md — source de vérité par repo, audit F1) : les
+// prompts intégrés ne récitent aucun workflow propre à un repo (#319).
+// ---------------------------------------------------------------------------
+
+/// Texte {REVIEW_TRIGGER} : le trigger commentaire configuré quand la
+/// review native est servie par le démon (`pr_review`), sinon renvoi
+/// aux règles du repo (automation externe, autre mécanisme — #318
+/// rendra les modes de trigger explicitement configurables).
+pub(crate) fn review_trigger_text(cfg: &cfg::OrchCfg) -> String {
+    if cfg.pr_review {
+        format!(
+            "le commentaire « {} » (corps exact, seul dans son \
+             commentaire) sur la PR — la review est servie par le daemon",
+            cfg.pr_review_trigger
+        )
+    } else {
+        "le mecanisme decrit dans les regles du repo (la review native \
+         du daemon est desactivee — pr_review off)"
+            .into()
+    }
+}
+
+/// Texte {MERGE_RULE} : `merge_rule` configuré si posé, sinon
+/// délégation aux règles du repo — merge par l'agent seulement si
+/// elles l'y autorisent, sinon le merge reste à l'utilisateur.
+pub(crate) fn merge_rule_text(cfg: &cfg::OrchCfg) -> String {
+    if cfg.merge_rule.trim().is_empty() {
+        "applique la regle de merge decrite dans les regles du repo \
+         (AGENTS.md/CLAUDE.md du workspace — merge par l'agent \
+         seulement si elles l'y autorisent)"
+            .into()
+    } else {
+        cfg.merge_rule.clone()
+    }
+}
+
+/// Paires de placeholders communes à tous les prompts orchestrateur —
+/// à concaténer aux clés propres de chaque site de fill.
+pub(crate) fn workflow_pairs(cfg: &cfg::OrchCfg) -> [(&'static str, String); 4] {
+    [
+        ("BASE", cfg.pr_base().to_string()),
+        ("REVIEW_TRIGGER", review_trigger_text(cfg)),
+        ("WORKTREE_DIR", cfg.worktree_dir.clone()),
+        ("MERGE_RULE", merge_rule_text(cfg)),
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -1116,18 +1171,19 @@ impl Daemon {
             // reviewer ET planificateur travaillent dans le checkout
             // du repo concerné — plus de revue de plan cross-repo.
             let iws = cfg.workspace_for(task_repo(t)).to_string();
-            let prompt = fill(
-                REVIEWER_PROMPT,
-                &[
-                    ("ID", key.clone()),
-                    ("ITEM", item_body(t)),
-                    ("WS", iws.clone()),
-                    ("PLANNER", planner_label),
-                    ("PLAN", plan_inline),
-                    ("ROUND", round.to_string()),
-                    ("HISTORY", history),
-                ],
-            );
+            let pairs: Vec<(&str, String)> = [
+                ("ID", key.clone()),
+                ("ITEM", item_body(t)),
+                ("WS", iws.clone()),
+                ("PLANNER", planner_label),
+                ("PLAN", plan_inline),
+                ("ROUND", round.to_string()),
+                ("HISTORY", history),
+            ]
+            .into_iter()
+            .chain(workflow_pairs(cfg))
+            .collect();
+            let prompt = fill(REVIEWER_PROMPT, &pairs);
             match self
                 .plan_spawn(
                     st.counter,
@@ -1260,8 +1316,10 @@ impl Daemon {
                             ("ITEM", item_body(t)),
                             ("WS", iws.clone()),
                             ("DOD", task_dod(t).replace("<ID>", &key)),
-                            ("BASE", cfg.pr_base().to_string()),
-                        ],
+                        ]
+                        .into_iter()
+                        .chain(workflow_pairs(cfg))
+                        .collect::<Vec<_>>(),
                     ),
                 )
             } else {
@@ -1297,8 +1355,10 @@ impl Daemon {
                             ("ID", key.clone()),
                             ("ITEM", item_body(t)),
                             ("WS", iws.clone()),
-                            ("BASE", cfg.pr_base().to_string()),
-                        ],
+                        ]
+                        .into_iter()
+                        .chain(workflow_pairs(cfg))
+                        .collect::<Vec<_>>(),
                     ),
                 )
             };
@@ -1634,9 +1694,9 @@ impl Daemon {
                     let msg = format!(
                         "Ton plan de l'item #{id} a été approuvé (round {}){cmt}. \
                          Tu passes en implémentation : suis-le en appliquant \
-                         le workflow PR/CI de {}/AGENTS.md (worktree dédié \
-                         basé sur origin/{} → PR draft → review → \
-                         ready → checks verts → merge). {} Blocage \
+                         le workflow de contribution décrit dans \
+                         {}/AGENTS.md ou CLAUDE.md (worktree dédié \
+                         basé sur {}). {} Blocage \
                          insurmontable : --release + explication.",
                         round.saturating_sub(1).max(0),
                         iws,
@@ -1684,8 +1744,10 @@ impl Daemon {
                             ("ROUND", format!("{}", round.saturating_sub(1).max(0))),
                             ("PLAN", clip_inline(task_plan_content(t), PLAN_INLINE_MAX)),
                             ("DOD", task_dod(t).replace("<ID>", &key)),
-                            ("BASE", cfg.pr_base().to_string()),
-                        ],
+                        ]
+                        .into_iter()
+                        .chain(workflow_pairs(cfg))
+                        .collect::<Vec<_>>(),
                     );
                     if let Some(nsid) = self
                         .plan_spawn(
@@ -2961,6 +3023,61 @@ mod tests {
 
     fn cfg_default() -> cfg::OrchCfg {
         cfg::OrchCfg::default()
+    }
+
+    #[test]
+    fn prompts_pipeline_sans_workflow_en_dur() {
+        // Item #319 : les templates intégrés ne récitent aucune règle
+        // propre à un repo — branche, commandes forge, trigger,
+        // verdict, convention de worktree. Les verdicts de plan
+        // (protocole agentbacklog --verdict) restent du produit.
+        for tpl in [
+            PLANNER_PROMPT,
+            REVIEWER_PROMPT,
+            REVIEWER_ROUND_MSG,
+            IMPLEMENTER_PROMPT,
+            CLAIMED_WORKER_PROMPT,
+        ] {
+            for b in [
+                "next_release",
+                "gh pr",
+                "gh api",
+                "gh run",
+                "/mr review",
+                "Verdict:",
+                "ac-<feat>",
+                "worktrees/ac",
+            ] {
+                assert!(!tpl.contains(b), "« {b} » dans un prompt intégré");
+            }
+        }
+    }
+
+    #[test]
+    fn workflow_pairs_substituent_la_config() {
+        let get = |c: &cfg::OrchCfg, k: &str| {
+            workflow_pairs(c)
+                .iter()
+                .find(|(x, _)| *x == k)
+                .unwrap()
+                .1
+                .clone()
+        };
+        let mut c = cfg_default();
+        // Défauts : BASE = integration_branch, WORKTREE_DIR =
+        // worktree_dir ; pr_review off → renvoi aux règles du repo ;
+        // merge_rule vide → « règles du repo ».
+        assert_eq!(get(&c, "BASE"), c.integration_branch);
+        assert_eq!(get(&c, "WORKTREE_DIR"), c.worktree_dir);
+        assert!(get(&c, "REVIEW_TRIGGER").contains("regles du repo"));
+        assert!(get(&c, "MERGE_RULE").contains("regles du repo"));
+        // Review native servie → trigger commentaire injecté tel quel.
+        c.pr_review = true;
+        c.pr_review_trigger = "/please review".into();
+        assert!(get(&c, "REVIEW_TRIGGER").contains("/please review"));
+        // merge_rule posé → texte injecté tel quel.
+        c.merge_rule = "merge en squash toi-meme".into();
+        assert_eq!(get(&c, "MERGE_RULE"), "merge en squash toi-meme");
     }
 
     #[test]

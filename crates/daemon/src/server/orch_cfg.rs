@@ -44,6 +44,8 @@ const KEYS: &[&str] = &[
     "spawn_managers",
     "integration_branch",
     "release_branch",
+    "worktree_dir",
+    "merge_rule",
     "metrics",
     "max_workers",
     "max_working",
@@ -322,6 +324,26 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
             Some("main"),
         ),
         ps(
+            "worktree_dir",
+            "Worktree root",
+            "root dir of the agents' dedicated worktrees — \
+             {WORKTREE_DIR} prompt placeholder (the fine naming \
+             convention stays with the repo's rules file); \
+             empty = default",
+            ParamKind::Path,
+            Some("~/worktrees"),
+        ),
+        ps(
+            "merge_rule",
+            "Agent merge rule",
+            "text substituted into the {MERGE_RULE} prompt \
+             placeholder — EMPTY = prompts defer to the repo's own \
+             rules file (agent merges only when its rules allow it, \
+             otherwise merge stays with the user)",
+            ParamKind::String,
+            None,
+        ),
+        ps(
             "metrics",
             "Metrics (sampling)",
             "each tick appends a {ts, pending, wip, workers} sample \
@@ -487,7 +509,8 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
             "Worker prompt",
             "custom worker prompt — empty = built-in prompt; \
              item dispatch (agentbacklog ≥ 0.7) substitutes \
-             {WS} {REPO} {ID} {ITEM} {BASE} and pre-assigns the item \
+             {WS} {REPO} {ID} {ITEM} {DOD} {BASE} {REVIEW_TRIGGER} \
+             {WORKTREE_DIR} {MERGE_RULE} and pre-assigns the item \
              (no --pop)",
             ParamKind::String,
             None,
@@ -495,7 +518,8 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
         ps(
             "manager_prompt",
             "Manager prompt",
-            "Manager template — placeholders {REPO}/{WS}/{BASE}; \
+            "Manager template — placeholders {REPO} {WS} {BASE} \
+             {REVIEW_TRIGGER} {WORKTREE_DIR} {MERGE_RULE}; \
              empty = built-in template",
             ParamKind::String,
             None,
@@ -735,6 +759,8 @@ pub(crate) fn params_values(cfg: &super::cfg::OrchCfg) -> HashMap<String, String
     m.insert("spawn_managers".into(), cfg.spawn_managers.to_string());
     m.insert("integration_branch".into(), cfg.integration_branch.clone());
     m.insert("release_branch".into(), cfg.release_branch.clone());
+    m.insert("worktree_dir".into(), cfg.worktree_dir.clone());
+    m.insert("merge_rule".into(), cfg.merge_rule.clone());
     m.insert("metrics".into(), cfg.metrics.to_string());
     m.insert("max_workers".into(), cfg.max_workers.to_string());
     m.insert("max_working".into(), cfg.max_working.to_string());
@@ -1062,6 +1088,19 @@ pub(crate) fn apply_patch(
             // Vide = sémantique « none » : aucune release PR cherchée,
             // aucun head exclu (le formulaire vide le champ pour ça).
             "release_branch" => cfg.release_branch = val_string(v)?.trim().to_string(),
+            // Vide → défaut : un {WORKTREE_DIR} vide rendrait le
+            // placeholder muet dans les prompts (champ cassant).
+            "worktree_dir" => {
+                cfg.worktree_dir = if is_empty(v) {
+                    OrchCfg::default().worktree_dir
+                } else {
+                    val_string(v)?.trim().to_string()
+                }
+            }
+            // Vide = sémantique « suis les règles du repo » — le
+            // placeholder {MERGE_RULE} délègue au fichier de règles
+            // du workspace (pas un défaut fixe).
+            "merge_rule" => cfg.merge_rule = val_string(v)?,
             // Vide = héritage du profil `agent` (sémantique du champ,
             // pas retour à un défaut fixe).
             "worker_agent" => cfg.worker_agent = val_string(v)?,

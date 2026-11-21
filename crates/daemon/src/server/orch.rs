@@ -66,11 +66,17 @@ pub(crate) const DEAD_WORKER_S: f64 = 1800.0;
 /// du cahier des charges.
 pub(crate) const DESC_MAX: usize = 4000;
 
-/// Prompt worker intégré — repris tel quel du script d'origine (le
-/// cahier des charges AgentBacklog des sessions `Backlog-W*`).
+/// Prompt worker intégré du dispatch SELF-POP legacy (agentbacklog
+/// sans `--claim` : l'item n'est pas connu au spawn, le worker le
+/// `--pop` lui-même dans `cfg.workspace`). Neutre de workflow : les
+/// règles de branches/PR/review/CI/merge sont déléguées au fichier de
+/// règles du workspace (AGENTS.md/CLAUDE.md) — seuls les mécanismes
+/// produit (file agentbacklog, waiters ac-wait, étapes acctl) sont
+/// récités. Placeholders : `{WS}` `{BASE}` `{REVIEW_TRIGGER}`
+/// `{WORKTREE_DIR}` `{MERGE_RULE}` `{DOD}` (cf. `workflow_pairs`).
 const PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
 
-Tu es un worker autonome sur le repo AgentControl (cwd /workspace). Commence par lire /workspace/AGENTS.md — le workflow PR/CI qu'il decrit est obligatoire.
+Tu es un worker autonome sur le workspace {WS}. Commence par lire {WS}/AGENTS.md (ou {WS}/CLAUDE.md a defaut) — les regles de branches, PR, review, CI et merge du repo s'y trouvent et priment ; a defaut applique les conventions du depot.
 
 MISSION — une seule tache (un worker = un item, pas de boucle) :
 
@@ -78,13 +84,13 @@ MISSION — une seule tache (un worker = un item, pas de boucle) :
 
    Cas particulier : si une de tes taches reste wip parce que sa PR n'est pas encore mergée (poppee avant cette consigne), tu n'es PAS libre — mene d'abord cette PR jusqu'au merge (etape 4), marque --done, puis reprends l'item poppe ci-dessus le cas echeant. Tu t'arretes quand TOUT ce qui t'est attribue est solde — tu NE RE-POP JAMAIS apres un --done : l'orchestrateur spawn un worker neuf par item pending.
 
-2. Implemente la tache en suivant sa description a la lettre : git worktree dedie base sur origin/{BASE} (JAMAIS dans le checkout principal /workspace), spec, verifications demandees. Option : review locale du diff avant de pousser — si `agent-reviewer review --help` existe (agent-reviewer >= 0.3) : `agent-reviewer review --path <ton worktree> --base origin/{BASE}` imprime la review sur stdout (exit 0 = APPROVED, 4 = CONDITIONAL, 5 = REJECTED).
+2. Implemente la tache en suivant sa description a la lettre : git worktree dedie sous {WORKTREE_DIR} base sur la branche d'integration du repo ({BASE}) — JAMAIS dans le checkout principal {WS} — spec, verifications demandees. Option : review locale du diff avant de pousser si un outil de review locale est disponible.
 
-3. Cycle PR (cf AGENTS.md) : branche -> push -> gh pr create --base {BASE} --draft -> commenter /mr review (la commande seule dans son commentaire) -> traiter chaque round de review en restant draft (corriger, push, relancer /mr review) -> review soldee -> gh pr ready au moins 30 s apres le dernier push -> attendre les check-runs du head VERTS en gatant sur les check-runs du head SHA (pas les metadonnees de runs — cf le snippet de gating dans AGENTS.md).
+3. Cycle de contribution : applique le workflow decrit dans les regles du repo ({WS}/AGENTS.md ou CLAUDE.md) — typiquement branche -> push -> PR draft -> demande la review ({REVIEW_TRIGGER}) -> traite chaque round (corriger, push, relancer la review) -> review soldee -> passe la PR prete -> attends les checks requis VERTS sur le head.
 
-   Toute attente > ~1 min (verdict de review, checks CI, merge, delai) passe par un waiter ac-wait — tu armes `ac-wait --name "<t>" --interval 60 -- <commande cheap>`, tu termines ton tour (ou `acctl sleep "$AGENTCONTROL_SESSION"` pour dormir vraiment), le ping te reveille quand la condition tombe. Jamais de `--watch` bloquant, de `sleep` long ni de boucle de poll dans un tool call (regle « Waiting » d'AGENTS.md — les conditions a attendre restent les memes, c'est la commande du waiter qui les porte).
+   Toute attente > ~1 min (verdict de review, checks CI, merge, delai) passe par un waiter ac-wait — tu armes `ac-wait --name "<t>" --interval 60 -- <commande cheap>`, tu termines ton tour (ou `acctl sleep "$AGENTCONTROL_SESSION"` pour dormir vraiment), le ping te reveille quand la condition tombe. Jamais de `--watch` bloquant, de `sleep` long ni de boucle de poll dans un tool call.
 
-4. Mene ta PR jusqu'au merge : si la regle de merge de /workspace/AGENTS.md le permet pour un agent (derniere review auto « Verdict: APPROVED » posterieure au push du head courant, fraicheur verifiee via les PushEvents du repo), procede au merge toi-meme (`gh pr merge <N> --squash --delete-branch` — squash = convention du repo, delete-branch = menage de la branche head au merge) ; sinon le merge reste a l'utilisateur — surveille jusqu'au merge effectif via un waiter (`ac-wait -- bash -c 'gh pr view <N> --json state -q .state | grep -q MERGED'` — pipe enrobe dans bash -c, un `|` nu couperait la commande).
+4. Mene ta PR jusqu'au merge : {MERGE_RULE} ; si le merge reste a l'utilisateur, surveille jusqu'au merge effectif via un waiter ac-wait (condition cheap en lecture seule : etat de la PR selon le CLI de la forge du repo ; enrobe un pipe dans bash -c).
 
 5. Marque la tache faite : {DOD} La regle --done depend du champ done_when de l'item (agentbacklog --list --json) : 'pr_merged' = ta PR de feature MERGED ; 'deliverable' = les criteres propres de l'item remplis, jamais d'attente de merge. Puis ARRETE : reponds « termine » et cesse tout travail — ne re-pop jamais, l'orchestrateur te supprime et spawn un worker neuf pour le pending suivant.
 
@@ -98,15 +104,16 @@ Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-da
 /// l'orchestrateur a déjà choisi l'item et son workspace — le prompt
 /// est templé `{WS}` (cwd de la session = workspace routé du tag repo),
 /// `{REPO}` (tag de l'item, « (non taggé) » sinon), `{ID}` et `{ITEM}`
-/// (titre + description inline) ; `{BASE}` est aussi substitué
-/// (branche d'intégration — le template intégré n'en a pas besoin,
-/// il lit les règles dans l'AGENTS.md du workspace). `cfg.prompt`
-/// remplace ce template et reçoit les mêmes substitutions. Les chemins
-/// et le workflow PR/CI viennent de l'AGENTS.md DU WORKSPACE ROUTÉ —
-/// rien n'est codé en dur pour un repo particulier.
+/// (titre + description inline), `{DOD}` (règle --done), plus les
+/// placeholders « workflow repo » de `workflow_pairs` : `{BASE}`
+/// `{REVIEW_TRIGGER}` `{WORKTREE_DIR}` `{MERGE_RULE}`. `cfg.prompt`
+/// remplace ce template et reçoit les mêmes substitutions. Les règles
+/// de workflow vivent dans le fichier de règles DU WORKSPACE ROUTÉ
+/// (AGENTS.md/CLAUDE.md) — rien n'est codé en dur pour un repo
+/// particulier.
 const WORKER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
 
-Tu es un worker autonome sur le workspace {WS} (repo {REPO}). Commence par lire {WS}/AGENTS.md — le workflow PR/CI qu'il decrit est obligatoire ; s'il est absent, applique les conventions du depot (branche -> PR draft -> review -> checks -> merge).
+Tu es un worker autonome sur le workspace {WS} (repo {REPO}). Commence par lire {WS}/AGENTS.md (ou {WS}/CLAUDE.md a defaut) — les regles de branches, PR, review, CI et merge du repo s'y trouvent et priment ; s'il est absent, applique les conventions du depot.
 
 ## ITEM ASSIGNE — ton unique tache
 {ITEM}
@@ -119,11 +126,11 @@ MISSION — une seule tache :
 
    Cas particulier : si une de tes taches reste wip parce que sa PR n'est pas encore mergée (assignee avant cette consigne), tu n'es PAS libre — mene d'abord cette PR jusqu'au merge (etape 4), marque --done, puis seulement ensuite l'item courant. Tu t'arretes quand TOUT ce qui t'est attribue est solde — tu NE RE-POP JAMAIS : l'orchestrateur spawn un worker neuf par item pending.
 
-2. Implemente la tache en suivant sa description a la lettre : git worktree dedie (JAMAIS dans le checkout principal {WS}), base sur la branche d'integration du repo, spec, verifications demandees. Option : review locale du diff avant de pousser si un outil de review locale est disponible.
+2. Implemente la tache en suivant sa description a la lettre : git worktree dedie sous {WORKTREE_DIR} base sur la branche d'integration du repo ({BASE}) — JAMAIS dans le checkout principal {WS} — spec, verifications demandees. Option : review locale du diff avant de pousser si un outil de review locale est disponible.
 
-3. Cycle PR (cf AGENTS.md de {WS}) : branche -> push -> PR draft -> review auto -> traiter chaque round en restant draft (corriger, push, relancer la review) -> review soldee -> passer la PR ready -> attendre les checks VERTS sur le head SHA. Toute attente > ~1 min (verdict de review, checks CI, merge, delai) passe par un waiter ac-wait si le demon AgentControl l'expose — jamais de `--watch` bloquant ni de boucle de poll dans un tool call.
+3. Cycle de contribution (selon les regles du repo — {WS}/AGENTS.md ou CLAUDE.md) : branche -> push -> PR draft -> demande la review ({REVIEW_TRIGGER}) -> traite chaque round (corriger, push, relancer la review) -> review soldee -> passe la PR prete -> attends les checks requis VERTS sur le head. Toute attente > ~1 min (verdict de review, checks CI, merge, delai) passe par un waiter ac-wait si le demon AgentControl l'expose — jamais de `--watch` bloquant ni de boucle de poll dans un tool call.
 
-4. Mene ta PR jusqu'au merge : si la regle de merge du repo le permet pour un agent (derniere review auto « Verdict: APPROVED » posterieure au push du head courant, fraicheur verifiee), procede au merge toi-meme ; sinon le merge reste a l'utilisateur — surveille jusqu'au merge effectif via un waiter (`ac-wait -- bash -c 'gh pr view <N> --json state -q .state | grep -q MERGED'` — pipe enrobe dans bash -c).
+4. Mene ta PR jusqu'au merge : {MERGE_RULE} ; si le merge reste a l'utilisateur, surveille jusqu'au merge effectif via un waiter ac-wait (condition cheap en lecture seule : etat de la PR selon le CLI de la forge du repo ; enrobe un pipe dans bash -c).
 
 5. Marque la tache faite : {DOD} Puis ARRETE : reponds « termine » et cesse tout travail — ne re-pop jamais, l'orchestrateur te supprime et spawn un worker neuf pour le pending suivant.
 
@@ -139,15 +146,15 @@ const NOTES_TITLE: &str = "[auto] Patchnotes utilisateur de la release PR + pass
 /// substitués depuis `release_pair()` dans `orch_add_notes`.
 const NOTES_DESC: &str = r#"[Item cree automatiquement par backlog-orchestrator : backlog vide, cloture du cycle de release.]
 
-La PR de release ({INT} -> {REL}, creee par le workflow de release du repo — retrouve-la via `gh pr list --head {INT} --base {REL} --state open --json number,isDraft`) doit etre prete a etre shippee par l'utilisateur.
+La PR de release ({INT} -> {REL}, creee par le workflow de release du repo — retrouve-la via le CLI de la forge du repo : liste des PR ouvertes head={INT} base={REL}) doit etre prete a etre shippee par l'utilisateur.
 
 MISSION :
 
 Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
 
-1. Body = patchnotes utilisateur EN ANGLAIS couvrant TOUTES les PR mergees dans {INT} sur le cycle (inventaire : git fetch origin && git log origin/{REL}..origin/{INT} --oneline, ou les commits de la PR). Le generateur automatique du repo regenere le body a chaque push sur {INT} : verifie qu'il est a jour vis-a-vis du head courant, EN ANGLAIS, et lisible par un utilisateur (fonctionnalites visibles, pas le detail technique interne). JAMAIS de reference interne dans le texte : pas de (#NNN), pas de lien PR, pas d'id backlog — uniquement des changements vecus par l'utilisateur ; les noms de fonctionnalites visibles restent OK. S'il est stale ou non anglophone, declenche la regeneration via le mecanisme du workflow ; a defaut reecris le body toi-meme (gh pr edit <N> --body). Si le generateur doit produire de l'anglais durablement, corrige-le via le cycle PR normal plutot qu'une edition manuelle.
-2. Passe la PR en ready : gh pr ready <N> — cela declenche la mecanique de release du repo (bump de version sur {INT}), c'est voulu. Ne merge JAMAIS la release PR vers {REL} : le merge reste a l'utilisateur.
-3. Si le generateur produit un body defectueux, corrige-le via le cycle PR normal dans un worktree separe (base origin/{INT}).
+1. Body = patchnotes utilisateur EN ANGLAIS couvrant TOUTES les PR mergees dans {INT} sur le cycle (inventaire : git fetch origin && git log origin/{REL}..origin/{INT} --oneline, ou les commits de la PR). Le generateur automatique du repo regenere le body a chaque push sur {INT} : verifie qu'il est a jour vis-a-vis du head courant, EN ANGLAIS, et lisible par un utilisateur (fonctionnalites visibles, pas le detail technique interne). JAMAIS de reference interne dans le texte : pas de (#NNN), pas de lien PR, pas d'id backlog — uniquement des changements vecus par l'utilisateur ; les noms de fonctionnalites visibles restent OK. S'il est stale ou non anglophone, declenche la regeneration via le mecanisme du workflow ; a defaut reecris le body toi-meme via le CLI de la forge du repo (edition du body de la PR). Si le generateur doit produire de l'anglais durablement, corrige-le via le cycle de contribution normal plutot qu'une edition manuelle.
+2. Passe la PR en non-draft (« ready ») selon le mecanisme du repo — cela declenche la mecanique de release du repo (bump de version sur {INT}), c'est voulu. Ne merge JAMAIS la release PR vers {REL} : le merge reste a l'utilisateur.
+3. Si le generateur produit un body defectueux, corrige-le via le cycle de contribution normal dans un worktree separe (base origin/{INT}).
 4. Quand la release PR est ready avec un body a jour : agentbacklog --done <ID> --agent-id "<ton agent-id>". La release PR {INT} -> {REL} n'est pas ta PR — son merge est reserve a l'utilisateur ; ton critere de fin est « release PR ready + body a jour », jamais l'attente du merge (item cree avec done_when=deliverable).
 5. Apres ton --done, si du nouveau travail arrive dans le backlog, l'orchestrateur repasse lui-meme la release PR en draft (garde open_any / notes_cycle_done se reinitialise en presence de travail) et un nouvel item patchnotes sera cree au prochain cycle vide — rien a faire de ton cote."#;
 
@@ -172,7 +179,8 @@ const MANAGER_TITLE_PREFIX: &str = "Manager · ";
 /// questions d'état, ajuster la file. Jamais worker (pas de --pop,
 /// pas de --done, pas d'implémentation). Surcharge :
 /// `[backlog_orchestrator] manager_prompt` (mêmes placeholders :
-/// `{REPO}` `{WS}` `{BASE}`).
+/// `{REPO}` `{WS}` `{BASE}` `{REVIEW_TRIGGER}` `{WORKTREE_DIR}`
+/// `{MERGE_RULE}`).
 const MANAGER_PROMPT: &str = r#"[Session creee automatiquement par la feature « Manager » d'AgentControl — pas par un agent humain ou une session parente.]
 
 Tu es le Manager du workspace {REPO} (cwd {WS}) : l'intendance de la file AgentBacklog partagee. On te donne des demandes en langage naturel ; tu les transformes en items backlog exploitables par les workers autonomes (sessions « Backlog-W* » pilotees par l'orchestrateur).
@@ -181,7 +189,7 @@ MISSIONS :
 
 1. DEPOSER UN ITEM — pour chaque demande de feature/fix :
    agentbacklog --add "<titre concis>" --desc "<description>" --repo {REPO}
-   Le titre : une ligne, actionnable (convention : [bug]/[feature] + objet). La description est le cahier des charges du worker — donne : le contexte (symptomes, fichiers/modules/pistes d'investigation dans {WS}), les verifications demandees (build/tests precis), et le rappel du cycle PR standard (worktree dedie base origin/{BASE}, PR draft -> /mr review -> corrections en draft -> ready -> checks verts -> merge).
+   Le titre : une ligne, actionnable (convention : [bug]/[feature] + objet). La description est le cahier des charges du worker — donne : le contexte (symptomes, fichiers/modules/pistes d'investigation dans {WS}), les verifications demandees (build/tests precis), et le rappel du cycle de contribution du repo — ses regles sont dans {WS}/AGENTS.md (ou CLAUDE.md) : worktree dedie sous {WORKTREE_DIR} base {BASE}, review ({REVIEW_TRIGGER}), merge ({MERGE_RULE}).
    Une demande qui enchaine des etapes ou depend d'un item existant : decoupe en sous-items ordonnes via --depends-on <ID> (et --depend ID DEP a posteriori). Une grosse demande floue : item d'exploration/decoupage d'abord.
    Ne duplique pas : agentbacklog --list --json avant d'ajouter.
 
@@ -1305,8 +1313,9 @@ pub(crate) fn task_dod(t: &Task) -> &'static str {
     } else {
         "agentbacklog --done <ID> --agent-id \"$AGENTCONTROL_SESSION\" \
          UNIQUEMENT quand ta PR est effectivement MERGED (verifie \
-         l'etat GitHub, pas seulement ready+checks) — ou quand les \
-         criteres propres de la tache sont remplis si elle n'a pas de PR."
+         l'etat de la PR via le CLI de la forge du repo, pas seulement \
+         ready+checks) — ou quand les criteres propres de la tache \
+         sont remplis si elle n'a pas de PR."
     }
 }
 /// Un item `pending` est « poppable » : sans dépendance ou dépendances
@@ -2185,16 +2194,19 @@ impl Daemon {
                     } else {
                         repo.to_string()
                     };
+                    let pairs: Vec<(&str, String)> = [
+                        ("WS", cwd.clone()),
+                        ("REPO", repo_label.clone()),
+                        ("ID", id.to_string()),
+                        ("ITEM", orch_plan::item_body(t)),
+                        ("DOD", task_dod(t).replace("<ID>", &id.to_string())),
+                    ]
+                    .into_iter()
+                    .chain(orch_plan::workflow_pairs(cfg))
+                    .collect();
                     let prompt = orch_plan::fill(
                         cfg.prompt.as_deref().unwrap_or(WORKER_PROMPT),
-                        &[
-                            ("WS", cwd.clone()),
-                            ("REPO", repo_label.clone()),
-                            ("ID", id.to_string()),
-                            ("ITEM", orch_plan::item_body(t)),
-                            ("DOD", task_dod(t).replace("<ID>", &id.to_string())),
-                            ("BASE", cfg.pr_base().to_string()),
-                        ],
+                        &pairs,
                     );
                     st.counter += 1;
                     info!(
@@ -2282,12 +2294,17 @@ impl Daemon {
                     // (le worker le --pop lui-même) — {DOD} est remplacé
                     // par la règle générique done_when, le détail par
                     // item reste dans le --list que le worker consultera.
-                    let prompt = cfg
-                        .prompt
-                        .clone()
-                        .unwrap_or_else(|| PROMPT.to_string())
-                        .replace("{DOD}", LEGACY_DOD)
-                        .replace("{BASE}", cfg.pr_base());
+                    let pairs: Vec<(&str, String)> = [
+                        ("WS", cfg.workspace.clone()),
+                        ("DOD", LEGACY_DOD.to_string()),
+                    ]
+                    .into_iter()
+                    .chain(orch_plan::workflow_pairs(cfg))
+                    .collect();
+                    let prompt = orch_plan::fill(
+                        cfg.prompt.as_deref().unwrap_or(PROMPT),
+                        &pairs,
+                    );
                     let Some(entry) = pool_next_entry(&entries, &workers, &live_waiters, &[])
                     else {
                         break;
@@ -2608,10 +2625,15 @@ impl Daemon {
     /// ici qu'avec une release PR détectée).
     async fn orch_add_notes(&self, bin: &str, ws: &Path, cfg: &cfg::OrchCfg) -> Option<u64> {
         let (head, base) = cfg.release_pair()?;
-        let desc = orch_plan::fill(
-            NOTES_DESC,
-            &[("INT", head.to_string()), ("REL", base.to_string())],
-        );
+        let pairs: Vec<(&str, String)> = [
+            ("INT", head.to_string()),
+            ("REL", base.to_string()),
+            ("WS", cfg.workspace.clone()),
+        ]
+        .into_iter()
+        .chain(orch_plan::workflow_pairs(cfg))
+        .collect();
+        let desc = orch_plan::fill(NOTES_DESC, &pairs);
         // plan_review : l'item notes est un pur travail d'implémentation —
         // `--no-plan` le dispatche en worker direct, sans boucle de revue.
         let mut argv = vec![bin, "--add", NOTES_TITLE, "--desc", desc.as_str()];
@@ -2660,19 +2682,19 @@ impl Daemon {
         open_prs: &[&String],
         wip: &[&String],
     ) -> bool {
+        let cfg = self.orch.cfg.read().unwrap().clone();
         let mut parts: Vec<String> = Vec::new();
         if !open_prs.is_empty() {
             parts.push(format!(
                 "Tes PR encore ouvertes : {}. Ta mission continue jusqu'au \
-                 merge — relis la regle de merge de /workspace/AGENTS.md : si \
-                 ses criteres sont reunis (verdict APPROVED posterieur au push \
-                 du head courant, fraicheur verifiee via PushEvents), procede \
-                 au merge toi-meme ; sinon surveille jusqu'au merge utilisateur.",
+                 merge — {} ; si le merge reste a l'utilisateur, surveille \
+                 jusqu'au merge effectif via un waiter ac-wait.",
                 open_prs
                     .iter()
                     .map(|p| format!("#{p}"))
                     .collect::<Vec<_>>()
-                    .join(", ")
+                    .join(", "),
+                orch_plan::merge_rule_text(&cfg)
             ));
         }
         if !wip.is_empty() {
@@ -2875,10 +2897,14 @@ impl Daemon {
             }
         }
         let tpl = cfg.manager_prompt.as_deref().unwrap_or(MANAGER_PROMPT);
-        let prompt = tpl
-            .replace("{REPO}", repo)
-            .replace("{WS}", &cwd)
-            .replace("{BASE}", cfg.pr_base());
+        let pairs: Vec<(&str, String)> = [
+            ("REPO", repo.to_string()),
+            ("WS", cwd.clone()),
+        ]
+        .into_iter()
+        .chain(orch_plan::workflow_pairs(cfg))
+        .collect();
+        let prompt = orch_plan::fill(tpl, &pairs);
         self.warn_spawn_cfg(&cfg.agent, &cfg.model, &cfg.mode);
         let v = self
             .h_new_session(
@@ -3405,24 +3431,73 @@ mod tests {
 
     #[test]
     fn worker_prompt_remplace_les_placeholders() {
-        let p = orch_plan::fill(
-            WORKER_PROMPT,
-            &[
-                ("WS", "/w".to_string()),
-                ("REPO", "Taskwondo".to_string()),
-                ("ID", "42".to_string()),
-                ("ITEM", "#42 — titre".to_string()),
-                ("DOD", "RULE-DONE".to_string()),
-            ],
-        );
+        let cfg = cfg::OrchCfg::default();
+        let pairs: Vec<(&str, String)> = [
+            ("WS", "/w".to_string()),
+            ("REPO", "Taskwondo".to_string()),
+            ("ID", "42".to_string()),
+            ("ITEM", "#42 — titre".to_string()),
+            ("DOD", "RULE-DONE".to_string()),
+        ]
+        .into_iter()
+        .chain(orch_plan::workflow_pairs(&cfg))
+        .collect();
+        let p = orch_plan::fill(WORKER_PROMPT, &pairs);
         assert!(p.contains("cwd /w") || p.contains("/w"));
         assert!(p.contains("repo Taskwondo"));
         assert!(p.contains("#42 — titre"));
         assert!(p.contains("RULE-DONE"));
-        assert!(!p.contains("{WS}") && !p.contains("{ITEM}") && !p.contains("{DOD}"));
+        // Tous les placeholders du template sont substitués.
+        for ph in [
+            "{WS}",
+            "{ITEM}",
+            "{DOD}",
+            "{BASE}",
+            "{REVIEW_TRIGGER}",
+            "{WORKTREE_DIR}",
+            "{MERGE_RULE}",
+        ] {
+            assert!(!p.contains(ph), "{ph} non substitué");
+        }
         // Le prompt worker ne doit plus imposer le self-pop : le dispatch
         // claim pré-assigne l'item.
         assert!(p.contains("PAS a lancer `agentbacklog --pop`"));
+    }
+
+    #[test]
+    fn prompts_integres_sans_workflow_en_dur() {
+        // Critère de l'item #319 : les templates intégrés ne récitent
+        // aucune règle propre à un repo — ni branche d'intégration, ni
+        // commandes de forge, ni trigger/verdict, ni convention de
+        // worktree. Les mécanismes produit (agentbacklog, acctl,
+        // ac-wait) restent, eux, universels.
+        let banned = [
+            "next_release",
+            "gh pr",
+            "gh api",
+            "gh run",
+            "/mr review",
+            "Verdict:",
+            "ac-<feat>",
+            "worktrees/ac",
+        ];
+        for tpl in [
+            PROMPT,
+            WORKER_PROMPT,
+            MANAGER_PROMPT,
+            NOTES_DESC,
+            LEGACY_DOD,
+        ] {
+            for b in banned {
+                assert!(!tpl.contains(b), "« {b} » dans un prompt intégré");
+            }
+        }
+        // Les règles {DOD} émises à la volée : même exigence.
+        for t in [json!({}), json!({"done_when": "deliverable"})] {
+            for b in banned {
+                assert!(!task_dod(&t).contains(b), "« {b} » dans task_dod");
+            }
+        }
     }
 
     fn worker_meta(id: &str, agent: &str) -> SessionMeta {
