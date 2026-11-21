@@ -70,6 +70,11 @@ struct Config {
     /// outils (voir docs/forges.md). github.com + gitlab.com implicites.
     #[serde(default)]
     forges: Vec<forges::ForgeCfg>,
+    /// Overrides `[catalog.<name>]` des entrées du catalogue embarqué
+    /// (repo/homepage/défauts de params — cf. server::CatalogPatch).
+    /// Repointer une recette vers un fork/miroir sans recompiler.
+    #[serde(default)]
+    catalog: HashMap<String, server::CatalogPatch>,
 }
 
 fn default_tcp() -> String {
@@ -95,6 +100,7 @@ impl Default for Config {
             watchdog: server::WatchdogCfg::default(),
             provision_skills: true,
             forges: Vec::new(),
+            catalog: HashMap::new(),
         }
     }
 }
@@ -317,6 +323,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
         cfg.compact.clone(),
         cfg.watchdog.clone(),
         cfg.provision_skills,
+        cfg.catalog.clone(),
     )
     .await?;
     tracing::info!(

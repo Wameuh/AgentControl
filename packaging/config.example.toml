@@ -216,3 +216,27 @@ command = ["codex-acp"]
 # [agents.gemini]
 # name = "Gemini CLI"
 # command = ["gemini", "--experimental-acp"]
+
+# ---------------------------------------------------------------------------
+# Catalogue de composants — overrides [catalog.<name>] par entrée embarquée
+# (noms connus au boot : agentbacklog, agentreviewer…). Repointer la source
+# d'install/métadonnées vers un fork, un miroir ou un chemin local sans
+# recompiler le démon. Noms ou clés de params inconnus → warn au démarrage,
+# ignorés.
+#
+#   repo      — dépôt upstream sondé pour latest_version (format
+#               "owner/name", sonde API GitHub) ; homepage dérivée si absente.
+#   homepage  — URL de documentation affichée par le client.
+#   params    — défauts des paramètres déclarés de l'entrée ; la valeur
+#               fournie à l'install (dialogue, component_install --set)
+#               prime toujours sur ces défauts.
+#
+# `install_spec` (entrées installées via `uv tool install`) accepte un nom
+# de paquet d'index, un `git+<url>` ou un chemin local — ex. :
+# [catalog.agentbacklog]
+# repo = "acme/AgentBacklog"
+# params.install_spec = "git+https://git.acme.corp/AgentBacklog"
+#
+# [catalog.agentreviewer]
+# params.install_spec = "/opt/checkouts/agentreviewer"
+# ---------------------------------------------------------------------------

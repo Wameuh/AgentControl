@@ -20,6 +20,7 @@ use tracing::{info, warn};
 
 use super::Components;
 use crate::server::misc::command_available;
+use crate::server::CatalogPatch;
 
 /// Fraîcheur du cache upstream (~5 min) — borne le rate-limit GitHub
 /// non authentifié (~12 appels/repo/h) et les allers réseau à chaque
@@ -100,9 +101,51 @@ pub(super) struct Upstream {
     pub at: Instant,
 }
 
+/// Dépôt upstream canonique d'une entrée externe — unique déclaration
+/// de la source : `repo`, `homepage` et le défaut `install_spec` en
+/// dérivent. `[catalog.<name>]` (config.toml) les surcharge, et le
+/// param `install_spec` fourni à l'install prime partout (audit
+/// découplage C4-C6 — aucune URL codée dans les recettes : le `run`
+/// porte le placeholder `{{install_spec}}` résolu à l'install).
+const AGENTBACKLOG_REPO: &str = "Wameuh/AgentBacklog";
+const AGENTREVIEWER_REPO: &str = "Wameuh/AgentReviewer";
+
+/// Param `install_spec` — le `<spec>` passé à `uv tool install` par la
+/// recette `run` (placeholder `{{install_spec}}`) : nom de paquet
+/// d'index, `git+<url>` ou chemin local. Déclaré sur les entrées
+/// externes pour que la source d'install soit un paramètre (dialogue
+/// d'install, `comp install --set`, défaut `[catalog.<name>]` —
+/// jamais une URL scellée dans l'argv). Persisté dans la spec posée :
+/// provenance de l'install.
+fn install_spec_param(upstream: &str) -> ParamSpec {
+    ParamSpec {
+        key: "install_spec".into(),
+        label: "Install source".into(),
+        description: Some(
+            "spec passed to `uv tool install` — index package name, \
+             `git+<url>` or local path; default = canonical upstream"
+                .into(),
+        ),
+        required: false,
+        kind: ParamKind::String,
+        default: Some(format!("git+https://github.com/{upstream}")),
+        secret: false,
+        // Le spec part tel quel dans l'argv de `uv tool install` :
+        // rien qui commence par `-` (un « spec » `--flag` deviendrait
+        // une option de uv) ni espace — un seul élément d'argv.
+        validation: Some(r"^([A-Za-z0-9]|\.|/|~)[^\s]*$".into()),
+        choices: Vec::new(),
+        choice_labels: Vec::new(),
+        open_enum: false,
+        group: None,
+    }
+}
+
 /// Entrées seed — ajouter un composant connu = une entrée ici, pas de
 /// code client (§2.5). `~` dans les chemins est expansé sous le HOME
-/// du démon à la détection et à l'installation.
+/// du démon à la détection et à l'installation. Les `{{key}}` des
+/// `run` de recette sont substitués à l'install depuis les params
+/// déclarés (fourni > `[catalog.<name>]` > défaut).
 static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
     vec![
         CatalogEntry {
@@ -110,8 +153,8 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
             description: "Feature FIFO queue shared between agents \
                           (SQLite ~/.agentbacklog/backlog.db)"
                 .into(),
-            repo: Some("Wameuh/AgentBacklog".into()),
-            homepage: Some("https://github.com/Wameuh/AgentBacklog".into()),
+            repo: Some(AGENTBACKLOG_REPO.into()),
+            homepage: Some(format!("https://github.com/{AGENTBACKLOG_REPO}")),
             suggested_spec: ComponentSpec {
                 name: "agentbacklog".into(),
                 kind: ComponentKind::Tool,
@@ -146,9 +189,10 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                 // superviseur du démon (systemd minimal…).
                 path: Some("~/.local/bin/agentbacklog".into()),
             },
-            // Aucun paramètre — le schéma existe pour les futurs
-            // composants qui en ont besoin (agentreviewer ci-dessous).
-            params: Vec::new(),
+            // Un seul param : `install_spec`, la source passée à
+            // `uv tool install` — substitué dans la recette et persisté
+            // dans la spec posée (provenance).
+            params: vec![install_spec_param(AGENTBACKLOG_REPO)],
             render: None,
             recipe: vec![
                 RecipeStep::Run {
@@ -156,7 +200,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                         "uv".into(),
                         "tool".into(),
                         "install".into(),
-                        "git+https://github.com/Wameuh/AgentBacklog".into(),
+                        "{{install_spec}}".into(),
                     ],
                 },
                 RecipeStep::UpsertSpec,
@@ -168,8 +212,8 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                           sessions (detects trigger comments, queue, \
                           batched « AgentReviewer » spawn)"
                 .into(),
-            repo: Some("Wameuh/AgentReviewer".into()),
-            homepage: Some("https://github.com/Wameuh/AgentReviewer".into()),
+            repo: Some(AGENTREVIEWER_REPO.into()),
+            homepage: Some(format!("https://github.com/{AGENTREVIEWER_REPO}")),
             suggested_spec: ComponentSpec {
                 name: "agentreviewer".into(),
                 kind: ComponentKind::Process,
@@ -484,6 +528,9 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                     open_enum: false,
                     group: None,
                 },
+                // Source de la recette (`{{install_spec}}`) — comme
+                // agentbacklog, jamais une URL scellée dans l'argv.
+                install_spec_param(AGENTREVIEWER_REPO),
             ],
             // Config utilisateur rendue depuis les params — couvre
             // toutes les clés upstream ; les lignes à placeholder non
@@ -505,7 +552,7 @@ static CATALOG: LazyLock<Vec<CatalogEntry>> = LazyLock::new(|| {
                         "tool".into(),
                         "install".into(),
                         "--force".into(),
-                        "git+https://github.com/Wameuh/AgentReviewer".into(),
+                        "{{install_spec}}".into(),
                     ],
                 },
                 // La config n'est plus seedée depuis upstream : elle
@@ -652,16 +699,22 @@ impl Components {
     /// `version` (sonde `--version` si installé) + `latest_version` /
     /// `latest_notes` upstream (cache ~5 min ; `refresh` force le
     /// refetch). Aucun échec n'est fatal : indétectable → champs null.
+    /// `repo`/`homepage`/défauts de `params` reflètent l'override
+    /// `[catalog.<name>]` éventuel — le dialogue d'install pré-remplit
+    /// la source choisie par l'opérateur.
     pub async fn catalog(self: &Arc<Self>, refresh: bool) -> Vec<Value> {
         let mut out = Vec::with_capacity(CATALOG.len());
         for e in CATALOG.iter() {
+            let patch = self.catalog_patches.get(&e.name);
+            let repo = effective_repo(e, patch);
+            let homepage = effective_homepage(e, patch);
             let installed = detected(&e.detect);
             let version = if installed {
                 probe_version(e).await
             } else {
                 None
             };
-            let (latest_version, latest_notes) = match &e.repo {
+            let (latest_version, latest_notes) = match &repo {
                 Some(repo) => {
                     let up = self.upstream(repo, refresh).await;
                     (up.tag, up.notes)
@@ -671,12 +724,13 @@ impl Components {
             out.push(json!({
                 "name": e.name,
                 "description": e.description,
-                "repo": e.repo,
-                "homepage": e.homepage,
+                "repo": repo,
+                "homepage": homepage,
                 "suggested_spec": e.suggested_spec,
-                "params": e.params,
+                "params": params_with_overrides(e, patch),
                 "render": e.render,
                 "recipe": e.recipe,
+                "overridden": patch.is_some(),
                 "installed": installed,
                 "version": version,
                 "latest_version": latest_version,
@@ -757,9 +811,17 @@ impl Components {
                 }
             }
         }
+        // Défauts `[catalog.<name>]` d'abord (install headless incluse :
+        // un `repo` repointé par config doit atterrir dans la spec sans
+        // passer par le dialogue), puis la recette matérialisée : les
+        // `{{key}}` des `run` sont résolus (fourni > override > défaut
+        // déclaré) et les clés consommées rejoignent `values` — la spec
+        // posée garde la provenance réelle de l'install.
+        apply_patch_params(entry, self.catalog_patches.get(name), &mut values)?;
+        let recipe = resolve_recipe(entry, &mut values)?;
         let mut notes: Vec<String> = Vec::new();
-        for (i, step) in entry.recipe.iter().enumerate() {
-            let step_ctx = format!("recipe « {name} » step {}/{}", i + 1, entry.recipe.len());
+        for (i, step) in recipe.iter().enumerate() {
+            let step_ctx = format!("recipe « {name} » step {}/{}", i + 1, recipe.len());
             match step {
                 RecipeStep::Run { argv } => {
                     run_step(argv).await.with_context(|| step_ctx.clone())?;
@@ -1060,6 +1122,172 @@ fn materialize_spec(e: &CatalogEntry, params: &HashMap<String, String>) -> Compo
 }
 
 // ---------------------------------------------------------------------------
+// Overrides `[catalog.<name>]` (config.toml) — voir CatalogPatch.
+// ---------------------------------------------------------------------------
+
+/// `repo` effectif d'une entrée : l'override ou la déclaration
+/// canonique.
+fn effective_repo(e: &CatalogEntry, patch: Option<&CatalogPatch>) -> Option<String> {
+    patch
+        .and_then(|p| p.repo.clone())
+        .or_else(|| e.repo.clone())
+}
+
+/// `homepage` effective : l'override explicite, sinon — quand `repo`
+/// est repointé — l'URL dérivée du nouveau dépôt (le lien canonique
+/// mentirait), sinon la déclaration de l'entrée.
+fn effective_homepage(e: &CatalogEntry, patch: Option<&CatalogPatch>) -> Option<String> {
+    if let Some(h) = patch.and_then(|p| p.homepage.clone()) {
+        return Some(h);
+    }
+    match patch.and_then(|p| p.repo.clone()) {
+        Some(repo) => Some(format!("https://github.com/{repo}")),
+        None => e.homepage.clone(),
+    }
+}
+
+/// Schéma de params sérialisé pour `catalog()` : défauts déclarés,
+/// surchargés par `[catalog.<name>].params` — le dialogue d'install
+/// pré-remplit alors la valeur choisie par l'opérateur.
+fn params_with_overrides(e: &CatalogEntry, patch: Option<&CatalogPatch>) -> Vec<ParamSpec> {
+    match patch {
+        Some(p) if !p.params.is_empty() => e
+            .params
+            .iter()
+            .map(|ps| {
+                let mut ps = ps.clone();
+                if let Some(v) = p.params.get(&ps.key) {
+                    ps.default = Some(v.clone());
+                }
+                ps
+            })
+            .collect(),
+        _ => e.params.clone(),
+    }
+}
+
+/// Injecte les valeurs `[catalog.<name>]` des params déclarés non
+/// fournis à l'install — un install headless honore ainsi les choix
+/// d'override de l'opérateur (le dialogue, lui, les renvoie pré-
+/// remplis via `catalog()`). Clés inconnues : ignorées — déjà warn
+/// au boot ; une valeur qui ne valide pas échoue l'install, jamais
+/// appliquée en silence.
+fn apply_patch_params(
+    entry: &CatalogEntry,
+    patch: Option<&CatalogPatch>,
+    values: &mut HashMap<String, String>,
+) -> Result<()> {
+    let Some(patch) = patch else {
+        return Ok(());
+    };
+    for (k, v) in &patch.params {
+        if values.contains_key(k) || v.is_empty() {
+            continue;
+        }
+        let Some(ps) = entry.params.iter().find(|p| &p.key == k) else {
+            continue;
+        };
+        values.insert(
+            k.clone(),
+            super::render::validate_value(ps, v)
+                .with_context(|| format!("« {k} » overridden by [catalog.{}]", entry.name))?,
+        );
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Placeholders `{{key}}` des recettes — substitution à l'install.
+// ---------------------------------------------------------------------------
+
+/// Clés `{{ … }}` présentes dans une chaîne (même convention que les
+/// templates de rendu, render.rs).
+fn placeholders(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = s;
+    while let Some(i) = rest.find("{{") {
+        let after = &rest[i + 2..];
+        let Some(end) = after.find("}}") else {
+            break;
+        };
+        out.push(after[..end].trim().to_string());
+        rest = &after[end + 2..];
+    }
+    out
+}
+
+/// Recette prête à exécuter : chaque `{{key}}` d'un argv `run` est
+/// remplacé par la valeur effective du param déclaré — source :
+/// `values` (fournies à l'install ou injectées depuis
+/// `[catalog.<name>]`, déjà validées) > `default` du schéma. Les clés
+/// consommées sont injectées dans `values` : la spec posée par
+/// `upsert_spec` garde la provenance réelle (ex. `install_spec`). Un
+/// placeholder non déclaré ou sans valeur échoue — jamais d'argv
+/// littéral `{{…}}` parti en run.
+fn resolve_recipe(
+    entry: &CatalogEntry,
+    values: &mut HashMap<String, String>,
+) -> Result<Vec<RecipeStep>> {
+    // Résoudre d'abord toutes les clés référencées : une valeur
+    // invalide est refusée avant le moindre step exécuté.
+    let mut keys: Vec<String> = Vec::new();
+    for step in &entry.recipe {
+        if let RecipeStep::Run { argv } = step {
+            for a in argv {
+                for k in placeholders(a) {
+                    if !keys.contains(&k) {
+                        keys.push(k);
+                    }
+                }
+            }
+        }
+    }
+    for key in &keys {
+        if values.contains_key(key) {
+            continue;
+        }
+        let ps = entry
+            .params
+            .iter()
+            .find(|p| &p.key == key)
+            .with_context(|| format!("placeholder {{{{{key}}}}} not declared"))?;
+        let raw = ps
+            .default
+            .as_ref()
+            .with_context(|| format!("placeholder {{{{{key}}}}} has no value"))?;
+        values.insert(key.clone(), super::render::validate_value(ps, raw)?);
+    }
+    let subst = |s: &str| -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut rest = s;
+        while let Some(i) = rest.find("{{") {
+            let after = &rest[i + 2..];
+            let Some(end) = after.find("}}") else {
+                out.push_str(rest);
+                rest = "";
+                break;
+            };
+            out.push_str(&rest[..i]);
+            let key = after[..end].trim();
+            out.push_str(values.get(key).map(String::as_str).unwrap_or(""));
+            rest = &after[end + 2..];
+        }
+        out.push_str(rest);
+        out
+    };
+    Ok(entry
+        .recipe
+        .iter()
+        .map(|step| match step {
+            RecipeStep::Run { argv } => RecipeStep::Run {
+                argv: argv.iter().map(|a| subst(a)).collect(),
+            },
+            s => s.clone(),
+        })
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
 // Utilitaires
 // ---------------------------------------------------------------------------
 
@@ -1163,20 +1391,150 @@ mod tests {
         assert_eq!(bare.description, entry.suggested_spec.description);
     }
 
-    /// Entrée sans schéma déclaré (agentbacklog) : les params libres —
-    /// acceptés par `set_params` (« spec sans schéma = params libres »)
-    /// — ne sont pas purgés au resync, sinon le chargement supprimerait
-    /// ce que le chemin d'écriture accepte.
+    /// Entrée à schéma désormais déclaré (agentbacklog porte
+    /// `install_spec` depuis la paramétrisation des recettes) : les
+    /// clés hors schéma — acceptées quand la spec n'avait pas de
+    /// schéma — sont purgées au resync (warn, jamais silencieux) ; les
+    /// clés déclarées sont conservées.
     #[test]
-    fn resync_preserve_les_params_libres_sans_schema() {
+    fn resync_purge_les_params_hors_schema() {
         let entry = entry_named("agentbacklog").unwrap();
-        assert!(entry.params.is_empty());
+        assert!(!entry.params.is_empty());
         let mut spec = materialize_spec(
             entry,
-            &HashMap::from([("meta".to_string(), "libre".to_string())]),
+            &HashMap::from([
+                ("meta".to_string(), "libre".to_string()),
+                (
+                    "install_spec".to_string(),
+                    "git+https://git.acme.corp/ab".to_string(),
+                ),
+            ]),
         );
         resync(&mut spec, entry);
-        assert_eq!(spec.params["meta"], "libre");
+        assert!(!spec.params.contains_key("meta"));
+        assert_eq!(spec.params["install_spec"], "git+https://git.acme.corp/ab");
+    }
+
+    /// Chaque `{{key}}` d'un argv `run` de recette doit être déclaré
+    /// dans les `params` de l'entrée — comme les placeholders de
+    /// template, une clé hors schéma échouerait l'install
+    /// (`resolve_recipe`) : autant la casser au test.
+    #[test]
+    fn les_placeholders_des_recettes_sont_declares() {
+        for e in CATALOG.iter() {
+            for step in &e.recipe {
+                let RecipeStep::Run { argv } = step else {
+                    continue;
+                };
+                for a in argv {
+                    for key in placeholders(a) {
+                        assert!(
+                            e.params.iter().any(|p| p.key == key),
+                            "entry « {} »: recipe placeholder {{{{{key}}}}} outside the schema",
+                            e.name
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// `{{install_spec}}` se résout : valeur fournie > override
+    /// `[catalog.<name>]` > défaut déclaré — et la clé consommée reste
+    /// dans `values` (provenance persistée dans la spec posée). Un
+    /// override invalide est refusé avant le run.
+    #[test]
+    fn resolve_recipe_substitue_install_spec() {
+        let entry = entry_named("agentbacklog").unwrap();
+        let canonical = format!("git+https://github.com/{AGENTBACKLOG_REPO}");
+        fn run_argv(recipe: &[RecipeStep]) -> &Vec<String> {
+            let RecipeStep::Run { argv } = &recipe[0] else {
+                panic!("run step attendu");
+            };
+            argv
+        }
+        // Défaut déclaré → upstream canonique.
+        let mut values = HashMap::new();
+        let recipe = resolve_recipe(entry, &mut values).unwrap();
+        assert_eq!(run_argv(&recipe).last().unwrap(), &canonical);
+        assert_eq!(values["install_spec"], canonical);
+        // Override [catalog] → fork (injecté par apply_patch_params,
+        // comme à l'install headless).
+        let patch = CatalogPatch {
+            params: HashMap::from([("install_spec".into(), "git+https://git.acme.corp/ab".into())]),
+            ..Default::default()
+        };
+        let mut values = HashMap::new();
+        apply_patch_params(entry, Some(&patch), &mut values).unwrap();
+        let recipe = resolve_recipe(entry, &mut values).unwrap();
+        assert_eq!(
+            run_argv(&recipe).last().unwrap(),
+            "git+https://git.acme.corp/ab"
+        );
+        // La valeur fournie à l'install prime sur l'override.
+        let mut values = HashMap::from([("install_spec".to_string(), "agentbacklog".to_string())]);
+        apply_patch_params(entry, Some(&patch), &mut values).unwrap();
+        let recipe = resolve_recipe(entry, &mut values).unwrap();
+        assert_eq!(run_argv(&recipe).last().unwrap(), "agentbacklog");
+        // Override invalide (flag déguisé) → refus avant le run.
+        let bad = CatalogPatch {
+            params: HashMap::from([("install_spec".into(), "-x".into())]),
+            ..Default::default()
+        };
+        assert!(apply_patch_params(entry, Some(&bad), &mut HashMap::new()).is_err());
+        // Clé patch inconnue → ignorée (déjà warn au boot), pas fatale.
+        let unknown = CatalogPatch {
+            params: HashMap::from([("nope".into(), "x".into())]),
+            ..Default::default()
+        };
+        let mut values = HashMap::new();
+        apply_patch_params(entry, Some(&unknown), &mut values).unwrap();
+        assert!(values.is_empty());
+    }
+
+    /// `[catalog.<name>]` repointe `repo`/`homepage` et les défauts
+    /// sérialisés — la recette et la sonde suivent la source choisie.
+    #[test]
+    fn overrides_repo_homepage_et_defauts() {
+        let entry = entry_named("agentbacklog").unwrap();
+        assert_eq!(
+            effective_repo(entry, None).as_deref(),
+            Some(AGENTBACKLOG_REPO)
+        );
+        // `repo` seul → `homepage` dérivée du nouveau dépôt (le lien
+        // canonique mentirait).
+        let patch = CatalogPatch {
+            repo: Some("acme/ab".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_repo(entry, Some(&patch)).as_deref(),
+            Some("acme/ab")
+        );
+        assert_eq!(
+            effective_homepage(entry, Some(&patch)).as_deref(),
+            Some("https://github.com/acme/ab")
+        );
+        // `homepage` explicite prime ; défaut de param surchargé.
+        let patch = CatalogPatch {
+            homepage: Some("https://docs.acme/ab".into()),
+            params: HashMap::from([("install_spec".into(), "agentbacklog".into())]),
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_homepage(entry, Some(&patch)).as_deref(),
+            Some("https://docs.acme/ab")
+        );
+        let params = params_with_overrides(entry, Some(&patch));
+        assert_eq!(
+            params
+                .iter()
+                .find(|p| p.key == "install_spec")
+                .unwrap()
+                .default
+                .as_deref(),
+            Some("agentbacklog")
+        );
     }
 
     /// Une spec déjà matérialisée depuis l'entrée courante ressort

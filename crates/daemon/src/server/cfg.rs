@@ -1103,6 +1103,32 @@ impl Default for WatchdogCfg {
     }
 }
 
+/// Override `[catalog.<name>]` d'une entrée du catalogue embarqué
+/// (config.toml — relu au démarrage, pas de hot-reload) : repointe les
+/// métadonnées et la source d'installation vers un fork/miroir sans
+/// recompiler le démon (audit découplage C4-C6).
+///
+/// - `repo` : dépôt upstream sondé pour `latest_version` (format
+///   `owner/name` — la sonde reste l'API GitHub) et repli du lien
+///   `homepage` quand celle-ci n'est pas donnée.
+/// - `homepage` : URL de documentation affichée par le client ;
+///   défaut dérivé `https://github.com/<repo>` quand `repo` est
+///   surchargé seul.
+/// - `params` : valeurs par défaut des paramètres déclarés de
+///   l'entrée — ex. `install_spec` (spec passé à `uv tool install` :
+///   nom de paquet d'index, `git+<url>` ou chemin local). Chaîne de
+///   résolution d'un placeholder `{{key}}` de recette : valeur fournie
+///   à l'install > `params[key]` > `default` du schéma.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct CatalogPatch {
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub homepage: Option<String>,
+    #[serde(default)]
+    pub params: HashMap<String, String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
