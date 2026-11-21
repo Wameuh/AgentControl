@@ -51,6 +51,19 @@ pub(crate) struct AdapterSpec {
     /// auto (ex. opus de claude, absent d'availableModels alors que
     /// session/set_model l'accepte). Vide = rien à ajouter.
     pub extra_models: &'static [(&'static str, &'static str)],
+    /// Modèles advisor proposables déclarés par le registre — unis à
+    /// `advisor_models` du profil comme `extra_models`. Vide
+    /// aujourd'hui : le mécanisme advisor reste l'affaire d'une
+    /// section `[agents.<id>]` explicite.
+    pub advisor_models: &'static [&'static str],
+    /// Note « catalogue complet » (#305) : quand un profil via:config
+    /// pin une commande qui n'est PAS un adaptateur du spec alors que
+    /// l'adaptateur préféré du registre est installé, list_agents
+    /// expose ce texte en `hint` — l'utilisateur voit que l'épinglé
+    /// n'annonce qu'un sous-ensemble (ex. claude-code-acp : 3 alias
+    /// nus, quand acp-claude rapporte les 14 modèles du CLI). `None`
+    /// = pas de hint pour cet adaptateur.
+    pub catalogue_note: Option<&'static str>,
 }
 
 /// Registre des adaptateurs ACP connus. `claude` : `acp-claude`
@@ -81,11 +94,36 @@ pub(crate) const KNOWN_ADAPTERS: &[AdapterSpec] = &[
         // le démon (daemon-update le pose depuis #284) — « installer »
         // renvoie l'erreur no-automatic-install + le hint ci-dessus.
         install: &[],
-        // « opus » reste proposé en extra : session/set_model accepte
-        // les alias CLI claude (opus, claude-opus-4-5…) même quand
-        // l'annonce ne les liste pas — fusion dédupliquée dans
-        // available_models au handshake (session/agent.rs).
-        extra_models: &[("opus", "Opus")],
+        // Catalogue claude (#305) : les alias nus absents de
+        // l'annonce npm claude-code-acp (qui ne rapporte que
+        // default/sonnet/haiku) + les uid versionnés relevés par
+        // probe acp-claude — session/set_model les accepte en
+        // pass-through CLI même via l'adaptateur npm. Les alias
+        // (opus, fable) sont les pointeurs stables « dernière
+        // génération » ; les uid claude-* figent une version —
+        // liste à ajuster quand le CLI en publie de nouveaux.
+        // acp-claude les annonce déjà tous → dédup par value au
+        // handshake, rien de visible en double.
+        extra_models: &[
+            ("opus", "Opus"),
+            ("fable", "Fable"),
+            ("claude-opus-5", "Opus 5"),
+            ("claude-sonnet-5", "Sonnet 5"),
+            ("claude-fable-5", "Fable 5"),
+            ("claude-fable-5-1", "Fable 5.1"),
+            ("claude-opus-4-8", "Opus 4.8"),
+            ("claude-opus-4-7", "Opus 4.7"),
+            ("claude-opus-4-6", "Opus 4.6"),
+            ("claude-sonnet-4-6", "Sonnet 4.6"),
+            ("claude-haiku-4-5-20251001", "Haiku 4.5"),
+        ],
+        advisor_models: &[],
+        catalogue_note: Some(
+            "acp-claude (livré avec AgentControl) annonce le catalogue \
+             complet du CLI claude — l'adaptateur épinglé n'en rapporte \
+             qu'un sous-ensemble ; pour en profiter, repointer \
+             [agents.claude] sur acp-claude",
+        ),
     },
     AdapterSpec {
         id: "codex",
@@ -103,6 +141,8 @@ pub(crate) const KNOWN_ADAPTERS: &[AdapterSpec] = &[
             &["npm", "i", "-g", "@zed-industries/codex-acp"],
         ],
         extra_models: &[],
+        advisor_models: &[],
+        catalogue_note: None,
     },
     AdapterSpec {
         id: "gemini",
@@ -112,6 +152,8 @@ pub(crate) const KNOWN_ADAPTERS: &[AdapterSpec] = &[
         install_hint: "npm i -g @google/gemini-cli",
         install: &[&["npm", "i", "-g", "@google/gemini-cli"]],
         extra_models: &[],
+        advisor_models: &[],
+        catalogue_note: None,
     },
     AdapterSpec {
         id: "opencode",
@@ -121,14 +163,48 @@ pub(crate) const KNOWN_ADAPTERS: &[AdapterSpec] = &[
         install_hint: "npm i -g opencode-ai",
         install: &[&["npm", "i", "-g", "opencode-ai"]],
         extra_models: &[],
+        advisor_models: &[],
+        catalogue_note: None,
     },
 ];
 
+/// `extra_models` du spec en `Vec<ExtraModel>` — partagé entre le
+/// profil auto et la fusion dans les profils déclarés.
+fn spec_extra_models(spec: &AdapterSpec) -> Vec<ExtraModel> {
+    spec.extra_models
+        .iter()
+        .map(|(v, l)| ExtraModel {
+            value: (*v).to_string(),
+            label: (*l).to_string(),
+        })
+        .collect()
+}
+
+/// Fusionne les compléments du registre (`extra_models`,
+/// `advisor_models`) dans un profil DÉCLARÉ — via:config ou builtin,
+/// jamais via:auto (déjà pourvu par `auto_profile`). Les valeurs de
+/// l'utilisateur priment à value égal : il peut relabeller un
+/// complément (« Opus 4.5 ») mais jamais le perdre. Idempotent (dédup
+/// par value) : le round-trip `acctl comp set agents` persiste les
+/// extras fusionnés dans `[agents.<id>]` sans doublon ni boucle — au
+/// rechargement ils sont relus comme valeurs config, déjà présentes.
+fn merge_registry_complements(p: &mut AgentProfile, spec: &AdapterSpec) {
+    for e in spec_extra_models(spec) {
+        if !p.extra_models.iter().any(|x| x.value == e.value) {
+            p.extra_models.push(e);
+        }
+    }
+    for v in spec.advisor_models {
+        if !p.advisor_models.iter().any(|x| x == v) {
+            p.advisor_models.push((*v).to_string());
+        }
+    }
+}
+
 /// Profil auto d'un adaptateur du registre — `commands` = tous les
 /// candidats (la résolution à chaud choisit le premier présent),
-/// `via:Auto`. `extra_models` est repris du spec (compléments
-/// d'annonce du registre) ; advisor reste l'affaire d'une section
-/// `[agents.<id>]` qui prime sur l'auto.
+/// `via:Auto`. `extra_models`/`advisor_models` sont repris du spec
+/// (compléments d'annonce du registre).
 fn auto_profile(spec: &AdapterSpec) -> AgentProfile {
     AgentProfile {
         name: spec.name.to_string(),
@@ -145,17 +221,9 @@ fn auto_profile(spec: &AdapterSpec) -> AgentProfile {
         model_override_cmd: None,
         // Les extra_models du spec sont des compléments d'annonce
         // contrôlés par le registre (ex. opus de claude, absent
-        // d'availableModels alors que session/set_model l'accepte) ;
-        // advisor reste réservé à une section [agents.<id>] explicite.
-        extra_models: spec
-            .extra_models
-            .iter()
-            .map(|(v, l)| ExtraModel {
-                value: (*v).to_string(),
-                label: (*l).to_string(),
-            })
-            .collect(),
-        advisor_models: Vec::new(),
+        // d'availableModels alors que session/set_model l'accepte).
+        extra_models: spec_extra_models(spec),
+        advisor_models: spec.advisor_models.iter().map(|s| s.to_string()).collect(),
         provision_skills: true,
     }
 }
@@ -206,7 +274,60 @@ pub(crate) fn sync_auto_agents(
             }
         }
     }
+    // Profils déclarés (via:config/builtin) dont l'id est connu du
+    // registre : la commande pinnée et le reste du profil restent
+    // strictement ceux de l'utilisateur — seuls les COMPLÉMENTS du
+    // registre sont unis (ex. opus de claude, absent d'availableModels
+    // de claude-code-acp alors que session/set_model l'accepte —
+    // #305). Le merge est idempotent : rejoué à chaque sync sans
+    // jamais dupliquer.
+    for spec in KNOWN_ADAPTERS {
+        if let Some(p) = agents.get_mut(spec.id) {
+            if p.via != AgentVia::Auto {
+                merge_registry_complements(p, spec);
+            }
+        }
+    }
     (added, removed)
+}
+
+/// Hint « catalogue complet » exposé par list_agents (#305) : un
+/// profil déclaré (via:config/builtin) dont la commande effective ne
+/// correspond à AUCUN adaptateur du spec, alors qu'au moins un
+/// adaptateur préféré du registre est installé et que le spec porte
+/// une `catalogue_note`. `None` sinon — profil auto, pin sur
+/// l'adaptateur du registre, spec sans note, ou adaptateur préféré
+/// absent (le hint proposerait une commande introuvable).
+/// `resolves` = même prédicat « argv[0] résolvable » que sync.
+pub(crate) fn catalogue_hint(
+    id: &str,
+    p: &AgentProfile,
+    resolves: &dyn Fn(&str) -> bool,
+) -> Option<String> {
+    if p.via == AgentVia::Auto {
+        return None;
+    }
+    let spec = KNOWN_ADAPTERS.iter().find(|s| s.id == id)?;
+    let note = spec.catalogue_note?;
+    // Commande effective : premier candidat résolvable, sinon le
+    // premier — même règle que misc::effective_command.
+    let effective = p
+        .commands
+        .iter()
+        .find(|c| c.first().map(|b| resolves(b)).unwrap_or(false))
+        .or_else(|| p.commands.first())?;
+    let pinned = effective.first()?;
+    if spec
+        .commands
+        .iter()
+        .any(|c| c.first().copied() == Some(pinned.as_str()))
+    {
+        return None;
+    }
+    spec.commands
+        .iter()
+        .any(|c| c.first().map(|b| resolves(b)).unwrap_or(false))
+        .then(|| note.to_string())
 }
 
 /// Hint d'install pour un id de profil — registre d'abord (couvre les
@@ -285,10 +406,12 @@ mod tests {
         let p = &agents["claude"];
         assert_eq!(p.via, AgentVia::Auto);
         assert_eq!(p.commands, vec![vec!["acp-claude".to_string()]]);
-        // opus : session/set_model accepte les alias CLI même hors
+        // Catalogue claude (#305) : alias opus/fable + uid versionnés
+        // — session/set_model accepte les alias CLI même hors
         // annonce → extra_models du registre.
-        assert_eq!(p.extra_models.len(), 1);
-        assert_eq!(p.extra_models[0].value, "opus");
+        assert!(p.extra_models.iter().any(|e| e.value == "opus"));
+        assert!(p.extra_models.iter().any(|e| e.value == "fable"));
+        assert!(p.extra_models.iter().any(|e| e.value == "claude-opus-5"));
         // Second scan idempotent : ni ajout ni retrait.
         let (a2, r2) = sync_auto_agents(&mut agents, &|b| b == "acp-claude");
         assert!(a2.is_empty() && r2.is_empty());
@@ -334,8 +457,11 @@ mod tests {
         assert_eq!(agents["claude"].commands[0], vec!["acp-claude".to_string()]);
     }
 
-    /// `[agents.claude]` déclaré (via:config) → l'auto ne l'écrase
-    /// jamais, même si l'adaptateur est détecté.
+    /// `[agents.claude]` déclaré (via:config) → l'auto n'écrase
+    /// jamais la commande, même si l'adaptateur est détecté — mais
+    /// les COMPLÉMENTS du registre (extra_models) sont fusionnés
+    /// (#305) : un pin npm garde opus/fable/uid alors que son
+    /// availableModels ne rapporte que default/sonnet/haiku.
     #[test]
     fn config_prime_sur_auto() {
         let mut agents = HashMap::new();
@@ -348,7 +474,71 @@ mod tests {
         );
         let (a, r) = sync_auto_agents(&mut agents, &|b| b == "acp-claude");
         assert!(a.is_empty() && r.is_empty());
-        assert_eq!(agents["claude"].commands[0], vec!["mon-adaptateur"]);
+        let p = &agents["claude"];
+        assert_eq!(p.commands[0], vec!["mon-adaptateur"]);
+        assert_eq!(p.via, AgentVia::Config);
+        // Compléments du registre fusionnés, commande intacte.
+        assert!(p.extra_models.iter().any(|e| e.value == "opus"));
+        assert!(p.extra_models.iter().any(|e| e.value == "fable"));
+        assert!(p.extra_models.iter().any(|e| e.value == "claude-opus-5"));
+        // Idempotent : un second sync ne duplique rien.
+        sync_auto_agents(&mut agents, &|b| b == "acp-claude");
+        let n = agents["claude"].extra_models.len();
+        sync_auto_agents(&mut agents, &|b| b == "acp-claude");
+        assert_eq!(agents["claude"].extra_models.len(), n);
+    }
+
+    /// #305 : une valeur config à value égal prime sur le libellé du
+    /// registre — l'utilisateur peut relabeller (« Opus 4.5 »), pas
+    /// perdre ni dupliquer le complément.
+    #[test]
+    fn config_extra_models_priment_sur_le_registre() {
+        let mut agents = HashMap::new();
+        let mut p = profile(&[&["claude-code-acp"]]);
+        p.via = AgentVia::Config;
+        p.extra_models.push(ExtraModel {
+            value: "opus".into(),
+            label: "Opus 4.5".into(),
+        });
+        agents.insert("claude".to_string(), p);
+        sync_auto_agents(&mut agents, &|_| false);
+        let extras = &agents["claude"].extra_models;
+        let opus: Vec<_> = extras.iter().filter(|e| e.value == "opus").collect();
+        assert_eq!(opus.len(), 1);
+        assert_eq!(opus[0].label, "Opus 4.5");
+        // Les autres compléments du registre sont tout de même là.
+        assert!(extras.iter().any(|e| e.value == "fable"));
+    }
+
+    /// #305 : `catalogue_hint` — pin npm alors qu'acp-claude est
+    /// installé → hint ; pin sur l'adaptateur du registre, profil
+    /// auto, ou adaptateur préféré absent → pas de hint.
+    #[test]
+    fn catalogue_hint_sur_pin_non_registre() {
+        let resolves = |b: &str| b == "acp-claude" || b == "claude-code-acp";
+        // Pin npm + acp-claude présent → hint.
+        let mut p = profile(&[&["claude-code-acp"]]);
+        p.via = AgentVia::Config;
+        assert!(catalogue_hint("claude", &p, &resolves).is_some());
+        // Pin sur l'adaptateur du registre → muet.
+        let mut p2 = profile(&[&["acp-claude"]]);
+        p2.via = AgentVia::Config;
+        assert!(catalogue_hint("claude", &p2, &resolves).is_none());
+        // Profil auto → muet (déjà le meilleur adaptateur).
+        let p3 = profile(&[&["acp-claude"]]);
+        assert!(catalogue_hint("claude", &p3, &resolves).is_none());
+        // acp-claude absent → pas de hint (on ne propose pas une
+        // commande introuvable) — profil config pour isoler le cas.
+        let mut p4 = profile(&[&["claude-code-acp"]]);
+        p4.via = AgentVia::Config;
+        assert!(catalogue_hint("claude", &p4, &|b| b == "claude-code-acp").is_none());
+        // Id hors registre ou spec sans note → muet.
+        let mut p5 = profile(&[&["foo"]]);
+        p5.via = AgentVia::Config;
+        assert!(catalogue_hint("inconnu", &p5, &resolves).is_none());
+        let mut p6 = profile(&[&["autre-chose"]]);
+        p6.via = AgentVia::Config;
+        assert!(catalogue_hint("codex", &p6, &resolves).is_none());
     }
 
     /// `install_hint_for` couvre les ids du registre (auto et déclarés).

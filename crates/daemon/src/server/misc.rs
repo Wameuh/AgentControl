@@ -161,6 +161,17 @@ impl Daemon {
                     // le client les fusionne à caps.models
                     // dans la vue des capacités.
                     "extra_models": a.extra_models,
+                    // Hint « catalogue complet » (#305) : profil
+                    // déclaré pinant un adaptateur autre que celui
+                    // du registre alors que l'adaptateur préféré est
+                    // installé (ex. claude-code-acp vs acp-claude).
+                    // null sinon — additif, les vieux clients
+                    // l'ignorent.
+                    "hint": crate::server::agents_auto::catalogue_hint(
+                        k,
+                        a,
+                        &command_available,
+                    ),
                 })
             })
             .collect();
