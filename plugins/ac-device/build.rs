@@ -1,7 +1,7 @@
-// Aucune commande webview : `signingInfo` n'est appelée que depuis le
-// Rust via `run_mobile_plugin` — jamais d'invoke JS → pas de
-// permissions à générer.
-const COMMANDS: &[&str] = &[];
+// Commande webview : `set_system_bars` (barres d'état/navigation lisibles
+// dans les deux thèmes, Y4). `signingInfo` reste Rust-only via
+// `run_mobile_plugin` — jamais d'invoke JS.
+const COMMANDS: &[&str] = &["set_system_bars"];
 
 fn main() {
     // `android_path` fait émettre `cargo:android_library_path` à la

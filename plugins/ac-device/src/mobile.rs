@@ -24,6 +24,18 @@ impl<R: Runtime> Device<R> {
             )
             .map_err(Into::into)
     }
+
+    /// Barres système lisibles suivant le thème (Y4) — `@Command
+    /// setSystemBars` Kotlin : `light: true` = icônes sombres (thème
+    /// clair), `false` = icônes claires (thème sombre).
+    pub fn set_system_bars(&self, light: bool) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin(
+                "setSystemBars",
+                serde_json::json!({ "light": light }),
+            )
+            .map_err(Into::into)
+    }
 }
 
 /// Enregistre la classe Kotlin auprès du runtime Android.

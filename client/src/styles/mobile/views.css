@@ -71,3 +71,14 @@ body.android #connview-body { padding: 16px; }
   font-size: 13px; color: var(--muted); }
 body.android #c-pubkey { font-size: 13px; max-height: 130px; }
 body.android #c-pubkey-box { font-size: 15px; }
+
+/* Paramètres en liste (Y4) : chaque section fermée est une ligne de
+   56 px — le chevron pointe à droite (rotation déjà posée par
+   .s-sec:not([open])) et le résumé d'état reste à droite en --dim.
+   En sous-écran (m-sub) : seule la section ouverte reste, sans son
+   summary puisque son titre monte dans l'en-tête. */
+body.android #settings-view:not(.m-sub) .s-sec > summary {
+  min-height: 56px;
+}
+body.android #settings-view.m-sub .s-sec:not([open]) { display: none; }
+body.android #settings-view.m-sub .s-sec[open] > summary { display: none; }

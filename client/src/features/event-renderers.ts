@@ -13,6 +13,7 @@ import { app } from "../core/state";
 import type { AcEvent, CmdInfo, ConfigOption } from "../core/types";
 import { t } from "../i18n";
 import { icon, qIco } from "../ui/icons";
+import { tick } from "../mobile/haptics";
 
 // Seuils au-delà desquels une bulle user est repliée par défaut.
 const USER_FOLD_CHARS = 480;
@@ -601,7 +602,9 @@ export class EventRenderer {
           session: app.current!.id,
           request_id: ev.request_id,
           option_id: o.option_id,
-        }).catch((e) => showErr(String(e)));
+        })
+          .then(() => tick("resolve"))
+          .catch((e) => showErr(String(e)));
         d.classList.add("done");
       };
       box.appendChild(b);
@@ -628,7 +631,9 @@ export class EventRenderer {
         session: app.current!.id,
         request_id: ev.request_id,
         answer: parsed,
-      }).catch((e) => showErr(String(e)));
+      })
+        .then(() => tick("resolve"))
+        .catch((e) => showErr(String(e)));
       d.classList.add("done");
     };
     d.querySelector<HTMLButtonElement>(".btn-allow")!.onclick = () => answer(input.value || "{}");

@@ -6,6 +6,7 @@
 
 import { call } from "../core/rpc";
 import type { AcEvent, SessionMeta } from "../core/types";
+import { tick } from "./haptics";
 
 export interface PendingReq {
   seq: number;
@@ -51,7 +52,10 @@ export async function findPending(s: SessionMeta): Promise<PendingReq[]> {
 
 /** Répond à une demande en attente, session ouverte ou non — `conn` est
  *  obligatoire : sans lui call() viserait la connexion courante. Signature
- *  légère (id + conn) réutilisable par les actions de notification (P4). */
+ *  légère (id + conn) réutilisable par les actions de notification (P4).
+ *  Entonnoir unique des réponses « hors session » (accueil inbox, actions
+ *  de notification Y3) : le tick haptique « resolve » (Y4) vit ici pour
+ *  couvrir tous les appelants sans double vibration. */
 export function respondPending(
   s: { id: string; conn?: string },
   requestId: string,
@@ -59,5 +63,8 @@ export function respondPending(
 ): Promise<unknown> {
   return call("respond", {
     session: s.id, conn: s.conn, request_id: requestId, ...reply,
+  }).then((r) => {
+    tick("resolve");
+    return r;
   });
 }

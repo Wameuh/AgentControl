@@ -153,6 +153,14 @@ export function applyTheme(name: "dark" | "light", persist = true) {
   if (persist) localStorage.setItem("ac-theme", name);
   // La palette dérivée dépend du mode : recalcul après le toggle.
   syncMeshAccent();
+  // Barres système Android (Y4) : icônes sombres en thème clair, claires
+  // en thème sombre — plugin natif ac-device ; erreurs avalées (web,
+  // plugin indisponible). Desktop inchangé.
+  if (android) {
+    void invoke("plugin:ac-device|set_system_bars", {
+      light: name === "light",
+    }).catch(() => {});
+  }
 }
 
 // Couleur d'accent — dimension orthogonale à dark/light (cf. styles/base.css).

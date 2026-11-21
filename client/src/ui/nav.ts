@@ -8,6 +8,7 @@
 
 import { $, esc } from "../core/dom";
 import { isAndroid } from "../core/chrome";
+import { closeSettingsSection } from "../mobile/settings-mobile";
 import { icon, type IconName } from "./icons";
 
 type ScrimOwner = "sheet" | "queue";
@@ -173,6 +174,10 @@ export class OverlayNav {
     } else if (id === "settings") {
       // Passe par le handler de ✕ : hidden + levée de l'inert + nav.close.
       $("settings-close").click();
+    } else if (id === "settings-sec") {
+      // Sous-écran Paramètres (Y4) : referme la section ouverte — son
+      // « toggle » retire m-sub et restaure le titre (settings-mobile).
+      closeSettingsSection();
     } else if (id === "connview") {
       // Même motif : le ✕ de la vue connexion porte le close complet.
       $("connview-close").click();

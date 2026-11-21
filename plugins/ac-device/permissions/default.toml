@@ -1,0 +1,12 @@
+"$schema" = "schemas/schema.json"
+[default]
+description = """
+Plugin appareil : `set_system_bars` ajuste l'apparence des barres
+d'état/navigation Android suivant le thème de l'UI (icônes sombres en
+thème clair, claires en thème sombre — Y4). `signingInfo` reste
+Rust-only (verdict update in-place, pas de commande webview).
+"""
+
+permissions = [
+  "allow-set-system-bars",
+]

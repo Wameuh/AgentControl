@@ -3,8 +3,10 @@
 // SHA-256 du certificat signataire) et rend un verdict
 // `update_in_place` comparé au certificat release injecté au build
 // (AGENTCONTROL_ANDROID_CERT_SHA256). Consommé par la commande
-// `app_signing` de src-tauri — aucune commande webview.
+// `app_signing` de src-tauri. Y4 : commande webview `set_system_bars`
+// (apparence des barres système suivant le thème de l'UI).
 
+mod commands;
 mod error;
 mod models;
 #[cfg(desktop)]
@@ -24,6 +26,7 @@ pub use mobile::Device;
 /// Initializes the plugin.
 pub fn init<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
     tauri::plugin::Builder::new("ac-device")
+        .invoke_handler(tauri::generate_handler![commands::set_system_bars])
         .setup(|app, api| {
             #[cfg(mobile)]
             let dev = mobile::init(app, api)?;
