@@ -302,9 +302,26 @@ impl Components {
             // Listes modèles/modes/thought_level annoncées par les
             // profils configurés — union sur tous les `*_agent`
             // effectifs (meta.json des sessions) → les dropdowns
-            // couvrent chaque profil routé par rôle.
-            let role_agents = cfg.role_agents();
-            let dyn_ = crate::server::orch_cfg::dyn_choices_multi(&self.root, &role_agents);
+            // couvrent chaque profil routé par rôle. `agent` vide est
+            // résolu pour les listes (premier profil disponible, même
+            // règle qu'au dispatch) — les *valeurs* affichées restent
+            // la config brute (« » = auto, jamais figé).
+            let role_agents: Vec<String> = {
+                let mut eff = cfg.clone();
+                if eff.agent.is_empty() {
+                    let agents = self.agents.read().await;
+                    let mut ids: Vec<&str> = agents.keys().map(String::as_str).collect();
+                    ids.sort_unstable();
+                    eff.agent = ids
+                        .into_iter()
+                        .find(|id| crate::server::misc::profile_available(&agents[*id]))
+                        .unwrap_or("")
+                        .to_string();
+                }
+                eff.role_agents().into_iter().map(str::to_string).collect()
+            };
+            let role_refs: Vec<&str> = role_agents.iter().map(String::as_str).collect();
+            let dyn_ = crate::server::orch_cfg::dyn_choices_multi(&self.root, &role_refs);
             // Ids des profils vivants, triés — lus dans la map partagée
             // (hot-reload des `[agents.*]` inclus) : un profil déclaré
             // à chaud est proposable dans les dropdowns `*_agent`.

@@ -357,11 +357,25 @@ pub struct OrchCfg {
     /// workers legacy sans routage, appels `gh` sans `--repo`) et cwd
     /// des appels `agentbacklog`/`gh` de l'orchestrateur — les workers
     /// taggés sont routés par `repo_workspaces` (workspace_for).
-    /// Défaut /workspace.
+    /// Défaut : toplevel git du cwd du démon, sinon son cwd — jamais
+    /// un chemin en dur qui n'existe pas sur la machine.
     #[serde(default = "dws")]
     pub workspace: String,
-    /// Profil agent des workers (défaut "devin").
-    #[serde(default = "dagent")]
+    /// Dossier d'état partagé de l'orchestrateur : flock
+    /// `orchestrator.lock`, `orchestrator.pause`,
+    /// `orchestrator-state.json`, `plans/`, `metrics.jsonl`,
+    /// worktrees `pr-reviews/`. Vide = `~/.agentbacklog` (défaut
+    /// historique — le flock n'exclut les implémentations concurrentes
+    /// que sur le MÊME dossier : tout orchestrateur partageant la file
+    /// doit partager le `state_dir`). `~`/`$VAR` expandés côté démon
+    /// comme les cwd de session (expand_cwd).
+    #[serde(default)]
+    pub state_dir: String,
+    /// Profil agent des workers : vide = premier profil `[agents.*]`
+    /// disponible résolu au dispatch (orch_cfg_snapshot) — défaut
+    /// neutre, l'environnement décide (la valeur historique "devin"
+    /// était calibrée pour l'auteur).
+    #[serde(default)]
     pub agent: String,
     /// Profil `[agents.*]` des workers `Backlog-W*` — vide = `agent`.
     #[serde(default)]
@@ -375,15 +389,17 @@ pub struct OrchCfg {
     /// Profil des reviewers PR `PRReview-*` — vide = `agent`.
     #[serde(default)]
     pub pr_reviewer_agent: String,
-    /// Mode demandé au spawn (défaut "bypass").
-    #[serde(default = "dmode")]
+    /// Mode demandé au spawn — vide = défaut du profil (l'agent
+    /// décide ; "bypass" était calibré Devin).
+    #[serde(default)]
     pub mode: String,
-    /// Modèle demandé au spawn (défaut "swe-2-high").
-    #[serde(default = "dmodel")]
+    /// Modèle demandé au spawn — vide = défaut du profil ("swe-2-high"
+    /// était calibré Devin).
+    #[serde(default)]
     pub model: String,
-    /// Option `thought_level` posée après chaque spawn (défaut "max",
-    /// vide = ne rien poser).
-    #[serde(default = "dlevel")]
+    /// Option `thought_level` posée après chaque spawn — vide = ne
+    /// rien poser ("max" était calibré Devin).
+    #[serde(default)]
     pub thought_level: String,
     /// Cooldown entre deux nudges à la même session (défaut 900 s).
     #[serde(default = "d900")]
@@ -418,18 +434,21 @@ pub struct OrchCfg {
     /// --claim-review, --verdict, --reassign).
     #[serde(default)]
     pub plan_review: bool,
-    /// Mode demandé au spawn des planificateurs `Backlog-P*` (défaut
-    /// "plan"). Vocabulaire propre à l'agent (`agent`), d'où un param.
-    #[serde(default = "dplan")]
+    /// Mode demandé au spawn des planificateurs `Backlog-P*` — vide =
+    /// défaut du profil. Vocabulaire propre à l'agent (`agent`), d'où
+    /// un param ("plan" était calibré Devin).
+    #[serde(default)]
     pub planner_mode: String,
-    /// Mode demandé au spawn des reviewers `Backlog-R*` (défaut "smart").
-    #[serde(default = "dsmart")]
+    /// Mode demandé au spawn des reviewers `Backlog-R*` — vide =
+    /// défaut du profil ("smart" était calibré Devin).
+    #[serde(default)]
     pub reviewer_mode: String,
     /// Mode des implémentations : workers `Backlog-W*` des items
     /// `no_plan=1` et implémenteurs (planificateur approuvé passé en
     /// ce mode, ou nouvelle session d'implémentation quand le
-    /// planificateur a disparu avant le verdict). Défaut "bypass".
-    #[serde(default = "dmode")]
+    /// planificateur a disparu avant le verdict) — vide = défaut du
+    /// profil ("bypass" était calibré Devin).
+    #[serde(default)]
     pub implement_mode: String,
     /// Nombre maximal de rounds de revue par item : au-delà, un verdict
     /// denied/conditional gèle l'item en `plan_review` « stalled —
@@ -465,9 +484,9 @@ pub struct OrchCfg {
     /// est requis.
     #[serde(default = "dtrigger")]
     pub pr_review_trigger: String,
-    /// Mode demandé au spawn des reviewers `PRReview-<N>` (défaut
-    /// "smart").
-    #[serde(default = "dsmart")]
+    /// Mode demandé au spawn des reviewers `PRReview-<N>` — vide =
+    /// défaut du profil ("smart" était calibré Devin).
+    #[serde(default)]
     pub pr_reviewer_mode: String,
     /// Modèle demandé au spawn des reviewers PR — vide = `model`.
     #[serde(default)]
@@ -512,10 +531,10 @@ pub struct OrchCfg {
     /// sessions spawnées pour un item taggé (worker legacy, planner,
     /// implémenteur, reviewer de plan — `workspace_for`), propose les
     /// Managers (un par entrée) et adosse les reviews PR
-    /// (`orch_review::ws_of`) ; défaut
-    /// `{"AgentControl": "/workspace"}` — hérité du script d'origine.
+    /// (`orch_review::ws_of`) ; vide = un seul workspace implicite
+    /// (un item taggé attend alors un routage — `repo_routable`).
     /// Dernier champ : sous-table TOML (voir l'avertissement en tête).
-    #[serde(default = "drw")]
+    #[serde(default)]
     pub repo_workspaces: std::collections::BTreeMap<String, String>,
 }
 
@@ -540,26 +559,23 @@ fn drelbranch() -> String {
 fn dgroup() -> String {
     "AgentControl".into()
 }
+/// Détection du workspace implicite : `git rev-parse --show-toplevel`
+/// sur le cwd du démon (lancé depuis un checkout → la racine du repo,
+/// jamais un sous-dossier), sinon le cwd tel quel — aucun chemin en
+/// dur : une install sans `/workspace` démarre quand même. Un seul
+/// appel à la lecture de la config / au « vide → défaut ».
 fn dws() -> String {
-    "/workspace".into()
-}
-fn dagent() -> String {
-    "devin".into()
-}
-fn dmode() -> String {
-    "bypass".into()
-}
-fn dmodel() -> String {
-    "swe-2-high".into()
-}
-fn dlevel() -> String {
-    "max".into()
-}
-fn dplan() -> String {
-    "plan".into()
-}
-fn dsmart() -> String {
-    "smart".into()
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let top = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(&cwd)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    top.unwrap_or_else(|| cwd.display().to_string())
 }
 fn drounds() -> u32 {
     5
@@ -572,9 +588,6 @@ fn d2() -> u32 {
 }
 fn d2700() -> u64 {
     2700
-}
-fn drw() -> std::collections::BTreeMap<String, String> {
-    [("AgentControl".to_string(), dws())].into_iter().collect()
 }
 
 impl Default for OrchCfg {
@@ -592,29 +605,30 @@ impl Default for OrchCfg {
             title_prefix: dprefix(),
             group: dgroup(),
             workspace: dws(),
-            agent: dagent(),
+            state_dir: String::new(),
+            agent: String::new(),
             worker_agent: String::new(),
             planner_agent: String::new(),
             reviewer_agent: String::new(),
             pr_reviewer_agent: String::new(),
-            mode: dmode(),
-            model: dmodel(),
-            thought_level: dlevel(),
+            mode: String::new(),
+            model: String::new(),
+            thought_level: String::new(),
             nudge_cooldown_secs: 900,
             metrics: true,
             prompt: None,
             manager_prompt: None,
             plan_review: false,
-            planner_mode: dplan(),
-            reviewer_mode: dsmart(),
-            implement_mode: dmode(),
+            planner_mode: String::new(),
+            reviewer_mode: String::new(),
+            implement_mode: String::new(),
             max_review_rounds: drounds(),
             plan_rereview: true,
             pr_rereview: true,
             reviewer_reuse: true,
             pr_review: false,
             pr_review_trigger: dtrigger(),
-            pr_reviewer_mode: dsmart(),
+            pr_reviewer_mode: String::new(),
             pr_reviewer_model: String::new(),
             pr_reviewer_effort: String::new(),
             planner_model: String::new(),
@@ -624,12 +638,46 @@ impl Default for OrchCfg {
             pr_review_max_parallel: d2(),
             pr_review_timeout: d2700(),
             worker_pool: Vec::new(),
-            repo_workspaces: drw(),
+            repo_workspaces: std::collections::BTreeMap::new(),
         }
     }
 }
 
+/// `~/.agentbacklog` — dossier d'état historique partagé avec le
+/// script Python legacy (le flock `orchestrator.lock` doit être au
+/// même endroit pour que les deux implémentations s'excluent).
+pub(crate) fn default_state_dir() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".agentbacklog")
+}
+
 impl OrchCfg {
+    /// Résout les défauts environnementaux des champs « vide =
+    /// cassant » après désérialisation : un `workspace = ""`
+    /// explicite dans config.toml vaut la clé absente → défaut env.
+    /// `state_dir`/`agent` gardent leur vide — résolus à la
+    /// consommation (`state_dir()`, `orch_cfg_snapshot`), jamais figés.
+    pub fn normalize(&mut self) {
+        if self.workspace.trim().is_empty() {
+            self.workspace = dws();
+        }
+    }
+
+    /// Dossier d'état résolu : le param `state_dir` expandé
+    /// (`~`/`$VAR` — même règle que les cwd de session, expand_cwd),
+    /// ou `~/.agentbacklog` quand il est vide (défaut historique).
+    /// Une expansion impossible (`~user` inconnu) retombe sur le
+    /// littéral — le chemin affiché dans `orch status` trahit l'erreur.
+    pub fn state_dir(&self) -> std::path::PathBuf {
+        let raw = self.state_dir.trim();
+        if raw.is_empty() {
+            return default_state_dir();
+        }
+        std::path::PathBuf::from(crate::server::expand_cwd(raw).unwrap_or_else(|_| raw.to_string()))
+    }
+
     /// Cap effectif `max_working` : 0 = non borné → capacité workers
     /// (`worker_capacity` — somme du pool, ou `max_workers` en mode
     /// legacy sans pool).
@@ -1156,6 +1204,68 @@ mod tests {
         .apply_to(&mut p);
         assert_eq!(p.at_tokens, Some(50));
         assert_eq!(p.at_pct, Some(0.4));
+    }
+
+    /// Défauts neutres (#320) : aucune valeur calibrée pour
+    /// l'environnement d'origine — workspace dérivé de la machine
+    /// (non vide, jamais « /workspace » en dur), routage vide,
+    /// agent/mode/modèle/effort vides (= résolus à l'usage).
+    #[test]
+    fn orch_defaults_env_neutres() {
+        let c = OrchCfg::default();
+        assert!(!c.workspace.is_empty(), "workspace must be env-derived");
+        assert!(c.repo_workspaces.is_empty());
+        assert!(c.agent.is_empty());
+        assert!(c.mode.is_empty() && c.model.is_empty() && c.thought_level.is_empty());
+        assert!(c.planner_mode.is_empty() && c.reviewer_mode.is_empty());
+        assert!(c.implement_mode.is_empty() && c.pr_reviewer_mode.is_empty());
+        assert!(
+            c.state_dir.is_empty(),
+            "state_dir reste vide — résolu à l'usage"
+        );
+        // Vide → défaut historique partagé avec le script legacy.
+        assert_eq!(c.state_dir(), default_state_dir());
+    }
+
+    /// `workspace = ""` explicite (config.toml) = clé absente :
+    /// `normalize` y remet le défaut env — un champ cassant ne reste
+    /// jamais vide après le boot (OrchProbe::open).
+    #[test]
+    fn normalize_workspace_vide() {
+        let mut c = OrchCfg {
+            workspace: "  ".into(),
+            ..Default::default()
+        };
+        c.normalize();
+        assert_eq!(c.workspace, OrchCfg::default().workspace);
+        // Non vide → inchangé.
+        let mut c = OrchCfg {
+            workspace: "/custom/ws".into(),
+            ..Default::default()
+        };
+        c.normalize();
+        assert_eq!(c.workspace, "/custom/ws");
+    }
+
+    /// `state_dir` : chemin custom pris tel quel, `~` expandé comme
+    /// les cwd de session (expand_cwd).
+    #[test]
+    fn state_dir_custom_et_expansion() {
+        let c = OrchCfg {
+            state_dir: "/tmp/orch-state-x".into(),
+            ..Default::default()
+        };
+        assert_eq!(c.state_dir(), std::path::PathBuf::from("/tmp/orch-state-x"));
+        if let Some(home) = std::env::var_os("HOME") {
+            let c = OrchCfg {
+                state_dir: "~/orch-state".into(),
+                ..Default::default()
+            };
+            assert_eq!(
+                c.state_dir(),
+                std::path::PathBuf::from(home).join("orch-state")
+            );
+        }
     }
 
     /// `agent_confs` (hot-reload) : ne lit que `[agents.*]` — le reste

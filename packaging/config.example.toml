@@ -162,7 +162,7 @@ name = "Codex CLI"
 command = ["codex-acp"]
 
 [agents.codex.env]
-CODEX_PATH = "/home/wameuh/.local/bin/codex" # adapter : chemin absolu du codex standalone
+# CODEX_PATH = "/chemin/absolu/vers/codex" # adapter : chemin absolu du codex standalone
 
 # Claude — adaptateur maison `acp-claude`, livré dans le tarball à
 # côté du démon (et posé par daemon-update) : aucun npm requis, le

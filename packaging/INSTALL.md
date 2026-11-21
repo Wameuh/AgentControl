@@ -1,14 +1,14 @@
 # AgentControl — Installation
 
 Archive: `agentcontrol-server-<arch>-linux.tar.gz`
-Contents: `agentcontrol-daemon` · `acctl` · `acp-claude` · `packaging/` (systemd unit, example config)
+Contents: `agentcontrol-daemon` · `acctl` · `acp-claude` · `ac-wait` · `packaging/` (systemd unit, example config)
 
 ## 1. Server (Ubuntu — where the agents run)
 
 ```bash
 tar xzf agentcontrol-server-*.tar.gz
 mkdir -p ~/.local/bin ~/.agentcontrol ~/.config/systemd/user
-cp agentcontrol-daemon acctl acp-claude ~/.local/bin/
+cp agentcontrol-daemon acctl acp-claude ac-wait ~/.local/bin/
 cp packaging/agentcontrol-daemon.service ~/.config/systemd/user/
 cp packaging/config.example.toml ~/.agentcontrol/config.toml
 
@@ -166,3 +166,68 @@ daemon is down (workers keep running; spawn/nudge/rm resume on
 restart). Same exposure as the supervisord program dying with the
 container — just not resurrected by `autorestart` while the daemon is
 absent.
+
+## 6. Orchestrator (optional — `backlog-orchestrator`)
+
+The internal `backlog-orchestrator` component drives a shared task
+queue: it claims pending items, spawns one worker session per item,
+nudges stalled ones, runs the plan→review pipeline and serves PR
+reviews. It is **opt-in** (`[backlog_orchestrator] enabled = true`,
+or `acctl orch set enabled true` for a persisted toggle) — the daemon
+starts fine without it and none of the prerequisites below is needed
+otherwise.
+
+Prerequisites:
+
+- **agentbacklog** — the queue CLI the orchestrator shells out to
+  (`agentbacklog --list/--pop/…`). Resolved either on the daemon's
+  PATH (`uv tool install git+https://github.com/Wameuh/AgentBacklog`)
+  or as a managed `tool` component — the catalog recipe does both
+  (`component_install agentbacklog`, also offered by the Backlog
+  sidebar tab). Without it the component reports
+  `waiting: agentbacklog missing` — an explicit phase, not a crash.
+- **An available agent profile** — `agent` empty (default) resolves
+  to the first `available` `[agents.*]` profile at dispatch
+  (auto-discovered ACP adapters count);
+  `worker_agent`/`planner_agent`/`reviewer_agent`/
+  `pr_reviewer_agent` override it per role. No resolvable profile →
+  a clear `no available agent profile` error in `acctl orch status`.
+  `mode`/`model`/`thought_level` empty (defaults) let the profile
+  decide — the previous named defaults were calibrated for Devin.
+- **A forge CLI/REST matching `[[forges]]`** — for the PR-review
+  pipeline and the forge calls of worker prompts. GitHub: `gh` on
+  the PATH + `gh auth login`. Other forges declared in `[[forges]]`
+  (gitlab/gerrit) use their own CLI/credentials there. Not needed
+  for pure queue dispatch — only the review pipeline is forge-bound.
+- **Workspace** — `workspace` defaults to `git rev-parse
+  --show-toplevel` run in the daemon's cwd, else the daemon's cwd
+  itself: declare it (and `repo_workspaces` repo→cwd routes for
+  repo-tagged items) when the daemon doesn't run inside the work
+  repo. `repo_workspaces` is empty by default — single implicit
+  workspace.
+- **State directory** — `state_dir` (default `~/.agentbacklog`)
+  holds `orchestrator.lock` (shared flock — every orchestrator of
+  the same queue must point at the same directory),
+  `orchestrator.pause`, `orchestrator-state.json`, `plans/`,
+  `metrics.jsonl` and the `pr-reviews/` review worktrees.
+- **ac-wait** — bash script shipped at the tarball root (same
+  install step as `acctl`, §1): worker/reviewer prompts delegate
+  any wait over ~1 min to it. Contract: `ac-wait -- <cmd>` polls
+  `<cmd>` until exit 0 then pings the session via
+  `acctl send --steer` (`--name`, `--interval`, `--timeout`,
+  `--until-pid|file|port` variants, `--list/--cancel/--log`); waiter
+  state lives under `${XDG_STATE_HOME:-~/.local/state}/ac-wait/` —
+  the daemon scans that dir to count parked sessions, it is the
+  tool's own XDG convention and stays independent of `state_dir`.
+  Needs `acctl` on the spawned agent's PATH.
+- **Branch conventions** — worker/reviewer prompts assume the repo's
+  own integration workflow (feature branch → PR on the integration
+  branch → automated review → merge). The convention itself lives
+  in the repo's `AGENTS.md`; a repo without one falls back to the
+  generic git flow described by the prompt.
+
+Optional knobs: `plan_review` (plan→review→implementation pipeline —
+needs agentbacklog ≥ 0.7), `pr_review` (native `/mr review` serving),
+`worker_pool`, `max_workers`… — all hot-settable via
+`acctl comp set backlog-orchestrator <key> <value>` or the component's
+config form.

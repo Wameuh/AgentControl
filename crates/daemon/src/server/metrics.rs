@@ -26,13 +26,14 @@
 //! (`items_available:false`, champs items → null).
 
 use super::orch::{
-    acwait_live_sids, counts_as_working, now_secs, state_dir, task_poppable, task_status,
-    OrchProbe, Task, COMPONENT_ORIGIN,
+    acwait_live_sids, counts_as_working, now_secs, task_poppable, task_status, OrchProbe, Task,
+    COMPONENT_ORIGIN,
 };
 use super::*;
 use proto::SessionMeta;
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 /// Âge max d'un sample conservé (30 j).
@@ -48,10 +49,11 @@ const COMPACT_EVERY: u64 = 1440;
 /// d'extrapoler une rafale instantanée sur la fenêtre « all ».
 const MIN_SPAN_DAYS: f64 = 1.0 / 24.0;
 
-/// `~/.agentbacklog/metrics.jsonl` — à côté de l'état orchestrateur
-/// (même périmètre « file backlog » : DB, lock, pause, state.json).
-pub(crate) fn metrics_path() -> PathBuf {
-    state_dir().join("metrics.jsonl")
+/// `metrics.jsonl` dans le `state_dir` configuré — à côté de l'état
+/// orchestrateur (même périmètre « file backlog » : lock, pause,
+/// state.json).
+pub(crate) fn metrics_path(cfg: &cfg::OrchCfg) -> PathBuf {
+    cfg.state_dir().join("metrics.jsonl")
 }
 
 /// Sample d'un tick : compteurs instantanés de la file.
@@ -131,7 +133,7 @@ impl OrchProbe {
     /// l'append est séquentiel et la compaction (read→rewrite→rename)
     /// ne peut pas perdre un append concurrent.
     pub(crate) fn metrics_sample(&self, tasks: &[Task], metas: &[SessionMeta]) {
-        let path = metrics_path();
+        let path = metrics_path(&self.cfg.read().unwrap());
         let line = match serde_json::to_string(&build_sample(tasks, metas)) {
             Ok(l) => l,
             Err(e) => {
@@ -239,10 +241,10 @@ fn window_secs(w: Option<&str>) -> Result<(Option<f64>, String)> {
     Ok((Some(secs), w))
 }
 
-/// Série du journal bornée à `since` (None = toute la série) —
+/// Série du journal `path` bornée à `since` (None = toute la série) —
 /// (samples, lignes corrompues ignorées). Fichier absent → vide.
-fn read_samples(since: Option<f64>) -> (Vec<Value>, u64) {
-    let Ok(txt) = std::fs::read_to_string(metrics_path()) else {
+fn read_samples(path: &Path, since: Option<f64>) -> (Vec<Value>, u64) {
+    let Ok(txt) = std::fs::read_to_string(path) else {
         return (Vec::new(), 0);
     };
     let mut out = Vec::new();
@@ -384,7 +386,8 @@ impl Daemon {
         let (span, label) = window_secs(window.as_deref())?;
         let now = now_secs();
         let since = span.map(|s| now - s);
-        let (samples, corrupt) = read_samples(since);
+        let mpath = metrics_path(&self.orch.cfg.read().unwrap());
+        let (samples, corrupt) = read_samples(&mpath, since);
         // Items = source des agrégats lead-time/attente — best-effort :
         // binaire non résolvable ou --list en échec → agrégats null.
         let items = match self.orch_agentbacklog_bin().await {
@@ -398,7 +401,7 @@ impl Daemon {
             "window": label,
             "since": since,
             "generated_at": proto::now_iso(),
-            "journal": metrics_path().display().to_string(),
+            "journal": mpath.display().to_string(),
             "sample_count": samples.len(),
             "corrupt_lines": corrupt,
             "samples": samples,
