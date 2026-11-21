@@ -1764,7 +1764,7 @@ impl Daemon {
             // dispatch pending prime sur le réveil des waiters PR.
             let mut asleep_nudges: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
             //    N° de la release PR `intégration → release` courante —
-            //    résolution paresseuse (une sonde gh par cycle au plus,
+            //    résolution paresseuse (une sonde forge par cycle au plus,
             //    seulement si une entrée registre est en jeu). L'entrée
             //    qui la désigne est exclue du critère de ménage : elle
             //    appartient au bot auto-release (même exclusion que la
@@ -1794,11 +1794,11 @@ impl Daemon {
                     .map(|(i, _)| i)
                     .collect();
                 // PRs du registre attribuées à ce worker, état forge réel —
-                // `gh pr view` n'a de sens que pour GitHub : une MR GitLab
-                // `!N` rapporterait l'état de la PR GitHub #N du workspace
-                // (fausse attribution), et un Change-Id Gerrit non résolu
-                // (pr 0) sonderait pour rien. Hors GitHub ou registre déjà
-                // terminal : confiance au statut enregistré.
+                // la sonde passe par le transport de la forge déclarée
+                // (`get_change` : PR GitHub, MR GitLab, change Gerrit) ;
+                // un Change-Id non résolu (pr 0) ou une forge sans
+                // lecture (git nu) sonderait pour rien → confiance au
+                // statut enregistré, idem pour un registre déjà terminal.
                 let mut my_prs: BTreeMap<String, String> = BTreeMap::new();
                 // `watch_prs=false` : aucune sonde forge — le ledger reste
                 // vide, un worker idle sans item wip est recyclé sans
@@ -2581,11 +2581,13 @@ impl Daemon {
     pub(crate) async fn release_pr(&self, ws: &Path, cfg: &cfg::OrchCfg) -> Option<(u64, bool)> {
         let (head, base) = cfg.release_pair()?;
         let client = self.forge_client_at(ws).await?;
-        if !client.caps().list || !client.available() {
-            return None;
-        }
         let (head, base) = (head.to_string(), base.to_string());
         tokio::task::spawn_blocking(move || {
+            // `available()` = subprocess CLI borné (~CLI_TIMEOUT) —
+            // dans le blocking, jamais sur le runtime async.
+            if !client.caps().list || !client.available() {
+                return None;
+            }
             client
                 .list_changes(&forgesync::ListQuery::open(200))
                 .and_then(|list| {

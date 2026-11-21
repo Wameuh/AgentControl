@@ -90,8 +90,6 @@ fn member_assoc(level: u64) -> String {
 /// REST v4 — `PRIVATE-TOKEN` depuis `token_env` ; lecture anonyme sur
 /// les instances publiques, écriture soumise au token.
 pub struct GitlabRestClient {
-    #[allow(dead_code)]
-    host: String,
     target: ForgeTarget,
     /// `https://<host>/api/v4`.
     api: String,
@@ -102,7 +100,6 @@ impl GitlabRestClient {
     pub fn new(spec: ForgeSpec, target: ForgeTarget) -> Self {
         Self {
             api: format!("{}/api/v4", host_base(&spec.host)),
-            host: spec.host,
             target,
             token: token_value(spec.token_env.as_deref()),
         }
