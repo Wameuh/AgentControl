@@ -285,6 +285,15 @@ export const de: Record<Key, string> = {
   dinstall_msg:
     "Auf {host} antwortet kein Daemon. Die Installation kopiert Binärdateien und aktiviert eine systemd-Benutzereinheit auf diesem Host — wird der Daemon dort anders verwaltet (Container, Supervisor), abbrechen und stattdessen korrigieren.",
   install_now: "Installieren",
+  connfail_auth: "SSH-Authentifizierung abgelehnt — Schlüssel oder Passwort prüfen.",
+  connfail_dns: "Host nicht gefunden — Name oder Adresse prüfen (DNS).",
+  connfail_unreachable: "Host nicht erreichbar — prüfen Sie, ob er läuft und erreichbar ist (Timeout).",
+  connfail_refused: "Verbindung abgelehnt — der SSH-Port ist geschlossen oder gefiltert; Port und Firewall prüfen.",
+  connfail_ssh_missing: "ssh-Client nicht gefunden — OpenSSH installieren oder die native SSH-Verbindung nutzen.",
+  connfail_transport: "Verbindung fehlgeschlagen.",
+  connfail_absent: "Auf {host} antwortet nichts — der Daemon scheint zu fehlen.",
+  connfail_unresponsive:
+    "Auf Port {port} von {host} lauscht ein Dienst, der aber nicht wie ein AgentControl-Daemon antwortet — er könnte eingefroren sein oder ein anderer Dienst belegt den Port. Erneut versuchen oder Remote-Port prüfen; es wurde keine Installation vorgeschlagen.",
   dupdate_busy:
     "Auf {host} lauscht bereits ein Daemon ({addr}) — verwaltet von Container/Supervisor oder weitergeleitetem Port. Installation nicht ausgeführt.",
   outdated_h: "Update erforderlich",

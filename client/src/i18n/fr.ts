@@ -282,6 +282,15 @@ export const fr: Record<Key, string> = {
   dinstall_msg:
     "Aucun démon ne répond sur {host}. L'installation copie des binaires et active une unit systemd sur cet hôte — si le démon y est géré autrement (conteneur, superviseur), annuler et corriger ça à la place.",
   install_now: "Installer",
+  connfail_auth: "Authentification SSH refusée — vérifiez la clé ou le mot de passe.",
+  connfail_dns: "Hôte introuvable — vérifiez le nom ou l'adresse (DNS).",
+  connfail_unreachable: "Hôte injoignable — vérifiez qu'il est allumé et joignable (timeout).",
+  connfail_refused: "Connexion refusée — le port SSH est fermé ou filtré ; vérifiez le port et le pare-feu.",
+  connfail_ssh_missing: "Client ssh introuvable — installez OpenSSH ou utilisez la connexion SSH native.",
+  connfail_transport: "Échec de la connexion.",
+  connfail_absent: "Rien ne répond sur {host} — le démon semble absent.",
+  connfail_unresponsive:
+    "Un service écoute sur le port {port} de {host} mais ne répond pas comme un démon AgentControl — il est peut-être gelé ou un autre service occupe le port. Réessayez ou vérifiez le port distant ; aucune installation n'a été proposée.",
   dupdate_busy:
     "Un démon écoute déjà sur {host} ({addr}) — géré par un conteneur/superviseur ou un port forwardé. Installation non appliquée.",
   outdated_h: "Mise à jour requise",

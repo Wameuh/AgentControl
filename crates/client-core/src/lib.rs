@@ -750,6 +750,121 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
 }
 
 // ---------------------------------------------------------------------------
+// Classification des échecs de `connect` — `connect-failed:<kind>:<detail>`.
+//
+// Le frontend (conn-view) propose l'install du démon UNIQUEMENT sur
+// `daemon-absent` : tout autre échec (auth refusée, DNS, timeout, port 22
+// fermé, démon gelé) doit remonter sa cause réelle. kinds :
+// `transport` (étage 1 ou canal mort sans signature), `daemon-absent`
+// (transport OK, endpoint démon refusé/inexistant), `daemon-unresponsive`
+// (le port écoute mais ne répond pas — autre service ou démon gelé :
+// installer dessus serait dangereux). `detail` = cause brute (stderr ssh,
+// death reason) bornée ~400 c.
+// ---------------------------------------------------------------------------
+
+fn connect_fail(kind: &str, detail: &str) -> String {
+    // Garde la FIN du détail (le stderr ssh répète ses dernières lignes —
+    // la cause réelle est en queue), bornée comme tail_suffix.
+    let d = detail.trim();
+    let tail: String = if d.chars().count() > 400 {
+        let s: String = d
+            .chars()
+            .rev()
+            .take(400)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        format!("…{s}")
+    } else {
+        d.to_string()
+    };
+    format!("connect-failed:{kind}:{tail}")
+}
+
+/// Étage 1 : `Client::connect` = transport. « Démon absent » n'y est
+/// légitime que pour les transports sans ssh (socket local / tcp : rien
+/// n'écoute) et pour le direct-tcpip russh refusé (SSH authentifié OK,
+/// port démon fermé côté sshd). `msg` = `format!("{e:#}")` de l'erreur.
+pub fn classify_connect_stage1(t: &Transport, msg: &str) -> String {
+    // Contrat existant : le frontend intercepte `hostkey-mismatch:<fp>`
+    // pour la re-confirmation TOFU — le laisser passer tel quel.
+    if msg.contains("hostkey-mismatch:") {
+        return msg.to_string();
+    }
+    let kind = match t {
+        Transport::Unix(_) | Transport::Tcp(_)
+            if msg.contains("Connection refused")
+                || msg.contains("No such file or directory")
+                || msg.contains("ENOENT") =>
+        {
+            "daemon-absent"
+        }
+        Transport::SshNative { .. }
+            if msg.contains("is the daemon listening on the remote port") =>
+        {
+            "daemon-absent"
+        }
+        Transport::SshNative { .. } if msg.contains("direct-tcpip timeout") => {
+            "daemon-unresponsive"
+        }
+        // ssh CLI (spawn, auth, DNS, timeout, tunnel) et tout le reste :
+        // l'échec est au transport — JAMAIS « démon absent ».
+        _ => "transport",
+    };
+    connect_fail(kind, msg)
+}
+
+/// Étage 2 : transport établi, `daemon_status` a échoué — SEUL cas où
+/// « démon absent » est possible. `rpc_err` = erreur du call,
+/// `death_reason`/`err_tail` = post-mortem du transport (death_reason()
+/// et transport_err_tail() du Client — err_tail vide hors ssh CLI).
+pub fn classify_connect_stage2(
+    t: &Transport,
+    rpc_err: &str,
+    death_reason: &str,
+    err_tail: &str,
+) -> String {
+    let kind = if rpc_err.contains("daemon timeout") {
+        // 60 s sans réponse : le port ÉCOUTE mais ne répond pas — autre
+        // service sur le port ou démon gelé (cf. #302). Installer un
+        // démon par-dessus serait dangereux → classe dédiée, pas d'install.
+        "daemon-unresponsive"
+    } else {
+        match t {
+            // ssh -L : le listener local accepte même port distant fermé
+            // → le channel meurt « open failed: connect failed:
+            // Connection refused » dans stderr. SEULE la signature
+            // « Connection refused » compte : « open failed » seul
+            // couvre « administratively prohibited » (politique de
+            // forward — AllowTcpForwarding=no, PermitOpen restrictif)
+            // qui est un problème transport, pas un démon absent.
+            Transport::Ssh { .. }
+                if err_tail.contains("Connection refused")
+                    || death_reason.contains("Connection refused") =>
+            {
+                "daemon-absent"
+            }
+            // russh : session SSH vivante mais canal direct-tcpip
+            // refermé = le démon a lâché la connexion ; une session morte
+            // avec raison (disconnect, keepalive) reste un problème
+            // transport/session.
+            Transport::SshNative { .. }
+                if death_reason.contains("direct-tcpip channel closed") =>
+            {
+                "daemon-absent"
+            }
+            // unix : socket accepté puis EOF = démon mort après accept.
+            Transport::Unix(_) if rpc_err.contains("connection closed") => "daemon-absent",
+            _ => "transport",
+        }
+    };
+    // Le détail joint l'erreur RPC et la cause de mort du transport —
+    // « connection closed » seul ne dirait rien à l'utilisateur.
+    connect_fail(kind, &format!("{rpc_err} — {death_reason}"))
+}
+
+// ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
 
@@ -1417,6 +1532,17 @@ impl Client {
         self.dead_info.lock().ok().and_then(|d| d.clone())
     }
 
+    /// Contenu brut du stderr du transport ssh CLI (vide pour les autres
+    /// transports) — la classification d'erreur de `connect` y lit les
+    /// signatures « channel N: open failed: connect failed: Connection
+    /// refused » du port démon refusé côté sshd.
+    pub fn transport_err_tail(&self) -> String {
+        self.guard
+            .as_deref()
+            .map(guard_err_tail)
+            .unwrap_or_default()
+    }
+
     fn set_death_reason(&self, reason: String) {
         if let Ok(mut d) = self.dead_info.lock() {
             if d.is_none() {
@@ -1684,6 +1810,121 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn connect_fail_stage1() {
+        let ssh = Transport::Ssh {
+            host: "h".into(),
+            remote_port: 7331,
+            args: vec![],
+        };
+        let native = Transport::SshNative {
+            host: "h".into(),
+            port: 22,
+            user: "u".into(),
+            remote_port: 7331,
+            password: None,
+            key_path: None,
+            expected_hk: None,
+        };
+        let unix = Transport::Unix("/tmp/s.sock".into());
+        let tcp = Transport::Tcp("127.0.0.1:1".into());
+
+        // ssh CLI : TOUT échec étage 1 = transport (auth, DNS, timeout…).
+        for m in [
+            "ssh exited (255) : Permission denied (publickey,password)",
+            "ssh exited (255) : Could not resolve hostname h",
+            "tunnel ssh h timeout",
+            "spawn ssh — is openssh installed?",
+        ] {
+            assert!(
+                classify_connect_stage1(&ssh, m).starts_with("connect-failed:transport:"),
+                "{m}"
+            );
+        }
+        // russh : auth et timeout = transport ; direct-tcpip refusé = absent.
+        assert!(classify_connect_stage1(&native, "password refused")
+            .starts_with("connect-failed:transport:"));
+        assert!(classify_connect_stage1(&native, "ssh connect timeout")
+            .starts_with("connect-failed:transport:"));
+        assert!(classify_connect_stage1(
+            &native,
+            "direct-tcpip — is the daemon listening on the remote port?"
+        )
+        .starts_with("connect-failed:daemon-absent:"));
+        assert!(classify_connect_stage1(&native, "direct-tcpip timeout")
+            .starts_with("connect-failed:daemon-unresponsive:"));
+        // unix/tcp : rien n'écoute = absent.
+        assert!(classify_connect_stage1(&unix, "unix /tmp/s.sock: No such file or directory (os error 2)")
+            .starts_with("connect-failed:daemon-absent:"));
+        assert!(classify_connect_stage1(&tcp, "tcp 127.0.0.1:1: Connection refused (os error 111)")
+            .starts_with("connect-failed:daemon-absent:"));
+        // hostkey-mismatch : contrat TOFU — passe tel quel.
+        assert_eq!(
+            classify_connect_stage1(&native, "hostkey-mismatch:SHA256:abc"),
+            "hostkey-mismatch:SHA256:abc"
+        );
+    }
+
+    #[test]
+    fn connect_fail_stage2() {
+        let ssh = Transport::Ssh {
+            host: "h".into(),
+            remote_port: 7331,
+            args: vec![],
+        };
+        let native = Transport::SshNative {
+            host: "h".into(),
+            port: 22,
+            user: "u".into(),
+            remote_port: 7331,
+            password: None,
+            key_path: None,
+            expected_hk: None,
+        };
+        let unix = Transport::Unix("/tmp/s.sock".into());
+
+        // ssh -L, port démon refusé : stderr « connect failed:
+        // Connection refused » → absent (cas install).
+        let tail = "channel 2: open failed: connect failed: Connection refused";
+        assert!(classify_connect_stage2(
+            &ssh,
+            "connection closed",
+            "forwarded channel closed — ssh process still alive",
+            tail
+        )
+        .starts_with("connect-failed:daemon-absent:"));
+        // Politique de forward : « open failed » sans refused → transport.
+        assert!(classify_connect_stage2(
+            &ssh,
+            "connection closed",
+            "forwarded channel closed — ssh process still alive",
+            "channel 2: open failed: administratively prohibited: open failed"
+        )
+        .starts_with("connect-failed:transport:"));
+        // EOF sans signature → transport.
+        assert!(classify_connect_stage2(&ssh, "connection closed", "remote eof", "")
+            .starts_with("connect-failed:transport:"));
+        // Timeout 60 s = port qui écoute sans répondre → unresponsive.
+        assert!(classify_connect_stage2(&ssh, "daemon timeout", "", "")
+            .starts_with("connect-failed:daemon-unresponsive:"));
+        // russh : canal direct-tcpip refermé session vivante → absent.
+        assert!(classify_connect_stage2(
+            &native,
+            "connection closed",
+            "direct-tcpip channel closed — ssh session still alive",
+            ""
+        )
+        .starts_with("connect-failed:daemon-absent:"));
+        // unix : socket accepté puis EOF → absent.
+        assert!(classify_connect_stage2(&unix, "connection closed", "remote eof", "")
+            .starts_with("connect-failed:daemon-absent:"));
+        // Le détail est borné ~400 c.
+        let big = "x".repeat(2000);
+        let out = classify_connect_stage1(&ssh, &big);
+        assert!(out.starts_with("connect-failed:transport:"));
+        assert!(out.len() < 460, "{}", out.len());
     }
 
     #[test]

@@ -282,6 +282,15 @@ export const en = {
   dinstall_msg:
     "No daemon answers on {host}. Installing copies binaries and enables a systemd user unit on that host — if the daemon is managed another way there (container, supervisor), cancel and fix that instead.",
   install_now: "Install",
+  connfail_auth: "SSH authentication refused — check the key or password.",
+  connfail_dns: "Host not found — check the name or address (DNS).",
+  connfail_unreachable: "Host unreachable — check it is up and reachable (timeout).",
+  connfail_refused: "Connection refused — the SSH port is closed or filtered; check the port and firewall.",
+  connfail_ssh_missing: "ssh client not found — install OpenSSH or use the native SSH connection.",
+  connfail_transport: "Connection failed.",
+  connfail_absent: "Nothing answers on {host} — the daemon seems absent.",
+  connfail_unresponsive:
+    "Something is listening on port {port} of {host} but does not answer like an AgentControl daemon — it may be frozen or another service occupies the port. Retry or check the remote port; no install was proposed.",
   dupdate_busy:
     "A daemon is already listening on {host} ({addr}) — managed by a container/supervisor or a forwarded port. Install left untouched.",
   outdated_h: "Update required",
