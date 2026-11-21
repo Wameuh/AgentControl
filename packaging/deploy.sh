@@ -5,6 +5,9 @@
 # Prérequis : binaire compilé pour l'arch cible
 #   cargo build --release -p agentcontrol-daemon
 #   (ou cross: cargo build --release --target x86_64-unknown-linux-gnu)
+# Côté serveur : systemd --user (loginctl linger pour la persistence).
+# Sans systemd, démarrer le démon à la main ou adapter la supervision —
+# voir packaging/INSTALL.md §1 « Without systemd ».
 set -euo pipefail
 
 HOST=${1:?usage: deploy.sh user@serveur [ssh args...]}

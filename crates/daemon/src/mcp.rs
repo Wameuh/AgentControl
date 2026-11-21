@@ -204,7 +204,7 @@ fn tools_list() -> Value {
                 "properties": {
                     "repo": {
                         "type": "string",
-                        "description": "repo owner/name (ex: Wameuh/AgentControl)",
+                        "description": "repo owner/name (e.g. <owner>/<repo>)",
                     },
                     "pr": {
                         "type": "integer",
