@@ -531,8 +531,9 @@ impl ItemPhase {
 }
 
 // ---------------------------------------------------------------------------
-// Prompts pipeline — {ID} {ITEM} {WS} {PLANNER} {PLAN} {ROUND}
-// (l'id de session propre s'y lit via $AGENTCONTROL_SESSION, injecté au
+// Prompts pipeline — {ID} {ITEM} {WS} {PLANNER} {PLAN} {ROUND} {BASE}
+// ({BASE} = branche d'intégration configurée `integration_branch` ;
+// l'id de session propre s'y lit via $AGENTCONTROL_SESSION, injecté au
 // spawn quand a2a est actif — pas de placeholder dédié).
 // ---------------------------------------------------------------------------
 
@@ -547,7 +548,7 @@ Tu es le PLANIFICATEUR de l'item backlog ci-dessous (session $AGENTCONTROL_SESSI
 
 Tu es en mode plan : tu n'implementes RIEN, tu ne modifies aucun fichier du repo.
 
-1. Lis {WS}/AGENTS.md : le workflow PR/CI qu'il decrit s'appliquera a l'implementation (worktree dedie base sur origin/next_release, PR draft -> review auto -> ready -> checks verts -> merge).
+1. Lis {WS}/AGENTS.md : le workflow PR/CI qu'il decrit s'appliquera a l'implementation (worktree dedie base sur origin/{BASE}, PR draft -> review auto -> ready -> checks verts -> merge).
 2. Explore le code concerne dans {WS} et redige un plan d'implementation concret : fichiers a toucher, etapes ordonnees, points de vigilance/risques, verifications a demander. Ecris-le dans un fichier HORS du checkout git (ex. /tmp/backlog-plan-{ID}.md).
 3. Termine ton tour par une ligne exactement :
    PLAN_FILE: <chemin absolu du fichier plan>
@@ -613,7 +614,7 @@ Tu es l'IMPLEMENTEUR de l'item backlog ci-dessous (session $AGENTCONTROL_SESSION
 
 ## MISSION
 
-Implemente le plan en suivant le workflow PR/CI de {WS}/AGENTS.md a la lettre : worktree dedie base sur origin/next_release (JAMAIS dans le checkout principal {WS}) -> branche -> push -> gh pr create --base next_release --draft -> review auto -> iterations en draft -> review soldee -> gh pr ready au moins 30 s apres le dernier push -> checks requis VERTS -> merge selon la regle de merge AGENTS.md. Toute attente > ~1 min (verdict, checks, merge) passe par un waiter ac-wait (regle « Waiting » d'AGENTS.md) — jamais de --watch bloquant ni de boucle de poll dans un tool call.
+Implemente le plan en suivant le workflow PR/CI de {WS}/AGENTS.md a la lettre : worktree dedie base sur origin/{BASE} (JAMAIS dans le checkout principal {WS}) -> branche -> push -> gh pr create --base {BASE} --draft -> review auto -> iterations en draft -> review soldee -> gh pr ready au moins 30 s apres le dernier push -> checks requis VERTS -> merge selon la regle de merge AGENTS.md. Toute attente > ~1 min (verdict, checks, merge) passe par un waiter ac-wait (regle « Waiting » d'AGENTS.md) — jamais de --watch bloquant ni de boucle de poll dans un tool call.
 
 {DOD} Blocage insurmontable : agentbacklog --release {ID} --agent-id "$AGENTCONTROL_SESSION", explique pourquoi, puis arrete.
 
@@ -628,8 +629,8 @@ Tu es un worker autonome sur le repo (cwd {WS}). Lis {WS}/AGENTS.md — le workf
 ## MISSION — une seule tache, deja assignee (item backlog)
 {ITEM}
 
-1. Implemente en suivant la description a la lettre : worktree dedie base sur origin/next_release (JAMAIS dans le checkout principal {WS}), spec, verifications demandees.
-2. Cycle PR (cf AGENTS.md) : branche -> push -> gh pr create --base next_release --draft -> review auto (iterations en draft) -> review soldee -> gh pr ready au moins 30 s apres le dernier push -> checks requis VERTS sur le head SHA -> merge (regle de merge AGENTS.md). Toute attente > ~1 min (verdict, checks, merge) passe par un waiter ac-wait (regle « Waiting » d'AGENTS.md) — jamais de --watch bloquant ni de boucle de poll dans un tool call.
+1. Implemente en suivant la description a la lettre : worktree dedie base sur origin/{BASE} (JAMAIS dans le checkout principal {WS}), spec, verifications demandees.
+2. Cycle PR (cf AGENTS.md) : branche -> push -> gh pr create --base {BASE} --draft -> review auto (iterations en draft) -> review soldee -> gh pr ready au moins 30 s apres le dernier push -> checks requis VERTS sur le head SHA -> merge (regle de merge AGENTS.md). Toute attente > ~1 min (verdict, checks, merge) passe par un waiter ac-wait (regle « Waiting » d'AGENTS.md) — jamais de --watch bloquant ni de boucle de poll dans un tool call.
 3. {DOD}
 
 Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
@@ -1259,6 +1260,7 @@ impl Daemon {
                             ("ITEM", item_body(t)),
                             ("WS", iws.clone()),
                             ("DOD", task_dod(t).replace("<ID>", &key)),
+                            ("BASE", cfg.pr_base().to_string()),
                         ],
                     ),
                 )
@@ -1295,6 +1297,7 @@ impl Daemon {
                             ("ID", key.clone()),
                             ("ITEM", item_body(t)),
                             ("WS", iws.clone()),
+                            ("BASE", cfg.pr_base().to_string()),
                         ],
                     ),
                 )
@@ -1347,18 +1350,19 @@ impl Daemon {
 
         // ---- E. Entretien des sessions P/W (ledger, titre, post,
         // détection plan, nudges, rm) — reviewers : titre seulement.
-        // N° de la release PR `next_release → main` pour l'exclusion
+        // N° de la release PR `intégration → release` pour l'exclusion
         // du critère de ménage (même règle que le cycle legacy : elle
         // appartient au bot auto-release, pas au session à laquelle le
         // watcher l'a attribuée) — une sonde gh seulement si la
         // surveillance PR est active et qu'une entrée registre non
-        // terminale existe.
+        // terminale existe ; workflow « none » → gh_release_pr = None
+        // immédiat (0 = rien à exclure).
         let release_pr = if cfg.watch_prs
             && prs
                 .iter()
                 .any(|p| !matches!(p.status.as_str(), "closed" | "merged"))
         {
-            self.gh_release_pr(ws).await.map(|r| r.0).unwrap_or(0)
+            self.gh_release_pr(ws, cfg).await.map(|r| r.0).unwrap_or(0)
         } else {
             0
         };
@@ -1633,11 +1637,12 @@ impl Daemon {
                         "Ton plan de l'item #{id} a été approuvé (round {}){cmt}. \
                          Tu passes en implémentation : suis-le en appliquant \
                          le workflow PR/CI de {}/AGENTS.md (worktree dédié \
-                         basé sur origin/next_release → PR draft → review → \
+                         basé sur origin/{} → PR draft → review → \
                          ready → checks verts → merge). {} Blocage \
                          insurmontable : --release + explication.",
                         round.saturating_sub(1).max(0),
                         iws,
+                        cfg.pr_base(),
                         task_dod(t).replace("<ID>", &id.to_string()),
                         cmt = if comment.is_empty() {
                             String::new()
@@ -1684,6 +1689,7 @@ impl Daemon {
                             ("ROUND", format!("{}", round.saturating_sub(1).max(0))),
                             ("PLAN", clip_inline(task_plan_content(t), PLAN_INLINE_MAX)),
                             ("DOD", task_dod(t).replace("<ID>", &key)),
+                            ("BASE", cfg.pr_base().to_string()),
                         ],
                     );
                     if let Some(nsid) = self
@@ -1850,7 +1856,7 @@ impl Daemon {
             for p in prs.iter().filter(|p| {
                 p.session == sid
                     && !matches!(p.status.as_str(), "closed" | "merged")
-                    && !release_pr_entry(p, release_pr)
+                    && !release_pr_entry(p, release_pr, cfg)
             }) {
                 let st_gh = self.orch_pr_state(p, ws).await;
                 my_prs.insert(p.pr.to_string(), st_gh);

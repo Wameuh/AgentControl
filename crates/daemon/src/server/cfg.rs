@@ -322,6 +322,18 @@ pub struct OrchCfg {
     /// = spawn refusé et proposition masquée au client. Défaut true.
     #[serde(default = "dtrue")]
     pub spawn_managers: bool,
+    /// Branche d'intégration du repo : base allowlistée des reviews PR
+    /// (garde `h_pr_review_request` + scan `gh pr list --base`),
+    /// placeholder `{BASE}` des prompts, et head de la release PR
+    /// quand `release_branch` est posé. Défaut "next_release".
+    #[serde(default = "dintbranch")]
+    pub integration_branch: String,
+    /// Branche de release du repo : base de la release PR (head =
+    /// `integration_branch`). **Vide = workflow « none »** : aucune
+    /// release PR n'est cherchée et aucun head n'est exclu du
+    /// registre/des gardes. Défaut "main".
+    #[serde(default = "drelbranch")]
+    pub release_branch: String,
     /// Workers `title_prefix*` simultanés max (défaut 5).
     #[serde(default = "d5")]
     pub max_workers: u32,
@@ -519,6 +531,12 @@ fn d900() -> u64 {
 fn dprefix() -> String {
     "Backlog-W".into()
 }
+fn dintbranch() -> String {
+    "next_release".into()
+}
+fn drelbranch() -> String {
+    "main".into()
+}
 fn dgroup() -> String {
     "AgentControl".into()
 }
@@ -566,6 +584,8 @@ impl Default for OrchCfg {
             watch_prs: true,
             auto_patchnotes: true,
             spawn_managers: true,
+            integration_branch: dintbranch(),
+            release_branch: drelbranch(),
             max_workers: 5,
             max_working: 0,
             poll_secs: 60,
@@ -618,6 +638,25 @@ impl OrchCfg {
             self.worker_capacity()
         } else {
             u64::from(self.max_working)
+        }
+    }
+
+    /// Base des PR de feature — la « branche d'intégration » du repo
+    /// (garde review, scans `gh pr list --base`, placeholder `{BASE}`
+    /// des prompts orchestrateur). Vide = `integration_branch`
+    /// lui-même (le repli au défaut est fait dans `apply_patch`).
+    pub fn pr_base(&self) -> &str {
+        self.integration_branch.as_str()
+    }
+
+    /// Paire `(head, base)` de la release PR — `None` en workflow
+    /// « none » (`release_branch` vide) : l'orchestrateur ne cherche
+    /// alors aucune release PR et n'exclut aucun head.
+    pub fn release_pair(&self) -> Option<(&str, &str)> {
+        if self.release_branch.is_empty() {
+            None
+        } else {
+            Some((&self.integration_branch, &self.release_branch))
         }
     }
 

@@ -525,12 +525,12 @@ pub enum Verify {
     /// (`gh` manquant ou non authentifié côté github). À retenter —
     /// n'est jamais un refus définitif.
     Unreachable,
-    /// La référence existe mais c'est la PR de release
-    /// (head `next_release` → base `main`) : elle ne doit jamais entrer
-    /// au registre — elle reste OPEN par construction et bloquerait la
-    /// garde « toutes PR soldées » de l'orchestrateur (deadlock
-    /// patchnotes vécu : #187 re-registrée à chaque `gh pr ready` du
-    /// worker patchnotes).
+    /// La référence existe mais c'est la PR de release configurée
+    /// (head = branche d'intégration → base = branche de release) :
+    /// elle ne doit jamais entrer au registre — elle reste OPEN par
+    /// construction et bloquerait la garde « toutes PR soldées » de
+    /// l'orchestrateur (deadlock patchnotes vécu : #187 re-registrée à
+    /// chaque `gh pr ready` du worker patchnotes).
     Release,
 }
 
@@ -540,9 +540,15 @@ pub enum Verify {
 /// pour gitlab (`/api/v4/…/merge_requests/<iid>`) et gerrit
 /// (`/changes/<num|Change-Id>`). Bloquant — à appeler hors du chemin
 /// critique (spawn_blocking / worker dédié).
-pub fn verify_ref(set: &[Value], t: &RefTarget) -> Verify {
+///
+/// `release` = la paire `(head, base)` de la release PR configurée —
+/// `Some(("intégration", "release"))` exclut la PR qui match cette
+/// forme (`Verify::Release`) ; `None` = workflow « none » : aucune
+/// release PR n'est exclue (une PR head=intégration entre alors au
+/// registre comme les autres).
+pub fn verify_ref(set: &[Value], t: &RefTarget, release: Option<(&str, &str)>) -> Verify {
     match t.forge.as_str() {
-        "github" => verify_github(t),
+        "github" => verify_github(t, release),
         "gitlab" => verify_gitlab(set, t),
         "gerrit" => verify_gerrit(set, t),
         _ => Verify::Unreachable,
@@ -570,7 +576,7 @@ fn github_repo_ok(repo: &str) -> bool {
 /// — et le sync ne pourrait de toute façon jamais relire l'entrée.
 /// Hôte ≠ github.com : hors périmètre de `gh`, jamais résolvable →
 /// `Missing` direct (l'extracteur ne produit d'ailleurs que github.com).
-fn verify_github(t: &RefTarget) -> Verify {
+fn verify_github(t: &RefTarget, release: Option<(&str, &str)>) -> Verify {
     if t.host != "github.com" || !github_repo_ok(&t.repo) {
         return Verify::Missing;
     }
@@ -579,16 +585,19 @@ fn verify_github(t: &RefTarget) -> Verify {
     }
     match gh_api(&format!("repos/{}/pulls/{}", t.repo, t.pr)) {
         GhCall::Ok(body) => {
-            // La release PR `next_release → main` (auto-release-pr.yml)
-            // existe mais reste exclue du registre — cf. Verify::Release.
+            // La release PR (head/branche d'intégration → base/branche
+            // de release, paire configurée) existe mais reste exclue du
+            // registre — cf. Verify::Release. `release=None` (workflow
+            // « none ») : rien à exclure.
             let v = serde_json::from_str::<Value>(&body).unwrap_or_default();
-            if v["head"]["ref"].as_str() == Some("next_release")
-                && v["base"]["ref"].as_str() == Some("main")
-            {
-                Verify::Release
-            } else {
-                Verify::Exists
+            if let Some((rh, rb)) = release {
+                if v["head"]["ref"].as_str() == Some(rh)
+                    && v["base"]["ref"].as_str() == Some(rb)
+                {
+                    return Verify::Release;
+                }
             }
+            Verify::Exists
         }
         GhCall::Http(404) | GhCall::Http(410) => Verify::Missing,
         // 403 (rate-limit, SSO non granté), 5xx, échec sans statut →

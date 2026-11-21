@@ -75,9 +75,9 @@ MISSION — une seule tache (un worker = un item, pas de boucle) :
 
    Cas particulier : si une de tes taches reste wip parce que sa PR n'est pas encore mergée (poppee avant cette consigne), tu n'es PAS libre — mene d'abord cette PR jusqu'au merge (etape 4), marque --done, puis reprends l'item poppe ci-dessus le cas echeant. Tu t'arretes quand TOUT ce qui t'est attribue est solde — tu NE RE-POP JAMAIS apres un --done : l'orchestrateur spawn un worker neuf par item pending.
 
-2. Implemente la tache en suivant sa description a la lettre : git worktree dedie base sur origin/next_release (JAMAIS dans le checkout principal /workspace), spec, verifications demandees. Option : review locale du diff avant de pousser — si `agent-reviewer review --help` existe (agent-reviewer >= 0.3) : `agent-reviewer review --path <ton worktree> --base origin/next_release` imprime la review sur stdout (exit 0 = APPROVED, 4 = CONDITIONAL, 5 = REJECTED).
+2. Implemente la tache en suivant sa description a la lettre : git worktree dedie base sur origin/{BASE} (JAMAIS dans le checkout principal /workspace), spec, verifications demandees. Option : review locale du diff avant de pousser — si `agent-reviewer review --help` existe (agent-reviewer >= 0.3) : `agent-reviewer review --path <ton worktree> --base origin/{BASE}` imprime la review sur stdout (exit 0 = APPROVED, 4 = CONDITIONAL, 5 = REJECTED).
 
-3. Cycle PR (cf AGENTS.md) : branche -> push -> gh pr create --base next_release --draft -> commenter /mr review (la commande seule dans son commentaire) -> traiter chaque round de review en restant draft (corriger, push, relancer /mr review) -> review soldee -> gh pr ready au moins 30 s apres le dernier push -> attendre les check-runs du head VERTS en gatant sur les check-runs du head SHA (pas les metadonnees de runs — cf le snippet de gating dans AGENTS.md).
+3. Cycle PR (cf AGENTS.md) : branche -> push -> gh pr create --base {BASE} --draft -> commenter /mr review (la commande seule dans son commentaire) -> traiter chaque round de review en restant draft (corriger, push, relancer /mr review) -> review soldee -> gh pr ready au moins 30 s apres le dernier push -> attendre les check-runs du head VERTS en gatant sur les check-runs du head SHA (pas les metadonnees de runs — cf le snippet de gating dans AGENTS.md).
 
    Toute attente > ~1 min (verdict de review, checks CI, merge, delai) passe par un waiter ac-wait — tu armes `ac-wait --name "<t>" --interval 60 -- <commande cheap>`, tu termines ton tour (ou `acctl sleep "$AGENTCONTROL_SESSION"` pour dormir vraiment), le ping te reveille quand la condition tombe. Jamais de `--watch` bloquant, de `sleep` long ni de boucle de poll dans un tool call (regle « Waiting » d'AGENTS.md — les conditions a attendre restent les memes, c'est la commande du waiter qui les porte).
 
@@ -95,10 +95,12 @@ Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-da
 /// l'orchestrateur a déjà choisi l'item et son workspace — le prompt
 /// est templé `{WS}` (cwd de la session = workspace routé du tag repo),
 /// `{REPO}` (tag de l'item, « (non taggé) » sinon), `{ID}` et `{ITEM}`
-/// (titre + description inline). `cfg.prompt` remplace ce template et
-/// reçoit les mêmes substitutions. Les chemins et le workflow PR/CI
-/// viennent de l'AGENTS.md DU WORKSPACE ROUTÉ — rien n'est codé en dur
-/// pour un repo particulier.
+/// (titre + description inline) ; `{BASE}` est aussi substitué
+/// (branche d'intégration — le template intégré n'en a pas besoin,
+/// il lit les règles dans l'AGENTS.md du workspace). `cfg.prompt`
+/// remplace ce template et reçoit les mêmes substitutions. Les chemins
+/// et le workflow PR/CI viennent de l'AGENTS.md DU WORKSPACE ROUTÉ —
+/// rien n'est codé en dur pour un repo particulier.
 const WORKER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
 
 Tu es un worker autonome sur le workspace {WS} (repo {REPO}). Commence par lire {WS}/AGENTS.md — le workflow PR/CI qu'il decrit est obligatoire ; s'il est absent, applique les conventions du depot (branche -> PR draft -> review -> checks -> merge).
@@ -129,18 +131,21 @@ Blocage insurmontable sur une tache : `agentbacklog --release <ID> --agent-id "$
 Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; push uniquement sur ta branche de PR ; nettoie ton worktree a la fin (git worktree remove) ; reponds en francais."#;
 
 const NOTES_TITLE: &str = "[auto] Patchnotes utilisateur de la release PR + passage ready";
+/// Corps de l'item patchnotes — `{INT}` = branche d'intégration
+/// (head de la release PR), `{REL}` = branche de release (base),
+/// substitués depuis `release_pair()` dans `orch_add_notes`.
 const NOTES_DESC: &str = r#"[Item cree automatiquement par backlog-orchestrator : backlog vide, cloture du cycle de release.]
 
-La PR de release (next_release -> main, creee par auto-release-pr.yml — retrouve-la via `gh pr list --head next_release --base main --state open --json number,isDraft`) doit etre prete a etre shippee par l'utilisateur.
+La PR de release ({INT} -> {REL}, creee par le workflow de release du repo — retrouve-la via `gh pr list --head {INT} --base {REL} --state open --json number,isDraft`) doit etre prete a etre shippee par l'utilisateur.
 
 MISSION :
 
 Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
 
-1. Body = patchnotes utilisateur EN ANGLAIS couvrant TOUTES les PR mergees dans next_release sur le cycle (inventaire : git fetch origin && git log origin/main..origin/next_release --oneline, ou les commits de la PR). Le generateur automatique (auto-release-pr.yml, cf item #18 / PR #126-127) regenere le body a chaque push sur next_release : verifie qu'il est a jour vis-a-vis du head courant, EN ANGLAIS, et lisible par un utilisateur (fonctionnalites visibles, pas le detail technique interne). JAMAIS de reference interne dans le texte : pas de (#NNN), pas de lien PR, pas d'id backlog — uniquement des changements vecus par l'utilisateur ; les noms de fonctionnalites visibles restent OK. S'il est stale ou non anglophone, declenche la regeneration via le mecanisme du workflow ; a defaut reecris le body toi-meme (gh pr edit <N> --body). Si le generateur doit produire de l'anglais durablement, corrige-le via le cycle PR normal plutot qu'une edition manuelle.
-2. Passe la PR en ready : gh pr ready <N> — cela declenche release-bump (tag rc.k + commit de version sur next_release), c'est voulu. Ne merge JAMAIS la release PR vers main : le merge reste a l'utilisateur.
-3. Si le generateur produit un body defectueux, corrige-le via le cycle PR normal dans un worktree separe (base origin/next_release).
-4. Quand la release PR est ready avec un body a jour : agentbacklog --done <ID> --agent-id "<ton agent-id>". La release PR next_release -> main n'est pas ta PR — son merge est reserve a l'utilisateur ; ton critere de fin est « release PR ready + body a jour », jamais l'attente du merge (item cree avec done_when=deliverable).
+1. Body = patchnotes utilisateur EN ANGLAIS couvrant TOUTES les PR mergees dans {INT} sur le cycle (inventaire : git fetch origin && git log origin/{REL}..origin/{INT} --oneline, ou les commits de la PR). Le generateur automatique du repo regenere le body a chaque push sur {INT} : verifie qu'il est a jour vis-a-vis du head courant, EN ANGLAIS, et lisible par un utilisateur (fonctionnalites visibles, pas le detail technique interne). JAMAIS de reference interne dans le texte : pas de (#NNN), pas de lien PR, pas d'id backlog — uniquement des changements vecus par l'utilisateur ; les noms de fonctionnalites visibles restent OK. S'il est stale ou non anglophone, declenche la regeneration via le mecanisme du workflow ; a defaut reecris le body toi-meme (gh pr edit <N> --body). Si le generateur doit produire de l'anglais durablement, corrige-le via le cycle PR normal plutot qu'une edition manuelle.
+2. Passe la PR en ready : gh pr ready <N> — cela declenche la mecanique de release du repo (bump de version sur {INT}), c'est voulu. Ne merge JAMAIS la release PR vers {REL} : le merge reste a l'utilisateur.
+3. Si le generateur produit un body defectueux, corrige-le via le cycle PR normal dans un worktree separe (base origin/{INT}).
+4. Quand la release PR est ready avec un body a jour : agentbacklog --done <ID> --agent-id "<ton agent-id>". La release PR {INT} -> {REL} n'est pas ta PR — son merge est reserve a l'utilisateur ; ton critere de fin est « release PR ready + body a jour », jamais l'attente du merge (item cree avec done_when=deliverable).
 5. Apres ton --done, si du nouveau travail arrive dans le backlog, l'orchestrateur repasse lui-meme la release PR en draft (garde open_any / notes_cycle_done se reinitialise en presence de travail) et un nouvel item patchnotes sera cree au prochain cycle vide — rien a faire de ton cote."#;
 
 /// Variante {DOD} du prompt self-pop legacy : l'item poppé n'est pas
@@ -163,7 +168,8 @@ const MANAGER_TITLE_PREFIX: &str = "Manager · ";
 /// demandes en items exploitables par les workers, répondre aux
 /// questions d'état, ajuster la file. Jamais worker (pas de --pop,
 /// pas de --done, pas d'implémentation). Surcharge :
-/// `[backlog_orchestrator] manager_prompt` (mêmes placeholders).
+/// `[backlog_orchestrator] manager_prompt` (mêmes placeholders :
+/// `{REPO}` `{WS}` `{BASE}`).
 const MANAGER_PROMPT: &str = r#"[Session creee automatiquement par la feature « Manager » d'AgentControl — pas par un agent humain ou une session parente.]
 
 Tu es le Manager du workspace {REPO} (cwd {WS}) : l'intendance de la file AgentBacklog partagee. On te donne des demandes en langage naturel ; tu les transformes en items backlog exploitables par les workers autonomes (sessions « Backlog-W* » pilotees par l'orchestrateur).
@@ -172,7 +178,7 @@ MISSIONS :
 
 1. DEPOSER UN ITEM — pour chaque demande de feature/fix :
    agentbacklog --add "<titre concis>" --desc "<description>" --repo {REPO}
-   Le titre : une ligne, actionnable (convention : [bug]/[feature] + objet). La description est le cahier des charges du worker — donne : le contexte (symptomes, fichiers/modules/pistes d'investigation dans {WS}), les verifications demandees (build/tests precis), et le rappel du cycle PR standard (worktree dedie base origin/next_release, PR draft -> /mr review -> corrections en draft -> ready -> checks verts -> merge).
+   Le titre : une ligne, actionnable (convention : [bug]/[feature] + objet). La description est le cahier des charges du worker — donne : le contexte (symptomes, fichiers/modules/pistes d'investigation dans {WS}), les verifications demandees (build/tests precis), et le rappel du cycle PR standard (worktree dedie base origin/{BASE}, PR draft -> /mr review -> corrections en draft -> ready -> checks verts -> merge).
    Une demande qui enchaine des etapes ou depend d'un item existant : decoupe en sous-items ordonnes via --depends-on <ID> (et --depend ID DEP a posteriori). Une grosse demande floue : item d'exploration/decoupage d'abord.
    Ne duplique pas : agentbacklog --list --json avant d'ajouter.
 
@@ -1412,14 +1418,19 @@ fn workspaces_json(enabled: bool, cfg: &cfg::OrchCfg) -> Vec<Value> {
 }
 
 /// L'entrée registre désigne-t-elle la release PR du workspace ?
-/// Vrai si son numéro est celui de la PR `next_release → main`
-/// courante, ou si sa branche head est `next_release` (re-registrement
-/// via le watcher — le numéro seul couvre déjà le cas nominal, la
-/// branche attrape les entrées dont la fiche a été enrichie par sync).
+/// Vrai si son numéro est celui de la PR `<intégration> → <release>`
+/// courante (paire `release_pair()` de la config), ou si sa branche
+/// head est la branche d'intégration (re-registrement via le watcher —
+/// le numéro seul couvre déjà le cas nominal, la branche attrape les
+/// entrées dont la fiche a été enrichie par sync). Workflow « none »
+/// (`release_branch` vide) → toujours faux : rien n'est exclu.
 /// `release_pr = 0` (numéro non résolu) : la branche seule décide — un
 /// change Gerrit non résolu (`pr 0`) ne doit pas matcher par numéro.
-pub(crate) fn release_pr_entry(p: &proto::PrEntry, release_pr: u64) -> bool {
-    (release_pr > 0 && p.pr == release_pr) || p.branch.as_deref() == Some("next_release")
+pub(crate) fn release_pr_entry(p: &proto::PrEntry, release_pr: u64, cfg: &cfg::OrchCfg) -> bool {
+    let Some((head, _base)) = cfg.release_pair() else {
+        return false;
+    };
+    (release_pr > 0 && p.pr == release_pr) || p.branch.as_deref() == Some(head)
 }
 
 /// « Ce meta est-il un Manager vivant du workspace `repo` ? » —
@@ -1696,7 +1707,7 @@ impl Daemon {
             // consomme un slot max_workers (comme plan_review), et le
             // dispatch pending prime sur le réveil des waiters PR.
             let mut asleep_nudges: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
-            //    N° de la release PR `next_release → main` courante —
+            //    N° de la release PR `intégration → release` courante —
             //    résolution paresseuse (une sonde gh par cycle au plus,
             //    seulement si une entrée registre est en jeu). L'entrée
             //    qui la désigne est exclue du critère de ménage : elle
@@ -1742,9 +1753,9 @@ impl Daemon {
                     }) {
                         if release_num.is_none() {
                             release_num =
-                                Some(self.gh_release_pr(ws).await.map(|r| r.0).unwrap_or(0));
+                                Some(self.gh_release_pr(ws, cfg).await.map(|r| r.0).unwrap_or(0));
                         }
-                        if release_pr_entry(p, release_num.unwrap_or(0)) {
+                        if release_pr_entry(p, release_num.unwrap_or(0), cfg) {
                             continue;
                         }
                         let st_gh = self.orch_pr_state(p, ws).await;
@@ -2135,6 +2146,7 @@ impl Daemon {
                             ("ID", id.to_string()),
                             ("ITEM", orch_plan::item_body(t)),
                             ("DOD", task_dod(t).replace("<ID>", &id.to_string())),
+                            ("BASE", cfg.pr_base().to_string()),
                         ],
                     );
                     st.counter += 1;
@@ -2227,7 +2239,8 @@ impl Daemon {
                         .prompt
                         .clone()
                         .unwrap_or_else(|| PROMPT.to_string())
-                        .replace("{DOD}", LEGACY_DOD);
+                        .replace("{DOD}", LEGACY_DOD)
+                        .replace("{BASE}", cfg.pr_base());
                     let Some(entry) = pool_next_entry(&entries, &workers, &live_waiters, &[])
                     else {
                         break;
@@ -2307,7 +2320,7 @@ impl Daemon {
             let active_other = tasks
                 .iter()
                 .any(|t| !notes_ids.contains(&task_id(t)) && in_flight(t));
-            let rpr = self.gh_release_pr(ws).await;
+            let rpr = self.gh_release_pr(ws, cfg).await;
             if active_other {
                 st.notes_cycle_done = false; // nouveau cycle de travail
                 if let Some(r) = rpr {
@@ -2335,7 +2348,7 @@ impl Daemon {
                         // La release PR reste OPEN par construction
                         // (c'est l'item patchnotes qui la passe ready)
                         // — la compter bloquerait sa propre création.
-                        if release_pr_entry(p, r.0) {
+                        if release_pr_entry(p, r.0, cfg) {
                             continue;
                         }
                         if self.orch_pr_state(p, ws).await == "OPEN" {
@@ -2353,7 +2366,7 @@ impl Daemon {
                              creating patchnotes item",
                             r.0
                         );
-                        if let Some(nid) = self.orch_add_notes(bin, ws, cfg.plan_review).await {
+                        if let Some(nid) = self.orch_add_notes(bin, ws, cfg).await {
                             st.notes_items.push(nid);
                             st.notes_cycle_done = true;
                         }
@@ -2496,18 +2509,24 @@ impl Daemon {
             .unwrap_or_else(|| "UNKNOWN".into())
     }
 
-    /// PR de release auto (`next_release` → `main`) si ouverte :
-    /// Some((number, isDraft)).
-    pub(crate) async fn gh_release_pr(&self, ws: &Path) -> Option<(u64, bool)> {
+    /// PR de release auto (`integration_branch` → `release_branch`)
+    /// si ouverte : Some((number, isDraft)). Workflow « none »
+    /// (`release_branch` vide) → `None` immédiat, sans sonde `gh`.
+    pub(crate) async fn gh_release_pr(
+        &self,
+        ws: &Path,
+        cfg: &cfg::OrchCfg,
+    ) -> Option<(u64, bool)> {
+        let (head, base) = cfg.release_pair()?;
         let (rc, out, _) = run_out(
             &[
                 "gh",
                 "pr",
                 "list",
                 "--head",
-                "next_release",
+                head,
                 "--base",
-                "main",
+                base,
                 "--state",
                 "open",
                 "--json",
@@ -2537,12 +2556,19 @@ impl Daemon {
     /// Some(0) quand l'id n'est pas récupérable : l'item est vraisem-
     /// blablement créé quand même — le cycle doit le compter pour ne
     /// pas en ajouter un second au tick suivant (0 n'est jamais un id
-    /// réel, l'entrée notes_items est inerte).
-    async fn orch_add_notes(&self, bin: &str, ws: &Path, no_plan: bool) -> Option<u64> {
+    /// réel, l'entrée notes_items est inerte). Requiert une paire de
+    /// release configurée (`release_pair()` — les appelants n'arrivent
+    /// ici qu'avec une release PR détectée).
+    async fn orch_add_notes(&self, bin: &str, ws: &Path, cfg: &cfg::OrchCfg) -> Option<u64> {
+        let (head, base) = cfg.release_pair()?;
+        let desc = orch_plan::fill(
+            NOTES_DESC,
+            &[("INT", head.to_string()), ("REL", base.to_string())],
+        );
         // plan_review : l'item notes est un pur travail d'implémentation —
         // `--no-plan` le dispatche en worker direct, sans boucle de revue.
-        let mut argv = vec![bin, "--add", NOTES_TITLE, "--desc", NOTES_DESC];
-        if no_plan {
+        let mut argv = vec![bin, "--add", NOTES_TITLE, "--desc", desc.as_str()];
+        if cfg.plan_review {
             argv.push("--no-plan");
         }
         // done_when=deliverable (agentbacklog ≥ 0.9) : l'item n'attend
@@ -2797,7 +2823,10 @@ impl Daemon {
             }
         }
         let tpl = cfg.manager_prompt.as_deref().unwrap_or(MANAGER_PROMPT);
-        let prompt = tpl.replace("{REPO}", repo).replace("{WS}", &cwd);
+        let prompt = tpl
+            .replace("{REPO}", repo)
+            .replace("{WS}", &cwd)
+            .replace("{BASE}", cfg.pr_base());
         self.warn_spawn_cfg(&cfg.agent, &cfg.model, &cfg.mode);
         let v = self
             .h_new_session(
@@ -3093,18 +3122,41 @@ mod tests {
             created_at: "t".into(),
             updated_at: "t".into(),
         };
+        let cfg = cfg::OrchCfg::default();
         // Numéro de la release PR courante → exclue.
-        assert!(release_pr_entry(&entry(187, None), 187));
+        assert!(release_pr_entry(&entry(187, None), 187, &cfg));
         // Entrée d'un autre numéro mais head=next_release → exclue.
-        assert!(release_pr_entry(&entry(9, Some("next_release")), 187));
+        assert!(release_pr_entry(&entry(9, Some("next_release")), 187, &cfg));
         // PR de feature ordinaire → comptée.
-        assert!(!release_pr_entry(&entry(9, Some("feat/x")), 187));
-        assert!(!release_pr_entry(&entry(9, None), 187));
+        assert!(!release_pr_entry(&entry(9, Some("feat/x")), 187, &cfg));
+        assert!(!release_pr_entry(&entry(9, None), 187, &cfg));
         // Numéro non résolu (release PR absente ou sonde en échec) : un
         // change Gerrit pr=0 ne doit pas matcher par numéro — la
         // branche seule décide.
-        assert!(!release_pr_entry(&entry(0, None), 0));
-        assert!(release_pr_entry(&entry(0, Some("next_release")), 0));
+        assert!(!release_pr_entry(&entry(0, None), 0, &cfg));
+        assert!(release_pr_entry(&entry(0, Some("next_release")), 0, &cfg));
+
+        // Branches custom : l'exclusion suit la paire configurée, pas
+        // la convention next_release/main.
+        let dev = cfg::OrchCfg {
+            integration_branch: "develop".into(),
+            release_branch: "stable".into(),
+            ..Default::default()
+        };
+        assert!(release_pr_entry(&entry(9, Some("develop")), 187, &dev));
+        assert!(!release_pr_entry(&entry(9, Some("next_release")), 187, &dev));
+
+        // Workflow « none » (release_branch vide) : aucune release PR
+        // cherchée, aucun head exclu — une entrée head=develop (ou même
+        // next_release) est une entrée comme les autres.
+        let none = cfg::OrchCfg {
+            integration_branch: "develop".into(),
+            release_branch: String::new(),
+            ..Default::default()
+        };
+        assert!(none.release_pair().is_none());
+        assert!(!release_pr_entry(&entry(9, Some("develop")), 187, &none));
+        assert!(!release_pr_entry(&entry(9, Some("next_release")), 187, &none));
     }
 
     #[test]
