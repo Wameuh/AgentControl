@@ -319,6 +319,14 @@ jobs:
             src-tauri/gen/android/app/src/main/AndroidManifest.xml
           grep -q 'android:allowBackup="false"' \
             src-tauri/gen/android/app/src/main/AndroidManifest.xml
+          # Portrait uniquement : patch post-init comme CAMERA / allowBackup
+          # (gen/android n'est pas commité). Garde : une seule <activity>,
+          # sinon le sed patcherait aussi des activités de plugins.
+          test "$(grep -c '<activity' src-tauri/gen/android/app/src/main/AndroidManifest.xml)" = 1
+          sed -i 's|<activity|<activity\n            android:screenOrientation="portrait"|' \
+            src-tauri/gen/android/app/src/main/AndroidManifest.xml
+          grep -q 'android:screenOrientation="portrait"' \
+            src-tauri/gen/android/app/src/main/AndroidManifest.xml
           # Icônes commitées (tauri icon) → projet généré
           cp -r src-tauri/icons/android/* src-tauri/gen/android/app/src/main/res/
           # ── Signature release : sans keystore CI, chaque APK était
@@ -394,6 +402,10 @@ jobs:
           find src-tauri/gen/android/app/build/intermediates \
             -name "AndroidManifest.xml" -path "*merged*" \
             -exec grep -l 'allowBackup="false"' {} \; | grep -q .
+          # screenOrientation doit survivre au manifest merger.
+          find src-tauri/gen/android/app/build/intermediates \
+            -name "AndroidManifest.xml" -path "*merged*" \
+            -exec grep -l 'screenOrientation="portrait"' {} \; | grep -q .
           # L'AAR sherpa-onnx doit être lié : jniLibs arm64 dans l'APK.
           find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" \
             -exec sh -c 'unzip -l "$1" | grep -q "arm64-v8a/libsherpa-onnx-jni.so"' _ {} \;

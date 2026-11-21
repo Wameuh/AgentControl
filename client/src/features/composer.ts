@@ -363,9 +363,8 @@ export class Composer {
     }
     if (force || this.fitStale) {
       this.fitStale = false;
-      // Cap sur le WRAP (le chemin field-sizing le pose sur #input) ;
-      // la règle landscape Android (max-height:54px, plus spécifique)
-      // prime toujours. Resync des métriques : un changement de fonte
+      // Cap sur le WRAP (le chemin field-sizing le pose sur #input).
+      // Resync des métriques : un changement de fonte
       // (thème, zoom) ne déclenche pas toujours un fitStale.
       this.syncGhostStyle();
       wrap.style.setProperty("--fit-cap", this.fitCap() + "px");
@@ -445,8 +444,8 @@ export class Composer {
     const need = inp.scrollHeight + 2;
     const over = need > this.smallCap();
     if (!over) this.inpExpanded = false;
-    // Cap via custom property : la règle landscape Android
-    // (max-height:54px, spécificité supérieure) n'est pas écrasée.
+    // Cap via custom property : consommée par max-height: var(--fit-cap)
+    // dans chat.css (chemin field-sizing et miroir autosize du wrap).
     inp.style.setProperty("--fit-cap", this.fitCap() + "px");
     this.paintFit(over, need);
     if (t0 >= 0) probeFitInput(performance.now() - t0);

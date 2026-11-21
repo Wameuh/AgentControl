@@ -209,7 +209,7 @@ export const es: Record<Key, string> = {
   cost_label: "Coste",
   catalog_badge: "catálogo",
   advisor_title: "Modelo asesor (créditos de uso — cambiar reinicia el agente)", advisor_default: "Asesor: defecto", advisor_off: "Asesor: off",
-  fusion_entry: "✨ Fusión (2 modelos)…", cmd_placeholder: "⌘ comandos…",
+  fusion_entry: "Fusión (2 modelos)…", fusion_cur: "Fusión · {label}", cmd_placeholder: "⌘ comandos…",
   effort_default: "predeterminado", subscribe_err: "subscribe: ",
   settings_title: "Configuración", about_title: "Acerca de AgentControl",
   map_title: "Diagrama", map_daemon: "daemon",

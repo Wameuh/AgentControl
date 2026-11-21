@@ -206,7 +206,7 @@ export const en = {
   cost_label: "Cost",
   catalog_badge: "catalogue",
   advisor_title: "Advisor model (usage credits — change restarts the agent)", advisor_default: "Advisor: default", advisor_off: "Advisor: off",
-  fusion_entry: "✨ Fusion (2 models)…", cmd_placeholder: "⌘ commands…",
+  fusion_entry: "Fusion (2 models)…", fusion_cur: "Fusion · {label}", cmd_placeholder: "⌘ commands…",
   effort_default: "default", subscribe_err: "subscribe: ",
   settings_title: "Settings", about_title: "About AgentControl",
   map_title: "Diagram", map_daemon: "daemon",

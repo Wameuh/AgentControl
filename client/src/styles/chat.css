@@ -485,9 +485,9 @@ img.md-img {
   #input {
     field-sizing: content;
     min-height: calc(3.1em + 20px);
-    /* Cap posé par fitInput via --fit-cap : la règle landscape Android
-       (body.android #input, spécificité supérieure) prime toujours —
-       un max-height inline l'écraserait. */
+    /* Cap posé par fitInput via --fit-cap : une custom property (pas un
+       max-height inline) pour que le miroir #input-wrap.grow lise le
+       même cap. */
     max-height: var(--fit-cap, none);
   }
 }
