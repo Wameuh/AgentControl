@@ -3,52 +3,64 @@
 //! domaine : sessions.rs (cycle de vie des sessions), files.rs (workspace
 //! + blobs), peers.rs (agent↔agent), prs.rs (registre PR), misc.rs.
 
-mod cfg;
+/// Auto-découverte des adaptateurs ACP connus sur le PATH
+/// (`via:auto` dans list_agents — item #261).
+pub(crate) mod agents_auto;
+/// Provisioning à la demande des adaptateurs du registre
+/// (`install_agent_adapter` — npm i -g côté démon, #277).
+mod agents_install;
 /// Profils agents éditables à chaud (composant interne `agents` —
 /// params → `[agents.*]` de config.toml, hot-reload du profil).
 pub(crate) mod agents_cfg;
+mod cfg;
 mod components;
 /// Watch FS de l'explorateur (auto-refresh) — cycle de vie borné à la
 /// connexion, debounce+coalesce anti-rafale, jamais journalisé.
 mod dirwatch;
 /// Bornage workspace réutilisé par l'endpoint HTTP /media|/download.
 pub(crate) mod files;
+/// Métriques backlog : journal JSONL échantillonné par le tick
+/// orchestrateur + RPC `backlog_metrics` (série + agrégats).
+pub(crate) mod metrics;
 /// `command_available` est réutilisé par la détection du catalogue
 /// (components/catalog.rs) et par la garde AgentBacklog de
 /// l'orchestrateur natif.
 pub(crate) mod misc;
-/// Métriques backlog : journal JSONL échantillonné par le tick
-/// orchestrateur + RPC `backlog_metrics` (série + agrégats).
-pub(crate) mod metrics;
 /// `OrchProbe` est partagé avec `crate::components` (statut du
 /// composant interne `backlog-orchestrator` dans list_components).
 pub(crate) mod orch;
+/// Surface de config éditable à chaud de l'orchestrateur (schéma
+/// params, validation de patch, persistance config.toml) — partagée
+/// avec `crate::components` (params_schema/params de l'item internal).
+pub(crate) mod orch_cfg;
+/// Failover provider (item #193) : sessions du composant en backoff
+/// `rate_limit` sur un profil `*_agent` remplacé → respawn sur le
+/// profil courant (worker/planner/reviewer ; PRReview-* dans
+/// orch_review.rs).
+pub(crate) mod orch_failover;
+/// Forges `[[forges]]` éditables à chaud (composant interne
+/// `prs-registry` — params → config.toml, hot-reload du set).
+pub(crate) mod forges_cfg;
+/// GC des sessions composant orphelines (item #250) — filet de
+/// sécurité au tick : toute session `feature:pr-review` /
+/// `component:backlog-orchestrator` déréférencée de l'état vivant est
+/// supprimée (worktree PRReview inclus).
+pub(crate) mod orch_gc;
 /// Pipeline plan→review→implémentation de l'orchestrateur
 /// (`plan_review=true`) — sessions planner/reviewer, verdicts, stall.
 pub(crate) mod orch_plan;
 /// Review de PR servie par le démon (`pr_review`) — passe séparée
 /// d'`orch_plan`, garde-fous propres (allowlist base, pool dédié).
 pub(crate) mod orch_review;
-/// Failover provider (item #193) : sessions du composant en backoff
-/// `rate_limit` sur un profil `*_agent` remplacé → respawn sur le
-/// profil courant (worker/planner/reviewer ; PRReview-* dans
-/// orch_review.rs).
-pub(crate) mod orch_failover;
-/// GC des sessions composant orphelines (item #250) — filet de
-/// sécurité au tick : toute session `feature:pr-review` /
-/// `component:backlog-orchestrator` déréférencée de l'état vivant est
-/// supprimée (worktree PRReview inclus).
-pub(crate) mod orch_gc;
-/// Surface de config éditable à chaud de l'orchestrateur (schéma
-/// params, validation de patch, persistance config.toml) — partagée
-/// avec `crate::components` (params_schema/params de l'item internal).
-pub(crate) mod orch_cfg;
 mod peers;
 mod prs;
 mod sessions;
 mod term;
 
-pub use cfg::{A2aCfg, AgentProfile, CompactCfg, CompactPartial, CompactPolicy, CompactSrc, OrchCfg, RetentionCfg, WatchdogCfg, DEFAULT_MAX_INSTANCES};
+pub use cfg::{
+    A2aCfg, AgentConf, AgentProfile, AgentVia, CompactCfg, CompactPartial, CompactPolicy,
+    CompactSrc, OrchCfg, RetentionCfg, WatchdogCfg, DEFAULT_MAX_INSTANCES,
+};
 pub(crate) use orch::OrchProbe;
 
 use anyhow::{Context, Result};
@@ -59,8 +71,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::UnixStream;
-use tokio::sync::{broadcast, mpsc, watch};
 use tokio::sync::RwLock;
+use tokio::sync::{broadcast, mpsc, watch};
 use tracing::{debug, info, warn};
 
 /// Fenêtre de rattrapage d'un `Subscribe` : au plus les N derniers events
@@ -68,21 +80,58 @@ use tracing::{debug, info, warn};
 /// paginable via `ReqKind::Events`). Borne la bande passante du replay —
 /// un journal très volumineux saturait sinon le lien pendant des minutes.
 pub(crate) const SUBSCRIBE_REPLAY_MAX: usize = 500;
+/// Budget OCTETS du même rattrapage : 500 events peuvent faire ~15 Mo
+/// (gros diffs, longues sorties) — la borne « events » seule ne suffit
+/// pas sur un lien lent (sonde affamée → down/reconnect → re-replay,
+/// #269). Le replay reste le suffixe le plus récent : `skipped` compte
+/// les events plus vieux omis, toujours paginables via `Events`.
+/// Les réponses RPC passent par la voie prioritaire de l'Outbox : une
+/// trame push de replay ne peut pas affamer un appel interactif.
+pub(crate) const SUBSCRIBE_REPLAY_MAX_BYTES: u64 = 512 * 1024;
 
 use crate::components::Components;
-use crate::forges::Forges;
+use crate::forges::{ForgeCfg, ForgeLive};
 
 /// Backlog maximal de la file d'émission par connexion, en OCTETS de
 /// lignes sérialisées : absorbe les bursts (replay de journal,
 /// term_data) et les micro-coupures sans geler la lecture des requêtes.
 /// Backlog ≥ borne = client durablement plus lent que la production →
 /// la connexion est refermée (un push ne doit jamais bloquer un req).
-/// Ne borne QUE le backlog : une frame unique plus grosse (aperçu
-/// binaire ~17 Mio) est admise — sinon elle tuerait la conn à coup sûr.
+/// Ne borne QUE le backlog : une frame unique plus grosse (les plus
+/// grosses sources sont désormais bornées — diff externalisé, page
+/// events ≤ 256 ko, aperçu binaire ~2 Mio — mais un cas non prévu
+/// resterait possible) est admise — sinon elle tuerait la conn à coup sûr.
 const WRITE_QUEUE_BYTES: usize = 8 << 20; // 8 Mio
+/// Seuil du warn « ligne géante » à l'enfilement outbox — le même ordre
+/// que la borne de page `events` : au-delà, la frame monopolise le fil
+/// assez longtemps pour timeout les RPC légers d'une connexion lente.
+const GIANT_LINE_BYTES: usize = 256 * 1024;
 /// Un flush qui ne s'écoule pas en 30 s = lien noir : la connexion meurt
 /// au lieu de rester zombie avec sa file qui gonfle.
 const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Étiquette cheap d'une ligne géante déjà sérialisée : push →
+/// `push=<genre>` + type_tag de l'event quand présent ; réponse →
+/// `resp id=<id> ok=<bool>`. Le nom de méthode RPC n'est pas
+/// récupérable de la réponse (seul l'id y figure) — len+lane suffisent.
+fn giant_line_label(s: &str) -> String {
+    let Ok(v) = serde_json::from_str::<Value>(s) else {
+        return String::new();
+    };
+    if let Some(p) = v.get("push").and_then(Value::as_str) {
+        let ev_ty = v
+            .get("event")
+            .and_then(|e| e.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let sess = v.get("session").and_then(Value::as_str).unwrap_or("");
+        return format!(" push={p} type={ev_ty} session={sess}");
+    }
+    match (v.get("id"), v.get("ok")) {
+        (Some(id), Some(ok)) => format!(" resp id={id} ok={ok}"),
+        _ => String::new(),
+    }
+}
 
 /// Extrémité émission d'une connexion : les réponses/pushes sérialisés
 /// partent dans la file drainée par la tâche d'écriture dédiée —
@@ -101,6 +150,8 @@ pub(crate) struct Outbox {
     /// tâche d'écriture à chaque ligne drainée (comptage approximatif
     /// suffisant : il ne sert qu'à borner la mémoire par connexion).
     queued: Arc<std::sync::atomic::AtomicUsize>,
+    /// Epoch (s) du dernier warn « ligne géante » — rate-limit 1/min/conn.
+    giant_warn: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Outbox {
@@ -125,20 +176,54 @@ impl Outbox {
         let len = s.len();
         // La borne couvre le BACKLOG (client durablement plus lent que la
         // production), pas la frame isolée : une ligne unique > capacité
-        // (aperçu binaire ~17 Mio) est admise sur file quasi vide —
-        // sinon toute grosse réponse tuerait la connexion à coup sûr.
+        // est admise sur file quasi vide — sinon toute grosse réponse
+        // tuerait la connexion à coup sûr (le warn `giant line` ci-dessous
+        // la rend visible).
         // fetch_add préalable = réservation atomique entre producteurs.
         if self.queued.fetch_add(len, Ordering::Relaxed) >= WRITE_QUEUE_BYTES {
             self.queued.fetch_sub(len, Ordering::Relaxed);
             let _ = self.dead.send(true);
-            anyhow::bail!("file d'émission saturée");
+            anyhow::bail!("outbound queue saturated");
+        }
+        // Ligne géante enfilée : elle va monopoliser le fil pendant sa
+        // vidange (head-of-line — les réponses hi attendent derrière).
+        // Warn rate-limité 1/min/conn avec le type cheap à extraire —
+        // le diagnostic d'un incident de ce type ne doit plus coûter
+        // une analyse manuelle des compteurs rx/tx (#302).
+        if len > GIANT_LINE_BYTES && self.giant_warn_allowed() {
+            let lane = if ch.same_channel(&self.hi) { "resp" } else { "push" };
+            warn!("outbox: giant line {len} B ({lane}{})", giant_line_label(&s));
         }
         if ch.send(s).is_err() {
             self.queued.fetch_sub(len, Ordering::Relaxed);
             let _ = self.dead.send(true);
-            anyhow::bail!("file d'émission fermée");
+            anyhow::bail!("outbound queue closed");
         }
         Ok(())
+    }
+
+    /// Rate-limit du warn « ligne géante » : 1/min/conn — au-delà, les
+    /// lignes géantes sont déjà connues et le warn ne dit plus rien.
+    fn giant_warn_allowed(&self) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut last = self.giant_warn.load(std::sync::atomic::Ordering::Relaxed);
+        loop {
+            if now.saturating_sub(last) < 60 {
+                return false;
+            }
+            match self.giant_warn.compare_exchange_weak(
+                last,
+                now,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(cur) => last = cur,
+            }
+        }
     }
 }
 
@@ -166,19 +251,24 @@ pub struct Daemon {
     pub sessions: RwLock<HashMap<String, Arc<Session>>>,
     /// Profils agents — mutable à chaud : `ComponentSetParams` sur le
     /// composant interne `agents` réécrit `[agents.*]` de config.toml
-    /// puis remplace les profils en place (agents_cfg.rs). Les lectures
-    /// passent par `.read().await`.
+    /// puis remplace les profils en place (agents_cfg.rs), et les
+    /// sections `[agents.*]` éditées à la main sont rechargées par
+    /// `reload_agent_profiles` (stamp mtime+taille — merge complet
+    /// built-ins + sections : ajout, modification ET retrait, comme
+    /// au boot) + re-scan périodique `agents_rescan_boot`.
+    /// Les lectures passent par `.read().await`.
     pub agents: Arc<RwLock<HashMap<String, AgentProfile>>>,
+    /// Estampille (mtime, taille) du config.toml au dernier hot-reload
+    /// des profils — évite de re-parser le fichier à chaque
+    /// list_agents/daemon_status.
+    agents_cfg_stamp: std::sync::Mutex<Option<(std::time::SystemTime, u64)>>,
     pub retention: RetentionCfg,
     pub a2a: A2aCfg,
     /// Horodatage des envois agent→agent par paire (from,to) — rate-limit.
-    peer_rate: std::sync::Mutex<
-        HashMap<(String, String), std::collections::VecDeque<std::time::Instant>>,
-    >,
+    peer_rate:
+        std::sync::Mutex<HashMap<(String, String), std::collections::VecDeque<std::time::Instant>>>,
     /// Horodatage des spawns agent→agent par session créatrice.
-    spawn_rate: std::sync::Mutex<
-        HashMap<String, std::collections::VecDeque<std::time::Instant>>,
-    >,
+    spawn_rate: std::sync::Mutex<HashMap<String, std::collections::VecDeque<std::time::Instant>>>,
     /// Registre PR ↔ session (prs.json) — voir prs.rs.
     pub prs: Arc<PrRegistry>,
     /// File de vérification forge des références détectées — une URL de
@@ -190,7 +280,13 @@ pub struct Daemon {
     pr_sync: Arc<std::sync::Mutex<prs::PrSyncCtl>>,
     /// Forges de review reconnues par le watcher PR (`[[forges]]` de
     /// config.toml + implicites github/gitlab.com) — voir forges.rs.
-    pub forges: Forges,
+    /// Mutable à chaud : le panneau `prs-registry` et le rechargement
+    /// config.toml remplacent l'état vivant (forges_cfg.rs) — watchers,
+    /// forge_list et pr_sync lisent le set courant sans restart.
+    pub forges: Arc<std::sync::RwLock<ForgeLive>>,
+    /// Estampille (mtime, taille) du config.toml pour le hot-reload
+    /// `[[forges]]` — même mécanique que `agents_cfg_stamp`.
+    forges_cfg_stamp: std::sync::Mutex<Option<(std::time::SystemTime, u64)>>,
     /// Surface web activée : {"bind": addr, "url": "http://…/?token=…"} —
     /// renseigné par main après le bind, reflété dans daemon_status.
     /// Partagé avec Components : l'état du composant interne `web-ui`
@@ -229,8 +325,12 @@ pub struct Daemon {
     /// Catalogues complets par profil (`catalogue_cmd`) — sert les
     /// variantes hors annonce ACP via ReqKind::ModelCatalog.
     pub catalogues: CatalogueCache,
+    /// `provision_skills` global (config.toml, défaut on) — synchro des
+    /// skills agents embarqués dans les répertoires scannés par chaque
+    /// provider au spawn et au boot (skills.rs) ; combiné au flag par
+    /// profil `AgentProfile::provision_skills`.
+    pub provision_skills: bool,
 }
-
 
 impl Daemon {
     /// Charge les sessions existantes depuis le disque.
@@ -242,11 +342,12 @@ impl Daemon {
         agents: HashMap<String, AgentProfile>,
         retention: RetentionCfg,
         a2a: A2aCfg,
-        forges: Forges,
+        forge_cfgs: Vec<ForgeCfg>,
         bind_tcp: String,
         orch: OrchCfg,
         compact: CompactCfg,
         watchdog: WatchdogCfg,
+        provision_skills: bool,
     ) -> Result<(Arc<Self>, Vec<String>)> {
         let web = Arc::new(RwLock::new(None));
         let orch = Arc::new(OrchProbe::open(orch));
@@ -263,32 +364,39 @@ impl Daemon {
         // inerte.
         if let Some(v) = compact.global.at_pct {
             if !(0.0..=1.0).contains(&v) {
-                tracing::warn!("[compact] at_pct={v} hors borne (0<p≤1) — règle % ignorée");
+                tracing::warn!("[compact] at_pct={v} out of range (0<p≤1) — % rule ignored");
             }
         }
         for (id, part) in &compact.by_agent {
             if let Some(v) = part.at_pct {
                 if !(0.0..=1.0).contains(&v) {
-                    tracing::warn!("[agents.{id}.compact] at_pct={v} hors borne (0<p≤1) — règle % ignorée");
+                    tracing::warn!(
+                        "[agents.{id}.compact] at_pct={v} out of range (0<p≤1) — % rule ignored"
+                    );
                 }
             }
         }
         let prs = Arc::new(PrRegistry::open(&root));
         let caps = crate::caps::CapsRegistry::open(&root);
-        // Set forge figé pour la vérif d'existence (hôtes déclarés +
-        // token_env) — la config ne change pas à chaud.
-        let forge_set = forges.list_json().as_array().cloned().unwrap_or_default();
+        // Set forge vivant pour la vérif d'existence (hôtes déclarés +
+        // token_env) — relu à chaque vérification : un `comp set
+        // prs-registry` ou un `[[forges]]` édité à la main est pris en
+        // compte sans restart (forges_cfg.rs).
+        let forges = Arc::new(std::sync::RwLock::new(ForgeLive::new(forge_cfgs)));
+        let forge_live = Arc::clone(&forges);
         let pr_verify = Arc::new(prs::PrVerifier::new(Arc::clone(&prs), move |t| {
-            forgesync::verify_ref(&forge_set, t)
+            let set = forge_live.read().unwrap().set.list_json();
+            forgesync::verify_ref(set.as_array().map(Vec::as_slice).unwrap_or(&[]), t)
         }));
-        let agent_ids: Vec<String> = agents.keys().cloned().collect();
         // Profils partagés avec Components (params du composant interne
-        // `agents`) — mutabilité à chaud voir agents_cfg.rs.
+        // `agents` + dropdowns `*_agent` de l'orchestrateur — lus à
+        // live) — mutabilité à chaud voir agents_cfg.rs.
         let agents = Arc::new(RwLock::new(agents));
         let d = Arc::new(Self {
             root: root.clone(),
             sessions: RwLock::new(HashMap::new()),
             agents: Arc::clone(&agents),
+            agents_cfg_stamp: std::sync::Mutex::new(None),
             retention,
             components: Components::open(
                 &root,
@@ -296,8 +404,8 @@ impl Daemon {
                 a2a.enabled,
                 Arc::clone(&web),
                 Arc::clone(&orch),
-                agent_ids,
                 Arc::clone(&agents),
+                Arc::clone(&forges),
             ),
             orch,
             a2a,
@@ -310,12 +418,14 @@ impl Daemon {
             pr_verify,
             pr_sync: Arc::new(std::sync::Mutex::new(prs::PrSyncCtl::default())),
             forges,
+            forges_cfg_stamp: std::sync::Mutex::new(None),
             web,
             dir_watch_n: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             host_sys: std::sync::Mutex::new(sysinfo::System::new()),
             slot_lock: tokio::sync::Mutex::new(()),
             model_costs: CostCache::default(),
             catalogues: CatalogueCache::default(),
+            provision_skills,
         });
         d.pr_verify.spawn_worker();
         let mut resumable = Vec::new();
@@ -348,11 +458,9 @@ impl Daemon {
                 let compact = d.compact.clone();
                 let caps = Arc::clone(&d.caps);
                 set.spawn(async move {
-                    let _permit = sem.acquire_owned().await.expect("semaphore jamais fermée");
-                    let r = tokio::task::spawn_blocking(move || {
-                        Session::open(dir, &compact, caps)
-                    })
-                    .await;
+                    let _permit = sem.acquire_owned().await.expect("semaphore never closed");
+                    let r = tokio::task::spawn_blocking(move || Session::open(dir, &compact, caps))
+                        .await;
                     (dir_err, r)
                 });
             }
@@ -360,7 +468,7 @@ impl Daemon {
                 let (dir, r) = match joined {
                     Ok(t) => t,
                     Err(e) => {
-                        warn!("session load: tâche rejointe en erreur: {e}");
+                        warn!("session load: task rejoined in error: {e}");
                         continue;
                     }
                 };
@@ -387,11 +495,48 @@ impl Daemon {
                     resumable.push(id.clone());
                 }
                 d.watch_prs(&s);
-                info!("session chargée: {id}");
+                info!("session loaded: {id}");
                 d.sessions.write().await.insert(id, s);
             }
         }
+        // Skills embarqués pour les sessions déjà connues : la sync au
+        // spawn couvre les respawns, mais un agent déjà vivant garderait
+        // un workspace sans skills jusqu'à son prochain cycle — une
+        // passe au boot rapproche tout le monde (idempotent, no-op si
+        // les fichiers sont déjà à jour).
+        d.provision_skills_boot();
         Ok((d, resumable))
+    }
+
+    /// Provisionnement initial des skills pour les sessions chargées au
+    /// boot — une sync par racine unique (plusieurs sessions peuvent
+    /// partager le même cwd).
+    fn provision_skills_boot(&self) {
+        if !self.provision_skills {
+            return;
+        }
+        // Read-locks sans await (fn sync) : try_read — au boot personne
+        // ne conteste ; en cas d'échec improbable on saute la passe
+        // (le prochain spawn reprovisionnera de toute façon).
+        let (Ok(agents), Ok(sessions)) = (self.agents.try_read(), self.sessions.try_read()) else {
+            return;
+        };
+        let mut roots = std::collections::BTreeSet::new();
+        for s in sessions.values() {
+            let meta = s.meta_snapshot();
+            let Some(profile) = agents.get(&meta.agent) else {
+                continue;
+            };
+            if !profile.provision_skills || !std::path::Path::new(&meta.cwd).is_dir() {
+                continue;
+            }
+            for d in crate::skills::dirs_for(&meta.agent) {
+                roots.insert(std::path::Path::new(&meta.cwd).join(d));
+            }
+        }
+        if !roots.is_empty() {
+            crate::skills::sync(&roots.into_iter().collect::<Vec<_>>());
+        }
     }
 
     /// Reprise post-crash : respawn des sessions qui travaillaient quand
@@ -401,7 +546,7 @@ impl Daemon {
     /// AGENTCONTROL_SOCK).
     pub async fn auto_resume(self: &Arc<Self>, sessions: Vec<String>) {
         info!(
-            "arrêt précédent brutal — {} session(s) active(s) à reprendre",
+            "previous unclean shutdown — {} active session(s) to resume",
             sessions.len()
         );
         for (i, sid) in sessions.into_iter().enumerate() {
@@ -409,10 +554,7 @@ impl Daemon {
             tokio::spawn(async move {
                 // Léger décalage : évite une rafale de spawns simultanés.
                 if i > 0 {
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        500 * i as u64,
-                    ))
-                    .await;
+                    tokio::time::sleep(std::time::Duration::from_millis(500 * i as u64)).await;
                 }
                 d.resume_after_crash(&sid).await;
             });
@@ -438,19 +580,15 @@ impl Daemon {
         let meta = s.meta_snapshot();
         let Some(native) = meta.native_session_id.clone() else {
             // Jamais arrivée jusqu'à session/new → rien à recharger.
-            info!("{sid}: pas de session native — reprise ignorée");
+            info!("{sid}: no native session — resume skipped");
             return;
         };
         let Some(profile) = self.agents.read().await.get(&meta.agent).cloned() else {
-            warn!("{sid}: agent « {} » inconnu — reprise ignorée", meta.agent);
+            warn!("{sid}: unknown agent « {} » — resume skipped", meta.agent);
             return;
         };
-        let (cmd, envs) = self.agent_parts(
-            &profile,
-            meta.model.as_deref(),
-            meta.mode.as_deref(),
-            sid,
-        );
+        let (cmd, envs) =
+            self.agent_parts(&profile, meta.model.as_deref(), meta.mode.as_deref(), sid);
         // Dernier re-check : l'essai suivant d'un spawn client peut
         // repartir dans la fenêtre (sleep 800 ms entre ses essais) —
         // le spawn_lock de spawn_agent empêche le doublon, mais le
@@ -463,9 +601,9 @@ impl Daemon {
             let _slot = match self.ensure_agent_slot(&meta.agent).await {
                 Ok(g) => g,
                 Err(e) => {
-                    warn!("{sid}: reprise auto refusée: {e:#}");
+                    warn!("{sid}: auto resume refused: {e:#}");
                     s.emit(proto::EventKind::Error {
-                        message: format!("reprise auto: {e:#}"),
+                        message: format!("auto resume: {e:#}"),
                     });
                     return;
                 }
@@ -492,16 +630,16 @@ impl Daemon {
                 // Fallback load→new : rejouer l'override catalogue sur
                 // le sid frais (no-op si le sid correspond déjà).
                 self.reapply_catalogue_if_new_sid(&s).await;
-                info!("{sid}: agent relancé — envoi « {AUTO_RESUME_PROMPT} »");
+                info!("{sid}: agent relaunched — sending « {AUTO_RESUME_PROMPT} »");
                 self.send_resume_prompt(&s, sid).await;
             }
             // Supplanté après le handshake (kill/rebind pendant le spawn) :
             // le nouveau cycle possède la session — pas de prompt de reprise.
             Ok(false) => {}
             Err(e) => {
-                warn!("{sid}: reprise auto échouée: {e:#}");
+                warn!("{sid}: auto resume failed: {e:#}");
                 s.emit(proto::EventKind::Error {
-                    message: format!("reprise auto: {e:#}"),
+                    message: format!("auto resume: {e:#}"),
                 });
             }
         }
@@ -517,8 +655,7 @@ impl Daemon {
     /// mort entre-temps : l'appelant reprend la main avec son propre spawn.
     async fn wait_revived_or_done(self: &Arc<Self>, s: &Arc<Session>, sid: &str) -> bool {
         let mut ev_rx = s.events_tx.subscribe();
-        let deadline =
-            tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
         while s.is_alive() && s.meta_snapshot().state == "interrupted" {
             if tokio::time::timeout_at(deadline, ev_rx.recv())
                 .await
@@ -533,15 +670,15 @@ impl Daemon {
         let st = s.meta_snapshot().state;
         match st.as_str() {
             "idle" => {
-                info!("{sid}: déjà relancée — envoi « {AUTO_RESUME_PROMPT} »");
+                info!("{sid}: already relaunched — sending « {AUTO_RESUME_PROMPT} »");
                 self.send_resume_prompt(s, sid).await;
             }
             "interrupted" => {
                 // Le cas que la reprise auto devait couvrir : visible
                 // (le spawn peut être simplement lent, pas bloqué).
-                warn!("{sid}: spawn en vol depuis plus de 2 min — prompt de reprise non envoyé");
+                warn!("{sid}: spawn in flight for over 2 min — resume prompt not sent");
             }
-            _ => debug!("{sid}: déjà relancée (état {st}) — reprise auto ignorée"),
+            _ => debug!("{sid}: already relaunched (state {st}) — auto resume skipped"),
         }
         true
     }
@@ -550,7 +687,7 @@ impl Daemon {
     /// qui explique le contexte puis l'envoi utilisateur lui-même.
     async fn send_resume_prompt(self: &Arc<Self>, s: &Arc<Session>, sid: &str) {
         s.emit(proto::EventKind::System {
-            text: "démon relancé après un arrêt brutal — reprise du travail…".into(),
+            text: "daemon restarted after an unclean shutdown — resuming work…".into(),
         });
         match s.send_prompt(AUTO_RESUME_PROMPT, false, false).await {
             // Rendormie entre le respawn et l'envoi : le prompt
@@ -558,9 +695,9 @@ impl Daemon {
             Ok(true) => self.spawn_wake(s, sid),
             Ok(false) => {}
             Err(e) => {
-                warn!("{sid}: prompt de reprise non délivré: {e:#}");
+                warn!("{sid}: resume prompt not delivered: {e:#}");
                 s.emit(proto::EventKind::Error {
-                    message: format!("prompt de reprise: {e:#}"),
+                    message: format!("resume prompt: {e:#}"),
                 });
             }
         }
@@ -572,7 +709,7 @@ impl Daemon {
             .await
             .get(id)
             .cloned()
-            .with_context(|| format!("session inconnue: {id}"))
+            .with_context(|| format!("unknown session: {id}"))
     }
 
     /// Réserve une place d'instance pour le profil `agent` avant un spawn.
@@ -629,16 +766,15 @@ impl Daemon {
         }
         anyhow::ensure!(
             idle.len() >= excess,
-            "limite d'instances atteinte pour « {agent} » ({}/{max}) — aucune session inactive à endormir",
+            "instance limit reached for « {agent} » ({}/{max}) — no inactive session to put to sleep",
             live.len()
         );
         for s in idle.into_iter().take(excess) {
-            info!("plafond {agent} ({max}) : endormie {}", s.meta_snapshot().id);
+            info!("{agent} cap ({max}): put to sleep {}", s.meta_snapshot().id);
             s.sleep().await;
         }
         Ok(guard)
     }
-
 
     // -----------------------------------------------------------------------
     // Agent↔agent : helpers
@@ -655,8 +791,10 @@ impl Daemon {
         session_id: &str,
     ) -> (Vec<String>, HashMap<String, String>) {
         let (m, md) = (model.unwrap_or(""), cfg::env_mode(mode.unwrap_or("")));
-        let cmd: Vec<String> = profile
-            .command
+        // Fallbacks : premier candidat dont argv[0] résout (même
+        // sélection que `available`/spawn_effective).
+        let argv = misc::effective_command(&profile.commands);
+        let cmd: Vec<String> = argv
             .iter()
             .map(|a| a.replace("{model}", m).replace("{mode}", md))
             .filter(|a| !a.is_empty())
@@ -664,12 +802,7 @@ impl Daemon {
         let mut envs: HashMap<String, String> = profile
             .env
             .iter()
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    v.replace("{model}", m).replace("{mode}", md),
-                )
-            })
+            .map(|(k, v)| (k.clone(), v.replace("{model}", m).replace("{mode}", md)))
             .filter(|(_, v)| !v.is_empty())
             .collect();
         if self.a2a.enabled {
@@ -691,6 +824,21 @@ impl Daemon {
         meta: &proto::SessionMeta,
     ) -> crate::session::SpawnHints {
         let acp_meta = advisor_acp_meta(profile, meta);
+        // Skills embarqués : les répertoires scannés par le provider de
+        // ce profil (skills.rs) sont synchronisés avant chaque spawn —
+        // cwd inexistant → rien à provisionner (on ne recrée pas un
+        // workspace supprimé pour y déposer des skills).
+        let skills_roots = if self.provision_skills
+            && profile.provision_skills
+            && std::path::Path::new(&meta.cwd).is_dir()
+        {
+            crate::skills::dirs_for(&meta.agent)
+                .iter()
+                .map(|d| std::path::Path::new(&meta.cwd).join(d))
+                .collect()
+        } else {
+            Vec::new()
+        };
         crate::session::SpawnHints {
             acp_meta,
             extra_models: profile
@@ -699,6 +847,7 @@ impl Daemon {
                 .map(|e| e.value.clone())
                 .collect(),
             advisor_models: profile.advisor_models.clone(),
+            skills_roots,
         }
     }
 
@@ -745,7 +894,6 @@ impl Daemon {
         }
     }
 
-
     async fn handle(self: &Arc<Self>, req: ReqKind) -> Result<Value> {
         match req {
             ReqKind::DaemonLogTail {
@@ -757,8 +905,9 @@ impl Daemon {
             ReqKind::UpdateDaemon { version } => self.h_update_daemon(version).await,
             ReqKind::ListAgents => self.h_list_agents().await,
             ReqKind::ModelCosts { agent } => self.h_model_costs(agent).await,
-            ReqKind::RefreshAgentCaps { agent } => {
-                self.h_refresh_agent_caps(agent).await
+            ReqKind::RefreshAgentCaps { agent } => self.h_refresh_agent_caps(agent).await,
+            ReqKind::InstallAgentAdapter { agent } => {
+                self.h_install_agent_adapter(agent).await
             }
             ReqKind::ModelCatalog { agent } => self.h_model_catalog(agent).await,
             ReqKind::ListSessions => self.h_list_sessions().await,
@@ -775,10 +924,8 @@ impl Daemon {
                 origin,
                 group,
             } => {
-                self.h_new_session(
-                    agent, cwd, title, model, mode, prompt, origin, group,
-                )
-                .await
+                self.h_new_session(agent, cwd, title, model, mode, prompt, origin, group)
+                    .await
             }
             ReqKind::AttachSession {
                 agent,
@@ -786,13 +933,13 @@ impl Daemon {
                 native_id,
                 title,
             } => self.h_attach_session(agent, cwd, native_id, title).await,
-            ReqKind::ListNativeSessions { session } => {
-                self.h_list_native_sessions(session).await
-            }
+            ReqKind::ListNativeSessions { session } => self.h_list_native_sessions(session).await,
             ReqKind::ForkSession { session } => self.h_fork_session(session).await,
-            ReqKind::ResumeSession { session, native_id } => {
-                self.h_resume_session(session, native_id).await
-            }
+            ReqKind::ResumeSession {
+                session,
+                native_id,
+                fresh,
+            } => self.h_resume_session(session, native_id, fresh).await,
             ReqKind::ClearSession { session } => self.h_clear_session(session).await,
             ReqKind::SleepSession { session } => self.h_sleep_session(session).await,
             ReqKind::Send {
@@ -836,12 +983,8 @@ impl Daemon {
                     .await
             }
             ReqKind::FirstPost { session } => self.h_first_post(session).await,
-            ReqKind::PinMessage { session, seq } => {
-                self.h_pin_message(session, seq).await
-            }
-            ReqKind::UnpinMessage { session, seq } => {
-                self.h_unpin_message(session, seq).await
-            }
+            ReqKind::PinMessage { session, seq } => self.h_pin_message(session, seq).await,
+            ReqKind::UnpinMessage { session, seq } => self.h_unpin_message(session, seq).await,
             ReqKind::ListPinned { session } => self.h_list_pinned(session).await,
             ReqKind::ReadFile {
                 session,
@@ -868,14 +1011,10 @@ impl Daemon {
                 query,
                 limit,
             } => self.h_find_files(session, path, query, limit).await,
-            ReqKind::DeletePath { session, path } => {
-                self.h_delete_path(session, path).await
+            ReqKind::DeletePath { session, path } => self.h_delete_path(session, path).await,
+            ReqKind::CreatePath { session, path, dir } => {
+                self.h_create_path(session, path, dir).await
             }
-            ReqKind::CreatePath {
-                session,
-                path,
-                dir,
-            } => self.h_create_path(session, path, dir).await,
             ReqKind::DownloadPath {
                 session,
                 path,
@@ -887,44 +1026,34 @@ impl Daemon {
                     .await
             }
             ReqKind::QueueList { session } => self.h_queue_list(session).await,
-            ReqKind::QueueEdit { session, index, text } => {
-                self.h_queue_edit(session, index, text).await
-            }
-            ReqKind::QueueDrop { session, index } => {
-                self.h_queue_drop(session, index).await
-            }
-            ReqKind::QueuePromote { session, index } => {
-                self.h_queue_promote(session, index).await
-            }
-            ReqKind::QueueSteer { session, index } => {
-                self.h_queue_steer(session, index).await
-            }
+            ReqKind::QueueEdit {
+                session,
+                index,
+                text,
+            } => self.h_queue_edit(session, index, text).await,
+            ReqKind::QueueDrop { session, index } => self.h_queue_drop(session, index).await,
+            ReqKind::QueuePromote { session, index } => self.h_queue_promote(session, index).await,
+            ReqKind::QueueSteer { session, index } => self.h_queue_steer(session, index).await,
+            ReqKind::QueueClear { session } => self.h_queue_clear(session).await,
             ReqKind::Cancel { session } => self.h_cancel(session).await,
             ReqKind::SessionInfo { session } => self.h_session_info(session).await,
             ReqKind::SetMode { session, mode } => self.h_set_mode(session, mode).await,
-            ReqKind::SetModel { session, model } => {
-                self.h_set_model(session, model).await
-            }
-            ReqKind::SetAdvisor { session, advisor } => {
-                self.h_set_advisor(session, advisor).await
+            ReqKind::SetModel { session, model } => self.h_set_model(session, model).await,
+            ReqKind::SetAdvisor { session, advisor } => self.h_set_advisor(session, advisor).await,
+            ReqKind::SessionSetSteps { session, steps } => {
+                self.h_session_set_steps(session, steps).await
             }
             ReqKind::SetConfigOption {
                 session,
                 config_id,
                 value,
-            } => {
-                self.h_set_config_option(session, config_id, value)
-                    .await
-            }
+            } => self.h_set_config_option(session, config_id, value).await,
             ReqKind::Respond {
                 session,
                 request_id,
                 option_id,
                 answer,
-            } => {
-                self.h_respond(session, request_id, option_id, answer)
-                    .await
-            }
+            } => self.h_respond(session, request_id, option_id, answer).await,
             ReqKind::GetBlob {
                 session,
                 blob,
@@ -957,8 +1086,8 @@ impl Daemon {
                 ci,
             } => {
                 self.h_pr_track(
-                    session, repo, pr, forge, host, change_id, url, branch, title,
-                    status, note, sync_fails, review, ci,
+                    session, repo, pr, forge, host, change_id, url, branch, title, status, note,
+                    sync_fails, review, ci,
                 )
                 .await
             }
@@ -975,46 +1104,28 @@ impl Daemon {
             ReqKind::ComponentInfo { name } => self.h_component_info(name).await,
             ReqKind::ComponentStart { name } => self.h_component_start(name).await,
             ReqKind::ComponentStop { name } => self.h_component_stop(name).await,
-            ReqKind::ComponentRestart { name } => {
-                self.h_component_restart(name).await
-            }
+            ReqKind::ComponentRestart { name } => self.h_component_restart(name).await,
             ReqKind::ComponentLogs {
                 name,
                 offset,
                 limit,
             } => self.h_component_logs(name, offset, limit).await,
-            ReqKind::ComponentUpsert { name, spec } => {
-                self.h_component_upsert(name, spec).await
-            }
+            ReqKind::ComponentUpsert { name, spec } => self.h_component_upsert(name, spec).await,
             ReqKind::ComponentRemove { name } => self.h_component_remove(name).await,
-            ReqKind::ComponentCatalog { refresh } => {
-                self.h_component_catalog(refresh).await
-            }
+            ReqKind::ComponentCatalog { refresh } => self.h_component_catalog(refresh).await,
             ReqKind::ComponentInstall { name, params } => {
                 self.h_component_install(name, params).await
             }
             ReqKind::ComponentSetParams { name, params } => {
                 self.h_component_set_params(name, params).await
             }
-            ReqKind::ComponentQuery { name, query } => {
-                self.h_component_query(name, query).await
-            }
-            ReqKind::PluginViewToken { name } => {
-                self.h_plugin_view_token(name).await
-            }
-            ReqKind::OrchestratorSet { enabled } => {
-                self.h_orch_set(enabled).await
-            }
-            ReqKind::OrchestratorConfig { patch } => {
-                self.h_orch_config(patch).await
-            }
+            ReqKind::ComponentQuery { name, query } => self.h_component_query(name, query).await,
+            ReqKind::PluginViewToken { name } => self.h_plugin_view_token(name).await,
+            ReqKind::OrchestratorSet { enabled } => self.h_orch_set(enabled).await,
+            ReqKind::OrchestratorConfig { patch } => self.h_orch_config(patch).await,
             ReqKind::ManagerSpawn { repo } => self.h_manager_spawn(&repo).await,
-            ReqKind::BacklogMetrics { window } => {
-                self.h_backlog_metrics(window).await
-            }
-            ReqKind::Subscribe { session, after_seq } => {
-                self.h_subscribe(session, after_seq).await
-            }
+            ReqKind::BacklogMetrics { window } => self.h_backlog_metrics(window).await,
+            ReqKind::Subscribe { session, after_seq } => self.h_subscribe(session, after_seq).await,
             ReqKind::ReviewReport {
                 session,
                 verdict,
@@ -1031,7 +1142,7 @@ impl Daemon {
             | ReqKind::TermClose { .. }
             | ReqKind::WatchDir { .. }
             | ReqKind::UnwatchDir { .. } => {
-                anyhow::bail!("requête bornée à la connexion hors serve_conn")
+                anyhow::bail!("bounded request outside serve_conn")
             }
         }
     }
@@ -1044,10 +1155,15 @@ impl Daemon {
     /// sur TOUTES les méthodes puis une fermeture (flap #227). L'ordre
     /// est préservé : la réponse et les pushes partent après l'await,
     /// le broadcast a bufferisé le live entre-temps.
-    async fn replay_tail(s: &Arc<Session>, after: u64) -> (Vec<proto::Event>, u64) {
+    async fn replay_tail(s: &Arc<Session>, after: u64) -> (Vec<proto::Event>, u64, u64) {
         let s = Arc::clone(s);
         tokio::task::spawn_blocking(move || {
-            s.journal.read_tail(&s.dir, after, SUBSCRIBE_REPLAY_MAX)
+            s.journal.read_tail(
+                &s.dir,
+                after,
+                SUBSCRIBE_REPLAY_MAX,
+                SUBSCRIBE_REPLAY_MAX_BYTES,
+            )
         })
         .await
         .ok()
@@ -1078,6 +1194,7 @@ impl Daemon {
             lo: wtx,
             dead: dead_tx.clone(),
             queued: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            giant_warn: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         // Guard : au retour de serve_conn (client parti, dead signalé,
         // erreur) le writer est avorté — dead = fermer maintenant, pas
@@ -1140,8 +1257,7 @@ impl Daemon {
         // term_close reçus pour des ids pas encore insérés (spawn en
         // vol — le client a abandonné/timeout) : le PTY est tué à son
         // arrivée au lieu de rester orphelin jusqu'à la déconnexion.
-        let mut pending_close: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut pending_close: std::collections::HashSet<String> = std::collections::HashSet::new();
         // Génération d'insertion — un Done tardif de la génération
         // précédente (reap jusqu'à EXIT_GRACE) ne doit pas tuer un
         // reopen sous le même id.
@@ -1155,7 +1271,7 @@ impl Daemon {
                         // EOF propre (client parti) vs erreur de lecture :
                         // le log de fermeture distingue les deux.
                         Ok(None) => return Ok(()),
-                        Err(e) => return Err(e).context("lecture conn"),
+                        Err(e) => return Err(e).context("reading conn"),
                     };
                     if line.trim().is_empty() {
                         continue;
@@ -1216,12 +1332,24 @@ impl Daemon {
                                 // sinon un journal volumineux sature le
                                 // lien et fait échouer toutes les requêtes
                                 // concurrentes par timeout.
-                                let (backlog, skipped) =
+                                let (backlog, skipped, replay_bytes) =
                                     Self::replay_tail(&s, after).await;
+                                if replay_bytes > 0 {
+                                    info!(
+                                        session = %session,
+                                        after_seq = after,
+                                        events = backlog.len(),
+                                        bytes = replay_bytes,
+                                        skipped,
+                                        "subscribe replay"
+                                    );
+                                }
                                 let resp = Response::ok(req.id, json!({
                                     "subscribed": session,
                                     "last_seq": s.journal.last_seq(),
                                     "skipped": skipped,
+                                    "replay_events": backlog.len(),
+                                    "replay_bytes": replay_bytes,
                                 }));
                                 Self::send_resp(&outbox, &resp)?;
                                 // Le signal de reset part avant le
@@ -1293,7 +1421,7 @@ impl Daemon {
                 // conn refermée — plus rien ne peut sortir. Remontée en
                 // erreur pour que le log de fermeture donne la raison.
                 _ = wdead.changed() => {
-                    return Err(anyhow::anyhow!("writer mort (flush timeout / file pleine)"));
+                    return Err(anyhow::anyhow!("writer dead (flush timeout / queue full)"));
                 }
                 ev = async {
                     match sub.as_mut() {
@@ -1348,10 +1476,10 @@ impl Daemon {
                                 };
                                 Self::send_push(&outbox, sid, &ev)?;
                             }
-                            let (backlog, skipped) =
+                            let (backlog, skipped, replay_bytes) =
                                 Self::replay_tail(&s, *last).await;
-                            if skipped > 0 {
-                                warn!(session = %sid, skipped, "subscribe lagged: events sautés au-delà de la fenêtre");
+                            if skipped > 0 || replay_bytes > 0 {
+                                warn!(session = %sid, skipped, events = backlog.len(), bytes = replay_bytes, "subscribe lagged: events skipped beyond the window");
                             }
                             for event in backlog {
                                 *last = event.seq;
@@ -1407,12 +1535,12 @@ impl Daemon {
                                     let resp = if terms.contains_key(&t.id) {
                                         Response::err(
                                             sp.id,
-                                            format!("id terminal déjà utilisé: {}", t.id),
+                                            format!("terminal id already used: {}", t.id),
                                         )
                                     } else if closed {
                                         Response::err(
                                             sp.id,
-                                            "terminal fermé pendant l'ouverture",
+                                            "terminal closed during open",
                                         )
                                     } else {
                                         let tid = t.id.clone();
@@ -1461,7 +1589,14 @@ impl Daemon {
     }
 
     fn send_push(w: &Outbox, session: &str, ev: &proto::Event) -> Result<()> {
-        Self::send_line(w, &Push { push: "event", session: session.into(), event: ev.clone() })
+        Self::send_line(
+            w,
+            &Push {
+                push: "event",
+                session: session.into(),
+                event: ev.clone(),
+            },
+        )
     }
 }
 
@@ -1475,9 +1610,9 @@ pub(super) fn resolve_cwd(raw: &str) -> Result<String> {
     let cwd = expand_cwd(raw)?;
     if !std::path::Path::new(&cwd).is_dir() {
         let extra = (cwd != raw)
-            .then(|| format!(" (expansé depuis « {raw} »)"))
+            .then(|| format!(" (expanded from « {raw} »)"))
             .unwrap_or_default();
-        anyhow::bail!("cwd introuvable : {cwd}{extra}");
+        anyhow::bail!("cwd not found: {cwd}{extra}");
     }
     Ok(cwd)
 }
@@ -1499,9 +1634,9 @@ fn expand_cwd(raw: &str) -> Result<String> {
         };
         let home = home.with_context(|| {
             if user.is_empty() {
-                "expansion `~` impossible : HOME absent".to_string()
+                "cannot expand `~`: HOME unset".to_string()
             } else {
-                format!("expansion `~{user}` impossible : utilisateur inconnu")
+                format!("cannot expand `~{user}`: unknown user")
             }
         })?;
         s = format!("{}{}", home.to_string_lossy(), tail);
@@ -1532,7 +1667,10 @@ fn expand_env(s: &str) -> String {
                 .count();
             (&rest[i..i + 1 + n], &after[..n], &after[n..])
         };
-        let ok = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        let ok = name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
             && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
         match (ok, std::env::var(name)) {
             (true, Ok(v)) => out.push_str(&v),
@@ -1638,16 +1776,17 @@ mod tests {
         assert_eq!(resolve_cwd("~").unwrap(), home);
         let e = resolve_cwd("~/dir_nope_zz9").unwrap_err().to_string();
         assert!(e.contains("dir_nope_zz9"), "{e}");
-        assert!(e.contains("expansé depuis"), "{e}");
+        assert!(e.contains("expanded from"), "{e}");
         // Forme déjà absolue : pas de mention « depuis ».
         let e2 = resolve_cwd("/dir_nope_zz9").unwrap_err().to_string();
-        assert!(!e2.contains("depuis"), "{e2}");
+        assert!(!e2.contains("from"), "{e2}");
     }
 
     fn advisor_profile(models: &[&str]) -> super::AgentProfile {
         super::AgentProfile {
             name: "T".into(),
-            command: vec![],
+            commands: vec![],
+            via: super::AgentVia::Builtin,
             env: Default::default(),
             compact: Default::default(),
             max_instances: 0,
@@ -1655,6 +1794,7 @@ mod tests {
             model_override_cmd: None,
             extra_models: vec![],
             advisor_models: models.iter().map(|s| s.to_string()).collect(),
+            provision_skills: true,
         }
     }
 
@@ -1698,7 +1838,8 @@ mod tests {
         // advisor non posé → rien (défaut du profil/agent).
         assert!(advisor_acp_meta(&advisor_profile(&["opus"]), &advisor_meta(None)).is_none());
         // Valeur → advisorModel via extraArgs.settings.
-        let v = advisor_acp_meta(&advisor_profile(&["opus"]), &advisor_meta(Some("fable"))).unwrap();
+        let v =
+            advisor_acp_meta(&advisor_profile(&["opus"]), &advisor_meta(Some("fable"))).unwrap();
         assert_eq!(
             v["claudeCode"]["options"]["extraArgs"]["settings"],
             serde_json::json!("{\"advisorModel\":\"fable\"}")
@@ -1718,7 +1859,7 @@ mod tests {
 fn log_conn_close(peer: &str, t0: std::time::Instant, r: &Result<()>) {
     let secs = t0.elapsed().as_secs();
     match r {
-        Ok(()) => info!("conn {peer} close ({secs}s) — client parti"),
+        Ok(()) => info!("conn {peer} closed ({secs}s) — client gone"),
         Err(e) => info!("conn {peer} close ({secs}s): {e:#}"),
     }
 }
@@ -1783,8 +1924,7 @@ pub async fn janitor(daemon: Arc<Daemon>) {
     let purge_age = std::time::Duration::from_secs(r.purge_days * 86400);
     loop {
         tokio::time::sleep(interval).await;
-        let sessions: Vec<Arc<Session>> =
-            daemon.sessions.read().await.values().cloned().collect();
+        let sessions: Vec<Arc<Session>> = daemon.sessions.read().await.values().cloned().collect();
         for s in &sessions {
             // Compaction = réécriture complète du journal + rebuild de
             // l'index : I/O disque synchrone, potentiellement des
@@ -1802,7 +1942,7 @@ pub async fn janitor(daemon: Arc<Daemon>) {
             {
                 Ok(pair) => pair,
                 Err(e) => {
-                    warn!("janitor {}: tâche: {e}", s.meta_snapshot().id);
+                    warn!("janitor {}: task: {e}", s.meta_snapshot().id);
                     continue;
                 }
             };
@@ -1810,7 +1950,7 @@ pub async fn janitor(daemon: Arc<Daemon>) {
                 warn!("compact {}: {e}", s.meta_snapshot().id);
             }
             match pb {
-                Ok(n) if n > 0 => info!("blobs purgés {}: {n}", s.meta_snapshot().id),
+                Ok(n) if n > 0 => info!("blobs purged {}: {n}", s.meta_snapshot().id),
                 Err(e) => warn!("purge blobs {}: {e}", s.meta_snapshot().id),
                 _ => {}
             }
@@ -1834,7 +1974,7 @@ pub async fn janitor(daemon: Arc<Daemon>) {
                     if let Err(e) = std::fs::remove_dir_all(&s.dir) {
                         warn!("purge session {id}: {e}");
                     } else {
-                        info!("session purgée (inactivité): {id}");
+                        info!("session purged (inactivity): {id}");
                     }
                     // Pièces jointes : <cwd>/.ac-uploads/<sid>/ part
                     // avec la session — même purge que delete_session.
@@ -1859,8 +1999,7 @@ pub async fn watchdog(daemon: Arc<Daemon>) {
         if !cfg.enabled {
             continue;
         }
-        let sessions: Vec<Arc<Session>> =
-            daemon.sessions.read().await.values().cloned().collect();
+        let sessions: Vec<Arc<Session>> = daemon.sessions.read().await.values().cloned().collect();
         for s in &sessions {
             s.watchdog_tick(&cfg);
         }

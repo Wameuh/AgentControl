@@ -150,8 +150,25 @@ pub(crate) async fn connect(app: AppHandle, state: State<'_, AppState>, cfg: Con
             }
         }
     };
-    let c = Client::connect(&t).await.map_err(|e| format!("{e:#}"))?;
-    let status = c.call(ReqKind::DaemonStatus).await.map_err(|e| format!("{e:#}"))?;
+    let c = Client::connect(&t)
+        .await
+        .map_err(|e| client_core::classify_connect_stage1(&t, &format!("{e:#}")))?;
+    let status = match c.call(ReqKind::DaemonStatus).await {
+        Ok(s) => s,
+        Err(e) => {
+            // Laisser le drain stderr ssh se vider : la signature
+            // « channel N: open failed: connect failed: Connection
+            // refused » arrive quelques ms après la mort du canal
+            // forwardé — la lire trop tôt classerait à faux.
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            return Err(client_core::classify_connect_stage2(
+                &t,
+                &format!("{e:#}"),
+                &c.death_reason().unwrap_or_default(),
+                &c.transport_err_tail(),
+            ));
+        }
+    };
     // Nouveau client = démon possiblement upgradé depuis le dernier
     // verdict : on oublie la capacité list_sessions_page mémorisée —
     // un `false` hérité blacklisterait la pagination jusqu'au restart.
@@ -529,6 +546,7 @@ pub(crate) async fn ensure_daemon(
          echo step:install >&2; \
          install -Dm755 agentcontrol-daemon $bin; \
          install -Dm755 acctl $HOME/.local/bin/acctl; \
+         for f in acp-*; do [ -f \"$f\" ] && install -Dm755 \"$f\" \"$HOME/.local/bin/$f\"; done; \
          echo step:service >&2; \
          confs=\"/etc/supervisor/conf.d/*.conf /etc/supervisord.d/*.conf $HOME/.supervisor/conf.d/*.conf\"; \
          ef=\"\"; for f in $confs; do [ -f \"$f\" ] && ef=\"$ef $f\"; done; \

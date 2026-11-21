@@ -153,9 +153,16 @@ A few concrete setups — every bullet is something you can do today:
   automatically migrated to another profile when the role's agent is
   switched.
 - **Pilot several agent providers side by side**: Devin and Cursor ship
-  as built-in profiles; any ACP-speaking agent can be declared as a
-  custom `[agents.*]` profile (Claude via `claude-code-acp`, Codex via
-  its adapter…). Each orchestrator role — worker, planner, reviewer,
+  as built-in profiles; known ACP adapters (Claude via the bundled
+  `acp-claude`, Codex via `codex-acp`, Gemini, OpenCode…) are auto-discovered on the
+  daemon's PATH — installing one makes its profile appear with no config
+  and no restart, and unavailable profiles say why (binary looked for +
+  install hint) — the daemon can even run the install itself
+  (`install_agent_adapter`: the agents dialog's Install button or
+  `acctl agents install <id>`, user npm prefix only, never sudo). Any ACP-speaking agent can also be declared as a
+  custom `[agents.*]` profile, which always wins over auto-detection —
+  `command` even accepts ordered fallbacks (`[["bin1"], ["bin2", "arg"]]`).
+  Each orchestrator role — worker, planner, reviewer,
   PR reviewer — can run on a different profile and mode; model and
   reasoning effort are shared pipeline settings (PR reviewers get a
   dedicated model), and sessions can carry an optional advisor model

@@ -156,8 +156,33 @@ pub(crate) fn item_body(t: &Task) -> String {
         .trim();
     let mut dc = desc.chars();
     let body: String = dc.by_ref().take(DESC_INLINE_MAX).collect();
+    // Spec de l'item (agentbacklog ≥ 0.9) + contrat de done —
+    // tolérant aux anciens JSON sans ces clés.
+    let mut spec: Vec<String> = Vec::new();
+    for (k, v) in [
+        ("agent", t.get("agent")),
+        ("model", t.get("model")),
+        ("effort", t.get("effort")),
+        ("mode", t.get("mode")),
+    ] {
+        if let Some(s) = v.and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            spec.push(format!("{k}={s}"));
+        }
+    }
+    if let Some(dw) = t
+        .get("done_when")
+        .and_then(Value::as_str)
+        .filter(|s| *s != "pr_merged" && !s.is_empty())
+    {
+        spec.push(format!("done_when={dw}"));
+    }
+    let spec = if spec.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nspec: {}", spec.join(" "))
+    };
     format!(
-        "#{id} — {title}\n\n{body}{cut}",
+        "#{id} — {title}\n\n{body}{cut}{spec}",
         id = task_id(t),
         cut = if dc.next().is_some() { "\n…" } else { "" }
     )
@@ -530,6 +555,8 @@ Tu es en mode plan : tu n'implementes RIEN, tu ne modifies aucun fichier du repo
 4. Un reviewer relira ton plan : si tu recois un verdict DENIED ou CONDITIONAL (message d'une session Backlog-R*), revise le plan en tenant compte du commentaire, recris le fichier et termine par une nouvelle ligne « PLAN_FILE: <chemin> ».
 5. Si le plan est approuve, l'orchestrateur compacte ton contexte, te passe en mode implementation et t'ordonne d'implementer — attends son message.
 
+Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
+
 Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; reponds en francais."#;
 
 const REVIEWER_PROMPT: &str = r#"[Session creee automatiquement par le service backlog-orchestrator — pas par un agent humain ou une session parente.]
@@ -546,6 +573,8 @@ Tu es le REVIEWER du plan de l'item backlog ci-dessous (session $AGENTCONTROL_SE
 {HISTORY}
 
 ## ROLE
+
+Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
 
 Verifie la faisabilite, la completude et les risques du plan EN REGARDANT LE CODE dans {WS} (les chemins/API du plan peuvent etre inexacts — c'est a toi de trancher). Verdicts : APPROVED si le plan est implementable tel quel ; CONDITIONAL s'il l'est moyennant des ajustements precis ; DENIED s'il est faux, incomplet ou dangereux.
 
@@ -564,6 +593,8 @@ const REVIEWER_ROUND_MSG: &str = r#"Plan resoumis pour l'item #{ID} — round {R
 
 ## PLAN — round {ROUND}
 {PLAN}
+
+Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
 
 Quand ton verdict est pret, dans l'ordre :
   a) agentbacklog --verdict {ID} --reviewer "$AGENTCONTROL_SESSION" --outcome APPROVED|DENIED|CONDITIONAL --comment "<ton commentaire>"
@@ -584,7 +615,9 @@ Tu es l'IMPLEMENTEUR de l'item backlog ci-dessous (session $AGENTCONTROL_SESSION
 
 Implemente le plan en suivant le workflow PR/CI de {WS}/AGENTS.md a la lettre : worktree dedie base sur origin/next_release (JAMAIS dans le checkout principal {WS}) -> branche -> push -> gh pr create --base next_release --draft -> review auto -> iterations en draft -> review soldee -> gh pr ready au moins 30 s apres le dernier push -> checks requis VERTS -> merge selon la regle de merge AGENTS.md. Toute attente > ~1 min (verdict, checks, merge) passe par un waiter ac-wait (regle « Waiting » d'AGENTS.md) — jamais de --watch bloquant ni de boucle de poll dans un tool call.
 
-Quand la PR est effectivement MERGED : agentbacklog --done {ID} --agent-id "$AGENTCONTROL_SESSION". Blocage insurmontable : agentbacklog --release {ID} --agent-id "$AGENTCONTROL_SESSION", explique pourquoi, puis arrete.
+{DOD} Blocage insurmontable : agentbacklog --release {ID} --agent-id "$AGENTCONTROL_SESSION", explique pourquoi, puis arrete.
+
+Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
 
 Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; push uniquement sur ta branche de PR ; nettoie ton worktree a la fin (git worktree remove) ; reponds en francais."#;
 
@@ -597,7 +630,9 @@ Tu es un worker autonome sur le repo (cwd {WS}). Lis {WS}/AGENTS.md — le workf
 
 1. Implemente en suivant la description a la lettre : worktree dedie base sur origin/next_release (JAMAIS dans le checkout principal {WS}), spec, verifications demandees.
 2. Cycle PR (cf AGENTS.md) : branche -> push -> gh pr create --base next_release --draft -> review auto (iterations en draft) -> review soldee -> gh pr ready au moins 30 s apres le dernier push -> checks requis VERTS sur le head SHA -> merge (regle de merge AGENTS.md). Toute attente > ~1 min (verdict, checks, merge) passe par un waiter ac-wait (regle « Waiting » d'AGENTS.md) — jamais de --watch bloquant ni de boucle de poll dans un tool call.
-3. agentbacklog --done {ID} --agent-id "$AGENTCONTROL_SESSION" UNIQUEMENT quand ta PR est effectivement MERGED (ou quand les criteres de la tache sont remplis si elle n'a pas de PR).
+3. {DOD}
+
+Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
 
 Blocage insurmontable : agentbacklog --release {ID} --agent-id "$AGENTCONTROL_SESSION", explique la raison, puis arrete.
 
@@ -615,7 +650,7 @@ pub(crate) fn fill(tpl: &str, pairs: &[(&str, String)]) -> String {
 // Résultat du tick remonté au cycle partagé (compteurs de statut).
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct PlanOutcome {
     /// Sessions Backlog-* vivantes (W+P+R) — `status.workers`.
     pub workers: usize,
@@ -626,6 +661,9 @@ pub(crate) struct PlanOutcome {
     pub pending: usize,
     pub planners: usize,
     pub reviewers: usize,
+    /// Items `no_plan` spec'd (agent=) sautés ce tick faute d'entrée
+    /// de pool compatible — détail « waiting » du statut composant.
+    pub spec_waiting: Vec<String>,
 }
 
 impl Daemon {
@@ -669,7 +707,7 @@ impl Daemon {
                 continue;
             }
             if !session_ids.contains(&rsid) {
-                info!("orchestrateur: reviewer {rsid} disparu → --unclaim-review #{id}");
+                info!("orchestrator: reviewer {rsid} gone → --unclaim-review #{id}");
                 let _ = run_out(&[bin, "--unclaim-review", &key], ws).await;
                 st.review_started.remove(&key);
                 st.reviewers.remove(&key);
@@ -701,10 +739,10 @@ impl Daemon {
                     ws,
                 )
                 .await
-                .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                .unwrap_or((-1, String::new(), "spawn failed".into()));
                 if rc == 0 {
                     info!(
-                        "orchestrateur: verdict {outcome} #{id} posté d'après \
+                        "orchestrator: verdict {outcome} #{id} posted from \
                          le marqueur de {rsid}"
                     );
                     // Snapshot pré-verdict : round + 1 = la valeur
@@ -743,7 +781,7 @@ impl Daemon {
                 } else {
                     // Le reviewer a sans doute posté entre-temps — le
                     // chemin « verdict frais » (B) traitera au prochain tick.
-                    warn!("orchestrateur: --verdict #{id} (marqueur) rc={rc} {e}");
+                    warn!("orchestrator: --verdict #{id} (marker) rc={rc} {e}");
                 }
                 continue;
             }
@@ -870,8 +908,8 @@ impl Daemon {
                 let aid = task_agent(t);
                 if aid.starts_with("s-") && !session_ids.contains(aid) {
                     info!(
-                        "orchestrateur: tâche #{} orpheline (owner {aid} \
-                         disparue) → release",
+                        "orchestrator: orphaned task #{} (owner {aid} \
+                         gone) → release",
                         task_id(t)
                     );
                     let _ = run_out(
@@ -895,10 +933,23 @@ impl Daemon {
         let alive = backlog_alive(metas, cfg, &live_waiters);
         let working = backlog_working(metas, cfg, &live_waiters);
         let mut slots = WorkerSlots {
-            total: (cfg.max_workers as usize).saturating_sub(alive),
+            // Capacité workers = somme du pool (`worker_capacity` =
+            // `max_workers` sans pool — legacy inchangé).
+            total: (cfg.worker_capacity() as usize).saturating_sub(alive),
             working: (cfg.max_working_cap() as usize).saturating_sub(working),
             gained: 0,
         };
+        // Pool workers pour les spawns no_plan : entrées normalisées +
+        // metas des sessions `Backlog-W*` (les planners ne consomment
+        // pas de slot d'entrée même s'ils partagent le profil) +
+        // profils déjà spawnés ce tick (metas = snapshot pré-spawn).
+        let entries = cfg.worker_entries();
+        let worker_metas: Vec<SessionMeta> = metas
+            .iter()
+            .filter(|m| m.title.starts_with(&cfg.title_prefix))
+            .cloned()
+            .collect();
+        let mut spawned_profiles: Vec<String> = Vec::new();
         // Mode sériel quota : au plus une session active à la fois —
         // dispatch seulement quand rien ne tourne ; la boucle reviewer
         // ci-dessous passe la première (priorité au reviewer) et un
@@ -908,8 +959,8 @@ impl Daemon {
             slots.total = slots.total.min(m);
             slots.working = slots.working.min(m);
             self.orch.set_detail(Some(format!(
-                "{rl} session(s) en rate_limit — exécution sérialisée \
-                 (1 session à la fois, reviewer prioritaire)"
+                "{rl} session(s) in rate_limit — serialized execution \
+                 (1 session at a time, reviewer prioritized)"
             )));
         }
         // Un reviewer persistant endormi ne tient pas le slot : il ne
@@ -952,17 +1003,14 @@ impl Daemon {
             let key = id.to_string();
             let planner = task_agent(t);
             let planner_label = if planner.is_empty() {
-                "le planner (inconnu)".to_string()
+                "the planner (unknown)".to_string()
             } else {
                 planner.to_string()
             };
             let plan_inline = {
                 let p = task_plan_content(t);
                 if p.is_empty() {
-                    format!(
-                        "(plan non stocké — fichier déclaré : {})",
-                        task_plan_file(t)
-                    )
+                    format!("(plan not stored — declared file: {})", task_plan_file(t))
                 } else {
                     clip_inline(p, PLAN_INLINE_MAX)
                 }
@@ -999,9 +1047,9 @@ impl Daemon {
                 }
                 let (rc, _o, e) = run_out(&[bin, "--claim-review", &key, "--reviewer", &rsid], ws)
                     .await
-                    .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                    .unwrap_or((-1, String::new(), "spawn failed".into()));
                 if rc == 0 {
-                    info!("orchestrateur: reviewer {rsid} réutilisé → #{id} (round {round})");
+                    info!("orchestrator: reviewer {rsid} reused → #{id} (round {round})");
                     self.reviewer_claim_reset(&rsid, planner, &key, st).await;
                     let msg = fill(
                         REVIEWER_ROUND_MSG,
@@ -1031,7 +1079,7 @@ impl Daemon {
                         // Réveil impossible : session morte entre le
                         // snapshot et le send → unclaim (l'item est déjà
                         // `reviewing`) + rm + spawn de secours.
-                        warn!("orchestrateur: send reviewer réutilisé {rsid} KO → unclaim + rm");
+                        warn!("orchestrator: reused reviewer send {rsid} KO → unclaim + rm");
                         let _ = run_out(&[bin, "--unclaim-review", &key], ws).await;
                         self.plan_rm_session(&rsid, st).await;
                         st.reviewers.remove(&key);
@@ -1041,7 +1089,7 @@ impl Daemon {
                 } else {
                     // Claim KO sur une session existante : elle reste
                     // endormie/mappée — retry au prochain tick, pas de rm.
-                    warn!("orchestrateur: claim-review #{id} reuse {rsid} rc={rc} {e}");
+                    warn!("orchestrator: claim-review #{id} reuse {rsid} rc={rc} {e}");
                     spawn_new = false;
                 }
             }
@@ -1060,7 +1108,7 @@ impl Daemon {
                 if rc == 0 && !out.is_empty() && out != "[]" {
                     clip_inline(out, 8000)
                 } else {
-                    "(aucune)".to_string()
+                    "(none)".to_string()
                 }
             };
             // Workspace routé de l'item (tag repo → repo_workspaces) :
@@ -1085,6 +1133,8 @@ impl Daemon {
                     REVIEWER_PREFIX,
                     cfg.agent_or(&cfg.reviewer_agent),
                     &cfg.reviewer_mode,
+                    cfg.model_or(&cfg.reviewer_model),
+                    cfg.effort_or(&cfg.reviewer_effort),
                     prompt,
                     &iws,
                     cfg,
@@ -1095,9 +1145,9 @@ impl Daemon {
                     let (rc, _o, e) =
                         run_out(&[bin, "--claim-review", &key, "--reviewer", &rsid], ws)
                             .await
-                            .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                            .unwrap_or((-1, String::new(), "spawn failed".into()));
                     if rc == 0 {
-                        info!("orchestrateur: reviewer {rsid} → #{id} (claim-review)");
+                        info!("orchestrator: reviewer {rsid} → #{id} (claim-review)");
                         // L'ancien reviewer mappé est supprimé avant
                         // l'écrasement du mapping — sinon il devient
                         // orphelin définitif (la sweep ne voit que les
@@ -1107,9 +1157,7 @@ impl Daemon {
                         // rate_limit (sain → `Reuse`, backoff → `Wait`)
                         // — dans les deux cas injoignable, le rm est
                         // sans risque (session déjà partie → warn).
-                        if let Some(old) =
-                            st.reviewers.get(&key).cloned().filter(|o| *o != rsid)
-                        {
+                        if let Some(old) = st.reviewers.get(&key).cloned().filter(|o| *o != rsid) {
                             self.plan_rm_session(&old, st).await;
                         }
                         st.reviewers.insert(key.clone(), rsid.clone());
@@ -1123,11 +1171,11 @@ impl Daemon {
                         slots.take();
                         reviewers_free -= 1;
                     } else {
-                        warn!("orchestrateur: claim-review #{id} rc={rc} {e} → rm {rsid}");
+                        warn!("orchestrator: claim-review #{id} rc={rc} {e} → rm {rsid}");
                         self.plan_rm_session(&rsid, st).await;
                     }
                 }
-                None => warn!("orchestrateur: spawn reviewer #{id} échoué"),
+                None => warn!("orchestrator: reviewer #{id} spawn failed"),
             }
         }
         // Revues éligibles restées sans reviewer ce tick → réserve de
@@ -1135,6 +1183,9 @@ impl Daemon {
         // working) tant qu'il en reste (priorité reviewers > planners).
         let unclaimed = (eligible_ids.len() - claimed_now.len()).min(reviewers_free);
 
+        // Items `no_plan` spec'd (agent=) sautés faute d'entrée de
+        // pool compatible — détail « waiting » du statut composant.
+        let mut spec_waiting: Vec<String> = Vec::new();
         for t in tasks
             .iter()
             .filter(|t| task_status(t) == "pending" && task_poppable(t))
@@ -1152,25 +1203,92 @@ impl Daemon {
             }
             let iws = cfg.workspace_for(task_repo(t)).to_string();
             let no_plan = task_no_plan(t);
-            let (prefix, agent, mode, prompt) = if no_plan {
+            // no_plan = worker du pool (profil + model/effort de son
+            // entrée — `implement_mode` reste le mode pipeline, la
+            // spec `mode` de l'item prime) ; sinon planner/implementer
+            // sur `planner_agent` avec `planner_model`/`planner_effort`
+            // (repli global) — la spec de l'item s'applique au
+            // planner ET à l'implémenteur (même exécutant), prioritaire
+            // sur les valeurs de rôle.
+            let (prefix, agent, mode, model, effort, prompt) = if no_plan {
+                // Spec `agent` : seules les entrées du pool à ce
+                // profil sont candidates — sans slot compatible
+                // l'item est sauté CE tick sans geler les suivants.
+                let req_agent = task_spec_agent(t);
+                let Some(entry) = pool_next_entry_for(
+                    &entries,
+                    &worker_metas,
+                    &live_waiters,
+                    &spawned_profiles,
+                    req_agent,
+                ) else {
+                    if !req_agent.is_empty() {
+                        spec_waiting.push(format!(
+                            "item #{id} requires agent={req_agent} \
+                             (no matching slot)"
+                        ));
+                    }
+                    continue;
+                };
+                // Overrides item > entrée pool (model/effort) ; le
+                // mode de l'item prime sur `implement_mode`.
+                let mut eff = entry.clone();
+                for (dst, src) in [
+                    (&mut eff.model, task_spec_model(t)),
+                    (&mut eff.effort, task_spec_effort(t)),
+                ] {
+                    if !src.is_empty() {
+                        *dst = src.to_string();
+                    }
+                }
+                let spec_mode = task_spec_mode(t);
                 (
                     cfg.title_prefix.clone(),
-                    cfg.agent_or(&cfg.worker_agent),
-                    cfg.implement_mode.clone(),
+                    entry.profile.clone(),
+                    if spec_mode.is_empty() {
+                        cfg.implement_mode.clone()
+                    } else {
+                        spec_mode.to_string()
+                    },
+                    eff.model.clone(),
+                    eff.effort.clone(),
                     fill(
                         CLAIMED_WORKER_PROMPT,
                         &[
                             ("ID", key.clone()),
                             ("ITEM", item_body(t)),
                             ("WS", iws.clone()),
+                            ("DOD", task_dod(t).replace("<ID>", &key)),
                         ],
                     ),
                 )
             } else {
+                let spec_agent = task_spec_agent(t);
+                let spec_mode = task_spec_mode(t);
+                let spec_model = task_spec_model(t);
+                let spec_effort = task_spec_effort(t);
                 (
                     PLANNER_PREFIX.to_string(),
-                    cfg.agent_or(&cfg.planner_agent),
-                    cfg.planner_mode.clone(),
+                    if spec_agent.is_empty() {
+                        cfg.agent_or(&cfg.planner_agent).to_string()
+                    } else {
+                        spec_agent.to_string()
+                    },
+                    if spec_mode.is_empty() {
+                        cfg.planner_mode.clone()
+                    } else {
+                        spec_mode.to_string()
+                    },
+                    if spec_model.is_empty() {
+                        cfg.model_or(&cfg.planner_model).to_string()
+                    } else {
+                        spec_model.to_string()
+                    },
+                    if spec_effort.is_empty() {
+                        cfg.effort_or(&cfg.planner_effort).to_string()
+                    } else {
+                        spec_effort.to_string()
+                    },
                     fill(
                         PLANNER_PROMPT,
                         &[
@@ -1183,17 +1301,28 @@ impl Daemon {
             };
             st.counter += 1;
             let Some(sid) = self
-                .plan_spawn(st.counter, &prefix, agent, &mode, prompt, &iws, cfg)
+                .plan_spawn(
+                    st.counter, &prefix, &agent, &mode, &model, &effort, prompt, &iws, cfg,
+                )
                 .await
             else {
+                // Spawn refusé sur un item spec'd (ex. profil `agent=`
+                // inconnu de l'agent) : exposé comme les items sans
+                // slot compatible plutôt qu'un warn récurrent muet.
+                let sa = task_spec_agent(t);
+                if !sa.is_empty() {
+                    spec_waiting.push(format!(
+                        "item #{id} requires agent={sa} (spawn refused)"
+                    ));
+                }
                 continue;
             };
             let (rc, _o, e) = run_out(&[bin, "--claim", &key, "--agent-id", &sid], ws)
                 .await
-                .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                .unwrap_or((-1, String::new(), "spawn failed".into()));
             if rc == 0 {
                 info!(
-                    "orchestrateur: {} → #{id} (claim, no_plan={})",
+                    "orchestrator: {} → #{id} (claim, no_plan={})",
                     sid, no_plan as u8
                 );
                 if !no_plan {
@@ -1203,9 +1332,15 @@ impl Daemon {
                 // Journal neuf → seqs repartent à 1 : le watermark d'un
                 // précédent planner rendrait ses marqueurs invisibles.
                 st.plan_marker_seq.remove(&key);
+                if no_plan {
+                    // Slot d'entrée consommé ce tick — metas est un
+                    // snapshot pré-spawn, le profil doit être compté
+                    // pour les items suivants de la même passe.
+                    spawned_profiles.push(agent.clone());
+                }
                 slots.take();
             } else {
-                warn!("orchestrateur: claim #{id} rc={rc} {e} → rm {sid}");
+                warn!("orchestrator: claim #{id} rc={rc} {e} → rm {sid}");
                 self.plan_rm_session(&sid, st).await;
             }
         }
@@ -1255,7 +1390,16 @@ impl Daemon {
                     outcome.planners += 1;
                     outcome.workers += 1;
                     self.planner_upkeep(
-                        &m, bin, cfg, ws, tasks, prs, release_pr, st, now, rl > 0,
+                        &m,
+                        bin,
+                        cfg,
+                        ws,
+                        tasks,
+                        prs,
+                        release_pr,
+                        st,
+                        now,
+                        rl > 0,
                         &mut slots,
                     )
                     .await;
@@ -1375,7 +1519,7 @@ impl Daemon {
                 cfg.reviewer_reuse,
             ) {
                 SweepAction::Rm => {
-                    info!("orchestrateur: reviewer {rsid} soldé → rm (item {key})");
+                    info!("orchestrator: reviewer {rsid} settled → rm (item {key})");
                     self.plan_rm_session(&rsid, st).await;
                     st.reviewers.remove(&key);
                     st.reviewer_seq.remove(&key);
@@ -1403,11 +1547,12 @@ impl Daemon {
                 .unwrap_or("");
             if reviewer_sleep_ok(ostate) {
                 match self.h_sleep_session(owner.clone()).await {
-                    Ok(_) => info!("orchestrateur: planner gelé {owner} endormi (#{key})"),
-                    Err(e) => warn!("orchestrateur: sleep planner gelé {owner}: {e:#}"),
+                    Ok(_) => info!("orchestrator: frozen planner {owner} put to sleep (#{key})"),
+                    Err(e) => warn!("orchestrator: sleep frozen planner {owner}: {e:#}"),
                 }
             }
         }
+        outcome.spec_waiting = spec_waiting;
         Ok(outcome)
     }
 
@@ -1452,7 +1597,7 @@ impl Daemon {
                 rsid,
                 &planner_sid,
                 &format!(
-                    "[backlog] revue du plan de l'item #{id} : {} — {}",
+                    "[backlog] plan review of item #{id}: {} — {}",
                     outcome.to_uppercase(),
                     comment
                 ),
@@ -1464,7 +1609,7 @@ impl Daemon {
                 st.item_phase
                     .insert(key.clone(), ItemPhase::Implementing.as_str().into());
                 if planner_alive {
-                    info!("orchestrateur: plan #{id} approuvé → implémentation par {planner_sid}");
+                    info!("orchestrator: plan #{id} approved → implementation by {planner_sid}");
                     // /compact en force (tête de file) : la compaction
                     // s'arme AVANT les messages déjà en attente, pour
                     // implémenter sur contexte frais — interrompre un
@@ -1489,33 +1634,47 @@ impl Daemon {
                          Tu passes en implémentation : suis-le en appliquant \
                          le workflow PR/CI de {}/AGENTS.md (worktree dédié \
                          basé sur origin/next_release → PR draft → review → \
-                         ready → checks verts → merge). Quand la PR est \
-                         effectivement mergée : agentbacklog --done {id} \
-                         --agent-id \"$AGENTCONTROL_SESSION\". Blocage \
+                         ready → checks verts → merge). {} Blocage \
                          insurmontable : --release + explication.",
                         round.saturating_sub(1).max(0),
                         iws,
+                        task_dod(t).replace("<ID>", &id.to_string()),
                         cmt = if comment.is_empty() {
                             String::new()
                         } else {
-                            format!(
-                                " — commentaire du reviewer : {}",
-                                clip_inline(comment, 2000)
-                            )
+                            format!(" — reviewer comment: {}", clip_inline(comment, 2000))
                         },
                     );
                     // Brief en file classique : la retenue compact le
                     // retient pendant la compaction, le drain le livre
                     // après — ordre « compact → brief » garanti.
                     self.plan_send(&planner_sid, msg, false).await;
+                    // Spec `mode` de l'item : la transition
+                    // planner→implémenteur in-place doit viser le même
+                    // mode qu'un spawn d'implémenteur frais.
+                    let impl_mode = {
+                        let sm = task_spec_mode(t);
+                        if sm.is_empty() {
+                            cfg.implement_mode.clone()
+                        } else {
+                            sm.to_string()
+                        }
+                    };
                     if let Err(e) = self
-                        .h_set_mode(planner_sid.clone(), cfg.implement_mode.clone())
+                        .h_set_mode(planner_sid.clone(), impl_mode)
                         .await
                     {
-                        warn!("orchestrateur: set_mode {planner_sid}: {e:#}");
+                        warn!("orchestrator: set_mode {planner_sid}: {e:#}");
                     }
                 } else {
                     st.counter += 1;
+                    // Spec de l'item : même exécutant que le planner
+                    // aurait été — agent/model/effort/mode priment sur
+                    // les valeurs de rôle.
+                    let spec_agent = task_spec_agent(t);
+                    let spec_mode = task_spec_mode(t);
+                    let spec_model = task_spec_model(t);
+                    let spec_effort = task_spec_effort(t);
                     let prompt = fill(
                         IMPLEMENTER_PROMPT,
                         &[
@@ -1524,14 +1683,33 @@ impl Daemon {
                             ("WS", iws.clone()),
                             ("ROUND", format!("{}", round.saturating_sub(1).max(0))),
                             ("PLAN", clip_inline(task_plan_content(t), PLAN_INLINE_MAX)),
+                            ("DOD", task_dod(t).replace("<ID>", &key)),
                         ],
                     );
                     if let Some(nsid) = self
                         .plan_spawn(
                             st.counter,
                             PLANNER_PREFIX,
-                            cfg.agent_or(&cfg.planner_agent),
-                            &cfg.implement_mode,
+                            if spec_agent.is_empty() {
+                                cfg.agent_or(&cfg.planner_agent)
+                            } else {
+                                spec_agent
+                            },
+                            if spec_mode.is_empty() {
+                                cfg.implement_mode.as_str()
+                            } else {
+                                spec_mode
+                            },
+                            if spec_model.is_empty() {
+                                cfg.model_or(&cfg.planner_model)
+                            } else {
+                                spec_model
+                            },
+                            if spec_effort.is_empty() {
+                                cfg.effort_or(&cfg.planner_effort)
+                            } else {
+                                spec_effort
+                            },
                             prompt,
                             &iws,
                             cfg,
@@ -1541,12 +1719,12 @@ impl Daemon {
                         let (rc, _o, e) =
                             run_out(&[bin, "--reassign", &key, "--agent-id", &nsid], ws)
                                 .await
-                                .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                                .unwrap_or((-1, String::new(), "spawn failed".into()));
                         if rc == 0 {
-                            info!("orchestrateur: #{id} réassigné à l'implémenteur {nsid}");
+                            info!("orchestrator: #{id} reassigned to implementer {nsid}");
                             st.plan_marker_seq.remove(&key);
                         } else {
-                            warn!("orchestrateur: reassign #{id} rc={rc} {e} → rm {nsid}");
+                            warn!("orchestrator: reassign #{id} rc={rc} {e} → rm {nsid}");
                             self.plan_rm_session(&nsid, st).await;
                         }
                     }
@@ -1574,12 +1752,12 @@ impl Daemon {
                         ws,
                     )
                     .await
-                    .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                    .unwrap_or((-1, String::new(), "spawn failed".into()));
                     if rc == 0 && !st.stalled_plans.contains_key(&key) {
                         st.stalled_plans.insert(key.clone(), planner_sid.clone());
                         info!(
-                            "orchestrateur: plan_review stalled #{id} (round \
-                             {round} ≥ {}) — revue humaine requise",
+                            "orchestrator: plan_review stalled #{id} (round \
+                             {round} ≥ {}) — human review required",
                             review_round_cap(cfg)
                         );
                         // Le planner n'a plus rien à faire : la passe
@@ -1592,7 +1770,7 @@ impl Daemon {
                         // verdict ci-dessus peut l'avoir laissé
                         // working.
                     } else if rc != 0 {
-                        warn!("orchestrateur: stall re-submit #{id} rc={rc} {e}");
+                        warn!("orchestrator: stall re-submit #{id} rc={rc} {e}");
                         // Re-submit impossible : retirer le gel posé par
                         // un précédent stall — sinon l'item (wip + owner
                         // peut-être mort) est figé hors de tout
@@ -1606,8 +1784,8 @@ impl Daemon {
                     .insert(key.clone(), ItemPhase::Planning.as_str().into());
                 if !planner_alive {
                     info!(
-                        "orchestrateur: verdict {outcome} #{id} + planner \
-                         {planner_sid} disparu → release"
+                        "orchestrator: verdict {outcome} #{id} + planner \
+                         {planner_sid} gone → release"
                     );
                     let _ =
                         run_out(&[bin, "--release", &key, "--agent-id", &planner_sid], ws).await;
@@ -1696,7 +1874,7 @@ impl Daemon {
                     let (sid2, want2) = (sid.to_string(), want.clone());
                     tokio::spawn(async move {
                         if let Err(e) = d.h_rename_session(sid2, want2).await {
-                            warn!("orchestrateur: rename: {e:#}");
+                            warn!("orchestrator: rename: {e:#}");
                         }
                     });
                     want
@@ -1798,7 +1976,7 @@ impl Daemon {
             if dead_stale {
                 for i in &my_open {
                     info!(
-                        "orchestrateur: {sid} dead depuis {}s — release #{}",
+                        "orchestrator: {sid} dead for {}s — release #{}",
                         (now - dead_since) as i64,
                         i.as_str()
                     );
@@ -1810,9 +1988,9 @@ impl Daemon {
             if unresolved && now - since < CLEAN_GRACE_S {
                 return true;
             }
-            info!("orchestrateur: {sid} inactive, tout soldé → rm");
+            info!("orchestrator: {sid} inactive, all settled → rm");
             if let Err(e) = self.h_delete_session(sid.to_string()).await {
-                warn!("orchestrateur: rm {sid}: {e:#}");
+                warn!("orchestrator: rm {sid}: {e:#}");
             }
             st.nudges.remove(sid);
             st.clean_since.remove(sid);
@@ -1829,7 +2007,7 @@ impl Daemon {
             let d = Arc::clone(self);
             tokio::spawn(async move {
                 if let Err(e) = d.h_pr_sync().await {
-                    warn!("orchestrateur: pr_sync pré-ménage: {e:#}");
+                    warn!("orchestrator: pr_sync pre-cleanup: {e:#}");
                 }
             });
         }
@@ -1869,8 +2047,8 @@ impl Daemon {
         // par le dispatch), différer. Idle compte déjà → pas de garde.
         if !nudge_slot_ok(*slots, state) {
             info!(
-                "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
-                 wip={my_open:?}) → nudge différé (max_workers/max_working)"
+                "orchestrator: {sid} asleep (open_prs={open_prs:?} \
+                 wip={my_open:?}) → nudge deferred (max_workers/max_working)"
             );
             return true;
         }
@@ -1879,11 +2057,11 @@ impl Daemon {
                 let n = st.plan_nudges.get(sid).copied().unwrap_or(0);
                 if n >= PLAN_MAX_NUDGES {
                     info!(
-                        "orchestrateur: planner {sid} sans plan après {n} \
+                        "orchestrator: planner {sid} without plan after {n} \
                          nudges → rm + release #{item_id}"
                     );
                     if let Err(e) = self.h_delete_session(sid.to_string()).await {
-                        warn!("orchestrateur: rm planner {sid} (item #{item_id}): {e:#}");
+                        warn!("orchestrator: rm planner {sid} (item #{item_id}): {e:#}");
                     }
                     let _ = run_out(
                         &[bin, "--release", &item_id.to_string(), "--agent-id", sid],
@@ -2053,13 +2231,13 @@ impl Daemon {
                         .unwrap_or((
                             -1,
                             String::new(),
-                            "spawn impossible".into(),
+                            "spawn failed".into(),
                         ));
                         if rc == 0 {
-                            info!("orchestrateur: plan #{id} soumis par {sid} → plan_review");
+                            info!("orchestrator: plan #{id} submitted by {sid} → plan_review");
                             st.plan_marker_seq.insert(key.clone(), seq);
                         } else {
-                            warn!("orchestrateur: submit-plan #{id} rc={rc} {e}");
+                            warn!("orchestrator: submit-plan #{id} rc={rc} {e}");
                         }
                     }
                     Err(e) => {
@@ -2067,7 +2245,7 @@ impl Daemon {
                         // ne doit pas re-déclencher à chaque tick — le
                         // planner est prévenu et corrigera le chemin.
                         st.plan_marker_seq.insert(key.clone(), seq);
-                        warn!("orchestrateur: PLAN_FILE #{id} illisible ({e})");
+                        warn!("orchestrator: PLAN_FILE #{id} unreadable ({e})");
                         // Pas de force : cette section n'est pas gardée
                         // par l'état — le feedback peut partir pendant
                         // un tour et cancel() l'annulerait ; la file
@@ -2108,17 +2286,17 @@ impl Daemon {
                 ws,
             )
             .await
-            .unwrap_or((-1, String::new(), "spawn impossible".into()));
+            .unwrap_or((-1, String::new(), "spawn failed".into()));
             if rc == 0 {
                 info!(
-                    "orchestrateur: plan #{id} soumis (fallback exit-plan \
+                    "orchestrator: plan #{id} submitted (exit-plan fallback \
                      {req_id}) → plan_review"
                 );
                 // « rester en plan » : refus poli — l'agent ne quitte pas
                 // le mode plan, le prochain prompt arbitre.
                 let _ = s.respond(&req_id, None, None);
             } else {
-                warn!("orchestrateur: submit-plan #{id} (exit-plan) rc={rc} {e}");
+                warn!("orchestrator: submit-plan #{id} (exit-plan) rc={rc} {e}");
             }
             return;
         }
@@ -2136,7 +2314,7 @@ impl Daemon {
             let (sid, want) = (m.id.clone(), want);
             tokio::spawn(async move {
                 if let Err(e) = d.h_rename_session(sid, want).await {
-                    warn!("orchestrateur: rename reviewer: {e:#}");
+                    warn!("orchestrator: rename reviewer: {e:#}");
                 }
             });
         }
@@ -2149,7 +2327,11 @@ impl Daemon {
     /// Dernier marqueur `PLAN_FILE:` du journal (AgentText) → (seq,
     /// chemin résolu). `~` et relatif sont normalisés sur le cwd de la
     /// session.
-    pub(crate) async fn plan_marker(&self, s: &Arc<Session>, m: &SessionMeta) -> Option<(u64, PathBuf)> {
+    pub(crate) async fn plan_marker(
+        &self,
+        s: &Arc<Session>,
+        m: &SessionMeta,
+    ) -> Option<(u64, PathBuf)> {
         let events = s.journal.read_page(&s.dir, None, JOURNAL_SCAN).ok()?;
         for ev in events.iter().rev() {
             let EventKind::AgentText { text } = &ev.kind else {
@@ -2242,11 +2424,11 @@ impl Daemon {
         }
         match self.h_sleep_session(sid.to_string()).await {
             Ok(_) => {
-                info!("orchestrateur: {sid} endormi");
+                info!("orchestrator: {sid} asleep");
                 true
             }
             Err(e) => {
-                warn!("orchestrateur: sleep {sid}: {e:#} → rm");
+                warn!("orchestrator: sleep {sid}: {e:#} → rm");
                 self.plan_rm_session(sid, st).await;
                 true
             }
@@ -2340,9 +2522,9 @@ impl Daemon {
                         .or_else(|| options.first())
                         .map(|o| o.option_id.clone());
                     if let Err(e) = s.respond(&rid, opt.as_deref(), None) {
-                        warn!("orchestrateur: respond {rid} ({sid}): {e:#}");
+                        warn!("orchestrator: respond {rid} ({sid}): {e:#}");
                     } else {
-                        info!("orchestrateur: permission {rid} ({sid}) auto-répondue");
+                        info!("orchestrator: permission {rid} ({sid}) auto-answered");
                         st.pending_req_seen.remove(&rid);
                     }
                 }
@@ -2353,9 +2535,9 @@ impl Daemon {
                     }
                     let a = serde_json::json!("procède au mieux de ton jugement");
                     if let Err(e) = s.respond(&rid, None, Some(&a)) {
-                        warn!("orchestrateur: respond {rid} ({sid}): {e:#}");
+                        warn!("orchestrator: respond {rid} ({sid}): {e:#}");
                     } else {
-                        info!("orchestrateur: question {rid} ({sid}) auto-répondue");
+                        info!("orchestrator: question {rid} ({sid}) auto-answered");
                         st.pending_req_seen.remove(&rid);
                     }
                 }
@@ -2426,7 +2608,7 @@ impl Daemon {
             tokio::spawn(async move {
                 if let Err(e) = d.resume_and_deliver(&sid, wrapped, true).await {
                     t.emit(EventKind::Error {
-                        message: format!("peer relay: resume échoué — {e:#}"),
+                        message: format!("peer relay: resume failed — {e:#}"),
                     });
                 }
             });
@@ -2439,29 +2621,32 @@ impl Daemon {
 
     /// Spawn d'une session pipeline — même mécanique que `orch_spawn`
     /// (h_new_session origin composant + apply_spawn_cfg) mais rôle
-    /// paramétré : préfixe, profil agent, mode et prompt ne dépendent
-    /// plus de la cfg worker. `cwd` = workspace routé de l'item
-    /// (repo_workspaces via `workspace_for`) — jamais le workspace par
-    /// défaut quand l'item est taggé.
+    /// paramétré : préfixe, profil agent, mode, modèle et effort ne
+    /// dépendent plus de la cfg worker. `cwd` = workspace routé de
+    /// l'item (repo_workspaces via `workspace_for`) — jamais le
+    /// workspace par défaut quand l'item est taggé.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn plan_spawn(
         self: &Arc<Self>,
         number: u64,
         prefix: &str,
         agent: &str,
         mode: &str,
+        model: &str,
+        effort: &str,
         prompt: String,
         cwd: &str,
         cfg: &cfg::OrchCfg,
     ) -> Option<String> {
         let title = format!("{prefix}{number}");
         let group = (!cfg.group.is_empty()).then(|| cfg.group.clone());
-        self.warn_spawn_cfg(agent, &cfg.model, mode);
+        self.warn_spawn_cfg(agent, model, mode);
         let v = match self
             .h_new_session(
                 agent.to_string(),
                 cwd.to_string(),
                 Some(title.clone()),
-                Some(cfg.model.clone()),
+                Some(model.to_string()),
                 Some(mode.to_string()),
                 Some(prompt),
                 Some(COMPONENT_ORIGIN.to_string()),
@@ -2471,13 +2656,13 @@ impl Daemon {
         {
             Ok(v) => v,
             Err(e) => {
-                warn!("orchestrateur: spawn {title}: {e:#}");
+                warn!("orchestrator: spawn {title}: {e:#}");
                 return None;
             }
         };
         let sid = v.get("session").and_then(Value::as_str)?.to_string();
-        self.apply_spawn_cfg(&sid).await;
-        info!("orchestrateur: spawned {title} = {sid}");
+        self.apply_spawn_cfg(&sid, effort).await;
+        info!("orchestrator: spawned {title} = {sid}");
         Some(sid)
     }
 
@@ -2498,7 +2683,7 @@ impl Daemon {
         // explicite, retry échue) reste livrable.
         if let Ok(s) = self.get_session(sid).await {
             if s.error_held() {
-                info!("orchestrateur: {sid} en retenue d'erreur — nudge abandonné");
+                info!("orchestrator: {sid} in error hold — nudge dropped");
                 return false;
             }
         }
@@ -2509,7 +2694,11 @@ impl Daemon {
         {
             return true;
         }
-        if self.h_resume_session(sid.to_string(), None).await.is_ok() {
+        if self
+            .h_resume_session(sid.to_string(), None, false)
+            .await
+            .is_ok()
+        {
             return self
                 .h_send(sid.to_string(), msg, force, false)
                 .await
@@ -2538,7 +2727,7 @@ impl Daemon {
     /// persistés la concernant.
     pub(crate) async fn plan_rm_session(self: &Arc<Self>, sid: &str, st: &mut OrchPersist) {
         if let Err(e) = self.h_delete_session(sid.to_string()).await {
-            warn!("orchestrateur: rm {sid}: {e:#}");
+            warn!("orchestrator: rm {sid}: {e:#}");
         }
         st.nudges.remove(sid);
         st.plan_nudges.remove(sid);
@@ -2578,7 +2767,7 @@ impl Daemon {
                 .collect::<String>()
         ));
         if let Err(e) = std::fs::write(&path, content) {
-            warn!("orchestrateur: write plan {}: {e}", path.display());
+            warn!("orchestrator: write plan {}: {e}", path.display());
         }
         path.display().to_string()
     }
@@ -2624,7 +2813,10 @@ impl Daemon {
             .filter(|t| {
                 matches!(task_status(t), "plan_review" | "reviewing")
                     || (task_status(t) == "wip"
-                        && st.item_phase.get(&task_id(t).to_string()).map(String::as_str)
+                        && st
+                            .item_phase
+                            .get(&task_id(t).to_string())
+                            .map(String::as_str)
                             == Some("planning"))
             })
             .cloned()
@@ -2652,9 +2844,9 @@ impl Daemon {
                     ws,
                 )
                 .await
-                .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                .unwrap_or((-1, String::new(), "spawn failed".into()));
                 if rc != 0 {
-                    warn!("orchestrateur: dégel #{key}: --claim-review rc={rc} {e}");
+                    warn!("orchestrator: unfreeze #{key}: --claim-review rc={rc} {e}");
                     continue;
                 }
             }
@@ -2674,15 +2866,15 @@ impl Daemon {
                         "--outcome",
                         "approved",
                         "--comment",
-                        "plan_review désactivé — passage direct en implémentation",
+                        "plan_review disabled — going straight to implementation",
                         "--force",
                     ],
                     ws,
                 )
                 .await
-                .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                .unwrap_or((-1, String::new(), "spawn failed".into()));
                 if rc != 0 {
-                    warn!("orchestrateur: dégel #{key}: --verdict rc={rc} {e}");
+                    warn!("orchestrator: unfreeze #{key}: --verdict rc={rc} {e}");
                     continue;
                 }
                 // Le verdict technique a bumpé review_round en base :
@@ -2697,7 +2889,7 @@ impl Daemon {
                 ws,
             )
             .await;
-            info!("orchestrateur: #{key} dégelé (plan_review off) → pending");
+            info!("orchestrator: #{key} unfrozen (plan_review off) → pending");
             for sid in reviewer_sids {
                 self.plan_rm_session(&sid, st).await;
             }
@@ -2749,6 +2941,16 @@ pub(crate) async fn cli_claim_capable(bin: &str, ws: &Path) -> bool {
     run_out(&[bin, "--help"], ws)
         .await
         .map(|(rc, out, _)| rc == 0 && out.contains("--claim"))
+        .unwrap_or(false)
+}
+
+/// `agentbacklog --help` mentionne `--done-when` → la definition of
+/// done par item (≥ 0.9) est jouable ; sinon l'item patchnotes auto
+/// garde l'ancien contrat et sa description porte le critère de fin.
+pub(crate) async fn cli_done_when_capable(bin: &str, ws: &Path) -> bool {
+    run_out(&[bin, "--help"], ws)
+        .await
+        .map(|(rc, out, _)| rc == 0 && out.contains("--done-when"))
         .unwrap_or(false)
 }
 
@@ -3009,9 +3211,15 @@ mod tests {
     #[test]
     fn sweep_decisions() {
         // Item absent / done / pending / implementing → Rm.
-        assert_eq!(reviewer_sweep(None, false, true, false, true), SweepAction::Rm);
+        assert_eq!(
+            reviewer_sweep(None, false, true, false, true),
+            SweepAction::Rm
+        );
         for st in ["done", "pending"] {
-            assert_eq!(reviewer_sweep(Some(st), false, true, true, true), SweepAction::Rm);
+            assert_eq!(
+                reviewer_sweep(Some(st), false, true, true, true),
+                SweepAction::Rm
+            );
         }
         assert_eq!(
             reviewer_sweep(Some("wip"), true, true, true, true),
@@ -3060,7 +3268,11 @@ mod tests {
         }
         assert!(!reviewer_alive_for_sweep(true, Some("error"), None));
         // error + rate_limit → backoff transitoire, conservé (Wait).
-        assert!(reviewer_alive_for_sweep(true, Some("error"), Some("rate_limit")));
+        assert!(reviewer_alive_for_sweep(
+            true,
+            Some("error"),
+            Some("rate_limit")
+        ));
     }
 
     #[test]
@@ -3193,5 +3405,34 @@ mod tests {
         assert!(!spawn_slot_ok(slots(1, 2), true));
         assert!(!spawn_slot_ok(slots(2, 1), true)); // working borne
         assert!(spawn_slot_ok(slots(2, 1), false));
+    }
+
+    /// {ITEM} expose la spec de l'item (agent/model/effort/mode +
+    /// done_when ≠ défaut) et reste identique pour un JSON ancien
+    /// sans ces clés.
+    #[test]
+    fn item_body_spec_meta() {
+        let plain = item_body(&json!({"id": 3, "title": "T", "description": "d"}));
+        assert!(!plain.contains("spec:"));
+        let specd = item_body(&json!({
+            "id": 3, "title": "T", "description": "d",
+            "agent": "claude", "model": "opus", "effort": "high",
+            "mode": "smart", "done_when": "deliverable"
+        }));
+        for frag in [
+            "agent=claude",
+            "model=opus",
+            "effort=high",
+            "mode=smart",
+            "done_when=deliverable",
+        ] {
+            assert!(specd.contains(frag), "{frag} manquant dans {specd}");
+        }
+        // done_when au défaut et champs vides → rien d'affiché.
+        let default_dw = item_body(&json!({
+            "id": 3, "title": "T", "description": "d",
+            "agent": "", "done_when": "pr_merged"
+        }));
+        assert!(!default_dw.contains("spec:"));
     }
 }

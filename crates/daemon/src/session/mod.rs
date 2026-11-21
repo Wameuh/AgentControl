@@ -13,6 +13,7 @@ mod compact;
 mod config;
 mod pins;
 mod prompt;
+mod steps;
 mod watch;
 
 /// Issue d'un steer_queued — le serveur la traduit en {delivered, reason}.
@@ -29,10 +30,10 @@ use tokio::process::Child;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::error;
 
+use self::compact::compact_done_text;
 use crate::caps::CapsRegistry;
 use crate::journal::{self, Journal};
 use crate::server::{CompactPartial, CompactPolicy, CompactSrc};
-use self::compact::compact_done_text;
 
 /// Requête émise par l'agent, en attente de réponse d'un client.
 enum PendingAgent {
@@ -41,7 +42,7 @@ enum PendingAgent {
 }
 
 /// Retenue active pendant un compact agent-side. `used_at_start` sert
-/// de référence au signal "contexte réduit", `timer` est le garde-fou,
+/// de référence au signal "context compacted", `timer` est le garde-fou,
 /// `auto` marque un compact déclenché par le démon sur seuil de
 /// contexte (→ « continue your task » relancé automatiquement à la fin).
 struct CompactHold {
@@ -84,6 +85,10 @@ pub(crate) struct SpawnHints {
     /// spawn (une session créée avant l'ajout de la clé voit le
     /// sélecteur sans être recréée).
     pub advisor_models: Vec<String>,
+    /// Racines de skills à synchroniser avant le spawn (chemins absolus
+    /// `<cwd>/<dir-provider>` — calculés par le serveur depuis le profil
+    /// + `provision_skills`, skills.rs). Vide = pas de provisionnement.
+    pub skills_roots: Vec<PathBuf>,
 }
 
 pub struct Session {
@@ -114,9 +119,30 @@ pub struct Session {
     tool_calls: Mutex<HashMap<String, (String, String)>>,
     /// Messages épinglés (persistés pinned.json — pins.rs).
     pinned: Mutex<Vec<proto::PinEntry>>,
+    /// Étapes de tâche publiées par l'agent (persistées steps.json —
+    /// steps.rs), remplacées en entier à chaque session_set_steps.
+    steps: Mutex<Vec<proto::SessionStep>>,
     /// Vrai pendant session/load : les updates d'historique rejoué sont
     /// ignorés (le journal local est déjà la source de vérité).
     loading_replay: std::sync::atomic::AtomicBool,
+    /// Vrai pendant TOUT session/load (skip_replay ou non) — pilote le
+    /// compteur de progression « N events rejoués » et le debounce des
+    /// save_meta (les events méta rejoués ne doivent pas écrire
+    /// meta.json par event — I/O amplifiée sur un replay de ~85k
+    /// updates, #271).
+    load_active: std::sync::atomic::AtomicBool,
+    /// Updates session/update vus depuis le début du load courant.
+    replay_seen: AtomicU64,
+    /// Throttle du sysline de progression (un report toutes les ~10 s).
+    replay_report_at: Mutex<std::time::Instant>,
+    /// meta.json sale pendant load_active — persisté une seule fois à
+    /// la fin du load (end_load_replay → flush_meta_save).
+    meta_dirty: std::sync::atomic::AtomicBool,
+    /// « resume --fresh » / abandon du contexte natif : le prochain
+    /// spawn_agent repart en session/new quoi qu'il arrive — y compris
+    /// un spawn déjà en file derrière le spawn_lock qui aurait capturé
+    /// l'ancien native_session_id avant le clear.
+    force_new_context: std::sync::atomic::AtomicBool,
     /// Un tour session/prompt en cours (le runner draine la file).
     busy: std::sync::atomic::AtomicBool,
     /// Requêtes session/prompt en vol (runner + steer concurrents) —
@@ -132,6 +158,20 @@ pub struct Session {
     /// durée de la session — l'appel est optionnel, pas la peine de
     /// retenter (et de risquer le stall) à chaque rename (#183).
     rename_supported: std::sync::atomic::AtomicBool,
+    /// `session/set_config_option` déclaré supporté : même logique que
+    /// rename_supported — les agents à modes/models ACP standard sans
+    /// configOptions (claude-code-acp) répondent « Method not found » ;
+    /// après le premier refus les appels sont soldés localement et les
+    /// valeurs model/mode passent par les setters dédiés
+    /// (session/set_model, session/set_mode) ou le repli prévu.
+    config_option_supported: std::sync::atomic::AtomicBool,
+    /// Le prochain exit du process agent est VOLONTAIRE (kill(),
+    /// delete, fork…) : on_agent_exit ne doit pas le comptabiliser
+    /// comme un crash (last_error). Posé par kill(), lu et soldé par
+    /// on_agent_exit, remis à zéro par chaque spawn_agent — les kills
+    /// supprimés par la génération (sleep/respawn) laissent le flag
+    /// jusqu'au prochain spawn, sans effet (pas de process entre-temps).
+    expected_exit: std::sync::atomic::AtomicBool,
     /// Sorties visibles du tour en vol (texte/pensée/tool call) —
     /// snapshot au départ du `session/prompt` puis comparé à la fin :
     /// inchangé = tour terminé sans rien produire → tracer (#183),
@@ -253,7 +293,6 @@ pub struct Session {
     child: Mutex<Option<Child>>,
 }
 
-
 /// Texte ramené à sa forme de comparaison anti-doublon : espaces
 /// collapsés — le rendu markdown est insensible à ces différences.
 fn norm_collapse(s: &str) -> String {
@@ -306,13 +345,15 @@ impl Session {
         caps: Arc<CapsRegistry>,
     ) -> Result<Arc<Self>> {
         let meta: SessionMeta = serde_json::from_str(
-            &std::fs::read_to_string(dir.join("meta.json")).context("meta.json illisible")?,
+            &std::fs::read_to_string(dir.join("meta.json")).context("meta.json unreadable")?,
         )?;
         let journal = Journal::open(&dir)?;
         let last_text = seed_text_anchor(&journal, &dir);
-        // Chargé avant le struct literal : `dir` y est déplacé en premier
-        // champ — un open_pins(&dir) inline serait un borrow-after-move.
+        // Chargés avant le struct literal : `dir` y est déplacé en
+        // premier champ — un open_pins/open_steps(&dir) inline serait
+        // un borrow-after-move.
         let pinned = Self::open_pins(&dir);
+        let steps = Self::open_steps(&dir);
         let compact_base = compact_src.base_for(&meta.agent);
         let compact_override = Self::open_compact_override(&dir);
         let (events_tx, _) = broadcast::channel(1024);
@@ -329,11 +370,19 @@ impl Session {
             last_text: Mutex::new(last_text),
             tool_calls: Mutex::new(HashMap::new()),
             pinned,
+            steps,
             loading_replay: std::sync::atomic::AtomicBool::new(false),
+            load_active: std::sync::atomic::AtomicBool::new(false),
+            replay_seen: AtomicU64::new(0),
+            replay_report_at: Mutex::new(std::time::Instant::now()),
+            meta_dirty: std::sync::atomic::AtomicBool::new(false),
+            force_new_context: std::sync::atomic::AtomicBool::new(false),
             busy: std::sync::atomic::AtomicBool::new(false),
             active_prompts: AtomicU64::new(0),
             pending_rename: Mutex::new(None),
             rename_supported: std::sync::atomic::AtomicBool::new(true),
+            config_option_supported: std::sync::atomic::AtomicBool::new(true),
+            expected_exit: std::sync::atomic::AtomicBool::new(false),
             turn_outputs: AtomicU64::new(0),
             watch: Mutex::new(watch::TurnWatch::new()),
             tool_inflight: Mutex::new(HashSet::new()),
@@ -372,11 +421,37 @@ impl Session {
     }
 
     fn save_meta(&self) {
+        // Pendant un session/load, les events méta rejoués (mode,
+        // config, usage, commandes) arrivent en rafale — écrire
+        // meta.json à chaque event sur un replay de ~85k updates
+        // serait de l'I/O amplifiée (#271). On marque dirty et le
+        // flush unique a lieu en fin de load (end_load_replay).
+        if self.load_active.load(Ordering::SeqCst) {
+            self.meta_dirty.store(true, Ordering::SeqCst);
+            return;
+        }
+        self.write_meta();
+    }
+
+    fn write_meta(&self) {
         if let Ok(m) = self.meta.lock() {
             let _ = std::fs::write(
                 self.dir.join("meta.json"),
                 serde_json::to_string_pretty(&*m).unwrap_or_default(),
             );
+        }
+    }
+
+    /// Persiste meta.json si des écritures ont été différées pendant un
+    /// load — appelé en fin de session/load (agent.rs) et au reset des
+    /// flags de spawn. No-op tant qu'un load est encore en vol (sa fin
+    /// flushera) ou si rien n'est dirty.
+    pub(super) fn flush_meta_save(&self) {
+        if self.load_active.load(Ordering::SeqCst) {
+            return;
+        }
+        if self.meta_dirty.swap(false, Ordering::SeqCst) {
+            self.write_meta();
         }
     }
 
@@ -397,7 +472,31 @@ impl Session {
     // Journalisation
     // -----------------------------------------------------------------------
 
+    /// Vrai pendant un session/load « refill » (skip_replay=false —
+    /// fork, rebind : le journal est à reconstruire depuis l'historique
+    /// rejoué). Les events sont alors journalisés
+    /// normalement mais le push live aux abonnés est supprimé : un
+    /// replay de ~85k updates ne doit ni flooder le DOM client ni
+    /// saturer le lien — le client recharge sa queue au marqueur
+    /// `history_replayed` de fin de load (#300). Le resume normal
+    /// (skip_replay=true) n'est pas concerné : ses updates sont
+    /// droppés avant tout emit.
+    fn replay_journal_only(&self) -> bool {
+        self.load_active.load(Ordering::SeqCst) && !self.loading_replay.load(Ordering::SeqCst)
+    }
+
     pub fn emit(&self, kind: EventKind) {
+        self.emit_inner(kind, false);
+    }
+
+    /// emit() dont le broadcast est garanti même pendant un replay
+    /// « refill » — réservé aux syslines de progression et au marqueur
+    /// de fin (le contenu rejoué, lui, reste journal-only, #300).
+    fn emit_live(&self, kind: EventKind) {
+        self.emit_inner(kind, true);
+    }
+
+    fn emit_inner(&self, kind: EventKind, live: bool) {
         // Flush un éventuel texte accumulé avant tout event non-chunk.
         self.flush_text();
         // Même anti-doublon que flush_text pour les textes émis en
@@ -416,7 +515,9 @@ impl Session {
                 if Self::is_agent_output(&ev.kind) {
                     self.turn_outputs.fetch_add(1, Ordering::SeqCst);
                 }
-                let _ = self.events_tx.send(ev);
+                if live || !self.replay_journal_only() {
+                    let _ = self.events_tx.send(ev);
+                }
             }
             Err(e) => error!("[{}] journal append failed: {e}", self.meta_snapshot().id),
         }
@@ -541,7 +642,12 @@ impl Session {
                     if Self::is_agent_output(&ev.kind) {
                         self.turn_outputs.fetch_add(1, Ordering::SeqCst);
                     }
-                    let _ = self.events_tx.send(ev);
+                    // Replay « refill » : journalisé mais pas poussé
+                    // live — le client le récupère via la queue
+                    // rechargée au marqueur history_replayed (#300).
+                    if !self.replay_journal_only() {
+                        let _ = self.events_tx.send(ev);
+                    }
                 }
                 Err(e) => error!("journal append failed: {e}"),
             }
@@ -660,19 +766,14 @@ impl Session {
             } else {
                 (target - now_unix).max(0)
             };
-            (
-                std::time::Duration::from_secs(d as u64),
-                Some(now_unix + d),
-            )
+            (std::time::Duration::from_secs(d as u64), Some(now_unix + d))
         } else {
             let d = prompt::backoff_for(count);
             (d, Some(now_unix + d.as_secs() as i64))
         };
         // retry_at n'a de sens que pour rate_limit — les autres kinds
         // n'ont jamais de retry automatique.
-        let retry_at = (kind == "rate_limit")
-            .then_some(retry_at)
-            .flatten();
+        let retry_at = (kind == "rate_limit").then_some(retry_at).flatten();
         self.set_last_error(kind, msg, count, retry_at);
         let mut h = self.error_hold.lock().unwrap();
         if let Some(old) = h.take() {
@@ -707,10 +808,10 @@ impl Session {
         self.emit(EventKind::System {
             text: match kind {
                 "rate_limit" => format!(
-                    "session en erreur : rate limit — retry automatique programmé ({msg})"
+                    "session in error: rate limit — auto retry scheduled ({msg})"
                 ),
                 _ => format!(
-                    "session en erreur : {kind} — aucun retry automatique (envoi forcé, set_model ou resume pour débloquer) ({msg})"
+                    "session in error: {kind} — no auto retry (forced send, set_model or resume to unblock) ({msg})"
                 ),
             },
         });
@@ -719,13 +820,7 @@ impl Session {
     /// Enregistre l'échec dans meta.last_error — `count` et `retry_at`
     /// sont calculés par l'appelant (hold_error gère la fenêtre
     /// annoncée : un échec in-window ne doit pas incrémenter).
-    pub(super) fn set_last_error(
-        &self,
-        kind: &str,
-        msg: &str,
-        count: u32,
-        retry_at: Option<i64>,
-    ) {
+    pub(super) fn set_last_error(&self, kind: &str, msg: &str, count: u32, retry_at: Option<i64>) {
         let mut m = self.meta.lock().unwrap();
         let mut message = msg.to_string();
         if message.chars().count() > 300 {
@@ -769,7 +864,6 @@ impl Session {
         }
         held
     }
-
 }
 
 #[cfg(test)]
@@ -785,11 +879,8 @@ mod tests {
     }
 
     pub(super) fn tmp_session(tag: &str) -> (Arc<Session>, PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
-            "ac-dedup-test-{}-{}",
-            std::process::id(),
-            tag
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("ac-dedup-test-{}-{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let meta = SessionMeta {
@@ -826,7 +917,10 @@ mod tests {
             serde_json::to_string_pretty(&meta).unwrap(),
         )
         .unwrap();
-        (Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap(), dir)
+        (
+            Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap(),
+            dir,
+        )
     }
 
     pub(super) fn kinds(dir: &PathBuf) -> Vec<&'static str> {
@@ -845,46 +939,76 @@ mod tests {
     fn text_dedup() {
         let (s, dir) = tmp_session("dedup");
         // Message puis pensée identique → la pensée n'est pas journalisée.
-        s.emit(EventKind::AgentText { text: "réponse finale".into() });
-        s.emit(EventKind::AgentThought { text: "réponse finale".into() });
+        s.emit(EventKind::AgentText {
+            text: "final response".into(),
+        });
+        s.emit(EventKind::AgentThought {
+            text: "final response".into(),
+        });
         // Message répété dans le même rôle → pas de copie non plus.
-        s.emit(EventKind::AgentText { text: "réponse finale".into() });
+        s.emit(EventKind::AgentText {
+            text: "final response".into(),
+        });
         assert_eq!(kinds(&dir), ["agent_text"]);
         // Pensée puis message identique → les DEUX : le message est
         // canonique, la pensée est masquée au rendu.
-        s.emit(EventKind::AgentThought { text: "autre".into() });
-        s.emit(EventKind::AgentText { text: "autre".into() });
+        s.emit(EventKind::AgentThought {
+            text: "other".into(),
+        });
+        s.emit(EventKind::AgentText {
+            text: "other".into(),
+        });
         assert_eq!(kinds(&dir), ["agent_text", "agent_thought", "agent_text"]);
         // Message user → nouveau tour : répéter le texte est légitime.
         s.emit(EventKind::UserMessage {
-            text: "autre".into(),
+            text: "other".into(),
             steer: false,
             origin: None,
             spawn_prompt: false,
         });
-        s.emit(EventKind::AgentText { text: "autre".into() });
+        s.emit(EventKind::AgentText {
+            text: "other".into(),
+        });
         assert_eq!(kinds(&dir).len(), 5);
         // Comparaison insensible aux espaces/retours.
-        s.emit(EventKind::AgentThought { text: "espaces   multiples\n\nici".into() });
-        s.emit(EventKind::AgentThought { text: "espaces multiples ici".into() });
+        s.emit(EventKind::AgentThought {
+            text: "multiple   spaces\n\nhere".into(),
+        });
+        s.emit(EventKind::AgentThought {
+            text: "multiple spaces here".into(),
+        });
         assert_eq!(
-            kinds(&dir).iter().filter(|k| **k == "agent_thought").count(),
+            kinds(&dir)
+                .iter()
+                .filter(|k| **k == "agent_thought")
+                .count(),
             2
         );
         // Réouverture : l'ancre est amorcée depuis la queue du journal,
         // un écho post-restart reste dédupliqué.
-        let s2 = Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
-        s2.emit(EventKind::AgentThought { text: "espaces multiples ici".into() });
+        let s2 =
+            Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
+        s2.emit(EventKind::AgentThought {
+            text: "multiple spaces here".into(),
+        });
         assert_eq!(
-            kinds(&dir).iter().filter(|k| **k == "agent_thought").count(),
+            kinds(&dir)
+                .iter()
+                .filter(|k| **k == "agent_thought")
+                .count(),
             2
         );
         // Reset du journal (/clear, rebind) : le même texte redevient
         // journalisable — le nouveau cycle n'hérite d'aucune ancre.
         s2.reset_text_anchor();
-        s2.emit(EventKind::AgentThought { text: "espaces multiples ici".into() });
+        s2.emit(EventKind::AgentThought {
+            text: "multiple spaces here".into(),
+        });
         assert_eq!(
-            kinds(&dir).iter().filter(|k| **k == "agent_thought").count(),
+            kinds(&dir)
+                .iter()
+                .filter(|k| **k == "agent_thought")
+                .count(),
             3
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -903,7 +1027,7 @@ mod tests {
             spawn_prompt: false,
         });
         s.emit(EventKind::AgentText {
-            text: "réponse".into(),
+            text: "response".into(),
         });
         // Pin valide + idempotent (même entrée, pas de doublon).
         let e = s.pin(1).unwrap();
@@ -921,7 +1045,8 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0]["live"], true);
         // Persisté : la réouverture recharge pinned.json.
-        let s2 = Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
+        let s2 =
+            Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
         assert_eq!(s2.pins_snapshot().len(), 1);
         // Journal vidé (/clear, rebind) : épinglé conservé mais mort.
         s2.journal.reset(&dir).unwrap();
@@ -933,7 +1058,7 @@ mod tests {
         // diffère → l'épinglé ne doit pas revenir « live ».
         std::thread::sleep(std::time::Duration::from_millis(2));
         s2.emit(EventKind::UserMessage {
-            text: "autre cycle".into(),
+            text: "other cycle".into(),
             steer: false,
             origin: None,
             spawn_prompt: false,
@@ -942,7 +1067,7 @@ mod tests {
         // Re-pin du même seq = nouvel event : l'entrée morte est
         // REMPLACÉE (pas de no-op silencieux, pas de doublon).
         let e3 = s2.pin(1).unwrap();
-        assert!(e3.text.contains("autre cycle"));
+        assert!(e3.text.contains("other cycle"));
         assert_ne!(e3.ts, e.ts);
         let relist = s2.pins_snapshot();
         assert_eq!(relist.len(), 1);
@@ -951,8 +1076,70 @@ mod tests {
         // suppression persistée à la réouverture.
         assert!(s2.unpin(1));
         assert!(!s2.unpin(1));
-        let s3 = Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
+        let s3 =
+            Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
         assert!(s3.pins_snapshot().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Étapes : remplacement complet persisté dans steps.json, event
+    /// `steps` journalisé à chaque changement (sauf no-op identique),
+    /// bornes (cap, nom vide) et clear_steps au reset de cycle.
+    #[test]
+    fn steps() {
+        use proto::{SessionStep, StepStatus};
+        let step = |name: &str, status: StepStatus| SessionStep {
+            name: name.into(),
+            status,
+        };
+        let (s, dir) = tmp_session("steps");
+        assert!(s.steps_snapshot().is_empty());
+        // Set initial : liste stockée + event `steps` journalisé.
+        let stored = s
+            .set_steps(vec![
+                step("Analyser", StepStatus::Done),
+                step("Implement", StepStatus::InProgress),
+            ])
+            .unwrap();
+        assert_eq!(stored.len(), 2);
+        assert_eq!(s.steps_snapshot()[1].status, StepStatus::InProgress);
+        assert!(kinds(&dir).contains(&"steps"));
+        // Remplacement complet : la liste entière est repousée.
+        s.set_steps(vec![
+            step("Analyser", StepStatus::Done),
+            step("Implement", StepStatus::Done),
+            step("Tests", StepStatus::InProgress),
+        ])
+        .unwrap();
+        assert_eq!(s.steps_snapshot().len(), 3);
+        // Liste identique → no-op silencieux (pas d'event en double).
+        let n = kinds(&dir).iter().filter(|k| **k == "steps").count();
+        s.set_steps(s.steps_snapshot()).unwrap();
+        assert_eq!(kinds(&dir).iter().filter(|k| **k == "steps").count(), n);
+        // Nom vide → erreur ; nom trop long → tronqué à la borne.
+        assert!(s.set_steps(vec![step("  ", StepStatus::Todo)]).is_err());
+        let long = "x".repeat(steps::STEP_NAME_MAX + 50);
+        s.set_steps(vec![step(&long, StepStatus::Todo)]).unwrap();
+        assert_eq!(
+            s.steps_snapshot()[0].name.chars().count(),
+            steps::STEP_NAME_MAX
+        );
+        // Cap : > STEPS_MAX étapes → refus.
+        let too_many: Vec<_> = (0..=steps::STEPS_MAX)
+            .map(|i| step(&format!("e{i}"), StepStatus::Todo))
+            .collect();
+        assert!(s.set_steps(too_many).is_err());
+        // Persisté : la réouverture recharge steps.json.
+        let s2 =
+            Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
+        assert_eq!(s2.steps_snapshot().len(), 1);
+        // Clear : liste vidée + event `steps` vide (resync clients).
+        assert!(s2.clear_steps());
+        assert!(s2.steps_snapshot().is_empty());
+        assert!(!s2.clear_steps()); // déjà vide → pas d'event en double
+        let s3 =
+            Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
+        assert!(s3.steps_snapshot().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -963,9 +1150,7 @@ mod tests {
     #[tokio::test]
     async fn compact_auto_crossing() {
         let (s, dir) = tmp_session("compact-auto");
-        let usage = |used: u64| {
-            serde_json::json!({"update": {"sessionUpdate": "usage_update", "used": used, "size": 100_000}})
-        };
+        let usage = |used: u64| serde_json::json!({"update": {"sessionUpdate": "usage_update", "used": used, "size": 100_000}});
         s.handle_session_update(&usage(50_000)).await;
         assert!(s.prompt_queue.lock().unwrap().is_empty());
         s.handle_session_update(&usage(91_000)).await;
@@ -994,7 +1179,10 @@ mod tests {
             "update": {"sessionUpdate": "usage_update", "used": 95_000, "size": 100_000}
         }))
         .await;
-        assert_eq!(s.prompt_queue.lock().unwrap().front().unwrap().0, "/compact");
+        assert_eq!(
+            s.prompt_queue.lock().unwrap().front().unwrap().0,
+            "/compact"
+        );
         // Le suivant au-dessus ne redéclenche pas (baseline posée).
         s.handle_session_update(&serde_json::json!({
             "update": {"sessionUpdate": "usage_update", "used": 96_000, "size": 100_000}
@@ -1034,7 +1222,10 @@ mod tests {
             "update": {"sessionUpdate": "usage_update", "used": 91_000, "size": 100_000}
         }))
         .await;
-        assert_eq!(s.prompt_queue.lock().unwrap().front().unwrap().0, "/compact");
+        assert_eq!(
+            s.prompt_queue.lock().unwrap().front().unwrap().0,
+            "/compact"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1045,7 +1236,7 @@ mod tests {
     async fn compact_auto_continue() {
         let (s, dir) = tmp_session("compact-cont");
         s.arm_compact(true);
-        s.end_compact("contexte réduit", false);
+        s.end_compact("context compacted", false);
         {
             let q = s.prompt_queue.lock().unwrap();
             assert_eq!(q.front().unwrap().0, "continue your task");
@@ -1054,11 +1245,11 @@ mod tests {
         s.prompt_queue.lock().unwrap().clear();
         // Hold manuel → pas de relance.
         s.arm_compact(false);
-        s.end_compact("contexte réduit", false);
+        s.end_compact("context compacted", false);
         assert!(s.prompt_queue.lock().unwrap().is_empty());
         // Hold auto + cancel utilisateur → pas de relance non plus.
         s.arm_compact(true);
-        s.end_compact("annulé", true);
+        s.end_compact("cancelled", true);
         assert!(s.prompt_queue.lock().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1114,23 +1305,38 @@ mod tests {
     async fn compact_session_override() {
         let (s, dir) = tmp_session("compact-cfg");
         assert!(s.compact_policy().enabled); // défaut global
-        s.set_config_option("ac.compact_enabled", "off").await.unwrap();
+        s.set_config_option("ac.compact_enabled", "off")
+            .await
+            .unwrap();
         assert!(!s.compact_policy().enabled);
-        s.set_config_option("ac.compact_at_tokens", "50000").await.unwrap();
+        s.set_config_option("ac.compact_at_tokens", "50000")
+            .await
+            .unwrap();
         assert_eq!(s.compact_policy().at_tokens, Some(50_000));
-        s.set_config_option("ac.compact_at_pct", "0.5").await.unwrap();
+        s.set_config_option("ac.compact_at_pct", "0.5")
+            .await
+            .unwrap();
         assert_eq!(s.compact_policy().at_pct, Some(0.5));
         // off → retour à l'hérité global (0.9), pas « pas de règle ».
-        s.set_config_option("ac.compact_at_pct", "off").await.unwrap();
+        s.set_config_option("ac.compact_at_pct", "off")
+            .await
+            .unwrap();
         assert_eq!(s.compact_policy().at_pct, Some(0.9));
         // Persisté : la réouverture relit compact.json.
-        let s2 = Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
+        let s2 =
+            Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
         let p = s2.compact_policy();
         assert!(!p.enabled && p.at_tokens == Some(50_000) && p.at_pct == Some(0.9));
         // Rejets : clé inconnue, booléen, borne %.
         assert!(s2.set_config_option("ac.nope", "1").await.is_err());
-        assert!(s2.set_config_option("ac.compact_enabled", "maybe").await.is_err());
-        assert!(s2.set_config_option("ac.compact_at_pct", "1.5").await.is_err());
+        assert!(s2
+            .set_config_option("ac.compact_enabled", "maybe")
+            .await
+            .is_err());
+        assert!(s2
+            .set_config_option("ac.compact_at_pct", "1.5")
+            .await
+            .is_err());
         // « 0 » ≠ « off » : 0 décoche la règle héritée (at_tokens Some(0)
         // → effectif None), off rend None = retour à l'hérité. Source
         // globale à at_tokens posé pour distinguer les deux.
@@ -1144,9 +1350,13 @@ mod tests {
         };
         let s3 = Session::open(dir.clone(), &src, CapsRegistry::in_memory()).unwrap();
         assert_eq!(s3.compact_policy().at_tokens, Some(50_000)); // override persistant
-        s3.set_config_option("ac.compact_at_tokens", "0").await.unwrap();
+        s3.set_config_option("ac.compact_at_tokens", "0")
+            .await
+            .unwrap();
         assert!(s3.compact_policy().at_tokens.is_none()); // règle décochée
-        s3.set_config_option("ac.compact_at_tokens", "off").await.unwrap();
+        s3.set_config_option("ac.compact_at_tokens", "off")
+            .await
+            .unwrap();
         assert_eq!(s3.compact_policy().at_tokens, Some(80_000)); // hérité global
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1157,19 +1367,24 @@ mod tests {
     #[tokio::test]
     async fn compact_setcfg_hot() {
         let (s, dir) = tmp_session("compact-hot-cfg");
-        let usage = |used: u64| {
-            serde_json::json!({"update": {"sessionUpdate": "usage_update", "used": used, "size": 100_000}})
-        };
+        let usage = |used: u64| serde_json::json!({"update": {"sessionUpdate": "usage_update", "used": used, "size": 100_000}});
         // Compact coupé pendant le dépassement → rien, mais la baseline
         // s'est posée sur cette valeur déjà haute.
-        s.set_config_option("ac.compact_enabled", "off").await.unwrap();
+        s.set_config_option("ac.compact_enabled", "off")
+            .await
+            .unwrap();
         s.handle_session_update(&usage(95_000)).await;
         assert!(s.prompt_queue.lock().unwrap().is_empty());
         // Réarmé à chaud : sans le reset, was(exceeds(95k)) resterait
         // vrai → le déclencheur serait muet indéfiniment.
-        s.set_config_option("ac.compact_enabled", "on").await.unwrap();
+        s.set_config_option("ac.compact_enabled", "on")
+            .await
+            .unwrap();
         s.handle_session_update(&usage(95_500)).await;
-        assert_eq!(s.prompt_queue.lock().unwrap().front().unwrap().0, "/compact");
+        assert_eq!(
+            s.prompt_queue.lock().unwrap().front().unwrap().0,
+            "/compact"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1186,6 +1401,13 @@ mod tests {
         assert_eq!(classify_error("resource exhausted"), "rate_limit");
         assert_eq!(classify_error("Invalid params: model foo"), "model");
         assert_eq!(classify_error("model not found"), "model");
+        // codex-acp : refus de modèle ChatGPT-account (backend 400).
+        assert_eq!(
+            classify_error(
+                "acp session/prompt: Internal error: The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account."
+            ),
+            "model"
+        );
         assert_eq!(classify_error("401 unauthorized"), "auth");
         assert_eq!(classify_error("invalid api key"), "auth");
         // auth prime sur les mots « quota »/« limit ».
@@ -1208,7 +1430,10 @@ mod tests {
         assert_eq!(prompt::backoff_for(1), std::time::Duration::from_secs(60));
         assert_eq!(prompt::backoff_for(2), std::time::Duration::from_secs(120));
         assert_eq!(prompt::backoff_for(7), std::time::Duration::from_secs(3600));
-        assert_eq!(prompt::backoff_for(30), std::time::Duration::from_secs(3600));
+        assert_eq!(
+            prompt::backoff_for(30),
+            std::time::Duration::from_secs(3600)
+        );
     }
 
     /// parse_reset_at : durée relative, retry-after nu, heure UTC
@@ -1217,9 +1442,7 @@ mod tests {
     #[test]
     fn reset_at_parsing() {
         let now = std::time::SystemTime::now();
-        let at = |d: i64| {
-            prompt::unix_secs(now) + d
-        };
+        let at = |d: i64| prompt::unix_secs(now) + d;
         // « reset in 15 minutes » — le message réel du provider.
         let t = prompt::parse_reset_at(
             "Reached free model rate limit. Your limit will reset in 15 minutes (at 13:56 UTC)",
@@ -1270,7 +1493,7 @@ mod tests {
         );
         let le = s.meta_snapshot().last_error.unwrap();
         assert_eq!(le.count, 1);
-        let retry1 = le.retry_at.expect("retry_at posé");
+        let retry1 = le.retry_at.expect("retry_at set");
         let now = prompt::unix_secs(std::time::SystemTime::now());
         let d = retry1 - now;
         assert!((870..=930).contains(&d), "retry ~15min+jitter, got {d}");
@@ -1281,8 +1504,8 @@ mod tests {
             "rate limit — your limit will reset in 15 minutes",
         );
         let le2 = s.meta_snapshot().last_error.unwrap();
-        assert_eq!(le2.count, 1, "échec in-window : count non incrémenté");
-        assert!(le2.retry_at.unwrap() > now, "échéance conservée");
+        assert_eq!(le2.count, 1, "in-window failure: count not incremented");
+        assert!(le2.retry_at.unwrap() > now, "deadline kept");
         // Un kind différent repart à 1.
         s.hold_error("model", "model not found");
         assert_eq!(s.meta_snapshot().last_error.unwrap().count, 1);
@@ -1305,7 +1528,14 @@ mod tests {
         assert!(!le.message.is_empty());
         assert!(s.error_held());
         // Timer absent pour model (jamais de retry auto).
-        assert!(s.error_hold.lock().unwrap().as_ref().unwrap().timer.is_none());
+        assert!(s
+            .error_hold
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .timer
+            .is_none());
 
         // Re-échec même kind → count++, hold ré-armé.
         s.hold_error("model", "still missing");
@@ -1314,7 +1544,14 @@ mod tests {
 
         // rate_limit → timer armé (retry programmé).
         s.hold_error("rate_limit", "429");
-        assert!(s.error_hold.lock().unwrap().as_ref().unwrap().timer.is_some());
+        assert!(s
+            .error_hold
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .timer
+            .is_some());
         // count repart à 1 : kind différent = nouvelle série.
         assert_eq!(s.meta_snapshot().last_error.unwrap().count, 1);
 
@@ -1329,7 +1566,8 @@ mod tests {
 
         // Persisté dans meta.json : la trace écrite est relue à l'open.
         s.hold_error("auth", "401");
-        let s2 = Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
+        let s2 =
+            Session::open(dir.clone(), &test_compact_src(), CapsRegistry::in_memory()).unwrap();
         let le2 = s2.meta_snapshot().last_error.unwrap();
         assert_eq!(le2.kind, "auth");
         assert_eq!(s2.meta_snapshot().state, "error");
@@ -1396,10 +1634,14 @@ mod tests {
             blob: None,
             size: None,
             diff: None,
+            diff_blob: None,
+            diff_size: None,
         }));
         for k in [
             EventKind::System { text: "s".into() },
-            EventKind::Error { message: "e".into() },
+            EventKind::Error {
+                message: "e".into(),
+            },
             EventKind::UserMessage {
                 text: "u".into(),
                 steer: false,
@@ -1409,5 +1651,61 @@ mod tests {
         ] {
             assert!(!Session::is_agent_output(&k));
         }
+    }
+
+    /// Replay « refill » (session/load skip_replay=false — fork,
+    /// rebind) : les events rejoués sont journalisés
+    /// pour compléter le journal (paging `events`, recherche) mais
+    /// PAS broadcastés aux abonnés — le client recharge sa queue au
+    /// marqueur `history_replayed` de fin de load (#300). Ni le
+    /// resume normal (loading_replay, skip_replay=true) ni le live
+    /// ne sont concernés.
+    #[tokio::test]
+    async fn replay_refill_journal_only() {
+        let (s, dir) = tmp_session("replay-refill");
+        let mut rx = s.events_tx.subscribe();
+        // Load refill en vol : load actif SANS loading_replay
+        // (skip_replay=false — journal à reconstruire).
+        s.load_active.store(true, Ordering::SeqCst);
+        s.loading_replay.store(false, Ordering::SeqCst);
+        s.handle_session_update(&serde_json::json!({
+            "update": {"sessionUpdate": "agent_message_chunk",
+                       "content": {"type": "text", "text": "historique rejoué"}}
+        }))
+        .await;
+        // L'update non-chunk flush le texte accumulé puis s'auto-émet.
+        s.handle_session_update(&serde_json::json!({
+            "update": {"sessionUpdate": "usage_update", "used": 10, "size": 100}
+        }))
+        .await;
+        // Journal complet…
+        assert!(kinds(&dir).contains(&"agent_text"));
+        assert!(kinds(&dir).contains(&"usage_update"));
+        // …mais rien n'a été poussé aux abonnés.
+        assert!(rx.try_recv().is_err());
+        // Les syslines de progression passent quand même (emit_live).
+        *s.replay_report_at.lock().unwrap() =
+            std::time::Instant::now() - std::time::Duration::from_secs(11);
+        s.note_load_progress();
+        assert!(matches!(
+            rx.try_recv().map(|e| e.kind),
+            Ok(EventKind::System { .. })
+        ));
+        // Fin du load : le marqueur est journalisé ET broadcasté.
+        s.end_load_replay();
+        assert!(kinds(&dir).contains(&"history_replayed"));
+        assert!(matches!(
+            rx.try_recv().map(|e| e.kind),
+            Ok(EventKind::HistoryReplayed { events: _ })
+        ));
+        // Après le load, le live repasse normalement.
+        s.emit(EventKind::System {
+            text: "live".into(),
+        });
+        assert!(matches!(
+            rx.try_recv().map(|e| e.kind),
+            Ok(EventKind::System { .. })
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

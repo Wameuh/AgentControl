@@ -1,7 +1,7 @@
 //! acctl — client CLI de test pour agentcontrol-daemon.
 //!
 //! Usage :
-//!   acctl status | agents | list
+//!   acctl status | agents [install <id>] | list
 //!   acctl new <agent> <cwd> [prompt...] [--title T] [--mode M] [--model X]
 //!               [--origin O]   (provenance service — badge « via » client ;
 //!               ex. --origin service:backlog-orchestrator)
@@ -12,7 +12,11 @@
 //!               [--mode M] [--model X] [--group G]   (session agent→agent)
 //!   acctl events <session> [before_seq] [limit]
 //!   acctl tail <session> [after_seq]
-//!   acctl resume|cancel|kill|clear|sleep <session>
+//!   acctl resume [--fresh] <session> [native_id]
+//!       (resume = respawn + session/load ; --fresh = abandonne le
+//!        contexte natif → session/new, journal conservé — utile quand
+//!        le replay d'une très longue session native est trop long)
+//!   acctl cancel|kill|clear|sleep <session>
 //!       (sleep = libère le process, la session reste — réveil auto au
 //!        prochain envoi)
 //!   acctl mode <session> <mode>
@@ -26,6 +30,9 @@
 //!   acctl pr review <N> [--repo R]       — review native (pr_review du
 //!       démon) : même pipeline que `/mr review`, verdict notifié en
 //!       message si lancé depuis une session agent
+//!   acctl steps set [--session S] "a:todo,b:wip,…" | steps get [--session S]
+//!                                     — étapes de la tâche (skill ac-steps ;
+//!                                     session = $AGENTCONTROL_SESSION sinon)
 //!   acctl comp [ls] [--json] | info <n> | start|stop|restart <n>
 //!       | logs <n> [--tail N] | catalog [--json] [--refresh]
 //!       | install <n> | add <n> [--kind K] [--cmd "<argv>"] [--hc S]
@@ -210,6 +217,18 @@ fn print_event(ev: &Value) {
             println!("[{seq}] commandes: {}", names.join(" "));
         }
         "status_changed" => println!("\x1b[90m[{seq}] état → {}\x1b[0m", ev["state"].as_str().unwrap_or("")),
+        "steps" => {
+            let n = ev["steps"].as_array().map(|a| a.len()).unwrap_or(0);
+            let cur = ev["steps"].as_array().and_then(|a| {
+                a.iter().find(|s| s["status"].as_str() == Some("in_progress"))
+            });
+            println!(
+                "\x1b[36m[{seq}] ▤ étapes: {n}{}\x1b[0m",
+                cur.and_then(|s| s["name"].as_str())
+                    .map(|n| format!(" — en cours: {n}"))
+                    .unwrap_or_default()
+            );
+        }
         "session_cleared" => println!("\x1b[90m[{seq}] ── contexte effacé ──\x1b[0m"),
         "error" => println!("\x1b[31m[{seq}] ERREUR {}\x1b[0m", ev["message"].as_str().unwrap_or("")),
         "system" => println!("\x1b[90m[{seq}] ⦿ {}\x1b[0m", ev["text"].as_str().unwrap_or("")),
@@ -217,11 +236,61 @@ fn print_event(ev: &Value) {
     }
 }
 
+/// Commandes top-level canoniques — source de la suggestion
+/// « vouliez-vous dire … » sur nom inconnu (les alias wr/dl/
+/// components/orchestrator restent valides mais ne sont pas
+/// suggérés : la forme canonique est à privilégier).
+const COMMANDS: &[&str] = &[
+    "status", "daemon-update", "agents", "list", "new", "send", "msg",
+    "spawn", "events", "tail", "search", "find", "create", "resume",
+    "attach", "fork", "cancel", "kill", "clear", "sleep", "rm", "mode",
+    "model", "setcfg", "steps", "respond", "blob", "download", "write",
+    "pr", "comp", "orch",
+];
+
+/// Distance d'édition de Levenshtein (deux rangées, noms courts).
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            cur[j + 1] = (prev[j + 1] + 1)
+                .min(cur[j] + 1)
+                .min(prev[j] + usize::from(ca != cb));
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// Commande la plus proche de `input`, si elle est assez proche :
+/// ≤ 2 fautes (ex. transposition « daemon-uptate ») ou ≤ 1/3 de la
+/// longueur pour les noms longs — en dessous on préfère ne rien
+/// suggérer plutôt qu'une piste trompeuse.
+fn suggest_command(input: &str) -> Option<&'static str> {
+    // Un flag (« -v ») n'est pas une commande — ne rien suggérer.
+    if input.starts_with('-') {
+        return None;
+    }
+    let mut best: Option<(&'static str, usize)> = None;
+    for &cmd in COMMANDS {
+        let d = edit_distance(input, cmd);
+        if best.is_none_or(|(_, bd)| d < bd) {
+            best = Some((cmd, d));
+        }
+    }
+    let (cmd, d) = best?;
+    let len = input.chars().count().max(cmd.len());
+    (d <= 2 || d * 3 <= len).then_some(cmd)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|search|find|create|resume|attach|fork|cancel|kill|clear|sleep|mode|respond|blob|download|write|pr|comp|orch|daemon-update");
+        eprintln!("usage: acctl status|agents|list|new|send|msg|spawn|events|tail|search|find|create|resume|attach|fork|cancel|kill|clear|sleep|mode|respond|blob|download|write|pr|comp|orch|steps|daemon-update");
         std::process::exit(2);
     }
     let mut c = connect().await?;
@@ -239,7 +308,25 @@ async fn main() -> Result<()> {
                 c.call(proto::ReqKind::UpdateDaemon { version }).await?
             );
         }
-        "agents" => println!("{}", c.call(proto::ReqKind::ListAgents).await?),
+        "agents" => {
+            // `agents install <id>` : provisioning de l'adaptateur ACP
+            // côté démon (npm i -g déclaré par le registre — #277) ;
+            // sans argument → liste des profils comme avant.
+            if args.get(1).map(String::as_str) == Some("install") {
+                let id = args
+                    .get(2)
+                    .context("usage: acctl agents install <id>")?;
+                println!(
+                    "{}",
+                    c.call(proto::ReqKind::InstallAgentAdapter {
+                        agent: id.clone(),
+                    })
+                    .await?
+                );
+            } else {
+                println!("{}", c.call(proto::ReqKind::ListAgents).await?);
+            }
+        }
         "list" => {
             let v = c.call(proto::ReqKind::ListSessions).await?;
             // Registre PR (tolère un vieux démon qui n'a pas pr_list).
@@ -539,10 +626,27 @@ async fn main() -> Result<()> {
                 if dir { "/" } else { "" },
             );
         }
-        "resume" => println!("{}", c.call(proto::ReqKind::ResumeSession {
-            session: args[1].clone(),
-            native_id: args.get(2).cloned(),
-        }).await?),
+        "resume" => {
+            // acctl resume [--fresh] <session> [native_id] — --fresh
+            // abandonne le contexte natif (session/new, journal conservé).
+            let mut fresh = false;
+            let mut pos: Vec<String> = Vec::new();
+            for a in args.iter().skip(1) {
+                if a == "--fresh" {
+                    fresh = true;
+                } else {
+                    pos.push(a.clone());
+                }
+            }
+            if pos.is_empty() {
+                bail!("resume [--fresh] <session> [native_id]");
+            }
+            println!("{}", c.call(proto::ReqKind::ResumeSession {
+                session: pos[0].clone(),
+                native_id: pos.get(1).cloned(),
+                fresh,
+            }).await?)
+        }
         "attach" => println!("{}", c.call(proto::ReqKind::AttachSession {
             agent: args[1].clone(),
             cwd: args[2].clone(),
@@ -564,6 +668,56 @@ async fn main() -> Result<()> {
             config_id: args[2].clone(),
             value: args[3].clone(),
         }).await?),
+        "steps" => {
+            // acctl steps set [--session S] <spec>   — spec = "a:todo,b:wip,…"
+            //   (statuts todo|in_progress|wip|done|abandoned|abandon) ou JSON
+            //   '[{"name":..,"status":..}]' ; "-" ou "[]" vide la liste.
+            // acctl steps get [--session S]  — liste courante.
+            // Session = --session ou $AGENTCONTROL_SESSION.
+            if args.len() < 2 {
+                bail!("steps set [--session S] <spec> | steps get [--session S]");
+            }
+            let mut session = None;
+            let mut rest: Vec<String> = Vec::new();
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--session" => { session = args.get(i + 1).cloned(); i += 2; }
+                    _ => { rest.push(args[i].clone()); i += 1; }
+                }
+            }
+            let session = session
+                .or_else(|| std::env::var("AGENTCONTROL_SESSION").ok())
+                .context("pas de session : --session S ou AGENTCONTROL_SESSION")?;
+            match args[1].as_str() {
+                "set" => {
+                    let spec = rest.join(" ");
+                    if spec.is_empty() {
+                        bail!("steps set [--session S] <spec>");
+                    }
+                    let steps = parse_steps_spec(&spec)?;
+                    let v = c
+                        .call(proto::ReqKind::SessionSetSteps {
+                            session,
+                            steps,
+                        })
+                        .await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                "get" => {
+                    // Pas de req dédiée : session_info porte `steps`.
+                    let v = c
+                        .call(proto::ReqKind::SessionInfo { session })
+                        .await?;
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&v["steps"])
+                            .unwrap_or_else(|_| "null".into())
+                    );
+                }
+                other => bail!("steps : sous-commande inconnue «{other}» (set|get)"),
+            }
+        }
         "respond" => {
             // respond <session> <request_id> [option_id | --answer JSON]
             let mut option_id = None;
@@ -734,7 +888,78 @@ async fn main() -> Result<()> {
                 other => bail!("usage: acctl orch [on|off|status|config|set <clé> <val>…|metrics [--window W]] (inconnu: {other})"),
             }
         }
-        other => bail!("commande inconnue: {other}"),
+        other => bail!(
+            "commande inconnue: {other}{}",
+            suggest_command(other)
+                .map(|c| format!(" — vouliez-vous dire « {c} » ?"))
+                .unwrap_or_default()
+        ),
     }
     Ok(())
+}
+
+/// Parse le spec de `acctl steps set` en Vec<SessionStep> :
+///   "-" ou "[]"            → liste vide (clear)
+///   '[{"name":..,"status":..}]' → JSON complet (statuts canoniques
+///                               snake_case, tolère les alias)
+///   "a:todo,b:wip,…"       → forme compacte, `nom:statut` séparés par
+///                            des virgules ; le statut est après le
+///                            DERNIER ':' (un nom peut contenir ':').
+/// Alias de statut acceptés : wip|in-progress → in_progress,
+/// done|complete → done, abandon|skip|skipped → abandoned.
+fn parse_steps_spec(spec: &str) -> Result<Vec<proto::SessionStep>> {
+    let spec = spec.trim();
+    if spec == "-" || spec == "[]" {
+        return Ok(Vec::new());
+    }
+    if spec.starts_with('[') {
+        let raw: Vec<Value> = serde_json::from_str(spec)
+            .context("spec JSON invalide — attendu [{\"name\":..,\"status\":..}]")?;
+        return raw
+            .iter()
+            .map(|v| {
+                let name = v["name"]
+                    .as_str()
+                    .context("étape JSON sans \"name\"")?
+                    .to_string();
+                let status = parse_step_status(
+                    v["status"].as_str().context("étape JSON sans \"status\"")?,
+                )?;
+                Ok(proto::SessionStep { name, status })
+            })
+            .collect();
+    }
+    spec.split(',')
+        .map(|part| {
+            let part = part.trim();
+            if part.is_empty() {
+                bail!("entrée d'étape vide dans «{spec}»");
+            }
+            let (name, st) = part
+                .rsplit_once(':')
+                .with_context(|| format!("étape «{part}» sans statut — forme attendue nom:statut"))?;
+            let name = name.trim();
+            if name.is_empty() {
+                bail!("étape sans nom dans «{part}»");
+            }
+            Ok(proto::SessionStep {
+                name: name.to_string(),
+                status: parse_step_status(st.trim())?,
+            })
+        })
+        .collect()
+}
+
+fn parse_step_status(s: &str) -> Result<proto::StepStatus> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "todo" | "to_do" => Ok(proto::StepStatus::Todo),
+        "in_progress" | "in-progress" | "wip" | "progress" | "doing" => {
+            Ok(proto::StepStatus::InProgress)
+        }
+        "done" | "complete" | "completed" | "finished" => Ok(proto::StepStatus::Done),
+        "abandoned" | "abandon" | "skip" | "skipped" => Ok(proto::StepStatus::Abandoned),
+        other => bail!(
+            "statut d'étape inconnu «{other}» — attendu todo|in_progress|done|abandoned"
+        ),
+    }
 }

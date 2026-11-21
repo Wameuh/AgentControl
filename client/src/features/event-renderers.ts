@@ -8,10 +8,12 @@
 import { $, copyText, esc, mkEv, q, showErr } from "../core/dom";
 import { linkify, mdRender } from "../core/format";
 import { call } from "../core/rpc";
+import { isAndroid } from "../core/chrome";
 import { app } from "../core/state";
 import type { AcEvent, CmdInfo, ConfigOption } from "../core/types";
 import { t } from "../i18n";
 import { icon, qIco } from "../ui/icons";
+import { tick } from "../mobile/haptics";
 
 // Seuils au-delà desquels une bulle user est repliée par défaut.
 const USER_FOLD_CHARS = 480;
@@ -22,6 +24,19 @@ const USER_FOLD_LINES = 5;
 // que le delta garde le coût total en O(sortie) au lieu de O(n²) dans
 // le DOM. WeakMap : libéré avec le nœud.
 const lastToolExcerpt = new WeakMap<HTMLElement, string>();
+
+/** Réponse à une question_request : JSON si possible, sinon `{answer: val}`,
+ *  `null` si vide. Partagé avec les cartes « À traiter » de l'accueil (N3). */
+export function parseAnswer(val: string | null): unknown {
+  if (val) {
+    try {
+      return JSON.parse(val);
+    } catch {
+      return { answer: val };
+    }
+  }
+  return null;
+}
 
 export class EventRenderer {
   // Réassignés au swap de session (cache par conversation) — publics pour
@@ -104,7 +119,6 @@ export class EventRenderer {
     if (ev.seq === 1) this.headSeen = true;
     switch (ev.type) {
       case "user_message": {
-        const d = mkEv("msg user", ev.seq);
         const txt = ev.text as string;
         // Prompt de spawn d'une session « service » (origin) = le 1er
         // user_message DU JOURNAL : identifiable seulement quand la
@@ -116,36 +130,12 @@ export class EventRenderer {
         const servicePrompt =
           !!ev.origin && this.userMsgs === 0 && this.headSeen;
         this.userMsgs += 1;
-        const body = document.createElement("div");
-        body.className = "um-body";
-        body.innerHTML =
+        const badges =
           (ev.origin
             ? `<span class="origin-badge">${esc(t("via"))} ${esc(ev.origin as string)}</span> `
             : "") +
-          (ev.steer ? `<span class="steer-badge">${t("steer_badge")}</span> ` : "") +
-          linkify(esc(txt));
-        d.appendChild(body);
-        // Prompt long → replié par défaut, bouton pour déplier/replier.
-        if (
-          servicePrompt ||
-          txt.length > USER_FOLD_CHARS ||
-          txt.split("\n").length > USER_FOLD_LINES
-        ) {
-          d.classList.add("um-collapsed");
-          if (servicePrompt) d.classList.add("um-service");
-          const btn = document.createElement("button");
-          btn.type = "button";
-          btn.className = "um-toggle";
-          const setLabel = (collapsed: boolean) => {
-            btn.innerHTML = `${icon("chev-down", "ic-caret")} ${esc(t(collapsed ? "um_expand" : "um_collapse"))}`;
-          };
-          setLabel(true);
-          btn.addEventListener("click", () => {
-            setLabel(d.classList.toggle("um-collapsed"));
-          });
-          d.appendChild(btn);
-        }
-        return d;
+          (ev.steer ? `<span class="steer-badge">${t("steer_badge")}</span> ` : "");
+        return this.userBubble(mkEv("msg user", ev.seq), txt, badges, servicePrompt);
       }
       case "agent_text": {
         const d = mkEv("msg agent", ev.seq);
@@ -228,6 +218,15 @@ export class EventRenderer {
         d.hidden = true;
         return d;
       }
+      case "steps": {
+        // Étapes de tâche (skill ac-steps) : état interne — le panneau
+        // est alimenté en amont (main.ts) et la reconstruction passe
+        // par session_info.steps. Sysline masquée : conservation du
+        // tracking par seq sans bruit dans le chat (comme usage_update).
+        const d = mkEv("sysline", ev.seq);
+        d.hidden = true;
+        return d;
+      }
       case "commands_available": {
         const d = mkEv("sysline", ev.seq);
         const cmds = ev.commands as CmdInfo[];
@@ -263,12 +262,72 @@ export class EventRenderer {
         d.innerHTML = `${icon("sys")} ${esc(ev.text as string)}`;
         return d;
       }
+      case "history_replayed": {
+        // Fin d'un replay session/load « refill » (fork/rebind) : le journal a été reconstruit sans broadcast live —
+        // la queue affichée a été rechargée en amont (main.ts → open
+        // forcé), cet event journalisé marque la fin du contexte
+        // rejoué dans l'historique.
+        const d = mkEv("sysline", ev.seq);
+        d.textContent = t("history_replayed", {
+          n: (ev.events as number) ?? 0,
+        });
+        return d;
+      }
       default: {
         const d = mkEv("sysline", ev.seq);
         d.textContent = ev.type;
         return d;
       }
     }
+  }
+
+  /// Bulle user commune au rendu confirmé et à l'écho optimiste :
+  /// corps (badges + texte linkifié) + repli des prompts longs.
+  private userBubble(
+    d: HTMLElement,
+    txt: string,
+    badgesHtml: string,
+    servicePrompt = false,
+  ): HTMLElement {
+    const body = document.createElement("div");
+    body.className = "um-body";
+    body.innerHTML = badgesHtml + linkify(esc(txt));
+    d.appendChild(body);
+    // Prompt long → replié par défaut, bouton pour déplier/replier.
+    if (
+      servicePrompt ||
+      txt.length > USER_FOLD_CHARS ||
+      txt.split("\n").length > USER_FOLD_LINES
+    ) {
+      d.classList.add("um-collapsed");
+      if (servicePrompt) d.classList.add("um-service");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "um-toggle";
+      const setLabel = (collapsed: boolean) => {
+        btn.innerHTML = `${icon("chev-down", "ic-caret")} ${esc(t(collapsed ? "um_expand" : "um_collapse"))}`;
+      };
+      setLabel(true);
+      btn.addEventListener("click", () => {
+        setLabel(d.classList.toggle("um-collapsed"));
+      });
+      d.appendChild(btn);
+    }
+    return d;
+  }
+
+  /// Écho optimiste d'un envoi (composer.sendInput) : bulle user
+  /// identique au rendu confirmé mais marquée `um-pending` — opacité
+  /// réduite tant que le user_message du journal n'est pas arrivé
+  /// (file d'attente, réveil…). Pas de data-seq : le nœud n'est pas un
+  /// event, il est retiré à la réconciliation.
+  renderUserEcho(text: string, steer: boolean): HTMLElement {
+    const d = document.createElement("div");
+    d.className = "ev msg user um-pending";
+    d.dataset.pending = "1";
+    d.title = t("um_pending");
+    const badges = steer ? `<span class="steer-badge">${t("steer_badge")}</span> ` : "";
+    return this.userBubble(d, text, badges);
   }
 
   /// Bouton « copier » en surimpression de chaque bloc de code markdown.
@@ -289,6 +348,15 @@ export class EventRenderer {
         });
       };
       wrap.appendChild(b);
+      // Mobile (S4) : un <pre> déborde l'écran 390px — bouton « retour à
+      // la ligne » à gauche du bouton copier. Android seul : le desktop
+      // garde le défilement horizontal comme unique comportement.
+      if (isAndroid()) {
+        const w = qIco("wrap", t("md_wrap"));
+        w.className = "md-wrap";
+        w.onclick = () => pre.classList.toggle("wrapped");
+        wrap.appendChild(w);
+      }
     }
   }
 
@@ -311,7 +379,8 @@ export class EventRenderer {
         ${ev.input ? '<pre class="tool-cmd"></pre>' : ""}
         <pre class="tool-out"></pre>
         ${ev.blob ? '<button class="btn-more">charger la sortie complète…</button>' : ""}
-        ${ev.diff ? `<pre class="tool-diff">${esc(ev.diff as string)}</pre>` : ""}
+        ${ev.diff ? `<pre class="tool-diff"></pre>` : ""}
+        ${ev.diff_blob ? '<button class="btn-diffmore"></button>' : ""}
       </div>`;
     const body = d.querySelector<HTMLElement>(".tool-body")!;
     const cmd = d.querySelector<HTMLElement>(".tool-cmd");
@@ -340,6 +409,8 @@ export class EventRenderer {
       pre.textContent = ev.excerpt as string;
       lastToolExcerpt.set(pre, ev.excerpt as string);
     }
+    const diffPre = d.querySelector<HTMLElement>(".tool-diff");
+    if (diffPre && ev.diff != null) diffPre.textContent = ev.diff as string;
     d.querySelector(".tool-head")!.addEventListener("click", () => {
       body.hidden = !body.hidden;
       d.classList.toggle("open", !body.hidden);
@@ -357,6 +428,44 @@ export class EventRenderer {
         });
         pre.textContent = r.data + (r.total > r.data.length ? `\n… (${r.total} o total)` : "");
         btn.remove();
+      });
+    }
+    // Diff externalisé (gros Write/Edit, #302) : `diff` ne porte que
+    // l'extrait — le patch complet se récupère du blob à la demande.
+    const dbtn = d.querySelector<HTMLButtonElement>(".btn-diffmore");
+    if (dbtn && diffPre && ev.diff_blob) {
+      dbtn.textContent = t("load_diff");
+      dbtn.addEventListener("click", async () => {
+        dbtn.disabled = true;
+        dbtn.textContent = t("loading");
+        try {
+          // Le blob peut faire plusieurs Mo — tranches de 1 Mio ;
+          // `size` = octets lus (data est du texte lossy, sa longueur
+          // ne mesure pas la tranche).
+          let out = "";
+          let off = 0;
+          let total = Infinity;
+          for (let i = 0; i < 16 && off < total; i++) {
+            const r = await call<{ data: string; total: number; size?: number }>("get_blob", {
+              session: app.current!.id,
+              blob: ev.diff_blob,
+              offset: off,
+              limit: 1 << 20,
+            });
+            total = r.total;
+            out += r.data;
+            off += r.size ?? r.data.length;
+            if (!r.data.length) break;
+          }
+          diffPre.textContent =
+            out + (off < total ? `\n… (${total} o total)` : "");
+        } catch (e) {
+          showErr(String(e));
+          dbtn.disabled = false;
+          dbtn.textContent = t("load_diff");
+          return;
+        }
+        dbtn.remove();
       });
     }
     return d;
@@ -487,13 +596,18 @@ export class EventRenderer {
       const b = document.createElement("button");
       b.textContent = o.name || o.option_id;
       b.className = o.kind.startsWith("reject") ? "btn-reject" : "btn-allow";
+      // Lu par le dock mobile (perm-dock.ts) pour mettre allow_once en
+      // avant quel que soit l'ordre des options annoncé par l'agent.
+      b.dataset.kind = o.kind;
       b.onclick = async () => {
         if (this.answered.has(ev.request_id as string)) return;
         await call("respond", {
           session: app.current!.id,
           request_id: ev.request_id,
           option_id: o.option_id,
-        }).catch((e) => showErr(String(e)));
+        })
+          .then(() => tick("resolve"))
+          .catch((e) => showErr(String(e)));
         d.classList.add("done");
       };
       box.appendChild(b);
@@ -515,19 +629,14 @@ export class EventRenderer {
     const input = d.querySelector<HTMLInputElement>(".q-input")!;
     const answer = async (val: string | null) => {
       if (this.answered.has(ev.request_id as string)) return;
-      let parsed: unknown = null;
-      if (val) {
-        try {
-          parsed = JSON.parse(val);
-        } catch {
-          parsed = { answer: val };
-        }
-      }
+      const parsed = parseAnswer(val);
       await call("respond", {
         session: app.current!.id,
         request_id: ev.request_id,
         answer: parsed,
-      }).catch((e) => showErr(String(e)));
+      })
+        .then(() => tick("resolve"))
+        .catch((e) => showErr(String(e)));
       d.classList.add("done");
     };
     d.querySelector<HTMLButtonElement>(".btn-allow")!.onclick = () => answer(input.value || "{}");

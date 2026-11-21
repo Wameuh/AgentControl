@@ -153,6 +153,14 @@ export function applyTheme(name: "dark" | "light", persist = true) {
   if (persist) localStorage.setItem("ac-theme", name);
   // La palette dérivée dépend du mode : recalcul après le toggle.
   syncMeshAccent();
+  // Barres système Android (Y4) : icônes sombres en thème clair, claires
+  // en thème sombre — plugin natif ac-device ; erreurs avalées (web,
+  // plugin indisponible). Desktop inchangé.
+  if (android) {
+    void invoke("plugin:ac-device|set_system_bars", {
+      light: name === "light",
+    }).catch(() => {});
+  }
 }
 
 // Couleur d'accent — dimension orthogonale à dark/light (cf. styles/base.css).
@@ -267,8 +275,9 @@ let windows = /Windows/i.test(navigator.userAgent);
 export const isWindows = () => windows;
 
 export function applyAndroidChrome() {
-  // Pas de fenêtre à minimizer/drag sous Android : ☰ + ⋮ seulement.
-  $("tb-menu").hidden = false;
+  // Pas de fenêtre à minimizer/drag sous Android : ⋮ seulement — le ☰
+  // reste masqué depuis la phase 3 (le drawer a disparu : accueil plein
+  // écran + barre basse + retour ←).
   $("tb-more").hidden = false;
   $("chat-more").hidden = false;
   ($("input") as HTMLTextAreaElement).enterKeyHint = "send";
@@ -277,6 +286,18 @@ export function applyAndroidChrome() {
   // rendu d'un coup, quel que soit l'ordre avec hydrateIcons() du boot.
   $("file-close").dataset.icon = "back";
   $("file-close").innerHTML = icon("back");
+  // Terminal plein écran (S5) : idem — le ✕ devient la flèche retour.
+  $("btn-term-hide").dataset.icon = "back";
+  $("btn-term-hide").innerHTML = icon("back");
+  // Envoyer devient un rond ↑ : retirer data-i18n sinon applyStatic() le
+  // réécrit en texte « Send » à chaque changement de langue (C1). L'aria-
+  // label passe par data-i18n-aria pour suivre le changement de langue.
+  const send = $("btn-send");
+  delete send.dataset.i18n;
+  send.dataset.i18nTitle = "send";
+  send.innerHTML = icon("up");
+  send.dataset.i18nAria = "send";
+  send.setAttribute("aria-label", t("send"));
 }
 
 export function initPlatform() {
@@ -328,9 +349,32 @@ const appWin = isWeb ? null : getCurrentWindow();
 // dragDropEnabled:false → WebView2 garde AllowExternalDrop=true : un
 // fichier OS droppé sur la fenêtre ferait naviguer la webview vers
 // file:///… — on avale les drops de fichiers au niveau window (les
-// cibles internes ont déjà traité les leurs en amont ; restreint à
-// "Files" pour garder curseur + drop de texte natif intacts).
-const isFileDrag = (e: DragEvent) => e.dataTransfer?.types.includes("Files") ?? false;
+// cibles internes ont déjà traité les leurs en amont). Types couverts :
+// « Files » (navigateur/Tauri) ET les drags URI (text/uri-list,
+// x-special/gnome-copied-files) — le gestionnaire de fichiers Linux
+// n'expose pas « Files » (#257). Le drop n'est avalé que sur cible non
+// éditable : sur une zone texte il est laissé passer pour que l'URI
+// s'insère (comportement composer) — sans ça, un drop de lien sur
+// #sess-filter-input ou #input serait mangé.
+const ATT_DRAG_TYPES = ["Files", "text/uri-list", "x-special/gnome-copied-files"];
+const isAttDrag = (e: DragEvent) => {
+  const types = e.dataTransfer?.types;
+  return !!types && ATT_DRAG_TYPES.some((t) => types.includes(t));
+};
+
+/// Cible de drop capable de recevoir du texte : textarea, input TEXTUEL
+/// ou contenteditable réel — les checkbox/select/range (settings,
+/// conn-view…) ne peuvent pas insérer et retomberaient sur le défaut UA
+/// (navigation). Partagé avec le composer (attachments.ts).
+export function isTextDropTarget(e: DragEvent): boolean {
+  const t = e.target as HTMLElement | null;
+  return (
+    t instanceof HTMLTextAreaElement ||
+    (t instanceof HTMLInputElement &&
+      /^(text|search|url|password|email|tel|number)$/.test(t.type)) ||
+    !!t?.isContentEditable
+  );
+}
 
 export function initWindowChrome() {
   if (!appWin) return; // navigateur : la fenêtre n'est pas pilotable
@@ -338,8 +382,13 @@ export function initWindowChrome() {
   $("tb-max").onclick = () => appWin.toggleMaximize();
   $("tb-close").onclick = () => appWin.close();
 
-  window.addEventListener("dragover", (e) => { if (isFileDrag(e)) e.preventDefault(); });
-  window.addEventListener("drop", (e) => { if (isFileDrag(e)) e.preventDefault(); });
+  window.addEventListener("dragover", (e) => { if (isAttDrag(e)) e.preventDefault(); });
+  window.addEventListener("drop", (e) => {
+    if (!isAttDrag(e) || e.defaultPrevented) return;
+    if (e.dataTransfer?.types.includes("Files") || !isTextDropTarget(e)) {
+      e.preventDefault();
+    }
+  });
 
   $("titlebar").addEventListener("dblclick", (e) => {
     if (!android && !(e.target as HTMLElement).closest("button")) appWin.toggleMaximize();

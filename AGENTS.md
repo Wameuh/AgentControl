@@ -172,18 +172,64 @@ reviewer session deleted, worktree removed, `review failed:
 disabled` posted so polling workers aren't left waiting.
 
 **Agent profiles**: `devin` and `cursor` are built-in presets
-(`default_agents()` in main.rs — cursor's argv[0] is resolved to an
-absolute path on the daemon PATH at boot: `cursor-agent` then the
-`agent` alias). Every `[agents.*]` profile (built-in or config.toml)
-is listed by `list_agents` — `available:false` greys it in the new
-session dialog. The internal component **`agents`** (options →
-composants, or `acctl comp set agents <id> <argv-csv>`) edits each
-profile's ACP command: one `list` param per profile, persisted as the
-FULL `[agents.<id>]` section of config.toml (name/env/compact/catalog
+(`default_agents()` in server/agents_cfg.rs — cursor's argv[0] is
+resolved to an absolute path on the daemon PATH when possible:
+`cursor-agent` then the `agent` alias). Every `[agents.*]` profile
+(built-in or config.toml) is listed by `list_agents` —
+`available:false` greys it in the new session dialog. The internal
+component **`agents`** (options → composants, or
+`acctl comp set agents <id> <argv-csv>`) edits each profile's ACP
+command: one `list` param per profile, persisted as the FULL
+`[agents.<id>]` section of config.toml (name/env/compact/catalog
 included — a partial write would silently drop fields at next boot)
 and hot-reloaded into `Daemon.agents` (tokio RwLock — reads via
 `.read().await`). Ids are not creatable/removable this way — declare
-new profiles in config.toml.
+new profiles in config.toml; **manual `[agents.*]` edits in
+config.toml are themselves hot-reloaded** (`Daemon::reload_agent_profiles`,
+stamp mtime+size — full merge built-ins + sections, so an added,
+modified OR removed section converges to the reboot state; triggered
+on `list_agents`/`daemon_status`/component views/`agent_profile`
+lookups on spawn/attach AND periodically by `agents_rescan_boot`,
+~60 s — `daemon_update` needs nothing extra: the replaced binary
+restarts under its supervisor and re-parses at boot).
+
+**Auto-discovered agent profiles** (`server/agents_auto.rs`, #261):
+the daemon embeds a registry of known ACP adapters (claude →
+`acp-claude` — the in-house Rust binary shipped in the tarball,
+#280 — as the ONLY automatic path since #285; the npm
+`claude-code-acp`/`claude-agent-acp` are no longer tried, though a
+manual `[agents.claude]` may still point at them; codex → `codex-acp`
+npm until `acp-codex` exists, gemini,
+opencode) and re-syncs it on every `reload_agent_profiles` call —
+an adapter installed after boot appears as a `via:"auto"` profile
+without restart or config; a declared `[agents.*]` always wins (same
+id → `via:"config"`). A profile whose tool is installed but whose
+adapter is missing (e.g. `claude` CLI without `acp-claude`) is
+still listed, `available:false` — `list_agents` then exposes
+`unavailable:{searched, hint}` (install hint per known adapter,
+generic PATH hint otherwise) shown as a tooltip in the new-session
+dialog. `command` accepts ordered fallbacks:
+`command = [["bin1"], ["bin2", "arg"]]` — `AgentProfile.commands` is
+the candidate list, `misc::effective_command` picks the first whose
+argv[0] resolves (used by spawn, `available`, caps probe, costs,
+catalogue); `via` is `builtin`/`config`/`auto`.
+
+**Adapter provisioning** (`server/agents_install.rs`, #277): each
+registry spec also declares `install` — ordered `npm i -g <pkg>`
+candidates for the third-party adapters (codex, gemini, opencode);
+`claude` declares none since #285 (`acp-claude` ships with the
+daemon — the Install action fails with the « update the daemon »
+hint instead of `npm i -g`). The `install_agent_adapter` RPC (button « Install » of
+the agent-capabilities dialog on `available:false` +
+`unavailable.installable`, or `acctl agents install <id>`) runs them
+daemon-side, user-triggered only: no shell, never sudo, 300 s timeout,
+serialized, user-namespace only — when npm's global prefix is outside
+HOME the command gets `--prefix ~/.npm-global` (already in
+`agent_path_dirs`), with the same fallback on EACCES; an already
+resolvable adapter is a `{already:true}` no-op and candidates are
+tried in order until a `commands` binary resolves. Success triggers
+`reload_agent_profiles` → `available:true` without restart.
+`daemon_status.agent_install` advertises the capability.
 
 **Agent profile per role** (`backlog_orchestrator` params, hot-settable
 via `acctl comp set`, dropdown of the declared `[agents.*]` profiles in
@@ -498,7 +544,7 @@ Manual off-PR: `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]`.
 - `write_file{path, offset, delete_len, data(base64), if_mtime_ms?}`:
   splice bounded to the workspace (`resolve_in_cwd_create` — parent
   canonicalized, absent leaf OK, `..`/symlink escaping refused);
-  `delete_len` clamped; `if_mtime_ms` ≠ disk mtime → `conflit:` error
+  `delete_len` clamped; `if_mtime_ms` ≠ disk mtime → `conflict:` error
   (the client offers `Reload`/`Overwrite` — `Recharger`/`Écraser` in
   the fr locale); atomic `.part`+`rename`
   write in `spawn_blocking`, unix mode preserved; `data` cap 16 MiB
@@ -514,6 +560,27 @@ Manual off-PR: `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]`.
   via streamed `TextDecoder`, homemade encoding (`core/encoding.ts`).
 - `acctl write <session> <path> [src|-]` = full replacement
   (`delete_len: u64::MAX`, no mtime guard).
+
+## Agent skills (provisionnement auto, #264)
+
+Les skills fournis par AgentControl (acctl, ac-wait, ac-steps…) vivent
+dans **`skills/<nom>/`** à la racine du repo — source de vérité unique,
+embarquée dans le binaire démon par `crates/daemon/build.rs`
+(`.devin/skills/` est fusionné en compat). Au spawn de chaque session
+(et une fois au boot), le démon les synchronise dans les répertoires
+scannés par le provider (`crates/daemon/src/skills.rs`) :
+`.devin/skills` (devin), `.claude/skills` (claude),
+`.agents/skills` + `.cursor/skills` (cursor), `.agents/skills`
+(codex et profils inconnus). Sync gérée par manifeste
+`.agentcontrol-skills.json` : contenu réécrit quand l'embarqué change,
+jamais d'écrasement d'un skill non managé (warn + skip). Désactivable :
+`provision_skills = false` global ou `[agents.<id>] provision_skills =
+false`. **Un nouveau skill livré avec le démon va dans `skills/`** — pas
+dans `.devin/skills` (répertoire de compat pour les PR en vol, et
+répertoire provisionné dans les workspaces — `build.rs` en exclut les
+skills listés par son `.agentcontrol-skills.json` pour éviter qu'une
+sortie provisionnée soit ré-embarquée). Les sorties provisionnées sont
+gitignorées (`.gitignore` racine).
 
 ## Known pitfalls
 
@@ -537,9 +604,12 @@ Manual off-PR: `python3 client/tools/bump_version.py [major|minor|patch|x.y.z]`.
   required to the standalone codex binary: otherwise the adapter takes
   its bundled `@openai/codex` npm (optional dep missing on arm64), and
   via npx `codex` in PATH is the npm wrapper, not the real CLI.
-- Claude: `@agentclientprotocol/claude-agent-acp` bundles the Claude
-  Agent SDK → `claude` CLI unneeded. Auth: ANTHROPIC_API_KEY or
-  CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`, headless OK).
+- Claude: `acp-claude` (in-house, #280, sole automatic adapter since
+  #285) spawns the real `claude` CLI
+  (`-p --input-format stream-json`) → the CLI must be installed
+  (unlike `claude-agent-acp`, which bundles the Agent SDK). Auth:
+  ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`,
+  headless OK).
 - Minimal systemd PATH: `ensure_agent_path` (main.rs) injects the
   binary's dir + the usual agent dirs (`~/.local/bin`,
   `~/.npm-global/bin`, `~/.local/share/mise/shims`, `~/.cargo/bin`,

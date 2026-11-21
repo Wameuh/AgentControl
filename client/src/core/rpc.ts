@@ -13,6 +13,7 @@
 
 import { invoke } from "./bridge";
 import { logUi, showErr } from "./dom";
+import { perfProbes } from "./probe";
 import { t } from "../i18n";
 import type { ConnLive } from "./types";
 
@@ -46,7 +47,7 @@ function connLostErr(): Error {
 export function isConnLost(e: unknown, ck = ""): boolean {
   if ((e as { connLost?: boolean } | null)?.connLost) return true;
   if (ck && (connState(ck) ?? "ok") !== "ok") return true;
-  return /connexion ferm[ée]e|connection lost|connexion perdue/i.test(String(e));
+  return /connexion ferm[ée]e|connection lost|connexion perdue|connection closed/i.test(String(e));
 }
 
 // Attente bornée du retour « conn prête » : le backoff du
@@ -121,7 +122,18 @@ export async function call<T = unknown>(
     // RPC — tracé comme les autres issues (un fast-fail muet était
     // indistinguable d'un clic sans effet dans client.log).
     if (ck && (connState(ck) ?? "ok") !== "ok") throw connLostErr();
-    const r = await invoke<T>("call", { method, params: p });
+    // Sonde télémétrie (#297) : latence transport par méthode — le
+    // fast-fail ci-dessus n'est pas un appel RPC, il n'est pas mesuré.
+    const probe = perfProbes.rpc;
+    const t1 = probe ? performance.now() : 0;
+    let r: T;
+    try {
+      r = await invoke<T>("call", { method, params: p });
+    } catch (e) {
+      probe?.(method, performance.now() - t1);
+      throw e;
+    }
+    probe?.(method, performance.now() - t1);
     if (traced) {
       const sid =
         r && typeof r === "object" && "session" in r
@@ -132,7 +144,7 @@ export async function call<T = unknown>(
     return r;
   } catch (e) {
     if (traced)
-      logUi("error", `rpc ${method} échec après ${Date.now() - t0} ms (conn ${connLabel}): ${e}`);
+      logUi("error", `rpc ${method} failed after ${Date.now() - t0} ms (conn ${connLabel}): ${e}`);
     throw e;
   }
 }
@@ -155,7 +167,7 @@ export function callBg<T = unknown>(
  *  échec applicatif → toast comme ailleurs. */
 export function bgErr(prefix: string, e: unknown, ck = "") {
   if (isConnLost(e, ck)) {
-    logUi("warn", `${prefix}: ${e} — transitoire conn`);
+    logUi("warn", `${prefix}: ${e} — transient conn`);
     return;
   }
   showErr(`${prefix}: ${e}`);

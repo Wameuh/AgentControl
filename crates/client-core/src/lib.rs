@@ -236,7 +236,12 @@ pub fn conn_key_json(cfg: &serde_json::Value) -> String {
             let nat = cfg.get("native").and_then(|v| v.as_bool()).unwrap_or(false)
                 || cfg!(target_os = "android");
             let port = cfg.get("port").and_then(|v| v.as_u64()).unwrap_or(22);
-            format!("{}:{}:{}", if nat { "ssh-native" } else { "ssh" }, s("host"), port)
+            format!(
+                "{}:{}:{}",
+                if nat { "ssh-native" } else { "ssh" },
+                s("host"),
+                port
+            )
         }
         "tcp" => format!("tcp:{}", s("addr")),
         "web" => "web".into(),
@@ -262,7 +267,7 @@ fn load_connections_for_write() -> Option<Vec<serde_json::Value>> {
 /// Ajoute une connexion en tête (dédupliquée par conn_key), max 10.
 pub fn save_connection(cfg: &serde_json::Value) {
     let Some(mut list) = load_connections_for_write() else {
-        log(Level::Warn, "connections.json illisible — sauvegarde refusée");
+        log(Level::Warn, "unreadable connections.json — save refused");
         return;
     };
     let key = conn_key_json(cfg);
@@ -278,7 +283,7 @@ pub fn save_connection(cfg: &serde_json::Value) {
 /// Retire une connexion de la liste (même clé de dédup que save).
 pub fn remove_connection(cfg: &serde_json::Value) {
     let Some(mut list) = load_connections_for_write() else {
-        log(Level::Warn, "connections.json illisible — suppression refusée");
+        log(Level::Warn, "unreadable connections.json — delete refused");
         return;
     };
     let key = conn_key_json(cfg);
@@ -305,7 +310,7 @@ pub fn log_tail(n: usize) -> String {
         lines = older;
     }
     if lines.is_empty() {
-        return "(pas de log)".into();
+        return "(no log)".into();
     }
     lines.reverse();
     lines.join("\n")
@@ -457,7 +462,7 @@ impl SshGuard {
                 killed,
             } => {
                 if killed.load(Ordering::SeqCst) {
-                    return "ssh tué localement (déconnexion/remplacement)".into();
+                    return "ssh killed locally (disconnect/replace)".into();
                 }
                 let st = child
                     .try_lock()
@@ -472,24 +477,18 @@ impl SshGuard {
                     // mort : le serveur a fermé ce seul canal (sshd a
                     // lâché la session ou le forward refusé côté distant).
                     return format!(
-                        "canal forwardé fermé — process ssh encore vivant{}",
+                        "forwarded channel closed — ssh process still alive{}",
                         tail_suffix(&tail)
                     );
                 };
-                let cls = if tail.contains("Timeout, server")
-                    && tail.contains("not responding")
-                {
-                    "keepalive-timeout local (serveur/réseau muet ~90-120 s)"
-                } else if tail.contains("Connection reset")
-                    || tail.contains("reset by peer")
-                {
-                    "RST distant (connexion réinitialisée)"
-                } else if tail.contains("closed by remote")
-                    || tail.contains("Connection to ")
-                {
-                    "EOF distant (le serveur a fermé la session)"
+                let cls = if tail.contains("Timeout, server") && tail.contains("not responding") {
+                    "local keepalive-timeout (server/network silent ~90-120 s)"
+                } else if tail.contains("Connection reset") || tail.contains("reset by peer") {
+                    "remote RST (connection reset)"
+                } else if tail.contains("closed by remote") || tail.contains("Connection to ") {
+                    "remote EOF (the server closed the session)"
                 } else {
-                    "ssh quitté"
+                    "ssh exited"
                 };
                 format!("{cls} [{status}]{}", tail_suffix(&tail))
             }
@@ -559,7 +558,10 @@ pub fn hide_console(cmd: &mut Command) {
 }
 
 async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<Arc<SshGuard>>)> {
-    log(Level::Debug, format!("connect transport={:?}", std::mem::discriminant(t)));
+    log(
+        Level::Debug,
+        format!("connect transport={:?}", std::mem::discriminant(t)),
+    );
     match t {
         Transport::Unix(path) => {
             #[cfg(unix)]
@@ -573,11 +575,13 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
             #[cfg(not(unix))]
             {
                 let _ = path;
-                bail!("socket unix non supporté sur cette plateforme — utilisez ssh ou tcp")
+                bail!("unix socket not supported on this platform — use ssh or tcp")
             }
         }
         Transport::Tcp(addr) => {
-            let s = TcpStream::connect(addr).await.with_context(|| format!("tcp {addr}"))?;
+            let s = TcpStream::connect(addr)
+                .await
+                .with_context(|| format!("tcp {addr}"))?;
             let (r, w) = s.into_split();
             Ok((Box::new(r), Box::new(w), None))
         }
@@ -588,10 +592,13 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
         } => {
             let local = free_port()?;
             let spec = format!("{local}:127.0.0.1:{remote_port}");
-            log(Level::Debug, format!(
-                "ssh -N -L {spec} {host} args={args:?} SSH_AUTH_SOCK={:?}",
-                std::env::var("SSH_AUTH_SOCK").unwrap_or_else(|_| "<absent>".into())
-            ));
+            log(
+                Level::Debug,
+                format!(
+                    "ssh -N -L {spec} {host} args={args:?} SSH_AUTH_SOCK={:?}",
+                    std::env::var("SSH_AUTH_SOCK").unwrap_or_else(|_| "<missing>".into())
+                ),
+            );
             let mut cmd = Command::new("ssh");
             cmd.args([
                 "-N",
@@ -627,7 +634,7 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
             hide_console(&mut cmd);
-            let mut child = cmd.spawn().context("spawn ssh — openssh installé ?")?;
+            let mut child = cmd.spawn().context("spawn ssh — is openssh installed?")?;
             let stderr_tail = Arc::new(std::sync::Mutex::new(String::new()));
             // stderr drainé en continu, borné aux ~4 Kio finaux : lu au
             // post-mortem (cause de mort) et le lecteur permanent évite
@@ -675,8 +682,15 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                         };
                         if let Some(st) = dead {
                             let e = guard_err_tail(&guard);
-                            log(Level::Error, format!("ssh mort ({st}): {e}"));
-                            bail!("ssh a quitté ({st}){}", if e.is_empty() { String::new() } else { format!(" : {e}") });
+                            log(Level::Error, format!("ssh dead ({st}): {e}"));
+                            bail!(
+                                "ssh exited ({st}){}",
+                                if e.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" : {e}")
+                                }
+                            );
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await
                     }
@@ -689,8 +703,18 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
                 }
             }
             let e = guard_err_tail(&guard);
-            log(Level::Error, format!("tunnel ssh {host} timeout (stderr: {e})"));
-            bail!("tunnel ssh {host} timeout{}", if e.is_empty() { String::new() } else { format!(" : {e}") })
+            log(
+                Level::Error,
+                format!("tunnel ssh {host} timeout (stderr: {e})"),
+            );
+            bail!(
+                "tunnel ssh {host} timeout{}",
+                if e.is_empty() {
+                    String::new()
+                } else {
+                    format!(" : {e}")
+                }
+            )
         }
         Transport::SshNative {
             host,
@@ -723,6 +747,121 @@ async fn open_stream(t: &Transport) -> Result<(BoxedStream, BoxedWriter, Option<
             ))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Classification des échecs de `connect` — `connect-failed:<kind>:<detail>`.
+//
+// Le frontend (conn-view) propose l'install du démon UNIQUEMENT sur
+// `daemon-absent` : tout autre échec (auth refusée, DNS, timeout, port 22
+// fermé, démon gelé) doit remonter sa cause réelle. kinds :
+// `transport` (étage 1 ou canal mort sans signature), `daemon-absent`
+// (transport OK, endpoint démon refusé/inexistant), `daemon-unresponsive`
+// (le port écoute mais ne répond pas — autre service ou démon gelé :
+// installer dessus serait dangereux). `detail` = cause brute (stderr ssh,
+// death reason) bornée ~400 c.
+// ---------------------------------------------------------------------------
+
+fn connect_fail(kind: &str, detail: &str) -> String {
+    // Garde la FIN du détail (le stderr ssh répète ses dernières lignes —
+    // la cause réelle est en queue), bornée comme tail_suffix.
+    let d = detail.trim();
+    let tail: String = if d.chars().count() > 400 {
+        let s: String = d
+            .chars()
+            .rev()
+            .take(400)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        format!("…{s}")
+    } else {
+        d.to_string()
+    };
+    format!("connect-failed:{kind}:{tail}")
+}
+
+/// Étage 1 : `Client::connect` = transport. « Démon absent » n'y est
+/// légitime que pour les transports sans ssh (socket local / tcp : rien
+/// n'écoute) et pour le direct-tcpip russh refusé (SSH authentifié OK,
+/// port démon fermé côté sshd). `msg` = `format!("{e:#}")` de l'erreur.
+pub fn classify_connect_stage1(t: &Transport, msg: &str) -> String {
+    // Contrat existant : le frontend intercepte `hostkey-mismatch:<fp>`
+    // pour la re-confirmation TOFU — le laisser passer tel quel.
+    if msg.contains("hostkey-mismatch:") {
+        return msg.to_string();
+    }
+    let kind = match t {
+        Transport::Unix(_) | Transport::Tcp(_)
+            if msg.contains("Connection refused")
+                || msg.contains("No such file or directory")
+                || msg.contains("ENOENT") =>
+        {
+            "daemon-absent"
+        }
+        Transport::SshNative { .. }
+            if msg.contains("is the daemon listening on the remote port") =>
+        {
+            "daemon-absent"
+        }
+        Transport::SshNative { .. } if msg.contains("direct-tcpip timeout") => {
+            "daemon-unresponsive"
+        }
+        // ssh CLI (spawn, auth, DNS, timeout, tunnel) et tout le reste :
+        // l'échec est au transport — JAMAIS « démon absent ».
+        _ => "transport",
+    };
+    connect_fail(kind, msg)
+}
+
+/// Étage 2 : transport établi, `daemon_status` a échoué — SEUL cas où
+/// « démon absent » est possible. `rpc_err` = erreur du call,
+/// `death_reason`/`err_tail` = post-mortem du transport (death_reason()
+/// et transport_err_tail() du Client — err_tail vide hors ssh CLI).
+pub fn classify_connect_stage2(
+    t: &Transport,
+    rpc_err: &str,
+    death_reason: &str,
+    err_tail: &str,
+) -> String {
+    let kind = if rpc_err.contains("daemon timeout") {
+        // 60 s sans réponse : le port ÉCOUTE mais ne répond pas — autre
+        // service sur le port ou démon gelé (cf. #302). Installer un
+        // démon par-dessus serait dangereux → classe dédiée, pas d'install.
+        "daemon-unresponsive"
+    } else {
+        match t {
+            // ssh -L : le listener local accepte même port distant fermé
+            // → le channel meurt « open failed: connect failed:
+            // Connection refused » dans stderr. SEULE la signature
+            // « Connection refused » compte : « open failed » seul
+            // couvre « administratively prohibited » (politique de
+            // forward — AllowTcpForwarding=no, PermitOpen restrictif)
+            // qui est un problème transport, pas un démon absent.
+            Transport::Ssh { .. }
+                if err_tail.contains("Connection refused")
+                    || death_reason.contains("Connection refused") =>
+            {
+                "daemon-absent"
+            }
+            // russh : session SSH vivante mais canal direct-tcpip
+            // refermé = le démon a lâché la connexion ; une session morte
+            // avec raison (disconnect, keepalive) reste un problème
+            // transport/session.
+            Transport::SshNative { .. }
+                if death_reason.contains("direct-tcpip channel closed") =>
+            {
+                "daemon-absent"
+            }
+            // unix : socket accepté puis EOF = démon mort après accept.
+            Transport::Unix(_) if rpc_err.contains("connection closed") => "daemon-absent",
+            _ => "transport",
+        }
+    };
+    // Le détail joint l'erreur RPC et la cause de mort du transport —
+    // « connection closed » seul ne dirait rien à l'utilisateur.
+    connect_fail(kind, &format!("{rpc_err} — {death_reason}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -877,12 +1016,24 @@ fn settle_waiter(m: &mut Inflight, c: &Client, id: u64, waiter: u64) {
     c.dec_open(e.class, e.written);
 }
 
+/// Seuil du warn « giant line » à la réception — symétrique de la borne
+/// outbox côté démon : au-delà, la frame monopolisait le fil NDJSON
+/// (head-of-line) et son diagnostic ne doit pas coûter une analyse des
+/// compteurs rx/tx (#302).
+const GIANT_RX_LINE_BYTES: usize = 256 * 1024;
+
 /// Dispatch d'une ligne NDJSON reçue : push broadcast ou réponse RPC.
 /// Une entrée dédupliquée est possible : la réponse est clonée pour
 /// chaque waiter.
 async fn dispatch_rx_line(c: &Client, line: &str) {
     if line.trim().is_empty() {
         return;
+    }
+    if line.len() > GIANT_RX_LINE_BYTES {
+        log(
+            Level::Warn,
+            format!("conn {}: giant line {} bytes", c.desc, line.len()),
+        );
     }
     let v: Value = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -1069,12 +1220,12 @@ fn transport_desc(t: &Transport) -> String {
 fn io_death_kind(e: &std::io::Error) -> &'static str {
     match e.kind() {
         std::io::ErrorKind::ConnectionReset => "reset socket (RST)",
-        std::io::ErrorKind::ConnectionAborted => "connexion avortée",
-        std::io::ErrorKind::BrokenPipe => "pipe brisé",
-        std::io::ErrorKind::UnexpectedEof => "EOF inattendu",
+        std::io::ErrorKind::ConnectionAborted => "connection aborted",
+        std::io::ErrorKind::BrokenPipe => "broken pipe",
+        std::io::ErrorKind::UnexpectedEof => "unexpected EOF",
         std::io::ErrorKind::TimedOut => "timeout io",
-        std::io::ErrorKind::NotConnected => "socket non connecté",
-        _ => "erreur socket",
+        std::io::ErrorKind::NotConnected => "socket not connected",
+        _ => "socket error",
     }
 }
 
@@ -1089,11 +1240,15 @@ impl Client {
                 Ok(x) => break x,
                 Err(e) => {
                     let m = format!("{e:#}");
-                    let busy = m.contains("Address already in use") || m.contains("cannot listen to port");
+                    let busy =
+                        m.contains("Address already in use") || m.contains("cannot listen to port");
                     if !busy || attempt >= 4 {
                         return Err(e);
                     }
-                    log(Level::Warn, format!("port local occupé — retry tunnel {attempt}/3"));
+                    log(
+                        Level::Warn,
+                        format!("local port busy — tunnel retry {attempt}/3"),
+                    );
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 }
             }
@@ -1128,7 +1283,7 @@ impl Client {
             me: std::sync::OnceLock::new(),
         });
         let _ = client.me.set(Arc::downgrade(&client));
-        log(Level::Info, format!("transport {} ouvert", client.desc));
+        log(Level::Info, format!("transport {} open", client.desc));
         // Writer task : seul propriétaire du socket sortant — drain la
         // file `outq` en priorisant le trafic léger et en bornant les
         // requêtes lourdes (ReqClass). Sans elle, `call` écrivait sous
@@ -1204,8 +1359,7 @@ impl Client {
                                     }
                                     ReqClass::Heavy => {
                                         c.open_heavy.fetch_add(1, Ordering::Relaxed);
-                                        c.last_heavy_tx_ms
-                                            .store(now_ms(), Ordering::Relaxed);
+                                        c.last_heavy_tx_ms.store(now_ms(), Ordering::Relaxed);
                                     }
                                 }
                                 true
@@ -1221,13 +1375,12 @@ impl Client {
                     c.tx_lines.fetch_add(1, Ordering::Relaxed);
                     c.tx_bytes.fetch_add(n, Ordering::Relaxed);
                     c.last_tx_ms.store(now_ms(), Ordering::Relaxed);
-                    if w.write_all(item.line.as_bytes()).await.is_err()
-                        || w.flush().await.is_err()
+                    if w.write_all(item.line.as_bytes()).await.is_err() || w.flush().await.is_err()
                     {
                         // Écriture impossible = transport mourant : le
                         // signal dead précipite le drain des pendings
                         // (le reader constatera l'EOF/RST symétrique).
-                        c.set_death_reason("écriture impossible (transport mort)".into());
+                        c.set_death_reason("write failed (dead transport)".into());
                         let _ = c.dead_tx.send(true);
                         return;
                     }
@@ -1304,11 +1457,17 @@ impl Client {
                     Some(e) => format!("{} ({e})", io_death_kind(e)),
                     None => match &c.guard {
                         Some(g) => g.death_note(),
-                        None => "eof distant (le pair a fermé)".to_string(),
+                        None => "remote eof (the peer closed)".to_string(),
                     },
                 };
                 c.set_death_reason(format!("{cause}, silent {silent} ms"));
-                log(Level::Warn, format!("conn {}: transport mort — {cause} (silent {silent} ms)", c.desc));
+                log(
+                    Level::Warn,
+                    format!(
+                        "conn {}: transport dead — {cause} (silent {silent} ms)",
+                        c.desc
+                    ),
+                );
                 // dead D'ABORD : un call() qui vérifie entre le drain et
                 // le signal s'insérerait après lui → timeout 60 s, la
                 // classe de bug corrigée ici.
@@ -1329,7 +1488,7 @@ impl Client {
                             // compte ici pour que `aband=` reflète les RPC
                             // en vol tués par la mort du transport.
                             c.abandoned_calls.fetch_add(1, Ordering::Relaxed);
-                            let _ = tx.send(Err("connexion fermée".into()));
+                            let _ = tx.send(Err("connection closed".into()));
                         }
                     }
                 }
@@ -1373,6 +1532,17 @@ impl Client {
         self.dead_info.lock().ok().and_then(|d| d.clone())
     }
 
+    /// Contenu brut du stderr du transport ssh CLI (vide pour les autres
+    /// transports) — la classification d'erreur de `connect` y lit les
+    /// signatures « channel N: open failed: connect failed: Connection
+    /// refused » du port démon refusé côté sshd.
+    pub fn transport_err_tail(&self) -> String {
+        self.guard
+            .as_deref()
+            .map(guard_err_tail)
+            .unwrap_or_default()
+    }
+
     fn set_death_reason(&self, reason: String) {
         if let Ok(mut d) = self.dead_info.lock() {
             if d.is_none() {
@@ -1392,7 +1562,7 @@ impl Client {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
-        self.set_death_reason("fermeture demandée (déconnexion/remplacement)".into());
+        self.set_death_reason("close requested (disconnect/replace)".into());
         let _ = self.dead_tx.send(true);
         if let Some(h) = self.reader_abort.get() {
             h.abort();
@@ -1409,7 +1579,7 @@ impl Client {
                         self.dec_open(e.class, e.written);
                         for (_, tx) in e.waiters {
                             self.abandoned_calls.fetch_add(1, Ordering::Relaxed);
-                            let _ = tx.send(Err("connexion fermée".into()));
+                            let _ = tx.send(Err("connection closed".into()));
                         }
                     }
                     return;
@@ -1436,11 +1606,7 @@ impl Client {
     /// différé du Drop (jamais de blocage en Drop).
     fn pending_guard(&self, id: u64, waiter: u64) -> PendingGuard {
         PendingGuard {
-            client: self
-                .me
-                .get()
-                .cloned()
-                .unwrap_or_else(std::sync::Weak::new),
+            client: self.me.get().cloned().unwrap_or_else(std::sync::Weak::new),
             id,
             waiter,
         }
@@ -1461,8 +1627,7 @@ impl Client {
     /// vol est re-testé périodiquement même sans notify (les réponses
     /// ne réveillent pas la file).
     fn heavy_gap_remaining(&self) -> std::time::Duration {
-        let elapsed =
-            now_ms().saturating_sub(self.last_heavy_tx_ms.load(Ordering::Relaxed));
+        let elapsed = now_ms().saturating_sub(self.last_heavy_tx_ms.load(Ordering::Relaxed));
         let gap = HEAVY_MIN_GAP_MS.saturating_sub(elapsed);
         std::time::Duration::from_millis(gap.max(100))
     }
@@ -1472,7 +1637,7 @@ impl Client {
         // Reader mort : pas la peine d'écrire — la réponse ne viendra
         // jamais. Échec immédiat plutôt qu'un timeout de 60 s.
         if *self.dead.borrow() {
-            bail!("connexion fermée");
+            bail!("connection closed");
         }
         // Requête sérialisée une fois : nom (classe + dedup) et clé de
         // fusion des appels identiques en vol. Les fields non
@@ -1504,7 +1669,7 @@ impl Client {
             // le check en tête et cet insert — sinon l'entrée
             // s'insèrerait après le drain et attendrait 60 s pour rien.
             if *self.dead.borrow() {
-                bail!("connexion fermée");
+                bail!("connection closed");
             }
             if let Some(k) = &key {
                 if let Some(&lid) = m.by_key.get(k) {
@@ -1562,7 +1727,11 @@ impl Client {
 
     /// Attend la réponse d'une entrée pending (leader ou follower
     /// dédupliqué) — timeout interne 60 s, log par nom de méthode.
-    async fn await_resp(&self, name: &str, rx: oneshot::Receiver<Result<Value, String>>) -> Result<Value> {
+    async fn await_resp(
+        &self,
+        name: &str,
+        rx: oneshot::Receiver<Result<Value, String>>,
+    ) -> Result<Value> {
         match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
             Ok(Ok(Ok(v))) => Ok(v),
             Ok(Ok(Err(e))) => {
@@ -1570,12 +1739,12 @@ impl Client {
                 bail!(e)
             }
             Ok(Err(_)) => {
-                log(Level::Error, format!("daemon {name}: connexion fermée"));
-                bail!("connexion fermée")
+                log(Level::Error, format!("daemon {name}: connection closed"));
+                bail!("connection closed")
             }
             Err(_) => {
                 log(Level::Error, format!("daemon {name}: timeout"));
-                bail!("timeout démon")
+                bail!("daemon timeout")
             }
         }
     }
@@ -1583,13 +1752,41 @@ impl Client {
     /// Souscrit sur la connexion principale — le démon n'a qu'un sub par
     /// connexion, un nouvel appel remplace l'ancien (un seul flux live,
     /// celui de la session ouverte). Plus de tunnel/process ssh dédié.
-    pub async fn subscribe(&self, session: &str, after_seq: u64) -> Result<broadcast::Receiver<Value>> {
+    pub async fn subscribe(
+        &self,
+        session: &str,
+        after_seq: u64,
+    ) -> Result<broadcast::Receiver<Value>> {
         let rx = self.pushes.subscribe();
-        self.call(ReqKind::Subscribe {
-            session: session.into(),
-            after_seq,
-        })
-        .await?;
+        let resp = self
+            .call(ReqKind::Subscribe {
+                session: session.into(),
+                after_seq,
+            })
+            .await?;
+        // Instrumentation du rattrapage (#269) : le démon borne le replay
+        // en events ET en octets — la taille réellement envoyée est
+        // journalisée ici pour corréler les gros transferts aux flaps.
+        let events = resp.get("replay_events").and_then(Value::as_u64);
+        let bytes = resp.get("replay_bytes").and_then(Value::as_u64);
+        if events.unwrap_or(0) > 0 || bytes.unwrap_or(0) > 0 {
+            // Gros rattrapage = le cas à surveiller (lien lent → flap) :
+            // Info seulement au-delà d'un seuil, Debug sinon.
+            let lvl = if bytes.unwrap_or(0) >= 128 * 1024 {
+                Level::Info
+            } else {
+                Level::Debug
+            };
+            log(
+                lvl,
+                format!(
+                    "subscribe {session}: replay {} events / {} o (skipped={})",
+                    events.unwrap_or(0),
+                    bytes.unwrap_or(0),
+                    resp.get("skipped").and_then(Value::as_u64).unwrap_or(0),
+                ),
+            );
+        }
         Ok(rx)
     }
 }
@@ -1616,6 +1813,121 @@ mod tests {
     }
 
     #[test]
+    fn connect_fail_stage1() {
+        let ssh = Transport::Ssh {
+            host: "h".into(),
+            remote_port: 7331,
+            args: vec![],
+        };
+        let native = Transport::SshNative {
+            host: "h".into(),
+            port: 22,
+            user: "u".into(),
+            remote_port: 7331,
+            password: None,
+            key_path: None,
+            expected_hk: None,
+        };
+        let unix = Transport::Unix("/tmp/s.sock".into());
+        let tcp = Transport::Tcp("127.0.0.1:1".into());
+
+        // ssh CLI : TOUT échec étage 1 = transport (auth, DNS, timeout…).
+        for m in [
+            "ssh exited (255) : Permission denied (publickey,password)",
+            "ssh exited (255) : Could not resolve hostname h",
+            "tunnel ssh h timeout",
+            "spawn ssh — is openssh installed?",
+        ] {
+            assert!(
+                classify_connect_stage1(&ssh, m).starts_with("connect-failed:transport:"),
+                "{m}"
+            );
+        }
+        // russh : auth et timeout = transport ; direct-tcpip refusé = absent.
+        assert!(classify_connect_stage1(&native, "password refused")
+            .starts_with("connect-failed:transport:"));
+        assert!(classify_connect_stage1(&native, "ssh connect timeout")
+            .starts_with("connect-failed:transport:"));
+        assert!(classify_connect_stage1(
+            &native,
+            "direct-tcpip — is the daemon listening on the remote port?"
+        )
+        .starts_with("connect-failed:daemon-absent:"));
+        assert!(classify_connect_stage1(&native, "direct-tcpip timeout")
+            .starts_with("connect-failed:daemon-unresponsive:"));
+        // unix/tcp : rien n'écoute = absent.
+        assert!(classify_connect_stage1(&unix, "unix /tmp/s.sock: No such file or directory (os error 2)")
+            .starts_with("connect-failed:daemon-absent:"));
+        assert!(classify_connect_stage1(&tcp, "tcp 127.0.0.1:1: Connection refused (os error 111)")
+            .starts_with("connect-failed:daemon-absent:"));
+        // hostkey-mismatch : contrat TOFU — passe tel quel.
+        assert_eq!(
+            classify_connect_stage1(&native, "hostkey-mismatch:SHA256:abc"),
+            "hostkey-mismatch:SHA256:abc"
+        );
+    }
+
+    #[test]
+    fn connect_fail_stage2() {
+        let ssh = Transport::Ssh {
+            host: "h".into(),
+            remote_port: 7331,
+            args: vec![],
+        };
+        let native = Transport::SshNative {
+            host: "h".into(),
+            port: 22,
+            user: "u".into(),
+            remote_port: 7331,
+            password: None,
+            key_path: None,
+            expected_hk: None,
+        };
+        let unix = Transport::Unix("/tmp/s.sock".into());
+
+        // ssh -L, port démon refusé : stderr « connect failed:
+        // Connection refused » → absent (cas install).
+        let tail = "channel 2: open failed: connect failed: Connection refused";
+        assert!(classify_connect_stage2(
+            &ssh,
+            "connection closed",
+            "forwarded channel closed — ssh process still alive",
+            tail
+        )
+        .starts_with("connect-failed:daemon-absent:"));
+        // Politique de forward : « open failed » sans refused → transport.
+        assert!(classify_connect_stage2(
+            &ssh,
+            "connection closed",
+            "forwarded channel closed — ssh process still alive",
+            "channel 2: open failed: administratively prohibited: open failed"
+        )
+        .starts_with("connect-failed:transport:"));
+        // EOF sans signature → transport.
+        assert!(classify_connect_stage2(&ssh, "connection closed", "remote eof", "")
+            .starts_with("connect-failed:transport:"));
+        // Timeout 60 s = port qui écoute sans répondre → unresponsive.
+        assert!(classify_connect_stage2(&ssh, "daemon timeout", "", "")
+            .starts_with("connect-failed:daemon-unresponsive:"));
+        // russh : canal direct-tcpip refermé session vivante → absent.
+        assert!(classify_connect_stage2(
+            &native,
+            "connection closed",
+            "direct-tcpip channel closed — ssh session still alive",
+            ""
+        )
+        .starts_with("connect-failed:daemon-absent:"));
+        // unix : socket accepté puis EOF → absent.
+        assert!(classify_connect_stage2(&unix, "connection closed", "remote eof", "")
+            .starts_with("connect-failed:daemon-absent:"));
+        // Le détail est borné ~400 c.
+        let big = "x".repeat(2000);
+        let out = classify_connect_stage1(&ssh, &big);
+        assert!(out.starts_with("connect-failed:transport:"));
+        assert!(out.len() < 460, "{}", out.len());
+    }
+
+    #[test]
     fn req_classifiers() {
         // Lectures mutualisables ; mutations jamais dédupliquées.
         assert!(req_dedupable("list_sessions"));
@@ -1638,7 +1950,9 @@ mod tests {
         assert_eq!(Level::parse(" warning "), Some(Level::Warn));
         assert_eq!(Level::parse("err"), Some(Level::Error));
         assert_eq!(Level::parse("nope"), None);
-        assert!(Level::Debug < Level::Info && Level::Info < Level::Warn && Level::Warn < Level::Error);
+        assert!(
+            Level::Debug < Level::Info && Level::Info < Level::Warn && Level::Warn < Level::Error
+        );
     }
 
     #[test]
@@ -1650,8 +1964,14 @@ mod tests {
             rotate_logs(&d, 3);
         }
         // .1/.2/.3 existent, .4 a été supprimé → contenu borné
-        assert_eq!(std::fs::read_to_string(d.join("client.log.1")).unwrap(), "gen 4\n");
-        assert_eq!(std::fs::read_to_string(d.join("client.log.3")).unwrap(), "gen 2\n");
+        assert_eq!(
+            std::fs::read_to_string(d.join("client.log.1")).unwrap(),
+            "gen 4\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(d.join("client.log.3")).unwrap(),
+            "gen 2\n"
+        );
         assert!(!d.join("client.log.4").exists());
     }
 

@@ -1,14 +1,14 @@
 # AgentControl — Installation
 
 Archive: `agentcontrol-server-<arch>-linux.tar.gz`
-Contents: `agentcontrol-daemon` · `acctl` · `packaging/` (systemd unit, example config)
+Contents: `agentcontrol-daemon` · `acctl` · `acp-claude` · `packaging/` (systemd unit, example config)
 
 ## 1. Server (Ubuntu — where the agents run)
 
 ```bash
 tar xzf agentcontrol-server-*.tar.gz
 mkdir -p ~/.local/bin ~/.agentcontrol ~/.config/systemd/user
-cp agentcontrol-daemon acctl ~/.local/bin/
+cp agentcontrol-daemon acctl acp-claude ~/.local/bin/
 cp packaging/agentcontrol-daemon.service ~/.config/systemd/user/
 cp packaging/config.example.toml ~/.agentcontrol/config.toml
 

@@ -330,6 +330,9 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         "list_agents" => ReqKind::ListAgents,
         "model_costs" => ReqKind::ModelCosts { agent: s("agent") },
         "refresh_agent_caps" => ReqKind::RefreshAgentCaps { agent: s("agent") },
+        // Provisioning adaptateur ACP côté démon (agents_auto registry,
+        // #277) — bouton « installer » du dialogue nouvelle session.
+        "install_agent_adapter" => ReqKind::InstallAgentAdapter { agent: s("agent") },
         "model_catalog" => ReqKind::ModelCatalog { agent: s("agent") },
         "list_sessions" => ReqKind::ListSessions,
         "session_info" => ReqKind::SessionInfo { session: s("session") },
@@ -346,6 +349,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
         "resume_session" => ReqKind::ResumeSession {
             session: s("session"),
             native_id: so("native_id"),
+            fresh: p.get("fresh").and_then(Value::as_bool).unwrap_or(false),
         },
         "list_native_sessions" => ReqKind::ListNativeSessions { session: s("session") },
         "attach_session" => ReqKind::AttachSession {
@@ -465,6 +469,7 @@ fn req_from(method: &str, p: Value) -> Result<ReqKind, String> {
             session: s("session"),
             index: p.get("index").and_then(Value::as_u64).unwrap_or(0),
         },
+        "queue_clear" => ReqKind::QueueClear { session: s("session") },
         "pr_list" => ReqKind::PrList { session: so("session") },
         "pr_track" => ReqKind::PrTrack {
             session: so("session"),

@@ -33,8 +33,14 @@ jobs:
         include:
           - os: ubuntu-latest
             arch: x86_64
+            target: x86_64-unknown-linux-musl
           - os: ubuntu-24.04-arm
             arch: aarch64
+            target: aarch64-unknown-linux-musl
+    # Nom de check figé : la ruleset next_release exige les contextes
+    # « daemon-linux (<os>, <arch>) » — sans `name:` la matrix
+    # ajouterait la cible au nom et les required checks ne matchent plus.
+    name: daemon-linux (${{ matrix.os }}, ${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -46,6 +52,12 @@ jobs:
         if: contains(github.ref_name, '-rc.')
         run: python3 client/tools/bump_version.py "${GITHUB_REF_NAME#v}"
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # ring (via rustls/ureq) compile son code C avec cc → les targets
+      # *-linux-musl exigent musl-gcc.
+      - name: musl-gcc
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - uses: Swatinem/rust-cache@v2
       # Le binaire démon embarque client/dist (build.rs) : la SPA doit
       # être buildée en amont pour que la web UI release soit servie.
@@ -56,13 +68,48 @@ jobs:
           cache-dependency-path: client/package-lock.json
       - run: npm ci && npm run build
         working-directory: client
-      - run: cargo build --release -p agentcontrol-daemon -p acctl
+      # Cible musl = binaire 100 % statique : plus d'exigence GLIBC_X.Y
+      # — les tarballs release démarrent sur n'importe quelle distro
+      # (Debian 11/12, Ubuntu 20.04/22.04/24.04…), là où un build
+      # ubuntu-latest (glibc 2.39) refuse de tourner sur glibc < 2.39.
+      - run: cargo build --release --target ${{ matrix.target }} -p agentcontrol-daemon -p acctl -p acp-claude
+        env:
+          # cc résout aarch64-linux-musl-gcc pour les cibles
+          # aarch64-*-musl — absent : musl-tools ne fournit que
+          # `musl-gcc`. Forcer le compilateur (sur le runner arm64 il
+          # produit bien du aarch64-musl) ; sans effet sur x86_64.
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          AR_aarch64_unknown_linux_musl: ar
       - name: package
         run: |
           mkdir -p dist
-          cp target/release/agentcontrol-daemon target/release/acctl dist/
+          cp target/${{ matrix.target }}/release/agentcontrol-daemon \
+             target/${{ matrix.target }}/release/acctl \
+             target/${{ matrix.target }}/release/acp-claude dist/
           cp -r packaging dist/
           tar czf agentcontrol-server-${{ matrix.arch }}-linux.tar.gz -C dist .
+      # Critère d'acceptation : les binaires tournent sur une vieille
+      # glibc. `ldd` doit dire « statically linked » (static-PIE x86_64)
+      # ou « not a dynamic executable » (ET_EXEC aarch64) et `acctl`
+      # sans argument doit afficher son usage dans debian:bookworm
+      # (glibc 2.36) — image native de l'arch du runner.
+      - name: Vérif portabilité (debian:bookworm)
+        run: |
+          for bin in acctl agentcontrol-daemon; do
+            # NB : `ldd` sort en code 1 sur un ET_EXEC statique — le
+            # `|| true` évite que set -e avorte le step ; le grep sur
+            # le contenu fait foi.
+            ldd_out=$(docker run --rm -v "$PWD/dist:/ac" debian:bookworm ldd /ac/$bin 2>&1 || true)
+            echo "== $bin"; echo "$ldd_out"
+            echo "$ldd_out" | grep -qE 'statically linked|not a dynamic executable'
+          done
+          set +e
+          help_out=$(docker run --rm -v "$PWD/dist:/ac" debian:bookworm /ac/acctl 2>&1)
+          code=$?
+          set -e
+          echo "$help_out"
+          [ "$code" -eq 2 ]
+          echo "$help_out" | grep -q "usage: acctl"
       - uses: actions/upload-artifact@v4
         with:
           name: agentcontrol-server-${{ matrix.arch }}-linux
@@ -272,6 +319,14 @@ jobs:
             src-tauri/gen/android/app/src/main/AndroidManifest.xml
           grep -q 'android:allowBackup="false"' \
             src-tauri/gen/android/app/src/main/AndroidManifest.xml
+          # Portrait uniquement : patch post-init comme CAMERA / allowBackup
+          # (gen/android n'est pas commité). Garde : une seule <activity>,
+          # sinon le sed patcherait aussi des activités de plugins.
+          test "$(grep -c '<activity' src-tauri/gen/android/app/src/main/AndroidManifest.xml)" = 1
+          sed -i 's|<activity|<activity\n            android:screenOrientation="portrait"|' \
+            src-tauri/gen/android/app/src/main/AndroidManifest.xml
+          grep -q 'android:screenOrientation="portrait"' \
+            src-tauri/gen/android/app/src/main/AndroidManifest.xml
           # Icônes commitées (tauri icon) → projet généré
           cp -r src-tauri/icons/android/* src-tauri/gen/android/app/src/main/res/
           # ── Signature release : sans keystore CI, chaque APK était
@@ -347,6 +402,10 @@ jobs:
           find src-tauri/gen/android/app/build/intermediates \
             -name "AndroidManifest.xml" -path "*merged*" \
             -exec grep -l 'allowBackup="false"' {} \; | grep -q .
+          # screenOrientation doit survivre au manifest merger.
+          find src-tauri/gen/android/app/build/intermediates \
+            -name "AndroidManifest.xml" -path "*merged*" \
+            -exec grep -l 'screenOrientation="portrait"' {} \; | grep -q .
           # L'AAR sherpa-onnx doit être lié : jniLibs arm64 dans l'APK.
           find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" \
             -exec sh -c 'unzip -l "$1" | grep -q "arm64-v8a/libsherpa-onnx-jni.so"' _ {} \;

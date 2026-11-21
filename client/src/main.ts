@@ -8,8 +8,8 @@
 
 import "./styles.css";
 import "./mesh-bg.ts";
-import { invoke, listen, getVersion, isWeb } from "./core/bridge";
-import { $, notify } from "./core/dom";
+import { invoke, listen, isWeb } from "./core/bridge";
+import { $, logUi, notify } from "./core/dom";
 import { app } from "./core/state";
 import { initRpc } from "./core/rpc";
 import { initModalGuard } from "./core/modal";
@@ -30,16 +30,18 @@ import {
   initExternalLinks,
   shellOpen,
 } from "./core/chrome";
-import { nav, type SheetItem } from "./ui/nav";
+import { nav } from "./ui/nav";
 import { hydrateIcons } from "./ui/icons";
 import { initStatus, type HostStats } from "./features/status";
-import { checkBootUpdate } from "./features/update";
+import { initMemDialog } from "./features/meminfo";
+import { checkBootUpdate, openAbout } from "./features/update";
 import { initModelBar } from "./features/modelbar";
 import { initModelCosts } from "./features/modelcosts";
 import { initModelCatalog } from "./features/modelcatalog";
 import { initFusionDialog, openFusion } from "./features/fusion-dialog";
 import { GroupStore } from "./features/groups";
 import { NewSessionDialog } from "./features/new-session";
+import { AgentCapsDialog } from "./features/agentcaps";
 import { ConnectionManager } from "./features/connections";
 import { ConnView } from "./features/conn-view";
 import { EventRenderer } from "./features/event-renderers";
@@ -60,8 +62,25 @@ import { stateDiff } from "./features/state-diff";
 import { sounds } from "./features/sounds";
 import { notifications } from "./features/notifications";
 import { initFirstPost } from "./features/first-post";
+import { initSessionBar, renderSessionBar } from "./mobile/session-bar";
+import { initSessionSheet, openSessionSheet } from "./mobile/session-sheet";
+import { initConnSheet } from "./mobile/conn-sheet";
+import { initHomeShell, syncHomeConn } from "./mobile/shell";
+import { initInbox } from "./mobile/inbox";
+import { initGestures } from "./mobile/gestures";
+import { initMapGestures } from "./mobile/map-gestures";
+import { initPermDock } from "./mobile/perm-dock";
+import { initComposerMobile } from "./mobile/composer-mobile";
+import { initSettingsMobile } from "./mobile/settings-mobile";
+import { tick } from "./mobile/haptics";
+import { initToolRuns } from "./mobile/tool-runs";
+import { initTermKeys } from "./mobile/term-keys";
+import { appMenuItems } from "./mobile/app-menu";
 import { Pins } from "./features/pins";
+import { Steps, type SessionStep } from "./features/steps";
+import { initTelemetry } from "./features/telemetry";
 import { initLang, t, applyStatic } from "./i18n";
+import { engineReport, debugNoCv } from "./core/engine";
 import type { AcEvent, SavedConn } from "./core/types";
 
 // Thème + langue persistés (localStorage), appliqués au boot
@@ -72,6 +91,13 @@ applyAccent(accentPref());
 // Intensité d'accent — dimension orthogonale, classe accent-strong.
 applyAccentStrong(accentStrongPref(), false);
 applyStatic();
+// Capacités du moteur de rendu (field-sizing / content-visibility /
+// contain) — détectées au boot, loguées et affichées dans « À propos »
+// : indispensable pour trancher « le fix est-il actif sur CE webview ? »
+// (#294). `ac-nocv` (localStorage) neutralise content-visibility pour
+// reproduire un vieux WebKitGTK sur un navigateur moderne.
+if (debugNoCv()) document.documentElement.classList.add("nocv");
+logUi("info", `engine: ${engineReport()}`);
 initGems();
 initPlatform();
 initWindowChrome();
@@ -145,6 +171,7 @@ const map = new MapView();
 const term = new TermPanel();
 const connView = new ConnView();
 const newSess = new NewSessionDialog();
+const agentCaps = new AgentCapsDialog();
 const settings = new SettingsPanel();
 const tts = new Tts();
 const comps = new ComponentsPanel();
@@ -152,6 +179,7 @@ const logsPanel = new LogsPanel();
 const pluginViews = new PluginView();
 const search = new SessionSearch();
 const pins = new Pins();
+const steps = new Steps();
 
 // call() a besoin de la conn courante + des états live — injectés pour éviter
 // l'import inverse core → features.
@@ -167,14 +195,20 @@ chat.bind(renderer, {
   refreshQueue: () => composer.refreshQueue(),
   syncAltBtn: () => composer.syncAltBtn(),
   onSessionOpened: () => {
+    // Pile de navigation mobile : l'écran Session glisse sur l'accueil —
+    // point unique qui couvre tous les chemins d'ouverture (liste,
+    // notif, carte du diagramme, puce de session des PRs, « À traiter »).
+    nav.enterSession();
     files.onSessionOpened();
     term.onSessionSwitched();
     pins.sessionOpened();
+    steps.sessionOpened();
   },
   onSessionChanged: () => {
     search.onSessionChanged();
     composer.sessionChanged();
     pins.sessionChanged();
+    steps.sessionChanged();
     // Une voix qui commente un journal qu'on a quitté = bug UX → stop.
     tts.sessionChanged();
   },
@@ -186,14 +220,18 @@ chat.bind(renderer, {
   firstPostCapable: (c) => conns.cap(c)?.first_post === true,
   termCapable: (c) => conns.cap(c)?.terminal === true,
   pinCapable: (c) => conns.cap(c)?.pinned === true,
+  stepsCapable: (c) => conns.cap(c)?.steps === true,
   capsCapable: (c) => conns.cap(c)?.agent_caps === true,
   pinsMark: (el) => pins.markNode(el),
+  afterHeader: () => renderSessionBar(),
 });
 search.bind({ jumpToSeq: (seq) => chat.jumpToSeq(seq) });
 pins.bind({
   capable: (c) => conns.cap(c)?.pinned === true,
   jumpToSeq: (seq) => chat.jumpToSeq(seq),
 });
+// Steps n'a pas besoin de deps injectées — la capability gate vit dans
+// chat.updateHeader (btn-steps) et le sheet ⋮.
 renderer.bind({
   metaChanged: () => chat.updateHeader(),
   ctxChanged: () => chat.updateCtx(),
@@ -203,7 +241,12 @@ renderer.bind({
 });
 // Canaux d'alerte branchés sur le diff partagé (state-diff) — sons et
 // notifications OS restent indépendants mais voient les mêmes transitions.
+// Question entrante au premier plan → vibration courte (Y4, Android
+// seul — en arrière-plan c'est la notif OS qui porte le signal).
 stateDiff.onTransition((kind) => sounds.alert(kind));
+stateDiff.onTransition((kind) => {
+  if (kind === "question" && document.hasFocus()) tick("alert");
+});
 stateDiff.onTransition((kind, s) => notifications.alert(kind, s));
 // Annulation des notifs OS quand leur condition se résout (#184) :
 // sortie de waiting_input → la « question » n'a plus lieu d'être ;
@@ -216,6 +259,7 @@ stateDiff.onRawTransition((prev, s) => {
 stateDiff.onGone((key) => notifications.sessionGone(key));
 notifications.bind({
   connCount: () => conns.knownConns().length,
+  connState: (k) => conns.state(k),
   // Clic sur la notif → même trajet qu'une ouverture depuis la sidebar :
   // les overlays de #chat doivent d'abord sortir (motif newSess.openSession).
   openSession: (id, conn) => {
@@ -250,6 +294,7 @@ tts.openSettings = () => {
 settings.tts = tts;
 composer.bindAttachCapable((c) => conns.cap(c ?? "default")?.files === true);
 composer.bindQueueSteerCapable((c) => conns.cap(c ?? "default")?.queue_steer === true);
+composer.bindQueueClearCapable((c) => conns.cap(c ?? "default")?.queue_clear === true);
 conns.bind({
   refresh: () => sidebar.refresh(),
   reopenIfConn: (c) => chat.reopenIfConn(c),
@@ -271,7 +316,11 @@ conns.bind({
     term.refreshTheme();
   },
   termDead: (k) => term.markConnDead(k),
-  liveChanged: () => connView.onLiveChanged(),
+  liveChanged: () => {
+    connView.onLiveChanged();
+    // Puce connexion de l'accueil mobile : point coloré = état live.
+    syncHomeConn();
+  },
 });
 connView.bind(conns);
 connView.refresh = () => sidebar.refresh();
@@ -317,6 +366,7 @@ newSess.openSession = (id, conn) => {
   void chat.open(id, false, conn);
 };
 newSess.knownConns = () => conns.knownConns();
+agentCaps.knownConns = () => conns.knownConns();
 groups.refresh = () => void sidebar.refresh();
 groups.deleteSession = (s) => sidebar.deleteSessionNow(s);
 files.bind({ sysline: (txt, ic) => chat.sysline(txt, ic) });
@@ -398,6 +448,22 @@ await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
     if (app.current && session === app.current.id) void chat.convCleared();
     return;
   }
+  // Fin d'un replay session/load « refill » (fork/rebind) : le démon
+  // a journalisé l'historique SANS le broadcaster — le DOM
+  // n'a vu que les syslines de progression. On recharge la queue du
+  // journal (open forcé : cache jeté, dernière page, resubscribe) au
+  // lieu d'avoir rendu le transcript entier au fil de l'eau (#300).
+  // L'event est journalisé : il sera rendu depuis la page rechargée.
+  if (event.type === "history_replayed" && app.current && session === app.current.id) {
+    void chat.open(session, true, app.current.conn ?? "");
+    return;
+  }
+  // Étapes de tâche publiées par l'agent : l'event porte la liste
+  // ENTIÈRE (remplacement complet, pas de delta) → application directe
+  // si c'est la session affichée.
+  if (event.type === "steps" && app.current && session === app.current.id) {
+    steps.onStepsEvent(event.steps as SessionStep[]);
+  }
   if (app.current && session === app.current.id) {
     chat.appendEvent(event, true);
   }
@@ -407,7 +473,7 @@ await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
   // d'état — refresh immédiat, restreint aux textes liés à la file
   // (un queue_list par event sinon, gratuit mais inutile).
   if (event.type === "system" && app.current?.id === session
-      && /file|steer|compact/i.test((event.text as string) ?? "")) {
+      && /queue|steer|compact|file/i.test((event.text as string) ?? "")) {
     void composer.refreshQueue();
   }
   if (event.type === "status_changed") void sidebar.refresh();
@@ -415,50 +481,17 @@ await listen<{ session: string; event: AcEvent }>("session-event", (msg) => {
 
 // --- Settings / About / menus ⋮ ----------------------------------------------
 
-// About : version réelle + lien GitHub via le plugin shell
-$("tb-about").onclick = async () => {
-  try {
-    $("about-version").textContent = "v" + (await getVersion());
-  } catch {
-    /* dev */
-  }
-  ($("dlg-about") as HTMLDialogElement).showModal();
+// About : point central des versions (client/démon/release) + updates —
+// openAbout ouvre la modale d'abord puis remplit en async ; le moteur
+// reste synchrone (report local, pas de réseau).
+$("tb-about").onclick = () => {
+  $("about-engine").textContent = engineReport();
+  openAbout(() => conns.knownConns()[0] ?? null);
 };
-// Menus ⋮ (Android) : l'app-level ouvre Settings/About, celui du chat les
-// actions de session (cachées du header sur mobile).
-$("tb-more").onclick = () => {
-  const items: SheetItem[] = [
-    { icon: "map", label: t("map_title"), fn: () => $("tb-map").click() },
-    { icon: "scroll", label: t("logs"), fn: () => $("tb-logs").click() },
-  ];
-  // Composants : même gate capability que le bouton titlebar masqué
-  // sur mobile — pas d'entrée vers un panneau inutilisable.
-  if (comps.capable())
-    items.push({ icon: "tool", label: t("comp_h"), fn: () => $("tb-components").click() });
-  items.push(
-    { icon: "settings", label: t("settings_title"), fn: () => $("tb-settings").click() },
-    { icon: "info", label: t("about_title"), fn: () => $("tb-about").click() },
-  );
-  nav.sheet(items);
-};
-$("chat-more").onclick = () => {
-  const items: SheetItem[] = [];
-  if (app.current) items.push({ icon: "search", label: t("search_title"), fn: () => search.open() });
-  if (app.current && conns.cap(app.current.conn ?? "default")?.first_post === true)
-    items.push({ icon: "top", label: t("first_post"), fn: () => $("btn-first").click() });
-  if (app.current && conns.cap(app.current.conn ?? "default")?.pinned === true)
-    items.push({ icon: "pin", label: t("pins_title"), fn: () => $("btn-pins").click() });
-  if (app.current && term.supported())
-    items.push({ icon: "terminal", label: t("term_title"), fn: () => $("btn-term").click() });
-  if (app.current) items.push({ icon: "folder", label: t("files_title"), fn: () => $("btn-files").click() });
-  if (app.current) items.push({ icon: "search", label: t("qo_open_path"), fn: () => quick.open("path") });
-  if (app.current && !app.alive && app.current.state !== "starting")
-    items.push({ icon: "play", label: t("resume"), fn: () => $("btn-resume").click() });
-  if (app.current && app.alive)
-    items.push({ icon: "sleep", label: t("ctx_sleep"), fn: () => $("btn-sleep").click() });
-  items.push({ icon: "refresh", label: t("refresh_title"), fn: () => $("btn-refresh").click() });
-  nav.sheet(items);
-};
+// Menus ⋮ (Android) : l'app-level ouvre Settings/About ; en session le
+// ⋮ du header ouvre la feuille Session (S2 — réglages + actions).
+$("tb-more").onclick = () => nav.sheet(appMenuItems(() => comps.capable()));
+$("chat-more").onclick = () => openSessionSheet();
 $("about-gh").addEventListener("click", (e) => {
   e.preventDefault();
   shellOpen("https://github.com/Wameuh/AgentControl");
@@ -469,6 +502,9 @@ $("about-gh").addEventListener("click", (e) => {
 hydrateIcons();
 groups.init();
 newSess.init();
+agentCaps.init();
+$("btn-agent-caps").onclick = () =>
+  agentCaps.open(app.current?.conn ?? conns.knownConns()[0]);
 conns.init();
 connView.init();
 chat.init();
@@ -489,9 +525,53 @@ initFirstPost((c) => conns.cap(c)?.first_post === true);
 initModelCosts({ capable: (c) => conns.cap(c)?.model_costs === true });
 initModelCatalog({ capable: (c) => conns.cap(c)?.model_catalog === true });
 pins.init();
+steps.init();
+// Barre + feuille Session mobiles (S1/S2) : câblage des conditions —
+// mêmes gates capability que l'ancien menu ⋮ du header.
+initSessionSheet({
+  openSearch: () => search.open(),
+  openPath: () => quick.open("path"),
+  termSupported: () => term.supported(),
+  firstPostCapable: (c) => conns.cap(c)?.first_post === true,
+  pinCapable: (c) => conns.cap(c)?.pinned === true,
+  stepsCapable: (c) => conns.cap(c)?.steps === true,
+  onRenamed: () => { chat.setChatTitle(); void sidebar.refresh(); },
+  refreshSidebar: () => void sidebar.refresh(),
+});
+initSessionBar(openSessionSheet);
+// Feuille connexion de la puce d'accueil + coquille mobile (N1/N2) :
+// titre de vue, loupe → filtre, re-rendu de la barre session à chaque
+// bascule de pile. No-ops hors Android.
+initConnSheet({
+  openPairSettings: () => {
+    settings.open();
+    const sec = $("s-sec-conn") as HTMLDetailsElement;
+    sec.open = true;
+    sec.scrollIntoView({ block: "start" });
+  },
+});
+initHomeShell(conns);
+// Accueil « par état » + glisser des lignes (N3/N4) — no-ops hors Android.
+initInbox(sidebar);
+initGestures(sidebar);
+initMapGestures();
+// Dock de permission (S3) + composer pilule (C1) — no-ops hors Android.
+initPermDock((seq) => chat.jumpToSeq(seq));
+initComposerMobile(composer);
+// Paramètres en liste → sous-écrans (Y4) — no-op hors Android.
+initSettingsMobile();
+// Suites d'outils compactées (S4) + rangée de touches du terminal (S5).
+initToolRuns();
+initTermKeys(term);
 initModelBar(openFusion, () => chat.updateHeader());
 initFusionDialog();
 initStatus(() => {
+  // Bouton « capacités agents » : visible dès qu'une conn connaît la
+  // capability agent_caps (vieux démon → masqué, comme les autres
+  // boutons à gate).
+  $("btn-agent-caps").hidden = !conns
+    .knownConns()
+    .some((c) => conns.cap(c)?.agent_caps === true);
   // Bloc host du démon de la conn affichée (session ouverte), sinon de
   // la conn liée — absent sur vieux démon → segment masqué.
   const k = app.current?.conn ?? conns.knownConns()[0] ?? "default";
@@ -500,5 +580,10 @@ initStatus(() => {
   if ((conns.state(k) ?? "ok") !== "ok") return undefined;
   return conns.cap(k)?.host as HostStats | undefined;
 });
+initMemDialog();
+// Télémétrie perf locale (#297) : collecteur singleton — ligne agrégée
+// dans client.log toutes les 5 min + window.__telemetry() pour le debug.
+// Démarré tôt pour couvrir tout le boot ; la préférence OFF le désarme.
+initTelemetry();
 checkBootUpdate();
 connView.autoConnect(savedConns, cliConn ?? undefined, autoSuppressed);

@@ -42,6 +42,7 @@ const KEYS: &[&str] = &[
     "metrics",
     "max_workers",
     "max_working",
+    "worker_pool",
     "poll_secs",
     "nudge_cooldown_secs",
     "title_prefix",
@@ -69,6 +70,11 @@ const KEYS: &[&str] = &[
     "pr_review_trigger",
     "pr_reviewer_mode",
     "pr_reviewer_model",
+    "pr_reviewer_effort",
+    "planner_model",
+    "planner_effort",
+    "reviewer_model",
+    "reviewer_effort",
     "pr_review_max_parallel",
     "pr_review_timeout",
     "repo_workspaces",
@@ -87,6 +93,7 @@ fn ps(key: &str, label: &str, desc: &str, kind: ParamKind, default: Option<&str>
         choices: Vec::new(),
         choice_labels: Vec::new(),
         open_enum: false,
+        group: None,
     }
 }
 
@@ -196,8 +203,8 @@ fn dyn_ps(
         }
         p.open_enum = true;
         p.description = Some(format!(
-            "{desc} — liste annoncée par l'agent ; une valeur hors \
-             liste est conservée (« (?) ») mais peut être refusée au \
+            "{desc} — list announced by the agent; a value outside \
+             the list is kept (« (?) ») but may be refused at \
              spawn"
         ));
     }
@@ -241,7 +248,7 @@ fn agent_ps(
         p.kind = ParamKind::Enum;
         p.choices = agents.to_vec();
         p.open_enum = true;
-        p.description = Some(format!("{desc} — liste des profils déclarés"));
+        p.description = Some(format!("{desc} — list of declared profiles"));
     }
     p
 }
@@ -250,322 +257,428 @@ fn agent_ps(
 /// `spec.params_schema` de l'item `backlog-orchestrator` : le client
 /// affiche alors son formulaire générique et envoie
 /// `component_set_params` (intercepté côté démon — aucun code client
-/// spécifique). Labels/aides en français, comme le catalogue.
+/// spécifique). Labels/help in English, like the catalog.
 /// `dyn_` porte les listes annoncées par l'agent configuré (modèles,
 /// modes, thought levels) — les params correspondants deviennent des
 /// menus déroulants ouverts au lieu de champs texte libres.
 pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSpec> {
-    vec![
+    let mut v = vec![
         ps(
             "enabled",
-            "Activé au boot",
-            "valeur persistée — l'appliquer bascule aussi le runtime ; \
-             `orch on|off` reste la bascule runtime non persistée",
+            "Enabled at boot",
+            "persisted value — applying it also flips the runtime; \
+             `orch on|off` remains the non-persisted runtime toggle",
             ParamKind::Bool,
             Some("false"),
         ),
         ps(
             "watch_prs",
-            "Surveillance PR",
-            "sondes « gh » du cycle : rétention des workers à PR \
-             ouverte, recyclage post-merge, release des wip orphelins — \
-             décocher = file seule : aucune sonde forge sur les workers \
-             (la garde release PR relève d'auto_patchnotes) et aucune \
-             récupération d'orphelins",
+            "PR watch",
+            "cycle « gh » probes: retention of workers with an open PR, \
+             post-merge recycling, orphan wip release — \
+             unchecking = queue only: no forge probe on workers \
+             (the release-PR guard falls under auto_patchnotes) and no \
+             orphan recovery",
             ParamKind::Bool,
             Some("true"),
         ),
         ps(
             "auto_patchnotes",
-            "Patchnotes auto",
-            "item patchnotes + passage ready/draft de la release PR \
-             quand la file se vide/se remplit",
+            "Auto patchnotes",
+            "patchnotes item + ready/draft flip of the release PR \
+             when the queue empties/fills",
             ParamKind::Bool,
             Some("true"),
         ),
         ps(
             "spawn_managers",
-            "Managers proposables",
-            "un Manager par workspace routé (section du panneau backlog)",
+            "Proposable Managers",
+            "one Manager per routed workspace (backlog panel section)",
             ParamKind::Bool,
             Some("true"),
         ),
         ps(
             "metrics",
-            "Métriques (échantillonnage)",
-            "à chaque tick, un sample {ts, pending, wip, workers} est \
-             ajouté au journal ~/.agentbacklog/metrics.jsonl (rétention \
-             30 j / ~100k samples) servi par la RPC backlog_metrics ; \
-             décocher = pas de série (les agrégats items restent \
-             calculés)",
+            "Metrics (sampling)",
+            "each tick appends a {ts, pending, wip, workers} sample \
+             to ~/.agentbacklog/metrics.jsonl (30d / ~100k samples \
+             retention) served by the backlog_metrics RPC; \
+             unchecking = no series (item aggregates still \
+             computed)",
             ParamKind::Bool,
             Some("true"),
         ),
         ps(
             "max_workers",
-            "Workers max",
-            "sessions worker simultanées (hors asleep) — 0 = aucun \
-             spawn ; un nudge qui réveille un worker endormi consomme \
-             aussi un slot",
+            "Max workers",
+            "simultaneous worker sessions (asleep excluded) — 0 = no \
+             spawn; a nudge waking a sleeping worker also \
+             consumes a slot",
             ParamKind::Int,
             Some("5"),
         ),
         ps(
             "max_working",
-            "Workers actifs max",
-            "sessions worker EN ACTIVITÉ simultanées — un worker garé \
-             sur un waiter ac-wait (review, checks CI…) libère un slot \
-             actif mais garde son slot max_workers ; spawn et réveil \
-             exigent du mou sur les deux caps ; 0 = suit max_workers",
+            "Max active workers",
+            "simultaneous ACTIVE worker sessions — a worker parked on an \
+             ac-wait waiter (review, CI checks…) frees an active slot \
+             but keeps its max_workers slot; spawn and wake require \
+             headroom on both caps; 0 = follows max_workers",
             ParamKind::Int,
             Some("0"),
         ),
+        {
+            // Pool workers par profil : JSON `[{profile,count,model,
+            // effort,mode}]` — `choices` porte les profils déclarés
+            // pour la colonne profil du widget « équipe » côté client.
+            let mut p = ps(
+                "worker_pool",
+                "Worker pool",
+                "worker team — one row per profile: count slots + own \
+                 model/effort/mode (empty = global values); when set, \
+                 the sum of counts replaces max_workers for worker \
+                 capacity (max_working still applies); empty = legacy \
+                 worker_agent + max_workers",
+                ParamKind::Json,
+                Some("[]"),
+            );
+            p.choices = agents.to_vec();
+            p
+        },
         ps(
             "poll_secs",
-            "Période de cycle (s)",
-            "cadence du tick — min effectif 10 s",
+            "Cycle period (s)",
+            "tick cadence — effective min 10 s",
             ParamKind::Int,
             Some("60"),
         ),
         ps(
             "nudge_cooldown_secs",
-            "Cooldown nudge (s)",
-            "entre deux relances du même worker",
+            "Nudge cooldown (s)",
+            "between two relaunches of the same worker",
             ParamKind::Int,
             Some("900"),
         ),
         ps(
             "title_prefix",
-            "Préfixe workers",
-            "préfixe de titre des sessions workers (\"Backlog-W\") — \
-             le changer en route « perd » les workers en cours (leur \
-             titre ne matche plus), un préfixe trop court adopterait \
-             des sessions étrangères (min 4 car.) ; vide = défaut",
+            "Worker prefix",
+            "worker session title prefix (\"Backlog-W\") — \
+             changing it mid-flight « loses » running workers (their \
+             title no longer matches), too short a prefix would \
+             adopt foreign sessions (min 4 chars); empty = default",
             ParamKind::String,
             Some("Backlog-W"),
         ),
         ps(
             "group",
-            "Groupe sidebar",
-            "groupe des sessions spawnées — vide = non groupées",
+            "Sidebar group",
+            "group of spawned sessions — empty = ungrouped",
             ParamKind::String,
             Some("AgentControl"),
         ),
         ps(
             "workspace",
-            "Workspace workers",
-            "cwd des items non taggés et des appels CLI de \
-             l'orchestrateur — les items taggés sont routés par \
+            "Worker workspace",
+            "cwd of untagged items and of the orchestrator's \
+             CLI calls — tagged items are routed via \
              repo_workspaces",
             ParamKind::Path,
             Some("/workspace"),
         ),
         agent_ps(
             "agent",
-            "Profil agent",
-            "profil `[agents.*]` des spawns ; vide = défaut — aussi le \
-             repli de tous les `*_agent` laissés vides",
+            "Agent profile",
+            "`[agents.*]` profile for spawns; empty = default — also the \
+             fallback for every `*_agent` left empty",
             Some("devin"),
             agents,
         ),
         agent_ps(
             "worker_agent",
-            "Profil worker (Backlog-W*)",
-            "profil `[agents.*]` des workers ; vide = le param agent",
+            "Worker profile (Backlog-W*)",
+            "`[agents.*]` profile for workers; empty = the agent param",
             Some(""),
             agents,
         ),
         agent_ps(
             "planner_agent",
-            "Profil planner (Backlog-P*)",
-            "profil `[agents.*]` des planificateurs et implémenteurs ; \
-             vide = le param agent",
+            "Planner profile (Backlog-P*)",
+            "`[agents.*]` profile for planners and implementers; \
+             empty = the agent param",
             Some(""),
             agents,
         ),
         agent_ps(
             "reviewer_agent",
-            "Profil reviewer (Backlog-R*)",
-            "profil `[agents.*]` des reviewers de plan ; vide = le \
-             param agent",
+            "Reviewer profile (Backlog-R*)",
+            "`[agents.*]` profile for plan reviewers; empty = the \
+             agent param",
             Some(""),
             agents,
         ),
         agent_ps(
             "pr_reviewer_agent",
-            "Profil reviewer PR (PRReview-*)",
-            "profil `[agents.*]` des reviewers de PR ; vide = le param \
-             agent",
+            "PR reviewer profile (PRReview-*)",
+            "`[agents.*]` profile for PR reviewers; empty = the \
+             agent param",
             Some(""),
             agents,
         ),
         dyn_ps(
             "mode",
-            "Mode au spawn",
-            "mode demandé aux sessions spawnées ; vide = défaut",
+            "Spawn mode",
+            "mode requested for spawned sessions; empty = default",
             Some("bypass"),
             &dyn_.modes,
         ),
         dyn_ps(
             "model",
-            "Modèle au spawn",
-            "modèle demandé aux sessions spawnées ; vide = défaut",
+            "Spawn model",
+            "model requested for spawned sessions; empty = default",
             Some("swe-2-high"),
             &dyn_.models,
         ),
         dyn_ps(
             "thought_level",
             "Thought level",
-            "posé après chaque spawn — vide = ne rien poser",
+            "applied after each spawn — empty = set nothing",
             Some("max"),
             &dyn_.thought_levels,
         ),
         ps(
             "prompt",
-            "Prompt worker",
-            "prompt sur mesure des workers — vide = prompt intégré ; \
-             le dispatch par item (agentbacklog ≥ 0.7) substitue \
-             {WS} {REPO} {ID} {ITEM} et pré-assigne l'item (pas de \
+            "Worker prompt",
+            "custom worker prompt — empty = built-in prompt; \
+             item dispatch (agentbacklog ≥ 0.7) substitutes \
+             {WS} {REPO} {ID} {ITEM} and pre-assigns the item (no \
              --pop)",
             ParamKind::String,
             None,
         ),
         ps(
             "manager_prompt",
-            "Prompt Manager",
-            "template Manager — placeholders {REPO}/{WS} ; vide = \
-             template intégré",
+            "Manager prompt",
+            "Manager template — placeholders {REPO}/{WS}; empty = \
+             built-in template",
             ParamKind::String,
             None,
         ),
         ps(
             "plan_review",
-            "Pipeline plan→review",
-            "chaque item no_plan=0 est planifié (Backlog-P*, mode \
-             planner_mode), relu par un reviewer éphémère (Backlog-R*, \
-             verdict relayé au planner), puis implémenté par le même \
-             planner après compact + implement_mode — nécessite \
-             agentbacklog ≥ 0.7 ; off = dispatch worker direct",
+            "Plan→review pipeline",
+            "each no_plan=0 item is planned (Backlog-P*, planner_mode), \
+             reviewed by an ephemeral reviewer (Backlog-R*, verdict \
+             relayed to the planner), then implemented by the same \
+             planner after compact + implement_mode — requires \
+             agentbacklog ≥ 0.7; off = direct worker dispatch",
             ParamKind::Bool,
             Some("false"),
         ),
         dyn_ps(
             "planner_mode",
-            "Mode planner",
-            "mode demandé au spawn des Backlog-P* ; vide = défaut",
+            "Planner mode",
+            "mode requested at Backlog-P* spawn; empty = default",
             Some("plan"),
             &dyn_.modes,
         ),
         dyn_ps(
             "reviewer_mode",
-            "Mode reviewer",
-            "mode demandé au spawn des Backlog-R* ; vide = défaut",
+            "Reviewer mode",
+            "mode requested at Backlog-R* spawn; empty = default",
             Some("smart"),
             &dyn_.modes,
         ),
         dyn_ps(
             "implement_mode",
-            "Mode implémentation",
-            "mode des workers d'items no_plan et des implémenteurs \
-             (planner approuvé ou nouvelle session) ; vide = défaut",
+            "Implementation mode",
+            "mode of no_plan item workers and implementers \
+             (approved planner or new session); empty = default",
             Some("bypass"),
             &dyn_.modes,
         ),
+        dyn_ps(
+            "planner_model",
+            "Planner model",
+            "model requested at Backlog-P* spawn (planners AND \
+             implementers); empty = the global model param",
+            None,
+            &dyn_.models,
+        ),
+        dyn_ps(
+            "planner_effort",
+            "Planner effort",
+            "thought_level applied after Backlog-P* spawn; \
+             empty = the global thought_level",
+            None,
+            &dyn_.thought_levels,
+        ),
+        dyn_ps(
+            "reviewer_model",
+            "Reviewer model",
+            "model requested at Backlog-R* spawn (plan reviewers); \
+             empty = the global model param",
+            None,
+            &dyn_.models,
+        ),
+        dyn_ps(
+            "reviewer_effort",
+            "Reviewer effort",
+            "thought_level applied after Backlog-R* spawn; \
+             empty = the global thought_level",
+            None,
+            &dyn_.thought_levels,
+        ),
         ps(
             "max_review_rounds",
-            "Rounds de revue max",
-            "au-delà, un verdict denied/conditional gèle l'item en \
-             plan_review « stalled — revue humaine requise »",
+            "Max review rounds",
+            "beyond that, a denied/conditional verdict freezes the item in \
+             plan_review « stalled — human review required »",
             ParamKind::Int,
             Some("5"),
         ),
         ps(
             "plan_rereview",
-            "Re-revue de plan",
-            "off : un seul round de revue par item — un verdict \
-             denied/conditional du round 1 gèle directement \
-             « stalled » (équivaut à max_review_rounds=1)",
+            "Plan re-review",
+            "off: a single review round per item — a denied/conditional \
+             verdict on round 1 freezes it directly \
+             « stalled » (equivalent to max_review_rounds=1)",
             ParamKind::Bool,
             Some("true"),
         ),
         ps(
             "reviewer_reuse",
-            "Reviewer persistant",
-            "off : session Backlog-R* neuve à chaque round, supprimée \
-             après le verdict (comportement pré-réutilisation)",
+            "Persistent reviewer",
+            "off: a fresh Backlog-R* session each round, deleted \
+             after the verdict (pre-reuse behavior)",
             ParamKind::Bool,
             Some("true"),
         ),
         ps(
             "pr_review",
-            "Review de PR par le démon",
-            "commentaire déclencheur sur une PR ouverte → session \
-             reviewer fraîche sur le head exact, « ## Verdict: … » \
-             posté par le démon — opt-in (remplace l'automatisation \
-             externe absente/morte)",
+            "Daemon PR review",
+            "trigger comment on an open PR → fresh reviewer session on \
+             the exact head, « ## Verdict: … » posted by the \
+             daemon — opt-in (replaces missing/dead external \
+             automation)",
             ParamKind::Bool,
             Some("false"),
         ),
         ps(
             "pr_rereview",
-            "Re-revue de PR",
-            "off : une seule review par PR — les triggers postérieurs \
-             à une review soldée done sont ignorés (failed reste \
-             rejouable)",
+            "PR re-review",
+            "off: one review per PR — triggers after a review \
+             settled done are ignored (failed stays replayable)",
             ParamKind::Bool,
             Some("true"),
         ),
         ps(
             "pr_review_trigger",
-            "Trigger review PR",
-            "commentaire nu déclencheur (corps exact) ; auteur \
-             OWNER/MEMBER/COLLABORATOR requis",
+            "PR review trigger",
+            "bare trigger comment (exact body); author must be \
+             OWNER/MEMBER/COLLABORATOR",
             ParamKind::String,
             Some("/mr review"),
         ),
         dyn_ps(
             "pr_reviewer_mode",
-            "Mode reviewer PR",
-            "mode demandé au spawn des sessions PRReview-<N> ; \
-             vide = défaut",
+            "PR reviewer mode",
+            "mode requested at PRReview-<N> spawn; \
+             empty = default",
             Some("smart"),
             &dyn_.modes,
         ),
         dyn_ps(
             "pr_reviewer_model",
-            "Modèle reviewer PR",
-            "modèle demandé au spawn des sessions PRReview-<N> ; \
-             vide = le param model global",
+            "PR reviewer model",
+            "model requested at PRReview-<N> spawn; \
+             empty = the global model param",
             None,
             &dyn_.models,
         ),
+        dyn_ps(
+            "pr_reviewer_effort",
+            "PR reviewer effort",
+            "thought_level applied after PRReview-<N> spawn; \
+             empty = the global thought_level",
+            None,
+            &dyn_.thought_levels,
+        ),
         ps(
             "pr_review_max_parallel",
-            "Reviews PR en parallèle",
-            "pool séparé de max_workers — des workers qui attendent \
-             une review ne doivent pas affamer les reviews",
+            "Parallel PR reviews",
+            "pool separate from max_workers — workers waiting on a \
+             review must not starve reviews",
             ParamKind::Int,
             Some("2"),
         ),
         ps(
             "pr_review_timeout",
-            "Timeout review PR (s)",
-            "durée max d'une session reviewer PR : kill + post \
-             « review failed » au-delà",
+            "PR review timeout (s)",
+            "max PR reviewer session duration: kill + post \
+             « review failed » beyond it",
             ParamKind::Int,
             Some("2700"),
         ),
         ps(
             "repo_workspaces",
-            "Workspaces routés",
-            "entrées « repo=/cwd » séparées par des virgules — routage \
-             des sessions par tag repo des items (worker, planner, \
-             reviewer, Manager) ; un tag sans entrée = item en \
-             attente ; vide = défaut",
+            "Routed workspaces",
+            "« repo=/cwd » entries separated by commas — routes \
+             sessions by item repo tag (worker, planner, \
+             reviewer, Manager); a tag with no entry = item \
+             waiting; empty = default",
             ParamKind::List,
             None,
         ),
-    ]
+    ];
+    // Sections du formulaire « équipe » : le client regroupe les
+    // params de même `group` sous un titre — l'orchestrateur passe de
+    // ~40 champs à plat à 4 sections lisibles. Tri stable par rang :
+    // workers d'abord (l'équipe se lit en premier), puis pipeline,
+    // revues PR, général ; l'ordre de déclaration est préservé dans
+    // chaque section.
+    for p in &mut v {
+        p.group = group_of(&p.key).map(Into::into);
+    }
+    v.sort_by_key(|p| group_rank(p.group.as_deref()));
+    v
+}
+
+/// Rang d'affichage d'une section — `None`/inconnu en dernier.
+fn group_rank(g: Option<&str>) -> u8 {
+    match g {
+        Some("workers") => 0,
+        Some("pipeline") => 1,
+        Some("pr_reviews") => 2,
+        Some("general") => 3,
+        _ => 4,
+    }
+}
+
+/// Section d'affichage d'un param orchestrateur — ordre = ordre
+/// d'apparition dans `params_schema`.
+fn group_of(key: &str) -> Option<&'static str> {
+    Some(match key {
+        // Équipe workers : pool + capacité + identité des sessions W*.
+        "worker_pool" | "max_workers" | "max_working" | "worker_agent" | "title_prefix"
+        | "prompt" => "workers",
+        // Planification & reviews de plan : pipeline P*/R*.
+        "plan_review" | "planner_agent" | "planner_mode" | "planner_model" | "planner_effort"
+        | "implement_mode" | "reviewer_agent" | "reviewer_mode" | "reviewer_model"
+        | "reviewer_effort" | "max_review_rounds" | "plan_rereview" | "reviewer_reuse" => {
+            "pipeline"
+        }
+        // Revues PR : pool PRReview-* dédié.
+        "pr_review"
+        | "pr_rereview"
+        | "pr_review_trigger"
+        | "pr_reviewer_agent"
+        | "pr_reviewer_mode"
+        | "pr_reviewer_model"
+        | "pr_reviewer_effort"
+        | "pr_review_max_parallel"
+        | "pr_review_timeout" => "pr_reviews",
+        _ => "general",
+    })
 }
 
 /// Valeurs courantes sous forme chaîne — `spec.params` de l'item
@@ -583,6 +696,10 @@ pub(crate) fn params_values(cfg: &super::cfg::OrchCfg) -> HashMap<String, String
     m.insert("metrics".into(), cfg.metrics.to_string());
     m.insert("max_workers".into(), cfg.max_workers.to_string());
     m.insert("max_working".into(), cfg.max_working.to_string());
+    m.insert(
+        "worker_pool".into(),
+        serde_json::to_string(&cfg.worker_pool).unwrap_or_else(|_| "[]".into()),
+    );
     m.insert("poll_secs".into(), cfg.poll_secs.to_string());
     m.insert(
         "nudge_cooldown_secs".into(),
@@ -595,10 +712,7 @@ pub(crate) fn params_values(cfg: &super::cfg::OrchCfg) -> HashMap<String, String
     m.insert("worker_agent".into(), cfg.worker_agent.clone());
     m.insert("planner_agent".into(), cfg.planner_agent.clone());
     m.insert("reviewer_agent".into(), cfg.reviewer_agent.clone());
-    m.insert(
-        "pr_reviewer_agent".into(),
-        cfg.pr_reviewer_agent.clone(),
-    );
+    m.insert("pr_reviewer_agent".into(), cfg.pr_reviewer_agent.clone());
     m.insert("mode".into(), cfg.mode.clone());
     m.insert("model".into(), cfg.model.clone());
     m.insert("thought_level".into(), cfg.thought_level.clone());
@@ -619,18 +733,14 @@ pub(crate) fn params_values(cfg: &super::cfg::OrchCfg) -> HashMap<String, String
     m.insert("reviewer_reuse".into(), cfg.reviewer_reuse.to_string());
     m.insert("pr_review".into(), cfg.pr_review.to_string());
     m.insert("pr_rereview".into(), cfg.pr_rereview.to_string());
-    m.insert(
-        "pr_review_trigger".into(),
-        cfg.pr_review_trigger.clone(),
-    );
-    m.insert(
-        "pr_reviewer_mode".into(),
-        cfg.pr_reviewer_mode.clone(),
-    );
-    m.insert(
-        "pr_reviewer_model".into(),
-        cfg.pr_reviewer_model.clone(),
-    );
+    m.insert("pr_review_trigger".into(), cfg.pr_review_trigger.clone());
+    m.insert("pr_reviewer_mode".into(), cfg.pr_reviewer_mode.clone());
+    m.insert("pr_reviewer_model".into(), cfg.pr_reviewer_model.clone());
+    m.insert("pr_reviewer_effort".into(), cfg.pr_reviewer_effort.clone());
+    m.insert("planner_model".into(), cfg.planner_model.clone());
+    m.insert("planner_effort".into(), cfg.planner_effort.clone());
+    m.insert("reviewer_model".into(), cfg.reviewer_model.clone());
+    m.insert("reviewer_effort".into(), cfg.reviewer_effort.clone());
     m.insert(
         "pr_review_max_parallel".into(),
         cfg.pr_review_max_parallel.to_string(),
@@ -669,10 +779,10 @@ fn val_bool(v: &Value) -> Result<bool> {
         Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
             "true" | "yes" | "on" | "1" => Ok(true),
             "false" | "no" | "off" | "0" => Ok(false),
-            _ => anyhow::bail!("booléen attendu, reçu « {s} »"),
+            _ => anyhow::bail!("expected boolean, got « {s} »"),
         },
         Value::Number(n) => Ok(n.as_i64().unwrap_or(0) != 0),
-        _ => anyhow::bail!("booléen attendu, reçu {v}"),
+        _ => anyhow::bail!("expected boolean, got {v}"),
     }
 }
 
@@ -680,12 +790,12 @@ fn val_u64(v: &Value) -> Result<u64> {
     match v {
         Value::Number(n) => n
             .as_u64()
-            .with_context(|| format!("entier ≥ 0 attendu, reçu {n}")),
+            .with_context(|| format!("expected integer ≥ 0, got {n}")),
         Value::String(s) => s
             .trim()
             .parse::<u64>()
-            .with_context(|| format!("entier ≥ 0 attendu, reçu « {s} »")),
-        _ => anyhow::bail!("entier attendu, reçu {v}"),
+            .with_context(|| format!("expected integer ≥ 0, got « {s} »")),
+        _ => anyhow::bail!("expected integer, got {v}"),
     }
 }
 
@@ -698,7 +808,7 @@ fn val_string(v: &Value) -> Result<String> {
         Value::Null => String::new(),
         Value::Bool(b) => b.to_string(),
         Value::Number(n) => n.to_string(),
-        other => anyhow::bail!("chaîne attendue, reçu {other}"),
+        other => anyhow::bail!("expected string, got {other}"),
     })
 }
 
@@ -709,7 +819,7 @@ fn val_map(v: &Value) -> Result<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
     let mut push = |k: &str, v: &str| -> Result<()> {
         let k = k.trim();
-        anyhow::ensure!(!k.is_empty(), "entrée repo_workspaces : clé vide");
+        anyhow::ensure!(!k.is_empty(), "repo_workspaces entry: empty key");
         out.insert(k.to_string(), v.trim().to_string());
         Ok(())
     };
@@ -724,7 +834,7 @@ fn val_map(v: &Value) -> Result<BTreeMap<String, String>> {
                 let s = val_string(e)?;
                 let (k, v) = s
                     .split_once('=')
-                    .with_context(|| format!("entrée « {s} » sans « repo=/cwd »"))?;
+                    .with_context(|| format!("entry « {s} » missing « repo=/cwd »"))?;
                 push(k, v)?;
             }
         }
@@ -742,13 +852,86 @@ fn val_map(v: &Value) -> Result<BTreeMap<String, String>> {
                 }
                 let (k, v) = e
                     .split_once('=')
-                    .with_context(|| format!("entrée « {e} » sans « repo=/cwd »"))?;
+                    .with_context(|| format!("entry « {e} » missing « repo=/cwd »"))?;
                 push(k, v)?;
             }
         }
-        _ => anyhow::bail!("objet/CSV « repo=/cwd » attendu, reçu {v}"),
+        _ => anyhow::bail!("expected object/CSV « repo=/cwd », got {v}"),
     }
     Ok(out)
+}
+
+/// Pool workers — tableau JSON `[{profile,count,model,effort,mode}]`
+/// (forme native `component_set_params`/`orchestrator_config`), chaîne
+/// JSON équivalente, ou CSV `profil:count` (`profil=count` accepté) :
+/// `devin:2,claude:1`. `{}`/`[]`/vide = pool vidé → retour au mode
+/// legacy `worker_agent` + `max_workers`. Les champs `model`/`effort`/
+/// `mode` d'une entrée restent optionnels (repli global au spawn) ;
+/// un `count` à 0 est toléré (entrée inerte) — les valeurs hors
+/// vocabulaire du profil ne sont PAS refusées ici : le spawn warn
+/// comme pour les autres params dynamiques.
+fn val_pool(v: &Value) -> Result<Vec<super::cfg::WorkerPoolEntry>> {
+    use super::cfg::WorkerPoolEntry;
+    fn shorthand(s: &str) -> Result<WorkerPoolEntry> {
+        let s = s.trim();
+        let (profile, count_s) = s
+            .split_once(':')
+            .or_else(|| s.split_once('='))
+            .with_context(|| format!("worker_pool entry « {s} » — expected « profile:count »"))?;
+        let count = count_s
+            .trim()
+            .parse::<u32>()
+            .with_context(|| format!("worker_pool « {s} »: count must be an integer"))?;
+        Ok(WorkerPoolEntry {
+            profile: profile.trim().to_string(),
+            count,
+            ..Default::default()
+        })
+    }
+    fn from_value(v: &Value) -> Result<WorkerPoolEntry> {
+        match v {
+            Value::Object(_) => {
+                let get = |k: &str| -> Result<String> {
+                    Ok(v.get(k).map(val_string).transpose()?.unwrap_or_default())
+                };
+                let count = match v.get("count") {
+                    Some(c) => {
+                        u32::try_from(val_u64(c)?).context("worker_pool count out of u32 range")?
+                    }
+                    None => 0,
+                };
+                Ok(WorkerPoolEntry {
+                    profile: get("profile")?,
+                    count,
+                    model: get("model")?,
+                    effort: get("effort")?,
+                    mode: get("mode")?,
+                })
+            }
+            Value::String(s) => shorthand(s),
+            other => anyhow::bail!(
+                "worker_pool entry: expected object or « profile:count », got {other}"
+            ),
+        }
+    }
+    match v {
+        Value::Array(a) => a.iter().map(from_value).collect(),
+        // `{}` natif = pool vidé (même sémantique que la chaîne).
+        Value::Object(o) if o.is_empty() => Ok(Vec::new()),
+        Value::String(s) => {
+            let s = s.trim();
+            if s.is_empty() || s == "[]" || s == "{}" {
+                return Ok(Vec::new());
+            }
+            if s.starts_with('[') {
+                let a: Value =
+                    serde_json::from_str(s).context("worker_pool: invalid JSON array")?;
+                return val_pool(&a);
+            }
+            s.split(',').map(shorthand).collect()
+        }
+        _ => anyhow::bail!("expected JSON array or « profile:count,… », got {v}"),
+    }
 }
 
 /// `true` si `v` est une chaîne vide — « champ vidé = défaut/vide »
@@ -777,16 +960,18 @@ pub(crate) fn apply_patch(
             "metrics" => cfg.metrics = val_bool(v)?,
             "max_workers" => {
                 cfg.max_workers =
-                    u32::try_from(val_u64(v)?).context("max_workers hors borne u32")?
+                    u32::try_from(val_u64(v)?).context("max_workers out of u32 range")?
             }
             // Vide → 0 = non borné (suit max_workers).
             "max_working" => {
                 cfg.max_working = if is_empty(v) {
                     0
                 } else {
-                    u32::try_from(val_u64(v)?).context("max_working hors borne u32")?
+                    u32::try_from(val_u64(v)?).context("max_working out of u32 range")?
                 }
             }
+            // Vide/{}/[] = pool vidé → mode legacy worker_agent+max_workers.
+            "worker_pool" => cfg.worker_pool = val_pool(v)?,
             "poll_secs" => cfg.poll_secs = val_u64(v)?,
             "nudge_cooldown_secs" => cfg.nudge_cooldown_secs = val_u64(v)?,
             // Vide → défaut : un champ cassant ne peut pas être « vidé »,
@@ -798,9 +983,8 @@ pub(crate) fn apply_patch(
                     let s = val_string(v)?;
                     anyhow::ensure!(
                         s.chars().count() >= 4,
-                        "title_prefix « {s} » trop court (< 4) — il \
-                         identifierait comme workers des sessions \
-                         étrangères (nudge/rm sur des sessions utilisateur)"
+                        "title_prefix « {s} » too short (< 4) — it would \
+                         adopt foreign sessions as workers (nudge/rm on user sessions)"
                     );
                     s
                 }
@@ -869,7 +1053,7 @@ pub(crate) fn apply_patch(
             }
             "max_review_rounds" => {
                 cfg.max_review_rounds = u32::try_from(val_u64(v)?)
-                    .context("max_review_rounds hors borne u32")?
+                    .context("max_review_rounds out of u32 range")?
                     .max(1)
             }
             "plan_rereview" => cfg.plan_rereview = val_bool(v)?,
@@ -900,14 +1084,20 @@ pub(crate) fn apply_patch(
                     val_string(v)?
                 }
             }
+            // Model/effort par rôle : vide = repli sur `model` /
+            // `thought_level` globaux (sémantique du champ, pas un
+            // défaut fixe — un "" explicite est la valeur « héritée »).
+            "pr_reviewer_effort" => cfg.pr_reviewer_effort = val_string(v)?,
+            "planner_model" => cfg.planner_model = val_string(v)?,
+            "planner_effort" => cfg.planner_effort = val_string(v)?,
+            "reviewer_model" => cfg.reviewer_model = val_string(v)?,
+            "reviewer_effort" => cfg.reviewer_effort = val_string(v)?,
             "pr_review_max_parallel" => {
                 cfg.pr_review_max_parallel = u32::try_from(val_u64(v)?)
-                    .context("pr_review_max_parallel hors borne u32")?
+                    .context("pr_review_max_parallel out of u32 range")?
                     .max(1)
             }
-            "pr_review_timeout" => {
-                cfg.pr_review_timeout = val_u64(v)?.max(60)
-            }
+            "pr_review_timeout" => cfg.pr_review_timeout = val_u64(v)?.max(60),
             // Vide → défaut ; `{}`/`[]` explicite = map vidée.
             "repo_workspaces" => {
                 cfg.repo_workspaces = if is_empty(v) {
@@ -916,7 +1106,7 @@ pub(crate) fn apply_patch(
                     val_map(v)?
                 }
             }
-            other => anyhow::bail!("clé inconnue « {other} » — connues : {}", KEYS.join(", ")),
+            other => anyhow::bail!("unknown key « {other} » — known: {}", KEYS.join(", ")),
         }
         applied.push(k.clone());
     }
@@ -943,17 +1133,17 @@ pub(crate) fn persist(root: &Path, cfg: &super::cfg::OrchCfg) -> Result<()> {
     let (text, perms) = match std::fs::read_to_string(&path) {
         Ok(t) => (t, std::fs::metadata(&path).ok().map(|m| m.permissions())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), None),
-        Err(e) => return Err(e).context("lecture config.toml"),
+        Err(e) => return Err(e).context("reading config.toml"),
     };
     let mut doc = text
         .parse::<toml_edit::DocumentMut>()
-        .context("config.toml illisible — [backlog_orchestrator] non réécrite")?;
+        .context("unreadable config.toml — [backlog_orchestrator] left unchanged")?;
     // OrchCfg sérialisé : clés simples puis [repo_workspaces] — la table
     // racine du fragment devient la section (ses sous-tables suivent).
-    let frag = toml::to_string(cfg).context("sérialisation OrchCfg")?;
+    let frag = toml::to_string(cfg).context("serializing OrchCfg")?;
     let sub = frag
         .parse::<toml_edit::DocumentMut>()
-        .context("re-parse OrchCfg")?;
+        .context("re-parsing OrchCfg")?;
     doc["backlog_orchestrator"] = toml_edit::Item::Table(sub.as_table().clone());
     commit_config(root, &path, doc.to_string(), perms)
 }
@@ -985,7 +1175,7 @@ pub(crate) fn commit_config(
     perms: Option<std::fs::Permissions>,
 ) -> Result<()> {
     let tmp = root.join("config.toml.part");
-    std::fs::write(&tmp, text).context("écriture config.toml.part")?;
+    std::fs::write(&tmp, text).context("writing config.toml.part")?;
     // Le tmp naît en 0666&~umask : recopier les permissions de
     // l'original (un config 0600 ne doit pas ressortir lisible par
     // tous) ; fichier neuf → 0600, la même retenue que web.token.
@@ -993,9 +1183,9 @@ pub(crate) fn commit_config(
     {
         use std::os::unix::fs::PermissionsExt;
         let p = perms.unwrap_or_else(|| std::fs::Permissions::from_mode(0o600));
-        std::fs::set_permissions(&tmp, p).context("permissions config.toml.part")?;
+        std::fs::set_permissions(&tmp, p).context("config.toml.part permissions")?;
     }
-    std::fs::rename(&tmp, path).context("rename config.toml")?;
+    std::fs::rename(&tmp, path).context("renaming config.toml")?;
     Ok(())
 }
 
@@ -1129,7 +1319,7 @@ mod tests {
         let schema = params_schema(&DynChoices::default(), &agents);
         for key in ["agent", "worker_agent", "reviewer_agent"] {
             let p = schema.iter().find(|p| p.key == key).unwrap();
-            assert_eq!(p.kind, ParamKind::Enum, "{key} doit devenir Enum");
+            assert_eq!(p.kind, ParamKind::Enum, "{key} must become Enum");
             assert!(p.open_enum);
             assert_eq!(p.choices, agents);
         }
@@ -1199,7 +1389,7 @@ mod tests {
         // "{}" et "[]" chaîne = map vidée (canal formulaire/comp set).
         for s in ["{}", "[]"] {
             apply_patch(&mut c, &patch(&[("repo_workspaces", json!(s))])).unwrap();
-            assert!(c.repo_workspaces.is_empty(), "chaîne {s} = map vidée");
+            assert!(c.repo_workspaces.is_empty(), "string {s} = emptied map");
             c.repo_workspaces.insert("R".into(), "/r".into());
         }
         // title_prefix < 4 caractères → refusé (adoption de sessions
@@ -1227,7 +1417,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
         // Contenu non-UTF8 → erreur, fichier intact (jamais
         // d'écrasement aveugle).
@@ -1245,7 +1438,7 @@ mod tests {
         let path = dir.join("config.toml");
         std::fs::write(
             &path,
-            "# commentaire utilisateur\nbind_tcp = \"127.0.0.1:9999\"\n\
+            "# user comment\nbind_tcp = \"127.0.0.1:9999\"\n\
              [backlog_orchestrator]\nenabled = false\nmax_workers = 5\n",
         )
         .unwrap();
@@ -1257,7 +1450,7 @@ mod tests {
         .unwrap();
         persist(&dir, &c).unwrap();
         let txt = std::fs::read_to_string(&path).unwrap();
-        assert!(txt.contains("# commentaire utilisateur"));
+        assert!(txt.contains("# user comment"));
         assert!(txt.contains("127.0.0.1:9999"));
         // Relu via le même parseur que le démon → valeurs identiques.
         let doc: toml::Value = toml::from_str(&txt).unwrap();
@@ -1271,14 +1464,17 @@ mod tests {
     #[test]
     fn schema_couvre_les_cles_et_valeurs() {
         let schema = params_schema(&DynChoices::default(), &[]);
-        assert_eq!(
-            schema.iter().map(|p| p.key.as_str()).collect::<Vec<_>>(),
-            KEYS.to_vec()
-        );
+        // Le schéma est trié par section d'affichage (`group`) — pas
+        // dans l'ordre canonique KEYS : même ensemble, autre ordre.
+        let mut got: Vec<&str> = schema.iter().map(|p| p.key.as_str()).collect();
+        let mut want = KEYS.to_vec();
+        got.sort_unstable();
+        want.sort_unstable();
+        assert_eq!(got, want);
         let c = super::super::cfg::OrchCfg::default();
         let vals = params_values(&c);
         for p in &schema {
-            assert!(vals.contains_key(&p.key), "valeur manquante: {}", p.key);
+            assert!(vals.contains_key(&p.key), "missing value: {}", p.key);
         }
     }
 
@@ -1296,7 +1492,7 @@ mod tests {
             "pr_reviewer_model",
         ] {
             let p = schema.iter().find(|p| p.key == key).unwrap();
-            assert_eq!(p.kind, ParamKind::String, "{key} doit rester String");
+            assert_eq!(p.kind, ParamKind::String, "{key} must stay String");
             assert!(!p.open_enum && p.choices.is_empty());
         }
     }
@@ -1320,10 +1516,7 @@ mod tests {
         assert_eq!(m.choice_labels, vec!["SWE 2", "swe-2-high"]);
         let tl = schema.iter().find(|p| p.key == "thought_level").unwrap();
         assert_eq!(tl.kind, ParamKind::Enum);
-        assert!(
-            tl.choice_labels.is_empty(),
-            "label == valeur → pas de labels"
-        );
+        assert!(tl.choice_labels.is_empty(), "label == value → no labels");
         for key in [
             "planner_mode",
             "reviewer_mode",
@@ -1331,7 +1524,7 @@ mod tests {
             "pr_reviewer_mode",
         ] {
             let p = schema.iter().find(|p| p.key == key).unwrap();
-            assert_eq!(p.kind, ParamKind::Enum, "{key} doit devenir Enum");
+            assert_eq!(p.kind, ParamKind::Enum, "{key} must become Enum");
             assert_eq!(p.choices, vec!["bypass"]);
         }
         let prm = schema
@@ -1384,7 +1577,7 @@ mod tests {
             options: vec![
                 proto::ConfigOpt {
                     value: "a".into(),
-                    name: "Modèle A".into(),
+                    name: "Model A".into(),
                     ..Default::default()
                 },
                 proto::ConfigOpt {
@@ -1399,7 +1592,7 @@ mod tests {
         assert_eq!(
             v,
             vec![
-                ("a".to_string(), "Modèle A".to_string()),
+                ("a".to_string(), "Model A".to_string()),
                 ("b".to_string(), String::new()),
                 ("c".to_string(), "c".to_string()),
             ]
@@ -1459,5 +1652,153 @@ mod tests {
         assert!(dyn_choices(&dir, "nope").models.is_empty());
         assert!(dyn_choices(&dir, "").models.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn patch_worker_pool_json_shorthand_et_replis() {
+        use super::super::cfg::OrchCfg;
+        let mut c = OrchCfg::default();
+        // Défaut : pool vide → capacité = max_workers (legacy).
+        assert!(c.worker_pool.is_empty());
+        assert_eq!(c.worker_capacity(), u64::from(c.max_workers));
+        let es = c.worker_entries();
+        assert_eq!(es.len(), 1);
+        assert_eq!(es[0].count, c.max_workers);
+        assert_eq!(es[0].model, c.model);
+        assert_eq!(es[0].effort, c.thought_level);
+        assert_eq!(es[0].mode, c.mode);
+
+        // JSON natif (array d'objets) — champs vides = replis globaux.
+        apply_patch(
+            &mut c,
+            &patch(&[(
+                "worker_pool",
+                json!([
+                    {"profile": "devin", "count": 2, "model": "default",
+                     "effort": "high", "mode": "agent"},
+                    {"profile": "claude", "count": 1},
+                ]),
+            )]),
+        )
+        .unwrap();
+        assert_eq!(c.worker_pool.len(), 2);
+        assert_eq!(c.worker_capacity(), 3);
+        // max_working = 0 → suit la capacité du pool.
+        assert_eq!(c.max_working_cap(), 3);
+        // worker_entries normalise : claude hérite model/effort/mode.
+        let es = c.worker_entries();
+        assert_eq!(es[1].model, c.model);
+        assert_eq!(es[1].effort, c.thought_level);
+        assert_eq!(es[1].mode, c.mode);
+        // role_agents inclut les profils du pool.
+        assert!(c.role_agents().contains(&"devin"));
+        assert!(c.role_agents().contains(&"claude"));
+
+        // Shorthand « profile:count » et « profile=count ».
+        apply_patch(
+            &mut c,
+            &patch(&[("worker_pool", json!("devin:2,claude=1"))]),
+        )
+        .unwrap();
+        assert_eq!(c.worker_pool.len(), 2);
+        assert_eq!(c.worker_pool[0].count, 2);
+        assert_eq!(c.worker_pool[1].profile, "claude");
+        assert_eq!(c.worker_capacity(), 3);
+
+        // Entrées tolérantes : count 0 et champs vides ne cassent rien.
+        apply_patch(
+            &mut c,
+            &patch(&[(
+                "worker_pool",
+                json!([{"profile": "", "count": 0}, {"count": 2}]),
+            )]),
+        )
+        .unwrap();
+        assert_eq!(c.worker_capacity(), 2);
+        // Profil vide → repli worker_agent→agent.
+        assert_eq!(c.worker_entries()[0].profile, c.agent_or(&c.worker_agent));
+
+        // « [] » / « {} » / vide = retour au mode legacy.
+        for v in [json!("[]"), json!("{}"), json!("")] {
+            apply_patch(&mut c, &patch(&[("worker_pool", v)])).unwrap();
+            assert!(c.worker_pool.is_empty());
+            assert_eq!(c.worker_capacity(), u64::from(c.max_workers));
+        }
+
+        // Roundtrip TOML : `worker_pool` sérialise en array-of-tables
+        // `[[worker_pool]]` (persist → config.toml → relecture).
+        apply_patch(
+            &mut c,
+            &patch(&[(
+                "worker_pool",
+                json!([{"profile": "devin", "count": 2, "effort": "high"}]),
+            )]),
+        )
+        .unwrap();
+        let frag = toml::to_string(&c).unwrap();
+        assert!(frag.contains("worker_pool"), "{frag}");
+        let back: OrchCfg = toml::from_str(&frag).unwrap();
+        assert_eq!(back.worker_pool, c.worker_pool);
+        assert_eq!(back.worker_capacity(), 2);
+    }
+
+    #[test]
+    fn patch_model_effort_par_role() {
+        use super::super::cfg::OrchCfg;
+        let mut c = OrchCfg::default();
+        apply_patch(
+            &mut c,
+            &patch(&[
+                ("planner_model", json!("opus")),
+                ("planner_effort", json!("high")),
+                ("reviewer_model", json!("sonnet")),
+                ("pr_reviewer_effort", json!("max")),
+            ]),
+        )
+        .unwrap();
+        // Posé → utilisé ; vide → repli global.
+        assert_eq!(c.model_or(&c.planner_model), "opus");
+        assert_eq!(c.effort_or(&c.planner_effort), "high");
+        assert_eq!(c.model_or(&c.reviewer_model), "sonnet");
+        assert_eq!(c.model_or(&c.pr_reviewer_model), c.model);
+        assert_eq!(c.effort_or(&c.pr_reviewer_effort), "max");
+        assert_eq!(c.effort_or(&c.reviewer_effort), c.thought_level);
+        // Le schéma expose les nouveaux champs (enum ouvertes).
+        let schema = params_schema(&DynChoices::default(), &[]);
+        for key in [
+            "planner_model",
+            "planner_effort",
+            "reviewer_model",
+            "reviewer_effort",
+            "pr_reviewer_effort",
+        ] {
+            assert!(schema.iter().any(|p| p.key == key), "{key} missing");
+        }
+    }
+
+    #[test]
+    fn schema_sections_groupees() {
+        let agents = vec!["devin".to_string(), "claude".to_string()];
+        let schema = params_schema(&DynChoices::default(), &agents);
+        // Groupes contigus et ordonnés : workers → pipeline →
+        // pr_reviews → general.
+        let groups: Vec<Option<&str>> = schema.iter().map(|p| p.group.as_deref()).collect();
+        let rank = |g: Option<&str>| match g {
+            Some("workers") => 0,
+            Some("pipeline") => 1,
+            Some("pr_reviews") => 2,
+            _ => 3,
+        };
+        assert!(groups.windows(2).all(|w| rank(w[0]) <= rank(w[1])));
+        // workers en premier, et worker_pool y figure avec les
+        // profils déclarés en choices (colonnes du widget « équipe »).
+        assert_eq!(groups[0], Some("workers"));
+        let wp = schema.iter().find(|p| p.key == "worker_pool").unwrap();
+        assert_eq!(wp.group.as_deref(), Some("workers"));
+        assert_eq!(wp.choices, agents);
+        assert!(schema.iter().any(|p| p.key == "max_workers"));
+        assert!(schema
+            .iter()
+            .any(|p| p.key == "pr_reviewer_effort" && p.group.as_deref() == Some("pr_reviews")));
     }
 }

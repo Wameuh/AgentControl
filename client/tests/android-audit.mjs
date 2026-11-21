@@ -117,7 +117,7 @@ await page.evaluateOnNewDocument(`
       return Promise.resolve(typeof o === "function" ? o(params) : o);
     }
     if (cmd === "connect") {
-      return Promise.resolve({ version: "0.2.9", sessions: 4, servers: 1,
+      return Promise.resolve({ version: "0.10.0", sessions: 4, servers: 1,
         terminal: true, first_post: true });
     }
     return __inv(cmd, args);
@@ -128,7 +128,7 @@ await page.evaluateOnNewDocument(`
   // daemon_status = map par conn ({local: {caps…}}) — les bools deviennent
   // les capabilities de conns.cap("local") : items Terminal/First-post du ⋮.
   window.__rpcOver.daemon_status = () => ({
-    local: { version: "0.2.9", sessions: 4, terminal: true, first_post: true } });
+    local: { version: "0.10.0", sessions: 4, terminal: true, first_post: true } });
   const __TEXT = "export async function apiCall(url, opts) {\\n" +
     "  return withRetry(() => fetch(url, opts), 3);\\n}\\n\\n" +
     "async function withRetry(fn, n) {\\n  try { return await fn(); }\\n" +
@@ -234,20 +234,9 @@ const closeDialogs = async () => {
   });
   await sleep(200);
 };
-const drawerOpen = () =>
-  ev(() => document.getElementById("sidebar")?.classList.contains("open"));
-const openDrawer = async () => {
-  if (!(await drawerOpen())) await tap("#tb-menu", 450);
-};
-const closeDrawer = async () => {
-  // Clic sur le scrim = chemin de fermeture utilisateur réel (nav-aware :
-  // scrim.onclick → nav.close("drawer")). Évite de taper #tb-menu sous le
-  // drawer — il recouvre la titlebar et le tap tomberait sur #btn-connect.
-  for (let i = 0; i < 3 && (await drawerOpen()); i++) {
-    await ev(() => document.getElementById("scrim")?.click());
-    await sleep(250);
-  }
-};
+// Phase 3 : plus de drawer — l'accueil Agents est l'écran racine
+// (body.m-home), la session est empilée au-dessus (body.m-in-session).
+const onHome = () => ev(() => document.body.classList.contains("m-home"));
 // Les toasts recouvrent la titlebar (z 55) — à fermer avant les taps du haut.
 const dismissToasts = () =>
   ev(() => document.querySelectorAll(".toast-x").forEach((b) => b.click()));
@@ -255,9 +244,19 @@ const dismissToasts = () =>
 // l'entrée racine a state null → ne jamais dépasser (sinon la page sort).
 const appBack = async () => {
   if (!(await ev(() => history.state && history.state.ac != null))) return false;
-  await page.goBack();
+  // history.back() en evaluate : page.goBack() attend une « navigation »
+  // qui n'arrive jamais sur les waypoints pushState (timeout 30 s).
+  await ev(() => history.back());
   await sleep(320);
   return true;
+};
+// Dépile overlays + écran session jusqu'à l'accueil. Les entrées « mortes »
+// (overlay refermé sans back = waypoint transparent) restent dans
+// l'historique : goBack n'en saute qu'une par appel — cap large.
+const goHome = async () => {
+  for (let i = 0; i < 40 && !(await onHome()); i++) {
+    if (!(await appBack())) break;
+  }
 };
 // Ferme un menu ctx bottom-sheet via un clic au-dehors (handler window).
 const dismissCtx = () =>
@@ -291,7 +290,7 @@ async function collect(screen) {
     for (const el of document.querySelectorAll("body *")) {
       if (n >= 6) break;
       if (!vis(el)) continue;
-      if (el.closest("#sidebar:not(.open), #file-viewer:not(.open)")) continue;
+      if (el.closest("#file-viewer:not(.open)")) continue;
       const r = el.getBoundingClientRect();
       if (r.right < 0) continue; // entièrement hors-champ gauche = off-canvas
       if (r.right > vw + 1 || r.left < -1) {
@@ -311,7 +310,9 @@ async function collect(screen) {
     // compacts ; hauteur seule pour les lignes quasi pleine largeur).
     // Seuil à 43 : tolérance sub-pixel — getBoundingClientRect rend des
     // fractions, un élément théoriquement 44px peut mesurer 43.6px.
-    const SEL = "button, select, input, textarea, a[href], [role=tab], .sess, .fnode, .fhit, .froot, .om-item, .ac-item, .pr, .pr-sess, .sv, .sr-row, .q-item button, .perm-opts button, label.s-row, .tool-head, .btn-more, .toast-x, .grp-add, .sess-del, .badge.st-dead, .badge.st-failed";
+    // .mh-seg / .mh-chip exclus : contrôles compacts ~30px dessinés ainsi
+    // dans la maquette (segmented control iOS, puces de flotte M3).
+    const SEL = "button:not(.mh-seg):not(.mh-chip), select, input, textarea, a[href], [role=tab], .sess, .fnode, .fhit, .froot, .om-item, .ac-item, .pr, .pr-sess, .sv, .sr-row, .q-item button, .perm-opts button, label.s-row, .tool-head, .btn-more, .toast-x, .grp-add, .sess-del, .badge.st-dead, .badge.st-failed";
     const seen = new Set();
     for (const el of document.querySelectorAll(SEL)) {
       if (seen.size >= 25) break;
@@ -373,13 +374,20 @@ await page.goto(`http://[::1]:${PORT}/`, { waitUntil: "networkidle0" });
 await shot("a01-boot", 500);
 await collect("a01-boot");
 
-// ── Drawer ───────────────────────────────────────────────────────────────────
-await tap("#tb-menu", 450);
-await shot("a02-drawer");
-await collect("a02-drawer");
+// ── Accueil Agents plein écran (racine — plus de drawer) ─────────────────────
+await shot("a02-home");
+await collect("a02-home");
+if (!(await onHome())) V("a02-home", "nav", "body.m-home absent au boot");
+if (!(await visible("#side-view")))
+  V("a02-home", "nav", "barre de navigation basse absente");
+if (!(await visible("#btn-new-session")))
+  V("a02-home", "nav", "FAB nouvelle session absent de l'accueil");
 
-// ── Dialogue connexion (bottom sheet) ────────────────────────────────────────
-await tap("#btn-connect", 500);
+// ── Dialogue connexion (via la puce #m-conn → feuille d'actions) ─────────────
+await tap("#m-conn", 400);
+await ev(() => [...document.querySelectorAll("#omenu .om-item")]
+  .find((b) => /connexion|connection/i.test(b.textContent))?.click());
+await sleep(400);
 await shot("a03-connect");
 await collect("a03-connect");
 await ev(() => {
@@ -393,12 +401,95 @@ await tap("#c-go", 900);
 await shot("a04-connected");
 await collect("a04-connected");
 
-// ── Vue Repos ────────────────────────────────────────────────────────────────
+// ── Vues de la barre basse : Repos, Backlog, Diagramme ───────────────────────
 await step("a05-repos", async () => {
   await tap("#sv-repos", 500);
   await shot("a05-repos");
   await collect("a05-repos");
-  await tap("#sv-agents", 400);
+});
+await step("a05b-backlog", async () => {
+  await tap("#sv-backlog", 500);
+  await shot("a05b-backlog");
+  await collect("a05b-backlog");
+});
+await step("a05c-map", async () => {
+  await tap("#sv-map", 600);
+  await shot("a05c-map");
+  await collect("a05c-map");
+  if (!(await ev(() => document.body.classList.contains("m-map"))))
+    V("a05c-map", "nav", "body.m-map absent — barre basse masquée ?");
+  if (!(await visible("#side-view")))
+    V("a05c-map", "nav", "barre basse non visible par-dessus le diagramme");
+  // N5 : pan au doigt (viewBox bouge sans ouvrir de session), double tap
+  // = retour à la vue de référence.
+  const vb0 = await ev(() => document.getElementById("map-svg")?.getAttribute("viewBox"));
+  const box = await ev(() => {
+    const r = document.getElementById("map-svg")?.getBoundingClientRect();
+    return r ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
+  });
+  if (vb0 && box) {
+    await page.touchscreen.touchStart(box.x, box.y);
+    for (let i = 1; i <= 5; i++)
+      await page.touchscreen.touchMove(box.x + i * 12, box.y - i * 8);
+    await page.touchscreen.touchEnd();
+    await sleep(200);
+    const vb1 = await ev(() => document.getElementById("map-svg")?.getAttribute("viewBox"));
+    if (vb1 === vb0) V("a05c-map", "nav", "glisser sur le diagramme n'a pas déplacé le viewBox");
+    if (await ev(() => document.body.classList.contains("m-in-session")))
+      V("a05c-map", "nav", "le glisser a ouvert une session");
+    await page.touchscreen.tap(box.x, box.y);
+    await sleep(120);
+    await page.touchscreen.tap(box.x, box.y);
+    await sleep(250);
+    const vb2 = await ev(() => document.getElementById("map-svg")?.getAttribute("viewBox"));
+    if (vb2 !== vb0) V("a05c-map", "nav", "double tap n'a pas restauré la vue de référence");
+  }
+  await ev(() => document.getElementById("map-close")?.click());
+  await sleep(300);
+});
+await tap("#sv-agents", 400);
+
+// ── Accueil « par état » (N3) : segmenté, carte À traiter, réponse ───────────
+await step("a05d-inbox", async () => {
+  if (!(await visible("#m-home-seg")))
+    V("a05d-inbox", "nav", "contrôle segmenté État|Groupes absent");
+  // L'accueil s'ouvre en mode État (profil neuf, aucun choix mémorisé).
+  if (!(await ev(() =>
+    document.querySelector('.mh-seg[data-m="state"]')?.classList.contains("on"))))
+    V("a05d-inbox", "nav", "mode État non actif par défaut");
+  // Indice d'appui long (N4) : posé dès que l'accueil a listé des sessions.
+  if (!(await ev(() => { try { return !!localStorage.getItem("ac-hint-longpress"); } catch { return false; } })))
+    V("a05d-inbox", "nav", "indice d'appui long jamais affiché");
+  await ev(() => document.querySelector('.mh-seg[data-m="state"]')?.click());
+  await sleep(600);
+  await shot("a05d-inbox");
+  await collect("a05d-inbox");
+  if (!(await visible("#m-home-state")))
+    V("a05d-inbox", "nav", "vue par état non affichée");
+  if (await ev(() => !document.getElementById("session-list").hidden))
+    V("a05d-inbox", "nav", "arbre encore visible en mode État");
+  // Carte « À traiter » de s4 (waiting_input + permission r1).
+  if (!(await ev(() => !!document.querySelector("#mh-sec-todo .mh-card"))))
+    V("a05d-inbox", "nav", "carte À traiter absente");
+  const opts = await ev(() =>
+    [...document.querySelectorAll("#mh-sec-todo .mh-card-acts .btn")]
+      .map((b) => b.textContent.trim()));
+  if (!opts.length) V("a05d-inbox", "nav", "options de la demande absentes");
+  // reject_* en premier : « Refuser » doit précéder « Autoriser une fois ».
+  if (opts.length && !/refuser|reject/i.test(opts[0]))
+    V("a05d-inbox", "nav", `tri des options : 1re = «${opts[0]}» (reject attendu)`);
+  // Répondre depuis la carte : allow_once débloque l'agent → au refresh,
+  // s4 repart « working » et la section À traiter disparaît.
+  await ev(() => [...document.querySelectorAll("#mh-sec-todo .mh-card-acts .btn")]
+    .find((b) => /une fois|once/i.test(b.textContent))?.click());
+  await sleep(900);
+  if (await ev(() => !!document.getElementById("mh-sec-todo")))
+    V("a05d-inbox", "nav", "section À traiter toujours visible après réponse");
+  // Retour en mode Groupes : l'arbre reparaît.
+  await ev(() => document.querySelector('.mh-seg[data-m="group"]')?.click());
+  await sleep(400);
+  if (await ev(() => document.getElementById("session-list").hidden))
+    V("a05d-inbox", "nav", "arbre absent en mode Groupes");
 });
 
 // ── Menu contextuel session (long-press) + vérif double-push ─────────────────
@@ -412,6 +503,34 @@ await dismissCtx();
 await sleep(250);
 await ev(() => { if (!document.getElementById("sctx").hidden) document.getElementById("sctx").hidden = true; });
 
+// ── Glisser-gauche (N4) : révèle Endormir / Supprimer, tap dehors ferme ──────
+await step("a06b-swipe", async () => {
+  const box = await ev(() => {
+    const b = document.querySelector(".sess").getBoundingClientRect();
+    return { x: b.x + b.width - 20, y: b.y + b.height / 2 };
+  });
+  await page.touchscreen.touchStart(box.x, box.y);
+  for (let i = 1; i <= 8; i++)
+    await page.touchscreen.touchMove(box.x - i * 15, box.y);
+  await page.touchscreen.touchEnd();
+  await sleep(350);
+  if (!(await ev(() => !!document.querySelector(".sess .sess-acts"))))
+    V("a06b-swipe", "nav", "glisser-gauche n'a pas révélé les actions");
+  await shot("a06b-swipe");
+  await page.touchscreen.tap(40, 500);
+  await sleep(350);
+  if (await ev(() => !!document.querySelector(".sess .sess-acts")))
+    V("a06b-swipe", "nav", "bande d'actions non refermée au tap extérieur");
+  // Un défilement vertical ne doit jamais engager le glisser.
+  await page.touchscreen.touchStart(box.x, box.y + 100);
+  for (let i = 1; i <= 8; i++)
+    await page.touchscreen.touchMove(box.x - i * 2, box.y + 100 - i * 12);
+  await page.touchscreen.touchEnd();
+  await sleep(250);
+  if (await ev(() => !!document.querySelector(".sess .sess-acts")))
+    V("a06b-swipe", "nav", "défilement vertical a révélé les actions");
+});
+
 // ── Menu contextuel groupe (long-press sur un header de groupe) ──────────────
 await step("a07-grp-ctx", async () => {
   if (!await visible(".grp-head")) throw new Error("pas de .grp-head visible");
@@ -423,21 +542,113 @@ await step("a07-grp-ctx", async () => {
   await ev(() => { if (!document.getElementById("sctx").hidden) document.getElementById("sctx").hidden = true; });
 });
 
-// ── Session s1 (working + permission + queue) ────────────────────────────────
+// ── Session s1 (working + permission + queue) : push « session » ─────────────
 await page.evaluate(() => document.querySelector(".sess")?.click());
 await sleep(800);
 await shot("a08-chat");
 await collect("a08-chat");
+if (!(await ev(() => document.body.classList.contains("m-in-session"))))
+  V("a08-chat", "nav", "m-in-session absent après ouverture de session");
+if (await onHome())
+  V("a08-chat", "nav", "m-home encore posé en session");
+if (!(await visible("#m-sbar-nav")))
+  V("a08-chat", "nav", "bouton retour ‹ absent de la barre session");
 
-// ── Sheet ⋮ du chat ──────────────────────────────────────────────────────────
+// ── File d'attente : la puce ouvre la feuille basse ─────────────────────────
+await step("a08b-queue-sheet", async () => {
+  if (!(await visible("#queue-open"))) throw new Error("#queue-open absent");
+  await tap("#queue-open", 450);
+  if (!(await visible("#queue-panel"))) throw new Error("#queue-panel non ouvert");
+  await shot("a08b-queue-sheet");
+  await collect("a08b-queue-sheet");
+  // Fermeture par le ✕ (chemin utilisateur complet — le scrim se retire).
+  await click("#qp-close");
+  await sleep(300);
+});
+
+// ── Dock de permission (S3) : la carte r1 vit au-dessus du composer ──────────
+await step("a08c-perm-dock", async () => {
+  if (!(await visible("#perm-dock"))) throw new Error("#perm-dock absent");
+  if (!(await visible("#perm-dock .pd-opts"))) throw new Error("pd-opts absent");
+  await shot("a08c-perm-dock");
+  await collect("a08c-perm-dock");
+  // Le mock annonce « Toujours autoriser » en premier : l'action principale
+  // doit rester « Autoriser une fois », placée en dernier (à droite).
+  const prim = await ev(() => {
+    const bs = [...document.querySelectorAll("#perm-dock .pd-opts button")];
+    const p = document.querySelector("#perm-dock .pd-opts .pd-primary");
+    return { text: p?.textContent ?? "", last: !!p && bs[bs.length - 1] === p };
+  });
+  if (!/une fois|once/i.test(prim.text) || !prim.last)
+    V("a08c-perm-dock", "nav", `action principale du dock : «${prim.text}» (allow_once à droite attendu)`);
+  // Réponse depuis le dock = clic sur le bouton réel de la carte : la
+  // carte passe .done et le dock se referme tout seul (observer rAF).
+  await click("#perm-dock .pd-opts .btn-allow.pd-primary");
+  await sleep(400);
+  if (await ev(() => !document.querySelector("#events .ev.perm.done")))
+    throw new Error("carte perm non résolue par le dock");
+  if (await visible("#perm-dock")) throw new Error("dock encore visible après résolution");
+});
+
+// ── Composer pilule (C1) : classe m-input-empty selon le contenu ─────────────
+await step("a08d-send-mic", async () => {
+  const empty = await ev(() => document.body.classList.contains("m-input-empty"));
+  if (!empty) throw new Error("m-input-empty absent avec champ vide");
+  await ev(() => {
+    const i = document.getElementById("input");
+    i.value = "bonjour"; i.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await sleep(300);
+  const still = await ev(() => document.body.classList.contains("m-input-empty"));
+  if (still) throw new Error("m-input-empty persistant après frappe");
+  await ev(() => {
+    const i = document.getElementById("input");
+    i.value = ""; i.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await sleep(300);
+});
+
+// ── Suite d'outils (S4) : seqs 3-4 consécutifs → « +N outils » sur le dernier
+await step("a08e-tool-run", async () => {
+  await ev(() => document.querySelector("#events .ev.tool.run-last")
+    ?.scrollIntoView({ block: "center" }));
+  await sleep(300);
+  const sum = await ev(() => document.querySelector(".run-sum")?.textContent ?? "");
+  if (!sum.trim()) throw new Error("pastille .run-sum absente sur la suite 3-4");
+  if (await ev(() => {
+    const r = document.querySelector(".ev.tool.run-rest");
+    return r && getComputedStyle(r).display !== "none";
+  })) throw new Error("membre run-rest visible alors que la suite est repliée");
+  await shot("a08e-tool-run");
+  await collect("a08e-tool-run");
+  // Tap sur la pastille → la suite se déplie (et se replie au tap suivant).
+  await ev(() => document.querySelector(".run-sum")?.click());
+  await sleep(300);
+  if (await ev(() => {
+    const r = document.querySelector(".ev.tool.run-rest");
+    return !r || getComputedStyle(r).display === "none";
+  })) throw new Error("suite non dépliée au tap de la pastille");
+  await ev(() => document.querySelector(".run-sum")?.click());
+  await sleep(200);
+});
+
+// ── Feuille Session (tap sur le titre de la barre) ───────────────────────────
 await dismissToasts();
-await tap("#chat-more", 400);
-await shot("a09-chat-sheet");
-await collect("a09-chat-sheet");
+await tap("#m-sbar-title", 400);
+await shot("a09-session-sheet");
+await collect("a09-session-sheet");
+// Section modèle : liste radio des variantes annoncées.
+await step("a09b-model", async () => {
+  await ev(() => document.querySelector("#dlg-session .ss-radios")
+    ?.scrollIntoView({ block: "center" }));
+  await sleep(250);
+  await shot("a09b-session-model-list");
+  await collect("a09b-session-model-list");
+});
 
-// ── Recherche dans l'historique (via le sheet) ───────────────────────────────
+// ── Recherche dans l'historique (via la feuille Session) ─────────────────────
 await step("a10-search", async () => {
-  await ev(() => [...document.querySelectorAll("#omenu .om-item")]
+  await ev(() => [...document.querySelectorAll("#dlg-session .ss-act")]
     .find((b) => /recherche|search/i.test(b.textContent))?.click());
   await sleep(400);
   await shot("a10-search");
@@ -484,10 +695,10 @@ if (nEvAfter <= nEvBefore) V("a13-live-append", "live-append", `events ${nEvBefo
 await shot("a13-live");
 await collect("a13-live");
 
-// ── Explorateur de fichiers (entrée du menu ⋮) ───────────────────────────────
+// ── Explorateur de fichiers (entrée de la feuille Session) ──────────────────
 await dismissToasts();
-await tap("#chat-more", 350);
-await ev(() => [...document.querySelectorAll("#omenu .om-item")]
+await tap("#m-sbar-title", 350);
+await ev(() => [...document.querySelectorAll("#dlg-session .ss-act")]
   .find((b) => /fichier|files|workspace/i.test(b.textContent))?.click());
 await sleep(600);
 await shot("a14-files");
@@ -573,9 +784,10 @@ await step("a20-image", async () => {
 await ev(() => document.getElementById("file-close")?.click());
 await sleep(350);
 
-// ── Dialogue nouvelle session ────────────────────────────────────────────────
+// ── Dialogue nouvelle session (FAB de l'accueil) ─────────────────────────────
 await dismissToasts();
-await openDrawer();
+await goHome();
+if (!(await onHome())) V("a21-new-session", "nav", "retour accueil impossible");
 await tap("#btn-new-session", 550);
 await shot("a21-new-session");
 await collect("a21-new-session");
@@ -583,22 +795,13 @@ await ev(() => { const d = document.getElementById("dlg-new"); d.scrollTop = d.s
 await shot("a21b-new-scrolled", 250);
 await ev(() => document.getElementById("f-cancel")?.click());
 await sleep(300);
-await closeDrawer();
 
-// ── Dialogue groupe (via ctx session) ────────────────────────────────────────
+// ── Dialogue groupe (via ctx session, depuis l'accueil) ──────────────────────
 await step("a22-group-dlg", async () => {
-  await openDrawer();
-  await sleep(400); // fin de l'animation slide-in (boundingBox stable)
+  await goHome();
+  await sleep(300);
   if (!(await visible(".sess"))) throw new Error("pas de .sess visible");
   for (let i = 0; i < 3 && !(await visible("#sctx")); i++) {
-    if (!(await drawerOpen())) await openDrawer(); // un clic parasite a pu refermer
-    if (i === 2) {
-      const b = await ev(() => {
-        const r = document.querySelector(".sess")?.getBoundingClientRect();
-        return r ? `${Math.round(r.x)},${Math.round(r.y)} ${Math.round(r.width)}x${Math.round(r.height)}` : "null";
-      });
-      console.log("  .sess box:", b, "| drawer:", await drawerOpen());
-    }
     await longPress(".sess");
     await sleep(350);
   }
@@ -612,11 +815,13 @@ await step("a22-group-dlg", async () => {
   await ev(() => document.getElementById("g-cancel")?.click());
   await sleep(250);
 });
-await closeDrawer();
 
-// ── Dialogue reprise (via /resume) ───────────────────────────────────────────
+// ── Dialogue reprise (via /resume, en session) ───────────────────────────────
 await step("a23-resume", async () => {
   await closeDialogs();
+  await goHome();
+  await ev(() => document.querySelector(".sess")?.click());
+  await sleep(600);
   await ev(() => {
     const i = document.querySelector("#input");
     i.value = "/resume";
@@ -630,26 +835,38 @@ await step("a23-resume", async () => {
   await sleep(250);
 });
 
-// ── Paramètres ───────────────────────────────────────────────────────────────
+// ── Paramètres (⋮ de l'accueil — la section Application a quitté la
+//    feuille Session en phase 3) ─────────────────────────────────────────────
 await step("a24-settings", async () => {
   await closeDialogs();
   await dismissToasts();
+  await goHome();
   await tap("#tb-more", 400);
   await ev(() => [...document.querySelectorAll("#omenu .om-item")]
     .find((b) => /param|settings/i.test(b.textContent))?.click());
-  await sleep(450);
+  await sleep(500);
   await shot("a24-settings");
   await collect("a24-settings");
+  // Y4 : la vue s'ouvre en liste de sections fermées (lignes 56 px) —
+  // référentiel visuel de la spec.
+  await shot("a13-settings-list");
+  await collect("a13-settings-list");
+  // Tap sur la section « Mises à jour » → sous-écran : les autres
+  // sections disparaissent, le titre monte dans l'en-tête.
+  await tap("#s-sec-update > summary", 500);
+  await shot("a13b-settings-section");
+  await collect("a13b-settings-section");
   await tap("#s-checkupdate", 800);
   await shot("a24b-settings-update");
   await collect("a24b-settings-update");
   await tap("#settings-close", 350);
 });
 
-// ── À propos ─────────────────────────────────────────────────────────────────
+// ── À propos (⋮ de l'accueil) ────────────────────────────────────────────────
 await step("a25-about", async () => {
   await closeDialogs();
   await dismissToasts();
+  await goHome();
   await tap("#tb-more", 400);
   await ev(() => [...document.querySelectorAll("#omenu .om-item")]
     .find((b) => /about|propos/i.test(b.textContent))?.click());
@@ -674,18 +891,36 @@ await step("a26-outdated", async () => {
   await sleep(250);
 });
 
-// ── Panneau terminal (caps injectées) ────────────────────────────────────────
+// ── Panneau terminal (caps injectées) — entrée de la feuille Session ────────
 await step("a27-term", async () => {
   await closeDialogs();
   await dismissToasts();
-  await tap("#chat-more", 350);
-  await ev(() => [...document.querySelectorAll("#omenu .om-item")]
+  await goHome();
+  await ev(() => document.querySelector(".sess")?.click());
+  await sleep(600);
+  await tap("#m-sbar-title", 350);
+  await ev(() => [...document.querySelectorAll("#dlg-session .ss-act")]
     .find((b) => /terminal/i.test(b.textContent))?.click());
   await sleep(700);
   if (!(await visible("#term-panel")))
     V("a27-term", "script-step", "item Terminal absent du ⋮ ou panneau non ouvert (caps watchdog ?)");
   await shot("a27-term");
   await collect("a27-term");
+  // S5 : plein écran + rangée de touches — Ctrl tap = « once » (pastille),
+  // re-tap = relâché. La rangée garde le clavier ouvert (pointerdown).
+  // Checks gatés sur le panneau : le flake caps ci-dessus a déjà son constat.
+  if (await visible("#term-panel")) {
+    if (!(await visible("#term-keys")))
+      V("a27-term", "term-keys", "rangée de touches absente en plein écran");
+    const cst = await ev(() => document.querySelector(".tkey-ctrl")?.dataset.state);
+    if (cst !== "off") V("a27-term", "term-keys", `ctrl initial=${cst}`);
+    await ev(() => document.querySelector(".tkey-ctrl")?.click());
+    await sleep(200);
+    const cst2 = await ev(() => document.querySelector(".tkey-ctrl")?.dataset.state);
+    if (cst2 !== "once") V("a27-term", "term-keys", `ctrl après tap=${cst2}`);
+    await ev(() => document.querySelector(".tkey-ctrl")?.click());
+  }
+  await shot("a12-terminal");
   await ev(() => document.getElementById("btn-term-hide")?.click());
   await sleep(300);
 });
@@ -707,47 +942,34 @@ await ev(async () => {
 await sleep(400);
 await collect("a28b-rafale");
 
-// ── Back-stack : drawer + ctx session → back ×2 dépile un par un ────────────
-// NB : la combinaison drawer + sheet ⋮ est INATTEIGNABLE au tactile — tout
-// tap hors du drawer tombe sur le scrim (qui ferme le drawer). Le combo
-// réellement empilable est drawer + #sctx (long-press sur une ligne session).
+// ── Back-stack : ctx session sur l'accueil → back ferme sctx seul ;
+//    puis entrée en session → back ramène à l'accueil (N2) ───────────────────
 await step("a29-backstack", async () => {
   await closeDialogs();
   await dismissToasts();
-  await openDrawer();
-  await sleep(400);
+  await goHome();
+  await sleep(300);
   for (let i = 0; i < 3 && !(await visible("#sctx")); i++) {
-    if (!(await drawerOpen())) await openDrawer();
     await longPress(".sess");
     await sleep(350);
   }
   if (!(await visible("#sctx"))) throw new Error("sctx non ouvert — setup impossible");
-  if (!(await drawerOpen())) throw new Error("drawer fermé avant le test");
   await shot("a29-stack");
   await appBack();
   if (await visible("#sctx"))
     V("a29-backstack", "back-stack", "back n'a pas fermé sctx");
-  if (!(await drawerOpen()))
-    V("a29-backstack", "back-stack", "le 1er back a aussi fermé le drawer");
-  await appBack();
-  if (await drawerOpen())
-    V("a29-backstack", "back-stack", "2e back n'a pas fermé le drawer");
+  if (!(await onHome()))
+    V("a29-backstack", "back-stack", "le back sctx a quitté l'accueil");
+  // « session » empilé : le ‹ de la barre session = history.back().
+  await ev(() => document.querySelector(".sess")?.click());
+  await sleep(700);
+  if (!(await ev(() => document.body.classList.contains("m-in-session"))))
+    throw new Error("m-in-session absent — session non empilée");
+  await tap("#m-sbar-nav", 500);
+  if (!(await onHome()))
+    V("a29-backstack", "back-stack", "‹ session n'a pas ramené à l'accueil");
   await shot("a29b-after-backs");
 });
-
-// ── Landscape ────────────────────────────────────────────────────────────────
-await page.setViewport({ ...PORTRAIT, width: 915, height: 412 });
-await sleep(450);
-await shot("a30-landscape");
-await collect("a30-landscape");
-await openDrawer();
-await shot("a30b-landscape-drawer");
-await collect("a30b-landscape-drawer");
-// Le drawer recouvre la titlebar → ne pas retaper #tb-menu (tomberait sur
-// #btn-connect) : fermer via goBack (pile nav).
-await closeDrawer();
-await page.setViewport(PORTRAIT);
-await sleep(450);
 
 // ── Grande liste de sessions (40) — perf + overflow ─────────────────────────
 await setRpc("list_sessions", () => {
@@ -768,11 +990,10 @@ await setRpc("list_sessions", () => {
 await step("a31-many", async () => {
   await closeDialogs();
   await dismissToasts();
-  // Déclenche sidebar.refresh() → list_sessions re-fetch (l'ouverture du
-  // drawer ne recharge pas).
+  // Déclenche sidebar.refresh() → list_sessions re-fetch.
   await emit("session-event", { session: "s1", event: { type: "status_changed", state: "working" } });
   await sleep(500);
-  await openDrawer();
+  await goHome();
   await sleep(600);
   await shot("a31-many-sessions");
   await collect("a31-many-sessions");
@@ -788,7 +1009,7 @@ await step("a31-many", async () => {
   console.log(`  scroll 20 frames : ${scrollMs}ms (${(scrollMs / 20).toFixed(1)}ms/frame)`);
   if (scrollMs / 20 > 32) V("a31-many", "scroll-perf", `${(scrollMs / 20).toFixed(1)}ms/frame > 32ms`);
   await page.screenshot({ path: `${OUT}/a31b-scrolled.png` });
-  await tap("#sess-filter-input", 200);
+  await tap("#m-search", 250);
   await page.type("#sess-filter-input", "Groupe 2");
   await sleep(400);
   await shot("a31c-filtered");

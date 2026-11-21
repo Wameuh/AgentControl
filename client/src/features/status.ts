@@ -7,6 +7,7 @@ import { invoke, isWeb } from "../core/bridge";
 import { gemSVG } from "../crystal";
 import { $ } from "../core/dom";
 import { t } from "../i18n";
+import type { SessionMeta } from "../core/types";
 
 /** Gemme d'état : dorée working, violette compacting, rouge question/failed,
  *  verte idle, grise dead, **opale wait** — attente transitoire (backoff
@@ -39,6 +40,12 @@ export function dotIcon(state: string, lastError?: LastError | null): string {
   return gemSVG(DOT_ROLE[dotKey(state, lastError)] ?? "slate");
 }
 
+/** Rôle de gemme d'un état (`DOT_ROLE[dotKey]` ou "slate") — sert au
+ *  regroupement « par état » de l'accueil mobile (N3). */
+export function dotRole(state: string, lastError?: LastError | null): string {
+  return DOT_ROLE[dotKey(state, lastError)] ?? "slate";
+}
+
 /** Classe `st-*` whitelistée pour l'attribut class : un état arbitraire
  *  (jamais prévu côté démon, mais la confiance n'est pas un filtre)
  *  retombe sur "dead" plutôt que d'être interpolé brut. */
@@ -56,6 +63,29 @@ export function setAppIcon(state: string) {
   lastIconState = state;
   invoke("set_app_icon", { state }).catch(() => {});
 }
+
+/** État agrégé de la flotte → la valeur passée à setAppIcon : « red » si
+ *  une question attend, « gold » si un agent tourne, « violet » si une
+ *  session compacte, « base » tant qu'il reste des sessions vivantes,
+ *  « grey » sinon. Partagé par l'icône fenêtre et l'onglet Agents mobile. */
+export function aggregateIcon(list: SessionMeta[]): string {
+  const live = list.filter((s) =>
+    !s.offline && s.state !== "dead" && s.state !== "interrupted" &&
+    s.state !== "asleep" && s.state !== "wait-asleep");
+  return live.some((s) => s.state === "waiting_input") ? "red"
+    : live.some((s) =>
+        s.state === "working" || s.state === "running" || s.state === "starting")
+      ? "gold"
+    : live.some((s) => s.state === "compacting") ? "violet"
+    : live.length > 0 ? "base" : "grey";
+}
+
+/** État agrégé (valeur d'aggregateIcon) → rôle de gemme pour l'onglet
+ *  Agents de la barre basse mobile. */
+export const AGG_ICON_ROLE: Record<string, string> = {
+  red: "inference", gold: "human", violet: "agent",
+  base: "neutral", grey: "slate",
+};
 
 /** Bloc `host` du daemon_status de la conn active — absent sur un vieux
  *  démon → la section reste masquée silencieusement. */
@@ -114,14 +144,26 @@ async function updateStatusbar() {
     // n'affiche que le trafic de la WebSocket vers le démon.
     const el = $("sb-stats");
     const host = hostPart();
-    el.textContent = (isWeb
+    // Le segment `mem` est cliquable → dialogue de répartition
+    // (features/meminfo.ts). Web : pas de RSS process → le span est
+    // absent et c'est #sb-stats entier qui ouvre le dialogue.
+    const memSeg = isWeb
+      ? ""
+      : `<span id="sb-mem" class="clk">mem ${Math.round(s.rss_mb)} MB</span>`;
+    const body = isWeb
       ? `↓${fmt(s.rx_bps)} ↑${fmt(s.tx_bps)}`
-      : `mem ${Math.round(s.rss_mb)} MB · cpu ${s.cpu.toFixed(1)}% · ↓${fmt(s.rx_bps)} ↑${fmt(s.tx_bps)}`)
-      + host;
+      : `${memSeg} · cpu ${s.cpu.toFixed(1)}% · ↓${fmt(s.rx_bps)} ↑${fmt(s.tx_bps)}`;
+    const txt = body + host;
+    // Sonde 3 s : n'écrire que si le texte a changé — innerHTML= le
+    // remplace même à l'identique (mutation DOM → invalidation pour rien).
+    if (el.innerHTML !== txt) el.innerHTML = txt;
     // Tooltip : l'espace est trop compté pour expliciter chaque
     // métrique inline — la portée (client / hôte entier / process
-    // démon) est détaillée au survol.
-    el.title = t("sb_stats_tip") + (host ? `\n${t("sb_srv_tip")}` : "");
+    // démon) est détaillée au survol, + le hint du clic mémoire.
+    const tip =
+      `${t("sb_stats_tip")} · ${t("sb_mem_click")}` +
+      (host ? `\n${t("sb_srv_tip")}` : "");
+    if (el.title !== tip) el.title = tip;
   } catch { /* silencieux */ }
 }
 

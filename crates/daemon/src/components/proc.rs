@@ -14,8 +14,7 @@
 
 use anyhow::{Context, Result};
 use proto::{
-    ComponentKind, ComponentSpec, ComponentState, ComponentStatus, Healthcheck,
-    RestartPolicy,
+    ComponentKind, ComponentSpec, ComponentState, ComponentStatus, Healthcheck, RestartPolicy,
 };
 use std::io::Write;
 use std::path::Path;
@@ -89,7 +88,7 @@ impl Components {
         let spec = self
             .spec_of(&name)
             .await
-            .with_context(|| format!("composant inconnu: {name}"))?;
+            .with_context(|| format!("unknown component: {name}"))?;
         super::check_usable(&spec)?;
         self.spawn_cycle(&spec, true).await?;
         Ok(self.status_of(&spec).await)
@@ -98,7 +97,9 @@ impl Components {
     /// Respawn supervisé — pas de bail sur état concurrent : désiré
     /// arrêté ou déjà relancé → no-op silencieux.
     async fn respawn(self: &Arc<Self>, name: &str) -> Result<()> {
-        let Some(spec) = self.spec_of(name).await else { return Ok(()) };
+        let Some(spec) = self.spec_of(name).await else {
+            return Ok(());
+        };
         // Un upsert a pu changer le kind entre l'exit et le respawn :
         // sans cycle de vie managé il n'y a plus rien à relancer.
         if spec.kind != ComponentKind::Process {
@@ -119,7 +120,7 @@ impl Components {
         let missing = super::render::missing_required(spec);
         if !missing.is_empty() {
             let hint = format!(
-                "configuration requise : {} — `acctl comp set {name} <clé> <valeur>`",
+                "missing required config: {} — `acctl comp set {name} <key> <value>`",
                 missing.join(", ")
             );
             if manual {
@@ -130,7 +131,7 @@ impl Components {
                 p.desired = Desired::Stopped;
                 p.state = ComponentState::Stopped;
             }
-            warn!("composant « {name} » : {hint} — lancement désarmé");
+            warn!("component « {name} »: {hint} — launch disarmed");
             return Ok(());
         }
         // Config managée supprimée à la main alors que les params sont
@@ -138,7 +139,7 @@ impl Components {
         // disque n'empêche pas le démarrage, les RPC explicites le
         // remontent déjà).
         if let Err(e) = super::render::render_if_ready(spec).await {
-            warn!("composant « {name} » : rendu config impossible: {e:#}");
+            warn!("component « {name} »: config render failed: {e:#}");
         }
         let reserved = {
             let mut procs = self.procs.write().await;
@@ -147,12 +148,9 @@ impl Components {
                 if p.desired == Desired::Running
                     && (p.pid.is_some() || p.state == ComponentState::Starting)
                 {
-                    anyhow::bail!("composant « {name} » déjà démarré");
+                    anyhow::bail!("component « {name} » already started");
                 }
-            } else if p.desired == Desired::Stopped
-                || p.pid.is_some()
-                || self.is_down()
-            {
+            } else if p.desired == Desired::Stopped || p.pid.is_some() || self.is_down() {
                 return Ok(());
             }
             p.gen += 1;
@@ -187,18 +185,15 @@ impl Components {
                             // policy. Retry planifié avec backoff
                             // exponentiel (×2 par échec consécutif).
                             p.state = ComponentState::Starting;
-                            delay = Some(Duration::from_secs(
-                                p.backoff_secs.min(BACKOFF_CAP_SECS),
-                            ));
-                            p.backoff_secs =
-                                p.backoff_secs.saturating_mul(2).min(BACKOFF_CAP_SECS);
+                            delay = Some(Duration::from_secs(p.backoff_secs.min(BACKOFF_CAP_SECS)));
+                            p.backoff_secs = p.backoff_secs.saturating_mul(2).min(BACKOFF_CAP_SECS);
                         }
                     }
                 }
                 if let Some(d) = delay {
                     warn!(
-                        "composant « {name} »: spawn impossible ({e:#}) — \
-                         nouvelle tentative dans {}s",
+                        "component « {name} »: spawn failed ({e:#}) — \
+                         retrying in {}s",
                         d.as_secs()
                     );
                     schedule_respawn(self, &name, d);
@@ -206,7 +201,7 @@ impl Components {
                 return Err(e);
             }
         };
-        let pid = child.id().context("spawn sans pid")?;
+        let pid = child.id().context("spawn returned no pid")?;
 
         // Fenêtre courte : un stop() a pu supplanter le cycle entre la
         // réservation et le spawn → on tue le process tout de suite.
@@ -223,15 +218,15 @@ impl Components {
         };
         if gen == 0 {
             let _ = child.kill().await;
-            anyhow::bail!("composant « {name} » supplanté pendant le spawn");
+            anyhow::bail!("component « {name} » superseded during spawn");
         }
 
         let _ = tokio::fs::create_dir_all(self.components_dir()).await;
         let pidfile = self.components_dir().join(format!("{name}.pid"));
         if let Err(e) = tokio::fs::write(&pidfile, format!("{pid}\n")).await {
-            warn!("composant « {name} »: pidfile: {e}");
+            warn!("component « {name} »: pidfile: {e}");
         }
-        info!("composant « {name} » démarré (pid {pid}, gen {gen})");
+        info!("component « {name} » started (pid {pid}, gen {gen})");
         watch_child(self, child, &name, gen);
         Ok(())
     }
@@ -239,7 +234,9 @@ impl Components {
     /// Watcher : constate l'exit, met à jour l'état et décide d'un
     /// respawn. `gen` obsolète → cycle supplanté, on ne touche à rien.
     async fn on_exit(self: &Arc<Self>, name: &str, gen: u64, code: i64) {
-        let Some(spec) = self.spec_of(name).await else { return };
+        let Some(spec) = self.spec_of(name).await else {
+            return;
+        };
         let delay = {
             let mut procs = self.procs.write().await;
             let Some(p) = procs.get_mut(name) else { return };
@@ -248,8 +245,7 @@ impl Components {
             }
             p.last_exit = Some(code);
             p.pid = None;
-            let _ =
-                std::fs::remove_file(self.components_dir().join(format!("{name}.pid")));
+            let _ = std::fs::remove_file(self.components_dir().join(format!("{name}.pid")));
             if p.desired == Desired::Stopped || self.is_down() {
                 p.state = ComponentState::Stopped;
                 return;
@@ -266,7 +262,7 @@ impl Components {
                 } else {
                     ComponentState::Stopped
                 };
-                info!("composant « {name} » terminé (exit {code}, pas de relance)");
+                info!("component « {name} » exited (code {code}, no restart)");
                 return;
             }
             // Backoff : stable ≥ 5 min → repart de restart_sec, sinon
@@ -282,7 +278,7 @@ impl Components {
             p.state = ComponentState::Starting;
             p.started = None;
             warn!(
-                "composant « {name} » mort (exit {code}) — respawn #{} dans {}s",
+                "component « {name} » died (exit {code}) — respawn #{} in {}s",
                 p.restarts,
                 delay.as_secs()
             );
@@ -449,9 +445,7 @@ impl Components {
                 .specs_all()
                 .await
                 .into_iter()
-                .filter(|s| {
-                    matches!(s.kind, ComponentKind::Process | ComponentKind::External)
-                })
+                .filter(|s| matches!(s.kind, ComponentKind::Process | ComponentKind::External))
                 .filter_map(|s| version::version_argv(&s).map(|a| (s.name.clone(), a)))
                 .collect();
             for (name, argv) in vprobes {
@@ -467,7 +461,9 @@ impl Components {
                         None => continue,
                     }
                 };
-                let Some(spec) = self.spec_of(&name).await else { continue };
+                let Some(spec) = self.spec_of(&name).await else {
+                    continue;
+                };
                 let Some(ok) = probe(&spec, Some(pid)).await else {
                     continue;
                 };
@@ -591,7 +587,7 @@ fn schedule_respawn(me: &Arc<Components>, name: &str, delay: Duration) {
     tokio::spawn(async move {
         tokio::time::sleep(delay).await;
         if let Err(e) = me.respawn(&name).await {
-            warn!("composant « {name} »: respawn impossible: {e:#}");
+            warn!("component « {name} »: respawn failed: {e:#}");
         }
     });
 }
@@ -601,7 +597,7 @@ fn schedule_respawn(me: &Arc<Components>, name: &str, delay: Duration) {
 /// tourné, `kill_on_drop` — même destin que les agents : le process
 /// meurt avec le démon.
 async fn spawn_child(c: &Arc<Components>, spec: &ComponentSpec) -> Result<Child> {
-    let argv0 = spec.command.first().context("commande vide")?;
+    let argv0 = spec.command.first().context("empty command")?;
     let cwd = spec
         .cwd
         .clone()
@@ -646,7 +642,7 @@ async fn pipe_log<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
             Ok(n) => {
                 if let Ok(mut w) = log.lock() {
                     let _ = w.write(&buf[..n]); // log borné : une
-                    // écriture ratée ne doit pas tuer la pompe
+                                                // écriture ratée ne doit pas tuer la pompe
                 }
             }
         }
@@ -671,9 +667,13 @@ impl LogWriter {
             .create(true)
             .append(true)
             .open(&path)
-            .with_context(|| format!("ouverture {}", path.display()))?;
+            .with_context(|| format!("opening {}", path.display()))?;
         let written = file.metadata().map(|m| m.len()).unwrap_or(0);
-        Ok(Self { path, file, written })
+        Ok(Self {
+            path,
+            file,
+            written,
+        })
     }
 
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
@@ -855,16 +855,11 @@ async fn probe(spec: &ComponentSpec, pid: Option<u32>) -> Option<bool> {
             _ => None,
         },
         Healthcheck::Process => Some(pid.map(pid_alive).unwrap_or(false)),
-        Healthcheck::Tcp { addr } => Some(
-            matches!(
-                tokio::time::timeout(
-                    PROBE_TIMEOUT,
-                    tokio::net::TcpStream::connect(addr.as_str()),
-                )
+        Healthcheck::Tcp { addr } => Some(matches!(
+            tokio::time::timeout(PROBE_TIMEOUT, tokio::net::TcpStream::connect(addr.as_str()),)
                 .await,
-                Ok(Ok(_))
-            ),
-        ),
+            Ok(Ok(_))
+        )),
         Healthcheck::Http { url } => {
             let url = url.clone();
             match tokio::task::spawn_blocking(move || {
@@ -977,8 +972,10 @@ mod tests {
             Arc::new(crate::server::OrchProbe::open(
                 crate::server::OrchCfg::default(),
             )),
-            Vec::new(),
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            Arc::new(std::sync::RwLock::new(crate::forges::ForgeLive::new(
+                vec![],
+            ))),
         );
         let absent = tool_spec(&["ac-tool-inexistant-xyz"]);
         // Verdicts d'une passe antérieure (tool alors installé).
@@ -1001,8 +998,7 @@ mod tests {
     /// « outdated » exposé (process comme tool), au-dessus → ok.
     #[tokio::test]
     async fn version_sous_le_seuil_marque_outdated() {
-        let root =
-            std::env::temp_dir().join(format!("ac-outdated-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("ac-outdated-{}", std::process::id()));
         let web: Arc<tokio::sync::RwLock<Option<serde_json::Value>>> =
             Arc::new(tokio::sync::RwLock::new(None));
         let c = Components::open(
@@ -1013,8 +1009,10 @@ mod tests {
             Arc::new(crate::server::OrchProbe::open(
                 crate::server::OrchCfg::default(),
             )),
-            Vec::new(),
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            Arc::new(std::sync::RwLock::new(crate::forges::ForgeLive::new(
+                vec![],
+            ))),
         );
         let mut spec = tool_spec(&["sh", "-c", "echo 0.2.0"]);
         spec.min_version = Some("0.3".into());
@@ -1038,8 +1036,7 @@ mod tests {
     /// permanent quand il n'a pas de healthcheck (jamais resondé).
     #[tokio::test]
     async fn upsert_tool_vers_external_purge_observed() {
-        let root =
-            std::env::temp_dir().join(format!("ac-upsert-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("ac-upsert-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let web: Arc<tokio::sync::RwLock<Option<serde_json::Value>>> =
             Arc::new(tokio::sync::RwLock::new(None));
@@ -1051,8 +1048,10 @@ mod tests {
             Arc::new(crate::server::OrchProbe::open(
                 crate::server::OrchCfg::default(),
             )),
-            Vec::new(),
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            Arc::new(std::sync::RwLock::new(crate::forges::ForgeLive::new(
+                vec![],
+            ))),
         );
         c.upsert("t", tool_spec(&["sh"])).await.unwrap();
         // Comme si le tool avait été sondé en échec avant la bascule.

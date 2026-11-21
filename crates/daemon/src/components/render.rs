@@ -83,11 +83,11 @@ pub(super) fn validate_value(ps: &ParamSpec, raw: &str) -> Result<String> {
         ParamKind::String | ParamKind::Path => {
             if let Some(re) = &ps.validation {
                 let ok = regex::Regex::new(re)
-                    .with_context(|| format!("validation « {} » invalide : {re}", ps.key))?
+                    .with_context(|| format!("invalid validation « {} »: {re}", ps.key))?
                     .is_match(v);
                 anyhow::ensure!(
                     ok,
-                    "« {} » : valeur « {v} » rejetée par la validation ({re})",
+                    "« {} »: value « {v} » rejected by validation ({re})",
                     ps.key
                 );
             }
@@ -95,12 +95,12 @@ pub(super) fn validate_value(ps: &ParamSpec, raw: &str) -> Result<String> {
         }
         ParamKind::Int => Ok(v
             .parse::<i64>()
-            .with_context(|| format!("« {} » : entier attendu, reçu « {v} »", ps.key))?
+            .with_context(|| format!("« {} »: expected integer, got « {v} »", ps.key))?
             .to_string()),
         ParamKind::Duration => {
             anyhow::ensure!(
                 valid_duration(v),
-                "« {} » : durée invalide « {v} » (ex. 3h, 90min, 1h30m)",
+                "« {} »: invalid duration « {v} » (e.g. 3h, 90min, 1h30m)",
                 ps.key
             );
             Ok(v.to_string())
@@ -108,12 +108,12 @@ pub(super) fn validate_value(ps: &ParamSpec, raw: &str) -> Result<String> {
         ParamKind::Bool => match v.to_ascii_lowercase().as_str() {
             "true" | "yes" | "on" | "1" => Ok("true".into()),
             "false" | "no" | "off" | "0" => Ok("false".into()),
-            _ => anyhow::bail!("« {} » : booléen attendu, reçu « {v} »", ps.key),
+            _ => anyhow::bail!("« {} »: expected boolean, got « {v} »", ps.key),
         },
         ParamKind::Enum => {
             anyhow::ensure!(
                 ps.choices.iter().any(|c| c == v),
-                "« {} » : « {v} » hors des choix ({})",
+                "« {} »: « {v} » not among the choices ({})",
                 ps.key,
                 ps.choices.join(", ")
             );
@@ -127,7 +127,7 @@ pub(super) fn validate_value(ps: &ParamSpec, raw: &str) -> Result<String> {
             .join(",")),
         ParamKind::Json => {
             let j: serde_json::Value = serde_json::from_str(v)
-                .with_context(|| format!("« {} » : JSON invalide « {v} »", ps.key))?;
+                .with_context(|| format!("« {} »: invalid JSON « {v} »", ps.key))?;
             // `null` n'existe pas en TOML : rejeté ici plutôt qu'au
             // rendu — la valeur refusée n'entre jamais dans params.
             check_no_null(&j, &ps.key)?;
@@ -144,7 +144,7 @@ pub(super) fn validate_value(ps: &ParamSpec, raw: &str) -> Result<String> {
 fn check_no_null(v: &serde_json::Value, key: &str) -> Result<()> {
     match v {
         serde_json::Value::Null => {
-            anyhow::bail!("« {key} » : null non représentable en TOML")
+            anyhow::bail!("« {key} »: null cannot be represented in TOML")
         }
         serde_json::Value::Array(a) => {
             for x in a {
@@ -196,17 +196,14 @@ pub(super) async fn render_if_ready(spec: &ComponentSpec) -> Result<bool> {
         return Ok(false);
     }
     let txt = render_template(&render.template, spec)
-        .with_context(|| format!("rendu de « {} »", render.path))?;
+        .with_context(|| format!("rendering « {} »", render.path))?;
     write_home_file(&render.path, &txt).await?;
     if spec.params_schema.iter().any(|p| p.secret) {
         let path = super::catalog::expand_home(&render.path);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(
-                &path,
-                std::fs::Permissions::from_mode(0o600),
-            );
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
         }
     }
     Ok(true)
@@ -234,13 +231,13 @@ fn render_template(tpl: &str, spec: &ComponentSpec) -> Result<String> {
             let after = &rest[start + 2..];
             let end = after
                 .find("}}")
-                .with_context(|| "placeholder « {{ » non fermé")?;
+                .with_context(|| "unclosed « {{ » placeholder")?;
             let key = after[..end].trim();
             let ps = spec
                 .params_schema
                 .iter()
                 .find(|p| p.key == key)
-                .with_context(|| format!("placeholder {{{{{key}}}}} hors schéma"))?;
+                .with_context(|| format!("placeholder {{{{{key}}}}} outside the schema"))?;
             match effective(spec, key) {
                 Some(v) => rendered.push_str(&toml_literal(ps, &v)?),
                 None => {
@@ -274,7 +271,7 @@ fn toml_literal(ps: &ParamSpec, value: &str) -> Result<String> {
     Ok(match ps.kind {
         ParamKind::Int => v
             .parse::<i64>()
-            .with_context(|| format!("« {} » : entier attendu", ps.key))?
+            .with_context(|| format!("« {} »: expected integer", ps.key))?
             .to_string(),
         ParamKind::Bool => v.to_string(), // déjà « true »/« false » (validate_value)
         ParamKind::List => format!(
@@ -288,7 +285,7 @@ fn toml_literal(ps: &ParamSpec, value: &str) -> Result<String> {
         ),
         ParamKind::Json => {
             let j: serde_json::Value = serde_json::from_str(&v)
-                .with_context(|| format!("« {} » : JSON invalide", ps.key))?;
+                .with_context(|| format!("« {} »: invalid JSON", ps.key))?;
             json_to_toml(&j)?
         }
         _ => toml_str(&v),
@@ -303,7 +300,7 @@ fn toml_literal(ps: &ParamSpec, value: &str) -> Result<String> {
 fn json_to_toml(v: &serde_json::Value) -> Result<String> {
     Ok(match v {
         serde_json::Value::Null => {
-            anyhow::bail!("null non représentable en TOML")
+            anyhow::bail!("null cannot be represented in TOML")
         }
         serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Number(n) => {
@@ -314,12 +311,12 @@ fn json_to_toml(v: &serde_json::Value) -> Result<String> {
                 // mieux une erreur qu'un float silencieusement approché.
                 anyhow::ensure!(
                     u <= i64::MAX as u64,
-                    "entier {u} hors borne i64 — non représentable en TOML"
+                    "integer {u} out of i64 range — cannot be represented in TOML"
                 );
                 (u as i64).to_string()
             } else {
-                let f = n.as_f64().context("nombre JSON illisible")?;
-                anyhow::ensure!(f.is_finite(), "nombre non fini en TOML");
+                let f = n.as_f64().context("unreadable JSON number")?;
+                anyhow::ensure!(f.is_finite(), "non-finite number in TOML");
                 // `1.0` s'imprimerait « 1 » → lu int par TOML : forcer
                 // la forme flottante pour garder le type (le Display
                 // de f64 n'émet jamais d'exposant ni NaN/inf).
@@ -332,10 +329,7 @@ fn json_to_toml(v: &serde_json::Value) -> Result<String> {
         }
         serde_json::Value::String(s) => toml_str(s),
         serde_json::Value::Array(a) => {
-            let items = a
-                .iter()
-                .map(json_to_toml)
-                .collect::<Result<Vec<_>>>()?;
+            let items = a.iter().map(json_to_toml).collect::<Result<Vec<_>>>()?;
             format!("[{}]", items.join(", "))
         }
         serde_json::Value::Object(o) => {
@@ -400,6 +394,7 @@ mod tests {
             choices: vec![],
             choice_labels: Vec::new(),
             open_enum: false,
+            group: None,
         }
     }
 
@@ -457,11 +452,11 @@ mod tests {
         assert!(validate_value(&s, "x").is_err());
         let b = ps("b", ParamKind::Bool, false);
         assert_eq!(validate_value(&b, "yes").unwrap(), "true");
-        assert!(validate_value(&b, "peut-être").is_err());
+        assert!(validate_value(&b, "maybe").is_err());
         let d = ps("d", ParamKind::Duration, false);
         assert_eq!(validate_value(&d, "3h").unwrap(), "3h");
         assert_eq!(validate_value(&d, "1h30m").unwrap(), "1h30m");
-        assert!(validate_value(&d, "un moment").is_err());
+        assert!(validate_value(&d, "a while").is_err());
         let mut e = ps("e", ParamKind::Enum, false);
         e.choices = vec!["a".into(), "b".into()];
         assert_eq!(validate_value(&e, "b").unwrap(), "b");
@@ -484,7 +479,7 @@ mod tests {
         let mut p = ps("repo", ParamKind::String, true);
         p.validation = Some(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$".into());
         assert!(validate_value(&p, "Wameuh/AgentControl").is_ok());
-        assert!(validate_value(&p, "sans-slash").is_err());
+        assert!(validate_value(&p, "no-slash").is_err());
     }
 
     #[test]
@@ -512,10 +507,7 @@ mod tests {
 
     #[test]
     fn rendu_echappe_et_placeholder_inconnu() {
-        let spec = spec_with(
-            vec![ps("k", ParamKind::String, false)],
-            &[("k", "a\"b\\c")],
-        );
+        let spec = spec_with(vec![ps("k", ParamKind::String, false)], &[("k", "a\"b\\c")]);
         let out = render_template("v = {{k}}\n", &spec).unwrap();
         assert_eq!(out, "v = \"a\\\"b\\\\c\"\n");
         assert!(render_template("v = {{inconnu}}\n", &spec).is_err());

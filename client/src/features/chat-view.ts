@@ -16,6 +16,8 @@ import { t } from "../i18n";
 import { icon, type IconName } from "../ui/icons";
 import { hideMenu, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
+import { isAndroid } from "../core/chrome";
+import { msgMenuItems, openMsgCtx } from "../mobile/msg-actions";
 import {
   fillEfforts,
   fillThoughtLevels,
@@ -29,6 +31,7 @@ import { costFor, ensureCosts } from "./modelcosts";
 import { notifications } from "./notifications";
 import { catalogFor, ensureCatalog } from "./modelcatalog";
 import type { EventRenderer } from "./event-renderers";
+import { probeDomFlush, telemetryActive } from "./telemetry";
 
 const MAX_RENDERED = 400;
 const PAGE = 50; // paquets au scroll
@@ -66,15 +69,38 @@ interface ConvCache {
   renderedCount: number;
   hasMoreHistory: boolean;
   /** Vue ancrée en plein journal (saut de recherche) : du contenu plus
-   *  récent existe après le dernier seq rendu. */
+   *  récent existe après le dernier seq rendu. En vue ancrée le
+   *  sticky-bottom est INERTE : l'utilisateur y navigue explicitement,
+   *  les events live sont tamponnés (pendingLive) et ⇥ ramène au
+   *  présent — le retour au bas réarme le stick (scrollBottom). */
   hasMoreNewer: boolean;
   /** Events live tamponnés pendant que la vue est ancrée. */
   pendingLive: AcEvent[];
   unseenBelow: number;
   lastSeq: number;
   scrollTop: number;
+  /** « Stuck » au moment du stash : l'utilisateur était collé en bas —
+   *  la restauration réépingle (et guérit l'écart de croissance async). */
   atBottom: boolean;
   ts: number;
+}
+
+/** Écho optimiste d'un envoi (composer.sendInput) : le RPC `send`
+ *  n'enfile que le prompt — le user_message du journal n'arrive
+ *  qu'à la livraison (file d'attente, réveil, steer). Le client affiche
+ *  une bulle « pending » dès l'Enter, réconciliée à l'arrivée du vrai
+ *  event. Par session : l'écho reste attaché au journal émetteur même
+ *  si l'utilisateur change de session entre-temps (son nœud voyage
+ *  avec le fragment de conversation, ou est recréé à la réouverture). */
+interface EchoPending {
+  id: number;
+  text: string;
+  steer: boolean;
+  /** maxRendered au moment de l'envoi : borne la réconciliation —
+   *  un replay d'historique (seq ≤ afterSeq) ne doit pas consommer
+   *  l'écho. */
+  afterSeq: number;
+  node: HTMLElement | null;
 }
 
 export class ChatView {
@@ -99,6 +125,9 @@ export class ChatView {
   private renderedSeqs = new Set<number>();
   private loadingPage = false;
   private hasMoreHistory = true;
+  // Vue ancrée : le sticky-bottom est inerte (navigation explicite de
+  // l'utilisateur, events live tamponnés) — ⇥ ramène au présent et
+  // réarme le stick via scrollBottom.
   private hasMoreNewer = false;
   private pendingLive: AcEvent[] = [];
   /** Events live en attente de rendu — flushés groupés sur le prochain
@@ -107,9 +136,23 @@ export class ChatView {
   private liveQueue: AcEvent[] = [];
   private liveRaf = 0;
   /** Batch du flushLive en cours : position lue une fois par frame
-   *  (nearBottom/scrollBottom par event = un layout synchrone chacun),
+   *  (stick/scrollBottom par event = un layout synchrone chacun),
    *  comptage des bulles ajoutées pour le badge « nouveaux ». */
   private liveBatch: { near: boolean; appended: number } | null = null;
+  /** « Stuck » — l'utilisateur est collé en bas et veut y rester
+   *  (comportement chat/Slack). Posé quand le scroll atteint le bas,
+   *  levé dès que la position affichée n'est plus en bas (scroll
+   *  volontaire vers le haut, saut de recherche, pagination). C'est un
+   *  FLAG et non un nearBottom() réévalué : une croissance async du
+   *  contenu (image lazy, <details> ouvert, highlight différé) après le
+   *  dernier append ne doit pas décoller le suivi — le ResizeObserver
+   *  réépingle tant que le flag tient. */
+  private stickBottom = true;
+  /** Enfants de #events suivis par le ResizeObserver du sticky-bottom
+   *  (un RO sur le scrollport ne tire pas sur scrollHeight). Synchronisé
+   *  par MutationObserver — aucune liste manuelle à tenir à jour. */
+  private stickObserved = new Set<Element>();
+  private stickRO: ResizeObserver | null = null;
   private jumpSeq = 0; // invalidation des sauts de recherche en vol
   private loadSeq = 0; // propriété du load en cours : un finally périmé ne doit pas libérer le flag d'un load plus récent
   /** open() en vol : les events live sont tamponnés (pendingLive) —
@@ -119,6 +162,10 @@ export class ChatView {
   private opening = false;
   private unseenBelow = 0;
   private convLoadingEl: HTMLElement | null = null;
+  /** Échos optimistes par session (FIFO — l'ordre d'envoi est celui de
+   *  la file du démon). Voir EchoPending. */
+  private pendingEchoes = new Map<string, EchoPending[]>();
+  private echoSeq = 0;
   /** Hôtes en cours d'auto-connexion (écran vide "connexion à…"). */
   private connectingHosts: string[] = [];
   /** Callback stable pour ensureCosts — dédupliqué côté modelcosts. */
@@ -134,6 +181,9 @@ export class ChatView {
     /** Bouton d'envoi alternatif (steer ↔ file selon la préférence) —
      *  icône + visibilité resynchronisés par updateHeader. */
     syncAltBtn: () => {},
+    /** Barre de session mobile (S1) — resynchronisée à la fin de
+     *  updateHeader + setChatTitle (no-op hors Android). */
+    afterHeader: () => {},
     /** Bouton « premier post » affiché seulement si le démon de la conn
      *  connaît first_post. */
     firstPostCapable: (_conn: string) => false,
@@ -142,6 +192,9 @@ export class ChatView {
     pinCapable: (_conn: string) => false,
     /** Marque l'état épinglé d'un nœud rendu (feature pins). */
     pinsMark: (_el: HTMLElement) => {},
+    /** Bouton « étapes » affiché seulement si le démon de la conn
+     *  connaît session_set_steps (daemon_status.steps). */
+    stepsCapable: (_conn: string) => false,
     /** L'arbre fichiers suit le workspace de la session ouverte. */
     onSessionOpened: () => {},
     /** Session affichée changée ou disparue (suppression, conn coupée,
@@ -308,6 +361,7 @@ export class ChatView {
     }
     this.loadingPage = false;
     this.unseenBelow = 0;
+    this.stickBottom = true; // conversation neuve → collée en bas
     this.jumpSeq++; // un saut de recherche en vol ne doit plus réinjecter sa fenêtre
     $("btn-bottom").hidden = true;
   }
@@ -324,7 +378,10 @@ export class ChatView {
     const frag = document.createDocumentFragment();
     let lastSeq = 0;
     let n0 = 0;
-    const atBottom = this.nearBottom();
+    // Le flag « stuck » est stashé, pas un nearBottom() instantané :
+    // une croissance async post-append peut laisser un écart > 120 px
+    // sans que l'utilisateur ait rien demandé — il reste collé en bas.
+    const atBottom = this.stickBottom;
     const scroll = this.eventsEl.scrollTop; // lu avant détachement (clamp après)
     for (const n of [...this.eventsEl.children]) {
       if (this.isDecor(n) || n === this.convLoadingEl) continue;
@@ -394,15 +451,20 @@ export class ChatView {
     this.pendingLive = c.pendingLive;
     this.loadingPage = false;
     this.unseenBelow = c.unseenBelow;
+    this.stickBottom = c.atBottom;
     if (c.atBottom) this.scrollBottom();
     else this.eventsEl.scrollTop = c.scrollTop;
     this.updateBottomBtn();
   }
 
-  /** Oublie la conversation cachée d'une session (suppression). */
+  /** Oublie la conversation cachée d'une session (suppression, journal
+   *  vidé) — ses échos pending partent avec elle (file purgée côté
+   *  démon : plus rien ne les réconciliera). */
   dropConv(id: string) {
     this.convCache.delete(id);
     this.tailCache.delete(id);
+    for (const e of this.pendingEchoes.get(id) ?? []) e.node?.remove();
+    this.pendingEchoes.delete(id);
   }
 
   /** Purge les conversations cachées des sessions d'une connexion. */
@@ -418,6 +480,9 @@ export class ChatView {
       this.clearConv();
       this.deps.onSessionChanged();
       this.updateEmptyState();
+      // La barre de session mobile lit app.current via afterHeader —
+      // sans ce hook, m-in-session resterait posé sur une vue vide.
+      this.deps.afterHeader();
     }
   }
 
@@ -628,6 +693,10 @@ export class ChatView {
       }
     }
 
+    // Journal reparti (nouveau cycle natif) : les échos pending de
+    // l'ancien cycle ne seront jamais réconciliés (file purgée au
+    // respawn, seqs reparties à 1) — les retirer avec le rendu.
+    if (journalReset) this.pendingEchoes.delete(id);
     // Subscribe live à partir du dernier event connu
     if (stale()) return;
     const subConn = app.current?.conn ?? connHint;
@@ -641,6 +710,9 @@ export class ChatView {
     // Journal réinitialisé (native changé) → les résultats de recherche
     // indexent l'ancien journal (seqs reparties à 1) → fermer la recherche.
     if (journalReset) this.deps.onSessionChanged();
+    // Échos pending de cette session : recrée les nœuds perdus avec la
+    // vue (fresh load, cache expiré, clear) — no-op si déjà montés.
+    this.ensureEchoNodes(id);
     void this.deps.refresh();
     // L'arbre suit le workspace de la session nouvellement ouverte
     this.deps.onSessionOpened();
@@ -703,7 +775,7 @@ export class ChatView {
     this.unseenBelow = 0;
     $("btn-bottom").hidden = true;
     $("chat-gem").hidden = true;
-    for (const b of ["btn-resume", "btn-cancel", "btn-alt"]) $(b).hidden = true;
+    for (const b of ["btn-resume", "btn-fresh", "btn-cancel", "btn-alt"]) $(b).hidden = true;
     const st = $("chat-state");
     st.textContent = "gone";
     st.className = "badge st-dead";
@@ -749,6 +821,7 @@ export class ChatView {
   setChatTitle() {
     const tl = document.getElementById("chat-title");
     if (tl && app.current) tl.textContent = `${app.current.title} — ${app.current.agent}`;
+    this.deps.afterHeader();
   }
 
   updateHeader() {
@@ -758,6 +831,8 @@ export class ChatView {
       !app.current || !this.deps.firstPostCapable(app.current?.conn ?? "default");
     $("btn-pins").hidden =
       !app.current || !this.deps.pinCapable(app.current?.conn ?? "default");
+    $("btn-steps").hidden =
+      !app.current || !this.deps.stepsCapable(app.current?.conn ?? "default");
     $("btn-term").hidden =
       !app.current || !this.deps.termCapable(app.current?.conn ?? "default");
     $("btn-caps-refresh").hidden =
@@ -765,7 +840,9 @@ export class ChatView {
     if (!app.current) {
       $("chat-ctx").hidden = true;
       $("chat-opts").hidden = true;
+      $("btn-fresh").hidden = true;
       this.deps.syncAltBtn(); // sans session → bouton alternatif caché
+      this.deps.afterHeader();
       return;
     }
     this.deps.refreshQueue();
@@ -787,6 +864,13 @@ export class ChatView {
     // meta.json — sauf "starting" : le spawn tourne déjà (afficher
     // Reprendre suggérerait un échec alors que le boot est en cours).
     $("btn-resume").hidden = app.alive || app.current.state === "starting";
+    // « starting » + sid natif = spawn en vol sur un contexte à
+    // reprendre (session/load, initialize) : proposer l'abandon du
+    // contexte natif — le replay d'une très longue session peut durer
+    // des dizaines de minutes (#271). Sans sid natif (session/new en
+    // cours) il n'y a rien à abandonner.
+    $("btn-fresh").hidden =
+      !(app.current.state === "starting" && !!app.current.native_session_id);
     const busySt =
       app.current.state === "working" ||
       app.current.state === "waiting_input" ||
@@ -878,7 +962,7 @@ export class ChatView {
         o.value = b;
         const fe = firstEff.get(b);
         const cost = costFor(fe ? joinModel(b, fe) : b);
-        o.textContent = "🧠 " + label + (cost ? ` · ${cost.label}` : "");
+        o.textContent = label + (cost ? ` · ${cost.label}` : "");
         if (cost?.detail) o.title = cost.detail;
         md.appendChild(o);
       }
@@ -895,7 +979,7 @@ export class ChatView {
       const curIsFusion = curVal.startsWith("fusion-");
       if (curIsFusion) {
         const fp = rawOpts.find((o) => o.v === curVal);
-        if (fp) fo.textContent = `✨ ${fp.label}`;
+        if (fp) fo.textContent = t("fusion_cur", { label: fp.label });
       }
       const [curBase, curEff] = splitModel(curVal);
       md.value = curIsFusion ? "__fusion" : curBase;
@@ -1009,6 +1093,7 @@ export class ChatView {
       ms.hidden && md.hidden && es.hidden && mf.hidden &&
       $("btn-fusion-edit").hidden && $("btn-caps-refresh").hidden &&
       dyn.children.length === 0;
+    this.deps.afterHeader();
   }
 
   private nearBottom() {
@@ -1066,6 +1151,10 @@ export class ChatView {
     const q = this.liveQueue;
     this.liveQueue = [];
     if (!q.length) return;
+    // Sonde télémétrie (#297) : ce batch est LE point de mutation du fil
+    // — sa durée + le nombre de nœuds rendus sont la métrique « DOM
+    // flush » (le coût perçu pendant le stream).
+    const t0 = telemetryActive() ? performance.now() : -1;
     // Coalescing par frame : les tool_call_update d'un même call_id sont
     // des snapshots cumulés de la sortie — seul le dernier est jamais
     // visible, rendre les intermédiaires coûtetrait un layout chacun
@@ -1076,10 +1165,11 @@ export class ChatView {
       const ev = q[i];
       if (ev.type === "tool_call_update") lastUpd.set(ev.call_id as string, i);
     }
-    // nearBottom lu UNE fois avant la frame : le scroll ne peut pas
-    // bouger pendant la boucle (single thread) — le relire par event
-    // forçait un layout synchrone par event (lag de frappe en stream).
-    const batch = { near: this.nearBottom(), appended: 0 };
+    // « Stuck » lu UNE fois avant la frame : le flag ne bouge que sur
+    // scroll (jamais pendant la boucle, single thread) — nearBottom()
+    // réévalué ici perdrait l'état dès qu'une croissance async a ouvert
+    // un écart > 120 px sans scroll de l'utilisateur.
+    const batch = { near: this.stickBottom, appended: 0 };
     this.liveBatch = batch;
     try {
       for (let i = 0; i < q.length; i++) {
@@ -1105,6 +1195,7 @@ export class ChatView {
       }
     }
     this.trimRendered();
+    if (t0 >= 0) probeDomFlush(performance.now() - t0, batch.appended);
   }
 
   private appendEventNow(ev: AcEvent, live: boolean) {
@@ -1140,6 +1231,12 @@ export class ChatView {
       this.renderer.updateToolBlock(ev);
       return;
     }
+    // Écho optimiste : le user_message confirmé consomme le pending
+    // correspondant (envoi encore en file ou livré pendant un trou) —
+    // le retrait du nœud pending et l'insertion du confirmé se font
+    // dans la même frame, jamais de doublon. Les prompts « service »
+    // (origin) ne sont pas des envois du composer : ignorés.
+    if (ev.type === "user_message" && !ev.origin) this.consumeEcho(ev);
     // Replay de resubscribe : un seq ≤ dernier rendu (et absent de
     // renderedSeqs — le cas couvert juste au-dessus) est un trou d'une
     // resync : inséré à sa position plutôt qu'en queue. Le test doit
@@ -1179,9 +1276,10 @@ export class ChatView {
         this.eventsEl.getBoundingClientRect().top
     ) {
       this.eventsEl.scrollTop += this.eventsEl.scrollHeight - sh;
-      // La compensation a bougé scrollTop : la position mise en cache
-      // pour la frame n'est plus fiable (cas rare — trou comblé live).
-      if (this.liveBatch) this.liveBatch.near = this.nearBottom();
+      // La compensation a bougé scrollTop : le flag « stuck » reste la
+      // référence (sa sémantique ne dépend pas de la géométrie
+      // instantanée — voir son commentaire de déclaration).
+      if (this.liveBatch) this.liveBatch.near = this.stickBottom;
     }
     this.deps.pinsMark(node);
     // lastText reste ancré sur le dernier texte de la vue — un nœud
@@ -1208,13 +1306,11 @@ export class ChatView {
     if (live && !insertAt) {
       if (this.liveBatch) {
         this.liveBatch.appended++;
+      } else if (this.stickBottom) {
+        this.scrollBottom();
       } else {
-        const nearBottom = this.nearBottom();
-        if (nearBottom) this.scrollBottom();
-        else {
-          this.unseenBelow++;
-          this.updateBottomBtn();
-        }
+        this.unseenBelow++;
+        this.updateBottomBtn();
       }
     }
     if (!this.liveBatch) this.trimRendered();
@@ -1507,23 +1603,31 @@ export class ChatView {
   private flushPendingLive() {
     const rest = this.pendingLive.filter((e) => e.seq > this.maxRendered);
     this.pendingLive = [];
+    const t0 = telemetryActive() ? performance.now() : -1;
     this.suppressAutoRead = true;
     try {
       for (const ev of rest) this.appendEventNow(ev, true);
     } finally {
       this.suppressAutoRead = false;
     }
+    // Retour au présent : les échos envoyés depuis la vue ancrée
+    // n'avaient pas de nœud — les monter en bas du fil.
+    if (app.current) this.ensureEchoNodes(app.current.id);
+    if (t0 >= 0) probeDomFlush(performance.now() - t0, rest.length);
   }
 
   /** Menu contextuel « Copier » sur la sélection du fil (même composant
    *  #evctx que les menus session/fichier — action-sheet sur Android). */
-  private openSelCtx(x: number, y: number, txt: string) {
+  private openSelCtx(x: number, y: number, txt: string, msgEl?: HTMLElement) {
     const ctx = this.selCtx;
     ctx.innerHTML = "";
     menuBtn(ctx, t("copy"), "", () => {
       hideMenu(ctx, "evctx");
       void copyText(txt);
     });
+    // Appui long Android avec sélection : les actions du message ciblé
+    // complètent « Copier » (mêmes entrées que le menu sans sélection).
+    if (msgEl && isAndroid()) msgMenuItems(ctx, msgEl);
     placeMenu(ctx, "evctx", x, y);
   }
 
@@ -1535,6 +1639,145 @@ export class ChatView {
     this.eventsEl.appendChild(d);
     this.scrollBottom();
     return d;
+  }
+
+  // -------------------------------------------------------------------------
+  // Échos optimistes des envois (composer.sendInput)
+  // -------------------------------------------------------------------------
+
+  private normEcho(s: string) {
+    return s.replace(/\s+/g, " ").trim();
+  }
+
+  /** Enregistre l'écho optimiste d'un envoi ; si la session est
+   *  affichée en vue directe, le nœud est inséré en bas du fil
+   *  immédiatement — sinon il sera monté au retour au présent
+   *  (ensureEchoNodes via openInner/flushPendingLive). Retourne l'id
+   *  pour dropEcho (envoi refusé). */
+  addEcho(sid: string, text: string, opts: { steer?: boolean } = {}): number {
+    const id = ++this.echoSeq;
+    // Filigrane = plus haut seq CONNU à l'envoi (rendu + tamponnés non
+    // encore rendus) : un user_message plus ancien (replay d'historique,
+    // event bufferisé pendant une vue ancrée) ne doit pas consommer
+    // l'écho — seuls les events postérieurs à l'envoi le réconcilient.
+    const afterSeq = Math.max(
+      this.maxRendered,
+      this.pendingLive[this.pendingLive.length - 1]?.seq ?? 0,
+      this.liveQueue[this.liveQueue.length - 1]?.seq ?? 0,
+    );
+    const e: EchoPending = {
+      id,
+      text,
+      steer: !!opts.steer,
+      afterSeq,
+      node: null,
+    };
+    const l = this.pendingEchoes.get(sid) ?? [];
+    l.push(e);
+    this.pendingEchoes.set(sid, l);
+    if (app.current?.id === sid && !this.hasMoreNewer && !this.opening) {
+      this.mountEcho(e);
+    }
+    return id;
+  }
+
+  private mountEcho(e: EchoPending) {
+    if (e.node?.isConnected) return;
+    e.node = this.renderer.renderUserEcho(e.text, e.steer);
+    this.eventsEl.appendChild(e.node);
+    if (this.stickBottom) this.scrollBottom();
+    else this.updateBottomBtn();
+  }
+
+  /** Recrée les nœuds d'écho absents du DOM — la vue a été reconstruite
+   *  (ouverture fraîche, cache expiré, clear, retour au présent après
+   *  une vue ancrée). Idempotent ; les échos déjà connectés gardent
+   *  leur place (et leur nœud stashé/restitué). */
+  private ensureEchoNodes(sid: string) {
+    const l = this.pendingEchoes.get(sid);
+    if (!l?.length || app.current?.id !== sid || this.hasMoreNewer) return;
+    if (l.every((e) => e.node?.isConnected)) return;
+    // Un nœud manquant → re-monter TOUS les échos de la session dans
+    // l'ordre d'envoi (un append unitaire casserait l'ordre FIFO).
+    for (const e of l) e.node?.remove();
+    for (const e of l) {
+      e.node = null;
+      this.mountEcho(e);
+    }
+  }
+
+  /** Retire l'écho #id — envoi refusé (RPC en erreur). */
+  dropEcho(sid: string, id: number) {
+    const l = this.pendingEchoes.get(sid);
+    if (!l) return;
+    const i = l.findIndex((e) => e.id === id);
+    if (i < 0) return;
+    l[i].node?.remove();
+    l.splice(i, 1);
+    if (!l.length) this.pendingEchoes.delete(sid);
+  }
+
+  /** Retire les échos dont le texte correspond — queue_drop : le
+   *  message retiré de la file ne sera jamais journalisé. Toutes les
+   *  occurrences : avec des doublons stricts, retirer un seul écho
+   *  laisserait un pending orphelin pour le message supprimé. */
+  dropEchoesByText(sid: string, text: string) {
+    const l = this.pendingEchoes.get(sid);
+    if (!l) return;
+    const norm = this.normEcho(text);
+    for (let i = l.length - 1; i >= 0; i--) {
+      if (this.normEcho(l[i].text) !== norm) continue;
+      l[i].node?.remove();
+      l.splice(i, 1);
+    }
+    if (!l.length) this.pendingEchoes.delete(sid);
+  }
+
+  /** Vide les échos d'une session — queue_clear côté client. */
+  clearEchoes(sid: string) {
+    const l = this.pendingEchoes.get(sid);
+    if (!l) return;
+    for (const e of l) e.node?.remove();
+    this.pendingEchoes.delete(sid);
+  }
+
+  /** queue_edit : suit le renommage du texte en file — l'écho pending
+   *  du message édité doit porter le texte qui sera journalisé. Un
+   *  seul candidat exact : avec des doublons, toucher le mauvais
+   *  écho désalignerait la réconciliation. */
+  retextEcho(sid: string, oldText: string, newText: string) {
+    const l = this.pendingEchoes.get(sid);
+    if (!l) return;
+    const norm = this.normEcho(oldText);
+    const hits = l.filter((e) => this.normEcho(e.text) === norm);
+    if (hits.length !== 1) return;
+    const e = hits[0];
+    e.text = newText;
+    const wasMounted = e.node != null;
+    e.node?.remove();
+    e.node = null;
+    if (wasMounted && app.current?.id === sid && !this.hasMoreNewer && !this.opening) {
+      this.mountEcho(e);
+    }
+  }
+
+  /** user_message confirmé : consomme l'écho pending correspondant
+   *  (texte normalisé + seq postérieur à l'envoi) — jamais de doublon.
+   *  Sans match (édition de file, envoi par un autre client), l'écho
+   *  reste : il se réconciliera à sa propre livraison. */
+  private consumeEcho(ev: AcEvent) {
+    const sid = app.current?.id;
+    const l = sid ? this.pendingEchoes.get(sid) : undefined;
+    if (!sid || !l?.length) return;
+    const norm = this.normEcho(String(ev.text ?? ""));
+    if (!norm) return;
+    const i = l.findIndex(
+      (e) => e.afterSeq < ev.seq && this.normEcho(e.text) === norm,
+    );
+    if (i < 0) return;
+    const [e] = l.splice(i, 1);
+    if (!l.length) this.pendingEchoes.delete(sid);
+    e.node?.remove();
   }
 
   /** La sentinelle (tête de #events) est-elle dans le scrollport ? */
@@ -1560,7 +1803,7 @@ export class ChatView {
     try {
       while (this.hasMoreHistory && this.sentinelVisible()) {
         const prevMin = this.minRendered;
-        const page = await callBg<{ events: AcEvent[] }>("events", {
+        const page = await callBg<{ events: AcEvent[]; more?: boolean }>("events", {
           session: sid,
           before_seq: this.minRendered,
           limit: PAGE,
@@ -1571,8 +1814,9 @@ export class ChatView {
         this.prependEvents(page.events);
         // Page courte = tête du journal atteinte (trous de compaction
         // inclus : le démon rend ce qui reste, jamais plus) — rien de
-        // plus ancien à chercher.
-        if (page.events.length < PAGE) this.hasMoreHistory = false;
+        // plus ancien à chercher. `more` = troncature par borne
+        // d'octets côté démon (#302) : la suite existe, on continue.
+        if (page.events.length < PAGE && !page.more) this.hasMoreHistory = false;
         // Garde-fou : la progression repose sur le contrat « page
         // strictement < before_seq » → minRendered décroît à chaque
         // tour ; sans ça la boucle enverrait des RPC à l'infini.
@@ -1585,7 +1829,41 @@ export class ChatView {
     }
   }
 
+  /** Aligne les cibles du ResizeObserver sticky sur les enfants
+   *  actuels de #events (ajouts ET retraits — unobserve des nœuds
+   *  détachés, sinon le RO les garderait vivants indéfiniment). */
+  private syncStickTargets() {
+    if (!this.stickRO) return;
+    const cur = new Set<Element>(Array.from(this.eventsEl.children));
+    for (const n of this.stickObserved) {
+      if (!cur.has(n)) {
+        this.stickRO.unobserve(n);
+        this.stickObserved.delete(n);
+      }
+    }
+    for (const n of cur) {
+      if (!this.stickObserved.has(n)) {
+        this.stickRO.observe(n);
+        this.stickObserved.add(n);
+      }
+    }
+  }
+
   init() {
+    // Sticky-bottom : croissance async du contenu (images lazy, <details>,
+    // rendu différé) APRÈS le scrollBottom du batch — le scrollport ne
+    // change pas de taille, seuls ses enfants grandissent : on les
+    // observe un par un. Le MutationObserver maintient la liste des
+    // cibles sans instrumentation des points d'insertion/suppression.
+    this.stickRO = new ResizeObserver(() => {
+      // Vue ancrée : pas de suivi automatique (cf. hasMoreNewer).
+      if (this.stickBottom && !this.hasMoreNewer) this.scrollBottom();
+    });
+    new MutationObserver(() => this.syncStickTargets()).observe(this.eventsEl, {
+      childList: true,
+    });
+    this.syncStickTargets();
+
     // Scroll : chargement des pages anciennes via sentinel
     const observer = new IntersectionObserver((entries) => {
       if (entries[0].isIntersecting) void this.loadOlderPages();
@@ -1594,6 +1872,13 @@ export class ChatView {
 
     this.eventsEl.addEventListener("scroll", () => {
       this.updateBottomBtn();
+      // Le flag « stuck » suit la position AFFICHÉE : tout scroll qui
+      // finit en bas (manuel, scrollBottom, compensation de trim/prepend
+      // qui préserve le bas) re-sticke ; tout scroll qui n'y finit pas
+      // (remontée volontaire, saut de recherche) décolle. Les événements
+      // scroll sont dispatchés après layout → la géométrie lue ici est
+      // déjà la position finale du geste.
+      this.stickBottom = this.nearBottom();
       // Pagination avant (vue ancrée) : le fond de la fenêtre est atteint
       // et du contenu plus récent existe → charger la page suivante.
       if (this.hasMoreNewer && this.nearBottom()) void this.loadNewerPage();
@@ -1604,16 +1889,28 @@ export class ChatView {
     };
     // Clic droit sur une sélection du fil → menu « Copier » (le handler
     // global de main.ts avale le contextmenu hors sélection — sans ça le
-    // texte de la discussion n'était pas copiable). Sans sélection on ne
-    // fait rien : le preventDefault global garde son rôle.
+    // texte de la discussion n'était pas copiable). Android : appui long
+    // sur un message = contextmenu — avec sélection les actions de
+    // message s'ajoutent à « Copier », sans sélection elles les remplacent
+    // (S4 — les boutons survol .pin-tag/.msg-tts sont masqués).
     this.eventsEl.addEventListener("contextmenu", (e) => {
+      const msgEl = (e.target as HTMLElement).closest<HTMLElement>(".ev.msg");
       const sel = getSelection();
-      if (!sel || sel.isCollapsed || !this.eventsEl.contains(sel.anchorNode)) return;
-      const txt = sel.toString();
-      if (!txt.trim()) return;
-      e.preventDefault();
-      e.stopPropagation();
-      this.openSelCtx(e.clientX, e.clientY, txt);
+      const txt =
+        sel && !sel.isCollapsed && this.eventsEl.contains(sel.anchorNode)
+          ? sel.toString()
+          : "";
+      if (txt.trim()) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.openSelCtx(e.clientX, e.clientY, txt, msgEl ?? undefined);
+        return;
+      }
+      if (isAndroid() && msgEl) {
+        e.preventDefault();
+        e.stopPropagation();
+        openMsgCtx(e.clientX, e.clientY, msgEl);
+      }
     });
     // Fermeture du menu « Copier » : clic ailleurs / Échap / scroll du
     // fil — même contrat que #fctx/#sctx (un clic DANS le menu ne doit

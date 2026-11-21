@@ -58,11 +58,11 @@ impl Session {
         let ev = self
             .journal
             .get(&self.dir, seq)?
-            .with_context(|| format!("aucun event au seq {seq}"))?;
+            .with_context(|| format!("no event at seq {seq}"))?;
         let text = ev.kind.searchable_text();
         if text.trim().is_empty() {
             anyhow::bail!(
-                "event #{seq} sans contenu épinglable ({})",
+                "event #{seq} has no pinnable content ({})",
                 ev.kind.type_tag()
             );
         }
@@ -78,7 +78,7 @@ impl Session {
             // nouvel event sans aucun signal côté client.
             p.retain(|e| e.seq != seq);
             if p.len() >= PINS_MAX {
-                anyhow::bail!("limite de {PINS_MAX} messages épinglés atteinte");
+                anyhow::bail!("limit of {PINS_MAX} pinned messages reached");
             }
             let entry = PinEntry {
                 seq,

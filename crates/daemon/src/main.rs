@@ -11,12 +11,13 @@ mod prs;
 mod selfupdate;
 mod server;
 mod session;
+mod skills;
 mod term;
 mod tui;
 mod web;
 
 use anyhow::{Context, Result};
-use server::{AgentProfile, Daemon};
+use server::Daemon;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -38,7 +39,7 @@ struct Config {
     #[serde(default = "default_true")]
     auto_resume: bool,
     #[serde(default)]
-    agents: HashMap<String, AgentConf>,
+    agents: HashMap<String, server::AgentConf>,
     #[serde(default)]
     retention: server::RetentionCfg,
     /// Communication agent↔agent (serveur MCP injecté dans les sessions).
@@ -58,43 +59,17 @@ struct Config {
     /// (session/watch.rs, server::watchdog).
     #[serde(default)]
     watchdog: server::WatchdogCfg,
+    /// Skills agents embarqués : synchronisés dans les répertoires
+    /// scannés par chaque provider au spawn et au boot (skills.rs) —
+    /// `false` désactive globalement, `[agents.<id>] provision_skills
+    /// = false` par profil.
+    #[serde(default = "default_true")]
+    provision_skills: bool,
     /// Forges de review au-delà de GitHub : `[[forges]]` {type, hosts,
     /// token_env} — détection des URLs GitLab/Gerrit dans les sorties
     /// outils (voir docs/forges.md). github.com + gitlab.com implicites.
     #[serde(default)]
     forges: Vec<forges::ForgeCfg>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct AgentConf {
-    name: Option<String>,
-    command: Vec<String>,
-    #[serde(default)]
-    env: HashMap<String, String>,
-    /// Override du compact auto pour ce profil agent
-    /// (`[agents.<id>.compact]`) — session > agent > global.
-    #[serde(default)]
-    compact: server::CompactPartial,
-    /// Agents vivants simultanés max pour ce profil (défaut 6, 0 = illimité).
-    #[serde(default)]
-    max_instances: Option<u32>,
-    /// Commande liste du catalogue complet des modèles (variantes hors
-    /// annonce ACP) — ex. "devin models list".
-    #[serde(default)]
-    catalogue_cmd: Option<String>,
-    /// Template shell `{native_sid}`/`{model}` pour persister un modèle
-    /// catalogue-only côté provider (ex. "devin -r {native_sid} --model {model}").
-    #[serde(default)]
-    model_override_cmd: Option<String>,
-    /// Modèles sélectionnables hors annonce ACP — `[{value=…, label=…}]`
-    /// (ex. variantes Fable de claude-code-acp que l'adaptateur n'annonce pas).
-    #[serde(default)]
-    extra_models: Vec<proto::ExtraModel>,
-    /// Modèles advisor proposables pour les sessions du profil — active
-    /// l'injection `advisorModel` via `_meta.claudeCode.options` au spawn
-    /// (mécanisme claude-code-acp). Ex. ["fable", "opus", "sonnet"].
-    #[serde(default)]
-    advisor_models: Vec<String>,
 }
 
 fn default_tcp() -> String {
@@ -118,6 +93,7 @@ impl Default for Config {
             backlog_orchestrator: server::OrchCfg::default(),
             compact: server::CompactCfg::default(),
             watchdog: server::WatchdogCfg::default(),
+            provision_skills: true,
             forges: Vec::new(),
         }
     }
@@ -144,7 +120,7 @@ fn parse_cli() -> Result<Cli> {
             "--web-dir" => {
                 cli.web_dir = Some(it.next().context("--web-dir <path>")?);
             }
-            other => anyhow::bail!("argument inconnu: {other}"),
+            other => anyhow::bail!("unknown argument: {other}"),
         }
     }
     Ok(cli)
@@ -159,8 +135,8 @@ fn check_loopback(addr: &str) -> Result<()> {
         .unwrap_or_default();
     anyhow::ensure!(
         matches!(host, "127.0.0.1" | "localhost" | "::1"),
-        "bind_http « {addr} » n'est pas loopback — utilisez 127.0.0.1 / ::1 \
-         (l'accès distant se fait via ssh -L, jamais par exposition réseau)"
+        "bind_http « {addr} » is not loopback — use 127.0.0.1 / ::1 \
+         (remote access goes through ssh -L, never network exposure)"
     );
     Ok(())
 }
@@ -177,7 +153,7 @@ fn gen_web_token(root: &std::path::Path) -> Result<String> {
         .read_exact(&mut b)?;
     let token: String = b.iter().map(|x| format!("{x:02x}")).collect();
     let p = root.join("web.token");
-    std::fs::write(&p, &token).context("écriture web.token")?;
+    std::fs::write(&p, &token).context("writing web.token")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -197,7 +173,7 @@ fn resolve_assets(explicit: Option<&str>, root: &std::path::Path) -> Option<web:
         if p.join("index.html").is_file() {
             return Some(web::Assets::Dir(p));
         }
-        tracing::warn!("web_dir {d}: index.html absent — ignoré");
+        tracing::warn!("web_dir {d}: index.html missing — ignored");
     }
     if let Some(m) = web::embedded_assets() {
         return Some(web::Assets::Embed(m));
@@ -221,56 +197,6 @@ fn resolve_assets(explicit: Option<&str>, root: &std::path::Path) -> Option<web:
         .into_iter()
         .find(|p| p.join("index.html").is_file())
         .map(web::Assets::Dir)
-}
-
-fn default_agents() -> HashMap<String, AgentProfile> {
-    let mut m = HashMap::new();
-    let mut devin_env = HashMap::new();
-    devin_env.insert("DEVIN_PERMISSION_MODE".to_string(), "{mode}".to_string());
-    m.insert(
-        "devin".into(),
-        AgentProfile {
-            name: "Devin CLI".into(),
-            command: vec!["devin".into(), "acp".into()],
-            env: devin_env,
-            compact: server::CompactPartial::default(),
-            max_instances: server::DEFAULT_MAX_INSTANCES,
-            catalogue_cmd: None,
-            model_override_cmd: None,
-            extra_models: Vec::new(),
-            advisor_models: Vec::new(),
-        },
-    );
-    // Cursor CLI — ACP natif (`agent acp` / `cursor-agent acp`, même
-    // binaire : `agent` est un alias d'install). argv[0] est résolu en
-    // chemin absolu au boot quand c'est possible : `agent` est un nom
-    // générique (collision possible) — la résolution fige le binaire
-    // concret trouvé, et `available`/spawn le re-résolvent à chaud via
-    // `command_path` (un Cursor installé APRÈS le boot reste
-    // `available` grâce au repli nu « cursor-agent » + PATH élargi).
-    // La commande reste surchargeable : `[agents.cursor]` dans
-    // config.toml ou le composant interne `agents` (options →
-    // composants).
-    let cursor_bin = ["cursor-agent", "agent"]
-        .iter()
-        .find_map(|c| server::misc::command_path(c))
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "cursor-agent".into());
-    m.insert(
-        "cursor".into(),
-        AgentProfile {
-            name: "Cursor CLI".into(),
-            command: vec![cursor_bin, "acp".into()],
-            env: HashMap::new(),
-            compact: server::CompactPartial::default(),
-            max_instances: server::DEFAULT_MAX_INSTANCES,
-            catalogue_cmd: None,
-            model_override_cmd: None,
-            extra_models: Vec::new(),
-            advisor_models: Vec::new(),
-        },
-    );
-    m
 }
 
 fn home_dir() -> PathBuf {
@@ -335,14 +261,14 @@ async fn run() -> Result<()> {
     // fichier — y compris l'erreur fatale, émise AVANT son drop.
     let _guard = logging::init(&root);
     tracing::info!(
-        "=== agentcontrol-daemon v{} démarré (pid {}) — logs: {} ===",
+        "=== agentcontrol-daemon v{} started (pid {}) — logs: {} ===",
         env!("CARGO_PKG_VERSION"),
         std::process::id(),
         root.join("logs").display()
     );
     let res = serve(&root).await;
     if let Err(e) = &res {
-        tracing::error!("arrêt sur erreur fatale: {e:#}");
+        tracing::error!("stopped on fatal error: {e:#}");
     }
     res
 }
@@ -358,7 +284,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     let crashed = match read_pid_marker(&pid_path)? {
         PidMarker::Absent => false,
         PidMarker::Running(pid) => {
-            anyhow::bail!("une autre instance agentcontrol-daemon tourne déjà (pid {pid})");
+            anyhow::bail!("another agentcontrol-daemon instance is already running (pid {pid})");
         }
         PidMarker::Stale => true,
     };
@@ -366,7 +292,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     // Config optionnelle
     let cfg_path = root.join("config.toml");
     let cfg: Config = if cfg_path.exists() {
-        toml::from_str(&std::fs::read_to_string(&cfg_path)?).context("config.toml invalide")?
+        toml::from_str(&std::fs::read_to_string(&cfg_path)?).context("invalid config.toml")?
     } else {
         Config::default()
     };
@@ -376,41 +302,35 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     let bind_http = cli.bind_http.or(cfg.bind_http.clone());
     let web_dir_cfg = cli.web_dir.or(cfg.web_dir.clone());
 
-    let mut agents = default_agents();
-    for (id, c) in cfg.agents {
-        agents.insert(
-            id.clone(),
-            AgentProfile {
-                name: c.name.unwrap_or(id),
-                command: c.command,
-                env: c.env,
-                compact: c.compact,
-                max_instances: c.max_instances.unwrap_or(server::DEFAULT_MAX_INSTANCES),
-                catalogue_cmd: c.catalogue_cmd,
-                model_override_cmd: c.model_override_cmd,
-                extra_models: c.extra_models,
-                advisor_models: c.advisor_models,
-            },
-        );
-    }
+    // Merge built-ins + [agents.*] + auto-découverte PATH — la même
+    // fonction que le hot-reload (agents_cfg.rs).
+    let agents = server::agents_cfg::full_agent_profiles(cfg.agents);
 
     let (daemon, resumable) = Daemon::open(
         root.to_path_buf(),
         agents,
         cfg.retention.clone(),
         cfg.a2a.clone(),
-        forges::Forges::resolve(&cfg.forges),
+        cfg.forges.clone(),
         cfg.bind_tcp.clone(),
         cfg.backlog_orchestrator.clone(),
         cfg.compact.clone(),
         cfg.watchdog.clone(),
+        cfg.provision_skills,
     )
     .await?;
     tracing::info!(
-        "{} session(s) chargée(s), root={}, agents: {}",
+        "{} session(s) loaded, root={}, agents: {}",
         daemon.sessions.read().await.len(),
         root.display(),
-        daemon.agents.read().await.keys().cloned().collect::<Vec<_>>().join(", ")
+        daemon
+            .agents
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
     );
 
     // Socket Unix
@@ -439,12 +359,12 @@ async fn serve(root: &std::path::Path) -> Result<()> {
         let assets = resolve_assets(web_dir_cfg.as_deref(), root);
         match &assets {
             Some(web::Assets::Embed(m)) => {
-                tracing::info!("web assets: {} fichier(s) embarqué(s)", m.len())
+                tracing::info!("web assets: {} embedded file(s)", m.len())
             }
             Some(web::Assets::Dir(d)) => tracing::info!("web assets: {}", d.display()),
             None => tracing::warn!(
-                "assets web introuvables (ni embed, ni root/web, ni exe/web, \
-                 ni client/dist) — page placeholder servie"
+                "web assets not found (neither embed, nor root/web, nor exe/web, \
+                 nor client/dist) — serving placeholder page"
             ),
         }
         let http_listener = tokio::net::TcpListener::bind(addr)
@@ -461,7 +381,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     }
 
     tracing::info!(
-        "listening: unix:{} + {} | rétention: journal>{}MB→{}MB, blobs<{}MB, purge_days={}",
+        "listening: unix:{} + {} | retention: journal>{}MB→{}MB, blobs<{}MB, purge_days={}",
         sock_path.display(),
         cfg.bind_tcp,
         cfg.retention.journal_max_mb,
@@ -472,8 +392,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
 
     // Listeners bindés → l'instance est la nôtre : le marqueur nous
     // représente jusqu'à un arrêt propre (voir la branche signal).
-    std::fs::write(&pid_path, std::process::id().to_string())
-        .context("écriture daemon.pid")?;
+    std::fs::write(&pid_path, std::process::id().to_string()).context("writing daemon.pid")?;
 
     let d1 = daemon.clone();
     let d2 = daemon.clone();
@@ -493,13 +412,38 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     // porte l'activation (opt-in config ou bascule RPC à chaud).
     daemon.orch_boot();
 
+    // Re-scan périodique des `[agents.*]` de config.toml : profils
+    // déclarés/modifiés/supprimés à la main pris en compte à chaud.
+    daemon.agents_rescan_boot();
+
+    // Idem `[[forges]]` : hôtes gitlab/gerrit édités à la main dans
+    // config.toml → nouveau set de détection/sync sans restart.
+    daemon.forges_rescan_boot();
+
+    // Fraîcheur des capacités par profil (item #268) : re-sonde
+    // périodique des profils dont l'instantané agent_caps.json est
+    // absent ou périmé — un profil auto-découvert post-boot (#260) ou
+    // une annonce provider périmée sont rattrapés sans action manuelle.
+    daemon.caps_sweep_boot();
+
+    // Rattrapage acp-* au boot (item #289) : un update depuis un
+    // updater buggé (≤ 0.10.4-rc.9) n'a pas posé les adaptateurs
+    // maison — le nouveau démon les installe depuis sa propre
+    // release, une fois par version. Non bloquant : spawn_blocking,
+    // agent_path_dirs() rescanne le dossier de l'exe à chaque
+    // list_agents → effet immédiat sans restart.
+    {
+        let root = root.to_path_buf();
+        tokio::task::spawn_blocking(move || selfupdate::acp_bootstrap(&root));
+    }
+
     if crashed && !resumable.is_empty() {
         if cfg.auto_resume {
             let d3 = daemon.clone();
             tokio::spawn(async move { d3.auto_resume(resumable).await });
         } else {
             tracing::info!(
-                "arrêt précédent brutal — {} session(s) active(s), reprise auto désactivée (auto_resume=false)",
+                "previous unclean shutdown — {} active session(s), auto resume disabled (auto_resume=false)",
                 resumable.len()
             );
         }
@@ -513,16 +457,16 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     let d_shutdown = daemon.clone();
     let clean = tokio::select! {
         _ = server::accept_unix(d1, unix_listener) => {
-            tracing::error!("accept_unix a retourné — arrêt inattendu");
+            tracing::error!("accept_unix returned — unexpected stop");
             false
         }
         _ = server::accept_tcp(daemon, tcp_listener) => {
-            tracing::error!("accept_tcp a retourné — arrêt inattendu");
+            tracing::error!("accept_tcp returned — unexpected stop");
             false
         }
         sig = shutdown_signal() => {
             tracing::info!(
-                "signal {sig} reçu — arrêt (les sessions restent journalisées sur disque)"
+                "signal {sig} received — stopping (sessions stay journaled on disk)"
             );
             true
         }
@@ -535,7 +479,10 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     if clean {
         let _ = std::fs::remove_file(&pid_path);
     }
-    tracing::info!("=== agentcontrol-daemon arrêté (pid {}) ===", std::process::id());
+    tracing::info!(
+        "=== agentcontrol-daemon stopped (pid {}) ===",
+        std::process::id()
+    );
     Ok(())
 }
 
@@ -553,7 +500,7 @@ fn read_pid_marker(path: &std::path::Path) -> Result<PidMarker> {
     let txt = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(PidMarker::Absent),
-        Err(e) => return Err(e).context("lecture daemon.pid"),
+        Err(e) => return Err(e).context("reading daemon.pid"),
     };
     let Ok(pid) = txt.trim().parse::<u32>() else {
         // Contenu illisible : écriture interrompue → arrêt brutal aussi.
@@ -586,7 +533,7 @@ async fn shutdown_signal() -> &'static str {
             _ = term.recv() => "SIGTERM",
         },
         Err(e) => {
-            tracing::warn!("handler SIGTERM indisponible: {e}");
+            tracing::warn!("SIGTERM handler unavailable: {e}");
             let _ = tokio::signal::ctrl_c().await;
             "SIGINT"
         }

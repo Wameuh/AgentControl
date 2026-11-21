@@ -83,7 +83,9 @@ MISSION — une seule tache (un worker = un item, pas de boucle) :
 
 4. Mene ta PR jusqu'au merge : si la regle de merge de /workspace/AGENTS.md le permet pour un agent (derniere review auto « Verdict: APPROVED » posterieure au push du head courant, fraicheur verifiee via les PushEvents du repo), procede au merge toi-meme (`gh pr merge <N> --squash --delete-branch` — squash = convention du repo, delete-branch = menage de la branche head au merge) ; sinon le merge reste a l'utilisateur — surveille jusqu'au merge effectif via un waiter (`ac-wait -- bash -c 'gh pr view <N> --json state -q .state | grep -q MERGED'` — pipe enrobe dans bash -c, un `|` nu couperait la commande).
 
-5. Marque la tache faite : agentbacklog --done <ID> --agent-id "<ton agent-id>" UNIQUEMENT quand ta PR est effectivement MERGED (verifie l'etat GitHub, pas seulement ready+checks) — cette regle vise TA PR de feature vers next_release. Pour une tache sans PR propre (ex. item patchnotes auto, dont la release PR appartient a l'utilisateur) : --done quand les criteres propres de la tache sont remplis, sans jamais attendre un merge qui n'est pas le tien. Puis ARRETE : reponds « termine » et cesse tout travail — ne re-pop jamais, l'orchestrateur te supprime et spawn un worker neuf pour le pending suivant.
+5. Marque la tache faite : {DOD} La regle --done depend du champ done_when de l'item (agentbacklog --list --json) : 'pr_merged' = ta PR de feature MERGED ; 'deliverable' = les criteres propres de l'item remplis, jamais d'attente de merge. Puis ARRETE : reponds « termine » et cesse tout travail — ne re-pop jamais, l'orchestrateur te supprime et spawn un worker neuf pour le pending suivant.
+
+Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
 
 Blocage insurmontable sur une tache : agentbacklog --release <ID> --agent-id "<ton agent-id>", explique la raison dans ta reponse, puis arrete — l'item repart pending pour un autre worker.
 
@@ -118,7 +120,9 @@ MISSION — une seule tache :
 
 4. Mene ta PR jusqu'au merge : si la regle de merge du repo le permet pour un agent (derniere review auto « Verdict: APPROVED » posterieure au push du head courant, fraicheur verifiee), procede au merge toi-meme ; sinon le merge reste a l'utilisateur — surveille jusqu'au merge effectif via un waiter (`ac-wait -- bash -c 'gh pr view <N> --json state -q .state | grep -q MERGED'` — pipe enrobe dans bash -c).
 
-5. Marque la tache faite : `agentbacklog --done <ID> --agent-id "$AGENTCONTROL_SESSION"` UNIQUEMENT quand ta PR est effectivement MERGED (verifie l'etat GitHub, pas seulement ready+checks) — ou quand les criteres propres de la tache sont remplis si elle n'a pas de PR. Puis ARRETE : reponds « termine » et cesse tout travail — ne re-pop jamais, l'orchestrateur te supprime et spawn un worker neuf pour le pending suivant.
+5. Marque la tache faite : {DOD} Puis ARRETE : reponds « termine » et cesse tout travail — ne re-pop jamais, l'orchestrateur te supprime et spawn un worker neuf pour le pending suivant.
+
+Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
 
 Blocage insurmontable sur une tache : `agentbacklog --release <ID> --agent-id "$AGENTCONTROL_SESSION"`, explique la raison dans ta reponse, puis arrete — l'item repart pending pour un autre worker.
 
@@ -131,11 +135,19 @@ La PR de release (next_release -> main, creee par auto-release-pr.yml — retrou
 
 MISSION :
 
+Etapes : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
+
 1. Body = patchnotes utilisateur EN ANGLAIS couvrant TOUTES les PR mergees dans next_release sur le cycle (inventaire : git fetch origin && git log origin/main..origin/next_release --oneline, ou les commits de la PR). Le generateur automatique (auto-release-pr.yml, cf item #18 / PR #126-127) regenere le body a chaque push sur next_release : verifie qu'il est a jour vis-a-vis du head courant, EN ANGLAIS, et lisible par un utilisateur (fonctionnalites visibles, pas le detail technique interne). JAMAIS de reference interne dans le texte : pas de (#NNN), pas de lien PR, pas d'id backlog — uniquement des changements vecus par l'utilisateur ; les noms de fonctionnalites visibles restent OK. S'il est stale ou non anglophone, declenche la regeneration via le mecanisme du workflow ; a defaut reecris le body toi-meme (gh pr edit <N> --body). Si le generateur doit produire de l'anglais durablement, corrige-le via le cycle PR normal plutot qu'une edition manuelle.
 2. Passe la PR en ready : gh pr ready <N> — cela declenche release-bump (tag rc.k + commit de version sur next_release), c'est voulu. Ne merge JAMAIS la release PR vers main : le merge reste a l'utilisateur.
 3. Si le generateur produit un body defectueux, corrige-le via le cycle PR normal dans un worktree separe (base origin/next_release).
-4. Quand la release PR est ready avec un body a jour : agentbacklog --done <ID> --agent-id "<ton agent-id>". La regle generique du prompt worker « --done UNIQUEMENT quand ta PR est MERGED » NE S'APPLIQUE PAS a cet item : la release PR next_release -> main n'est pas ta PR — son merge est reserve a l'utilisateur. Ton critere de fin est « release PR ready + body a jour », point.
+4. Quand la release PR est ready avec un body a jour : agentbacklog --done <ID> --agent-id "<ton agent-id>". La release PR next_release -> main n'est pas ta PR — son merge est reserve a l'utilisateur ; ton critere de fin est « release PR ready + body a jour », jamais l'attente du merge (item cree avec done_when=deliverable).
 5. Apres ton --done, si du nouveau travail arrive dans le backlog, l'orchestrateur repasse lui-meme la release PR en draft (garde open_any / notes_cycle_done se reinitialise en presence de travail) et un nouvel item patchnotes sera cree au prochain cycle vide — rien a faire de ton cote."#;
+
+/// Variante {DOD} du prompt self-pop legacy : l'item poppé n'est pas
+/// connu au spawn, la règle renvoie au champ `done_when` lu via
+/// `--list --json` (deliverable = critères propres, jamais d'attente
+/// de merge ; pr_merged = PR mergée).
+const LEGACY_DOD: &str = "agentbacklog --done <ID> --agent-id \"$AGENTCONTROL_SESSION\" selon le done_when de l'item (regle detaillee ci-dessous)";
 
 /// `origin` des sessions Manager — rôle d'intendance backlog proposé
 /// par le client (un par workspace routé), distinct des workers : le
@@ -167,6 +179,8 @@ MISSIONS :
 2. REPONDRE AUX QUESTIONS D'ETAT — file (agentbacklog --list --json, --all pour l'historique), items wip/pending/bloques, workers actifs (acctl list), PRs en cours (acctl pr ls --all). Reponses concises, en francais.
 
 3. AJUSTER LA FILE SUR DEMANDE — priorite : agentbacklog --bump <ID> ; dependance : agentbacklog --depend <ID> <DEP> (DEP=0 retire) ; rendre un item wip abandonne : agentbacklog --release <ID> --force. Refuse toute demande qui depasse ton role.
+
+4. ETAPES : publie la liste des etapes de ta tache via `acctl steps set` (skill ac-steps, provisionne dans ton workspace) — la liste des le debut, puis une maj a chaque etape franchie ; le panneau « Etapes » du client la montre a l'utilisateur.
 
 JAMAIS : --pop (tu n'implementes pas), --done (sauf item que TU as toi-meme cree par erreur et qu'il faut retirer — prefere --release + --depend sinon), pas de code a ecrire, pas de PR a mener. Regles absolues : ne jamais stopper/redemarrer/toucher le daemon agentcontrol-daemon ; aucun secret commite ; reponds en francais."#;
 
@@ -365,8 +379,14 @@ impl OrchProbe {
         Self {
             enabled: AtomicBool::new(cfg.enabled),
             status: Mutex::new(OrchStatus {
-                phase: if cfg.enabled { Phase::Waiting } else { Phase::Disabled },
-                detail: cfg.enabled.then(|| "démarrage — en attente du premier cycle".into()),
+                phase: if cfg.enabled {
+                    Phase::Waiting
+                } else {
+                    Phase::Disabled
+                },
+                detail: cfg
+                    .enabled
+                    .then(|| "startup — waiting for the first cycle".into()),
                 last_cycle: None,
                 workers: 0,
                 working: 0,
@@ -398,7 +418,7 @@ impl OrchProbe {
             // périmé pour une demande d'activation.
             self.set_status(
                 Phase::Waiting,
-                Some("activé — en attente du prochain cycle".into()),
+                Some("enabled — waiting for the next cycle".into()),
             );
         }
         self.wake.notify_one();
@@ -508,8 +528,7 @@ impl OrchProbe {
             LockHolder::None => ("none", None),
             LockHolder::Unknown => ("unknown", None),
         };
-        let (item_post, item_post_detail) =
-            item_post_state(self.is_enabled(), holder);
+        let (item_post, item_post_detail) = item_post_state(self.is_enabled(), holder);
         let st = self.status.lock().unwrap();
         let persist = self.state.lock().unwrap();
         let phase = match st.phase {
@@ -585,7 +604,11 @@ impl OrchProbe {
                 return LockState::Error(format!("mkdir {}: {e}", dir.display()));
             }
             let path = dir.join("orchestrator.lock");
-            let f = match std::fs::OpenOptions::new().create(true).write(true).open(&path) {
+            let f = match std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(&path)
+            {
                 Ok(f) => f,
                 Err(e) => return LockState::Error(format!("open {}: {e}", path.display())),
             };
@@ -597,9 +620,7 @@ impl OrchProbe {
                 return match e.raw_os_error() {
                     // EWOULDBLOCK == EAGAIN sur Linux — le guard
                     // évite le pattern dupliqué.
-                    Some(c) if c == libc::EWOULDBLOCK || c == libc::EAGAIN => {
-                        LockState::Busy
-                    }
+                    Some(c) if c == libc::EWOULDBLOCK || c == libc::EAGAIN => LockState::Busy,
                     _ => LockState::Error(format!("flock {}: {e}", path.display())),
                 };
             }
@@ -700,8 +721,7 @@ fn lock_holder() -> LockHolder {
             continue;
         }
         let mut d = devino.split(':');
-        let (Some(maj), Some(min), Some(ino), None) =
-            (d.next(), d.next(), d.next(), d.next())
+        let (Some(maj), Some(min), Some(ino), None) = (d.next(), d.next(), d.next(), d.next())
         else {
             continue;
         };
@@ -734,24 +754,24 @@ fn lock_holder() -> LockHolder {
 /// Tout autre détenteur ou sonde en échec retombe sur le message
 /// générique (jamais d'affirmation « legacy » sans preuve).
 fn blocked_detail() -> String {
-    let generic = "flock ~/.agentbacklog/orchestrator.lock détenu par une \
-                   autre instance (script Python encore actif ?) — le natif \
-                   prend le relais dès qu'il se libère";
+    let generic = "flock ~/.agentbacklog/orchestrator.lock held by another \
+                   instance (legacy Python script still active?) — the native \
+                   takes over as soon as it is released";
     match lock_holder() {
         LockHolder::Legacy(pid) => format!(
-            "flock ~/.agentbacklog/orchestrator.lock détenu par l'orchestrateur \
-             Python legacy (backlog-orchestrator.py, pid {pid}) : post \
-             « [Backlog] item » indisponible, seul le natif le journalise — \
-             retirer le programme supervisord pour qu'il prenne le relais"
+            "flock ~/.agentbacklog/orchestrator.lock held by the legacy \
+             Python orchestrator (backlog-orchestrator.py, pid {pid}): \
+             « [Backlog] item » post unavailable, only the native one \
+             journals it — remove the supervisord program so it takes over"
         ),
         LockHolder::Native(pid) => format!(
-            "flock ~/.agentbacklog/orchestrator.lock détenu par un autre \
-             démon natif (pid {pid}) — c'est lui qui orchestre"
+            "flock ~/.agentbacklog/orchestrator.lock held by another \
+             native daemon (pid {pid}) — it is the one orchestrating"
         ),
         LockHolder::Foreign(pid) => format!(
-            "flock ~/.agentbacklog/orchestrator.lock détenu par le pid {pid} \
-             (non identifié) — si c'est le script Python legacy, le post \
-             « [Backlog] item » n'est pas émis"
+            "flock ~/.agentbacklog/orchestrator.lock held by pid {pid} \
+             (unidentified) — if it is the legacy Python script, the \
+             « [Backlog] item » post is not emitted"
         ),
         _ => generic.into(),
     }
@@ -768,17 +788,17 @@ fn item_post_state(enabled: bool, holder: LockHolder) -> (&'static str, Option<S
         LockHolder::Legacy(pid) => (
             "unavailable",
             Some(format!(
-                "post « [Backlog] item » indisponible — l'orchestrateur Python \
-                 legacy (backlog-orchestrator.py, pid {pid}) détient le flock \
-                 et ne le journalise pas : retirer le programme supervisord \
-                 pour que le natif prenne le relais"
+                "« [Backlog] item » post unavailable — the legacy Python \
+                 orchestrator (backlog-orchestrator.py, pid {pid}) holds the flock \
+                 and does not journal it: remove the supervisord program \
+                 so the native one takes over"
             )),
         ),
         LockHolder::Foreign(pid) => (
             "unknown",
             Some(format!(
-                "détenteur du flock non identifié (pid {pid}) — si c'est le \
-                 script Python legacy, le post « [Backlog] item » n'est pas émis"
+                "flock holder unidentified (pid {pid}) — if it is the \
+                 legacy Python script, the « [Backlog] item » post is not emitted"
             )),
         ),
         LockHolder::Unknown => ("unknown", None),
@@ -890,6 +910,61 @@ impl WorkerSlots {
     }
 }
 
+/// Prochaine entrée du `worker_pool` à pourvoir : la PREMIÈRE entrée
+/// (ordre déclaré) dont les `count` slots ne sont pas tous occupés —
+/// politique de remplissage déterministe et séquentielle (pas de
+/// round-robin : l'équipe se compose dans l'ordre configuré).
+/// Appariement worker→entrée : `meta.agent == entry.profile`, rempli
+/// dans l'ordre déclaré — un worker dont le profil a disparu du pool
+/// n'occupe aucun slot (le failover le réassigne à la 1re entrée).
+/// `extra` = profils déjà spawnés ce tick mais absents des metas
+/// (snapshot pris avant les spawns — évite la double allocation
+/// intra-tick). `None` = pool complet → ne pas spawner.
+pub(crate) fn pool_next_entry<'a>(
+    entries: &'a [cfg::WorkerPoolEntry],
+    workers: &[SessionMeta],
+    live: &HashSet<String>,
+    extra: &[String],
+) -> Option<&'a cfg::WorkerPoolEntry> {
+    pool_next_entry_for(entries, workers, live, extra, "")
+}
+
+/// Variante contrainte par la spec `agent` de l'item : `req_agent`
+/// non vide ne retient que les entrées `profile == req_agent` ayant
+/// un slot libre — `None` = aucune entrée compatible ce tick (profil
+/// absent du pool ou slots pleins), l'item est sauté sans geler les
+/// items non spec'd derrière lui.
+pub(crate) fn pool_next_entry_for<'a>(
+    entries: &'a [cfg::WorkerPoolEntry],
+    workers: &[SessionMeta],
+    live: &HashSet<String>,
+    extra: &[String],
+    req_agent: &str,
+) -> Option<&'a cfg::WorkerPoolEntry> {
+    fn occupy(entries: &[cfg::WorkerPoolEntry], remaining: &mut [u32], agent: &str) {
+        for (i, e) in entries.iter().enumerate() {
+            if remaining[i] > 0 && e.profile == agent {
+                remaining[i] -= 1;
+                return;
+            }
+        }
+    }
+    let mut remaining: Vec<u32> = entries.iter().map(|e| e.count).collect();
+    for w in workers {
+        if counts_as_alive(&w.state, &w.id, live) {
+            occupy(entries, &mut remaining, &w.agent);
+        }
+    }
+    for a in extra {
+        occupy(entries, &mut remaining, a);
+    }
+    entries
+        .iter()
+        .zip(remaining.iter())
+        .find(|(e, r)| **r > 0 && (req_agent.is_empty() || e.profile == req_agent))
+        .map(|(e, _)| e)
+}
+
 /// Sids ayant au moins un waiter ac-wait vivant — scan unique du
 /// répertoire d'état (un appel par lot de sessions, ex. list_sessions,
 /// au lieu d'une relecture disque par session).
@@ -958,7 +1033,9 @@ fn acwait_live_waiters_in(dir: &std::path::Path) -> HashMap<String, AcwaitWait> 
     /// le meta est tout frais.
     const START_GRACE_S: f64 = 30.0;
     let mut out = HashMap::new();
-    let Ok(entries) = std::fs::read_dir(dir) else { return out };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
     let now = now_secs();
     for e in entries.flatten() {
         let meta_path = e.path();
@@ -978,12 +1055,7 @@ fn acwait_live_waiters_in(dir: &std::path::Path) -> HashMap<String, AcwaitWait> 
         let field = |k: &str| -> Option<String> {
             meta.lines().find_map(|l| {
                 let (k2, v) = l.split_once('=')?;
-                (k2 == k).then(|| {
-                    v.trim()
-                        .trim_matches('\'')
-                        .trim_matches('"')
-                        .to_string()
-                })
+                (k2 == k).then(|| v.trim().trim_matches('\'').trim_matches('"').to_string())
             })
         };
         let Some(sid) = field("session") else {
@@ -1007,9 +1079,7 @@ fn acwait_live_waiters_in(dir: &std::path::Path) -> HashMap<String, AcwaitWait> 
                 #[cfg(unix)]
                 let alive = pid > 0 && {
                     let rc = unsafe { libc::kill(pid, 0) };
-                    rc == 0
-                        || std::io::Error::last_os_error().raw_os_error()
-                            == Some(libc::EPERM)
+                    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
                 };
                 #[cfg(not(unix))]
                 let alive = pid > 0;
@@ -1046,9 +1116,7 @@ fn acwait_live_waiters_in(dir: &std::path::Path) -> HashMap<String, AcwaitWait> 
                 v.insert(w);
             }
             std::collections::hash_map::Entry::Occupied(mut o) => {
-                if w.started.unwrap_or(f64::MAX)
-                    < o.get().started.unwrap_or(f64::MAX)
-                {
+                if w.started.unwrap_or(f64::MAX) < o.get().started.unwrap_or(f64::MAX) {
                     o.insert(w);
                 }
             }
@@ -1092,8 +1160,7 @@ fn acwait_cancel_session_in(dir: &std::path::Path, sid: &str) {
         };
         let is_target = meta.lines().any(|l| {
             l.split_once('=').is_some_and(|(k, v)| {
-                k == "session"
-                    && v.trim().trim_matches('\'').trim_matches('"') == sid
+                k == "session" && v.trim().trim_matches('\'').trim_matches('"') == sid
             })
         });
         if !is_target {
@@ -1131,6 +1198,18 @@ fn acwait_cancel_session_in(dir: &std::path::Path, sid: &str) {
 /// par profil.
 pub(crate) fn rate_limited_count(metas: &[SessionMeta], cfg: &cfg::OrchCfg) -> usize {
     let agents = cfg.role_agents();
+    // Modèles effectifs par rôle + entrées du pool : un worker sur le
+    // modèle de SON entrée compte même si `cfg.model` global diffère.
+    // Ensemble vide (aucun modèle configuré nulle part) = tout modèle.
+    let mut models: Vec<String> = vec![
+        cfg.model_or(&cfg.planner_model).to_string(),
+        cfg.model_or(&cfg.reviewer_model).to_string(),
+        cfg.model_or(&cfg.pr_reviewer_model).to_string(),
+    ];
+    for e in cfg.worker_entries() {
+        models.push(e.model);
+    }
+    models.retain(|m| !m.is_empty());
     metas
         .iter()
         .filter(|m| {
@@ -1140,7 +1219,10 @@ pub(crate) fn rate_limited_count(metas: &[SessionMeta], cfg: &cfg::OrchCfg) -> u
                     .as_ref()
                     .is_some_and(|le| le.kind == "rate_limit")
                 && agents.contains(&m.agent.as_str())
-                && (cfg.model.is_empty() || m.model.as_deref() == Some(cfg.model.as_str()))
+                && (models.is_empty()
+                    || m.model
+                        .as_deref()
+                        .is_some_and(|mm| models.iter().any(|x| x == mm)))
         })
         .count()
 }
@@ -1167,6 +1249,52 @@ pub(crate) fn task_repo<'a>(t: &'a Task) -> &'a str {
 /// même file que le self-pop historique.
 pub(crate) fn task_priority(t: &Task) -> i64 {
     t.get("priority").and_then(Value::as_i64).unwrap_or(0)
+}
+/// Profil `[agents.*]` EXIGÉ par l'item (colonne `agent` de
+/// agentbacklog ≥ 0.9, NULL = sans contrainte) — distinct de
+/// `agent_id` (session owner, `task_agent`). L'orchestrateur ne
+/// dispatche l'item que sur une entrée du `worker_pool` (ou le rôle
+/// planner en mode plan_review) à ce profil ; absent → item en
+/// attente, jamais re-cueilli par un autre profil.
+pub(crate) fn task_spec_agent<'a>(t: &'a Task) -> &'a str {
+    t.get("agent").and_then(Value::as_str).unwrap_or("")
+}
+/// Override modèle au spawn — priorité item > entrée pool > cfg rôle.
+pub(crate) fn task_spec_model<'a>(t: &'a Task) -> &'a str {
+    t.get("model").and_then(Value::as_str).unwrap_or("")
+}
+/// Override effort (`thought_level`) au spawn — même priorité.
+pub(crate) fn task_spec_effort<'a>(t: &'a Task) -> &'a str {
+    t.get("effort").and_then(Value::as_str).unwrap_or("")
+}
+/// Override mode de session au spawn — même priorité.
+pub(crate) fn task_spec_mode<'a>(t: &'a Task) -> &'a str {
+    t.get("mode").and_then(Value::as_str).unwrap_or("")
+}
+/// `done_when` de l'item : `pr_merged` (défaut — `--done` à la PR de
+/// l'item MERGED) ou `deliverable` (`--done` aux critères propres de
+/// l'item, jamais d'attente de merge). Texte libre extensible côté
+/// CLI ; une valeur inconnue retombe sur le contrat historique.
+pub(crate) fn task_done_when(t: &Task) -> &'static str {
+    match t.get("done_when").and_then(Value::as_str) {
+        Some("deliverable") => "deliverable",
+        _ => "pr_merged",
+    }
+}
+/// Règle « done » substituée dans les prompts worker ({DOD}) selon
+/// `done_when` — `deliverable` lève l'attente de merge ; `pr_merged`
+/// (et toute valeur inconnue) garde le contrat PR mergée.
+pub(crate) fn task_dod(t: &Task) -> &'static str {
+    if task_done_when(t) == "deliverable" {
+        "agentbacklog --done <ID> --agent-id \"$AGENTCONTROL_SESSION\" \
+         des que les criteres propres de l'item sont remplis \
+         (done_when=deliverable) — jamais d'attente de merge."
+    } else {
+        "agentbacklog --done <ID> --agent-id \"$AGENTCONTROL_SESSION\" \
+         UNIQUEMENT quand ta PR est effectivement MERGED (verifie \
+         l'etat GitHub, pas seulement ready+checks) — ou quand les \
+         criteres propres de la tache sont remplis si elle n'a pas de PR."
+    }
 }
 /// Un item `pending` est « poppable » : sans dépendance ou dépendances
 /// toutes soldées — compter les dep-bloqués ferait spawner des workers
@@ -1230,7 +1358,11 @@ fn clean_task_title(t: &Task) -> String {
 /// natif (et inverse) ne déclenche aucun ping-pong de renommages.
 /// `None` = base `<préfixe><N>` introuvable dans le titre courant
 /// (session renommée à la main → on n'y touche plus).
-pub(crate) fn orch_desired_title(prefix: &str, current: &str, wip: Option<&Task>) -> Option<String> {
+pub(crate) fn orch_desired_title(
+    prefix: &str,
+    current: &str,
+    wip: Option<&Task>,
+) -> Option<String> {
     let digits = current
         .strip_prefix(prefix)?
         .bytes()
@@ -1257,7 +1389,7 @@ pub(crate) async fn run_out(argv: &[&str], cwd: &Path) -> Result<(i64, String, S
     let out = tokio::time::timeout(CMD_TIMEOUT, cmd.output())
         .await
         .with_context(|| format!("`{}` : timeout {}s", argv[0], CMD_TIMEOUT.as_secs()))?
-        .with_context(|| format!("`{}` : spawn impossible", argv[0]))?;
+        .with_context(|| format!("`{}` : spawn failed", argv[0]))?;
     Ok((
         out.status.code().map(i64::from).unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout).trim().to_string(),
@@ -1340,7 +1472,8 @@ impl Daemon {
                 return;
             }
             LockState::Error(e) => {
-                self.orch.set_status(Phase::Error, Some(format!("lock: {e}")));
+                self.orch
+                    .set_status(Phase::Error, Some(format!("lock: {e}")));
                 return;
             }
         }
@@ -1350,7 +1483,7 @@ impl Daemon {
         // Appelée même `pr_review=false` : une bascule en vol laisse des
         // entrées Running à solder (session + worktree à libérer).
         if let Err(e) = self.orch_pr_review_tick().await {
-            warn!("orchestrateur: review PR: {e:#}");
+            warn!("orchestrator: review PR: {e:#}");
         }
         // GC des sessions `feature:pr-review` orphelines — sous les
         // gardes enable/pause/lock comme la passe review, indépendante
@@ -1361,10 +1494,8 @@ impl Daemon {
         let bin = match self.orch_agentbacklog_bin().await {
             Some(b) => b,
             None => {
-                self.orch.set_status(
-                    Phase::Waiting,
-                    Some("waiting: agentbacklog manquant".into()),
-                );
+                self.orch
+                    .set_status(Phase::Waiting, Some("waiting: agentbacklog missing".into()));
                 return;
             }
         };
@@ -1379,15 +1510,15 @@ impl Daemon {
             self.orch.set_status(
                 Phase::Waiting,
                 Some(
-                    "waiting: plan_review nécessite agentbacklog ≥ 0.7 \
-                     (--claim-review absent du CLI résolu)"
+                    "waiting: plan_review requires agentbacklog ≥ 0.7 \
+                     (--claim-review missing from the resolved CLI)"
                         .into(),
                 ),
             );
             return;
         }
         if let Err(e) = self.orch_cycle(&bin).await {
-            warn!("orchestrateur: cycle échoué: {e:#}");
+            warn!("orchestrator: cycle failed: {e:#}");
             self.orch.set_status(Phase::Error, Some(format!("{e:#}")));
         }
     }
@@ -1427,11 +1558,10 @@ impl Daemon {
         let tasks = self
             .orch_tasks(bin, ws)
             .await
-            .context("agentbacklog --list a échoué")?;
+            .context("agentbacklog --list failed")?;
         let (metas, session_ids): (Vec<SessionMeta>, HashSet<String>) = {
             let sessions = self.sessions.read().await;
-            let metas: Vec<SessionMeta> =
-                sessions.values().map(|s| s.meta_snapshot()).collect();
+            let metas: Vec<SessionMeta> = sessions.values().map(|s| s.meta_snapshot()).collect();
             let ids = metas.iter().map(|m| m.id.clone()).collect();
             (metas, ids)
         };
@@ -1501,17 +1631,26 @@ impl Daemon {
         self.orch_failover_tick(bin, cfg, ws, &tasks, &metas, &prs, &mut st)
             .await;
 
+        // Items spec'd (agent=) sautés ce tick faute d'entrée de pool
+        // compatible — remplis par la branche legacy ou le tick
+        // plan_review, remontés dans le détail de statut.
+        let mut spec_waiting: Vec<String> = Vec::new();
         // plan_review (opt-in) : pipeline plan→review→implémentation
         // dédié (server/orch_plan.rs — même snapshot, même état
         // persisté partagé) ; l'autre branche est le dispatch worker
         // direct historique, inchangé.
         let (n_workers, n_working, n_pending, n_planners, n_reviewers) = if cfg.plan_review {
             let oc = self
-                .orch_plan_tick(
-                    bin, cfg, ws, &tasks, &metas, &session_ids, &prs, &mut st,
-                )
+                .orch_plan_tick(bin, cfg, ws, &tasks, &metas, &session_ids, &prs, &mut st)
                 .await?;
-            (oc.workers, oc.working, oc.pending, oc.planners, oc.reviewers)
+            spec_waiting = oc.spec_waiting;
+            (
+                oc.workers,
+                oc.working,
+                oc.pending,
+                oc.planners,
+                oc.reviewers,
+            )
         } else {
             // 0. Désactivation en vol : items encore plan_review/
             //    reviewing → dégel en pending (claim-review + verdict
@@ -1528,7 +1667,7 @@ impl Daemon {
                     let aid = task_agent(t);
                     if aid.starts_with("s-") && !session_ids.contains(aid) {
                         info!(
-                            "orchestrateur: tâche #{} orpheline (owner {aid} disparue) → release",
+                            "orchestrator: task #{} orphaned (owner {aid} gone) → release",
                             task_id(t)
                         );
                         let _ = run_out(
@@ -1602,9 +1741,8 @@ impl Daemon {
                         p.session == sid && !matches!(p.status.as_str(), "closed" | "merged")
                     }) {
                         if release_num.is_none() {
-                            release_num = Some(
-                                self.gh_release_pr(ws).await.map(|r| r.0).unwrap_or(0),
-                            );
+                            release_num =
+                                Some(self.gh_release_pr(ws).await.map(|r| r.0).unwrap_or(0));
                         }
                         if release_pr_entry(p, release_num.unwrap_or(0)) {
                             continue;
@@ -1635,12 +1773,12 @@ impl Daemon {
                     .filter(|_| !about_to_delete)
                 {
                     Some(want) if want != w.title => {
-                        info!("orchestrateur: rename {sid} : {:?} → {want:?}", w.title);
+                        info!("orchestrator: rename {sid}: {:?} → {want:?}", w.title);
                         let d = Arc::clone(self);
                         let (sid2, want2) = (sid.to_string(), want.clone());
                         tokio::spawn(async move {
                             if let Err(e) = d.h_rename_session(sid2, want2).await {
-                                warn!("orchestrateur: rename: {e:#}");
+                                warn!("orchestrator: rename: {e:#}");
                             }
                         });
                         want
@@ -1761,7 +1899,7 @@ impl Daemon {
                     if dead_stale {
                         for id in &my_open {
                             info!(
-                                "orchestrateur: {sid} dead depuis {}s — release #{id}",
+                                "orchestrator: {sid} dead for {}s — release #{id}",
                                 (now - dead_since) as i64
                             );
                             let _ =
@@ -1775,18 +1913,18 @@ impl Daemon {
                     let since = *st.clean_since.entry(sid.to_string()).or_insert(now);
                     if unresolved && now - since < CLEAN_GRACE_S {
                         info!(
-                            "orchestrateur: {sid} propre sauf PR non enregistrées \
-                             (done={my_done:?}) — grâce {}s",
+                            "orchestrator: {sid} clean except unregistered PRs \
+                             (done={my_done:?}) — {}s grace",
                             (now - since) as i64
                         );
                         continue;
                     }
                     info!(
-                        "orchestrateur: {sid} inactive, items soldés \
+                        "orchestrator: {sid} inactive, items settled \
                          (done={my_done:?}), prs={my_prs:?} → rm"
                     );
                     if let Err(e) = self.h_delete_session(sid.to_string()).await {
-                        warn!("orchestrateur: rm {sid}: {e:#}");
+                        warn!("orchestrator: rm {sid}: {e:#}");
                     }
                     st.nudges.remove(sid);
                     st.clean_since.remove(sid);
@@ -1805,7 +1943,7 @@ impl Daemon {
                     let d = Arc::clone(self);
                     tokio::spawn(async move {
                         if let Err(e) = d.h_pr_sync().await {
-                            warn!("orchestrateur: pr_sync pré-ménage: {e:#}");
+                            warn!("orchestrator: pr_sync pre-cleanup: {e:#}");
                         }
                     });
                 }
@@ -1838,7 +1976,7 @@ impl Daemon {
                         continue;
                     }
                     info!(
-                        "orchestrateur: {sid} idle (open_prs={open_prs:?} \
+                        "orchestrator: {sid} idle (open_prs={open_prs:?} \
                          wip={my_open:?}) → nudge"
                     );
                     if self.orch_nudge(sid, &open_prs, &my_open).await {
@@ -1875,7 +2013,10 @@ impl Daemon {
                 .filter(|w| counts_as_working(&w.state, &w.id, &live_waiters))
                 .count();
             let mut slots = WorkerSlots {
-                total: (cfg.max_workers as usize).saturating_sub(alive),
+                // Capacité workers = somme du pool (`worker_capacity`
+                // = `max_workers` quand worker_pool est vide — legacy
+                // inchangé) ; `max_working` reste le second seuil.
+                total: (cfg.worker_capacity() as usize).saturating_sub(alive),
                 working: (cfg.max_working_cap() as usize).saturating_sub(working),
                 gained: 0,
             };
@@ -1891,8 +2032,8 @@ impl Daemon {
                 }
                 if !slots.ok() {
                     info!(
-                        "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
-                         wip={my_open:?}) → nudge différé (max_workers/max_working)"
+                        "orchestrator: {sid} asleep (open_prs={open_prs:?} \
+                         wip={my_open:?}) → nudge deferred (max_workers/max_working)"
                     );
                     continue;
                 }
@@ -1900,7 +2041,7 @@ impl Daemon {
                     return Ok(());
                 }
                 info!(
-                    "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
+                    "orchestrator: {sid} asleep (open_prs={open_prs:?} \
                      wip={my_open:?}) → nudge wip-prioritaire (slots={:?})",
                     slots
                 );
@@ -1940,12 +2081,12 @@ impl Daemon {
                     )
                 });
                 info!(
-                    "orchestrateur: {rl} session(s) en rate_limit — mode sériel \
+                    "orchestrator: {rl} session(s) in rate_limit — serial mode \
                      (active={active})"
                 );
                 self.orch.status.lock().unwrap().detail = Some(format!(
-                    "{rl} session(s) en rate_limit — exécution sérialisée \
-                     (1 session à la fois)"
+                    "{rl} session(s) in rate_limit — serialized execution \
+                     (1 session at a time)"
                 ));
                 usize::from(!active).min(n)
             };
@@ -1960,19 +2101,29 @@ impl Daemon {
                     .cmp(&task_priority(a))
                     .then(task_id(a).cmp(&task_id(b)))
             });
+            // Pool effectif : `worker_entries` = worker_pool configuré
+            // ou pool implicite legacy (worker_agent + max_workers +
+            // valeurs globales) — `pool_next_entry` choisit la 1re
+            // entrée non pleine dans l'ordre déclaré.
+            let entries = cfg.worker_entries();
             if orch_plan::cli_claim_capable(bin, ws).await {
                 let cap = serial_cap(&workers, spawnable.len())
                     .min(slots.total)
                     .min(slots.working);
-                for t in spawnable.iter().take(cap) {
-                    if !slots.ok() || !self.orch.is_enabled() {
+                // `cap` borne les SPAWNS effectifs, pas les items
+                // examinés : un item spec'd sauté (pas d'entrée de
+                // pool compatible) ne doit pas consommer le budget —
+                // sinon il gèlerait les items non-spec'd derrière.
+                let mut spawned = 0usize;
+                for t in spawnable.iter() {
+                    if spawned >= cap || !slots.ok() || !self.orch.is_enabled() {
                         break;
                     }
                     let id = task_id(t);
                     let repo = task_repo(t);
                     let cwd = cfg.workspace_for(repo).to_string();
                     let repo_label = if repo.is_empty() {
-                        "(non taggé)".to_string()
+                        "(untagged)".to_string()
                     } else {
                         repo.to_string()
                     };
@@ -1983,12 +2134,13 @@ impl Daemon {
                             ("REPO", repo_label.clone()),
                             ("ID", id.to_string()),
                             ("ITEM", orch_plan::item_body(t)),
+                            ("DOD", task_dod(t).replace("<ID>", &id.to_string())),
                         ],
                     );
                     st.counter += 1;
                     info!(
-                        "orchestrateur: pending={} unrouted={} → spawn {}{} \
-                         pour #{} (repo {}, ws {})",
+                        "orchestrator: pending={} unrouted={} → spawn {}{} \
+                         for #{} (repo {}, ws {})",
                         pending.len(),
                         unrouted_tags.len(),
                         cfg.title_prefix,
@@ -1997,27 +2149,56 @@ impl Daemon {
                         repo_label,
                         cwd
                     );
-                    let Some(sid) = self
-                        .orch_spawn(st.counter, &cwd, prompt)
-                        .await
+                    // Spec `agent` de l'item : seules les entrées du
+                    // pool à ce profil sont candidates — sans slot
+                    // compatible l'item est sauté CE tick (un item
+                    // spec'd en tête ne gèle pas les non-spec'd).
+                    let req_agent = task_spec_agent(t);
+                    let Some(entry) =
+                        pool_next_entry_for(&entries, &workers, &live_waiters, &[], req_agent)
                     else {
+                        if req_agent.is_empty() {
+                            // Pool complet pour CE tick (les slots
+                            // globaux ont du mou mais chaque entrée est
+                            // pleine — workers non appariés au pool) :
+                            // ne pas spawner.
+                            break;
+                        }
+                        spec_waiting.push(format!(
+                            "item #{} requires agent={req_agent} \
+                             (no matching slot)",
+                            id
+                        ));
                         continue;
                     };
-                    let (rc, _o, e) = run_out(
-                        &[bin, "--claim", &id.to_string(), "--agent-id", &sid],
-                        ws,
-                    )
-                    .await
-                    .unwrap_or((-1, String::new(), "spawn impossible".into()));
+                    // Overrides item > entrée pool (model/effort/mode).
+                    let mut eff = entry.clone();
+                    for (dst, src) in [
+                        (&mut eff.model, task_spec_model(t)),
+                        (&mut eff.effort, task_spec_effort(t)),
+                        (&mut eff.mode, task_spec_mode(t)),
+                    ] {
+                        if !src.is_empty() {
+                            *dst = src.to_string();
+                        }
+                    }
+                    let Some(sid) = self.orch_spawn(st.counter, &cwd, prompt, &eff).await else {
+                        continue;
+                    };
+                    let (rc, _o, e) =
+                        run_out(&[bin, "--claim", &id.to_string(), "--agent-id", &sid], ws)
+                            .await
+                            .unwrap_or((-1, String::new(), "spawn failed".into()));
                     if rc == 0 {
                         if let Ok(s) = self.get_session(&sid).await {
                             workers.push(s.meta_snapshot());
                         }
                         slots.take();
+                        spawned += 1;
                     } else {
-                        warn!("orchestrateur: claim #{id} rc={rc} {e} → rm {sid}");
+                        warn!("orchestrator: claim #{id} rc={rc} {e} → rm {sid}");
                         if let Err(e2) = self.h_delete_session(sid.clone()).await {
-                            warn!("orchestrateur: rm {sid} (claim échoué): {e2:#}");
+                            warn!("orchestrator: rm {sid} (claim failed): {e2:#}");
                         }
                     }
                 }
@@ -2031,16 +2212,28 @@ impl Daemon {
                     }
                     st.counter += 1;
                     info!(
-                        "orchestrateur: pending={} active={} → spawn {}{} \
-                         (self-pop, agentbacklog sans --claim)",
+                        "orchestrator: pending={} active={} → spawn {}{} \
+                         (self-pop, agentbacklog without --claim)",
                         pending.len(),
                         alive,
                         cfg.title_prefix,
                         st.counter
                     );
-                    let prompt = cfg.prompt.clone().unwrap_or_else(|| PROMPT.to_string());
+                    // Self-pop legacy : l'item n'est pas connu au spawn
+                    // (le worker le --pop lui-même) — {DOD} est remplacé
+                    // par la règle générique done_when, le détail par
+                    // item reste dans le --list que le worker consultera.
+                    let prompt = cfg
+                        .prompt
+                        .clone()
+                        .unwrap_or_else(|| PROMPT.to_string())
+                        .replace("{DOD}", LEGACY_DOD);
+                    let Some(entry) = pool_next_entry(&entries, &workers, &live_waiters, &[])
+                    else {
+                        break;
+                    };
                     if let Some(sid) = self
-                        .orch_spawn(st.counter, &cfg.workspace, prompt)
+                        .orch_spawn(st.counter, &cfg.workspace, prompt, entry)
                         .await
                     {
                         if let Ok(s) = self.get_session(&sid).await {
@@ -2061,8 +2254,8 @@ impl Daemon {
                 }
                 if !slots.ok() {
                     info!(
-                        "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
-                         wip={my_open:?}) → nudge différé (max_workers/max_working)"
+                        "orchestrator: {sid} asleep (open_prs={open_prs:?} \
+                         wip={my_open:?}) → nudge deferred (max_workers/max_working)"
                     );
                     continue;
                 }
@@ -2072,7 +2265,7 @@ impl Daemon {
                 let open_refs: Vec<&String> = open_prs.iter().collect();
                 let wip_refs: Vec<&String> = my_open.iter().collect();
                 info!(
-                    "orchestrateur: {sid} asleep (open_prs={open_prs:?} \
+                    "orchestrator: {sid} asleep (open_prs={open_prs:?} \
                      wip={my_open:?}) → nudge (slots={:?})",
                     slots
                 );
@@ -2106,23 +2299,22 @@ impl Daemon {
             // doit pas passer ready pendant qu'elle tourne).
             let in_flight = |t: &Task| {
                 matches!(task_status(t), "pending" | "wip")
-                    || (cfg.plan_review
-                        && matches!(task_status(t), "plan_review" | "reviewing"))
+                    || (cfg.plan_review && matches!(task_status(t), "plan_review" | "reviewing"))
             };
-            let active_notes = tasks.iter().any(|t| {
-                notes_ids.contains(&task_id(t)) && in_flight(t)
-            });
-            let active_other = tasks.iter().any(|t| {
-                !notes_ids.contains(&task_id(t)) && in_flight(t)
-            });
+            let active_notes = tasks
+                .iter()
+                .any(|t| notes_ids.contains(&task_id(t)) && in_flight(t));
+            let active_other = tasks
+                .iter()
+                .any(|t| !notes_ids.contains(&task_id(t)) && in_flight(t));
             let rpr = self.gh_release_pr(ws).await;
             if active_other {
                 st.notes_cycle_done = false; // nouveau cycle de travail
                 if let Some(r) = rpr {
                     if !r.1 {
                         info!(
-                            "orchestrateur: release PR #{} ready mais backlog non \
-                             vide → repasse draft",
+                            "orchestrator: release PR #{} ready but backlog not \
+                             empty → back to draft",
                             r.0
                         );
                         let _ =
@@ -2152,13 +2344,13 @@ impl Daemon {
                     }
                     if !open_any.is_empty() {
                         info!(
-                            "orchestrateur: backlog vide mais PRs encore ouvertes \
-                             {open_any:?} → patchnotes en attente"
+                            "orchestrator: backlog empty but PRs still open \
+                             {open_any:?} → patchnotes pending"
                         );
                     } else {
                         info!(
-                            "orchestrateur: backlog vide + release PR #{} draft → \
-                             création item patchnotes",
+                            "orchestrator: backlog empty + release PR #{} draft → \
+                             creating patchnotes item",
                             r.0
                         );
                         if let Some(nid) = self.orch_add_notes(bin, ws, cfg.plan_review).await {
@@ -2196,28 +2388,38 @@ impl Daemon {
             // — visible via `acctl status` / comp info.
             let errs: Vec<&str> = metas
                 .iter()
-                .filter(|m| {
-                    m.origin.as_deref() == Some(COMPONENT_ORIGIN) && m.state == "error"
-                })
+                .filter(|m| m.origin.as_deref() == Some(COMPONENT_ORIGIN) && m.state == "error")
                 .filter_map(|m| m.last_error.as_ref().map(|le| le.kind.as_str()))
                 .collect();
             let mut detail_parts: Vec<String> = Vec::new();
             if !errs.is_empty() {
                 detail_parts.push(format!(
-                    "{} session(s) en erreur : {}",
+                    "{} session(s) in error: {}",
                     errs.len(),
                     errs.join(", ")
                 ));
             }
             if !unrouted_tags.is_empty() {
                 detail_parts.push(format!(
-                    "items non dispatchables — tag(s) repo sans workspace \
-                     (déclarer via repo_workspaces) : {}",
+                    "undispatchable items — repo tag(s) without a workspace \
+                     (declare via repo_workspaces): {}",
                     unrouted_tags.join(", ")
                 ));
             }
+            if !spec_waiting.is_empty() {
+                detail_parts.push(format!("waiting: {}", spec_waiting.join(" ; ")));
+            }
             let detail = (!detail_parts.is_empty()).then(|| detail_parts.join(" ; "));
-            self.orch.set_status(Phase::Active, detail);
+            // Items spec'd en attente d'un slot compatible sans rien
+            // d'autre en vol → Waiting explicite plutôt qu'une
+            // starvation silencieuse ; du travail actif garde Active
+            // (le détail « waiting: … » reste visible dans les deux cas).
+            let phase = if !spec_waiting.is_empty() && n_working == 0 {
+                Phase::Waiting
+            } else {
+                Phase::Active
+            };
+            self.orch.set_status(phase, detail);
         }
         // Échantillon métriques post-cycle (server/metrics.rs) —
         // best-effort : un journal inscriptible ne casse jamais le tick.
@@ -2230,14 +2432,11 @@ impl Daemon {
     /// `agentbacklog --list --all --json` → items, None si la lecture
     /// a échoué (le cycle avorte : aucune décision sur du flou).
     pub(crate) async fn orch_tasks(&self, bin: &str, ws: &Path) -> Option<Vec<Task>> {
-        let (rc, out, err) = run_out(
-            &[bin, "--list", "--all", "--json"],
-            ws,
-        )
-        .await
-        .ok()?;
+        let (rc, out, err) = run_out(&[bin, "--list", "--all", "--json"], ws)
+            .await
+            .ok()?;
         if rc != 0 {
-            warn!("orchestrateur: agentbacklog --list rc={rc} err={err}");
+            warn!("orchestrator: agentbacklog --list rc={rc} err={err}");
             return None;
         }
         serde_json::from_str(&out).ok()
@@ -2290,19 +2489,32 @@ impl Daemon {
         }
         let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
         run_out(&argv, ws)
-        .await
-        .ok()
-        .filter(|(rc, out, _)| *rc == 0 && !out.is_empty())
-        .map(|(_, out, _)| out)
-        .unwrap_or_else(|| "UNKNOWN".into())
+            .await
+            .ok()
+            .filter(|(rc, out, _)| *rc == 0 && !out.is_empty())
+            .map(|(_, out, _)| out)
+            .unwrap_or_else(|| "UNKNOWN".into())
     }
 
     /// PR de release auto (`next_release` → `main`) si ouverte :
     /// Some((number, isDraft)).
     pub(crate) async fn gh_release_pr(&self, ws: &Path) -> Option<(u64, bool)> {
         let (rc, out, _) = run_out(
-            &["gh", "pr", "list", "--head", "next_release", "--base", "main",
-              "--state", "open", "--json", "number,isDraft", "--limit", "1"],
+            &[
+                "gh",
+                "pr",
+                "list",
+                "--head",
+                "next_release",
+                "--base",
+                "main",
+                "--state",
+                "open",
+                "--json",
+                "number,isDraft",
+                "--limit",
+                "1",
+            ],
             ws,
         )
         .await
@@ -2333,10 +2545,18 @@ impl Daemon {
         if no_plan {
             argv.push("--no-plan");
         }
+        // done_when=deliverable (agentbacklog ≥ 0.9) : l'item n'attend
+        // pas le merge de la release PR — le prompt worker reçoit la
+        // règle « critères propres » via {DOD}. CLI plus ancien → pas
+        // de flag, la description porte le critère de fin.
+        if orch_plan::cli_done_when_capable(bin, ws).await {
+            argv.push("--done-when");
+            argv.push("deliverable");
+        }
         argv.push("--json");
         let (rc, out, _) = run_out(&argv, ws).await.ok()?;
         if rc != 0 {
-            warn!("orchestrateur: notes item add rc={rc} out={out}");
+            warn!("orchestrator: item note add rc={rc} out={out}");
             return None;
         }
         let id = serde_json::from_str::<Value>(&out)
@@ -2351,7 +2571,7 @@ impl Daemon {
                     .and_then(|s| s.parse().ok())
             })
             .unwrap_or_else(|| {
-                warn!("orchestrateur: notes item créé mais id non parsé (out={out})");
+                warn!("orchestrator: item note created but id not parsed (out={out})");
                 0
             });
         Some(id)
@@ -2361,7 +2581,12 @@ impl Daemon {
     /// prend plus de prompts (morte/interrompue — h_send enfile + réveille
     /// les `asleep` tout seul, seul le cas « agent not running » exige le
     /// respawn explicite).
-    async fn orch_nudge(self: &Arc<Self>, sid: &str, open_prs: &[&String], wip: &[&String]) -> bool {
+    async fn orch_nudge(
+        self: &Arc<Self>,
+        sid: &str,
+        open_prs: &[&String],
+        wip: &[&String],
+    ) -> bool {
         let mut parts: Vec<String> = Vec::new();
         if !open_prs.is_empty() {
             parts.push(format!(
@@ -2370,7 +2595,11 @@ impl Daemon {
                  ses criteres sont reunis (verdict APPROVED posterieur au push \
                  du head courant, fraicheur verifiee via PushEvents), procede \
                  au merge toi-meme ; sinon surveille jusqu'au merge utilisateur.",
-                open_prs.iter().map(|p| format!("#{p}")).collect::<Vec<_>>().join(", ")
+                open_prs
+                    .iter()
+                    .map(|p| format!("#{p}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         if !wip.is_empty() {
@@ -2378,7 +2607,10 @@ impl Daemon {
                 "Tes taches encore wip : {}. Si tu les as abandonnees, \
                  release-les : agentbacklog --release <ID> --agent-id \
                  \"$AGENTCONTROL_SESSION\". Sinon reprends le travail dessus.",
-                wip.iter().map(|t| format!("#{t}")).collect::<Vec<_>>().join(", ")
+                wip.iter()
+                    .map(|t| format!("#{t}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         parts.push(
@@ -2390,10 +2622,18 @@ impl Daemon {
         );
         let msg = parts.join(" ");
         let sid = sid.to_string();
-        if self.h_send(sid.clone(), msg.clone(), false, false).await.is_ok() {
+        if self
+            .h_send(sid.clone(), msg.clone(), false, false)
+            .await
+            .is_ok()
+        {
             return true;
         }
-        if self.h_resume_session(sid.clone(), None).await.is_ok() {
+        if self
+            .h_resume_session(sid.clone(), None, false)
+            .await
+            .is_ok()
+        {
             return self.h_send(sid, msg, false, false).await.is_ok();
         }
         false
@@ -2407,20 +2647,34 @@ impl Daemon {
     /// `prompt` déjà templé — le dispatch claim passe le prompt par
     /// item, le repli self-pop le prompt générique dans cfg.workspace.
     /// Remplace les `acctl new/setcfg`/RPC socket du script.
-    async fn orch_spawn(self: &Arc<Self>, number: u64, cwd: &str, prompt: String) -> Option<String> {
+    async fn orch_spawn(
+        self: &Arc<Self>,
+        number: u64,
+        cwd: &str,
+        prompt: String,
+        entry: &cfg::WorkerPoolEntry,
+    ) -> Option<String> {
         let cfg = self.orch.cfg.read().unwrap().clone();
         let cfg = &cfg;
         let title = format!("{}{}", cfg.title_prefix, number);
         let group = (!cfg.group.is_empty()).then(|| cfg.group.clone());
-        let agent = cfg.agent_or(&cfg.worker_agent);
-        self.warn_spawn_cfg(agent, &cfg.model, &cfg.mode);
+        // `worker_entries` porte déjà les replis globalaux (profil
+        // worker_agent/agent, model/mode/thought_level) — pool vide =
+        // entrée implicite legacy, comportement inchangé.
+        let (agent, model, mode, effort) = (
+            entry.profile.as_str(),
+            entry.model.as_str(),
+            entry.mode.as_str(),
+            entry.effort.as_str(),
+        );
+        self.warn_spawn_cfg(agent, model, mode);
         let v = match self
             .h_new_session(
                 agent.to_string(),
                 cwd.to_string(),
                 Some(title.clone()),
-                Some(cfg.model.clone()),
-                Some(cfg.mode.clone()),
+                Some(model.to_string()),
+                Some(mode.to_string()),
                 Some(prompt),
                 Some(COMPONENT_ORIGIN.to_string()),
                 group,
@@ -2429,13 +2683,13 @@ impl Daemon {
         {
             Ok(v) => v,
             Err(e) => {
-                warn!("orchestrateur: spawn {title}: {e:#}");
+                warn!("orchestrator: spawn {title}: {e:#}");
                 return None;
             }
         };
         let sid = v.get("session").and_then(Value::as_str)?.to_string();
-        self.apply_spawn_cfg(&sid).await;
-        info!("orchestrateur: spawned {title} = {sid}");
+        self.apply_spawn_cfg(&sid, effort).await;
+        info!("orchestrator: spawned {title} = {sid}");
         Some(sid)
     }
 
@@ -2452,14 +2706,12 @@ impl Daemon {
             agent.to_string()
         };
         let dyn_ = orch_cfg::dyn_choices(&self.root, &agent);
-        for (key, val, known) in [
-            ("model", model, &dyn_.models),
-            ("mode", mode, &dyn_.modes),
-        ] {
-            if !val.is_empty() && !known.is_empty() && !known.iter().any(|(v, _)| v.as_str() == val) {
+        for (key, val, known) in [("model", model, &dyn_.models), ("mode", mode, &dyn_.modes)] {
+            if !val.is_empty() && !known.is_empty() && !known.iter().any(|(v, _)| v.as_str() == val)
+            {
                 warn!(
-                    "orchestrateur: {key} « {val} » hors liste annoncée \
-                     par l'agent « {agent} » — valeurs : {}",
+                    "orchestrator: {key} « {val} » outside the list announced \
+                     by agent « {agent} » — values: {}",
                     known
                         .iter()
                         .map(|(v, _)| v.as_str())
@@ -2474,20 +2726,21 @@ impl Daemon {
     /// `thought_level` de la config — best-effort, les échecs sont
     /// loggés sans faire échouer le spawn. (Le groupe sidebar est posé
     /// à la création via le param `group` de `h_new_session`.)
-    pub(crate) async fn apply_spawn_cfg(self: &Arc<Self>, sid: &str) {
-        let cfg = self.orch.cfg.read().unwrap().clone();
-        if !cfg.thought_level.is_empty() {
+    /// `effort` = `thought_level` à poser — l'appelant a déjà résolu
+    /// le repli (entrée du pool ou `*_effort` de rôle → global).
+    pub(crate) async fn apply_spawn_cfg(self: &Arc<Self>, sid: &str, effort: &str) {
+        if !effort.is_empty() {
             // Posée en pending_config tant que l'agent n'est pas prêt —
             // rejouée au spawn (comme `acctl setcfg` juste après `new`).
             if let Err(e) = self
                 .h_set_config_option(
                     sid.to_string(),
                     "thought_level".to_string(),
-                    cfg.thought_level.clone(),
+                    effort.to_string(),
                 )
                 .await
             {
-                warn!("orchestrateur: thought_level {sid}: {e:#}");
+                warn!("orchestrator: thought_level {sid}: {e:#}");
             }
         }
     }
@@ -2500,24 +2753,28 @@ impl Daemon {
     pub(super) async fn h_manager_spawn(self: &Arc<Self>, repo: &str) -> Result<Value> {
         anyhow::ensure!(
             self.orch.is_enabled(),
-            "orchestrateur désactivé — la surface « Manager » n'est \
-             proposée que quand il est actif"
+            "orchestrator disabled — the « Manager » surface is \
+             only offered when it is active"
         );
         let cfg = self.orch.cfg.read().unwrap().clone();
         let cfg = &cfg;
         anyhow::ensure!(
             cfg.spawn_managers,
-            "spawn_managers désactivé — la surface « Manager » est coupée"
+            "spawn_managers disabled — the « Manager » surface is off"
         );
         anyhow::ensure!(
             self.orch_agentbacklog_bin().await.is_some(),
-            "agentbacklog non résolvable — un Manager sans file à gérer \
-             ne sert à rien"
+            "agentbacklog not resolvable — a Manager with no queue to \
+             manage is useless"
         );
         let cwd = cfg.repo_workspaces.get(repo).cloned().with_context(|| {
             format!(
-                "workspace inconnu: {repo} — routés : {}",
-                cfg.repo_workspaces.keys().cloned().collect::<Vec<_>>().join(", ")
+                "unknown workspace: {repo} — routed: {}",
+                cfg.repo_workspaces
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
         })?;
         let title = format!("{MANAGER_TITLE_PREFIX}{repo}");
@@ -2557,9 +2814,9 @@ impl Daemon {
         let sid = v
             .get("session")
             .and_then(Value::as_str)
-            .context("spawn Manager: pas de session dans la réponse")?
+            .context("spawn Manager: no session in the response")?
             .to_string();
-        self.apply_spawn_cfg(&sid).await;
+        self.apply_spawn_cfg(&sid, &cfg.thought_level).await;
         info!("manager: spawned {title} = {sid} (workspace {repo} → {cwd})");
         Ok(json!({
             "session": sid, "repo": repo, "cwd": cwd,
@@ -2573,20 +2830,19 @@ impl Daemon {
     pub(crate) fn orch_save(&self, st: &OrchPersist) {
         let dir = state_dir();
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            warn!("orchestrateur: mkdir {}: {e}", dir.display());
+            warn!("orchestrator: mkdir {}: {e}", dir.display());
             return;
         }
         let tmp = dir.join("orchestrator-state.json.part");
         let dst = dir.join("orchestrator-state.json");
         match serde_json::to_string_pretty(st) {
             Ok(txt) => {
-                if let Err(e) = std::fs::write(&tmp, txt)
-                    .and_then(|_| std::fs::rename(&tmp, &dst))
+                if let Err(e) = std::fs::write(&tmp, txt).and_then(|_| std::fs::rename(&tmp, &dst))
                 {
-                    warn!("orchestrateur: save state: {e}");
+                    warn!("orchestrator: save state: {e}");
                 }
             }
-            Err(e) => warn!("orchestrateur: sérialisation state: {e}"),
+            Err(e) => warn!("orchestrator: state serialization: {e}"),
         }
     }
 
@@ -2595,7 +2851,7 @@ impl Daemon {
     /// *persistée* : `OrchestratorConfig{patch:{enabled:…}}`).
     pub(super) async fn h_orch_set(self: &Arc<Self>, enabled: bool) -> Result<Value> {
         self.orch.set_enabled(enabled);
-        info!("orchestrateur: bascule RPC enabled={enabled}");
+        info!("orchestrator: RPC toggle enabled={enabled}");
         Ok(json!({
             "enabled": enabled,
             "status": self.orch.status_json(),
@@ -2621,7 +2877,7 @@ impl Daemon {
             }));
         };
         let applied = self.orch_patch(patch)?;
-        info!("orchestrateur: config persistée ({applied:?})");
+        info!("orchestrator: config persisted ({applied:?})");
         Ok(json!({
             "config": orch_cfg::cfg_json(
                 &self.orch.cfg.read().unwrap(),
@@ -2647,7 +2903,7 @@ impl Daemon {
             .map(|(k, v)| (k.clone(), Value::String(v.clone())))
             .collect();
         let applied = self.orch_patch(patch)?;
-        info!("orchestrateur: params persistés ({applied:?})");
+        info!("orchestrator: params persisted ({applied:?})");
         Ok(json!({
             "name": COMPONENT_NAME,
             "state": self.orch.component_state(),
@@ -2677,8 +2933,7 @@ impl Daemon {
             let mut next = guard.clone();
             let applied = orch_cfg::apply_patch(&mut next, &patch)?;
             orch_cfg::persist(&self.root, &next)?;
-            let flip = patch.contains_key("enabled")
-                && next.enabled != self.orch.is_enabled();
+            let flip = patch.contains_key("enabled") && next.enabled != self.orch.is_enabled();
             let en = next.enabled;
             *guard = next;
             (applied, flip, en)
@@ -2737,7 +2992,7 @@ mod tests {
         ));
         // Mauvais repo → pas le nôtre.
         assert!(!is_live_manager(
-            &meta(Some(MANAGER_ORIGIN), "Manager · Autre", "idle"),
+            &meta(Some(MANAGER_ORIGIN), "Manager · Other", "idle"),
             "AgentControl"
         ));
         // États terminaux → respawn proposable.
@@ -2859,7 +3114,7 @@ mod tests {
         let ws = workspaces_json(true, &cfg);
         assert_eq!(ws.len(), 1);
         assert_eq!(ws[0]["repo"], "AgentControl");
-        cfg.repo_workspaces.insert("Autre".into(), "/tmp/x".into());
+        cfg.repo_workspaces.insert("Other".into(), "/tmp/x".into());
         assert_eq!(workspaces_json(true, &cfg).len(), 2);
         cfg.repo_workspaces.clear();
         assert!(workspaces_json(true, &cfg).is_empty());
@@ -2956,8 +3211,7 @@ mod tests {
 
     #[test]
     fn acwait_waiters_retient_le_plus_ancien() {
-        let dir =
-            std::env::temp_dir().join(format!("ac-wait-test-multi-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ac-wait-test-multi-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let now = now_secs();
@@ -2981,7 +3235,7 @@ mod tests {
         );
         std::fs::write(dir.join("w-old.pid"), &pid).unwrap();
         let ws = acwait_live_waiters_in(&dir);
-        let w = ws.get("s-multi").expect("waiter vivant attendu");
+        let w = ws.get("s-multi").expect("live waiter expected");
         assert_eq!(w.started, Some(now - 900.0));
         assert_eq!(w.name, "verdict PR #42"); // backslashes %q déséchappés
         assert_eq!(w.timeout, Some(1800.0));
@@ -3016,14 +3270,170 @@ mod tests {
                 ("REPO", "Taskwondo".to_string()),
                 ("ID", "42".to_string()),
                 ("ITEM", "#42 — titre".to_string()),
+                ("DOD", "RULE-DONE".to_string()),
             ],
         );
         assert!(p.contains("cwd /w") || p.contains("/w"));
         assert!(p.contains("repo Taskwondo"));
         assert!(p.contains("#42 — titre"));
-        assert!(!p.contains("{WS}") && !p.contains("{ITEM}"));
+        assert!(p.contains("RULE-DONE"));
+        assert!(!p.contains("{WS}") && !p.contains("{ITEM}") && !p.contains("{DOD}"));
         // Le prompt worker ne doit plus imposer le self-pop : le dispatch
         // claim pré-assigne l'item.
         assert!(p.contains("PAS a lancer `agentbacklog --pop`"));
+    }
+
+    fn worker_meta(id: &str, agent: &str) -> SessionMeta {
+        let mut m = meta(Some(COMPONENT_ORIGIN), "Backlog-W1", "idle");
+        m.id = id.into();
+        m.agent = agent.into();
+        m
+    }
+
+    fn pool_entry(profile: &str, count: u32) -> cfg::WorkerPoolEntry {
+        cfg::WorkerPoolEntry {
+            profile: profile.into(),
+            count,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pool_next_entry_ordre_comptage_et_extra() {
+        let entries = vec![pool_entry("devin", 2), pool_entry("claude", 1)];
+        let live = HashSet::new();
+        let w: Vec<SessionMeta> = Vec::new();
+        // Ordre déclaré : devin d'abord tant qu'un slot reste.
+        assert_eq!(
+            pool_next_entry(&entries, &w, &live, &[]).unwrap().profile,
+            "devin"
+        );
+        // 1 worker devin vivant → encore devin (count=2).
+        let w = vec![worker_meta("s-1", "devin")];
+        assert_eq!(
+            pool_next_entry(&entries, &w, &live, &[]).unwrap().profile,
+            "devin"
+        );
+        // 2 devin vivants → claude.
+        let w = vec![worker_meta("s-1", "devin"), worker_meta("s-2", "devin")];
+        assert_eq!(
+            pool_next_entry(&entries, &w, &live, &[]).unwrap().profile,
+            "claude"
+        );
+        // Pool plein → None (ne pas spawner).
+        let w = vec![
+            worker_meta("s-1", "devin"),
+            worker_meta("s-2", "devin"),
+            worker_meta("s-3", "claude"),
+        ];
+        assert!(pool_next_entry(&entries, &w, &live, &[]).is_none());
+        // `extra` = profils spawnés ce tick hors snapshot metas.
+        let w2 = vec![worker_meta("s-1", "devin"), worker_meta("s-2", "devin")];
+        assert_eq!(
+            pool_next_entry(&entries, &w2, &live, &["claude".to_string()])
+                .map(|e| e.profile.as_str()),
+            None
+        );
+        // Worker dont le profil a DISPARU du pool : n'occupe aucun
+        // slot d'entrée (le failover le réassigne) — mais il compte
+        // dans la capacité globale ailleurs.
+        let w3 = vec![worker_meta("s-9", "cursor")];
+        assert_eq!(
+            pool_next_entry(&entries, &w3, &live, &[]).unwrap().profile,
+            "devin"
+        );
+        // Session `asleep` SANS waiter vivant : `counts_as_alive` la
+        // dit morte pour le slot — ne consomme pas d'entrée.
+        let mut parked = worker_meta("s-8", "devin");
+        parked.state = "asleep".into();
+        let w4 = vec![parked];
+        assert_eq!(
+            pool_next_entry(&entries, &w4, &live, &[]).unwrap().profile,
+            "devin"
+        );
+        // `asleep` + waiter vivant : slot conservé (retour garanti).
+        let mut parked = worker_meta("s-8", "devin");
+        parked.state = "asleep".into();
+        let live_waiter: HashSet<String> = ["s-8".to_string()].into_iter().collect();
+        let entries1 = vec![pool_entry("devin", 1)];
+        assert!(pool_next_entry(&entries1, &[parked], &live_waiter, &[]).is_none());
+    }
+
+    #[test]
+    fn task_spec_accessors_tolérants() {
+        // JSON ancien agentbacklog (sans les colonnes) → chaînes vides,
+        // jamais de panic ni de contrainte fantôme.
+        let old: Task = serde_json::from_str(r#"{"id": 1, "status": "pending"}"#).unwrap();
+        assert_eq!(task_spec_agent(&old), "");
+        assert_eq!(task_spec_model(&old), "");
+        assert_eq!(task_spec_effort(&old), "");
+        assert_eq!(task_spec_mode(&old), "");
+        assert_eq!(task_done_when(&old), "pr_merged");
+        // Valeurs non-string / null → idem.
+        let weird: Task =
+            serde_json::from_str(r#"{"id": 1, "agent": 5, "done_when": null}"#).unwrap();
+        assert_eq!(task_spec_agent(&weird), "");
+        assert_eq!(task_done_when(&weird), "pr_merged");
+        // Spec complète.
+        let t: Task = serde_json::from_str(
+            r#"{"id": 1, "agent": "claude", "model": "opus",
+                "effort": "high", "mode": "smart", "done_when": "deliverable"}"#,
+        )
+        .unwrap();
+        assert_eq!(task_spec_agent(&t), "claude");
+        assert_eq!(task_spec_model(&t), "opus");
+        assert_eq!(task_spec_effort(&t), "high");
+        assert_eq!(task_spec_mode(&t), "smart");
+        assert_eq!(task_done_when(&t), "deliverable");
+        // done_when inconnu → contrat historique (extensible, pas de gate).
+        let u: Task = serde_json::from_str(r#"{"id": 1, "done_when": "pr_open"}"#).unwrap();
+        assert_eq!(task_done_when(&u), "pr_merged");
+    }
+
+    #[test]
+    fn task_dod_selon_done_when() {
+        let merged: Task = serde_json::from_str(r#"{"id": 1}"#).unwrap();
+        assert!(task_dod(&merged).contains("MERGED"));
+        let deliv: Task = serde_json::from_str(r#"{"id": 1, "done_when": "deliverable"}"#).unwrap();
+        assert!(!task_dod(&deliv).contains("MERGED"));
+        assert!(task_dod(&deliv).contains("deliverable"));
+    }
+
+    #[test]
+    fn pool_next_entry_for_spec_agent() {
+        let entries = vec![pool_entry("devin", 1), pool_entry("claude", 1)];
+        let live = HashSet::new();
+        let w: Vec<SessionMeta> = Vec::new();
+        // Sans contrainte : 1re entrée libre (comportement inchangé).
+        assert_eq!(
+            pool_next_entry_for(&entries, &w, &live, &[], "")
+                .unwrap()
+                .profile,
+            "devin"
+        );
+        // agent=claude → seule l'entrée claude, même si devin est libre.
+        assert_eq!(
+            pool_next_entry_for(&entries, &w, &live, &[], "claude")
+                .unwrap()
+                .profile,
+            "claude"
+        );
+        // Slot claude occupé → None (item sauté, pas de repli devin).
+        let w = vec![worker_meta("s-1", "claude")];
+        assert!(pool_next_entry_for(&entries, &w, &live, &[], "claude").is_none());
+        // …alors que l'item non spec'd prend encore devin.
+        assert_eq!(
+            pool_next_entry_for(&entries, &w, &live, &[], "")
+                .unwrap()
+                .profile,
+            "devin"
+        );
+        // Profil absent du pool → None.
+        assert!(pool_next_entry_for(&entries, &w, &live, &[], "cursor").is_none());
+        // `extra` (spawns intra-tick) consomme le slot claude.
+        let w2: Vec<SessionMeta> = Vec::new();
+        assert!(
+            pool_next_entry_for(&entries, &w2, &live, &["claude".to_string()], "claude").is_none()
+        );
     }
 }

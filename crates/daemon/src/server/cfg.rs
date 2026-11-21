@@ -4,10 +4,39 @@
 use proto::SessionMeta;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
+/// Provenance d'un profil agent — exposée par list_agents (`via`) :
+/// `builtin` = preset du démon (devin, cursor), `config` = section
+/// `[agents.*]` de config.toml (prime toujours, même id), `auto` =
+/// adaptateur ACP découvert sur le PATH (agents_auto.rs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentVia {
+    #[default]
+    Builtin,
+    Config,
+    Auto,
+}
+
+impl AgentVia {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Builtin => "builtin",
+            Self::Config => "config",
+            Self::Auto => "auto",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct AgentProfile {
     pub name: String,
-    pub command: Vec<String>,
+    /// Commandes candidates, essayées dans l'ordre : la première dont
+    /// argv[0] résout sur le PATH du démon est retenue au spawn et pour
+    /// `available` (ex. `claude-code-acp` puis `claude-agent-acp`).
+    /// Si aucune ne résout, la première est utilisée (spawn → ENOENT
+    /// explicite, comme avant).
+    pub commands: Vec<Vec<String>>,
+    /// Provenance du profil (builtin / config.toml / auto-découverte).
+    pub via: AgentVia,
     /// Templates d'env : {mode}, {model} substitués ; var omise si vide.
     pub env: HashMap<String, String>,
     /// Override du seuil de compact auto `[agents.<id>.compact]` — voir
@@ -40,11 +69,111 @@ pub struct AgentProfile {
     /// `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` pour la valeur "off").
     /// Vide = fonctionnalité absente.
     pub advisor_models: Vec<String>,
+    /// `false` = les skills agents embarqués ne sont PAS provisionnés
+    /// dans les répertoires scannés par ce provider (skills.rs) —
+    /// défaut true, override global `provision_skills` dans config.toml.
+    pub provision_skills: bool,
 }
 
 /// Plafond d'instances par profil agent quand `max_instances` n'est pas
 /// précisé dans `[agents.<id>]`.
 pub const DEFAULT_MAX_INSTANCES: u32 = 6;
+
+/// `command` d'une section `[agents.<id>]` : argv simple
+/// `command = ["bin", "arg"]` (historique) ou liste de fallbacks
+/// `command = [["bin1"], ["bin2", "arg"]]` — chaque entrée est un argv
+/// complet, le premier dont argv[0] résout sur le PATH gagne.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(untagged)]
+pub enum AgentCommand {
+    Argv(Vec<String>),
+    Fallbacks(Vec<Vec<String>>),
+}
+
+impl AgentCommand {
+    /// Toutes les commandes candidates, dans l'ordre d'essai.
+    pub fn argvs(&self) -> Vec<Vec<String>> {
+        match self {
+            Self::Argv(a) => vec![a.clone()],
+            Self::Fallbacks(v) => v.clone(),
+        }
+    }
+}
+
+/// Une section `[agents.<id>]` de config.toml — forme brute
+/// (désérialisation), convertie en `AgentProfile` par
+/// `profile_from_conf`. Définie ici (et non dans main.rs) pour être
+/// partagée entre le chargement au boot et le hot-reload
+/// `Daemon::reload_agent_profiles` — les profils ajoutés à config.toml
+/// APRÈS le démarrage deviennent utilisables sans restart.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AgentConf {
+    pub name: Option<String>,
+    pub command: AgentCommand,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// Override du compact auto pour ce profil agent
+    /// (`[agents.<id>.compact]`) — session > agent > global.
+    #[serde(default)]
+    pub compact: CompactPartial,
+    /// Agents vivants simultanés max pour ce profil (défaut 6, 0 = illimité).
+    #[serde(default)]
+    pub max_instances: Option<u32>,
+    /// Commande liste du catalogue complet des modèles (variantes hors
+    /// annonce ACP) — ex. "devin models list".
+    #[serde(default)]
+    pub catalogue_cmd: Option<String>,
+    /// Template shell `{native_sid}`/`{model}` pour persister un modèle
+    /// catalogue-only côté provider (ex. "devin -r {native_sid} --model {model}").
+    #[serde(default)]
+    pub model_override_cmd: Option<String>,
+    /// Modèles sélectionnables hors annonce ACP — `[{value=…, label=…}]`
+    /// (ex. variantes Fable de claude-code-acp que l'adaptateur n'annonce pas).
+    #[serde(default)]
+    pub extra_models: Vec<proto::ExtraModel>,
+    /// Modèles advisor proposables pour les sessions du profil — active
+    /// l'injection `advisorModel` via `_meta.claudeCode.options` au spawn
+    /// (mécanisme claude-code-acp). Ex. ["fable", "opus", "sonnet"].
+    #[serde(default)]
+    pub advisor_models: Vec<String>,
+    /// `provision_skills = false` désactive la synchro des skills
+    /// agents embarqués pour ce profil (défaut : activé).
+    #[serde(default)]
+    pub provision_skills: Option<bool>,
+}
+
+/// Lit uniquement la table `[agents]` d'un config.toml — le hot-reload
+/// n'a pas besoin du reste de la config (rétention, a2a, orchestrateur
+/// restent boot-only). `None` = TOML invalide : l'appelant conserve les
+/// profils déjà chargés (un config.toml cassé ne doit ni vider la table
+/// ni empêcher le démarrage — le parse complet reste le garde-fou du
+/// boot dans main.rs). Section absente → table vide.
+pub fn agent_confs(text: &str) -> Option<HashMap<String, AgentConf>> {
+    #[derive(serde::Deserialize)]
+    struct AgentsOnly {
+        #[serde(default)]
+        agents: HashMap<String, AgentConf>,
+    }
+    toml::from_str::<AgentsOnly>(text).ok().map(|c| c.agents)
+}
+
+/// `AgentConf` (config.toml) → `AgentProfile` effectif — mapping
+/// unique partagé par le boot (main.rs) et le hot-reload.
+pub fn profile_from_conf(id: &str, c: AgentConf) -> AgentProfile {
+    AgentProfile {
+        name: c.name.unwrap_or_else(|| id.to_string()),
+        commands: c.command.argvs(),
+        via: AgentVia::Config,
+        env: c.env,
+        compact: c.compact,
+        max_instances: c.max_instances.unwrap_or(DEFAULT_MAX_INSTANCES),
+        catalogue_cmd: c.catalogue_cmd,
+        model_override_cmd: c.model_override_cmd,
+        extra_models: c.extra_models,
+        advisor_models: c.advisor_models,
+        provision_skills: c.provision_skills.unwrap_or(true),
+    }
+}
 
 /// Valeur de {mode} pour la ligne de commande/env de l'agent : les ids de
 /// modes de **session ACP** qui n'existent pas côté CLI (`plan`, `smart`,
@@ -63,13 +192,19 @@ pub(crate) fn env_mode(mode: &str) -> &str {
 
 /// Substitution {model}/{mode} du profil avec les valeurs courantes de la
 /// session (mêmes règles que new_session/resume : entrée vide → omise).
-pub(super) fn spawn_args(profile: &AgentProfile, meta: &SessionMeta) -> (Vec<String>, HashMap<String, String>) {
+pub(super) fn spawn_args(
+    profile: &AgentProfile,
+    meta: &SessionMeta,
+) -> (Vec<String>, HashMap<String, String>) {
     let (m, mo) = (
         meta.model.as_deref().unwrap_or(""),
         env_mode(meta.mode.as_deref().unwrap_or("")),
     );
-    let cmd = profile
-        .command
+    // Fallbacks : la première commande dont argv[0] résout est
+    // retenue ; aucune ne résout → la première (spawn → ENOENT
+    // explicite). Le repli sur le nom brut reste dans agent.rs.
+    let argv = crate::server::misc::effective_command(&profile.commands);
+    let cmd = argv
         .iter()
         .map(|a| a.replace("{model}", m).replace("{mode}", mo))
         .filter(|a| !a.is_empty())
@@ -126,6 +261,32 @@ impl Default for RetentionCfg {
             interval_secs: 600,
         }
     }
+}
+
+/// Une entrée du pool de workers (`[[worker_pool]]`) : `count` slots
+/// du profil `profile`, chacun avec modèle/effort/mode propres —
+/// vides = repli sur les valeurs globales (`model`/`thought_level`/
+/// `mode`). Le spawn remplit les entrées dans l'ordre déclaré : la
+/// première entrée dont les slots ne sont pas tous occupés gagne.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WorkerPoolEntry {
+    /// Profil `[agents.*]` de l'entrée — vide = `agent_or(worker_agent)`.
+    #[serde(default)]
+    pub profile: String,
+    /// Slots workers de ce profil — 0 = entrée inerte (tolérée : un
+    /// count à 0 dans une config éditée à la main ne casse rien).
+    #[serde(default)]
+    pub count: u32,
+    /// Modèle demandé au spawn — vide = `model` global.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    /// Niveau d'effort (`thought_level` posé post-spawn) — vide =
+    /// `thought_level` global.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub effort: String,
+    /// Mode demandé au spawn — vide = `mode` global.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mode: String,
 }
 
 /// Orchestrateur backlog natif (section [backlog_orchestrator] de
@@ -299,6 +460,22 @@ pub struct OrchCfg {
     /// Modèle demandé au spawn des reviewers PR — vide = `model`.
     #[serde(default)]
     pub pr_reviewer_model: String,
+    /// Niveau d'effort (`thought_level`) des reviewers PR — vide =
+    /// `thought_level` global.
+    #[serde(default)]
+    pub pr_reviewer_effort: String,
+    /// Modèle des planificateurs/implémenteurs `Backlog-P*` — vide = `model`.
+    #[serde(default)]
+    pub planner_model: String,
+    /// Niveau d'effort (`thought_level`) des planificateurs — vide = `thought_level`.
+    #[serde(default)]
+    pub planner_effort: String,
+    /// Modèle des reviewers de plan `Backlog-R*` — vide = `model`.
+    #[serde(default)]
+    pub reviewer_model: String,
+    /// Niveau d'effort (`thought_level`) des reviewers de plan — vide = `thought_level`.
+    #[serde(default)]
+    pub reviewer_effort: String,
     /// Reviews PR simultanées max — pool SÉPARÉ de `max_workers` (les
     /// workers en attente d'une review ne doivent jamais affamer les
     /// reviews qu'ils attendent). Défaut 2.
@@ -308,6 +485,16 @@ pub struct OrchCfg {
     /// « review failed » au-delà. Défaut 2700 s (45 min).
     #[serde(default = "d2700")]
     pub pr_review_timeout: u64,
+    /// Pool de workers structurés (`[[worker_pool]]` dans config.toml) —
+    /// présent non vide = la somme des `count` remplace `max_workers`
+    /// pour la capacité workers et chaque entrée porte profil +
+    /// modèle/effort/mode propres ; vide = comportement legacy
+    /// (`worker_agent`/`agent` + `max_workers` + `model`/`mode`/
+    /// `thought_level` = pool implicite à une entrée). Placé juste
+    /// avant `repo_workspaces` : les deux sont des sous-structures TOML
+    /// (array-of-tables / table) — jamais de clé scalaire après elles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worker_pool: Vec<WorkerPoolEntry>,
     /// Routing workspace repo → cwd : une entrée = un « workspace »
     /// porté par le backlog (tag `--repo` des items). Route les
     /// sessions spawnées pour un item taggé (worker legacy, planner,
@@ -409,21 +596,29 @@ impl Default for OrchCfg {
             pr_review_trigger: dtrigger(),
             pr_reviewer_mode: dsmart(),
             pr_reviewer_model: String::new(),
+            pr_reviewer_effort: String::new(),
+            planner_model: String::new(),
+            planner_effort: String::new(),
+            reviewer_model: String::new(),
+            reviewer_effort: String::new(),
             pr_review_max_parallel: d2(),
             pr_review_timeout: d2700(),
+            worker_pool: Vec::new(),
             repo_workspaces: drw(),
         }
     }
 }
 
 impl OrchCfg {
-    /// Cap effectif `max_working` : 0 = non borné → `max_workers`.
+    /// Cap effectif `max_working` : 0 = non borné → capacité workers
+    /// (`worker_capacity` — somme du pool, ou `max_workers` en mode
+    /// legacy sans pool).
     pub fn max_working_cap(&self) -> u64 {
-        u64::from(if self.max_working == 0 {
-            self.max_workers
+        if self.max_working == 0 {
+            self.worker_capacity()
         } else {
-            self.max_working
-        })
+            u64::from(self.max_working)
+        }
     }
 
     /// Workspace de session pour un tag `repo` d'item backlog :
@@ -469,20 +664,112 @@ impl OrchCfg {
 
     /// Profils effectifs de tous les rôles spawnés par l'orchestrateur
     /// (worker, planner, reviewer, reviewer PR), dédoublonnés — le
-    /// périmètre « quota » du mode sériel rate_limit.
+    /// périmètre « quota » du mode sériel rate_limit. Avec un
+    /// `worker_pool`, les profils workers sont ceux des entrées du
+    /// pool (pas seulement `worker_agent`).
     pub fn role_agents(&self) -> Vec<&str> {
         let mut out: Vec<&str> = Vec::new();
-        for a in [
-            self.agent_or(&self.worker_agent),
+        // Profils workers : ceux du pool quand configuré (vide =
+        // worker_agent/agent, comme worker_entries).
+        let workers: Vec<&str> = if self.worker_pool.is_empty() {
+            vec![self.agent_or(&self.worker_agent)]
+        } else {
+            self.worker_pool
+                .iter()
+                .map(|e| {
+                    if e.profile.is_empty() {
+                        self.agent_or(&self.worker_agent)
+                    } else {
+                        e.profile.as_str()
+                    }
+                })
+                .collect()
+        };
+        for a in workers.into_iter().chain([
             self.agent_or(&self.planner_agent),
             self.agent_or(&self.reviewer_agent),
             self.agent_or(&self.pr_reviewer_agent),
-        ] {
+        ]) {
             if !a.is_empty() && !out.contains(&a) {
                 out.push(a);
             }
         }
         out
+    }
+
+    /// Pool effectif des workers, entrées normalisées : `worker_pool`
+    /// non vide → chaque entrée avec repli sur le profil worker
+    /// (`agent_or(worker_agent)` quand `profile` est vide) ; vide →
+    /// pool implicite legacy à une entrée portant `max_workers` slots
+    /// et les valeurs globales `model`/`thought_level`/`mode` —
+    /// aucune config existante ne change de comportement.
+    pub fn worker_entries(&self) -> Vec<WorkerPoolEntry> {
+        if self.worker_pool.is_empty() {
+            return vec![WorkerPoolEntry {
+                profile: self.agent_or(&self.worker_agent).to_string(),
+                count: self.max_workers,
+                model: self.model.clone(),
+                effort: self.thought_level.clone(),
+                mode: self.mode.clone(),
+            }];
+        }
+        self.worker_pool
+            .iter()
+            .map(|e| WorkerPoolEntry {
+                profile: if e.profile.is_empty() {
+                    self.agent_or(&self.worker_agent).to_string()
+                } else {
+                    e.profile.clone()
+                },
+                count: e.count,
+                model: if e.model.is_empty() {
+                    self.model.clone()
+                } else {
+                    e.model.clone()
+                },
+                effort: if e.effort.is_empty() {
+                    self.thought_level.clone()
+                } else {
+                    e.effort.clone()
+                },
+                mode: if e.mode.is_empty() {
+                    self.mode.clone()
+                } else {
+                    e.mode.clone()
+                },
+            })
+            .collect()
+    }
+
+    /// Capacité totale workers : somme des `count` du pool effectif.
+    /// `max_working` reste le second seuil (`max_working_cap`),
+    /// indépendant — un `max_workers` résiduel est ignoré dès que le
+    /// pool est configuré.
+    pub fn worker_capacity(&self) -> u64 {
+        self.worker_entries()
+            .iter()
+            .map(|e| u64::from(e.count))
+            .sum()
+    }
+
+    /// Modèle effectif d'un rôle : champ `*_model` posé → sinon le
+    /// `model` global.
+    pub fn model_or<'a>(&'a self, role_model: &'a str) -> &'a str {
+        if role_model.is_empty() {
+            self.model.as_str()
+        } else {
+            role_model
+        }
+    }
+
+    /// Effort (`thought_level`) effectif d'un rôle : champ `*_effort`
+    /// posé → sinon le `thought_level` global.
+    pub fn effort_or<'a>(&'a self, role_effort: &'a str) -> &'a str {
+        if role_effort.is_empty() {
+            self.thought_level.as_str()
+        } else {
+            role_effort
+        }
     }
 }
 
@@ -578,7 +865,7 @@ impl Default for CompactCfg {
 /// le niveau inférieur (session > agent > global) ; tout None = hérité
 /// intégral ; `0` (ou hors borne pour le %) = règle retirée — un
 /// override peut donc « décocher » un seuil hérité.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CompactPartial {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
@@ -715,7 +1002,11 @@ mod tests {
     use super::*;
 
     fn policy(enabled: bool, at_tokens: Option<u64>, at_pct: Option<f64>) -> CompactPolicy {
-        CompactPolicy { enabled, at_tokens, at_pct }
+        CompactPolicy {
+            enabled,
+            at_tokens,
+            at_pct,
+        }
     }
 
     /// exceeds : OU des deux règles — seuil tokens, seuil % (fenêtre
@@ -734,9 +1025,9 @@ mod tests {
         // OU : l'un des deux suffit.
         let p = policy(true, Some(50_000), Some(0.9));
         assert!(p.exceeds(50_000, 1_000_000)); // tokens seuls
-        assert!(!p.exceeds(0, 0));             // aucun — used 0 sous les seuils
+        assert!(!p.exceeds(0, 0)); // aucun — used 0 sous les seuils
         assert!(p.exceeds(950_000, 1_000_000)); // pct seul
-        // Désactivé → jamais de déclenchement.
+                                                // Désactivé → jamais de déclenchement.
         let p = policy(false, Some(1), Some(0.01));
         assert!(!p.exceeds(u64::MAX, u64::MAX));
     }
@@ -748,14 +1039,26 @@ mod tests {
         let mut by_agent = HashMap::new();
         by_agent.insert(
             "devin".to_string(),
-            CompactPartial { enabled: None, at_tokens: Some(10_000), at_pct: None },
+            CompactPartial {
+                enabled: None,
+                at_tokens: Some(10_000),
+                at_pct: None,
+            },
         );
         by_agent.insert(
             "codex".to_string(),
-            CompactPartial { enabled: Some(false), at_tokens: None, at_pct: None },
+            CompactPartial {
+                enabled: Some(false),
+                at_tokens: None,
+                at_pct: None,
+            },
         );
         let src = CompactSrc {
-            global: CompactCfg { enabled: true, at_tokens: None, at_pct: Some(0.8) },
+            global: CompactCfg {
+                enabled: true,
+                at_tokens: None,
+                at_pct: Some(0.8),
+            },
             by_agent,
         };
         // Agent sans override → global intégral.
@@ -778,24 +1081,143 @@ mod tests {
     fn compact_bounds() {
         // Global : 0 = off, hors borne ignoré.
         let src = CompactSrc {
-            global: CompactCfg { enabled: true, at_tokens: Some(0), at_pct: Some(0.0) },
+            global: CompactCfg {
+                enabled: true,
+                at_tokens: Some(0),
+                at_pct: Some(0.0),
+            },
             by_agent: HashMap::new(),
         };
         let p = src.base_for("x");
         assert!(p.enabled && p.at_tokens.is_none() && p.at_pct.is_none());
         assert!(!p.exceeds(u64::MAX, u64::MAX)); // inerte, jamais de trigger
         let src = CompactSrc {
-            global: CompactCfg { enabled: true, at_tokens: None, at_pct: Some(1.5) },
+            global: CompactCfg {
+                enabled: true,
+                at_tokens: None,
+                at_pct: Some(1.5),
+            },
             by_agent: HashMap::new(),
         };
         assert!(src.base_for("x").at_pct.is_none());
         // Override : Some(0)/hors borne retire la règle héritée.
         let mut p = policy(true, Some(100), Some(0.5));
-        CompactPartial { enabled: None, at_tokens: Some(0), at_pct: Some(1.5) }.apply_to(&mut p);
+        CompactPartial {
+            enabled: None,
+            at_tokens: Some(0),
+            at_pct: Some(1.5),
+        }
+        .apply_to(&mut p);
         assert!(p.at_tokens.is_none() && p.at_pct.is_none());
-        CompactPartial { enabled: None, at_tokens: Some(50), at_pct: Some(0.4) }.apply_to(&mut p);
+        CompactPartial {
+            enabled: None,
+            at_tokens: Some(50),
+            at_pct: Some(0.4),
+        }
+        .apply_to(&mut p);
         assert_eq!(p.at_tokens, Some(50));
         assert_eq!(p.at_pct, Some(0.4));
+    }
+
+    /// `agent_confs` (hot-reload) : ne lit que `[agents.*]` — le reste
+    /// de la config (sections orchestrateur, compact…) est ignoré même
+    /// s'il est présent et valide.
+    #[test]
+    fn agent_confs_ne_lit_que_agents() {
+        let text = r#"
+[agents.claude]
+command = ["claude-code-acp"]
+
+[agents.codex]
+name = "Codex"
+command = ["codex-acp"]
+max_instances = 2
+[agents.codex.env]
+FOO = "bar"
+
+[backlog_orchestrator]
+enabled = true
+agent = "devin"
+"#;
+        let confs = agent_confs(text).unwrap();
+        assert_eq!(confs.len(), 2);
+        assert_eq!(
+            confs["claude"].command.argvs(),
+            vec![vec!["claude-code-acp"]]
+        );
+        assert_eq!(confs["codex"].name.as_deref(), Some("Codex"));
+        assert_eq!(confs["codex"].max_instances, Some(2));
+        assert_eq!(
+            confs["codex"].env.get("FOO").map(String::as_str),
+            Some("bar")
+        );
+        // Section absente → table vide (≠ None : TOML valide sans agents).
+        assert!(agent_confs("[backlog_orchestrator]\nenabled = true\n")
+            .unwrap()
+            .is_empty());
+        // TOML invalide → None (l'appelant conserve les profils).
+        assert!(agent_confs("ceci n'est pas du toml = [").is_none());
+    }
+
+    /// `command` en fallbacks : `[[argv], [argv]]` → plusieurs
+    /// candidates dans l'ordre ; la forme plate reste un seul argv.
+    #[test]
+    fn agent_command_fallbacks() {
+        let confs = agent_confs(
+            r#"[agents.claude]
+command = [["claude-code-acp"], ["claude-agent-acp"]]
+
+[agents.devin]
+command = ["devin", "acp"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            confs["claude"].command.argvs(),
+            vec![vec!["claude-code-acp"], vec!["claude-agent-acp"]]
+        );
+        assert_eq!(confs["devin"].command.argvs(), vec![vec!["devin", "acp"]]);
+        // profile_from_conf reporte les candidates telles quelles.
+        let p = profile_from_conf("claude", confs["claude"].clone());
+        assert_eq!(p.commands.len(), 2);
+        assert_eq!(p.via, AgentVia::Config);
+    }
+
+    /// `profile_from_conf` : mapping AgentConf → AgentProfile — défauts
+    /// (name = id, max_instances = DEFAULT_MAX_INSTANCES) et recopie
+    /// intégrale des champs optionnels.
+    #[test]
+    fn profile_from_conf_mapping() {
+        let conf: AgentConf = toml::from_str(
+            r#"command = ["a", "b"]
+name = "Mon Agent"
+max_instances = 3
+catalogue_cmd = "cat list"
+model_override_cmd = "set -m {model}"
+advisor_models = ["opus"]
+extra_models = [{ value = "fable", label = "Fable" }]
+[compact]
+enabled = false
+"#,
+        )
+        .unwrap();
+        let p = profile_from_conf("x", conf);
+        assert_eq!(p.name, "Mon Agent");
+        assert_eq!(p.commands, vec![vec!["a", "b"]]);
+        assert_eq!(p.via, AgentVia::Config);
+        assert_eq!(p.max_instances, 3);
+        assert_eq!(p.catalogue_cmd.as_deref(), Some("cat list"));
+        assert_eq!(p.model_override_cmd.as_deref(), Some("set -m {model}"));
+        assert_eq!(p.advisor_models, vec!["opus"]);
+        assert_eq!(p.extra_models[0].value, "fable");
+        assert!(!p.compact.enabled.unwrap_or(true));
+        // Défauts : name = id, max_instances = plafond par défaut.
+        let p = profile_from_conf(
+            "y",
+            toml::from_str::<AgentConf>(r#"command = ["c"]"#).unwrap(),
+        );
+        assert_eq!(p.name, "y");
+        assert_eq!(p.max_instances, DEFAULT_MAX_INSTANCES);
     }
 
     /// env_mode : les ids de session ACP incompatibles env/CLI sont omis
@@ -805,7 +1227,15 @@ mod tests {
         for acp_only in ["plan", "smart", "ask"] {
             assert_eq!(env_mode(acp_only), "", "{acp_only} doit être omis de l'env");
         }
-        for cli_ok in ["bypass", "dangerous", "normal", "accept-edits", "autonomous", "yolo", ""] {
+        for cli_ok in [
+            "bypass",
+            "dangerous",
+            "normal",
+            "accept-edits",
+            "autonomous",
+            "yolo",
+            "",
+        ] {
             assert_eq!(env_mode(cli_ok), cli_ok, "{cli_ok} doit passer tel quel");
         }
         // Valeur arbitraire (autre agent, autre vocab) : conservée — le

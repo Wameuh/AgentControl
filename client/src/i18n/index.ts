@@ -49,7 +49,8 @@ export function t(k: Key, vars?: Record<string, string | number>): string {
   return s;
 }
 
-/** Traduit les éléments marqués data-i18n / data-i18n-ph / data-i18n-title. */
+/** Traduit les éléments marqués data-i18n / data-i18n-ph / data-i18n-title
+ *  / data-i18n-aria (aria-label — ex. boutons iconifiés sous Android). */
 export function applyStatic() {
   document.documentElement.lang = lang;
   for (const el of document.querySelectorAll<HTMLElement>("[data-i18n]")) {
@@ -60,5 +61,8 @@ export function applyStatic() {
   }
   for (const el of document.querySelectorAll<HTMLElement>("[data-i18n-title]")) {
     el.title = t(el.dataset.i18nTitle as Key);
+  }
+  for (const el of document.querySelectorAll<HTMLElement>("[data-i18n-aria]")) {
+    el.setAttribute("aria-label", t(el.dataset.i18nAria as Key));
   }
 }

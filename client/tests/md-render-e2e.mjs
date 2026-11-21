@@ -59,7 +59,7 @@ const MOCK = `(function () {
         const f = FILES[args.path];
         if (f == null) throw new Error("no such file " + args.path);
         if (args.if_mtime_ms != null && args.if_mtime_ms !== 1) {
-          throw new Error("conflit: fichier modifié sur disque");
+          throw new Error("conflict: file modified on disk");
         }
         const bytes = Uint8Array.from(atob(args.data ?? ""), (c) => c.charCodeAt(0));
         const text = new TextDecoder().decode(bytes);

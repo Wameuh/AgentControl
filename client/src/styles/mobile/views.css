@@ -1,0 +1,84 @@
+/* ── Android — vues plein écran : accueil, réglages, connexion ────────── */
+/* « Fond animé » : forcé statique sur Android (batterie) — réglage masqué. */
+body.android #s-bganim-row { display: none; }
+/* Écran d'accueil */
+body.android #empty-cta { min-height: 44px; }
+
+/* ── Chrome de l'accueil (m-home) : titre de vue, puce connexion,
+   loupe → filtre. #chat couvre la titlebar hors accueil — ces éléments
+   n'existent visuellement qu'en m-home. ─────────────────────────────── */
+#m-home-title, #m-conn, #m-search { display: none; }
+body.android.m-home #titlebar-title { display: none; }
+body.android.m-home #m-home-title {
+  display: block; flex: 1; min-width: 0;
+  font-size: 17px; font-weight: 600; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+body.android.m-home #m-conn:not([hidden]) {
+  display: inline-flex; align-items: center; gap: 6px; flex: none;
+  min-height: 44px; max-width: 40%; padding: 0 12px;
+  border: 1px solid var(--line); border-radius: 999px;
+  background: rgba(var(--tint-rgb), .06); color: var(--ink);
+  font: inherit; font-size: 13px; cursor: pointer;
+}
+body.android.m-home #m-conn .m-conn-l {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+body.android.m-home #m-conn .conn-st { display: inline-flex; flex: none; }
+body.android.m-home #m-conn .conn-st .ic { width: 9px; height: 9px; display: block; }
+body.android.m-home #m-conn .conn-st.warn .ic { width: 11px; height: 11px; }
+body.android.m-home #m-conn > .ic {
+  width: 13px; height: 13px; display: block; flex: none; color: var(--dim);
+}
+body.android.m-home #m-search {
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  min-width: 44px; min-height: 44px; padding: 0;
+  background: none; border: 0; color: var(--muted); font: inherit; cursor: pointer;
+}
+body.android.m-home #m-search .ic { width: 20px; height: 20px; display: block; }
+body.android.m-home.m-filter #m-search { color: var(--accent); }
+
+/* Overlays plein #chat : le conteneur #chat (fixed inset:0) couvre la
+   status bar — chaque vue descend son contenu de l'inset haut. */
+body.android #settings-view, body.android #conn-view,
+body.android #components-view, body.android #logs-view,
+body.android #plugin-view { padding-top: env(safe-area-inset-top); }
+/* Panneau paramètres (#settings-view — un panneau, pas un <dialog>) :
+   lignes et contrôles à 44px ; la croix de fermeture est carrée. */
+body.android .s-row { min-height: 44px; }
+body.android .s-row select { min-height: 44px; font-size: 15px; }
+body.android #settings-view button { min-height: 44px; }
+body.android #settings-close { min-width: 44px; }
+body.android #s-snd-vol { min-height: 44px; }
+
+/* Vue connexion (#conn-view — panneau plein, pas un <dialog>) :
+   lignes de la liste et champs à 44px comme les réglages. */
+body.android #conn-view button { min-height: 44px; }
+body.android #connview-close { min-width: 44px; }
+body.android .cv-conn { min-height: 52px; }
+body.android #conn-view input, body.android #conn-view select {
+  min-height: 44px; font-size: 15px;
+}
+body.android .cv-btns button { min-width: 44px; }
+body.android #connview-body { padding: 16px; }
+/* Champs SSH natifs dans la vue connexion */
+#c-pubkey {
+  margin: 0; padding: 8px; font-size: 11px; white-space: pre-wrap;
+  word-break: break-all; user-select: all; max-height: 90px; overflow: auto;
+  background: rgba(var(--tint-rgb), .05); border-radius: 6px; color: var(--accent);
+}
+#c-pubkey-box { display: flex; flex-direction: column; gap: 6px;
+  font-size: 13px; color: var(--muted); }
+body.android #c-pubkey { font-size: 13px; max-height: 130px; }
+body.android #c-pubkey-box { font-size: 15px; }
+
+/* Paramètres en liste (Y4) : chaque section fermée est une ligne de
+   56 px — le chevron pointe à droite (rotation déjà posée par
+   .s-sec:not([open])) et le résumé d'état reste à droite en --dim.
+   En sous-écran (m-sub) : seule la section ouverte reste, sans son
+   summary puisque son titre monte dans l'en-tête. */
+body.android #settings-view:not(.m-sub) .s-sec > summary {
+  min-height: 56px;
+}
+body.android #settings-view.m-sub .s-sec:not([open]) { display: none; }
+body.android #settings-view.m-sub .s-sec[open] > summary { display: none; }

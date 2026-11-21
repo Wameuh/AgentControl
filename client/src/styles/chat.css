@@ -170,6 +170,10 @@
   background: var(--msg-user-bg); color: var(--msg-user-fg); align-self: flex-end;
   border-radius: 14px 14px 4px 14px; font-weight: 500;
 }
+/* Écho optimiste d'un envoi (user_message pas encore journalisé —
+   file, réveil) : opacité réduite tant que le vrai event n'est pas
+   arrivé et n'a pas remplacé le nœud pending. */
+.msg.user.um-pending { opacity: .55; }
 /* liens/chemins dans une bulle user : le fond est --accent, --violet/--sage y
    sont invisibles → couleur dédiée par thème */
 .msg.user .flink, .msg.user a { color: var(--msg-user-link); }
@@ -472,8 +476,60 @@ img.md-img {
   border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; font: inherit;
 }
 #input:focus { border-color: var(--accent); outline: none; }
+/* field-sizing:content = le navigateur dimensionne le champ sur son
+   contenu (max-height posé par fitInput) — fini la mesure JS
+   (scrollHeight = reflow forcé à chaque frappe). min-height reproduit
+   rows=2 : 2 lignes × line-height 1.55 + padding 18px + bordures 2px.
+   Navigateurs sans support → fitInput manuel (repli JS). */
+@supports (field-sizing: content) {
+  #input {
+    field-sizing: content;
+    min-height: calc(3.1em + 20px);
+    /* Cap posé par fitInput via --fit-cap : une custom property (pas un
+       max-height inline) pour que le miroir #input-wrap.grow lise le
+       même cap. */
+    max-height: var(--fit-cap, none);
+  }
+}
 /* Champ long : scrollable + place réservée à la pill « N lignes » */
 #input-wrap.over #input { overflow-y: auto; padding-right: 62px; }
+/* ---- Repli autosize sans field-sizing : miroir #input-ghost ----
+   #input-wrap.grow : le div miroir (mêmes métriques texte, voir
+   syncGhostStyle) est le seul enfant en flux → sa hauteur intrinsèque
+   dimensionne le wrap (cap --fit-cap), #input est posé en absolute
+   et remplit le wrap. Zéro lecture de layout côté JS.
+   ⚠️ Le padding du miroir DOIT suivre celui de #input : les règles
+   padding de #input (base, .over, body.android) ont leur jumeau
+   #input-ghost — les garder synchrones. */
+#input-ghost { display: none; }
+#input-wrap.grow {
+  min-height: calc(3.1em + 20px); /* = min-height field-sizing (2 lignes) */
+  max-height: var(--fit-cap, none);
+  overflow: hidden;
+}
+#input-wrap.grow #input {
+  /* Longhands, pas `inset` : shorthand Safari ≥14.1, absents de
+     certains WebKitGTK embarqués — pileau exact du bug #294. */
+  position: absolute; top: 0; right: 0; bottom: 0; left: 0;
+  width: 100%; height: 100%;
+  /* ac-nofs sur un moteur à field-sizing : la règle @supports
+     s'appliquerait encore à #input — on la neutralise ici. */
+  field-sizing: normal;
+  max-height: none; min-height: 0;
+  overflow-y: auto; overflow-x: hidden;
+}
+#input-wrap.grow #input-ghost {
+  display: block; visibility: hidden; pointer-events: none;
+  user-select: none; box-sizing: border-box; width: 100%;
+  /* flex item du wrap : sans ça, align-items:stretch lui donne la
+     hauteur du wrap CAPPÉ — offsetHeight ne mesurerait plus le
+     contenu et la détection d'overflow serait aveugle. */
+  align-self: flex-start; flex: none;
+  overflow: hidden; border: 1px solid transparent; border-radius: 10px;
+  font: inherit; white-space: pre-wrap; overflow-wrap: break-word;
+  padding: 9px 11px; /* = padding de #input (chat.css) — synchroniser */
+}
+#input-wrap.grow.over #input-ghost { padding-right: 62px; } /* = .over #input */
 #btn-expand {
   /* right:18px dégage la pill de la scrollbar classique Windows (~14-17px) */
   position: absolute; top: 5px; right: 18px; z-index: 2;
@@ -559,6 +615,32 @@ details.th .ic-thought { width: 12px; height: 12px; }
    écrasait chaque bloc verticalement quand le contenu débordait (barres
    compressées illisibles). flex-shrink:0 = hauteur naturelle + scroll. */
 #events > .ev { flex-shrink: 0; }
+/* Containment du fil : un event hors viewport n'est ni layouté ni peint
+   (content-visibility:auto) — le coût d'un reflow forcé (fitInput à la
+   frappe, chunks de streaming) ne croît plus avec la longueur du fil.
+   contain-intrinsic-height = hauteur estimée du placeholder ; `auto`
+   mémorise la taille réelle après le premier rendu. Navigateurs sans
+   support → déclaration ignorée, rendu normal. */
+#events > .ev {
+  content-visibility: auto;
+  contain-intrinsic-height: auto 120px;
+}
+/* Repli containment pour les moteurs SANS content-visibility (vieux
+   WebKitGTK/WKWebView — pileau typique du lag #294) : contain:layout
+   isole la mise en page interne de chaque event — un reflow ancêtre
+   (hauteur du composer à la frappe) ne redescend pas dans les sous-
+   arbres propres. Pas de size/paint : la hauteur reste intrinsèque et
+   rien n'est clippé (pin-tag, menus). Supporté depuis Safari 15.4. */
+@supports not (content-visibility: auto) {
+  #events > .ev { contain: layout; }
+}
+/* Debug `ac-nocv` (localStorage) : neutralise content-visibility pour
+   reproduire le webview affecté sur un navigateur moderne — le repli
+   contain:layout ci-dessus prend alors le relais. */
+html.nocv #events > .ev {
+  content-visibility: visible;
+  contain: layout;
+}
 
 
 /* File d'attente des prompts */
@@ -603,6 +685,9 @@ details.th .ic-thought { width: 12px; height: 12px; }
 }
 #qp-title { font-size: 12px; font-weight: 500; color: var(--muted); }
 #qp-count { font-size: 10.5px; }
+#qp-clear { padding: 2px 8px; font-size: 10.5px; color: var(--dim); }
+#qp-clear:hover { color: var(--err); border-color: var(--err); }
+#qp-clear.armed { color: var(--err); border-color: var(--err); }
 #qp-close { margin-left: auto; padding: 2px 7px; }
 #qp-close .ic { width: 12px; height: 12px; display: block; }
 #qp-list {
@@ -636,8 +721,11 @@ details.th .ic-thought { width: 12px; height: 12px; }
 
 /* Messages épinglés : indicateur + action au survol, panneau d'accès. */
 .msg { position: relative; }
+/* Le badge reste DANS la boîte de .ev : content-visibility:auto sur
+   les events impose contain:paint — un débordement (-7px) serait
+   clippé en permanence, pas seulement hors viewport. */
 .pin-tag {
-  position: absolute; top: -7px; right: -7px; z-index: 3;
+  position: absolute; top: 2px; right: 2px; z-index: 3;
   width: 20px; height: 20px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
   border-radius: 50%; border: 1px solid var(--line);
@@ -718,6 +806,45 @@ body.android .ev.pinned .pin-tag { opacity: 1; }
 .pin-unpin { flex: none; padding: 2px 6px; }
 .pin-unpin .ic { width: 11px; height: 11px; display: block; }
 .pin-unpin:hover { border-color: var(--accent); color: var(--accent); }
+
+/* Panneau des étapes de tâche (skill ac-steps) : dans le flux comme
+   #pins-panel — nom + badge coloré par statut. */
+#steps-panel {
+  flex-shrink: 0; display: flex; flex-direction: column; max-height: 42%;
+  border-top: 1px solid var(--line);
+  background: rgba(var(--tint-rgb), .02);
+}
+#sp-head {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  padding: 5px 14px; border-bottom: 1px solid var(--line);
+}
+#sp-title { font-size: 12px; font-weight: 500; color: var(--muted); }
+#sp-count { font-size: 10.5px; }
+#sp-close { margin-left: auto; padding: 2px 7px; }
+#sp-close .ic { width: 12px; height: 12px; display: block; }
+#sp-list {
+  flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 6px; padding: 8px 14px;
+}
+.sp-empty { color: var(--dim); font-size: 12.5px; padding: 6px 2px; }
+.sp-row {
+  display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  background: var(--glass); border: 1px solid var(--line);
+  border-radius: 8px; padding: 6px 10px; font-size: 12.5px;
+}
+.sp-badge {
+  flex: none; font-size: 10.5px; border-radius: 6px; padding: 1px 6px;
+  border: 1px solid var(--line); color: var(--dim);
+}
+.sp-name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--muted);
+}
+.sp-in_progress .sp-badge { color: var(--sand); border-color: rgba(205, 182, 140, .45); }
+.sp-in_progress .sp-name { color: var(--ink); }
+.sp-done .sp-badge { color: var(--sage); border-color: rgba(184, 207, 174, .4); }
+.sp-done .sp-name { color: var(--dim); text-decoration: line-through; }
+.sp-abandoned .sp-name { color: var(--dim); text-decoration: line-through; }
 
 
 /* Selects d'options config dynamiques (thought_level, speed…) */

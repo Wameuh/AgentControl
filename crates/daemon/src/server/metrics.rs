@@ -135,7 +135,7 @@ impl OrchProbe {
         let line = match serde_json::to_string(&build_sample(tasks, metas)) {
             Ok(l) => l,
             Err(e) => {
-                warn!("métriques: sérialisation sample: {e}");
+                warn!("metrics: sample serialization: {e}");
                 return;
             }
         };
@@ -148,7 +148,7 @@ impl OrchProbe {
                 .and_then(|mut f| writeln!(f, "{line}"))
         });
         if let Err(e) = appended {
-            warn!("métriques: append {}: {e}", path.display());
+            warn!("metrics: append {}: {e}", path.display());
             return;
         }
         // Compaction : périodique (borne d'âge) ou pression taille.
@@ -162,10 +162,10 @@ impl OrchProbe {
         self.metrics_appends.store(0, Ordering::Relaxed);
         match compact(&path) {
             Ok((kept, dropped)) if dropped > 0 => {
-                info!("métriques: compaction — {kept} gardés, {dropped} tronqués/corrompus");
+                info!("metrics: compaction — {kept} kept, {dropped} truncated/corrupt");
             }
             Ok(_) => {}
-            Err(e) => warn!("métriques: compaction {}: {e}", path.display()),
+            Err(e) => warn!("metrics: compaction {}: {e}", path.display()),
         }
     }
 }
@@ -226,15 +226,15 @@ fn window_secs(w: Option<&str>) -> Result<(Option<f64>, String)> {
     let num = &w[..w.len().saturating_sub(unit.len_utf8())];
     let n: f64 = num
         .parse()
-        .with_context(|| format!("fenêtre « {w} » invalide (ex. 24h, 7d, 30d, all)"))?;
+        .with_context(|| format!("invalid window « {w} » (e.g. 24h, 7d, 30d, all)"))?;
     let secs = match unit {
         'h' => n * 3_600.0,
         'd' => n * 86_400.0,
-        _ => anyhow::bail!("fenêtre « {w} » invalide (ex. 24h, 7d, 30d, all)"),
+        _ => anyhow::bail!("invalid window « {w} » (e.g. 24h, 7d, 30d, all)"),
     };
     anyhow::ensure!(
         secs > 0.0,
-        "fenêtre « {w} » invalide (ex. 24h, 7d, 30d, all)"
+        "invalid window « {w} » (e.g. 24h, 7d, 30d, all)"
     );
     Ok((Some(secs), w))
 }
@@ -495,8 +495,8 @@ mod tests {
         assert_eq!(s["poppable"], 2); // le dep-bloqué ne compte pas
         assert_eq!(s["wip"], 1);
         assert_eq!(s["workers_alive"], 2); // dead exclu, non-orch exclus
-        // working : sous-ensemble en activité — seul le meta « working »
-        // (asleep et dead exclus, autres origines exclues).
+                                           // working : sous-ensemble en activité — seul le meta « working »
+                                           // (asleep et dead exclus, autres origines exclues).
         assert_eq!(s["working"], 1);
         assert_eq!(s["by_repo"]["AgentControl"]["pending"], 2);
         assert_eq!(s["by_repo"]["AgentControl"]["wip"], 1);

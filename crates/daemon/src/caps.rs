@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -38,6 +39,12 @@ pub struct CapsRegistry {
     /// Sérialise les probes (un spawn d'agent chacun) : le refresh est
     /// explicite et rare — jamais deux moissons en parallèle.
     probe_lock: tokio::sync::Mutex<()>,
+    /// Persist suspendue pendant un session/load : les
+    /// `config_option_update` rejoués arrivent en rafale — la map est
+    /// tenue à jour en mémoire et une seule écriture a lieu au
+    /// `resume_persist` final (#271, même logique que save_meta).
+    persist_paused: AtomicBool,
+    persist_dirty: AtomicBool,
 }
 
 impl CapsRegistry {
@@ -51,6 +58,8 @@ impl CapsRegistry {
             map: Mutex::new(map),
             path: Some(path),
             probe_lock: tokio::sync::Mutex::new(()),
+            persist_paused: AtomicBool::new(false),
+            persist_dirty: AtomicBool::new(false),
         })
     }
 
@@ -61,6 +70,8 @@ impl CapsRegistry {
             map: Mutex::new(HashMap::new()),
             path: None,
             probe_lock: tokio::sync::Mutex::new(()),
+            persist_paused: AtomicBool::new(false),
+            persist_dirty: AtomicBool::new(false),
         })
     }
 
@@ -98,7 +109,10 @@ impl CapsRegistry {
             if !caps.current_model.is_empty() {
                 e.current_model = caps.current_model.clone();
             }
-            for (kind, cur) in [("mode", &mut e.current_mode), ("model", &mut e.current_model)] {
+            for (kind, cur) in [
+                ("mode", &mut e.current_mode),
+                ("model", &mut e.current_model),
+            ] {
                 if let Some(o) = caps
                     .config_options
                     .iter()
@@ -127,11 +141,11 @@ impl CapsRegistry {
             e.config_options = options.to_vec();
             // La notification porte aussi les valeurs courantes — les
             // indices de présélection restent frais entre deux probes.
-            for (kind, cur) in [("mode", &mut e.current_mode), ("model", &mut e.current_model)] {
-                if let Some(o) = options
-                    .iter()
-                    .find(|o| o.id == kind || o.category == kind)
-                {
+            for (kind, cur) in [
+                ("mode", &mut e.current_mode),
+                ("model", &mut e.current_model),
+            ] {
+                if let Some(o) = options.iter().find(|o| o.id == kind || o.category == kind) {
                     if !o.current_value.is_empty() {
                         *cur = o.current_value.clone();
                     }
@@ -156,9 +170,29 @@ impl CapsRegistry {
         &self.probe_lock
     }
 
+    /// Suspendre les écritures `agent_caps.json` — appelé au début d'un
+    /// session/load : la map reste à jour en mémoire, `persist()` ne
+    /// fait que marquer dirty. `resume_persist` écrit une fois.
+    pub fn pause_persist(&self) {
+        self.persist_paused.store(true, Ordering::SeqCst);
+    }
+
+    /// Reprendre les écritures — une seule persist si du contenu a
+    /// été moissonné pendant la suspension.
+    pub fn resume_persist(&self) {
+        self.persist_paused.store(false, Ordering::SeqCst);
+        if self.persist_dirty.swap(false, Ordering::SeqCst) {
+            self.persist();
+        }
+    }
+
     /// `.tmp` + rename : pas de json tronqué si le démon meurt en
     /// pleine écriture (même convention que pinned/compact).
     fn persist(&self) {
+        if self.persist_paused.load(Ordering::SeqCst) {
+            self.persist_dirty.store(true, Ordering::SeqCst);
+            return;
+        }
         let Some(path) = &self.path else { return };
         let map = self.map.lock().unwrap();
         let Ok(s) = serde_json::to_string_pretty(&*map) else {
@@ -244,13 +278,12 @@ pub(crate) fn caps_from_new_resp(resp: &Value) -> proto::AgentCaps {
 /// `probe_lock`).
 pub async fn probe(profile: &AgentProfile, cwd: &Path) -> Result<proto::AgentCaps> {
     let subst = |s: &str| s.replace("{model}", "").replace("{mode}", "");
-    let argv: Vec<String> = profile
-        .command
+    let argv: Vec<String> = crate::server::misc::effective_command(&profile.commands)
         .iter()
         .map(|a| subst(a))
         .filter(|a| !a.is_empty())
         .collect();
-    let (cmd, args) = argv.split_first().context("commande agent vide")?;
+    let (cmd, args) = argv.split_first().context("empty agent command")?;
     let envs: HashMap<String, String> = profile
         .env
         .iter()
@@ -360,7 +393,7 @@ impl ProbeIo {
             if self.note(&v, stdin).await {
                 if v.get("id").and_then(Value::as_u64) == Some(id) {
                     if let Some(e) = v.get("error") {
-                        anyhow::bail!("acp {method}: {}", e.get("message").unwrap_or(e));
+                        anyhow::bail!("acp {method}: {}", acp::acp_error_string(e));
                     }
                     return Ok(v.get("result").cloned().unwrap_or(Value::Null));
                 }
@@ -404,7 +437,9 @@ impl ProbeIo {
         let deadline = std::time::Instant::now() + DRAIN_MAX;
         let mut quiet = std::time::Instant::now() + DRAIN_QUIET;
         loop {
-            let budget = quiet.min(deadline).saturating_duration_since(std::time::Instant::now());
+            let budget = quiet
+                .min(deadline)
+                .saturating_duration_since(std::time::Instant::now());
             if budget.is_zero() {
                 return;
             }

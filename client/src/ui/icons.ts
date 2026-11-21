@@ -116,6 +116,12 @@ const SHAPES: Record<string, string> = {
     '<path d="M8.5 6h12M8.5 12h12M8.5 18h12"/>' +
     '<path d="m3 5.9 1.2 1.2 2.3-2.4"/><path d="m3 11.9 1.2 1.2 2.3-2.4"/>' +
     '<path d="m3 17.9 1.2 1.2 2.3-2.4"/>',
+  // Liste d'étapes de tâche (cases + traits — progression agent)
+  steps:
+    '<rect x="4" y="4.5" width="3.2" height="3.2" rx="0.8"/>' +
+    '<rect x="4" y="10.4" width="3.2" height="3.2" rx="0.8"/>' +
+    '<rect x="4" y="16.3" width="3.2" height="3.2" rx="0.8"/>' +
+    '<path d="M10.5 6h9.5M10.5 12h9.5M10.5 18h9.5"/>',
   // Panneau logs live (journaux client + démon)
   scroll:
     '<path d="M6 3.5h12A1.5 1.5 0 0 1 19.5 5v15.5l-3-2-3.5 2-3.5-2-3 2V5A1.5 1.5 0 0 1 6 3.5Z"/>' +
@@ -131,6 +137,10 @@ const SHAPES: Record<string, string> = {
   copy:
     '<rect x="9" y="9" width="12" height="12" rx="2"/>' +
     '<path d="M5 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5"/>',
+  sliders:
+    '<path d="M4 6h16"/><circle cx="9" cy="6" r="2" fill="currentColor" stroke="none"/>' +
+    '<path d="M4 12h16"/><circle cx="15" cy="12" r="2" fill="currentColor" stroke="none"/>' +
+    '<path d="M4 18h16"/><circle cx="7" cy="18" r="2" fill="currentColor" stroke="none"/>',
   // QR code (appairage)
   qr:
     '<rect x="4" y="4" width="6" height="6" rx="1"/>' +
@@ -138,6 +148,10 @@ const SHAPES: Record<string, string> = {
     '<rect x="4" y="14" width="6" height="6" rx="1"/>' +
     '<path d="M14 14h2.5v2.5H14z"/><path d="M20 14v1.5"/>' +
     '<path d="M14 20h1.5"/><path d="M18.5 18.5H20V20h-1.5z"/>',
+  // Retour à la ligne (bloc de code mobile)
+  wrap:
+    '<path d="M3.5 6h17"/><path d="M3.5 12h14a3 3 0 0 1 0 6H13"/>' +
+    '<path d="m15 15.5-2.5 2.5 2.5 2.5"/><path d="M3.5 18h5"/>',
 };
 
 export type IconName = keyof typeof SHAPES;
@@ -147,7 +161,7 @@ export type IconName = keyof typeof SHAPES;
 export function icon(name: IconName, cls = ""): string {
   let safe = name;
   if (!(name in SHAPES)) {
-    console.warn(`[icons] nom d'icône inconnu: ${name}`);
+    console.warn(`[icons] unknown icon name: ${name}`);
     safe = "sys";
   }
   return (

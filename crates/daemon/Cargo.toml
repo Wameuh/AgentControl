@@ -1,11 +1,14 @@
 [package]
 name = "agentcontrol-daemon"
-version = "0.10.3"
+version = "0.10.4"
 edition = "2021"
 
 [[bin]]
 name = "agentcontrol-daemon"
 path = "src/main.rs"
+
+[build-dependencies]
+serde_json = { workspace = true }
 
 [dependencies]
 proto = { path = "../proto" }

@@ -21,7 +21,9 @@ fn sock_path() -> String {
 }
 
 fn self_session() -> Option<String> {
-    std::env::var("AGENTCONTROL_SESSION").ok().filter(|s| !s.is_empty())
+    std::env::var("AGENTCONTROL_SESSION")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 /// Une requête vers le démon : connexion Unix par appel (le démon gère la
@@ -29,23 +31,23 @@ fn self_session() -> Option<String> {
 async fn daemon_call(req: proto::ReqKind) -> Result<Value, String> {
     let s = tokio::net::UnixStream::connect(sock_path())
         .await
-        .map_err(|e| format!("connexion démon ({}): {e}", sock_path()))?;
+        .map_err(|e| format!("daemon connection ({}): {e}", sock_path()))?;
     let (r, mut w) = s.into_split();
-    let mut line = serde_json::to_string(&proto::Request { id: 1, req })
-        .map_err(|e| e.to_string())?;
+    let mut line =
+        serde_json::to_string(&proto::Request { id: 1, req }).map_err(|e| e.to_string())?;
     line.push('\n');
     w.write_all(line.as_bytes())
         .await
-        .map_err(|e| format!("write démon: {e}"))?;
-    w.flush().await.map_err(|e| format!("flush démon: {e}"))?;
+        .map_err(|e| format!("daemon write: {e}"))?;
+    w.flush().await.map_err(|e| format!("daemon flush: {e}"))?;
     let mut lines = BufReader::new(r).lines();
     let l = lines
         .next_line()
         .await
-        .map_err(|e| format!("read démon: {e}"))?
-        .ok_or_else(|| "démon a fermé la connexion".to_string())?;
+        .map_err(|e| format!("daemon read: {e}"))?
+        .ok_or_else(|| "daemon closed the connection".to_string())?;
     let resp: proto::Response =
-        serde_json::from_str(&l).map_err(|e| format!("réponse démon invalide: {e}"))?;
+        serde_json::from_str(&l).map_err(|e| format!("invalid daemon response: {e}"))?;
     if resp.ok {
         Ok(resp.result.unwrap_or(Value::Null))
     } else {
@@ -64,36 +66,36 @@ fn tools_list() -> Value {
     json!({"tools": [
         {
             "name": "agentcontrol_list_sessions",
-            "description": "Liste les sessions d'agents pilotées par AgentControl \
-                (id, agent, titre, état, cwd, groupe, session créatrice ou \
-                provenance service « via » le cas échéant). Utilise les `id` \
-                pour envoyer des messages ou lire leur transcript.",
+            "description": "Lists the agent sessions driven by AgentControl \
+                (id, agent, title, state, cwd, group, creating session or \
+                service provenance « via » when applicable). Use the `id`s \
+                to send messages or read their transcript.",
             "inputSchema": {"type": "object", "properties": {}},
         },
         {
             "name": "agentcontrol_send_message",
-            "description": "Envoie un message à une autre session d'agent. Le \
-                message est livré comme prompt à la session cible (elle est \
-                réveillée automatiquement si son agent est arrêté). La réponse \
-                de l'agent cible te reviendra sous forme d'un message entrant \
-                — conversation asynchrone, pas de réponse synchrone.",
+            "description": "Sends a message to another agent session. The \
+                message is delivered as a prompt to the target session (it is \
+                woken automatically if its agent is stopped). The target \
+                agent's reply comes back to you as an incoming \
+                message — asynchronous conversation, no synchronous reply.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "session": {
                         "type": "string",
-                        "description": "id de session cible (ex: s-a3f9c2d1) \
-                            — voir agentcontrol_list_sessions",
+                        "description": "target session id (e.g. s-a3f9c2d1) \
+                            — see agentcontrol_list_sessions",
                     },
-                    "text": {"type": "string", "description": "contenu du message"},
+                    "text": {"type": "string", "description": "message content"},
                     "delivery": {
                         "type": "string",
                         "enum": ["queue", "steer"],
-                        "description": "steer (défaut) : injecté pendant le \
-                            tour de la cible, après le tool call en cours, si \
-                            l'agent le supporte (sinon en file ; pas d'ordre \
-                            garanti entre steers). queue : livré quand sa \
-                            tâche courante se termine (FIFO strict).",
+                        "description": "steer (default): injected during the \
+                            target's turn, after the current tool call, if \
+                            the agent supports it (otherwise queued; no order \
+                            guaranteed between steers). queue: delivered when \
+                            its current task ends (strict FIFO).",
                     },
                 },
                 "required": ["session", "text"],
@@ -101,45 +103,45 @@ fn tools_list() -> Value {
         },
         {
             "name": "agentcontrol_create_session",
-            "description": "Crée une nouvelle session d'agent AgentControl : \
-                un agent démarre dans une session séparée et reçoit `task` \
-                comme premier prompt (délégation). La session apparaît dans \
-                agentcontrol_list_sessions ; elle connaît ta provenance et \
-                peut te répondre via agentcontrol_send_message. Sans \
-                agent/cwd, elle hérite des tiens.",
+            "description": "Creates a new AgentControl agent session: \
+                an agent starts in a separate session and receives `task` \
+                as its first prompt (delegation). The session shows up in \
+                agentcontrol_list_sessions; it knows your provenance and \
+                can reply via agentcontrol_send_message. Without \
+                agent/cwd it inherits yours.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "task": {
                         "type": "string",
-                        "description": "tâche livrée à la nouvelle session \
-                            comme premier prompt",
+                        "description": "task delivered to the new session \
+                            as its first prompt",
                     },
                     "agent": {
                         "type": "string",
-                        "description": "type d'agent (devin, claude, codex…) \
-                            — défaut : le tien",
+                        "description": "agent type (devin, claude, codex…) \
+                            — default: yours",
                     },
                     "cwd": {
                         "type": "string",
-                        "description": "dossier de travail — défaut : le tien",
+                        "description": "working directory — default: yours",
                     },
                     "title": {
                         "type": "string",
-                        "description": "titre de la session — défaut : début \
-                            de la tâche",
+                        "description": "session title — default: start \
+                            of the task",
                     },
                     "model": {
                         "type": "string",
-                        "description": "modèle — défaut : le tien si même agent",
+                        "description": "model — default: yours if same agent",
                     },
                     "mode": {
                         "type": "string",
-                        "description": "mode — défaut : le tien si même agent",
+                        "description": "mode — default: yours if same agent",
                     },
                     "group": {
                         "type": "string",
-                        "description": "groupe sidebar — défaut : le tien",
+                        "description": "sidebar group — default: yours",
                     },
                 },
                 "required": ["task"],
@@ -147,17 +149,17 @@ fn tools_list() -> Value {
         },
         {
             "name": "agentcontrol_sleep_session",
-            "description": "Endort une session : son process agent est libéré \
-                (la session native et l'historique sont conservés). Elle se \
-                réveille automatiquement dès qu'un message lui est envoyé \
-                (user ou agent). Utile pour garer une session devenue \
-                inutile sans la supprimer.",
+            "description": "Puts a session to sleep: its agent process is freed \
+                (the native session and history are kept). It wakes \
+                automatically as soon as a message is sent to it \
+                (user or agent). Useful to park a session that became \
+                useless without deleting it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "session": {
                         "type": "string",
-                        "description": "id de session à endormir — voir \
+                        "description": "session id to put to sleep — see \
                             agentcontrol_list_sessions",
                     },
                 },
@@ -166,11 +168,11 @@ fn tools_list() -> Value {
         },
         {
             "name": "agentcontrol_report_verdict",
-            "description": "Rend ton verdict de review de PR au démon — \
-                réservé aux sessions reviewer PR (feature:pr-review). \
-                Push direct : le démon poste lui-même le commentaire \
-                `## Verdict:` sur la PR, puis termine ta session. \
-                Appelle-le quand ton analyse est finie, rien après.",
+            "description": "Reports your PR review verdict to the daemon — \
+                reserved for PR reviewer sessions (feature:pr-review). \
+                Direct push: the daemon posts the `## Verdict:` \
+                comment on the PR itself, then ends your session. \
+                Call it when your analysis is done, nothing after.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -180,8 +182,8 @@ fn tools_list() -> Value {
                     },
                     "body": {
                         "type": "string",
-                        "description": "corps du commentaire de review \
-                            (findings, points vérifiés, non-bloquants)",
+                        "description": "review comment body \
+                            (findings, verified points, non-blockers)",
                     },
                 },
                 "required": ["verdict", "body"],
@@ -189,13 +191,13 @@ fn tools_list() -> Value {
         },
         {
             "name": "agentcontrol_request_review",
-            "description": "Demande une review de PR à l'orchestrateur \
-                AgentControl — même pipeline que le commentaire `/mr review` \
-                (worktree au head, verdict `## Verdict:` posté sur la PR). \
-                Ta session est notifiée du verdict via \
-                agentcontrol_send_message (ack « acceptée » puis résultat) — \
-                pas de polling GitHub nécessaire. Réservé aux PR dont la \
-                base est `next_release`.",
+            "description": "Requests a PR review from the AgentControl \
+                orchestrator — same pipeline as the `/mr review` comment \
+                (worktree at head, `## Verdict:` posted on the PR). \
+                Your session is notified of the verdict via \
+                agentcontrol_send_message (« accepted » ack then result) — \
+                no GitHub polling needed. Reserved for PRs based on \
+                `next_release`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -205,7 +207,7 @@ fn tools_list() -> Value {
                     },
                     "pr": {
                         "type": "integer",
-                        "description": "numéro de la pull request",
+                        "description": "pull request number",
                     },
                 },
                 "required": ["repo", "pr"],
@@ -213,16 +215,16 @@ fn tools_list() -> Value {
         },
         {
             "name": "agentcontrol_read_events",
-            "description": "Lit la fin du transcript d'une autre session \
-                (messages user/agent/peer/système) pour prendre du contexte \
-                sur ce qu'elle fait ou a fait.",
+            "description": "Reads the tail of another session's transcript \
+                (user/agent/peer/system messages) to get context \
+                on what it is doing or did.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "session": {"type": "string", "description": "id de session"},
+                    "session": {"type": "string", "description": "session id"},
                     "limit": {
                         "type": "integer",
-                        "description": "nombre d'événements (défaut 20, max 50)",
+                        "description": "number of events (default 20, max 50)",
                     },
                 },
                 "required": ["session"],
@@ -236,14 +238,18 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
         "agentcontrol_list_sessions" => {
             let me = self_session();
             let v = daemon_call(proto::ReqKind::ListSessions).await?;
-            let arr = v.as_array().ok_or("list_sessions: réponse inattendue")?;
+            let arr = v.as_array().ok_or("list_sessions: unexpected response")?;
             if arr.is_empty() {
-                return Ok("(aucune session)".into());
+                return Ok("(no sessions)".into());
             }
             let mut out = String::new();
             for s in arr {
                 let id = s["id"].as_str().unwrap_or("?");
-                let mark = if Some(id.to_string()) == me { " (toi)" } else { "" };
+                let mark = if Some(id.to_string()) == me {
+                    " (you)"
+                } else {
+                    ""
+                };
                 out.push_str(&format!(
                     "{id}{mark} | {} | {} | {} | cwd={}{}{}{}\n",
                     s["agent"].as_str().unwrap_or("?"),
@@ -267,12 +273,12 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
             Ok(out)
         }
         "agentcontrol_send_message" => {
-            let from = self_session()
-                .ok_or("AGENTCONTROL_SESSION absent — session émettrice inconnue")?;
+            let from =
+                self_session().ok_or("AGENTCONTROL_SESSION unset — unknown emitting session")?;
             let session = args["session"]
                 .as_str()
-                .ok_or("argument 'session' manquant")?;
-            let text = args["text"].as_str().ok_or("argument 'text' manquant")?;
+                .ok_or("missing 'session' argument")?;
+            let text = args["text"].as_str().ok_or("missing 'text' argument")?;
             let delivery = args["delivery"].as_str().unwrap_or("").to_string();
             let v = daemon_call(proto::ReqKind::PeerSend {
                 from,
@@ -281,14 +287,14 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
                 delivery,
             })
             .await?;
-            Ok(format!("message envoyé à {session} : {v}"))
+            Ok(format!("message sent to {session}: {v}"))
         }
         "agentcontrol_create_session" => {
-            let from = self_session()
-                .ok_or("AGENTCONTROL_SESSION absent — session émettrice inconnue")?;
-            let task = args["task"].as_str().ok_or("argument 'task' manquant")?;
+            let from =
+                self_session().ok_or("AGENTCONTROL_SESSION unset — unknown emitting session")?;
+            let task = args["task"].as_str().ok_or("missing 'task' argument")?;
             if task.trim().is_empty() {
-                return Err("argument 'task' vide".into());
+                return Err("empty 'task' argument".into());
             }
             let opt = |k: &str| args[k].as_str().map(String::from);
             let v = daemon_call(proto::ReqKind::PeerSpawn {
@@ -303,8 +309,8 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
             })
             .await?;
             Ok(format!(
-                "session créée : {} «{}» — la tâche lui est livrée comme \
-                premier prompt ; elle peut te répondre via \
+                "session created: {} «{}» — the task is delivered as its \
+                first prompt; it can reply to you via \
                 agentcontrol_send_message",
                 v["session"].as_str().unwrap_or("?"),
                 v["title"].as_str().unwrap_or("")
@@ -313,42 +319,42 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
         "agentcontrol_sleep_session" => {
             let session = args["session"]
                 .as_str()
-                .ok_or("argument 'session' manquant")?;
+                .ok_or("missing 'session' argument")?;
             let v = daemon_call(proto::ReqKind::SleepSession {
                 session: session.into(),
             })
             .await?;
             Ok(format!(
-                "session endormie : {session}{}",
+                "session put to sleep: {session}{}",
                 if v["already"].as_bool().unwrap_or(false) {
-                    " (déjà endormie)"
+                    " (already asleep)"
                 } else {
-                    " — elle se réveillera au prochain message"
+                    " — it will wake on the next message"
                 }
             ))
         }
         "agentcontrol_report_verdict" => {
-            let from = self_session()
-                .ok_or("AGENTCONTROL_SESSION absent — session émettrice inconnue")?;
+            let from =
+                self_session().ok_or("AGENTCONTROL_SESSION unset — unknown emitting session")?;
             let verdict = args["verdict"]
                 .as_str()
-                .ok_or("argument 'verdict' manquant")?;
-            let body = args["body"].as_str().ok_or("argument 'body' manquant")?;
+                .ok_or("missing 'verdict' argument")?;
+            let body = args["body"].as_str().ok_or("missing 'body' argument")?;
             let v = daemon_call(proto::ReqKind::ReviewReport {
                 session: from,
                 verdict: verdict.into(),
                 body: body.into(),
             })
             .await?;
-            Ok(format!("verdict transmis au démon : {v}"))
+            Ok(format!("verdict forwarded to the daemon: {v}"))
         }
         "agentcontrol_request_review" => {
-            let from = self_session()
-                .ok_or("AGENTCONTROL_SESSION absent — session émettrice inconnue")?;
-            let repo = args["repo"].as_str().ok_or("argument 'repo' manquant")?;
+            let from =
+                self_session().ok_or("AGENTCONTROL_SESSION unset — unknown emitting session")?;
+            let repo = args["repo"].as_str().ok_or("missing 'repo' argument")?;
             let pr = args["pr"]
                 .as_u64()
-                .ok_or("argument 'pr' manquant (nombre)")?;
+                .ok_or("missing 'pr' argument (number)")?;
             let v = daemon_call(proto::ReqKind::PrReviewRequest {
                 session: Some(from),
                 repo: repo.into(),
@@ -356,16 +362,16 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
             })
             .await?;
             Ok(format!(
-                "demande de review enregistrée : {} — le verdict te sera \
-                 notifié par message (preuve officielle : commentaire \
-                 `## Verdict:` sur la PR)",
+                "review request recorded: {} — the verdict will be \
+                 notified by message (official proof: `## Verdict:` \
+                 comment on the PR)",
                 v["key"].as_str().unwrap_or("?")
             ))
         }
         "agentcontrol_read_events" => {
             let session = args["session"]
                 .as_str()
-                .ok_or("argument 'session' manquant")?;
+                .ok_or("missing 'session' argument")?;
             let limit = args["limit"].as_u64().unwrap_or(20).min(50) as u32;
             let v = daemon_call(proto::ReqKind::Events {
                 session: session.into(),
@@ -374,21 +380,23 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
                 limit,
             })
             .await?;
-            let events = v["events"].as_array().ok_or("events: réponse inattendue")?;
+            let events = v["events"]
+                .as_array()
+                .ok_or("events: unexpected response")?;
             let mut out = String::new();
             for ev in events {
                 let ty = ev["type"].as_str().unwrap_or("?");
                 let text = match ty {
                     "user_message" => format!("user> {}", ev["text"].as_str().unwrap_or("")),
                     "agent_text" => ev["text"].as_str().unwrap_or("").to_string(),
-                    "agent_thought" => format!("(pensée) {}", ev["text"].as_str().unwrap_or("")),
+                    "agent_thought" => format!("(thought) {}", ev["text"].as_str().unwrap_or("")),
                     "peer_message" => format!(
                         "peer {}→{}> {}",
                         ev["from_session"].as_str().unwrap_or("?"),
                         ev["to_session"].as_str().unwrap_or("?"),
                         ev["text"].as_str().unwrap_or("")
                     ),
-                    "system" => format!("(système) {}", ev["text"].as_str().unwrap_or("")),
+                    "system" => format!("(system) {}", ev["text"].as_str().unwrap_or("")),
                     "tool_call" | "tool_call_update" => format!(
                         "(tool {} — {})",
                         ev["title"]
@@ -397,8 +405,10 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
                             .unwrap_or("?"),
                         ev["status"].as_str().unwrap_or("?")
                     ),
-                    "error" => format!("(erreur) {}", ev["message"].as_str().unwrap_or("")),
-                    "status_changed" => format!("(état → {})", ev["state"].as_str().unwrap_or("?")),
+                    "error" => format!("(error) {}", ev["message"].as_str().unwrap_or("")),
+                    "status_changed" => {
+                        format!("(state → {})", ev["state"].as_str().unwrap_or("?"))
+                    }
                     _ => continue, // permissions, commands, config… peu utiles au pair
                 };
                 let t: String = text.chars().take(600).collect();
@@ -408,11 +418,11 @@ async fn call_tool(name: &str, args: &Value) -> Result<String, String> {
                 }
             }
             if out.is_empty() {
-                out = "(aucun événement pertinent)".into();
+                out = "(no relevant event)".into();
             }
             Ok(out)
         }
-        _ => Err(format!("outil inconnu: {name}")),
+        _ => Err(format!("unknown tool: {name}")),
     }
 }
 
@@ -435,7 +445,8 @@ pub async fn serve_stdio() -> Result<()> {
             Ok(v) => v,
             Err(e) => {
                 let resp = rpc_error(&Value::Null, -32700, &format!("parse: {e}"));
-                out.write_all(serde_json::to_string(&resp)?.as_bytes()).await?;
+                out.write_all(serde_json::to_string(&resp)?.as_bytes())
+                    .await?;
                 out.write_all(b"\n").await?;
                 out.flush().await?;
                 continue;
@@ -456,10 +467,10 @@ pub async fn serve_stdio() -> Result<()> {
                         "name": "agentcontrol",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
-                    "instructions": "Outils de communication entre agents \
-                        AgentControl : liste les sessions, envoie des \
-                        messages, lis leurs transcripts, crée des sessions \
-                        (délégation de tâche), endort les sessions inutiles.",
+                    "instructions": "AgentControl agent communication tools: \
+                        lists sessions, sends messages, reads their \
+                        transcripts, creates sessions \
+                        (task delegation), puts idle sessions to sleep.",
                 }
             }),
             ("ping", Some(id)) => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
@@ -477,7 +488,8 @@ pub async fn serve_stdio() -> Result<()> {
             (_, None) => continue,
             (_, Some(id)) => rpc_error(&id, -32601, "method not found"),
         };
-        out.write_all(serde_json::to_string(&resp)?.as_bytes()).await?;
+        out.write_all(serde_json::to_string(&resp)?.as_bytes())
+            .await?;
         out.write_all(b"\n").await?;
         out.flush().await?;
     }

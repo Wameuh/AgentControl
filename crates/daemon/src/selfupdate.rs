@@ -36,7 +36,7 @@ pub fn self_update(version: &str) -> Result<Value> {
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
-        bail!("update déjà en cours");
+        bail!("update already in progress");
     }
     let _guard = UpdateGuard;
 
@@ -53,7 +53,7 @@ pub fn self_update(version: &str) -> Result<Value> {
     // `../` traverserait vers un asset arbitraire (tout client du
     // socket peut appeler, agents et listener TCP sans auth compris).
     if !valid_version(&ver) {
-        bail!("version cible invalide (semver attendu, ex. \"0.5.0\")");
+        bail!("invalid target version (semver expected, e.g. \"0.5.0\")");
     }
     // No-op sur le chemin `latest` quand la cible n'est pas plus
     // récente que le binaire courant : un branch build (ex. 0.10.0
@@ -69,39 +69,29 @@ pub fn self_update(version: &str) -> Result<Value> {
             "restarting": false,
         }));
     }
-    let arch = match std::env::consts::ARCH {
-        "x86_64" => "x86_64",
-        "aarch64" => "aarch64",
-        a => bail!("arch non supportée: {a}"),
-    };
     let exe = std::env::current_exe().context("current_exe")?;
     // Après un update non redémarré, /proc/self/exe pointe l'inode
     // supprimé ("<chemin> (deleted)") : laisser faire renommerait vers
     // un fichier littéralement " (deleted)" → le nom réel ne serait
     // jamais recréé, prochain démarrage cassé.
     if !exe.exists() {
-        bail!("binaire courant déjà remplacé — redémarrer le démon avant un nouvel update");
+        bail!("current binary already replaced — restart the daemon before a new update");
     }
     let dir = exe
         .parent()
-        .context("binaire sans dossier parent")?
+        .context("binary has no parent dir")?
         .to_path_buf();
     // Le rename atomique exige l'écriture sur le DOSSIER (pas le
     // fichier) — un binaire installé par image/système (/usr/local/bin
     // root) refuse ici plutôt qu'à moitié.
-    probe_dir_writable(&dir).with_context(|| {
-        format!("binaire non inscriptible ({}) — géré par le système ?", exe.display())
-    })?;
+    probe_dir_writable(&dir)
+        .with_context(|| format!("binary not writable ({}) — system-managed?", exe.display()))?;
 
-    let url = format!(
-        "https://github.com/{REPO}/releases/download/v{ver}/agentcontrol-server-{arch}-linux.tar.gz"
-    );
+    let url = release_asset_url(&ver)?;
     let tgz = match http_get(&url) {
         Ok(b) => b,
         Err(HttpError::Status(404)) => bail!("{}", release_not_found(&ver)),
-        Err(e) => {
-            return Err(anyhow::Error::from(e)).with_context(|| format!("téléchargement {url}"))
-        }
+        Err(e) => return Err(anyhow::Error::from(e)).with_context(|| format!("downloading {url}")),
     };
     let staging = dir.join(format!(".ac-upd-{}", std::process::id()));
     std::fs::create_dir_all(&staging).context("staging")?;
@@ -128,6 +118,114 @@ pub fn self_update(version: &str) -> Result<Value> {
         "path": exe.display().to_string(),
         "restarting": restarting,
     }))
+}
+
+/// Rattrapage au boot (item #289) : le swap des `acp-*` de #361
+/// s'exécute dans l'ANCIEN démon pendant l'update — un serveur qui
+/// update depuis un updater buggé (≤ 0.10.4-rc.9) vers une version
+/// fixée ne reçoit donc jamais les adaptateurs maison. Le nouveau
+/// démon vérifie au boot que les `acp-*` attendus (argv[0] `acp-*`
+/// du registre `agents_auto`) sont bien à côté de l'exe ; si l'un
+/// manque, il télécharge l'asset de SA PROPRE version et pose les
+/// `acp-*` absents — une seule commande d'update par serveur.
+///
+/// Gardes :
+/// - tous les `acp-*` attendus présents → retour immédiat, zéro
+///   réseau (cas normal post-install) ;
+/// - version sans asset publié (404) ou archive sans `acp-*` →
+///   marker `<root>/.acp-bootstrap-<version>` : un essai par version,
+///   retry automatique à la suivante ;
+/// - erreur transitoire (réseau, extraction, rename) → warn, pas de
+///   marker → retry au boot suivant ;
+/// - jamais bloquant : appelé via `spawn_blocking`, timeout HTTP
+///   borné (120 s), toute erreur → warn log + on continue (le profil
+///   reste `available:false` avec son hint) ;
+/// - `acp-*` déjà présents jamais écrasés ; dossier de l'exe non
+///   writable → warn + skip.
+pub fn acp_bootstrap(root: &Path) {
+    if let Err(e) = acp_bootstrap_inner(root) {
+        tracing::warn!("self-update: acp bootstrap failed: {e:#}");
+    }
+}
+
+fn acp_bootstrap_inner(root: &Path) -> Result<()> {
+    let expected = crate::server::agents_auto::shipped_acp_names();
+    if expected.is_empty() {
+        return Ok(());
+    }
+    let exe = std::env::current_exe().context("current_exe")?;
+    let dir = exe
+        .parent()
+        .context("binary has no parent dir")?
+        .to_path_buf();
+    if expected.iter().all(|n| dir.join(n).is_file()) {
+        return Ok(());
+    }
+    let ver = env!("CARGO_PKG_VERSION");
+    let marker = root.join(format!(".acp-bootstrap-{ver}"));
+    if marker.exists() {
+        return Ok(());
+    }
+    // Rename atomique = écriture sur le dossier — read-only → warn +
+    // skip (le hint installable du profil reste le recours).
+    probe_dir_writable(&dir).with_context(|| {
+        format!(
+            "acp bootstrap skipped — binary dir not writable ({})",
+            dir.display()
+        )
+    })?;
+    let url = release_asset_url(ver)?;
+    let tgz = match http_get(&url) {
+        Ok(b) => b,
+        Err(HttpError::Status(404)) => {
+            // Version dev / tag non publié : la réponse ne changera
+            // pas → un seul essai pour cette version.
+            let _ = std::fs::write(&marker, "");
+            tracing::info!("self-update: no published asset for v{ver} — acp bootstrap skipped");
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(anyhow::Error::from(e)).with_context(|| format!("downloading {url}"));
+        }
+    };
+    let staging = dir.join(format!(".ac-bt-{}", std::process::id()));
+    std::fs::create_dir_all(&staging).context("staging")?;
+    let res = (|| -> Result<Vec<String>> {
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(&tgz[..]));
+        archive
+            .unpack(&staging)
+            .context("extracting release archive")?;
+        install_staged_acp(&staging, &dir, true)
+    })();
+    let _ = std::fs::remove_dir_all(&staging);
+    let installed = res?;
+    // Réponse définitive obtenue (archive traitée, qu'elle ait posé
+    // des acp-* ou non) → pas de nouvel essai pour cette version.
+    let _ = std::fs::write(&marker, "");
+    if installed.is_empty() {
+        tracing::info!("self-update: no acp-* in v{ver} archive — nothing to install");
+    }
+    for name in &installed {
+        tracing::info!("self-update: installed {name} beside daemon (bootstrap catch-up)");
+    }
+    Ok(())
+}
+
+/// Arch de l'asset `agentcontrol-server-{arch}-linux.tar.gz`.
+fn asset_arch() -> Result<&'static str> {
+    match std::env::consts::ARCH {
+        "x86_64" => Ok("x86_64"),
+        "aarch64" => Ok("aarch64"),
+        a => bail!("unsupported arch: {a}"),
+    }
+}
+
+/// URL de l'asset serveur de la release `ver` (tag `v{ver}`).
+fn release_asset_url(ver: &str) -> Result<String> {
+    Ok(format!(
+        "https://github.com/{REPO}/releases/download/v{ver}/agentcontrol-server-{}-linux.tar.gz",
+        asset_arch()?
+    ))
 }
 
 /// Semver strict `X.Y.Z` (+ suffixe `-pre`/`+meta` alphanumérique) —
@@ -210,7 +308,7 @@ fn gh_api(path: &str) -> Result<Value> {
         .call()
         .with_context(|| format!("GET {url}"))?;
     serde_json::from_reader(resp.into_reader().take(8 * 1024 * 1024))
-        .context("décodage JSON GitHub")
+        .context("decoding GitHub JSON")
 }
 
 /// Dernière release publiée : `releases/latest` d'abord — la release
@@ -221,7 +319,9 @@ fn gh_api(path: &str) -> Result<Value> {
 /// en passant son tag explicitement).
 fn latest_release() -> Result<String> {
     if let Ok(v) = gh_api("releases/latest") {
-        if let Some(t) = v["tag_name"].as_str().map(|t| t.trim().trim_start_matches('v'))
+        if let Some(t) = v["tag_name"]
+            .as_str()
+            .map(|t| t.trim().trim_start_matches('v'))
         {
             if valid_version(t) {
                 return Ok(t.to_string());
@@ -235,7 +335,7 @@ fn latest_release() -> Result<String> {
     let mut best_stable = String::new();
     for page in 1..=3 {
         let rels = gh_api(&format!("releases?per_page=100&page={page}"))?;
-        let arr = rels.as_array().context("réponse releases inattendue")?;
+        let arr = rels.as_array().context("unexpected releases response")?;
         if arr.is_empty() {
             break;
         }
@@ -250,8 +350,7 @@ fn latest_release() -> Result<String> {
             if !valid_version(v) {
                 continue;
             }
-            if best_any.is_empty() || semver_cmp(v, &best_any) == std::cmp::Ordering::Greater
-            {
+            if best_any.is_empty() || semver_cmp(v, &best_any) == std::cmp::Ordering::Greater {
                 best_any = v.to_string();
             }
             if !r["prerelease"].as_bool().unwrap_or(false)
@@ -271,7 +370,7 @@ fn latest_release() -> Result<String> {
         best_stable
     };
     if best.is_empty() {
-        bail!("aucune release publiée trouvée pour {REPO}");
+        bail!("no published release found for {REPO}");
     }
     Ok(best)
 }
@@ -279,7 +378,7 @@ fn latest_release() -> Result<String> {
 /// Message d'erreur 404 orienté utilisateur : la release demandée
 /// n'existe pas — suggère un tag existant et liste les récents.
 fn release_not_found(ver: &str) -> String {
-    let hint = "préciser un tag existant, ex. acctl daemon-update vX.Y.Z";
+    let hint = "specify an existing tag, e.g. acctl daemon-update vX.Y.Z";
     match gh_api("releases?per_page=100") {
         Ok(rels) => {
             let tags: Vec<&str> = rels
@@ -292,17 +391,17 @@ fn release_not_found(ver: &str) -> String {
                 })
                 .unwrap_or_default();
             if tags.is_empty() {
-                format!("release v{ver} introuvable — {hint}")
+                format!("release v{ver} not found — {hint}")
             } else {
                 let ex = tags[0];
                 format!(
-                    "release v{ver} introuvable — préciser un tag existant, \
+                    "release v{ver} not found — specify an existing tag, \
                      ex. acctl daemon-update {ex} ; tags : {}",
                     tags.join(", ")
                 )
             }
         }
-        Err(_) => format!("release v{ver} introuvable (HTTP 404) — {hint}"),
+        Err(_) => format!("release v{ver} not found (HTTP 404) — {hint}"),
     }
 }
 
@@ -324,7 +423,11 @@ fn semver_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     let (an, ap) = parse(a);
     let (bn, bp) = parse(b);
     for i in 0..3 {
-        let d = an.get(i).copied().unwrap_or(0).cmp(&bn.get(i).copied().unwrap_or(0));
+        let d = an
+            .get(i)
+            .copied()
+            .unwrap_or(0)
+            .cmp(&bn.get(i).copied().unwrap_or(0));
         if d != Equal {
             return d;
         }
@@ -355,20 +458,20 @@ fn semver_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     Equal
 }
 
-/// Extrait `agentcontrol-daemon` (+ `acctl` si présent dans le même
-/// dossier que le binaire courant) dans `staging`, puis remplace les
-/// cibles par rename atomique.
+/// Extrait l'archive dans `staging`, remplace `agentcontrol-daemon`
+/// (+ `acctl` s'il cohabite déjà avec le démon) et installe chaque
+/// binaire `acp-*` racine à côté du démon par rename atomique.
 fn swap_binaries(tgz: &[u8], staging: &Path, dir: &Path, exe: &Path) -> Result<()> {
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(tgz));
     archive
         .unpack(staging)
-        .context("extraction de l'archive release")?;
+        .context("extracting release archive")?;
 
     for name in ["agentcontrol-daemon", "acctl"] {
         let src = staging.join(name);
         if !src.is_file() {
             if name == "agentcontrol-daemon" {
-                bail!("{name} absent de l'archive release");
+                bail!("{name} missing from the release archive");
             }
             continue;
         }
@@ -381,15 +484,65 @@ fn swap_binaries(tgz: &[u8], staging: &Path, dir: &Path, exe: &Path) -> Result<(
         if name == "acctl" && !target.exists() {
             continue;
         }
-        let staged = stage_executable(&src, &dir, name)?;
-        if let Err(e) = std::fs::rename(&staged, &target)
-            .with_context(|| format!("remplacement de {}", target.display()))
-        {
-            let _ = std::fs::remove_file(&staged);
-            return Err(e);
-        }
-        tracing::info!("self-update: {} remplacé", target.display());
+        replace_extracted(&src, dir, &target, name)?;
     }
+
+    // Adaptateurs ACP livrés dans la release : installation
+    // inconditionnelle, archive sans `acp-*` tolérée. Les anciens
+    // `acp-*` absents de la nouvelle archive ne sont pas purgés —
+    // retrait hors scope de l'update (KISS).
+    install_staged_acp(staging, dir, false)?;
+    Ok(())
+}
+
+/// Installe les `acp-*` racine de l'archive extraite dans `dir` par
+/// rename atomique. `skip_existing` = ne pas écraser un adaptateur
+/// déjà présent (rattrapage boot #289 — un acp-* en place, même
+/// ancien, n'est pas touché : l'update normal le remplacera via
+/// `swap_binaries`) ; `false` = comportement update (#361).
+/// Retourne les noms installés, triés.
+fn install_staged_acp(staging: &Path, dir: &Path, skip_existing: bool) -> Result<Vec<String>> {
+    let mut installed = Vec::new();
+    for name in staged_acp_binaries(staging)? {
+        let target = dir.join(&name);
+        if skip_existing && target.exists() {
+            continue;
+        }
+        replace_extracted(&staging.join(&name), dir, &target, &name)?;
+        installed.push(name);
+    }
+    Ok(installed)
+}
+
+/// Binaires `acp-*` à la racine de l'archive extraite, triés pour un
+/// ordre déterministe.
+fn staged_acp_binaries(staging: &Path) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(staging).context("listing staged binaries")? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if name.len() > 4 && name.starts_with("acp-") {
+            names.push(name);
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+fn replace_extracted(src: &Path, dir: &Path, target: &Path, name: &str) -> Result<()> {
+    let staged = stage_executable(src, dir, name)?;
+    if let Err(e) =
+        std::fs::rename(&staged, target).with_context(|| format!("replacing {}", target.display()))
+    {
+        let _ = std::fs::remove_file(&staged);
+        return Err(e);
+    }
+    tracing::info!("self-update: {} replaced", target.display());
     Ok(())
 }
 
@@ -412,6 +565,123 @@ fn stage_executable(src: &Path, dir: &Path, name: &str) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use std::cmp::Ordering::*;
+
+    fn tgz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        {
+            let mut builder = tar::Builder::new(&mut enc);
+            for (name, data) in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(data.len() as u64);
+                header.set_mode(0o755);
+                header.set_cksum();
+                builder.append_data(&mut header, name, *data).unwrap();
+            }
+            builder.finish().unwrap();
+        }
+        enc.finish().unwrap()
+    }
+
+    fn fixture(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "ac-swap-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let dir = root.join("bin");
+        let staging = root.join("staging");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&staging).unwrap();
+        (root, dir, staging)
+    }
+
+    #[test]
+    fn swap_installe_les_acp_de_la_release() {
+        let (root, dir, staging) = fixture("acp");
+        let exe = dir.join("agentcontrol-daemon");
+        std::fs::write(&exe, b"old").unwrap();
+        let archive = tgz(&[
+            ("agentcontrol-daemon", &b"daemon"[..]),
+            ("acp-claude", &b"claude"[..]),
+            ("acp-codex", &b"codex"[..]),
+        ]);
+
+        swap_binaries(&archive, &staging, &dir, &exe).unwrap();
+
+        assert_eq!(std::fs::read(dir.join("acp-claude")).unwrap(), b"claude");
+        assert_eq!(std::fs::read(dir.join("acp-codex")).unwrap(), b"codex");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(dir.join("acp-claude"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn swap_tolere_archive_sans_acp_et_conserve_les_anciens() {
+        let (root, dir, staging) = fixture("noacp");
+        let exe = dir.join("agentcontrol-daemon");
+        std::fs::write(&exe, b"old").unwrap();
+        std::fs::write(dir.join("acp-old"), b"old-adapter").unwrap();
+        let archive = tgz(&[("agentcontrol-daemon", &b"daemon"[..])]);
+
+        swap_binaries(&archive, &staging, &dir, &exe).unwrap();
+
+        assert!(!dir.join("acp-claude").exists());
+        assert_eq!(std::fs::read(dir.join("acp-old")).unwrap(), b"old-adapter");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Rattrapage boot (#289) : `skip_existing` n'écrase pas un acp-*
+    /// déjà présent et n'installe que les absents.
+    #[test]
+    fn bootstrap_installe_seulement_les_acp_manquants() {
+        let (root, dir, staging) = fixture("skip");
+        let archive = tgz(&[
+            ("agentcontrol-daemon", &b"daemon"[..]),
+            ("acp-claude", &b"new"[..]),
+            ("acp-codex", &b"codex"[..]),
+        ]);
+        tar::Archive::new(flate2::read::GzDecoder::new(&archive[..]))
+            .unpack(&staging)
+            .unwrap();
+        std::fs::write(dir.join("acp-claude"), b"old").unwrap();
+
+        let installed = install_staged_acp(&staging, &dir, true).unwrap();
+
+        assert_eq!(installed, vec!["acp-codex".to_string()]);
+        assert_eq!(std::fs::read(dir.join("acp-claude")).unwrap(), b"old");
+        assert_eq!(std::fs::read(dir.join("acp-codex")).unwrap(), b"codex");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `skip_existing=false` (update #361) écrase bien l'existant.
+    #[test]
+    fn update_ecrase_les_acp_existants() {
+        let (root, dir, staging) = fixture("overwrite");
+        let archive = tgz(&[("acp-claude", &b"new"[..])]);
+        tar::Archive::new(flate2::read::GzDecoder::new(&archive[..]))
+            .unpack(&staging)
+            .unwrap();
+        std::fs::write(dir.join("acp-claude"), b"old").unwrap();
+
+        let installed = install_staged_acp(&staging, &dir, false).unwrap();
+
+        assert_eq!(installed, vec!["acp-claude".to_string()]);
+        assert_eq!(std::fs::read(dir.join("acp-claude")).unwrap(), b"new");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn semver_cmp_orders_core_and_prerelease() {

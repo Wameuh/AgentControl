@@ -28,3 +28,11 @@ graphify-out/
 # Keystore Android — jamais commité (signature release, cf. client/tools/android-upload-keystore.sh)
 *.jks
 *.keystore
+
+# Sorties provisionnées par le démon (skills.rs) — jamais des sources :
+# la source de vérité des skills agents est skills/ à la racine.
+.agentcontrol-skills.json
+.devin/skills/
+.claude/skills/
+.cursor/skills/
+.agents/skills/

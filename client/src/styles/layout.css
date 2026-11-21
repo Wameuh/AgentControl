@@ -73,3 +73,7 @@
 #sb-left .conn-seg.clk { cursor:pointer }
 #sb-left .conn-seg.clk:hover { color:var(--ink) }
 .sb-sep { opacity:.4 }
+
+/* Segment `mem` cliquable de #sb-stats → dialogue de répartition. */
+#sb-stats .clk, #sb-stats.clk { cursor:pointer }
+#sb-stats .clk:hover, #sb-stats.clk:hover { color:var(--ink) }

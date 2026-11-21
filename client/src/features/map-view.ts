@@ -836,9 +836,8 @@ export class MapView {
   init() {
     $("tb-map").onclick = () => this.toggle();
     // Entrée labellée du sélecteur de vues — l'endroit où l'on cherche
-    // les vues ; le drawer Android recouvrirait l'overlay (le fermer).
+    // les vues (barre basse mobile : le diagramme s'ouvre par-dessus).
     $("sv-map").onclick = () => {
-      nav.closeDrawer();
       this.toggle();
     };
     $("map-close").onclick = () => this.close();

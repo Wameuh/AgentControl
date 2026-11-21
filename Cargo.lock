@@ -4,13 +4,35 @@ version = 4
 
 [[package]]
 name = "acctl"
-version = "0.10.2"
+version = "0.10.4"
 dependencies = [
  "anyhow",
  "base64",
  "forgesync",
  "proto",
  "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "acp-claude"
+version = "0.1.0"
+dependencies = [
+ "acp-core",
+ "anyhow",
+ "libc",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "acp-core"
+version = "0.1.0"
+dependencies = [
  "serde_json",
  "tokio",
 ]
@@ -60,7 +82,7 @@ dependencies = [
 
 [[package]]
 name = "agentcontrol-daemon"
-version = "0.10.2"
+version = "0.10.4"
 dependencies = [
  "anyhow",
  "base64",
@@ -312,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "client-core"
-version = "0.10.2"
+version = "0.10.4"
 dependencies = [
  "anyhow",
  "getrandom 0.4.3",
@@ -642,6 +664,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastrand"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+
+[[package]]
 name = "ff"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -697,7 +725,7 @@ dependencies = [
 
 [[package]]
 name = "forgesync"
-version = "0.10.2"
+version = "0.10.4"
 dependencies = [
  "proto",
  "serde_json",
@@ -1640,7 +1668,7 @@ dependencies = [
 
 [[package]]
 name = "proto"
-version = "0.10.2"
+version = "0.10.4"
 dependencies = [
  "chrono",
  "serde",
@@ -2319,6 +2347,19 @@ dependencies = [
  "filetime",
  "libc",
  "xattr",
+]
+
+[[package]]
+name = "tempfile"
+version = "3.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+dependencies = [
+ "fastrand",
+ "getrandom 0.4.3",
+ "once_cell",
+ "rustix",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

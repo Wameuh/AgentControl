@@ -86,6 +86,9 @@ export class TermPanel {
   /** Le panneau reste ouvert d'une session à l'autre : masqué seulement
    *  pour les sessions sans terminal. */
   private wantOpen = false;
+  /** Verrou Ctrl de la rangée de touches mobile (S5) : "once" se relâche
+   *  après la première touche, "held" se maintient. */
+  private ctrlLatch: "once" | "held" | null = null;
   private capable: (conn: string) => boolean = () => false;
   /** Résout la sentinelle "default" → clé de conn réelle (mono-conn). */
   private defaultConn: () => string | undefined = () => undefined;
@@ -121,6 +124,40 @@ export class TermPanel {
   supported(): boolean {
     const s = app.current;
     return !!s && this.capable(s.conn ?? "default");
+  }
+
+  /** Rangée de touches (S5) : envoie une séquence au terminal courant
+   *  — passe par sendData (bufferisation "connecting…" comprise) mais
+   *  les séquences multi-caractères (Échap, flèches) ne sont jamais
+   *  Ctrl-transformées. */
+  sendToCurrent(seq: string) {
+    const e = this.currentEntry();
+    if (e) this.sendData(e, seq);
+  }
+
+  /** Verrou Ctrl piloté par le bouton Ctrl de la rangée de touches. */
+  setCtrl(state: "off" | "once" | "held") {
+    this.ctrlLatch = state === "off" ? null : state;
+  }
+
+  /** Envoi d'une donnée au shell (frappe xterm ou rangée de touches) :
+   *  verrou Ctrl → transforme un caractère seul en sa forme de contrôle,
+   *  puis bufferise tant que term_open n'a pas répondu. */
+  private sendData(entry: TermEntry, d: string) {
+    if (this.ctrlLatch && d.length === 1) {
+      d = String.fromCharCode(d.toUpperCase().charCodeAt(0) & 0x1f);
+      if (this.ctrlLatch === "once") this.ctrlLatch = null;
+    }
+    if (entry.exited) return;
+    if (!entry.termId) {
+      if (entry.pending.length < 256) entry.pending.push(d);
+      return;
+    }
+    void call("term_input", {
+      term: entry.termId,
+      conn: apiConn(entry.conn), // pas de session → injecté via params
+      data: b64enc(new TextEncoder().encode(d)),
+    }).catch(() => {});
   }
 
   /** Bouton ⌨ / entrée du menu ⋮ : ouvre ou ferme le panneau. */
@@ -276,19 +313,7 @@ export class TermPanel {
     // Handlers posés AVANT term_open : les frappes pendant "connecting…"
     // sont bufferisées (bornées) puis flushées à l'ouverture — sans ça
     // elles tombaient dans le vide (pas de onData enregistré).
-    const enc = new TextEncoder();
-    xterm.onData((d) => {
-      if (entry.exited) return;
-      if (!entry.termId) {
-        if (entry.pending.length < 256) entry.pending.push(d);
-        return;
-      }
-      void call("term_input", {
-        term: entry.termId,
-        conn: apiConn(entry.conn), // pas de session → injecté via params
-        data: b64enc(enc.encode(d)),
-      }).catch(() => {});
-    });
+    xterm.onData((d) => this.sendData(entry, d));
     xterm.onResize(({ cols, rows }) => {
       if (!entry.termId || entry.exited) return;
       void call("term_resize", {
@@ -340,6 +365,7 @@ export class TermPanel {
           rows: d2.rows,
         }).catch(() => {});
       }
+      const enc = new TextEncoder();
       for (const d of entry.pending.splice(0)) {
         void call("term_input", {
           term: r.term,

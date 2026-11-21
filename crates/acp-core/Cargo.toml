@@ -1,0 +1,9 @@
+[package]
+name = "acp-core"
+version = "0.1.0"
+edition = "2021"
+description = "Squelette ACP minimal : JSON-RPC 2.0 sur NDJSON stdio, commun aux adaptateurs maison (acp-claude, acp-codex…)"
+
+[dependencies]
+serde_json = { workspace = true }
+tokio = { workspace = true }

@@ -14,6 +14,7 @@
 
 import { t } from "../i18n";
 import { $, esc } from "./dom";
+import { perfProbes } from "./probe";
 
 type Pending = {
   resolve: (v: unknown) => void;
@@ -229,7 +230,7 @@ class WsClient {
     if (ws !== this.ws) return;
     this.ws = null;
     this.failAll(new Error(t("conn_offline")));
-    this.emit("conn-dead", { conn: WEB_CONN, why: "websocket fermée" });
+    this.emit("conn-dead", { conn: WEB_CONN, why: "websocket closed" });
     void this.reverifyToken();
   }
 
@@ -262,7 +263,7 @@ class WsClient {
         // Même télémétrie que la fusion Tauri : silent_ms prouve le
         // transport vivant (trafic entrant récent) → le watchdog
         // distingue lenteur démon et blackhole.
-        const isTimeout = e instanceof Error && e.message === "timeout démon";
+        const isTimeout = e instanceof Error && e.message === "daemon timeout";
         return {
           [WEB_CONN]: {
             error: isTimeout ? "timeout" : String(e),
@@ -315,7 +316,7 @@ class WsClient {
     const p = new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error("timeout démon"));
+        reject(new Error("daemon timeout"));
       }, CALL_TIMEOUT);
       this.pending.set(id, {
         resolve: resolve as (v: unknown) => void,
@@ -332,12 +333,16 @@ class WsClient {
     const data = typeof m.data === "string" ? m.data : "";
     this.rxTotal += data.length;
     this.lastRxAt = Date.now();
+    // Sonde télémétrie (#297) : octets + coût du JSON.parse par message.
+    const probe = perfProbes.wsMsg;
+    const t0 = probe ? performance.now() : 0;
     let v: Record<string, unknown>;
     try {
       v = JSON.parse(data);
     } catch {
       return;
     }
+    probe?.(data.length, performance.now() - t0);
     if (v.push) {
       // Push démon → nom d'event Tauri équivalent (le payload conserve
       // la forme brute : {session, event} / {term, data} / {term, code}

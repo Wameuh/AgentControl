@@ -10,12 +10,21 @@ import { nav } from "../ui/nav";
 import { call, callBg, isConnLost } from "../core/rpc";
 import { app } from "../core/state";
 import { isAndroid } from "../core/chrome";
+import { engineCaps, debugNoFs } from "../core/engine";
 import type { CmdInfo, SendMode } from "../core/types";
 import { t } from "../i18n";
 import { cmdDesc, cmdHint, cmdName } from "./modelbar";
 import { sendPref } from "./settings";
 import { Attachments } from "./attachments";
 import { SttMic } from "./stt-mic";
+import { syncSendMic } from "../mobile/composer-mobile";
+import { tick } from "../mobile/haptics";
+import {
+  probeFitInput,
+  probeInputHandler,
+  probeInputPaint,
+  telemetryActive,
+} from "./telemetry";
 import type { ChatView } from "./chat-view";
 
 // ---- Undo/redo du composer : pile custom d'états ----
@@ -39,6 +48,13 @@ const UNDO_DEBOUNCE_MS = 800;
 /// Borne de la pile (les très longs brouillons ne sont pas gardés à
 /// l'infini — 100 pas × un prompt reste raisonnable en mémoire).
 const UNDO_MAX = 100;
+
+/// `field-sizing: content` laisse le navigateur dimensionner #input
+/// tout seul (max-height borne) — plus de mesure JS (scrollHeight =
+/// reflow forcé) à chaque frappe. Repli : miroir #input-ghost en flux
+/// (fitInputGhost — aucune lecture de layout dans le chemin chaud).
+/// `ac-nofs` en localStorage force le repli pour test A/B.
+const FIELD_SIZING = engineCaps.fieldSizing && !debugNoFs();
 
 // ---- Commandes built-in (toujours dispo, exécutées côté client) ----
 const BUILTINS = (): { name: string; description: string; hint: string }[] => [
@@ -243,39 +259,201 @@ export class Composer {
     this.lastGroup = null;
   }
 
-  fitInput() {
-    const inp = $("input") as HTMLTextAreaElement;
+  /** Hauteur/largeur du fil (#chat) pilotant les caps et le wrapping
+   *  du champ — suivies par ResizeObserver (pas de lecture de layout
+   *  dans le chemin chaud). */
+  private chatH = 0;
+  private chatW = 0;
+  /** fitInput saute la mesure tant que ni la valeur ni la géométrie
+   *  (resize → fitStale) n'ont changé : les scheduleUi sans contenu
+   *  nouveau (setInput identique, restore, IME) ne paient pas de reflow. */
+  private lastFitVal: string | null = null;
+  private fitStale = true;
+  /** padding/line-height du champ — stables (pas de réglage de fonte
+   *  dans le client), lus une fois pour le libellé « N lignes ». */
+  private fitMetrics: { padV: number; lh: number } | null = null;
+  /** Dernier rendu de la pill « N lignes » — innerHTML n'est réécrit
+   *  que si le compte, l'état expandé ou le titre (langue) changent :
+   *  la frappe dans un champ overflowing ne doit pas muter le DOM à
+   *  chaque frame. */
+  private lastBtnLines = -1;
+  private lastBtnExp: boolean | null = null;
+
+  // ---- Repli sans field-sizing : miroir #input-ghost ----
+  // Le div pré-wrap (mêmes métriques texte que #input) est le SEUL
+  // enfant en flux de #input-wrap.grow : sa hauteur intrinsèque
+  // dimensionne le wrap, #input est posé en absolute inset:0. Le
+  // navigateur fait la mise en page — aucune lecture forcée
+  // (scrollHeight = reflow synchrone proportionnel au fil sur les
+  // vieux webview sans content-visibility, cause du lag #294).
+  private ghostEl: HTMLElement | null = null;
+  private ghostVal: string | null = null;
+  /** Sonde « overflow » coalescée : lecture de ghost.offsetHeight
+   *  APRÈS le layout de la frame (setTimeout post-rAF) — pas de
+   *  reflow forcé dans le chemin de frappe. */
+  private overTimer: number | undefined;
+
+  /** Cap « petit » (~1/3 du fil) — même formule qu'avant, référence
+   *  #chat (hauteur fixée par le viewport, suivie par ResizeObserver). */
+  private smallCap(): number {
+    const chatH = this.chatH || window.innerHeight;
+    return Math.max(100, Math.round(chatH * 0.33));
+  }
+
+  private bigCap(): number {
+    const small = this.smallCap();
+    const chatH = this.chatH || window.innerHeight;
+    return Math.max(small + 80, Math.round(chatH * 0.66));
+  }
+
+  /** Cap actif : étendu ↔ replié (inpExpanded). */
+  private fitCap(): number {
+    return this.inpExpanded ? this.bigCap() : this.smallCap();
+  }
+
+  /** État « déborde » + pill « N lignes » — partagé par les deux
+   *  chemins de mesure (field-sizing et miroir). `need` = hauteur
+   *  contenu nécessaire (px). */
+  private paintFit(over: boolean, need: number) {
     const wrap = $("input-wrap");
     const btn = $("btn-expand");
-    // Mesure : retour à la hauteur naturelle (rows=2) puis scrollHeight
-    // = hauteur nécessaire. +2 pour les bordures (box-sizing border-box).
-    inp.style.height = "auto";
-    const need = inp.scrollHeight + 2;
-    // Référence stable : la colonne #chat (hauteur fixée par le viewport)
-    // — pas #events, qui rétrécit quand le champ grandit (cap mouvant).
-    const chatH = $("chat")?.clientHeight || window.innerHeight;
-    const small = Math.max(100, Math.round(chatH * 0.33));
-    const big = Math.max(small + 80, Math.round(chatH * 0.66));
-    const over = need > small;
-    if (!over) this.inpExpanded = false;
-    const cap = this.inpExpanded ? big : small;
-    inp.style.height = Math.min(need, cap) + "px";
+    const inp = $("input") as HTMLTextAreaElement;
     wrap.classList.toggle("over", over);
     btn.hidden = !over;
-    if (over) {
+    if (!over) return;
+    if (!this.fitMetrics) {
       const cs = getComputedStyle(inp);
-      const padV = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
-      const lh = parseFloat(cs.lineHeight) || 21;
-      const lines = Math.max(
-        inp.value.split("\n").length,
-        Math.round((need - padV) / lh),
-      );
+      this.fitMetrics = {
+        padV: parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom),
+        lh: parseFloat(cs.lineHeight) || 21,
+      };
+    }
+    const lines = Math.max(
+      inp.value.split("\n").length,
+      Math.round((need - this.fitMetrics.padV) / this.fitMetrics.lh),
+    );
+    const title = t(this.inpExpanded ? "input_collapse" : "input_expand");
+    if (
+      lines !== this.lastBtnLines ||
+      this.inpExpanded !== this.lastBtnExp ||
+      title !== btn.title
+    ) {
+      this.lastBtnLines = lines;
+      this.lastBtnExp = this.inpExpanded;
       btn.innerHTML =
         icon(this.inpExpanded ? "chev-down" : "chev-up") +
         `<span class="n">${lines}</span>`;
-      btn.title = t(this.inpExpanded ? "input_collapse" : "input_expand");
-      btn.setAttribute("aria-label", btn.title);
+      btn.title = title;
+      btn.setAttribute("aria-label", title);
     }
+  }
+
+  /** fitInput du chemin miroir : synchro du texte du miroir (une
+   *  écriture par frame via le rAF amont), maj du cap seulement si
+   *  géométrie/état a changé, sonde overflow différée. */
+  private fitInputGhost(force: boolean) {
+    const wrap = $("input-wrap");
+    const inp = $("input") as HTMLTextAreaElement;
+    wrap.classList.add("grow");
+    const v = inp.value;
+    if (v !== this.ghostVal && this.ghostEl) {
+      this.ghostVal = v;
+      // \n terminal : une div pre-wrap ne matérialise pas la dernière
+      // ligne vide — la ZWSP (largeur nulle) la force, comme le curseur
+      // du textarea sur sa ligne vide.
+      this.ghostEl.textContent = v.endsWith("\n") ? v + "\u200B" : v;
+    }
+    if (force || this.fitStale) {
+      this.fitStale = false;
+      // Cap sur le WRAP (le chemin field-sizing le pose sur #input).
+      // Resync des métriques : un changement de fonte
+      // (thème, zoom) ne déclenche pas toujours un fitStale.
+      this.syncGhostStyle();
+      wrap.style.setProperty("--fit-cap", this.fitCap() + "px");
+    }
+    this.scheduleOverCheck();
+  }
+
+  private scheduleOverCheck() {
+    if (this.overTimer !== undefined) return;
+    this.overTimer = window.setTimeout(() => {
+      this.overTimer = undefined;
+      this.updateOver();
+    }, 0);
+  }
+
+  /** Sonde post-layout : ghost.offsetHeight = hauteur contenu non
+   *  cappée (le miroir déborde du wrap cappé, sa propre hauteur reste
+   *  complète). Lecture à layout propre → quasi-gratuite. */
+  private updateOver() {
+    const g = this.ghostEl;
+    const wrap = $("input-wrap");
+    if (!g || !wrap) return;
+    const need = g.offsetHeight;
+    const over = need > this.smallCap();
+    if (!over && this.inpExpanded) {
+      // Rétracté : le cap doit redescendre petit sans attendre un
+      // fitInput forcé (il n'y a plus de mesure périodique ici).
+      this.inpExpanded = false;
+      wrap.style.setProperty("--fit-cap", this.fitCap() + "px");
+    }
+    this.paintFit(over, need);
+  }
+
+  /** Recopie les métriques texte du champ sur le miroir — le miroir
+   *  doit wrapper à l'identique (font, chasse, césure). Le padding
+   *  reste en CSS : les règles .over partagées #input/#input-ghost
+   *  doivent rester synchrones (commentaire dans chat.css). */
+  private syncGhostStyle() {
+    const g = this.ghostEl;
+    const inp = $("input") as HTMLTextAreaElement;
+    if (!g) return;
+    const cs = getComputedStyle(inp);
+    const PROPS = [
+      "fontStyle", "fontVariant", "fontWeight", "fontStretch",
+      "fontSize", "lineHeight", "fontFamily", "letterSpacing",
+      "wordSpacing", "fontKerning", "fontFeatureSettings",
+      "fontVariationSettings", "whiteSpace", "overflowWrap",
+      "wordBreak", "hyphens", "tabSize", "direction", "unicodeBidi",
+    ] as const;
+    const gs = g.style as unknown as Record<string, string>;
+    const c = cs as unknown as Record<string, string>;
+    for (const p of PROPS) {
+      if (c[p]) gs[p] = c[p];
+    }
+  }
+
+  fitInput(force = false) {
+    // En tête : m-input-empty dépend de la valeur courante, pas de la
+    // mesure — tous les early-returns doivent le rafraîchir (C1 mobile).
+    syncSendMic();
+    // Sonde télémétrie (#297) : la mesure propre (scrollHeight = reflow
+    // forcé) est le suspect n°1 des lag de frappe — chronométrée seulement
+    // quand la collecte est active, skip précoce non compté (coût ~0).
+    const t0 = telemetryActive() ? performance.now() : -1;
+    const inp = $("input") as HTMLTextAreaElement;
+    // Moteur sans field-sizing : le miroir #input-ghost dimensionne le
+    // wrap en flux normal — aucune mesure JS (scrollHeight = reflow
+    // synchrone proportionnel au fil sur les vieux webview).
+    if (!FIELD_SIZING) {
+      this.fitInputGhost(force);
+      if (t0 >= 0) probeFitInput(performance.now() - t0);
+      return;
+    }
+    if (!force && !this.fitStale && inp.value === this.lastFitVal) return;
+    this.lastFitVal = inp.value;
+    this.fitStale = false;
+    // Mesure : hauteur nécessaire au contenu. En field-sizing le
+    // navigateur dimensionne via max-height — scrollHeight lit le
+    // contenu complet même cappé, pas de reset nécessaire.
+    const need = inp.scrollHeight + 2;
+    const over = need > this.smallCap();
+    if (!over) this.inpExpanded = false;
+    // Cap via custom property : consommée par max-height: var(--fit-cap)
+    // dans chat.css (chemin field-sizing et miroir autosize du wrap).
+    inp.style.setProperty("--fit-cap", this.fitCap() + "px");
+    this.paintFit(over, need);
+    if (t0 >= 0) probeFitInput(performance.now() - t0);
   }
 
   private async runBuiltin(name: string, arg: string): Promise<boolean> {
@@ -352,46 +530,199 @@ export class Composer {
   /** Dialogue : sessions natives de l'agent (ACP session/list) → reprise. */
   private async openNativePicker() {
     if (!app.current) return;
-    const box = $("native-list");
+    type Sess = { sessionId: string; title?: string; updatedAt?: string; cwd?: string };
+    const dlg = $("dlg-resume") as HTMLDialogElement;
+    const box = $("native-list") as HTMLElement;
+    const filter = $("native-filter") as HTMLInputElement;
+    const track = $("native-scrollbar") as HTMLElement;
+    const thumb = $("native-scroll-thumb") as HTMLElement;
     box.innerHTML = "…";
-    ($("dlg-resume") as HTMLDialogElement).showModal();
-    try {
-      const r = await call<{ sessions?: { sessionId: string; title?: string; updatedAt?: string; cwd?: string }[] }>(
-        "list_native_sessions",
-        { session: app.current.id },
-      );
-      const list = r.sessions ?? [];
-      box.innerHTML = list.length
-        ? ""
-        : t("no_native");
+    filter.value = "";
+    track.classList.remove("on");
+    dlg.showModal();
+    filter.focus();
+
+    let all: Sess[] = [];
+    let loaded = false;
+    let failed = false;
+    // Actions parallèles à `rows` : Enter/↑↓ agissent via `acts[sel]`
+    // (la ligne fallback d'erreur n'est pas une Sess).
+    let acts: (() => void)[] = [];
+    let sel = -1;
+    let rows: HTMLElement[] = [];
+
+    const matches = (s: Sess, q: string) => {
+      const hay = `${s.sessionId} ${s.title ?? ""} ${s.cwd ?? ""} ${(s.updatedAt ?? "").slice(0, 16)}`.toLowerCase();
+      return hay.includes(q);
+    };
+
+    const pick = (s: Sess | undefined) => {
+      if (!s) return;
+      dlg.close();
+      notify("info", t("resume_wait"));
+      void call("resume_session", { session: app.current!.id, native_id: s.sessionId })
+        .catch((e) => showErr(String(e)))
+        .then(() => this.chat.open(app.current!.id));
+    };
+
+    const syncThumb = () => {
+      const h = box.clientHeight;
+      const sh = box.scrollHeight;
+      if (sh <= h) { track.classList.remove("on"); return; }
+      track.classList.add("on");
+      const th = Math.max(24, (h / sh) * h);
+      const top = box.scrollTop / (sh - h) * (h - th);
+      thumb.style.height = th + "px";
+      thumb.style.top = top + "px";
+    };
+
+    const render = () => {
+      if (failed) return; // état d'erreur : la ligne fallback reste
+      const q = filter.value.trim().toLowerCase();
+      const list = q ? all.filter((s) => matches(s, q)) : all;
+      acts = [];
+      rows = [];
+      sel = -1;
+      box.innerHTML = "";
+      if (!list.length) {
+        box.textContent = !loaded ? "…" : all.length ? t("resume_no_match") : t("no_native");
+      }
       for (const s of list) {
         const row = document.createElement("div");
         row.className = "ac-item";
         row.innerHTML = `<span class="n">${esc(s.sessionId.slice(0, 12))}</span>` +
           `<span class="d">${esc(s.title || s.cwd || "")}</span>` +
           `<span class="h">${esc((s.updatedAt || "").slice(0, 16).replace("T", " "))}</span>`;
-        row.onclick = async () => {
-          ($("dlg-resume") as HTMLDialogElement).close();
-          notify("info", t("resume_wait"));
-          await call("resume_session", { session: app.current!.id, native_id: s.sessionId })
-            .catch((e) => showErr(String(e)));
-          await this.chat.open(app.current!.id);
-        };
+        const idx = rows.length;
+        row.onclick = () => pick(s);
+        row.onmouseenter = () => { sel = idx; syncSel(); };
         box.appendChild(row);
+        rows.push(row);
+        acts.push(() => pick(s));
       }
+      box.scrollTop = 0;
+      sel = rows.length ? 0 : -1;
+      syncSel();
+      syncThumb();
+    };
+
+    const syncSel = () => {
+      rows.forEach((r, i) => r.classList.toggle("sel", i === sel));
+    };
+
+    // Navigation clavier : ↑/↓ sur les entrées, Entrée pour choisir,
+    // Échap vide le filtre puis ferme (comme les pickers natifs).
+    filter.onkeydown = (e) => {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        if (!rows.length) return;
+        e.preventDefault();
+        sel = (sel + (e.key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length;
+        rows[sel].scrollIntoView({ block: "nearest" });
+        syncSel();
+      } else if (e.key === "Enter") {
+        e.preventDefault(); // pas de submit implicite du <form method=dialog>
+        acts[sel]?.();
+      } else if (e.key === "Escape") {
+        if (filter.value) {
+          e.preventDefault();
+          filter.value = "";
+          render();
+        } else {
+          dlg.close();
+        }
+      }
+    };
+
+    filter.oninput = render;
+    box.onscroll = syncThumb;
+    // window resize pendant le dialogue → recalcul du thumb.
+    const onResize = () => syncThumb();
+
+    // Scrollbar custom : la piste native (overlay fine) ne grab pas
+    // dans <dialog> — thumb DOM draggable via pointer events. Handlers
+    // nommés et retirés au close : thumb/track sont du DOM statique,
+    // les re-attacher à chaque ouverture les cumulerait (wheel ×N).
+    const onThumbDown = (e: PointerEvent) => {
+      e.preventDefault();
+      thumb.setPointerCapture(e.pointerId);
+      const startY = e.clientY;
+      const startTop = box.scrollTop;
+      const trackH = box.clientHeight;
+      const range = box.scrollHeight - trackH;
+      const thumbH = thumb.offsetHeight;
+      const move = (ev: PointerEvent) => {
+        const dy = ev.clientY - startY;
+        const dScroll = (dy / Math.max(1, trackH - thumbH)) * range;
+        box.scrollTop = startTop + dScroll;
+        syncThumb();
+      };
+      const up = () => {
+        thumb.removeEventListener("pointermove", move);
+        thumb.removeEventListener("pointerup", up);
+        thumb.removeEventListener("pointercancel", up);
+      };
+      thumb.addEventListener("pointermove", move);
+      thumb.addEventListener("pointerup", up);
+      thumb.addEventListener("pointercancel", up);
+    };
+    // Clic sur la piste (hors thumb) : sauter à la position cliquée.
+    // Molette au-dessus de la piste = scroll aussi (la piste n'est pas
+    // dans #native-list, le wheel ne la traverserait pas).
+    const onTrackWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      box.scrollTop += e.deltaY;
+      syncThumb();
+    };
+    const onTrackDown = (e: PointerEvent) => {
+      if (e.target !== track) return;
+      e.preventDefault(); // garder le focus dans le filtre (↑/↓/Entrée)
+      const r = track.getBoundingClientRect();
+      const frac = (e.clientY - r.top - thumb.offsetHeight / 2) / Math.max(1, r.height - thumb.offsetHeight);
+      box.scrollTop = Math.max(0, Math.min(1, frac)) * (box.scrollHeight - box.clientHeight);
+      syncThumb();
+    };
+    thumb.addEventListener("pointerdown", onThumbDown);
+    track.addEventListener("wheel", onTrackWheel, { passive: false });
+    track.addEventListener("pointerdown", onTrackDown);
+    window.addEventListener("resize", onResize);
+    dlg.addEventListener("close", () => {
+      window.removeEventListener("resize", onResize);
+      thumb.removeEventListener("pointerdown", onThumbDown);
+      track.removeEventListener("wheel", onTrackWheel);
+      track.removeEventListener("pointerdown", onTrackDown);
+      filter.onkeydown = filter.oninput = box.onscroll = null;
+    }, { once: true });
+
+    try {
+      const r = await call<{ sessions?: Sess[] }>(
+        "list_native_sessions",
+        { session: app.current.id },
+      );
+      all = r.sessions ?? [];
+      loaded = true;
+      render();
     } catch (e) {
       // Agent mort → impossible de lister ; proposer la reprise de la session courante
+      loaded = true;
+      failed = true;
+      all = [];
       box.innerHTML = `<div class="errline">${esc(String(e))}</div>`;
       const row = document.createElement("div");
       row.className = "ac-item";
       row.innerHTML = `<span class="n">${icon("play")}</span><span class="d">${t("resume_current")}</span>`;
-      row.onclick = async () => {
-        ($("dlg-resume") as HTMLDialogElement).close();
+      const act = async () => {
+        dlg.close();
         notify("info", t("resume_wait"));
         await call("resume_session", { session: app.current!.id }).catch((er) => showErr(String(er)));
         await this.chat.open(app.current!.id);
       };
+      row.onclick = () => void act();
+      row.onmouseenter = () => { sel = 0; syncSel(); };
       box.appendChild(row);
+      rows = [row];
+      acts = [act];
+      sel = 0;
+      syncSel();
     }
   }
 
@@ -424,6 +755,11 @@ export class Composer {
   /** Capability `queue_steer` du démon (injectée depuis conns.cap) —
    *  le bouton steer des entrées est masqué sur les vieux démons. */
   private qSteerCapable: (conn: string | undefined) => boolean = () => false;
+  /** Capability `queue_clear` du démon — le bouton « tout vider » de
+   *  l'en-tête du panneau est masqué sur les vieux démons. */
+  private qClearCapable: (conn: string | undefined) => boolean = () => false;
+  /** Timer de désarmement du « tout vider » (confirm armé 2.5 s). */
+  private qClearTimer: ReturnType<typeof setTimeout> | undefined;
   /** Rebuild du panneau en cours : le blur d'une textarea détachée par
    *  innerHTML ne doit ni sauvegarder ni annuler (l'éditeur est recréé
    *  juste après si l'entrée est toujours là). */
@@ -483,6 +819,16 @@ export class Composer {
     open.insertAdjacentHTML("beforeend", `<span class="n">${queue.length}</span>`);
     open.onclick = () => this.toggleQueuePanel();
     bar.appendChild(open);
+    if (isAndroid()) {
+      // Sur mobile la barre se réduit à une puce (compteur + aperçu du
+      // 1er message) : les entrées et leurs actions vivent dans la
+      // feuille basse #queue-panel, pas dans une rangée de chips.
+      open.classList.add("q-chip");
+      open.innerHTML =
+        `${icon("clock")}<b>${esc(t("queue_chip", { n: queue.length }))}</b>` +
+        `<span class="q-ex">${queue[0] ? `· ${esc(queue[0])}` : ""}</span>`;
+      return;
+    }
     const broken = this.qEditBroken.has(connKey);
     queue.forEach((txt, i) => {
       const d = document.createElement("div");
@@ -533,6 +879,11 @@ export class Composer {
     const queue = this.qSnapshot;
     panel.hidden = false;
     $("qp-count").textContent = String(queue.length);
+    // « Tout vider » : masqué sur les démons sans queue_clear — le
+    // panneau n'existe que file non vide, la garde suffit.
+    const clr = $("qp-clear") as HTMLButtonElement;
+    clr.hidden = !this.qClearCapable(conn);
+    if (clr.hidden) this.disarmQueueClear();
     const list = $("qp-list");
     // Rebuild pendant une édition (refreshQueue déclenché par un nouveau
     // message en file) : la textarea va être recréée — sauvegarder le
@@ -609,8 +960,18 @@ export class Composer {
   /** queue_* puis re-render : l'erreur part en toast plutôt que de
    *  finir en unhandled rejection (conn down, index périmé…). */
   private queueCall(method: string, params: Record<string, unknown>) {
+    // queue_drop : le message retiré ne sera jamais journalisé —
+    // retirer l'écho pending correspondant (sinon bulle orpheline).
+    const dropped =
+      method === "queue_drop"
+        ? this.qSnapshot[params.index as number]
+        : undefined;
+    const sid = params.session as string;
     void call(method, params)
-      .then(() => this.refreshQueue())
+      .then(() => {
+        if (dropped != null) this.chat.dropEchoesByText(sid, dropped);
+        return this.refreshQueue();
+      })
       .catch((e) => showErr(String(e)));
   }
 
@@ -716,6 +1077,9 @@ export class Composer {
         .then((r) => {
           // Index périmé (entrée déplacée/supprimée par ailleurs).
           if (!r.ok) notify("warn", t("queue_edit_failed"));
+          // L'écho pending du message édité doit porter le texte qui
+          // sera journalisé à la livraison (réconciliation par texte).
+          else this.chat.retextEcho(sid, ed.orig, text);
         })
         .catch((e) => {
           this.markQueueEditBroken(conn ?? "default", e);
@@ -759,6 +1123,7 @@ export class Composer {
     } else if (this.qSnapshot.length && app.current) {
       this.qOpen = true;
       nav.push("queue");
+      if (isAndroid()) nav.showScrim("queue");
       this.renderQueuePanel();
       $("queue-open")?.classList.add("on");
     }
@@ -768,11 +1133,27 @@ export class Composer {
    *  dépile aussi l'entrée nav et l'état « on » du bouton horloge. */
   closeQueuePanel() {
     if (this.qOpen) nav.close("queue");
+    nav.hideScrim("queue");
     this.qOpen = false;
     this.qEditing = null;
+    this.disarmQueueClear();
     const panel = $("queue-panel");
     if (panel) panel.hidden = true;
     $("queue-open")?.classList.remove("on");
+  }
+
+  /** Désarme le « tout vider » : libellé de base + classe armed
+   *  retirée (expiré au bout de 2.5 s ou au 2e clic). */
+  private disarmQueueClear() {
+    if (this.qClearTimer) {
+      clearTimeout(this.qClearTimer);
+      this.qClearTimer = undefined;
+    }
+    const b = $("qp-clear") as HTMLButtonElement | null;
+    if (b) {
+      b.classList.remove("armed");
+      b.textContent = t("queue_clear");
+    }
   }
 
   /** Vieux démon : ReqKind::QueueEdit inconnu → « parse: unknown
@@ -838,6 +1219,11 @@ export class Composer {
       : atLines;
     const sid = app.current.id; // peut changer pendant l'await
     this.setInput("");
+    // Écho optimiste : la bulle user apparaît dès l'Enter — le
+    // user_message du journal n'arrive qu'à la livraison (file,
+    // réveil), le RPC send n'enfile que le prompt. Le pending est
+    // réconcilié à l'arrivée du vrai event ; retiré si le RPC échoue.
+    const echoId = this.chat.addEcho(sid, payload, { steer: mode === "steer" });
     try {
       await call("send", {
         session: sid,
@@ -845,8 +1231,11 @@ export class Composer {
         force: mode === "force",
         steer: mode === "steer",
       });
+      // Confirmation haptique de l'envoi (Y4) — no-op hors Android.
+      tick("send");
       this.attach.sent(sid);
     } catch (e) {
+      this.chat.dropEcho(sid, echoId);
       showErr(String(e));
       // Envoi refusé : le brouillon n'est vidé que sur succès — rendre
       // le texte à SA session (champ, ou draft garé si l'utilisateur a
@@ -869,6 +1258,13 @@ export class Composer {
       this.chat.sysline(t("cmd_sent_hint", { cmd: bm[1] }));
     }
     void this.refreshQueue();
+  }
+
+  /** Envoie dans un mode explicite — voie publique pour les actions
+   *  mobiles (appui long Envoyer → steer/file, C1) qui ne passent pas
+   *  par le bouton principal ni le bouton alternatif. */
+  sendWith(mode: SendMode) {
+    void this.sendInput(mode);
   }
 
   // ---- Autocomplete des slash-commands ----
@@ -988,7 +1384,7 @@ export class Composer {
   refreshHints() {
     // Un placeholder plus long peut wrapper → refit, et le titre de la
     // pill suit la langue courante.
-    this.fitInput();
+    this.fitInput(true);
     this.syncAltBtn(); // bouton alternatif : suit la préférence/langue
     if (isAndroid()) return; // placeholder mobile sans raccourcis
     ($("input") as HTMLTextAreaElement).placeholder =
@@ -1048,6 +1444,12 @@ export class Composer {
    *  — bouton steer des entrées masqué si queue_steer est inconnu. */
   bindQueueSteerCapable(capable: (conn: string | undefined) => boolean) {
     this.qSteerCapable = capable;
+  }
+
+  /** Capacité « clear de file » du démon (injectée depuis conns.cap)
+   *  — bouton « tout vider » masqué si queue_clear est inconnu. */
+  bindQueueClearCapable(capable: (conn: string | undefined) => boolean) {
+    this.qClearCapable = capable;
   }
 
   init() {
@@ -1119,6 +1521,10 @@ export class Composer {
       }
     });
     $("input").addEventListener("input", (e) => {
+      // Sondes télémétrie (#297) : durée du handler + délai event→paint.
+      // t0 = début du traitement ; le rAF de sonde est enregistré APRÈS
+      // celui de scheduleUi → il mesure la frame complète.
+      const t0 = telemetryActive() ? performance.now() : -1;
       // En dictée : la frappe ne doit pas être écrasée par le prochain
       // partial — le segment live se ré-ancre au curseur (hors
       // composition IME, sinon chaque lettre committerait l'autocorrect).
@@ -1127,6 +1533,10 @@ export class Composer {
       this.acStale = true;
       this.acDismissed = false;
       this.scheduleUi();
+      if (t0 >= 0) {
+        probeInputHandler(performance.now() - t0);
+        probeInputPaint(t0);
+      }
     });
     $("input").addEventListener("blur", () => {
       // délai pour laisser le click sur un item passer — le masquage
@@ -1142,15 +1552,81 @@ export class Composer {
     // Android via nav.rawCloseOverlay).
     $("qp-close").onclick = () => this.closeQueuePanel();
 
+    // « Tout vider » : danger-armed (pattern ctxmenu/components) —
+    // 1er clic arme le libellé de confirmation, 2e clic = queue_clear
+    // (drain atomique côté démon ; le tour en cours n'est pas touché).
+    const qpClear = $("qp-clear") as HTMLButtonElement;
+    qpClear.onclick = () => {
+      if (!app.current) return;
+      if (!qpClear.classList.contains("armed")) {
+        qpClear.classList.add("armed");
+        qpClear.textContent = t("queue_clear_armed");
+        this.qClearTimer = setTimeout(() => this.disarmQueueClear(), 2500);
+        return;
+      }
+      this.disarmQueueClear();
+      const sid = app.current.id;
+      const conn = app.current.conn;
+      void call<{ cleared: number; queue?: string[] }>("queue_clear", {
+        session: sid,
+        conn,
+      })
+        .then((r) => {
+          if (Array.isArray(r.queue)) this.qSnapshot = r.queue;
+          // File purgée : les échos pending de ces messages ne seront
+          // jamais journalisés — les retirer (bulles orphelines).
+          this.chat.clearEchoes(sid);
+          this.refreshQueue();
+        })
+        .catch((e) => showErr(String(e)));
+    };
+
     // Bouton « N lignes » : bascule replié ↔ étendu, puis redonne le focus
     // au champ pour continuer la frappe.
     $("btn-expand").onclick = () => {
       this.inpExpanded = !this.inpExpanded;
-      this.fitInput();
+      this.fitInput(true);
       ($("input") as HTMLTextAreaElement).focus();
     };
-    // Les caps dépendent de la hauteur du fil (resize, rotation mobile).
-    window.addEventListener("resize", () => this.fitInput());
+    // Les caps dépendent de la hauteur du fil (resize, rotation mobile,
+    // panneaux) — #chat la suit sans reflow côté fitInput.
+    const chatEl = $("chat");
+    this.chatH = chatEl?.clientHeight || window.innerHeight;
+    this.chatW = chatEl?.clientWidth || window.innerWidth;
+    if (chatEl) {
+      new ResizeObserver(() => {
+        const h = chatEl.clientHeight;
+        const w = chatEl.clientWidth;
+        if (h > 0 && (h !== this.chatH || w !== this.chatW)) {
+          this.chatH = h;
+          this.chatW = w;
+          this.fitStale = true;
+          this.fitInput();
+        }
+      }).observe(chatEl);
+    }
+    // Largeur du champ : #chat ne bouge pas quand les boutons du
+    // composer (alt/mic/attach) apparaissent — #input-wrap, si.
+    const wrapEl = $("input-wrap");
+    let wrapW = wrapEl?.clientWidth ?? 0;
+    if (wrapEl) {
+      new ResizeObserver(() => {
+        const w = wrapEl.clientWidth;
+        if (w > 0 && w !== wrapW) {
+          wrapW = w;
+          this.fitStale = true;
+          this.fitInput();
+        }
+      }).observe(wrapEl);
+    }
+    window.addEventListener("resize", () => {
+      this.fitStale = true; // largeur changée → le contenu re-wrappé
+      this.fitInput();
+    });
+    // Miroir autosize (repli sans field-sizing) : métriques texte
+    // recopiées une fois — le padding reste porté par le CSS partagé.
+    this.ghostEl = document.getElementById("input-ghost");
+    if (!FIELD_SIZING) this.syncGhostStyle();
     this.fitInput();
 
     $("btn-cancel").onclick = () =>
@@ -1172,6 +1648,25 @@ export class Composer {
       } finally {
         resumeBtn.disabled = false;
         resumeBtn.classList.remove("spin");
+      }
+    };
+
+    // « Contexte neuf » pendant un long chargement : abandonne la
+    // session native (session/new, journal conservé) — issue explicite
+    // quand le replay d'une très longue session est trop long (#271).
+    const freshBtn = $("btn-fresh") as HTMLButtonElement;
+    freshBtn.onclick = async () => {
+      if (!app.current) return;
+      freshBtn.disabled = true;
+      freshBtn.classList.add("spin");
+      try {
+        await call("resume_session", { session: app.current.id, fresh: true });
+        await this.chat.open(app.current.id);
+      } catch (e) {
+        showErr(String(e));
+      } finally {
+        freshBtn.disabled = false;
+        freshBtn.classList.remove("spin");
       }
     };
 

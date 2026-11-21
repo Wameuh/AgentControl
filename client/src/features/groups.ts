@@ -48,6 +48,18 @@ export const grpAncestors = (p: string): string[] => {
 export const inSubtree = (p: string, root: string): boolean =>
   p === root || p.startsWith(root + "/");
 
+/** Assignation optimiste en vol : la valeur locale est déjà posée,
+ *  `promise` porte le RPC `set_session_group`, `before` est le
+ *  snapshot du store pour le rollback (undoAssign). */
+interface AssignOp {
+  s: SessionMeta;
+  g: string | undefined;
+  prev: string | undefined;
+  conn: string;
+  before: Set<string>;
+  promise: Promise<unknown>;
+}
+
 export class GroupStore {
   /** Rafraîchit la sidebar après une mutation (injecté — évite la dépendance
    *  circulaire groups ↔ sidebar). */
@@ -147,18 +159,86 @@ export class GroupStore {
     dlg.showModal();
   }
 
-  async applyAssign(s: SessionMeta, group?: string) {
+  /** Mutation locale + RPC en arrière-plan : `s.group`, le store et le
+   *  rendu sont posés AVANT tout await — l'affichage reflète le
+   *  déplacement sans round-trip démon. Renvoie l'op en vol (undo pour
+   *  le rollback, promise pour le suivi). */
+  private assignOp(s: SessionMeta, group?: string): AssignOp {
     const g = group ? grpNorm(group) : undefined;
+    const conn = s.conn ?? "default";
+    const op: AssignOp = {
+      s, g, conn, prev: s.group,
+      before: new Set(this.stored(conn)),
+      promise: call("set_session_group", { session: s.id, conn: s.conn, group: g }),
+    };
+    s.group = g;
+    // Store aligné localement : les opérations chaînées sur un
+    // sous-arbre (rename/dissolve) relisent s.group avant que la
+    // réconciliation démon n'arrive. En cas d'échec RPC, undo()
+    // retire les chemins introduits restés orphelins.
+    if (g) this.add(conn, g);
+    return op;
+  }
+
+  /** Rollback d'un op en échec : restaure `s.group` SEULEMENT si la
+   *  valeur locale est encore celle posée par cette opération — une
+   *  mutation plus récente de l'utilisateur n'est jamais écrasée —
+   *  et retire du store les chemins que l'add() optimiste a pu
+   *  introduire sans être référencés (un groupe vide préexistant
+   *  survit toujours). Retourne true si l'affichage a changé. */
+  private undoAssign(op: AssignOp): boolean {
+    const restored = op.s.group === op.g;
+    if (restored) op.s.group = op.prev;
+    let changed = restored;
+    if (op.g) {
+      // Candidats introduits par l'add() = ancêtres de g + g, moins
+      // ceux déjà stockés avant l'opération.
+      const fresh = [...grpAncestors(op.g), op.g].filter((c) => !op.before.has(c));
+      if (fresh.length) {
+        const referenced = (c: string) =>
+          app.lastSessions.some((x) =>
+            (x.conn ?? "default") === op.conn && !!x.group &&
+            inSubtree(grpNorm(x.group), c)) ||
+          this.stored(op.conn).some((p) => op.before.has(p) && inSubtree(p, c));
+        const drop = new Set(fresh.filter((c) => !referenced(c)));
+        if (drop.size) {
+          this.save(op.conn, this.stored(op.conn).filter((p) => !drop.has(p)));
+          changed = true;
+        }
+      }
+    }
+    return changed;
+  }
+
+  /** Attend un lot d'assignations déjà posées en local : RPC en
+   *  parallèle (allSettled — le fond se solde en ~1 RTT quel que
+   *  soit N), rollback par membre en échec et toast agrégé. */
+  private async settleAssigns(ops: AssignOp[]) {
+    this.refresh();
+    const res = await Promise.allSettled(ops.map((o) => o.promise));
+    let failed = 0;
+    res.forEach((r, i) => {
+      if (r.status === "rejected") {
+        this.undoAssign(ops[i]);
+        failed++;
+      }
+    });
+    if (failed) {
+      this.refresh();
+      showErr(t("grp_assign_failed", { n: failed }));
+    }
+  }
+
+  /** Assignation d'une session isolée (drop, dialogue, ctx menu) :
+   *  locale d'abord, RPC attendu pour le toast d'erreur — l'UI n'a
+   *  déjà plus besoin d'attendre (refresh() posée dans assignOp). */
+  async applyAssign(s: SessionMeta, group?: string) {
+    const op = this.assignOp(s, group);
+    this.refresh();
     try {
-      await call("set_session_group", { session: s.id, conn: s.conn, group: g });
-      // Local à jour tout de suite : les opérations chaînées sur un
-      // sous-arbre (rename/dissolve bouclent) relisent s.group avant
-      // que refresh() n'ait resynchronisé la méta démon.
-      s.group = g;
-      // Store aligné sur la réalité démon : en cas d'échec RPC, pas de
-      // groupe fantôme persisté (ni ses ancêtres explicites).
-      if (g) this.add(s.conn ?? "default", g);
+      await op.promise;
     } catch (er) {
+      if (this.undoAssign(op)) this.refresh();
       showErr(String(er));
     }
   }
@@ -180,8 +260,11 @@ export class GroupStore {
    *  leurs états de collapse sont oubliés (menu ctx ET dialogue rename). */
   async dissolve(conn: string, path: string) {
     const p = grpNorm(path);
-    for (const s of this.subtreeMembers(conn, p)) await this.applyAssign(s, undefined);
+    const ops = this.subtreeMembers(conn, p).map((s) => this.assignOp(s, undefined));
+    // Chemins stockés + collapse oubliés localement dès maintenant :
+    // le sous-arbre disparaît de l'affichage sans attendre les RPC.
     this.remapStored(conn, p, undefined);
+    await this.settleAssigns(ops);
   }
 
   /** Cible du dialogue « dissoudre et supprimer » en attente de
@@ -226,14 +309,10 @@ export class GroupStore {
     const ctx = this.delCtx;
     this.delCtx = null;
     if (!ctx) return;
-    let failed = 0;
-    for (const s of this.subtreeMembers(ctx.conn, ctx.path)) {
-      try {
-        await this.deleteSession(s);
-      } catch {
-        failed++;
-      }
-    }
+    const members = this.subtreeMembers(ctx.conn, ctx.path);
+    // Suppressions en parallèle — même fan-out que les assignations.
+    const res = await Promise.allSettled(members.map((s) => this.deleteSession(s)));
+    const failed = res.filter((r) => r.status === "rejected").length;
     this.remapStored(ctx.conn, ctx.path, undefined);
     this.refresh();
     if (failed) showErr(t("grpdel_failed", { n: failed }));
@@ -251,12 +330,15 @@ export class GroupStore {
     if (!dst) { await this.dissolve(conn, src); return true; }
     if (dst === src) return true;
     if (inSubtree(dst, src)) return false; // un groupe ne peut pas entrer dans son propre sous-arbre
-    for (const s of this.subtreeMembers(conn, src)) {
+    // Toutes les mutations locales (s.group + store + collapse) sont
+    // posées d'abord via assignOp/remapStored, les RPC membres partent
+    // en parallèle dans settleAssigns — ~1 RTT quel que soit N.
+    const ops = this.subtreeMembers(conn, src).map((s) =>
       // Suffixe lu sur le chemin NORMALISÉ (le brut peut être mal formé).
-      await this.applyAssign(s, dst + grpNorm(s.group!).slice(src.length));
-    }
+      this.assignOp(s, dst + grpNorm(s.group!).slice(src.length)));
     this.remapStored(conn, src, dst);
     this.add(conn, dst);
+    await this.settleAssigns(ops);
     return true;
   }
 

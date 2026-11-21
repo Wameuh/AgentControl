@@ -4,66 +4,79 @@ use super::*;
 
 impl Daemon {
     pub(super) async fn h_daemon_status(self: &Arc<Self>) -> Result<Value> {
-                let sessions = self.sessions.read().await;
-                // Métriques de l'hôte où tourne le démon — champ additif :
-                // les vieux clients l'ignorent, les nouveaux sur un vieux
-                // démon voient le bloc absent (pas de (sync)).
-                let host = self.host_stats();
-                Ok(json!({
-                    "version": env!("CARGO_PKG_VERSION"),
-                    "sessions": sessions.len(),
-                    "agents": self.agents.read().await.keys().collect::<Vec<_>>(),
-                    // Capacité annoncée au client : ce démon sait répondre à
-                    // ReqKind::UpdateDaemon. Gate fiable côté client — un
-                    // démon plus vieux répondrait `parse: unknown variant`
-                    // avec id=0, droppé par le routage client → 60 s muet.
-                    "self_update": true,
-                    // Idem pour ReqKind::FirstPost (bouton « premier post »).
-                    "first_post": true,
-                    // Même gate capacité : ReqKind::TermOpen connu →
-                    // le client affiche le bouton terminal.
-                    "terminal": true,
-                    // Idem pour les RPC fichiers en écriture
-                    // (WriteFile/CreatePath, AC#93/#99) — masque le « + »
-                    // pièces jointes sur les démons trop vieux.
-                    "files": true,
-                    // Interface web servie par ce démon (null si
-                    // bind_http absent) : {"bind", "url"?token=…}.
-                    "web": self.web.read().await.clone(),
-                    // Même gate capacité : les ReqKind Component* /
-                    // ListComponents sont connus → le client peut
-                    // afficher la section composants.
-                    "components": true,
-                    // Idem pour ReqKind::OrchestratorSet (orchestrateur
-                    // backlog natif — bascule à chaud).
-                    "orchestrator": true,
-                    // Idem pour PinMessage/UnpinMessage/ListPinned
-                    // (messages épinglés par session).
-                    "pinned": true,
-                    // Idem pour QueueSteer (bouton « steer » par entrée
-                    // de la file de prompts — injecte dans le tour en
-                    // cours sans l'annuler).
-                    "queue_steer": true,
-                    // Idem pour ReqKind::ModelCosts (suffixes de prix
-                    // des selects de modèles — costs.rs).
-                    "model_costs": true,
-                    // Idem pour les capacités par profil agent : champ
-                    // `caps` de list_agents + RPC refresh_agent_caps
-                    // (bouton refresh mode/modèle du header).
-                    "agent_caps": true,
-                    // Idem pour ReqKind::DaemonLogTail (panneau logs
-                    // live — onglet « Démon »).
-                    "daemon_logs": true,
-                    // Idem pour ReqKind::ModelCatalog (variantes modèle
-                    // hors annonce ACP — catalogue.rs, clés
-                    // catalogue_cmd/model_override_cmd des profils).
-                    "model_catalog": true,
-                    // Idem pour ReqKind::PluginViewToken + la route
-                    // /plugin/<name>/ (vues plugin en iframe
-                    // sandboxée — option B).
-                    "plugin_views": true,
-                    "host": host,
-                }))
+        // Hot-reload des profils [agents.*] : un profil déclaré
+        // après le boot apparaît ici sans restart.
+        self.reload_agent_profiles().await;
+        let sessions = self.sessions.read().await;
+        // Métriques de l'hôte où tourne le démon — champ additif :
+        // les vieux clients l'ignorent, les nouveaux sur un vieux
+        // démon voient le bloc absent (pas de (sync)).
+        let host = self.host_stats();
+        Ok(json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "sessions": sessions.len(),
+            "agents": self.agents.read().await.keys().collect::<Vec<_>>(),
+            // Capacité annoncée au client : ce démon sait répondre à
+            // ReqKind::UpdateDaemon. Gate fiable côté client — un
+            // démon plus vieux répondrait `parse: unknown variant`
+            // avec id=0, droppé par le routage client → 60 s muet.
+            "self_update": true,
+            // Idem pour ReqKind::FirstPost (bouton « premier post »).
+            "first_post": true,
+            // Même gate capacité : ReqKind::TermOpen connu →
+            // le client affiche le bouton terminal.
+            "terminal": true,
+            // Idem pour les RPC fichiers en écriture
+            // (WriteFile/CreatePath, AC#93/#99) — masque le « + »
+            // pièces jointes sur les démons trop vieux.
+            "files": true,
+            // Interface web servie par ce démon (null si
+            // bind_http absent) : {"bind", "url"?token=…}.
+            "web": self.web.read().await.clone(),
+            // Même gate capacité : les ReqKind Component* /
+            // ListComponents sont connus → le client peut
+            // afficher la section composants.
+            "components": true,
+            // Idem pour ReqKind::OrchestratorSet (orchestrateur
+            // backlog natif — bascule à chaud).
+            "orchestrator": true,
+            // Idem pour PinMessage/UnpinMessage/ListPinned
+            // (messages épinglés par session).
+            "pinned": true,
+            // Idem pour QueueSteer (bouton « steer » par entrée
+            // de la file de prompts — injecte dans le tour en
+            // cours sans l'annuler).
+            "queue_steer": true,
+            // Idem pour QueueClear (bouton « tout vider » de
+            // l'en-tête du panneau file — drain atomique).
+            "queue_clear": true,
+            // Idem pour ReqKind::ModelCosts (suffixes de prix
+            // des selects de modèles — costs.rs).
+            "model_costs": true,
+            // Idem pour les capacités par profil agent : champ
+            // `caps` de list_agents + RPC refresh_agent_caps
+            // (bouton refresh mode/modèle du header).
+            "agent_caps": true,
+            // Idem pour ReqKind::DaemonLogTail (panneau logs
+            // live — onglet « Démon »).
+            "daemon_logs": true,
+            // Idem pour ReqKind::InstallAgentAdapter (bouton
+            // « installer » du dialogue nouvelle session —
+            // agents_install.rs, #277).
+            "agent_install": true,
+            // Idem pour ReqKind::ModelCatalog (variantes modèle
+            // hors annonce ACP — catalogue.rs, clés
+            // catalogue_cmd/model_override_cmd des profils).
+            "model_catalog": true,
+            // Idem pour ReqKind::SessionSetSteps (étapes de
+            // tâche publiées par l'agent — panneau du client).
+            "steps": true,
+            // Idem pour ReqKind::PluginViewToken + la route
+            // /plugin/<name>/ (vues plugin en iframe
+            // sandboxée — option B).
+            "plugin_views": true,
+            "host": host,
+        }))
     }
 
     /// Bloc `"host"` de daemon_status : cpu % (f64 arrondi à 1 décimale
@@ -97,8 +110,7 @@ impl Daemon {
                 // CPU % du process démon — delta entre deux refresh du
                 // `System` persistant (le poll client ~10 s dépasse
                 // l'intervalle minimal) ; premier appel ≈ 0.
-                host["daemon_cpu"] =
-                    json!(((p.cpu_usage() as f64) * 10.0).round() / 10.0);
+                host["daemon_cpu"] = json!(((p.cpu_usage() as f64) * 10.0).round() / 10.0);
             }
         }
         host
@@ -112,27 +124,58 @@ impl Daemon {
             .context("self-update task")?
     }
     pub(super) async fn h_list_agents(self: &Arc<Self>) -> Result<Value> {
-                let list: Vec<Value> = self
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .map(|(k, a)| {
-                        json!({
-                            "id": k,
-                            "name": a.name,
-                            "command": a.command,
-                            "available": a.command.first().map(|c| command_available(c)).unwrap_or(false),
-                            // Capacités moissonnées pour le profil
-                            // (agent_caps.json — modes/models/config
-                            // annoncés par les sessions passées et les
-                            // probes). null tant que rien n'a été
-                            // annoncé → le client garde la saisie libre.
-                            "caps": self.caps.get(k),
-                        })
-                    })
-                    .collect();
-                Ok(json!(list))
+        // Hot-reload : les profils ajoutés à config.toml après
+        // le boot sont listés (et spawnables) sans restart.
+        self.reload_agent_profiles().await;
+        let list: Vec<Value> = self
+            .agents
+            .read()
+            .await
+            .iter()
+            .map(|(k, a)| {
+                let available = profile_available(a);
+                json!({
+                    "id": k,
+                    "name": a.name,
+                    // argv effectivement retenu (premier
+                    // candidat résolu, sinon le premier).
+                    "command": effective_command(&a.commands),
+                    // Toutes les commandes candidates, dans
+                    // l'ordre d'essai (fallbacks).
+                    "commands": a.commands,
+                    "via": a.via.as_str(),
+                    "available": available,
+                    // Pourquoi indisponible : binaire(s)
+                    // cherché(s) + hint d'install — affiché
+                    // dans le dialogue nouvelle session.
+                    "unavailable": (!available).then(|| unavailable_info(k, a)),
+                    // Capacités moissonnées pour le profil
+                    // (agent_caps.json — modes/models/config
+                    // annoncés par les sessions passées et les
+                    // probes). null tant que rien n'a été
+                    // annoncé → le client garde la saisie libre.
+                    "caps": self.caps.get(k),
+                    // Modèles sélectionnables hors annonce ACP
+                    // du profil ([agents.<id>.extra_models] ou
+                    // registre auto — ex. opus de claude) :
+                    // le client les fusionne à caps.models
+                    // dans la vue des capacités.
+                    "extra_models": a.extra_models,
+                    // Hint « catalogue complet » (#305) : profil
+                    // déclaré pinant un adaptateur autre que celui
+                    // du registre alors que l'adaptateur préféré est
+                    // installé (ex. claude-code-acp vs acp-claude).
+                    // null sinon — additif, les vieux clients
+                    // l'ignorent.
+                    "hint": crate::server::agents_auto::catalogue_hint(
+                        k,
+                        a,
+                        &command_available,
+                    ),
+                })
+            })
+            .collect();
+        Ok(json!(list))
     }
 
     /// `ModelCosts` : {"models": {<id>: {label, detail}}} — map vide
@@ -140,12 +183,10 @@ impl Daemon {
     /// sonde en échec). La sonde tourne hors du chemin async.
     pub(super) async fn h_model_costs(self: &Arc<Self>, agent: String) -> Result<Value> {
         let command = self
-            .agents
-            .read()
+            .agent_profile(&agent)
             .await
-            .get(&agent)
-            .map(|p| p.command.clone())
-            .ok_or_else(|| anyhow::anyhow!("agent inconnu: {agent}"))?;
+            .map(|p| effective_command(&p.commands).to_vec())
+            .ok_or_else(|| anyhow::anyhow!("unknown agent: {agent}"))?;
         let costs = self.model_costs.get(&agent, &command).await;
         Ok(json!({ "models": costs }))
     }
@@ -158,44 +199,61 @@ impl Daemon {
     /// chaque session est conservée). Cher (un spawn d'agent complet) :
     /// sérialisé par `probe_lock`, réservé à une action explicite.
     pub(super) async fn h_refresh_agent_caps(self: &Arc<Self>, agent: String) -> Result<Value> {
+        let (caps, touched) = self.probe_agent_caps(&agent).await?;
+        Ok(json!({
+            "agent": agent,
+            "caps": caps,
+            "sessions": touched,
+        }))
+    }
+
+    /// Sonde les capacités d'un profil et les applique : spawn jetable
+    /// (session/new dans un cwd scratch, drain bref des notifications,
+    /// kill — caps::probe), remplacement de l'instantané du cache et
+    /// ré-application aux sessions du profil (listes fraîches
+    /// sélectionnables sans recréer la session ; la valeur courante de
+    /// chaque session est conservée). Partagé entre le RPC explicite
+    /// `refresh_agent_caps` et le sweep périodique de fraîcheur
+    /// (`caps_sweep_boot`, item #268). Sérialisé par `probe_lock` —
+    /// un spawn d'agent complet à la fois, jamais en boucle.
+    pub(crate) async fn probe_agent_caps(
+        self: &Arc<Self>,
+        agent: &str,
+    ) -> Result<(proto::AgentCaps, Vec<String>)> {
         let profile = self
-            .agents
-            .read()
+            .agent_profile(agent)
             .await
-            .get(&agent)
-            .with_context(|| format!("agent inconnu: {agent}"))?
-            .clone();
-        match profile.command.first() {
-            Some(c) if command_available(c) => {}
-            other => {
-                anyhow::bail!(
-                    "commande agent introuvable : {}",
-                    other.map(String::as_str).unwrap_or("(vide)")
-                )
-            }
+            .with_context(|| format!("unknown agent: {agent}"))?;
+        if !profile_available(&profile) {
+            anyhow::bail!(
+                "agent command not found: {}",
+                searched_commands(&profile).join(", ")
+            )
         }
         let _permit = self.caps.probe_lock().lock().await;
         let cwd = self.root.join("probe");
-        std::fs::create_dir_all(&cwd).context("cwd du probe")?;
+        std::fs::create_dir_all(&cwd).context("probe cwd")?;
         let caps = crate::caps::probe(&profile, &cwd).await?;
-        self.caps.set(&agent, caps.clone());
+        self.caps.set(agent, caps.clone());
         // Ré-application aux sessions du profil — meta + push
-        // ConfigOptions aux clients abonnés.
+        // ConfigOptions aux clients abonnés. Les extra_models du
+        // profil rejoignent available_models (fusion handshake).
+        let extra_models: Vec<String> = profile
+            .extra_models
+            .iter()
+            .map(|e| e.value.clone())
+            .collect();
         let sessions = self.sessions.read().await;
         let mut touched = Vec::new();
         for s in sessions.values() {
             if s.meta_snapshot().agent != agent {
                 continue;
             }
-            if s.apply_caps(&caps) {
+            if s.apply_caps(&caps, &extra_models) {
                 touched.push(s.meta_snapshot().id);
             }
         }
-        Ok(json!({
-            "agent": agent,
-            "caps": caps,
-            "sessions": touched,
-        }))
+        Ok((caps, touched))
     }
 
     /// `DaemonLogTail{file?, offset?, limit?}` — tail incrémental du
@@ -219,8 +277,7 @@ impl Daemon {
             };
             let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             let incremental = file.as_deref() == Some(name.as_str());
-            let (data, new_off) =
-                crate::logging::tail_slice(&path, incremental, offset, limit);
+            let (data, new_off) = crate::logging::tail_slice(&path, incremental, offset, limit);
             json!({
                 "file": name,
                 "offset": new_off,
@@ -236,16 +293,14 @@ impl Daemon {
     /// le profil n'a pas de `catalogue_cmd` ou si la sonde échoue.
     pub(super) async fn h_model_catalog(self: &Arc<Self>, agent: String) -> Result<Value> {
         let profile = self
-            .agents
-            .read()
+            .agent_profile(&agent)
             .await
-            .get(&agent)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("agent inconnu: {agent}"))?;
+            .ok_or_else(|| anyhow::anyhow!("unknown agent: {agent}"))?;
         // Les deux clés sont requises pour qu'une valeur catalogue soit
         // applicable — servir le catalogue sans model_override_cmd
         // proposerait des options vouées à l'échec côté ACP.
-        let mut models = if profile.catalogue_cmd.is_some() && profile.model_override_cmd.is_some() {
+        let mut models = if profile.catalogue_cmd.is_some() && profile.model_override_cmd.is_some()
+        {
             self.catalogues
                 .get(&agent, profile.catalogue_cmd.as_deref())
                 .await
@@ -276,6 +331,63 @@ impl Daemon {
     }
 }
 
+/// `argv[0]` des commandes candidates d'un profil, dans l'ordre
+/// d'essai — liste vide si une commande est sans argv.
+fn searched_commands(p: &AgentProfile) -> Vec<String> {
+    p.commands
+        .iter()
+        .filter_map(|c| c.first().cloned())
+        .collect()
+}
+
+/// Vrai si au moins une commande candidate du profil a un argv[0]
+/// résolvable sur le PATH — `available` de list_agents.
+pub(crate) fn profile_available(p: &AgentProfile) -> bool {
+    p.commands
+        .iter()
+        .any(|c| c.first().map(|b| command_available(b)).unwrap_or(false))
+}
+
+/// Commande effective d'un profil : la première candidate dont argv[0]
+/// résout (spawn et `available` voient le même binaire) ; aucune ne
+/// résout → la première (le spawn échouera en ENOENT explicite, comme
+/// avant les fallbacks). Liste vide → slice vide.
+pub(crate) fn effective_command(commands: &[Vec<String>]) -> &[String] {
+    effective_command_if(commands, command_available)
+}
+
+/// `effective_command` avec prédicat injectable (tests).
+fn effective_command_if(commands: &[Vec<String>], resolves: impl Fn(&str) -> bool) -> &[String] {
+    commands
+        .iter()
+        .find(|c| c.first().map(|b| resolves(b)).unwrap_or(false))
+        .or_else(|| commands.first())
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+/// Diagnostic « pourquoi indisponible » de list_agents : les argv[0]
+/// recherchés et un hint d'install quand l'id est un adaptateur connu
+/// (registre agents_auto) — sinon un hint générique PATH.
+fn unavailable_info(id: &str, p: &AgentProfile) -> Value {
+    let searched: Vec<String> = searched_commands(p);
+    let hint = crate::server::agents_auto::install_hint_for(id)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            "check that the command is installed and reachable on the \
+             daemon PATH (~/.local/bin, npm-global, nvm, mise…)"
+                .to_string()
+        });
+    json!({
+        "searched": searched,
+        "hint": hint,
+        // Vrai quand le registre connaît une commande d'installation
+        // pour cet id → le client propose le bouton « installer »
+        // (install_agent_adapter, #277). Additif : absent = false.
+        "installable": crate::server::agents_auto::install_cmds_for(id).is_some(),
+    })
+}
+
 /// `argv[0]` d'un profil agent résolvable : binaire sur le PATH du démon
 /// (tel qu'assuré par ensure_agent_path) ou chemin absolu existant.
 /// Réutilisé par la détection « installed » du catalogue composants.
@@ -283,16 +395,54 @@ pub(crate) fn command_available(cmd: &str) -> bool {
     command_path(cmd).is_some()
 }
 
+/// TTL du cache de `command_path` : chaque `list_agents` (et chaque
+/// `daemon_status`, `agent_profile`, auto-discovery) re-sonde la
+/// disponibilité de chaque binaire — un `stat` par dossier PATH par
+/// candidat, plus le `read_dir` de `nvm_node_bin` — des centaines de
+/// syscalls bloquants sur le runtime async à chaque appel, et
+/// `daemon_status` est pollé en continu par les clients. 10 s : un
+/// binaire installé après le boot devient `available` au plus 10 s
+/// plus tard — très en dessous de la cadence de re-scan des profils
+/// (60 s) et invisible à l'échelle d'un spawn.
+const CMD_PATH_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Cache court `argv[0] → résolution` partagé par tous les appelants
+/// de `command_path` (`available`, `effective_command`,
+/// auto-discovery, spawn). Les misses (binaire absent) sont cachés
+/// aussi — ce sont eux qui coûtent le plus : le scan balaaye tous
+/// les dossiers. Borné par la variété des argv[0] vus (~dizaines).
+fn cmd_path_cache(
+) -> &'static std::sync::Mutex<HashMap<String, (std::time::Instant, Option<PathBuf>)>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<String, (std::time::Instant, Option<PathBuf>)>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 /// Résout `argv[0]` en chemin concret : absolu existant+exécutable, ou
 /// premier hit sur le PATH effectif du démon — `agent_path_dirs()`
 /// (dossiers usuels injectés par `ensure_agent_path` au boot) puis le
 /// PATH process. La recherche refait ses stats à chaque appel : un
 /// binaire installé APRÈS le démarrage dans l'un de ces dossiers est
-/// `available` sans restart. `None` = introuvable — `available:false`
-/// côté list_agents. Le chemin absolu retourné lève l'ambiguïté d'un
-/// nom générique (`agent` peut désigner autre chose selon la machine).
+/// `available` sans restart (borné par `CMD_PATH_TTL`). `None` =
+/// introuvable — `available:false` côté list_agents. Le chemin absolu
+/// retourné lève l'ambiguïté d'un nom générique (`agent` peut désigner
+/// autre chose selon la machine).
 pub(crate) fn command_path(cmd: &str) -> Option<std::path::PathBuf> {
-    command_path_in(cmd, &search_dirs())
+    {
+        let cache = cmd_path_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, hit)) = cache.get(cmd) {
+            if at.elapsed() < CMD_PATH_TTL {
+                return hit.clone();
+            }
+        }
+    }
+    let resolved = command_path_in(cmd, &search_dirs());
+    cmd_path_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(cmd.to_string(), (std::time::Instant::now(), resolved.clone()));
+    resolved
 }
 
 /// Dossiers fouillés par `command_path`, dans l'ordre : `agent_path_dirs()`
@@ -318,9 +468,7 @@ fn command_path_in(cmd: &str, dirs: &[PathBuf]) -> Option<std::path::PathBuf> {
     if p.is_absolute() || cmd.contains('/') || cmd.contains('\\') {
         return is_executable(&p).then_some(p);
     }
-    dirs.iter()
-        .map(|d| d.join(cmd))
-        .find(|c| is_executable(c))
+    dirs.iter().map(|d| d.join(cmd)).find(|c| is_executable(c))
 }
 
 /// Dossiers « agents » injectés en tête du PATH du démon au boot par
@@ -344,8 +492,7 @@ pub(crate) fn agent_path_dirs() -> Vec<PathBuf> {
         // `#!/usr/bin/env node`, or nvm n'est pas sur le PATH systemd.
         nvm_node_bin(home.as_ref()),
         home.as_ref().map(|h| h.join(".npm-global/bin")),
-        home.as_ref()
-            .map(|h| h.join(".local/share/mise/shims")),
+        home.as_ref().map(|h| h.join(".local/share/mise/shims")),
         home.as_ref().map(|h| h.join(".cargo/bin")),
         Some(PathBuf::from("/usr/local/bin")),
         // macOS : installs hors /usr/local (Apple Silicon = /opt/homebrew).
@@ -421,6 +568,45 @@ mod tests {
         let found = command_path_in("ac-test-agent-xyz", &[bin_dir.clone()]);
         let _ = std::fs::remove_dir_all(&home);
         assert_eq!(found.as_deref(), Some(bin.as_path()));
+    }
+
+    /// Fallbacks : le premier candidat dont argv[0] « résout » gagne ;
+    /// aucun → le premier (spawn → ENOENT explicite) ; liste vide → vide.
+    #[test]
+    fn effective_command_ordre_des_fallbacks() {
+        let cmds = vec![
+            vec!["absent-1".to_string()],
+            vec!["present".to_string(), "acp".to_string()],
+            vec!["aussi-present".to_string()],
+        ];
+        let eff = effective_command_if(&cmds, |b| b == "present" || b == "aussi-present");
+        assert_eq!(eff, ["present", "acp"]);
+        // Rien ne résout → le premier candidat.
+        let eff = effective_command_if(&cmds, |_| false);
+        assert_eq!(eff, ["absent-1"]);
+        // Liste vide → slice vide (pas de panic).
+        assert!(effective_command_if(&[], |_| true).is_empty());
+    }
+
+    /// `profile_available` : vrai dès qu'UNE candidate résout.
+    #[test]
+    fn profile_available_une_candidate_suffit() {
+        let mut p = crate::server::AgentProfile {
+            name: "t".into(),
+            commands: vec![vec!["nope".into()], vec!["nope2".into()]],
+            via: crate::server::AgentVia::Auto,
+            env: HashMap::new(),
+            compact: Default::default(),
+            max_instances: super::DEFAULT_MAX_INSTANCES,
+            catalogue_cmd: None,
+            model_override_cmd: None,
+            extra_models: vec![],
+            advisor_models: vec![],
+            provision_skills: true,
+        };
+        assert!(!profile_available(&p));
+        p.commands[1] = vec!["sh".into()]; // /bin/sh ou /usr/bin/sh sur PATH
+        assert!(profile_available(&p));
     }
 
     /// argv[0] avec séparateur = chemin relatif littéral, jamais cherché

@@ -14,6 +14,10 @@ impl<R: Runtime> Device<R> {
     ) -> crate::Result<crate::SigningInfo> {
         Err(crate::Error::AndroidOnly)
     }
+
+    pub fn set_system_bars(&self, _light: bool) -> crate::Result<()> {
+        Err(crate::Error::AndroidOnly)
+    }
 }
 
 /// Initializes the desktop implementation of the plugin.

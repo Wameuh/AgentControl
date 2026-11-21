@@ -16,6 +16,7 @@ import { t, type Key } from "../i18n";
 import { icon } from "../ui/icons";
 import { nav } from "../ui/nav";
 import type {
+  AgentOpt,
   CatalogEntry,
   ComponentHealthcheck,
   ComponentItem,
@@ -66,6 +67,19 @@ function paramBool(v: string): boolean {
 function paramList(v: string): string[] {
   return v.split(",").map((s) => s.trim()).filter(Boolean);
 }
+
+/** Libellé de section du formulaire params — groupes connus de
+ *  l'orchestrateur ; un groupe inconnu s'affiche brut (extensible). */
+const SEC_KEYS: Record<string, Key> = {
+  workers: "cp_sec_workers",
+  pipeline: "cp_sec_pipeline",
+  pr_reviews: "cp_sec_pr_reviews",
+  general: "cp_sec_general",
+};
+const secLabel = (g: string) => {
+  const k = SEC_KEYS[g];
+  return k ? t(k) : g;
+};
 
 /** Chaîne stockée d'un param `json` (forme canonique compacte) → JSON
  *  pretty-print pour le textarea ; invalide → la chaîne telle quelle. */
@@ -151,6 +165,11 @@ export class ComponentsPanel {
    *  timer de désarmement, même pattern que le danger-armed du ctxmenu. */
   private delArmed = false;
   private delTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Caps des profils agents pour le widget « worker_pool » — chargé
+   *  une fois par connexion à l'ouverture du formulaire (dropdowns
+   *  modèle/effort/mode par profil choisi dans la ligne). */
+  private poolAgents = new Map<string, AgentOpt>();
+  private poolAgentsConn = "";
 
   bind(conns: ConnectionManager) {
     this.conns = conns;
@@ -608,6 +627,222 @@ export class ComponentsPanel {
     }
   }
 
+  /** Caps `list_agents` pour les dropdowns du widget worker_pool —
+   *  cache par connexion, rechargé à chaque ouverture du formulaire
+   *  (les profils bougent : install d'adaptateur, rescan). */
+  private async loadPoolAgents() {
+    const conn = this.connKey();
+    if (this.poolAgentsConn === conn && this.poolAgents.size) return;
+    try {
+      const c = apiConn(conn);
+      const list = await call<AgentOpt[]>(
+        "list_agents",
+        c ? { conn: c } : {},
+      );
+      this.poolAgents = new Map(list.map((a) => [a.id, a]));
+      this.poolAgentsConn = conn;
+    } catch {
+      // Caps injoignables : les champs restent en texte libre —
+      // la validation vocabulaire reste côté démon (warn, pas refus).
+      this.poolAgents = new Map();
+      this.poolAgentsConn = conn;
+    }
+  }
+
+  /** Options d'une colonne du widget pool pour un profil donné :
+   *  modèles = caps.models + extra_models ; modes = caps.modes ;
+   *  effort = config_option « thought_level »/« effort » si annoncée.
+   *  Vide → champ texte libre (valeur hors vocabulaire tolérée). */
+  private poolOpts(
+    profile: string,
+    field: "model" | "effort" | "mode",
+  ): { v: string; n: string }[] {
+    const a = this.poolAgents.get(profile);
+    if (!a?.caps) return [];
+    if (field === "mode")
+      return (a.caps.modes ?? []).map((o) => ({ v: o.value, n: o.name || o.value }));
+    if (field === "model") {
+      const out = new Map<string, string>();
+      for (const m of a.caps.models ?? []) out.set(m.value, m.name || m.value);
+      for (const e of a.extra_models ?? [])
+        if (!out.has(e.value)) out.set(e.value, e.label || e.value);
+      return [...out].map(([v, n]) => ({ v, n }));
+    }
+    const co = (a.caps.config_options ?? []).find((o) =>
+      /thought|effort|thinking/i.test(o.id),
+    );
+    return (co?.options ?? []).map((o) => ({ v: o.value, n: o.name || o.value }));
+  }
+
+  /** Widget « worker_pool » : une ligne par entrée
+   *  `{profile,count,model,effort,mode}` — profil en select (choices
+   *  = profils déclarés), count numérique, model/effort/mode en
+   *  input + datalist alimentée par les caps DU PROFIL de la ligne.
+   *  La valeur sérialisée vit dans `hidden` (JSON compact — même
+   *  forme que le textarea json historique). Renvoie le wrap +
+   *  l'input porteur de `data-pkey`. */
+  private poolEditor(
+    cur: string,
+    ps: ParamSpec,
+    current: Record<string, string>,
+  ): { wrap: HTMLElement; hidden: HTMLInputElement } {
+    interface Row {
+      profile: HTMLSelectElement;
+      count: HTMLInputElement;
+      model: HTMLInputElement;
+      effort: HTMLInputElement;
+      mode: HTMLInputElement;
+      dls: HTMLDataListElement[];
+    }
+    const wrap = document.createElement("div");
+    wrap.className = "wp";
+    const rows = document.createElement("div");
+    rows.className = "wp-rows";
+    const hidden = document.createElement("input");
+    hidden.type = "hidden";
+    const profiles = ps.choices ?? [];
+    const maxWorking = parseInt(current["max_working"] ?? "", 10);
+    const totalEl = document.createElement("div");
+    totalEl.className = "wp-total";
+    let uid = 0;
+
+    const sync = () => {
+      const out: Record<string, string | number>[] = [];
+      let total = 0;
+      for (const r of rowEls) {
+        const count = Math.max(0, parseInt(r.count.value, 10) || 0);
+        total += count;
+        out.push({
+          profile: r.profile.value,
+          count,
+          model: r.model.value.trim(),
+          effort: r.effort.value.trim(),
+          mode: r.mode.value.trim(),
+        });
+      }
+      hidden.value = JSON.stringify(out);
+      totalEl.textContent =
+        maxWorking > 0
+          ? t("wp_total_active", { n: total, m: maxWorking })
+          : t("wp_total", { n: total });
+    };
+
+    const fillDatalist = (r: Row) => {
+      const profile = r.profile.value;
+      (["model", "effort", "mode"] as const).forEach((f, i) => {
+        const dl = r.dls[i];
+        dl.innerHTML = "";
+        for (const o of this.poolOpts(profile, f)) {
+          const opt = document.createElement("option");
+          opt.value = o.v;
+          opt.label = o.n;
+          dl.appendChild(opt);
+        }
+      });
+      sync();
+    };
+
+    const rowEls: Row[] = [];
+    const addRow = (e?: {
+      profile?: string; count?: number; model?: string;
+      effort?: string; mode?: string;
+    }) => {
+      const tr = document.createElement("div");
+      tr.className = "wp-row";
+      const mk = (cls: string) => {
+        const i = document.createElement("input");
+        i.className = cls;
+        return i;
+      };
+      const profile = document.createElement("select");
+      profile.className = "wp-profile";
+      const cur0 = e?.profile ?? "";
+      const known = profiles.length ? profiles : [cur0].filter(Boolean);
+      for (const p of known) {
+        const o = document.createElement("option");
+        o.value = p;
+        o.textContent = p;
+        profile.appendChild(o);
+      }
+      if (cur0 && !known.includes(cur0)) {
+        const o = document.createElement("option");
+        o.value = cur0;
+        o.textContent = `${cur0} (?)`;
+        profile.appendChild(o);
+      }
+      profile.value = cur0 || known[0] || "";
+      const count = mk("wp-count");
+      count.type = "number";
+      count.min = "0";
+      count.step = "1";
+      count.value = String(e?.count ?? 1);
+      const dlIds = ["model", "effort", "mode"].map((f) => `wp-dl-${uid++}-${f}`);
+      const dls = dlIds.map((id) => {
+        const dl = document.createElement("datalist");
+        dl.id = id;
+        document.body.appendChild(dl);
+        return dl;
+      });
+      const fields = (["model", "effort", "mode"] as const).map((f, i) => {
+        const inp = mk(`wp-${f}`);
+        inp.placeholder = f === "model" ? t("wp_ph_model")
+          : f === "effort" ? t("wp_ph_effort") : t("wp_ph_mode");
+        inp.setAttribute("list", dlIds[i]);
+        inp.value = (e?.[f] as string | undefined) ?? "";
+        inp.addEventListener("input", sync);
+        return inp;
+      });
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "wp-del";
+      del.title = t("wp_remove");
+      del.textContent = "✕";
+      del.onclick = () => {
+        tr.remove();
+        dls.forEach((d) => d.remove());
+        const i = rowEls.indexOf(r);
+        if (i >= 0) rowEls.splice(i, 1);
+        sync();
+      };
+      profile.onchange = () => fillDatalist(r);
+      count.addEventListener("input", sync);
+      tr.append(profile, count, ...fields, del);
+      rows.appendChild(tr);
+      const r: Row = { profile, count, model: fields[0], effort: fields[1], mode: fields[2], dls };
+      rowEls.push(r);
+      fillDatalist(r);
+    };
+
+    // Valeur courante : JSON `[{profile,count,model,effort,mode}]`
+    // (params_values sérialise worker_pool ainsi) — parsage tolérant,
+    // forme inattendue → une ligne vide pré-remplie.
+    let entries: Record<string, unknown>[] = [];
+    try {
+      const j = JSON.parse(cur || "[]");
+      if (Array.isArray(j)) entries = j.filter((x) => x && typeof x === "object");
+    } catch { /* chaîne non-JSON (saisie shorthand) → éditeur vide */ }
+    // Pool vide = mode legacy (worker_agent + max_workers) : aucune
+    // ligne pré-créée — sinon un OK sans toucher injecterait une
+    // entrée {profile,count:1} qui n'existait pas.
+    for (const e of entries)
+      addRow({
+          profile: String(e.profile ?? ""),
+          count: typeof e.count === "number" ? e.count : parseInt(String(e.count ?? "1"), 10) || 1,
+          model: String(e.model ?? ""),
+          effort: String(e.effort ?? ""),
+          mode: String(e.mode ?? ""),
+        });
+
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "wp-add";
+    add.textContent = `+ ${t("wp_add")}`;
+    add.onclick = () => addRow();
+    wrap.append(rows, add, totalEl);
+    sync();
+    return { wrap, hidden };
+  }
+
   /** Dialogue générique piloté par un `ParamSpec[]` — les `secret`
    *  viennent masqués (« •••••• » en placeholder) : champ laissé vide =
    *  valeur conservée (on n'envoie pas la clé). Renvoie les saisies
@@ -627,7 +862,24 @@ export class ComponentsPanel {
       el: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
       has: boolean;
     }[] = [];
+    // Widget « équipe » : dropdowns par profil → caps des agents
+    // (une fois par ouverture, seulement si le schéma le demande).
+    if (schema.some((p) => p.key === "worker_pool"))
+      await this.loadPoolAgents();
+    let lastGroup: string | null = null;
     for (const ps of schema) {
+      // Section : titre quand le groupe change (le démon trie le
+      // schéma par section — groupes contigus garantis).
+      const grp = ps.group ?? null;
+      if (grp !== lastGroup) {
+        lastGroup = grp;
+        if (grp) {
+          const h = document.createElement("div");
+          h.className = "cp-sec";
+          h.textContent = secLabel(grp);
+          fields.appendChild(h);
+        }
+      }
       const lab = document.createElement("label");
       const cur = current[ps.key];
       const set = cur !== undefined && cur !== "";
@@ -644,7 +896,13 @@ export class ComponentsPanel {
         lab.appendChild(head);
       } else {
         lab.appendChild(head);
-        if (ps.kind === "enum") {
+        if (ps.key === "worker_pool" && ps.kind === "json") {
+          // « Équipe » : table profil/slots/modèle/effort/mode — la
+          // valeur reste le JSON canonique dans un input masqué.
+          const w = this.poolEditor(set ? cur : (ps.default ?? ""), ps, current);
+          lab.appendChild(w.wrap);
+          el = w.hidden;
+        } else if (ps.kind === "enum") {
           el = document.createElement("select");
           const opts = ps.choices ?? [];
           // Valeur à choisir vide : toujours offerte en tête —

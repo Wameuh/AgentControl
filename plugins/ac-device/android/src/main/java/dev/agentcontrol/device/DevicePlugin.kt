@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Build
+import androidx.core.view.WindowCompat
 import app.tauri.annotation.Command
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
@@ -62,6 +63,26 @@ class DevicePlugin(private val activity: Activity): Plugin(activity) {
     if (debuggable) return "impossible"
     if (expected.isBlank() || signer == null) return "unknown"
     return if (signer.equals(expected, ignoreCase = true)) "ok" else "impossible"
+  }
+
+  // Barres système lisibles dans les deux thèmes (Y4) : `light` (arg
+  // JSON) vient d'`applyTheme` côté webview — true = icônes sombres sur
+  // barre d'état ET barre de navigation (thème clair), false = claires.
+  // WindowInsetsControllerCompat exige le thread UI.
+  @Command
+  fun setSystemBars(invoke: Invoke) {
+    try {
+      val light = invoke.getArgs().optBoolean("light", false)
+      activity.runOnUiThread {
+        val c = WindowCompat.getInsetsController(
+          activity.window, activity.window.decorView)
+        c.isAppearanceLightStatusBars = light
+        c.isAppearanceLightNavigationBars = light
+      }
+      invoke.resolve()
+    } catch (e: Exception) {
+      invoke.reject("setSystemBars: ${e.message}")
+    }
   }
 
   @Command

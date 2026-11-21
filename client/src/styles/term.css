@@ -68,9 +68,41 @@
 }
 
 body.android #term-panel {
-  height: 46vh;
+  /* S5 : le terminal prend tout l'écran — la conversation reste derrière,
+     le retour système ferme le panneau (nav « term » → btn-term-hide). */
+  position: fixed; inset: 0; z-index: 45;
+  height: auto;
 }
+
+body.android #term-head {
+  padding-top: env(safe-area-inset-top);
+}
+
+/* Le bouton fermer devient la « flèche retour » en tête (applyAndroidChrome
+   échange l'icône) ; order:-1 le place avant le titre. */
+body.android #btn-term-hide { order: -1; }
 
 body.android #term-resize {
   display: none;
+}
+
+/* Rangée de touches (S5) : invisible hors Android — le div existe dans le
+   DOM desktop mais n'est pas peuplé (initTermKeys gated par isAndroid). */
+#term-keys { display: none; }
+body.android #term-keys {
+  display: flex; gap: 6px; overflow-x: auto; flex-shrink: 0;
+  padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line);
+}
+body.android .tkey {
+  flex: none; min-width: 44px; min-height: 44px; padding: 0 10px;
+  border-radius: 10px; border: 1px solid var(--line);
+  background: var(--panel-solid); color: var(--ink);
+  font: 13px/1 var(--mono, monospace);
+}
+body.android .tkey-ctrl[data-state="once"] {
+  border-color: var(--accent); color: var(--accent);
+}
+body.android .tkey-ctrl[data-state="held"] {
+  background: var(--accent); border-color: var(--accent); color: #1a1d16;
 }

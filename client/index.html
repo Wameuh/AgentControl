@@ -13,6 +13,11 @@
         <button id="tb-menu" hidden data-icon="menu" data-i18n-title="menu_title" title="Menu"></button>
         <span id="titlebar-gem"></span>
         <span id="titlebar-title">AgentControl</span>
+        <!-- Chrome de l'accueil mobile (m-home) : titre de vue, puce de
+             connexion → feuille d'actions, loupe → filtre de sessions. -->
+        <span id="m-home-title"></span>
+        <button id="m-conn" type="button"></button>
+        <button id="m-search" type="button" data-icon="search" data-i18n-title="sess_filter_title" title="Filter"></button>
         <div class="tb-btns">
           <button id="tb-map" data-icon="map" title="Map" data-i18n-title="map_title"></button>
           <button id="tb-logs" data-icon="scroll" title="Logs" data-i18n-title="logs"></button>
@@ -38,9 +43,13 @@
             <button id="sv-map" class="sv" role="tab" data-i18n-title="map_title" title="Diagram"><span class="sv-ic" data-icon="map"></span><span data-i18n="map_title">Diagram</span></button>
           </div>
           <div id="sess-filter">
-            <input id="sess-filter-input" data-i18n-ph="sess_filter_ph" data-i18n-title="sess_filter_title" placeholder="Filter sessions…" />
-            <button id="sess-filter-clear" hidden data-icon="close" data-i18n-title="sess_filter_clear" title="Clear the filter"></button>
+            <div id="sess-filter-box">
+              <input id="sess-filter-input" data-i18n-ph="sess_filter_ph" data-i18n-title="sess_filter_title" placeholder="Filter sessions…" />
+              <button id="sess-filter-clear" hidden data-icon="close" data-i18n-title="sess_filter_clear" title="Clear the filter"></button>
+            </div>
+            <button id="btn-agent-caps" hidden data-icon="sliders" data-i18n-title="agent_caps_title" title="Agent capabilities"></button>
           </div>
+          <div id="m-home-state" hidden></div>
           <div id="session-list"></div>
           <div id="pr-list" hidden></div>
           <div id="backlog-list" hidden></div>
@@ -48,6 +57,15 @@
           <div id="sidebar-resize" title="Drag to resize"></div>
         </aside>
         <main id="chat">
+          <header id="m-sbar">
+            <button id="m-sbar-nav" data-icon="back" data-i18n-title="comp_back" title="Back"></button>
+            <span id="m-sbar-gem"></span>
+            <button id="m-sbar-title" type="button">
+              <span id="m-sbar-name">—</span>
+              <span id="m-sbar-sub"></span>
+            </button>
+            <button id="m-sbar-stop" hidden data-icon="stop" data-i18n-title="stop" title="Stop"></button>
+          </header>
           <header id="chat-header">
             <span id="chat-gem" hidden></span>
             <span id="chat-title" data-i18n-title="title_dblclick">—</span>
@@ -66,10 +84,12 @@
             <button id="btn-search" hidden data-icon="search" data-i18n-title="search_title" title="Search"></button>
             <button id="btn-first" hidden data-icon="top" data-i18n-title="first_post" title="First post"></button>
             <button id="btn-pins" hidden data-icon="pin" data-i18n-title="pins_title" title="Pinned messages"></button>
+            <button id="btn-steps" hidden data-icon="steps" data-i18n-title="steps_title" title="Task steps"></button>
             <button id="btn-term" hidden data-icon="terminal" data-i18n-title="term_title" title="Terminal"></button>
             <button id="btn-files" hidden data-icon="folder" data-i18n-title="files_title" title="Files"></button>
             <button id="btn-refresh" data-icon="refresh" data-i18n-title="refresh_title" title="Reload"></button>
             <button id="btn-resume" hidden data-i18n="resume">Resume</button>
+            <button id="btn-fresh" hidden data-i18n="fresh_ctx" data-i18n-title="fresh_ctx_title" title="New context">New context</button>
             <button id="btn-sleep" hidden data-i18n="ctx_sleep">Sleep</button>
             <button id="btn-cancel" hidden data-i18n="stop">Stop</button>
             <button id="chat-more" hidden data-icon="more" data-i18n-title="menu_title" title="Menu"></button>
@@ -99,6 +119,7 @@
             <header id="qp-head">
               <span id="qp-title" data-i18n="queue_panel_title">Queued prompts</span>
               <span id="qp-count" class="badge"></span>
+              <button id="qp-clear" hidden data-i18n="queue_clear" data-i18n-title="queue_clear_title" title="Clear all"></button>
               <button id="qp-close" data-icon="close" data-i18n-title="close" title="Close"></button>
             </header>
             <div id="qp-list"></div>
@@ -111,6 +132,14 @@
             </header>
             <div id="pp-list"></div>
           </div>
+          <div id="steps-panel" hidden>
+            <header id="sp-head">
+              <span id="sp-title" data-i18n="steps_title">Task steps</span>
+              <span id="sp-count" class="badge"></span>
+              <button id="sp-close" data-icon="close" data-i18n-title="close" title="Close"></button>
+            </header>
+            <div id="sp-list"></div>
+          </div>
           <div id="term-panel" hidden>
             <div id="term-resize" data-i18n-title="term_drag" title="Drag to resize"></div>
             <header id="term-head">
@@ -120,7 +149,9 @@
               <button id="btn-term-hide" data-icon="close" data-i18n-title="close" title="Close"></button>
             </header>
             <div id="term-box"></div>
+            <div id="term-keys"></div>
           </div>
+          <div id="perm-dock" hidden></div>
           <footer id="composer">
             <div id="cmd-ac" hidden></div>
             <div id="attach-bar" hidden></div>
@@ -129,6 +160,7 @@
             <input id="attach-pick" type="file" multiple hidden>
             <div id="mic-hint" hidden></div>
             <div id="input-wrap">
+              <div id="input-ghost" aria-hidden="true"></div>
               <textarea id="input" data-i18n-ph="input_ph" placeholder="Message… (Enter = send)" rows="2"></textarea>
               <button id="btn-expand" type="button" hidden></button>
             </div>
@@ -453,6 +485,20 @@
                   <div id="s-tts-models"></div>
                 </div>
               </details>
+              <details class="s-sec" id="s-sec-diag">
+                <summary>
+                  <span class="s-chev" data-icon="chev-down"></span>
+                  <span class="s-sec-title" data-i18n="sec_diag">Diagnostics</span>
+                  <span class="s-sec-state" id="s-st-diag"></span>
+                </summary>
+                <div class="s-sec-body">
+                  <label class="s-row chk">
+                    <input type="checkbox" id="s-telemetry" checked />
+                    <span class="s-txt"><span data-i18n="telemetry_label">Perf telemetry</span>
+                      <small class="s-desc" data-i18n="telemetry_desc">Aggregated perf counters (typing latency, long tasks, DOM flushes, RPC) written to the local log every 5 min — stays on this machine</small></span>
+                  </label>
+                </div>
+              </details>
             </div>
           </div>
           <div id="conn-view" tabindex="-1" hidden>
@@ -685,6 +731,7 @@
           <div id="file-resize" title="Drag to resize"></div>
           <header id="file-head">
             <span id="file-path"></span>
+            <span id="file-title" hidden><b id="file-title-name"></b><small id="file-title-path"></small></span>
             <button id="btn-tree" data-icon="panel" data-i18n-title="tree_title" title="File tree"></button>
             <button id="btn-tree-refresh" hidden data-icon="refresh" data-i18n-title="tree_refresh" title="Refresh"></button>
             <button id="btn-openpath" data-icon="search" data-i18n-title="qo_title" title="Quick open"></button>
@@ -696,6 +743,7 @@
                 <span id="ft-ico" data-icon="search"></span>
                 <input id="ft-q" data-i18n-ph="file_search_ph" data-i18n-title="file_search_ph" placeholder="Search files…" autocomplete="off" spellcheck="false" />
               </div>
+              <div id="ft-recent" hidden></div>
               <div id="file-tree"></div>
               <div id="file-hits" hidden></div>
             </div>
@@ -747,11 +795,24 @@
     <div class="resize-edge" id="re-bottom" data-dir="South"></div>
     <div class="resize-edge" id="re-corner" data-dir="SouthEast"></div>
 
+    <dialog id="dlg-agentcaps">
+      <form method="dialog">
+        <h3 data-i18n="agent_caps_h">Agent capabilities</h3>
+        <label id="ac-conn-wrap"><span data-i18n="server_label">Server</span> <select id="ac-conn"></select></label>
+        <div id="ac-list"></div>
+        <div id="ac-err" class="dlg-err" role="alert" hidden></div>
+        <menu>
+          <button type="button" id="ac-refresh" data-i18n="comp_refresh">Refresh</button>
+          <button id="ac-close" value="cancel" data-i18n="close">Close</button>
+        </menu>
+      </form>
+    </dialog>
+
     <dialog id="dlg-new">
       <form method="dialog" id="form-new">
         <h3 data-i18n="new_session_h">New session</h3>
         <label id="f-conn-wrap" hidden><span data-i18n="server_label">Server</span> <select id="f-conn"></select></label>
-        <label><span data-i18n="agent">Agent</span> <select id="f-agent"></select></label>
+        <label><span data-i18n="agent">Agent</span> <select id="f-agent"></select><span id="f-agent-spin" class="spin-ico" data-icon="loader" hidden></span></label>
         <label><span data-i18n="workdir">Working directory</span> <input id="f-cwd" placeholder="/home/agent/projet" required /></label>
         <label><span data-i18n="title_label">Title</span> <input id="f-title" data-i18n-ph="title_ph" placeholder="my session" /></label>
         <label><span data-i18n="mode_label">Mode</span> <select id="f-mode-sel" hidden></select><input id="f-mode" data-i18n-ph="mode_ph" placeholder="normal (optional)" /></label>
@@ -788,7 +849,12 @@
     <dialog id="dlg-resume">
       <form method="dialog">
         <h3 data-i18n="resume_h">Agent sessions to resume</h3>
-        <div id="native-list">…</div>
+        <input id="native-filter" type="text" autocomplete="off"
+               spellcheck="false" data-i18n-ph="resume_filter_ph" placeholder="Filter…" />
+        <div id="native-scroll">
+          <div id="native-list">…</div>
+          <div id="native-scrollbar"><div id="native-scroll-thumb"></div></div>
+        </div>
         <menu><button value="cancel" data-i18n="close">Close</button></menu>
       </form>
     </dialog>
@@ -941,12 +1007,41 @@
         <h3 data-i18n="about_h">About</h3>
         <div id="about-body">
           <span id="about-gem"></span>
-          <div>
-            <div><b>AgentControl</b> <span id="about-version">v0.0.1</span></div>
+          <div id="about-info">
+            <div><b>AgentControl</b></div>
+            <div class="about-row" id="about-client-row">
+              <span><span data-i18n="about_client">Client</span> : <b id="about-version" class="about-ver">v0.0.1</b></span>
+              <button id="about-update-app" type="button" hidden data-i18n="about_update_app">Update app</button>
+            </div>
+            <div class="about-row" id="about-daemon-row" hidden>
+              <span><span data-i18n="about_daemon">Daemon</span> : <b id="about-daemon-ver" class="about-ver">—</b><span id="about-daemon-host"></span></span>
+              <button id="about-update-daemon" type="button" hidden data-i18n="daemon_update_now">Update daemon</button>
+            </div>
+            <div class="about-row" id="about-release-row" hidden>
+              <span><span data-i18n="about_release">Latest release</span> : <b id="about-remote-ver" class="about-ver"></b></span>
+            </div>
             <div><a id="about-gh" href="https://github.com/Wameuh/AgentControl">github.com/Wameuh/AgentControl</a></div>
+            <div class="about-eng" id="about-engine"></div>
             <div><span data-i18n="license_label">License</span> : MIT</div>
           </div>
         </div>
+        <menu><button value="cancel" data-i18n="close">Close</button></menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-mem">
+      <form method="dialog">
+        <h3 data-i18n="mem_h">Memory</h3>
+        <div id="mem-body"></div>
+        <menu><button value="cancel" data-i18n="close">Close</button></menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-session">
+      <form method="dialog">
+        <div id="ss-head"></div>
+        <div id="ss-opts"></div>
+        <div id="ss-acts"></div>
         <menu><button value="cancel" data-i18n="close">Close</button></menu>
       </form>
     </dialog>
