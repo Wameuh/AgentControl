@@ -2504,6 +2504,19 @@ mod tests {
         // Override global du prompt (sans override repo).
         c.review_prompt = Some("tpl {VERDICT_APPROVED}".into());
         assert_eq!(c.review_prompt_for("a/b"), Some("tpl {VERDICT_APPROVED}"));
+        // `Some("")` dans l'override = champ effacé → hérite du global
+        // (un prompt vide ne doit jamais primer).
+        c.review.insert(
+            "forge/repo".into(),
+            cfg::ReviewOverride {
+                review_prompt: Some(String::new()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            c.review_prompt_for("forge/repo"),
+            Some("tpl {VERDICT_APPROVED}")
+        );
     }
 
     /// La garde de base review (`base == cfg.pr_base()`) suit le param

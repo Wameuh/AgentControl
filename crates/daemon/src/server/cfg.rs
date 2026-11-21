@@ -1052,10 +1052,14 @@ impl OrchCfg {
     }
 
     /// Prompt reviewer effectif d'un repo : override → `review_prompt`
-    /// global → None (template intégré `REVIEW_PROMPT`).
+    /// global → None (template intégré `REVIEW_PROMPT`). Un `Some("")`
+    /// (JSON `review_overrides` ou TOML `""` — forme « champ effacé »
+    /// d'un formulaire) hérite du global comme les autres champs :
+    /// un prompt vide ne doit jamais primer.
     pub fn review_prompt_for<'a>(&'a self, repo: &str) -> Option<&'a str> {
         self.review_ov(repo)
             .and_then(|o| o.review_prompt.as_deref())
+            .filter(|s| !s.is_empty())
             .or(self.review_prompt.as_deref())
     }
 

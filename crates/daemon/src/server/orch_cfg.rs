@@ -1151,6 +1151,12 @@ fn val_review_overrides(
             o.verdict_changes =
                 val_label(&json!(o.verdict_changes)).context("review_overrides verdict_changes")?;
         }
+        // `Some("")` = champ effacé → hérite du global (même sémantique
+        // vide que les chaînes ; `review_prompt_for` filtre aussi à la
+        // lecture pour les entrées TOML écrites à la main).
+        if o.review_prompt.as_deref().is_some_and(|s| s.trim().is_empty()) {
+            o.review_prompt = None;
+        }
     }
     Ok(out)
 }
