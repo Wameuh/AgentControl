@@ -19,7 +19,7 @@
 use serde_json::{json, Value};
 
 /// Une entrée `[[forges]]` de config.toml.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ForgeCfg {
     /// "gitlab" | "gerrit" — github est implicite, le déclarer est un no-op.
     #[serde(rename = "type")]
@@ -30,7 +30,7 @@ pub struct ForgeCfg {
     /// Nom d'une variable d'environnement contenant le token API de la
     /// forge (GitLab `PRIVATE-TOKEN` pour les instances privées) — lu
     /// dans l'env de l'appelant du sync (`acctl`), jamais stocké.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_env: Option<String>,
 }
 
@@ -40,6 +40,28 @@ pub struct ForgeCfg {
 pub struct ForgeHost {
     pub host: String,
     pub token_env: Option<String>,
+}
+
+/// État vivant des forges : les entrées `[[forges]]` déclarées ET le
+/// set résolu — mutés ensemble par le panneau `prs-registry`
+/// (server/forges_cfg.rs) et le rechargement config.toml, jamais l'un
+/// sans l'autre. `Daemon.forges` est un `RwLock<ForgeLive>` : les
+/// watchers PR et les RPC lisent le set courant sans restart.
+#[derive(Debug, Clone)]
+pub struct ForgeLive {
+    /// Entrées `[[forges]]` telles que déclarées (base du panneau et
+    /// de la persistance — `set` seul perdrait le regroupement
+    /// hôtes↔token_env et les types no-op comme github).
+    pub declared: Vec<ForgeCfg>,
+    /// Set effectif résolu (`Forges::resolve(&declared)`).
+    pub set: Forges,
+}
+
+impl ForgeLive {
+    pub fn new(declared: Vec<ForgeCfg>) -> Self {
+        let set = Forges::resolve(&declared);
+        Self { declared, set }
+    }
 }
 
 /// Set effectif de forges pour la détection : github implicite,
@@ -81,7 +103,7 @@ impl PrRef {
     }
 }
 
-fn norm_host(h: &str) -> String {
+pub(crate) fn norm_host(h: &str) -> String {
     let h = h.trim().to_lowercase();
     h.trim_start_matches("https://")
         .trim_start_matches("http://")

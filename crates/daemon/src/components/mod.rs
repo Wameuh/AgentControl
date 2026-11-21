@@ -66,7 +66,8 @@ const INTERNALS: &[Internal] = &[
     },
     Internal {
         name: "prs-registry",
-        description: "PR ↔ session registry (prs.json, tool-output watchers)",
+        description: "PR ↔ session registry (prs.json, tool-output watchers, \
+                      [[forges]] editable hot — GitLab/Gerrit hosts)",
     },
     Internal {
         name: "web-ui",
@@ -124,6 +125,12 @@ pub struct Components {
     /// `*_agent` du schéma orchestrateur (lus à live : un profil
     /// `[agents.*]` ajouté à chaud y apparaît sans restart).
     agents: Arc<RwLock<HashMap<String, crate::server::AgentProfile>>>,
+    /// Forges de review vivantes (partagé avec `Daemon.forges`) —
+    /// schéma/valeurs du composant interne `prs-registry` (un `[[forges]]`
+    /// édité à chaud y apparaît sans restart). std::sync::RwLock : les
+    /// lectures sont brefs et la vérif forge (closure sync du
+    /// PrVerifier) a besoin du même verrou.
+    forges: Arc<std::sync::RwLock<crate::forges::ForgeLive>>,
     /// Cache des sondes upstream du catalogue (tag+notes par repo,
     /// TTL ~5 min) — voir catalog.rs. Mutex std : sections courtes
     /// (get/insert), jamais tenue pendant un await.
@@ -145,6 +152,7 @@ impl Components {
         web: Arc<RwLock<Option<Value>>>,
         orch: Arc<OrchProbe>,
         agents: Arc<RwLock<HashMap<String, crate::server::AgentProfile>>>,
+        forges: Arc<std::sync::RwLock<crate::forges::ForgeLive>>,
     ) -> Arc<Self> {
         let dir = root.join("components");
         let specs = match read_specs(&root.join("components.toml")) {
@@ -193,6 +201,7 @@ impl Components {
             down: Arc::new(AtomicBool::new(false)),
             orch,
             agents,
+            forges,
             upstream: Mutex::new(HashMap::new()),
             view_tokens: Mutex::new(HashMap::new()),
         })
@@ -361,6 +370,47 @@ impl Components {
                 view_dir: None,
             };
             drop(agents);
+            let st = ComponentStatus {
+                state: ComponentState::Running,
+                ..Default::default()
+            };
+            return Some(item_json(&spec, &st, "internal"));
+        }
+        if name == crate::server::forges_cfg::COMPONENT_NAME {
+            // Forges `[[forges]]` : un param `json` `forges` (tableau
+            // des entrées déclarées) — le formulaire « Configurer »
+            // envoie `component_set_params` (intercepté → forges_cfg,
+            // persiste `[[forges]]` de config.toml + hot-reload du set
+            // — watchers PR, forge_list et pr_sync voient le nouveau
+            // set sans restart).
+            let i = INTERNALS.iter().find(|i| i.name == name)?;
+            let (schema, values) = {
+                let live = self.forges.read().unwrap();
+                (
+                    crate::server::forges_cfg::params_schema(&live),
+                    crate::server::forges_cfg::params_values(&live),
+                )
+            };
+            let spec = ComponentSpec {
+                name: name.to_string(),
+                kind: ComponentKind::Internal,
+                command: Vec::new(),
+                version_argv: None,
+                min_version: None,
+                env: HashMap::new(),
+                cwd: None,
+                autostart: true,
+                restart: RestartPolicy::Never,
+                restart_sec: 0,
+                healthcheck: Healthcheck::None,
+                description: Some(i.description.to_string()),
+                queries: HashMap::new(),
+                catalog: None,
+                params_schema: schema,
+                params: values,
+                render: None,
+                view_dir: None,
+            };
             let st = ComponentStatus {
                 state: ComponentState::Running,
                 ..Default::default()

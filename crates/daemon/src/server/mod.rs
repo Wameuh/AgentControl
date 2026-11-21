@@ -38,6 +38,9 @@ pub(crate) mod orch_cfg;
 /// profil courant (worker/planner/reviewer ; PRReview-* dans
 /// orch_review.rs).
 pub(crate) mod orch_failover;
+/// Forges `[[forges]]` éditables à chaud (composant interne
+/// `prs-registry` — params → config.toml, hot-reload du set).
+pub(crate) mod forges_cfg;
 /// GC des sessions composant orphelines (item #250) — filet de
 /// sécurité au tick : toute session `feature:pr-review` /
 /// `component:backlog-orchestrator` déréférencée de l'état vivant est
@@ -87,7 +90,7 @@ pub(crate) const SUBSCRIBE_REPLAY_MAX: usize = 500;
 pub(crate) const SUBSCRIBE_REPLAY_MAX_BYTES: u64 = 512 * 1024;
 
 use crate::components::Components;
-use crate::forges::Forges;
+use crate::forges::{ForgeCfg, ForgeLive};
 
 /// Backlog maximal de la file d'émission par connexion, en OCTETS de
 /// lignes sérialisées : absorbe les bursts (replay de journal,
@@ -277,7 +280,13 @@ pub struct Daemon {
     pr_sync: Arc<std::sync::Mutex<prs::PrSyncCtl>>,
     /// Forges de review reconnues par le watcher PR (`[[forges]]` de
     /// config.toml + implicites github/gitlab.com) — voir forges.rs.
-    pub forges: Forges,
+    /// Mutable à chaud : le panneau `prs-registry` et le rechargement
+    /// config.toml remplacent l'état vivant (forges_cfg.rs) — watchers,
+    /// forge_list et pr_sync lisent le set courant sans restart.
+    pub forges: Arc<std::sync::RwLock<ForgeLive>>,
+    /// Estampille (mtime, taille) du config.toml pour le hot-reload
+    /// `[[forges]]` — même mécanique que `agents_cfg_stamp`.
+    forges_cfg_stamp: std::sync::Mutex<Option<(std::time::SystemTime, u64)>>,
     /// Surface web activée : {"bind": addr, "url": "http://…/?token=…"} —
     /// renseigné par main après le bind, reflété dans daemon_status.
     /// Partagé avec Components : l'état du composant interne `web-ui`
@@ -333,7 +342,7 @@ impl Daemon {
         agents: HashMap<String, AgentProfile>,
         retention: RetentionCfg,
         a2a: A2aCfg,
-        forges: Forges,
+        forge_cfgs: Vec<ForgeCfg>,
         bind_tcp: String,
         orch: OrchCfg,
         compact: CompactCfg,
@@ -369,11 +378,15 @@ impl Daemon {
         }
         let prs = Arc::new(PrRegistry::open(&root));
         let caps = crate::caps::CapsRegistry::open(&root);
-        // Set forge figé pour la vérif d'existence (hôtes déclarés +
-        // token_env) — la config ne change pas à chaud.
-        let forge_set = forges.list_json().as_array().cloned().unwrap_or_default();
+        // Set forge vivant pour la vérif d'existence (hôtes déclarés +
+        // token_env) — relu à chaque vérification : un `comp set
+        // prs-registry` ou un `[[forges]]` édité à la main est pris en
+        // compte sans restart (forges_cfg.rs).
+        let forges = Arc::new(std::sync::RwLock::new(ForgeLive::new(forge_cfgs)));
+        let forge_live = Arc::clone(&forges);
         let pr_verify = Arc::new(prs::PrVerifier::new(Arc::clone(&prs), move |t| {
-            forgesync::verify_ref(&forge_set, t)
+            let set = forge_live.read().unwrap().set.list_json();
+            forgesync::verify_ref(set.as_array().map(Vec::as_slice).unwrap_or(&[]), t)
         }));
         // Profils partagés avec Components (params du composant interne
         // `agents` + dropdowns `*_agent` de l'orchestrateur — lus à
@@ -392,6 +405,7 @@ impl Daemon {
                 Arc::clone(&web),
                 Arc::clone(&orch),
                 Arc::clone(&agents),
+                Arc::clone(&forges),
             ),
             orch,
             a2a,
@@ -404,6 +418,7 @@ impl Daemon {
             pr_verify,
             pr_sync: Arc::new(std::sync::Mutex::new(prs::PrSyncCtl::default())),
             forges,
+            forges_cfg_stamp: std::sync::Mutex::new(None),
             web,
             dir_watch_n: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             host_sys: std::sync::Mutex::new(sysinfo::System::new()),

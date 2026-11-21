@@ -973,6 +973,9 @@ mod tests {
                 crate::server::OrchCfg::default(),
             )),
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            Arc::new(std::sync::RwLock::new(crate::forges::ForgeLive::new(
+                vec![],
+            ))),
         );
         let absent = tool_spec(&["ac-tool-inexistant-xyz"]);
         // Verdicts d'une passe antérieure (tool alors installé).
@@ -1007,6 +1010,9 @@ mod tests {
                 crate::server::OrchCfg::default(),
             )),
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            Arc::new(std::sync::RwLock::new(crate::forges::ForgeLive::new(
+                vec![],
+            ))),
         );
         let mut spec = tool_spec(&["sh", "-c", "echo 0.2.0"]);
         spec.min_version = Some("0.3".into());
@@ -1043,6 +1049,9 @@ mod tests {
                 crate::server::OrchCfg::default(),
             )),
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            Arc::new(std::sync::RwLock::new(crate::forges::ForgeLive::new(
+                vec![],
+            ))),
         );
         c.upsert("t", tool_spec(&["sh"])).await.unwrap();
         // Comme si le tool avait été sondé en échec avant la bascule.

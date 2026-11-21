@@ -16,12 +16,16 @@ impl Daemon {
         // profils — hot-reload pour qu'un [agents.*] ajouté après le
         // boot y apparaisse sans restart.
         self.reload_agent_profiles().await;
+        // Idem `prs-registry` : un [[forges]] édité à la main dans
+        // config.toml apparaît dans le panneau sans restart.
+        self.reload_forges().await;
         Ok(json!(self.components.list().await))
     }
 
     /// `ComponentInfo{name}` — spec complète + état détaillé.
     pub(super) async fn h_component_info(self: &Arc<Self>, name: String) -> Result<Value> {
         self.reload_agent_profiles().await;
+        self.reload_forges().await;
         self.components.info(&name).await
     }
 
@@ -126,9 +130,11 @@ impl Daemon {
     /// déclarés du composant (seule surface de config utilisateur) :
     /// fusion + validation + re-rendu + restart si le process tourne
     /// → {name, state, params(masqués), config_required, rendered,
-    /// restarted}. Exception `backlog-orchestrator` : l'interne n'a pas
-    /// de spec toml — ses params mappent sur la config orchestrateur
-    /// (orch.rs — même validation que `OrchestratorConfig`).
+    /// restarted}. Exceptions `backlog-orchestrator`/`agents`/
+    /// `prs-registry` : les internes n'ont pas de spec toml — leurs
+    /// params mappent sur la config orchestrateur (orch.rs — même
+    /// validation que `OrchestratorConfig`), les profils `[agents.*]`
+    /// (agents_cfg.rs) et les `[[forges]]` (forges_cfg.rs).
     pub(super) async fn h_component_set_params(
         self: &Arc<Self>,
         name: String,
@@ -139,6 +145,9 @@ impl Daemon {
         }
         if name == crate::server::agents_cfg::COMPONENT_NAME {
             return self.h_agents_params_set(params).await;
+        }
+        if name == crate::server::forges_cfg::COMPONENT_NAME {
+            return self.h_forges_params_set(params).await;
         }
         self.components.set_params(&name, &params).await
     }

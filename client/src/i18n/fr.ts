@@ -479,6 +479,7 @@ export const fr: Record<Key, string> = {
   pr_open_title: "Ouvrir sur {host}",
   pr_st_ready: "prête", pr_st_draft: "brouillon", pr_st_conflict: "conflit",
   pr_st_merged: "fusionnée", pr_st_closed: "fermée",
+  pr_st_ready_m: "prêt", pr_st_merged_m: "fusionné", pr_st_closed_m: "fermé", // gerrit « Change » = masculin
   pr_st_unresolved: "non résoluble",
   pr_unres_hint: "jamais résolue par le sync ({n} échecs) — repo fantôme ou hôte mort probable",
   pr_nrev_running: "en review", pr_nrev_retry: "review à retenter",

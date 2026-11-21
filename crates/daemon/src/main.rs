@@ -311,7 +311,7 @@ async fn serve(root: &std::path::Path) -> Result<()> {
         agents,
         cfg.retention.clone(),
         cfg.a2a.clone(),
-        forges::Forges::resolve(&cfg.forges),
+        cfg.forges.clone(),
         cfg.bind_tcp.clone(),
         cfg.backlog_orchestrator.clone(),
         cfg.compact.clone(),
@@ -415,6 +415,10 @@ async fn serve(root: &std::path::Path) -> Result<()> {
     // Re-scan périodique des `[agents.*]` de config.toml : profils
     // déclarés/modifiés/supprimés à la main pris en compte à chaud.
     daemon.agents_rescan_boot();
+
+    // Idem `[[forges]]` : hôtes gitlab/gerrit édités à la main dans
+    // config.toml → nouveau set de détection/sync sans restart.
+    daemon.forges_rescan_boot();
 
     // Fraîcheur des capacités par profil (item #268) : re-sonde
     // périodique des profils dont l'instantané agent_caps.json est

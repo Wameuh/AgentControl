@@ -382,7 +382,10 @@ impl Daemon {
         }
         let sid = s.meta_snapshot().id;
         let verify = Arc::clone(&self.pr_verify);
-        let forges = self.forges.clone();
+        // Verrou vivant : un `comp set prs-registry` ou un `[[forges]]`
+        // édité à la main est vu par le watcher sans restart (read
+        // bref par event, jamais tenu à travers un await).
+        let forges = Arc::clone(&self.forges);
         let weak = Arc::downgrade(s);
         let s2 = Arc::clone(s);
         tokio::spawn(async move {
@@ -403,7 +406,8 @@ impl Daemon {
                     if let Ok(evs) = s3.journal.read_page(&s3.dir, None, 2000) {
                         let mut titles = HashMap::new();
                         for ev in &evs {
-                            scan_pr_event(&verify_b, &forges_b, &s3, &sid_b, ev, &mut titles);
+                            let f = forges_b.read().unwrap();
+                            scan_pr_event(&verify_b, &f.set, &s3, &sid_b, ev, &mut titles);
                         }
                     }
                 })
@@ -428,9 +432,10 @@ impl Daemon {
                                 if let Ok(evs) = s3.journal.read_page(&s3.dir, None, 2000) {
                                     let mut titles = HashMap::new();
                                     for ev in &evs {
+                                        let f = forges_b.read().unwrap();
                                         scan_pr_event(
                                             &verify_b,
-                                            &forges_b,
+                                            &f.set,
                                             &s3,
                                             &sid_b,
                                             ev,
@@ -442,7 +447,8 @@ impl Daemon {
                             .await;
                             continue;
                         }
-                        scan_pr_event(&verify, &forges, &s, &sid, &ev, &mut titles);
+                        let f = forges.read().unwrap();
+                        scan_pr_event(&verify, &f.set, &s, &sid, &ev, &mut titles);
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -572,9 +578,12 @@ impl Daemon {
     }
     /// Set effectif des forges de review (détection + sync) — github et
     /// gitlab.com implicites + `[[forges]]` de la config. `token_env` est
-    /// un nom de variable d'environnement, jamais le token.
+    /// un nom de variable d'environnement, jamais le token. Relecture
+    /// config.toml d'abord : un `[[forges]]` édité à la main est vu ici
+    /// sans restart.
     pub(super) async fn h_forge_list(self: &Arc<Self>) -> Result<Value> {
-        Ok(self.forges.list_json())
+        self.reload_forges().await;
+        Ok(self.forges.read().unwrap().set.list_json())
     }
 
     /// `pr_sync` : resynchronise les statuts du registre depuis les
@@ -605,7 +614,8 @@ impl Daemon {
             c.running_since = Some(std::time::Instant::now());
         }
         let prs = Arc::clone(&self.prs);
-        let set = self.forges.list_json();
+        self.reload_forges().await;
+        let set = self.forges.read().unwrap().set.list_json();
         let ctl = Arc::clone(&self.pr_sync);
         let work = tokio::task::spawn_blocking(move || {
             let entries: Vec<Value> = prs

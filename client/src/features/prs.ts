@@ -9,7 +9,7 @@
 
 import { $, esc, q } from "../core/dom";
 import { shellOpen } from "../core/chrome";
-import { t } from "../i18n";
+import { t, type Key } from "../i18n";
 import { dotCls, dotIcon } from "./status";
 import { icon } from "../ui/icons";
 import { nav } from "../ui/nav";
@@ -59,6 +59,34 @@ export function prBadge(p: PrEntry): string {
     return p.pr ? `c#${p.pr}` : `c#${(p.change_id ?? "").slice(0, 9)}`;
   }
   return `#${p.pr}`;
+}
+
+/** Nom de la référence selon la forge : « PR » github, « MR » gitlab,
+ *  « Change » gerrit — même convention que `proto::forge_noun`. */
+export function prNoun(p: PrEntry): string {
+  const f = p.forge || "github";
+  if (f === "gitlab") return "MR";
+  if (f === "gerrit") return "Change";
+  return "PR";
+}
+
+/** Libellé de statut selon la forge : les formes « _m » (masculin)
+ *  pour gerrit — « Change » est masculin là où « PR »/« MR » sont
+ *  féminins (fr « prêt »/« fusionné », es « listo »/« fusionado »). */
+function prStText(st: string, forge: string): string {
+  const k =
+    st === "open" ? "pr_st_ready"
+    : st === "draft" ? "pr_st_draft"
+    : st === "conflict" ? "pr_st_conflict"
+    : st === "merged" ? "pr_st_merged"
+    : st === "closed" ? "pr_st_closed"
+    : null;
+  if (!k) return st;
+  if ((forge || "github") === "gerrit" &&
+      (st === "open" || st === "merged" || st === "closed")) {
+    return t(`${k}_m` as Key);
+  }
+  return t(k as Key);
 }
 
 /** Lien web de la référence : `url` du registre d'abord, sinon
@@ -216,14 +244,7 @@ export class PrListView {
   private prRow(p: PrEntry, unassigned: boolean): HTMLElement {
     const st = p.status || "open";
     const unres = prUnresolved(p);
-    const stTxt = unres
-      ? t("pr_st_unresolved")
-      : st === "open" ? t("pr_st_ready")
-      : st === "draft" ? t("pr_st_draft")
-      : st === "conflict" ? t("pr_st_conflict")
-      : st === "merged" ? t("pr_st_merged")
-      : st === "closed" ? t("pr_st_closed")
-      : st;
+    const stTxt = unres ? t("pr_st_unresolved") : prStText(st, p.forge || "github");
     const div = document.createElement("div");
     div.className = "pr" + (CLOSED.has(st) ? " pr-done" : "") + (unres ? " pr-unres" : "");
     const openHost = p.host ||
@@ -243,7 +264,7 @@ export class PrListView {
       : p.ci === "failure" ? t("pr_ci_fail")
       : "",
     ].filter(Boolean).join(" · ");
-    div.title = `${repoLabel(p)} ${prBadge(p)} — ${stTxt}${extraTxt ? ` · ${extraTxt}` : ""}${p.via ? ` · ${p.via}` : ""}` +
+    div.title = `${prNoun(p)} ${repoLabel(p)} ${prBadge(p)} — ${stTxt}${extraTxt ? ` · ${extraTxt}` : ""}${p.via ? ` · ${p.via}` : ""}` +
       `${unres ? `\n${t("pr_unres_hint", { n: p.sync_fails ?? 0 })}` : ""}` +
       `${p.branch ? `\n${p.branch}` : ""}${p.note ? `\n${p.note}` : ""}\n${t("pr_open_title", { host: openHost })}`;
     const top = document.createElement("div");

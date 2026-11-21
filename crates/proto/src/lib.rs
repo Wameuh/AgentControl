@@ -1659,6 +1659,17 @@ pub fn forge_url(forge: &str, host: &str, repo: &str, pr: u64, change_id: Option
     }
 }
 
+/// Nom de la référence selon la forge — « PR » github, « MR » gitlab,
+/// « Change » gerrit : libellés UI (client, acctl) qui disent « PR,
+/// MR ou Change » selon l'entrée affichée.
+pub fn forge_noun(forge: &str) -> &'static str {
+    match forge_kind(forge) {
+        "gitlab" => "MR",
+        "gerrit" => "Change",
+        _ => "PR",
+    }
+}
+
 /// Badge compact de la référence (sidebar client, `acctl list`) :
 /// `#N` github, `!N` gitlab, `c#N` gerrit, `c#I<8>` pour un Change-Id
 /// non résolu. Convention GitLab `!N` / préfixe `c#` — lisible et court.
