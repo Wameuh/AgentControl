@@ -205,3 +205,4 @@ sha:71fcbdf871390152ae3de8661e3fc1da87e2e3f7: ACP-only session modes (plan/smart
 394: Repos, Backlog and Diagram become proper mobile screens: PR cards, horizontally scrolling backlog metrics, and a finger-driven map (pan, pinch-zoom, double-tap recenter).
 395: On Android, permission and question notifications are now actionable — a permission shows Allow once / Deny / Open buttons that answer the agent right from the notification (the app resumes but never navigates), and a question offers inline Reply plus Open; if the answer can't be sent the notification falls back to opening the session.
 396: Android: short haptic feedback on send, request replies and incoming questions; readable system bars in both themes; Settings now opens as a list of sections with sub-screens.
+388: [skip] internal orchestrator review fix, no user-facing change
