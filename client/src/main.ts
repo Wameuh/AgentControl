@@ -68,6 +68,7 @@ import { initConnSheet } from "./mobile/conn-sheet";
 import { initHomeShell, syncHomeConn } from "./mobile/shell";
 import { initInbox } from "./mobile/inbox";
 import { initGestures } from "./mobile/gestures";
+import { initMapGestures } from "./mobile/map-gestures";
 import { initPermDock } from "./mobile/perm-dock";
 import { initComposerMobile } from "./mobile/composer-mobile";
 import { initToolRuns } from "./mobile/tool-runs";
@@ -545,6 +546,7 @@ initHomeShell(conns);
 // Accueil « par état » + glisser des lignes (N3/N4) — no-ops hors Android.
 initInbox(sidebar);
 initGestures(sidebar);
+initMapGestures();
 // Dock de permission (S3) + composer pilule (C1) — no-ops hors Android.
 initPermDock((seq) => chat.jumpToSeq(seq));
 initComposerMobile(composer);

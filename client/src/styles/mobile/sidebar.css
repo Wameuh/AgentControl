@@ -121,18 +121,62 @@ body.android #btn-new-session {
 body.android.m-home #btn-new-session:not([hidden]) { display: flex; }
 body.android #btn-new-session .ic { width: 17px; height: 17px; display: block; }
 
-/* ── Liste PR (pleine largeur en accueil ; cartes soignées en 3c) ────── */
-body.android #pr-list .pr { padding: 11px 10px; }
-body.android #pr-list .pr .pr-t { font-size: 14px; }
-body.android #pr-list .pr .pr-st { font-size: 10px; }
-body.android #pr-list .pr .pr-sub { font-size: 12px; margin-top: 6px; }
-body.android #pr-list .pr .pr-num,
+/* ── Dépôts (N5) : PR en cartes — titre 2 lignes, puces d'état colorées
+   (classes st-* existantes), chip session sur sa propre ligne ────────── */
+body.android #pr-list .pr {
+  padding: 12px; margin: 0 10px 8px; border: 1px solid var(--line);
+  border-radius: 12px; background: var(--panel);
+}
+body.android #pr-list .pr:hover { background: var(--panel); }
+body.android #pr-list .pr .pr-top {
+  flex-wrap: wrap; align-items: flex-start; row-gap: 5px;
+}
+body.android #pr-list .pr .pr-num { font-size: 12px; padding-top: 1px; }
+body.android #pr-list .pr .pr-t {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; white-space: normal; font-size: 14px; line-height: 1.3;
+}
+body.android #pr-list .pr .pr-st { font-size: 10.5px; padding: 2px 7px; }
+body.android #pr-list .pr .pr-sub {
+  flex-wrap: wrap; row-gap: 4px; font-size: 12px; margin-top: 8px;
+}
 body.android #pr-list .pr .pr-branch,
 body.android #pr-list .pr .pr-repo-lbl { font-size: 12px; }
-body.android #pr-list .pr .pr-sess { min-height: 44px; font-size: 12px; }
+body.android #pr-list .pr .pr-sess {
+  flex-basis: 100%; margin-left: 0; padding: 0;
+  min-height: 44px; font-size: 12.5px;
+}
+body.android #pr-list .pr .pr-sess .dot { width: 14px; height: 14px; }
 body.android #pr-list .pr-note { font-size: 12px; padding: 8px 10px; }
 body.android .pr-repo { font-size: 12px; }
 body.android .pr-repo .pr-n { font-size: 12px; }
+
+/* ── Backlog (N5) : métriques en bande défilante, items sur 2 lignes ── */
+body.android .bl-m-cards {
+  display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px;
+  -webkit-overflow-scrolling: touch;
+}
+body.android .bl-m-card { flex: none; min-width: 132px; }
+body.android .bl-m-card .bl-m-v { font-size: 15px; }
+body.android .bl-m-card .bl-m-k { font-size: 12px; }
+body.android #bl-mw { min-height: 44px; font-size: 12px; }
+body.android .bl-metrics .grp-head.bl-m-head { font-size: 12px; }
+body.android .bl-m-legend { font-size: 12px; }
+body.android .bl-item {
+  flex-wrap: wrap; row-gap: 4px; padding: 8px 10px; min-height: 44px;
+}
+body.android .bl-item .bl-id { font-size: 12px; }
+body.android .bl-item .bl-title { font-size: 13px; white-space: normal; }
+/* Césure : tout ce qui suit id+titre retombe en ligne 2 (::before est un
+   item flex ; order:9 le place entre le titre et les infos liées). */
+body.android .bl-item::before {
+  content: ""; order: 9; flex-basis: 100%; height: 0;
+}
+body.android .bl-item .bl-blocked { order: 3; }
+body.android .bl-item .bl-agent,
+body.android .bl-item .bl-repo { order: 10; font-size: 11.5px; min-height: 30px; }
+body.android .bl-item .bl-cta { order: 10; margin: 2px 0 0; min-height: 44px; }
+body.android .bl-item .bl-when { order: 20; margin-left: auto; font-size: 11.5px; }
 
 /* ── Accueil « par état » (N3) : segmenté, flotte, sections, cartes ─── */
 body.android #m-home-seg {
