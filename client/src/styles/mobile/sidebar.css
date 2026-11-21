@@ -1,14 +1,42 @@
-/* ── Android — drawer sidebar : sessions, groupes, onglets, PR ────────── */
+/* ── Android — accueil : la sidebar EST l'écran d'accueil (phase 3) ──── */
+/* La sidebar reste un item flex qui remplit #app-body (#chat est fixed,
+   hors flux) — pas de position:fixed : un contexte d'empilement propre
+   enfermerait #side-view, qui doit passer au-dessus de #chat (z 40)
+   quand le diagramme est ouvert. */
 body.android #sidebar {
-  position: fixed; z-index: 40; top: 0; bottom: 0; left: 0;
-  width: min(84vw, 340px); min-width: 0;
-  padding-top: max(10px, env(safe-area-inset-top));
-  padding-bottom: max(12px, env(safe-area-inset-bottom));
-  transform: translateX(-105%); transition: transform .2s ease;
+  flex: 1; width: auto; min-width: 0; border-right: 0;
+  padding: 6px 12px 0;
 }
-body.android #sidebar.open { transform: translateX(0); }
-body.android #conn-bar button {
-  min-height: 44px; font-size: 15px; padding: 8px 14px;
+/* Écran Session / overlays : #chat glisse depuis la droite. Il reste
+   dans le DOM (pas de display:none) : xterm, le fil et leurs mesures
+   restent valides ; visibility libère la surface sans tout démonter. */
+body.android #chat {
+  position: fixed; inset: 0; z-index: 40;
+  background: var(--bg);
+  transform: translateX(102%); visibility: hidden;
+  transition: transform .2s ease, visibility 0s .2s;
+}
+body.android:not(.m-home) #chat {
+  transform: none; visibility: visible; transition: transform .2s ease;
+}
+/* Plus de #conn-bar : les actions connexion vivent dans la puce de la
+   barre d'accueil (feuille) — les boutons restent pilotables en JS. */
+body.android #conn-bar { display: none; }
+/* Ligne de filtre : masquée par défaut, révélée par la loupe (m-filter). */
+body.android #sess-filter { display: none; }
+body.android.m-filter #sess-filter { display: flex; }
+/* Filtre de sessions : champ pleine hauteur + croix d'effacement 44px
+   (boîte transparente, l'icône reste petite). */
+body.android #sess-filter input { min-height: 44px; font-size: 15px; padding-right: 46px; }
+body.android #sess-filter-clear { min-width: 44px; min-height: 44px; padding: 0; }
+body.android #btn-agent-caps { min-width: 44px; min-height: 44px; }
+/* Dégagements bas : la barre basse recouvre le bas des listes (le FAB
+   « Nouvel agent » demande ~130px sur la vue Agents). */
+body.android #pr-list, body.android #backlog-list {
+  padding-bottom: calc(76px + env(safe-area-inset-bottom));
+}
+body.android #session-list {
+  padding-bottom: calc(136px + env(safe-area-inset-bottom));
 }
 body.android #session-list .sess {
   padding: 13px 10px; font-size: 15px;
@@ -31,10 +59,68 @@ body.android #session-list .sess .sess-pr,
 body.android #session-list .sess .sess-origin { font-size: 12px; }
 body.android .grp-head .grp-name, body.android .grp-sub .grp-name,
 body.android .grp-add-lbl { font-size: 12px; }
-body.android #btn-new-session { min-height: 46px; font-size: 15px; }
-/* Sélecteur de vue + liste PR : cibles tactiles ≥44px */
-body.android #side-view .sv { min-height: 44px; font-size: 14px; }
-body.android #side-view .sv .ic { width: 15px; height: 15px; }
+/* En-tête de connexion : libellé humain (cfg.label), casse conservée. */
+body.android .grp-head.grp-conn {
+  text-transform: none; letter-spacing: normal;
+}
+body.android .grp-head.grp-conn .grp-name { font-size: 14px; }
+/* Boutons « + groupe » / « + agent » des headers : le texte reste
+   compact, la boîte (sans fond) monte à 44px. */
+body.android .grp-head .grp-add, body.android .grp-sub .grp-add {
+  min-height: 44px;
+}
+
+/* ── Barre basse = les onglets de vue existants (#side-view) ─────────── */
+body.android #side-view {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+  display: none; grid-template-columns: repeat(4, 1fr); gap: 0;
+  height: calc(66px + env(safe-area-inset-bottom));
+  padding: 4px 8px env(safe-area-inset-bottom);
+  background: var(--panel-solid); border: 0; border-radius: 0;
+  border-top: 1px solid var(--line);
+}
+body.android.m-home #side-view, body.android.m-map #side-view { display: grid; }
+body.android #side-view .sv {
+  position: relative;
+  flex-direction: column; gap: 2px; justify-content: center;
+  min-height: 0; padding: 0; font-size: 12px; border-radius: 0;
+}
+body.android #side-view .sv.on {
+  background: none; border-color: transparent; color: var(--accent);
+}
+/* Pastille 58×30 : teintée sur l'onglet actif, neutre sinon. */
+body.android #side-view .sv .sv-ic {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 58px; height: 30px; border-radius: 999px;
+}
+body.android #side-view .sv.on .sv-ic {
+  background: rgba(var(--accent-rgb), .2);
+}
+body.android #side-view .sv .ic { width: 20px; height: 20px; }
+body.android #side-view .sv .sv-ic svg.gem { width: 20px; height: 20px; display: block; }
+/* Compteurs = badges en haut à droite de la pastille. */
+body.android #side-view #sv-count, body.android #side-view #sv-bcount {
+  position: absolute; top: 1px; left: calc(50% + 10px);
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 19px; height: 19px; padding: 0 6px; border-radius: 10px;
+  background: var(--accent); color: var(--msg-user-fg);
+  font-size: 12px; line-height: 1;
+}
+
+/* ── FAB « Nouvel agent » : visible en m-home sur la vue Agents ─────── */
+body.android #btn-new-session {
+  position: fixed; right: 14px; z-index: 30;
+  bottom: calc(66px + 12px + env(safe-area-inset-bottom));
+  display: none; align-items: center; justify-content: center; gap: 9px;
+  height: 52px; padding: 0 22px; border: 0; border-radius: 16px;
+  font: inherit; font-size: 15px; font-weight: 600; cursor: pointer;
+  background: var(--accent); color: var(--msg-user-fg);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .4);
+}
+body.android.m-home #btn-new-session:not([hidden]) { display: flex; }
+body.android #btn-new-session .ic { width: 17px; height: 17px; display: block; }
+
+/* ── Liste PR (pleine largeur en accueil ; cartes soignées en 3c) ────── */
 body.android #pr-list .pr { padding: 11px 10px; }
 body.android #pr-list .pr .pr-t { font-size: 14px; }
 body.android #pr-list .pr .pr-st { font-size: 10px; }
@@ -46,14 +132,3 @@ body.android #pr-list .pr .pr-sess { min-height: 44px; font-size: 12px; }
 body.android #pr-list .pr-note { font-size: 12px; padding: 8px 10px; }
 body.android .pr-repo { font-size: 12px; }
 body.android .pr-repo .pr-n { font-size: 12px; }
-
-/* Boutons « + groupe » / « + agent » des headers de groupes : le texte
-   reste compact, la boîte (sans fond) monte à 44px → lignes ~50px. */
-body.android .grp-head .grp-add, body.android .grp-sub .grp-add {
-  min-height: 44px;
-}
-/* Filtre de sessions : champ pleine hauteur + croix d'effacement 44px
-   (boîte transparente, l'icône reste petite). */
-body.android #sess-filter input { min-height: 44px; font-size: 15px; padding-right: 46px; }
-body.android #sess-filter-clear { min-width: 44px; min-height: 44px; padding: 0; }
-body.android #btn-agent-caps { min-width: 44px; min-height: 44px; }

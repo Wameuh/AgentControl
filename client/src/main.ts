@@ -64,6 +64,8 @@ import { notifications } from "./features/notifications";
 import { initFirstPost } from "./features/first-post";
 import { initSessionBar, renderSessionBar } from "./mobile/session-bar";
 import { initSessionSheet, openSessionSheet } from "./mobile/session-sheet";
+import { initConnSheet } from "./mobile/conn-sheet";
+import { initHomeShell, syncHomeConn } from "./mobile/shell";
 import { initPermDock } from "./mobile/perm-dock";
 import { initComposerMobile } from "./mobile/composer-mobile";
 import { initToolRuns } from "./mobile/tool-runs";
@@ -188,6 +190,10 @@ chat.bind(renderer, {
   refreshQueue: () => composer.refreshQueue(),
   syncAltBtn: () => composer.syncAltBtn(),
   onSessionOpened: () => {
+    // Pile de navigation mobile : l'écran Session glisse sur l'accueil —
+    // point unique qui couvre tous les chemins d'ouverture (liste,
+    // notif, carte du diagramme, puce de session des PRs, « À traiter »).
+    nav.enterSession();
     files.onSessionOpened();
     term.onSessionSwitched();
     pins.sessionOpened();
@@ -299,7 +305,11 @@ conns.bind({
     term.refreshTheme();
   },
   termDead: (k) => term.markConnDead(k),
-  liveChanged: () => connView.onLiveChanged(),
+  liveChanged: () => {
+    connView.onLiveChanged();
+    // Puce connexion de l'accueil mobile : point coloré = état live.
+    syncHomeConn();
+  },
 });
 connView.bind(conns);
 connView.refresh = () => sidebar.refresh();
@@ -514,11 +524,22 @@ initSessionSheet({
   firstPostCapable: (c) => conns.cap(c)?.first_post === true,
   pinCapable: (c) => conns.cap(c)?.pinned === true,
   stepsCapable: (c) => conns.cap(c)?.steps === true,
-  compsCapable: () => comps.capable(),
   onRenamed: () => { chat.setChatTitle(); void sidebar.refresh(); },
   refreshSidebar: () => void sidebar.refresh(),
 });
 initSessionBar(openSessionSheet);
+// Feuille connexion de la puce d'accueil + coquille mobile (N1/N2) :
+// titre de vue, loupe → filtre, re-rendu de la barre session à chaque
+// bascule de pile. No-ops hors Android.
+initConnSheet({
+  openPairSettings: () => {
+    settings.open();
+    const sec = $("s-sec-conn") as HTMLDetailsElement;
+    sec.open = true;
+    sec.scrollIntoView({ block: "start" });
+  },
+});
+initHomeShell(conns);
 // Dock de permission (S3) + composer pilule (C1) — no-ops hors Android.
 initPermDock((seq) => chat.jumpToSeq(seq));
 initComposerMobile(composer);

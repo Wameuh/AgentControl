@@ -185,6 +185,13 @@
 .mi-row { display: flex; justify-content: space-between; gap: 10px; padding: 1.5px 0; }
 .mi-row b { color: var(--ink); font-weight: 400; font-family: Mono, ui-monospace, monospace; }
 
+/* La barre basse reste visible par-dessus le diagramme (m-map) : la vue
+   dégage son bas de sa hauteur, et son haut de la status bar (#chat
+   couvre désormais tout le viewport). */
+body.android #map-view {
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: calc(66px + env(safe-area-inset-bottom));
+}
 body.android #map-legend {
   bottom: calc(10px + env(safe-area-inset-bottom));
 }

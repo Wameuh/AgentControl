@@ -267,8 +267,9 @@ let windows = /Windows/i.test(navigator.userAgent);
 export const isWindows = () => windows;
 
 export function applyAndroidChrome() {
-  // Pas de fenêtre à minimizer/drag sous Android : ☰ + ⋮ seulement.
-  $("tb-menu").hidden = false;
+  // Pas de fenêtre à minimizer/drag sous Android : ⋮ seulement — le ☰
+  // reste masqué depuis la phase 3 (le drawer a disparu : accueil plein
+  // écran + barre basse + retour ←).
   $("tb-more").hidden = false;
   $("chat-more").hidden = false;
   ($("input") as HTMLTextAreaElement).enterKeyHint = "send";

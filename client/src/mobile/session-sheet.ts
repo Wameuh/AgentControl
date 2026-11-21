@@ -3,9 +3,8 @@
 // session ouverte — remplace le menu ⋮ du header masqué sous m-in-session.
 // Les <select> réels vivent dans #chat-opts (câblés par modelbar.ts) : la
 // feuille ne duplique pas la logique, elle reflète leur état et délègue —
-// un choix = value + dispatch "change" vers le handler d'origine. La
-// section « Application » compense la ⋮ titlebar masquée (retirée en
-// phase 3 quand la navigation fournit l'entrée dédiée).
+// un choix = value + dispatch "change" vers le handler d'origine. Les
+// entrées d'application vivent dans le ⋮ de l'accueil (phase 3).
 // ---------------------------------------------------------------------------
 
 import { $, esc, showErr } from "../core/dom";
@@ -18,7 +17,6 @@ import type { SessionMeta } from "../core/types";
 import { dotIcon } from "../features/status";
 import { icon } from "../ui/icons";
 import type { SheetItem } from "../ui/nav";
-import { appMenuItems } from "./app-menu";
 
 export interface SessionSheetDeps {
   /** Recherche dans le journal (SessionSearch.open). */
@@ -30,8 +28,6 @@ export interface SessionSheetDeps {
   firstPostCapable: (conn: string) => boolean;
   pinCapable: (conn: string) => boolean;
   stepsCapable: (conn: string) => boolean;
-  /** Gate « Composants » de la section Application (ComponentsPanel). */
-  compsCapable: () => boolean;
   /** Titre renommé → resync barre session + liste sidebar. */
   onRenamed: () => void;
   /** kill_session appliqué → refresh de la liste (Sidebar.refresh). */
@@ -82,7 +78,6 @@ function renderSheet() {
   renderHead(s);
   renderOpts();
   renderActs(s);
-  renderApp();
 }
 
 // ── En-tête : gemme + titre renommable + sous-ligne agent·conn·cwd ───────
@@ -352,34 +347,4 @@ function renderActs(s: SessionMeta) {
       .catch((e) => showErr(String(e)));
   };
   host.appendChild(kill);
-}
-
-// ── Application : entrées du ⋮ titlebar masqué + chip update ─────────────
-
-function renderApp() {
-  const host = $("ss-app");
-  host.innerHTML = "";
-  const lab = document.createElement("div");
-  lab.className = "ss-label";
-  lab.textContent = t("ss_app");
-  host.appendChild(lab);
-  const items = appMenuItems(deps.compsCapable);
-  // Chip « Mise à jour » de la titlebar : masquée sous m-in-session —
-  // l'entrée vit ici tant que la barre session ne porte pas de ⋮.
-  const upd = document.querySelector<HTMLElement>(".tb-update");
-  if (upd) {
-    items.unshift({
-      icon: "up",
-      label: upd.title || (upd.textContent ?? "").trim(),
-      fn: () => upd.click(),
-    });
-  }
-  for (const it of items) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "ss-approw";
-    b.innerHTML = (it.icon ? icon(it.icon) : "") + `<span>${esc(it.label)}</span>`;
-    b.onclick = () => { closeSheet(); it.fn(); };
-    host.appendChild(b);
-  }
 }

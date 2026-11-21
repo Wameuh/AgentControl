@@ -1,11 +1,25 @@
 // Captures Android : Chromium headless, viewport S25, mock __TAURI_INTERNALS__.
 // Usage : npm run build && node tests/android-shots.mjs [outdir]
 import puppeteer from "puppeteer-core";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, existsSync, readdirSync } from "node:fs";
 import { spawn } from "node:child_process";
 
 const OUT = process.argv[2] || "shots";
 mkdirSync(OUT, { recursive: true });
+
+// Même détection que l'audit : CHROME_PATH, /usr/bin/chromium, cache local.
+function findChrome() {
+  if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
+  if (existsSync("/usr/bin/chromium")) return "/usr/bin/chromium";
+  const base = `${process.env.HOME}/.cache/audit-chrome/chrome-headless-shell`;
+  try {
+    for (const v of readdirSync(base).sort()) {
+      const p = `${base}/${v}/chrome-headless-shell-linux64/chrome-headless-shell`;
+      if (existsSync(p)) return p;
+    }
+  } catch { /* cache absent */ }
+  throw new Error("Chromium introuvable — CHROME_PATH=… ou /usr/bin/chromium");
+}
 
 const server = spawn("npx", ["vite", "preview", "--port", "4173", "--strictPort"], {
   cwd: new URL("..", import.meta.url).pathname, stdio: "ignore",
@@ -13,7 +27,7 @@ const server = spawn("npx", ["vite", "preview", "--port", "4173", "--strictPort"
 await new Promise((r) => setTimeout(r, 1800));
 
 const browser = await puppeteer.launch({
-  executablePath: "/usr/bin/chromium",
+  executablePath: findChrome(),
   headless: "new",
   args: ["--no-sandbox", "--disable-dev-shm-usage", "--font-render-hinting=none"],
 });
@@ -47,14 +61,18 @@ const longPress = async (sel) => {
 await page.goto("http://localhost:4173/", { waitUntil: "networkidle0" });
 await shot("01-app");
 
-await tap("#tb-menu", 450);           await shot("02-drawer");
-await tap("#btn-connect", 500);       await shot("03-connect-sheet");
+// Phase 3 : accueil plein écran — la connexion passe par la puce #m-conn.
+await shot("02-home", 200);
+await tap("#m-conn", 400);
+await page.evaluate(() => [...document.querySelectorAll("#omenu .om-item")]
+  .find((b) => /connexion|connection/i.test(b.textContent))?.click());
+await shot("03-connect-sheet", 400);
 
 // Remplir host + Connecter → mock retourne OK → sessions listées
 await page.type("#c-host", "me@pi5.local");
 await tap("#c-go", 900);              await shot("04-connected");
 
-await tap(".sess", 800);              await shot("05-chat");           // ouvre s1, drawer fermé
+await tap(".sess", 800);              await shot("05-chat");           // ouvre s1 — écran empilé
 await tap("#m-sbar-title", 400);      await shot("06-session-sheet");
 await page.keyboard.press("Escape");  // ferme la feuille (dialog)
 await new Promise((r) => setTimeout(r, 300));
@@ -67,9 +85,11 @@ await tap("#fv-back", 400);                                        // retour lis
 await longPress(".fnode.is-dir");      await shot("09-fctx", 400);
 await page.evaluate(() => { document.getElementById("fctx").hidden = true; });
 
-// Nouvelle session → bottom sheet (depuis le drawer)
-await page.evaluate(() => { document.getElementById("file-panel").hidden = true; document.getElementById("file-viewer").classList.remove("open"); });
-await tap("#m-sbar-nav", 400);
+// Nouvelle session → retour accueil par ‹ puis FAB (phase 3)
+await page.evaluate(() => { document.getElementById("file-viewer").classList.remove("open"); });
+await tap("#file-close", 400);          // ferme l'explorateur (nav-aware)
+await tap("#m-sbar-nav", 500);          // ‹ = history.back() → accueil
+await shot("09b-home");
 await tap("#btn-new-session", 500);    await shot("10-new-session");
 
 await browser.close();

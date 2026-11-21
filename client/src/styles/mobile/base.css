@@ -48,9 +48,14 @@ body.android .resize-edge, body.android #sidebar-resize {
 }
 body.android #tb-menu { font-size: 24px; min-width: 44px; min-height: 44px; }
 body.android .tb-update { font-size: 12px; }
-/* Barre d'app mobile : un seul ⋮ au lieu des boutons fenêtre/settings. */
+/* Barre d'app mobile : un seul ⋮ au lieu des boutons fenêtre/settings —
+   #tb-logs aussi (l'entrée vit dans la feuille ⋮). */
 body.android #tb-settings, body.android #tb-about,
+body.android #tb-logs, body.android #tb-components,
 body.android #tb-map { display: none; }
+/* Hors accueil, #chat (fixed inset:0) recouvre la titlebar : la masquer
+   évite qu'elle ne transparaisse sous les overlays transparents (#map-view). */
+body.android:not(.m-home) #titlebar { visibility: hidden; }
 body.android #tb-more { display: inline-block; font-size: 22px; min-width: 44px; min-height: 44px; padding: 10px 13px; }
 
 /* ── Cibles tactiles ≥44px (audit Android) ────────────────────────────── */

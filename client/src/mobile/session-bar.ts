@@ -1,16 +1,16 @@
 // ---------------------------------------------------------------------------
 // Barre de session mobile (S1) : en session, remplace #titlebar +
-// #chat-header (body.m-in-session) — ☰ drawer à gauche, gemme d'état,
-// titre + sous-titre (tap → feuille Session), Stop à droite quand l'agent
-// est occupé. Synchronisée par le hook afterHeader de ChatView (fin
-// d'updateHeader/setChatTitle).
+// #chat-header (body.m-in-session) — ← retour à l'accueil à gauche,
+// gemme d'état, titre + sous-titre (tap → feuille Session), Stop à droite
+// quand l'agent est occupé. Synchronisée par le hook afterHeader de
+// ChatView (fin d'updateHeader/setChatTitle).
 // ---------------------------------------------------------------------------
 
 import { app } from "../core/state";
 import { $, esc } from "../core/dom";
 import { isAndroid } from "../core/chrome";
-import { nav } from "../ui/nav";
 import { icon } from "../ui/icons";
+import { nav } from "../ui/nav";
 import { t } from "../i18n";
 import { dotCls, dotIcon } from "../features/status";
 import { joinModel } from "../features/modelbar";
@@ -19,24 +19,32 @@ import { refreshSessionSheet } from "./session-sheet";
 let gemCls = "";
 
 /** Câble les trois zones de la barre — Android uniquement (le reste de
- *  l'app garde titlebar + chat-header). Le ☰ reste un menu en phase 2 ;
- *  la phase 3 le transformera en retour ‹. */
+ *  l'app garde titlebar + chat-header). ← dépile « session » de la pile
+ *  de navigation → retour à l'accueil (phase 3). */
 export function initSessionBar(openSheet: () => void) {
   if (!isAndroid()) return;
-  $("m-sbar-nav").onclick = () => nav.openDrawer();
+  // ‹ = « retour » applicatif : dépile « session » (waypoint mort dans
+  // l'historique — même modèle que les overlays fermés sans back). Un
+  // history.back() brut sous activation utilisateur serait traité en
+  // « retour utilisateur » par Chromium et sauterait toutes les entrées
+  // sans activation — no-op en tests automatisés.
+  $("m-sbar-nav").onclick = () => nav.close("session");
   $("m-sbar-title").onclick = openSheet;
   $("m-sbar-title").setAttribute("aria-label", t("ss_open"));
   $("m-sbar-stop").onclick = () => ($("btn-cancel") as HTMLButtonElement).click();
 }
 
 /** Resynchronise la barre depuis app.current + le DOM du header (source
- *  unique : badge d'état, selects, jauge contexte, bouton Stop). Sans
- *  session ouverte, m-in-session retombe → titlebar + header reviennent
- *  (écran d'accueil inchangé). */
+ *  unique : badge d'état, selects, jauge contexte, bouton Stop).
+ *  m-in-session = session chargée ET l'écran Session affiché (m-home
+ *  absent — ouverture depuis l'accueil, la carte « À traiter », la notif). */
 export function renderSessionBar() {
   if (!isAndroid()) return;
   const s = app.current;
-  document.body.classList.toggle("m-in-session", !!s);
+  document.body.classList.toggle(
+    "m-in-session",
+    !!s && !document.body.classList.contains("m-home"),
+  );
   // Appelé même sans session : refreshSessionSheet referme la feuille
   // si la session affichée vient de disparaître.
   refreshSessionSheet();

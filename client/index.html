@@ -13,6 +13,11 @@
         <button id="tb-menu" hidden data-icon="menu" data-i18n-title="menu_title" title="Menu"></button>
         <span id="titlebar-gem"></span>
         <span id="titlebar-title">AgentControl</span>
+        <!-- Chrome de l'accueil mobile (m-home) : titre de vue, puce de
+             connexion → feuille d'actions, loupe → filtre de sessions. -->
+        <span id="m-home-title"></span>
+        <button id="m-conn" type="button"></button>
+        <button id="m-search" type="button" data-icon="search" data-i18n-title="sess_filter_title" title="Filter"></button>
         <div class="tb-btns">
           <button id="tb-map" data-icon="map" title="Map" data-i18n-title="map_title"></button>
           <button id="tb-logs" data-icon="scroll" title="Logs" data-i18n-title="logs"></button>
@@ -52,7 +57,7 @@
         </aside>
         <main id="chat">
           <header id="m-sbar">
-            <button id="m-sbar-nav" data-icon="menu" data-i18n-title="menu_title" title="Menu"></button>
+            <button id="m-sbar-nav" data-icon="back" data-i18n-title="comp_back" title="Back"></button>
             <span id="m-sbar-gem"></span>
             <button id="m-sbar-title" type="button">
               <span id="m-sbar-name">—</span>
@@ -1036,7 +1041,6 @@
         <div id="ss-head"></div>
         <div id="ss-opts"></div>
         <div id="ss-acts"></div>
-        <div id="ss-app"></div>
         <menu><button value="cancel" data-i18n="close">Close</button></menu>
       </form>
     </dialog>
