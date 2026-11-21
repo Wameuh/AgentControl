@@ -180,12 +180,43 @@ otherwise.
 Prerequisites:
 
 - **agentbacklog** — the queue CLI the orchestrator shells out to
-  (`agentbacklog --list/--pop/…`). Resolved either on the daemon's
-  PATH (`uv tool install git+https://github.com/Wameuh/AgentBacklog`)
-  or as a managed `tool` component — the catalog recipe does both
+  (`agentbacklog --list/--pop/--claim/--done/--verdict/…`).
+  **This is a required, non-negotiable dependency**: the task-queue
+  backend is not pluggable — the orchestrator assumes agentbacklog's
+  flag surface and SQLite semantics (see the note at the end of this
+  section). Without the CLI the component reports
+  `waiting: agentbacklog missing` — an explicit phase, not a crash,
+  and it never starts dispatching.
+
+  Install **before enabling** — recommended **≥ 0.9** (per-item
+  `--done-when` done contract and the `agent`/`model`/`effort`
+  spec fields); **≥ 0.7** is the floor for `plan_review`
+  (`--claim`, `--submit-plan`, `--claim-review`, `--verdict`,
+  `--reassign`); older releases still dispatch, falling back to the
+  unscoped self-`--pop` cycle.
+
+  The package is **not published on PyPI** — install from source
+  with `uv` (the daemon ships no copy):
+
+  ```sh
+  uv tool install git+https://github.com/Wameuh/AgentBacklog
+  ```
+
+  or let the daemon do it: the catalog recipe
   (`component_install agentbacklog`, also offered by the Backlog
-  sidebar tab). Without it the component reports
-  `waiting: agentbacklog missing` — an explicit phase, not a crash.
+  sidebar tab) runs the same `uv tool install` and materializes the
+  managed `tool` spec. The binary is then resolved either on the
+  daemon's PATH or through that managed component.
+
+  Fork/mirror/local checkout? The recipe's `install_spec` parameter
+  accepts an index package name, a `git+<url>` or a local path —
+  pass it at install time, or pin it permanently in `config.toml`:
+
+  ```toml
+  [catalog.agentbacklog]
+  repo = "acme/AgentBacklog"              # upstream probed for versions
+  params.install_spec = "git+https://git.acme.corp/ab"
+  ```
 - **An available agent profile** — `agent` empty (default) resolves
   to the first `available` `[agents.*]` profile at dispatch
   (auto-discovered ACP adapters count);
@@ -231,3 +262,16 @@ needs agentbacklog ≥ 0.7), `pr_review` (native `/mr review` serving),
 `worker_pool`, `max_workers`… — all hot-settable via
 `acctl comp set backlog-orchestrator <key> <value>` or the component's
 config form.
+
+> **Task-queue backend — design decision** (coupling audit #321):
+> the orchestrator talks to a ~20-flag CLI surface
+> (`--list/--pop/--claim/--done/--release/--reassign/--reviews/
+> --claim-review/--unclaim-review/--verdict/--submit-plan/--depend/
+> --bump/--add/--json`…) with queue-specific semantics — WIP claims,
+> review rounds, plan submission, dependency bumps. Abstracting that
+> behind a trait would mean re-specifying each workflow twice
+> (CLI and backend-neutral API) for a single known implementation, so
+> **`agentbacklog` stays an explicit, documented prerequisite** rather
+> than a generic interface: installing a different queue is a port of
+> the component, not a config change. The decision is revisitable if a
+> second backend ever ships.

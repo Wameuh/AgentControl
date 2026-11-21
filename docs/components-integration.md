@@ -246,35 +246,49 @@ few clicks — its metadata (description, version, doc) fetched from its
 upstream source.
 
 - **Embedded catalog** in the daemon (const table or packaged JSON):
-  `name, description, repo ("Wameuh/AgentBacklog"), homepage,
+  `name, description, repo ("<owner>/<repo>"), homepage,
   suggested_spec (kind/command/env/healthcheck prefilled), recipe`.
 - **Upstream fetch** (`ComponentCatalog refresh: true`):
   `ureq` (already a daemon dep, rustls TLS) →
   `api.github.com/repos/<repo>/releases/latest` (tag + body); fallback
   `releases` → `tags` → HEAD. Result cached a few minutes.
-  E.g. agentbacklog → `Wameuh/AgentBacklog`, latest release/tag.
 - **Declarative recipes** audited in code (never an arbitrary command
   sent by the client): typed steps `run {argv}` /
-  `write_file {path, content}` / `upsert_spec {}`. Examples:
-  - `agentbacklog`: `uv tool install git+https://github.com/Wameuh/AgentBacklog`
-    (documented upstream install) + `tool` spec.
-  - `agentreviewer`: `uv tool install git+https://github.com/Wameuh/AgentReviewer`
-    (packaged upstream: pyproject + console script) + `config.toml` seed
-    if absent + `process` spec (`agent-reviewer --watch`, in-process
+  `write_file {path, content}` / `upsert_spec {}`. `run` argv may carry
+  `{{key}}` placeholders — each is a declared catalog `param` resolved
+  at install time (provided > `[catalog.<name>]` config > declared
+  default); the consumed keys land in the spec's `params` so the
+  installed component keeps its provenance. Examples:
+  - `agentbacklog`: `uv tool install {{install_spec}}` — `install_spec`
+    defaults to `git+https://github.com/<canonical repo>` but accepts
+    an index package name, a `git+<url>` or a local path → the source
+    is a parameter, never a URL sealed in the argv + `tool` spec.
+  - `agentreviewer`: same `uv tool install {{install_spec}}` shape
+    (packaged upstream: pyproject + console script) + rendered
+    `config.toml` + `process` spec (`agent-reviewer --watch`, in-process
     loop — it receives the injected `AGENTCONTROL_SOCK`/`AGENTCONTROL_TCP`
     and creates its reviews as `origin=component:agentreviewer`
     sessions, "AgentReviewer" group; SIGTERM from `component stop`
     reaches the real process, no external loop orphan).
-  - `backlog-orchestrator` (**superseded — no catalog entry**): the
-    name is reserved for the *internal* component (item #29 ported the
-    loop into the daemon); `component_install`/`component_upsert` on it
-    now fails `reserved component name`. The Python script it replaces
-    stays unversioned — deprecated, kept on hosts only for rollback;
-    migration procedure in `packaging/INSTALL.md` §5 (native component
-    enabled persistently + supervisord conf removed; the shared flock
-    serializes the handover). The dev container ran that migration in
-    #140 — service stopped + `autostart=false`, internal component
-    active.
+- **Catalog overrides** (`[catalog.<name>]` in `config.toml`):
+  `repo` (upstream probed for `latest_version`, GitHub `owner/name`
+  format), `homepage` (doc link shown by the client — derived from
+  `repo` when only the repo is repointed) and `params` (per-key
+  defaults for the entry's declared params). Point a recipe at a
+  fork/mirror without rebuilding: `[catalog.agentbacklog] repo =
+  "acme/AgentBacklog"` or `params.install_spec =
+  "git+https://git.acme.corp/ab"`. Unknown entries/params warn at
+  boot and are ignored — no silent failure.
+- `backlog-orchestrator` (**superseded — no catalog entry**): the
+  name is reserved for the *internal* component (item #29 ported the
+  loop into the daemon); `component_install`/`component_upsert` on it
+  now fails `reserved component name`. The Python script it replaces
+  stays unversioned — deprecated, kept on hosts only for rollback;
+  migration procedure in `packaging/INSTALL.md` §5 (native component
+  enabled persistently + supervisord conf removed; the shared flock
+  serializes the handover). The dev container ran that migration in
+  #140 — service stopped + `autostart=false`, internal component
+  active.
 - **Detection**: the catalog marks each entry `installed` (command
   found on the daemon PATH / file present) + version if probeable → the
   client shows "installed v0.2 — integrate?" vs "available".

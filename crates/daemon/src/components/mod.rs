@@ -139,6 +139,10 @@ pub struct Components {
     /// token → (composant, expiration). Mutex std : sections courtes
     /// (insert/get/retain), jamais tenue pendant un await.
     view_tokens: Mutex<HashMap<String, (String, std::time::Instant)>>,
+    /// Overrides `[catalog.<name>]` de config.toml — appliqués aux
+    /// entrées du catalogue dans `catalog()` et `install()`
+    /// (catalog.rs : repo/homepage + défauts de params).
+    catalog_patches: HashMap<String, crate::server::CatalogPatch>,
 }
 
 impl Components {
@@ -153,6 +157,7 @@ impl Components {
         orch: Arc<OrchProbe>,
         agents: Arc<RwLock<HashMap<String, crate::server::AgentProfile>>>,
         forges: Arc<std::sync::RwLock<crate::forges::ForgeLive>>,
+        catalog_patches: HashMap<String, crate::server::CatalogPatch>,
     ) -> Arc<Self> {
         let dir = root.join("components");
         let specs = match read_specs(&root.join("components.toml")) {
@@ -188,6 +193,20 @@ impl Components {
             }
             map.insert(spec.name.clone(), spec);
         }
+        for (name, patch) in &catalog_patches {
+            let Some(entry) = catalog::entry_named(name) else {
+                warn!("[catalog.{name}] ignored — no such catalog entry");
+                continue;
+            };
+            for key in patch.params.keys() {
+                if !entry.params.iter().any(|p| &p.key == key) {
+                    warn!(
+                        "[catalog.{name}] param « {key} » ignored — not \
+                         declared by the catalog entry"
+                    );
+                }
+            }
+        }
         Arc::new(Self {
             root: root.to_path_buf(),
             dir,
@@ -204,6 +223,7 @@ impl Components {
             forges,
             upstream: Mutex::new(HashMap::new()),
             view_tokens: Mutex::new(HashMap::new()),
+            catalog_patches,
         })
     }
 

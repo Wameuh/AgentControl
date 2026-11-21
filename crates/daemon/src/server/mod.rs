@@ -58,8 +58,8 @@ mod sessions;
 mod term;
 
 pub use cfg::{
-    A2aCfg, AgentConf, AgentProfile, AgentVia, CompactCfg, CompactPartial, CompactPolicy,
-    CompactSrc, OrchCfg, RetentionCfg, WatchdogCfg, DEFAULT_MAX_INSTANCES,
+    A2aCfg, AgentConf, AgentProfile, AgentVia, CatalogPatch, CompactCfg, CompactPartial,
+    CompactPolicy, CompactSrc, OrchCfg, RetentionCfg, WatchdogCfg, DEFAULT_MAX_INSTANCES,
 };
 pub(crate) use orch::OrchProbe;
 
@@ -348,6 +348,7 @@ impl Daemon {
         compact: CompactCfg,
         watchdog: WatchdogCfg,
         provision_skills: bool,
+        catalog: HashMap<String, CatalogPatch>,
     ) -> Result<(Arc<Self>, Vec<String>)> {
         let web = Arc::new(RwLock::new(None));
         let orch = Arc::new(OrchProbe::open(orch));
@@ -420,6 +421,7 @@ impl Daemon {
                 Arc::clone(&orch),
                 Arc::clone(&agents),
                 Arc::clone(&forges),
+                catalog,
             ),
             orch,
             a2a,

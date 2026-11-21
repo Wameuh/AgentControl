@@ -976,6 +976,7 @@ mod tests {
             Arc::new(std::sync::RwLock::new(crate::forges::ForgeLive::new(
                 vec![],
             ))),
+            std::collections::HashMap::new(),
         );
         let absent = tool_spec(&["ac-tool-inexistant-xyz"]);
         // Verdicts d'une passe antérieure (tool alors installé).
@@ -1013,6 +1014,7 @@ mod tests {
             Arc::new(std::sync::RwLock::new(crate::forges::ForgeLive::new(
                 vec![],
             ))),
+            std::collections::HashMap::new(),
         );
         let mut spec = tool_spec(&["sh", "-c", "echo 0.2.0"]);
         spec.min_version = Some("0.3".into());
@@ -1052,6 +1054,7 @@ mod tests {
             Arc::new(std::sync::RwLock::new(crate::forges::ForgeLive::new(
                 vec![],
             ))),
+            std::collections::HashMap::new(),
         );
         c.upsert("t", tool_spec(&["sh"])).await.unwrap();
         // Comme si le tool avait été sondé en échec avant la bascule.
