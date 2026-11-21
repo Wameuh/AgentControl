@@ -9,6 +9,7 @@ import { isAndroid } from "../core/chrome";
 import { t } from "../i18n";
 import { nav } from "../ui/nav";
 import { bindCtx } from "../ui/ctxmenu";
+import { sendPref } from "../features/settings";
 import type { Composer } from "../features/composer";
 
 /** Champ vide + aucune pièce jointe en attente → micro visible à la place
@@ -25,12 +26,13 @@ export function initComposerMobile(composer: Composer) {
   if (!isAndroid()) return;
   // Appui long sur Envoyer → feuille steer/file — seulement quand le mode
   // alternatif existe (btn-alt visible en desktop, masqué par CSS mobile).
+  // Un seul item : celui du mode alternatif — proposer l'action du tap
+  // serait redondant (ex. « Inject now » alors que sendPref = steer).
   bindCtx($("btn-send"), () => {
     if (($("btn-alt") as HTMLElement).hidden) return;
-    nav.sheet([
-      { icon: "steer", label: t("send_steer_now"), fn: () => composer.sendWith("steer") },
-      { icon: "clock", label: t("send_queue"), fn: () => composer.sendWith("normal") },
-    ]);
+    nav.sheet(sendPref() === "steer"
+      ? [{ icon: "clock", label: t("send_queue"), fn: () => composer.sendWith("normal") }]
+      : [{ icon: "steer", label: t("send_steer_now"), fn: () => composer.sendWith("steer") }]);
   });
   // La barre de chips (pièces jointes) bascule hidden sans passer par
   // fitInput — observer pour garder m-input-empty à jour.

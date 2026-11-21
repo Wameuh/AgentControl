@@ -647,4 +647,9 @@ export const de: Record<Key, string> = {
   perm_dock_show: "Anzeigen",
   send_steer_now: "Jetzt einfügen",
   send_queue: "In die Warteschlange",
+  md_wrap: "Zeilen umbrechen",
+  tool_run: "+{n} Werkzeuge",
+  msg_copy: "Nachricht kopieren",
+  term_key_esc: "Esc",
+  term_key_ctrl: "Strg",
 };

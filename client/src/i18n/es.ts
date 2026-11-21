@@ -647,4 +647,9 @@ export const es: Record<Key, string> = {
   perm_dock_show: "Mostrar",
   send_steer_now: "Inyectar ahora",
   send_queue: "Añadir a la cola",
+  md_wrap: "Ajustar líneas",
+  tool_run: "+{n} herramientas",
+  msg_copy: "Copiar mensaje",
+  term_key_esc: "Esc",
+  term_key_ctrl: "Ctrl",
 };

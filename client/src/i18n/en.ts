@@ -644,6 +644,11 @@ export const en = {
   perm_dock_show: "Show",
   send_steer_now: "Inject now",
   send_queue: "Add to queue",
+  md_wrap: "Wrap lines",
+  tool_run: "+{n} tools",
+  msg_copy: "Copy message",
+  term_key_esc: "Esc",
+  term_key_ctrl: "Ctrl",
 } as const;
 
 export type Key = keyof typeof en;

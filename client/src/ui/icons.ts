@@ -148,6 +148,10 @@ const SHAPES: Record<string, string> = {
     '<rect x="4" y="14" width="6" height="6" rx="1"/>' +
     '<path d="M14 14h2.5v2.5H14z"/><path d="M20 14v1.5"/>' +
     '<path d="M14 20h1.5"/><path d="M18.5 18.5H20V20h-1.5z"/>',
+  // Retour à la ligne (bloc de code mobile)
+  wrap:
+    '<path d="M3.5 6h17"/><path d="M3.5 12h14a3 3 0 0 1 0 6H13"/>' +
+    '<path d="m15 15.5-2.5 2.5 2.5 2.5"/><path d="M3.5 18h5"/>',
 };
 
 export type IconName = keyof typeof SHAPES;

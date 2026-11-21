@@ -8,6 +8,7 @@
 import { $, copyText, esc, mkEv, q, showErr } from "../core/dom";
 import { linkify, mdRender } from "../core/format";
 import { call } from "../core/rpc";
+import { isAndroid } from "../core/chrome";
 import { app } from "../core/state";
 import type { AcEvent, CmdInfo, ConfigOption } from "../core/types";
 import { t } from "../i18n";
@@ -333,6 +334,15 @@ export class EventRenderer {
         });
       };
       wrap.appendChild(b);
+      // Mobile (S4) : un <pre> déborde l'écran 390px — bouton « retour à
+      // la ligne » à gauche du bouton copier. Android seul : le desktop
+      // garde le défilement horizontal comme unique comportement.
+      if (isAndroid()) {
+        const w = qIco("wrap", t("md_wrap"));
+        w.className = "md-wrap";
+        w.onclick = () => pre.classList.toggle("wrapped");
+        wrap.appendChild(w);
+      }
     }
   }
 

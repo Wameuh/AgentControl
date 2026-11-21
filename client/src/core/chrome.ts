@@ -277,12 +277,17 @@ export function applyAndroidChrome() {
   // rendu d'un coup, quel que soit l'ordre avec hydrateIcons() du boot.
   $("file-close").dataset.icon = "back";
   $("file-close").innerHTML = icon("back");
+  // Terminal plein écran (S5) : idem — le ✕ devient la flèche retour.
+  $("btn-term-hide").dataset.icon = "back";
+  $("btn-term-hide").innerHTML = icon("back");
   // Envoyer devient un rond ↑ : retirer data-i18n sinon applyStatic() le
-  // réécrit en texte « Send » à chaque changement de langue (C1).
+  // réécrit en texte « Send » à chaque changement de langue (C1). L'aria-
+  // label passe par data-i18n-aria pour suivre le changement de langue.
   const send = $("btn-send");
   delete send.dataset.i18n;
   send.dataset.i18nTitle = "send";
   send.innerHTML = icon("up");
+  send.dataset.i18nAria = "send";
   send.setAttribute("aria-label", t("send"));
 }
 
