@@ -252,6 +252,7 @@ stateDiff.onRawTransition((prev, s) => {
 stateDiff.onGone((key) => notifications.sessionGone(key));
 notifications.bind({
   connCount: () => conns.knownConns().length,
+  connState: (k) => conns.state(k),
   // Clic sur la notif → même trajet qu'une ouverture depuis la sidebar :
   // les overlays de #chat doivent d'abord sortir (motif newSess.openSession).
   openSession: (id, conn) => {
