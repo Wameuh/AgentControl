@@ -16,6 +16,8 @@ import { t } from "../i18n";
 import { icon, type IconName } from "../ui/icons";
 import { hideMenu, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
+import { isAndroid } from "../core/chrome";
+import { msgMenuItems, openMsgCtx } from "../mobile/msg-actions";
 import {
   fillEfforts,
   fillThoughtLevels,
@@ -1616,13 +1618,16 @@ export class ChatView {
 
   /** Menu contextuel « Copier » sur la sélection du fil (même composant
    *  #evctx que les menus session/fichier — action-sheet sur Android). */
-  private openSelCtx(x: number, y: number, txt: string) {
+  private openSelCtx(x: number, y: number, txt: string, msgEl?: HTMLElement) {
     const ctx = this.selCtx;
     ctx.innerHTML = "";
     menuBtn(ctx, t("copy"), "", () => {
       hideMenu(ctx, "evctx");
       void copyText(txt);
     });
+    // Appui long Android avec sélection : les actions du message ciblé
+    // complètent « Copier » (mêmes entrées que le menu sans sélection).
+    if (msgEl && isAndroid()) msgMenuItems(ctx, msgEl);
     placeMenu(ctx, "evctx", x, y);
   }
 
@@ -1884,16 +1889,28 @@ export class ChatView {
     };
     // Clic droit sur une sélection du fil → menu « Copier » (le handler
     // global de main.ts avale le contextmenu hors sélection — sans ça le
-    // texte de la discussion n'était pas copiable). Sans sélection on ne
-    // fait rien : le preventDefault global garde son rôle.
+    // texte de la discussion n'était pas copiable). Android : appui long
+    // sur un message = contextmenu — avec sélection les actions de
+    // message s'ajoutent à « Copier », sans sélection elles les remplacent
+    // (S4 — les boutons survol .pin-tag/.msg-tts sont masqués).
     this.eventsEl.addEventListener("contextmenu", (e) => {
+      const msgEl = (e.target as HTMLElement).closest<HTMLElement>(".ev.msg");
       const sel = getSelection();
-      if (!sel || sel.isCollapsed || !this.eventsEl.contains(sel.anchorNode)) return;
-      const txt = sel.toString();
-      if (!txt.trim()) return;
-      e.preventDefault();
-      e.stopPropagation();
-      this.openSelCtx(e.clientX, e.clientY, txt);
+      const txt =
+        sel && !sel.isCollapsed && this.eventsEl.contains(sel.anchorNode)
+          ? sel.toString()
+          : "";
+      if (txt.trim()) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.openSelCtx(e.clientX, e.clientY, txt, msgEl ?? undefined);
+        return;
+      }
+      if (isAndroid() && msgEl) {
+        e.preventDefault();
+        e.stopPropagation();
+        openMsgCtx(e.clientX, e.clientY, msgEl);
+      }
     });
     // Fermeture du menu « Copier » : clic ailleurs / Échap / scroll du
     // fil — même contrat que #fctx/#sctx (un clic DANS le menu ne doit

@@ -478,6 +478,30 @@ await step("a08d-send-mic", async () => {
   await sleep(300);
 });
 
+// ── Suite d'outils (S4) : seqs 3-4 consécutifs → « +N outils » sur le dernier
+await step("a08e-tool-run", async () => {
+  await ev(() => document.querySelector("#events .ev.tool.run-last")
+    ?.scrollIntoView({ block: "center" }));
+  await sleep(300);
+  const sum = await ev(() => document.querySelector(".run-sum")?.textContent ?? "");
+  if (!sum.trim()) throw new Error("pastille .run-sum absente sur la suite 3-4");
+  if (await ev(() => {
+    const r = document.querySelector(".ev.tool.run-rest");
+    return r && getComputedStyle(r).display !== "none";
+  })) throw new Error("membre run-rest visible alors que la suite est repliée");
+  await shot("a08e-tool-run");
+  await collect("a08e-tool-run");
+  // Tap sur la pastille → la suite se déplie (et se replie au tap suivant).
+  await ev(() => document.querySelector(".run-sum")?.click());
+  await sleep(300);
+  if (await ev(() => {
+    const r = document.querySelector(".ev.tool.run-rest");
+    return !r || getComputedStyle(r).display === "none";
+  })) throw new Error("suite non dépliée au tap de la pastille");
+  await ev(() => document.querySelector(".run-sum")?.click());
+  await sleep(200);
+});
+
 // ── Feuille Session (tap sur le titre de la barre) ───────────────────────────
 await dismissToasts();
 await tap("#m-sbar-title", 400);
@@ -743,6 +767,21 @@ await step("a27-term", async () => {
     V("a27-term", "script-step", "item Terminal absent du ⋮ ou panneau non ouvert (caps watchdog ?)");
   await shot("a27-term");
   await collect("a27-term");
+  // S5 : plein écran + rangée de touches — Ctrl tap = « once » (pastille),
+  // re-tap = relâché. La rangée garde le clavier ouvert (pointerdown).
+  // Checks gatés sur le panneau : le flake caps ci-dessus a déjà son constat.
+  if (await visible("#term-panel")) {
+    if (!(await visible("#term-keys")))
+      V("a27-term", "term-keys", "rangée de touches absente en plein écran");
+    const cst = await ev(() => document.querySelector(".tkey-ctrl")?.dataset.state);
+    if (cst !== "off") V("a27-term", "term-keys", `ctrl initial=${cst}`);
+    await ev(() => document.querySelector(".tkey-ctrl")?.click());
+    await sleep(200);
+    const cst2 = await ev(() => document.querySelector(".tkey-ctrl")?.dataset.state);
+    if (cst2 !== "once") V("a27-term", "term-keys", `ctrl après tap=${cst2}`);
+    await ev(() => document.querySelector(".tkey-ctrl")?.click());
+  }
+  await shot("a12-terminal");
   await ev(() => document.getElementById("btn-term-hide")?.click());
   await sleep(300);
 });

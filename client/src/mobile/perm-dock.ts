@@ -18,6 +18,16 @@ let jumpToSeq: JumpFn;
 let idx = 0;
 let lastCount = 0;
 let lastSid: string | null = null;
+let lastRid: string | null = null;
+/** Saisie du dock question par rid — préservée à travers les re-rendus
+ *  (mutations du fil sans rapport) et la navigation ‹/›. */
+const savedQ = new Map<string, string>();
+
+/** Hauteur du dock exposée en CSS var — #btn-bottom reste au-dessus. */
+function setDockH(d: HTMLElement) {
+  document.body.style.setProperty(
+    "--dock-h", d.hidden ? "0px" : `${d.offsetHeight}px`);
+}
 
 export function initPermDock(jump: JumpFn) {
   if (!isAndroid()) return;
@@ -52,14 +62,18 @@ function sync() {
     // est plus haut dans l'historique (paginée) → ligne « Afficher ».
     if (app.current?.state === "waiting_input") {
       idx = 0;
+      lastRid = null;
       d.innerHTML =
         `<div class="pd-off">${icon("question")}<span>${esc(t("perm_dock_offscreen"))}</span>` +
         `<button type="button" class="pd-show">${esc(t("perm_dock_show"))}</button></div>`;
       d.querySelector<HTMLElement>(".pd-show")!.onclick = () => void showOffscreen();
       d.hidden = false;
+      setDockH(d);
       return;
     }
+    lastRid = null;
     d.hidden = true;
+    setDockH(d);
     return;
   }
   // Une nouvelle demande remonte en tête (ordre DOM = chronologique) ;
@@ -71,9 +85,22 @@ function sync() {
   lastCount = cards.length;
   const card = cards[idx];
   d.hidden = false;
+  // Saisie en cours dans le dock question : la préserver à travers les
+  // re-rendus déclenchés par des mutations sans rapport du fil.
+  const curQ = d.querySelector<HTMLInputElement>(".pd-qrow input");
+  if (curQ && lastRid) savedQ.set(lastRid, curQ.value);
+  const prevQ = savedQ.get(card.dataset.req ?? "") ?? "";
+  lastRid = card.dataset.req ?? null;
   d.innerHTML = "";
-  d.appendChild(
-    card.classList.contains("question") ? renderQuestion(card, cards.length) : renderPerm(card, cards.length));
+  const node = card.classList.contains("question")
+    ? renderQuestion(card, cards.length)
+    : renderPerm(card, cards.length);
+  d.appendChild(node);
+  if (prevQ) {
+    const inp = node.querySelector<HTMLInputElement>(".pd-qrow input");
+    if (inp) inp.value = prevQ;
+  }
+  setDockH(d);
 }
 
 /** La demande est hors DOM : remonter à la carte via les derniers events. */
@@ -83,6 +110,12 @@ async function showOffscreen() {
   const reqs = await findPending(s);
   const target = reqs[reqs.length - 1];
   if (target) void jumpToSeq(target.seq);
+  else {
+    // Résolue entre-temps sans mutation #events : la ligne ne doit pas
+    // rester en façade d'un no-op.
+    dock().hidden = true;
+    setDockH(dock());
+  }
 }
 
 // ── Rendu ─────────────────────────────────────────────────────────────────

@@ -76,9 +76,48 @@ body.android .xterm-helper-textarea {
   min-width: 44px !important; min-height: 44px !important;
 }
 body.android #btn-bottom {
-  bottom: 80px; right: 14px; width: 46px; height: 46px; font-size: 18px;
+  /* Le dock de demande (S3) grandit sous le bouton — --dock-h est posé
+     par perm-dock.ts à chaque sync (0 quand le dock est masqué). */
+  bottom: calc(80px + var(--dock-h, 0px)); right: 14px; width: 46px; height: 46px; font-size: 18px;
 }
 body.android #events { padding: 8px 10px; }
+/* ── Fil pensé pour 390 px (S4) : .ev a width:fit-content sur desktop —
+   un <pre> élargirait la bulle au-delà de l'écran et overflow-x ne
+   servirait jamais ; sur mobile tout rentre dans le viewport. ── */
+body.android #events .ev { max-width: 100%; min-width: 0; }
+/* Messages agent sans cadre : le fond pleine largeur se confond avec la
+   page, la séparation vient du rythme vertical. */
+body.android .msg.agent { background: none; border: 0; padding-inline: 2px; }
+/* Bulles utilisateur : 85 % max, coin asymétrique côté droit. */
+body.android .msg.user { max-width: 85%; border-radius: 18px 18px 5px 18px; }
+/* Tables markdown : bloc scrollable plutôt que colonnes écrasées. */
+body.android .md table.mdt { display: block; overflow-x: auto; max-width: 100%; }
+/* Bouton « retour à la ligne » : à gauche de .md-copy — visuel 30px dans
+   une cible tactile 44px (le ::before porte le chrome du bouton). */
+body.android .md-wrap {
+  position: absolute; top: 0; right: 30px; z-index: 2;
+  width: 44px; height: 44px; border: 0; background: transparent;
+  color: var(--dim); opacity: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+body.android .md-wrap::before {
+  content: ""; position: absolute; inset: 7px; z-index: -1;
+  background: var(--panel-solid); border: 1px solid var(--line);
+  border-radius: 8px;
+}
+body.android .md-wrap .ic { width: 15px; height: 15px; }
+body.android pre.md-code.wrapped { white-space: pre-wrap; word-break: break-word; }
+/* Suites d'outils (S4) : les membres non-derniers disparaissent derrière
+   la pastille « +N outils » du dernier — run-open les réaffiche. */
+body.android .ev.tool.run-rest:not(.run-open) { display: none; }
+body.android .run-sum {
+  margin-left: auto; flex: none; min-height: 44px; padding: 4px 12px;
+  border-radius: 999px; border: 1px solid var(--line);
+  background: rgba(var(--tint-rgb), .06); color: var(--dim); font-size: 12px;
+}
+/* Actions de message par appui long (S4) : les boutons survol sont
+   masqués — l'épingle reste lisible via le contour .ev.pinned. */
+body.android .pin-tag, body.android .msg-tts { display: none; }
 body.android .msg { font-size: 15px; }
 body.android .msg.peer .peer-head { font-size: 12px; }
 body.android .q-item .q-txt { font-size: 12px; }
