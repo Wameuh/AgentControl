@@ -1625,11 +1625,12 @@ impl ReqKind {
 // ---------------------------------------------------------------------------
 
 /// Hôte implicite d'une forge — "" (entrée legacy) se résout là.
-/// Gerrit n'a pas d'hôte implicite : toujours déclaré via `[[forges]]`.
+/// Gerrit et git nu n'ont pas d'hôte implicite : toujours déclarés
+/// via `[[forges]]`.
 pub fn forge_default_host(forge: &str) -> &'static str {
     match forge_kind(forge) {
         "gitlab" => "gitlab.com",
-        "gerrit" => "",
+        "gerrit" | "git" => "",
         _ => "github.com",
     }
 }
@@ -1644,7 +1645,8 @@ pub fn forge_kind(forge: &str) -> &str {
 }
 
 /// URL canonique web d'une référence — lien d'ouverture côté client.
-/// Gerrit sans numéro : URL de recherche du Change-Id.
+/// Gerrit sans numéro : URL de recherche du Change-Id. Git nu : pas
+/// de référence forge, lien vers le projet.
 pub fn forge_url(forge: &str, host: &str, repo: &str, pr: u64, change_id: Option<&str>) -> String {
     match forge_kind(forge) {
         "gitlab" => format!("https://{host}/{repo}/-/merge_requests/{pr}"),
@@ -1655,6 +1657,7 @@ pub fn forge_url(forge: &str, host: &str, repo: &str, pr: u64, change_id: Option
                 format!("https://{host}/q/{}", change_id.unwrap_or_default())
             }
         }
+        "git" => format!("https://{host}/{repo}"),
         _ => format!("https://{host}/{repo}/pull/{pr}"),
     }
 }
@@ -1666,6 +1669,7 @@ pub fn forge_noun(forge: &str) -> &'static str {
     match forge_kind(forge) {
         "gitlab" => "MR",
         "gerrit" => "Change",
+        "git" => "Ref",
         _ => "PR",
     }
 }

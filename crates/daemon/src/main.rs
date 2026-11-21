@@ -66,8 +66,10 @@ struct Config {
     #[serde(default = "default_true")]
     provision_skills: bool,
     /// Forges de review au-delà de GitHub : `[[forges]]` {type, hosts,
-    /// token_env} — détection des URLs GitLab/Gerrit dans les sorties
-    /// outils (voir docs/forges.md). github.com + gitlab.com implicites.
+    /// token_env, transport} — détection des URLs GitLab/Gerrit dans
+    /// les sorties outils et transport du pipeline (gh/rest/glab/
+    /// mcp→rest/git — voir docs/forges.md). github.com + gitlab.com
+    /// implicites.
     #[serde(default)]
     forges: Vec<forges::ForgeCfg>,
     /// Overrides `[catalog.<name>]` des entrées du catalogue embarqué

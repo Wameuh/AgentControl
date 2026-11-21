@@ -755,15 +755,17 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             println!("sync ok ({} vérifiées, {} maj)", out.checked, out.updates.len());
         }
         "review" => {
-            // Review native de la PR (pr_review de l'orchestrateur) :
+            // Review native du change (pr_review de l'orchestrateur) :
             // même pipeline que le commentaire `/mr review` — worktree
             // au head courant, verdict `## Verdict:` posté par le
-            // démon. GitHub only (gh) ; le verdict arrive en message
-            // si acctl tourne dans une session agent (AGENTCONTROL_SESSION).
+            // démon sur la forge résolue (note GitLab, review Gerrit…).
+            // Le verdict arrive en message si acctl tourne dans une
+            // session agent (AGENTCONTROL_SESSION).
             let t = detect_target(args, c, 2).await?;
             anyhow::ensure!(
-                t.change_id.is_none() && t.forge == "github",
-                "acctl pr review : review native = GitHub only"
+                t.change_id.is_none() && t.forge != "git",
+                "acctl pr review : review native indisponible en git nu \
+                 (pas de forge) — lancez la review manuellement"
             );
             anyhow::ensure!(!t.repo.is_empty(), "repo requis (--repo ou remote git)");
             let v = c

@@ -890,11 +890,13 @@ mod tests {
                 kind: "gitlab".into(),
                 hosts: vec![],
                 token_env: None,
+                transport: None,
             },
             crate::forges::ForgeCfg {
                 kind: "gerrit".into(),
                 hosts: vec!["gerrit.corp".into()],
                 token_env: None,
+                transport: None,
             },
         ])
     }

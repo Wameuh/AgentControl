@@ -1420,7 +1420,7 @@ impl Daemon {
                 .iter()
                 .any(|p| !matches!(p.status.as_str(), "closed" | "merged"))
         {
-            self.gh_release_pr(ws, cfg).await.map(|r| r.0).unwrap_or(0)
+            self.release_pr(ws, cfg).await.map(|r| r.0).unwrap_or(0)
         } else {
             0
         };
