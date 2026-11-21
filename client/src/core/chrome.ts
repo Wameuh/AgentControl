@@ -277,6 +277,13 @@ export function applyAndroidChrome() {
   // rendu d'un coup, quel que soit l'ordre avec hydrateIcons() du boot.
   $("file-close").dataset.icon = "back";
   $("file-close").innerHTML = icon("back");
+  // Envoyer devient un rond ↑ : retirer data-i18n sinon applyStatic() le
+  // réécrit en texte « Send » à chaque changement de langue (C1).
+  const send = $("btn-send");
+  delete send.dataset.i18n;
+  send.dataset.i18nTitle = "send";
+  send.innerHTML = icon("up");
+  send.setAttribute("aria-label", t("send"));
 }
 
 export function initPlatform() {

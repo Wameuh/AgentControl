@@ -279,3 +279,133 @@ body.android .ss-approw {
 }
 body.android .ss-approw:active { background: rgba(var(--tint-rgb), .07); }
 body.android .ss-approw .ic { width: 17px; height: 17px; color: var(--dim); }
+
+/* ── Dock de demande (S3) : la permission/question en attente vit dans
+     la zone du pouce, au-dessus du composer. Bord teinté rouge : la
+     carte réclame une décision, pas une simple info. Les boutons du
+     dock délèguent aux vrais boutons de la carte dans le fil. ── */
+#perm-dock { display: none; }
+body.android #perm-dock {
+  display: block; flex: none; margin: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--red) 45%, var(--line));
+  border-bottom: 0; border-radius: 18px 18px 0 0;
+  background: var(--panel-solid);
+  box-shadow: 0 -10px 30px rgba(0, 0, 0, .4);
+  animation: sheet-up .2s ease-out;
+}
+body.android #perm-dock[hidden] { display: none; }
+body.android .pd-card { padding: 8px 10px 10px; }
+body.android .pd-head {
+  display: flex; align-items: center; gap: 8px; min-height: 40px;
+}
+body.android .pd-head > .ic { width: 16px; height: 16px; color: var(--red); }
+body.android .pd-question .pd-head > .ic { color: var(--accent); }
+body.android .pd-title {
+  flex: 1; min-width: 0; font-size: 14.5px; font-weight: 500; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-height: 44px; display: flex; align-items: center; /* tap = voir la carte */
+}
+body.android .pd-kind {
+  flex: none; font-size: 12px; color: var(--dim); padding: 2px 8px;
+  border: 1px solid var(--line); border-radius: 999px;
+}
+body.android .pd-nav { display: flex; align-items: center; gap: 2px; flex: none; }
+body.android .pd-count { font-size: 12px; color: var(--dim); min-width: 30px; text-align: center; }
+body.android .pd-arrow {
+  min-width: 44px; min-height: 44px; padding: 8px; border-radius: 10px;
+  color: var(--dim); display: inline-flex; align-items: center; justify-content: center;
+}
+body.android .pd-arrow .ic { width: 16px; height: 16px; }
+body.android .pd-arrow .pd-rot { transform: rotate(90deg); }
+body.android .pd-arrow:last-child .ic { transform: rotate(-90deg); }
+body.android .pd-detail { margin: 2px 0 6px; }
+body.android .pd-detail summary {
+  font-size: 12.5px; color: var(--dim); cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+body.android .pd-detail pre {
+  font-size: 12px; max-height: 140px; overflow: auto; margin: 6px 0 0;
+  padding: 8px; border-radius: 8px; background: rgba(var(--tint-rgb), .05);
+  white-space: pre-wrap; word-break: break-word;
+}
+body.android .pd-opts {
+  display: grid; grid-template-columns: 1fr 1fr 1.45fr; gap: 8px; margin-top: 8px;
+}
+body.android .pd-opts button {
+  min-height: 44px; border-radius: 12px; font-size: 14.5px;
+  border: 1px solid var(--line); color: var(--ink);
+}
+body.android .pd-opts .btn-reject { color: var(--red); }
+body.android .pd-opts .pd-primary {
+  background: var(--accent); border-color: var(--accent);
+  color: var(--msg-user-fg); font-weight: 500;
+}
+body.android .pd-qrow { display: flex; gap: 8px; margin-top: 8px; }
+body.android .pd-qrow input {
+  flex: 1; min-width: 0; min-height: 44px; font-size: 16px;
+  border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px;
+  background: rgba(var(--tint-rgb), .05); color: var(--ink);
+}
+body.android .pd-qrow button {
+  flex: none; min-height: 44px; border-radius: 12px; font-size: 14.5px;
+  border: 1px solid var(--line); color: var(--ink); padding: 8px 14px;
+}
+body.android .pd-qrow .btn-reject { color: var(--red); }
+body.android .pd-qrow .pd-primary {
+  background: var(--accent); border-color: var(--accent);
+  color: var(--msg-user-fg); font-weight: 500;
+}
+/* Demande hors DOM (paginée plus haut) : ligne discrète + bouton Show. */
+body.android .pd-off {
+  display: flex; align-items: center; gap: 8px;
+  min-height: 48px; padding: 8px 10px;
+}
+body.android .pd-off > .ic { width: 15px; height: 15px; color: var(--red); flex: none; }
+body.android .pd-off span {
+  flex: 1; min-width: 0; font-size: 13.5px; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+body.android .pd-off .pd-show {
+  flex: none; min-height: 44px; padding: 6px 16px; border-radius: 12px;
+  border: 1px solid var(--line-strong); color: var(--ink); font-size: 14px;
+}
+
+/* ── Composer pilule (C1) : « + » et champ fusionnés en une capsule,
+     micro à droite tant que le champ est vide, rond Envoyer accent
+     dès qu'il y a du texte (body.m-input-empty posé par syncSendMic).
+     L'appui long sur Envoyer ouvre la feuille steer/file (btn-alt,
+     masqué par CSS, reste la référence « mode alternatif dispo »). ── */
+body.android #btn-alt { display: none !important; }
+body.android #composer { column-gap: 0; }
+body.android #btn-mic, body.android #btn-send { margin-left: 8px; }
+/* Bouton « + » fusionné au champ : moitié gauche de la capsule, sans
+   bord droit ni écart — même fond que #input. Étiré sur la hauteur
+   du champ (le composer wrappe : align-self stretch). */
+body.android #btn-attach {
+  width: 40px; height: auto; align-self: stretch;
+  border-radius: 23px 0 0 23px; border-right: 0;
+  background: rgba(var(--tint-rgb), .05);
+}
+body.android #btn-attach .ic { width: 18px; height: 18px; }
+body.android #input { border-radius: 0 23px 23px 0; border-left: 0; padding-left: 10px; }
+/* Miroir autosize : mêmes métriques que #input. */
+body.android #input-wrap.grow #input-ghost { padding-left: 10px; }
+/* Pas de capability fichiers → « + » absent : le champ reprend sa
+   capsule complète (bord gauche + rayon des deux côtés). */
+body.android #btn-attach[hidden] ~ #input-wrap #input {
+  border-radius: 23px; border-left: 1px solid var(--line); padding-left: 11px;
+}
+/* Rond Envoyer : icône ↑ posée par applyAndroidChrome (chrome.ts). */
+body.android #btn-send {
+  width: 46px; height: 46px; min-width: 46px; min-height: 46px; flex: none;
+  align-self: flex-end; padding: 0; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent); color: var(--msg-user-fg); font-size: 15px;
+}
+body.android #btn-send .ic { width: 20px; height: 20px; }
+/* Le micro garde son carré mais remplace Envoyer tant que le champ est
+   vide ; une frappe (ou un enregistrement .stt-on) fait revenir Envoyer
+   sans perdre le micro en cours d'écoute. */
+body.android.m-input-empty #btn-mic:not([hidden]) ~ #btn-send { display: none; }
+body.android:not(.m-input-empty) #btn-mic:not(.stt-on) { display: none; }
+body.android #btn-mic { align-self: flex-end; }

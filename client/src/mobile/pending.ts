@@ -1,0 +1,50 @@
+// ---------------------------------------------------------------------------
+// Demandes d'agent en attente (S3) : ids via session_info.pending, contenu
+// via les derniers events du journal — partagé entre le dock de permission
+// et d'éventuelles vues « en attente ». Aucun RPC nouveau.
+// ---------------------------------------------------------------------------
+
+import { call } from "../core/rpc";
+import type { AcEvent, SessionMeta } from "../core/types";
+
+export interface PendingReq {
+  seq: number;
+  request_id: string;
+  type: "permission_request" | "question_request";
+  title: string;
+  kind?: string;
+  detail?: string;
+  options: { option_id: string; name: string; kind: string }[];
+}
+
+/** Demandes en attente d'une session, même non ouverte : ids via
+ *  session_info.pending, contenu via les 200 derniers events. */
+export async function findPending(s: SessionMeta): Promise<PendingReq[]> {
+  const info = await call<{ pending?: string[] }>("session_info", {
+    session: s.id,
+    conn: s.conn,
+  }).catch(() => null);
+  const ids = info?.pending;
+  if (!ids?.length) return [];
+  const res = await call<{ events?: AcEvent[] }>("events", {
+    session: s.id,
+    conn: s.conn,
+    limit: 200,
+  }).catch(() => null);
+  const out: PendingReq[] = [];
+  for (const ev of res?.events ?? []) {
+    if (ev.type !== "permission_request" && ev.type !== "question_request") continue;
+    const rid = ev.request_id as string;
+    if (!rid || !ids.includes(rid)) continue;
+    out.push({
+      seq: ev.seq as number,
+      request_id: rid,
+      type: ev.type,
+      title: (ev.title ?? ev.message) as string,
+      kind: ev.kind as string | undefined,
+      detail: ev.detail as string | undefined,
+      options: (ev.options as PendingReq["options"]) ?? [],
+    });
+  }
+  return out;
+}

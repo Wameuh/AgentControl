@@ -46,10 +46,15 @@ export function initSessionSheet(d: SessionSheetDeps) {
 
 const dlg = () => $("dlg-session") as HTMLDialogElement;
 
+/** Arme du bouton « Arrêter l'agent » : survit aux re-rendus live de la
+ *  feuille (état session) — réarmé à chaque nouvelle ouverture. */
+let killArmed = false;
+
 /** Ouvre la feuille — rendue à l'ouverture puis rafraîchie par
  *  renderSessionBar tant qu'elle reste affichée. */
 export function openSessionSheet() {
   if (!isAndroid() || !app.current || dlg().open) return;
+  killArmed = false;
   renderSheet();
   dlg().showModal();
 }
@@ -59,6 +64,9 @@ export function openSessionSheet() {
  *  re-rendu — sinon le focus et le texte tapé seraient perdus. */
 export function refreshSessionSheet() {
   if (!dlg().open) return;
+  // Session disparue (kill depuis ailleurs, conn perdue) : une feuille
+  // qui délègue à des contrôles d'une session morte n'a plus de sens.
+  if (!app.current) { closeSheet(); return; }
   const ae = document.activeElement as HTMLElement | null;
   if (ae && dlg().contains(ae) && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA")) return;
   renderSheet();
@@ -150,11 +158,16 @@ function renderOpts() {
     const h = el as HTMLElement;
     if (h.hidden) continue;
     if (h instanceof HTMLSelectElement) {
-      host.appendChild(optSection(OPT_LABELS[h.id] ? t(OPT_LABELS[h.id]) : h.title || h.id, h));
+      host.appendChild(optSection(
+        OPT_LABELS[h.id] ? t(OPT_LABELS[h.id]) : h.title || h.id,
+        h, h.id === "model-select"));
     } else if (h.id === "model-free") {
       host.appendChild(freeSection(h as HTMLInputElement));
     } else if (h.id === "dyn-opts") {
+      // Les selects enfants peuvent être masqués un à un (option sans
+      // valeur pour l'agent courant) — même filtre que le parent.
       for (const sel of h.querySelectorAll<HTMLSelectElement>("select")) {
+        if (sel.hidden) continue;
         host.appendChild(optSection(sel.title || sel.id, sel));
       }
     }
@@ -162,15 +175,17 @@ function renderOpts() {
   }
 }
 
-/** Libellé + refresh (caps) d'une section d'options. */
-function optLabel(labelText: string): HTMLElement {
+/** Libellé de section d'options ; `refresh` ajoute le bouton « re-sonder
+ *  les caps » — pertinent seulement sur la section Modèle (il re-scrute
+ *  modes/modèles, pas chaque select). */
+function optLabel(labelText: string, refresh = false): HTMLElement {
   const lab = document.createElement("div");
   lab.className = "ss-label";
   const txt = document.createElement("span");
   txt.textContent = labelText;
   lab.appendChild(txt);
   const caps = $("btn-caps-refresh") as HTMLButtonElement;
-  if (!caps.hidden) {
+  if (refresh && !caps.hidden) {
     const r = document.createElement("button");
     r.type = "button";
     r.className = "ss-refresh";
@@ -185,10 +200,14 @@ function optLabel(labelText: string): HTMLElement {
 
 /** Section d'un <select> : segmenté si ≤4 options courtes, sinon liste
  *  radio. Le choix délègue au select réel (value + "change"). */
-function optSection(labelText: string, sel: HTMLSelectElement): HTMLElement {
+function optSection(
+  labelText: string,
+  sel: HTMLSelectElement,
+  refresh = false,
+): HTMLElement {
   const sec = document.createElement("div");
   sec.className = "ss-sec";
-  sec.appendChild(optLabel(labelText));
+  sec.appendChild(optLabel(labelText, refresh));
   const items = [...sel.options].map((o) => {
     const txt = o.textContent ?? o.value;
     const i = txt.indexOf(" · ");
@@ -239,7 +258,7 @@ function optSection(labelText: string, sel: HTMLSelectElement): HTMLElement {
 function freeSection(mf: HTMLInputElement): HTMLElement {
   const sec = document.createElement("div");
   sec.className = "ss-sec";
-  sec.appendChild(optLabel(t("ss_model")));
+  sec.appendChild(optLabel(t("ss_model"), true));
   const row = document.createElement("div");
   row.className = "ss-free";
   const inp = document.createElement("input");
@@ -309,14 +328,18 @@ function renderActs(s: SessionMeta) {
   }
   host.appendChild(grid);
   // « Arrêter l'agent » — destructif → double-tap armé (même motif que
-  // ctx_exit dans le menu session de la sidebar).
+  // ctx_exit dans le menu session de la sidebar). L'arme vit dans un
+  // flag module (killArmed) : un re-rendu live reconstruit ce bouton —
+  // dataset.armed serait perdu et le premier tap devrait être refait.
   const kill = document.createElement("button");
   kill.type = "button";
   kill.className = "ss-danger";
-  kill.innerHTML = `${icon("stop")}<span>${esc(t("ctx_exit"))}</span>`;
+  kill.innerHTML = `${icon("stop")}<span>${esc(killArmed ? t("ss_kill_confirm") : t("ctx_exit"))}</span>`;
+  if (killArmed) kill.dataset.armed = "1";
   kill.onclick = () => {
     const lbl = kill.querySelector("span")!;
     if (!kill.dataset.armed) {
+      killArmed = true;
       kill.dataset.armed = "1";
       lbl.textContent = t("ss_kill_confirm");
       return;

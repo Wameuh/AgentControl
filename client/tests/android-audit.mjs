@@ -445,6 +445,39 @@ await step("a08b-queue-sheet", async () => {
   await sleep(300);
 });
 
+// ── Dock de permission (S3) : la carte r1 vit au-dessus du composer ──────────
+await step("a08c-perm-dock", async () => {
+  if (!(await visible("#perm-dock"))) throw new Error("#perm-dock absent");
+  if (!(await visible("#perm-dock .pd-opts"))) throw new Error("pd-opts absent");
+  await shot("a08c-perm-dock");
+  await collect("a08c-perm-dock");
+  // Réponse depuis le dock = clic sur le bouton réel de la carte : la
+  // carte passe .done et le dock se referme tout seul (observer rAF).
+  await click("#perm-dock .pd-opts .btn-allow.pd-primary");
+  await sleep(400);
+  if (await ev(() => !document.querySelector("#events .ev.perm.done")))
+    throw new Error("carte perm non résolue par le dock");
+  if (await visible("#perm-dock")) throw new Error("dock encore visible après résolution");
+});
+
+// ── Composer pilule (C1) : classe m-input-empty selon le contenu ─────────────
+await step("a08d-send-mic", async () => {
+  const empty = await ev(() => document.body.classList.contains("m-input-empty"));
+  if (!empty) throw new Error("m-input-empty absent avec champ vide");
+  await ev(() => {
+    const i = document.getElementById("input");
+    i.value = "bonjour"; i.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await sleep(300);
+  const still = await ev(() => document.body.classList.contains("m-input-empty"));
+  if (still) throw new Error("m-input-empty persistant après frappe");
+  await ev(() => {
+    const i = document.getElementById("input");
+    i.value = ""; i.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await sleep(300);
+});
+
 // ── Feuille Session (tap sur le titre de la barre) ───────────────────────────
 await dismissToasts();
 await tap("#m-sbar-title", 400);
