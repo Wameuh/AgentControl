@@ -9,6 +9,8 @@ export const es: Record<Key, string> = {
   connect: "Conectar", new_conn: "Nueva conexión",
   conn_ok: "conectado", reconnecting: "reconectando…",
   conn_offline: "conexión perdida", retry_now: "reconectar ahora",
+  home_conn_new: "Nueva conexión", home_conn_pair: "Emparejar un dispositivo",
+  home_conn_retry: "Reconectar",
   web_token_h: "Token de acceso requerido",
   web_token_msg: "Esta interfaz es servida por el daemon. Pegue el token de web.token (mostrado por acctl status), o abra la URL completa que imprime.",
   web_token_ph: "token de acceso",

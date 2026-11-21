@@ -6,6 +6,8 @@ export const en = {
   connect: "Connect", new_conn: "New connection",
   conn_ok: "connected", reconnecting: "reconnecting…",
   conn_offline: "connection lost", retry_now: "reconnect now",
+  home_conn_new: "New connection", home_conn_pair: "Pair a device",
+  home_conn_retry: "Reconnect",
   web_token_h: "Access token required",
   web_token_msg: "This interface is served by the daemon. Paste the token from web.token (shown by acctl status), or open the full URL it prints.",
   web_token_ph: "access token",

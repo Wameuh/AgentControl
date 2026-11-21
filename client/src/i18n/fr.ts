@@ -8,6 +8,8 @@ export const fr: Record<Key, string> = {
   connect: "Connecter", new_conn: "Nouvelle connexion",
   conn_ok: "connecté", reconnecting: "reconnexion…",
   conn_offline: "connexion perdue", retry_now: "reconnecter",
+  home_conn_new: "Nouvelle connexion", home_conn_pair: "Appairer un appareil",
+  home_conn_retry: "Reconnecter",
   web_token_h: "Token d'accès requis",
   web_token_msg: "Cette interface est servie par le démon. Collez le token de web.token (affiché par acctl status), ou ouvrez l'URL complète qu'il affiche.",
   web_token_ph: "token d'accès",

@@ -7,6 +7,7 @@ import { invoke, isWeb } from "../core/bridge";
 import { gemSVG } from "../crystal";
 import { $ } from "../core/dom";
 import { t } from "../i18n";
+import type { SessionMeta } from "../core/types";
 
 /** Gemme d'état : dorée working, violette compacting, rouge question/failed,
  *  verte idle, grise dead, **opale wait** — attente transitoire (backoff
@@ -56,6 +57,29 @@ export function setAppIcon(state: string) {
   lastIconState = state;
   invoke("set_app_icon", { state }).catch(() => {});
 }
+
+/** État agrégé de la flotte → la valeur passée à setAppIcon : « red » si
+ *  une question attend, « gold » si un agent tourne, « violet » si une
+ *  session compacte, « base » tant qu'il reste des sessions vivantes,
+ *  « grey » sinon. Partagé par l'icône fenêtre et l'onglet Agents mobile. */
+export function aggregateIcon(list: SessionMeta[]): string {
+  const live = list.filter((s) =>
+    !s.offline && s.state !== "dead" && s.state !== "interrupted" &&
+    s.state !== "asleep" && s.state !== "wait-asleep");
+  return live.some((s) => s.state === "waiting_input") ? "red"
+    : live.some((s) =>
+        s.state === "working" || s.state === "running" || s.state === "starting")
+      ? "gold"
+    : live.some((s) => s.state === "compacting") ? "violet"
+    : live.length > 0 ? "base" : "grey";
+}
+
+/** État agrégé (valeur d'aggregateIcon) → rôle de gemme pour l'onglet
+ *  Agents de la barre basse mobile. */
+export const AGG_ICON_ROLE: Record<string, string> = {
+  red: "inference", gold: "human", violet: "agent",
+  base: "neutral", grey: "slate",
+};
 
 /** Bloc `host` du daemon_status de la conn active — absent sur un vieux
  *  démon → la section reste masquée silencieusement. */

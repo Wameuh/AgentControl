@@ -9,9 +9,11 @@ import { fmtDur } from "../core/format";
 import { call } from "../core/rpc";
 import { app } from "../core/state";
 import { isAndroid, meshSetMood } from "../core/chrome";
+import { connLabel } from "../core/conn";
 import type { PrEntry, SessionMeta } from "../core/types";
 import { getLang, t } from "../i18n";
-import { dotCls, dotIcon, setAppIcon } from "./status";
+import { gemSVG } from "../crystal";
+import { aggregateIcon, AGG_ICON_ROLE, dotCls, dotIcon, setAppIcon } from "./status";
 import { icon } from "../ui/icons";
 import { bindCtx, hideSessCtx, menuBtn, placeMenu } from "../ui/ctxmenu";
 import { nav } from "../ui/nav";
@@ -318,23 +320,14 @@ export class Sidebar {
     // fusionnées (cache offline inclus) + compteur sur l'onglet.
     this.prsView.setData(this.prRows, list, this.prFailed);
     this.renderPrBadge();
-    const live = list.filter((s) =>
-      !s.offline && s.state !== "dead" && s.state !== "interrupted" &&
-      s.state !== "asleep" && s.state !== "wait-asleep");
-    setAppIcon(
-      live.some((s) => s.state === "waiting_input")
-        ? "red"
-        : live.some(
-              (s) =>
-                s.state === "working" ||
-                s.state === "running" ||
-                s.state === "starting",
-            )
-          ? "gold"
-          : live.some((s) => s.state === "compacting")
-            ? "violet"
-            : live.length > 0 ? "base" : "grey",
-    );
+    const agg = aggregateIcon(list);
+    setAppIcon(agg);
+    // Onglet « Agents » de la barre basse : sa pastille porte la gemme
+    // agrégée de la flotte (rouge question, dorée en cours…).
+    if (isAndroid()) {
+      const ic = $("sv-agents").querySelector(".sv-ic");
+      if (ic) ic.innerHTML = gemSVG(AGG_ICON_ROLE[agg] ?? "neutral");
+    }
     // Session courante disparue alors que sa connexion répond encore
     // (sessions du même serveur présentes) → supprimée côté serveur.
     this.chat.markGoneIfMissing(list);
@@ -561,6 +554,12 @@ export class Sidebar {
     $("pr-list").hidden = v !== "repos";
     $("backlog-list").hidden = v !== "backlog";
     $("btn-new-session").hidden = v !== "agents";
+    // Titre de la barre d'accueil mobile : libellé de la vue courante.
+    if (isAndroid()) {
+      $("m-home-title").textContent = t(
+        m ? "map_title" : v === "repos" ? "view_repos" : v === "backlog" ? "view_backlog" : "view_agents",
+      );
+    }
     // L'onglet backlog pilote sa cadence de fetch (rapide actif, lente
     // pour le badge inactif) — la bascule se fait ici. Pareil pour
     // le poll pr_sync de l'onglet repos (arrêté hors de la vue).
@@ -746,12 +745,15 @@ export class Sidebar {
       const connClosed = !f && localStorage.getItem(key) === "1";
       const st = this.conns.state(conn) ?? "ok";
       const ch = document.createElement("div");
-      ch.className = "grp-head" + (connClosed ? " closed" : "");
+      ch.className = "grp-head grp-conn" + (connClosed ? " closed" : "");
       const badge = this.conns.hasCfg(conn)
         ? `<span class="conn-st ${st === "ok" ? "ok" : st === "reconnecting" ? "warn" : "bad"}"` +
           ` title="${q(esc(this.conns.tip(st, conn)))}">${st === "reconnecting" ? icon("refresh") : icon("dot")}</span> `
         : "";
-      ch.innerHTML = `<span class="grp-arrow">${icon(connClosed ? "chev-right" : "chev-down")}</span> ${badge}<span class="grp-name">${this.hl(conn)}</span>` +
+      // Mobile : le libellé humain de la connexion (cfg.label) plutôt que
+      // la clé brute — l'en-tête garde sa casse (CSS text-transform:none).
+      const connName = isAndroid() ? connLabel(conn) : conn;
+      ch.innerHTML = `<span class="grp-arrow">${icon(connClosed ? "chev-right" : "chev-down")}</span> ${badge}<span class="grp-name">${this.hl(connName)}</span>` +
         `<button class="grp-add" title="${esc(t("new_group"))}">${icon("folder-plus")}` +
         `<span class="grp-add-lbl">${esc(t("new_group_lbl"))}</span></button>`;
       ch.onclick = () => {
@@ -1160,8 +1162,9 @@ export class Sidebar {
     div.innerHTML = `<span class="dot st-${dotCls(s.state, s.last_error)}" title="${q(esc(dotTip))}">${dotIcon(s.state, s.last_error)}</span><span class="t">${this.hl(s.title)}</span>${originHtml}${prHtml}<span class="a">${this.hl(s.agent)}</span><button class="sess-del" title="Supprimer">${icon("close")}</button>`;
     div.onclick = () => {
       void this.openSession(s.id);
-      // Mobile : fermer le drawer après sélection.
-      nav.closeDrawer();
+      // Mobile : l'écran Session glisse depuis la droite (retour ← /
+      // système ramène à l'accueil).
+      nav.enterSession();
     };
     bindCtx(div, (x, y) => this.openSessionCtx(x, y, s, div));
     if (!isAndroid()) {

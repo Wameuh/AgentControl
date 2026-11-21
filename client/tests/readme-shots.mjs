@@ -150,12 +150,12 @@ async function openSession(p, frag = "Refactor") {
   await openSession(p);
   await shot("android-chat");
 
-  // Drawer (sessions + groupes + actions) — ☰ dans la barre session.
+  // Accueil Agents plein écran (phase 3 — plus de drawer) : ‹ barre
+  // session = retour système.
   await tap("#m-sbar-nav", 500);
-  await shot("android-drawer");
-  // Retour chat puis fichiers plein écran via la feuille Session.
-  await p.evaluate(() => document.getElementById("scrim")?.click());
-  await sleep(350);
+  await shot("android-home");
+  // Retour en session puis fichiers plein écran via la feuille Session.
+  await openSession(p);
   await tap("#m-sbar-title", 350);
   await clickText(p, "#dlg-session .ss-act", "fichier|files");
   await sleep(700);
