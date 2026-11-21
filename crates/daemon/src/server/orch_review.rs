@@ -441,7 +441,10 @@ impl Daemon {
             let sha = entry.get("sha").and_then(Value::as_str).unwrap_or("");
             if let Some((repo, pr)) = key.split_once('#') {
                 if let Ok(pr_n) = pr.parse::<u64>() {
-                    remove_review_worktree(Path::new(ws_of(cfg, repo)), &pr_review_dir(pr_n, sha));
+                    remove_review_worktree(
+                        Path::new(ws_of(cfg, repo)),
+                        &pr_review_dir(cfg, pr_n, sha),
+                    );
                 }
             }
             if let Some(e) = entry.as_object_mut() {
@@ -458,7 +461,14 @@ impl Daemon {
     /// `cfg.pr_review`. Jamais fatale au tick : les erreurs par PR
     /// sont loguées, la passe continue.
     pub(crate) async fn orch_pr_review_tick(self: &Arc<Self>) -> Result<()> {
-        let cfg = self.orch.cfg.read().unwrap().clone();
+        let cfg = self.orch_cfg_snapshot().await;
+        // Profil reviewer PR introuvable → chaque spawn échouerait
+        // « unknown agent » : erreur claire plutôt que du churn.
+        anyhow::ensure!(
+            !cfg.agent_or(&cfg.pr_reviewer_agent).is_empty(),
+            "no available agent profile — declare an [agents.*] \
+             profile or set `agent`/`pr_reviewer_agent` explicitly"
+        );
         let now = now_secs();
         let mut st = self.orch.state.lock().unwrap().clone();
         // Snapshot `pr_reviews`/`pr_review_requests` au clone : les
@@ -565,7 +575,10 @@ impl Daemon {
                 if !sid.is_empty() {
                     self.pr_review_rm_session(&key, sid, &mut st).await;
                 }
-                remove_review_worktree(Path::new(ws_of(&cfg, repo)), &pr_review_dir(pr_n, sha));
+                remove_review_worktree(
+                    Path::new(ws_of(&cfg, repo)),
+                    &pr_review_dir(&cfg, pr_n, sha),
+                );
                 self.gh_comment(repo, pr_n, &fail_comment("disabled"), &cfg)
                     .await;
                 if let Some(e) = st.pr_reviews.get_mut(&key) {
@@ -648,7 +661,7 @@ impl Daemon {
             let Ok(pr_n) = pr.parse::<u64>() else {
                 continue;
             };
-            let wt = pr_review_dir(pr_n, sha);
+            let wt = pr_review_dir(&cfg, pr_n, sha);
             // Verdict extrait mais post échoué au tick précédent →
             // retry borné. Le body brut est persisté : le texte final
             // est RECONSTRUIT à chaque tentative (head re-vérifié —
@@ -836,7 +849,7 @@ impl Daemon {
             let Ok(pr_n) = pr.parse::<u64>() else {
                 continue;
             };
-            let wt = pr_review_dir(pr_n, &sha);
+            let wt = pr_review_dir(&cfg, pr_n, &sha);
             if let Some(h) = self.gh_pr_head(repo, pr_n, &cfg).await {
                 if h != sha {
                     self.gh_comment(repo, pr_n, &fail_comment("stale — head changed"), &cfg)
@@ -1049,7 +1062,7 @@ impl Daemon {
                         &repo,
                         pr_n,
                         &mut st,
-                        &pr_review_dir(pr_n, &head_sha),
+                        &pr_review_dir(&cfg, pr_n, &head_sha),
                         &cfg,
                     )
                     .await;
@@ -1154,7 +1167,7 @@ impl Daemon {
                         &repo,
                         pr_n,
                         &mut st,
-                        &pr_review_dir(pr_n, &head_sha),
+                        &pr_review_dir(&cfg, pr_n, &head_sha),
                         &cfg,
                     )
                     .await;
@@ -1821,8 +1834,8 @@ impl Daemon {
         );
         // Ref de la PR fetchée (fallback SHA si `pull/N/head` absente)
         // puis worktree détaché au SHA exact.
-        let wt = pr_review_dir(pr_n, sha);
-        let _ = std::fs::create_dir_all(pr_reviews_root());
+        let wt = pr_review_dir(cfg, pr_n, sha);
+        let _ = std::fs::create_dir_all(pr_reviews_root(cfg));
         fetch_pr_head(Path::new(ws), pr_n, sha, key).await?;
         let (rc, _o, e) = run_out(
             &[
@@ -1910,7 +1923,7 @@ impl Daemon {
     /// démon redémarré) : `git worktree remove --force` + `prune`, puis
     /// suppression du répertoire.
     async fn pr_review_sweep_orphans(self: &Arc<Self>, cfg: &cfg::OrchCfg) {
-        let root = pr_reviews_root();
+        let root = pr_reviews_root(cfg);
         let Ok(rd) = std::fs::read_dir(&root) else {
             return;
         };
@@ -1946,15 +1959,15 @@ pub(super) fn remove_review_worktree(ws: &Path, wt: &Path) {
     let _ = std::fs::remove_dir_all(wt);
 }
 
-/// Racine des worktrees de review (hors checkout — `state_dir`).
-pub(super) fn pr_reviews_root() -> PathBuf {
-    state_dir().join("pr-reviews")
+/// Racine des worktrees de review (hors checkout — `state_dir` configuré).
+pub(super) fn pr_reviews_root(cfg: &OrchCfg) -> PathBuf {
+    cfg.state_dir().join("pr-reviews")
 }
 
 /// Worktree d'une review : `pr-<N>-<sha7>` sous la racine dédiée.
-fn pr_review_dir(pr_n: u64, sha: &str) -> PathBuf {
+fn pr_review_dir(cfg: &OrchCfg, pr_n: u64, sha: &str) -> PathBuf {
     let s7: String = sha.chars().take(7).collect();
-    pr_reviews_root().join(format!("pr-{pr_n}-{s7}"))
+    pr_reviews_root(cfg).join(format!("pr-{pr_n}-{s7}"))
 }
 
 /// Numéro de titre dérivé du numéro de PR (stable, pas de compteur
@@ -2218,14 +2231,20 @@ mod tests {
             .output()
             .unwrap();
         // sha-in-want comme GitHub.
-        git(&remote, &["config", "uploadpack.allowAnySHA1InWant", "true"]);
+        git(
+            &remote,
+            &["config", "uploadpack.allowAnySHA1InWant", "true"],
+        );
         std::fs::create_dir_all(&work).unwrap();
         std::process::Command::new("git")
             .arg("init")
             .arg(&work)
             .output()
             .unwrap();
-        git(&work, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        git(
+            &work,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
         std::fs::write(work.join("f.txt"), "x").unwrap();
         git(&work, &["add", "f.txt"]);
         git(
@@ -2256,13 +2275,7 @@ mod tests {
         let wt = work.parent().unwrap().join("wt-detache");
         git(
             &work,
-            &[
-                "worktree",
-                "add",
-                "--detach",
-                wt.to_str().unwrap(),
-                &sha,
-            ],
+            &["worktree", "add", "--detach", wt.to_str().unwrap(), &sha],
         );
         assert_eq!(
             git(&wt, &["rev-parse", "HEAD"]),
@@ -2281,7 +2294,9 @@ mod tests {
         let e = fetch_pr_head(&work, 383, &bogus, "W/R#383")
             .await
             .unwrap_err();
-        let r = e.downcast_ref::<RefMissingError>().expect("RefMissingError");
+        let r = e
+            .downcast_ref::<RefMissingError>()
+            .expect("RefMissingError");
         assert!(r.0.contains("pull/383/head absente"));
         assert!(r.0.contains("pousser un nouveau commit"));
         let _ = std::fs::remove_dir_all(work.parent().unwrap());
@@ -2302,12 +2317,7 @@ mod tests {
             .unwrap();
         git(
             &work,
-            &[
-                "remote",
-                "add",
-                "origin",
-                "/nonexistent/ac-prfetch-remote",
-            ],
+            &["remote", "add", "origin", "/nonexistent/ac-prfetch-remote"],
         );
         let e = fetch_pr_head(&work, 383, &"a".repeat(40), "W/R#383")
             .await

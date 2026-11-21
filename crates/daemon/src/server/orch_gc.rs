@@ -204,7 +204,7 @@ impl Daemon {
     /// n'est jamais touché.
     async fn gc_review_worktree(self: &Arc<Self>, cwd: &str, cfg: &cfg::OrchCfg) {
         let p = Path::new(cwd);
-        if !p.starts_with(pr_reviews_root()) || !p.is_dir() {
+        if !p.starts_with(pr_reviews_root(cfg)) || !p.is_dir() {
             return;
         }
         let mut wss: Vec<String> = vec![cfg.workspace.clone()];

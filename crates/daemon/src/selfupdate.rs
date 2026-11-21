@@ -13,6 +13,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 const REPO: &str = "Wameuh/AgentControl";
 
+/// Outils non-`acp-*` livrés à la racine du tarball et installés à
+/// côté du démon (sur le PATH injecté aux sessions) : `ac-wait` est
+/// exigé par les prompts workers et son répertoire d'état est scanné
+/// par l'orchestrateur — il suit le même canal d'installation que les
+/// adaptateurs `acp-*` (update + rattrapage boot).
+const SHIPPED_TOOLS: &[&str] = &["ac-wait"];
+
 /// Un seul update à la fois par process : les chemins temporaires sont
 /// namespacés par pid → deux requêtes concurrentes partageraient le
 /// staging (extractions entrelacées, rename croisés → binaire brické).
@@ -120,19 +127,21 @@ pub fn self_update(version: &str) -> Result<Value> {
     }))
 }
 
-/// Rattrapage au boot (item #289) : le swap des `acp-*` de #361
-/// s'exécute dans l'ANCIEN démon pendant l'update — un serveur qui
-/// update depuis un updater buggé (≤ 0.10.4-rc.9) vers une version
-/// fixée ne reçoit donc jamais les adaptateurs maison. Le nouveau
-/// démon vérifie au boot que les `acp-*` attendus (argv[0] `acp-*`
-/// du registre `agents_auto`) sont bien à côté de l'exe ; si l'un
-/// manque, il télécharge l'asset de SA PROPRE version et pose les
-/// `acp-*` absents — une seule commande d'update par serveur.
+/// Rattrapage au boot (item #289) : le swap des binaires livrés de
+/// #361 s'exécute dans l'ANCIEN démon pendant l'update — un serveur
+/// qui update depuis un updater buggé (≤ 0.10.4-rc.9) vers une
+/// version fixée ne reçoit donc jamais les adaptateurs maison ; même
+/// cas pour `ac-wait` ajouté au tarball après coup (#320 — un vieil
+/// updater ne le pose pas). Le nouveau démon vérifie au boot que les
+/// binaires attendus (argv[0] `acp-*` du registre `agents_auto` +
+/// `SHIPPED_TOOLS`) sont bien à côté de l'exe ; si l'un manque, il
+/// télécharge l'asset de SA PROPRE version et pose les absents —
+/// une seule commande d'update par serveur.
 ///
 /// Gardes :
-/// - tous les `acp-*` attendus présents → retour immédiat, zéro
+/// - tous les binaires attendus présents → retour immédiat, zéro
 ///   réseau (cas normal post-install) ;
-/// - version sans asset publié (404) ou archive sans `acp-*` →
+/// - version sans asset publié (404) ou archive sans binaire livré →
 ///   marker `<root>/.acp-bootstrap-<version>` : un essai par version,
 ///   retry automatique à la suivante ;
 /// - erreur transitoire (réseau, extraction, rename) → warn, pas de
@@ -140,7 +149,7 @@ pub fn self_update(version: &str) -> Result<Value> {
 /// - jamais bloquant : appelé via `spawn_blocking`, timeout HTTP
 ///   borné (120 s), toute erreur → warn log + on continue (le profil
 ///   reste `available:false` avec son hint) ;
-/// - `acp-*` déjà présents jamais écrasés ; dossier de l'exe non
+/// - binaires déjà présents jamais écrasés ; dossier de l'exe non
 ///   writable → warn + skip.
 pub fn acp_bootstrap(root: &Path) {
     if let Err(e) = acp_bootstrap_inner(root) {
@@ -149,7 +158,11 @@ pub fn acp_bootstrap(root: &Path) {
 }
 
 fn acp_bootstrap_inner(root: &Path) -> Result<()> {
-    let expected = crate::server::agents_auto::shipped_acp_names();
+    // Adaptateurs `acp-*` du registre + outils livrés (`ac-wait`) —
+    // même rattrapage : un update piloté par un ancien démon ne les
+    // pose pas, le nouveau les installe au boot.
+    let mut expected = crate::server::agents_auto::shipped_acp_names();
+    expected.extend(SHIPPED_TOOLS.iter().copied());
     if expected.is_empty() {
         return Ok(());
     }
@@ -195,7 +208,7 @@ fn acp_bootstrap_inner(root: &Path) -> Result<()> {
         archive
             .unpack(&staging)
             .context("extracting release archive")?;
-        install_staged_acp(&staging, &dir, true)
+        install_staged_shipped(&staging, &dir, true)
     })();
     let _ = std::fs::remove_dir_all(&staging);
     let installed = res?;
@@ -460,7 +473,8 @@ fn semver_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 
 /// Extrait l'archive dans `staging`, remplace `agentcontrol-daemon`
 /// (+ `acctl` s'il cohabite déjà avec le démon) et installe chaque
-/// binaire `acp-*` racine à côté du démon par rename atomique.
+/// binaire livré (`acp-*`, `SHIPPED_TOOLS`) à côté du démon par
+/// rename atomique.
 fn swap_binaries(tgz: &[u8], staging: &Path, dir: &Path, exe: &Path) -> Result<()> {
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(tgz));
     archive
@@ -487,23 +501,24 @@ fn swap_binaries(tgz: &[u8], staging: &Path, dir: &Path, exe: &Path) -> Result<(
         replace_extracted(&src, dir, &target, name)?;
     }
 
-    // Adaptateurs ACP livrés dans la release : installation
-    // inconditionnelle, archive sans `acp-*` tolérée. Les anciens
-    // `acp-*` absents de la nouvelle archive ne sont pas purgés —
+    // Outils livrés dans la release (`acp-*` + SHIPPED_TOOLS) :
+    // installation inconditionnelle, archive sans eux tolérée. Les
+    // anciens absents de la nouvelle archive ne sont pas purgés —
     // retrait hors scope de l'update (KISS).
-    install_staged_acp(staging, dir, false)?;
+    install_staged_shipped(staging, dir, false)?;
     Ok(())
 }
 
-/// Installe les `acp-*` racine de l'archive extraite dans `dir` par
-/// rename atomique. `skip_existing` = ne pas écraser un adaptateur
-/// déjà présent (rattrapage boot #289 — un acp-* en place, même
-/// ancien, n'est pas touché : l'update normal le remplacera via
-/// `swap_binaries`) ; `false` = comportement update (#361).
+/// Installe les binaires livrés (`acp-*` + SHIPPED_TOOLS) de
+/// l'archive extraite dans `dir` par rename atomique.
+/// `skip_existing` = ne pas écraser un fichier déjà présent
+/// (rattrapage boot #289 — un acp-* en place, même ancien, n'est pas
+/// touché : l'update normal le remplacera via `swap_binaries`) ;
+/// `false` = comportement update (#361).
 /// Retourne les noms installés, triés.
-fn install_staged_acp(staging: &Path, dir: &Path, skip_existing: bool) -> Result<Vec<String>> {
+fn install_staged_shipped(staging: &Path, dir: &Path, skip_existing: bool) -> Result<Vec<String>> {
     let mut installed = Vec::new();
-    for name in staged_acp_binaries(staging)? {
+    for name in staged_shipped_binaries(staging)? {
         let target = dir.join(&name);
         if skip_existing && target.exists() {
             continue;
@@ -514,9 +529,9 @@ fn install_staged_acp(staging: &Path, dir: &Path, skip_existing: bool) -> Result
     Ok(installed)
 }
 
-/// Binaires `acp-*` à la racine de l'archive extraite, triés pour un
-/// ordre déterministe.
-fn staged_acp_binaries(staging: &Path) -> Result<Vec<String>> {
+/// Binaires livrés à la racine de l'archive extraite (`acp-*` et
+/// `SHIPPED_TOOLS`), triés pour un ordre déterministe.
+fn staged_shipped_binaries(staging: &Path) -> Result<Vec<String>> {
     let mut names = Vec::new();
     for entry in std::fs::read_dir(staging).context("listing staged binaries")? {
         let entry = entry?;
@@ -526,7 +541,7 @@ fn staged_acp_binaries(staging: &Path) -> Result<Vec<String>> {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if name.len() > 4 && name.starts_with("acp-") {
+        if (name.len() > 4 && name.starts_with("acp-")) || SHIPPED_TOOLS.contains(&name.as_str()) {
             names.push(name);
         }
     }
@@ -658,7 +673,7 @@ mod tests {
             .unwrap();
         std::fs::write(dir.join("acp-claude"), b"old").unwrap();
 
-        let installed = install_staged_acp(&staging, &dir, true).unwrap();
+        let installed = install_staged_shipped(&staging, &dir, true).unwrap();
 
         assert_eq!(installed, vec!["acp-codex".to_string()]);
         assert_eq!(std::fs::read(dir.join("acp-claude")).unwrap(), b"old");
@@ -676,10 +691,46 @@ mod tests {
             .unwrap();
         std::fs::write(dir.join("acp-claude"), b"old").unwrap();
 
-        let installed = install_staged_acp(&staging, &dir, false).unwrap();
+        let installed = install_staged_shipped(&staging, &dir, false).unwrap();
 
         assert_eq!(installed, vec!["acp-claude".to_string()]);
         assert_eq!(std::fs::read(dir.join("acp-claude")).unwrap(), b"new");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `ac-wait` (SHIPPED_TOOLS, #320) suit le même canal que les
+    /// acp-* : reconnu à la racine de l'archive, posé à côté du démon.
+    #[test]
+    fn acwait_installe_comme_les_acp() {
+        let (root, dir, staging) = fixture("acwait");
+        let archive = tgz(&[
+            ("agentcontrol-daemon", &b"daemon"[..]),
+            ("ac-wait", &b"#!/bin/sh\n"[..]),
+            ("acp-claude", &b"claude"[..]),
+        ]);
+        tar::Archive::new(flate2::read::GzDecoder::new(&archive[..]))
+            .unpack(&staging)
+            .unwrap();
+
+        let installed = install_staged_shipped(&staging, &dir, true).unwrap();
+
+        assert_eq!(
+            installed,
+            vec!["ac-wait".to_string(), "acp-claude".to_string()]
+        );
+        assert!(dir.join("ac-wait").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(dir.join("ac-wait"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            );
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

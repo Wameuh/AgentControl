@@ -1311,9 +1311,7 @@ impl Daemon {
                 // slot compatible plutôt qu'un warn récurrent muet.
                 let sa = task_spec_agent(t);
                 if !sa.is_empty() {
-                    spec_waiting.push(format!(
-                        "item #{id} requires agent={sa} (spawn refused)"
-                    ));
+                    spec_waiting.push(format!("item #{id} requires agent={sa} (spawn refused)"));
                 }
                 continue;
             };
@@ -1660,10 +1658,7 @@ impl Daemon {
                             sm.to_string()
                         }
                     };
-                    if let Err(e) = self
-                        .h_set_mode(planner_sid.clone(), impl_mode)
-                        .await
-                    {
+                    if let Err(e) = self.h_set_mode(planner_sid.clone(), impl_mode).await {
                         warn!("orchestrator: set_mode {planner_sid}: {e:#}");
                     }
                 } else {
@@ -2750,11 +2745,11 @@ impl Daemon {
             .max_by_key(|r| r.get("round").and_then(Value::as_u64).unwrap_or(0))
     }
 
-    /// Écrit un contenu de plan sous `~/.agentbacklog/plans/` et rend
-    /// le chemin — le `--submit-plan` du stall et le fallback exit-plan
+    /// Écrit un contenu de plan sous `<state_dir>/plans/` et rend le
+    /// chemin — le `--submit-plan` du stall et le fallback exit-plan
     /// ont besoin d'un fichier relisible.
     async fn plan_write(&self, name: &str, content: &str) -> String {
-        let dir = state_dir().join("plans");
+        let dir = self.orch.cfg.read().unwrap().state_dir().join("plans");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join(format!(
             "{}.md",

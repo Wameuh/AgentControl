@@ -19,19 +19,22 @@
 //!     interne `backlog-orchestrator`.
 //!
 //! Gardes à chaque tick (la boucle reste vivante quoi qu'il arrive) :
-//!   - `~/.agentbacklog/orchestrator.pause` présent → actions suspendues ;
-//!   - flock `~/.agentbacklog/orchestrator.lock` détenu par une autre
+//!   - `<state_dir>/orchestrator.pause` présent → actions suspendues ;
+//!   - flock `<state_dir>/orchestrator.lock` détenu par une autre
 //!     instance (script Python encore actif ailleurs) → refus de
 //!     doubler, le natif prend le relais dès que le lock se libère ;
 //!   - binaire `agentbacklog` non résolvable (ni composant `tool`
 //!     déclaré installé, ni PATH) → « waiting: agentbacklog manquant ».
 //!
-//! État partagé avec le script d'origine — mêmes fichiers, même schéma
-//! (`orchestrator-state.json`, `.lock`, `.pause`) : une coupure
-//! supervisord → démon reprend compteurs, cooldowns et items notes.
+//! `state_dir` = `[backlog_orchestrator] state_dir`, `~/.agentbacklog`
+//! par défaut : l'état partagé avec le script d'origine — mêmes
+//! fichiers, même schéma (`orchestrator-state.json`, `.lock`,
+//! `.pause`) — n'exclut les implémentations concurrentes que sur le
+//! MÊME dossier ; une coupure supervisord → démon reprend compteurs,
+//! cooldowns et items notes.
 
 use super::*;
-use crate::server::misc::command_available;
+use crate::server::misc::{command_available, profile_available};
 use proto::{ComponentKind, EventKind, SessionMeta};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -355,9 +358,12 @@ pub struct OrchProbe {
     enabled: AtomicBool,
     status: Mutex<OrchStatus>,
     pub(crate) state: Mutex<OrchPersist>,
-    /// Fichier `.lock` ouvert et locké tant que le natif travaille —
-    /// libéré sur disable pour laisser la place à une autre instance.
-    lock_file: Mutex<Option<std::fs::File>>,
+    /// Fichier `orchestrator.lock` ouvert et locké tant que le natif
+    /// travaille — libéré sur disable pour laisser la place à une
+    /// autre instance. Le `PathBuf` mémorise le `state_dir` au moment
+    /// de la prise : un set à chaud qui déplace le dossier fait
+    /// relâcher l'ancien flock puis reprendre le nouveau (ensure_lock).
+    lock_file: Mutex<Option<(std::path::PathBuf, std::fs::File)>>,
     /// Sérialise le check-then-spawn de `h_manager_spawn` — deux requêtes
     /// concurrentes ne doivent pas franchir ensemble la fenêtre entre la
     /// dédupe et l'insertion de la session (doublon orphelin garanti :
@@ -371,8 +377,11 @@ pub struct OrchProbe {
 }
 
 impl OrchProbe {
-    pub fn open(cfg: cfg::OrchCfg) -> Self {
-        let state = std::fs::read_to_string(state_dir().join("orchestrator-state.json"))
+    pub fn open(mut cfg: cfg::OrchCfg) -> Self {
+        // `workspace = ""` explicite (config.toml) = clé absente →
+        // défaut env — normalize avant toute consommation.
+        cfg.normalize();
+        let state = std::fs::read_to_string(cfg.state_dir().join("orchestrator-state.json"))
             .ok()
             .and_then(|txt| serde_json::from_str::<OrchPersist>(&txt).ok())
             .unwrap_or_default();
@@ -514,11 +523,12 @@ impl OrchProbe {
         // les mutex ne se cumulent pas dans l'autre sens (set_enabled
         // prend lock_file puis set_status — séquentiels, mais on
         // conserve l'ordre lock_file → status ici aussi).
+        let sdir = self.cfg.read().unwrap().state_dir();
         let self_held = self.lock_file.lock().unwrap().is_some();
         let holder = if self_held {
             LockHolder::SelfHeld
         } else {
-            lock_holder()
+            lock_holder(&sdir)
         };
         let (holder_name, holder_pid) = match holder {
             LockHolder::SelfHeld => ("self", Some(std::process::id())),
@@ -553,7 +563,7 @@ impl OrchProbe {
             "stalled_plans": persist.stalled_plans.clone(),
             "assignments": persist.assignments.clone(),
             "notes_cycle_done": persist.notes_cycle_done,
-            "state_dir": state_dir().display().to_string(),
+            "state_dir": sdir.display().to_string(),
             // Détenteur du flock partagé (sonde /proc/locks,
             // best-effort) — « legacy » = le script Python : le post
             // « [Backlog] item » n'existe pas sous lui.
@@ -591,13 +601,19 @@ impl OrchProbe {
     /// unix-only de toute façon).
     fn ensure_lock(&self) -> LockState {
         let mut held = self.lock_file.lock().unwrap();
-        if held.is_some() {
-            return LockState::Held;
+        let dir = self.cfg.read().unwrap().state_dir();
+        if let Some((p, _f)) = held.as_ref() {
+            if *p == dir {
+                return LockState::Held;
+            }
+            // state_dir déplacé à chaud : relâcher l'ancien flock et
+            // reprendre celui du nouveau dossier — sinon le verrou
+            // détenu ne protégerait plus le dossier effectivement utilisé.
+            *held = None;
         }
         #[cfg(unix)]
         {
             use std::os::unix::io::AsRawFd;
-            let dir = state_dir();
             // Comme le log_setup du script : le dossier existe avant
             // l'ouverture du lock.
             if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -624,7 +640,7 @@ impl OrchProbe {
                     _ => LockState::Error(format!("flock {}: {e}", path.display())),
                 };
             }
-            *held = Some(f);
+            *held = Some((dir, f));
             LockState::Held
         }
         #[cfg(not(unix))]
@@ -691,13 +707,13 @@ fn classify_holder(pid: u32) -> LockHolder {
     }
 }
 
-/// Qui détient `orchestrator.lock` ? `/proc/locks` indexe les verrous
-/// par dev:ino (maj:min en hex, inode en décimal) : « 1: FLOCK
-/// ADVISORY WRITE 1234 00:3f:5515305 0 EOF ».
+/// Qui détient `orchestrator.lock` dans `dir` ? `/proc/locks` indexe
+/// les verrous par dev:ino (maj:min en hex, inode en décimal) :
+/// « 1: FLOCK ADVISORY WRITE 1234 00:3f:5515305 0 EOF ».
 #[cfg(unix)]
-fn lock_holder() -> LockHolder {
+fn lock_holder(dir: &Path) -> LockHolder {
     use std::os::unix::fs::MetadataExt;
-    let meta = match std::fs::metadata(state_dir().join("orchestrator.lock")) {
+    let meta = match std::fs::metadata(dir.join("orchestrator.lock")) {
         Ok(m) => m,
         Err(_) => return LockHolder::None,
     };
@@ -744,7 +760,7 @@ fn lock_holder() -> LockHolder {
 }
 
 #[cfg(not(unix))]
-fn lock_holder() -> LockHolder {
+fn lock_holder(_dir: &Path) -> LockHolder {
     LockHolder::Unknown
 }
 
@@ -753,27 +769,29 @@ fn lock_holder() -> LockHolder {
 /// post « [Backlog] item » indisponible (seul le natif le journalise).
 /// Tout autre détenteur ou sonde en échec retombe sur le message
 /// générique (jamais d'affirmation « legacy » sans preuve).
-fn blocked_detail() -> String {
-    let generic = "flock ~/.agentbacklog/orchestrator.lock held by another \
-                   instance (legacy Python script still active?) — the native \
-                   takes over as soon as it is released";
-    match lock_holder() {
+fn blocked_detail(dir: &Path) -> String {
+    let lock = dir.join("orchestrator.lock").display().to_string();
+    let generic = format!(
+        "flock {lock} held by another instance (legacy Python script \
+         still active?) — the native takes over as soon as it is released"
+    );
+    match lock_holder(dir) {
         LockHolder::Legacy(pid) => format!(
-            "flock ~/.agentbacklog/orchestrator.lock held by the legacy \
-             Python orchestrator (backlog-orchestrator.py, pid {pid}): \
-             « [Backlog] item » post unavailable, only the native one \
-             journals it — remove the supervisord program so it takes over"
+            "flock {lock} held by the legacy Python orchestrator \
+             (backlog-orchestrator.py, pid {pid}): « [Backlog] item » \
+             post unavailable, only the native one journals it — \
+             remove the supervisord program so it takes over"
         ),
         LockHolder::Native(pid) => format!(
-            "flock ~/.agentbacklog/orchestrator.lock held by another \
-             native daemon (pid {pid}) — it is the one orchestrating"
+            "flock {lock} held by another native daemon (pid {pid}) \
+             — it is the one orchestrating"
         ),
         LockHolder::Foreign(pid) => format!(
-            "flock ~/.agentbacklog/orchestrator.lock held by pid {pid} \
-             (unidentified) — if it is the legacy Python script, the \
-             « [Backlog] item » post is not emitted"
+            "flock {lock} held by pid {pid} (unidentified) — if it is \
+             the legacy Python script, the « [Backlog] item » post is \
+             not emitted"
         ),
-        _ => generic.into(),
+        _ => generic,
     }
 }
 
@@ -804,17 +822,6 @@ fn item_post_state(enabled: bool, holder: LockHolder) -> (&'static str, Option<S
         LockHolder::Unknown => ("unknown", None),
         LockHolder::None => (if enabled { "available" } else { "off" }, None),
     }
-}
-
-/// `~/.agentbacklog` — le dossier d'état partagé avec le script
-/// (DB sqlite, lock, pause, state.json). HOME du démon comme
-/// `expanduser` : pas de override — le flock doit être au même endroit
-/// pour les deux implémentations quelle que soit `--db`/AGENTBACKLOG_DB.
-pub(crate) fn state_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".agentbacklog")
 }
 
 pub(crate) fn now_secs() -> f64 {
@@ -1461,14 +1468,16 @@ impl Daemon {
         if !self.orch.is_enabled() {
             return; // phase Disabled posée par set_enabled/init
         }
-        if state_dir().join("orchestrator.pause").exists() {
+        let sdir = self.orch.cfg.read().unwrap().state_dir();
+        if sdir.join("orchestrator.pause").exists() {
             self.orch.set_status(Phase::Paused, None);
             return;
         }
         match self.orch.ensure_lock() {
             LockState::Held => {}
             LockState::Busy => {
-                self.orch.set_status(Phase::Blocked, Some(blocked_detail()));
+                self.orch
+                    .set_status(Phase::Blocked, Some(blocked_detail(&sdir)));
                 return;
             }
             LockState::Error(e) => {
@@ -1523,6 +1532,32 @@ impl Daemon {
         }
     }
 
+    /// Snapshot dispatch de la cfg orchestrateur : `agent` vide y est
+    /// résolu sur le premier profil disponible (défaut neutre —
+    /// l'environnement décide, la valeur persistée n'est jamais figée
+    /// dans config.toml). Aucun profil disponible → `agent` reste vide :
+    /// le cycle le traite en erreur explicite plutôt que de spawner
+    /// des sessions condamnées à « unknown agent ».
+    pub(crate) async fn orch_cfg_snapshot(&self) -> cfg::OrchCfg {
+        let mut c = self.orch.cfg.read().unwrap().clone();
+        if c.agent.is_empty() {
+            c.agent = self.first_available_agent().await;
+        }
+        c
+    }
+
+    /// Premier profil `available` — ordre déterministe : id trié
+    /// alphabétiquement. Résolution du défaut neutre `agent=""`.
+    async fn first_available_agent(&self) -> String {
+        let agents = self.agents.read().await;
+        let mut ids: Vec<&str> = agents.keys().map(String::as_str).collect();
+        ids.sort_unstable();
+        ids.into_iter()
+            .find(|id| profile_available(&agents[*id]))
+            .unwrap_or("")
+            .to_string()
+    }
+
     /// Garde AgentBacklog → le binaire résolu à réutiliser en argv[0] :
     /// nom nu sur le PATH du démon, ou argv0 d'un composant `tool`
     /// déclaré et installé (chemin absolu hors PATH accepté — la
@@ -1548,8 +1583,9 @@ impl Daemon {
     async fn orch_cycle(self: &Arc<Self>, bin: &str) -> Result<()> {
         // Snapshot par tick : un set de config à chaud s'applique au
         // prochain cycle, jamais à mi-cycle (cohérent avec « effet au
-        // prochain tick » annoncé par le schéma).
-        let cfg = self.orch.cfg.read().unwrap().clone();
+        // prochain tick » annoncé par le schéma). Le snapshot résout
+        // `agent` vide → premier profil disponible.
+        let cfg = self.orch_cfg_snapshot().await;
         let cfg = &cfg;
         let ws = Path::new(&cfg.workspace);
         // Pas de liste → pas de cycle : décider sur une DB illisible
@@ -1559,6 +1595,17 @@ impl Daemon {
             .orch_tasks(bin, ws)
             .await
             .context("agentbacklog --list failed")?;
+        // Aucun profil résolu pour aucun rôle (agent + *_agent vides,
+        // ou aucun `[agents.*]` disponible pour résoudre `agent`) :
+        // dépiler spawnerait des sessions condamnées à « unknown
+        // agent » — Error explicite (critère « install fraîche :
+        // défauts sains ou erreur claire »).
+        anyhow::ensure!(
+            cfg.role_agents().iter().any(|a| !a.is_empty()),
+            "no available agent profile — declare an [agents.*] \
+             profile, install an ACP adapter, or set `agent`/`*_agent` \
+             explicitly"
+        );
         let (metas, session_ids): (Vec<SessionMeta>, HashSet<String>) = {
             let sessions = self.sessions.read().await;
             let metas: Vec<SessionMeta> = sessions.values().map(|s| s.meta_snapshot()).collect();
@@ -2756,7 +2803,7 @@ impl Daemon {
             "orchestrator disabled — the « Manager » surface is \
              only offered when it is active"
         );
-        let cfg = self.orch.cfg.read().unwrap().clone();
+        let cfg = self.orch_cfg_snapshot().await;
         let cfg = &cfg;
         anyhow::ensure!(
             cfg.spawn_managers,
@@ -2766,6 +2813,11 @@ impl Daemon {
             self.orch_agentbacklog_bin().await.is_some(),
             "agentbacklog not resolvable — a Manager with no queue to \
              manage is useless"
+        );
+        anyhow::ensure!(
+            !cfg.agent.is_empty(),
+            "no available agent profile — declare an [agents.*] \
+             profile or set `agent` explicitly"
         );
         let cwd = cfg.repo_workspaces.get(repo).cloned().with_context(|| {
             format!(
@@ -2828,7 +2880,7 @@ impl Daemon {
     /// rename (le fichier est lu par le script en cas de reprise
     /// hybride : pas de troncation visible).
     pub(crate) fn orch_save(&self, st: &OrchPersist) {
-        let dir = state_dir();
+        let dir = self.orch.cfg.read().unwrap().state_dir();
         if let Err(e) = std::fs::create_dir_all(&dir) {
             warn!("orchestrator: mkdir {}: {e}", dir.display());
             return;
@@ -3107,10 +3159,44 @@ mod tests {
         assert!(release_pr_entry(&entry(0, Some("next_release")), 0));
     }
 
+    /// `state_dir` déplacé à chaud (#320) : le flock suit le dossier
+    /// configuré — l'ancien est relâché, le nouveau pris ; un autre
+    /// orchestrateur sur le nouveau dossier voit `Busy`, l'ancien
+    /// dossier est de nouveau libre.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_lock_suit_un_state_dir_deplace() {
+        let base = std::env::temp_dir().join(format!("orch-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let d1 = base.join("a");
+        let d2 = base.join("b");
+        let mut c = cfg::OrchCfg::default();
+        c.state_dir = d1.display().to_string();
+        let probe = OrchProbe::open(c);
+        assert!(matches!(probe.ensure_lock(), LockState::Held));
+        // Déplacement à chaud → relock dans d2.
+        probe.cfg.write().unwrap().state_dir = d2.display().to_string();
+        assert!(matches!(probe.ensure_lock(), LockState::Held));
+        assert!(d2.join("orchestrator.lock").exists());
+        // Un autre probe sur d2 est bloqué ; l'ancien dossier est libre.
+        let mut c2 = cfg::OrchCfg::default();
+        c2.state_dir = d2.display().to_string();
+        assert!(matches!(OrchProbe::open(c2).ensure_lock(), LockState::Busy));
+        let mut c3 = cfg::OrchCfg::default();
+        c3.state_dir = d1.display().to_string();
+        assert!(matches!(OrchProbe::open(c3).ensure_lock(), LockState::Held));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn workspaces_gated_enabled() {
         let mut cfg = cfg::OrchCfg::default();
         assert!(workspaces_json(false, &cfg).is_empty());
+        // repo_workspaces vide par défaut (#320) — la surface ne se
+        // propose qu'avec au moins un routage déclaré.
+        assert!(workspaces_json(true, &cfg).is_empty());
+        cfg.repo_workspaces
+            .insert("AgentControl".into(), "/tmp/ac".into());
         let ws = workspaces_json(true, &cfg);
         assert_eq!(ws.len(), 1);
         assert_eq!(ws[0]["repo"], "AgentControl");
@@ -3125,6 +3211,8 @@ mod tests {
         };
         assert!(workspaces_json(true, &cfg).is_empty());
         cfg.spawn_managers = true;
+        cfg.repo_workspaces
+            .insert("AgentControl".into(), "/tmp/ac".into());
         assert_eq!(workspaces_json(true, &cfg).len(), 1);
     }
 
@@ -3245,8 +3333,9 @@ mod tests {
     #[test]
     fn repo_routing_workspace_for_et_routable() {
         let mut c = cfg::OrchCfg::default();
-        // Non taggé → workspace par défaut, toujours routable.
-        assert_eq!(c.workspace_for(""), "/workspace");
+        // Non taggé → workspace par défaut (env : git top-level du cwd
+        // démon, sinon cwd), toujours routable.
+        assert_eq!(c.workspace_for(""), c.workspace.as_str());
         assert!(c.repo_routable(""));
         // Tag connu → son cwd ; tag inconnu → fallback workspace mais
         // NON routable (l'item doit attendre, pas partir dans le
@@ -3255,10 +3344,11 @@ mod tests {
             .insert("Taskwondo".into(), "/home/dev/taskwondo".into());
         assert_eq!(c.workspace_for("Taskwondo"), "/home/dev/taskwondo");
         assert!(c.repo_routable("Taskwondo"));
-        assert_eq!(c.workspace_for("Inconnu"), "/workspace");
+        assert_eq!(c.workspace_for("Inconnu"), c.workspace.as_str());
         assert!(!c.repo_routable("Inconnu"));
-        // routed_tags = clés triées (BTreeMap), exposé au client.
-        assert_eq!(c.routed_tags(), vec!["AgentControl", "Taskwondo"]);
+        // routed_tags = clés triées (BTreeMap), exposé au client —
+        // map vide par défaut (plus de routage hérité « AgentControl »).
+        assert_eq!(c.routed_tags(), vec!["Taskwondo"]);
     }
 
     #[test]

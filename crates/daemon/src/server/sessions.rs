@@ -84,6 +84,18 @@ impl Daemon {
         origin: Option<String>,
         group: Option<String>,
     ) -> Result<Value> {
+        // Profil vide (orch `agent` non résolu, RPC explicite) :
+        // erreur explicite plutôt que « unknown agent: » tronqué.
+        anyhow::ensure!(
+            !agent.trim().is_empty(),
+            "no agent profile — declare an [agents.*] profile or \
+             install an ACP adapter (orchestrator: set `agent`)"
+        );
+        // Chaîne vide = « l'agent décide » — des callers passent
+        // Some("") (orchestrateur, défauts neutres) : normalisé en
+        // None, jamais `--mode ""`/`--model ""` au spawn.
+        let model = model.filter(|m| !m.trim().is_empty());
+        let mode = mode.filter(|m| !m.trim().is_empty());
         // agent_profile : hot-reload — un profil [agents.*]
         // déclaré après le boot est spawnable sans restart.
         let profile = self

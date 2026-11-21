@@ -86,6 +86,9 @@ jobs:
           cp target/${{ matrix.target }}/release/agentcontrol-daemon \
              target/${{ matrix.target }}/release/acctl \
              target/${{ matrix.target }}/release/acp-claude dist/
+          # ac-wait : script (pas de build cargo) — exigé par les
+          # prompts agents, son état est scanné par l'orchestrateur.
+          install -m 755 tools/ac-wait dist/
           cp -r packaging dist/
           tar czf agentcontrol-server-${{ matrix.arch }}-linux.tar.gz -C dist .
       # Critère d'acceptation : les binaires tournent sur une vieille

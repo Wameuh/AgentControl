@@ -20,11 +20,14 @@
 //!
 //! Convention « vide » par champ (formulaire : champ vidé = `""`) :
 //! vide → défaut pour ce qui serait cassant (`title_prefix`,
-//! `workspace`, `agent`, `mode`, `model`, `repo_workspaces`) ; vide →
-//! vide quand le vide a une sémantique (`group` = pas de groupe,
-//! `thought_level` = ne pas poser) ; vide → `None` pour les prompts
-//! (retour au template intégré) ; `repo_workspaces` vide s'exprime par
-//! `{}`/`[]` (objet ou liste vide — distinct du défaut « vide »).
+//! `workspace`, `agent`, `mode`, `model`, `repo_workspaces`,
+//! `state_dir` — les défauts agent/mode/modèle étant désormais le
+//! vide lui-même, « vide → défaut » et « vide → vide » y coïncident) ;
+//! vide → vide quand le vide a une sémantique (`group` = pas de
+//! groupe, `thought_level` = ne pas poser) ; vide → `None` pour les
+//! prompts (retour au template intégré) ; `repo_workspaces` vide
+//! s'exprime par `{}`/`[]` (objet ou liste vide — distinct du défaut
+//! « vide »).
 
 use anyhow::{Context, Result};
 use proto::{ParamKind, ParamSpec};
@@ -48,6 +51,7 @@ const KEYS: &[&str] = &[
     "title_prefix",
     "group",
     "workspace",
+    "state_dir",
     "agent",
     "worker_agent",
     "planner_agent",
@@ -381,16 +385,27 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
             "Worker workspace",
             "cwd of untagged items and of the orchestrator's \
              CLI calls — tagged items are routed via \
-             repo_workspaces",
+             repo_workspaces; empty = git root of the daemon cwd \
+             (rev-parse --show-toplevel), else its cwd",
             ParamKind::Path,
-            Some("/workspace"),
+            None,
+        ),
+        ps(
+            "state_dir",
+            "State directory",
+            "orchestrator state — flock, pause, state.json, plans/, \
+             metrics.jsonl, review worktrees; empty = ~/.agentbacklog \
+             (every orchestrator of the same queue must share it)",
+            ParamKind::Path,
+            None,
         ),
         agent_ps(
             "agent",
             "Agent profile",
-            "`[agents.*]` profile for spawns; empty = default — also the \
-             fallback for every `*_agent` left empty",
-            Some("devin"),
+            "`[agents.*]` profile for spawns; empty = first available \
+             profile — also the fallback for every `*_agent` left \
+             empty",
+            None,
             agents,
         ),
         agent_ps(
@@ -427,22 +442,24 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
         dyn_ps(
             "mode",
             "Spawn mode",
-            "mode requested for spawned sessions; empty = default",
-            Some("bypass"),
+            "mode requested for spawned sessions; empty = the \
+             profile's default",
+            None,
             &dyn_.modes,
         ),
         dyn_ps(
             "model",
             "Spawn model",
-            "model requested for spawned sessions; empty = default",
-            Some("swe-2-high"),
+            "model requested for spawned sessions; empty = the \
+             profile's default",
+            None,
             &dyn_.models,
         ),
         dyn_ps(
             "thought_level",
             "Thought level",
             "applied after each spawn — empty = set nothing",
-            Some("max"),
+            None,
             &dyn_.thought_levels,
         ),
         ps(
@@ -477,23 +494,26 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
         dyn_ps(
             "planner_mode",
             "Planner mode",
-            "mode requested at Backlog-P* spawn; empty = default",
-            Some("plan"),
+            "mode requested at Backlog-P* spawn; empty = the \
+             profile's default",
+            None,
             &dyn_.modes,
         ),
         dyn_ps(
             "reviewer_mode",
             "Reviewer mode",
-            "mode requested at Backlog-R* spawn; empty = default",
-            Some("smart"),
+            "mode requested at Backlog-R* spawn; empty = the \
+             profile's default",
+            None,
             &dyn_.modes,
         ),
         dyn_ps(
             "implement_mode",
             "Implementation mode",
             "mode of no_plan item workers and implementers \
-             (approved planner or new session); empty = default",
-            Some("bypass"),
+             (approved planner or new session); empty = the \
+             profile's default",
+            None,
             &dyn_.modes,
         ),
         dyn_ps(
@@ -583,8 +603,8 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
             "pr_reviewer_mode",
             "PR reviewer mode",
             "mode requested at PRReview-<N> spawn; \
-             empty = default",
-            Some("smart"),
+             empty = the profile's default",
+            None,
             &dyn_.modes,
         ),
         dyn_ps(
@@ -708,6 +728,7 @@ pub(crate) fn params_values(cfg: &super::cfg::OrchCfg) -> HashMap<String, String
     m.insert("title_prefix".into(), cfg.title_prefix.clone());
     m.insert("group".into(), cfg.group.clone());
     m.insert("workspace".into(), cfg.workspace.clone());
+    m.insert("state_dir".into(), cfg.state_dir.clone());
     m.insert("agent".into(), cfg.agent.clone());
     m.insert("worker_agent".into(), cfg.worker_agent.clone());
     m.insert("planner_agent".into(), cfg.planner_agent.clone());
@@ -996,6 +1017,9 @@ pub(crate) fn apply_patch(
                     val_string(v)?
                 }
             }
+            // Vide = défaut `~/.agentbacklog` (OrchCfg::state_dir
+            // résout le vide — même convention que workspace).
+            "state_dir" => cfg.state_dir = val_string(v)?,
             "agent" => {
                 cfg.agent = if is_empty(v) {
                     OrchCfg::default().agent
@@ -1228,11 +1252,12 @@ mod tests {
     #[test]
     fn patch_pipeline_plan_review() {
         let mut c = super::super::cfg::OrchCfg::default();
-        // Défauts : pipeline off, modes pipeline nommés.
+        // Défauts : pipeline off, modes pipeline vides (le profil
+        // décide — les valeurs nommées étaient calibrées Devin).
         assert!(!c.plan_review);
-        assert_eq!(c.planner_mode, "plan");
-        assert_eq!(c.reviewer_mode, "smart");
-        assert_eq!(c.implement_mode, "bypass");
+        assert!(c.planner_mode.is_empty());
+        assert!(c.reviewer_mode.is_empty());
+        assert!(c.implement_mode.is_empty());
         assert_eq!(c.max_review_rounds, 5);
         apply_patch(
             &mut c,
@@ -1269,7 +1294,8 @@ mod tests {
         )
         .unwrap();
         assert!(c.plan_rereview && c.pr_rereview && c.reviewer_reuse);
-        // Vide → retour au défaut (modes cassants), round min 1.
+        // Vide → retour au défaut (vide lui-même pour les modes),
+        // round min 1.
         apply_patch(
             &mut c,
             &patch(&[
@@ -1278,7 +1304,7 @@ mod tests {
             ]),
         )
         .unwrap();
-        assert_eq!(c.reviewer_mode, "smart");
+        assert_eq!(c.reviewer_mode, "");
         assert_eq!(c.max_review_rounds, 1);
     }
 
@@ -1286,15 +1312,20 @@ mod tests {
     fn patch_agents_par_role_et_fallback() {
         use super::super::cfg::OrchCfg;
         let mut c = OrchCfg::default();
-        // Défaut : tout hérite du profil global.
+        // Défaut : tout hérite du profil global — vide = premier profil
+        // disponible résolu au dispatch (orch_cfg_snapshot).
         for r in [
             c.worker_agent.clone(),
             c.planner_agent.clone(),
             c.reviewer_agent.clone(),
             c.pr_reviewer_agent.clone(),
         ] {
-            assert_eq!(c.agent_or(&r), "devin");
+            assert_eq!(c.agent_or(&r), "");
         }
+        assert!(c.role_agents().is_empty());
+        // agent posé → l'héritage redevient explicite.
+        apply_patch(&mut c, &patch(&[("agent", json!("devin"))])).unwrap();
+        assert_eq!(c.agent_or(&c.worker_agent.clone()), "devin");
         assert_eq!(c.role_agents(), vec!["devin"]);
         apply_patch(
             &mut c,
