@@ -10,13 +10,19 @@
 //!   `ForgeClient` résolu ∪ registre — la base allowlistée est le
 //!   param orchestrateur, défaut `next_release`), TOUTES forges
 //!   déclarées (gh, REST github/gitlab, glab, gerrit — git nu exclu,
-//!   mode dégradé sans review auto) :
-//!   un commentaire nu `pr_review_trigger` (corps exact après trim,
-//!   auteur OWNER/MEMBER/COLLABORATOR — `author_assoc` du transport)
-//!   plus récent que le dernier traité lance une review — sauf si une
-//!   review est déjà en cours sur ce change, si le pool
-//!   `pr_review_max_parallel` est plein, ou si un ack d'automatisation
-//!   externe (« Launching a review ») suit le trigger.
+//!   mode dégradé sans review auto) : la source du déclencheur dépend
+//!   de `review_trigger_mode` (global ou override `[review.<repo>]`) :
+//!   `comment` = un commentaire nu `pr_review_trigger` (corps exact
+//!   après trim, auteur OWNER/MEMBER/COLLABORATOR — `author_assoc`
+//!   du transport) plus récent que le dernier traité lance une
+//!   review — sauf si une review est déjà en cours sur ce change, si
+//!   le pool `pr_review_max_parallel` est plein, ou si un ack
+//!   d'automatisation externe (« Launching a review ») suit le
+//!   trigger ; `auto_open` = review à la première vue du change
+//!   ouvert ; `auto_push` = re-review à chaque head différent du sha
+//!   reviewé ; `manual` = aucun scan forge (demandes internes
+//!   `acctl pr review`/RPC seules) ; `off` = même les demandes sont
+//!   refusées.
 //! - La session reviewer `PRReview-<N>` (origin `feature:pr-review`)
 //!   est spawnée dans un worktree FRAIS détaché au head SHA exact
 //!   (fetché via la ref de change de la forge — `pull/N/head`,
@@ -24,15 +30,21 @@
 //!   — read-only, elle REND son verdict en A2A natif via le tool MCP
 //!   `agentcontrol_report_verdict` (push direct au démon, plus de
 //!   polling) ; le bloc `REVIEW_RESULT_BEGIN … END` scanné à idle
-//!   reste le filet de secours si le tool est indisponible.
+//!   reste le filet de secours si le tool est indisponible. Le prompt
+//!   reviewer est `review_prompt` (global ou override `[review.<repo>]`
+//!   — template intégré `REVIEW_PROMPT` sinon).
 //! - Le DÉMON poste le verdict par `post_comment` du transport
 //!   (commentaire PR, note MR, review-message gerrit — compte gh local
-//!   = OWNER pour `.devin/hooks/block-merge.py` sur github) avec le
-//!   SHA reviewé en pied ; head déplacé avant le post → titre
-//!   `## Verdict: stale` (jamais `APPROVED`) ; échec définitif →
-//!   `review failed: <kind>` (ni `#`/`*` ni « Verdict » → jamais pris
-//!   pour une review par le hook). Session supprimée et worktree
-//!   retiré à la fin de passe.
+//!   = OWNER pour `.devin/hooks/block-merge.py` sur github) sous le
+//!   titre `## <label>` — labels `verdict_approved`/`verdict_changes`
+//!   configurables (défauts « Verdict: APPROVED » /
+//!   « Verdict: CHANGES_REQUESTED » ; le mot de protocole rendu par
+//!   le reviewer est mappé sur le label du repo) — avec le SHA
+//!   reviewé en pied ; head déplacé avant le post → titre
+//!   `## Verdict: stale` (jamais le label approved) ; échec
+//!   définitif → `review failed: <kind>` (ni `#`/`*` ni « Verdict »
+//!   → jamais pris pour une review par le hook). Session supprimée
+//!   et worktree retiré à la fin de passe.
 //! - Les échecs transitoires (spawn KO — rate limit en tête, reviewer
 //!   mort ou idle sans bloc, timeout, verdict malformé) sont REJOUÉS
 //!   en backoff borné (2 min/10 min/30 min, 3 retries) : l'entrée
@@ -68,9 +80,12 @@ const REVIEW_JOURNAL_SCAN: usize = 150;
 /// Marqueurs du bloc verdict rendu par le reviewer.
 const VERDICT_BEGIN: &str = "REVIEW_RESULT_BEGIN";
 const VERDICT_END: &str = "REVIEW_RESULT_END";
-/// Le trigger externe matche `contains` — jamais de mention littérale
-/// dans un texte publié (stale, échec, pied de verdict).
-const TRIGGER_ESCAPED: &str = "/mr&#32;review";
+/// Le trigger mentionné dans un texte publié est échappé (`&#32;` par
+/// espace) — le corps exact `pr_review_trigger` ne doit jamais
+/// apparaître tel quel (stale, échec, pied de verdict).
+fn esc_trigger(cfg: &cfg::OrchCfg, repo: &str) -> String {
+    cfg.review_trigger_for(repo).replace(' ', "&#32;")
+}
 /// Auteurs acceptés pour le commentaire déclencheur.
 const TRIGGER_AUTHORS: &[&str] = &["OWNER", "MEMBER", "COLLABORATOR"];
 /// Ack d'une automatisation externe — sa présence après le trigger
@@ -150,19 +165,56 @@ fn extract_verdict_block(events: &[proto::Event]) -> Option<String> {
     None
 }
 
-/// Le commentaire final posté est-il acceptable ? Le titre doit être
-/// `## Verdict: APPROVED` ou `## Verdict: CHANGES_REQUESTED` — toute
-/// autre forme est rejetée plutôt que mal postée.
-fn verdict_body_ok(body: &str) -> bool {
-    let first = body.lines().next().unwrap_or("").trim();
-    first == "## Verdict: APPROVED" || first == "## Verdict: CHANGES_REQUESTED"
+/// Famille de verdict lue en position de titre `## <t>` : labels
+/// configurés du repo (`verdict_approved`/`verdict_changes`) OU
+/// formes canoniques du protocole (`Verdict: APPROVED` /
+/// `Verdict: CHANGES_REQUESTED` — le prompt intégré et l'enum MCP
+/// les rendent toujours). Toute autre forme est rejetée plutôt que
+/// mal postée.
+fn verdict_kind(first: &str, cfg: &cfg::OrchCfg, repo: &str) -> Option<cfg::ReviewVerdict> {
+    use cfg::ReviewVerdict::*;
+    let first = first.trim();
+    if first == format!("## {}", cfg.verdict_label_for(Approved, repo))
+        || first == "## Verdict: APPROVED"
+    {
+        Some(Approved)
+    } else if first == format!("## {}", cfg.verdict_label_for(Changes, repo))
+        || first == "## Verdict: CHANGES_REQUESTED"
+    {
+        Some(Changes)
+    } else {
+        None
+    }
+}
+
+/// Le bloc verdict extrait est-il acceptable ?
+fn verdict_body_ok(body: &str, cfg: &cfg::OrchCfg, repo: &str) -> bool {
+    verdict_kind(body.lines().next().unwrap_or(""), cfg, repo).is_some()
+}
+
+/// Normalise le corps persisté : la première ligne devient
+/// `## <label configuré>` quelle que soit la forme rendue (canonique
+/// ou label) — un bloc `## Verdict: APPROVED` est publié
+/// `## LGTM` quand `verdict_approved = "LGTM"`. None si le titre
+/// n'est pas un verdict accepté.
+fn normalize_verdict_body(body: &str, cfg: &cfg::OrchCfg, repo: &str) -> Option<String> {
+    let first = body.lines().next().unwrap_or("");
+    let kind = verdict_kind(first, cfg, repo)?;
+    Some(format!(
+        "## {}{}",
+        cfg.verdict_label_for(kind, repo),
+        &body[first.len()..]
+    ))
 }
 
 /// Message d'« échec » publié : ne commence jamais par `#`/`*` et ne
 /// contient pas le mot Verdict — le hook de merge ne doit jamais le
 /// lire comme une review.
-fn fail_comment(kind: &str) -> String {
-    format!("review failed: {kind} — repost the trigger ({TRIGGER_ESCAPED}) to relaunch")
+fn fail_comment(kind: &str, cfg: &cfg::OrchCfg, repo: &str) -> String {
+    format!(
+        "review failed: {kind} — repost the trigger ({}) to relaunch",
+        esc_trigger(cfg, repo)
+    )
 }
 
 /// Note de reprogrammation postée quand un retry est armé — même
@@ -186,17 +238,26 @@ fn ack_comment(model: &str, sid: &str) -> String {
 }
 
 /// Texte final du commentaire de verdict — reconstruit à chaque
-/// tentative : `APPROVED`/`CHANGES_REQUESTED` seulement si le head
-/// courant est EXACTEMENT celui reviewé, sinon titre `stale` (jamais
-/// de `APPROVED` si le head a bougé ou est illisible).
-fn verdict_comment(body: &str, sha: &str, head: Option<&str>) -> String {
+/// tentative : le corps (déjà titré `## <label>`) seulement si le
+/// head courant est EXACTEMENT celui reviewé, sinon titre `stale`
+/// (jamais le label approved si le head a bougé ou est illisible —
+/// « Verdict: stale » reste le marqueur fixe, quel que soit le
+/// label configuré).
+fn verdict_comment(
+    body: &str,
+    sha: &str,
+    head: Option<&str>,
+    cfg: &cfg::OrchCfg,
+    repo: &str,
+) -> String {
     if head == Some(sha) {
         format!("{body}\n\nReviewed head: {sha}")
     } else {
         format!(
             "## Verdict: stale — head changed, re-run \
-             {TRIGGER_ESCAPED}\n\n(review rendered for \
+             {}\n\n(review rendered for \
              {sha}, current head {})",
+            esc_trigger(cfg, repo),
             head.unwrap_or("unknown")
         )
     }
@@ -574,7 +635,7 @@ impl Daemon {
                     Path::new(ws_of(&cfg, repo)),
                     &pr_review_dir(&cfg, pr_n, sha),
                 );
-                self.pr_comment(repo, pr_n, &fail_comment("disabled"), &cfg)
+                self.pr_comment(repo, pr_n, &fail_comment("disabled", &cfg, repo), &cfg)
                     .await;
                 if let Some(e) = st.pr_reviews.get_mut(&key) {
                     e["state"] = json!(EntryState::Failed.as_str());
@@ -708,8 +769,13 @@ impl Daemon {
                 if !pending.is_empty() {
                     if denied >= 2 {
                         warn!("orchestrator: PR review {key} blocked on request → failed");
-                        self.pr_comment(repo, pr_n, &fail_comment("blocked on request"), &cfg)
-                            .await;
+                        self.pr_comment(
+                            repo,
+                            pr_n,
+                            &fail_comment("blocked on request", &cfg, repo),
+                            &cfg,
+                        )
+                        .await;
                         self.pr_review_finish(
                             &key,
                             EntryState::Failed,
@@ -746,12 +812,15 @@ impl Daemon {
                 .and_then(|s| s.journal.read_page(&s.dir, None, REVIEW_JOURNAL_SCAN).ok())
                 .and_then(|ev| extract_verdict_block(&ev));
             match block {
-                Some(body) if verdict_body_ok(&body) => {
-                    // Le body brut du bloc est persisté AVANT le post
-                    // — si le commentaire échoue il est reposté au
-                    // tick suivant (jamais perdu silencieusement). Le
-                    // head est re-vérifié à CHAQUE tentative : un
-                    // APPROVED sur head déplacé devient stale.
+                Some(body) if verdict_body_ok(&body, &cfg, repo) => {
+                    // Le body du bloc est NORMALISÉ sous le label
+                    // configuré du repo (`## <label>`) puis persisté
+                    // AVANT le post — si le commentaire échoue il est
+                    // reposté au tick suivant (jamais perdu
+                    // silencieusement). Le head est re-vérifié à
+                    // CHAQUE tentative : un APPROVED sur head déplacé
+                    // devient stale.
+                    let body = normalize_verdict_body(&body, &cfg, repo).unwrap_or(body);
                     if let Some(e) = st.pr_reviews.get_mut(&key) {
                         e["pending_body"] = json!(body);
                         e["sid"] = json!("");
@@ -847,8 +916,13 @@ impl Daemon {
             let wt = pr_review_dir(&cfg, pr_n, &sha);
             if let Some(h) = self.pr_head(repo, pr_n, &cfg).await {
                 if h != sha {
-                    self.pr_comment(repo, pr_n, &fail_comment("stale — head changed"), &cfg)
-                        .await;
+                    self.pr_comment(
+                        repo,
+                        pr_n,
+                        &fail_comment("stale — head changed", &cfg, repo),
+                        &cfg,
+                    )
+                    .await;
                     self.pr_review_finish(
                         &key,
                         EntryState::Failed,
@@ -941,6 +1015,19 @@ impl Daemon {
                 continue;
             };
             let repo = repo.to_string();
+            // `review_trigger_mode=off` sur ce repo (override ou
+            // global — la demande peut avoir été posée avant un flip
+            // de config) → refusée et soldée comme une demande sur
+            // mécanisme coupé.
+            if cfg.review_mode_for(&repo) == cfg::ReviewTriggerMode::Off {
+                st.pr_review_requests.remove(&key);
+                self.pr_review_notify(
+                    &by,
+                    format!("[AgentControl] review {key} refused — review_trigger_mode=off"),
+                )
+                .await;
+                continue;
+            }
             // Review déjà en cours → la demande attend son terme.
             if st
                 .pr_reviews
@@ -1066,13 +1153,24 @@ impl Daemon {
             self.orch_save(&st);
         }
 
-        // 2b. Triggers nouveaux sur les PR ouvertes.
-        for (repo, pr_n, _head) in self.pr_review_candidates(&cfg).await {
+        // 2b. Triggers nouveaux sur les PR ouvertes — la source
+        // dépend du `review_trigger_mode` effectif du repo (override
+        // `[review.<repo>]` sinon global) : `comment` = scan des
+        // commentaires forge ; `auto_open`/`auto_push` = détection sur
+        // le head listé, SANS lire les commentaires (forges sans cap
+        // `comments` exclues en amont par `list_changes` de toute
+        // façon) ; `manual`/`off` = aucun scan — les demandes
+        // internes de 2a.5 restent la seule voie (`off` les refuse).
+        for (repo, pr_n, head) in self.pr_review_candidates(&cfg).await {
             if free == 0 {
                 break;
             }
             if !self.orch.is_enabled() {
                 break;
+            }
+            let mode = cfg.review_mode_for(&repo);
+            if !mode.scans() {
+                continue;
             }
             let key = format!("{repo}#{pr_n}");
             let last_trigger = st
@@ -1102,11 +1200,51 @@ impl Daemon {
             {
                 continue;
             }
-            let Some((trigger_id, head_sha)) = self
-                .pr_review_find_trigger(&repo, pr_n, &cfg, last_trigger)
-                .await
-            else {
-                continue;
+            let (trigger_id, head_sha) = match mode {
+                cfg::ReviewTriggerMode::Comment => {
+                    let Some(t) = self
+                        .pr_review_find_trigger(&repo, pr_n, &cfg, last_trigger)
+                        .await
+                    else {
+                        continue;
+                    };
+                    t
+                }
+                // auto_open : première apparition du change ouvert
+                // (aucune entrée connue) → review du head courant.
+                // auto_push : idem, OU head listé différent du sha
+                // reviewé → re-review (entry done/failed/retry_wait —
+                // running déjà filtré). Watermark synthétique
+                // `last_trigger+1` : il ne matche aucun commentaire.
+                _ => {
+                    let entry = st.pr_reviews.get(&key);
+                    let new_change = entry.is_none();
+                    // auto_push : head listé différent du sha reviewé
+                    // (head vide = illisible → conservateur, pas de
+                    // re-review en boucle) ; auto_open sur une entrée
+                    // existante ≠ nouvelle ouverture.
+                    let pushed = mode == cfg::ReviewTriggerMode::AutoPush
+                        && !head.is_empty()
+                        && head
+                            != entry
+                                .and_then(|v| v.get("sha"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("");
+                    if !new_change && !pushed {
+                        continue;
+                    }
+                    // Sha de vérité : `list_changes` peut le laisser
+                    // vide selon la forge → relecture exacte.
+                    let head_sha = if head.is_empty() {
+                        match self.pr_head(&repo, pr_n, &cfg).await {
+                            Some(h) => h,
+                            None => continue,
+                        }
+                    } else {
+                        head.clone()
+                    };
+                    (last_trigger + 1, head_sha)
+                }
             };
             // Claim-first : l'état running est persisté AVANT le spawn
             // — un crash entre les deux ne relance rien en double.
@@ -1129,6 +1267,7 @@ impl Daemon {
                     "started": now,
                     "state": EntryState::Running.as_str(),
                     "denied": 0,
+                    "origin": mode.as_str(),
                 }),
             );
             self.orch_save(&st);
@@ -1279,9 +1418,11 @@ impl Daemon {
             self.pr_comment(
                 repo,
                 pr_n,
-                &fail_comment(&format!(
-                    "pull/{pr_n}/head absente sur origin, fetch sha impossible"
-                )),
+                &fail_comment(
+                    &format!("pull/{pr_n}/head absente sur origin, fetch sha impossible"),
+                    cfg,
+                    repo,
+                ),
                 cfg,
             )
             .await;
@@ -1343,7 +1484,8 @@ impl Daemon {
             info!("orchestrator: PR review {key} {kind} → retry #{attempts} in {delay}s");
         } else {
             warn!("orchestrator: PR review {key} {kind} — attempts exhausted → failed");
-            self.pr_comment(repo, pr_n, &fail_comment(kind), cfg).await;
+            self.pr_comment(repo, pr_n, &fail_comment(kind, cfg, repo), cfg)
+                .await;
             self.pr_review_finish(key, EntryState::Failed, st, wt, Path::new(ws_of(cfg, repo)))
                 .await;
         }
@@ -1373,7 +1515,7 @@ impl Daemon {
             return;
         };
         let head = self.pr_head(repo, pr_n, cfg).await;
-        let text = verdict_comment(&body, sha, head.as_deref());
+        let text = verdict_comment(&body, sha, head.as_deref(), cfg, repo);
         if self.pr_comment(repo, pr_n, &text, cfg).await {
             info!("orchestrator: PR review {key} verdict posted");
             self.pr_review_finish(key, EntryState::Done, st, wt, Path::new(ws_of(cfg, repo)))
@@ -1388,7 +1530,12 @@ impl Daemon {
             if tries >= 3 {
                 warn!("orchestrator: PR {key} verdict could not be posted → failed");
                 let _ = self
-                    .pr_comment(repo, pr_n, &fail_comment("verdict post failed"), cfg)
+                    .pr_comment(
+                        repo,
+                        pr_n,
+                        &fail_comment("verdict post failed", cfg, repo),
+                        cfg,
+                    )
                     .await;
                 self.pr_review_finish(key, EntryState::Failed, st, wt, Path::new(ws_of(cfg, repo)))
                     .await;
@@ -1428,7 +1575,7 @@ impl Daemon {
             verdict == "APPROVED" || verdict == "CHANGES_REQUESTED",
             "unknown verdict: {verdict}"
         );
-        let body = format!("## Verdict: {verdict}\n\n{body}");
+        let cfg = self.orch.cfg.read().unwrap().clone();
         {
             let mut live = self.orch.state.lock().unwrap();
             let found = live.pr_reviews.iter().find_map(|(k, v)| {
@@ -1445,6 +1592,16 @@ impl Daemon {
                 // idempotent : le second appel n'écrase rien.
                 return Ok(json!({"received": true, "duplicate": true}));
             }
+            // Le mot de protocole est traduit en titre `## <label
+            // configuré du repo>` dès l'écriture — le post du tick
+            // republie `pending_body` tel quel.
+            let kind = if verdict == "APPROVED" {
+                cfg::ReviewVerdict::Approved
+            } else {
+                cfg::ReviewVerdict::Changes
+            };
+            let repo = key.rsplit('#').nth(1).unwrap_or("");
+            let body = format!("## {}\n\n{body}", cfg.verdict_label_for(kind, repo));
             if let Some(e) = live.pr_reviews.get_mut(&key) {
                 e["pending_body"] = json!(body);
                 e["reported_by"] = json!(session.clone());
@@ -1518,6 +1675,13 @@ impl Daemon {
         anyhow::ensure!(
             !repo.is_empty() && !repo.contains(char::is_whitespace),
             "repo expected in path/name format"
+        );
+        // `review_trigger_mode=off` (global ou override repo) coupe
+        // AUSSI les demandes internes — `manual` reste le mode « RPC
+        // seule ».
+        anyhow::ensure!(
+            cfg.review_mode_for(&repo) != cfg::ReviewTriggerMode::Off,
+            "review_trigger_mode=off on {repo} — reviews refused"
         );
         // Demandeur A2A : la session doit exister (traçabilité de la
         // notification verdict — jamais de notification vers un
@@ -1824,7 +1988,7 @@ impl Daemon {
             return None;
         }
         let id = pr_n.to_string();
-        let trig = cfg.pr_review_trigger.clone();
+        let trig = cfg.review_trigger_for(repo).to_string();
         tokio::task::spawn_blocking(move || {
             let cs = client.list_comments(&id, None)?;
             // `author_assoc` n'est résolu que sur les notes candidates
@@ -1946,8 +2110,13 @@ impl Daemon {
             .unwrap_or_default();
         let meta = meta.trim().to_string();
         let (title, body) = meta.split_once('\n').unwrap_or((&meta, ""));
+        // Template : `review_prompt` du repo (override `[review.<repo>]`
+        // sinon global) — surcharge TOTALE du built-in `REVIEW_PROMPT`,
+        // même mécanique de placeholders ({PR}…{BODY} + {TRIGGER},
+        // {VERDICT_APPROVED}/{VERDICT_CHANGES} pour rester aligné sur
+        // les labels configurés et le déclencheur du repo).
         let prompt = fill_pr(
-            REVIEW_PROMPT,
+            cfg.review_prompt_for(repo).unwrap_or(REVIEW_PROMPT),
             &[
                 ("PR", pr_n.to_string()),
                 ("REPO", repo.to_string()),
@@ -1956,6 +2125,17 @@ impl Daemon {
                 ("WS", ws.to_string()),
                 ("TITLE", title.to_string()),
                 ("BODY", clip(body, 8000)),
+                ("TRIGGER", cfg.review_trigger_for(repo).to_string()),
+                (
+                    "VERDICT_APPROVED",
+                    cfg.verdict_label_for(cfg::ReviewVerdict::Approved, repo)
+                        .to_string(),
+                ),
+                (
+                    "VERDICT_CHANGES",
+                    cfg.verdict_label_for(cfg::ReviewVerdict::Changes, repo)
+                        .to_string(),
+                ),
             ],
         );
         let n: u64 = st_counter(&key);
@@ -2110,21 +2290,90 @@ mod tests {
 
     #[test]
     fn verdict_titre() {
-        assert!(verdict_body_ok("## Verdict: APPROVED\n\ncorps"));
-        assert!(verdict_body_ok("## Verdict: CHANGES_REQUESTED\nfix X"));
-        assert!(!verdict_body_ok("## Verdict: stale"));
-        assert!(!verdict_body_ok("# Review\n## Verdict: APPROVED"));
-        assert!(!verdict_body_ok(""));
+        let c = cfg::OrchCfg::default();
+        assert!(verdict_body_ok("## Verdict: APPROVED\n\ncorps", &c, "r"));
+        assert!(verdict_body_ok(
+            "## Verdict: CHANGES_REQUESTED\nfix X",
+            &c,
+            "r"
+        ));
+        assert!(!verdict_body_ok("## Verdict: stale", &c, "r"));
+        assert!(!verdict_body_ok("# Review\n## Verdict: APPROVED", &c, "r"));
+        assert!(!verdict_body_ok("", &c, "r"));
+    }
+
+    /// Labels configurés : le parser accepte la forme canonique ET le
+    /// label custom, et la normalisation réécrit le titre sous
+    /// `## <label>` — `verdict_approved="LGTM"` poste `## LGTM`.
+    #[test]
+    fn verdict_labels_custom() {
+        let c = cfg::OrchCfg {
+            verdict_approved: "LGTM".into(),
+            verdict_changes: "NEEDS WORK".into(),
+            ..Default::default()
+        };
+        // Les deux formes sont lues.
+        for t in ["## LGTM\nok", "## Verdict: APPROVED\nok"] {
+            assert!(verdict_body_ok(t, &c, "r"), "{t}");
+            let n = normalize_verdict_body(t, &c, "r").unwrap();
+            assert!(n.starts_with("## LGTM"), "{n}");
+        }
+        for t in ["## NEEDS WORK\nfix", "## Verdict: CHANGES_REQUESTED\nfix"] {
+            let n = normalize_verdict_body(t, &c, "r").unwrap();
+            assert!(n.starts_with("## NEEDS WORK"), "{n}");
+        }
+        // Un label d'un autre repo n'est pas confondu.
+        assert!(verdict_kind("## LGTM", &cfg::OrchCfg::default(), "r").is_none());
+        assert!(!verdict_body_ok("## LGTM", &cfg::OrchCfg::default(), "r"));
+        // Override repo > global — clé au chemin complet ET au nom
+        // court (résolu pour les requêtes en chemin complet).
+        let mut o = cfg::OrchCfg::default();
+        o.review.insert(
+            "forge/repo".into(),
+            cfg::ReviewOverride {
+                verdict_approved: "SHIP IT".into(),
+                ..Default::default()
+            },
+        );
+        o.review.insert(
+            "short".into(),
+            cfg::ReviewOverride {
+                verdict_approved: "GO".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            o.verdict_label_for(cfg::ReviewVerdict::Approved, "forge/repo"),
+            "SHIP IT"
+        );
+        assert_eq!(
+            o.verdict_label_for(cfg::ReviewVerdict::Approved, "other/repo"),
+            "Verdict: APPROVED"
+        );
+        // Clé courte : une requête « g/short » retombe sur « short ».
+        assert_eq!(
+            o.verdict_label_for(cfg::ReviewVerdict::Approved, "g/short"),
+            "GO"
+        );
     }
 
     #[test]
     fn formats_hook() {
+        let c = cfg::OrchCfg::default();
         // L'ack et l'échec ne matchent pas `^[*#]+ ?(Review|Verdict)`.
         let re = regex_lite("^[*#]+ ?(Review|Verdict)");
         assert!(!re.is_match(&ack_comment("swe-2-high", "s-x")));
-        assert!(!re.is_match(&fail_comment("timeout")));
-        assert!(!fail_comment("x").contains("Verdict"));
+        assert!(!re.is_match(&fail_comment("timeout", &c, "r")));
+        assert!(!fail_comment("x", &c, "r").contains("Verdict"));
         assert!(!ack_comment("m", "s").contains("/mr review"));
+        // Trigger custom échappé aussi (jamais de corps exact publié).
+        let c2 = cfg::OrchCfg {
+            pr_review_trigger: "please review".into(),
+            ..Default::default()
+        };
+        let f = fail_comment("timeout", &c2, "r");
+        assert!(f.contains("please&#32;review"), "{f}");
+        assert!(!f.contains("please review"));
         // Stale : titre Verdict mais jamais APPROVED dans le texte.
         let stale = "## Verdict: stale — head changed, re-run /mr&#32;review";
         assert!(!stale.contains("APPROVED"));
@@ -2178,17 +2427,83 @@ mod tests {
 
     #[test]
     fn verdict_comment_head() {
+        let c = cfg::OrchCfg::default();
         let body = "## Verdict: APPROVED\n\nok";
         // Head inchangé → verdict posté avec l'ancre.
-        let t = verdict_comment(body, "abc123", Some("abc123"));
+        let t = verdict_comment(body, "abc123", Some("abc123"), &c, "r");
         assert!(t.starts_with("## Verdict: APPROVED"));
         assert!(t.contains("Reviewed head: abc123"));
         // Head déplacé → stale, JAMAIS APPROVED dans le texte.
         for h in [Some("def456"), None] {
-            let s = verdict_comment(body, "abc123", h);
+            let s = verdict_comment(body, "abc123", h, &c, "r");
             assert!(s.starts_with("## Verdict: stale"));
             assert!(!s.contains("APPROVED"));
         }
+        // Label custom : le titre normalisé est reposté tel quel,
+        // stale reste le marqueur fixe.
+        let c2 = cfg::OrchCfg {
+            verdict_approved: "LGTM".into(),
+            ..Default::default()
+        };
+        let t = verdict_comment("## LGTM\n\nok", "abc123", Some("abc123"), &c2, "r");
+        assert!(t.starts_with("## LGTM"));
+    }
+
+    /// Modes de trigger : parsing du vocabulaire, `scans()` — et
+    /// l'override par repo prime sur le global.
+    #[test]
+    fn trigger_modes() {
+        use cfg::ReviewTriggerMode::*;
+        for (s, m) in [
+            ("comment", Comment),
+            ("auto_open", AutoOpen),
+            ("auto_push", AutoPush),
+            ("manual", Manual),
+            ("off", Off),
+        ] {
+            assert_eq!(cfg::ReviewTriggerMode::parse(s), Some(m));
+        }
+        for bad in ["", "auto", "COMMENTS", "auto-open", "AutoOpen"] {
+            assert_eq!(cfg::ReviewTriggerMode::parse(bad), None, "{bad}");
+        }
+        // `of` retombe sur comment pour les valeurs persistées
+        // inconnues/vides (jamais de mode fantôme).
+        assert_eq!(cfg::ReviewTriggerMode::of(""), Comment);
+        assert_eq!(cfg::ReviewTriggerMode::of("wat"), Comment);
+        // Scans : comment + autos seulement — manual n'ouvre JAMAIS
+        // list_comments, off idem.
+        assert!(Comment.scans() && AutoOpen.scans() && AutoPush.scans());
+        assert!(!Manual.scans() && !Off.scans());
+        // Override repo.
+        let mut c = cfg::OrchCfg::default();
+        assert_eq!(c.review_mode_for("x/y"), Comment);
+        c.review_trigger_mode = "manual".into();
+        c.review.insert(
+            "forge/repo".into(),
+            cfg::ReviewOverride {
+                trigger_mode: "auto_push".into(),
+                pr_review_trigger: "/please review".into(),
+                review_prompt: Some("custom {PR} {TRIGGER}".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(c.review_mode_for("forge/repo"), AutoPush);
+        assert_eq!(c.review_mode_for("a/b"), Manual);
+        assert_eq!(c.review_trigger_for("forge/repo"), "/please review");
+        assert_eq!(c.review_trigger_for("a/b"), c.pr_review_trigger);
+        assert_eq!(
+            c.review_prompt_for("forge/repo"),
+            Some("custom {PR} {TRIGGER}")
+        );
+        // Pas de prompt configuré → template intégré au launch.
+        assert_eq!(c.review_prompt_for("a/b"), None);
+        assert_eq!(
+            c.review_prompt_for("a/b").unwrap_or(REVIEW_PROMPT),
+            REVIEW_PROMPT
+        );
+        // Override global du prompt (sans override repo).
+        c.review_prompt = Some("tpl {VERDICT_APPROVED}".into());
+        assert_eq!(c.review_prompt_for("a/b"), Some("tpl {VERDICT_APPROVED}"));
     }
 
     /// La garde de base review (`base == cfg.pr_base()`) suit le param

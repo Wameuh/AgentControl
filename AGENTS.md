@@ -185,6 +185,46 @@ reviewer sessions. Flipping `pr_review` off settles running reviews:
 reviewer session deleted, worktree removed, `review failed:
 disabled` posted so polling workers aren't left waiting.
 
+**WHEN — `review_trigger_mode`** (`backlog_orchestrator` param,
+hot-settable, default `comment`): what launches a daemon PR review —
+`comment` = a bare `pr_review_trigger` comment on an open change
+(historical behavior, forge comment scan: PR comments GitHub, MR
+notes GitLab REST, patchset messages Gerrit); `auto_open` = review
+when the change first shows up open; `auto_push` = also re-review on
+every head differing from the reviewed sha; `manual` = only
+`acctl pr review <N>` / `agentcontrol_request_review` — **no forge
+scan at all**; `off` = nothing, internal requests refused too
+(in-flight reviews still settle — flip `pr_review` off to abort
+them). A forge without `comments` cap (plain `git`) can't serve
+`comment` mode anyway — `manual` is its only meaningful mode.
+**HOW**: `review_prompt` fully overrides the built-in reviewer
+template (same mechanics as `prompt`/`manager_prompt` — placeholders
+`{PR}` `{REPO}` `{SHA}` `{BASE}` `{WS}` `{TITLE}` `{BODY}` plus
+`{TRIGGER}`, `{VERDICT_APPROVED}`, `{VERDICT_CHANGES}` which expand
+to the repo's configured trigger and labels); `verdict_approved` /
+`verdict_changes` set the posted `## <label>` titles (defaults
+`Verdict: APPROVED` / `Verdict: CHANGES_REQUESTED` — the reviewer
+renders the canonical protocol word and the daemon maps it onto the
+configured label, so `verdict_approved=LGTM` posts `## LGTM`).
+**WHO** stays `pr_reviewer_agent`/`pr_reviewer_mode`/
+`pr_reviewer_model`/`pr_reviewer_effort` — empty falls back to the
+global `agent`/`model`/thought level (`agent_or`/`model_or`/
+`effort_or`). **Per-repo overrides**:
+`[backlog_orchestrator.review.<repo>]` in config.toml (or the
+`review_overrides` JSON param) accepts `trigger_mode`,
+`pr_review_trigger`, `review_prompt`, `verdict_approved`,
+`verdict_changes` — key = repo path as it appears in
+`pr_reviews`/the registry (`owner/name`, gerrit project), a short
+name resolves too; each empty field inherits the global param —
+mixed-forge workspaces can e.g. keep `comment` on GitHub and run
+`manual` on a gerrit repo. ⚠️ **Merge policy**: custom verdict
+labels must be recognized repo-side — the merge hook
+(`block-merge.py`) only treats `Verdict:` titles from
+`AGENTCONTROL_MERGE_VERDICTS` (default `approved,mergeable`) as
+approvals, so a `## LGTM` approval needs
+`AGENTCONTROL_MERGE_VERDICTS=…,lgtm` (or the default labels) or the
+hook won't let the merge through.
+
 **Agent profiles**: `devin` and `cursor` are built-in presets
 (`default_agents()` in server/agents_cfg.rs — cursor's argv[0] is
 resolved to an absolute path on the daemon PATH when possible:

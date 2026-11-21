@@ -268,8 +268,15 @@ forge's change ref (`pull/N/head`, `merge-requests/<iid>/head`,
 `refs/changes/…`) with the SHA fallback, and ack/verdict/failure notes
 are posted back through `post_comment`. A forge without comment caps
 simply skips comment scans; `git` entries never reach the pipeline.
-The verdict comment keeps the same `## Verdict:` marker whatever the
-forge — merge hooks consuming it stay forge-side by design.
+When the comment scan is unwanted at all,
+`review_trigger_mode=manual|auto_open|auto_push|off` (global or
+`[backlog_orchestrator.review.<repo>]`) switches the trigger source —
+`manual` needs no comment caps and is the only mode a plain `git`
+forge can serve. The verdict comment posts `## <verdict_approved |
+verdict_changes>` — labels configurable per repo, defaults
+`## Verdict: APPROVED` / `## Verdict: CHANGES_REQUESTED`; merge hooks
+consuming them stay forge-side by design (the repo's merge policy
+must know the chosen label).
 
 Merging a review stays a **GitHub-only permission**: the PR merge hook
 (`/mr review`, CI gates) does not extend to GitLab or Gerrit — the

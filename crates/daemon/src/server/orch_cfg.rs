@@ -85,6 +85,11 @@ const KEYS: &[&str] = &[
     "reviewer_effort",
     "pr_review_max_parallel",
     "pr_review_timeout",
+    "review_trigger_mode",
+    "review_prompt",
+    "verdict_approved",
+    "verdict_changes",
+    "review_overrides",
     "repo_workspaces",
 ];
 
@@ -683,6 +688,69 @@ pub(crate) fn params_schema(dyn_: &DynChoices, agents: &[String]) -> Vec<ParamSp
             ParamKind::Int,
             Some("2700"),
         ),
+        {
+            // WHEN des reviews : vocabulaire clos — un mode mal
+            // orthographé couperait la détection en silence.
+            let mut p = ps(
+                "review_trigger_mode",
+                "Review trigger mode",
+                "when daemon PR reviews fire: comment = bare \
+                 `pr_review_trigger` comment (default, forge comment \
+                 scan); auto_open = when the change first shows up \
+                 open; auto_push = on every head differing from the \
+                 reviewed sha; manual = acctl pr review / internal \
+                 RPC only (no forge scan at all); off = nothing, \
+                 internal requests refused too (in-flight reviews \
+                 still settle — flip pr_review off to abort them). \
+                 Per-repo override via review_overrides",
+                ParamKind::Enum,
+                Some("comment"),
+            );
+            p.choices = ["comment", "auto_open", "auto_push", "manual", "off"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            p
+        },
+        ps(
+            "review_prompt",
+            "PR review prompt",
+            "custom reviewer template — {PR} {REPO} {SHA} {BASE} {WS} \
+             {TITLE} {BODY} {TRIGGER} {VERDICT_APPROVED} \
+             {VERDICT_CHANGES} placeholders; empty = built-in \
+             template",
+            ParamKind::String,
+            None,
+        ),
+        ps(
+            "verdict_approved",
+            "Approve verdict label",
+            "approval heading posted as « ## <label> » — default \
+             « Verdict: APPROVED »; the repo's merge policy must \
+             accept the chosen label (merge hooks / verdict grep)",
+            ParamKind::String,
+            Some("Verdict: APPROVED"),
+        ),
+        ps(
+            "verdict_changes",
+            "Changes verdict label",
+            "« changes requested » heading posted as « ## <label> » — \
+             default « Verdict: CHANGES_REQUESTED »",
+            ParamKind::String,
+            Some("Verdict: CHANGES_REQUESTED"),
+        ),
+        ps(
+            "review_overrides",
+            "Per-repo review overrides",
+            "JSON object {repo_path: {trigger_mode, pr_review_trigger, \
+             review_prompt, verdict_approved, verdict_changes}} — key \
+             = repo path (owner/name, gerrit project; short name \
+             resolves too); same as TOML \
+             [backlog_orchestrator.review.<repo>]; empty = global \
+             params only",
+            ParamKind::Json,
+            None,
+        ),
         ps(
             "repo_workspaces",
             "Routed workspaces",
@@ -731,7 +799,7 @@ fn group_of(key: &str) -> Option<&'static str> {
         | "reviewer_effort" | "max_review_rounds" | "plan_rereview" | "reviewer_reuse" => {
             "pipeline"
         }
-        // Revues PR : pool PRReview-* dédié.
+        // Revues PR : pool PRReview-* dédié + WHEN/HOW configurables.
         "pr_review"
         | "pr_rereview"
         | "pr_review_trigger"
@@ -740,7 +808,12 @@ fn group_of(key: &str) -> Option<&'static str> {
         | "pr_reviewer_model"
         | "pr_reviewer_effort"
         | "pr_review_max_parallel"
-        | "pr_review_timeout" => "pr_reviews",
+        | "pr_review_timeout"
+        | "review_trigger_mode"
+        | "review_prompt"
+        | "verdict_approved"
+        | "verdict_changes"
+        | "review_overrides" => "pr_reviews",
         _ => "general",
     })
 }
@@ -817,6 +890,20 @@ pub(crate) fn params_values(cfg: &super::cfg::OrchCfg) -> HashMap<String, String
     m.insert(
         "pr_review_timeout".into(),
         cfg.pr_review_timeout.to_string(),
+    );
+    m.insert(
+        "review_trigger_mode".into(),
+        cfg.review_trigger_mode.clone(),
+    );
+    m.insert(
+        "review_prompt".into(),
+        cfg.review_prompt.clone().unwrap_or_default(),
+    );
+    m.insert("verdict_approved".into(), cfg.verdict_approved.clone());
+    m.insert("verdict_changes".into(), cfg.verdict_changes.clone());
+    m.insert(
+        "review_overrides".into(),
+        serde_json::to_string(&cfg.review).unwrap_or_else(|_| "{}".into()),
     );
     m.insert(
         "repo_workspaces".into(),
@@ -1001,6 +1088,71 @@ fn val_pool(v: &Value) -> Result<Vec<super::cfg::WorkerPoolEntry>> {
         }
         _ => anyhow::bail!("expected JSON array or « profile:count,… », got {v}"),
     }
+}
+
+/// Label de verdict — texte du titre posté `## <label>` : trim +
+/// retrait des préfixes markdown (`#`, `*`, espaces — une valeur
+/// « ## LGTM » ne produit pas « ## ## LGTM »), une seule ligne,
+/// jamais « stale » (réservé au titre de head déplacé).
+fn val_label(v: &Value) -> Result<String> {
+    let s = val_string(v)?;
+    let s = s
+        .trim()
+        .trim_start_matches(['#', '*', ' '])
+        .trim()
+        .to_string();
+    anyhow::ensure!(!s.is_empty(), "verdict label must be non-empty");
+    anyhow::ensure!(!s.contains('\n'), "verdict label must be a single line");
+    anyhow::ensure!(
+        !s.eq_ignore_ascii_case("stale") && !s.to_ascii_lowercase().starts_with("verdict: stale"),
+        "verdict label « {s} » collides with the reserved stale title"
+    );
+    Ok(s)
+}
+
+/// Overrides review par repo — objet JSON `{repo: {trigger_mode,
+/// pr_review_trigger, review_prompt, verdict_approved,
+/// verdict_changes}}` (forme native `component_set_params` ou chaîne
+/// JSON via `acctl comp set`). `{}`/`[]`/vide = map vidée (params
+/// globaux seuls). Chaque champ vide/absent hérite du global ;
+/// `trigger_mode` hors vocabulaire et labels invalides sont refusés
+/// — même validation que les params plats.
+fn val_review_overrides(
+    v: &Value,
+) -> Result<std::collections::BTreeMap<String, super::cfg::ReviewOverride>> {
+    use super::cfg::ReviewOverride;
+    let mut out: std::collections::BTreeMap<String, ReviewOverride> = match v {
+        Value::String(s) => {
+            let s = s.trim();
+            if s.is_empty() || s == "{}" || s == "[]" {
+                return Ok(Default::default());
+            }
+            let parsed: Value =
+                serde_json::from_str(s).context("review_overrides: invalid JSON")?;
+            serde_json::from_value(parsed).context("review_overrides: invalid shape")?
+        }
+        other => serde_json::from_value(other.clone())
+            .context("review_overrides: expected a JSON object {repo: {…}}")?,
+    };
+    for (repo, o) in &mut out {
+        anyhow::ensure!(!repo.trim().is_empty(), "review_overrides: empty repo key");
+        if !o.trigger_mode.is_empty() {
+            let m = super::cfg::ReviewTriggerMode::parse(&o.trigger_mode)
+                .with_context(|| {
+                    format!("review_overrides[{repo}].trigger_mode « {} » — expected comment|auto_open|auto_push|manual|off", o.trigger_mode)
+                })?;
+            o.trigger_mode = m.as_str().to_string();
+        }
+        if !o.verdict_approved.is_empty() {
+            o.verdict_approved = val_label(&json!(o.verdict_approved))
+                .context("review_overrides verdict_approved")?;
+        }
+        if !o.verdict_changes.is_empty() {
+            o.verdict_changes =
+                val_label(&json!(o.verdict_changes)).context("review_overrides verdict_changes")?;
+        }
+    }
+    Ok(out)
 }
 
 /// `true` si `v` est une chaîne vide — « champ vidé = défaut/vide »
@@ -1196,6 +1348,60 @@ pub(crate) fn apply_patch(
                     .max(1)
             }
             "pr_review_timeout" => cfg.pr_review_timeout = val_u64(v)?.max(60),
+            // Vide → défaut `comment` ; vocabulaire clos sinon —
+            // une faute de frappe couperait la détection en silence.
+            "review_trigger_mode" => {
+                cfg.review_trigger_mode = if is_empty(v) {
+                    OrchCfg::default().review_trigger_mode
+                } else {
+                    super::cfg::ReviewTriggerMode::parse(&val_string(v)?)
+                        .with_context(|| {
+                            format!(
+                                "review_trigger_mode « {} » — expected \
+                                 comment|auto_open|auto_push|manual|off",
+                                val_string(v).unwrap_or_default()
+                            )
+                        })?
+                        .as_str()
+                        .to_string()
+                }
+            }
+            // Vide → None = template intégré (même convention que
+            // `prompt`/`manager_prompt`).
+            "review_prompt" => cfg.review_prompt = Some(val_string(v)?).filter(|s| !s.is_empty()),
+            // Vide → défaut ; « ## X » saisi est normalisé en « X ».
+            "verdict_approved" => {
+                cfg.verdict_approved = if is_empty(v) {
+                    OrchCfg::default().verdict_approved
+                } else {
+                    let s = val_label(v)?;
+                    anyhow::ensure!(
+                        s != cfg.verdict_changes,
+                        "verdict_approved « {s} » must differ from verdict_changes"
+                    );
+                    s
+                }
+            }
+            "verdict_changes" => {
+                cfg.verdict_changes = if is_empty(v) {
+                    OrchCfg::default().verdict_changes
+                } else {
+                    let s = val_label(v)?;
+                    anyhow::ensure!(
+                        s != cfg.verdict_approved,
+                        "verdict_changes « {s} » must differ from verdict_approved"
+                    );
+                    s
+                }
+            }
+            // Vide → défaut (map vide) ; `{}`/`[]` explicite = map vidée.
+            "review_overrides" => {
+                cfg.review = if is_empty(v) {
+                    OrchCfg::default().review
+                } else {
+                    val_review_overrides(v)?
+                }
+            }
             // Vide → défaut ; `{}`/`[]` explicite = map vidée.
             "repo_workspaces" => {
                 cfg.repo_workspaces = if is_empty(v) {
@@ -1469,6 +1675,65 @@ mod tests {
     }
 
     #[test]
+    fn patch_review_trigger_labels_overrides() {
+        let mut c = super::super::cfg::OrchCfg::default();
+        // Mode : vocabulaire clos, vide → défaut `comment`.
+        apply_patch(&mut c, &patch(&[("review_trigger_mode", json!("manual"))])).unwrap();
+        assert_eq!(c.review_trigger_mode, "manual");
+        assert!(apply_patch(&mut c, &patch(&[("review_trigger_mode", json!("auto"))])).is_err());
+        apply_patch(&mut c, &patch(&[("review_trigger_mode", json!(""))])).unwrap();
+        assert_eq!(c.review_trigger_mode, "comment");
+        // Prompt : vide → None (template intégré), sinon surcharge.
+        apply_patch(&mut c, &patch(&[("review_prompt", json!("tpl {PR}"))])).unwrap();
+        assert_eq!(c.review_prompt.as_deref(), Some("tpl {PR}"));
+        apply_patch(&mut c, &patch(&[("review_prompt", json!(""))])).unwrap();
+        assert!(c.review_prompt.is_none());
+        // Labels : « ## X » normalisé en « X », multi-lignes et
+        // « stale » refusés, approved ≠ changes, vide → défaut.
+        apply_patch(&mut c, &patch(&[("verdict_approved", json!("## LGTM"))])).unwrap();
+        assert_eq!(c.verdict_approved, "LGTM");
+        assert!(apply_patch(&mut c, &patch(&[("verdict_approved", json!("a\nb"))])).is_err());
+        assert!(apply_patch(&mut c, &patch(&[("verdict_approved", json!("stale"))])).is_err());
+        assert!(apply_patch(&mut c, &patch(&[("verdict_changes", json!("LGTM"))])).is_err());
+        apply_patch(&mut c, &patch(&[("verdict_approved", json!(""))])).unwrap();
+        assert_eq!(c.verdict_approved, "Verdict: APPROVED");
+        // Overrides par repo — objet JSON natif ou chaîne ; mode
+        // invalide et labels invalides refusés ; vide → map vidée.
+        apply_patch(
+            &mut c,
+            &patch(&[(
+                "review_overrides",
+                json!({"forge/repo": {"trigger_mode": "auto_push", "verdict_approved": "LGTM"}}),
+            )]),
+        )
+        .unwrap();
+        assert_eq!(
+            c.review_mode_for("forge/repo"),
+            super::super::cfg::ReviewTriggerMode::AutoPush
+        );
+        assert_eq!(
+            c.verdict_label_for(super::super::cfg::ReviewVerdict::Approved, "forge/repo"),
+            "LGTM"
+        );
+        assert!(apply_patch(
+            &mut c,
+            &patch(&[("review_overrides", json!({"r": {"trigger_mode": "nope"}}))]),
+        )
+        .is_err());
+        apply_patch(
+            &mut c,
+            &patch(&[(
+                "review_overrides",
+                json!("{\"o/r\": {\"review_prompt\": \"p {SHA}\"}}"),
+            )]),
+        )
+        .unwrap();
+        assert_eq!(c.review_prompt_for("o/r"), Some("p {SHA}"));
+        apply_patch(&mut c, &patch(&[("review_overrides", json!(""))])).unwrap();
+        assert!(c.review.is_empty());
+    }
+
+    #[test]
     fn patch_map_csv_objet_liste() {
         let mut c = super::super::cfg::OrchCfg::default();
         apply_patch(
@@ -1575,7 +1840,10 @@ mod tests {
         assert_eq!(c.pr_base(), "next_release");
         assert_eq!(c.release_pair(), Some(("next_release", "main")));
         let schema = params_schema(&DynChoices::default(), &[]);
-        for (key, want) in [("integration_branch", "next_release"), ("release_branch", "main")] {
+        for (key, want) in [
+            ("integration_branch", "next_release"),
+            ("release_branch", "main"),
+        ] {
             let p = schema.iter().find(|p| p.key == key).unwrap();
             assert_eq!(p.default.as_deref(), Some(want), "{key} default");
         }
