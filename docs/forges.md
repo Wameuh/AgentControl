@@ -75,7 +75,29 @@ re-read at sync time would have no value anyway.
 
 ## Configuration
 
-Daemon `config.toml` (`$AGENTCONTROL_HOME/config.toml`):
+The canonical way to edit `[[forges]]` is the **`prs-registry` component
+panel** (Composants → `prs-registry` → Configurer): a single `forges`
+JSON param holding the declared entries —
+
+```json
+[{"type":"gitlab","hosts":["gitlab.example.com"],"token_env":"GITLAB_TOKEN"},
+ {"type":"gerrit","hosts":["gerrit.corp:8080","example.com/gerrit"]}]
+```
+
+— or `acctl comp set prs-registry forges '<json>'`. The set is applied
+**hot**: PR watchers of live sessions, `forge_list` and `pr_sync` see
+the new hosts without a daemon restart, and the change is persisted as
+`[[forges]]` in `config.toml` (atomic rewrite, same lock as the other
+config writers). `token_env` stays an env var **name** — a value that
+isn't a valid identifier is rejected (never a token in the config).
+
+`config.toml` remains editable by hand — a `[[forges]]` added, modified
+or removed there is picked up at the next `forge_list`/panel read, at
+`pr_sync`, and by a 60 s rescan — but the panel/`comp set` is the
+canonical path (it validates and normalizes hosts).
+
+Daemon `config.toml` (`$AGENTCONTROL_HOME/config.toml`) — same entries,
+hand-edited or panel-written:
 
 ```toml
 [[forges]]
@@ -91,9 +113,37 @@ hosts = ["gerrit.corp:8080", "example.com/gerrit"]  # port and path
                                                     # prefix OK
 ```
 
-- `github.com` and `gitlab.com` are implicit — no need to declare them.
+- `github.com` and `gitlab.com` are implicit — no need to declare them,
+  and they are **not removable** via the panel (they are not `[[forges]]`
+  entries — only declared hosts are editable).
 - The same host may serve several forges: the URL path discriminates.
-- The effective set is exposed via the `forge_list` RPC.
+- The effective set is exposed via the `forge_list` RPC (implicit +
+  declared hosts with their `token_env`).
+- **Removing a declared host does not touch existing registry
+  entries**: their references stay (attribution, badges, history) but
+  stop being synced — an undeclared host is noted "undeclared host —
+  status unchanged" at the next `pr_sync` and counts toward
+  `sync_fails`. Re-declaring the host resumes sync.
+
+## Repo resolution
+
+The registry keys each reference by `forge + host + repo + number`
+(`+ Change-Id` for unresolved Gerrit changes). There is no repo
+allowlist: which repo a reference belongs to is decided by the URL
+itself. For manual commands the **current clone keeps priority**:
+
+- `acctl pr add` without `--repo` resolves the target from the `origin`
+  remote of the cwd (host matched against the declared forge hosts — a
+  Gerrit's ssh `:29418` port matches its declared web host);
+- `acctl pr rm|note <N>` prefers the entry whose repo matches the
+  clone's remote when several candidates share the number;
+- a bare `Change-Id: I<sha>` trailer detected in a tool output is
+  recorded with an empty repo and resolved at the next `pr_sync`.
+
+Auto-detection never guesses a repo: a reference is only created from
+a full forge URL found in a tool output (placeholder-looking repo paths
+are refused, and every new reference is existence-checked on the forge
+before entering the registry — see above).
 
 ## `acctl pr`
 

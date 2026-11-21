@@ -479,6 +479,7 @@ export const en = {
   pr_open_title: "Open on {host}",
   pr_st_ready: "ready", pr_st_draft: "draft", pr_st_conflict: "conflict",
   pr_st_merged: "merged", pr_st_closed: "closed",
+  pr_st_ready_m: "ready", pr_st_merged_m: "merged", pr_st_closed_m: "closed", // gerrit « Change » = masculin
   pr_st_unresolved: "unresolvable",
   pr_unres_hint: "never resolved by sync ({n} failures) — likely phantom repo or dead host",
   pr_nrev_running: "in review", pr_nrev_retry: "review retry",

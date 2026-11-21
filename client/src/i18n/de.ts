@@ -482,6 +482,7 @@ export const de: Record<Key, string> = {
   pr_open_title: "Auf {host} öffnen",
   pr_st_ready: "bereit", pr_st_draft: "Entwurf", pr_st_conflict: "Konflikt",
   pr_st_merged: "gemergt", pr_st_closed: "geschlossen",
+  pr_st_ready_m: "bereit", pr_st_merged_m: "gemergt", pr_st_closed_m: "geschlossen", // gerrit « Change »
   pr_st_unresolved: "nicht auflösbar",
   pr_unres_hint: "nie vom Sync aufgelöst ({n} Fehler) — wahrscheinlich Phantom-Repo oder toter Host",
   pr_nrev_running: "in Review", pr_nrev_retry: "Review-Wiederholung",
