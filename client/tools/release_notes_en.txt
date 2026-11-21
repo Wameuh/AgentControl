@@ -192,3 +192,4 @@ sha:71fcbdf871390152ae3de8661e3fc1da87e2e3f7: ACP-only session modes (plan/smart
 373: A new About dialog now shows client, daemon and latest-release versions side by side, with one-click update buttons for the app and the daemon.
 377: Forking or rebinding a session with a long history no longer floods the chat — the replayed history is journaled quietly and the conversation reloads once at the end instead of streaming every old event live.
 379: Very large journal events no longer break the connection — oversized NDJSON lines and diff blobs are bounded, event pages are capped at 256 KB, and a partially received frame now counts as proof the link is alive instead of triggering a reconnect.
+386: On Android the app now stays locked in portrait (no more cramped landscape layout), and the model picker no longer shows a broken glyph in front of model names.
