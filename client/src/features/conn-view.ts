@@ -27,6 +27,30 @@ const SCRIPT_STEPS = ["check", "download", "install", "service", "verify"];
 // Variante pour l'auto-update via ReqKind::UpdateDaemon (pas de script).
 const SELF_STEPS = ["send", "restart"];
 
+/** Préfixe d'erreur typée émis par la commande Tauri `connect` :
+ *  `connect-failed:<kind>:<detail>` — kinds `transport` |
+ *  `daemon-absent` | `daemon-unresponsive` (commands/connect.rs).
+ *  Seul `daemon-absent` justifie la proposition d'install : tout autre
+ *  échec (auth, DNS, timeout, démon gelé) doit montrer sa cause réelle. */
+const CONNECT_FAIL_RE =
+  /^connect-failed:(transport|daemon-absent|daemon-unresponsive):([\s\S]*)$/;
+
+/** Signature reconnaissable dans le détail d'un échec → clé i18n du
+ *  message (cause + hint d'action) ; repli = libellé générique, le détail
+ *  brut suit toujours le message. */
+function transportHint(detail: string): Key {
+  const d = detail.toLowerCase();
+  if (/permission denied|password refused|auth failed|key refused|disposable key refused/.test(d))
+    return "connfail_auth";
+  if (/could not resolve|name or service|nodename nor servname|temporary failure in name|no such host/.test(d))
+    return "connfail_dns";
+  if (/timed? ?out|no route to host|network is unreachable/.test(d))
+    return "connfail_unreachable";
+  if (/connection refused|refused|refus/.test(d)) return "connfail_refused";
+  if (/openssh|spawn ssh/.test(d)) return "connfail_ssh_missing";
+  return "connfail_transport";
+}
+
 export class ConnView {
   private conns!: ConnectionManager;
   /** Rafraîchit la sidebar après connexion (injecté). */
@@ -82,6 +106,29 @@ export class ConnView {
   private report(msg: string, level: "info" | "success" | "warn" | "error" = "error") {
     if (this.isOpen()) dlgErr("c-err", msg);
     else notify(level, msg);
+  }
+
+  /** Message affichable d'un échec `connect` : l'erreur typée
+   *  `connect-failed:<kind>:<detail>` est traduite en libellé i18n +
+   *  cause brute (bornée côté Rust) ; sans préfixe (vieux client-core,
+   *  transport web) l'erreur brute EST la cause réelle. La classe
+   *  n'est jamais mémorisée — chaque tentative est reclassée. */
+  private connectErrorMsg(e: unknown, cfg: Record<string, unknown>): string {
+    const s = String(e);
+    const m = CONNECT_FAIL_RE.exec(s);
+    const kind = m?.[1];
+    const detail = (m?.[2] ?? s).replace(/\s+/g, " ").trim();
+    const host = String(cfg.host ?? cfg.addr ?? cfg.path ?? "local");
+    const msg =
+      kind === "daemon-unresponsive"
+        ? t("connfail_unresponsive", {
+            host,
+            port: Number(cfg.remote_port) || 7331,
+          })
+        : kind === "daemon-absent"
+          ? t("connfail_absent", { host })
+          : t(transportHint(detail));
+    return detail ? `${msg} — ${detail}` : msg;
   }
 
   /** Ligne de statut du flux de connexion (étape en cours). */
@@ -286,16 +333,24 @@ export class ConnView {
         if (!ok) throw e;
         cfg.host_keys = [m[1]];
         this.cStatus(t("connecting_to", { host }));
-        status = await invoke("connect", { cfg });
+        status = await invoke("connect", { cfg }).catch((e3) => {
+          throw this.connectErrorMsg(e3, cfg);
+        });
       } else {
-      // SSH : échec → démon absent ou arrêté → bootstrap depuis la release.
-      if (cfg.kind !== "ssh" || !cfg.host) throw e;
+      // Erreur typée `connect-failed:<kind>:<detail>` : SEUL
+      // `daemon-absent` (transport OK, port démon refusé) justifie le
+      // bootstrap — auth refusée, DNS, timeout, démon gelé ou kind
+      // inconnu (vieux client-core) affichent la cause réelle, jamais
+      // d'install proposée.
+      const cf = CONNECT_FAIL_RE.exec(String(e));
+      if (cf?.[1] === "daemon-absent" && cfg.kind === "ssh" && cfg.host) {
       const ver = await getVersion().catch(() => "0.0.0");
       // L'install copie des binaires + une unit systemd sur l'hôte : si la
       // connexion pointe un démon managé autrement (conteneur, superviseur,
       // port forwardé) mais momentanément down, installer ici écraserait
       // l'hôte — confirmation explicite avant toute mutation.
-      if (!(await this.confirmDaemonInstall(String(cfg.host)))) throw e;
+      if (!(await this.confirmDaemonInstall(String(cfg.host))))
+        throw this.connectErrorMsg(e, cfg);
       const res = await this.runDaemonScript(
         cfg, ver, t("installing_daemon") + " — " + host,
       );
@@ -309,8 +364,11 @@ export class ConnView {
       this.cStatus(t("connecting_to", { host }));
       status = await invoke("connect", { cfg }).catch((e2) => {
         if (newerDaemon) showOutdated(ver, newerDaemon);
-        throw e2;
+        throw this.connectErrorMsg(e2, cfg);
       });
+      } else {
+        throw this.connectErrorMsg(e, cfg);
+      }
       }
     }
     // Incompatibilité de version mineure (x.y) — jamais à chaque patch.
