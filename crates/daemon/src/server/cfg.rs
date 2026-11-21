@@ -334,6 +334,20 @@ pub struct OrchCfg {
     /// registre/des gardes. Défaut "main".
     #[serde(default = "drelbranch")]
     pub release_branch: String,
+    /// Racine des worktrees dédiés créés par les agents — placeholder
+    /// `{WORKTREE_DIR}` des prompts orchestrateur. Convention produit
+    /// « hors du checkout principal » : la convention de nommage fine
+    /// reste aux règles du repo (AGENTS.md/CLAUDE.md). Vide = défaut.
+    /// Défaut "~/worktrees".
+    #[serde(default = "dwtroot")]
+    pub worktree_dir: String,
+    /// Règle de merge substituée dans `{MERGE_RULE}` — **vide = le
+    /// prompt renvoie aux règles du repo** (le fichier de règles du
+    /// workspace fait foi : merge par l'agent seulement s'il y est
+    /// autorisé, sinon le merge reste à l'utilisateur). Posé = texte
+    /// injecté tel quel dans les prompts.
+    #[serde(default)]
+    pub merge_rule: String,
     /// Workers `title_prefix*` simultanés max (défaut 5).
     #[serde(default = "d5")]
     pub max_workers: u32,
@@ -556,6 +570,9 @@ fn dintbranch() -> String {
 fn drelbranch() -> String {
     "main".into()
 }
+fn dwtroot() -> String {
+    "~/worktrees".into()
+}
 fn dgroup() -> String {
     "AgentControl".into()
 }
@@ -599,6 +616,8 @@ impl Default for OrchCfg {
             spawn_managers: true,
             integration_branch: dintbranch(),
             release_branch: drelbranch(),
+            worktree_dir: dwtroot(),
+            merge_rule: String::new(),
             max_workers: 5,
             max_working: 0,
             poll_secs: 60,
