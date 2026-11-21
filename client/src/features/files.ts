@@ -27,6 +27,7 @@ import { call, callBg } from "../core/rpc";
 import { app } from "../core/state";
 import { pushRecentFile, recentsId } from "../core/recent-files";
 import { isAndroid, isWindows } from "../core/chrome";
+import { setFileTitle, renderRecents } from "../mobile/files-head";
 import type { DirEntry } from "../core/types";
 import { t } from "../i18n";
 import { icon, type IconName } from "../ui/icons";
@@ -1105,6 +1106,10 @@ export class FileExplorer {
       hd.innerHTML = `<span class="fico">${icon("folder")}</span><span class="fname">${esc(r.dir)}</span>`;
       hd.title = r.dir;
       this.treeRootDir = r.dir;
+      if (isAndroid() && app.current) {
+        setFileTitle(r.dir);
+        renderRecents(app.current.id, app.current.conn, (p) => void this.openFilePanel(p));
+      }
       bindCtx(hd, (x, y) => this.openFileCtx(x, y, hd));
       tree.appendChild(hd);
       for (const en of r.entries) {

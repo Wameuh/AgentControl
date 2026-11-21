@@ -6,9 +6,11 @@
 
 import { $, esc } from "../core/dom";
 import { isAndroid } from "../core/chrome";
+import { t } from "../i18n";
 import { icon, type IconName } from "./icons";
+import { hintOnce } from "../mobile/hints";
 
-type ScrimOwner = "drawer" | "sheet";
+type ScrimOwner = "drawer" | "sheet" | "queue";
 
 export interface SheetItem {
   label: string;
@@ -41,6 +43,9 @@ export class OverlayNav {
         this.close("sheet");
         this.omenu.hidden = true;
         this.scrimOff("sheet");
+      } else if (this.scrimOwner === "queue") {
+        // Même motif que rawCloseOverlay : le ✕ porte le close complet.
+        $("qp-close").click();
       }
     };
     // NB : dans #app-body (pas body) — #app a z-index:1 (contexte d'empilement),
@@ -154,6 +159,12 @@ export class OverlayNav {
     if (this.scrimOwner === owner) { this.scrimOwner = null; this.scrim.hidden = true; }
   }
 
+  /** Voile modal pour un overlay hors nav (file d'attente en bottom-sheet) —
+   *  le tap dehors ferme via le ✕ de l'overlay (scrim.onclick). */
+  showScrim(owner: ScrimOwner) { this.scrimOn(owner); }
+  /** No-op si le voile appartient à un autre overlay. */
+  hideScrim(owner: ScrimOwner) { this.scrimOff(owner); }
+
   sheet(items: SheetItem[]) {
     this.omenu.innerHTML = "";
     for (const it of items) {
@@ -178,6 +189,11 @@ export class OverlayNav {
     $("sidebar").classList.add("open");
     this.scrimOn("drawer");
     this.push("drawer");
+    // Indice de découverte (une seule fois) : les actions des lignes de
+    // session — suppression comprise — vivent dans le menu d'appui long.
+    if (isAndroid() && document.querySelector("#session-list .sess")) {
+      hintOnce("longpress", t("hint_longpress"));
+    }
   }
 
   closeDrawer() {

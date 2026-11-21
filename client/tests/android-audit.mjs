@@ -117,7 +117,7 @@ await page.evaluateOnNewDocument(`
       return Promise.resolve(typeof o === "function" ? o(params) : o);
     }
     if (cmd === "connect") {
-      return Promise.resolve({ version: "0.2.9", sessions: 4, servers: 1,
+      return Promise.resolve({ version: "0.10.0", sessions: 4, servers: 1,
         terminal: true, first_post: true });
     }
     return __inv(cmd, args);
@@ -128,7 +128,7 @@ await page.evaluateOnNewDocument(`
   // daemon_status = map par conn ({local: {caps…}}) — les bools deviennent
   // les capabilities de conns.cap("local") : items Terminal/First-post du ⋮.
   window.__rpcOver.daemon_status = () => ({
-    local: { version: "0.2.9", sessions: 4, terminal: true, first_post: true } });
+    local: { version: "0.10.0", sessions: 4, terminal: true, first_post: true } });
   const __TEXT = "export async function apiCall(url, opts) {\\n" +
     "  return withRetry(() => fetch(url, opts), 3);\\n}\\n\\n" +
     "async function withRetry(fn, n) {\\n  try { return await fn(); }\\n" +
@@ -428,6 +428,18 @@ await page.evaluate(() => document.querySelector(".sess")?.click());
 await sleep(800);
 await shot("a08-chat");
 await collect("a08-chat");
+
+// ── File d'attente : la puce ouvre la feuille basse ─────────────────────────
+await step("a08b-queue-sheet", async () => {
+  if (!(await visible("#queue-open"))) throw new Error("#queue-open absent");
+  await tap("#queue-open", 450);
+  if (!(await visible("#queue-panel"))) throw new Error("#queue-panel non ouvert");
+  await shot("a08b-queue-sheet");
+  await collect("a08b-queue-sheet");
+  // Fermeture par le ✕ (chemin utilisateur complet — le scrim se retire).
+  await click("#qp-close");
+  await sleep(300);
+});
 
 // ── Sheet ⋮ du chat ──────────────────────────────────────────────────────────
 await dismissToasts();

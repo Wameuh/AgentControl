@@ -26,6 +26,9 @@
   --gold: #e0c996;
   --violet: #c4a9dc;
   --red: #e89486;
+  /* Opale — teinte de la gemme « wait » (fichiers récents, sessions en
+     veille) : entre sauge et ardoise, lisible sur --panel-solid. */
+  --opal: #7fb0a2;
   /* Couleur de marque GitLab (onglet Dépôts — tag/icone forge). */
   --forge-gitlab: #e2893d;
   /* --tint-rgb : canaux rgb des voiles neutres (surfaces de hover, fonds
@@ -77,6 +80,7 @@ body {
   --gold: #93712f;
   --violet: #6b4d8c;
   --red: #b04a3e;
+  --opal: #3f6f6a;
   --forge-gitlab: #cf6f1e;
   --tint-rgb: 43, 42, 36;
   --line: rgba(var(--tint-rgb), .16);
