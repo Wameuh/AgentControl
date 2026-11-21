@@ -98,7 +98,7 @@ body.android #session-list .sess.sub::before { margin-top: -6px; height: 14px; }
 body.android #session-list .sess .sess-del { display: none; }
 /* Lisibilité : contenu lu ≥ 12px — badges d'état/compteurs ornementaux
    (.badge.st-*, #sv-count, .steer-badge, .pr-st, .sr-type, .perm-kind,
-   .toast-x, .farrow) exclus du seuil. */
+   .farrow) exclus du seuil. */
 body.android #session-list .sess .a,
 body.android #session-list .sess .sess-pr,
 body.android #session-list .sess .sess-origin { font-size: 12px; }
@@ -328,7 +328,7 @@ body.android #composer button#btn-expand {
 /* Chip update dans la titlebar (56px de haut — 44 tient sans la gonfler) */
 body.android .tb-update { min-height: 44px; }
 /* Fermeture de toast : ✕ gardé petit visuellement, boîte transparente 44px. */
-body.android .toast-x { min-width: 44px; min-height: 44px; padding: 0; }
+body.android .toast-x { min-width: 44px; min-height: 44px; padding: 0; font-size: 12px; }
 /* Boutons « + groupe » / « + agent » des headers de groupes : le texte
    reste compact, la boîte (sans fond) monte à 44px → lignes ~50px. */
 body.android .grp-head .grp-add, body.android .grp-sub .grp-add {
@@ -444,12 +444,13 @@ body.android .qp-txt, body.android .qp-edit { font-size: 14px; }
 body.android .qp-idx { font-size: 12px; padding-top: 3px; }
 body.android .qp-acts button { min-width: 44px; min-height: 44px; }
 body.android .qp-acts button .ic { width: 16px; height: 16px; }
-body.android #queue-open { min-height: 40px; padding: 4px 12px; font-size: 13px; }
+body.android #queue-open { min-height: 44px; padding: 4px 12px; font-size: 13px; }
 body.android #queue-open .ic { width: 15px; height: 15px; }
-body.android #qp-clear { min-height: 38px; padding: 4px 12px; font-size: 13px; }
-body.android #qp-close { min-height: 38px; padding: 4px 12px; }
+body.android #qp-clear { min-height: 44px; padding: 4px 12px; font-size: 13px; }
+body.android #qp-close { min-width: 44px; min-height: 44px; padding: 4px 12px; }
 body.android #qp-close .ic { width: 15px; height: 15px; }
 body.android #qp-title { font-size: 14px; }
+body.android #qp-count { font-size: 12px; }
 
 /* Vue connexion (#conn-view — panneau plein, pas un <dialog>) :
    lignes de la liste et champs à 44px comme les réglages. */
