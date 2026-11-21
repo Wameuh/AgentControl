@@ -2541,23 +2541,28 @@ impl Daemon {
         };
         if p.pr > 0 && !host.is_empty() {
             if let Some(client) = self.forge_client_of(&kind, &host, &p.repo, ws).await {
-                let id = p.pr.to_string();
-                let state = tokio::task::spawn_blocking(move || {
-                    if !client.available() {
-                        return None;
-                    }
-                    client.get_change(&id).map(|c| c.state)
-                })
-                .await
-                .ok()
-                .flatten();
-                return match state.as_deref() {
-                    Some("open") | Some("draft") => "OPEN".into(),
-                    Some("merged") => "MERGED".into(),
-                    Some("closed") => "CLOSED".into(),
-                    // Échec de sonde ou état exotique → jamais OPEN.
-                    _ => "UNKNOWN".into(),
-                };
+                // Sans capacité de lecture (git nu) la sonde rendrait
+                // structurellement None → UNKNOWN « soldé » : le
+                // statut enregistré fait foi à la place.
+                if client.caps().list {
+                    let id = p.pr.to_string();
+                    let state = tokio::task::spawn_blocking(move || {
+                        if !client.available() {
+                            return None;
+                        }
+                        client.get_change(&id).map(|c| c.state)
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                    return match state.as_deref() {
+                        Some("open") | Some("draft") => "OPEN".into(),
+                        Some("merged") => "MERGED".into(),
+                        Some("closed") => "CLOSED".into(),
+                        // Échec de sonde ou état exotique → jamais OPEN.
+                        _ => "UNKNOWN".into(),
+                    };
+                }
             }
         }
         match p.status.as_str() {

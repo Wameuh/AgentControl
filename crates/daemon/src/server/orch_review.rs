@@ -1742,7 +1742,9 @@ impl Daemon {
         // portent forge+host directement ; le workspace entre via son
         // remote (pas besoin de `gh repo view`).
         let mut targets: Vec<(String, String, String)> = Vec::new();
-        let mut seen: HashSet<(String, String)> = HashSet::new();
+        // Dédup sur (kind, host, repo) : le même chemin peut exister
+        // sur deux hôtes d'un type (gitlab.com + self-hosted).
+        let mut seen: HashSet<(String, String, String)> = HashSet::new();
         for p in self.prs.list() {
             let kind = proto::forge_kind(&p.forge).to_string();
             let host = if p.host.is_empty() {
@@ -1750,7 +1752,7 @@ impl Daemon {
             } else {
                 p.host.clone()
             };
-            if seen.insert((kind.clone(), p.repo.clone())) {
+            if seen.insert((kind.clone(), host.clone(), p.repo.clone())) {
                 targets.push((p.repo.clone(), kind, host));
             }
         }
@@ -1769,7 +1771,7 @@ impl Daemon {
             // routé — le repo de la forge fait foi pour l'appel API.
             for ws in &wss {
                 if let Some((kind, host, r)) = crate::forges::remote_forge(&f.set, Path::new(ws)) {
-                    if seen.insert((kind.clone(), r.clone())) {
+                    if seen.insert((kind.clone(), host.clone(), r.clone())) {
                         targets.push((r, kind, host));
                     }
                 }

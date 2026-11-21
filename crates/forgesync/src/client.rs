@@ -341,6 +341,29 @@ pub fn client_for(
     Some(client)
 }
 
+/// Pages `per_page=100` concaténées — arrêt sur page courte, borné à
+/// `max` pages. `f(page)` rend le tableau de la page ou `None` en
+/// échec : échec page 1 → `None` (lecture impossible) ; échec ensuite
+/// → ce qui est déjà lu est conservé (le scan retentera au tick
+/// suivant — les triggers récents sont en fin de liste).
+pub(crate) fn paged(max: u32, f: impl Fn(u32) -> Option<Vec<Value>>) -> Option<Vec<Value>> {
+    let mut out = Vec::new();
+    for p in 1..=max {
+        match f(p) {
+            Some(v) => {
+                let last = v.len() < 100;
+                out.extend(v);
+                if last {
+                    break;
+                }
+            }
+            None if p == 1 => return None,
+            None => break,
+        }
+    }
+    Some(out)
+}
+
 /// Horodatage → forme `YYYY-MM-DDTHH:MM:SSZ` comparable à `since` —
 /// normalise le format Gerrit (`2024-01-02 03:04:05.000000000`).
 pub(crate) fn norm_ts(s: &str) -> String {

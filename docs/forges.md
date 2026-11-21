@@ -242,7 +242,9 @@ Each sync pass also tracks **seen** and **unreachable** entries: the
 registry's `sync_fails` is reset to zero on the first live read and
 incremented otherwise (dead or undeclared host, missing repo or
 reference — a missing transport never counts: `available()` false
-leaves the entry unchanged, a daemon without `gh` penalizes nothing).
+leaves the entry unchanged, a daemon without `gh` penalizes nothing;
+a `git` entry likewise never fails — no forge to read, its status
+stays manual).
 Past **3 consecutive failures** the entry becomes **"unresolvable"**:
 dedicated state and dimmed line in the Repos tab, out of the counter
 and session badges (status restored as soon as a sync re-reads it — a
@@ -252,11 +254,16 @@ host coming back unmasks the entry).
 
 The native review (`pr_review`, `/mr review` comment or
 `acctl pr review <N>` / `agentcontrol_request_review`) resolves the
-forge client of the target repo — the `origin` remote of the routed
-workspace first, then the registry entry — and serves the same
+forge client of the target repo — a registry entry matching
+`(kind, host, repo)` wins (the review request carries an explicit
+target), the `origin` remote of the routed workspace is the fallback
+for unregistered repos — and serves the same
 pipeline on any declared forge: trigger comments are read via
 `list_comments` (notes GitLab, messages Gerrit — system notes skipped,
-membership resolved per transport), the head is fetched via the
+membership resolved per transport: GitHub `author_association`,
+GitLab `members/all`, **Gerrit maps every registered account to
+MEMBER** — permissive by design on an instance where accounts are
+already trusted), the head is fetched via the
 forge's change ref (`pull/N/head`, `merge-requests/<iid>/head`,
 `refs/changes/…`) with the SHA fallback, and ack/verdict/failure notes
 are posted back through `post_comment`. A forge without comment caps

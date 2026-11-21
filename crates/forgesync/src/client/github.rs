@@ -169,22 +169,23 @@ impl ForgeClient for GhCliClient {
     }
 
     fn list_comments(&self, id: &str, since: Option<&str>) -> Option<Vec<ChangeComment>> {
-        // `?since=` filtre côté serveur — le trigger `/mr review` vit
-        // dans les issue comments ; per_page=100 borne comme l'ancien
-        // `--json comments` de `gh pr view`.
-        let mut ep = format!(
-            "repos/{}/issues/{id}/comments?per_page=100",
-            self.target.repo
-        );
-        if let Some(s) = since {
-            ep.push_str(&format!("&since={s}"));
-        }
-        match gh_api(&self.host, &ep, &[]) {
-            GhCall::Ok(body) => serde_json::from_str::<Vec<Value>>(&body)
-                .ok()
-                .map(|v| v.iter().map(issue_comment).collect()),
-            _ => None,
-        }
+        // `?since=` filtre côté serveur ; toutes les pages lues (le
+        // trigger `/mr review` peut vivre au-delà de la 100e entrée —
+        // régression vs l'ancien `--paginate` sinon), borné à 10 pages.
+        let pages = super::paged(10, |p| {
+            let mut ep = format!(
+                "repos/{}/issues/{id}/comments?per_page=100&page={p}",
+                self.target.repo
+            );
+            if let Some(s) = since {
+                ep.push_str(&format!("&since={s}"));
+            }
+            match gh_api(&self.host, &ep, &[]) {
+                GhCall::Ok(body) => serde_json::from_str::<Vec<Value>>(&body).ok(),
+                _ => None,
+            }
+        })?;
+        Some(pages.iter().map(issue_comment).collect())
     }
 
     fn post_comment(&self, id: &str, body: &str) -> bool {
@@ -251,23 +252,37 @@ pub struct GhRestClient {
     target: ForgeTarget,
     /// Base API (`https://api.github.com` ou `https://h/api/v3`).
     api: String,
+    /// Endpoint GraphQL (`…/graphql` — pas `…/api/v3/graphql` sur
+    /// GHES : le préfixe `v3` est propre au REST).
+    gql: String,
     /// Token résolu (token_env, puis GH_TOKEN/GITHUB_TOKEN).
     token: Option<String>,
 }
 
 impl GhRestClient {
     pub fn new(spec: ForgeSpec, target: ForgeTarget) -> Self {
-        let api = if spec.host == "github.com" {
-            "https://api.github.com".into()
+        let (api, gql) = if spec.host == "github.com" {
+            (
+                "https://api.github.com".into(),
+                "https://api.github.com/graphql".into(),
+            )
         } else {
-            format!("{}/api/v3", host_base(&spec.host))
+            (
+                format!("{}/api/v3", host_base(&spec.host)),
+                format!("{}/api/graphql", host_base(&spec.host)),
+            )
         };
         // Repli implicite : les variables standard de `gh` servent de
         // token quand `token_env` n'est pas configuré.
         let token = token_value(spec.token_env.as_deref())
             .or_else(|| token_value(Some("GH_TOKEN")))
             .or_else(|| token_value(Some("GITHUB_TOKEN")));
-        Self { target, api, token }
+        Self {
+            target,
+            api,
+            gql,
+            token,
+        }
     }
 
     fn headers(&self) -> Vec<(&'static str, String)> {
@@ -331,10 +346,7 @@ impl GhRestClient {
             return false;
         }
         matches!(
-            http_send(
-                "POST",
-                &format!("{}/graphql", self.api),
-                &self.headers(),
+            http_send("POST", &self.gql, &self.headers(),
                 &json!({"query": format!(
                     "mutation {{ {mutation}(input: {{pullRequestId: \"{node}\"}}) {{ pullRequest {{ isDraft }} }} }}"
                 )}),
@@ -387,17 +399,20 @@ impl ForgeClient for GhRestClient {
     }
 
     fn list_comments(&self, id: &str, since: Option<&str>) -> Option<Vec<ChangeComment>> {
-        let mut ep = format!(
-            "/repos/{}/issues/{id}/comments?per_page=100",
-            self.target.repo
-        );
-        if let Some(s) = since {
-            ep.push_str(&format!("&since={s}"));
-        }
-        match self.get(&ep) {
-            Http::Ok(v) => v.as_array().map(|a| a.iter().map(issue_comment).collect()),
-            _ => None,
-        }
+        let pages = super::paged(10, |p| {
+            let mut ep = format!(
+                "/repos/{}/issues/{id}/comments?per_page=100&page={p}",
+                self.target.repo
+            );
+            if let Some(s) = since {
+                ep.push_str(&format!("&since={s}"));
+            }
+            match self.get(&ep) {
+                Http::Ok(v) => v.as_array().cloned(),
+                _ => None,
+            }
+        })?;
+        Some(pages.iter().map(issue_comment).collect())
     }
 
     fn post_comment(&self, id: &str, body: &str) -> bool {

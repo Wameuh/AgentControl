@@ -201,17 +201,24 @@ impl ForgeClient for GitlabRestClient {
     }
 
     fn list_comments(&self, id: &str, since: Option<&str>) -> Option<Vec<ChangeComment>> {
-        match self.get(&self.proj(&format!(
-            "/merge_requests/{id}/notes?sort=asc&order_by=created_at&per_page=100"
-        ))) {
-            Http::Ok(v) => v.as_array().map(|a| {
-                a.iter()
-                    .map(mr_note)
-                    .filter(|c| since.is_none_or(|s| c.created_at.as_str() >= s))
-                    .collect()
-            }),
-            _ => None,
-        }
+        // Toutes les pages (trigger possible au-delà de la 100e note),
+        // borné à 10 pages ; `since` reste un filtre local (l'API
+        // accepte `updated_after` mais pas `created_after`).
+        let pages = super::paged(10, |p| {
+            match self.get(&self.proj(&format!(
+                "/merge_requests/{id}/notes?sort=asc&order_by=created_at&per_page=100&page={p}"
+            ))) {
+                Http::Ok(v) => v.as_array().cloned(),
+                _ => None,
+            }
+        })?;
+        Some(
+            pages
+                .iter()
+                .map(mr_note)
+                .filter(|c| since.is_none_or(|s| c.created_at.as_str() >= s))
+                .collect(),
+        )
     }
 
     fn post_comment(&self, id: &str, body: &str) -> bool {
@@ -339,18 +346,20 @@ impl ForgeClient for GlabClient {
     }
 
     fn list_comments(&self, id: &str, since: Option<&str>) -> Option<Vec<ChangeComment>> {
-        self.api_json(&format!(
-            "projects/{}/merge_requests/{id}/notes?sort=asc&order_by=created_at&per_page=100",
-            urlenc(&self.target.repo)
-        ))
-        .and_then(|v| {
-            v.as_array().map(|a| {
-                a.iter()
-                    .map(mr_note)
-                    .filter(|c| since.is_none_or(|s| c.created_at.as_str() >= s))
-                    .collect()
-            })
-        })
+        let pages = super::paged(10, |p| {
+            self.api_json(&format!(
+                "projects/{}/merge_requests/{id}/notes?sort=asc&order_by=created_at&per_page=100&page={p}",
+                urlenc(&self.target.repo)
+            ))
+            .and_then(|v| v.as_array().cloned())
+        })?;
+        Some(
+            pages
+                .iter()
+                .map(mr_note)
+                .filter(|c| since.is_none_or(|s| c.created_at.as_str() >= s))
+                .collect(),
+        )
     }
 
     fn post_comment(&self, id: &str, body: &str) -> bool {

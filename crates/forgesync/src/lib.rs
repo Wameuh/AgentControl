@@ -821,11 +821,13 @@ fn group_sync(set: &[Value], g: &SyncGroup) -> SyncPartial {
     };
     if !client.caps().list {
         // git nu : aucune lecture forge — le statut reste manuel.
+        // Pas d'échec d'entrée (sinon `sync_fails` la ferait passer
+        // « non résoluble » au bout de 3 passes alors que le statut
+        // stocké fait foi).
         p.notes.push(format!(
             "{} {} {}: pas de lecture automatique (git nu) — statuts inchangés",
             g.kind, g.host, g.repo
         ));
-        fail_all(&mut p);
         return p;
     }
     if !client.available() {
