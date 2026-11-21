@@ -289,6 +289,99 @@ pub struct WorkerPoolEntry {
     pub mode: String,
 }
 
+/// Mode de déclenchement des reviews PR servies par le démon
+/// (`review_trigger_mode`, surchargeable par repo via
+/// `[backlog_orchestrator.review.<repo>]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewTriggerMode {
+    /// Commentaire nu `pr_review_trigger` scanné via la couche forge
+    /// (`list_comments`) — comportement historique, défaut.
+    Comment,
+    /// Review à l'ouverture du change (première vue par le listing
+    /// forge — aucune entrée `pr_reviews` connue).
+    AutoOpen,
+    /// Re-review à chaque head différent du SHA reviewé.
+    AutoPush,
+    /// Aucun scan forge : seuls `acctl pr review` / les RPC internes
+    /// déclenchent.
+    Manual,
+    /// Rien du tout — les demandes internes sont elles-mêmes refusées
+    /// (les reviews en vol se soldent normalement ; `pr_review=false`
+    /// reste la bascule qui les avorte).
+    Off,
+}
+
+impl ReviewTriggerMode {
+    /// Chaîne configurée → mode ; `comment` pour vide ou inconnu —
+    /// `parse` (édition) refuse les fautes de frappe, `of` (lecture)
+    /// retombe sur le comportement historique plutôt que de couper
+    /// les reviews en silence.
+    pub fn of(s: &str) -> Self {
+        Self::parse(s).unwrap_or(Self::Comment)
+    }
+    /// Chaîne validée → mode ; None hors vocabulaire (apply_patch
+    /// refuse — un mode mal orthographé couperait la détection sans
+    /// signaler l'erreur).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "comment" => Some(Self::Comment),
+            "auto_open" => Some(Self::AutoOpen),
+            "auto_push" => Some(Self::AutoPush),
+            "manual" => Some(Self::Manual),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Comment => "comment",
+            Self::AutoOpen => "auto_open",
+            Self::AutoPush => "auto_push",
+            Self::Manual => "manual",
+            Self::Off => "off",
+        }
+    }
+    /// Le mode déclenche par scan forge (commentaires ou listing des
+    /// changes ouverts) — `manual`/`off` ne déclenchent jamais.
+    pub fn scans(self) -> bool {
+        matches!(self, Self::Comment | Self::AutoOpen | Self::AutoPush)
+    }
+}
+
+/// Famille de verdict de review — le label posté (`## <label>`) est
+/// résolu par `OrchCfg::verdict_label_for`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewVerdict {
+    Approved,
+    Changes,
+}
+
+/// Sous-ensemble des paramètres review surchargeable par repo —
+/// `[backlog_orchestrator.review.<repo>]` (clé = chemin du repo tel
+/// qu'il apparaît dans `pr_reviews`/le registre, ex.
+/// `"owner/name"` ou projet gerrit) ou entrée du JSON
+/// `review_overrides`. Chaque champ vide/absent hérite du param
+/// global correspondant.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ReviewOverride {
+    /// `trigger_mode` local — vide = `review_trigger_mode` global.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub trigger_mode: String,
+    /// Trigger commentaire local — vide = `pr_review_trigger` global.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pr_review_trigger: String,
+    /// Prompt reviewer local — absent = `review_prompt` global
+    /// (ou le template intégré).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_prompt: Option<String>,
+    /// Label `## <approved>` local — vide = `verdict_approved` global.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub verdict_approved: String,
+    /// Label `## <changes>` local — vide = `verdict_changes` global.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub verdict_changes: String,
+}
+
 /// Orchestrateur backlog natif (section [backlog_orchestrator] de
 /// config.toml) — port interne du service `backlog-orchestrator.py`
 /// (voir server/orch.rs). **Désactivé par défaut** (opt-in explicite) ;
@@ -530,6 +623,30 @@ pub struct OrchCfg {
     /// « review failed » au-delà. Défaut 2700 s (45 min).
     #[serde(default = "d2700")]
     pub pr_review_timeout: u64,
+    /// QUAND les reviews PR se déclenchent : `comment` (défaut —
+    /// commentaire `pr_review_trigger`), `auto_open` (à l'ouverture
+    /// du change), `auto_push` (à chaque head différent), `manual`
+    /// (demandes `acctl pr review`/RPC seules — aucun scan forge) ou
+    /// `off` (demandes refusées aussi). Surchargeable par repo via
+    /// `review.<repo>.trigger_mode`.
+    #[serde(default = "dtrigmode")]
+    pub review_trigger_mode: String,
+    /// Prompt reviewer PR sur mesure — None = `REVIEW_PROMPT` intégré.
+    /// Placeholders `{PR}` `{REPO}` `{SHA}` `{BASE}` `{WS}` `{TITLE}`
+    /// `{BODY}` `{TRIGGER}` `{VERDICT_APPROVED}` `{VERDICT_CHANGES}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_prompt: Option<String>,
+    /// Label du titre de verdict d'approbation — posté `## <label>`
+    /// (défaut « Verdict: APPROVED » → `## Verdict: APPROVED`). Le mot
+    /// de protocole rendu par le reviewer (`APPROVED` ou le label
+    /// configuré) est mappé sur ce label à la publication : la
+    /// politique de merge du repo doit accepter le label choisi.
+    #[serde(default = "dvapproved")]
+    pub verdict_approved: String,
+    /// Label du titre de verdict « changes requested » — posté
+    /// `## <label>` (défaut « Verdict: CHANGES_REQUESTED »).
+    #[serde(default = "dvchanges")]
+    pub verdict_changes: String,
     /// Pool de workers structurés (`[[worker_pool]]` dans config.toml) —
     /// présent non vide = la somme des `count` remplace `max_workers`
     /// pour la capacité workers et chaque entrée porte profil +
@@ -540,6 +657,13 @@ pub struct OrchCfg {
     /// (array-of-tables / table) — jamais de clé scalaire après elles.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub worker_pool: Vec<WorkerPoolEntry>,
+    /// Overrides review par repo — `[backlog_orchestrator.review.<repo>]`
+    /// (clé = chemin du repo) : `trigger_mode`, `pr_review_trigger`,
+    /// `review_prompt`, `verdict_approved`, `verdict_changes` locaux
+    /// pour des workspaces multi-forge. Sous-table TOML comme
+    /// `repo_workspaces` — parmi les sous-structures de fin.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub review: std::collections::BTreeMap<String, ReviewOverride>,
     /// Routing workspace repo → cwd : une entrée = un « workspace »
     /// porté par le backlog (tag `--repo` des items). Route les
     /// sessions spawnées pour un item taggé (worker legacy, planner,
@@ -600,6 +724,15 @@ fn drounds() -> u32 {
 fn dtrigger() -> String {
     "/mr review".into()
 }
+fn dtrigmode() -> String {
+    "comment".into()
+}
+fn dvapproved() -> String {
+    "Verdict: APPROVED".into()
+}
+fn dvchanges() -> String {
+    "Verdict: CHANGES_REQUESTED".into()
+}
 fn d2() -> u32 {
     2
 }
@@ -656,7 +789,12 @@ impl Default for OrchCfg {
             reviewer_effort: String::new(),
             pr_review_max_parallel: d2(),
             pr_review_timeout: d2700(),
+            review_trigger_mode: dtrigmode(),
+            review_prompt: None,
+            verdict_approved: dvapproved(),
+            verdict_changes: dvchanges(),
             worker_pool: Vec::new(),
+            review: std::collections::BTreeMap::new(),
             repo_workspaces: std::collections::BTreeMap::new(),
         }
     }
@@ -875,6 +1013,71 @@ impl OrchCfg {
             self.thought_level.as_str()
         } else {
             role_effort
+        }
+    }
+
+    /// Override review déclaré pour `repo` : chemin exact
+    /// (`"owner/name"`, projet gerrit) d'abord, nom court ensuite —
+    /// même convention de clé que `pr_reviews`/le registre pour le
+    /// chemin complet, repli `repo_workspaces`-style pour le court.
+    fn review_ov<'a>(&'a self, repo: &str) -> Option<&'a ReviewOverride> {
+        self.review.get(repo).or_else(|| {
+            repo.rsplit('/')
+                .next()
+                .filter(|short| *short != repo)
+                .and_then(|short| self.review.get(short))
+        })
+    }
+
+    /// Mode de déclenchement global — `comment` pour vide/inconnu.
+    pub fn review_mode(&self) -> ReviewTriggerMode {
+        ReviewTriggerMode::of(&self.review_trigger_mode)
+    }
+
+    /// Mode effectif d'un repo : l'override `trigger_mode` posé prime,
+    /// le global sinon.
+    pub fn review_mode_for(&self, repo: &str) -> ReviewTriggerMode {
+        self.review_ov(repo)
+            .and_then(|o| ReviewTriggerMode::parse(&o.trigger_mode))
+            .unwrap_or_else(|| self.review_mode())
+    }
+
+    /// Trigger commentaire effectif d'un repo (`pr_review_trigger`
+    /// local puis global) — le mode `comment` seul le consomme.
+    pub fn review_trigger_for<'a>(&'a self, repo: &str) -> &'a str {
+        self.review_ov(repo)
+            .map(|o| o.pr_review_trigger.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.pr_review_trigger)
+    }
+
+    /// Prompt reviewer effectif d'un repo : override → `review_prompt`
+    /// global → None (template intégré `REVIEW_PROMPT`). Un `Some("")`
+    /// (JSON `review_overrides` ou TOML `""` — forme « champ effacé »
+    /// d'un formulaire) hérite du global comme les autres champs :
+    /// un prompt vide ne doit jamais primer.
+    pub fn review_prompt_for<'a>(&'a self, repo: &str) -> Option<&'a str> {
+        self.review_ov(repo)
+            .and_then(|o| o.review_prompt.as_deref())
+            .filter(|s| !s.is_empty())
+            .or(self.review_prompt.as_deref())
+    }
+
+    /// Label posté `## <label>` pour la famille de verdict `kind` :
+    /// override repo puis global — le reviewer rend le mot de
+    /// protocole canonique (`APPROVED`/`CHANGES_REQUESTED`) ou le
+    /// label, le démon publie toujours sous le label configuré.
+    pub fn verdict_label_for<'a>(&'a self, kind: ReviewVerdict, repo: &str) -> &'a str {
+        let ov = self.review_ov(repo);
+        match kind {
+            ReviewVerdict::Approved => ov
+                .map(|o| o.verdict_approved.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&self.verdict_approved),
+            ReviewVerdict::Changes => ov
+                .map(|o| o.verdict_changes.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&self.verdict_changes),
         }
     }
 }
