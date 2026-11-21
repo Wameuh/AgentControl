@@ -453,6 +453,13 @@ await tap("#sv-agents", 400);
 await step("a05d-inbox", async () => {
   if (!(await visible("#m-home-seg")))
     V("a05d-inbox", "nav", "contrôle segmenté État|Groupes absent");
+  // L'accueil s'ouvre en mode État (profil neuf, aucun choix mémorisé).
+  if (!(await ev(() =>
+    document.querySelector('.mh-seg[data-m="state"]')?.classList.contains("on"))))
+    V("a05d-inbox", "nav", "mode État non actif par défaut");
+  // Indice d'appui long (N4) : posé dès que l'accueil a listé des sessions.
+  if (!(await ev(() => { try { return !!localStorage.getItem("ac-hint-longpress"); } catch { return false; } })))
+    V("a05d-inbox", "nav", "indice d'appui long jamais affiché");
   await ev(() => document.querySelector('.mh-seg[data-m="state"]')?.click());
   await sleep(600);
   await shot("a05d-inbox");
@@ -565,6 +572,15 @@ await step("a08c-perm-dock", async () => {
   if (!(await visible("#perm-dock .pd-opts"))) throw new Error("pd-opts absent");
   await shot("a08c-perm-dock");
   await collect("a08c-perm-dock");
+  // Le mock annonce « Toujours autoriser » en premier : l'action principale
+  // doit rester « Autoriser une fois », placée en dernier (à droite).
+  const prim = await ev(() => {
+    const bs = [...document.querySelectorAll("#perm-dock .pd-opts button")];
+    const p = document.querySelector("#perm-dock .pd-opts .pd-primary");
+    return { text: p?.textContent ?? "", last: !!p && bs[bs.length - 1] === p };
+  });
+  if (!/une fois|once/i.test(prim.text) || !prim.last)
+    V("a08c-perm-dock", "nav", `action principale du dock : «${prim.text}» (allow_once à droite attendu)`);
   // Réponse depuis le dock = clic sur le bouton réel de la carte : la
   // carte passe .done et le dock se referme tout seul (observer rAF).
   await click("#perm-dock .pd-opts .btn-allow.pd-primary");

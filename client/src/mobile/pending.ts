@@ -50,6 +50,17 @@ export async function findPending(s: SessionMeta): Promise<PendingReq[]> {
   return out;
 }
 
+/** Ordre d'affichage des options d'une permission, partagé par la carte
+ *  « À traiter » de l'accueil et le dock : reject_* à gauche, puis
+ *  allow_always, et allow_once en dernier — l'action principale, sous le
+ *  pouce. L'ordre annoncé par l'agent ne compte pas : « toujours
+ *  autoriser » n'est jamais l'action mise en avant. */
+export function sortPermOptions<T extends { kind: string }>(opts: T[]): T[] {
+  const rank = (k: string) =>
+    k.startsWith("reject") ? 0 : k === "allow_always" ? 1 : 2;
+  return [...opts].sort((a, b) => rank(a.kind) - rank(b.kind));
+}
+
 /** Répond à une demande en attente, session ouverte ou non — `conn` est
  *  obligatoire : sans lui call() viserait la connexion courante. Signature
  *  légère (id + conn) réutilisable par les actions de notification (P4).

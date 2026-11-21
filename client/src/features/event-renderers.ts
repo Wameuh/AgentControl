@@ -596,6 +596,9 @@ export class EventRenderer {
       const b = document.createElement("button");
       b.textContent = o.name || o.option_id;
       b.className = o.kind.startsWith("reject") ? "btn-reject" : "btn-allow";
+      // Lu par le dock mobile (perm-dock.ts) pour mettre allow_once en
+      // avant quel que soit l'ordre des options annoncé par l'agent.
+      b.dataset.kind = o.kind;
       b.onclick = async () => {
         if (this.answered.has(ev.request_id as string)) return;
         await call("respond", {

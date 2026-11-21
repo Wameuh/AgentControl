@@ -10,7 +10,7 @@ import { isAndroid } from "../core/chrome";
 import { app } from "../core/state";
 import { t } from "../i18n";
 import { icon } from "../ui/icons";
-import { findPending } from "./pending";
+import { findPending, sortPermOptions } from "./pending";
 
 type JumpFn = (seq: number) => Promise<boolean>;
 
@@ -158,20 +158,22 @@ function renderPerm(card: HTMLElement, count: number): HTMLElement {
   }
   const opts = document.createElement("div");
   opts.className = "pd-opts";
-  // Ordre visuel du dock : refus d'abord (rouge), puis les autorisations —
-  // la première .btn-allow de la carte est l'action principale (accent).
+  // Même ordre que la carte « À traiter » de l'accueil (sortPermOptions) :
+  // refus à gauche, allow_once à droite en action principale (accent).
+  // Le type vient de data-kind (renderPermission), pas de l'ordre du DOM :
+  // un agent qui annonce « toujours » en premier ne doit pas le mettre
+  // sous le pouce. Sans allow_once, aucune action n'est mise en avant.
   const orig = [...card.querySelectorAll<HTMLButtonElement>(".perm-opts button")];
-  const firstAllow = card.querySelector<HTMLButtonElement>(".perm-opts .btn-allow");
-  const ordered = [
-    ...orig.filter((o) => o.classList.contains("btn-reject")),
-    ...orig.filter((o) => !o.classList.contains("btn-reject")),
-  ];
-  for (const o of ordered) {
+  const ordered = sortPermOptions(orig.map((o) => ({
+    o,
+    kind: o.dataset.kind ?? (o.classList.contains("btn-reject") ? "reject" : ""),
+  })));
+  for (const { o, kind } of ordered) {
     const b = document.createElement("button");
     b.type = "button";
     b.textContent = o.textContent;
     b.className = o.classList.contains("btn-reject") ? "btn-reject" : "btn-allow";
-    if (o === firstAllow) b.classList.add("pd-primary");
+    if (kind === "allow_once") b.classList.add("pd-primary");
     b.onclick = () => o.click(); // le RPC respond reste côté carte
     opts.appendChild(b);
   }

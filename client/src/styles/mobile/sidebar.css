@@ -54,10 +54,12 @@ body.android .sess.sub::before { margin-top: -6px; height: 14px; }
 body.android .sess .sess-del { display: none; }
 /* Lisibilité : contenu lu ≥ 12px — badges d'état/compteurs ornementaux
    (.badge.st-*, #sv-count, .steer-badge, .pr-st, .sr-type, .perm-kind,
-   .farrow) exclus du seuil. */
-body.android .sess .a,
-body.android .sess .sess-pr,
-body.android .sess .sess-origin { font-size: 12px; }
+   .farrow) exclus du seuil. L'id dans :is() est nécessaire : la règle
+   desktop `#session-list .sess(.sub) .a` (sidebar.css) porte un id et
+   l'emporterait sur un sélecteur à classes seules (10–11 px). */
+body.android :is(#session-list, #m-home-state) .sess .a,
+body.android :is(#session-list, #m-home-state) .sess .sess-pr,
+body.android :is(#session-list, #m-home-state) .sess .sess-origin { font-size: 12px; }
 body.android .grp-head .grp-name, body.android .grp-sub .grp-name,
 body.android .grp-add-lbl { font-size: 12px; }
 /* En-tête de connexion : libellé humain (cfg.label), casse conservée. */
