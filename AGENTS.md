@@ -52,6 +52,20 @@ branch stays), but resync with `git fetch --prune` and drop stale
 worktrees with `git worktree remove` — `git branch -D` on a
 checked-out branch fails, remove the worktree first.
 
+**Hook config** (`.devin/hooks/`): `guard-main-worktree.py` and
+`block-merge.py` are **repo-local policy examples** — written for this
+`next_release` → `main` workflow but genericized for reuse. The branch
+they enforce resolves, first non-empty wins: env
+`AGENTCONTROL_INTEGRATION_BRANCH` → repo
+`git config agentcontrol.integration-branch` → the daemon's
+`[backlog_orchestrator] integration_branch` (`config.toml`, #316) →
+`next_release`. A resolved name absent from the repo's refs leaves the
+hooks **inert** (`none`/`off` disables explicitly); `block-merge.py`'s
+approving `Verdict:` labels come from `AGENTCONTROL_MERGE_VERDICTS`
+(CSV, default `approved,mergeable`). Copying `.devin/hooks` to another
+repo is safe — nothing triggers until a branch is configured (see each
+script's CONFIGURATION docstring).
+
 **Waiting = `ac-wait`, never in-turn**: any wait longer than ~1 min
 (CI checks, `/mr review` verdict, merge watch, long builds)
 is delegated to a background waiter, never

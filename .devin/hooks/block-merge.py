@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """PreToolUse hook: block merge commands — merges are the user's prerogative.
 
-Exception: `gh pr merge <N>` is allowed when the PR targets
-`next_release` AND the latest review-shaped comment (marker
+Exception: `gh pr merge <N>` is allowed when the PR targets the repo's
+integration branch AND the latest review-shaped comment (marker
 `^[*#]+ ?(Review|Verdict)`, from the review bot or an owner/member/
 collaborator) carries an approving verdict **in title position**
 (`Verdict: APPROVED` / `Verdict: mergeable`) posted after the
@@ -18,8 +18,30 @@ Tripwire, not a security boundary: lexical tricks (`gh 'pr' 'merge'`)
 are not matched, and a review-shaped comment self-posted under the
 local gh account is indistinguishable from a real review — the hook
 prevents policy-drift merges, not a determined bypass.
+
+CONFIGURATION — this hook is an EXAMPLE of repo-local policy; adapt or
+drop it per repo. Resolution (first non-empty wins):
+
+1. env `AGENTCONTROL_INTEGRATION_BRANCH` — the allowed PR base;
+   `none`/`off`/`disabled`/`false`/`0` disables the hook entirely.
+2. `git config agentcontrol.integration-branch` in the repo where the
+   command runs — the repo-local pin, recommended when copying this
+   file elsewhere.
+3. `[backlog_orchestrator] integration_branch` from the AgentControl
+   daemon's config.toml (#316) — found next to `$AGENTCONTROL_SOCK`
+   (injected into daemon-spawned sessions) or the default
+   `~/.agentcontrol/config.toml`.
+4. `DEFAULT_BASE` below ("next_release").
+
+A resolved base that doesn't exist in the repo leaves the hook inert
+(fail-open) — a blind copy into a repo without this merge policy does
+nothing instead of blocking every merge. Approving verdict labels come
+from `AGENTCONTROL_MERGE_VERDICTS` (CSV, default
+`approved,mergeable`); the review-comment marker is REVIEW_MARKER,
+the trusted bot logins REVIEW_BOTS — edit them to taste.
 """
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -44,9 +66,11 @@ BOOL_FLAGS = {"--auto", "--disable-auto", "-d", "--delete-branch",
 VAL_FLAGS = {"-b", "--body", "--body-file", "--match-head-commit",
              "-t", "--subject", "-R", "--repo"}
 
-REASON = (
+DEFAULT_BASE = "next_release"
+
+REASON_T = (
     "Merge bloqué : réservé à l'utilisateur, sauf `gh pr merge <N>` vers "
-    "`next_release` quand la dernière review auto est `Verdict: APPROVED` "
+    "`{b}` quand la dernière review auto est `Verdict: APPROVED` "
     "postérieure au push du head courant."
 )
 
@@ -59,8 +83,103 @@ def run(cmd, timeout=4):
         return ""
 
 
-def repo_nwo():
-    url = run(["git", "remote", "get-url", "origin"])
+def _toml_integration_branch(path):
+    """`integration_branch` from `[backlog_orchestrator]` in a
+    config.toml — tiny section scan (tomllib is 3.11+ only, this hook
+    stays dependency-free)."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return ""
+    in_sec = False
+    for l in lines:
+        s = l.strip()
+        if s.startswith("["):
+            in_sec = s == "[backlog_orchestrator]"
+            continue
+        if in_sec:
+            m = re.match(
+                r"integration_branch\s*=\s*[\"']([^\"']*)[\"']", s)
+            if m:
+                return m.group(1).strip()
+    return ""
+
+
+def _daemon_integration_branch():
+    """integration_branch exposed by the AgentControl daemon (#316):
+    config.toml next to `$AGENTCONTROL_SOCK` (env injected into
+    daemon-spawned sessions), else `~/.agentcontrol/config.toml`."""
+    cands = []
+    sock = os.environ.get("AGENTCONTROL_SOCK") or ""
+    if sock:
+        cands.append(os.path.join(os.path.dirname(sock), "config.toml"))
+    cands.append(os.path.expanduser("~/.agentcontrol/config.toml"))
+    for p in cands:
+        v = _toml_integration_branch(p)
+        if v:
+            return v
+    return ""
+
+
+def _disabled(v):
+    return v.strip().lower() in (
+        "none", "off", "disabled", "false", "0")
+
+
+def resolve_base(cwd):
+    """Allowed PR base for the repo at `cwd` — "" disables the hook.
+    Order: env → repo git config → daemon config.toml → DEFAULT_BASE."""
+    v = os.environ.get("AGENTCONTROL_INTEGRATION_BRANCH") or ""
+    if v.strip():
+        return "" if _disabled(v) else v.strip()
+    v = run(["git", "-C", cwd, "config", "--get",
+             "agentcontrol.integration-branch"])
+    if v.strip():
+        return "" if _disabled(v) else v.strip()
+    name = _daemon_integration_branch() or DEFAULT_BASE
+    return "" if _disabled(name) else name
+
+
+def merge_verdicts():
+    """Approving `Verdict:` tokens — env CSV, default kept."""
+    v = os.environ.get("AGENTCONTROL_MERGE_VERDICTS") or ""
+    toks = [t.strip().lower() for t in v.split(",") if t.strip()]
+    return toks or ["approved", "mergeable"]
+
+
+def local_ref_exists(cwd, name):
+    """`name` resolves to a local head or remote-tracking ref in the
+    repo at `cwd`."""
+    if run(["git", "-C", cwd, "rev-parse", "--verify", "--quiet",
+            "refs/heads/" + name]):
+        return True
+    out = run(["git", "-C", cwd, "for-each-ref",
+               "--format=%(refname)", "refs/remotes/"])
+    return any(l.rsplit("/", 1)[-1] == name for l in out.splitlines())
+
+
+def remote_ref_exists(cwd, name, has_remote):
+    """Like local_ref_exists, plus `git ls-remote --heads origin` when
+    nothing matches locally — the base may exist only server-side.
+    No `origin` remote at all → definitely absent; a reachable remote
+    answering "no match" → absent; an unreachable one → assume the base
+    exists (stay enforcing)."""
+    if local_ref_exists(cwd, name):
+        return True
+    if not has_remote:
+        return False
+    try:
+        p = subprocess.run(
+            ["git", "-C", cwd, "ls-remote", "--exit-code", "--heads",
+             "origin", name], capture_output=True, timeout=8)
+    except Exception:
+        return True  # can't decide → stay enforcing
+    return p.returncode != 2  # 2 = def. absent; other rc → assume exists
+
+
+def repo_nwo(cwd):
+    url = run(["git", "-C", cwd, "remote", "get-url", "origin"])
     m = re.search(r"[:/]([^/:]+/[^/]+?)(?:\.git)?$", url)
     return m.group(1) if m else ""
 
@@ -166,18 +285,18 @@ def pushed_at(nwo, head, ref):
                 ' | .[0].timestamp // ""'], timeout=8)
 
 
-def approved_next_release_merge(n, nwo):
+def approved_base_merge(n, nwo, base):
     pr = run(["gh", "pr", "view", n, "-R", nwo,
               "--json", "baseRefName,headRefOid,headRefName"])
     try:
         pr = json.loads(pr)
     except Exception:
         return False
-    if pr.get("baseRefName") != "next_release":
+    if pr.get("baseRefName") != base:
         return False
     head = pr.get("headRefOid") or ""
     created_s, verdict = latest_verdict(n, nwo)
-    if not created_s or verdict not in ("approved", "mergeable"):
+    if not created_s or verdict not in merge_verdicts():
         return False
     name = pr.get("headRefName") or ""
     pushed = pushed_at(nwo, head, f"refs/heads/{name}" if name else "")
@@ -198,18 +317,33 @@ def main():
     ti = data.get("tool_input") or {}
     cmd = " ".join(str(ti.get(k) or "")
                    for k in ("command", "text_input", "bytes_input"))
-    nwo = None
+    cwd = ti.get("workdir") or os.environ.get("DEVIN_PROJECT_DIR") \
+        or os.getcwd()
+    base, nwo = None, None
     for seg in re.split(r"&&|\|\||[;|]", cmd):
-        if any(re.search(p, seg) for p in HARD_BLOCK):
-            print(json.dumps({"decision": "block", "reason": REASON}))
-            return 0
-        if GH_PR_MERGE.search(seg):
-            if nwo is None:
-                nwo = repo_nwo()
-            n, ok = pr_target(seg, nwo) if nwo else ("", False)
-            if not (ok and approved_next_release_merge(n, nwo)):
-                print(json.dumps({"decision": "block", "reason": REASON}))
+        hit_hard = any(re.search(p, seg) for p in HARD_BLOCK)
+        hit_gh = bool(GH_PR_MERGE.search(seg))
+        if not (hit_hard or hit_gh):
+            continue
+        if base is None:
+            base = resolve_base(cwd)
+        if not base:
+            continue  # unconfigured/absent branch → hook inert
+        reason = REASON_T.format(b=base)
+        if hit_hard:
+            if local_ref_exists(cwd, base):
+                print(json.dumps(
+                    {"decision": "block", "reason": reason}))
                 return 0
+            continue
+        if nwo is None:
+            nwo = repo_nwo(cwd)
+        if not remote_ref_exists(cwd, base, bool(nwo)):
+            continue  # base absent from this repo → inert
+        n, ok = pr_target(seg, nwo) if nwo else ("", False)
+        if not (ok and approved_base_merge(n, nwo, base)):
+            print(json.dumps({"decision": "block", "reason": reason}))
+            return 0
     return 0
 
 

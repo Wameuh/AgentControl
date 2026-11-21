@@ -81,6 +81,14 @@ interval_secs = 600
 
 ## 5. Managed components — migrating a supervisord service
 
+> **Scope — reference deployment.** This section documents the
+> migration the author's own dev container went through (supervisord →
+> daemon-internal orchestrator, #140). It only matters if your install
+> still runs the legacy `backlog-orchestrator.py` under an external
+> supervisor — a fresh install has nothing to migrate; skip to §6 to
+> simply enable the orchestrator. This repo's deployment specifics are
+> collected in `docs/reference-deployment.md`.
+
 The daemon itself supervises satellite programs: `kind=process`
 (spawn/stop/restart, healthcheck, paged logs), `tool`, `external` —
 full model in `docs/components-integration.md`. Specs live in
