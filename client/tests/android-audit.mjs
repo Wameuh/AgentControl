@@ -310,7 +310,9 @@ async function collect(screen) {
     // compacts ; hauteur seule pour les lignes quasi pleine largeur).
     // Seuil à 43 : tolérance sub-pixel — getBoundingClientRect rend des
     // fractions, un élément théoriquement 44px peut mesurer 43.6px.
-    const SEL = "button, select, input, textarea, a[href], [role=tab], .sess, .fnode, .fhit, .froot, .om-item, .ac-item, .pr, .pr-sess, .sv, .sr-row, .q-item button, .perm-opts button, label.s-row, .tool-head, .btn-more, .toast-x, .grp-add, .sess-del, .badge.st-dead, .badge.st-failed";
+    // .mh-seg / .mh-chip exclus : contrôles compacts ~30px dessinés ainsi
+    // dans la maquette (segmented control iOS, puces de flotte M3).
+    const SEL = "button:not(.mh-seg):not(.mh-chip), select, input, textarea, a[href], [role=tab], .sess, .fnode, .fhit, .froot, .om-item, .ac-item, .pr, .pr-sess, .sv, .sr-row, .q-item button, .perm-opts button, label.s-row, .tool-head, .btn-more, .toast-x, .grp-add, .sess-del, .badge.st-dead, .badge.st-failed";
     const seen = new Set();
     for (const el of document.querySelectorAll(SEL)) {
       if (seen.size >= 25) break;
@@ -423,6 +425,42 @@ await step("a05c-map", async () => {
 });
 await tap("#sv-agents", 400);
 
+// ── Accueil « par état » (N3) : segmenté, carte À traiter, réponse ───────────
+await step("a05d-inbox", async () => {
+  if (!(await visible("#m-home-seg")))
+    V("a05d-inbox", "nav", "contrôle segmenté État|Groupes absent");
+  await ev(() => document.querySelector('.mh-seg[data-m="state"]')?.click());
+  await sleep(600);
+  await shot("a05d-inbox");
+  await collect("a05d-inbox");
+  if (!(await visible("#m-home-state")))
+    V("a05d-inbox", "nav", "vue par état non affichée");
+  if (await ev(() => !document.getElementById("session-list").hidden))
+    V("a05d-inbox", "nav", "arbre encore visible en mode État");
+  // Carte « À traiter » de s4 (waiting_input + permission r1).
+  if (!(await ev(() => !!document.querySelector("#mh-sec-todo .mh-card"))))
+    V("a05d-inbox", "nav", "carte À traiter absente");
+  const opts = await ev(() =>
+    [...document.querySelectorAll("#mh-sec-todo .mh-card-acts .btn")]
+      .map((b) => b.textContent.trim()));
+  if (!opts.length) V("a05d-inbox", "nav", "options de la demande absentes");
+  // reject_* en premier : « Refuser » doit précéder « Autoriser une fois ».
+  if (opts.length && !/refuser|reject/i.test(opts[0]))
+    V("a05d-inbox", "nav", `tri des options : 1re = «${opts[0]}» (reject attendu)`);
+  // Répondre depuis la carte : allow_once débloque l'agent → au refresh,
+  // s4 repart « working » et la section À traiter disparaît.
+  await ev(() => [...document.querySelectorAll("#mh-sec-todo .mh-card-acts .btn")]
+    .find((b) => /une fois|once/i.test(b.textContent))?.click());
+  await sleep(900);
+  if (await ev(() => !!document.getElementById("mh-sec-todo")))
+    V("a05d-inbox", "nav", "section À traiter toujours visible après réponse");
+  // Retour en mode Groupes : l'arbre reparaît.
+  await ev(() => document.querySelector('.mh-seg[data-m="group"]')?.click());
+  await sleep(400);
+  if (await ev(() => document.getElementById("session-list").hidden))
+    V("a05d-inbox", "nav", "arbre absent en mode Groupes");
+});
+
 // ── Menu contextuel session (long-press) + vérif double-push ─────────────────
 await ev(() => { window.__pushLog = []; });
 await longPress(".sess");
@@ -433,6 +471,34 @@ if (pushes !== 1) V("a06-sctx", "ctx-double-push", `nav.push("sctx") ×${pushes}
 await dismissCtx();
 await sleep(250);
 await ev(() => { if (!document.getElementById("sctx").hidden) document.getElementById("sctx").hidden = true; });
+
+// ── Glisser-gauche (N4) : révèle Endormir / Supprimer, tap dehors ferme ──────
+await step("a06b-swipe", async () => {
+  const box = await ev(() => {
+    const b = document.querySelector(".sess").getBoundingClientRect();
+    return { x: b.x + b.width - 20, y: b.y + b.height / 2 };
+  });
+  await page.touchscreen.touchStart(box.x, box.y);
+  for (let i = 1; i <= 8; i++)
+    await page.touchscreen.touchMove(box.x - i * 15, box.y);
+  await page.touchscreen.touchEnd();
+  await sleep(350);
+  if (!(await ev(() => !!document.querySelector(".sess .sess-acts"))))
+    V("a06b-swipe", "nav", "glisser-gauche n'a pas révélé les actions");
+  await shot("a06b-swipe");
+  await page.touchscreen.tap(40, 500);
+  await sleep(350);
+  if (await ev(() => !!document.querySelector(".sess .sess-acts")))
+    V("a06b-swipe", "nav", "bande d'actions non refermée au tap extérieur");
+  // Un défilement vertical ne doit jamais engager le glisser.
+  await page.touchscreen.touchStart(box.x, box.y + 100);
+  for (let i = 1; i <= 8; i++)
+    await page.touchscreen.touchMove(box.x - i * 2, box.y + 100 - i * 12);
+  await page.touchscreen.touchEnd();
+  await sleep(250);
+  if (await ev(() => !!document.querySelector(".sess .sess-acts")))
+    V("a06b-swipe", "nav", "défilement vertical a révélé les actions");
+});
 
 // ── Menu contextuel groupe (long-press sur un header de groupe) ──────────────
 await step("a07-grp-ctx", async () => {

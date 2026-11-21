@@ -38,25 +38,26 @@ body.android #pr-list, body.android #backlog-list {
 body.android #session-list {
   padding-bottom: calc(136px + env(safe-area-inset-bottom));
 }
-body.android #session-list .sess {
+body.android .sess {
+  min-height: 44px;
   padding: 13px 10px; font-size: 15px;
 }
 /* Sous-agent : plus petit qu'une session racine mais cible tactile
    conservée (~44px de hauteur de ligne). */
-body.android #session-list .sess.sub {
+body.android .sess.sub {
   padding: 10px; font-size: 13px;
 }
-body.android #session-list .sess.sub .dot { width: 14px; height: 14px; }
-body.android #session-list .sess.sub::before { margin-top: -6px; height: 14px; }
+body.android .sess.sub .dot { width: 14px; height: 14px; }
+body.android .sess.sub::before { margin-top: -6px; height: 14px; }
 /* Plus de ✕ par ligne : la suppression vit dans le menu d'appui long
    (ctx_delete_sess) — le DOM garde le bouton pour le desktop. */
-body.android #session-list .sess .sess-del { display: none; }
+body.android .sess .sess-del { display: none; }
 /* Lisibilité : contenu lu ≥ 12px — badges d'état/compteurs ornementaux
    (.badge.st-*, #sv-count, .steer-badge, .pr-st, .sr-type, .perm-kind,
    .farrow) exclus du seuil. */
-body.android #session-list .sess .a,
-body.android #session-list .sess .sess-pr,
-body.android #session-list .sess .sess-origin { font-size: 12px; }
+body.android .sess .a,
+body.android .sess .sess-pr,
+body.android .sess .sess-origin { font-size: 12px; }
 body.android .grp-head .grp-name, body.android .grp-sub .grp-name,
 body.android .grp-add-lbl { font-size: 12px; }
 /* En-tête de connexion : libellé humain (cfg.label), casse conservée. */
@@ -132,3 +133,90 @@ body.android #pr-list .pr .pr-sess { min-height: 44px; font-size: 12px; }
 body.android #pr-list .pr-note { font-size: 12px; padding: 8px 10px; }
 body.android .pr-repo { font-size: 12px; }
 body.android .pr-repo .pr-n { font-size: 12px; }
+
+/* ── Accueil « par état » (N3) : segmenté, flotte, sections, cartes ─── */
+body.android #m-home-seg {
+  display: flex; gap: 2px; width: fit-content;
+  margin: 6px 12px 2px auto; padding: 2px;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 999px;
+}
+body.android #m-home-seg[hidden] { display: none; }
+body.android .mh-sec-t #m-home-seg { margin: 0; }
+body.android .mh-seg {
+  min-height: 30px; padding: 3px 14px; border: 0; border-radius: 999px;
+  background: transparent; color: var(--muted);
+  font: inherit; font-size: 12px; font-weight: 500; cursor: pointer;
+}
+body.android .mh-seg.on { background: var(--panel-solid); color: var(--ink); }
+body.android .mh-fleet {
+  display: flex; gap: 8px; padding: 8px 12px 4px; overflow-x: auto;
+  scrollbar-width: none;
+}
+body.android .mh-chip {
+  display: inline-flex; align-items: center; gap: 6px; flex: none;
+  min-height: 32px; padding: 4px 12px; border: 1px solid var(--line);
+  border-radius: 999px; background: var(--panel);
+  color: var(--muted); font: inherit; font-size: 12px; cursor: pointer;
+}
+body.android .mh-chip b { color: var(--ink); font-weight: 600; }
+body.android .mh-chip svg { width: 15px; height: 15px; }
+body.android .mh-sec-t {
+  display: flex; align-items: center; justify-content: space-between;
+  margin: 16px 14px 4px; font-size: 12px; font-weight: 600;
+  color: var(--muted); text-transform: uppercase; letter-spacing: .04em;
+}
+body.android .mh-card {
+  margin: 6px 12px; border: 1px solid
+    color-mix(in srgb, var(--err) 45%, var(--panel));
+  border-radius: 14px; background: var(--panel); overflow: hidden;
+}
+body.android .mh-card .sess { border-radius: 0; }
+body.android .mh-card-body { padding: 0 12px 12px; }
+body.android .mh-card-t {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 13px; font-weight: 500; color: var(--ink);
+  padding: 8px 0 6px;
+}
+body.android .mh-card-t .ic { width: 15px; height: 15px; flex: none; }
+body.android .mh-card-t.mh-err {
+  color: var(--err); font-weight: 400; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+body.android .mh-card-k { font-size: 12px; color: var(--muted); padding-bottom: 6px; }
+body.android .mh-card-acts { display: flex; gap: 8px; flex-wrap: wrap; }
+body.android .mh-card-acts .btn {
+  flex: 1; min-width: 120px; min-height: 44px; padding: 10px 14px;
+  border: 1px solid var(--line); border-radius: 12px;
+  background: var(--panel-solid); color: var(--ink);
+  font: inherit; font-size: 13px; cursor: pointer;
+}
+body.android .mh-card-acts .btn-allow {
+  background: var(--accent); border-color: transparent;
+  color: var(--msg-user-fg); font-weight: 600;
+}
+body.android .mh-card-acts .btn-reject {
+  background: transparent; color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 55%, transparent);
+}
+body.android .mh-card-acts.mh-q-row { flex-wrap: nowrap; }
+body.android .mh-card-acts .mh-q {
+  flex: 1; min-width: 0; min-height: 44px; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 12px;
+  background: var(--bg); color: var(--ink); font: inherit; font-size: 13px;
+}
+
+/* ── Glisser des lignes (N4) : bande d'actions plaquée à droite ────── */
+body.android .sess-acts {
+  position: absolute; top: 0; bottom: 0; right: 0; width: 132px;
+  display: flex; transform: translateX(132px);
+  transition: transform .18s ease-out; z-index: 3;
+}
+body.android .sess-acts .sact {
+  flex: 1; border: 0; font: inherit; font-size: 11px; font-weight: 600;
+  line-height: 1.15; padding: 0 4px;
+  color: var(--msg-user-fg); cursor: pointer;
+}
+body.android .sess-acts .sact:disabled { opacity: .45; }
+body.android .sess-acts .sact-sleep { background: var(--muted); }
+body.android .sess-acts .sact-del { background: var(--err); }

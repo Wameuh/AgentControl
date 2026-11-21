@@ -559,6 +559,7 @@ export class Sidebar {
       $("m-home-title").textContent = t(
         m ? "map_title" : v === "repos" ? "view_repos" : v === "backlog" ? "view_backlog" : "view_agents",
       );
+      this.onViewChanged?.(v === "agents" && !m);
     }
     // L'onglet backlog pilote sa cadence de fetch (rapide actif, lente
     // pour le badge inactif) — la bascule se fait ici. Pareil pour
@@ -583,6 +584,12 @@ export class Sidebar {
 
   /** Filtre de l'arbre (normalisé : trim + bas de casse) — vide = tout. */
   private filter = "";
+  /** Accueil mobile (N3) : notifié à chaque re-rendu effectif de
+   *  #session-list — la vue « par état » s'y synchronise. */
+  onListRendered?: (list: SessionMeta[]) => void;
+  /** Accueil mobile (N3) : notifié des bascules vue/onglet/map —
+   *  `true` = onglet Agents visible (hors diagramme). */
+  onViewChanged?: (agentsHome: boolean) => void;
 
   /** Surligne la 1re occurrence du filtre dans un libellé (HTML sûr :
    *  chaque segment passe par esc(), seul le <mark> est injecté). */
@@ -843,6 +850,9 @@ export class Sidebar {
       none.textContent = t("sess_filter_none");
       el.appendChild(none);
     }
+    this.onListRendered?.(
+      app.lastSessions.filter((s) => !this.pendingDel.has(s.id)),
+    );
   }
 
   /** Payload du drag en cours — renseigné au dragstart (ligne session ou
@@ -914,6 +924,29 @@ export class Sidebar {
     });
   }
 
+  /** Actions session partagées entre le menu contextuel et le glisser des
+   *  lignes de l'accueil mobile (N3/N4) : mêmes effets que les entrées
+   *  « Endormir » et « Supprimer la session » (flux optimiste compris). */
+  sessionAction(s: SessionMeta, action: "sleep" | "delete", row?: HTMLElement) {
+    if (action === "sleep") {
+      void call("sleep_session", { session: s.id, conn: s.conn })
+        .then(() => this.refresh())
+        .catch((e) => showErr(String(e)));
+      return;
+    }
+    row?.remove();
+    void this.refresh();
+    void this.deleteSessionNow(s)
+      .catch((er) => showErr(String(er)))
+      .finally(() => void this.refresh());
+  }
+
+  /** Ligne session standalone pour l'accueil « par état » (N3) : même
+   *  clic, même appui long, même gemme que l'arbre, sans indentation. */
+  buildRow(s: SessionMeta): HTMLElement {
+    return this.sessRow(s, s.conn ?? "default", 0, false);
+  }
+
   /** Menu contextuel session (clic droit / appui long) : rename / fork /
    *  groupe / exit — fixe au point cliqué sur desktop, action-sheet ancrée
    *  en bas sur Android. */
@@ -946,9 +979,7 @@ export class Sidebar {
     // session n'a déjà plus de process (dead/interrupted/asleep).
     const sleepBtn = menuBtn(this.ctx, t("ctx_sleep"), "", () => {
       hideSessCtx();
-      void call("sleep_session", { session: s.id, conn: s.conn })
-        .then(() => this.refresh())
-        .catch((e) => showErr(String(e)));
+      this.sessionAction(s, "sleep");
     });
     sleepBtn.disabled = !!s.offline ||
       s.state === "asleep" || s.state === "wait-asleep" ||
@@ -979,11 +1010,7 @@ export class Sidebar {
           return;
         }
         hideSessCtx();
-        row.remove();
-        void this.refresh();
-        void this.deleteSessionNow(s)
-          .catch((er) => showErr(String(er)))
-          .finally(() => void this.refresh());
+        this.sessionAction(s, "delete", row);
       });
     }
     placeMenu(this.ctx, "sctx", x, y);
