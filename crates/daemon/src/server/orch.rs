@@ -1764,7 +1764,7 @@ impl Daemon {
             // dispatch pending prime sur le réveil des waiters PR.
             let mut asleep_nudges: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
             //    N° de la release PR `intégration → release` courante —
-            //    résolution paresseuse (une sonde gh par cycle au plus,
+            //    résolution paresseuse (une sonde forge par cycle au plus,
             //    seulement si une entrée registre est en jeu). L'entrée
             //    qui la désigne est exclue du critère de ménage : elle
             //    appartient au bot auto-release (même exclusion que la
@@ -1794,11 +1794,11 @@ impl Daemon {
                     .map(|(i, _)| i)
                     .collect();
                 // PRs du registre attribuées à ce worker, état forge réel —
-                // `gh pr view` n'a de sens que pour GitHub : une MR GitLab
-                // `!N` rapporterait l'état de la PR GitHub #N du workspace
-                // (fausse attribution), et un Change-Id Gerrit non résolu
-                // (pr 0) sonderait pour rien. Hors GitHub ou registre déjà
-                // terminal : confiance au statut enregistré.
+                // la sonde passe par le transport de la forge déclarée
+                // (`get_change` : PR GitHub, MR GitLab, change Gerrit) ;
+                // un Change-Id non résolu (pr 0) ou une forge sans
+                // lecture (git nu) sonderait pour rien → confiance au
+                // statut enregistré, idem pour un registre déjà terminal.
                 let mut my_prs: BTreeMap<String, String> = BTreeMap::new();
                 // `watch_prs=false` : aucune sonde forge — le ledger reste
                 // vide, un worker idle sans item wip est recyclé sans
@@ -1809,7 +1809,7 @@ impl Daemon {
                     }) {
                         if release_num.is_none() {
                             release_num =
-                                Some(self.gh_release_pr(ws, cfg).await.map(|r| r.0).unwrap_or(0));
+                                Some(self.release_pr(ws, cfg).await.map(|r| r.0).unwrap_or(0));
                         }
                         if release_pr_entry(p, release_num.unwrap_or(0), cfg) {
                             continue;
@@ -2384,7 +2384,7 @@ impl Daemon {
             let active_other = tasks
                 .iter()
                 .any(|t| !notes_ids.contains(&task_id(t)) && in_flight(t));
-            let rpr = self.gh_release_pr(ws, cfg).await;
+            let rpr = self.release_pr(ws, cfg).await;
             if active_other {
                 st.notes_cycle_done = false; // nouveau cycle de travail
                 if let Some(r) = rpr {
@@ -2394,8 +2394,14 @@ impl Daemon {
                              empty → back to draft",
                             r.0
                         );
-                        let _ =
-                            run_out(&["gh", "pr", "ready", &r.0.to_string(), "--undo"], ws).await;
+                        // mark_draft du transport résolu (gh pr ready
+                        // --undo, MR Draft:, :wip gerrit) — no-op si la
+                        // forge ne sait pas repasser en draft.
+                        if let Some(client) = self.forge_client_at(ws).await {
+                            let id = r.0.to_string();
+                            let _ =
+                                tokio::task::spawn_blocking(move || client.mark_draft(&id)).await;
+                        }
                     }
                 }
             } else if let Some(r) = rpr {
@@ -2519,21 +2525,45 @@ impl Daemon {
         serde_json::from_str(&out).ok()
     }
 
-    /// État d'une entrée du registre : sonde `gh` réservée aux PR
-    /// GitHub numérotées (les entrées legacy sont normalisées
-    /// github/github.com à la charge) ; GitLab/Gerrit, Change-Id non
-    /// résolu (pr 0) ou statut exotique → statut enregistré mappé sur
-    /// l'échelle de gh ("open"/"draft" → OPEN).
+    /// État d'une entrée du registre : sonde live via le `ForgeClient`
+    /// résolu (toutes forges, tout transport) quand l'entrée est
+    /// numérotée et sa forge déclarée — "UNKNOWN" en cas d'échec de
+    /// sonde, jamais OPEN : traitée comme soldée (cf. script). Forge
+    /// non résolvable (git nu, hôte non déclaré) ou Change-Id non
+    /// résolu (pr 0) → statut enregistré mappé sur l'échelle gh
+    /// ("open"/"draft" → OPEN).
     pub(crate) async fn orch_pr_state(&self, p: &proto::PrEntry, ws: &Path) -> String {
-        if p.forge == "github" && p.pr > 0 {
-            // `-R` accepte [HOST/]OWNER/REPO — host préfixé seulement
-            // s'il n'est pas l'hôte GitHub par défaut (GHES).
-            let repo = if p.host.is_empty() || p.host == "github.com" {
-                p.repo.clone()
-            } else {
-                format!("{}/{}", p.host, p.repo)
-            };
-            return self.gh_pr_state(p.pr, &repo, ws).await;
+        let kind = proto::forge_kind(&p.forge).to_string();
+        let host = if p.host.is_empty() {
+            proto::forge_default_host(&kind).to_string()
+        } else {
+            p.host.clone()
+        };
+        if p.pr > 0 && !host.is_empty() {
+            if let Some(client) = self.forge_client_of(&kind, &host, &p.repo, ws).await {
+                // Sans capacité de lecture (git nu) la sonde rendrait
+                // structurellement None → UNKNOWN « soldé » : le
+                // statut enregistré fait foi à la place.
+                if client.caps().list {
+                    let id = p.pr.to_string();
+                    let state = tokio::task::spawn_blocking(move || {
+                        if !client.available() {
+                            return None;
+                        }
+                        client.get_change(&id).map(|c| c.state)
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                    return match state.as_deref() {
+                        Some("open") | Some("draft") => "OPEN".into(),
+                        Some("merged") => "MERGED".into(),
+                        Some("closed") => "CLOSED".into(),
+                        // Échec de sonde ou état exotique → jamais OPEN.
+                        _ => "UNKNOWN".into(),
+                    };
+                }
+            }
         }
         match p.status.as_str() {
             "open" | "draft" => "OPEN".into(),
@@ -2543,77 +2573,34 @@ impl Daemon {
         }
     }
 
-    /// État forge d'une PR — "UNKNOWN" en cas d'échec, jamais OPEN :
-    /// traitée comme soldée (cf. script). `repo` = "owner/name" de
-    /// l'entrée registre : passé à `gh -R` pour sonder LA BONNE forge
-    /// quel que soit le cwd (multi-workspaces — sinon la sonde
-    /// interrogerait la PR #N du repo du cwd, une autre PR).
-    async fn gh_pr_state(&self, pr: u64, repo: &str, ws: &Path) -> String {
-        let num = pr.to_string();
-        let mut argv: Vec<String> = vec![
-            "gh".into(),
-            "pr".into(),
-            "view".into(),
-            num,
-            "--json".into(),
-            "state".into(),
-            "-q".into(),
-            ".state".into(),
-        ];
-        if !repo.is_empty() {
-            argv.push("-R".into());
-            argv.push(repo.to_string());
-        }
-        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
-        run_out(&argv, ws)
-            .await
-            .ok()
-            .filter(|(rc, out, _)| *rc == 0 && !out.is_empty())
-            .map(|(_, out, _)| out)
-            .unwrap_or_else(|| "UNKNOWN".into())
-    }
-
-    /// PR de release auto (`integration_branch` → `release_branch`)
-    /// si ouverte : Some((number, isDraft)). Workflow « none »
-    /// (`release_branch` vide) → `None` immédiat, sans sonde `gh`.
-    pub(crate) async fn gh_release_pr(
-        &self,
-        ws: &Path,
-        cfg: &cfg::OrchCfg,
-    ) -> Option<(u64, bool)> {
+    /// PR/MR de release auto (`integration_branch` → `release_branch`)
+    /// si ouverte : Some((number, isDraft)). Toutes forges à listing —
+    /// le repo est celui du remote `origin` du workspace. Workflow
+    /// « none » (`release_branch` vide) ou transport sans lecture →
+    /// `None` immédiat, sans sonde.
+    pub(crate) async fn release_pr(&self, ws: &Path, cfg: &cfg::OrchCfg) -> Option<(u64, bool)> {
         let (head, base) = cfg.release_pair()?;
-        let (rc, out, _) = run_out(
-            &[
-                "gh",
-                "pr",
-                "list",
-                "--head",
-                head,
-                "--base",
-                base,
-                "--state",
-                "open",
-                "--json",
-                "number,isDraft",
-                "--limit",
-                "1",
-            ],
-            ws,
-        )
+        let client = self.forge_client_at(ws).await?;
+        let (head, base) = (head.to_string(), base.to_string());
+        tokio::task::spawn_blocking(move || {
+            // `available()` = subprocess CLI borné (~CLI_TIMEOUT) —
+            // dans le blocking, jamais sur le runtime async.
+            if !client.caps().list || !client.available() {
+                return None;
+            }
+            client
+                .list_changes(&forgesync::ListQuery::open(200))
+                .and_then(|list| {
+                    list.iter()
+                        .find(|c| {
+                            c.branch.eq_ignore_ascii_case(&head)
+                                && c.base.eq_ignore_ascii_case(&base)
+                        })
+                        .map(|c| (c.number, c.state == "draft"))
+                })
+        })
         .await
-        .ok()?;
-        if rc != 0 {
-            return None;
-        }
-        serde_json::from_str::<Vec<Value>>(&out)
-            .ok()?
-            .first()
-            .and_then(|v| {
-                Some((
-                    v.get("number")?.as_u64()?,
-                    v.get("isDraft")?.as_bool().unwrap_or(true),
-                ))
-            })
+        .ok()?
     }
 
     /// `agentbacklog --add` de l'item patchnotes → Some(id) si rc==0.
@@ -3222,7 +3209,11 @@ mod tests {
             ..Default::default()
         };
         assert!(release_pr_entry(&entry(9, Some("develop")), 187, &dev));
-        assert!(!release_pr_entry(&entry(9, Some("next_release")), 187, &dev));
+        assert!(!release_pr_entry(
+            &entry(9, Some("next_release")),
+            187,
+            &dev
+        ));
 
         // Workflow « none » (release_branch vide) : aucune release PR
         // cherchée, aucun head exclu — une entrée head=develop (ou même
@@ -3234,7 +3225,11 @@ mod tests {
         };
         assert!(none.release_pair().is_none());
         assert!(!release_pr_entry(&entry(9, Some("develop")), 187, &none));
-        assert!(!release_pr_entry(&entry(9, Some("next_release")), 187, &none));
+        assert!(!release_pr_entry(
+            &entry(9, Some("next_release")),
+            187,
+            &none
+        ));
     }
 
     /// `state_dir` déplacé à chaud (#320) : le flock suit le dossier

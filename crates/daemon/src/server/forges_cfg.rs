@@ -49,10 +49,16 @@ const PARAM_KEY: &str = "forges";
 /// par période tant que le fichier n'a pas changé.
 const RESCAN_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Types de forge acceptés — "github" est un no-op documenté
-/// (`Forges::resolve` le saute avec un warn) mais reste exprimable
-/// pour la round-trip d'une config qui le déclarerait.
-const KNOWN_TYPES: &[&str] = &["github", "gitlab", "gerrit"];
+/// Types de forge acceptés — "github" déclare des hôtes GHES ou fixe
+/// le transport de l'hôte implicite ; "git" = git nu (mode dégradé
+/// explicite : pas de list/comment/review auto — verdict local).
+const KNOWN_TYPES: &[&str] = &["github", "gitlab", "gerrit", "git"];
+
+/// Transports acceptés — résolution vers un client forge dans
+/// `forgesync::client` ("auto" = CLI de la forge si présente, REST
+/// sinon ; "mcp" accepté mais dégradé sur REST — spike documenté dans
+/// docs/forges.md).
+const KNOWN_TRANSPORTS: &[&str] = &["auto", "gh", "rest", "glab", "mcp", "git"];
 
 /// Schéma déclaratif : un param `json` `forges` — le tableau des
 /// entrées `[[forges]]` déclarées (implicit github.com/gitlab.com non
@@ -65,10 +71,14 @@ pub(crate) fn params_schema(_live: &ForgeLive) -> Vec<ParamSpec> {
         description: Some(
             "JSON array of [[forges]] entries — \
              [{\"type\":\"gitlab\",\"hosts\":[\"gitlab.example.com\"],\
-             \"token_env\":\"GITLAB_TOKEN\"}] ; \
-             type: gitlab|gerrit (github is implicit — declaring it is a no-op) ; \
+             \"token_env\":\"GITLAB_TOKEN\",\"transport\":\"rest\"}] ; \
+             type: github|gitlab|gerrit|git (github.com and gitlab.com are \
+             implicit — declaring them adds hosts or sets their transport) ; \
              hosts: host[:port][/prefix] without scheme ; \
              token_env: NAME of an env var holding the API token, never the token itself ; \
+             transport: auto|gh|rest|glab|mcp (auto = forge CLI if present, \
+             REST otherwise ; mcp falls back to REST — see docs/forges.md) ; \
+             git = plain git, degraded mode (no list/comment/auto-review) ; \
              github.com and gitlab.com are implicit and cannot be removed here \
              (see forge_list for the effective set) ; \
              persisted as [[forges]] in config.toml, applied hot"
@@ -111,6 +121,14 @@ fn declared_json(cfgs: &[ForgeCfg]) -> Value {
                     .filter(|s| !s.is_empty())
                 {
                     o["token_env"] = json!(t);
+                }
+                if let Some(t) = c
+                    .transport
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    o["transport"] = json!(t);
                 }
                 o
             })
@@ -158,8 +176,8 @@ pub(crate) fn parse_forges_param(value: &str) -> Result<Vec<ForgeCfg>> {
             .with_context(|| format!("forges[{i}]: expected an object"))?;
         for k in obj.keys() {
             anyhow::ensure!(
-                matches!(k.as_str(), "type" | "hosts" | "token_env"),
-                "forges[{i}]: unknown key « {k} » (expected type/hosts/token_env)"
+                matches!(k.as_str(), "type" | "hosts" | "token_env" | "transport"),
+                "forges[{i}]: unknown key « {k} » (expected type/hosts/token_env/transport)"
             );
         }
         let kind = obj
@@ -170,7 +188,7 @@ pub(crate) fn parse_forges_param(value: &str) -> Result<Vec<ForgeCfg>> {
             .to_lowercase();
         anyhow::ensure!(
             KNOWN_TYPES.contains(&kind.as_str()),
-            "forges[{i}]: unknown type « {kind} » (github|gitlab|gerrit)"
+            "forges[{i}]: unknown type « {kind} » (github|gitlab|gerrit|git)"
         );
         let hosts_v = obj
             .get("hosts")
@@ -204,10 +222,24 @@ pub(crate) fn parse_forges_param(value: &str) -> Result<Vec<ForgeCfg>> {
             }
             _ => anyhow::bail!("forges[{i}]: token_env must be a string"),
         };
+        let transport = match obj.get("transport") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) => {
+                let s = s.trim().to_lowercase();
+                anyhow::ensure!(
+                    KNOWN_TRANSPORTS.contains(&s.as_str()),
+                    "forges[{i}]: unknown transport « {s} » \
+                     (auto|gh|rest|glab|mcp|git)"
+                );
+                Some(s)
+            }
+            _ => anyhow::bail!("forges[{i}]: transport must be a string"),
+        };
         out.push(ForgeCfg {
             kind,
             hosts,
             token_env,
+            transport,
         });
     }
     Ok(out)
@@ -466,6 +498,37 @@ mod tests {
         assert_eq!(cfgs[1].kind, "gitlab");
         assert_eq!(cfgs[1].hosts, vec!["git.example.com"]);
         assert_eq!(cfgs[2].hosts, vec!["gerrit.corp:8080/review"]);
+    }
+
+    #[test]
+    fn parse_transport_et_type_git() {
+        // Transport validé + persisté ; type « git » accepté.
+        let cfgs = parse_forges_param(
+            r#"[{"type":"gitlab","hosts":["lab.ex"],"transport":"REST"},
+                {"type":"github","hosts":["github.com"],"transport":"gh"},
+                {"type":"git","hosts":["code.corp"]}]"#,
+        )
+        .unwrap();
+        assert_eq!(cfgs[0].transport.as_deref(), Some("rest"));
+        assert_eq!(cfgs[1].transport.as_deref(), Some("gh"));
+        assert_eq!(cfgs[2].kind, "git");
+        // Tous les transports connus passent.
+        for t in ["auto", "gh", "rest", "glab", "mcp", "git"] {
+            let v = format!(r#"[{{"type":"gitlab","hosts":["lab.ex"],"transport":"{t}"}}]"#);
+            parse_forges_param(&v).unwrap_or_else(|_| panic!("{t} rejected"));
+        }
+        // Transport inconnu rejeté ; la clé inconnue l'était déjà.
+        assert!(
+            parse_forges_param(r#"[{"type":"gitlab","hosts":["x.com"],"transport":"svn"}]"#)
+                .is_err()
+        );
+        // Aller-retour JSON : transport conservé dans la vue déclarée.
+        let live = live_of(r#"[{"type":"gitlab","hosts":["lab.ex"],"transport":"rest"}]"#);
+        let back = parse_forges_param(&params_values(&live)["forges"]).unwrap();
+        assert_eq!(back[0].transport.as_deref(), Some("rest"));
+        // Le set résolu propage le transport à l'hôte.
+        let h = &live.set.gitlab.iter().find(|h| h.host == "lab.ex").unwrap();
+        assert_eq!(h.transport.as_deref(), Some("rest"));
     }
 
     #[test]

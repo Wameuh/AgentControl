@@ -56,8 +56,8 @@ daemon; undeclared host) → rejection + **bounded negative cache**
 (1024 entries, 30 min TTL): re-occurrences of the same URL are ignored
 without a new call, but a reference created *after* being quoted becomes
 recordable again on expiry; **forge unreachable** (outage, 5xx,
-rate-limit, `gh` missing/unauthenticated) → retries in backoff over
-~15 min then **give up** — detection stays best-effort: a URL
+rate-limit, transport missing or unauthenticated) → retries in backoff
+over ~15 min then **give up** — detection stays best-effort: a URL
 reappearing later in output restarts the cycle (and journal backfill
 at restart replays outputs).
 
@@ -68,10 +68,53 @@ detection takes over: possible "strong" reattribution); entry created
 in the meantime (`pr add`, other queue) → verification skipped at
 processing time.
 
-Consequence on a daemon **without working `gh`**: GitHub URLs cannot be
-verified → no auto-recording (retries run out); `acctl pr add` remains
-the fallback — a deliberate choice: an entry this daemon could never
-re-read at sync time would have no value anyway.
+Consequence on a daemon **without any working transport** (no `gh`,
+no `token_env` for GitHub REST): GitHub URLs cannot be verified → no
+auto-recording (retries run out); `acctl pr add` remains the fallback
+— a deliberate choice: an entry this daemon could never re-read at
+sync time would have no value anyway. Declaring
+`[[forges]] type="github" transport="rest" token_env="GH_TOKEN"`
+removes the `gh` dependency entirely.
+
+## Transports (`transport = "…"`)
+
+Every forge op in the pipeline — orchestrator review (`/mr review`,
+`acctl pr review`), registry sync, release-PR guards — goes through a
+`forgesync::ForgeClient` resolved per (forge, host, repo). The
+`transport` key of `[[forges]]` selects the implementation, per host
+group:
+
+| `transport` | meaning |
+|---|---|
+| `auto` (default) | the forge's CLI if installed **and** authenticated (`gh auth status` / `glab auth status`), else REST |
+| `gh` | GitHub CLI — forced even if `gh` would fail the probe |
+| `glab` | GitLab CLI (`glab api`) |
+| `rest` | direct REST — GitHub REST (`token_env`, implicit `GH_TOKEN` fallback), GitLab REST v4 (`PRIVATE-TOKEN`), Gerrit REST (`/changes/`, anonymous read) |
+| `mcp` | accepted, **resolves to `rest`** — see below |
+| `git` | reserved — selected implicitly by `type = "git"` |
+
+```toml
+[[forges]]
+type = "gitlab"
+hosts = ["gitlab.example.com"]
+transport = "rest"                 # never spawns gh/glab
+token_env = "GITLAB_TOKEN"         # NAME of an env var holding the token
+```
+
+`[[forges]] type="git"` is the explicit **degraded mode**: a plain git
+host with no forge API — no listing, no comments, no automatic review
+trigger; `verify_ref` answers "unreachable" so detection and sync stay
+inert by design instead of erroring.
+
+**MCP spike — verdict.** A daemon-side MCP client for the GitLab MCP
+server was evaluated for `gitlab_mcp`: the server exposes the same
+surface as REST v4 (MRs, notes, pipelines) while adding a runtime
+dependency (stdio spawn or SSE endpoint, handshake, tool schema
+versioning) the pipeline gains nothing from — `post_comment` is one
+`POST /notes` call, `list_comments` one `GET`. `transport = "mcp"`
+therefore resolves to `rest`; the REST transport covers every op
+without a second dependency, and the config key stays valid so a
+future client can take the slot without a config break.
 
 ## Configuration
 
@@ -101,11 +144,12 @@ hand-edited or panel-written:
 
 ```toml
 [[forges]]
-type = "gitlab"                    # "gitlab" | "gerrit"
+type = "gitlab"                    # "gitlab" | "gerrit" | "git"
 hosts = ["gitlab.example.com"]     # host[:port][/prefix] without scheme
 token_env = "GITLAB_TOKEN"         # optional — NAME of an env var
                                    # holding the token (never the
                                    # token itself in the config)
+transport = "rest"                 # optional — auto|gh|rest|glab|mcp
 
 [[forges]]
 type = "gerrit"
@@ -174,15 +218,21 @@ an ambiguity lists the candidates.
 
 ## Status sync
 
-- **GitHub**: `gh pr view|list` (unchanged).
-- **GitLab**: `GET /api/v4/projects/<p%2Fenc>/merge_requests/<iid>` —
+Collection groups the registry by (forge, host, repo) and issues one
+`list_changes` per group on the resolved transport — `gh pr list`,
+`glab api`, or REST — falling back to `get_change` per entry missing
+from the list:
+
+- **GitHub**: `gh pr view|list` (default `auto`) or REST
+  `repos/{o}/{r}/pulls` + check-runs (`token_env`/`GH_TOKEN`).
+- **GitLab**: `GET /api/v4/projects/<p%2Fenc>/merge_requests` —
   anonymous on public projects; for a private instance, declare
-  `token_env` and export the variable in `acctl`'s env
-  (`PRIVATE-TOKEN`). A 401/403 or an outage leaves the status unchanged
-  with a warning.
+  `token_env` and export the variable (`PRIVATE-TOKEN`). A 401/403 or
+  an outage leaves the status unchanged with a warning.
 - **Gerrit**: `GET /changes/<ref>` anonymous — works on public instances
   (verified on `gerrit-review.googlesource.com`). `status` NEW → open
   (+ `work_in_progress` → draft), MERGED → merged, ABANDONED → closed.
+- **Plain git**: no transport — entries are never probed.
 - **Host scope**: collection only queries declared hosts (`forge_list`
   — gitlab.com implicit for gitlab, github.com for github); a registry
   entry on an undeclared host is noted "undeclared host — status
@@ -191,12 +241,35 @@ an ambiguity lists the candidates.
 Each sync pass also tracks **seen** and **unreachable** entries: the
 registry's `sync_fails` is reset to zero on the first live read and
 incremented otherwise (dead or undeclared host, missing repo or
-reference — for GitHub the failure only counts if `gh auth status`
-answers: a daemon without working gh penalizes nothing). Past **3
-consecutive failures** the entry becomes **"unresolvable"**: dedicated
-state and dimmed line in the Repos tab, out of the counter and session
-badges (status restored as soon as a sync re-reads it — a host coming
-back unmasks the entry).
+reference — a missing transport never counts: `available()` false
+leaves the entry unchanged, a daemon without `gh` penalizes nothing;
+a `git` entry likewise never fails — no forge to read, its status
+stays manual).
+Past **3 consecutive failures** the entry becomes **"unresolvable"**:
+dedicated state and dimmed line in the Repos tab, out of the counter
+and session badges (status restored as soon as a sync re-reads it — a
+host coming back unmasks the entry).
+
+## Orchestrator review (multi-forge)
+
+The native review (`pr_review`, `/mr review` comment or
+`acctl pr review <N>` / `agentcontrol_request_review`) resolves the
+forge client of the target repo — a registry entry matching
+`(kind, host, repo)` wins (the review request carries an explicit
+target), the `origin` remote of the routed workspace is the fallback
+for unregistered repos — and serves the same
+pipeline on any declared forge: trigger comments are read via
+`list_comments` (notes GitLab, messages Gerrit — system notes skipped,
+membership resolved per transport: GitHub `author_association`,
+GitLab `members/all`, **Gerrit maps every registered account to
+MEMBER** — permissive by design on an instance where accounts are
+already trusted), the head is fetched via the
+forge's change ref (`pull/N/head`, `merge-requests/<iid>/head`,
+`refs/changes/…`) with the SHA fallback, and ack/verdict/failure notes
+are posted back through `post_comment`. A forge without comment caps
+simply skips comment scans; `git` entries never reach the pipeline.
+The verdict comment keeps the same `## Verdict:` marker whatever the
+forge — merge hooks consuming it stay forge-side by design.
 
 Merging a review stays a **GitHub-only permission**: the PR merge hook
 (`/mr review`, CI gates) does not extend to GitLab or Gerrit — the

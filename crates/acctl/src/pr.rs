@@ -335,7 +335,7 @@ async fn detect_target(args: &[String], c: &mut Conn, from: usize) -> Result<PrT
     let remote = git_remote();
     let mut matched: Option<(String, String)> = None;
     if let Some((rh, _)) = &remote {
-        for kind in ["gitlab", "gerrit", "github"] {
+        for kind in ["gitlab", "gerrit", "github", "git"] {
             if let Some((fh, _)) = forge_hosts(&set, kind)
                 .into_iter()
                 .find(|(fh, _)| host_part(fh) == rh)
@@ -392,8 +392,8 @@ async fn detect_target(args: &[String], c: &mut Conn, from: usize) -> Result<PrT
         .context("repo introuvable — passez --repo <path> [--forge F] [--host H] (ou lancez depuis le clone)")?;
     }
     anyhow::ensure!(
-        matches!(forge.as_str(), "github" | "gitlab" | "gerrit"),
-        "--forge github|gitlab|gerrit"
+        matches!(forge.as_str(), "github" | "gitlab" | "gerrit" | "git"),
+        "--forge github|gitlab|gerrit|git"
     );
     anyhow::ensure!(!host.is_empty(), "--host requis pour la forge {forge}");
     Ok(PrTarget {
@@ -755,15 +755,17 @@ pub(crate) async fn run(args: &[String], c: &mut Conn) -> Result<()> {
             println!("sync ok ({} vérifiées, {} maj)", out.checked, out.updates.len());
         }
         "review" => {
-            // Review native de la PR (pr_review de l'orchestrateur) :
+            // Review native du change (pr_review de l'orchestrateur) :
             // même pipeline que le commentaire `/mr review` — worktree
             // au head courant, verdict `## Verdict:` posté par le
-            // démon. GitHub only (gh) ; le verdict arrive en message
-            // si acctl tourne dans une session agent (AGENTCONTROL_SESSION).
+            // démon sur la forge résolue (note GitLab, review Gerrit…).
+            // Le verdict arrive en message si acctl tourne dans une
+            // session agent (AGENTCONTROL_SESSION).
             let t = detect_target(args, c, 2).await?;
             anyhow::ensure!(
-                t.change_id.is_none() && t.forge == "github",
-                "acctl pr review : review native = GitHub only"
+                t.change_id.is_none() && t.forge != "git",
+                "acctl pr review : review native indisponible en git nu \
+                 (pas de forge) — lancez la review manuellement"
             );
             anyhow::ensure!(!t.repo.is_empty(), "repo requis (--repo ou remote git)");
             let v = c

@@ -514,13 +514,12 @@ impl Daemon {
         let mut out = Vec::with_capacity(v.len());
         for e in &v {
             let mut j = serde_json::to_value(e)?;
-            // La review orchestrateur ne connaît que github.com.
-            let gh = proto::forge_kind(&e.forge) == "github"
-                && (e.host.is_empty() || e.host == "github.com");
-            if gh {
-                if let Some(nr) = Self::native_review_of(&reviews, &requests, &e.repo, e.pr) {
-                    j["native_review"] = json!(nr);
-                }
+            // Jointure toutes forges : la review orchestrateur prend
+            // désormais n'importe quelle forge connue (git nu exclu —
+            // pas de review auto, l'entrée n'y arrive pas de toute
+            // façon par la détection).
+            if let Some(nr) = Self::native_review_of(&reviews, &requests, &e.repo, e.pr) {
+                j["native_review"] = json!(nr);
             }
             out.push(j);
         }

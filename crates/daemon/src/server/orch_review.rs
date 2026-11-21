@@ -6,27 +6,33 @@
 //! indépendante d'agentbacklog et du cycle — un agentbacklog absent ou
 //! un cycle en erreur ne coupe pas les reviews) :
 //!
-//! - PR ouvertes à base `integration_branch` (`gh pr list` ∪ registre
-//!   PR — la base allowlistée est le param orchestrateur, défaut
-//!   `next_release`) :
+//! - Changes ouverts à base `integration_branch` (`list_changes` du
+//!   `ForgeClient` résolu ∪ registre — la base allowlistée est le
+//!   param orchestrateur, défaut `next_release`), TOUTES forges
+//!   déclarées (gh, REST github/gitlab, glab, gerrit — git nu exclu,
+//!   mode dégradé sans review auto) :
 //!   un commentaire nu `pr_review_trigger` (corps exact après trim,
-//!   auteur OWNER/MEMBER/COLLABORATOR) plus récent que le dernier
-//!   traité lance une review — sauf si une review est déjà en cours
-//!   sur cette PR, si le pool `pr_review_max_parallel` est plein, ou
-//!   si un ack d'automatisation externe (« Launching a review ») suit
-//!   le trigger.
+//!   auteur OWNER/MEMBER/COLLABORATOR — `author_assoc` du transport)
+//!   plus récent que le dernier traité lance une review — sauf si une
+//!   review est déjà en cours sur ce change, si le pool
+//!   `pr_review_max_parallel` est plein, ou si un ack d'automatisation
+//!   externe (« Launching a review ») suit le trigger.
 //! - La session reviewer `PRReview-<N>` (origin `feature:pr-review`)
-//!   est spawnée dans un worktree FRAIS détaché au `headRefOid` exact
+//!   est spawnée dans un worktree FRAIS détaché au head SHA exact
+//!   (fetché via la ref de change de la forge — `pull/N/head`,
+//!   `merge-requests/<iid>/head`, patchset gerrit — avec fallback SHA)
 //!   — read-only, elle REND son verdict en A2A natif via le tool MCP
 //!   `agentcontrol_report_verdict` (push direct au démon, plus de
 //!   polling) ; le bloc `REVIEW_RESULT_BEGIN … END` scanné à idle
 //!   reste le filet de secours si le tool est indisponible.
-//! - Le DÉMON poste le verdict (compte gh local = OWNER, accepté par
-//!   `.devin/hooks/block-merge.py`) avec le SHA reviewé en pied ;
-//!   head déplacé avant le post → titre `## Verdict: stale` (jamais
-//!   `APPROVED`) ; échec définitif → `review failed: <kind>` (ni
-//!   `#`/`*` ni « Verdict » → jamais pris pour une review par le
-//!   hook). Session supprimée et worktree retiré à la fin de passe.
+//! - Le DÉMON poste le verdict par `post_comment` du transport
+//!   (commentaire PR, note MR, review-message gerrit — compte gh local
+//!   = OWNER pour `.devin/hooks/block-merge.py` sur github) avec le
+//!   SHA reviewé en pied ; head déplacé avant le post → titre
+//!   `## Verdict: stale` (jamais `APPROVED`) ; échec définitif →
+//!   `review failed: <kind>` (ni `#`/`*` ni « Verdict » → jamais pris
+//!   pour une review par le hook). Session supprimée et worktree
+//!   retiré à la fin de passe.
 //! - Les échecs transitoires (spawn KO — rate limit en tête, reviewer
 //!   mort ou idle sans bloc, timeout, verdict malformé) sont REJOUÉS
 //!   en backoff borné (2 min/10 min/30 min, 3 retries) : l'entrée
@@ -220,17 +226,6 @@ fn pick_trigger(comments: &[(u64, String, String)], trigger: &str, last: u64) ->
     Some(tid)
 }
 
-/// `owner/repo` normalisé d'une URL remote (`git@h:o/r.git`,
-/// `https://h/o/r`, …) — comparaison exacte, pas un `contains`.
-fn remote_nwo(url: &str) -> Option<String> {
-    let p = url.trim().trim_end_matches(".git");
-    let path = p.rsplit_once(':').map(|(_, r)| r).unwrap_or(p);
-    let mut it = path.trim_matches('/').rsplit('/');
-    let name = it.next()?;
-    let owner = it.next()?;
-    (!name.is_empty() && !owner.is_empty()).then(|| format!("{owner}/{name}"))
-}
-
 /// Nom de repo court (`owner/<name>` → `<name>`) — clé de
 /// `repo_workspaces`.
 fn repo_short(repo: &str) -> &str {
@@ -248,11 +243,11 @@ fn ws_of<'a>(cfg: &'a cfg::OrchCfg, repo: &str) -> &'a str {
         .unwrap_or(&cfg.workspace)
 }
 
-/// Échec DÉFINITIF du fetch de tête de PR : `refs/pull/<N>/head` est
-/// absente sur origin (anomalie GitHub — seule `/merge` est
-/// matérialisée) ET le fetch par SHA a échoué aussi. Un retry
-/// buterait pareil — downcasté par les appelants pour un fail-fast
-/// plutôt que le retry borné des erreurs transitoires.
+/// Échec DÉFINITIF du fetch de tête de PR : la ref de change de la
+/// forge est absente sur origin (anomalie connue — ex. GitHub qui ne
+/// matérialise que `pull/N/merge`) ET le fetch par SHA a échoué
+/// aussi. Un retry buterait pareil — downcasté par les appelants pour
+/// un fail-fast plutôt que le retry borné des erreurs transitoires.
 #[derive(Debug)]
 pub(super) struct RefMissingError(pub(super) String);
 
@@ -263,36 +258,33 @@ impl std::fmt::Display for RefMissingError {
 }
 impl std::error::Error for RefMissingError {}
 
-/// Fetch de la tête de PR dans `ws` : `pull/<N>/head` d'abord, puis
-/// fallback sur le SHA direct (`headRefOid` — sha-in-want, accepté
-/// par GitHub) quand la ref n'est pas matérialisée. Le worktree se
-/// détache ensuite au même SHA : le fetch ne sert qu'à rendre
-/// l'objet disponible localement. `RefMissingError` uniquement
-/// quand l'absence de ref est explicite (« couldn't find remote
-/// ref ») ET le SHA échoue — une erreur réseau reste transitoire.
-async fn fetch_pr_head(ws: &Path, pr_n: u64, sha: &str, key: &str) -> Result<()> {
+/// Fetch de la tête de change dans `ws` : la ref de la forge
+/// (`pull/<N>/head` github, `merge-requests/<N>/head` gitlab, ref de
+/// patchset gerrit — `head_ref` du transport) d'abord, puis fallback
+/// sur le SHA direct (sha-in-want) quand la ref n'est pas
+/// matérialisée. Le worktree se détache ensuite au même SHA : le
+/// fetch ne sert qu'à rendre l'objet disponible localement.
+/// `RefMissingError` uniquement quand l'absence de ref est explicite
+/// (« couldn't find remote ref ») ET le SHA échoue — une erreur
+/// réseau reste transitoire.
+async fn fetch_pr_head(ws: &Path, refname: Option<&str>, sha: &str, key: &str) -> Result<()> {
     let ws_s = ws.to_str().context("workspace path non utf8")?;
-    let (rc, _o, e) = run_out(
-        &[
-            "git",
-            "-C",
-            ws_s,
-            "fetch",
-            "origin",
-            &format!("pull/{pr_n}/head"),
-        ],
-        ws,
-    )
-    .await
-    .unwrap_or((-1, String::new(), "spawn".into()));
-    if rc == 0 {
-        return Ok(());
+    let mut ref_missing = false;
+    let mut ref_err = String::new();
+    if let Some(r) = refname {
+        let (rc, _o, e) = run_out(&["git", "-C", ws_s, "fetch", "origin", r], ws)
+            .await
+            .unwrap_or((-1, String::new(), "spawn".into()));
+        if rc == 0 {
+            return Ok(());
+        }
+        ref_missing = e.contains("couldn't find remote ref");
+        ref_err = e;
+        warn!(
+            "orchestrator: review {key}: git fetch {r} KO (rc={rc}) — \
+             fallback fetch sha {sha} direct : {ref_err}"
+        );
     }
-    let ref_missing = e.contains("couldn't find remote ref");
-    warn!(
-        "orchestrator: review {key}: git fetch pull/{pr_n}/head KO (rc={rc}) — \
-         fallback fetch sha {sha} direct : {e}"
-    );
     let (rc2, _o2, e2) = run_out(&["git", "-C", ws_s, "fetch", "origin", sha], ws)
         .await
         .unwrap_or((-1, String::new(), "spawn".into()));
@@ -301,12 +293,16 @@ async fn fetch_pr_head(ws: &Path, pr_n: u64, sha: &str, key: &str) -> Result<()>
     }
     if ref_missing {
         return Err(RefMissingError(format!(
-            "pull/{pr_n}/head absente sur origin et fetch {sha} impossible : {e2} — \
-             pousser un nouveau commit sur la branche recrée la ref"
+            "{} absente sur origin et fetch {sha} impossible : {e2} — \
+             pousser un nouveau commit sur la branche recrée la ref",
+            refname.unwrap_or("ref de change")
         ))
         .into());
     }
-    anyhow::bail!("git fetch pull/{pr_n}/head: {e} ; fetch {sha}: {e2}")
+    anyhow::bail!(
+        "git fetch {}: {ref_err} ; fetch {sha}: {e2}",
+        refname.unwrap_or("head")
+    )
 }
 
 const REVIEW_PROMPT: &str = r#"[Session creee automatiquement par l'orchestrateur AgentControl — review de PR native.]
@@ -578,7 +574,7 @@ impl Daemon {
                     Path::new(ws_of(&cfg, repo)),
                     &pr_review_dir(&cfg, pr_n, sha),
                 );
-                self.gh_comment(repo, pr_n, &fail_comment("disabled"), &cfg)
+                self.pr_comment(repo, pr_n, &fail_comment("disabled"), &cfg)
                     .await;
                 if let Some(e) = st.pr_reviews.get_mut(&key) {
                     e["state"] = json!(EntryState::Failed.as_str());
@@ -712,7 +708,7 @@ impl Daemon {
                 if !pending.is_empty() {
                     if denied >= 2 {
                         warn!("orchestrator: PR review {key} blocked on request → failed");
-                        self.gh_comment(repo, pr_n, &fail_comment("blocked on request"), &cfg)
+                        self.pr_comment(repo, pr_n, &fail_comment("blocked on request"), &cfg)
                             .await;
                         self.pr_review_finish(
                             &key,
@@ -849,9 +845,9 @@ impl Daemon {
                 continue;
             };
             let wt = pr_review_dir(&cfg, pr_n, &sha);
-            if let Some(h) = self.gh_pr_head(repo, pr_n, &cfg).await {
+            if let Some(h) = self.pr_head(repo, pr_n, &cfg).await {
                 if h != sha {
-                    self.gh_comment(repo, pr_n, &fail_comment("stale — head changed"), &cfg)
+                    self.pr_comment(repo, pr_n, &fail_comment("stale — head changed"), &cfg)
                         .await;
                     self.pr_review_finish(
                         &key,
@@ -890,7 +886,7 @@ impl Daemon {
                         e["sid"] = json!(sid.clone());
                     }
                     self.orch_save(&st);
-                    self.gh_comment(
+                    self.pr_comment(
                         repo,
                         pr_n,
                         &ack_comment(cfg.model_or(&cfg.pr_reviewer_model), &sid),
@@ -981,7 +977,7 @@ impl Daemon {
                 .await;
                 continue;
             }
-            let Some(head_sha) = self.gh_pr_head(&repo, pr_n, &cfg).await else {
+            let Some(head_sha) = self.pr_head(&repo, pr_n, &cfg).await else {
                 st.pr_review_requests.remove(&key);
                 self.pr_review_notify(
                     &by,
@@ -1035,7 +1031,7 @@ impl Daemon {
                         e["sid"] = json!(sid.clone());
                     }
                     self.orch_save(&st);
-                    self.gh_comment(
+                    self.pr_comment(
                         &repo,
                         pr_n,
                         &ack_comment(cfg.model_or(&cfg.pr_reviewer_model), &sid),
@@ -1146,7 +1142,7 @@ impl Daemon {
                         e["sid"] = json!(sid.clone());
                     }
                     self.orch_save(&st);
-                    self.gh_comment(
+                    self.pr_comment(
                         &repo,
                         pr_n,
                         &ack_comment(cfg.model_or(&cfg.pr_reviewer_model), &sid),
@@ -1280,7 +1276,7 @@ impl Daemon {
         remove_review_worktree(Path::new(ws_of(cfg, repo)), wt);
         if err.downcast_ref::<RefMissingError>().is_some() {
             warn!("orchestrator: PR review {key} ref pull/{pr_n}/head absente → failed");
-            self.gh_comment(
+            self.pr_comment(
                 repo,
                 pr_n,
                 &fail_comment(&format!(
@@ -1342,12 +1338,12 @@ impl Daemon {
                 e.insert("sid".into(), json!(""));
                 e.insert("denied".into(), json!(0));
             }
-            self.gh_comment(repo, pr_n, &retry_comment(kind, delay), cfg)
+            self.pr_comment(repo, pr_n, &retry_comment(kind, delay), cfg)
                 .await;
             info!("orchestrator: PR review {key} {kind} → retry #{attempts} in {delay}s");
         } else {
             warn!("orchestrator: PR review {key} {kind} — attempts exhausted → failed");
-            self.gh_comment(repo, pr_n, &fail_comment(kind), cfg).await;
+            self.pr_comment(repo, pr_n, &fail_comment(kind), cfg).await;
             self.pr_review_finish(key, EntryState::Failed, st, wt, Path::new(ws_of(cfg, repo)))
                 .await;
         }
@@ -1376,9 +1372,9 @@ impl Daemon {
         else {
             return;
         };
-        let head = self.gh_pr_head(repo, pr_n, cfg).await;
+        let head = self.pr_head(repo, pr_n, cfg).await;
         let text = verdict_comment(&body, sha, head.as_deref());
-        if self.gh_comment(repo, pr_n, &text, cfg).await {
+        if self.pr_comment(repo, pr_n, &text, cfg).await {
             info!("orchestrator: PR review {key} verdict posted");
             self.pr_review_finish(key, EntryState::Done, st, wt, Path::new(ws_of(cfg, repo)))
                 .await;
@@ -1392,7 +1388,7 @@ impl Daemon {
             if tries >= 3 {
                 warn!("orchestrator: PR {key} verdict could not be posted → failed");
                 let _ = self
-                    .gh_comment(repo, pr_n, &fail_comment("verdict post failed"), cfg)
+                    .pr_comment(repo, pr_n, &fail_comment("verdict post failed"), cfg)
                     .await;
                 self.pr_review_finish(key, EntryState::Failed, st, wt, Path::new(ws_of(cfg, repo)))
                     .await;
@@ -1517,9 +1513,11 @@ impl Daemon {
         let cfg = self.orch.cfg.read().unwrap().clone();
         anyhow::ensure!(cfg.pr_review, "pr_review disabled (orchestrator)");
         anyhow::ensure!(pr > 0, "invalid PR number");
+        // `group/sub/proj` GitLab comme `proj` Gerrit sont valides —
+        // seul le format « pas de chemin du tout » est rejeté.
         anyhow::ensure!(
-            repo.contains('/') && !repo.contains(char::is_whitespace),
-            "repo expected in owner/name format"
+            !repo.is_empty() && !repo.contains(char::is_whitespace),
+            "repo expected in path/name format"
         );
         // Demandeur A2A : la session doit exister (traçabilité de la
         // notification verdict — jamais de notification vers un
@@ -1528,11 +1526,15 @@ impl Daemon {
             self.get_session(sid).await?;
         }
         // PR cible : ouverte + base allowlistée (branche d'intégration
-        // configurée) — les mêmes gardes que le chemin commentaire.
-        let Some((state, base, _head)) = self.gh_pr_info(&repo, pr, &cfg).await else {
+        // configurée) — les mêmes gardes que le chemin commentaire,
+        // toutes forges (state normalisé open|draft|merged|closed).
+        let Some((state, base, _head)) = self.pr_change_info(&repo, pr, &cfg).await else {
             anyhow::bail!("PR {repo}#{pr} not found");
         };
-        anyhow::ensure!(state == "OPEN", "PR {repo}#{pr} closed ({state})");
+        anyhow::ensure!(
+            state == "open" || state == "draft",
+            "PR {repo}#{pr} closed ({state})"
+        );
         anyhow::ensure!(
             base == cfg.pr_base(),
             "PR {repo}#{pr}: base «{base}» ≠ {} — review refused",
@@ -1586,40 +1588,124 @@ impl Daemon {
         }))
     }
 
-    /// `gh pr view` → (state, baseRefName, headRefOid) — validation
-    /// d'une demande interne (ouverte + base allowlistée).
-    async fn gh_pr_info(
+    /// Client forge résolu pour `repo` — (kind, host, repo) de
+    /// l'entrée registre portant ce repo (la cible explicite prime),
+    /// sinon du remote `origin` du workspace routé (vérité du clone),
+    /// sinon github.com implicite.
+    /// Le transport vient de `[[forges]]` (`spec_for`) — `gh` n'est
+    /// requis que si la forge résolue est github sans autre
+    /// transport. Le `spawn_blocking` absorbe les probes `auto`
+    /// (`gh auth status`) et le `git remote` du routage.
+    pub(crate) async fn forge_client(
+        &self,
+        repo: &str,
+        cfg: &cfg::OrchCfg,
+    ) -> Option<Arc<dyn forgesync::ForgeClient>> {
+        let ws = ws_of(cfg, repo).to_string();
+        let repo = repo.to_string();
+        let forges = Arc::clone(&self.forges);
+        let registry: Vec<(String, String, String)> = self
+            .prs
+            .list()
+            .iter()
+            .map(|p| {
+                (
+                    p.repo.clone(),
+                    proto::forge_kind(&p.forge).to_string(),
+                    if p.host.is_empty() {
+                        proto::forge_default_host(&p.forge).to_string()
+                    } else {
+                        p.host.clone()
+                    },
+                )
+            })
+            .collect();
+        tokio::task::spawn_blocking(move || {
+            let f = forges.read().unwrap();
+            let set = f.set.list_json();
+            let set = set.as_array()?;
+            // Registre D'ABORD : `repo` est la cible explicite (entrée
+            // connue → sa forge fait foi) ; le remote ne sert que pour
+            // un repo jamais enregistré (PR du workspace).
+            let (kind, host, r) = registry
+                .iter()
+                .find(|(rr, _, _)| rr == &repo)
+                .map(|(_, k, h)| (k.clone(), h.clone(), repo.clone()))
+                .or_else(|| crate::forges::remote_forge(&f.set, Path::new(&ws)))
+                .unwrap_or_else(|| ("github".into(), "github.com".into(), repo));
+            forgesync::client_for(set, &kind, &host, &r, Path::new(&ws))
+        })
+        .await
+        .ok()?
+    }
+
+    /// Client forge direct depuis (kind, host, repo) — résolution
+    /// « registre » sans consulter le remote (entrée `PrEntry` qui
+    /// porte déjà forge/host/repo). `spawn_blocking` pour les probes
+    /// `auto`.
+    pub(crate) async fn forge_client_of(
+        &self,
+        kind: &str,
+        host: &str,
+        repo: &str,
+        ws: &Path,
+    ) -> Option<Arc<dyn forgesync::ForgeClient>> {
+        let forges = Arc::clone(&self.forges);
+        let ws = ws.to_path_buf();
+        let (kind, host, repo) = (kind.to_string(), host.to_string(), repo.to_string());
+        tokio::task::spawn_blocking(move || {
+            let f = forges.read().unwrap();
+            let set = f.set.list_json();
+            forgesync::client_for(set.as_array()?, &kind, &host, &repo, &ws)
+        })
+        .await
+        .ok()?
+    }
+
+    /// Client du repo du WORKSPACE (release PR, garde draft) — tout
+    /// vient du remote `origin`, sans `gh` ni registre.
+    pub(crate) async fn forge_client_at(
+        &self,
+        ws: &Path,
+    ) -> Option<Arc<dyn forgesync::ForgeClient>> {
+        let forges = Arc::clone(&self.forges);
+        let ws = ws.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let f = forges.read().unwrap();
+            let (kind, host, repo) = crate::forges::remote_forge(&f.set, &ws)?;
+            let set = f.set.list_json();
+            forgesync::client_for(set.as_array()?, &kind, &host, &repo, &ws)
+        })
+        .await
+        .ok()?
+    }
+
+    /// `get_change` du transport résolu — (state, base, head, title,
+    /// body…) normalisé `ChangeInfo`.
+    async fn pr_change(
+        &self,
+        repo: &str,
+        id: &str,
+        cfg: &cfg::OrchCfg,
+    ) -> Option<forgesync::ChangeInfo> {
+        let c = self.forge_client(repo, cfg).await?;
+        let id = id.to_string();
+        tokio::task::spawn_blocking(move || c.get_change(&id))
+            .await
+            .ok()?
+    }
+
+    /// (state, baseRefName, headRefOid) — validation d'une demande
+    /// interne (ouverte + base allowlistée), toutes forges.
+    async fn pr_change_info(
         &self,
         repo: &str,
         pr_n: u64,
         cfg: &cfg::OrchCfg,
     ) -> Option<(String, String, String)> {
-        let (rc, out, _e) = run_out(
-            &[
-                "gh",
-                "pr",
-                "view",
-                &pr_n.to_string(),
-                "-R",
-                repo,
-                "--json",
-                "state,baseRefName,headRefOid",
-                "-q",
-                "[.state, .baseRefName, .headRefOid] | @tsv",
-            ],
-            Path::new(&cfg.workspace),
-        )
-        .await
-        .unwrap_or((-1, String::new(), String::new()));
-        if rc != 0 {
-            return None;
-        }
-        let mut f = out.trim().splitn(3, '\t');
-        Some((
-            f.next()?.to_string(),
-            f.next()?.to_string(),
-            f.next().unwrap_or("").to_string(),
-        ))
+        self.pr_change(repo, &pr_n.to_string(), cfg)
+            .await
+            .map(|c| (c.state, c.base, c.head_sha))
     }
 
     /// Notification A2A au demandeur d'une review interne — même
@@ -1646,81 +1732,86 @@ impl Daemon {
         }
     }
 
-    /// PR ouvertes à reviewer : `gh pr list --base <integration_branch>`
-    /// par repo routé (registre ∪ origin du workspace), chaque numéro
-    /// une seule fois — la liste forge fait foi pour le statut.
+    /// Changes ouverts à reviewer : `list_changes` du transport résolu
+    /// filtré à base `integration_branch` par repo routé (registre ∪
+    /// remote du workspace), chaque numéro une seule fois — la liste
+    /// forge fait foi pour le statut. Toutes forges à `caps.list` ;
+    /// git nu est exclu (pas de lecture automatique).
     async fn pr_review_candidates(&self, cfg: &cfg::OrchCfg) -> Vec<(String, u64, String)> {
-        let mut repos: HashSet<String> = self
-            .prs
-            .list()
-            .iter()
-            .filter(|p| p.forge.is_empty() || p.forge == "github")
-            .map(|p| p.repo.clone())
-            .collect();
-        let (rc, out, _e) = run_out(
-            &[
-                "gh",
-                "repo",
-                "view",
-                "--json",
-                "nameWithOwner",
-                "-q",
-                ".nameWithOwner",
-            ],
-            Path::new(&cfg.workspace),
-        )
-        .await
-        .unwrap_or((-1, String::new(), String::new()));
-        if rc == 0 {
-            let r = out.trim().to_string();
-            if !r.is_empty() {
-                repos.insert(r);
+        // (repo, kind, host) côté client : les entrées du registre
+        // portent forge+host directement ; le workspace entre via son
+        // remote (pas besoin de `gh repo view`).
+        let mut targets: Vec<(String, String, String)> = Vec::new();
+        // Dédup sur (kind, host, repo) : le même chemin peut exister
+        // sur deux hôtes d'un type (gitlab.com + self-hosted).
+        let mut seen: HashSet<(String, String, String)> = HashSet::new();
+        for p in self.prs.list() {
+            let kind = proto::forge_kind(&p.forge).to_string();
+            let host = if p.host.is_empty() {
+                proto::forge_default_host(&p.forge).to_string()
+            } else {
+                p.host.clone()
+            };
+            if seen.insert((kind.clone(), host.clone(), p.repo.clone())) {
+                targets.push((p.repo.clone(), kind, host));
             }
         }
-        let mut out_v: Vec<(String, u64, String)> = Vec::new();
-        for repo in repos {
-            let (rc, out, _e) = run_out(
-                &[
-                    "gh",
-                    "pr",
-                    "list",
-                    "-R",
-                    &repo,
-                    "--state",
-                    "open",
-                    "--base",
-                    cfg.pr_base(),
-                    "--json",
-                    "number,headRefOid",
-                ],
-                Path::new(&cfg.workspace),
-            )
-            .await
-            .unwrap_or((-1, String::new(), String::new()));
-            if rc != 0 {
-                continue;
-            }
-            let Ok(list) = serde_json::from_str::<Vec<Value>>(&out) else {
-                continue;
+        let base = cfg.pr_base().to_string();
+        let forges = Arc::clone(&self.forges);
+        let wss: Vec<String> = std::iter::once(cfg.workspace.clone())
+            .chain(cfg.repo_workspaces.values().cloned())
+            .collect();
+        tokio::task::spawn_blocking(move || {
+            let f = forges.read().unwrap();
+            let set = f.set.list_json();
+            let Some(set) = set.as_array() else {
+                return Vec::new();
             };
-            for pr in list {
-                if let Some(n) = pr.get("number").and_then(Value::as_u64) {
-                    let head = pr
-                        .get("headRefOid")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    out_v.push((repo.clone(), n, head));
+            // Remote du workspace principal puis de chaque workspace
+            // routé — le repo de la forge fait foi pour l'appel API.
+            for ws in &wss {
+                if let Some((kind, host, r)) = crate::forges::remote_forge(&f.set, Path::new(ws)) {
+                    if seen.insert((kind.clone(), host.clone(), r.clone())) {
+                        targets.push((r, kind, host));
+                    }
                 }
             }
-        }
-        out_v
+            let mut out_v = Vec::new();
+            for (repo, kind, host) in &targets {
+                let Some(client) = forgesync::client_for(set, kind, host, repo, Path::new(&wss[0]))
+                else {
+                    continue;
+                };
+                let caps = client.caps();
+                if !caps.list || !client.available() {
+                    continue;
+                }
+                let Some(list) = client.list_changes(&forgesync::ListQuery::open(200)) else {
+                    continue;
+                };
+                for c in list {
+                    // Base allowlistée — même garde que `--base` de
+                    // `gh pr list` (filtre côté client, les API ne
+                    // filtrent pas toutes pareil).
+                    if base.is_empty() || c.base.eq_ignore_ascii_case(&base) {
+                        if c.number > 0 {
+                            out_v.push((repo.clone(), c.number, c.head_sha));
+                        }
+                    }
+                }
+            }
+            out_v
+        })
+        .await
+        .unwrap_or_default()
     }
 
     /// Dernier trigger non traité d'une PR → (comment id, head sha).
     /// Retourne None si : pas de trigger plus récent que
     /// `last_trigger`, trigger d'un tiers, ou un ack d'automatisation
-    /// externe suit le trigger.
+    /// externe suit le trigger. Toutes forges : les notes système
+    /// (events GitLab, messages autogenerated Gerrit) sont ignorées,
+    /// l'autorisation passe par `author_assoc` du transport.
     async fn pr_review_find_trigger(
         &self,
         repo: &str,
@@ -1728,88 +1819,65 @@ impl Daemon {
         cfg: &cfg::OrchCfg,
         last_trigger: u64,
     ) -> Option<(u64, String)> {
-        let ep = format!("repos/{repo}/issues/{pr_n}/comments?per_page=100");
-        let (rc, out, _e) = run_out(
-            &[
-                "gh",
-                "api",
-                "--paginate",
-                &ep,
-                "--jq",
-                ".[] | [.id, .created_at, .author_association, (.body | @base64)] | @tsv",
-            ],
-            Path::new(&cfg.workspace),
-        )
-        .await
-        .unwrap_or((-1, String::new(), String::new()));
-        if rc != 0 {
+        let client = self.forge_client(repo, cfg).await?;
+        if !client.caps().comments {
             return None;
         }
-        let mut comments: Vec<(u64, String, String)> = Vec::new();
-        for line in out.lines() {
-            let mut f = line.splitn(4, '\t');
-            let (Some(id), Some(_ts), Some(assoc), Some(b64)) =
-                (f.next(), f.next(), f.next(), f.next())
-            else {
-                continue;
-            };
-            let Ok(id) = id.parse::<u64>() else { continue };
-            let body = String::from_utf8(base64_decode(b64.trim())).unwrap_or_default();
-            comments.push((id, assoc.trim().to_string(), body));
-        }
-        let tid = pick_trigger(&comments, &cfg.pr_review_trigger, last_trigger)?;
-        // Head courant — lu frais (la liste batch peut être pire).
-        self.gh_pr_head(repo, pr_n, cfg).await.map(|h| (tid, h))
+        let id = pr_n.to_string();
+        let trig = cfg.pr_review_trigger.clone();
+        tokio::task::spawn_blocking(move || {
+            let cs = client.list_comments(&id, None)?;
+            // `author_assoc` n'est résolu que sur les notes candidates
+            // au trigger (GitLab = 1 GET members/<id> par note — ~0-1
+            // appel par tick au lieu d'un par note du fil) ; hors de
+            // cet ensemble `pick_trigger` ne lit jamais l'assoc, "" y
+            // suffit.
+            let comments: Vec<(u64, String, String)> = cs
+                .iter()
+                .filter(|c| !c.system)
+                .map(|c| {
+                    let assoc = if c.id > last_trigger && is_trigger(&c.body, &trig) {
+                        client.author_assoc(c)
+                    } else {
+                        String::new()
+                    };
+                    (c.id, assoc, c.body.clone())
+                })
+                .collect();
+            let tid = pick_trigger(&comments, &trig, last_trigger)?;
+            // Head courant — lu frais (la liste batch peut être pire).
+            client
+                .get_change(&id)
+                .and_then(|c| (!c.head_sha.is_empty()).then_some((tid, c.head_sha)))
+        })
+        .await
+        .ok()?
     }
 
-    /// `gh pr view` → headRefOid courant (frais, décide stale).
-    async fn gh_pr_head(&self, repo: &str, pr_n: u64, cfg: &cfg::OrchCfg) -> Option<String> {
-        let (rc, out, _e) = run_out(
-            &[
-                "gh",
-                "pr",
-                "view",
-                &pr_n.to_string(),
-                "-R",
-                repo,
-                "--json",
-                "headRefOid,baseRefName",
-                "-q",
-                ".headRefOid",
-            ],
-            Path::new(&cfg.workspace),
-        )
-        .await
-        .unwrap_or((-1, String::new(), String::new()));
-        if rc != 0 {
-            return None;
-        }
-        let h = out.trim().to_string();
-        (!h.is_empty()).then_some(h)
+    /// Head SHA courant du change (frais, décide stale) — `head_sha`
+    /// normalisé du transport (pull head / MR sha / patchset courant).
+    async fn pr_head(&self, repo: &str, pr_n: u64, cfg: &cfg::OrchCfg) -> Option<String> {
+        self.pr_change(repo, &pr_n.to_string(), cfg)
+            .await
+            .and_then(|c| (!c.head_sha.is_empty()).then_some(c.head_sha))
     }
 
-    /// Commentaire sur la PR via gh (compte local = OWNER pour le
-    /// hook) → posté ?
-    async fn gh_comment(&self, repo: &str, pr_n: u64, body: &str, cfg: &cfg::OrchCfg) -> bool {
-        let (rc, _o, e) = run_out(
-            &[
-                "gh",
-                "pr",
-                "comment",
-                &pr_n.to_string(),
-                "-R",
-                repo,
-                "--body",
-                body,
-            ],
-            Path::new(&cfg.workspace),
-        )
-        .await
-        .unwrap_or((-1, String::new(), "spawn failed".into()));
-        if rc != 0 {
-            warn!("orchestrator: comment {repo}#{pr_n} rc={rc} {e}");
+    /// Commentaire/note/review-message sur le change (compte local
+    /// pour le hook github) → posté ? false si le transport ne sait
+    /// pas écrire (anonyme, git nu) — les appelants dégradent.
+    async fn pr_comment(&self, repo: &str, pr_n: u64, body: &str, cfg: &cfg::OrchCfg) -> bool {
+        let Some(c) = self.forge_client(repo, cfg).await else {
+            return false;
+        };
+        let id = pr_n.to_string();
+        let body = body.to_string();
+        let ok = tokio::task::spawn_blocking(move || c.post_comment(&id, &body))
+            .await
+            .unwrap_or(false);
+        if !ok {
+            warn!("orchestrator: comment {repo}#{pr_n} refused by transport");
         }
-        rc == 0
+        ok
     }
 
     /// Worktree frais au SHA + spawn `PRReview-<N>` → sid.
@@ -1824,19 +1892,37 @@ impl Daemon {
         let ws = ws_of(cfg, repo);
         let ws_path = Path::new(ws);
         // Remote du clone = repo de la PR, sinon review sur le mauvais
-        // dépôt (skip silencieux, pas de boucle).
+        // dépôt (skip silencieux, pas de boucle). Le chemin complet du
+        // remote est comparé — sous-groupes GitLab compris.
         let (rc, out, _e) = run_out(&["git", "-C", ws, "remote", "get-url", "origin"], ws_path)
             .await
             .context("git remote get-url")?;
         anyhow::ensure!(
-            rc == 0 && remote_nwo(&out).is_some_and(|nwo| nwo.eq_ignore_ascii_case(repo)),
+            rc == 0
+                && crate::forges::remote_parts(&out).is_some_and(|(_, p)| {
+                    p.eq_ignore_ascii_case(repo)
+                        || p.trim_start_matches("a/").eq_ignore_ascii_case(repo)
+                }),
             "workspace {ws} : remote origin ≠ {repo}"
         );
-        // Ref de la PR fetchée (fallback SHA si `pull/N/head` absente)
-        // puis worktree détaché au SHA exact.
+        // Ref de change de la forge (`pull/N/head`, `merge-requests/
+        // N/head`, ref de patchset gerrit) fetchée — fallback SHA si
+        // absente — puis worktree détaché au SHA exact. La métadonnée
+        // (titre/body) arrive par le même `get_change`.
+        let id = pr_n.to_string();
+        let client = self.forge_client(repo, cfg).await;
+        let (head_ref, meta) = match client {
+            Some(c) => {
+                let id2 = id.clone();
+                tokio::task::spawn_blocking(move || (c.head_ref(&id2), c.get_change(&id2)))
+                    .await
+                    .unwrap_or((None, None))
+            }
+            None => (None, None),
+        };
         let wt = pr_review_dir(cfg, pr_n, sha);
         let _ = std::fs::create_dir_all(pr_reviews_root(cfg));
-        fetch_pr_head(Path::new(ws), pr_n, sha, key).await?;
+        fetch_pr_head(Path::new(ws), head_ref.as_deref(), sha, key).await?;
         let (rc, _o, e) = run_out(
             &[
                 "git",
@@ -1853,24 +1939,11 @@ impl Daemon {
         .await
         .unwrap_or((-1, String::new(), "spawn".into()));
         anyhow::ensure!(rc == 0, "git worktree add: {e}");
-        // Métadonnées de la PR pour le prompt.
-        let (_rc, meta, _e) = run_out(
-            &[
-                "gh",
-                "pr",
-                "view",
-                &pr_n.to_string(),
-                "-R",
-                repo,
-                "--json",
-                "title,body",
-                "-q",
-                ".title + \"\\n\\n\" + .body",
-            ],
-            ws_path,
-        )
-        .await
-        .unwrap_or((-1, String::new(), String::new()));
+        // Métadonnées du change pour le prompt (dégradé : titre seul
+        // si le transport ne lit pas — le SHA+diff restent reviewés).
+        let meta = meta
+            .map(|c| format!("{}\n\n{}", c.title, c.body))
+            .unwrap_or_default();
         let meta = meta.trim().to_string();
         let (title, body) = meta.split_once('\n').unwrap_or((&meta, ""));
         let prompt = fill_pr(
@@ -1977,49 +2050,6 @@ fn st_counter(key: &str) -> u64 {
         .next()
         .and_then(|n| n.parse().ok())
         .unwrap_or(0)
-}
-
-/// Décodage base64 minimal (std seul — pas de dépendance suppl.).
-fn base64_decode(s: &str) -> Vec<u8> {
-    fn val(c: u8) -> Option<u8> {
-        match c {
-            b'A'..=b'Z' => Some(c - b'A'),
-            b'a'..=b'z' => Some(c - b'a' + 26),
-            b'0'..=b'9' => Some(c - b'0' + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    }
-    let mut out = Vec::with_capacity(s.len() * 3 / 4);
-    let bytes: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-    for chunk in bytes.chunks(4) {
-        let mut acc = 0u32;
-        let mut n = 0;
-        for (i, &c) in chunk.iter().enumerate() {
-            if c == b'=' {
-                break;
-            }
-            if let Some(v) = val(c) {
-                acc |= (v as u32) << (18 - 6 * i);
-                n += 1;
-            }
-        }
-        match n {
-            4 => {
-                out.push((acc >> 16) as u8);
-                out.push((acc >> 8) as u8);
-                out.push(acc as u8);
-            }
-            3 => {
-                out.push((acc >> 16) as u8);
-                out.push((acc >> 8) as u8);
-            }
-            2 => out.push((acc >> 16) as u8),
-            _ => {}
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -2147,27 +2177,6 @@ mod tests {
     }
 
     #[test]
-    fn remote_nwo_urls() {
-        assert_eq!(
-            remote_nwo("git@github.com:Wameuh/AgentControl.git\n"),
-            Some("Wameuh/AgentControl".to_string())
-        );
-        assert_eq!(
-            remote_nwo("https://github.com/Wameuh/AgentControl"),
-            Some("Wameuh/AgentControl".to_string())
-        );
-        assert_eq!(
-            remote_nwo("ssh://git@github.com/Wameuh/AgentControl.git"),
-            Some("Wameuh/AgentControl".to_string())
-        );
-        // Pas de match souple : « Agent » ≠ « Wameuh/AgentControl ».
-        assert_ne!(
-            remote_nwo("https://github.com/Wameuh/Agent.git"),
-            Some("Wameuh/AgentControl".to_string())
-        );
-    }
-
-    #[test]
     fn verdict_comment_head() {
         let body = "## Verdict: APPROVED\n\nok";
         // Head inchangé → verdict posté avec l'ancre.
@@ -2180,18 +2189,6 @@ mod tests {
             assert!(s.starts_with("## Verdict: stale"));
             assert!(!s.contains("APPROVED"));
         }
-    }
-
-    #[test]
-    fn b64_roundtrip() {
-        assert_eq!(
-            String::from_utf8(base64_decode("L21yIHJldmlldw==")).unwrap(),
-            "/mr review"
-        );
-        assert_eq!(
-            String::from_utf8(base64_decode("aGVsbG8gd29ybGQ=")).unwrap(),
-            "hello world"
-        );
     }
 
     /// La garde de base review (`base == cfg.pr_base()`) suit le param
@@ -2290,7 +2287,9 @@ mod tests {
     async fn fetch_pr_head_fallback_sha_puis_worktree() {
         let (_remote, work, sha) = pr_fetch_fixture("ok");
         // pull/383/head absente → fallback fetch par SHA → Ok.
-        fetch_pr_head(&work, 383, &sha, "W/R#383").await.unwrap();
+        fetch_pr_head(&work, Some("pull/383/head"), &sha, "W/R#383")
+            .await
+            .unwrap();
         // L'objet est local et le worktree détaché se crée — même
         // comportement que pr_review_launch après le fetch.
         assert_eq!(git(&work, &["cat-file", "-t", &sha]), "commit");
@@ -2313,7 +2312,7 @@ mod tests {
         // SHA inexistant + pull/N/head absente → RefMissingError
         // (cause définitive, jamais retryée).
         let bogus = "f".repeat(40);
-        let e = fetch_pr_head(&work, 383, &bogus, "W/R#383")
+        let e = fetch_pr_head(&work, Some("pull/383/head"), &bogus, "W/R#383")
             .await
             .unwrap_err();
         let r = e
@@ -2341,7 +2340,7 @@ mod tests {
             &work,
             &["remote", "add", "origin", "/nonexistent/ac-prfetch-remote"],
         );
-        let e = fetch_pr_head(&work, 383, &"a".repeat(40), "W/R#383")
+        let e = fetch_pr_head(&work, Some("pull/383/head"), &"a".repeat(40), "W/R#383")
             .await
             .unwrap_err();
         assert!(e.downcast_ref::<RefMissingError>().is_none());
@@ -2349,9 +2348,9 @@ mod tests {
     }
 
     // Mini regex maison pour les tests de format (évite une dépendance).
-    struct RegexLite(&'static str);
-    fn regex_lite(p: &'static str) -> RegexLite {
-        RegexLite(p)
+    struct RegexLite;
+    fn regex_lite(_p: &'static str) -> RegexLite {
+        RegexLite
     }
     impl RegexLite {
         fn is_match(&self, s: &str) -> bool {
