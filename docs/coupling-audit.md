@@ -4,10 +4,15 @@
 de l'auteur (repo `Wameuh/AgentControl`, workflow `next_release` → `main`,
 chemins `/workspace`, outils perso `agentbacklog`/`ac-wait`/`gh`).
 
-**Objectif produit** : qu'un tiers installe le démon + le client sur
-n'importe quel repo et que l'orchestrateur, les reviews PR, les updates
-et le catalogue fonctionnent — ou se désactivent proprement — sans
-supposer notre infra.
+**Objectif produit** : qu'un tiers utilise AgentControl **pour un autre
+projet** — le repo travaillé peut être GitLab, Gerrit, ou même du git
+nu, **sans `gh` installé**. Le pipeline côté projet (orchestrateur,
+review PR, registre PR) doit fonctionner sur chaque forge via l'un des
+transports — CLI de la forge (`gh`/`glab`), API REST (GitLab via
+`token_env`), serveur MCP de la forge, ou git nu (mode dégradé sans
+PR) — chacun indépendamment des autres, ou se désactiver proprement.
+L'auto-update de l'app, elle, pointe par nature sur le repo de l'app
+(section A — correct, non bloquant).
 
 Méthode : grep de `github.com`, `Wameuh`, `/workspace`, `next_release`,
 `agentbacklog`, `gh `, `devcontainer`, `supervisord` sur `crates/`,
@@ -31,23 +36,38 @@ Méthode : grep de `github.com`, `Wameuh`, `/workspace`, `next_release`,
 
 ---
 
-## A. Identité du repo GitHub — l'update est GitHub-only et repo-en-dur
+## A. Identité du repo GitHub — update repo-en-dur (correct : repo de l'app)
+
+> **Re-cadrage (#315)** : `Wameuh/AgentControl` en dur dans
+> `selfupdate.rs`/`update.rs`/`connect.rs` est **correct** — c'est le
+> repo de l'application elle-même : l'auto-update du démon et du client
+> *doit* pointer dessus, quel que soit le repo travaillé par le projet
+> de l'utilisateur. Forker AgentControl n'est pas le scénario cible ;
+> les entrées A1-A5 sont donc rétrogradées en ⚪ / basse priorité — un
+> param `update_repo` optionnel, utile **seulement si quelqu'un FORK
+> AgentControl**, pas un prérequis d'usage tiers.
 
 | # | Couplage | Localisation | Gravité | Découplage proposé |
 |---|----------|--------------|---------|--------------------|
-| A1 | Self-update du démon : `const REPO = "Wameuh/AgentControl"` — URL release + API releases en dur | `crates/daemon/src/selfupdate.rs:14,226,304` | 🔴 | `param` — `[daemon] update_repo = "owner/name"` (ou détection du remote git du checkout d'origine) ; abstraction `ReleaseSource { GitHubReleases, UrlTemplate, None }` pour anticiper GitLab. |
-| A2 | Check/update client Tauri : 4 URLs `api.github.com/repos/Wameuh/AgentControl/releases…` en dur | `client/src-tauri/src/commands/update.rs:89,124,131,331-333` ; `client/src/features/update.ts:32,55,75,88,151` (doublon TS) | 🔴 | `param` — champ `release_repo` dans la config du client (ou réponse `daemon_status`/`daemon_update` pour que le client suive le repo du démon) ; un seul endroit de vérité côté démon. |
-| A3 | `connect.rs` : `const BASE = "https://github.com/Wameuh/AgentControl/releases"` pour le script d'install distant | `client/src-tauri/src/commands/connect.rs:501` | 🔴 | `param`/`détection` — même source que A2 ; à défaut, documenter que le bootstrap install ne marche que pour ce repo. |
+| A1 | Self-update du démon : `const REPO = "Wameuh/AgentControl"` — URL release + API releases en dur (**correct** : repo de l'app) | `crates/daemon/src/selfupdate.rs:14,226,304` | ⚪ | `param` optionnel — `[daemon] update_repo = "owner/name"`, utile seulement pour un fork ; abstraction `ReleaseSource { GitHubReleases, UrlTemplate, None }` si le fork publie ailleurs. |
+| A2 | Check/update client Tauri : 4 URLs `api.github.com/repos/Wameuh/AgentControl/releases…` en dur (**correct** : repo de l'app) | `client/src-tauri/src/commands/update.rs:89,124,131,331-333` ; `client/src/features/update.ts:32,55,75,88,151` (doublon TS) | ⚪ | `param` optionnel — champ `release_repo` dans la config du client, fork seulement (un seul endroit de vérité côté démon si fait). |
+| A3 | `connect.rs` : `const BASE = "https://github.com/Wameuh/AgentControl/releases"` pour le script d'install distant (**correct**) | `client/src-tauri/src/commands/connect.rs:501` | ⚪ | `param` optionnel — même source que A2 ; fork seulement. |
 | A4 | Lien « repo » dans le client (à propos / shell open) | `client/src/main.ts:503` | ⚪ | `param` — même config que A2. |
-| A5 | CSP `connect-src … https://api.github.com https://raw.githubusercontent.com https://objects.githubusercontent.com` + CSP web démon `web/mod.rs:66` | `client/src-tauri/tauri.conf.json:25` ; `crates/daemon/src/web/mod.rs:66` | 🟠 | `param`/`feature-flag` — n'élargir la CSP que si `update_repo` est une forge GitHub ; sinon CSP minimale. Aujourd'hui la CSP GitHub est justifiée *uniquement* par A1/A2. |
+| A5 | CSP `connect-src … https://api.github.com https://raw.githubusercontent.com https://objects.githubusercontent.com` + CSP web démon `web/mod.rs:66` | `client/src-tauri/tauri.conf.json:25` ; `crates/daemon/src/web/mod.rs:66` | ⚪ | Justifiée par A1/A2 — `param` optionnel : CSP minimale seulement si `update_repo` sort de GitHub (fork). |
 
 ## B. Workflow git/forge — `next_release` → `main` et `gh` supposés universels
 
-C'est le couplage le plus diffus : le **registre PR** (`forges.rs`,
-`forgesync`, `prs.rs`, `[[forges]]` config) est déjà multi-forge
-(GitHub implicite + GitLab + Gerrit déclarés), mais **tout le
-pipeline au-dessus** (orchestrateur, review PR, prompts workers)
-parle `gh`, `pull request`, base `next_release`.
+C'est le couplage le plus diffus — et **le vrai 🔴 du découplage**
+(re-cadrage #315) : le scénario cible est d'utiliser AgentControl
+**pour un autre projet**, dont le repo peut vivre sur GitLab, Gerrit,
+ou même du git nu, **sans `gh` installé**. Le **registre PR**
+(`forges.rs`, `forgesync`, `prs.rs`, `[[forges]]` config) est déjà
+multi-forge (GitHub implicite + GitLab + Gerrit déclarés), mais **tout
+le pipeline au-dessus** (orchestrateur, review PR, prompts workers)
+parle `gh`, `pull request`, base `next_release`. Chaque transport doit
+marcher indépendamment : CLI de la forge (`gh`/`glab`), API REST
+(GitLab via `token_env`), serveur MCP de la forge, ou git nu (mode
+dégradé sans PR — trigger manuel, verdict rapporté localement).
 
 | # | Couplage | Localisation | Gravité | Découplage proposé |
 |---|----------|--------------|---------|--------------------|
@@ -56,7 +76,7 @@ parle `gh`, `pull request`, base `next_release`.
 | B3 | Release PR `next_release → main` : détection codée en dur dans l'orchestrateur (`gh pr list --head next_release --base main`), le registre (`prs.rs:248`, `orch.rs:1415-1422,2499-2536`), forgesync (`crates/forgesync/src/lib.rs:529,582-585` skip release PR), et `ALLOWED_BASE` côté review | `crates/daemon/src/server/orch.rs:134,1415,2499-2536` ; `crates/daemon/src/server/prs.rs:248,516` ; `crates/forgesync/src/lib.rs:582-585` ; `crates/daemon/src/server/orch_review.rs:58-59` | 🔴 | `param` — un triplet `integration_branch`/`release_branch` (défauts `next_release`/`main`) ou un `workflow = "none"|"next_release"` ; quand `none`, l'orchestrateur ne cherche ni release PR ni n'exclut de head. |
 | B4 | Daemon-side `gh` : l'orchestrateur et le review appellent `gh pr list/view/comment/ready` en argv direct — aucune abstraction forge pour ces appels (seul le *registre* et forgesync passent par `[[forges]]`) | `crates/daemon/src/server/orch.rs:2321,2477,2504` ; `crates/daemon/src/server/orch_review.rs:1500-1782` ; `crates/daemon/src/server/prs.rs` (gh_api) | 🔴 | `abstraction` — route `gh` à travers la couche forge existante (GitLab `glab`, API REST GitLab) ou introduire un `ForgeCli` par `[[forges]]` ; court terme : documenter que `pr_review`/`backlog_orchestrator` exigent `gh` + GitHub (feature-flag). |
 | B5 | Outils attendus par les prompts : `gh`, `ac-wait` (`tools/ac-wait`), `acctl`, `agentbacklog` — le worker prompt impose `ac-wait` pour toute attente > 1 min et `acctl steps set` ; rien ne vérifie leur présence avant de spawner | `crates/daemon/src/server/orch.rs:82,88,125,138,179,183` ; `crates/daemon/src/server/orch_plan.rs:558+` | 🟠 | `doc`+`détection` — prérequis explicites dans INSTALL.md ; à terme prompts conditionnels (« si `ac-wait` est absent, attends en une seule commande ») ou ship `ac-wait`/`acctl` avec le tarball daemon (déjà le cas pour `acctl`/`acp-claude` — `ac-wait` est un script shell dans `tools/`, pas packagé). |
-| B6 | Le trigger `/mr review` et le verdict `## Verdict:` sont des conventions de NOTRE automatisation externe ; le review natif (`pr_review`) les reproduit — un repo sans cette convention n'a pas de review | `crates/daemon/src/server/orch_review.rs` (constantes `TRIGGER` via param `pr_review_trigger`, `VERDICT_BEGIN/END`, `EXTERNAL_ACK`) ; prompts `orch.rs:80`, `orch_plan.rs` | 🟠 | `param` — déjà partiellement paramétrable (`pr_review_trigger`) ; documenter que `pr_review=false` + `pr_review_trigger` custom = review générique ; envisager un `review_cmd`/`merge_rule` documenté par repo. |
+| B6 | **Review 100 % configurable — WHEN/HOW/WHO.** WHEN : aujourd'hui seul un commentaire `pr_review_trigger` lu via `gh` déclenche une review (GitHub-only) — pas de modes `auto_open`/`auto_push`/`manual`/`off`, pas de source de trigger par forge (notes MR GitLab, comments Gerrit, RPC/`acctl pr review` seul sur git nu). HOW : `REVIEW_PROMPT`, `VERDICT_BEGIN/END` et le `## Verdict:` posté sont codés en dur ; `ALLOWED_BASE` → `pr_base` (couvert par l'item branches #316). WHO : déjà découplé (`pr_reviewer_agent`/`mode`/`model`/`effort`) — cf. G | `crates/daemon/src/server/orch_review.rs` (`pr_review_trigger`, `REVIEW_PROMPT` :313-360, `VERDICT_BEGIN/END` :64-65, post `## Verdict:` :1423, `EXTERNAL_ACK`) ; prompts `orch.rs:80`, `orch_plan.rs` | 🔴 | `param` — `review_trigger_mode = comment|auto_open|auto_push|manual|off` (défaut `comment` = actuel) lu via la couche forge (#317) ; `review_prompt` param (même mécanique que `prompt`/`manager_prompt`, placeholders {PR}/{REPO}/{SHA}/{BASE}/{WS}/{TITLE}/{BODY}) + labels de verdict configurables (`verdict_approved`/`verdict_changes`) ; `pr_review_trigger` garde son rôle en mode `comment` (item #318). |
 
 ## C. Chemins et environnement supposés
 
@@ -110,6 +130,7 @@ parle `gh`, `pull request`, base `next_release`.
 - `[[forges]]` config + `ForgeLive` hot-reload : GitLab/Gerrit déclarables, hôtes implicites github.com/gitlab.com (`forges.rs`, `forges_cfg.rs`, `docs/forges.md`).
 - `[agents.*]` profils : presets devin/cursor, auto-découverte adapters, `commands` fallbacks, install `npm i -g` daemon-side (#261, #277, #285).
 - Tous les params `[backlog_orchestrator]` hot-settables via `acctl comp set` + UI (agents par rôle, modes, modèles, flags review, `repo_workspaces`, prompts sur mesure).
+- Review **WHO** : `pr_reviewer_agent`/`mode`/`model`/`effort` déjà paramétrables — « qui review » est découplé ; seuls WHEN (trigger) et HOW (prompt/verdict) restent en dur (B6).
 - `[backlog_orchestrator] prompt`/`manager_prompt` : surcharge totale des prompts (mais les défauts restent couplés — B2).
 - `provision_skills` : skills embarqués multi-provider.
 - Le composant `backlog-orchestrator` est **opt-in** (`enabled` param) — un tiers n'a pas l'orchestrateur forcé ; le problème est qu'*s'il l'active*, tout suppose notre env.
@@ -117,25 +138,35 @@ parle `gh`, `pull request`, base `next_release`.
 
 ## Synthèse par gravité
 
-**🔴 Bloquants pour un tiers** (features cassées ou silencieusement
-mauvaises) : A1, A2, A3, B1, B2, B3, B4, C1, C4, C6, F1.
+Cadrage corrigé (#315) : le 🔴 n'est **pas** l'update de l'app —
+`Wameuh/AgentControl` en dur dans selfupdate/update/connect est correct
+(c'est le repo de l'app). Le 🔴 est le **pipeline côté projet** :
+orchestrateur, review et registre PR qui supposent `gh` + GitHub +
+`next_release` sur le repo travaillé.
 
-**🟠 Dégradés** : A5, B5, B6, C2, C3, C5, C7, D1, D3, D4, E2, E3, E5, F3, F8.
+**🔴 Bloquants pour un tiers** (pipeline projet cassé ou silencieusement
+mauvais hors GitHub/`gh`) : B1, B2, B3, B4, B6, C1, C4, C6, F1.
 
-**⚪ Cosmétique / déjà correct** : A4, D2, D5, E1, E4, F2, F4, F5, F6, F7, F9, F10.
+**🟠 Dégradés** : B5, C2, C3, C5, C7, D1, D3, D4, E2, E3, E5, F3, F8.
 
-## Items fils proposés (ordonnés)
+**⚪ Cosmétique / déjà correct** : A1, A2, A3, A4, A5 (update repo =
+correct ; `update_repo` optionnel pour forks), D2, D5, E1, E4, F2, F4,
+F5, F6, F7, F9, F10.
 
-1. **`update_repo` paramétrable** — `[daemon] update_repo` + `release_repo` client + `connect.rs` BASE + CSP conditionnelle (A1-A5). *Débloque l'update pour tout fork.*
-2. **`workflow_profile` / branches configurables** — `integration_branch` (défaut `next_release`), `release_branch` (défaut `main`), `pr_base` pour `ALLOWED_BASE` et le scan `gh pr list` ; propager à `forgesync` skip et `prs.rs` (B1, B3, F8). *Débloque review + orchestrateur sur un repo sans cette convention.*
-3. **Prompts orchestrateur neutres** — réécrire les templates `PROMPT`/`WORKER_PROMPT`/`MANAGER_PROMPT`/`PLANNER_*`/`REVIEWER_*`/`IMPLEMENTER_*`/`CLAIMED_WORKER_PROMPT`/failover pour qu'ils délèguent les règles de branche/PR/merge au `AGENTS.md`/`CLAUDE.md` du workspace (`{WS}`) au lieu de réciter `next_release`/`gh`/`Verdict` ; placeholders `{BASE}`/`{REVIEW_TRIGGER}` si un `workflow_profile` existe (B2, F1). *Gros morceau — le plus rentable pour l'usage tiers.*
-4. **`agentbacklog` : prérequis documenté + source d'install découplée** — INSTALL.md section « orchestrateur » ; `catalog.rs` `repo`/`homepage`/`recipe` paramétrables ou passage à un package public ; découverte du composant backlog côté client au lieu du nom en dur `agentbacklog` (C7) ; décision sur l'abstraction « task queue » (C4, C5, C6).
-5. **Défauts workspace/agent** — `workspace` défaut = cwd démon ou détection git ; `repo_workspaces` défaut vide ; `agent`/`model`/`mode` défauts vides ou détection (C1, C2, D1).
-6. **`gh` → couche forge pour orch/review** — router les appels `gh pr *` via une abstraction `ForgeCli` adossée à `[[forges]]` (GitLab `glab`/API) ou documenter la limitation GitHub-only (B4, D3).
-7. **`state_dir` agentbacklog + packager `ac-wait`** — `[backlog_orchestrator] state_dir` ; inclure `tools/ac-wait` dans le tarball ; documenter `ac-wait`/`acctl`/`agentbacklog` comme prérequis (C3, D4, E5).
-8. **Hooks `.devin/` documentés comme optionnels** — externaliser `PROTECTED_BRANCH`/base/règle de merge ; note dans AGENTS.md/INSTALL.md (E2).
-9. **Docs : splitter générique vs notre infra** — `components-integration.md`, INSTALL.md §5, exemples catalogue `Wameuh/*` → `{owner}/{repo}` ; `docs/ci-example.md` optionnel pour reproduire notre pipeline (E1, E3, F3).
-10. **CSP dynamique** — `connect-src` GitHub seulement si forge/update l'exige (A5) — peut fusionner avec l'item 1.
+## Items fils (créés — ordonnés)
 
-Ordre conseillé : 1 → 2 → 5 (petits, forte valeur) → 4 → 3 (le plus
-gros) → 6 → 7 → 8 → 9 → 10.
+Ordre : branches config → abstraction forge projet → review
+configurable → prompts neutres → défauts env → agentbacklog →
+hooks/docs.
+
+1. **#316 — Branches workflow configurables** — `integration_branch` (défaut `next_release`), `release_branch` (défaut `main`), `pr_base` pour `ALLOWED_BASE` et le scan `gh pr list`, mode `workflow = "none"` ; propager au skip forgesync et `prs.rs` (B1, B3, F8). *Bloque #317 et #319.*
+2. **#317 — Abstraction forge projet (multi-transport)** — trait `ForgeClient` couvrant les ops du pipeline (list/get change, comments depuis un timestamp, post, mark_ready, checks, fetch head) ; impls `gh` (existant refactoré), GitLab REST v4 (`token_env`, sans `glab`), `glab` optionnel, MCP GitLab (spike d'abord), Gerrit, git nu (dégradé explicite) ; `[[forges]] transport = "gh"|"rest"|"glab"|"mcp"|"auto"` + routage de **tous** les appels `gh` de orch/orch_review/prs/forgesync via le trait (B4, D3, F8). *Le morceau central — le pipeline projet sans `gh` ni GitHub.* Dépend de #316.
+3. **#318 — Review 100 % configurable** — WHEN : `review_trigger_mode = comment|auto_open|auto_push|manual|off` + lecture des triggers via la couche forge (commentaire PR, note MR, commentaire patchset Gerrit ; git nu = manual only) ; HOW : `review_prompt` param + labels de verdict (`verdict_approved`/`verdict_changes`) ; WHO : déjà découplé (G) ; `pr_base` via #316 (B6). Dépend de #317.
+4. **#319 — Prompts orchestrateur neutres** — les templates délèguent les règles de branche/PR/merge/review au `AGENTS.md`/`CLAUDE.md` du workspace cible au lieu de réciter `next_release`/`gh`/`/mr review`/`Verdict:` ; placeholders `{BASE}`/`{REVIEW_TRIGGER}`/`{MERGE_RULE}`/`{WORKTREE_DIR}` substitués depuis la config (B2, C2, F1). Dépend de #316.
+5. **#320 — Défauts env + packaging** — `workspace`/`repo_workspaces`/`agent`/`model`/`mode` défauts neutres ou détectés, `state_dir` param, `ac-wait` packagé dans le tarball, composant backlog découvert côté client (plus de nom en dur), prérequis INSTALL.md (C1, C2, C3, C7, D1, D4, E5).
+6. **#321 — `agentbacklog` découplé** — recettes catalogue paramétrables (plus de `Wameuh/*` en dur dans `catalog.rs`), prérequis documenté, décision sur l'abstraction « task queue » (C4, C5, C6).
+7. **#322 — Hooks `.devin` optionnels + docs** — `PROTECTED_BRANCH`/base/règle de merge externalisées ; split « doc générique vs notre infra » (`components-integration.md`, INSTALL.md §5) ; exemples `mcp.rs`/catalogue génériques `{owner}/{repo}` (E2, E3, F3, F7).
+
+Section A : **pas d'item** — `update_repo`/`release_repo`/CSP restent
+des params optionnels « fork only », à n'implémenter que si un fork
+d'AgentControl en a réellement besoin.
