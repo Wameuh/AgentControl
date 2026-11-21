@@ -814,6 +814,16 @@ export class Composer {
     open.insertAdjacentHTML("beforeend", `<span class="n">${queue.length}</span>`);
     open.onclick = () => this.toggleQueuePanel();
     bar.appendChild(open);
+    if (isAndroid()) {
+      // Sur mobile la barre se réduit à une puce (compteur + aperçu du
+      // 1er message) : les entrées et leurs actions vivent dans la
+      // feuille basse #queue-panel, pas dans une rangée de chips.
+      open.classList.add("q-chip");
+      open.innerHTML =
+        `${icon("clock")}<b>${esc(t("queue_chip", { n: queue.length }))}</b>` +
+        `<span class="q-ex">${queue[0] ? `· ${esc(queue[0])}` : ""}</span>`;
+      return;
+    }
     const broken = this.qEditBroken.has(connKey);
     queue.forEach((txt, i) => {
       const d = document.createElement("div");
@@ -1108,6 +1118,7 @@ export class Composer {
     } else if (this.qSnapshot.length && app.current) {
       this.qOpen = true;
       nav.push("queue");
+      if (isAndroid()) nav.showScrim("queue");
       this.renderQueuePanel();
       $("queue-open")?.classList.add("on");
     }
@@ -1117,6 +1128,7 @@ export class Composer {
    *  dépile aussi l'entrée nav et l'état « on » du bouton horloge. */
   closeQueuePanel() {
     if (this.qOpen) nav.close("queue");
+    nav.hideScrim("queue");
     this.qOpen = false;
     this.qEditing = null;
     this.disarmQueueClear();

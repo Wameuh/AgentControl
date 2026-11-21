@@ -967,6 +967,23 @@ export class Sidebar {
         .then(() => this.refresh())
         .catch((e) => showErr(String(e)));
     });
+    if (isAndroid()) {
+      // Seul chemin de suppression sur mobile (.sess-del masqué) —
+      // même double-tap armé et même flux optimiste que le ✕ desktop.
+      menuBtn(this.ctx, t("ctx_delete_sess"), "danger", (b) => {
+        if (!b.dataset.armed) {
+          b.dataset.armed = "1";
+          b.textContent = t("ctx_confirm");
+          return;
+        }
+        hideSessCtx();
+        row.remove();
+        void this.refresh();
+        void this.deleteSessionNow(s)
+          .catch((er) => showErr(String(er)))
+          .finally(() => void this.refresh());
+      });
+    }
     placeMenu(this.ctx, "sctx", x, y);
   }
 
